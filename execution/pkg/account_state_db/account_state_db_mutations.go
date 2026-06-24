@@ -435,3 +435,69 @@ func (db *AccountStateDB) AddLogHash(address common.Address, logsHash common.Has
 	db.setDirtyAccountState(as)
 	return nil
 }
+
+func (db *AccountStateDB) ExecuteNativeTransfer(
+	from, to common.Address,
+	amount, gasFee *big.Int,
+	txHash common.Hash,
+	newDeviceKey common.Hash,
+) error {
+	if db.lockedFlag.Load() {
+		return errors.New("ExecuteNativeTransfer: db.lockedFlag is already locked")
+	}
+
+	totalCost := new(big.Int).Add(amount, gasFee)
+
+	senderShard := from[0]
+	receiverShard := to[0]
+
+	if senderShard == receiverShard {
+		db.accountLocks[senderShard].Lock()
+		defer db.accountLocks[senderShard].Unlock()
+	} else if senderShard < receiverShard {
+		db.accountLocks[senderShard].Lock()
+		db.accountLocks[receiverShard].Lock()
+		defer db.accountLocks[receiverShard].Unlock()
+		defer db.accountLocks[senderShard].Unlock()
+	} else {
+		db.accountLocks[receiverShard].Lock()
+		db.accountLocks[senderShard].Lock()
+		defer db.accountLocks[senderShard].Unlock()
+		defer db.accountLocks[receiverShard].Unlock()
+	}
+
+	as, err := db.getOrCreateAccountState(from)
+	if err != nil {
+		return fmt.Errorf("sender account state error: %w", err)
+	}
+	if as == nil {
+		return errors.New("sender account state is nil")
+	}
+
+	// SubTotalBalance in-place
+	err = as.SubTotalBalance(totalCost)
+	if err != nil {
+		return fmt.Errorf("SubTotalBalance: %w", err)
+	}
+
+	// Modify other sender fields in-place
+	as.PlusOneNonce()
+	as.SetLastHash(txHash)
+	as.SetNewDeviceKey(newDeviceKey)
+	db.setDirtyAccountState(as)
+
+	// Receiver
+	toAs, err := db.getOrCreateAccountState(to)
+	if err != nil {
+		return fmt.Errorf("receiver account state error: %w", err)
+	}
+	if toAs == nil {
+		return errors.New("receiver account state is nil")
+	}
+
+	// Modify receiver balance
+	toAs.AddBalance(amount)
+	db.setDirtyAccountState(toAs)
+
+	return nil
+}

@@ -150,26 +150,17 @@ func processNativeTransfersFastPath(
 						gasLimit = uint64(mt_common.MAX_GASS_FEE)
 					}
 					gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
-					totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
-					// SubTotalBalance (thread-safe via sharded lock)
-					err := globalAccountDB.SubTotalBalance(tx.FromAddress(), totalCost)
+					// ExecuteNativeTransfer (batch transaction in a single lock acquisition to reduce lock contention)
+					err := globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
 					if err != nil {
-						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", "Insufficient balance")
-						rcp := createErrorReceipt(tx, toAddress, fmt.Errorf("insufficient balance for transfer"))
+						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", err.Error())
+						rcp := createErrorReceipt(tx, toAddress, err)
 						txs = append(txs, tx)
 						rcps = append(rcps, rcp)
 						failedSenders[tx.FromAddress()] = true
 						continue
 					}
-
-					// PlusOneNonce + SetLastHash + SetNewDeviceKey (thread-safe)
-					globalAccountDB.PlusOneNonce(tx.FromAddress())
-					globalAccountDB.SetLastHash(tx.FromAddress(), tx.Hash())
-					globalAccountDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-
-					// AddBalance to receiver (thread-safe)
-					globalAccountDB.AddBalance(toAddress, tx.Amount())
 
 					// Accumulate gas fee
 					totalGasFee.Add(totalGasFee, gasFee)
@@ -192,31 +183,33 @@ func processNativeTransfersFastPath(
 					GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_RECEIPT_CREATED", fmt.Sprintf("Fast-path receipt. Status: %d", rcp.Status()))
 
 					// Record Prometheus metrics
-					if traceObj, ok := GlobalTxTraceStore.GetTrace(tx.Hash()); ok {
-						var tInjection, tForward, tConsensus, tReceipt int64
-						for _, step := range traceObj.Steps {
-							switch step.Step {
-							case "INJECTION_RECEIVED":
-								tInjection = step.Timestamp
-							case "FORWARDED_TO_RUST":
-								tForward = step.Timestamp
-							case "CONSENSUS_COMMITTED":
-								tConsensus = step.Timestamp
-							case "BLOCK_RECEIPT_CREATED":
-								tReceipt = step.Timestamp
+					if GlobalTxTraceStore.Enabled() {
+						if traceObj, ok := GlobalTxTraceStore.GetTrace(tx.Hash()); ok {
+							var tInjection, tForward, tConsensus, tReceipt int64
+							for _, step := range traceObj.Steps {
+								switch step.Step {
+								case "INJECTION_RECEIVED":
+									tInjection = step.Timestamp
+								case "FORWARDED_TO_RUST":
+									tForward = step.Timestamp
+								case "CONSENSUS_COMMITTED":
+									tConsensus = step.Timestamp
+								case "BLOCK_RECEIPT_CREATED":
+									tReceipt = step.Timestamp
+								}
 							}
-						}
-						if tInjection > 0 && tForward >= tInjection {
-							metrics.TxMempoolDuration.Observe(float64(tForward-tInjection) / 1000.0)
-						}
-						if tForward > 0 && tConsensus >= tForward {
-							metrics.TxConsensusDuration.Observe(float64(tConsensus-tForward) / 1000.0)
-						}
-						if tConsensus > 0 && tReceipt >= tConsensus {
-							metrics.TxExecutionDuration.Observe(float64(tReceipt-tConsensus) / 1000.0)
-						}
-						if tInjection > 0 && tReceipt >= tInjection {
-							metrics.TxEndToEndDuration.Observe(float64(tReceipt-tInjection) / 1000.0)
+							if tInjection > 0 && tForward >= tInjection {
+								metrics.TxMempoolDuration.Observe(float64(tForward-tInjection) / 1000.0)
+							}
+							if tForward > 0 && tConsensus >= tForward {
+								metrics.TxConsensusDuration.Observe(float64(tConsensus-tForward) / 1000.0)
+							}
+							if tConsensus > 0 && tReceipt >= tConsensus {
+								metrics.TxExecutionDuration.Observe(float64(tReceipt-tConsensus) / 1000.0)
+							}
+							if tInjection > 0 && tReceipt >= tInjection {
+								metrics.TxEndToEndDuration.Observe(float64(tReceipt-tInjection) / 1000.0)
+							}
 						}
 					}
 

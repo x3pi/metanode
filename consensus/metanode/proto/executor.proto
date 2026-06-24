@@ -79,5 +79,7 @@ message ExecuteBlockResponse {
     bool success = 4;
     // Error message if !success
     string error = 5;
+    // The computed StateRoot of the block (empty for non-block/empty commits)
+    bytes state_root = 6;
 }
 

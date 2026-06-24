@@ -9,7 +9,7 @@ package executor
 #include <stdbool.h>
 
 typedef struct {
-    bool (*execute_block)(uint8_t* payload, size_t len);
+    bool (*execute_block)(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
     bool (*process_rpc_request)(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
     void (*free_go_buffer)(uint8_t* ptr);
     char* (*get_state_root)();
@@ -24,7 +24,7 @@ bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
 
 // Gateway functions that we will export
-extern bool cgo_execute_block(uint8_t* payload, size_t len);
+extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
 extern bool cgo_process_rpc_request(uint8_t* req_payload, size_t req_len, uint8_t** out_payload, size_t* out_len);
 extern void cgo_free_go_buffer(uint8_t* ptr);
 extern char* cgo_get_state_root();
@@ -106,10 +106,14 @@ func GetAuthoritativeBlockQueue() <-chan *AuthoritativeBlockRequest {
 }
 
 //export cgo_execute_block
-func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
+func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8_t, outLen *C.size_t) (ret C.bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_execute_block: %v", r)
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Panic in Go FFI handler: %v", r),
+			}, outPayload, outLen)
 			ret = C.bool(false)
 		}
 	}()
@@ -117,6 +121,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 	// Sanity check length to prevent overflow or out-of-memory allocations
 	if payload == nil || length == 0 || length > 100*1024*1024 {
 		logger.Error("[FFI Bridge] Invalid block payload or length from Rust: %d", length)
+		serializeAndSetResponse(&pb.ExecuteBlockResponse{
+			Success: false,
+			Error:   "invalid block payload or length",
+		}, outPayload, outLen)
 		return C.bool(false)
 	}
 
@@ -126,34 +134,16 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 	err := subDag.UnmarshalVT(data)
 	if err != nil {
 		logger.Error("[FFI Bridge] Failed to unmarshal ExecutableBlock: %v", err)
+		serializeAndSetResponse(&pb.ExecuteBlockResponse{
+			Success: false,
+			Error:   err.Error(),
+		}, outPayload, outLen)
 		return C.bool(false)
 	}
 
 	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d, authoritative=%v",
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 
-	// ═══════════════════════════════════════════════════════════════════
-	// BACKPRESSURE FIX (May 2026): Synchronous dispatch via authQueue
-	// with HONEST indefinite wait — provides natural backpressure.
-	//
-	// KEY INSIGHT: Rust calls cgo_execute_block via spawn_blocking(),
-	// which runs on a dedicated thread pool. Blocking here does NOT
-	// block Rust's async runtime (tokio). This means we can safely
-	// wait indefinitely — Rust can still process consensus, RPCs, etc.
-	//
-	// WHY NOT TIMEOUT:
-	// The previous 5s timeout returned true (lied to Rust), causing:
-	// - Rust thought block was processed → sent next block immediately
-	// - Gap accumulated: 121+ blocks between Rust GEI and Go GEI
-	// - At epoch boundary, poll_go_until_synced waited 30+s for Go
-	// - If Go couldn't catch up → crash
-	//
-	// HONEST WAIT gives natural backpressure:
-	// - Rust can only send 1 block per spawn_blocking thread at a time
-	// - Go processing time directly limits Rust's send rate
-	// - Gap stays small (< authQueue buffer size)
-	// - "thà pending chứ không fork" — prefer stall over divergence
-	// ═══════════════════════════════════════════════════════════════════
 	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
 		req := &AuthoritativeBlockRequest{
@@ -170,6 +160,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 			logger.Error("[FFI Bridge] 🚨 authQueue full (1000)! Block GEI=%d dropped. "+
 				"Go block processing is severely behind.",
 				subDag.GetGlobalExecIndex())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "authQueue full (1000)",
+			}, outPayload, outLen)
 			return C.bool(false)
 		}
 
@@ -188,10 +182,17 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 						logger.Info("[FFI Bridge] ✅ Block GEI=%d processed after %v (slow but OK)",
 							gei, elapsed)
 					}
+					serializeAndSetResponse(resp, outPayload, outLen)
 					return C.bool(true)
 				}
 				if resp != nil {
 					logger.Error("[FFI Bridge] Block processing failed: %s", resp.Error)
+					serializeAndSetResponse(resp, outPayload, outLen)
+				} else {
+					serializeAndSetResponse(&pb.ExecuteBlockResponse{
+						Success: false,
+						Error:   "unknown error (nil response)",
+					}, outPayload, outLen)
 				}
 				return C.bool(false)
 			case <-time.After(logInterval):
@@ -207,16 +208,44 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t) (ret C.bool) {
 	if defaultListenerBlockQueue != nil {
 		select {
 		case defaultListenerBlockQueue <- &subDag:
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: true,
+			}, outPayload, outLen)
 			return C.bool(true)
 		case <-time.After(5 * time.Second):
 			logger.Error("[FFI Bridge] dataChan blocked for 5s. GEI=%d",
 				subDag.GetGlobalExecIndex())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "dataChan blocked for 5s",
+			}, outPayload, outLen)
 			return C.bool(false)
 		}
 	}
 
 	logger.Error("[FFI Bridge] Block queue is not initialized!")
+	serializeAndSetResponse(&pb.ExecuteBlockResponse{
+		Success: false,
+		Error:   "block queue is not initialized",
+	}, outPayload, outLen)
 	return C.bool(false)
+}
+
+func serializeAndSetResponse(resp *pb.ExecuteBlockResponse, outPayload **C.uint8_t, outLen *C.size_t) {
+	if resp == nil || outPayload == nil || outLen == nil {
+		return
+	}
+	resData, err := proto.Marshal(resp)
+	if err != nil {
+		logger.Error("[FFI Bridge] Failed to marshal ExecuteBlockResponse: %v", err)
+		return
+	}
+	cResLen := C.size_t(len(resData))
+	cResData := (*C.uint8_t)(C.malloc(cResLen))
+	cSlice := unsafe.Slice((*byte)(unsafe.Pointer(cResData)), len(resData))
+	copy(cSlice, resData)
+	*outPayload = cResData
+	*outLen = cResLen
 }
 
 //export cgo_process_rpc_request
