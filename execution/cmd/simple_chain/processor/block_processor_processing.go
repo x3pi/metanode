@@ -792,7 +792,21 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	bp.chainState.GetStakeStateDB().Discard() // CRITICAL FIX: Prevent stake state divergence
 	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
 
-	// 2. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
+	// 2. Discard pending NOMT payloads to release the commit wait group
+	if bp.pendingAccountPayload != nil {
+		if discarder, ok := bp.pendingAccountPayload.(interface{ Discard() }); ok {
+			discarder.Discard()
+		}
+		bp.pendingAccountPayload = nil
+	}
+	if bp.pendingStakePayload != nil {
+		if discarder, ok := bp.pendingStakePayload.(interface{ Discard() }); ok {
+			discarder.Discard()
+		}
+		bp.pendingStakePayload = nil
+	}
+
+	// 3. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
 	parentBlockNumber := failedBlockNumber - 1
 	parentBlock := blockchain.GetBlockChainInstance().GetBlockByNumber(parentBlockNumber)
 	if parentBlock != nil {

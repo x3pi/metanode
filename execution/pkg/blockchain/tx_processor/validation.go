@@ -419,3 +419,71 @@ func VerifyTransaction(
 
 	return nil
 }
+
+// PreVerifySignatures verifies BLS signatures of the given transactions in parallel
+// and populates the signature verification cache to eliminate sequential execution bottlenecks.
+func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainState) {
+	if len(txs) == 0 {
+		return
+	}
+
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 128 {
+		numWorkers = 128
+	}
+	if len(txs) < 200 {
+		numWorkers = 1 // Sequential is faster for small batches
+	}
+
+	accountDB := chainState.GetAccountStateDB()
+
+	verifyFn := func(tx types.Transaction) {
+		txHash := tx.Hash()
+		if LoadVerifiedSignature(txHash) {
+			return
+		}
+
+		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
+		if err != nil || as == nil || len(as.PublicKeyBls()) == 0 {
+			return
+		}
+
+		request := transaction.NewVerifyTransactionRequest(
+			txHash,
+			common.PubkeyFromBytes(as.PublicKeyBls()),
+			tx.Sign(),
+		)
+		if request.Valid() {
+			StoreVerifiedSignature(txHash)
+		}
+	}
+
+	if numWorkers <= 1 {
+		for _, tx := range txs {
+			verifyFn(tx)
+		}
+		return
+	}
+
+	var wg sync.WaitGroup
+	chunkSize := (len(txs) + numWorkers - 1) / numWorkers
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		if start >= len(txs) {
+			break
+		}
+		end := start + chunkSize
+		if end > len(txs) {
+			end = len(txs)
+		}
+
+		wg.Add(1)
+		go func(slice []types.Transaction) {
+			defer wg.Done()
+			for _, tx := range slice {
+				verifyFn(tx)
+			}
+		}(txs[start:end])
+	}
+	wg.Wait()
+}

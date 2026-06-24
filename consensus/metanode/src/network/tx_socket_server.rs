@@ -312,7 +312,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 15000;
+            const MAX_BUNDLE_SIZE: usize = 2500;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
@@ -371,7 +371,7 @@ impl TxSocketServer {
                             break;
                         } else {
                             error!("❌ [FFI TX FLOW] Submission failed fatally: {}", e);
-                            all_succeeded = false;
+                            return; // Fatal failure: stop retrying and discard batch
                         }
                     }
                 }
