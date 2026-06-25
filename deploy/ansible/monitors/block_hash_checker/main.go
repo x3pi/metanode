@@ -36,7 +36,39 @@ func clearLoggedBlocks() {
 	os.Truncate("ghost_blocks.log", 0)
 }
 
+func loadEnvFallback() {
+	paths := []string{
+		"../../.env",
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					k := strings.TrimSpace(parts[0])
+					v := strings.TrimSpace(parts[1])
+					v = strings.Trim(v, `"'`)
+					if os.Getenv(k) == "" {
+						os.Setenv(k, v)
+					}
+				}
+			}
+		}
+	}
+}
+
 func init() {
+	loadEnvFallback()
+	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" {
+		fmt.Println("❌ LỖI NGHIÊM TRỌNG: Không tìm thấy TELEGRAM_BOT_TOKEN! Vui lòng tạo file .env hoặc cấu hình biến môi trường trước khi chạy.")
+		os.Exit(1)
+	}
 	loadLoggedBlocks()
 }
 
@@ -101,6 +133,7 @@ func logBlockEvent(eventType string, blockNum uint64, gei string) {
 	// In ra terminal hiện tại chỉ khi là NIL_BLOCK
 	if strings.Contains(eventType, "NIL_BLOCK") {
 		logger.Info("\n🚨 " + msg)
+		sendTelegramAlertDirect(fmt.Sprintf("🚨 *[CẢNH BÁO]* %s", msg), false)
 	}
 }
 
@@ -187,8 +220,14 @@ func sendTelegramAlertDirect(message string, isCritical bool) {
 		return
 	}
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
-	chatID := "-1003867050625"
+	chatID := os.Getenv("TELEGRAM_CHAT_ID")
+	if chatID == "" {
+		chatID = "-1003867050625"
+	}
 	ipInfo := getSystemIPInfo()
+
+	// Fix Telegram Markdown parsing error (status 400) when message contains unbalanced underscores like "NIL_BLOCK"
+	safeMessage := strings.ReplaceAll(message, "_", "\\_")
 
 	var header string
 	if isCritical {
@@ -197,7 +236,7 @@ func sendTelegramAlertDirect(message string, isCritical bool) {
 		header = "⚠️ *[WARNING - KHÔNG DỪNG TEST & POLLING]*"
 	}
 
-	fullMessage := fmt.Sprintf("%s\n\n*Server:* `%s`\n\n%s", header, ipInfo, message)
+	fullMessage := fmt.Sprintf("%s\n\n*Server:* `%s`\n\n%s", header, ipInfo, safeMessage)
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	payload := map[string]string{
@@ -214,6 +253,21 @@ func sendTelegramAlertDirect(message string, isCritical bool) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		fmt.Printf("⚠️ Lỗi gửi Telegram alert, status code: %d\n", resp.StatusCode)
+		if resp.StatusCode == 400 {
+			// Fallback: Gửi lại dạng raw text (bỏ parse_mode)
+			fmt.Printf("🔄 Thử gửi lại bằng raw text...\n")
+			delete(payload, "parse_mode")
+			body, _ = json.Marshal(payload)
+			fallbackResp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
+			if err == nil {
+				defer fallbackResp.Body.Close()
+				if fallbackResp.StatusCode == 200 {
+					fmt.Printf("✅ Đã gửi thành công Telegram (fallback raw text)!\n")
+				} else {
+					fmt.Printf("⚠️ Vẫn lỗi khi gửi raw text, status code: %d\n", fallbackResp.StatusCode)
+				}
+			}
+		}
 	}
 }
 
