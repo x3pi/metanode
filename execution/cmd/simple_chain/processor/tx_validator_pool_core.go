@@ -580,6 +580,9 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		if waitCount > 0 {
 			avgWaitGoUs = totalWaitGoUs / waitCount
 			avgWaitRustUs = totalWaitRustUs / waitCount
+			// logger.Info("✅ [WAIT-DEBUG] waitCount=%d, avgWaitGoUs=%d, avgWaitRustUs=%d", waitCount, avgWaitGoUs, avgWaitRustUs)
+		} else {
+			logger.Warn("⚠️  [WAIT-DEBUG] waitCount=0! Could not find any local transactions in %d txs to measure WaitGo.", len(txs))
 		}
 	}
 	pipeline.GlobalBlockTraceStore.SetWaitTime(blockNum, avgWaitGoUs, avgWaitRustUs)
