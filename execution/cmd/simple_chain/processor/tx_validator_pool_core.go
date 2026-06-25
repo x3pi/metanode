@@ -723,7 +723,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	lockWaitDuration := time.Since(waitLockStart)
 
 	startExecution := time.Now()
-	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
+	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum, false)
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
@@ -846,7 +846,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	}
 	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution (pool path).
 	vp.blockProcessingLock.Lock()
-	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, true, blockTime, leaderAddr, blockNum)
+	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, true, blockTime, leaderAddr, blockNum, false)
 	vp.blockProcessingLock.Unlock()
 	return result, err
 }

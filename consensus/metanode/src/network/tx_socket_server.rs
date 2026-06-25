@@ -5,12 +5,12 @@ use anyhow::Result;
 use consensus_core;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
-    node: Option<Arc<Mutex<ConsensusNode>>>,
+    node: Option<Arc<RwLock<ConsensusNode>>>,
     is_transitioning: Option<Arc<AtomicBool>>,
     peer_rpc_addresses: Vec<String>,
     peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
@@ -20,7 +20,7 @@ pub struct TxSocketServer {
 impl TxSocketServer {
     pub fn with_node(
         transaction_client: Arc<dyn TransactionSubmitter>,
-        node: Option<Arc<Mutex<ConsensusNode>>>,
+        node: Option<Arc<RwLock<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
         peer_rpc_addresses: Vec<String>,
     ) -> Self {
@@ -80,7 +80,7 @@ impl TxSocketServer {
     async fn process_ffi_batch(
         tx_data: Vec<u8>,
         client: Arc<dyn TransactionSubmitter>,
-        node: Option<Arc<Mutex<ConsensusNode>>>,
+        node: Option<Arc<RwLock<ConsensusNode>>>,
         is_transitioning: Option<Arc<AtomicBool>>,
         peer_rpc_addresses: Vec<String>,
         peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
@@ -188,21 +188,21 @@ impl TxSocketServer {
                 if transitioning.load(Ordering::SeqCst) {
                     warn!("⚡ [FFI TX FLOW] Epoch transition in progress. Delaying {} TXs internally.", transactions_to_submit.len());
                     attempt += 1;
-                    if attempt % 60 == 0 {
-                        warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt, transactions_to_submit.len());
+                    if attempt % 20 == 0 {
+                        warn!("⏳ [FFI TX FLOW] Epoch transition still in progress. Waited {}s for {} TXs.", attempt / 20, transactions_to_submit.len());
                     }
                     // SAFETY TIMEOUT: Prevent permanent deadlock if is_transitioning
                     // flag is never cleared (same pattern as CommitProcessor).
-                    // After 60s, force-clear and proceed to submission.
-                    if attempt >= 60 {
+                    // After 60s (1200 attempts at 50ms), force-clear and proceed to submission.
+                    if attempt >= 1200 {
                         error!(
                             "🚨 [FFI TX FLOW] is_transitioning stuck for {}s! Force-clearing to prevent permanent TX deadlock.",
-                            attempt
+                            attempt / 20
                         );
                         transitioning.store(false, Ordering::SeqCst);
                         // Fall through to submission
                     } else {
-                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         continue;
                     }
                 }
@@ -210,7 +210,7 @@ impl TxSocketServer {
 
             // Node acceptance check (takes node lock momentarily)
             if let Some(ref node_arc) = node {
-                let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_arc.lock()).await;
+                let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_arc.read()).await;
                 match lock_result {
                     Ok(node_guard) => {
                         let (should_accept, should_queue, reason) = node_guard.check_transaction_acceptance().await;
@@ -281,14 +281,14 @@ impl TxSocketServer {
                                     }
                                 }
 
-                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/5).", transactions_to_submit.len(), attempt + 1);
+                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/20).", transactions_to_submit.len(), attempt + 1);
                                 drop(node_guard);
                                 attempt += 1;
-                                if attempt >= 5 {
-                                    error!("🚨 [FFI TX FLOW] Dropping {} TXs after 5 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
+                                if attempt >= 20 {
+                                    error!("🚨 [FFI TX FLOW] Dropping {} TXs after 20 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
                                     return;
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 continue;
                             }
 
@@ -304,7 +304,7 @@ impl TxSocketServer {
 
                         if is_epoch_transition {
                             attempt += 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                             continue;
                         }
                     }
@@ -312,7 +312,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 2500;
+            const MAX_BUNDLE_SIZE: usize = 10000;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
@@ -384,10 +384,10 @@ impl TxSocketServer {
 
             // If we broke out early due to transient transition error, sleep and retry
             attempt += 1;
-            if attempt % 60 == 0 {
-                warn!("⏳ [FFI TX FLOW] Delayed TXs for {}s due to submission failure.", attempt);
+            if attempt % 20 == 0 {
+                warn!("⏳ [FFI TX FLOW] Delayed TXs for {}s due to submission failure.", attempt / 20);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 }

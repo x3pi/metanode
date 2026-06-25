@@ -145,7 +145,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 delay = backoff
                     .next()
                     .expect("ExponentialBackoff::next() should always return Some");
-                debug!(
+                tracing::warn!(
                     "Delaying retry {} of peer {} subscription, in {} seconds",
                     retries,
                     peer_hostname,
@@ -165,7 +165,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 .await
             {
                 Ok(blocks) => {
-                    debug!(
+                    tracing::warn!(
                         "Subscribed to peer {} {} after {} attempts",
                         peer, peer_hostname, retries
                     );
@@ -178,7 +178,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                     blocks
                 }
                 Err(e) => {
-                    debug!(
+                    tracing::warn!(
                         "Failed to subscribe to blocks from peer {} {}: {}",
                         peer, peer_hostname, e
                     );
@@ -215,7 +215,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                         if let Err(e) = result {
                             match e {
                                 ConsensusError::BlockRejected { block_ref, reason } => {
-                                    debug!(
+                                    tracing::warn!(
                                         "Failed to process block from peer {} {} for block {:?}: {}",
                                         peer, peer_hostname, block_ref, reason
                                     );
@@ -233,7 +233,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                         .unwrap_or(false);
 
                                     if is_recovering {
-                                        tracing::debug!(
+                                        tracing::warn!(
                                             "🛡️ [POST-RESTORE-GUARD] Ignoring Epoch mismatch from peer {} {} during recovery to keep stream open for catchup: {}",
                                             peer, peer_hostname, e
                                         );
@@ -249,7 +249,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                     }
                                 }
                                 ConsensusError::Shutdown => {
-                                    debug!(
+                                    tracing::warn!(
                                         "Subscriber block handler shut down for peer {} {}",
                                         peer, peer_hostname
                                     );
@@ -267,7 +267,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                         retries = 0;
                     }
                     None => {
-                        debug!(
+                        tracing::warn!(
                             "Subscription to blocks from peer {} {} ended",
                             peer, peer_hostname
                         );

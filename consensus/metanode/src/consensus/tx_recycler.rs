@@ -12,10 +12,10 @@
 
 
 use sha3::{Digest, Keccak256};
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 /// How long to wait before recycling unconfirmed TXs
@@ -37,20 +37,20 @@ struct PendingTx {
 /// Shared TX recycler between tx_socket_server and commit_processor
 pub struct TxRecycler {
     /// TXs submitted but not yet confirmed: tx_hash -> PendingTx
-    pending: Mutex<HashMap<[u8; 32], PendingTx>>,
+    pending: DashMap<[u8; 32], PendingTx>,
     /// Stats
-    total_submitted: Mutex<u64>,
-    total_confirmed: Mutex<u64>,
-    total_recycled: Mutex<u64>,
+    total_submitted: AtomicU64,
+    total_confirmed: AtomicU64,
+    total_recycled: AtomicU64,
 }
 
 impl TxRecycler {
     pub fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
-            total_submitted: Mutex::new(0),
-            total_confirmed: Mutex::new(0),
-            total_recycled: Mutex::new(0),
+            pending: DashMap::new(),
+            total_submitted: AtomicU64::new(0),
+            total_confirmed: AtomicU64::new(0),
+            total_recycled: AtomicU64::new(0),
         }
     }
 
@@ -59,10 +59,9 @@ impl TxRecycler {
     /// confirm_committed missed them due to CommitProcessor halting) or will be recovered
     /// via `recover_epoch_pending_transactions` which tracks them separately.
     pub async fn clear_pending(&self) {
-        let mut pending = self.pending.lock().await;
-        let count = pending.len();
-        pending.clear();
-        pending.shrink_to_fit();
+        let count = self.pending.len();
+        self.pending.clear();
+        self.pending.shrink_to_fit();
         if count > 0 {
             info!(
                 "🧹 [TX RECYCLER] Epoch transition: cleared {} pending TXs to prevent memory leak",
@@ -79,11 +78,10 @@ impl TxRecycler {
     /// those that were submitted but not yet committed. If confirm_committed() was never
     /// called (BUG 2), ALL pending TXs were lost at every epoch boundary.
     pub async fn drain_all_pending(&self) -> Vec<Vec<u8>> {
-        let mut pending = self.pending.lock().await;
-        let txs: Vec<Vec<u8>> = pending.values().map(|ptx| ptx.data.clone()).collect();
-        let count = pending.len();
-        pending.clear();
-        pending.shrink_to_fit();
+        let count = self.pending.len();
+        let txs: Vec<Vec<u8>> = self.pending.iter().map(|ptx| ptx.data.clone()).collect();
+        self.pending.clear();
+        self.pending.shrink_to_fit();
         if count > 0 {
             info!(
                 "♻️ [TX RECYCLER] Epoch transition: drained {} pending TXs for migration to new epoch",
@@ -110,23 +108,19 @@ impl TxRecycler {
             .map(|tx_data| Self::hash_tx(tx_data))
             .collect();
 
-        let mut pending = self.pending.lock().await;
-        let mut total = self.total_submitted.lock().await;
-
         for (tx_data, hash) in tx_data_list.iter().zip(hashes) {
             // Don't overwrite if already pending (might be a re-submission)
-            if !pending.contains_key(&hash) {
+            if !self.pending.contains_key(&hash) {
                 // Memory safety: evict pseudo-random element if too many.
-                // PERF: Replacing O(N) min_by_key search with O(1) next() eviction.
-                // This prevents 5 billion iteration stalls when pending > 100,000.
-                if pending.len() >= MAX_PENDING_TXS {
-                    let key_to_remove = pending.keys().next().copied();
+                if self.pending.len() >= MAX_PENDING_TXS {
+                    // In DashMap, we can just grab an arbitrary key to evict
+                    let key_to_remove = self.pending.iter().next().map(|r| *r.key());
                     if let Some(k) = key_to_remove {
-                        pending.remove(&k);
+                        self.pending.remove(&k);
                     }
                 }
 
-                pending.insert(
+                self.pending.insert(
                     hash,
                     PendingTx {
                         data: tx_data.clone(),
@@ -136,7 +130,7 @@ impl TxRecycler {
                 );
             }
 
-            *total += 1;
+            self.total_submitted.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -151,22 +145,19 @@ impl TxRecycler {
             .map(|tx_data| Self::hash_tx(tx_data.as_ref()))
             .collect();
 
-        let mut pending = self.pending.lock().await;
-        let mut total_confirmed = self.total_confirmed.lock().await;
-
-        let before = pending.len();
+        let before = self.pending.len();
         for hash in hashes {
-            if pending.remove(&hash).is_some() {
-                *total_confirmed += 1;
+            if self.pending.remove(&hash).is_some() {
+                self.total_confirmed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let removed = before - pending.len();
+        let removed = before - self.pending.len();
 
         if removed > 0 {
             info!(
                 "♻️ [TX RECYCLER] Confirmed {} TXs from committed sub-DAG ({} still pending)",
                 removed,
-                pending.len()
+                self.pending.len()
             );
         }
     }
@@ -174,32 +165,30 @@ impl TxRecycler {
     /// Collect TXs that have been pending too long and need re-submission.
     /// Returns the raw TX data for re-submission. Max 3 recycle attempts per TX.
     pub async fn collect_stale(&self) -> Vec<Vec<u8>> {
-        let mut pending = self.pending.lock().await;
-        let mut total_recycled = self.total_recycled.lock().await;
-
         let now = Instant::now();
         let mut stale_txs = Vec::new();
         let mut keys_to_update = Vec::new();
 
-        for (hash, ptx) in pending.iter() {
+        for entry in self.pending.iter() {
+            let ptx = entry.value();
             if now.duration_since(ptx.submitted_at) > RECYCLE_TIMEOUT && ptx.recycle_count < 3 {
                 stale_txs.push(ptx.data.clone());
-                keys_to_update.push(*hash);
+                keys_to_update.push(*entry.key());
             }
         }
 
         // Update recycle count and reset timer for re-submitted TXs
         for hash in &keys_to_update {
-            if let Some(ptx) = pending.get_mut(hash) {
+            if let Some(mut ptx) = self.pending.get_mut(hash) {
                 ptx.recycle_count += 1;
                 ptx.submitted_at = now; // Reset timer for next recycle attempt
-                *total_recycled += 1;
+                self.total_recycled.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         // Remove TXs that exceeded max retries
         let mut expired_count = 0;
-        pending.retain(|_, ptx| {
+        self.pending.retain(|_, ptx| {
             if ptx.recycle_count >= 3 && now.duration_since(ptx.submitted_at) > RECYCLE_TIMEOUT {
                 expired_count += 1;
                 false
@@ -213,7 +202,7 @@ impl TxRecycler {
                 "♻️ [TX RECYCLER] Recycling {} stale TXs, expired {} (pending: {})",
                 stale_txs.len(),
                 expired_count,
-                pending.len()
+                self.pending.len()
             );
         }
 
@@ -222,18 +211,16 @@ impl TxRecycler {
 
     // Get current stats
     pub async fn stats(&self) -> (usize, u64, u64, u64) {
-        let pending = self.pending.lock().await;
-        let submitted = *self.total_submitted.lock().await;
-        let confirmed = *self.total_confirmed.lock().await;
-        let recycled = *self.total_recycled.lock().await;
-        (pending.len(), submitted, confirmed, recycled)
+        let submitted = self.total_submitted.load(Ordering::Relaxed);
+        let confirmed = self.total_confirmed.load(Ordering::Relaxed);
+        let recycled = self.total_recycled.load(Ordering::Relaxed);
+        (self.pending.len(), submitted, confirmed, recycled)
     }
 
     /// Load pending TXs from disk on startup
     pub async fn load_from_disk(&self, storage_path: &str) {
         let file_path = format!("{}/tx_recycler_pending.dat", storage_path);
         if let Ok(data) = std::fs::read(&file_path) {
-            let mut pending = self.pending.lock().await;
             let mut offset = 0;
             let mut loaded_count = 0;
             while offset + 32 < data.len() {
@@ -258,7 +245,7 @@ impl TxRecycler {
                 let tx_data = data[offset..offset + tx_len].to_vec();
                 offset += tx_len;
 
-                pending.insert(
+                self.pending.insert(
                     hash,
                     PendingTx {
                         data: tx_data,
@@ -279,17 +266,16 @@ impl TxRecycler {
 
     /// Save pending TXs to disk
     pub async fn save_to_disk(&self, storage_path: &str) {
-        let pending = self.pending.lock().await;
         // Don't save if empty to save I/O
-        if pending.is_empty() {
+        if self.pending.is_empty() {
             return;
         }
 
         let mut data = Vec::new();
-        for (hash, ptx) in pending.iter() {
-            data.extend_from_slice(hash);
-            data.extend_from_slice(&(ptx.data.len() as u32).to_le_bytes());
-            data.extend_from_slice(&ptx.data);
+        for entry in self.pending.iter() {
+            data.extend_from_slice(entry.key());
+            data.extend_from_slice(&(entry.value().data.len() as u32).to_le_bytes());
+            data.extend_from_slice(&entry.value().data);
         }
 
         let file_path = format!("{}/tx_recycler_pending.dat", storage_path);

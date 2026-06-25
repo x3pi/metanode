@@ -135,7 +135,7 @@ pub(super) async fn validator_multi_epoch_transition(
                                     Ok((last_commit_index, _, _, _, _, _, _)) => {
                                         info!("✅ [EPOCH MONITOR] Go last handled commit is {}", last_commit_index);
                                         if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                                            match node_arc.try_lock() {
+                                            match node_arc.try_read() {
                                                 Ok(node_guard) => {
                                                     let old_handled = node_guard.commit_consumer_monitor.highest_handled_commit();
                                                     if last_commit_index > old_handled {
@@ -215,7 +215,7 @@ pub(super) async fn validator_multi_epoch_transition(
         }
 
         if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-            let mut node_guard = node_arc.lock().await;
+            let mut node_guard = node_arc.write().await;
 
             let synced_global_exec_index = if boundary_gei > 0 {
                 boundary_gei

@@ -19,8 +19,8 @@ import (
 // (creating it if necessary), modify it, and then mark it as dirty using setDirtyAccountState.
 
 func (db *AccountStateDB) SubPendingBalance(address common.Address, amount *big.Int) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SubPendingBalance db.lockedFlag is already locked")
@@ -42,8 +42,8 @@ func (db *AccountStateDB) SubPendingBalance(address common.Address, amount *big.
 }
 
 func (db *AccountStateDB) RefreshPendingBalance(address common.Address) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("RefreshPendingBalance db.lockedFlag is already locked")
@@ -76,8 +76,8 @@ func (db *AccountStateDB) RefreshPendingBalance(address common.Address) error {
 }
 
 func (db *AccountStateDB) AddPendingBalance(address common.Address, amount *big.Int) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("AddPendingBalance db.lockedFlag is already locked")
@@ -96,8 +96,8 @@ func (db *AccountStateDB) AddPendingBalance(address common.Address, amount *big.
 }
 
 func (db *AccountStateDB) PlusOneNonce(address common.Address) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("PlusOneNonce db.lockedFlag is already locked")
@@ -118,8 +118,8 @@ func (db *AccountStateDB) PlusOneNonce(address common.Address) error {
 }
 
 func (db *AccountStateDB) SetAccountType(address common.Address, accountTypeNew pb.ACCOUNT_TYPE) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetAccountType db.lockedFlag is already locked")
@@ -141,8 +141,8 @@ func (db *AccountStateDB) SetAccountType(address common.Address, accountTypeNew 
 }
 
 func (db *AccountStateDB) SetPublicKeyBls(address common.Address, publicKeyBls []byte) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetPublicKeyBls db.lockedFlag is already locked")
@@ -173,8 +173,8 @@ func (db *AccountStateDB) GetPublicKeyBls(address common.Address) ([]byte, error
 }
 
 func (db *AccountStateDB) AddBalance(address common.Address, amount *big.Int) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("AddBalance db.lockedFlag is already locked")
@@ -198,8 +198,8 @@ func (db *AccountStateDB) AddBalance(address common.Address, amount *big.Int) er
 }
 
 func (db *AccountStateDB) SubBalance(address common.Address, amount *big.Int) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SubBalance db.lockedFlag is already locked")
@@ -225,8 +225,8 @@ func (db *AccountStateDB) SubBalance(address common.Address, amount *big.Int) er
 }
 
 func (db *AccountStateDB) SubTotalBalance(address common.Address, amount *big.Int) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SubTotalBalance db.lockedFlag is already locked")
@@ -250,8 +250,8 @@ func (db *AccountStateDB) SubTotalBalance(address common.Address, amount *big.In
 }
 
 func (db *AccountStateDB) SetNonce(address common.Address, nonce uint64) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetNonce db.lockedFlag is already locked")
@@ -275,8 +275,8 @@ func (db *AccountStateDB) SetNonce(address common.Address, nonce uint64) error {
 }
 
 func (db *AccountStateDB) SetLastHash(address common.Address, hash common.Hash) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetLastHash db.lockedFlag is already locked")
@@ -309,8 +309,8 @@ func (db *AccountStateDB) GetLastHash(address common.Address) (common.Hash, erro
 }
 
 func (db *AccountStateDB) SetNewDeviceKey(address common.Address, newDeviceKey common.Hash) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetNewDeviceKey db.lockedFlag is already locked")
@@ -344,8 +344,8 @@ func (db *AccountStateDB) SetCreatorPublicKey(
 	address common.Address,
 	creatorPublicKey p_common.PublicKey,
 ) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetCreatorPublicKey db.lockedFlag is already locked")
@@ -363,8 +363,8 @@ func (db *AccountStateDB) SetCreatorPublicKey(
 }
 
 func (db *AccountStateDB) SetCodeHash(address common.Address, codeHash common.Hash) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetCodeHash db.lockedFlag is already locked")
@@ -383,8 +383,8 @@ func (db *AccountStateDB) SetCodeHash(address common.Address, codeHash common.Ha
 }
 
 func (db *AccountStateDB) SetStorageRoot(address common.Address, storageRoot common.Hash) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetStorageRoot db.lockedFlag is already locked")
@@ -405,8 +405,8 @@ func (db *AccountStateDB) SetStorageAddress(
 	address common.Address,
 	storageAddress common.Address,
 ) error {
-	db.accountLocks[address[0]].Lock()
-	defer db.accountLocks[address[0]].Unlock()
+	db.accountLocks[getShardIndex(address)].Lock()
+	defer db.accountLocks[getShardIndex(address)].Unlock()
 
 	if db.lockedFlag.Load() {
 		return errors.New("SetStorageAddress db.lockedFlag is already locked")

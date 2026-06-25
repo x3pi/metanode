@@ -155,13 +155,13 @@ impl Core {
                 .map(|p| p.get_go_lag())
                 .unwrap_or(0);
 
-            if go_lag >= 500 { // Start throttling at moderate_lag_threshold (500, was 100)
-                let extra_delay = if go_lag >= 1000 { // severe_lag_threshold (1000, was 200)
+            if go_lag >= 50000 { // Start throttling at moderate_lag_threshold (50000, was 500)
+                let extra_delay = if go_lag >= 100000 { // severe_lag_threshold (100000, was 1000)
                     // Severe throttling: 500ms base, scaling up to 2000ms max (was 5000ms)
-                    Duration::from_millis(500 + (go_lag.saturating_sub(1000) * 10).min(1500))
+                    Duration::from_millis(500 + (go_lag.saturating_sub(100000) * 10).min(1500))
                 } else {
                     // Moderate throttling: scaling up to 500ms (was 1000ms)
-                    Duration::from_millis((go_lag.saturating_sub(500) * 1).min(500))
+                    Duration::from_millis((go_lag.saturating_sub(50000) * 1).min(500))
                 };
 
                 effective_delay += extra_delay;
@@ -175,6 +175,16 @@ impl Core {
                         effective_delay.as_millis()
                     );
                 }
+            }
+
+            // [USER REQUIREMENT] Force 40K-50K block aggregation by increasing the base proposal delay.
+            // Instead of proposing every 50ms (which results in 10K blocks), we wait 200ms to accumulate more txs.
+            let min_aggregation_delay = Duration::from_millis(200);
+            
+            // ADAPTIVE BYPASS: If the queue already has enough TXs waiting, propose immediately!
+            let has_sufficient_txs = self.transaction_consumer.has_sufficient_transactions();
+            if effective_delay < min_aggregation_delay && !has_sufficient_txs {
+                effective_delay = min_aggregation_delay;
             }
 
             if Duration::from_millis(

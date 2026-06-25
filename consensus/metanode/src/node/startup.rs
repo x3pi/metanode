@@ -6,7 +6,7 @@ use mysten_metrics::start_prometheus_server;
 use prometheus::Registry;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use tracing::{error, info, warn};
 
 use crate::config::NodeConfig;
@@ -39,7 +39,7 @@ impl StartupConfig {
 
 /// Represents the initialized node and its servers
 pub struct InitializedNode {
-    pub node: Arc<Mutex<ConsensusNode>>,
+    pub node: Arc<tokio::sync::RwLock<ConsensusNode>>,
     pub rpc_server_handle: Option<tokio::task::JoinHandle<()>>,
     pub uds_server_handle: Option<tokio::task::JoinHandle<()>>,
     #[allow(dead_code)]
@@ -63,9 +63,8 @@ impl InitializedNode {
         // (e.g. during genesis) while Rust is still initializing.
         // ═══════════════════════════════════════════════════════════════
         let (ffi_tx_sender, ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
-        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.lock() {
+        if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.write() {
             *sender_guard = Some(ffi_tx_sender);
-            crate::ffi::FFI_TX_CONDVAR.notify_all();
             tracing::info!("🔌 [STARTUP] Early FFI Transaction Channel initialized to prevent Go deadlocks.");
         } else {
             tracing::warn!("⚠️ [STARTUP] Failed to acquire lock for FFI TX SENDER initialization!");
@@ -93,7 +92,7 @@ impl InitializedNode {
         };
 
         // Create the ConsensusNode wrapped in a Mutex for safe concurrent access
-        let node = Arc::new(Mutex::new(
+        let node = Arc::new(tokio::sync::RwLock::new(
             ConsensusNode::new_with_registry_and_service(node_config.clone(), registry).await?,
         ));
 
@@ -101,7 +100,7 @@ impl InitializedNode {
         crate::node::set_transition_handler_node(node.clone()).await;
 
         // Get transaction submitter for servers
-        let tx_client = { node.lock().await.transaction_submitter() };
+        let tx_client = { node.read().await.transaction_submitter() };
 
         let rpc_server_handle;
         let uds_server_handle;
@@ -132,7 +131,7 @@ impl InitializedNode {
 
             let node_for_uds = node.clone();
             let (is_transitioning_for_uds, _pending_tx_queue, _storage_path) = {
-                let node_guard = node.lock().await;
+                let node_guard = node.read().await;
                 (
                     node_guard.coordination_hub.get_is_transitioning_ref(),
                     node_guard.pending_transactions_queue.clone(),
@@ -182,7 +181,7 @@ impl InitializedNode {
 
             // ♻️ TX RECYCLER: Inject into UDS server for tracking submitted TXs
             {
-                let node_guard = node.lock().await;
+                let node_guard = node.read().await;
                 if let Some(ref recycler) = node_guard.tx_recycler {
                     uds_server = uds_server.with_tx_recycler(recycler.clone());
                     info!("♻️ [TX RECYCLER] Injected into UDS server");
@@ -205,7 +204,7 @@ impl InitializedNode {
         if let Some(peer_port) = node_config.peer_rpc_port {
             if peer_port > 0 {
                 let (executor_client_for_peer, shared_index_for_peer) = {
-                    let node_guard = node.lock().await;
+                    let node_guard = node.read().await;
                     (
                         node_guard.executor_client.clone(),
                         Some(node_guard.coordination_hub.get_global_exec_index_ref()),
@@ -266,7 +265,7 @@ impl InitializedNode {
         loop {
             tokio::select! {
                 _ = check_interval.tick() => {
-                    let is_alive = { self.node.lock().await.is_alive() };
+                    let is_alive = { self.node.read().await.is_alive() };
                     if !is_alive {
                         tracing::error!("🔴 [SUPERVISOR] Lõi đồng thuận đã Crash! Kích hoạt quy trình Auto-Restart...");
                         // CRITICAL: Explicitly shut down node, servers, and clear global registry to release locks
@@ -307,8 +306,8 @@ impl InitializedNode {
         }
 
         // 2. Lock node and perform shutdown sequence
-        // We use lock() instead of try_unwrap() because the node is shared (e.g. global registry)
-        let mut node = self.node.lock().await;
+        // We use write() instead of try_unwrap() because the node is shared (e.g. global registry)
+        let mut node = self.node.write().await;
 
         // 3. Flush remaining blocks to Go Master
         if let Err(e) = node.flush_blocks_to_go_master().await {

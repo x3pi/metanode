@@ -65,7 +65,7 @@ pub(super) async fn recover_from_block_stall(
                                 Ok((last_commit_index, _, _, _, _, _, _)) => {
                                     info!("✅ [STALL RECOVERY] Go last handled commit is {}", last_commit_index);
                                     if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                                        match node_arc.try_lock() {
+                                        match node_arc.try_read() {
                                             Ok(node_guard) => {
                                                 let old_handled = node_guard.commit_consumer_monitor.highest_handled_commit();
                                                 if last_commit_index > old_handled {

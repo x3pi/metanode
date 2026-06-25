@@ -115,7 +115,7 @@ pub fn start_unified_epoch_monitor(
             // and calls poll_go_until_synced which awaits. If epoch_monitor calls lock().await,
             // it deadlocks, preventing STALL RECOVERY from executing to help Go catch up.
             let lock_res = if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                match node_arc.try_lock() {
+                match node_arc.try_read() {
                     Ok(node_guard) => {
                         last_known_epoch = node_guard.current_epoch;
                         last_known_mode = Some(node_guard.node_mode.clone());

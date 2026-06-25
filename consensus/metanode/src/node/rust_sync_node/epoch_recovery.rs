@@ -235,7 +235,7 @@ impl RustSyncNode {
 
             // Scope the lock to avoid holding it across the advance_epoch call
             {
-                let node_guard = node.lock().await;
+                let mut node_guard = node.write().await;
                 let mut pending = node_guard.pending_epoch_transitions.lock().await;
 
                 // Check each pending transition
@@ -304,7 +304,7 @@ impl RustSyncNode {
 
                     // Re-queue if failed
                     if let Some(node) = get_transition_handler_node().await {
-                        let node_guard = node.lock().await;
+                        let mut node_guard = node.write().await;
                         let mut pending = node_guard.pending_epoch_transitions.lock().await;
                         pending.push(trans);
                     }
