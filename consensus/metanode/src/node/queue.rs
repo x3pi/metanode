@@ -105,10 +105,7 @@ pub async fn submit_queued_transactions(node: &mut ConsensusNode) -> Result<usiz
     );
 
     // Load committed transaction hashes to avoid resubmitting already committed transactions
-    let committed_hashes = {
-        let hashes_guard = node.committed_transaction_hashes.lock().await;
-        hashes_guard.clone()
-    };
+    let committed_hashes = node.committed_transaction_hashes.clone();
     info!(
         "📋 [TX FLOW] Loaded {} committed transaction hashes from current epoch",
         committed_hashes.len()

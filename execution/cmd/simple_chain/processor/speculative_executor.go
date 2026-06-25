@@ -120,8 +120,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			return
 		}
 
-		// 6. Preload accounts
-		preloadChan := startPreloadForCloned(csCopy, allTransactions)
+		// 6. (Preload accounts removed - now handled exclusively in block_stm.go)
 
 		// 7. Deterministic timestamp
 		commitTimestampMs := epochData.GetCommitTimestampMs()
@@ -144,12 +143,11 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		}
 		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
 
-		// Wait for preload
-		<-preloadChan
+		// (Wait for preload removed)
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
 		startTime := time.Now()
-		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum)
+		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(allTransactions), 0, execDuration.Microseconds())
 
@@ -197,30 +195,6 @@ func (se *SpeculativeExecutor) GetSpeculativeResult(gei uint64) (*SpeculativeRes
 		return nil, false
 	}
 	return val.(*SpeculativeResult), true
-}
-
-func startPreloadForCloned(cs *blockchain.ChainState, txs []types.Transaction) <-chan struct{} {
-	preloadDone := make(chan struct{})
-	go func() {
-		defer close(preloadDone)
-		uniqueMap := make(map[common.Address]struct{}, len(txs)*2)
-		for _, tx := range txs {
-			uniqueMap[tx.FromAddress()] = struct{}{}
-			if !tx.IsDeployContract() {
-				uniqueMap[tx.ToAddress()] = struct{}{}
-			}
-		}
-		addrSlice := make([]common.Address, 0, len(uniqueMap))
-		for addr := range uniqueMap {
-			addrSlice = append(addrSlice, addr)
-		}
-		// Sort deterministically to avoid any preloading race
-		sort.Slice(addrSlice, func(i, j int) bool {
-			return bytes.Compare(addrSlice[i].Bytes(), addrSlice[j].Bytes()) < 0
-		})
-		cs.GetAccountStateDB().PreloadAccounts(addrSlice)
-	}()
-	return preloadDone
 }
 
 // StartCommitterLoop starts the sequential committer loop
@@ -417,7 +391,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		}
 
 		// Preload
-		preloadChan := startPreloadForCloned(csCopy, res.Txs)
+		// (Preload removed)
 
 		blockTimeSec := res.TimestampMs / 1000
 
@@ -431,9 +405,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		}
 		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
 
-		<-preloadChan
+		// (Wait removed)
 
-		accumulatedResults, commitErr = tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, res.LeaderAddr, res.BlockNum)
+		accumulatedResults, commitErr = tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, res.LeaderAddr, res.BlockNum, true)
 		if commitErr != nil {
 			commitErr = fmt.Errorf("sequential re-execution failed: %w", commitErr)
 			return commitErr

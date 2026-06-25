@@ -178,7 +178,7 @@ pub async fn transition_to_epoch_from_system_tx(
 
     // Memory cleanup
     {
-        let mut hashes = node.committed_transaction_hashes.lock().await;
+        let hashes = &node.committed_transaction_hashes;
         let old_count = hashes.len();
         hashes.clear();
         hashes.shrink_to_fit();

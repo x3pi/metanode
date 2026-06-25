@@ -80,10 +80,10 @@ pub struct PendingEpochTransition {
 
 // Global registry for transition handler to access node
 static TRANSITION_HANDLER_REGISTRY: tokio::sync::OnceCell<
-    tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<ConsensusNode>>>>,
+    tokio::sync::RwLock<Option<Arc<tokio::sync::RwLock<ConsensusNode>>>>,
 > = tokio::sync::OnceCell::const_new();
 
-pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<ConsensusNode>>> {
+pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::RwLock<ConsensusNode>>> {
     if let Some(registry) = TRANSITION_HANDLER_REGISTRY.get() {
         let registry_guard = registry.read().await;
         registry_guard.clone()
@@ -92,7 +92,7 @@ pub async fn get_transition_handler_node() -> Option<Arc<tokio::sync::Mutex<Cons
     }
 }
 
-pub async fn set_transition_handler_node(node: Arc<tokio::sync::Mutex<ConsensusNode>>) {
+pub async fn set_transition_handler_node(node: Arc<tokio::sync::RwLock<ConsensusNode>>) {
     if TRANSITION_HANDLER_REGISTRY.get().is_none() {
         let _ = TRANSITION_HANDLER_REGISTRY.set(tokio::sync::RwLock::new(None));
     }
@@ -158,7 +158,7 @@ pub struct ConsensusNode {
     pub(crate) epoch_pending_transactions: Arc<tokio::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>>,
     /// Transaction hashes that have been committed in current epoch (for duplicate prevention)
     pub(crate) committed_transaction_hashes:
-        Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+        Arc<dashmap::DashSet<Vec<u8>>>,
 
     /// Queued epoch transitions waiting for sync to complete (for SyncOnly nodes)
     /// When a SyncOnly node receives AdvanceEpoch but hasn't synced to the boundary yet,
@@ -233,7 +233,7 @@ pub(crate) struct ConsensusSetup {
     pub(crate) executor_client_for_proc: Arc<ExecutorClient>,
     pub(crate) current_commit_index: Arc<AtomicU32>,
     pub(crate) pending_transactions_queue: Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
-    pub(crate) committed_transaction_hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    pub(crate) committed_transaction_hashes: Arc<dashmap::DashSet<Vec<u8>>>,
     pub(crate) epoch_tx_sender: tokio::sync::mpsc::Sender<(u64, u64, u64, u64)>,
     pub(crate) epoch_tx_receiver: tokio::sync::mpsc::Receiver<(u64, u64, u64, u64)>,
     pub(crate) system_transaction_provider: Arc<DefaultSystemTransactionProvider>,

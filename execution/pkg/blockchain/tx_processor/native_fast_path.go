@@ -17,6 +17,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -32,7 +33,7 @@ import (
 //   - Chunked parallel workers instead of N goroutine jobs
 //
 // FORK-SAFETY: Thread-safety is guaranteed by AccountStateDB's sharded locks
-// (accountLocks[address[0]]). Each sender appears in exactly one group
+// (accountLocks[address[0:2]]). Each sender appears in exactly one group
 // (guaranteed by UnionFind grouping), so no concurrent writes to the same
 // sender account. Receiver accounts may be shared (e.g., multiple senders
 // sending to the same address), but AddBalance uses the same sharded lock.
@@ -47,6 +48,7 @@ func processNativeTransfersFastPath(
 	totalTxs int,
 	enableTrace bool,
 	leaderAddr common.Address,
+	skipSignatureVerify bool,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -101,25 +103,40 @@ func processNativeTransfersFastPath(
 				for _, item := range group.Items {
 					tx := item.Tx
 
-					GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_START", "Native transfer fast-path execution")
+					if enableTrace {
+						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_START", "Native transfer fast-path execution")
+					}
 
 					// Skip if sender has prior failure in this group
 					if failedSenders[tx.FromAddress()] {
-						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Skipped: prior sender failure")
+						if enableTrace {
+							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Skipped: prior sender failure")
+						}
 						continue
 					}
 
 					// Load sender state for nonce/balance checks
 					as, _ := globalAccountDB.AccountState(tx.FromAddress())
 					if as == nil {
-						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Sender account not found")
+						if enableTrace {
+							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTION_SKIPPED", "Sender account not found")
+						}
 						failedSenders[tx.FromAddress()] = true
 						continue
 					}
 
 					// Verify transaction (BLS signature, amount, etc.)
-					if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
-						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
+					var errVerify *transaction.TransactionError
+					if skipSignatureVerify || LoadVerifiedSignature(tx.Hash()) {
+						errVerify = nil
+					} else {
+						errVerify = VerifyTransaction(tx, chainState, as)
+					}
+
+					if errVerify != nil {
+						if enableTrace {
+							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
+						}
 						logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] %v for tx %s (From: %s)", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
 						if errVerify.Code != 120001 { // InvalidNonce code
 							failedSenders[tx.FromAddress()] = true
@@ -131,7 +148,9 @@ func processNativeTransfersFastPath(
 					if tx.GetNonce() != as.Nonce() {
 						if !NomtAheadReplayMode.Load() {
 							err := fmt.Errorf("nonce mismatch: tx.Nonce()=%d, state.Nonce()=%d", tx.GetNonce(), as.Nonce())
-							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_NONCE_REJECTED", err.Error())
+							if enableTrace {
+								GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_NONCE_REJECTED", err.Error())
+							}
 							logger.Warn("❌ [FAST-PATH-NONCE-REJECT] %v for tx %s (From: %s)", err, tx.Hash().Hex(), tx.FromAddress().Hex())
 							if tx.GetNonce() > as.Nonce() {
 								failedSenders[tx.FromAddress()] = true
@@ -154,7 +173,9 @@ func processNativeTransfersFastPath(
 					// ExecuteNativeTransfer (batch transaction in a single lock acquisition to reduce lock contention)
 					err := globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
 					if err != nil {
-						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", err.Error())
+						if enableTrace {
+							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", err.Error())
+						}
 						rcp := createErrorReceipt(tx, toAddress, err)
 						txs = append(txs, tx)
 						rcps = append(rcps, rcp)
@@ -180,7 +201,9 @@ func processNativeTransfersFastPath(
 						nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 					)
 
-					GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_RECEIPT_CREATED", fmt.Sprintf("Fast-path receipt. Status: %d", rcp.Status()))
+					if enableTrace {
+						GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_RECEIPT_CREATED", fmt.Sprintf("Fast-path receipt. Status: %d", rcp.Status()))
+					}
 
 					// Record Prometheus metrics
 					if GlobalTxTraceStore.Enabled() {

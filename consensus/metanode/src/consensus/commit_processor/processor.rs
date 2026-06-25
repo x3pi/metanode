@@ -26,7 +26,7 @@ pub struct CommitProcessorConfig {
     pub epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
     pub epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     pub tx_recycler: Option<Arc<TxRecycler>>,
-    pub committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    pub committed_transaction_hashes: Option<Arc<dashmap::DashSet<Vec<u8>>>>,
     pub storage_path: Option<std::path::PathBuf>,
     pub lag_alert_sender: Option<tokio::sync::mpsc::Sender<crate::consensus::commit_processor::lag_monitor::LagAlert>>,
     pub quorum_commit_index: Option<Arc<AtomicU32>>,
@@ -226,7 +226,7 @@ impl CommitProcessor {
     /// Set committed transaction hashes
     pub fn with_committed_transaction_hashes(
         mut self,
-        hashes: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+        hashes: Arc<dashmap::DashSet<Vec<u8>>>,
     ) -> Self {
         self.config.committed_transaction_hashes = Some(hashes);
         self
