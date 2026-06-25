@@ -168,6 +168,21 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 	toErrCount := 0
 	txHashDeliveredCount := 0
 
+	type sendTask struct {
+		msgID        string
+		txHash       string
+		payload      []byte
+		deliveryType string // "txHash", "toAddr", "bls"
+		targetAddr   common.Address
+	}
+
+	type connBatch struct {
+		conn  network.Connection
+		tasks []sendTask
+	}
+
+	batches := make(map[string]*connBatch)
+
 	for _, v := range receipts {
 		// Skip pre-commit notifications
 		if v.ProcessingType() == pb.RECEIPT_PROCESSING_TYPE_PRE_COMMIT_NOTIFICATION {
@@ -235,27 +250,28 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 			continue
 		}
 
+		// Helper to queue tasks
+		queueTask := func(conn network.Connection, deliveryType string, msgID string, txHash string, targetAddr common.Address) {
+			addr := conn.RemoteAddrSafe()
+			cb, exists := batches[addr]
+			if !exists {
+				cb = &connBatch{conn: conn, tasks: make([]sendTask, 0, 100)}
+				batches[addr] = cb
+			}
+			cb.tasks = append(cb.tasks, sendTask{
+				msgID:        msgID,
+				txHash:       txHash,
+				payload:      b,
+				deliveryType: deliveryType,
+				targetAddr:   targetAddr,
+			})
+		}
+
 		// Deliver via txHash
 		if hasTxHashConn {
 			txHashDeliveredCount++
 			processedCount++
-			_txHash := txHash.Hex()
-			go func(_conn network.Connection, _marshaledReceipt []byte, _msgID string, _txHash string) {
-				respMsg := p_network.NewMessage(&pb.Message{
-					Header: &pb.Header{
-						Command: command.Receipt,
-						ID:      _msgID,
-					},
-					Body: _marshaledReceipt,
-				})
-				sendErr := _conn.SendMessage(respMsg)
-				if sendErr != nil {
-					logger.Error("❌ [RECEIPT BROADCAST] txHash delivery failed: txHash=%s, err=%v",
-						_txHash, sendErr)
-				} else {
-					// logger.Info("📬 [RECEIPT BROADCAST] Delivered via txHash: %s (msgID=%s)", safePrefix(_txHash, 16), safePrefix(_msgID, 8))
-				}
-			}(txHashConn, b, txHashEntry.MsgID, _txHash)
+			queueTask(txHashConn, "txHash", txHashEntry.MsgID, txHash.Hex(), common.Address{})
 		}
 
 		// Deliver via toAddress connection
@@ -263,16 +279,7 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 			// Skip if it is the same connection as txHash to avoid double delivery
 			if txHashConn == nil || connTo.RemoteAddrSafe() != txHashConn.RemoteAddrSafe() {
 				processedCount++
-				_txHash := txHash.Hex()
-				go func(_conn network.Connection, _marshaledReceipt []byte, _txHash string, _targetAddr common.Address) {
-					sendErr := bp.messageSender.SendBytes(_conn, command.Receipt, _marshaledReceipt)
-					if sendErr != nil {
-						logger.Error("❌ [RECEIPT BROADCAST] Failed to send receipt: txHash=%s, target=%s, error=%v",
-							_txHash, _targetAddr.Hex(), sendErr)
-					} else {
-						logger.Info("📬 [RECEIPT BROADCAST] Delivered via toAddress: %s (target=%s)", safePrefix(_txHash, 16), _targetAddr.Hex())
-					}
-				}(connTo, b, _txHash, toAddr)
+				queueTask(connTo, "toAddr", "", txHash.Hex(), toAddr)
 			}
 		}
 
@@ -280,20 +287,40 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 		if connBls != nil {
 			if txHashConn == nil || connBls.RemoteAddrSafe() != txHashConn.RemoteAddrSafe() {
 				processedCount++
-				_txHash := txHash.Hex()
-				blsAddr := bls.GetAddressFromPublicKey(v.ToAddress().Bytes()) // target log
-				go func(_conn network.Connection, _marshaledReceipt []byte, _txHash string, _targetAddr common.Address) {
-					sendErr := bp.messageSender.SendBytes(_conn, command.Receipt, _marshaledReceipt)
-					if sendErr != nil {
-						logger.Error("❌ [RECEIPT BROADCAST] Failed to send receipt: txHash=%s, target=%s, error=%v",
-							_txHash, _targetAddr.Hex(), sendErr)
-					} else {
-						logger.Info("📬 [RECEIPT BROADCAST] Delivered via BLS toAddress: %s (target=%s)", safePrefix(_txHash, 16), _targetAddr.Hex())
-					}
-				}(connBls, b, _txHash, blsAddr)
+				blsAddr := bls.GetAddressFromPublicKey(v.ToAddress().Bytes())
+				queueTask(connBls, "bls", "", txHash.Hex(), blsAddr)
 			}
 		}
 	}
+
+	// Dispatch grouped receipts: spawn exactly one goroutine per target connection
+	for _, cb := range batches {
+		go func(batch *connBatch) {
+			for _, task := range batch.tasks {
+				if task.deliveryType == "txHash" {
+					respMsg := p_network.NewMessage(&pb.Message{
+						Header: &pb.Header{
+							Command: command.Receipt,
+							ID:      task.msgID,
+						},
+						Body: task.payload,
+					})
+					sendErr := batch.conn.SendMessage(respMsg)
+					if sendErr != nil {
+						logger.Error("❌ [RECEIPT BROADCAST] txHash delivery failed: txHash=%s, err=%v",
+							task.txHash, sendErr)
+					}
+				} else {
+					sendErr := bp.messageSender.SendBytes(batch.conn, command.Receipt, task.payload)
+					if sendErr != nil {
+						logger.Error("❌ [RECEIPT BROADCAST] Failed to send receipt: txHash=%s, target=%s, error=%v",
+							task.txHash, task.targetAddr.Hex(), sendErr)
+					}
+				}
+			}
+		}(cb)
+	}
+
 	// NOTE: All sends are fire-and-forget goroutines — we do NOT wg.Wait() here.
 	// This keeps BroadCastReceipts non-blocking so the block processor can continue immediately.
 	logger.Info("✅ [RECEIPT BROADCAST] BroadCastReceipts: total=%d, processed=%d, skipped=%d, txHash_delivered=%d, to_err=%d",
