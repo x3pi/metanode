@@ -17,6 +17,7 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -47,6 +48,7 @@ func processNativeTransfersFastPath(
 	totalTxs int,
 	enableTrace bool,
 	leaderAddr common.Address,
+	skipSignatureVerify bool,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -124,7 +126,14 @@ func processNativeTransfersFastPath(
 					}
 
 					// Verify transaction (BLS signature, amount, etc.)
-					if errVerify := VerifyTransaction(tx, chainState, as); errVerify != nil {
+					var errVerify *transaction.TransactionError
+					if skipSignatureVerify || LoadVerifiedSignature(tx.Hash()) {
+						errVerify = nil
+					} else {
+						errVerify = VerifyTransaction(tx, chainState, as)
+					}
+
+					if errVerify != nil {
 						if enableTrace {
 							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
 						}

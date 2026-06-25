@@ -174,7 +174,7 @@ impl BlockManager {
         self.update_stats(missing_blocks.len() as u64);
 
         let elapsed = start.elapsed();
-        if !blocks.is_empty() && (elapsed.as_micros() > 500 || blocks.iter().any(|b| !b.transactions().is_empty())) {
+        if !blocks.is_empty() {
             let refs = blocks.iter().map(|b| format!("r{}/a{}", b.round(), b.author())).collect::<Vec<_>>().join(",");
             tracing::warn!(
                 "⏱️ [PERF-RUST] try_accept_blocks_internal (committed: {}, blocks: [{}], accepted: {}): total={:?}, db_write={:?}",

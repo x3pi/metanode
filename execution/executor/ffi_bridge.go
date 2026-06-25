@@ -155,52 +155,16 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		// If queue is full, Go is severely behind — drop block.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
-			// Block dispatched. Now wait for response INDEFINITELY.
-		default:
-			logger.Error("[FFI Bridge] 🚨 authQueue full (1000)! Block GEI=%d dropped. "+
-				"Go block processing is severely behind.",
-				subDag.GetGlobalExecIndex())
-			serializeAndSetResponse(&pb.ExecuteBlockResponse{
-				Success: false,
-				Error:   "authQueue full (1000)",
-			}, outPayload, outLen)
-			return C.bool(false)
-		}
+			// Wait for speculative executor to finish and return actual authoritative response
+			response := <-req.ResponseCh
 
-		// Wait for Go to finish processing — INDEFINITELY with progress logging.
-		// Rust uses spawn_blocking() so blocking here is safe.
-		// This provides honest backpressure: Rust send rate = Go processing rate.
-		waitStart := time.Now()
-		logInterval := 5 * time.Second
-		gei := subDag.GetGlobalExecIndex()
-		for {
-			select {
-			case resp := <-responseCh:
-				if resp != nil && resp.Success {
-					elapsed := time.Since(waitStart)
-					if elapsed > 3*time.Second {
-						logger.Info("[FFI Bridge] ✅ Block GEI=%d processed after %v (slow but OK)",
-							gei, elapsed)
-					}
-					serializeAndSetResponse(resp, outPayload, outLen)
-					return C.bool(true)
-				}
-				if resp != nil {
-					logger.Error("[FFI Bridge] Block processing failed: %s", resp.Error)
-					serializeAndSetResponse(resp, outPayload, outLen)
-				} else {
-					serializeAndSetResponse(&pb.ExecuteBlockResponse{
-						Success: false,
-						Error:   "unknown error (nil response)",
-					}, outPayload, outLen)
-				}
-				return C.bool(false)
-			case <-time.After(logInterval):
-				elapsed := time.Since(waitStart)
-				logger.Warn("[FFI Bridge] ⏳ Block GEI=%d still processing after %v. "+
-					"authQueue depth=%d. Waiting (backpressure active).",
-					gei, elapsed, len(defaultAuthoritativeBlockQueue))
-			}
+			// Set out payload
+			serializeAndSetResponse(response, outPayload, outLen)
+			return C.bool(true)
+		case <-time.After(5 * time.Second):
+			// Timeout if authoritative queue is completely blocked
+			logger.Error("[FFI BRIDGE] Timeout sending to authoritative queue")
+			return C.bool(false)
 		}
 	}
 

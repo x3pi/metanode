@@ -41,6 +41,7 @@ func processSingleGroup(
 	blockTime uint64,
 	leaderAddr common.Address,
 	hasEvmTx bool,
+	skipSignatureVerify bool,
 ) groupResultExt {
 	// Acquire slices from memory pools to eliminate GC pressure
 	txPtr := txSlicePool.Get().(*[]types.Transaction)
@@ -153,7 +154,7 @@ func processSingleGroup(
 		// Bổ sung xác thực lại giao dịch (BLS, Amount, MaxFee,...)
 		// để chặn các giao dịch không hợp lệ lọt vào block (đặc biệt từ Sync Data của Rust)
 		var errVerify *transaction.TransactionError
-		if LoadVerifiedSignature(tx.Hash()) {
+		if skipSignatureVerify || LoadVerifiedSignature(tx.Hash()) {
 			// PERF OPT (D): Fast path for already verified transactions (e.g., from local mempool injection).
 			// Skips redundant AccountState fetches and amount/fee validations.
 			// Nonce check is handled explicitly below.

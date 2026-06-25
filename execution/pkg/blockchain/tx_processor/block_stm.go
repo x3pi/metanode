@@ -118,7 +118,7 @@ func ProcessTransactionsOptimistic(
 	if !hasEvmTx {
 		return processNativeTransfersFastPath(
 			ctx, chainState, groupedGroups, totalTxs,
-			enableTrace, leaderAddr,
+			enableTrace, leaderAddr, skipSignatureVerify,
 		)
 	}
 
@@ -200,7 +200,7 @@ func ProcessTransactionsOptimistic(
 						res := processSingleGroup(
 							ctx, chainState, localAccountDB, localSmartContractDB,
 							group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
-							hasEvmTx,
+							hasEvmTx, skipSignatureVerify,
 						)
 						res.readAccounts = localAccountDB.GetLoadedAccounts()
 						res.readStorage = localSmartContractDB.GetReadStorageKeys()
@@ -368,7 +368,7 @@ func ProcessTransactionsOptimistic(
 							res := processSingleGroup(
 								ctx, chainState, localAccountDB, localSmartContractDB,
 								group.Items, mvmId, lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr,
-								hasEvmTx,
+								hasEvmTx, skipSignatureVerify,
 							)
 							res.readAccounts = localAccountDB.GetLoadedAccounts()
 							res.readStorage = localSmartContractDB.GetReadStorageKeys()
