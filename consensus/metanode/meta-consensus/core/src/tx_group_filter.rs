@@ -34,7 +34,7 @@ pub fn get_group_addresses(tx_data: &[u8]) -> Vec<Vec<u8>> {
 /// Verifies that no address-sharing group of transactions has more than `max_group_size` transactions.
 /// A group is formed by transactions that share at least one address in `RelatedAddresses`.
 pub fn verify_group_limit(txs: &[crate::block::Transaction], max_group_size: usize) -> bool {
-    if txs.is_empty() {
+    if txs.is_empty() || max_group_size >= 100_000 {
         return true;
     }
 
@@ -132,6 +132,10 @@ impl IncrementalGroupVerifier {
     /// Adds a transaction and returns false if it violates the group limit.
     /// Note: If this returns false, the internal state might be partially updated.
     pub fn add_tx(&mut self, tx: &crate::block::Transaction) -> bool {
+        if self.max_group_size >= 100_000 {
+            return true;
+        }
+
         let i = self.next_index;
         let addrs = get_group_addresses(tx.data());
         

@@ -26,7 +26,7 @@ pub async fn dispatch_commit(
     executor_client: Option<Arc<ExecutorClient>>,
     delivery_sender: Option<tokio::sync::mpsc::Sender<crate::node::block_delivery::ValidatedCommit>>,
     tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
-    committed_transaction_hashes: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>>,
+    committed_transaction_hashes: Option<Arc<dashmap::DashSet<Vec<u8>>>>,
     storage_path: Option<std::path::PathBuf>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
@@ -189,7 +189,6 @@ pub async fn dispatch_commit(
                     // the Node lock, which under high TPS is heavily contended (e.g. by UdsServer), causing
                     // tracking to fail and dropping transactions into a re-submission loop.
                     if let Some(hashes_arc) = &committed_transaction_hashes {
-                        let mut hashes_guard = hashes_arc.lock().await;
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
@@ -206,7 +205,7 @@ pub async fn dispatch_commit(
                                     crate::types::tx_hash::calculate_transaction_hash_single(
                                         tx_data,
                                     );
-                                hashes_guard.insert(tx_hash.clone());
+                                hashes_arc.insert(tx_hash.clone());
                                 
                                 committed_tx_data.push(tx_data);
                                 batch_hashes.push(tx_hash);

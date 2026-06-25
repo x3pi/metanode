@@ -428,7 +428,7 @@ impl ConsensusNode {
         storage: &StorageSetup,
     ) -> (
         Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
-        Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+        Arc<dashmap::DashSet<Vec<u8>>>,
     ) {
         let persisted_queue = crate::node::queue::load_transaction_queue_static(&storage.storage_path)
             .await
@@ -450,7 +450,11 @@ impl ConsensusNode {
                 storage.current_epoch
             );
         }
-        let committed_transaction_hashes = Arc::new(tokio::sync::Mutex::new(committed_hashes));
+        let dash_set = dashmap::DashSet::new();
+        for hash in committed_hashes {
+            dash_set.insert(hash);
+        }
+        let committed_transaction_hashes = Arc::new(dash_set);
 
         (pending_transactions_queue, committed_transaction_hashes)
     }
