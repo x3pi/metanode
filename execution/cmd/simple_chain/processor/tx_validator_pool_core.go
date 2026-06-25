@@ -549,25 +549,15 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	// PERF OPT (C): Sample-based WaitGo/WaitRust metrics instead of iterating all TXs.
-	// For 50k TXs, sampling first+last entries gives representative averages
-	// without O(n) map lookups on the hot path.
+	// We iterate through the batch to find up to 10 locally submitted transactions.
+	// This prevents incorrect 0 metrics when testing with multi-node RPC pools.
 	var avgWaitGoUs, avgWaitRustUs int64
 	now := time.Now()
 	if vp.env != nil && len(txs) > 0 {
-		// Sample up to 10 entries: first 5 + last 5
 		const maxSamples = 10
-		var sampleTxs []types.Transaction
-		if len(txs) <= maxSamples {
-			sampleTxs = txs
-		} else {
-			half := maxSamples / 2
-			sampleTxs = make([]types.Transaction, 0, maxSamples)
-			sampleTxs = append(sampleTxs, txs[:half]...)
-			sampleTxs = append(sampleTxs, txs[len(txs)-half:]...)
-		}
 		var totalWaitGoUs, totalWaitRustUs int64
 		var waitCount int64
-		for _, tx := range sampleTxs {
+		for _, tx := range txs {
 			if entry, ok := vp.env.GetTxHashConnEntry(tx.Hash()); ok {
 				waitCount++
 				waitGoUs := entry.SentToRustAt.Sub(entry.CreatedAt).Microseconds()
@@ -581,6 +571,10 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 					waitRustUs = 0
 				}
 				totalWaitRustUs += waitRustUs
+
+				if waitCount >= maxSamples {
+					break
+				}
 			}
 		}
 		if waitCount > 0 {
