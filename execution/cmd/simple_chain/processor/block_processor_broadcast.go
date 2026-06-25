@@ -132,15 +132,15 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 				revertedCount++
 			}
 		}
-		blockNum := lastBlock.Header().BlockNumber()
-		logger.Info("📤 [RECEIPT BROADCAST] broadcastEventsAndReceipts: queuing receipts for broadcast to clients",
-			"blockNumber", blockNum,
-			"totalReceipts", len(allReceipts),
-			"revertedReceipts", revertedCount,
-			"successReceipts", len(allReceipts)-revertedCount)
+		// blockNum := lastBlock.Header().BlockNumber()
+		// logger.Info("📤 [RECEIPT BROADCAST] broadcastEventsAndReceipts: queuing receipts for broadcast to clients",
+		// 	"blockNumber", blockNum,
+		// 	"totalReceipts", len(allReceipts),
+		// 	"revertedReceipts", revertedCount,
+		// 	"successReceipts", len(allReceipts)-revertedCount)
 		// ✅ Child node will broadcast ALL receipts (including revert) to client connections
-		logger.Info("🚀 [RECEIPT BROADCAST] Block #%d: broadcasting %d receipts",
-			blockNum, len(allReceipts))
+		// logger.Info("🚀 [RECEIPT BROADCAST] Block #%d: broadcasting %d receipts",
+		// 	blockNum, len(allReceipts))
 		go bp.BroadCastReceipts(allReceipts)
 	} else {
 		// logger.Warn("⚠️  [RECEIPT BROADCAST] broadcastEventsAndReceipts: no receipts to broadcast for block #%d",
@@ -253,7 +253,7 @@ func (bp *BlockProcessor) BroadCastReceipts(receipts []types.Receipt) {
 					logger.Error("❌ [RECEIPT BROADCAST] txHash delivery failed: txHash=%s, err=%v",
 						_txHash, sendErr)
 				} else {
-					logger.Info("📬 [RECEIPT BROADCAST] Delivered via txHash: %s (msgID=%s)", safePrefix(_txHash, 16), safePrefix(_msgID, 8))
+					// logger.Info("📬 [RECEIPT BROADCAST] Delivered via txHash: %s (msgID=%s)", safePrefix(_txHash, 16), safePrefix(_msgID, 8))
 				}
 			}(txHashConn, b, txHashEntry.MsgID, _txHash)
 		}

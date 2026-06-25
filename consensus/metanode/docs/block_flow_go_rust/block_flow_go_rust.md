@@ -81,13 +81,13 @@ Nó đứng đợi mẻ dữ liệu và **giữ đúng thứ tự commit**. Đâ
   - CHỈ dispatch khi `digest_verifier` xác nhận quorum (2f+1 node) đồng ý cùng `digest`.
   - Nếu `CertifiedCommit` từ mạng đến cùng `commit_index` → dùng CertifiedCommit, vứt local.
 
-- **3 Bypass Case:**
+- **2 Bypass Case & 1 Data-Driven Check:**
 
-  | Bypass | Điều kiện | Mục đích |
+  | Bypass / Check | Điều kiện | Mục đích |
   |---|---|---|
   | **QUORUM-GC-BYPASS** | `quorum_commit_index > local_idx + 50,000` | Digest đã bị GC → mạng đã đồng ý |
-  | **COLD-START-BYPASS** | `qci == 0 && waiting >= 30s` | Epoch mới, chưa có digest data |
-  | **MEMORY-GUARD** | Buffer > 500 commits | Drop oldest, CommitSyncer re-deliver |
+  | **PEER-ATTESTATION** | Không có quorum digest | Giao tiếp P2P data-driven hỏi peer (Zero-timeout). Nếu Ok (≥2f+1) → dispatch. Nếu Conflict → discard. Thà pending chứ không fork. |
+  | **MEMORY-GUARD** | Buffer > 2000 commits | Drop oldest, CommitSyncer re-deliver |
 
 - **WAL (Write-Ahead Log):**
   - Ghi trạng thái `PENDING` trước khi gọi FFI tới Go.
@@ -359,7 +359,7 @@ sequenceDiagram
 ```
 
 **Lưu ý quan trọng:**
-- `COLD-START-BYPASS` (30s timeout) cho phép dispatch unverified commit khi epoch mới chưa có digest data.
+- Cơ chế **PEER-ATTESTATION** (Zero-timeout) cho phép dispatch an toàn khi epoch mới chưa có digest data bằng cách giao tiếp trực tiếp P2P thay vì dùng timeout. Mọi timeout đã bị loại bỏ theo nguyên tắc "Zero-Fork".
 - `EPOCH-INFLATION-GUARD` (Go) ngăn auto-advance epoch cho replayed blocks (GEI ≤ persisted).
 - `initialize_from_go()` phải được gọi sau epoch transition để Go không reject block do "regression".
 
