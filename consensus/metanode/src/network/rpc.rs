@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+
 use tracing::{debug, error, info, warn};
 
 /// Simple HTTP RPC server for submitting transactions
@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 pub struct RpcServer {
     port: u16,
     /// Optional node reference for readiness checking and dynamic submitter fetching
-    node: Option<Arc<Mutex<crate::node::ConsensusNode>>>,
+    node: Option<Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
 }
 
 impl RpcServer {
@@ -24,7 +24,7 @@ impl RpcServer {
     }
 
     /// Create RPC server with node reference
-    pub fn with_node(port: u16, node: Arc<Mutex<crate::node::ConsensusNode>>) -> Self {
+    pub fn with_node(port: u16, node: Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>) -> Self {
         Self {
             port,
             node: Some(node),
@@ -230,7 +230,7 @@ impl RpcServer {
     }
 
     async fn process_transaction_data(
-        node: &Option<Arc<Mutex<crate::node::ConsensusNode>>>,
+        node: &Option<Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
         stream: &mut tokio::net::TcpStream,
         tx_data: Vec<u8>,
         is_length_prefixed: bool,
@@ -400,7 +400,7 @@ impl RpcServer {
         // Check if node is ready and fetch current submitter
         let mut active_client = None;
         if let Some(ref node) = node {
-            let node_guard = node.lock().await;
+            let node_guard = node.read().await;
             let (is_ready, should_queue, reason) = node_guard.check_transaction_acceptance().await;
             active_client = node_guard.transaction_submitter();
             drop(node_guard);
@@ -412,7 +412,7 @@ impl RpcServer {
                         transactions_to_submit.len(), reason, first_tx_hash);
 
                     // Queue all transactions
-                    let node_guard = node.lock().await;
+                    let node_guard = node.read().await;
                     if let Err(e) = node_guard
                         .queue_transactions_for_next_epoch(transactions_to_submit.clone())
                         .await

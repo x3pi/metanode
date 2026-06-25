@@ -59,7 +59,7 @@ pub fn start_epoch_transition_handler(
                 if is_epoch_current {
                     // Check if node is SyncOnly - might need mode upgrade
                     if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                        let node_guard = node_arc.lock().await;
+                        let mut node_guard = node_arc.write().await;
                         let is_sync_only =
                             matches!(node_guard.node_mode, crate::node::NodeMode::SyncOnly);
                         drop(node_guard);
@@ -96,7 +96,7 @@ pub fn start_epoch_transition_handler(
 
             // Try to get node from global registry and call transition function
             if let Some(node_arc) = crate::node::get_transition_handler_node().await {
-                let mut node_guard = node_arc.lock().await;
+                let mut node_guard = node_arc.write().await;
 
                 // Thực hiện chuyển đổi trên Node trước
                 if let Err(e) = node_guard

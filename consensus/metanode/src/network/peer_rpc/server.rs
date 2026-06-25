@@ -34,7 +34,7 @@ pub struct PeerRpcServer {
     /// Executor client for querying Go Master
     executor_client: Arc<ExecutorClient>,
     /// Optional dynamic reference to the ConsensusNode for fetching the transaction_submitter
-    node: Option<Arc<tokio::sync::Mutex<crate::node::ConsensusNode>>>,
+    node: Option<Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
     /// Shared index to get the last global execution index
     shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -59,7 +59,7 @@ impl PeerRpcServer {
     }
 
     /// Set node reference for dynamic transaction submitter fetching
-    pub fn with_node(mut self, node: Arc<tokio::sync::Mutex<crate::node::ConsensusNode>>) -> Self {
+    pub fn with_node(mut self, node: Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>) -> Self {
         self.node = Some(node);
         self
     }
@@ -694,7 +694,7 @@ impl PeerRpcServer {
     /// on validator nodes. The validator must submit these TXs to its local consensus (DAG).
     async fn handle_submit_transaction(
         stream: &mut tokio::net::TcpStream,
-        node: Option<&Arc<tokio::sync::Mutex<crate::node::ConsensusNode>>>,
+        node: Option<&Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
         request: &str,
     ) {
         // Parse POST body - find content after double newline
@@ -729,7 +729,7 @@ impl PeerRpcServer {
 
         let mut submitter = None;
         if let Some(wrapped_node) = node {
-            submitter = wrapped_node.lock().await.transaction_submitter();
+            submitter = wrapped_node.read().await.transaction_submitter();
         }
 
         // Submit TXs to local consensus if submitter is available (validator nodes)
