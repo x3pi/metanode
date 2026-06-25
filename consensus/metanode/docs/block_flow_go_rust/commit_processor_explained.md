@@ -117,9 +117,7 @@ if let Some(ref is_transitioning) = self.is_transitioning {
     while is_transitioning.load(Ordering::Acquire) {        // L347
         // LOG + CHỜ 100ms mỗi vòng
         tokio::time::sleep(Duration::from_millis(100)).await; // L363
-
-        // SAFETY: Nếu chờ > 120s → force clear flag              
-        if elapsed > 120s { is_transitioning.store(false); break; } // L356-361
+        // ZERO-FORK INVARIANT: Không có timeout. Thà pending chứ tuyệt đối không fork.
     }
 }
 ```
@@ -127,7 +125,7 @@ if let Some(ref is_transitioning) = self.is_transitioning {
 > [!WARNING]
 > **CRITICAL DEFENSE!** Khi đang chuyển epoch, Go Master đang re-initialize. Nếu Rust tiếp tục gửi commit mới → Go bị **nghẹn**. Nên processor **tạm dừng** (pause) cho đến khi flag `is_transitioning` = false.
 >
-> Timeout 120s để tránh **deadlock vĩnh viễn** nếu flag không bao giờ được clear (do panic, task bị cancel...).
+> **Lưu ý (May 2026)**: Timeout 120s đã bị loại bỏ hoàn toàn theo nguyên tắc **Zero-Fork**. Nếu Go bị kẹt khi chuyển epoch, Rust sẽ pending vĩnh viễn thay vì tự ý bỏ qua cờ này, tránh nguy cơ dẫn đến hard fork.
 
 ---
 
@@ -343,7 +341,7 @@ flowchart TD
 |--------|----------|------|
 | **DIGEST-GATE** | Buffer local commit cho đến khi quorum digest xác nhận | — |
 | **Epoch Transition Pause** | Dừng xử lý khi Go đang re-init | 341–368 |
-| **120s Deadlock Timeout** | Force-clear flag nếu bị stuck | 356–361 |
+| **Zero-Fork Pending** | Bỏ timeout 120s, chờ vô thời hạn thay vì fork | 356–361 |
 | **WAL (PENDING/COMMITTED)** | Crash-safe giữa Rust và Go | — |
 | **FAST-FORWARD** | Skip commit đã được Go xử lý | — |
 | **Pending Commits Cap** | Giới hạn 5000 pending → tránh OOM | 623–632 |
