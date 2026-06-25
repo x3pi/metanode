@@ -1311,7 +1311,7 @@ func (t *Transaction) ValidCallSmartContractToAccount(toAccountState types.Accou
 }
 
 func MarshalTransactions(txs []types.Transaction) ([]byte, error) {
-	return proto.MarshalOptions{Deterministic: true}.Marshal(&pb.Transactions{Transactions: TransactionsToProto(txs)})
+	return proto.Marshal(&pb.Transactions{Transactions: TransactionsToProto(txs)})
 }
 
 func UnmarshalTransactions(b []byte) ([]types.Transaction, error) {

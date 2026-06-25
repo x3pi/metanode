@@ -41,7 +41,6 @@ type TxValidatorPool struct {
 	storageManager    *storage.StorageManager
 	eventSystem       *mt_filters.EventSystem
 	transactionPool   *transaction_pool.TransactionPool
-	pendingTxManager  *PendingTransactionManager
 	excludedItems     []grouptxns.Item
 
 	futureTxTimeMap map[common.Hash]time.Time
@@ -58,7 +57,6 @@ func NewTxValidatorPool(
 	storageManager *storage.StorageManager,
 	eventSystem *mt_filters.EventSystem,
 	transactionPool *transaction_pool.TransactionPool,
-	pendingTxManager *PendingTransactionManager,
 	blockProcessingLock *sync.RWMutex,
 ) *TxValidatorPool {
 	vp := &TxValidatorPool{
@@ -68,7 +66,6 @@ func NewTxValidatorPool(
 		storageManager:      storageManager,
 		eventSystem:         eventSystem,
 		transactionPool:     transactionPool,
-		pendingTxManager:    pendingTxManager,
 		excludedItems:       make([]grouptxns.Item, 0),
 		futureTxTimeMap:     make(map[common.Hash]time.Time),
 		blockProcessingLock: blockProcessingLock,
@@ -230,22 +227,11 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 			return 0, nil
 		}
 	}
-	// Sử dụng pendingTxManager đã được tối ưu
-	conflict := vp.pendingTxManager.HasNonceConflict(tx)
-	if conflict {
-		logger.Error("❌ [TX FLOW] Transaction conflict: nonce conflict detected for address %s: txHash: %s", tx.FromAddress().Hex(), tx.Hash().Hex())
-		return transaction.NonceConflictError.Code, fmt.Errorf(transaction.NonceConflictError.Description)
-	}
-
 	err := vp.transactionPool.AddTransaction(tx)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to add transaction to pool: %v", err)
 		return transaction.AddToPoolError.Code, fmt.Errorf("failed to add transaction %s to pool: %w", tx.Hash().Hex(), err)
 	}
-
-	// *** THAY ĐỔI: Thêm vào pending manager với trạng thái InPool ***
-	vp.pendingTxManager.Add(tx, StatusInPool)
-	// ***************************************************************
 
 	// Pipeline stats: track TX received
 	GlobalPipelineStats.IncrTxsReceived(1)
@@ -458,10 +444,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 					errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
 					continue
 				}
-
-				if vp.pendingTxManager.HasNonceConflict(tx) {
-					errorsList[i] = fmt.Errorf(transaction.NonceConflictError.Description)
-				}
 			}
 		}(start, end)
 	}
@@ -483,9 +465,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 
 		// Bulk insert to pool (acquires lock ONCE)
 		vp.transactionPool.AddTransactions(validTxs)
-
-		// Bulk insert to pending tracking manager (avoids redundant map ops overhead context switching)
-		vp.pendingTxManager.AddBatch(validTxs, StatusInPool)
 
 		GlobalPipelineStats.IncrTxsReceived(int64(len(validTxs)))
 	}
@@ -751,11 +730,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	}
 
 	if len(txs) > 0 {
-		// *** THAY ĐỔI: Cập nhật trạng thái thành Processing ***
-		for _, tx := range txs {
-			vp.pendingTxManager.UpdateStatus(tx.Hash(), StatusProcessing)
-		}
-		// ****************************************************
+
 		storage.SetCommitLock(true)
 	}
 

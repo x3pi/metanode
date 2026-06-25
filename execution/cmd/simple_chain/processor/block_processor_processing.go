@@ -679,7 +679,7 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 		return
 	}
 
-	removedCount := 0
+
 	skippedCount := 0
 	indexDroppedCount := 0
 	for _, txHash := range txHashes {
@@ -703,20 +703,12 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 				indexDroppedCount++
 			}
 		}
-
-		// Remove transaction from pending pool
-		removed := bp.transactionProcessor.pendingTxManager.Remove(txHash)
-		if removed {
-			removedCount++
-		}
 	}
 
 	if skippedCount > 0 {
 		logger.Warn("⚠️ [PENDING POOL] postProcessBlock for block #%d: skipped %d/%d transactions due to lookup failures",
 			blockNumber, skippedCount, len(txHashes))
 	}
-	logger.Debug("✅ [PENDING POOL] postProcessBlock completed for block #%d: removed %d/%d transactions from pending pool",
-		blockNumber, removedCount, len(txHashes))
 	if bp.storageManager.IsExplorer() {
 		bp.storageManager.GetExplorerSearchService().Commit()
 		// OOM PREVENTION: Only mark block as fully indexed if ALL transactions were indexed.

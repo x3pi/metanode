@@ -27,7 +27,6 @@ var LastSendBatchTxCount = &pipeline.LastSendBatchTxCount
 func (bp *BlockProcessor) GetPipelineStatsJSON() ([]byte, error) {
 	// Update live pool/pending sizes before snapshot
 	GlobalPipelineStats.SetPoolSize(int64(bp.transactionProcessor.transactionPool.CountTransactions()))
-	GlobalPipelineStats.SetPendingSize(int64(bp.transactionProcessor.pendingTxManager.Count()))
 	return GlobalPipelineStats.SnapshotJSON()
 }
 

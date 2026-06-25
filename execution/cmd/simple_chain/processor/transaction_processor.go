@@ -184,8 +184,6 @@ func NewTransactionProcessor(
 		blockProcessingLock,
 	)
 
-	pendingTxManager := NewPendingTransactionManager()
-
 	tp.TxValidatorPool = NewTxValidatorPool(
 		nil, // env is set via SetEnvironment later
 		tp,  // offChainProcessor (TransactionProcessor implements it)
@@ -193,7 +191,6 @@ func NewTransactionProcessor(
 		storageManager,
 		eventSystem,
 		transactionPool,
-		pendingTxManager,
 		blockProcessingLock,
 	)
 
@@ -209,9 +206,7 @@ func NewTransactionProcessor(
 	// Start TX injection workers (Phase 6)
 	tp.startInjectionWorkers(NumInjectionWorkers)
 
-	// MEMORY LEAK FIX: Start background sweeper for PendingTransactionManager
-	// Uses a never-closed channel (lifetime of TransactionProcessor)
-	pendingTxManager.StartCleanupLoop(make(chan struct{}))
+	// MEMORY LEAK FIX: Start background cleanup for verifiedSignaturesCache
 
 	// MEMORY LEAK FIX: Start background cleanup for verifiedSignaturesCache
 	// Prevents unbounded growth of signature verification cache (~2.3GB/hour at 10K TPS)

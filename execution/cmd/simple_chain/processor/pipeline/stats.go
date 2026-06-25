@@ -23,9 +23,6 @@ type PipelineStats struct {
 	// Stage 2: TXs currently in transaction pool (set, not incremented)
 	PoolSize atomic.Int64
 
-	// Stage 3: TXs in pendingTxManager (set, not incremented)
-	PendingSize atomic.Int64
-
 	// Stage 4: TXs forwarded to Rust via UDS (cumulative)
 	TxsForwarded atomic.Int64
 
@@ -58,7 +55,6 @@ type PipelineSnapshot struct {
 	UptimeSeconds  float64 `json:"uptime_seconds"`
 	TxsReceived    int64   `json:"txs_received"`
 	PoolSize       int64   `json:"pool_size"`
-	PendingSize    int64   `json:"pending_size"`
 	TxsForwarded   int64   `json:"txs_forwarded"`
 	BlocksReceived int64   `json:"blocks_received"`
 	TxsCommitted   int64   `json:"txs_committed"`
@@ -115,7 +111,6 @@ func (ps *PipelineStats) Snapshot() PipelineSnapshot {
 		UptimeSeconds:  time.Since(ps.StartTime).Seconds(),
 		TxsReceived:    ps.TxsReceived.Load(),
 		PoolSize:       ps.PoolSize.Load(),
-		PendingSize:    ps.PendingSize.Load(),
 		TxsForwarded:   ps.TxsForwarded.Load(),
 		BlocksReceived: ps.BlocksReceived.Load(),
 		TxsCommitted:   ps.TxsCommitted.Load(),
@@ -136,7 +131,6 @@ func (ps *PipelineStats) SnapshotJSON() ([]byte, error) {
 func (ps *PipelineStats) Reset() {
 	ps.TxsReceived.Store(0)
 	ps.PoolSize.Store(0)
-	ps.PendingSize.Store(0)
 	ps.TxsForwarded.Store(0)
 	ps.BlocksReceived.Store(0)
 	ps.TxsCommitted.Store(0)
@@ -156,7 +150,6 @@ func (ps *PipelineStats) IncrTxsForwarded(n int64)     { ps.TxsForwarded.Add(n) 
 func (ps *PipelineStats) IncrBlocksReceived(n int64)   { ps.BlocksReceived.Add(n) }
 func (ps *PipelineStats) IncrTxsCommitted(n int64)     { ps.TxsCommitted.Add(n) }
 func (ps *PipelineStats) SetPoolSize(n int64)          { ps.PoolSize.Store(n) }
-func (ps *PipelineStats) SetPendingSize(n int64)       { ps.PendingSize.Store(n) }
 func (ps *PipelineStats) SetLastBlock(n int64)         { ps.LastBlock.Store(n) }
 func (ps *PipelineStats) SetLastCommitTimeUs(us int64) { ps.LastCommitTimeUs.Store(us) }
 

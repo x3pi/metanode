@@ -115,10 +115,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		}
 
 		poolSizeBefore = bf.transactionProcessor.transactionPool.CountTransactions()
-		pendingPoolSizeBefore := bf.transactionProcessor.pendingTxManager.Count()
 		txs := bf.transactionProcessor.ProcessTransactionsInPoolSub(setEmptyBlock)
 		poolSizeAfter := bf.transactionProcessor.transactionPool.CountTransactions()
-		pendingPoolSizeAfter := bf.transactionProcessor.pendingTxManager.Count()
 
 		// TBAB: Update TPS
 		totalTxs := len(txs)
@@ -132,8 +130,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		if len(txs) == 0 {
 			if poolSizeBefore > 0 {
-				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, pending_pool_size=%d->%d, but retrieved 0 transactions. Sleeping 10ms to prevent spin.",
-					poolSizeBefore, poolSizeAfter, pendingPoolSizeBefore, pendingPoolSizeAfter)
+				logger.Warn("⚠️  [TX FLOW] TxsProcessor2: Race condition detected! pool_size=%d->%d, but retrieved 0 transactions. Sleeping 10ms to prevent spin.",
+					poolSizeBefore, poolSizeAfter)
 				// Backoff to prevent 100% CPU spin loop when pool contains only future nonces
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -146,9 +144,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
-			for _, tx := range remainingTxs {
-				bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
-			}
 			txs = txs[:targetBlockSize]
 			totalTxs = len(txs) // Update totalTxs to match the capped list
 		}
@@ -159,8 +154,8 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				totalTxs, maxTransactionsPerBatch)
 		}
 
-		logger.Debug("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions from pool (pool_size: %d->%d, pending_pool_size: %d->%d)",
-			totalTxs, poolSizeBefore, poolSizeAfter, pendingPoolSizeBefore, pendingPoolSizeAfter)
+		logger.Debug("📦 [TX FLOW] TxsProcessor2: Retrieved %d transactions from pool (pool_size: %d->%d)",
+			totalTxs, poolSizeBefore, poolSizeAfter)
 
 		// Chia nhỏ thành các batch nhỏ hơn để gửi
 		for batchStart := 0; batchStart < totalTxs; batchStart += maxTransactionsPerBatch {
@@ -202,9 +197,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
 				remainingTxs := txs[batchStart:]
 				bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
-				for _, tx := range remainingTxs {
-					bf.transactionProcessor.pendingTxManager.UpdateStatus(tx.Hash(), StatusInPool)
-				}
 				// Slow down slightly on backpressure
 				time.Sleep(50 * time.Millisecond)
 				break // Break out of the batch loop to wait for the next tick
