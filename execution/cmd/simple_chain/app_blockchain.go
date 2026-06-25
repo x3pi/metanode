@@ -355,7 +355,11 @@ func (app *App) initBlockchain() error {
 
 		// EPOCH VALIDATION: The commit_index is only valid if it belongs to the current epoch
 		targetCommitIndex := uint32(0)
-		if backupCommitEpoch == headerEpoch && backupCommitIndex > 0 {
+		if app.startLastBlock.Header().BlockNumber() == 0 {
+			// THIS IS GENESIS! The database was wiped/empty, but BackupDB might be stale!
+			logger.Warn("🚨 [STARTUP] blockNumber is 0 (Genesis). IGNORING BackupDb to prevent Cold Start Deadlock from stale data!")
+			targetCommitIndex = 0
+		} else if backupCommitEpoch == headerEpoch && backupCommitIndex > 0 {
 			// Backup is from the same epoch — safe to use
 			if backupCommitIndex > headerCommitIndex {
 				targetCommitIndex = backupCommitIndex

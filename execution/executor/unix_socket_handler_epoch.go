@@ -34,6 +34,11 @@ func (rh *RequestHandler) HandleGetLastHandledCommitIndexRequest(request *pb.Get
 		commitIndex = 0
 	}
 
+	if lastBlockNumber == 0 {
+		logger.Info("🔄 [GO-AUTH GEI] lastBlockNumber is 0 (Genesis). Reporting commit_index=0 regardless of BackupDB to prevent Cold Start Deadlock.")
+		commitIndex = 0
+	}
+
 	var lastBlockTimestampMs uint64 = 0
 	var stateRoot []byte = nil
 	if lastBlockNumber > 0 {
