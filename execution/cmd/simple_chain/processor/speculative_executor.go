@@ -85,24 +85,8 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// 3. Epoch boundary check
 		isEpochBoundary := lastBlockHeader.Epoch() > 0 && epochNum > lastBlockHeader.Epoch()
 
-		// 4. Handle empty block speculative shortcut
-		if len(allTransactions) == 0 && len(epochData.GetSystemTransactions()) == 0 && !isEpochBoundary {
-			res := &SpeculativeResult{
-				BlockNum:        blockNum,
-				GEI:             gei,
-				CommitIndex:     commitIndex,
-				Epoch:           epochNum,
-				TimestampMs:     epochData.GetCommitTimestampMs(),
-				LeaderAddr:      common.BytesToAddress(epochData.GetLeaderAddress()),
-				RawBlock:        epochData,
-				Txs:             nil,
-				IsEpochBoundary: false,
-				AuthRespCh:      authRespCh,
-			}
-			se.activeSessions.Store(gei, res)
-			se.resultChan <- res
-			return
-		}
+		// 4. Handle empty block speculative shortcut (REMOVED)
+		// We no longer skip empty blocks. They will be executed and created to ensure 100% fork-safety and sequential block progression.
 
 		// 5. Clone chainState
 		csCopy, err := se.bp.chainState.CloneSpeculative(lastBlockHeader)
@@ -226,77 +210,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 				break
 			}
 
-			// BATCH-DRAIN OPTIMIZATION: Process consecutive empty commits in bulk
-			if len(specRes.Txs) == 0 && len(specRes.RawBlock.GetSystemTransactions()) == 0 && !specRes.IsEpochBoundary {
-				batchCount := uint64(1)
-				highestGEI := specRes.GEI
-				highestCommitIndex := specRes.CommitIndex
-				lastEpochNum := specRes.Epoch
-
-				// Send response for the first empty block if it is authoritative
-				if specRes.AuthRespCh != nil {
-					var stateRoot []byte
-					if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
-						stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
-					}
-					specRes.AuthRespCh <- &pb.ExecuteBlockResponse{
-						Success:      true,
-						ActualGei:    specRes.GEI,
-						BlockNumber:  specRes.BlockNum,
-						GeisConsumed: 1,
-						StateRoot:    stateRoot,
-					}
-				}
-
-				// Drain consecutive empty speculative results from activeSessions
-				for {
-					nextGEI := highestGEI + 1
-					nextRes, nextExists := bp.speculativeExecutor.GetSpeculativeResult(nextGEI)
-					if !nextExists {
-						break
-					}
-					// Only absorb if it is also an empty block
-					if len(nextRes.Txs) == 0 && len(nextRes.RawBlock.GetSystemTransactions()) == 0 && !nextRes.IsEpochBoundary {
-						highestGEI = nextGEI
-						highestCommitIndex = nextRes.CommitIndex
-						lastEpochNum = nextRes.Epoch
-						batchCount++
-						
-						// Send response for drained empty block if it is authoritative
-						if nextRes.AuthRespCh != nil {
-							var stateRoot []byte
-							if bp.chainState != nil && bp.chainState.GetAccountStateDB() != nil {
-								stateRoot = bp.chainState.GetAccountStateDB().Trie().Hash().Bytes()
-							}
-							nextRes.AuthRespCh <- &pb.ExecuteBlockResponse{
-								Success:      true,
-								ActualGei:    nextRes.GEI,
-								BlockNumber:  nextRes.BlockNum,
-								GeisConsumed: 1,
-								StateRoot:    stateRoot,
-							}
-						}
-						
-						bp.speculativeExecutor.CleanGEI(nextGEI)
-					} else {
-						break
-					}
-				}
-
-				bp.updateAndPersistConsensusState(highestGEI, highestCommitIndex, lastEpochNum)
-				if dispatchMs := specRes.RawBlock.GetRustDispatchTimestampMs(); dispatchMs > 0 {
-					pipeline.LastRustDispatchTimestampMs.Store(dispatchMs)
-				}
-
-				if batchCount > 1 {
-					logger.Info("⚡ [COMMITTER-BATCH-DRAIN] Processed %d consecutive empty commits in 1 batch (GEI %d→%d)",
-						batchCount, highestGEI-batchCount+1, highestGEI)
-				}
-
-				bp.speculativeExecutor.CleanGEI(specRes.GEI)
-				nextExpectedGEI = highestGEI + 1
-				continue
-			}
+			// BATCH-DRAIN OPTIMIZATION REMOVED: Every empty commit is now sequentially processed to prevent gaps.
 
 			err := bp.commitSpeculativeResult(specRes, epochFileLogger)
 			if err != nil {
@@ -428,17 +342,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	}
 
 	// 3. Tiến hành tạo block và commit
-	isEpochBoundary := res.IsEpochBoundary
 
-	// Trường hợp block trống
-	if len(res.Txs) == 0 && len(res.RawBlock.GetSystemTransactions()) == 0 && !isEpochBoundary {
-		// Skip block creation, chỉ update GEI
-		bp.updateAndPersistConsensusState(res.GEI, res.CommitIndex, res.Epoch)
-		if dispatchMs := res.RawBlock.GetRustDispatchTimestampMs(); dispatchMs > 0 {
-			pipeline.LastRustDispatchTimestampMs.Store(dispatchMs)
-		}
-		return nil
-	}
+	// Trường hợp block trống (REMOVED)
+	// We no longer skip block creation for empty blocks to guarantee zero gaps and 100% no-fork.
 
 	if len(res.Txs) == 0 {
 		// Ghost-block-guard: 0 transactions, tạo block trống để tránh gap
