@@ -54,10 +54,20 @@ func GetGEIAuthority() *GEIAuthority {
 		geiAuthority = &GEIAuthority{}
 		// Initialize from persistent storage
 		lastGEI := storage.GetLastGlobalExecIndex()
-		geiAuthority.lastAssignedGEI.Store(lastGEI)
 		lastCommit := storage.GetLastHandledCommitIndex()
-		geiAuthority.lastHandledCommitIndex.Store(lastCommit)
 		lastEpoch := storage.GetLastHandledCommitEpoch()
+
+		lastBlock := storage.GetLastBlockNumber()
+		if lastBlock == 0 && (lastGEI > 0 || lastCommit > 0) {
+			logger.Warn("⚠️ [GEI-AUTHORITY] Node is at Genesis (block 0) but lastGEI=%d, lastCommit=%d! Forcing to 0 to prevent Ghost Gap (missing block 1).", lastGEI, lastCommit)
+			lastGEI = 0
+			lastCommit = 0
+			storage.ForceSetLastGlobalExecIndex(0)
+			storage.ForceSetLastHandledCommitIndex(0)
+		}
+
+		geiAuthority.lastAssignedGEI.Store(lastGEI)
+		geiAuthority.lastHandledCommitIndex.Store(lastCommit)
 		geiAuthority.lastHandledCommitEpoch.Store(lastEpoch)
 		logger.Info("🔑 [GEI-AUTHORITY] Initialized: lastGEI=%d, lastCommit=%d, lastCommitEpoch=%d, mode=AUTHORITATIVE", lastGEI, lastCommit, lastEpoch)
 	})
