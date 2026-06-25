@@ -125,7 +125,18 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
     # Compile the binary
     go build -o block_hash_checker main.go
     
-    nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --no-stop-flag --daemon > block_checker_daemon.log 2>&1 &
+    nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --daemon > block_checker_daemon.log 2>&1 &
+    PID=$!
+    sleep 1
+    
+    # Kiểm tra xem tiến trình còn sống sau 1 giây không
+    if ! kill -0 $PID 2>/dev/null; then
+        echo -e "\033[0;31m❌ [ERROR] Block Hash Monitor khởi động thất bại!\033[0m"
+        echo -e "\033[0;33mChi tiết lỗi trong block_checker_daemon.log:\033[0m"
+        cat block_checker_daemon.log
+        exit 1
+    fi
+    
     echo "✅ Đã bật Block Hash Monitor (kiểm tra lệch hash)"
 else
     echo "⚠️ Không tìm thấy thư mục block_hash_checker"

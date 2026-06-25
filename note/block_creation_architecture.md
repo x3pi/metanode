@@ -287,7 +287,7 @@ Hệ thống được thiết kế theo nguyên lý **Chờ Mãi Mãi > Fork** (
 
 | # | Điểm chờ | Đang chờ gì? | Cơ chế | Trạng thái |
 |---|---|---|---|---|
-| ① | `is_transitioning` flag | Epoch transition hoàn tất | Timeout **300s** force-clear (increased from 120s to allow heavy state trie updates during Go epoch transitions) | 🟢 **AN TOÀN** |
+| ① | `is_transitioning` flag | Epoch transition hoàn tất | Chờ vô thời hạn (Zero-Fork). Bỏ hoàn toàn timeout để tránh hard-fork | 🟢 **AN TOÀN** |
 | ② | DIGEST-GATE buffer | CertifiedCommit hoặc digest match | Poll loop. CertifiedCommit thay thế. Buffer giới hạn (**MAX=2000**, tăng từ 500 để absorb 10+s high-TPS commits) | 🟢 **AN TOÀN** |
 | ③ | QUORUM-GATE | `quorum_commit_index >= commit_index` | Poll loop + CertifiedCommit | 🟢 **AN TOÀN** |
 | ④ | Runtime Fork Guard | Go đạt `next_check_block` | Background task, Backoff 60s khi peers fail | 🟢 **AN TOÀN** |
