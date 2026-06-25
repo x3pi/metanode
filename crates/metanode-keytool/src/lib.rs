@@ -126,11 +126,18 @@ pub fn gen_bls() -> (bls12381::min_sig::BLS12381KeyPair, AuthorityKeyFile) {
 
 /// Generate Ed25519 keypair (used for both protocol_key and network_key).
 pub fn gen_ed25519() -> (ed25519::Ed25519KeyPair, Ed25519KeyFile) {
-    let kp = ed25519::Ed25519KeyPair::generate(&mut thread_rng());
-    let priv_bytes = kp.copy().private().as_bytes().to_vec();
+    use rand::RngCore;
+    use fastcrypto::traits::ToFromBytes;
+    
+    let mut seed = [0u8; 32];
+    thread_rng().fill_bytes(&mut seed);
+    
+    let priv_key = ed25519::Ed25519PrivateKey::from_bytes(&seed).unwrap();
+    let kp = ed25519::Ed25519KeyPair::from(priv_key);
+    
     let pub_bytes = kp.public().as_bytes().to_vec();
     let file = Ed25519KeyFile {
-        private_key_hex: hex::encode(&priv_bytes),
+        private_key_hex: hex::encode(&seed),
         public_key_base64: base64_encode(&pub_bytes),
     };
     (kp, file)

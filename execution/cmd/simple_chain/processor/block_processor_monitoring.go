@@ -3,16 +3,10 @@
 package processor
 
 import (
-	"fmt"
 	"runtime"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // startResourceMonitoring monitors resource usage to detect memory leaks and resource exhaustion
@@ -117,54 +111,6 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 // IMPORTANT: Reduce timeout from 50s to 30s for faster cleanup
 // Transactions pending > 30s will be removed and error receipts sent
 func (bp *BlockProcessor) CleanupOldPendingTransactions() {
-	// IMPORTANT: Reduce timeout from 50s to 30s for faster cleanup
-	const timeoutDuration = PendingTimeout
-
-	// Log before cleanup for debugging
-	totalPendingCount := bp.transactionProcessor.pendingTxManager.Count()
-	if totalPendingCount > 0 {
-		logger.Debug("[TX FLOW] CleanupOldPendingTransactions: checking %d pending transactions (timeout=%v)",
-			totalPendingCount, timeoutDuration)
-	}
-
-	allOldPendingTxs := bp.transactionProcessor.pendingTxManager.GetOldTransactionsForRemoval(timeoutDuration)
-	var receiptErrors []types.Receipt
-
-	// Log details of each timed-out transaction
-	for _, tx := range allOldPendingTxs {
-		age := time.Since(tx.Timestamp)
-		// Create more detailed error message
-		errorMessage := fmt.Sprintf("Transaction timeout: pending for more than 30 seconds. txHash: %s, from: %s, nonce: %d",
-			tx.Tx.Hash().Hex(),
-			tx.Tx.FromAddress().Hex()[:10]+"...",
-			tx.Tx.GetNonce())
-		rcpErr := receipt.NewReceipt(tx.Tx.Hash(), tx.Tx.FromAddress(), tx.Tx.ToAddress(), tx.Tx.Amount(), pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errorMessage), pb.EXCEPTION_NONE, p_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, uint64(0), common.Hash{}, 0)
-		receiptErrors = append(receiptErrors, rcpErr)
-
-		// Log detailed warning about timeout transaction
-		logger.Warn("⏰ [TX FLOW] Pending transaction timeout: txHash=%s, from=%s, to=%s, nonce=%d, status=%s, age=%v (added at %v)",
-			tx.Tx.Hash().Hex(),
-			tx.Tx.FromAddress().Hex()[:10]+"...",
-			tx.Tx.ToAddress().Hex()[:10]+"...",
-			tx.Tx.GetNonce(),
-			tx.Status,
-			age,
-			tx.Timestamp.Format("15:04:05.000"))
-	}
-
-	removedCount := len(allOldPendingTxs)
-	if removedCount > 0 {
-		bp.transactionProcessor.pendingTxManager.RemoveTransactions(allOldPendingTxs)
-		logger.Info("✅ [TX FLOW] CleanupOldPendingTransactions: removed %d timeout transactions (remaining pending: %d)",
-			removedCount, totalPendingCount-removedCount)
-	} else if totalPendingCount > 0 {
-		// Log when no transactions were timed out (to know mechanism is running)
-		logger.Debug("✅ [TX FLOW] CleanupOldPendingTransactions: no timeout transactions (all %d pending transactions are still within timeout)",
-			totalPendingCount)
-	}
-
-	if len(receiptErrors) > 0 {
-		logger.Info("📤 [TX FLOW] Broadcasting %d error receipts for timeout transactions", len(receiptErrors))
-		go bp.BroadCastReceipts(receiptErrors)
-	}
+	// PendingTransactionManager has been removed, so this function is intentionally left empty.
+	// Transaction timeout handling should be implemented elsewhere or relies on transaction pool expiration.
 }

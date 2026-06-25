@@ -23,3 +23,7 @@ clap       = { version = "4", features = ["derive"] }
 anyhow     = "1.0.71"
 # For ETH address derivation: keccak256(uncompressed_pubkey[1..])
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[[bin]]
+name = "test_key"
+path = "src/bin/test_key.rs"
