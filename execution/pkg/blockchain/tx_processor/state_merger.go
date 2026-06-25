@@ -1,7 +1,6 @@
 package tx_processor
 
 import (
-	"fmt"
 	"math/big"
 	"sort"
 
@@ -100,47 +99,12 @@ func applyMergedExecuteResult(
 	accDB := chainState.GetAccountStateDB()
 	scDB := chainState.GetSmartContractDB()
 
-	// --- Add Balance ---
-	if len(exRs.MapAddBalance()) > 0 {
-		sortedAddrs := make([]string, 0, len(exRs.MapAddBalance()))
-		for addr := range exRs.MapAddBalance() {
-			sortedAddrs = append(sortedAddrs, addr)
-		}
-		sort.Strings(sortedAddrs)
-		for _, address := range sortedAddrs {
-			amountBytes := exRs.MapAddBalance()[address]
-			fmtAddress := common.HexToAddress(address)
-			addAmount := big.NewInt(0).SetBytes(amountBytes)
-
-			if addAmount.Sign() > 0 {
-				err := accDB.AddBalance(fmtAddress, addAmount)
-				if err != nil {
-					return fmt.Errorf("failed to add balance for %s: %w", address, err)
-				}
-			}
-		}
-	}
-
-	// --- Sub Balance ---
-	if len(exRs.MapSubBalance()) > 0 {
-		sortedAddrs := make([]string, 0, len(exRs.MapSubBalance()))
-		for addr := range exRs.MapSubBalance() {
-			sortedAddrs = append(sortedAddrs, addr)
-		}
-		sort.Strings(sortedAddrs)
-		for _, address := range sortedAddrs {
-			amountBytes := exRs.MapSubBalance()[address]
-			fmtAddress := common.HexToAddress(address)
-			subAmount := big.NewInt(0).SetBytes(amountBytes)
-
-			if subAmount.Sign() > 0 {
-				err := accDB.SubTotalBalance(fmtAddress, subAmount)
-				if err != nil {
-					return fmt.Errorf("failed to subtract balance for %s: %w", address, err)
-				}
-			}
-		}
-	}
+	// 🔒 [DOUBLE-BALANCE-FIX]
+	// We DO NOT apply MapAddBalance and MapSubBalance here!
+	// In Block-STM, balances are applied inline to `localAccountDB` in `tx_executor.go` 
+	// to ensure sequential state visibility. Those changes become `DirtyAccounts` 
+	// and are persisted to the global DB via `validationCache.FlushToGlobal()`.
+	// Applying them again here would cause a Double-Balance Bug!
 
 	// --- Nonce ---
 	if len(exRs.MapNonce()) > 0 {
