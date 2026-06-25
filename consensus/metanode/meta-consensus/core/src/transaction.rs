@@ -167,7 +167,7 @@ impl TransactionConsumer {
 
         let max_transactions_in_block_bytes =
             context.protocol_config.max_transactions_in_block_bytes();
-        let max_num_transactions_in_block = context.protocol_config.max_num_transactions_in_block();
+        let max_num_transactions_in_block = std::cmp::min(10000, context.protocol_config.max_num_transactions_in_block());
         tracing::info!(
             "TransactionConsumer initialized with max_num_transactions_in_block: {}, max_transactions_in_block_bytes: {}",
             max_num_transactions_in_block,
