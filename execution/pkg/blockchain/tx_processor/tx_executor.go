@@ -670,6 +670,17 @@ func processSingleGroup(
 						localAccountDB.SubTotalBalance(addr, subAmt)
 					}
 				}
+				// 🔒 [STATE-LEAK-FIX / BLOCK-STM DESIGN FIX]
+				// Apply storage changes to localSmartContractDB so subsequent TXs in the same sequential meta-group see the updated state!
+				if exRs.MapStorageChange() != nil {
+					for addrHex, changes := range exRs.MapStorageChange() {
+						addr := common.HexToAddress(addrHex)
+						for keyHex, valueBytes := range changes {
+							key := common.HexToHash(keyHex)
+							localSmartContractDB.SetStorageValue(addr, key.Bytes(), valueBytes)
+						}
+					}
+				}
 			}
 		}
 
