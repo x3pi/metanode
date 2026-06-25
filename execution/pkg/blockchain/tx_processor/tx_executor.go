@@ -675,10 +675,14 @@ func processSingleGroup(
 				if exRs.MapStorageChange() != nil {
 					for addrHex, changes := range exRs.MapStorageChange() {
 						addr := common.HexToAddress(addrHex)
+						var keys [][]byte
+						var values [][]byte
 						for keyHex, valueBytes := range changes {
-							key := common.HexToHash(keyHex)
-							localSmartContractDB.SetStorageValue(addr, key.Bytes(), valueBytes)
+							keys = append(keys, common.HexToHash(keyHex).Bytes())
+							values = append(values, valueBytes)
 						}
+						// Tối ưu I/O và Mutex: Ghi nguyên một mẻ (batch) cho toàn bộ thay đổi của Contract này
+						localSmartContractDB.BatchSetStorageValues(addr, keys, values)
 					}
 				}
 			}
