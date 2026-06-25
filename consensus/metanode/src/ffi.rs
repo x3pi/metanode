@@ -5,7 +5,7 @@ use crate::config::NodeConfig;
 use crate::node::startup::{InitializedNode, StartupConfig};
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
 
 // The global callbacks registry configured from Go
@@ -15,16 +15,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static TX_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // The global channel sender for zero-copy FFI transaction submission
-pub static FFI_TX_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = Mutex::new(None);
-// Condvar to block Go's FFI caller until the channel is initialized
-pub static FFI_TX_CONDVAR: Condvar = Condvar::new();
+pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = std::sync::RwLock::new(None);
+
 
 // DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 static FFI_TX_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static FFI_TX_SUBMIT_BYTES: AtomicU64 = AtomicU64::new(0);
 static FFI_TX_FULL_COUNT: AtomicU64 = AtomicU64::new(0);
-static FFI_TX_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static FFI_TX_LAST_LOG_SECS: AtomicU64 = AtomicU64::new(0);
 
 pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = None;
 
@@ -143,12 +142,22 @@ pub fn get_go_state_root() -> String {
 
 /// Returns the current number of items in the FFI TX queue.
 pub fn get_ffi_tx_queue_depth() -> usize {
-    if let Ok(guard) = FFI_TX_SENDER.lock() {
+    if let Ok(guard) = FFI_TX_SENDER.read() {
         if let Some(sender) = guard.as_ref() {
             return sender.max_capacity() - sender.capacity();
         }
     }
     0
+}
+
+pub fn setup_ffi_transaction_channel(sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
+    // Acquire the lock and update the channel
+    if let Ok(mut guard) = FFI_TX_SENDER.write() {
+        *guard = Some(sender);
+    } else {
+        error!("❌ [FFI SETUP] Failed to acquire FFI_TX_SENDER lock for setup!");
+        return;
+    }
 }
 
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
@@ -161,34 +170,23 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
     let tx_data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
 
     // Wait for the channel to be initialized (blocks Go caller until Rust is ready, with 5s timeout)
-    let sender = {
-        let mut guard = match FFI_TX_SENDER.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        let timeout = std::time::Duration::from_secs(5);
-        while guard.is_none() {
-            info!("⏳ [FFI TX FLOW] Waiting for FFI_TX_SENDER to be initialized...");
-            let wait_res = FFI_TX_CONDVAR.wait_timeout(guard, timeout);
-            match wait_res {
-                Ok((g, timeout_result)) => {
-                    guard = g;
-                    if timeout_result.timed_out() {
-                        warn!("⚠️ [FFI TX FLOW] Timeout waiting for FFI_TX_SENDER to be initialized! Returning false.");
-                        return false;
-                    }
-                }
-                Err(poisoned) => {
-                    guard = poisoned.into_inner().0;
-                    break;
-                }
+    let mut sender_opt = None;
+    for _ in 0..100 {
+        if let Ok(guard) = FFI_TX_SENDER.read() {
+            if let Some(ref s) = *guard {
+                sender_opt = Some(s.clone());
+                break;
             }
         }
-        if guard.is_none() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    
+    let sender = match sender_opt {
+        Some(s) => s,
+        None => {
+            tracing::warn!("⚠️ [FFI TX FLOW] Timeout waiting for FFI_TX_SENDER to be initialized! Returning false.");
             return false;
         }
-        guard.clone().unwrap()
     };
 
     // Instrumentation: Queue Saturation metrics
@@ -208,15 +206,21 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
             FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
 
             // DIAGNOSTIC: Periodic summary every 5s
-            let should_log = {
-                let mut last_log = FFI_TX_LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
-                match *last_log {
-                    Some(ts) if ts.elapsed().as_secs() < 5 => false,
-                    _ => {
-                        *last_log = Some(std::time::Instant::now());
-                        true
-                    }
+            let current_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let last_log = FFI_TX_LAST_LOG_SECS.load(AtomicOrdering::Relaxed);
+            let should_log = if current_secs >= last_log + 5 {
+                if FFI_TX_LAST_LOG_SECS.compare_exchange(
+                    last_log,
+                    current_secs,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed
+                ).is_ok() {
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             };
             if should_log {
                 let total_batches = FFI_TX_SUBMIT_COUNT.load(AtomicOrdering::Relaxed);
@@ -244,8 +248,8 @@ pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, l
         Err(_) => {
             error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed due to restart)");
 
-            // Channel closed. Reset sender to None so the next call blocks on the Condvar until a new channel is registered.
-            if let Ok(mut guard) = FFI_TX_SENDER.lock() {
+            // Channel closed. Reset sender to None so the next call blocks on the spin loop until a new channel is registered.
+            if let Ok(mut guard) = FFI_TX_SENDER.write() {
                 *guard = None;
             }
             false

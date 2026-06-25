@@ -180,7 +180,10 @@ impl Core {
             // [USER REQUIREMENT] Force 40K-50K block aggregation by increasing the base proposal delay.
             // Instead of proposing every 50ms (which results in 10K blocks), we wait 200ms to accumulate more txs.
             let min_aggregation_delay = Duration::from_millis(200);
-            if effective_delay < min_aggregation_delay {
+            
+            // ADAPTIVE BYPASS: If the queue already has enough TXs waiting, propose immediately!
+            let has_sufficient_txs = self.transaction_consumer.has_sufficient_transactions();
+            if effective_delay < min_aggregation_delay && !has_sufficient_txs {
                 effective_delay = min_aggregation_delay;
             }
 

@@ -183,6 +183,13 @@ impl TransactionConsumer {
         }
     }
 
+    // Checks if there are enough pending transactions to skip the aggregation delay.
+    // E.g., if there are already 25k pending or multiple FFI batches queued.
+    pub(crate) fn has_sufficient_transactions(&self) -> bool {
+        let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
+        pending_len >= 25000 || self.tx_receiver.len() >= 2
+    }
+
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
     // and `max_num_transactions_in_block` parameters specified via protocol config.
     // This returns one or more transactions to be included in the block and a callback to acknowledge the inclusion of those transactions.
