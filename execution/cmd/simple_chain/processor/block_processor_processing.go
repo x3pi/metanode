@@ -815,6 +815,10 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	if txDB != nil {
 		txDB.Discard()
 	}
+
+	if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
+		bp.transactionProcessor.ClearNoncesCache()
+	}
 }
 
 // ForceCommit triggers an immediate block generation by sending a signal to forceCommitChan
