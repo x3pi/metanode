@@ -8,7 +8,7 @@ use consensus_types::block::Round;
 use futures::StreamExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::{task::JoinHandle, time::sleep};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::{
     block::BlockAPI as _,

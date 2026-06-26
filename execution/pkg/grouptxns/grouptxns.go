@@ -404,15 +404,28 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 		if len(g.Items) <= MaxGroupSize {
 			chunkedGroups = append(chunkedGroups, g)
 		} else {
-			for i := 0; i < len(g.Items); i += MaxGroupSize {
-				end := i + MaxGroupSize
-				if end > len(g.Items) {
-					end = len(g.Items)
+			startIndex := 0
+			for startIndex < len(g.Items) {
+				endIndex := startIndex + MaxGroupSize
+				if endIndex >= len(g.Items) {
+					endIndex = len(g.Items)
+				} else {
+					// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
+					// If we split them into parallel chunks, they will fail nonce validation.
+					// Find the sender of the last transaction in the proposed chunk.
+					lastSender := g.Items[endIndex-1].Tx.FromAddress()
+					
+					// Extend the chunk until the sender changes
+					for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
+						endIndex++
+					}
 				}
+				
 				chunk := RelativeGroup{
-					Items: g.Items[i:end],
+					Items: g.Items[startIndex:endIndex],
 				}
 				chunkedGroups = append(chunkedGroups, chunk)
+				startIndex = endIndex
 			}
 		}
 	}
