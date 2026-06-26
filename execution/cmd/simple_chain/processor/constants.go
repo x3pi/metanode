@@ -25,8 +25,8 @@ const (
 	MaxTimeForAccumulatedResults = 5 * time.Second
 
 	// TxBatchSize is the number of transactions per batch in GenerateBlocksInBatch.
-	// TPS OPTIMIZATION: 500K -> 4000 to limit massive blocks.
-	TxBatchSize = 1000
+	// TPS OPTIMIZATION: 500K -> 50000 to allow larger blocks under heavy load.
+	TxBatchSize = 50000
 
 	// BlockInBatch is the number of blocks to create from a single batch.
 	BlockInBatch = 10
@@ -51,9 +51,9 @@ const (
 	MaxConcurrentSends = 200
 
 	// MaxTransactionsPerBatch is the maximum number of transactions sent in a single batch over UDS.
-	// TPS OPTIMIZATION: 60K -> 4000 to prevent DAG over-batching and DIGEST-GATE starvation.
+	// TPS OPTIMIZATION: 5000 -> 50000 to package transactions into larger batches and avoid fragmentation.
 	// FORK-SAFETY: Does not affect block content — Rust consensus groups TXs independently.
-	MaxTransactionsPerBatch = 5000
+	MaxTransactionsPerBatch = 50000
 
 	// MaxConcurrentReadTx limits parallel read-transaction goroutines.
 	MaxConcurrentReadTx = 10000

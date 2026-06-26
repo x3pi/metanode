@@ -261,11 +261,11 @@ pub async fn dispatch_commit(
 
                     // NEW: Send ForceCommit request to Go via isolated deferred task
                     // This triggers Event-Driven Block Generation in the Go execution engine
-                    // RATE-LIMIT: Only trigger ForceCommit on EndOfEpoch OR once every 500ms
+                    // RATE-LIMIT: Only trigger ForceCommit on EndOfEpoch OR once every 20ms
                     // This prevents TCP socket saturation under high TPS.
                     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
                     let last_ms = LAST_FORCE_COMMIT.load(std::sync::atomic::Ordering::Relaxed);
-                    let should_force_commit = has_system_tx || (now_ms.saturating_sub(last_ms) >= 500);
+                    let should_force_commit = has_system_tx || (now_ms.saturating_sub(last_ms) >= 20);
 
                     if should_force_commit {
                         LAST_FORCE_COMMIT.store(now_ms, std::sync::atomic::Ordering::Relaxed);
