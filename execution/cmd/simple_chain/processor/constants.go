@@ -53,7 +53,7 @@ const (
 	// MaxTransactionsPerBatch is the maximum number of transactions sent in a single batch over UDS.
 	// TPS OPTIMIZATION: 60K -> 4000 to prevent DAG over-batching and DIGEST-GATE starvation.
 	// FORK-SAFETY: Does not affect block content — Rust consensus groups TXs independently.
-	MaxTransactionsPerBatch = 10000
+	MaxTransactionsPerBatch = 50000
 
 	// MaxConcurrentReadTx limits parallel read-transaction goroutines.
 	MaxConcurrentReadTx = 10000

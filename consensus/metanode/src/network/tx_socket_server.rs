@@ -314,7 +314,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 10000;
+            const MAX_BUNDLE_SIZE: usize = 5000;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
@@ -358,15 +358,25 @@ impl TxSocketServer {
                     Ok(included_in_block_rx) => {
                         debug!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);
                         // total_submitted += chunk_len;
-                        tokio::spawn(async move {
-                            if let Ok((_block_ref, _indices, status_receiver)) = included_in_block_rx.await {
+                        // STABILITY FIX: We await block inclusion to provide backpressure!
+                        // Fire-and-forget causes unbounded mempool growth during blast tests,
+                        // leading to SyncOnly states. By awaiting here, we propagate backpressure
+                        // up to the FFI channel -> Go mempool -> TCP sockets.
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), included_in_block_rx).await {
+                            Ok(Ok((_block_ref, _indices, status_receiver))) => {
                                 tokio::spawn(async move {
                                     if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
                                         warn!("♻️ [FFI TX STATUS] Block {:?} Garbage Collected.", gc_block);
                                     }
                                 });
                             }
-                        });
+                            Ok(Err(e)) => {
+                                warn!("⚠️ [FFI TX FLOW] Failed to get inclusion confirmation: {}", e);
+                            }
+                            Err(_) => {
+                                warn!("⏰ [FFI TX FLOW] Timeout waiting for block inclusion. Consensus might be congested.");
+                            }
+                        }
                     }
                     Err(e) => {
                         let err_str = e.to_string();

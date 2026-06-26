@@ -28,7 +28,7 @@ use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};
 /// vs IntermediateRoot overhead). Splitting at 50000 reduces per-block overhead
 /// while keeping GC pressure and EVM contention manageable.
 /// FORK-SAFETY: All nodes use the same threshold → deterministic split.
-pub const MAX_TXS_PER_GO_BLOCK: usize = 65000;
+pub const MAX_TXS_PER_GO_BLOCK: usize = 50_000;
 
 impl ExecutorClient {
     /// Send committed sub-DAG to executor, with automatic fragmentation for large commits.
