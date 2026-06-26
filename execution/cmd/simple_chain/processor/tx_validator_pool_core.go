@@ -316,9 +316,12 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	senderStates := make(map[common.Address]types.AccountState, len(preloadAddrs))
 	if len(preloadAddrs) > 0 {
 		var senderStatesMutex sync.Mutex
-		numPreloadWorkers := runtime.NumCPU()
-		if numPreloadWorkers > 128 {
-			numPreloadWorkers = 128
+		numPreloadWorkers := runtime.NumCPU() / 2
+		if numPreloadWorkers < 4 {
+			numPreloadWorkers = 4
+		}
+		if numPreloadWorkers > 64 {
+			numPreloadWorkers = 64
 		}
 		if len(preloadAddrs) < numPreloadWorkers {
 			numPreloadWorkers = len(preloadAddrs)
@@ -359,12 +362,12 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	// PERF: Cap workers at numCPU/2 (max 48) to reduce sync.Map contention on
 	// verifiedSignaturesCache. 104 goroutines cause excessive cache-line bouncing.
 	if !skipVerification {
-		numWorkers := runtime.NumCPU()
+		numWorkers := runtime.NumCPU() / 2
 		if numWorkers < 4 {
 			numWorkers = 4
 		}
-		if numWorkers > 96 {
-			numWorkers = 96
+		if numWorkers > 48 {
+			numWorkers = 48
 		}
 		if len(txs) < numWorkers {
 			numWorkers = len(txs)
@@ -407,12 +410,12 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 	t3 := time.Now()
 	var logFile *os.File
 	// Phase 3 (TPS Optimization): Parallel HasNonceConflict Checks
-	numWorkersConflict := runtime.NumCPU()
+	numWorkersConflict := runtime.NumCPU() / 2
 	if numWorkersConflict < 4 {
 		numWorkersConflict = 4
 	}
-	if numWorkersConflict > 96 {
-		numWorkersConflict = 96
+	if numWorkersConflict > 48 {
+		numWorkersConflict = 48
 	}
 	if len(txs) < numWorkersConflict {
 		numWorkersConflict = len(txs)
@@ -834,6 +837,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 		if len(allTxs) == 0 {
 			return allTxs
 		}
+        
+        startProcess := time.Now()
 
 		var validTxs []types.Transaction
 		var futureTxs []types.Transaction
@@ -852,9 +857,12 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 			vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
 			
 			var nonceMapMutex sync.Mutex
-			numWorkers := runtime.NumCPU()
-			if numWorkers > 128 {
-				numWorkers = 128
+			numWorkers := runtime.NumCPU() / 2
+			if numWorkers < 4 {
+				numWorkers = 4
+			}
+			if numWorkers > 48 {
+				numWorkers = 48
 			}
 			if len(preloadAddrs) < numWorkers {
 				numWorkers = len(preloadAddrs)
@@ -940,7 +948,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 		}
 
 		if f, errFile := os.OpenFile("/tmp/vp_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); errFile == nil {
-			f.WriteString(fmt.Sprintf("ProcessPoolSub: allTxs=%d, validTxs=%d, futureTxs=%d\n", len(allTxs), len(validTxs), len(futureTxs)))
+			elapsedStr := time.Since(startProcess).String()
+			f.WriteString(fmt.Sprintf("[%s] ProcessPoolSub elapsed: %s, allTxs=%d, validTxs=%d, futureTxs=%d\n", time.Now().Format("15:04:05.000"), elapsedStr, len(allTxs), len(validTxs), len(futureTxs)))
 			if len(allTxs) > 0 {
 				expectedNonce := uint64(0)
 				if nonceMap[allTxs[0].FromAddress()] > 0 {

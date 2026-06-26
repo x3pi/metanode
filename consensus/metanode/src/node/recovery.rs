@@ -116,6 +116,7 @@ pub async fn perform_block_recovery_check(
                 }
             }
         }
+        drop(cache);
         let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
 
         let geis_consumed: u64 = if total_txs == 0 && !has_system_tx {
