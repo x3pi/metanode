@@ -100,15 +100,15 @@ impl TxRecycler {
 
     /// Track submitted TXs. Called by tx_socket_server after client.submit() succeeds.
     pub async fn track_submitted(&self, tx_data_list: &[Vec<u8>]) {
-        // PERF: Pre-compute hashes concurrently outside the Mutex to prevent
-        // blocking the async executor during high-throughput submission.
-        use rayon::prelude::*;
-        let hashes: Vec<[u8; 32]> = tx_data_list
-            .par_iter()
-            .map(|tx_data| Self::hash_tx(tx_data))
-            .collect();
+        // PERF: Hash in chunks and yield to the Tokio executor to prevent
+        // blocking the async reactor during high-throughput submission.
+        for chunk in tx_data_list.chunks(1000) {
+            let mut hashes = Vec::with_capacity(chunk.len());
+            for tx_data in chunk {
+                hashes.push(Self::hash_tx(tx_data));
+            }
 
-        for (tx_data, hash) in tx_data_list.iter().zip(hashes) {
+            for (tx_data, hash) in chunk.iter().zip(hashes.into_iter()) {
             // Don't overwrite if already pending (might be a re-submission)
             if !self.pending.contains_key(&hash) {
                 // Memory safety: evict pseudo-random element if too many.
@@ -130,26 +130,30 @@ impl TxRecycler {
                 );
             }
 
-            self.total_submitted.fetch_add(1, Ordering::Relaxed);
+            }
+            tokio::task::yield_now().await;
         }
     }
 
     /// Mark TXs as confirmed (committed). Called by commit_processor when processing sub-DAGs.
     /// `committed_tx_data` is the raw TX bytes from committed blocks.
     pub async fn confirm_committed<T: AsRef<[u8]> + Sync>(&self, committed_tx_data: &[T]) {
-        // Pre-compute hashes concurrently to minimize the Mutex lock duration.
-        // Hashing 50k transactions sequentially takes significant time.
-        use rayon::prelude::*;
-        let hashes: Vec<[u8; 32]> = committed_tx_data
-            .par_iter()
-            .map(|tx_data| Self::hash_tx(tx_data.as_ref()))
-            .collect();
-
+        // Pre-compute hashes in chunks and yield to minimize Mutex lock duration
+        // and prevent blocking the Tokio async executor.
         let before = self.pending.len();
-        for hash in hashes {
-            if self.pending.remove(&hash).is_some() {
-                self.total_confirmed.fetch_add(1, Ordering::Relaxed);
+
+        for chunk in committed_tx_data.chunks(1000) {
+            let mut hashes = Vec::with_capacity(chunk.len());
+            for tx_data in chunk {
+                hashes.push(Self::hash_tx(tx_data.as_ref()));
             }
+
+            for hash in hashes {
+                if self.pending.remove(&hash).is_some() {
+                    self.total_confirmed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            tokio::task::yield_now().await;
         }
         let removed = before - self.pending.len();
 
