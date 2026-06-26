@@ -640,12 +640,21 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 					}
 				}
 				if err != nil || (bi.IsError() && bi.Error != "(block không tồn tại)") {
-					// Retry logic: allow lagging nodes to catch up on async LevelDB writes
-					for retries := 1; retries <= 3; retries++ {
-						time.Sleep(500 * time.Millisecond)
-						bi, err = getBlockInfo(client, node.URL, blockNum)
-						if err == nil && (!bi.IsError() || bi.Error == "(block không tồn tại)") {
-							break
+					isPruned := false
+					if err != nil && strings.Contains(err.Error(), "pruned") {
+						isPruned = true
+					}
+					if bi.IsError() && strings.Contains(bi.Error, "pruned") {
+						isPruned = true
+					}
+					if !isPruned {
+						// Retry logic: allow lagging nodes to catch up on async LevelDB writes
+						for retries := 1; retries <= 3; retries++ {
+							time.Sleep(500 * time.Millisecond)
+							bi, err = getBlockInfo(client, node.URL, blockNum)
+							if err == nil && (!bi.IsError() || bi.Error == "(block không tồn tại)") {
+								break
+							}
 						}
 					}
 				}
@@ -682,22 +691,26 @@ func checkBatch(client *http.Client, nodes []nodeInfo, from, to uint64) (mismatc
 		var validBlocks []blockInfo
 		var validNames []string
 		missingResponseCount := 0
+		prunedResponseCount := 0
 
 		for _, node := range nodes {
 			bi := r.blocks[node.Name]
 			if !bi.IsError() {
 				validBlocks = append(validBlocks, bi)
 				validNames = append(validNames, node.Name)
-			} else if bi.Error == "(block không tồn tại)" {
-				missingResponseCount++
-				// logSystemError(node.Name, r.blockNum, bi.Error)
+			} else {
+				if bi.Error == "(block không tồn tại)" {
+					missingResponseCount++
+				} else if strings.Contains(bi.Error, "pruned") {
+					prunedResponseCount++
+				}
 			}
 		}
 
 		if len(validBlocks) < 2 {
 			// Nếu tất cả các node phản hồi đều báo block không tồn tại, thì coi là ghost block và bỏ qua.
 			// (Không cần đợi các node đang lỗi/sập phản hồi)
-			if len(validBlocks) == 0 && missingResponseCount > 0 {
+			if len(validBlocks) == 0 && missingResponseCount > 0 && prunedResponseCount == 0 {
 				nilBlocks = append(nilBlocks, r.blockNum)
 				logBlockEvent("NIL_BLOCK", r.blockNum, "")
 				// Crucial: delete from prevBlockHashes for all nodes since this block is a gap/nil block
