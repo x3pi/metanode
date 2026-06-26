@@ -231,9 +231,16 @@ func (bp *BlockProcessor) PauseExecution() {
 	//    This MUST come first — it blocks new NOMT sessions from starting,
 	//    which is required for CloseForSnapshot() to complete without deadlock.
 	bp.closeSnapshotGate()
-	logger.Info("🔒 [PAUSE] PauseExecution: snapshotGate CLOSED, waiting for ExecutionMutex.Lock()...")
 
-	// 2. Lock execution mutex (gates network handlers)
+	// 2. CRITICAL FIX (Jun 2026): Wait for all background persistence to complete before pausing.
+	// This MUST be called BEFORE acquiring ExecutionMutex.Lock(), otherwise commitWorker
+	// (which needs ExecutionMutex.RLock() to process speculative results) will be
+	// blocked by the Lock(), and WaitForPersistence() will wait forever -> Deadlock.
+	logger.Info("🔒 [PAUSE] PauseExecution: calling WaitForPersistence...")
+	bp.WaitForPersistence()
+	logger.Info("🔒 [PAUSE] PauseExecution: WaitForPersistence DONE, waiting for ExecutionMutex.Lock()...")
+
+	// 3. Lock execution mutex (gates network handlers)
 	// FORK-SAFETY (May 2026): ALWAYS block until lock is acquired.
 	// Proceeding without the lock could cause snapshot to capture inconsistent
 	// state → fork on restore. Prefer pending over fork.
@@ -267,14 +274,7 @@ func (bp *BlockProcessor) PauseExecution() {
 		}
 	}
 LOCK_ACQUIRED:
-	logger.Info("🔒 [PAUSE] PauseExecution: ExecutionMutex.Lock() ACQUIRED")
-
-	// 3. CRITICAL FIX: Wait for all background persistence to complete before pausing.
-	// This ensures both PebbleDB and NOMT have fully written the in-memory state out to disk,
-	// preventing truncated/partial snapshots where metadata.json has a newer StateRoot than the disk.
-	logger.Info("🔒 [PAUSE] PauseExecution: calling WaitForPersistence...")
-	bp.WaitForPersistence()
-	logger.Info("🔒 [PAUSE] PauseExecution: WaitForPersistence DONE — system fully paused")
+	logger.Info("🔒 [PAUSE] PauseExecution: ExecutionMutex.Lock() ACQUIRED — system fully paused")
 }
 
 // ResumeExecution releases the exclusive execution lock

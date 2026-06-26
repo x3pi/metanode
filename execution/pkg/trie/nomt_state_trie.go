@@ -96,7 +96,7 @@ type NomtStateTrie struct {
 	wOldLoaded map[string]bool            // tracks which old values were loaded
 
 	// registry is a thread-safe registry of all known keys shared across trie clones.
-	registry    *sharedRegistry
+	registry *sharedRegistry
 
 	// ─── SESSION STATE (protected by sessionMu) ────────────────────────
 	// Separate from writerMu to allow session drain without blocking writes.
@@ -200,8 +200,9 @@ func registryKeyPath(namespace []byte) [32]byte {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 type sharedRegistry struct {
-	mu   sync.RWMutex
-	keys map[string][]byte
+	mu        sync.RWMutex
+	keys      map[string][]byte
+	persistMu sync.Mutex
 }
 
 // registryFilePath returns the filesystem path for storing a namespace's key registry.
@@ -292,7 +293,7 @@ func (n *NomtStateTrie) updateRegistryCache() {
 	registryCacheMu.Unlock()
 }
 
-// persistRegistryToFile writes the knownKeys registry to a file and updates the memory cache.
+// persistRegistryToFile writes the knownKeys registry to a file asynchronously and updates the memory cache.
 // This is called after each Commit to ensure the registry is durable.
 func (n *NomtStateTrie) persistRegistryToFile() {
 	n.registry.mu.RLock()
@@ -301,43 +302,56 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 		return
 	}
 
-	sortedKeys := make([]string, 0, len(n.registry.keys))
-	for hexKey := range n.registry.keys {
-		sortedKeys = append(sortedKeys, hexKey)
-	}
-	sort.Strings(sortedKeys)
-
-	var data []byte
-	for _, hexKey := range sortedKeys {
-		origKey := n.registry.keys[hexKey]
-		if len(origKey) > 255 {
-			continue
-		}
-		data = append(data, byte(len(origKey)))
-		data = append(data, origKey...)
-	}
-	n.registry.mu.RUnlock()
-
-	filePath := registryFilePath(n.handle.GetPath(), string(n.namespace))
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
-		logger.Warn("[NomtStateTrie] Failed to persist registry to file %s: %v", filePath, err)
-	}
-
-	// Update the memory cache as well
-	dbPath := n.handle.GetPath()
-	namespace := string(n.namespace)
-	cacheKey := dbPath + ":" + namespace
-
-	cloned := make(map[string][]byte, len(sortedKeys))
-	n.registry.mu.RLock()
+	cloned := make(map[string][]byte, len(n.registry.keys))
 	for k, v := range n.registry.keys {
 		cloned[k] = v
 	}
 	n.registry.mu.RUnlock()
 
+	// Update the memory cache synchronously
+	dbPath := n.handle.GetPath()
+	namespace := string(n.namespace)
+	cacheKey := dbPath + ":" + namespace
+
 	registryCacheMu.Lock()
 	registryCache[cacheKey] = cloned
 	registryCacheMu.Unlock()
+
+	filePath := registryFilePath(dbPath, namespace)
+
+	n.commitWg.Add(1)
+	go func(keys map[string][]byte, path string, reg *sharedRegistry) {
+		defer n.commitWg.Done()
+
+		// Prevent concurrent file writes for the same registry
+		reg.persistMu.Lock()
+		defer reg.persistMu.Unlock()
+
+		sortedKeys := make([]string, 0, len(keys))
+		for hexKey := range keys {
+			sortedKeys = append(sortedKeys, hexKey)
+		}
+		sort.Strings(sortedKeys)
+
+		var data []byte
+		for _, hexKey := range sortedKeys {
+			origKey := keys[hexKey]
+			if len(origKey) > 255 {
+				continue
+			}
+			data = append(data, byte(len(origKey)))
+			data = append(data, origKey...)
+		}
+
+		tmpPath := path + ".tmp"
+		if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+			logger.Warn("[NomtStateTrie] Failed to write temp registry file %s: %v", tmpPath, err)
+			return
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			logger.Warn("[NomtStateTrie] Failed to rename temp registry file %s: %v", tmpPath, err)
+		}
+	}(cloned, filePath, n.registry)
 }
 
 // RegisterKnownKey safely adds a key to the registry map.
@@ -1385,30 +1399,42 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		}
 	}
 
+	t0 := time.Now()
 	session := nomt_ffi.BeginSession(n.handle)
 	if session == nil {
 		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BeginSession failed")
 	}
+	tBegin := time.Since(t0)
+	tRead := time.Duration(0)
+	tWrite := time.Duration(0)
+
 
 	if len(reads) > 0 {
+		tReadStart := time.Now()
 		if err := session.BatchRecordRead(reads, readVals); err != nil {
 			session.Abort()
 			return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BatchRecordRead failed: %w", err)
 		}
+		tRead = time.Since(tReadStart)
 	}
 
 	if len(writes) > 0 {
+		tWriteStart := time.Now()
 		if err := session.BatchWrite(writes, writeVals); err != nil {
 			session.Abort()
 			return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: BatchWrite failed: %w", err)
 		}
+		tWrite = time.Since(tWriteStart)
 	}
 
+	tFinishStart := time.Now()
 	newRoot, finishedSession, err := session.Finish(n.handle)
 	if err != nil {
 		return currentRoot, nil, nil, fmt.Errorf("NomtStateTrie: session.Finish failed: %w", err)
 	}
+	tFinish := time.Since(tFinishStart)
 
+	logger.Info("[NOMT-COMMIT-PERF] dirty=%d | BeginSession=%v | BatchRecordRead=%v | BatchWrite=%v | Finish=%v", dirtyCount, tBegin, tRead, tWrite, tFinish)
 	newRootHash := e_common.BytesToHash(newRoot[:])
 
 	n.sessionMu.Lock()

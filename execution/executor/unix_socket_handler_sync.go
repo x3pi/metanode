@@ -125,6 +125,19 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
+	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
+	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
+	// all prior consensus block executions have been fully committed to disk,
+	// preventing concurrent PebbleDB writes or stale parent root checks.
+	// CRITICAL FIX (Jun 2026): Must wait for persistence BEFORE acquiring ExecutionMutex.Lock(),
+	// otherwise commitWorker will deadlock waiting for ExecutionMutex.RLock().
+	// ═══════════════════════════════════════════════════════════════════════════
+	if sm := rh.getSnapshotManager(); sm != nil {
+		logger.Info("⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
+		sm.WaitForPersistence()
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
 	// CONCURRENCY & FORK-SAFETY GATE (May 2026): Acquire ExecutionMutex lock.
 	// This serializes block sync writes with consensus block execution, preventing
 	// NOMT trie root invalidations (Changeset no longer valid FFI errors).
@@ -172,17 +185,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 	storage.SetPreConsensusSyncActive(isPreConsensusSync)
 	defer storage.SetPreConsensusSyncActive(false)
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
-	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
-	// all prior consensus block executions have been fully committed to disk,
-	// preventing concurrent PebbleDB writes or stale parent root checks.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if sm := rh.getSnapshotManager(); sm != nil {
-		logger.Info("⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
-		sm.WaitForPersistence()
-	}
 
 	if isPreConsensusSync {
 		logger.Info("🔧 [STARTUP-SYNC] execute_mode=true: NOMT trie rebuild will be ENABLED on last block (no concurrent consensus)")

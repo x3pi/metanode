@@ -314,7 +314,7 @@ impl TxSocketServer {
             }
 
             // Submission phase
-            const MAX_BUNDLE_SIZE: usize = 5000;
+            const MAX_BUNDLE_SIZE: usize = 50000;
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
