@@ -52,7 +52,15 @@ impl TxSocketServer {
         let peer_discovery_addresses = self.peer_discovery_addresses;
         let tx_recycler = self.tx_recycler;
 
+        // BOUNDED PIPELINE BACKPRESSURE: Allow up to 8 concurrent batches in flight.
+        // This prevents the livelock caused by unbounded spawning during epoch transitions,
+        // but solves the sequential bottleneck that was starving the DAG consensus and
+        // reducing End-to-End TPS. FFI channel will block when 8 batches are pending.
+        let pipeline_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+
         while let Some(tx_data) = ffi_tx_receiver.recv().await {
+            let permit = pipeline_semaphore.clone().acquire_owned().await.unwrap();
+
             let client_ref = client.clone();
             let node_ref = node.clone();
             let is_transitioning_ref = is_transitioning.clone();
@@ -60,19 +68,19 @@ impl TxSocketServer {
             let peer_discovery_addresses_ref = peer_discovery_addresses.clone();
             let tx_recycler_ref = tx_recycler.clone();
 
-            // DO NOT spawn a new task. Process sequentially to exert backpressure 
-            // on the bounded FFI channel (capacity 1000). If we spawn, unbounded tasks
-            // pile up during epoch transitions, causing a livelock.
-            Self::process_ffi_batch(
-                tx_data,
-                client_ref,
-                node_ref,
-                is_transitioning_ref,
-                peer_rpc_addresses_ref,
-                peer_discovery_addresses_ref,
-                tx_recycler_ref,
-            )
-            .await;
+            tokio::spawn(async move {
+                Self::process_ffi_batch(
+                    tx_data,
+                    client_ref,
+                    node_ref,
+                    is_transitioning_ref,
+                    peer_rpc_addresses_ref,
+                    peer_discovery_addresses_ref,
+                    tx_recycler_ref,
+                )
+                .await;
+                drop(permit);
+            });
         }
         Ok(())
     }
