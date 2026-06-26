@@ -2267,7 +2267,7 @@ impl ProtocolConfig {
         if cfg!(msim) {
             8
         } else {
-            self.consensus_max_num_transactions_in_block.unwrap_or(5000)
+            self.consensus_max_num_transactions_in_block.unwrap_or(50000)
         }
     }
 
@@ -3760,7 +3760,7 @@ impl ProtocolConfig {
 
                     // Tuned for high throughput with small, fast blocks
                     cfg.consensus_max_transactions_in_block_bytes = Some(2 * 1024 * 1024);
-                    cfg.consensus_max_num_transactions_in_block = Some(5000);
+                    cfg.consensus_max_num_transactions_in_block = Some(50000);
 
                     cfg.feature_flags.rethrow_serialization_type_layout_errors = true;
                 }
@@ -4469,7 +4469,7 @@ impl ProtocolConfig {
 
         // MetaNode performance overrides for >30K TPS target
         cfg.consensus_max_transactions_in_block_bytes = Some(64 * 1024 * 1024); // 64 MB max payload size
-        cfg.consensus_max_num_transactions_in_block = Some(5000); // Target block size cap at 50,000 Go txs (Pipelining)
+        cfg.consensus_max_num_transactions_in_block = Some(50000); // Target block size cap at 50,000 Go txs (Pipelining)
 
         // Simtest specific overrides.
         if cfg!(msim) {
