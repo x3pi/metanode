@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -531,8 +532,30 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 		for _, pTx := range processedTxs {
 			tx_processor.GlobalTxTraceStore.UpdateTrace(pTx.Hash(), "MEMPOOL_ADD_START", "Adding transaction batch to mempool")
 		}
-		errors := tp.AddTransactionsToPool(processedTxs)
-		for i, err := range errors {
+		// DYNAMIC CHUNKING: Scale block size verification chunks based on server CPU cores,
+		// or allow overriding via simple chain configuration.
+		maxChunkSize := tp.chainState.GetConfig().TxVerificationChunkSize
+		if maxChunkSize <= 0 {
+			maxChunkSize = runtime.NumCPU() * 50
+			if maxChunkSize < 1000 {
+				maxChunkSize = 1000
+			} else if maxChunkSize > 5000 {
+				maxChunkSize = 5000
+			}
+		}
+		var allErrors = make([]error, 0, len(processedTxs))
+		
+		for i := 0; i < len(processedTxs); i += maxChunkSize {
+			end := i + maxChunkSize
+			if end > len(processedTxs) {
+				end = len(processedTxs)
+			}
+			chunkTxs := processedTxs[i:end]
+			chunkErrs := tp.AddTransactionsToPool(chunkTxs)
+			allErrors = append(allErrors, chunkErrs...)
+		}
+		
+		for i, err := range allErrors {
 			if err != nil {
 				tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_FAILED", err.Error())
 				queueFullErrs++
