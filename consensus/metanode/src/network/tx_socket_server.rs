@@ -326,6 +326,14 @@ impl TxSocketServer {
             let total_tx_count = transactions_to_submit.len();
             // let mut total_submitted = 0usize;
 
+            let mut broadcast_peers = peer_rpc_addresses.clone();
+            if let Some(ref discovery_lock) = peer_discovery_addresses {
+                let discovered = discovery_lock.read().await.clone();
+                if !discovered.is_empty() {
+                    broadcast_peers = discovered;
+                }
+            }
+
             let chunks_list: Vec<Vec<Vec<u8>>> = if total_tx_count <= MAX_BUNDLE_SIZE {
                 vec![transactions_to_submit.clone()]
             } else {
@@ -334,6 +342,22 @@ impl TxSocketServer {
 
             let mut all_succeeded = true;
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
+                // Background mempool pre-propagation to peer validators to populate their caches
+                // and completely avoid missing transaction sync stalls during consensus voting.
+                if !broadcast_peers.is_empty() {
+                    let chunk_clone = chunk_vec.clone();
+                    for peer_addr in broadcast_peers.clone() {
+                        let chunk = chunk_clone.clone();
+                        tokio::spawn(async move {
+                            let _ = crate::network::peer_rpc::forward_transactions_to_peer(
+                                &peer_addr,
+                                chunk,
+                            )
+                            .await;
+                        });
+                    }
+                }
+
                 // STABILITY FIX: epoch_pending_transactions tracking REMOVED from hot path.
                 //
                 // ROOT CAUSE OF TX LOSS: Previously, every TX was inserted into 
@@ -370,7 +394,8 @@ impl TxSocketServer {
                         // Fire-and-forget causes unbounded mempool growth during blast tests,
                         // leading to SyncOnly states. By awaiting here, we propagate backpressure
                         // up to the FFI channel -> Go mempool -> TCP sockets.
-                        match tokio::time::timeout(std::time::Duration::from_secs(5), included_in_block_rx).await {
+                        // Timeout lowered to 2s to prevent holding FFI semaphore permits for too long.
+                        match tokio::time::timeout(std::time::Duration::from_secs(2), included_in_block_rx).await {
                             Ok(Ok((_block_ref, _indices, status_receiver))) => {
                                 tokio::spawn(async move {
                                     if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
