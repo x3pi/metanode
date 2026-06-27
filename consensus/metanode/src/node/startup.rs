@@ -62,7 +62,7 @@ impl InitializedNode {
         // This prevents Go from deadlocking if it submits a transaction
         // (e.g. during genesis) while Rust is still initializing.
         // ═══════════════════════════════════════════════════════════════
-        let (ffi_tx_sender, ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
+        let (ffi_tx_sender, ffi_tx_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
         if let Ok(mut sender_guard) = crate::ffi::FFI_TX_SENDER.write() {
             *sender_guard = Some(ffi_tx_sender);
             tracing::info!("🔌 [STARTUP] Early FFI Transaction Channel initialized to prevent Go deadlocks.");
