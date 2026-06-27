@@ -15,8 +15,8 @@ ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
 TimeoutStopSec=90
-Restart=on-failure
-RestartSec=15s
+Restart=no
+# RestartSec=15s
 
 # Environment
 Environment=GOTRACEBACK=all
