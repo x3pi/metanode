@@ -19,6 +19,7 @@ def parse_inventory(file_path):
     entries = re.split(r'\n(?=\s{8}\S)', hosts_text)
     node_map = {}
     is_synconly_map = {}
+    is_rpc_map = {}
     for entry in entries:
         entry = entry.strip()
         if not entry:
@@ -29,7 +30,8 @@ def parse_inventory(file_path):
         # default IP to the host key if it's a valid IP
         ip = host_key
         node_ids = []
-        is_synconly = False
+        synconly_nodes = []
+        rpc_nodes = []
         for line in lines[1:]:
             line = line.strip()
             if line.startswith('ansible_host:'):
@@ -39,10 +41,14 @@ def parse_inventory(file_path):
                 node_ids_match = re.search(r'\[(.*?)\]', line)
                 if node_ids_match:
                     node_ids = [int(x.strip()) for x in node_ids_match.group(1).split(',') if x.strip()]
-            elif line.startswith('is_synconly:'):
-                val = line.split(':', 1)[1].strip().lower()
-                if val == 'true' or val == 'yes':
-                    is_synconly = True
+            elif line.startswith('synconly_nodes:'):
+                match = re.search(r'\[(.*?)\]', line)
+                if match:
+                    synconly_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
+            elif line.startswith('rpc_nodes:'):
+                match = re.search(r'\[(.*?)\]', line)
+                if match:
+                    rpc_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
         
         # clean up IP
         if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
@@ -52,9 +58,10 @@ def parse_inventory(file_path):
                 
         for nid in node_ids:
             node_map[nid] = ip
-            is_synconly_map[nid] = is_synconly
+            is_synconly_map[nid] = (nid in synconly_nodes)
+            is_rpc_map[nid] = (nid in rpc_nodes)
             
-    return node_map, is_synconly_map
+    return node_map, is_synconly_map, is_rpc_map
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
@@ -69,7 +76,7 @@ if __name__ == '__main__':
         print(result)
         sys.exit(1)
         
-    node_map, is_synconly_map = result
+    node_map, is_synconly_map, is_rpc_map = result
         
     if target == 'json':
         import json
@@ -88,21 +95,7 @@ if __name__ == '__main__':
         for nid in sorted(node_map.keys()):
             ip = node_map[nid]
             role = "SyncOnly" if is_synconly_map.get(nid, False) else "Validator"
-            
-            # check if RPC Node is enabled by looking at the execution.json if available
-            is_rpc = False
-            exec_json_path = f"/opt/metanode/node-{nid}/config/execution.json"
-            try:
-                import os, json
-                if os.path.exists(exec_json_path):
-                    with open(exec_json_path, 'r') as jf:
-                        cfg = json.load(jf)
-                        if cfg.get("is_rpc_node", False):
-                            is_rpc = True
-            except Exception:
-                pass
-                
-            rpc_status = "[RPC Enabled]" if is_rpc else ""
+            rpc_status = "[RPC Enabled]" if is_rpc_map.get(nid, False) else ""
             out.append(f"   - Node {nid} ({ip}): {role} {rpc_status}")
             
         print("\n".join(out))
