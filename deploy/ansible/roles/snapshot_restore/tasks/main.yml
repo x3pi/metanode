@@ -4,7 +4,7 @@
     bash setup-cluster-btrfs.sh
   args:
     chdir: "{{ remote_deploy_dir }}/cluster"
-  when: "is_synconly | default(false)"
+  when: "(synconly_nodes | default([]) | length > 0) or (is_synconly | default(false))"
 
 - name: Restore node data from snapshot
   ansible.builtin.shell: |
