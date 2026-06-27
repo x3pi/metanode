@@ -63,7 +63,7 @@ send_telegram_notification() {
         curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "text=${message}" \
-            -d "parse_mode=Markdown" > /dev/null 2>&1 || true
+            -d "parse_mode=HTML" > /dev/null 2>&1 || true
     fi
 }
 
@@ -147,21 +147,21 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     echo "$ROLES_OUTPUT"
 fi
 
-send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
-- Deployer Server IP: \`${DEPLOY_IP}\`
-- Target Node IPs: \`${TARGET_NODES_IPS}\`
-- Source: \`${DEPLOY_SOURCE}\`
-- Action: \`${ACTION}\`
-- Target Node: \`${TARGET_NODE}\`
-- Keep Data: \`${KEEP_DATA}\`
-- Restore Node: \`${RESTORE_NODE}\`
-- Open Ports: \`${OPEN_PORTS}\`
-- Watcher Daemon: \`${WATCHER_STATUS}\`
+send_telegram_notification "🚀 <b>[DEPLOY]</b> Bắt đầu quá trình Ansible Deploy:
+- Deployer Server IP: <code>${DEPLOY_IP}</code>
+- Target Node IPs: <code>${TARGET_NODES_IPS}</code>
+- Source: <code>${DEPLOY_SOURCE}</code>
+- Action: <code>${ACTION}</code>
+- Target Node: <code>${TARGET_NODE}</code>
+- Keep Data: <code>${KEEP_DATA}</code>
+- Restore Node: <code>${RESTORE_NODE}</code>
+- Open Ports: <code>${OPEN_PORTS}</code>
+- Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
-📋 *Node Roles:*
-\`\`\`
+📋 <b>Node Roles:</b>
+<pre>
 ${ROLES_OUTPUT}
-\`\`\`"
+</pre>"
 
 # Prepare extra vars
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST}"
@@ -195,46 +195,46 @@ if [ $ansible_exit -eq 0 ]; then
     echo "$RPC_CONFIG"
 
     echo -e  "\n📋 *Node Roles:*"
-    echo "\`\`\`${ROLES_OUTPUT}\`\`\`"
-    send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
-- Watcher Daemon: \`${WATCHER_STATUS}\`
+    echo "${ROLES_OUTPUT}"
+    send_telegram_notification "✅ <b>[DEPLOY]</b> Quá trình Ansible Deploy (<code>${ACTION}</code>) từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+- Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
-📋 *Node Roles:*
-\`\`\`
+📋 <b>Node Roles:</b>
+<pre>
 ${ROLES_OUTPUT}
-\`\`\`
+</pre>
 
-⚙️ *Cấu hình kết nối client:*
-\`\`\`json
+⚙️ <b>Cấu hình kết nối client:</b>
+<pre>
 ${RPC_CONFIG}
-\`\`\`
+</pre>
 
-🔍 *Lệnh lấy log hữu ích:*
-• *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
-  - *Consensus logs:*
-    \`sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager\`
-  - *Execution logs:*
-    \`tail -n 100 /opt/metanode/node-X/logs/execution/execution.log\`
-• *Từ xa tại máy Master (chạy từ thư mục ansible):*
-  - *Consensus logs:*
-    \`ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"\`
-  - *Execution logs:*
-    \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
+🔍 <b>Lệnh lấy log hữu ích:</b>
+• <b>Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):</b>
+  - <b>Consensus logs:</b>
+    <code>sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager</code>
+  - <b>Execution logs:</b>
+    <code>tail -n 100 /opt/metanode/node-X/logs/execution/execution.log</code>
+• <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
+  - <b>Consensus logs:</b>
+    <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
+  - <b>Execution logs:</b>
+    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"</code>"
 else
-    send_telegram_notification "❌ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` thất bại với mã lỗi \`${ansible_exit}\`!
-- Watcher Daemon: \`${WATCHER_STATUS}\`
+    send_telegram_notification "❌ <b>[DEPLOY]</b> Quá trình Ansible Deploy (<code>${ACTION}</code>) từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+- Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
-🔍 *Lệnh lấy log kiểm tra lỗi:*
-• *Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):*
-  - *Consensus logs:*
-    \`sudo journalctl -u \"metanode-consensus-*\" -n 100 --no-pager\`
-  - *Execution logs:*
-    \`tail -n 100 /opt/metanode/node-X/logs/execution/execution.log\`
-• *Từ xa tại máy Master (chạy từ thư mục ansible):*
-  - *Consensus logs:*
-    \`ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"\`
-  - *Execution logs:*
-    \`ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"\`"
+🔍 <b>Lệnh lấy log kiểm tra lỗi:</b>
+• <b>Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):</b>
+  - <b>Consensus logs:</b>
+    <code>sudo journalctl -u \"metanode-consensus-*\" -n 100 --no-pager</code>
+  - <b>Execution logs:</b>
+    <code>tail -n 100 /opt/metanode/node-X/logs/execution/execution.log</code>
+• <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
+  - <b>Consensus logs:</b>
+    <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
+  - <b>Execution logs:</b>
+    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"</code>"
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
