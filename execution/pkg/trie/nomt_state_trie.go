@@ -1443,6 +1443,21 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 		n.pendingFinishedSession.Abort()
 	}
 	n.pendingFinishedSession = finishedSession
+
+	if n.changelogDB != nil {
+		var changes []state_changelog.StateChange
+		for _, hexKey := range sortedDirtyKeys {
+			entry := committingSnapshot[hexKey]
+			oldVal := oldValuesSnapshot[hexKey]
+			changes = append(changes, state_changelog.StateChange{
+				Key:      entry.originalKey,
+				OldValue: oldVal,
+				NewValue: entry.value,
+			})
+		}
+		n.pendingChangelog = changes
+		n.pendingChangelogBlock = n.currentCommitBlock
+	}
 	n.sessionMu.Unlock()
 
 	n.writerMu.Lock()
@@ -1542,18 +1557,35 @@ func (n *NomtStateTrie) CommitPayload() error {
 	n.sessionMu.Lock()
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
+	changes := n.pendingChangelog
+	blockNum := n.pendingChangelogBlock
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
 	n.sessionMu.Unlock()
 
-	if fs == nil {
+	if fs == nil && len(changes) == 0 {
 		return nil
 	}
 
-	n.handle.LockCommitPayload()
-	err := fs.CommitPayload(n.handle)
-	n.handle.UnlockCommitPayload()
+	if fs != nil {
+		n.handle.LockCommitPayload()
+		err := fs.CommitPayload(n.handle)
+		n.handle.UnlockCommitPayload()
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+
+		if string(n.namespace) == "account_state" && blockNum > 0 {
+			storage.UpdateLastNomtCommittedBlock(blockNum)
+		}
+	}
+
+	if n.changelogDB != nil && len(changes) > 0 {
+		if err := n.changelogDB.WriteBlockChanges(blockNum, changes); err != nil {
+			logger.Error("❌ [CommitPayload] Failed to write changelog (namespace=%s): %v", string(n.namespace), err)
+			return err
+		}
 	}
 
 	n.writerMu.Lock()
@@ -1568,6 +1600,8 @@ type NomtPayload struct {
 	trie            *NomtStateTrie
 	finishedSession *nomt_ffi.FinishedSession
 	doneOnce        sync.Once
+	changes         []state_changelog.StateChange
+	blockNum        uint64
 }
 
 func (p *NomtPayload) Discard() {
@@ -1579,6 +1613,7 @@ func (p *NomtPayload) Discard() {
 				p.trie.handle.UnlockCommitPayload()
 				p.finishedSession = nil
 			}
+			p.changes = nil
 			p.trie.commitWg.Done()
 		})
 	}
@@ -1588,9 +1623,13 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	n.sessionMu.Lock()
 	fs := n.pendingFinishedSession
 	n.pendingFinishedSession = nil
+	changes := n.pendingChangelog
+	blockNum := n.pendingChangelogBlock
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
 	n.sessionMu.Unlock()
 
-	if fs == nil {
+	if fs == nil && len(changes) == 0 {
 		return nil
 	}
 
@@ -1598,13 +1637,25 @@ func (n *NomtStateTrie) ExtractPendingPayload() *NomtPayload {
 	return &NomtPayload{
 		trie:            n,
 		finishedSession: fs,
+		changes:         changes,
+		blockNum:        blockNum,
 	}
 }
 
-func (p *NomtPayload) WriteChangelog() {}
+func (p *NomtPayload) WriteChangelog() {
+	if p == nil || p.trie == nil || p.trie.changelogDB == nil || len(p.changes) == 0 {
+		return
+	}
+	if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
+		logger.Error("❌ [NomtPayload.WriteChangelog] Failed to write changelog (namespace=%s): %v", string(p.trie.namespace), err)
+	} else {
+		logger.Debug("📜 [NomtPayload.WriteChangelog] Successfully wrote %d changes for block %d (namespace=%s)", len(p.changes), p.blockNum, string(p.trie.namespace))
+	}
+	p.changes = nil // Prevent duplicate writes in CommitAsync
+}
 
 func (p *NomtPayload) CommitAsync() {
-	if p == nil || p.finishedSession == nil {
+	if p == nil {
 		return
 	}
 	go func() {
@@ -1612,15 +1663,24 @@ func (p *NomtPayload) CommitAsync() {
 			p.trie.commitWg.Done()
 		})
 
-		p.trie.handle.LockCommitPayload()
-		err := p.finishedSession.CommitPayload(p.trie.handle)
-		p.trie.handle.UnlockCommitPayload()
+		if p.finishedSession != nil {
+			p.trie.handle.LockCommitPayload()
+			err := p.finishedSession.CommitPayload(p.trie.handle)
+			p.trie.handle.UnlockCommitPayload()
 
-		if err != nil {
-			p.trie.setAsyncError(err)
-			logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
-		} else {
-			logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+			if err != nil {
+				p.trie.setAsyncError(err)
+				logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to commit payload: %v", err)
+			} else {
+				logger.Debug("[NOMT-ASYNC-COMMIT] Successfully committed NOMT payload asynchronously")
+			}
+		}
+
+		if p.trie.changelogDB != nil && len(p.changes) > 0 {
+			if err := p.trie.changelogDB.WriteBlockChanges(p.blockNum, p.changes); err != nil {
+				logger.Error("❌ [NOMT-ASYNC-COMMIT] Failed to write changelog (namespace=%s): %v", string(p.trie.namespace), err)
+			}
+			p.changes = nil
 		}
 
 		// Clear committing from readView since data is now on disk
