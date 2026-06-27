@@ -62,7 +62,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 		// Kiểm tra pool size trước khi lấy transactions
 		if poolSizeBefore == 0 {
-			time.Sleep(1 * time.Millisecond)
 			continue
 		}
 
@@ -74,16 +73,19 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		// BATCH ACCUMULATION: Throughput-Based Adaptive Batching (TBAB)
 		// Dynamically adjust timeout based on real-time TPS
 		var batchAccumulationTimeout time.Duration
+		var minBatchSize int
 		if emaTPS < 1000 {
-			batchAccumulationTimeout = 5 * time.Millisecond // Low latency for low load
+			batchAccumulationTimeout = 2 * time.Millisecond // Low latency for low load
+			minBatchSize = 500
 		} else if emaTPS < 10000 {
-			batchAccumulationTimeout = 20 * time.Millisecond // Balanced
+			batchAccumulationTimeout = 5 * time.Millisecond // Balanced
+			minBatchSize = 1500
 		} else {
-			batchAccumulationTimeout = 100 * time.Millisecond // Max throughput for extreme load
+			batchAccumulationTimeout = 10 * time.Millisecond // Max throughput for extreme load (push faster to keep pipeline hot)
+			minBatchSize = 3000
 		}
 
 		const batchAccumulationCheckInterval = 1 * time.Millisecond
-		const minBatchSize = 2500
 
 		accumulationStart := time.Now()
 		lastPoolSize := poolSizeBefore
@@ -138,9 +140,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// Block size capping: Limit total transactions processed per block tick to ~20000 txs.
+		// Block size capping: Limit total transactions processed per block tick to ~50000 txs.
 		// Return any excess transactions back to the pool to be processed in the next blocks.
-		const targetBlockSize = 20000
+		const targetBlockSize = 50000
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
@@ -218,9 +220,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				LastSendBatchTimeNano.Store(time.Now().UnixNano())
 				LastSendBatchTxCount.Store(int64(totalTxs))
 				// ─────────────────────────────────────────────────────────────────
-				// PACING: Add an adaptive delay proportional to batch size to prevent overflowing Rust consensus.
-				// For small batches, sleep less (proportional to size) to avoid artificially bottlenecking TPS.
-				// Capped at 5ms to prevent excessive delays for large batches.
+				// PACING REMOVED: Bounded pipeline backpressure is already managed by Rust's Semaphore
+				// and channel buffer. Artificially sleeping here starves consensus.
+				/*
 				pacingDelay := time.Duration(len(batchTxs)) * 2 * time.Microsecond
 				if pacingDelay > 5*time.Millisecond {
 					pacingDelay = 5 * time.Millisecond
@@ -228,6 +230,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				if pacingDelay > 0 {
 					time.Sleep(pacingDelay)
 				}
+				*/
 			}
 		}
 	}

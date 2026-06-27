@@ -48,6 +48,8 @@ type TxValidatorPool struct {
 	// FORK-SAFETY: Shared lock — Lock() during real block execution blocks
 	// all virtual execution goroutines that hold RLock().
 	blockProcessingLock *sync.RWMutex
+
+	noncesCache atomic.Value // Holds *sync.Map for expected nonces caching
 }
 
 func NewTxValidatorPool(
@@ -70,9 +72,17 @@ func NewTxValidatorPool(
 		futureTxTimeMap:     make(map[common.Hash]time.Time),
 		blockProcessingLock: blockProcessingLock,
 	}
+	vp.noncesCache.Store(&sync.Map{})
 
 	vp.StartMemoryMonitor()
 	return vp
+}
+
+// ClearNoncesCache clears the local cache of expected nonces.
+// Called on block commits or reverts to reflect updated on-chain state.
+func (vp *TxValidatorPool) ClearNoncesCache() {
+	vp.noncesCache.Store(&sync.Map{})
+	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed/reverted)")
 }
 
 // SetEnvironment updates the environment reference
@@ -855,48 +865,74 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				preloadAddrs = append(preloadAddrs, addr)
 			}
 			vp.chainState.GetAccountStateDB().PreloadAccounts(preloadAddrs)
-			
-			var nonceMapMutex sync.Mutex
-			numWorkers := runtime.NumCPU() / 2
-			if numWorkers < 4 {
-				numWorkers = 4
-			}
-			if numWorkers > 48 {
-				numWorkers = 48
-			}
-			if len(preloadAddrs) < numWorkers {
-				numWorkers = len(preloadAddrs)
-			}
-			var wg sync.WaitGroup
-			wg.Add(numWorkers)
-			chunkSize := (len(preloadAddrs) + numWorkers - 1) / numWorkers
 
-			for w := 0; w < numWorkers; w++ {
-				start := w * chunkSize
-				end := start + chunkSize
-				if end > len(preloadAddrs) {
-					end = len(preloadAddrs)
-				}
-				go func(s, e int) {
-					defer wg.Done()
-					localNonces := make(map[common.Address]uint64, e-s)
-					for i := s; i < e; i++ {
-						addr := preloadAddrs[i]
-						as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr)
-						if err == nil && as != nil {
-							localNonces[addr] = as.Nonce()
-						} else {
-							localNonces[addr] = 0
-						}
-					}
-					nonceMapMutex.Lock()
-					for k, v := range localNonces {
-						nonceMap[k] = v
-					}
-					nonceMapMutex.Unlock()
-				}(start, end)
+			// Load the current noncesCache
+			cacheVal := vp.noncesCache.Load()
+			var cache *sync.Map
+			if cacheVal != nil {
+				cache = cacheVal.(*sync.Map)
+			} else {
+				cache = &sync.Map{}
+				vp.noncesCache.Store(cache)
 			}
-			wg.Wait()
+
+			// First, resolve nonces using the cache
+			var missingAddrs []common.Address
+			for _, addr := range preloadAddrs {
+				if val, ok := cache.Load(addr); ok {
+					nonceMap[addr] = val.(uint64)
+				} else {
+					missingAddrs = append(missingAddrs, addr)
+				}
+			}
+
+			// If there are cache misses, fetch nonces from DB in parallel
+			if len(missingAddrs) > 0 {
+				var nonceMapMutex sync.Mutex
+				numWorkers := runtime.NumCPU() / 2
+				if numWorkers < 4 {
+					numWorkers = 4
+				}
+				if numWorkers > 48 {
+					numWorkers = 48
+				}
+				if len(missingAddrs) < numWorkers {
+					numWorkers = len(missingAddrs)
+				}
+				var wg sync.WaitGroup
+				wg.Add(numWorkers)
+				chunkSize := (len(missingAddrs) + numWorkers - 1) / numWorkers
+
+				for w := 0; w < numWorkers; w++ {
+					start := w * chunkSize
+					end := start + chunkSize
+					if end > len(missingAddrs) {
+						end = len(missingAddrs)
+					}
+					go func(s, e int) {
+						defer wg.Done()
+						localNonces := make(map[common.Address]uint64, e-s)
+						for i := s; i < e; i++ {
+							addr := missingAddrs[i]
+							as, err := vp.chainState.GetAccountStateDB().AccountStateReadOnly(addr)
+							var nonce uint64
+							if err == nil && as != nil {
+								nonce = as.Nonce()
+							} else {
+								nonce = 0
+							}
+							localNonces[addr] = nonce
+							cache.Store(addr, nonce) // Cache for future ticks
+						}
+						nonceMapMutex.Lock()
+						for k, v := range localNonces {
+							nonceMap[k] = v
+						}
+						nonceMapMutex.Unlock()
+					}(start, end)
+				}
+				wg.Wait()
+			}
 		}
 
 		// Sort by FromAddress and Nonce to ensure contiguous evaluation

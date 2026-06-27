@@ -163,6 +163,9 @@ func (bp *BlockProcessor) commitWorker() {
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
 		} else {
+			if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
+				bp.transactionProcessor.ClearNoncesCache()
+			}
 			// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
 			if job.AccountNomtPayload != nil {
 				if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {

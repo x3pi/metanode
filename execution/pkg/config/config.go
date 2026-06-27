@@ -177,7 +177,8 @@ type SimpleChainConfig struct {
 	GoMemLimitGB int `json:"go_mem_limit_gb,omitempty"` // Go soft memory limit in GB (default: 8). Set per-node to prevent OOM when running multiple nodes on same server.
 	GoGCPercent  int `json:"go_gc_percent,omitempty"`   // GC target percentage (default: 800). Lower = more frequent GC = less memory but more CPU.
 
-	Pruning        PruningConfig      `json:"pruning,omitempty"`
+	TxVerificationChunkSize int                `json:"tx_verification_chunk_size,omitempty"`
+	Pruning                 PruningConfig      `json:"pruning,omitempty"`
 	RpcRateLimit   RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
 	TraceEnabled   bool               `json:"trace_enabled,omitempty"`
 	TraceEndpoint  string             `json:"trace_endpoint,omitempty"`

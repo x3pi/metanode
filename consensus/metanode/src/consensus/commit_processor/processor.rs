@@ -1076,7 +1076,7 @@ impl CommitProcessor {
             let recv_result = if !pending_local_commits.is_empty() {
                 tokio::select! {
                     result = receiver.recv() => result,
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(200)) => {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(5)) => {
                         // Timeout — loop back to check quorum again
                         continue;
                     }
