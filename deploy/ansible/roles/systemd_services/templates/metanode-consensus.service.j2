@@ -15,8 +15,8 @@ ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/metanode start --config
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 TimeoutStopSec=60
-Restart=on-failure
-RestartSec=10s
+Restart=no
+# RestartSec=10s
 
 # Environment
 Environment=RUST_BACKTRACE=full
