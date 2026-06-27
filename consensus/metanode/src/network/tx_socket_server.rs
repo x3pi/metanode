@@ -254,35 +254,49 @@ impl TxSocketServer {
                                     );
                                     let mut forwarded = false;
                                     let mut explicitly_rejected = false;
-                                    for peer_addr in &targets {
-                                        match crate::network::peer_rpc::forward_transactions_to_peer(
-                                            peer_addr,
-                                            transactions_to_submit.clone(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(resp) => {
-                                                if resp.success {
-                                                    info!(
-                                                        "📡 [FFI TX FLOW] Successfully forwarded {} TXs to validator {}",
-                                                        transactions_to_submit.len(),
-                                                        peer_addr
-                                                    );
-                                                    forwarded = true;
-                                                    break;
-                                                } else {
-                                                    warn!(
-                                                        "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
-                                                        peer_addr, resp.error
-                                                    );
-                                                    explicitly_rejected = true;
+                                    let tx_hex_list: Vec<String> = transactions_to_submit.iter().map(hex::encode).collect();
+                                    let req = crate::network::peer_rpc::SubmitTransactionRequest {
+                                        transactions_hex: tx_hex_list,
+                                    };
+                                    let body_arc_opt = match serde_json::to_string(&req) {
+                                        Ok(body) => Some(std::sync::Arc::new(body)),
+                                        Err(e) => {
+                                            error!("❌ [FFI TX FLOW] Failed to serialize SyncOnly transactions: {}", e);
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(body_arc) = body_arc_opt {
+                                        for peer_addr in &targets {
+                                            match crate::network::peer_rpc::forward_serialized_transactions_to_peer(
+                                                peer_addr,
+                                                body_arc.clone(),
+                                            )
+                                            .await
+                                            {
+                                                Ok(resp) => {
+                                                    if resp.success {
+                                                        info!(
+                                                            "📡 [FFI TX FLOW] Successfully forwarded {} TXs to validator {}",
+                                                            transactions_to_submit.len(),
+                                                            peer_addr
+                                                        );
+                                                        forwarded = true;
+                                                        break;
+                                                    } else {
+                                                        warn!(
+                                                            "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
+                                                            peer_addr, resp.error
+                                                        );
+                                                        explicitly_rejected = true;
+                                                    }
                                                 }
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    "📡 [FFI TX FLOW] Failed to forward transactions to validator {}: {}",
-                                                    peer_addr, e
-                                                );
+                                                Err(e) => {
+                                                    warn!(
+                                                        "📡 [FFI TX FLOW] Failed to forward transactions to validator {}: {}",
+                                                        peer_addr, e
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -345,16 +359,27 @@ impl TxSocketServer {
                 // Background mempool pre-propagation to peer validators to populate their caches
                 // and completely avoid missing transaction sync stalls during consensus voting.
                 if !broadcast_peers.is_empty() {
-                    let chunk_clone = chunk_vec.clone();
-                    for peer_addr in broadcast_peers.clone() {
-                        let chunk = chunk_clone.clone();
-                        tokio::spawn(async move {
-                            let _ = crate::network::peer_rpc::forward_transactions_to_peer(
-                                &peer_addr,
-                                chunk,
-                            )
-                            .await;
-                        });
+                    let tx_hex_list: Vec<String> = chunk_vec.iter().map(hex::encode).collect();
+                    let req = crate::network::peer_rpc::SubmitTransactionRequest {
+                        transactions_hex: tx_hex_list,
+                    };
+                    match serde_json::to_string(&req) {
+                        Ok(body) => {
+                            let body_arc = std::sync::Arc::new(body);
+                            for peer_addr in broadcast_peers.clone() {
+                                let body_clone = body_arc.clone();
+                                tokio::spawn(async move {
+                                    let _ = crate::network::peer_rpc::forward_serialized_transactions_to_peer(
+                                        &peer_addr,
+                                        body_clone,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!("❌ [FFI TX FLOW] Failed to serialize pre-propagation transactions: {}", e);
+                        }
                     }
                 }
 
