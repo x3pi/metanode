@@ -191,7 +191,12 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     meta_rpc_port    = getattr(args, "meta_node_rpc_port",10100 + node_id)
     metrics_port     = getattr(args, "metrics_port",      9200 + node_id)
     
-    is_rpc_node      = not is_validator
+    # RPC is independent of validator status, controlled by --is-rpc
+    is_rpc_node      = args.is_rpc
+    
+    # Explorer defaults to True for synconly nodes, unless specified
+    is_explorer = getattr(args, "is_explorer", False) or (args.node_type == "synconly")
+    
     snapshot_enabled = not is_validator
     epochs_to_keep   = 5 if is_validator else 0
     commit_batch_size= 500 if is_validator else 100
@@ -280,7 +285,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "nomt_page_cache_mb": 4096,
         "nomt_leaf_cache_mb": 4096,
         "rust_config_path": f"{install_dir}/config/consensus.toml",
-        "is_explorer": is_rpc_node,
+        "is_explorer": is_explorer,
         "is_rpc_node": is_rpc_node,
         "explorer_db_path": f"{install_dir}/data/execution/explorer",
         "explorer_read_only_db_path": f"{install_dir}/data/execution/explorer-read-only",
@@ -383,6 +388,8 @@ def parse_args():
     parser.add_argument("--hostname",     required=True, help="Validator hostname, e.g. node-0")
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
+    parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
+    parser.add_argument("--is-explorer",  action="store_true", help="Enable Explorer for this node")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
     parser.add_argument("--ip",           default="127.0.0.1")
