@@ -52,11 +52,11 @@ impl TxSocketServer {
         let peer_discovery_addresses = self.peer_discovery_addresses;
         let tx_recycler = self.tx_recycler;
 
-        // BOUNDED PIPELINE BACKPRESSURE: Allow up to 8 concurrent batches in flight.
+        // BOUNDED PIPELINE BACKPRESSURE: Allow up to 128 concurrent batches in flight.
         // This prevents the livelock caused by unbounded spawning during epoch transitions,
         // but solves the sequential bottleneck that was starving the DAG consensus and
-        // reducing End-to-End TPS. FFI channel will block when 8 batches are pending.
-        let pipeline_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+        // reducing End-to-End TPS. FFI channel will block when 128 batches are pending.
+        let pipeline_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
 
         while let Some(tx_data) = ffi_tx_receiver.recv().await {
             let permit = pipeline_semaphore.clone().acquire_owned().await.unwrap();
