@@ -639,13 +639,21 @@ pub async fn forward_transactions_to_peer(
     peer_address: &str,
     transactions: Vec<Vec<u8>>,
 ) -> Result<SubmitTransactionResponse> {
-    use tokio::net::TcpStream;
-
     let tx_hex_list: Vec<String> = transactions.iter().map(hex::encode).collect();
     let req = SubmitTransactionRequest {
         transactions_hex: tx_hex_list,
     };
     let body = serde_json::to_string(&req)?;
+    forward_serialized_transactions_to_peer(peer_address, std::sync::Arc::new(body)).await
+}
+
+/// Forward a pre-serialized batch of transactions to a validator node via /submit_transaction HTTP POST endpoint.
+pub async fn forward_serialized_transactions_to_peer(
+    peer_address: &str,
+    serialized_body: std::sync::Arc<String>,
+) -> Result<SubmitTransactionResponse> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
 
     // Connect with timeout
     let mut stream = tokio::time::timeout(
@@ -660,8 +668,8 @@ pub async fn forward_transactions_to_peer(
     let request = format!(
         "POST /submit_transaction HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         peer_address,
-        body.len(),
-        body
+        serialized_body.len(),
+        *serialized_body
     );
     stream.write_all(request.as_bytes()).await?;
 
@@ -714,4 +722,5 @@ pub async fn forward_transactions_to_peer(
 
     Ok(resp)
 }
+
 

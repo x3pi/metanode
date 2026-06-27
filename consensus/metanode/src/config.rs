@@ -84,6 +84,8 @@ pub struct NodeConfig {
     /// This allows flexible testing with different commit node configurations
     #[serde(default)]
     pub executor_commit_enabled: bool,
+    #[serde(default)]
+    pub consensus_max_num_transactions_in_block: Option<u64>,
 
     /// Commit sync batch size for catch-up (default: 200, higher = faster catch-up but more memory)
     /// When node is lagging, larger batch size allows fetching more commits in parallel
@@ -330,6 +332,7 @@ impl NodeConfig {
                 ntp_sync_interval_seconds: 300,
                 executor_read_enabled: true, // All nodes can read committee state from Go
                 executor_commit_enabled: true, // All validators commit blocks to their local Go Master
+                consensus_max_num_transactions_in_block: None,
 
                 commit_sync_batch_size: default_commit_sync_batch_size(),
                 commit_sync_parallel_fetches: default_commit_sync_parallel_fetches(),
