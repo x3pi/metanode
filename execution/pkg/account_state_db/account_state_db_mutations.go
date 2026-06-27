@@ -501,3 +501,50 @@ func (db *AccountStateDB) ExecuteNativeTransfer(
 
 	return nil
 }
+
+func (db *AccountStateDB) ExecuteNativeTransferLockFree(
+from, to common.Address,
+amount, gasFee *big.Int,
+txHash common.Hash,
+newDeviceKey common.Hash,
+) error {
+totalCost := new(big.Int).Add(amount, gasFee)
+
+as, err := db.getOrCreateAccountState(from)
+if err != nil {
+ fmt.Errorf("sender account state error: %w", err)
+}
+if as == nil {
+ errors.New("sender account state is nil")
+}
+
+// SubTotalBalance in-place
+err = as.SubTotalBalance(totalCost)
+if err != nil {
+ fmt.Errorf("SubTotalBalance: %w", err)
+}
+
+// Add nonce
+as.SetNonce(as.Nonce() + 1)
+if newDeviceKey != (common.Hash{}) {
+(newDeviceKey.Bytes())
+}
+
+// Get receiver state
+asTo, err := db.getOrCreateAccountState(to)
+if err != nil {
+ fmt.Errorf("receiver account state error: %w", err)
+}
+if asTo == nil {
+ errors.New("receiver account state is nil")
+}
+
+// AddBalance in-place
+asTo.AddBalance(amount)
+
+// Save to dirty map (thread-safe)
+db.setDirtyAccountState(as)
+db.setDirtyAccountState(asTo)
+
+return nil
+}
