@@ -334,6 +334,7 @@ epoch_monitor_poll_interval_secs = 5
 peer_rpc_port = {peer_rpc_port}
 peer_rpc_addresses = [{peer_rpc_str}]
 epochs_to_keep = {epochs_to_keep}
+consensus_max_num_transactions_in_block = {args.consensus_max_txs_per_block}
 
 [log]
 level = "info"
@@ -397,6 +398,8 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
+    parser.add_argument("--consensus-max-txs-per-block", type=int, default=10000,
+                        help="Maximum number of transactions proposed in a single consensus block (default: 10000)")
     return parser.parse_args()
 
 

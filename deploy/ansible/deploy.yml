@@ -10,7 +10,8 @@
           {%- set nodes = [] -%}
           {%- for host in groups['metanode_cluster'] -%}
             {%- for nid in hostvars[host]['node_ids'] -%}
-              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': hostvars[host]['is_synconly'] | default(false)}) -%}
+              {%- set is_sync = (nid | int in hostvars[host]['synconly_nodes'] | default([])) or (hostvars[host]['is_synconly'] | default(false)) -%}
+              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync}) -%}
             {%- endfor -%}
           {%- endfor -%}
           {{ nodes }}

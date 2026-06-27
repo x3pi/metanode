@@ -305,7 +305,10 @@ impl ConsensusNode {
         commit_processor = commit_processor.with_lag_alert_sender(lag_alert_sender);
 
         let parameters = Self::build_consensus_parameters(config, storage)?;
-        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
+        let mut protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
+        if let Some(limit) = config.consensus_max_num_transactions_in_block {
+            protocol_config.set_consensus_max_num_transactions_in_block_for_testing(limit);
+        }
 
         let (authority, commit_consumer_holder) = if start_as_validator {
             info!("🚀 Starting consensus authority node (phase=Bootstrapping)...");
