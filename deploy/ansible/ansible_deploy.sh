@@ -194,8 +194,15 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n⚙️ Cấu hình kết nối client:"
     echo "$RPC_CONFIG"
 
+    echo -e  "\n📋 *Node Roles:*"
+    echo "\`\`\`${ROLES_OUTPUT}\`\`\`"
     send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
 - Watcher Daemon: \`${WATCHER_STATUS}\`
+
+📋 *Node Roles:*
+\`\`\`
+${ROLES_OUTPUT}
+\`\`\`
 
 ⚙️ *Cấu hình kết nối client:*
 \`\`\`json
