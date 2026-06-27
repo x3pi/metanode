@@ -897,6 +897,11 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] ✅ Completed: executed %d/%d blocks, last_block=#%d, last_gei=%d",
 		executedCount, blockCount, lastExecutedBlock, lastExecutedGEI)
 
+	// Invalidate nonce cache after syncing new blocks to ensure mempool validation uses updated nonces
+	if executedCount > 0 && rh.clearNoncesCacheCallback != nil {
+		rh.clearNoncesCacheCallback()
+	}
+
 	// Cache invalidation is handled by the defer block at the start of the function
 
 	return &pb.SyncBlocksResponse{

@@ -13,6 +13,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+
 	// "github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -69,6 +70,13 @@ func (bp *BlockProcessor) runUnixSocket() {
 		bp.broadcastEventsAndReceipts(blk, receipts, eventLogs)
 	})
 
+	// Inject SetClearNoncesCacheCallback for SyncOnly transaction mempool invalidation
+	reqHandler.SetClearNoncesCacheCallback(func() {
+		if bp.transactionProcessor != nil {
+			bp.transactionProcessor.ClearNoncesCache()
+		}
+	})
+
 	// 2. Create the block ingestion channel (was listener.DataChannel())
 	// In the legacy setup, processRustEpochData reads from this channel
 	blockQueue := make(chan *pb.ExecutableBlock, 5000)
@@ -110,8 +118,6 @@ func (bp *BlockProcessor) runUnixSocket() {
 		logger.Debug("🔌 [FFI BRIDGE] Main thread monitoring FFI alive")
 	}
 }
-
-
 
 // processRustEpochData processes epoch data from Rust
 func (bp *BlockProcessor) processRustEpochData(dataChan <-chan *pb.ExecutableBlock) {
