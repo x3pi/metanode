@@ -214,6 +214,12 @@ if $DO_SETUP; then
         BTRFS_SET[$bn]=1
     done
 
+    # Parse RPC_NODES into an associative set for quick lookup
+    declare -A RPC_SET
+    for rn in ${RPC_NODES:-}; do
+        RPC_SET[$rn]=1
+    done
+
     # Build peers map for Python script
     PEERS_MAP=""
     for i in "${ALL_NODE_IDS[@]}"; do
@@ -233,6 +239,11 @@ if $DO_SETUP; then
         NODE_TYPE_FLAG="validator"
         $IS_SYNCONLY && NODE_TYPE_FLAG="synconly"
 
+        RPC_FLAG=""
+        if [ -n "${RPC_SET[$nid]+_}" ]; then
+            RPC_FLAG="--is-rpc"
+        fi
+
         log_info "Node $nid ($NODE_TYPE_FLAG) → $KEYS_DIR"
 
         python3 "$GEN_VALIDATOR_SCRIPT" \
@@ -242,6 +253,7 @@ if $DO_SETUP; then
             --ip "${NODE_SERVER[$nid]}" \
             --peers-map "$PEERS_MAP" \
             --keys-dir "$KEYS_DIR" \
+            $RPC_FLAG \
             --output "${KEYS_DIR}/node-${nid}_genesis.json" \
             --metanode-bin "$METANODE_BIN" \
             || { log_err "gen_validator_entry.py failed for node $nid"; exit 1; }
