@@ -29,6 +29,7 @@ type RequestHandler struct {
 	lockExecutionCallback              func()                                                                      // Callback to acquire BlockProcessor's ExecutionMutex lock
 	unlockExecutionCallback            func()                                                                      // Callback to release BlockProcessor's ExecutionMutex lock
 	broadcastEventsAndReceiptsCallback func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) // Callback to broadcast transaction receipts on synced blocks
+	clearNoncesCacheCallback           func()                                                                      // Callback to clear expected nonces cache on block sync
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -91,6 +92,11 @@ func (rh *RequestHandler) SetExecutionLockCallbacks(lock, unlock func()) {
 // SetBroadcastEventsAndReceiptsCallback sets the callback for broadcasting transaction receipts on synced blocks
 func (rh *RequestHandler) SetBroadcastEventsAndReceiptsCallback(cb func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog)) {
 	rh.broadcastEventsAndReceiptsCallback = cb
+}
+
+// SetClearNoncesCacheCallback sets the callback for clearing expected nonces cache
+func (rh *RequestHandler) SetClearNoncesCacheCallback(cb func()) {
+	rh.clearNoncesCacheCallback = cb
 }
 
 // NOTE (Sync Architecture Redesign, Apr 2026):
