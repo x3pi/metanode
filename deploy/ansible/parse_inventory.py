@@ -18,6 +18,8 @@ def parse_inventory(file_path):
     # Split by indent level of 8 spaces to get separate host blocks
     entries = re.split(r'\n(?=\s{8}\S)', hosts_text)
     node_map = {}
+    is_synconly_map = {}
+    is_rpc_map = {}
     for entry in entries:
         entry = entry.strip()
         if not entry:
@@ -28,6 +30,8 @@ def parse_inventory(file_path):
         # default IP to the host key if it's a valid IP
         ip = host_key
         node_ids = []
+        synconly_nodes = []
+        rpc_nodes = []
         for line in lines[1:]:
             line = line.strip()
             if line.startswith('ansible_host:'):
@@ -37,6 +41,14 @@ def parse_inventory(file_path):
                 node_ids_match = re.search(r'\[(.*?)\]', line)
                 if node_ids_match:
                     node_ids = [int(x.strip()) for x in node_ids_match.group(1).split(',') if x.strip()]
+            elif line.startswith('synconly_nodes:'):
+                match = re.search(r'\[(.*?)\]', line)
+                if match:
+                    synconly_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
+            elif line.startswith('rpc_nodes:'):
+                match = re.search(r'\[(.*?)\]', line)
+                if match:
+                    rpc_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
         
         # clean up IP
         if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
@@ -46,8 +58,10 @@ def parse_inventory(file_path):
                 
         for nid in node_ids:
             node_map[nid] = ip
+            is_synconly_map[nid] = (nid in synconly_nodes)
+            is_rpc_map[nid] = (nid in rpc_nodes)
             
-    return node_map
+    return node_map, is_synconly_map, is_rpc_map
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
@@ -57,10 +71,12 @@ if __name__ == '__main__':
     inv_file = sys.argv[1]
     target = sys.argv[2]
     
-    node_map = parse_inventory(inv_file)
-    if isinstance(node_map, str):
-        print(node_map)
+    result = parse_inventory(inv_file)
+    if isinstance(result, str):
+        print(result)
         sys.exit(1)
+        
+    node_map, is_synconly_map, is_rpc_map = result
         
     if target == 'json':
         import json
@@ -73,6 +89,18 @@ if __name__ == '__main__':
         print(json.dumps(out, indent=2))
         sys.exit(0)
         
+    if target == 'roles':
+        # output roles summary
+        out = []
+        for nid in sorted(node_map.keys()):
+            ip = node_map[nid]
+            role = "SyncOnly" if is_synconly_map.get(nid, False) else "Validator"
+            rpc_status = "[RPC Enabled]" if is_rpc_map.get(nid, False) else ""
+            out.append(f"   - Node {nid} ({ip}): {role} {rpc_status}")
+            
+        print("\n".join(out))
+        sys.exit(0)
+
     if target == 'all':
         # format: Node 0 (IP), Node 1 (IP)... sorted by node_id
         sorted_nodes = sorted(node_map.keys())

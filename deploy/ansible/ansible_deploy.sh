@@ -140,6 +140,13 @@ echo "   Open Ports:         $OPEN_PORTS"
 echo "   Build Fast:         $BUILD_FAST"
 echo "   Watcher:            $WATCHER_STATUS"
 
+ROLES_OUTPUT=""
+if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
+    ROLES_OUTPUT=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "roles" || true)
+    echo -e "\n📋 Node Roles:"
+    echo "$ROLES_OUTPUT"
+fi
+
 send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Deploy:
 - Deployer Server IP: \`${DEPLOY_IP}\`
 - Target Node IPs: \`${TARGET_NODES_IPS}\`
@@ -149,7 +156,12 @@ send_telegram_notification "🚀 *[DEPLOY]* Bắt đầu quá trình Ansible Dep
 - Keep Data: \`${KEEP_DATA}\`
 - Restore Node: \`${RESTORE_NODE}\`
 - Open Ports: \`${OPEN_PORTS}\`
-- Watcher Daemon: \`${WATCHER_STATUS}\`"
+- Watcher Daemon: \`${WATCHER_STATUS}\`
+
+📋 *Node Roles:*
+\`\`\`
+${ROLES_OUTPUT}
+\`\`\`"
 
 # Prepare extra vars
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST}"
@@ -182,8 +194,15 @@ if [ $ansible_exit -eq 0 ]; then
     echo -e "\n⚙️ Cấu hình kết nối client:"
     echo "$RPC_CONFIG"
 
+    echo -e  "\n📋 *Node Roles:*"
+    echo "\`\`\`${ROLES_OUTPUT}\`\`\`"
     send_telegram_notification "✅ *[DEPLOY]* Quá trình Ansible Deploy (\`${ACTION}\`) từ \`${DEPLOY_SOURCE}\` hoàn tất thành công!
 - Watcher Daemon: \`${WATCHER_STATUS}\`
+
+📋 *Node Roles:*
+\`\`\`
+${ROLES_OUTPUT}
+\`\`\`
 
 ⚙️ *Cấu hình kết nối client:*
 \`\`\`json
