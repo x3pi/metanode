@@ -318,6 +318,10 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 		}
 	}
 
+	if changelogDB == nil && mt_trie.GetStateBackend() == mt_trie.BackendNOMT && isHistorical {
+		return nil, fmt.Errorf("historical state query not supported: StateChangelogDB is disabled (missing --is-rpc flag)")
+	}
+
 	stateRootInterface := blockMap["stateRoot"]
 	var stateRoot common.Hash
 	switch v := stateRootInterface.(type) {
