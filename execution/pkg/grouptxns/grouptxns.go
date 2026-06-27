@@ -24,14 +24,24 @@ type Item struct {
 	TimeStart time.Time
 }
 
+// IsNativeParallelAddress checks if the address is a special native contract
+// that bypasses Union-Find grouping to allow concurrent execution.
+func IsNativeParallelAddress(addr common.Address) bool {
+	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
+	if addr == accountSettingAddr {
+		return true
+	}
+	if addr == mt_common.VALIDATOR_CONTRACT_ADDRESS {
+		return true
+	}
+	if addr == common.HexToAddress("0x0000000000000000000000000000000000000106") {
+		return true
+	}
+	return false
+}
+
 // BuildDeterministicGroupAddrs builds the Array for UnionFind grouping
 func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	nativeParallelAddrs := map[common.Address]struct{}{
-		accountSettingAddr:                   {},
-		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
-		common.HexToAddress("0x0000000000000000000000000000000000000106"): {},
-	}
 
 	groupAddrs := make([]common.Address, 0)
 
@@ -51,7 +61,7 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 	if hasAccessList && !isValueTransfer {
 		groupAddrs = append(groupAddrs, tx.FromAddress())
 		for _, tuple := range al {
-			if _, isNative := nativeParallelAddrs[tuple.Address]; !isNative {
+			if !IsNativeParallelAddress(tuple.Address) {
 				groupAddrs = append(groupAddrs, tuple.Address)
 			}
 			for _, key := range tuple.StorageKeys {
@@ -61,7 +71,7 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 		}
 	} else {
 		for _, addr := range tx.RelatedAddresses() {
-			if _, isNative := nativeParallelAddrs[addr]; !isNative {
+			if !IsNativeParallelAddress(addr) {
 				groupAddrs = append(groupAddrs, addr)
 			}
 		}

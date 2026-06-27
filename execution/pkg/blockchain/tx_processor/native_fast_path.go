@@ -170,8 +170,15 @@ func processNativeTransfersFastPath(
 					}
 					gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
 
-					// ExecuteNativeTransfer (batch transaction in a single lock acquisition to reduce lock contention)
-					err := globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					// Route to lock-free fast path if NO parallel addresses are involved.
+					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe.
+					var err error
+					if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
+						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					} else {
+						err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					}
+
 					if err != nil {
 						if enableTrace {
 							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_EXECUTE_FAILED", err.Error())
