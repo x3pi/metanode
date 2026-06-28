@@ -133,7 +133,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		startTime := time.Now()
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
-		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(allTransactions), 0, execDuration.Microseconds())
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 
 		res := &SpeculativeResult{
 			BlockNum:        blockNum,
@@ -226,7 +226,7 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
-	logger.Info("📥 [COMMITTER] Processing speculative commit: GEI=%d, block=#%d, txs=%d", res.GEI, res.BlockNum, len(res.Txs))
+	logger.Info("📥 [COMMITTER] Processing speculative commit: GEI=%d, block=#%d, txs=%d", res.GEI, res.BlockNum, len(res.ProcessResult.Transactions))
 
 	lastBlock := bp.GetLastBlock()
 	var currentBlockNumber uint64
