@@ -552,7 +552,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	gasUsed := uint64(21000)
 	if errExec != nil || exRs == nil {
 		status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR // Failed
-		status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR // Failed
 	} else {
 		gasUsed = exRs.GasUsed()
 		status = exRs.ReceiptStatus()
@@ -567,21 +566,10 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		From:              fromAddress.Hex(),
 		CumulativeGasUsed: hexutil.EncodeUint64(gasUsed),
 		GasUsed:           hexutil.EncodeUint64(gasUsed),
-		TransactionHash:   ethTx.Hash().Hex(),
-		TransactionIndex:  "0x0",
-		BlockHash:         common.Hash{}.Hex(), // Pending block
-		BlockNumber:       "0x0",
-		From:              fromAddress.Hex(),
-		CumulativeGasUsed: hexutil.EncodeUint64(gasUsed),
-		GasUsed:           hexutil.EncodeUint64(gasUsed),
 		Status:            status,
 	}
 	if ethTx.To() != nil {
 		mockReceipt.To = ethTx.To().Hex()
-	} else {
-		// Calculate the new contract address
-		createdAddr := crypto.CreateAddress(fromAddress, ethTx.Nonce())
-		mockReceipt.ContractAddress = createdAddr.Hex()
 	}
 
 	// 9. Store in cache
