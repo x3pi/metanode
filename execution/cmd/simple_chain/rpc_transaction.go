@@ -485,17 +485,17 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 		}
 	}
 
-		if api.App.config.EnablePrivateGateway {
-			return api.sendRawEthTransactionSpeculative(ctx, input)
-		}
+	if api.App.config.EnablePrivateGateway {
+		return api.sendRawEthTransactionSpeculative(ctx, input)
+	}
 
-		// Async path: enqueue and return immediately
-		if api.App.txAsyncQueue != nil {
-			return api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
-		}
+	// Async path: enqueue and return immediately
+	if api.App.txAsyncQueue != nil {
+		return api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
+	}
 
-		// Fallback: synchronous processing (legacy path)
-		return api.sendRawEthTransactionSync(ctx, input)
+	// Fallback: synchronous processing (legacy path)
+	return api.sendRawEthTransactionSync(ctx, input)
 }
 
 // sendRawEthTransactionSpeculative performs speculative execution for the Private Gateway
@@ -552,15 +552,21 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	gasUsed := uint64(21000)
 	if errExec != nil || exRs == nil {
 		status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR // Failed
+		status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR // Failed
 	} else {
 		gasUsed = exRs.GasUsed()
-		if exRs.ReceiptStatus() != mt_proto.RECEIPT_STATUS_RETURNED {
-			status = exRs.ReceiptStatus()
-		}
+		status = exRs.ReceiptStatus()
 	}
 
 	// 8. Create Mock Receipt
 	mockReceipt := &mt_proto.RpcReceipt{
+		TransactionHash:   ethTx.Hash().Hex(),
+		TransactionIndex:  "0x0",
+		BlockHash:         common.Hash{}.Hex(), // Pending block
+		BlockNumber:       "0x0",
+		From:              fromAddress.Hex(),
+		CumulativeGasUsed: hexutil.EncodeUint64(gasUsed),
+		GasUsed:           hexutil.EncodeUint64(gasUsed),
 		TransactionHash:   ethTx.Hash().Hex(),
 		TransactionIndex:  "0x0",
 		BlockHash:         common.Hash{}.Hex(), // Pending block
