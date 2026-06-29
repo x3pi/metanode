@@ -153,7 +153,10 @@ func (q *TxAsyncQueue) EnqueueEthTransaction(ctx context.Context, input hexutil.
 
 	// 3. Determine BLS private key
 	var blsPrivateKey mt_common.PrivateKey
-	if q.app.blsKeyStore != nil {
+	if q.app.config.GatewayBLSKey != "" {
+		kp := bls.NewKeyPair(common.FromHex(q.app.config.GatewayBLSKey))
+		blsPrivateKey = kp.PrivateKey()
+	} else if q.app.blsKeyStore != nil {
 		exists, _ := q.app.blsKeyStore.HasPrivateKey(fromAddress)
 		if exists {
 			pkStr, err := q.app.blsKeyStore.GetPrivateKey(fromAddress)

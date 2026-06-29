@@ -62,8 +62,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                 let synchronizer = self.synchronizer.clone();
                 let core_dispatcher = self.core_dispatcher.clone();
                 let transaction_certifier = self.transaction_certifier.clone();
-                let dag_state = self.dag_state.clone();
-                let round_tracker = self.round_tracker.clone();
+
                 let tx_fetcher = self.tx_fetcher.clone();
                 let peer_hostname = peer_hostname.to_string();
                 let peer_clone = peer;

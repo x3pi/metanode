@@ -23,7 +23,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
-	"github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
+	sharedmemory "github.com/meta-node-blockchain/meta-node/pkg/shared_memory"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -547,7 +547,7 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	scTx := &transaction.Transaction{}
 	scTx.FromProto(txD.Transaction)
 	exRs, errExec := api.App.transactionProcessor.TxVirtualExecutor.ExecuteTransactionOffChain(scTx)
-	
+
 	status := mt_proto.RECEIPT_STATUS_RETURNED
 	gasUsed := uint64(21000)
 	if errExec != nil || exRs == nil {
@@ -683,23 +683,28 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 			if cachedRcpt, found := SpeculativeReceiptCache.Load(searchHash); found {
 				rcp := cachedRcpt.(*mt_proto.RpcReceipt)
 				logger.Info("[RPC-RECEIPT] Found Speculative Receipt for %s", searchHash.Hex())
-				
-				statusStr := "0x1"
-				if rcp.Status != mt_proto.RECEIPT_STATUS_RETURNED {
-					statusStr = "0x0"
+
+				statusStr := "0x0"
+				if rcp.Status == mt_proto.RECEIPT_STATUS_RETURNED {
+					statusStr = "0x1"
+				}
+
+				var contractAddress interface{}
+				if rcp.ContractAddress != "" {
+					contractAddress = rcp.ContractAddress
 				}
 
 				resp := map[string]interface{}{
 					"transactionHash":   searchHash.Hex(),
 					"transactionIndex":  "0x0",
 					"blockHash":         common.Hash{}.Hex(), // Pending
-					"blockNumber":       "0x0", // Pending
+					"blockNumber":       "0x0",               // Pending
 					"from":              common.HexToAddress(rcp.From).Hex(),
 					"cumulativeGasUsed": rcp.CumulativeGasUsed,
 					"gasUsed":           rcp.GasUsed,
-					"contractAddress":   nil,
+					"contractAddress":   contractAddress,
 					"logs":              []interface{}{},
-					"logsBloom":         "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+					"logsBloom":         types.Bloom{},
 					"status":            statusStr,
 				}
 				if len(rcp.To) > 0 {

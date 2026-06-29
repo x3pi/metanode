@@ -230,6 +230,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
         "enable_private_gateway": True,
+        "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
         "chainId": 991,
         "private_key": bls_private_hex,
         "address": eth_addr_stripped,
