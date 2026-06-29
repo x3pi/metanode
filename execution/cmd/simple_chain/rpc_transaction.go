@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -525,7 +526,7 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	stateRoot := api.App.blockProcessor.GetLastBlock().Header().AccountStatesRoot()
 
 	// 5. Build MetaTx from EthTx
-	metaTxData, metaTx, err := buildMetaTxFromEthTx(
+	metaTxData, _, err := buildMetaTxFromEthTx(
 		ethTx,
 		api.App.config.ChainId,
 		blsPrivateKey,
@@ -547,30 +548,28 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	scTx.FromProto(txD.Transaction)
 	exRs, errExec := api.App.transactionProcessor.TxVirtualExecutor.ExecuteTransactionOffChain(scTx)
 	
-	status := uint64(1)
+	status := mt_proto.RECEIPT_STATUS_RETURNED
 	gasUsed := uint64(21000)
 	if errExec != nil || exRs == nil {
-		status = 0 // Failed
+		status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR // Failed
 	} else {
-		gasUsed = exRs.GetGasUsed()
-		if exRs.GetRevert() {
-			status = 0
-		}
+		gasUsed = exRs.GasUsed()
+		status = exRs.ReceiptStatus()
 	}
 
 	// 8. Create Mock Receipt
 	mockReceipt := &mt_proto.RpcReceipt{
-		TransactionHash:   ethTx.Hash().Bytes(),
-		TransactionIndex:  0,
-		BlockHash:         common.Hash{}.Bytes(), // Pending block
-		BlockNumber:       0,
-		From:              fromAddress.Bytes(),
-		CumulativeGasUsed: gasUsed,
-		GasUsed:           gasUsed,
+		TransactionHash:   ethTx.Hash().Hex(),
+		TransactionIndex:  "0x0",
+		BlockHash:         common.Hash{}.Hex(), // Pending block
+		BlockNumber:       "0x0",
+		From:              fromAddress.Hex(),
+		CumulativeGasUsed: hexutil.EncodeUint64(gasUsed),
+		GasUsed:           hexutil.EncodeUint64(gasUsed),
 		Status:            status,
 	}
 	if ethTx.To() != nil {
-		mockReceipt.To = ethTx.To().Bytes()
+		mockReceipt.To = ethTx.To().Hex()
 	}
 
 	// 9. Store in cache
@@ -686,7 +685,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 				logger.Info("[RPC-RECEIPT] Found Speculative Receipt for %s", searchHash.Hex())
 				
 				statusStr := "0x1"
-				if rcp.Status == 0 {
+				if rcp.Status != mt_proto.RECEIPT_STATUS_RETURNED {
 					statusStr = "0x0"
 				}
 
@@ -695,16 +694,16 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 					"transactionIndex":  "0x0",
 					"blockHash":         common.Hash{}.Hex(), // Pending
 					"blockNumber":       "0x0", // Pending
-					"from":              common.BytesToAddress(rcp.From).Hex(),
-					"cumulativeGasUsed": hexutil.EncodeUint64(rcp.CumulativeGasUsed),
-					"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed),
+					"from":              common.HexToAddress(rcp.From).Hex(),
+					"cumulativeGasUsed": rcp.CumulativeGasUsed,
+					"gasUsed":           rcp.GasUsed,
 					"contractAddress":   nil,
 					"logs":              []interface{}{},
 					"logsBloom":         "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
 					"status":            statusStr,
 				}
 				if len(rcp.To) > 0 {
-					resp["to"] = common.BytesToAddress(rcp.To).Hex()
+					resp["to"] = common.HexToAddress(rcp.To).Hex()
 				}
 				return resp, nil
 			}
