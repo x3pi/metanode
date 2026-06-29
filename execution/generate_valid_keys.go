@@ -18,7 +18,7 @@ type Account struct {
 
 func main() {
 	var keys []Account
-	count := 50000
+	count := 20000
 
 	for i := 0; i < count; i++ {
 		kp := bls.GenerateKeyPair()
