@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,7 +27,7 @@ import (
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
 
-func (api *MetaAPI) Call(ctx context.Context, input hexutil.Bytes, blockNrOrHash *rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
+func (api *MetaAPI) Call(ctx context.Context, rawInput json.RawMessage, blockNrOrHash *rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	// Chuyển yêu cầu đến hàm xử lý song song
 	resultChan := make(chan CallResult, 1) // Channel để nhận kết quả
 
@@ -36,7 +37,7 @@ func (api *MetaAPI) Call(ctx context.Context, input hexutil.Bytes, blockNrOrHash
 		blockNrOrHash = &defaultBlock
 	}
 
-	go api.processCallRequest(ctx, input, *blockNrOrHash, resultChan)
+	go api.processCallRequest(ctx, rawInput, *blockNrOrHash, resultChan)
 
 	// Chờ kết quả từ goroutine
 	result := <-resultChan
@@ -55,21 +56,94 @@ type CallResult struct {
 }
 
 // processCallRequest handles the call request concurrently
-func (api *MetaAPI) processCallRequest(ctx context.Context, input hexutil.Bytes, blockNrOrHash rpc.BlockNumberOrHash, resultChan chan CallResult) {
+func (api *MetaAPI) processCallRequest(ctx context.Context, rawInput json.RawMessage, blockNrOrHash rpc.BlockNumberOrHash, resultChan chan CallResult) {
 	defer close(resultChan) // Đóng channel khi hoàn thành
 
-	txM := &transaction.Transaction{}
-	err := txM.Unmarshal(input)
-	if err != nil {
-		logger.Warn("Error Unmarshal input:", err)
-		resultChan <- CallResult{Result: common.FromHex("0x00"), Error: err}
-		return
+	var inputStr string
+	var txM *transaction.Transaction
+
+	// 1. Cố gắng parse theo chuẩn cũ (truyền raw hexutil.Bytes của MetaNode transaction)
+	if err := json.Unmarshal(rawInput, &inputStr); err == nil {
+		inputBytes, errHex := hexutil.Decode(inputStr)
+		if errHex == nil {
+			txM = &transaction.Transaction{}
+			if errUnmarshal := txM.Unmarshal(inputBytes); errUnmarshal != nil {
+				txM = nil // Fallback
+			}
+		}
 	}
+
+	// 2. Nếu parse chuẩn cũ thất bại, cố gắng parse theo chuẩn Ethereum (TransactionArgs JSON object)
+	if txM == nil {
+		var args TransactionArgs
+		if err := json.Unmarshal(rawInput, &args); err != nil {
+			logger.Warn("Error Unmarshal Call input: %v", err)
+			resultChan <- CallResult{Result: common.FromHex("0x00"), Error: fmt.Errorf("invalid Call input: %v", err)}
+			return
+		}
+
+		var toAddress common.Address
+		if args.To != nil {
+			toAddress = *args.To
+		}
+
+		amount := big.NewInt(0)
+		if args.Value != nil {
+			amount = (*big.Int)(args.Value)
+		}
+
+		var inputData []byte
+		if args.Data != nil {
+			inputData = *args.Data
+		} else if args.Input != nil {
+			inputData = *args.Input
+		}
+
+		gasLimit := uint64(50000000)
+		if args.Gas != nil {
+			gasLimit = uint64(*args.Gas)
+		}
+
+		gasPrice := uint64(0)
+		if args.GasPrice != nil {
+			gasPrice = (*big.Int)(args.GasPrice).Uint64()
+		}
+
+		var fromAddress common.Address
+		if args.From != nil {
+			fromAddress = *args.From
+		}
+
+		var bData []byte
+		if inputData != nil {
+			callData := transaction.NewCallData(inputData)
+			bData, _ = callData.Marshal()
+		}
+
+		txM = transaction.NewTransaction(
+			fromAddress,
+			toAddress,
+			amount,
+			gasLimit,
+			gasPrice,
+			0, // maxTimeUse
+			bData,
+			nil,           // relatedAddresses
+			common.Hash{}, // lastDeviceKey
+			common.Hash{}, // newDeviceKey
+			1,             // nonce
+			api.App.config.ChainId.Uint64(),
+		).(*transaction.Transaction)
+
+		txM.SetReadOnly(true)
+	}
+
 	if txM.GetNonce() == 0 {
 		txM.SetNonce(1)
 	}
 
 	var rs mt_types.ExecuteSCResult
+	var err error
 
 	// Decide if we can use the fast in-memory current state
 	isLatest := false
