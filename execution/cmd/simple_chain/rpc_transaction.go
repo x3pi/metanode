@@ -699,7 +699,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 					"transactionIndex":  "0x0",
 					"blockHash":         common.Hash{}.Hex(), // Pending
 					"blockNumber":       "0x0",               // Pending
-					"from":              rcp.From,
+					"from":              common.HexToAddress(rcp.From).Hex(),
 					"cumulativeGasUsed": rcp.CumulativeGasUsed,
 					"gasUsed":           rcp.GasUsed,
 					"contractAddress":   contractAddress,
@@ -708,7 +708,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 					"status":            statusStr,
 				}
 				if len(rcp.To) > 0 {
-					resp["to"] = rcp.To
+					resp["to"] = common.HexToAddress(rcp.To).Hex()
 				}
 				return resp, nil
 			}

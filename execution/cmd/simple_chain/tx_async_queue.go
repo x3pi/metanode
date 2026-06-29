@@ -1,4 +1,4 @@
- package main
+package main
 
 // tx_async_queue.go — Asynchronous transaction processing queue.
 //
