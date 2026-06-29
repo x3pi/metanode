@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 
@@ -654,23 +655,92 @@ func (api *MetaAPI) GetRawTransactionByBlockHashAndIndex(ctx context.Context, bl
 // value is capped by both `args.Gas` (if non-nil & non-zero) and the backend's RPCGasCap
 // configuration (if non-zero).
 // Note: Required blob gas is not computed in this method.
-func (api *MetaAPI) EstimateGas(ctx context.Context, input hexutil.Bytes) (hexutil.Uint64, error) {
-	txM := &transaction.Transaction{}
-	err := txM.Unmarshal(input)
-	if err != nil {
-		logger.Warn("Error Unmarshal input:", err)
-		return 0, err
+func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage) (hexutil.Uint64, error) {
+	var inputStr string
+	var txM *transaction.Transaction
+
+	// 1. Cố gắng parse theo chuẩn cũ (truyền raw hexutil.Bytes của MetaNode transaction)
+	if err := json.Unmarshal(rawInput, &inputStr); err == nil {
+		inputBytes, errHex := hexutil.Decode(inputStr)
+		if errHex == nil {
+			txM = &transaction.Transaction{}
+			if errUnmarshal := txM.Unmarshal(inputBytes); errUnmarshal != nil {
+				txM = nil // Fallback
+			}
+		}
 	}
+
+	// 2. Nếu parse chuẩn cũ thất bại, cố gắng parse theo chuẩn Ethereum (TransactionArgs JSON object)
+	if txM == nil {
+		var args TransactionArgs
+		if err := json.Unmarshal(rawInput, &args); err != nil {
+			logger.Warn("Error Unmarshal EstimateGas input: %v", err)
+			return 0, fmt.Errorf("invalid EstimateGas input: %v", err)
+		}
+
+		var toAddress common.Address
+		if args.To != nil {
+			toAddress = *args.To
+		}
+
+		amount := big.NewInt(0)
+		if args.Value != nil {
+			amount = (*big.Int)(args.Value)
+		}
+
+		var inputData []byte
+		if args.Data != nil {
+			inputData = *args.Data
+		} else if args.Input != nil {
+			inputData = *args.Input
+		}
+
+		gasLimit := uint64(50000000)
+		if args.Gas != nil {
+			gasLimit = uint64(*args.Gas)
+		}
+
+		gasPrice := uint64(0)
+		if args.GasPrice != nil {
+			gasPrice = (*big.Int)(args.GasPrice).Uint64()
+		}
+
+		var fromAddress common.Address
+		if args.From != nil {
+			fromAddress = *args.From
+		}
+
+		var bData []byte
+		if inputData != nil {
+			callData := transaction.NewCallData(inputData)
+			bData, _ = callData.Marshal()
+		}
+
+		txM = transaction.NewTransaction(
+			fromAddress,
+			toAddress,
+			amount,
+			gasLimit,
+			gasPrice,
+			0, // maxTimeUse
+			bData,
+			nil,           // relatedAddresses
+			common.Hash{}, // lastDeviceKey
+			common.Hash{}, // newDeviceKey
+			1,             // nonce
+			api.App.config.ChainId.Uint64(),
+		).(*transaction.Transaction)
+
+		txM.SetReadOnly(true)
+	}
+
 	rs, err := api.App.transactionProcessor.ProcessTransactionOffChain(txM)
-
 	if err != nil {
-		logger.Warn("Error Unmarshal input:", err)
-
+		logger.Warn("Error executing EstimateGas transaction off-chain: %v", err)
 		return 0, err
 	}
 	if rs == nil {
 		return hexutil.Uint64(mt_common.MINIMUM_BASE_FEE), nil
-
 	}
 	return hexutil.Uint64(rs.GasUsed() + mt_common.MINIMUM_BASE_FEE), nil
 }
