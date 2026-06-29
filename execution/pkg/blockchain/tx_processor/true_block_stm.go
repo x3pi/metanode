@@ -173,6 +173,8 @@ func (stm *TrueBlockSTM) Process(
 							_ = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
 							mvccDB.PlusOneNonce(tx.FromAddress())
 							mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
+							mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+							mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 							
 							// Create receipt for native transfer
 							rcp = receipt.NewReceipt(
@@ -183,7 +185,65 @@ func (stm *TrueBlockSTM) Process(
 							)
 						} else {
 							// Smart Contract
-							exRs, _ = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
+							var err error
+							exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
+							if err != nil {
+								logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
+								rcp = receipt.NewReceipt(
+									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+									pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
+									mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+								)
+							} else {
+								rcp = receipt.NewReceipt(
+									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+									pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+									mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+									[]types.EventLog{}, 0, common.Hash{}, 0,
+								)
+							}
+
+							if exRs != nil {
+								rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
+								// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
+								if exRs.MapNonce() != nil {
+									for addrHex, newNonceBytes := range exRs.MapNonce() {
+										addr := common.HexToAddress(addrHex)
+										newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+										mvccDB.SetNonce(addr, newNonce)
+									}
+								}
+								if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+									if exRs.MapAddBalance() != nil {
+										for addrHex, addAmtBytes := range exRs.MapAddBalance() {
+											addr := common.HexToAddress(addrHex)
+											addAmt := big.NewInt(0).SetBytes(addAmtBytes)
+											mvccDB.AddBalance(addr, addAmt)
+										}
+									}
+									if exRs.MapSubBalance() != nil {
+										for addrHex, subAmtBytes := range exRs.MapSubBalance() {
+											addr := common.HexToAddress(addrHex)
+											subAmt := big.NewInt(0).SetBytes(subAmtBytes)
+											mvccDB.SubTotalBalance(addr, subAmt)
+										}
+									}
+									if exRs.MapStorageChange() != nil {
+										for addrHex, changes := range exRs.MapStorageChange() {
+											addr := common.HexToAddress(addrHex)
+											var keys [][]byte
+											var values [][]byte
+											for keyHex, valueBytes := range changes {
+												keys = append(keys, common.HexToHash(keyHex).Bytes())
+												values = append(values, valueBytes)
+											}
+											scDB.BatchSetStorageValues(addr, keys, values)
+										}
+									}
+								}
+							}
+							mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+							mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 						}
 					}
 					
