@@ -460,6 +460,19 @@ func (api *MetaAPI) GetSendRawTransaction(ctx context.Context, input hexutil.Byt
 // (receive stream).
 //
 // Falls back to synchronous processing if the async queue is not available.
+var (
+	// Cache lưu trữ Receipt giả lập cho Speculative Execution (Key: ethTxHash, Value: *mt_proto.RpcReceipt)
+	SpeculativeReceiptCache sync.Map
+)
+
+// SendRawEthTransaction accepts a raw Ethereum-format transaction (the same
+// payload as eth_sendRawTransaction in MetaMask), converts it locally to a
+// Metanode transaction (MetaTx) by signing it with a BLS key, and submits it.
+//
+// If EnablePrivateGateway is true (Private Chain), it executes the transaction
+// speculatively and caches a mock receipt for instant finality.
+//
+// Falls back to synchronous processing if the async queue is not available.
 func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	var isExistOverloaded bool
 	value, exists := sharedmemory.GlobalSharedMemory.Read("pendingOverloaded")
@@ -471,6 +484,10 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 		}
 	}
 
+	if api.App.config.EnablePrivateGateway {
+		return api.sendRawEthTransactionSpeculative(ctx, input)
+	}
+
 	// Async path: enqueue and return immediately
 	if api.App.txAsyncQueue != nil {
 		return api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
@@ -478,6 +495,99 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 
 	// Fallback: synchronous processing (legacy path)
 	return api.sendRawEthTransactionSync(ctx, input)
+}
+
+// sendRawEthTransactionSpeculative performs speculative execution for the Private Gateway
+func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	// 1. Decode the Ethereum TX
+	ethTx := new(types.Transaction)
+	if err := ethTx.UnmarshalBinary(input); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to decode Ethereum transaction: %w", err)
+	}
+
+	// 2. Derive sender
+	signer := types.LatestSignerForChainID(api.App.config.ChainId)
+	fromAddress, err := types.Sender(signer, ethTx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to derive sender: %w", err)
+	}
+
+	// 3. Determine BLS private key: Use GatewayBLSKey from config
+	var blsPrivateKey mt_common.PrivateKey
+	if api.App.config.GatewayBLSKey != "" {
+		kp := bls.NewKeyPair(common.FromHex(api.App.config.GatewayBLSKey))
+		blsPrivateKey = kp.PrivateKey()
+	} else {
+		blsPrivateKey = api.App.keyPair.PrivateKey()
+	}
+
+	// 4. Get latest state root for account lookup
+	stateRoot := api.App.blockProcessor.GetLastBlock().Header().AccountStatesRoot()
+
+	// 5. Build MetaTx from EthTx
+	metaTxData, metaTx, err := buildMetaTxFromEthTx(
+		ethTx,
+		api.App.config.ChainId,
+		blsPrivateKey,
+		stateRoot,
+		api.App,
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to build MetaTx: %w", err)
+	}
+
+	// 6. Process the transaction
+	txD := &mt_proto.TransactionWithDeviceKey{}
+	if err := proto.Unmarshal(metaTxData, txD); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
+	}
+
+	// 7. Speculative Execution (Off-chain run)
+	scTx := &transaction.Transaction{}
+	scTx.FromProto(txD.Transaction)
+	exRs, errExec := api.App.transactionProcessor.TxVirtualExecutor.ExecuteTransactionOffChain(scTx)
+	
+	status := uint64(1)
+	gasUsed := uint64(21000)
+	if errExec != nil || exRs == nil {
+		status = 0 // Failed
+	} else {
+		gasUsed = exRs.GetGasUsed()
+		if exRs.GetRevert() {
+			status = 0
+		}
+	}
+
+	// 8. Create Mock Receipt
+	mockReceipt := &mt_proto.RpcReceipt{
+		TransactionHash:   ethTx.Hash().Bytes(),
+		TransactionIndex:  0,
+		BlockHash:         common.Hash{}.Bytes(), // Pending block
+		BlockNumber:       0,
+		From:              fromAddress.Bytes(),
+		CumulativeGasUsed: gasUsed,
+		GasUsed:           gasUsed,
+		Status:            status,
+	}
+	if ethTx.To() != nil {
+		mockReceipt.To = ethTx.To().Bytes()
+	}
+
+	// 9. Store in cache
+	SpeculativeReceiptCache.Store(ethTx.Hash(), mockReceipt)
+
+	// 10. Enqueue for real execution in the background
+	if api.App.txAsyncQueue != nil {
+		api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
+	} else {
+		go func() {
+			api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
+		}()
+	}
+
+	logger.Info("[SpeculativeGateway] TX executed speculatively: ethHash=%s status=%d", ethTx.Hash().Hex(), status)
+
+	return ethTx.Hash(), nil
 }
 
 // sendRawEthTransactionSync is the original synchronous implementation, kept
@@ -569,6 +679,36 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 
 	blockNumber, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(searchHash)
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
+		// KIỂM TRA SPECULATIVE CACHE TRƯỚC KHI TRẢ VỀ NIL
+		if api.App.config.EnablePrivateGateway {
+			if cachedRcpt, found := SpeculativeReceiptCache.Load(searchHash); found {
+				rcp := cachedRcpt.(*mt_proto.RpcReceipt)
+				logger.Info("[RPC-RECEIPT] Found Speculative Receipt for %s", searchHash.Hex())
+				
+				statusStr := "0x1"
+				if rcp.Status == 0 {
+					statusStr = "0x0"
+				}
+
+				resp := map[string]interface{}{
+					"transactionHash":   searchHash.Hex(),
+					"transactionIndex":  "0x0",
+					"blockHash":         common.Hash{}.Hex(), // Pending
+					"blockNumber":       "0x0", // Pending
+					"from":              common.BytesToAddress(rcp.From).Hex(),
+					"cumulativeGasUsed": hexutil.EncodeUint64(rcp.CumulativeGasUsed),
+					"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed),
+					"contractAddress":   nil,
+					"logs":              []interface{}{},
+					"logsBloom":         "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+					"status":            statusStr,
+				}
+				if len(rcp.To) > 0 {
+					resp["to"] = common.BytesToAddress(rcp.To).Hex()
+				}
+				return resp, nil
+			}
+		}
 		return nil, nil // Trả về nil nếu không tìm thấy giao dịch hoặc chưa committed
 	}
 
