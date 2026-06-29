@@ -80,11 +80,10 @@ if __name__ == '__main__':
         
     if target == 'json':
         import json
-        out = {"nodes": {}, "rpc_proxies": {}, "tcp_nodes": {}}
+        out = {"nodes": {}, "tcp_nodes": {}}
         for nid, ip in node_map.items():
             key = f"m{nid}"
             out["nodes"][key] = f"http://{ip}:{10746 + nid}"
-            out["rpc_proxies"][key] = f"http://{ip}:{8650 + nid}"
             out["tcp_nodes"][key] = f"{ip}:{6200 + nid}"
         print(json.dumps(out, indent=2))
         sys.exit(0)
