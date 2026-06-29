@@ -103,9 +103,9 @@
   loop: "{{ active_nodes }}"
   when: "open_ports | default('false') | bool == true"
 
-- name: Generate and start systemd service for RPC Proxy
-  ansible.builtin.shell: |
-    bash install-rpc-systemd.sh --node {{ item }} --no-build
-  args:
-    chdir: "{{ remote_deploy_dir }}/cluster"
-  loop: "{{ active_nodes }}"
+# - name: Generate and start systemd service for RPC Proxy
+#   ansible.builtin.shell: |
+#     bash install-rpc-systemd.sh --node {{ item }} --no-build
+#   args:
+#     chdir: "{{ remote_deploy_dir }}/cluster"
+#   loop: "{{ active_nodes }}"

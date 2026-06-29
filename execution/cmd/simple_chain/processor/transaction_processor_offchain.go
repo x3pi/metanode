@@ -27,7 +27,7 @@ import (
 
 func (v *TxVirtualExecutor) ProcessTransactionOffChain(tx types.Transaction) (types.ExecuteSCResult, error) {
 	if tx.IsCallContract() || tx.IsDeployContract() {
-		exRs, err := v.executeTransactionOffChain(tx)
+		exRs, err := v.ExecuteTransactionOffChain(tx)
 		if err != nil {
 			logger.Error("Error executing transaction off-chain: %v", err)
 			return nil, err
@@ -202,7 +202,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 }
 
 // Nhật
-func (v *TxVirtualExecutor) executeTransactionOffChain(
+func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	executeTransaction types.Transaction,
 ) (types.ExecuteSCResult, error) {
 
@@ -216,7 +216,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
 		headerPtr := v.chainState.GetcurrentBlockHeader()
 		if headerPtr == nil {
-			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in executeTransactionOffChain")
+			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in ExecuteTransactionOffChain")
 			return nil, fmt.Errorf("current block header is nil")
 		}
 		lastBlockHeader := *headerPtr
@@ -238,7 +238,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChain(
 		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
 		headerPtr := v.chainState.GetcurrentBlockHeader()
 		if headerPtr == nil {
-			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in executeTransactionOffChain for cross-chain")
+			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in ExecuteTransactionOffChain for cross-chain")
 			return nil, fmt.Errorf("current block header is nil")
 		}
 		lastBlockHeader := *headerPtr

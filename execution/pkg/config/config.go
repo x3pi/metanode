@@ -148,6 +148,10 @@ type SimpleChainConfig struct {
 	MasterPassword string `json:"master_password,omitempty"`
 	AppPepper      string `json:"app_pepper,omitempty"`
 
+	// Unified Node RPC (Private Gateway) configuration
+	EnablePrivateGateway bool   `json:"enable_private_gateway"` // Nếu true, Node sẽ tự động chặn ETH tx, chạy Speculative Execution và bọc BLS
+	GatewayBLSKey        string `json:"gateway_bls_key"`        // Private Key BLS dùng để ký bảo lãnh cho các giao dịch bị chặn
+
 	// Snapshot configuration
 	SnapshotEnabled         bool   `json:"snapshot_enabled"`                    // Bật/tắt tự động snapshot
 	SnapshotServerPort      int    `json:"snapshot_server_port"`                // Port HTTP server cho snapshot (default: 8700)
