@@ -17,3 +17,17 @@ all:
           node_ids: [1]
         192.168.1.234:
           node_ids: [0]
+
+
+# 1 machine
+hosts:
+  192.168.1.234_sync:
+    node_ids: [4]
+    synconly_nodes: [4]
+    rpc_nodes: [4]
+    ansible_connection: local
+    ansible_host: 192.168.1.234
+  192.168.1.234_validator:
+    node_ids: [0,1,2,3]
+    ansible_connection: local
+    ansible_host: 192.168.1.234
