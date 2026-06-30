@@ -2,10 +2,8 @@ package vm_processor
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -13,6 +11,7 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	"github.com/meta-node-blockchain/meta-node/pkg/tee_revm_ffi"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -98,38 +97,23 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		// DETERMINISTIC: Use txHash-only hash for readOnly mvmId.
 		// No state changes occur, so no fork risk, but deterministic IDs
 		// make execution reproducible for debugging.
-		var mvmIdReadOnly common.Address
-		for {
-			combinedHash := sha256.Sum256(append([]byte(fmt.Sprintf("readonly-%d-", time.Now().UnixNano())), tx.Hash().Bytes()...))
-			ethAddressBytes := combinedHash[12:]
-			ethAddressBytes[0] = 0xFC // Prefix cho readonly
-			mvmIdReadOnly = common.BytesToAddress(ethAddressBytes)
-			if mvm.GetMVMApi(mvmIdReadOnly) == nil {
-				break
-			}
-		}
 		if span != nil {
-			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
+			span.SetAttribute("readOnlyMvmId", "tee-revm")
 		}
-		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
-		defer mvm.ClearMVMApi(mvmIdReadOnly)
-		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
-		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, mvmROnly)
+		
+		teeRevm := tee_revm_ffi.NewTeeRevm()
+		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, teeRevm)
 	} else {
 		if span != nil {
 			span.AddEvent("HandlingWriteTransaction", map[string]interface{}{"actualMvmId": vmP.mvmId.Hex()})
 		}
-		if isCache {
-			mvm.ProtectMVMApi(vmP.mvmId)
-		}
-		mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
-		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
-		if isCache {
-			defer mvm.UnprotectMVMApi(vmP.mvmId)
-		}
+		
+		// 🛑 TEE REVM FIX: Remove GetOrCreateMVMApi and Protect/Unprotect calls
+		// Just create an instance of TeeRevm
+		teeRevm := tee_revm_ffi.NewTeeRevm()
 
 		if tx.IsRegularTransaction() || tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-			mvmRs, execErr = vmP.sendNative(execCtx, tx, mvmE, isCache)
+			mvmRs, execErr = vmP.sendNative(execCtx, tx, nil, isCache)
 		} else if tx.IsDeployContract() {
 			if !tx.ValidDeployData() {
 				execErr = fmt.Errorf("deploy data is nil or invalid")
@@ -144,7 +128,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 					"storageAddress":       tx.DeployData().StorageAddress().Hex(),
 				})
 			}
-			mvmRs, execErr = vmP.deploySmartContract(execCtx, tx, mvmE, vmP.mvmId, isCache)
+			mvmRs, execErr = vmP.deploySmartContract(execCtx, tx, teeRevm, vmP.mvmId, isCache)
 		} else {
 			if span != nil {
 				span.AddEvent("HandlingCallContract", map[string]interface{}{
@@ -153,7 +137,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 				span.AddEvent("SmartContractCallValidationPassed", nil)
 				span.AddEvent("ExecutingSmartContractViaMVM", nil)
 			}
-			mvmRs, execErr = vmP.executeSmartContract(execCtx, tx, mvmE, isCache)
+			mvmRs, execErr = vmP.executeSmartContract(execCtx, tx, teeRevm, isCache)
 		}
 	}
 
@@ -178,15 +162,10 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 func (vmP *VmProcessor) deploySmartContract(
 	ctx context.Context, // Context từ caller
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	teeRevm *tee_revm_ffi.TeeRevm,
 	mvmId common.Address,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
-	defer func() {
-		if !isCache {
-			mvm.ClearMVMApi(mvmId)
-		}
-	}()
 	var span *trace.Span = nil // Khởi tạo nil
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
@@ -223,11 +202,14 @@ func (vmP *VmProcessor) deploySmartContract(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
-	mvmResult := mvmE.Deploy( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
-		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
-	)
+	
+	// 🛑 TEE REVM FIX: Call ExecuteTx instead of mvmE.Deploy
+	stateDiff, err := teeRevm.ExecuteTx(tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.DeployData().Code(), maxGas)
+	if err != nil {
+		return nil, err
+	}
+	
+	mvmResult := mapTeeStateDiffToMVMResult(stateDiff)
 	if span != nil { // GUARD
 		span.AddEvent("MvmDeployFinished", map[string]interface{}{
 			"status":        mvmResult.Status.String(),
@@ -245,8 +227,7 @@ func (vmP *VmProcessor) deploySmartContract(
 	if span != nil { // GUARD
 		span.AddEvent("ClearingMVMApiAfterDeploy", map[string]interface{}{"mvmIdToClear": mvmId.Hex()})
 	}
-	// logger.Error("ClearMVM: 3: %v", mvmId)
-
+	
 	return mvmResult, nil
 }
 
@@ -254,7 +235,7 @@ func (vmP *VmProcessor) deploySmartContract(
 func (vmP *VmProcessor) readOnlyCall(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	teeRevm *tee_revm_ffi.TeeRevm,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil
 	// var readOnlyCtx context.Context = ctx // Không cần tạo context mới nếu không dùng
@@ -263,7 +244,6 @@ func (vmP *VmProcessor) readOnlyCall(
 	if vmP.tracingEnabled { // Chỉ tạo span nếu flag processor bật
 		var actualSpan *trace.Span
 		_, actualSpan = trace.StartSpan(ctx, "VmProcessor.readOnlyCall", map[string]interface{}{
-			"mvmId":       mvmE.GetKey().Hex(),
 			"from":        tx.FromAddress().Hex(),
 			"to":          tx.ToAddress().Hex(),
 			"value":       tx.Amount().String(),
@@ -295,12 +275,12 @@ func (vmP *VmProcessor) readOnlyCall(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
-	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
-		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
-	)
-
+	// 🛑 TEE REVM FIX: Call ExecuteTx instead of mvmE.Call
+	stateDiff, err := teeRevm.ExecuteTx(tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), maxGas)
+	if err != nil {
+		return nil, err
+	}
+	mvmResult := mapTeeStateDiffToMVMResult(stateDiff)
 	if span != nil { // GUARD
 		span.AddEvent("MvmCallReadOnlyFinished", map[string]interface{}{
 			"status":    mvmResult.Status.String(),
@@ -311,13 +291,9 @@ func (vmP *VmProcessor) readOnlyCall(
 		})
 	}
 
-	readOnlyMvmId := mvmE.GetKey()
 	if span != nil { // GUARD
-		span.AddEvent("ClearingMVMApiAfterReadOnlyCall", map[string]interface{}{"mvmIdToClear": readOnlyMvmId.Hex()})
+		span.AddEvent("ClearingMVMApiAfterReadOnlyCall", nil)
 	}
-	// logger.Error("ClearMVM: 4", readOnlyMvmId)
-
-	mvm.ClearMVMApi(readOnlyMvmId) // Luôn clear MVM API
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmResultConvertedToExecuteResult", nil)
@@ -329,21 +305,15 @@ func (vmP *VmProcessor) readOnlyCall(
 func (vmP *VmProcessor) executeSmartContract(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	teeRevm *tee_revm_ffi.TeeRevm,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
-	defer func() {
-		if !isCache {
-			mvm.ClearMVMApi(mvmE.GetKey())
-		}
-	}()
 	var span *trace.Span = nil // Khởi tạo nil
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
 
 	if vmP.tracingEnabled { // Chỉ tạo span nếu flag processor bật
 		var actualSpan *trace.Span
 		_, actualSpan = trace.StartSpan(ctx, "VmProcessor.executeSmartContract", map[string]interface{}{
-			"mvmId":       mvmE.GetKey().Hex(),
 			"from":        tx.FromAddress().Hex(),
 			"to":          tx.ToAddress().Hex(),
 			"value":       tx.Amount().String(),
@@ -376,22 +346,12 @@ func (vmP *VmProcessor) executeSmartContract(
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
 
-	if isCache {
-		mvmResult = mvmE.Execute( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
-			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
-			isCache,
-		)
-
-	} else {
-		mvmResult = mvmE.Call( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
-			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
-		)
-
+	// 🛑 TEE REVM FIX: Call ExecuteTx instead of mvmE.Execute or mvmE.Call
+	stateDiff, err := teeRevm.ExecuteTx(tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), maxGas)
+	if err != nil {
+		return nil, err
 	}
+	mvmResult = mapTeeStateDiffToMVMResult(stateDiff)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{
@@ -407,12 +367,30 @@ func (vmP *VmProcessor) executeSmartContract(
 		})
 	}
 
-	currentMvmId := mvmE.GetKey()
 	if span != nil { // GUARD
-		span.AddEvent("UpdatingStateDBAfterExecute", map[string]interface{}{"mvmIdToUpdate": currentMvmId.Hex()})
+		span.AddEvent("UpdatingStateDBAfterExecute", nil)
 	}
 
 	return mvmResult, nil
+}
+
+// mapTeeStateDiffToMVMResult is a temporary adapter
+func mapTeeStateDiffToMVMResult(diff *tee_revm_ffi.TeeStateDiff) *mvm.MVMExecuteResult {
+	status := pb.RECEIPT_STATUS_TRANSACTION_ERROR
+	if diff.Success {
+		status = pb.RECEIPT_STATUS_RETURNED
+	}
+	return &mvm.MVMExecuteResult{
+		Status:           status,
+		Exception:        pb.EXCEPTION_NONE,
+		GasUsed:          diff.GasUsed,
+		MapAddBalance:    make(map[string][]byte),
+		MapSubBalance:    make(map[string][]byte),
+		MapNonce:         make(map[string][]byte),
+		MapCodeChange:    make(map[string][]byte),
+		MapStorageChange: make(map[string]map[string][]byte),
+		MapCodeHash:      make(map[string][]byte),
+	}
 }
 
 // ProcessNativeMintBurn xử lý mint/burn native token cho cross-cluster transfers

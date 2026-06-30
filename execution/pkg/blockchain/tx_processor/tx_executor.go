@@ -43,6 +43,9 @@ func processSingleGroup(
 	hasEvmTx bool,
 	skipSignatureVerify bool,
 ) groupResultExt {
+	// 🛑 TEE REVM FIX: Disable Cache manually per user instruction
+	isCache = false
+	
 	// Acquire slices from memory pools to eliminate GC pressure
 	txPtr := txSlicePool.Get().(*[]types.Transaction)
 	txs := (*txPtr)[:0]
@@ -392,8 +395,6 @@ func processSingleGroup(
 				logger.Debug("[NONCE-TRACE] BLS-SetPublicKey OK: addr=%s, tx.nonce=%d, state.nonce=%d, txHash=%s", tx.FromAddress().Hex(), tx.GetNonce(), as.Nonce(), tx.Hash().Hex())
 				as.SetNonce(as.Nonce() + 1)
 				logger.Debug("[NONCE-TRACE] BLS-SetNonce: addr=%s, nonce after +1=%d, txHash=%s", tx.FromAddress().Hex(), as.Nonce(), tx.Hash().Hex())
-				// 🔒 NONCE-FIX: Sync C++ State cache to prevent stale nonce for subsequent EVM TXs
-				mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce())
 				as.SetLastHash(tx.Hash())
 				
 				// Standardize Dirty Marking: Delegate to localAccountDB instead of manual gRs.DirtyAccounts slice
@@ -438,8 +439,6 @@ func processSingleGroup(
 				// CRITICAL FORK-FIX: Create deterministic success receipt + nonce increment HERE.
 				localAccountDB.SetNonce(fromAddr, as.Nonce()+1)
 				logger.Debug("[NONCE-TRACE] setAccountType-SetNonce: addr=%s, nonce=%d, txHash=%s", fromAddr.Hex(), as.Nonce()+1, tx.Hash().Hex())
-				// 🔒 NONCE-FIX: Sync C++ State cache to prevent stale nonce for subsequent EVM TXs
-				mvm.CallUpdateStateNonce(fromAddr, as.Nonce()+1)
 				localAccountDB.SetLastHash(fromAddr, tx.Hash())
 				rcp := receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -567,27 +566,6 @@ func processSingleGroup(
 
 			// Accumulate gas fee for later batch update to coinbase
 			totalGasFee.Add(totalGasFee, gasFee)
-
-			// Sync C++ cache to prevent stale nonce for subsequent EVM TXs (if any)
-			// Wait, we need the new nonce! Fetch it thread-safely:
-			// as was fetched at the beginning, but its nonce might be stale now.
-			// However, since FromAddress is grouped, no other native TX is modifying it,
-			// and EVM doesn't modify nonces unless it's the sender of EVM tx (which is also grouped).
-			// So we can just use as.Nonce() + 1
-			if hasEvmTx {
-				mvm.CallUpdateStateNonce(tx.FromAddress(), as.Nonce()+1)
-
-				// 🔒 BALANCE-FIX: Sync C++ State cache to prevent stale balance for subsequent EVM TXs
-				asSender, _ := localAccountDB.AccountState(tx.FromAddress())
-				if asSender != nil {
-					mvm.CallUpdateStateBalance(tx.FromAddress(), asSender.TotalBalance())
-				}
-
-				asReceiver, _ := localAccountDB.AccountState(tx.ToAddress())
-				if asReceiver != nil {
-					mvm.CallUpdateStateBalance(tx.ToAddress(), asReceiver.TotalBalance())
-				}
-			}
 
 			// Generate fake MVM result
 			exRs = smart_contract.NewExecuteSCResult(
