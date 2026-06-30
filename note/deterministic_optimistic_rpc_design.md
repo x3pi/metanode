@@ -105,3 +105,56 @@ Lỗi lệch kết quả lớn nhất thường đến từ việc Smart Contrac
 Để Public Chain không cần phải chạy lại toàn bộ tính toán (vừa chậm vừa tốn gas) mà vẫn chắc chắn kết quả là đúng:
 - **Mô hình ZK-Rollup:** Private Chain không chỉ gửi danh sách giao dịch, mà còn sinh ra một Bằng chứng Không Tri Thức (ZK-SNARK proof) chứng minh: *"Áp dụng mảng TX này vào State A, kết quả chắc chắn toán học là State B"*. Public Chain chỉ việc xác thực (Verify) bằng chứng này cực kỳ nhanh.
 - **Mô hình Optimistic Rollup:** Private Chain đẩy thẳng kết quả State B (Root) lên Public Chain. Mạng lưới cho phép một khoảng thời gian (Challenge Period) để bất kỳ ai phát hiện tính toán sai sót gửi Bằng chứng Gian Lận (Fraud Proof). Nếu sai, kết quả bị revert và Private Chain bị phạt tiền (Slashing). Nhờ vậy kết quả luôn được giữ chuẩn xác.
+
+---
+
+## 8. 🛡️ Tích Hợp TEE (Trusted Execution Environment) Cho RPC Ký Hộ
+
+Để giải quyết triệt để rủi ro tập trung (Centralization Risk) và điểm yếu duy nhất của Master BLS Key (đã nêu ở phần 5), hệ thống tích hợp công nghệ **TEE (như Intel SGX, AMD SEV, AWS Nitro Enclaves)** đóng vai trò như một "Vùng An Toàn Tuyệt Đối" (Secure Enclave).
+
+### 8.1. Vị Trí Của TEE Trong Kiến Trúc
+* **Host (Untrusted Zone):** Nhận giao dịch từ người dùng, quản lý kết nối P2P/RPC, duy trì In-Memory Database và chạy giả lập song song cường độ cao.
+* **TEE Enclave (Trusted Zone):** Nơi **duy nhất** khởi tạo và lưu giữ Master BLS Private Key. Bộ nhớ của TEE được mã hóa ở cấp độ phần cứng, ngay cả Admin hay hệ điều hành Host cũng không thể trích xuất được Private Key.
+
+### 8.2. Ranh Giới Thực Thi: Host vs TEE (Giải Quyết Bài Toán Dung Lượng TEE)
+
+Việc đưa toàn bộ máy ảo (MVM/EVM) và State Database vào trong TEE (như SGX) là bất khả thi, tốn kém và sẽ làm sập hiệu năng hệ thống. Do đó, kiến trúc áp dụng nguyên tắc **"Thực thi nặng ở ngoài, Xác thực và Ký ở trong" (Execute Outside, Verify & Sign Inside)**.
+
+#### Phần 1: Chạy ở HOST (Môi trường ngoài - Untrusted, Cấu hình siêu mạnh)
+* **P2P & RPC Server:** Lắng nghe giao dịch từ người dùng và đẩy vào hàng đợi (Mempool).
+* **State Storage:** Quản lý toàn bộ dữ liệu State (In-Memory hoặc LevelDB/RocksDB).
+* **MVM (Metanode Virtual Machine):** Đảm nhận 100% việc chạy các Smart Contract phức tạp. Nó tính toán logic, thay đổi biến môi trường, và sinh ra `Post-State Root`.
+* **Đóng gói (Batch Builder):** Gộp hàng ngàn giao dịch lại thành một Batch.
+=> *Tóm lại: Host làm toàn bộ phần việc "nặng nhọc" (Heavy lifting), nhưng nó không có quyền tự ký chốt hạ.*
+
+#### Phần 2: Chạy ở TEE Enclave (Vùng an toàn - Lightweight, Bảo mật tuyệt đối)
+TEE chỉ chứa một bộ mã (Micro-logic) cực nhẹ viết bằng Rust/C++, **hoàn toàn không chứa MVM**. TEE làm 3 nhiệm vụ:
+1. **Lưu Trữ Khóa (Key Custody):** Nơi duy nhất chứa Master BLS Private Key.
+2. **Thẩm Định Siêu Nhẹ (Stateless Verification):** Host chỉ truyền vào TEE một dữ liệu cực nhỏ qua ECALL gồm: *Danh sách Giao dịch thô, State Root, và Merkle Proofs*.
+   - TEE verify chữ ký gốc (Secp256k1/Ed25519) của từng user.
+   - TEE chốt cứng danh sách Hash giao dịch, đảm bảo Host không được phép xáo trộn thứ tự (Chống MEV).
+   - Với giao dịch Native (chuyển coin), TEE dùng Merkle Proof do Host cấp để tự cộng trừ kiểm tra số dư (bỏ qua MVM).
+3. **Ký Hộ (Proxy Signing):** Sau khi xác nhận thứ tự và chữ ký User là hợp lệ, TEE lấy Master BLS Key để **Ký lên Hash của toàn bộ Batch**. Chữ ký BLS này đưa ra ngoài cho Host mang lên Public Chain nộp.
+
+### 8.3. Ưu Điểm Của Kiến Trúc TEE So Với MPC/TSS
+- **Độ trễ cực thấp (Micro-seconds):** Thay vì phải gửi thông điệp qua lại giữa nhiều node để ký TSS (gây bottleneck mạng), chữ ký BLS được TEE sinh ra cục bộ trực tiếp trên CPU, phù hợp hoàn hảo với kiến trúc *In-Memory Database*.
+- **Đơn giản hóa hạ tầng mạng:** Tránh được các thuật toán phân mảnh khóa phức tạp (DKG) và các kịch bản khôi phục khi node rớt mạng. Tăng tính sẵn sàng (Liveness) của hệ thống.
+- **Tính công bằng tuyệt đối (Fair Sequencing):** Logic Sequencer có thể khóa chặt bên trong TEE, đảm bảo người vận hành Private Chain không thể tự ý xáo trộn thứ tự giao dịch để trục lợi cá nhân.
+
+### 8.4. Xử Lý Kịch Bản Host Gian Lận (Host Maliciousness)
+
+Vì phần thực thi nặng (MVM) nằm ở Host (Untrusted), chuyện gì xảy ra nếu Admin của Host cố tình gian lận để trục lợi? Kiến trúc "Execute Outside, Verify & Sign Inside" kết hợp với Rollup giải quyết triệt để như sau:
+
+1. **Host chèn giao dịch giả / Sửa số tiền của người dùng?**
+   - **Bị TEE chặn đứng:** TEE tự tay xác minh chữ ký (Secp256k1/Ed25519) của người dùng trên *từng* giao dịch thô truyền vào. Nếu Host tự ý chèn giao dịch không có chữ ký hợp lệ, TEE sẽ từ chối Ký Hộ (Proxy Sign) cho toàn bộ Batch đó.
+   
+2. **Host thay đổi, xáo trộn thứ tự giao dịch (Reordering, Front-running)?**
+   - **Bị TEE chặn đứng:** Mặc dù Host thu thập giao dịch, nhưng TEE mới là người tính toán Hash của toàn bộ mảng giao dịch đó để "niêm phong". TEE ký BLS lên cái Hash chốt này. Nếu Host mang lên Public Chain một thứ tự khác để chèn ép người dùng (MEV), Hash sẽ thay đổi, chữ ký BLS sẽ không khớp và Public Chain sẽ reject lệnh.
+
+3. **Host chạy MVM cố tình sai và lừa TEE bằng một "State Root" giả mạo?**
+   - Vì TEE không chứa MVM, nó không biết kết quả chạy Smart Contract phức tạp có đúng hay không. Host có thể báo cáo láo State Root cho TEE. Tuy nhiên, hệ thống được bảo vệ bởi lớp khiên thứ hai: **Cơ Chế Optimistic Rollup (Cơ chế 4 ở phần 7)**.
+   - Chữ ký BLS của TEE lúc này chỉ mang ý nghĩa xác thực **Dữ liệu đầu vào (Input/Sequencing)** là công bằng và xuất phát từ Private Chain hợp pháp.
+   - Khi State Root (Output) nộp lên Public Chain, nó vẫn có một khoảng thời gian **Challenge Period**. Các node giám sát (Watchtowers) chạy độc lập trên mạng sẽ tự chạy lại MVM. Nếu phát hiện Host tính toán sai, họ lập tức nộp **Fraud Proof (Bằng chứng gian lận)**.
+   - Kết quả: Lệnh sai bị Revert, và số tiền cọc (Stake) khổng lồ của Admin Private Chain sẽ bị tịch thu (Slashing). Host hoàn toàn không có động cơ để lừa TEE về mặt State Root.
+
+*(Tóm tắt nguyên lý: TEE bảo đảm Đầu vào sạch và Không bị tráo bài. Optimistic Fraud Proof bảo đảm Đầu ra chính xác tuyệt đối).*
