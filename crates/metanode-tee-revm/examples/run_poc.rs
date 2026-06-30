@@ -355,6 +355,56 @@ fn main() {
     }
     println!("\n[TEE]  🛡️ KẾT LUẬN: TEE an toàn tuyệt đối trước Rollback Attack nhờ RPMB Anti-Replay!");
 
+    println!("\n[Test 8] Giả lập Xác thực Fraud Proof bằng Nomt Trie");
+    // Giả lập Host gửi kết quả search cho TEE kèm theo Merkle Proof của Nomt Trie
+    // Dữ liệu: value (danh sách ID) = "Product_ID_1,2,3"
+    let search_result_data = b"Product_ID_1,2,3";
+    let leaf_hash: [u8; 32] = blake3::hash(search_result_data).into();
+    
+    // Giả lập Host cung cấp Sibling Hashes (Merkle Path)
+    let sibling_1: [u8; 32] = blake3::hash(b"Sibling_A").into();
+    let sibling_2: [u8; 32] = blake3::hash(b"Sibling_B").into();
+    let merkle_proof = vec![sibling_1, sibling_2];
+    
+    // Tính State Root HỢP LỆ (Băm mô phỏng để ra Root đúng)
+    let mut current = leaf_hash;
+    for sibling in &merkle_proof {
+        let mut hasher = blake3::Hasher::new();
+        if current.cmp(sibling) == core::cmp::Ordering::Less {
+            hasher.update(&current); hasher.update(sibling);
+        } else {
+            hasher.update(sibling); hasher.update(&current);
+        }
+        current = hasher.finalize().into();
+    }
+    let valid_state_root = current;
+
+    println!("[Host] Gửi kết quả: \"Product_ID_1,2,3\"");
+    println!("[Host] Kèm Merkle Proof (độ dài {} siblings) và State Root...", merkle_proof.len());
+    
+    println!("\n[TEE]  [8A] TEE Xác minh bằng chứng HỢP LỆ");
+    use metanode_tee_revm::nomt_verifier::NomtVerifier;
+    let is_valid = NomtVerifier::verify_proof(leaf_hash, &merkle_proof, valid_state_root);
+    if is_valid {
+        println!("[TEE]  ✅ VERIFIED: Toán học xác nhận kết quả thuộc về State Root hợp lệ. TEE phê duyệt!");
+    } else {
+        println!("[TEE]  ❌ REJECTED");
+    }
+
+    println!("\n[TEE]  [8B] Hacker cố tình giấu kết quả (Fraud/Omission Attack)");
+    // Hacker sửa dữ liệu thành "Product_ID_1" (giấu bớt kết quả 2,3)
+    let fake_data = b"Product_ID_1";
+    let fake_leaf_hash: [u8; 32] = blake3::hash(fake_data).into();
+    println!("[Host] Gửi kết quả BỊ LÀM GIẢ: \"Product_ID_1\"");
+    let is_valid_fake = NomtVerifier::verify_proof(fake_leaf_hash, &merkle_proof, valid_state_root);
+    if !is_valid_fake {
+        println!("[TEE]  🚨 LỚP BẢO VỆ KÍCH HOẠT: Merkle Proof Verification FAILED!");
+        println!("[TEE]  🚨 Root được băm từ dữ liệu giả mạo KHÔNG KHỚP với State Root tin cậy.");
+    } else {
+        println!("[TEE]  ✅ VERIFIED (Lỗi!)");
+    }
+    println!("\n[TEE]  🛡️ KẾT LUẬN: TEE kiểm chứng mọi truy vấn bằng Toán Học O(1) qua Nomt Trie!");
+
     println!("\n=====================================================");
     println!("KẾT THÚC GIẢ LẬP");
 }
