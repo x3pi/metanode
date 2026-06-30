@@ -23,8 +23,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/mining"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	"github.com/meta-node-blockchain/meta-node/pkg/network"
+		"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/pruning"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -128,7 +127,7 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 				fullXapianPath, app.config.Databases.RootPath, xapianRelPath, mkErr,
 			)
 		}
-		mvm.ConfigureXapianBasePath(fullXapianPath)
+// 		mvm.ConfigureXapianBasePath(fullXapianPath)
 	}
 
 	// Set state trie backend from config (must be before any trie creation)

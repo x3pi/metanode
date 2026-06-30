@@ -13,7 +13,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -36,8 +35,7 @@ func (h *CrossChainHandler) executeMintForInbound(
 	}
 
 	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
-	mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
-
+	
 	var allLogs []types.EventLog
 	val := pkt.Value
 	if val == nil {
@@ -68,12 +66,12 @@ func (h *CrossChainHandler) executeMintForInbound(
 		}
 		if val.Sign() > 0 {
 			fakeTx := proxy_tx.New(tx, tx.FromAddress(), recipient, val, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeTx, mvmE, 0) // 0 = MINT
+			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeTx, 0) // 0 = MINT
 			var exRs types.ExecuteSCResult
 			if err == nil {
 				_, err = vmP.UpdateStateDB(ctx, fakeTx, mvmResult, mvmId, false, false)
 				if err == nil {
-					exRs, err = vmP.MvmResultToExecuteResult(ctx, fakeTx, mvmResult)
+					exRs, err = vmP.TeeResultToExecuteResult(ctx, fakeTx, mvmResult)
 				}
 			}
 			if err != nil || (exRs != nil && exRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
@@ -96,12 +94,12 @@ func (h *CrossChainHandler) executeMintForInbound(
 		// 2.a. Nếu có value → mint tiền cho tx.FromAddress()
 		if val.Sign() > 0 {
 			fakeMintTx := proxy_tx.New(tx, tx.FromAddress(), tx.FromAddress(), val, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeMintTx, mvmE, 0) // 0 = MINT
+			mvmResult, err := vmP.ProcessNativeMintBurn(ctx, fakeMintTx, 0) // 0 = MINT
 			var mintRs types.ExecuteSCResult
 			if err == nil {
 				_, err = vmP.UpdateStateDB(ctx, fakeMintTx, mvmResult, mvmId, false, false)
 				if err == nil {
-					mintRs, err = vmP.MvmResultToExecuteResult(ctx, fakeMintTx, mvmResult)
+					mintRs, err = vmP.TeeResultToExecuteResult(ctx, fakeMintTx, mvmResult)
 				}
 			}
 			if err != nil || (mintRs != nil && mintRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
@@ -118,8 +116,8 @@ func (h *CrossChainHandler) executeMintForInbound(
 			// Set cross-chain context trên MVMApi để precompile address(263)
 			// trả về đúng pkt.Sender và pkt.SourceNationId khi contract gọi
 			// getOriginalSender() hoặc getSourceChainId().
-			mvmE.SetCrossChainContext(pkt.Sender, pkt.SourceNationId.Uint64())
-			defer mvmE.ClearCrossChainContext()
+			
+			
 			fakeCallTx := proxy_tx.New(tx, tx.FromAddress(), pkt.Target, val, gasFree, 0 /* free gas */, pkt.Payload)
 			exRs, err := vmP.ExecuteTransactionWithMvmId(ctx, fakeCallTx, true, true)
 
@@ -130,12 +128,12 @@ func (h *CrossChainHandler) executeMintForInbound(
 				failReason = []byte(fmt.Sprintf("contract call reverted: %v + %s", err, string(exRs.Return())))
 				if val.Sign() > 0 {
 					fakeBurnTx := proxy_tx.New(tx, tx.FromAddress(), tx.FromAddress(), val, gasFree, 0 /* free gas */, nil)
-					burnMvmResult, errBurn := vmP.ProcessNativeMintBurn(ctx, fakeBurnTx, mvmE, 1) // 1 = BURN
+					burnMvmResult, errBurn := vmP.ProcessNativeMintBurn(ctx, fakeBurnTx, 1) // 1 = BURN
 					var burnRs types.ExecuteSCResult
 					if errBurn == nil {
 						_, errBurn = vmP.UpdateStateDB(ctx, fakeBurnTx, burnMvmResult, mvmId, false, false)
 						if errBurn == nil {
-							burnRs, errBurn = vmP.MvmResultToExecuteResult(ctx, fakeBurnTx, burnMvmResult)
+							burnRs, errBurn = vmP.TeeResultToExecuteResult(ctx, fakeBurnTx, burnMvmResult)
 						}
 					}
 					if errBurn != nil || (burnRs != nil && burnRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {
@@ -240,15 +238,14 @@ func (h *CrossChainHandler) executeConfirmation(
 		// Giao dịch thất bại bên kia → MINT lại (hoàn tiền) cho người gửi (Sender) bên này
 		if refundAmount.Sign() > 0 {
 			vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
-			mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
-
+			
 			fakeRefundTx := proxy_tx.New(tx, tx.FromAddress(), conf.Sender, refundAmount, uint64(mt_common.MAX_GASS_FEE), 0 /* free gas */, nil)
-			mvmResult, errMint := vmP.ProcessNativeMintBurn(ctx, fakeRefundTx, mvmE, 0) // 0 = MINT
+			mvmResult, errMint := vmP.ProcessNativeMintBurn(ctx, fakeRefundTx, 0) // 0 = MINT
 			var mintRs types.ExecuteSCResult
 			if errMint == nil {
 				_, errMint = vmP.UpdateStateDB(ctx, fakeRefundTx, mvmResult, mvmId, false, false)
 				if errMint == nil {
-					mintRs, errMint = vmP.MvmResultToExecuteResult(ctx, fakeRefundTx, mvmResult)
+					mintRs, errMint = vmP.TeeResultToExecuteResult(ctx, fakeRefundTx, mvmResult)
 				}
 			}
 			if errMint != nil || (mintRs != nil && mintRs.ReceiptStatus() != pb.RECEIPT_STATUS_RETURNED) {

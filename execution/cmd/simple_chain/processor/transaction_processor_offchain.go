@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
@@ -17,12 +16,9 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+		"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
-	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -116,12 +112,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
 	mvmId := common.BytesToAddress(ethAddressBytes)
 
-	accountStateTrie, err := trie.NewStateTrie(stateRoot, v.storageManager.GetStorageAccount(), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create account state trie: %v", err)
-	}
-	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, v.storageManager.GetStorageAccount())
-
+		
 	blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
 	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
@@ -130,75 +121,9 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	defer chainStateNew.Close()
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, header.TimeStamp(), common.Address{})
-	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
-	defer func() {
-		mvm.ClearMVMApi(mvmId)
-		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
-		mvm.CallClearAllStateInstances()
-	}()
-	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
-	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
-	var mvmResult *mvm.MVMExecuteResult
+	
+exRsE, err := vmP.ExecuteTransactionWithMvmId(ctx, executeTransaction, false, false)
 
-	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.
-	v.blockProcessingLock.RLock()
-	defer v.blockProcessingLock.RUnlock()
-
-	if executeTransaction.IsRegularTransaction() {
-		mvmResult = &mvm.MVMExecuteResult{
-			Status:  pb.RECEIPT_STATUS_RETURNED,
-			GasUsed: mt_common.TRANSFER_GAS_COST,
-		}
-	} else if executeTransaction.IsCallContract() {
-		mvmResult = mvmOffChain.Call(
-			executeTransaction.FromAddress().Bytes(),
-			executeTransaction.ToAddress().Bytes(),
-			executeTransaction.CallData().Input(),
-			executeTransaction.Amount(),
-			executeTransaction.MaxGasPrice(),
-			executeTransaction.MaxGas(),
-			header.TimeStamp(),
-			mt_common.OFF_CHAIN_GAS_LIMIT,
-			header.TimeStamp(),
-			mt_common.MINIMUM_BASE_FEE,
-			header.BlockNumber(),
-			header.LeaderAddress(),
-			mvmId,
-			true,
-			executeTransaction.Hash().Bytes(),
-			executeTransaction.RelatedAddresses(),
-			false,
-			true,
-		)
-	} else if executeTransaction.IsDeployContract() {
-		if !executeTransaction.ValidDeployData() {
-			return nil, fmt.Errorf("deploy data is nil or invalid")
-		}
-		mvmResult = mvmOffChain.Deploy(
-			executeTransaction.FromAddress().Bytes(),
-			executeTransaction.DeployData().Code(),
-			executeTransaction.Amount(),
-			executeTransaction.MaxGasPrice(),
-			executeTransaction.MaxGas(),
-			header.TimeStamp(),
-			mt_common.OFF_CHAIN_GAS_LIMIT,
-			header.TimeStamp(),
-			mt_common.MINIMUM_BASE_FEE,
-			header.BlockNumber(),
-			header.LeaderAddress(),
-			mvmId,
-			executeTransaction.Hash().Bytes(),
-			false,
-			false,
-			true,
-		)
-	}
-	logger.Info("MVM execution completed for transaction %v", mvmResult)
-	if mvmResult == nil {
-		return nil, fmt.Errorf("mvmResult is nil")
-	}
-
-	exRsE, err := vmP.MvmResultToExecuteResultOffChain(ctx, executeTransaction, mvmResult)
 	if err != nil {
 		return nil, err
 	}
@@ -286,19 +211,11 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		ethAddressBytes := combinedHash[12:]
 		ethAddressBytes[0] = 0xFD // Prevent overlap with real Xapian DB contracts
 		mvmId = common.BytesToAddress(ethAddressBytes)
-		if mvm.GetMVMApi(mvmId) == nil {
-			break
-		}
+		break
 	}
 	lastBlockHeader := *v.chainState.GetcurrentBlockHeader()
-	stateRoot := lastBlockHeader.AccountStatesRoot()
 
-	accountStateTrie, err := trie.NewStateTrie(stateRoot, v.storageManager.GetStorageAccount(), true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create account state trie: %v", err)
-	}
-	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, v.storageManager.GetStorageAccount())
-
+		
 	blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
 	chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
 	if err != nil {
@@ -307,75 +224,9 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	defer chainStateNew.Close()
 
 	vmP := vm_processor.NewVmProcessor(chainStateNew, mvmId, false, lastBlockHeader.TimeStamp(), common.Address{})
-	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
-	defer func() {
-		mvm.ClearMVMApi(mvmId)
-		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
-		mvm.CallClearAllStateInstances()
-	}()
-	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
-	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
-	var mvmResult *mvm.MVMExecuteResult
+	
+exRsE, err := vmP.ExecuteTransactionWithMvmId(ctx, executeTransaction, false, false)
 
-	// FORK-SAFETY: Acquire shared read lock before MVM execution via cgo.
-	v.blockProcessingLock.RLock()
-	defer v.blockProcessingLock.RUnlock()
-
-	if executeTransaction.IsRegularTransaction() {
-		mvmResult = &mvm.MVMExecuteResult{
-			Status:  pb.RECEIPT_STATUS_RETURNED,
-			GasUsed: mt_common.TRANSFER_GAS_COST,
-		}
-	} else if executeTransaction.IsCallContract() {
-		mvmResult = mvmOffChain.Call(
-			executeTransaction.FromAddress().Bytes(),
-			executeTransaction.ToAddress().Bytes(),
-			executeTransaction.CallData().Input(),
-			executeTransaction.Amount(),
-			executeTransaction.MaxGasPrice(),
-			executeTransaction.MaxGas(),
-			lastBlockHeader.TimeStamp(),
-			mt_common.OFF_CHAIN_GAS_LIMIT,
-			lastBlockHeader.TimeStamp(),
-			mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber(),
-			lastBlockHeader.LeaderAddress(),
-			mvmId,
-			true,
-			executeTransaction.Hash().Bytes(),
-			executeTransaction.RelatedAddresses(),
-			false,
-			true,
-		)
-	} else if executeTransaction.IsDeployContract() {
-		if !executeTransaction.ValidDeployData() {
-			return nil, fmt.Errorf("deploy data is nil or invalid")
-		}
-		mvmResult = mvmOffChain.Deploy(
-			executeTransaction.FromAddress().Bytes(),
-			executeTransaction.DeployData().Code(),
-			executeTransaction.Amount(),
-			executeTransaction.MaxGasPrice(),
-			executeTransaction.MaxGas(),
-			lastBlockHeader.TimeStamp(),
-			mt_common.OFF_CHAIN_GAS_LIMIT,
-			lastBlockHeader.TimeStamp(),
-			mt_common.MINIMUM_BASE_FEE,
-			lastBlockHeader.BlockNumber(),
-			lastBlockHeader.LeaderAddress(),
-			mvmId,
-			executeTransaction.Hash().Bytes(),
-			false,
-			false,
-			true,
-		)
-	}
-	logger.Info("MVM execution completed for transaction %v", mvmResult)
-	if mvmResult == nil {
-		return nil, fmt.Errorf("mvmResult is null for transaction %s", executeTransaction.Hash().Hex())
-	}
-
-	exRsE, err := vmP.MvmResultToExecuteResultOffChain(ctx, executeTransaction, mvmResult)
 	if err != nil {
 		return nil, err
 	}

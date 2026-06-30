@@ -21,8 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+		"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -1464,10 +1463,8 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 
 		// 6. Invalidate state caches to ensure next block reads fresh data
 		app.chainState.InvalidateAllState()
-		mvm.ClearAllMVMApi()
-		mvm.ClearAllProtectedMVMApi()
-		mvm.CallClearAllStateInstances()
-		trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+// 				mvm.ClearAllProtectedMVMApi()
+				trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 
 		// 7. Update in-memory tracking values block-by-block
 		storage.UpdateLastBlockNumber(bn)

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
@@ -391,9 +390,8 @@ func (node *HostNode) processIncomingData(reader *bufio.Reader) error {
 			processingSuccessful = true
 			storage.UpdateState(2)
 
-			// CLEAR C++ CACHE: C++ cache must be cleared when a snapshot is loaded to prevent stale state reads
-			logger.Info("🧹 [SNAPSHOT LOADED] Clearing C++ State Cache to prevent stale reads...")
-			mvm.ClearAllStateInstances()
+			// CLEAR C++ CACHE: Removed since we use TEE REVM
+			logger.Info("🧹 [SNAPSHOT LOADED] Skipping C++ State Cache clear (MVM removed)...")
 
 			logger.Debug(fmt.Sprintf("Cleaning up temporary parts directory: %s", tempDir))
 			removeErr := os.RemoveAll(tempDir)
@@ -448,8 +446,7 @@ func (node *HostNode) processIncomingData(reader *bufio.Reader) error {
 			logger.Info(fmt.Sprintf("✅ Successfully decompressed '%s' to '%s'.", targetFilePath, finalPath))
 			if isArchive {
 				// Clear cache if this is a snapshot DB folder
-				logger.Info("🧹 [SNAPSHOT LOADED] Clearing C++ State Cache to prevent stale reads...")
-				mvm.ClearAllStateInstances()
+				logger.Info("🧹 [SNAPSHOT LOADED] Skipping C++ State Cache clear (MVM removed)...")
 			}
 			processingSuccessful = true
 			logger.Debug(fmt.Sprintf("Removing original compressed file: %s", targetFilePath))

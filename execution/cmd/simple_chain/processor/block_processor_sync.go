@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -508,9 +507,9 @@ PROCESS_BLOCK:
 
 					// Invalidate caches to ensure state freshness on sync resume
 					bp.chainState.InvalidateAllState()
-					mvm.ClearAllMVMApi()
-					mvm.ClearAllProtectedMVMApi()
-					mvm.CallClearAllStateInstances()
+// 					mvm.ClearAllMVMApi()
+// 					mvm.ClearAllProtectedMVMApi()
+// 					mvm.CallClearAllStateInstances()
 					trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 				} else {
 					logger.Error("❌ [NOMT-GUARD] Failed to load historic block #%d from DB by hash %s: %v", nextBlockToCreate, blockHash.Hex(), err)
@@ -855,7 +854,7 @@ PROCESS_BLOCK:
 	// block (~100-200ms). Over 1500+ blocks, the repeated map alloc/dealloc
 	// caused progressive GC pressure → throughput degradation → stall at ~1672.
 	//
-	// C++ State::instances is cleared by mvm.CallClearAllStateInstances() in
+// 	// C++ State::instances is cleared by mvm.CallClearAllStateInstances() in
 	// the appropriate places (LAZY REFRESH, epoch transition).
 	// ═══════════════════════════════════════════════════════════════════════════
 

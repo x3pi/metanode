@@ -3,14 +3,12 @@ package executor
 import (
 	"encoding/binary"
 	"path/filepath"
-	"time"
-
+	
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+		"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
@@ -23,8 +21,7 @@ var globalSnapshotManager *SnapshotManager
 func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.ChainState) *SnapshotManager {
 	// Start background worker for Xapian commit (runs every 10 seconds)
 	// We start this unconditionally to ensure Xapian data is flushed to disk periodically even if Snapshot is disabled.
-	mvm.StartXapianBackgroundWorker(10 * time.Second)
-	if !cfg.SnapshotEnabled {
+		if !cfg.SnapshotEnabled {
 		logger.Info("📸 [SNAPSHOT] Snapshot system DISABLED — but log rotation callback will be registered")
 
 		// Tạo lightweight SnapshotManager (disabled) chỉ để đăng ký callback cho log rotation
@@ -126,8 +123,7 @@ func InitSnapshotSystem(cfg *config.SimpleChainConfig, chainState *blockchain.Ch
 		if storageMgr := chainState.GetStorageManager(); storageMgr != nil {
 			sm.SetForceFlushCallback(func() error {
 				// Xả Xapian xuống đĩa trước
-				mvm.CommitAllXapian()
-				return storageMgr.FlushAll()
+								return storageMgr.FlushAll()
 			})
 			logger.Info("📸 [SNAPSHOT] Registered synchronous storage flush callback")
 

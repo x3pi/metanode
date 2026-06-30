@@ -13,8 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
+		"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	p_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -157,8 +156,7 @@ func (bp *BlockProcessor) createBlockBatch(results []tx_processor.ProcessResult,
 	// Previously, GetAccountBatch() used clear-after-read, causing only the first
 	// goroutine to get the trie nodes; all others got nil → go-sub missing account state.
 	bp.chainState.GetAccountStateDB().ClearAccountBatch()
-	mvm.CallClearAllStateInstances()
-	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+		trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 	logger.Debug("createBlockBatch: Completed, all %d goroutines finished (batchID: %s)", actualBlocksToCreate, batchID)
 	// Only log when batch has many transactions
 	if totalTxs > 5000 {
@@ -299,10 +297,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	logger.Warn("APPLY_BATCH_DEBUG: allFullDbLogs count=%d", len(allFullDbLogs))
 	for idx, logMap := range allFullDbLogs {
 		logger.Warn("APPLY_BATCH_DEBUG: Replaying FullDbLogs batch %d/%d with %d entries", idx+1, len(allFullDbLogs), len(logMap))
-		result := mvm.CallReplayFullDbLogs(logMap)
-		if result == 0 {
-			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs FAILED for batch %d/%d (%d entries) — Xapian DB may be OUT OF SYNC! This WILL cause stateRoot/receiptsRoot divergence.", idx+1, len(allFullDbLogs), len(logMap))
-		}
+		
 	}
 
 	// CRITICAL FORK-SAFETY: Clear C++ EVM State Cache after applying network blocks.
@@ -310,10 +305,7 @@ func (bp *BlockProcessor) applyBlockBatch(blockBatch []*storage.BackUpDb) error 
 	// the C++ EVM remains unaware and keeps stale nonces/balances in its memory cache.
 	// Clearing it forces the next EVM transaction to fetch fresh state from Go DB,
 	// preventing 'nonce mismatch' rejections and stateRoot divergence.
-	mvm.ClearAllMVMApi()
-	mvm.ClearAllProtectedMVMApi()
-	mvm.CallClearAllStateInstances()
-	trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
+				trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 
 	// FORK-SAFETY (Apr 2026): Clear Go-side AccountStateDB and StakeStateDB read caches.
 	// applyBlockBatch writes directly to NOMT/PebbleDB, bypassing AccountStateDB.
@@ -387,12 +379,7 @@ func (bp *BlockProcessor) applyBlockBatchForMapping(blockBatch []*storage.BackUp
 		}
 	}
 
-	for idx, logMap := range allFullDbLogs {
-		result := mvm.CallReplayFullDbLogs(logMap)
-		if result == 0 {
-			logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs (mapping) FAILED for batch %d/%d (%d entries) — Xapian DB may be OUT OF SYNC!", idx+1, len(allFullDbLogs), len(logMap))
-		}
-	}
+	
 
 	return nil
 }

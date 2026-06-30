@@ -18,7 +18,6 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/pkg/proxy_tx"
 )
 
@@ -250,23 +249,18 @@ func (v *TxVirtualExecutor) processBatchSubmitVirtual(
 			if err != nil || !vmP.IsValidSmartContractCall(toAccountState, updatedTx) {
 				logger.Warn("[VIRTUAL CC batchSubmit] target=%s is not a valid contract, skip dry-run", item.Target.Hex())
 				updatedTx.AddRelatedAddress(item.Target) // vẫn thêm địa chỉ để đảm bảo sequential
-				mvm.ClearMVMApi(itemMvmId)
+// 				mvm.ClearMVMApi(itemMvmId)
 				continue
 			}
 			// Fake call với đúng payload của packet để EVM simulate đúng code path,
 			// touch đúng storage slots → relatedAddresses sẽ khớp với lúc execute thật.
 			fakeCallTx := proxy_tx.New(updatedTx, updatedTx.FromAddress(), item.Target,
 				updatedTx.Amount(), uint64(mt_common.MAX_GASS_FEE), 0, item.Payload)
-			mvm.CallClearAllStateInstances()
+// 			mvm.CallClearAllStateInstances()
 			_, _, _ = vmP.ExecuteTransactionWithMvmIdSub(ctx, fakeCallTx, true)
-			mvmApi := mvm.GetMVMApi(itemMvmId)
-			if mvmApi != nil {
-				for _, addr := range mvmApi.GetCurrentRelatedAddresses() {
-					updatedTx.AddRelatedAddress(addr)
-				}
-			}
-			mvm.ClearMVMApi(itemMvmId)
-			mvm.CallClearAllStateInstances()
+// 			mvmApi := mvm.GetMVMApi(itemMvmId)
+// 			mvm.ClearMVMApi(itemMvmId)
+// 			mvm.CallClearAllStateInstances()
 			logger.Info("[VIRTUAL CC batchSubmit] 🔍 dry-run target=%s sender=%s payload=%dB → collected relatedAddresses: %v",
 				item.Target.Hex(), item.Sender.Hex(), len(item.Payload), updatedTx.RelatedAddresses())
 		}

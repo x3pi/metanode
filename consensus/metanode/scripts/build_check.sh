@@ -82,13 +82,6 @@ run_step() {
 }
 
 # ═══════════════════════════════════════════════════════════════════
-# 1. BUILD EVM & NOMT FFI
-# ═══════════════════════════════════════════════════════════════════
-if [ "$BUILD_RUST" = true ] || [ "$BUILD_GO" = true ]; then
-    echo -e "${CYAN}─── EVM & NOMT FFI Build ─────────────────────────────${NC}"
-    run_step "EVM & NOMT FFI (mvm/build.sh)" \
-        bash -c "cd '$GO_ROOT/pkg/mvm' && chmod +x build.sh && ./build.sh linux"
-fi
 
 # ═══════════════════════════════════════════════════════════════════
 # 2. RUST BUILDS

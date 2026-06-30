@@ -12,7 +12,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -83,9 +82,8 @@ func (h *CrossChainHandler) handleLockAndBridge(
 	var exRs types.ExecuteSCResult
 	if ctx != nil {
 		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
-		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
-
-		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		
+		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("lockAndBridge: burn failed: %v", err)
 		}
@@ -93,7 +91,7 @@ func (h *CrossChainHandler) handleLockAndBridge(
 		if err != nil {
 			return nil, exRs, fmt.Errorf("lockAndBridge: update state db failed: %v", err)
 		}
-		exRs, err = vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
+		exRs, err = vmP.TeeResultToExecuteResult(ctx, tx, mvmResult)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("lockAndBridge: convert result failed: %v", err)
 		}
@@ -217,9 +215,8 @@ func (h *CrossChainHandler) handleSendMessage(
 	var exRs types.ExecuteSCResult
 	if amount.Sign() > 0 && ctx != nil {
 		vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})
-		mvmE := mvm.GetOrCreateMVMApi(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), true)
-
-		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, mvmE, 1)
+		
+		mvmResult, err := vmP.ProcessNativeMintBurn(ctx, tx, 1)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("sendMessage: burn msg.value failed: %v", err)
 		}
@@ -227,7 +224,7 @@ func (h *CrossChainHandler) handleSendMessage(
 		if err != nil {
 			return nil, exRs, fmt.Errorf("sendMessage: update state db failed: %v", err)
 		}
-		exRs, err = vmP.MvmResultToExecuteResult(ctx, tx, mvmResult)
+		exRs, err = vmP.TeeResultToExecuteResult(ctx, tx, mvmResult)
 		if err != nil {
 			return nil, exRs, fmt.Errorf("sendMessage: convert result failed: %v", err)
 		}

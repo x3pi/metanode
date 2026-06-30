@@ -17,7 +17,6 @@ package tx_processor
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -106,13 +105,13 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
 	if isCache {
-		mvm.CallClearAllStateInstances()
+		
 	}
 
 	defer func() {
-		mvm.ClearAllMVMApi()
+		
 		if isCache {
-			mvm.CallClearAllStateInstances()
+			
 		}
 	}()
 
@@ -248,13 +247,13 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 
 	// Clear C++ EVM global state cache at the start of block execution to prevent virtual execution leakage
 	if isCache {
-		mvm.CallClearAllStateInstances()
+		
 	}
 
 	defer func() {
-		mvm.ClearAllMVMApi()
+		
 		if isCache {
-			mvm.CallClearAllStateInstances()
+			
 		}
 	}()
 

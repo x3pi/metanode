@@ -14,7 +14,6 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -212,8 +211,7 @@ func (stm *TrueBlockSTM) Process(
 							binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(txIndex))
 							mvmId := common.Address(ethAddressBytes)
 
-							mvm.ClearMVMApi(mvmId)
-
+							
 							mapMu.Lock()
 							mvmIdMap[tx.Hash()] = mvmId
 							mapMu.Unlock()

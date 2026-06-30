@@ -24,8 +24,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-)
+	)
 
 var (
 	defaultConfigPath = flag.String("config", "config.json", "Config path")
@@ -267,9 +266,9 @@ func main() {
 	if mvmProcessName == "" {
 		mvmProcessName = "default"
 	}
-	mvm.InitMVMCppLog("", mvmProcessName)
-	defer mvm.CloseMVMCppLog()
-	defer mvm.CloseMVMFileLogger()
+// 	mvm.InitMVMCppLog("", mvmProcessName)
+// 	defer mvm.CloseMVMCppLog()
+// 	defer mvm.CloseMVMFileLogger()
 
 	// Redirect stderr vào file log
 	// Đảm bảo unrecovered panic và runtime fatal error được ghi vào file

@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 
 	// "github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -274,9 +273,9 @@ func (bp *BlockProcessor) syncLocalStateWithDB(nextExpectedGlobalExecIndex *uint
 						// CRITICAL C++ EVM CACHE INVALIDATION:
 						// Since sync directly updated the LevelDB/NOMT database, we must clear/reset internal memory caches.
 						bp.chainState.InvalidateAllState()
-						mvm.ClearAllMVMApi()
-						mvm.ClearAllProtectedMVMApi()
-						mvm.CallClearAllStateInstances()
+// 						mvm.ClearAllMVMApi()
+// 						mvm.ClearAllProtectedMVMApi()
+// 						mvm.CallClearAllStateInstances()
 						trie_database.GetTrieDatabaseManager().ClearAllTrieDatabases()
 					} else {
 						logger.Error("❌ [TRANSITION SYNC] Failed to load fresh block #%d from DB: %v", actualLastBlockDB, err)
