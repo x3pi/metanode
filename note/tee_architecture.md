@@ -17,8 +17,8 @@ Giải pháp đề xuất: **một luồng thực thi EVM duy nhất** (Xapian �
 
 | Tầng | Loại truy vấn dùng | Số dư thay đổi khi nào | Cơ chế xác thực |
 |---|---|---|---|
-| **Tier 1 — Instant Finality** | Structured Query (tag/range cấu trúc) | Ngay lập tức, không thể đảo ngược | Toán học thuần túy: Sorted MMR + Non-membership/Range Proof |
-| **Tier 2 — Deferred Finality** | Unstructured Search (Xapian full-text) | Ngay lập tức nhưng ở trạng thái **Pending/Locked**, chỉ "chốt cứng" (final) sau khi qua Challenge Window | Optimistic Execution + Fraud Proof (Keyword-MMR) + Bonding tỉ lệ thuận giá trị rủi ro |
+| **Tier 1 — Instant Finality** | Structured Query (tag/range cấu trúc) | Ngay lập tức, không thể đảo ngược | Toán học thuần túy: Nomt Trie + Non-membership/Range Proof |
+| **Tier 2 — Deferred Finality** | Unstructured Search (Xapian full-text) | Ngay lập tức nhưng ở trạng thái **Pending/Locked**, chỉ "chốt cứng" (final) sau khi qua Challenge Window | Optimistic Execution + Fraud Proof (Keyword-Nomt Mapping) + Bonding tỉ lệ thuận giá trị rủi ro |
 
 Cả hai tầng đều cho phép `revm` **gọi Xapian như một phần của logic hợp đồng và đổi số dư trong cùng giao dịch**. Khác biệt duy nhất là thời điểm số dư trở thành final. Đây là mô hình tương tự cách Optimistic Rollup xử lý rút tiền: thực thi và cập nhật trạng thái ngay, nhưng chỉ "cứng" hoàn toàn sau cửa sổ thử thách — cho phép Xapian thực sự nằm trong đường đi tiền mà vẫn không đánh đổi tính trustless.
 
@@ -54,7 +54,7 @@ Năm ràng buộc trên là kim chỉ nam quyết định mọi lựa chọn thi
 ```mermaid
 flowchart TD
     A[Giao dịch gọi Smart Contract] --> B{Logic hợp đồng cần loại truy vấn nào?}
-    B -->|Structured: tag/range cấu trúc| C[Sorted MMR + Range/Non-membership Proof]
+    B -->|Structured: tag/range cấu trúc| C[Nomt Trie + Range/Non-membership Proof]
     B -->|Unstructured: full-text Xapian| D[Xapian trên Host trả kết quả]
 
     C --> C1[TEE xác thực 100% bằng toán học]
@@ -64,7 +64,7 @@ flowchart TD
     D1 --> D2[Số dư đổi ngay nhưng gắn nhãn PENDING / LOCKED]
     D2 --> D3[Ghi pending_root vào hàng đợi RPMB, mở Challenge Window]
     D3 --> D4{Trong cửa sổ thử thách}
-    D4 -->|Fraud Proof hợp lệ từ Keyword-MMR| D5[Rollback: hủy pending_root, slashing bond Host, thưởng người challenge]
+    D4 -->|Fraud Proof hợp lệ từ Nomt Trie| D5[Rollback: hủy pending_root, slashing bond Host, thưởng người challenge]
     D4 -->|Hết hạn, không ai challenge| D6[Promote: pending_root -> finalized_root, số dư thành FINAL - Tier 2]
 ```
 
@@ -74,8 +74,8 @@ Cả hai nhánh đều **đổi số dư trong cùng một giao dịch EVM** —
 
 | Vấn đề | Giải pháp đề xuất | Lý do chọn |
 |---|---|---|
-| Xác thực truy vấn có cấu trúc (Tier 1) | **Sorted Merkle Mountain Range (MMR)** + Non-membership Proof | $O(1)$ append, Range Proof gọn nhẹ, không cần reconstruct cả cây |
-| Cho phép Xapian (Tier 2) đổi số dư mà vẫn an toàn | **Optimistic Execution + Pending/Locked Balance + Fraud Proof (Keyword-MMR) + Challenge Window** | Né xung đột toán học Inverted-Index vs Merkle Tree, nhưng vẫn cho kết quả search tác động trực tiếp số dư thay vì chỉ phục vụ UX |
+| Xác thực truy vấn có cấu trúc (Tier 1) | **Nomt Trie (Nearly Optimal Merkle Trie)** + Non-membership Proof | Cấu trúc có sẵn của Metanode, không cần load thêm Verifier mới, O(1) verify |
+| Cho phép Xapian (Tier 2) đổi số dư mà vẫn an toàn | **Optimistic Execution + Pending/Locked Balance + Fraud Proof (Keyword-Nomt Mapping) + Challenge Window** | Né xung đột toán học Inverted-Index vs Merkle Tree, nhưng vẫn cho kết quả search tác động trực tiếp số dư thay vì chỉ phục vụ UX |
 | Chống Host trục lợi trong lúc số dư đang Pending | **Bonding tỉ lệ thuận giá trị giao dịch** + trích thưởng cho người gửi Fraud Proof thành công | Đảm bảo chi phí gian lận luôn lớn hơn lợi ích; đồng thời giải quyết vấn đề "free-rider" không ai chịu giám sát |
 | Double-spend trong lúc số dư đang Pending | **Khóa (lock)** số dư Pending — không cho dùng làm input cho giao dịch khác tới khi finalize | Tránh chi tiêu hai lần trên một khoản tiền chưa được xác nhận chắc chắn |
 | Đồng bộ 2 DB (LevelDB + Xapian) | **State-Versioned Query** (gắn `block_height`) | Tránh State Drift khi Xapian index trễ |
@@ -88,11 +88,11 @@ Cả hai nhánh đều **đổi số dư trong cùng một giao dịch EVM** —
 ### 4.3. Các cơ chế tối ưu đặc thù cho 16MB RAM
 
 Để kiến trúc "Chia cắt thế giới" vận hành trơn tru trên phần cứng cực yếu, hệ thống áp dụng 5 "vũ khí" tối ưu cốt lõi:
-1. **Sorted Merkle Mountain Range (MMR):** Thay thế Binary Merkle Tree, cho phép băm $O(1)$ và tạo Range Proof gọn nhẹ để TEE xác thực hàng nghìn bản ghi chỉ với vài KB RAM.
+1. **Nomt Trie (Nearly Optimal Merkle Trie):** Tận dụng cấu trúc Merkle sẵn có của mạng Metanode, giúp TEE không cần gánh thêm bộ thư viện Verifier thứ hai nào khác.
 2. **Epoch Batching (Gom lô giao dịch):** TEE không bao giờ xử lý giao dịch lẻ. Host gom các giao dịch thành khối ~12MB mỗi giây rồi gọi SMC một lần duy nhất, tối đa hóa TPS và bù đắp chi phí world-switch đắt đỏ.
 3. **WAL Fallback:** Khi Xapian index trễ so với LevelDB, hệ thống tự động fallback sang quét trực tiếp LevelDB, loại bỏ rủi ro ngưng trệ và từ chối dịch vụ oan (State Drift).
 4. **Async Message Passing (Giao tiếp liên Shard):** Dùng "Ticket" do TEE gốc ký thay vì khóa đồng bộ Two-Phase Commit (2PC) để đảm bảo hiệu năng Sharding không bị sụp đổ.
-5. **Pre-committed Deterministic Tokenization:** Tiền xử lý từ khóa thành mã băm ngay khi ghi xuống đĩa để tạo Keyword-MMR. Giúp Fraud Proof hoạt động hoàn toàn dựa trên đối chiếu toán học thuần túy.
+5. **Pre-committed Deterministic Tokenization:** Tiền xử lý từ khóa thành mã băm ngay khi ghi xuống đĩa để tạo Keyword-Nomt Mapping. Giúp Fraud Proof hoạt động hoàn toàn dựa trên đối chiếu toán học thuần túy bằng `blake3` hoặc `keccak256`.
 
 ---
 
@@ -134,7 +134,7 @@ sequenceDiagram
     autonumber
     actor U as Người dùng
     participant H as Host Linux (Normal World)
-    participant DB as LevelDB / Sorted MMR
+    participant DB as LevelDB / Nomt Trie
     participant T as OP-TEE (Secure World)
 
     U->>H: Gửi giao dịch thưởng ví tag "VIP_TAG"
@@ -145,11 +145,11 @@ sequenceDiagram
     Note over T: revm thực thi logic thưởng token
     Note over T: Tính State Root mới → ghi RPMB → ký
     T-->>H: State Root mới + chữ ký
-    H->>DB: Ghi đè LevelDB, cập nhật MMR
+    H->>DB: Ghi đè LevelDB, cập nhật Nomt Trie
     H-->>U: Kết quả đã xác thực toán học 100% — số dư FINAL ngay lập tức
 ```
 
-**Điểm mấu chốt giúp luồng này khả thi trên 16MB RAM:** số tag mỗi giao dịch bị giới hạn (K ≤ 5), và thay vì gửi hàng nghìn Merkle Proof rời rạc, Host chỉ gửi **một Range Proof gọn nhẹ** từ Sorted MMR — TEE xác minh hàng nghìn bản ghi chỉ với vài KB RAM.
+**Điểm mấu chốt giúp luồng này khả thi trên 16MB RAM:** số tag mỗi giao dịch bị giới hạn (K ≤ 5), và thay vì gửi hàng nghìn Merkle Proof rời rạc, Host chỉ gửi **Merkle Proof gọn nhẹ** từ Nomt Trie — TEE dùng hàm Verifier có sẵn để xác minh chỉ với vài KB RAM.
 
 ### 5.4. Luồng D — Tier 2: Unstructured Search (Xapian full-text) — *CÓ đổi số dư, chốt trễ qua Challenge Window*
 
@@ -172,7 +172,7 @@ sequenceDiagram
     H->>H: Khóa (lock) số dư Pending — chưa cho chi tiêu tiếp
     T->>V: Mở Challenge Window, VRF chọn ủy ban giám sát nhỏ
     alt Phát hiện gian lận (bỏ sót/giấu ví khớp)
-        V->>T: Gửi Fraud Proof (hash từ khóa + Merkle Proof trong Keyword-MMR)
+        V->>T: Gửi Fraud Proof (hash từ khóa + Merkle Proof trong Nomt Trie)
         T->>T: Rollback: hủy pending_root, giữ nguyên finalized_root cũ
         T->>H: Slashing bond của Host, trích thưởng cho người gửi Fraud Proof
     else Hết Challenge Window, không ai phản đối
@@ -183,7 +183,7 @@ sequenceDiagram
 
 **Vì sao vẫn an toàn dù số dư đổi ngay lập tức:** Khoản tiền ở trạng thái Pending bị khóa, không thể dùng làm input cho bất kỳ giao dịch Tier 1 hay Tier 2 nào khác cho tới khi finalize — loại bỏ rủi ro double-spend. Bond mà Host ký quỹ luôn được thiết lập **≥ tổng giá trị có thể bị thao túng trong một epoch Pending**, nên kẻ gian lận luôn lỗ nếu bị bắt; phần bond bị slashing được trích một phần thưởng cho node gửi Fraud Proof thành công để giải quyết vấn đề "không ai chịu giám sát" (free-rider).
 
-**Cơ chế xác thực từ khóa tự do bằng toán học (Keyword-MMR):** Làm thế nào TEE có thể kiểm chứng từ khóa văn bản? Bí quyết nằm ở **Pre-committed Deterministic Tokenization**. Khi tài liệu được ghi vào đĩa, Host bắt buộc phải tự cắt từ (tokenize) và băm các từ khóa này để dựng thành một cây Keyword-MMR riêng. Khi xảy ra thử thách, Fraud Proof chỉ cần nộp mã băm của từ khóa bị bỏ sót kèm theo Merkle Proof của nó. Nhờ đó, lõi TEE chỉ việc đối chiếu mã băm bằng toán học thuần túy, hoàn toàn không cần phải tự mình cắt từ hay phân tích ngữ nghĩa văn bản.
+**Cơ chế xác thực từ khóa tự do bằng toán học (Keyword-Nomt Mapping):** Làm thế nào TEE có thể kiểm chứng từ khóa văn bản? Bí quyết nằm ở **Pre-committed Deterministic Tokenization**. Khi tài liệu được ghi vào đĩa, Host bắt buộc phải tự cắt từ (tokenize) và băm các từ khóa này để đưa vào cây Nomt Trie. Khi xảy ra thử thách, Fraud Proof chỉ cần nộp mã băm của từ khóa bị bỏ sót kèm theo Merkle Proof của nó. Nhờ đó, lõi TEE chỉ việc đối chiếu mã băm bằng hàm Nomt Verifier có sẵn, hoàn toàn không cần phải tự mình cắt từ hay phân tích ngữ nghĩa văn bản.
 
 **Vì sao TEE 16MB vẫn chịu được:** RPMB chỉ cần lưu một hàng đợi nhỏ gồm các `pending_root` (mỗi root vài chục byte) kèm `deadline` của Challenge Window — không lưu dữ liệu giao dịch thật. Số epoch Pending đồng thời bị giới hạn cứng (tối đa N epoch treo cùng lúc) để hàng đợi không vượt RAM.
 

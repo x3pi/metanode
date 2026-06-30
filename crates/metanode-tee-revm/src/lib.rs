@@ -234,6 +234,7 @@ pub fn run_peak_limit_test(target_memory_bytes: u32, gas_limit: u64) -> (bool, u
 
 pub mod search_provider;
 pub mod rpmb;
+pub mod nomt_verifier;
 
 use search_provider::SearchProvider;
 use alloc::sync::Arc;
