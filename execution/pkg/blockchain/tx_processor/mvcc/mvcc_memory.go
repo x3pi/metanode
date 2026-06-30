@@ -3,6 +3,7 @@ package mvcc
 import (
 	"math"
 	"sync"
+        "sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -10,19 +11,33 @@ import (
 
 // Version represents the transaction index in a block.
 // A version consists of the transaction index.
-type Version uint32
+type Version int64
+
+// WriteID uniquely identifies a specific write operation.
+// Used to prevent ABA problems when a transaction re-executes and writes to the same Version.
+type WriteID uint64
 
 const (
 	// BaseVersion is the version of data loaded from the global database (before any block transactions).
-	BaseVersion Version = 0
+	BaseVersion Version = -1
 	// MaxVersion represents the maximum possible version.
-	MaxVersion Version = math.MaxUint32
+	MaxVersion Version = math.MaxInt64
+	// BaseWriteID is the WriteID for data loaded from the global database.
+	BaseWriteID WriteID = 0
 )
+
+var globalWriteIDCounter uint64
+
+func nextWriteID() WriteID {
+	// Import sync/atomic if not already imported
+	return WriteID(atomic.AddUint64(&globalWriteIDCounter, 1))
+}
 
 // VersionedAccountState holds multiple versions of an AccountState.
 type VersionedAccountState struct {
-	mu       sync.RWMutex
-	versions map[Version]types.AccountState
+	mu             sync.RWMutex
+	versions       map[Version]types.AccountState
+	writeIDs       map[Version]WriteID
 	// highest version written so far (for fast path lookups)
 	highestVersion Version
 }
@@ -30,6 +45,7 @@ type VersionedAccountState struct {
 func NewVersionedAccountState() *VersionedAccountState {
 	return &VersionedAccountState{
 		versions:       make(map[Version]types.AccountState),
+		writeIDs:       make(map[Version]WriteID),
 		highestVersion: BaseVersion,
 	}
 }
@@ -38,29 +54,43 @@ func (v *VersionedAccountState) Write(version Version, state types.AccountState)
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.versions[version] = state
+	v.writeIDs[version] = nextWriteID()
 	if version > v.highestVersion {
 		v.highestVersion = version
 	}
 }
 
+func (v *VersionedAccountState) Delete(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	delete(v.versions, version)
+	delete(v.writeIDs, version)
+}
+
 // Read finds the highest version of the account state that is less than or equal to the requested version.
 // If the highest version is found, it returns the state and its version.
 // If no version is found (e.g., all versions are > requested version), it returns (nil, BaseVersion).
-func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState, Version) {
+func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState, Version, WriteID) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	var bestVersion Version = BaseVersion
 	var bestState types.AccountState = nil
+	var bestWriteID WriteID = BaseWriteID
+	found := false
 
 	for ver, state := range v.versions {
-		if ver <= requestVersion && ver > bestVersion {
-			bestVersion = ver
-			bestState = state
+		if ver <= requestVersion {
+			if !found || ver > bestVersion {
+				bestVersion = ver
+				bestState = state
+				bestWriteID = v.writeIDs[ver]
+				found = true
+			}
 		}
 	}
 
-	return bestState, bestVersion
+	return bestState, bestVersion, bestWriteID
 }
 
 // MVCCAccountMap stores all versioned account states for the block.
@@ -80,7 +110,7 @@ func (m *MVCCAccountMap) ExportLatest() map[common.Address]types.AccountState {
 	defer m.mu.RUnlock()
 	res := make(map[common.Address]types.AccountState)
 	for addr, vState := range m.accounts {
-		state, _ := vState.Read(MaxVersion)
+		state, _, _ := vState.Read(MaxVersion)
 		if state != nil {
 			res[addr] = state
 		}
@@ -114,13 +144,22 @@ func (m *MVCCAccountMap) Write(addr common.Address, version Version, state types
 	v.Write(version, state)
 }
 
+func (m *MVCCAccountMap) Delete(addr common.Address, version Version) {
+	m.mu.RLock()
+	v, exists := m.accounts[addr]
+	m.mu.RUnlock()
+	if exists {
+		v.Delete(version)
+	}
+}
+
 // Read gets the highest version of the state strictly less than requestVersion.
 // (Because a transaction with requestVersion = i should read the output of transaction i-1 or earlier).
-func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version) {
+func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version, WriteID) {
 	v := m.getOrCreate(addr)
 	// We read the version STRICTLY LESS THAN requestVersion
 	if requestVersion == 0 {
-		return nil, BaseVersion
+		return nil, BaseVersion, BaseWriteID
 	}
 	return v.Read(requestVersion - 1)
 }
@@ -129,11 +168,13 @@ func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (type
 type VersionedStorage struct {
 	mu       sync.RWMutex
 	versions map[Version][]byte
+	writeIDs map[Version]WriteID
 }
 
 func NewVersionedStorage() *VersionedStorage {
 	return &VersionedStorage{
 		versions: make(map[Version][]byte),
+		writeIDs: make(map[Version]WriteID),
 	}
 }
 
@@ -141,23 +182,37 @@ func (v *VersionedStorage) Write(version Version, value []byte) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.versions[version] = value
+	v.writeIDs[version] = nextWriteID()
 }
 
-func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version) {
+func (v *VersionedStorage) Delete(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	delete(v.versions, version)
+	delete(v.writeIDs, version)
+}
+
+func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteID) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	var bestVersion Version = BaseVersion
 	var bestVal []byte = nil
+	var bestWriteID WriteID = BaseWriteID
+	found := false
 
 	for ver, val := range v.versions {
-		if ver <= requestVersion && ver > bestVersion {
-			bestVersion = ver
-			bestVal = val
+		if ver <= requestVersion {
+			if !found || ver > bestVersion {
+				bestVersion = ver
+				bestVal = val
+				bestWriteID = v.writeIDs[ver]
+				found = true
+			}
 		}
 	}
 
-	return bestVal, bestVersion
+	return bestVal, bestVersion, bestWriteID
 }
 
 // MVCCStorageMap stores all versioned storage values for the block.
@@ -177,7 +232,7 @@ func (m *MVCCStorageMap) ExportLatest() map[string][]byte {
 	defer m.mu.RUnlock()
 	res := make(map[string][]byte)
 	for sKey, vStorage := range m.storage {
-		val, _ := vStorage.Read(MaxVersion)
+		val, _, _ := vStorage.Read(MaxVersion)
 		if val != nil {
 			res[sKey] = val
 		}
@@ -215,10 +270,26 @@ func (m *MVCCStorageMap) Write(addr common.Address, key string, version Version,
 	v.Write(version, value)
 }
 
-func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version) {
+func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version) {
+	sKey := storageKey(addr, key)
+	m.mu.RLock()
+	v, exists := m.storage[sKey]
+	m.mu.RUnlock()
+	if exists {
+		v.Delete(version)
+	}
+}
+
+func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version, WriteID) {
 	v := m.getOrCreate(addr, key)
 	if requestVersion == 0 {
-		return nil, BaseVersion
+		return nil, BaseVersion, BaseWriteID
 	}
 	return v.Read(requestVersion - 1)
+}
+
+// ReadVersion is used by read sets to track exactly which version of data was read
+type ReadVersion struct {
+	Version Version
+	WriteID WriteID
 }

@@ -321,6 +321,18 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 		return []RelativeGroup{}
 	}
 
+	// 🚨 FORK-SAFETY FIX: Only enable chunking for blocks with EVM/CrossChain transactions.
+	// Native Fast Path has NO conflict detection, so chunking interdependent Native transactions
+	// (e.g. A->B, B->C) into parallel groups causes race conditions and state divergence.
+	// TrueBlockSTM handles EVM txs and has built-in conflict detection, so chunking is safe there.
+	enableChunking := false
+	for _, item := range items {
+		if !item.Tx.IsRegularTransaction() {
+			enableChunking = true
+			break
+		}
+	}
+
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 1: Union-Find to merge TXs sharing any RelatedAddress
 	// ═══════════════════════════════════════════════════════════════
@@ -408,38 +420,40 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 6: CHUNKING HOT-CONTRACTS (MaxGroupSize = 100)
 	// ═══════════════════════════════════════════════════════════════
-	const MaxGroupSize = 100
-	var chunkedGroups []RelativeGroup
-	for _, g := range groups {
-		if len(g.Items) <= MaxGroupSize {
-			chunkedGroups = append(chunkedGroups, g)
-		} else {
-			startIndex := 0
-			for startIndex < len(g.Items) {
-				endIndex := startIndex + MaxGroupSize
-				if endIndex >= len(g.Items) {
-					endIndex = len(g.Items)
-				} else {
-					// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
-					// If we split them into parallel chunks, they will fail nonce validation.
-					// Find the sender of the last transaction in the proposed chunk.
-					lastSender := g.Items[endIndex-1].Tx.FromAddress()
-					
-					// Extend the chunk until the sender changes
-					for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
-						endIndex++
+	if enableChunking {
+		const MaxGroupSize = 100
+		var chunkedGroups []RelativeGroup
+		for _, g := range groups {
+			if len(g.Items) <= MaxGroupSize {
+				chunkedGroups = append(chunkedGroups, g)
+			} else {
+				startIndex := 0
+				for startIndex < len(g.Items) {
+					endIndex := startIndex + MaxGroupSize
+					if endIndex >= len(g.Items) {
+						endIndex = len(g.Items)
+					} else {
+						// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
+						// If we split them into parallel chunks, they will fail nonce validation.
+						// Find the sender of the last transaction in the proposed chunk.
+						lastSender := g.Items[endIndex-1].Tx.FromAddress()
+						
+						// Extend the chunk until the sender changes
+						for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
+							endIndex++
+						}
 					}
+					
+					chunk := RelativeGroup{
+						Items: g.Items[startIndex:endIndex],
+					}
+					chunkedGroups = append(chunkedGroups, chunk)
+					startIndex = endIndex
 				}
-				
-				chunk := RelativeGroup{
-					Items: g.Items[startIndex:endIndex],
-				}
-				chunkedGroups = append(chunkedGroups, chunk)
-				startIndex = endIndex
 			}
 		}
+		groups = chunkedGroups
 	}
-	groups = chunkedGroups
 
 	// Assign sequential GroupIDs after chunking
 	for i := range groups {

@@ -173,11 +173,7 @@ func processNativeTransfersFastPath(
 					// Route to lock-free fast path if NO parallel addresses are involved.
 					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe.
 					var err error
-					if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
-						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
-					} else {
-						err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
-					}
+					err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
 
 					if err != nil {
 						if enableTrace {
