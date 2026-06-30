@@ -14,6 +14,7 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -25,37 +26,45 @@ type TrueBlockSTM struct {
 	txs        []types.Transaction
 	accountMap *mvcc.MVCCAccountMap
 	storageMap *mvcc.MVCCStorageMap
-	
-	// status: 0 = Pending, 1 = Executed, 2 = Validated, 3 = Aborted
+
+	// status: 0 = Pending, 1 = Executed, 2 = Validating, 3 = Validated, 4 = Aborted
 	txStatus []int32
-	
-	// Track read and write sets per transaction
-	readSets  []map[common.Address]mvcc.Version
+
+	// State Access Tracking
+	// readSets tracks which versions/writeIDs of accounts a transaction read
+	readSets []map[common.Address]mvcc.ReadVersion
+	// writeSets tracks which accounts a transaction modified
 	writeSets []map[common.Address]bool
+
+	// Smart Contract Tracking
+	scReadSets  []map[string]mvcc.ReadVersion
+	scWriteSets []map[string]bool
 
 	// Mutex to protect readSets/writeSets slices (the maps themselves belong to the TxIndex)
 	rwMu sync.RWMutex
 
-	receipts []types.Receipt
+	receipts  []types.Receipt
 	scResults []types.ExecuteSCResult
 }
 
 func NewTrueBlockSTM(txs []types.Transaction) *TrueBlockSTM {
 	numTxs := len(txs)
 	return &TrueBlockSTM{
-		txs:        txs,
-		accountMap: mvcc.NewMVCCAccountMap(),
-		storageMap: mvcc.NewMVCCStorageMap(),
-		txStatus:   make([]int32, numTxs),
-		readSets:   make([]map[common.Address]mvcc.Version, numTxs),
-		writeSets:  make([]map[common.Address]bool, numTxs),
-		receipts:   make([]types.Receipt, numTxs),
-		scResults:  make([]types.ExecuteSCResult, numTxs),
+		txs:         txs,
+		accountMap:  mvcc.NewMVCCAccountMap(),
+		storageMap:  mvcc.NewMVCCStorageMap(),
+		txStatus:    make([]int32, numTxs),
+		readSets:    make([]map[common.Address]mvcc.ReadVersion, numTxs),
+		writeSets:   make([]map[common.Address]bool, numTxs),
+		scReadSets:  make([]map[string]mvcc.ReadVersion, numTxs),
+		scWriteSets: make([]map[string]bool, numTxs),
+		receipts:    make([]types.Receipt, numTxs),
+		scResults:   make([]types.ExecuteSCResult, numTxs),
 	}
 }
 
 func (stm *TrueBlockSTM) Process(
-	ctx context.Context, 
+	ctx context.Context,
 	chainState *blockchain.ChainState,
 	leaderAddr common.Address,
 	lastBlockHeader types.BlockHeader,
@@ -68,7 +77,7 @@ func (stm *TrueBlockSTM) Process(
 	logger.Info("🚀 [BLOCK-STM] Khởi chạy %d TXs trên True MVCC Engine", numTxs)
 
 	var wg sync.WaitGroup
-	execCh := make(chan uint32, numTxs*5)     // buffer for re-executions
+	execCh := make(chan uint32, numTxs*5) // buffer for re-executions
 	validateCh := make(chan uint32, numTxs*5)
 	doneCh := make(chan struct{})
 
@@ -84,9 +93,7 @@ func (stm *TrueBlockSTM) Process(
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	var doneCount int32
 	var activeTasks int32 = int32(numTxs)
-	_ = activeTasks
 
 	// Start Execution Workers (High concurrency, e.g., 16 workers)
 	for w := 0; w < 16; w++ {
@@ -101,9 +108,29 @@ func (stm *TrueBlockSTM) Process(
 					// 1. Mark as Executing (Pending)
 					atomic.StoreInt32(&stm.txStatus[txIndex], 0)
 
+					// CLEAR previous writes from MVCC to prevent ghost state!
+					stm.rwMu.RLock()
+					oldWriteSet := stm.writeSets[txIndex]
+					oldScWriteSet := stm.scWriteSets[txIndex]
+					stm.rwMu.RUnlock()
+
+					if oldWriteSet != nil {
+						for addr := range oldWriteSet {
+							stm.accountMap.Delete(addr, mvcc.Version(txIndex))
+						}
+					}
+					if oldScWriteSet != nil {
+						for sKey := range oldScWriteSet {
+							if len(sKey) >= 42 {
+								addr := common.HexToAddress(sKey[:42])
+								stm.storageMap.Delete(addr, sKey[42:], mvcc.Version(txIndex))
+							}
+						}
+					}
+
 					// 2. Initialize MVCC Wrapper
-					mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, txIndex)
-					scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, txIndex)
+					mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, mvcc.Version(txIndex))
+					scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, mvcc.Version(txIndex))
 
 					// 3. Thực thi Transaction theo từng loại (đầy đủ các loại giao dịch)
 					tx := stm.txs[txIndex]
@@ -122,9 +149,18 @@ func (stm *TrueBlockSTM) Process(
 						stm.receipts[txIndex] = nil
 						stm.scResults[txIndex] = nil
 						stm.rwMu.Unlock()
-						
+
 						atomic.StoreInt32(&stm.txStatus[txIndex], 1)
+						atomic.AddInt32(&activeTasks, 1)
 						validateCh <- txIndex
+
+						if atomic.AddInt32(&activeTasks, -1) == 0 {
+							select {
+							case <-doneCh:
+							default:
+								close(doneCh)
+							}
+						}
 						continue
 					}
 
@@ -156,6 +192,8 @@ func (stm *TrueBlockSTM) Process(
 						binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(txIndex))
 						mvmId := common.Address(ethAddressBytes)
 
+						mvm.ClearMVMApi(mvmId)
+
 						mapMu.Lock()
 						mvmIdMap[tx.Hash()] = mvmId
 						mapMu.Unlock()
@@ -164,25 +202,35 @@ func (stm *TrueBlockSTM) Process(
 						vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, 0, leaderAddr)
 						vmP.SetAccountStateDB(mvccDB)
 						vmP.SetSmartContractDB(scDB)
-						
+
 						if tx.IsRegularTransaction() {
 							// Native Transfer
 							gasFee := big.NewInt(int64(mt_common.TRANSFER_GAS_COST * tx.MaxGasPrice()))
 							totalCost := new(big.Int).Add(tx.Amount(), gasFee)
-							
-							_ = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
-							mvccDB.PlusOneNonce(tx.FromAddress())
-							mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
-							mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
-							mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-							
-							// Create receipt for native transfer
-							rcp = receipt.NewReceipt(
-								tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
-								pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-								mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
-								[]types.EventLog{}, 0, common.Hash{}, 0,
-							)
+
+							errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+							if errSub != nil {
+								// Revert Native Transfer
+								rcp = receipt.NewReceipt(
+									tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
+									pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
+									mt_common.TRANSFER_GAS_COST, 0,
+									[]types.EventLog{}, 0, common.Hash{}, 0,
+								)
+							} else {
+								mvccDB.PlusOneNonce(tx.FromAddress())
+								mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
+								mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+								mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+
+								// Create receipt for native transfer
+								rcp = receipt.NewReceipt(
+									tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
+									pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+									mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
+									[]types.EventLog{}, 0, common.Hash{}, 0,
+								)
+							}
 						} else {
 							// Smart Contract
 							var err error
@@ -197,7 +245,7 @@ func (stm *TrueBlockSTM) Process(
 							} else {
 								rcp = receipt.NewReceipt(
 									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
-									pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+									exRs.ReceiptStatus(), nil, exRs.Exception(),
 									mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
 									[]types.EventLog{}, 0, common.Hash{}, 0,
 								)
@@ -254,27 +302,52 @@ func (stm *TrueBlockSTM) Process(
 							}
 						}
 					}
-					
+
 					// 4. Save Read/Write sets and Results
 					stm.rwMu.Lock()
 					stm.receipts[txIndex] = rcp
 					stm.scResults[txIndex] = exRs
 					stm.readSets[txIndex] = mvccDB.ReadSet
 					stm.writeSets[txIndex] = mvccDB.WriteSet
+					stm.scReadSets[txIndex] = scDB.ReadSet
+					stm.scWriteSets[txIndex] = scDB.WriteSet
 					stm.rwMu.Unlock()
 
 					// 5. Mark as Executed
 					atomic.StoreInt32(&stm.txStatus[txIndex], 1)
 
-					// 6. Push to validation
-					validateCh <- txIndex
-					
-					// Cascade Validation: Any TX > txIndex that was already Validated (2)
-					// must be downgraded and re-validated because our new WriteSet might affect them.
+					// Cascade Validation: Any TX > txIndex that was already Validated (3)
+					// or Validating (2) must be downgraded and re-validated.
 					for j := int(txIndex) + 1; j < numTxs; j++ {
-						if atomic.CompareAndSwapInt32(&stm.txStatus[j], 2, 1) {
-							atomic.AddInt32(&doneCount, -1)
-							validateCh <- uint32(j)
+						for {
+							st := atomic.LoadInt32(&stm.txStatus[j])
+							if st == 3 {
+								if atomic.CompareAndSwapInt32(&stm.txStatus[j], 3, 1) {
+									atomic.AddInt32(&activeTasks, 1)
+									validateCh <- uint32(j)
+									break
+								}
+							} else if st == 2 {
+								if atomic.CompareAndSwapInt32(&stm.txStatus[j], 2, 1) {
+									atomic.AddInt32(&activeTasks, 1)
+									validateCh <- uint32(j)
+									break
+								}
+							} else {
+								break
+							}
+						}
+					}
+
+					// 6. Push to validation AFTER cascading is fully complete
+					atomic.AddInt32(&activeTasks, 1)
+					validateCh <- txIndex
+
+					if atomic.AddInt32(&activeTasks, -1) == 0 {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
 						}
 					}
 				}
@@ -292,39 +365,60 @@ func (stm *TrueBlockSTM) Process(
 				case <-workerCtx.Done():
 					return
 				case txIndex := <-validateCh:
+					if !atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 1, 2) {
+						continue
+					}
+
 					stm.rwMu.RLock()
 					rSet := stm.readSets[txIndex]
+					scRSet := stm.scReadSets[txIndex]
 					stm.rwMu.RUnlock()
 
 					isValid := true
-					for addr, readVer := range rSet {
-						// What is the HIGHEST version < txIndex for this address?
-						_, highestVer := stm.accountMap.Read(addr, mvcc.Version(txIndex))
-						
-						// If the highest version currently in MVCC does NOT match what we read,
-						// it means a lower TxIndex just overwrote our data! (Stale Read)
-						if highestVer != readVer {
-							isValid = false
-							break
+					if rSet != nil {
+						for addr, readVer := range rSet {
+							_, highestVer, highestWriteID := stm.accountMap.Read(addr, mvcc.Version(txIndex))
+							if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+								isValid = false
+								break
+							}
 						}
 					}
 
 					if isValid {
-						// Mark as Validated
-						if atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 1, 2) {
-							if atomic.AddInt32(&doneCount, 1) == int32(numTxs) {
-								// All done, signal completion
-								select {
-								case <-doneCh:
-								default:
-									close(doneCh)
-								}
+						for sKey, readVer := range scRSet {
+							if len(sKey) < 42 {
+								continue
+							}
+							addrHex := sKey[:42]
+							keyStr := sKey[42:]
+							addr := common.HexToAddress(addrHex)
+
+							_, highestVer, highestWriteID := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
+							if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+								isValid = false
+								break
 							}
 						}
+					}
+
+					if isValid {
+						// Mark as Validated (3)
+						atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 2, 3)
 					} else {
 						// ABORT & RE-EXECUTE (100% No Fork Guarantee)
-						atomic.StoreInt32(&stm.txStatus[txIndex], 3)
-						execCh <- txIndex
+						if atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 2, 4) {
+							atomic.AddInt32(&activeTasks, 1)
+							execCh <- txIndex
+						}
+					}
+
+					if atomic.AddInt32(&activeTasks, -1) == 0 {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
 					}
 				}
 			}
@@ -344,7 +438,7 @@ func (stm *TrueBlockSTM) Process(
 
 	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB", numTxs)
 	baseAccountDB := chainState.GetAccountStateDB()
-	
+
 	// 1. Commit Account States
 	finalAccounts := stm.accountMap.ExportLatest()
 	for _, state := range finalAccounts {

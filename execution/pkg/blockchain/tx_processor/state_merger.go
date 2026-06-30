@@ -234,3 +234,95 @@ func applyMergedExecuteResult(
 
 	return nil
 }
+
+// applyCodeAndStorageRootOnly applies ONLY code deployment changes from C++ EVM results.
+// This is used after TrueBlockSTM, which already commits account state (balance, nonce, etc.)
+// via MVCC ExportLatest. We must NOT re-apply nonce/balance here to avoid double-writes.
+// However, contract code deployment (CodeHash, CodeChange, StorageRoot, CreatorPubkey, etc.)
+// is NOT tracked by Block-STM's MVCC, so we must apply it here.
+func applyCodeAndStorageRootOnly(
+	chainState *blockchain.ChainState,
+	exRs types.ExecuteSCResult,
+) {
+	accDB := chainState.GetAccountStateDB()
+	scDB := chainState.GetSmartContractDB()
+
+	// --- Code Hash (contract deployment) ---
+	if len(exRs.MapCodeHash()) > 0 {
+		sortedAddrs := make([]string, 0, len(exRs.MapCodeHash()))
+		for addr := range exRs.MapCodeHash() {
+			sortedAddrs = append(sortedAddrs, addr)
+		}
+		sort.Strings(sortedAddrs)
+
+		for _, address := range sortedAddrs {
+			codeHashBytes := exRs.MapCodeHash()[address]
+			fmtAddress := common.HexToAddress(address)
+
+			var creatorKey []byte
+			var storageAddr common.Address
+			if mapCreator := exRs.MapCreatorPubkey(); mapCreator != nil {
+				creatorKey = mapCreator[address]
+			}
+			if mapStorage := exRs.MapStorageAddress(); mapStorage != nil {
+				storageAddr = mapStorage[address]
+			}
+
+			asState, _ := accDB.AccountState(fmtAddress)
+			if asState != nil {
+				asState.SetCreatorPublicKey(mt_common.PubkeyFromBytes(creatorKey))
+				asState.SetStorageAddress(storageAddr)
+				asState.SetCodeHash(common.BytesToHash(codeHashBytes))
+				accDB.SetState(asState)
+			}
+
+			if mapCodeChange := exRs.MapCodeChange(); mapCodeChange != nil {
+				if code, ok := mapCodeChange[address]; ok {
+					scDB.SetCode(fmtAddress, common.BytesToHash(codeHashBytes), code)
+				}
+			}
+		}
+	}
+
+	// --- Storage Root ---
+	if len(exRs.MapStorageRoot()) > 0 {
+		sortedAddrs := make([]string, 0, len(exRs.MapStorageRoot()))
+		for addr := range exRs.MapStorageRoot() {
+			sortedAddrs = append(sortedAddrs, addr)
+		}
+		sort.Strings(sortedAddrs)
+
+		for _, address := range sortedAddrs {
+			storageRoot := exRs.MapStorageRoot()[address]
+			fmtAddress := common.HexToAddress(address)
+
+			asState, _ := accDB.AccountState(fmtAddress)
+			if asState != nil {
+				asState.SetStorageRoot(common.BytesToHash(storageRoot))
+				accDB.SetState(asState)
+			}
+		}
+	}
+
+	// --- BLS Keys ---
+	if len(exRs.MapPublicKeyBls()) > 0 {
+		for addrHex, blsKey := range exRs.MapPublicKeyBls() {
+			asState, _ := accDB.AccountState(common.HexToAddress(addrHex))
+			if asState != nil {
+				asState.SetPublicKeyBls(blsKey)
+				accDB.SetState(asState)
+			}
+		}
+	}
+
+	// --- Account Types ---
+	if len(exRs.MapAccountType()) > 0 {
+		for addrHex, accType := range exRs.MapAccountType() {
+			asState, _ := accDB.AccountState(common.HexToAddress(addrHex))
+			if asState != nil {
+				asState.SetAccountType(pb.ACCOUNT_TYPE(accType))
+				accDB.SetState(asState)
+			}
+		}
+	}
+}

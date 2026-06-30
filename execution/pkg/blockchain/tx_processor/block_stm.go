@@ -153,12 +153,26 @@ func ProcessTransactionsOptimistic(
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// MERGE & APPLY GLOBALLY
+	// BLOCK-STM ALREADY COMMITTED ALL STATE VIA MVCC
 	// ═══════════════════════════════════════════════════════════════
+	// DO NOT call mergeMvmResults + applyMergedExecuteResult here!
+	// TrueBlockSTM.Process() already commits:
+	//   1. Account states (balance, nonce, lastHash, deviceKey) via ExportLatest → SetState
+	//   2. Storage values via storageMap.ExportLatest → SetStorageValue
+	//   3. Leader gas reward via AddBalance(leaderAddr, totalGasFee)
+	//
+	// Calling applyMergedExecuteResult would DOUBLE-WRITE nonces from C++ EVM results,
+	// overwriting Block-STM's correct sequential nonces with stale C++ values.
+	// This was the ROOT CAUSE of non-deterministic hash mismatches between nodes:
+	//   - Block-STM sets nonce=3 (correct, after 3 TXs from same sender)
+	//   - C++ EVM MapNonce returns nonce=2 (stale, only knows about its own TX)
+	//   - applyMergedExecuteResult overwrites nonce=3 → nonce=2 (WRONG!)
+	//
+	// However, we still need to apply CODE changes (deploy contracts) because
+	// Block-STM MVCC does not track contract code deployment.
 	mergedRs := mergeMvmResults(allExecuteSCResults, leaderAddr)
-	err := applyMergedExecuteResult(chainState, mergedRs)
-	if err != nil {
-		logger.Error("Failed to apply merged ExecuteSCResult to global DB: %v", err)
+	if mergedRs != nil {
+		applyCodeAndStorageRootOnly(chainState, mergedRs)
 	}
 
 	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap
