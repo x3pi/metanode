@@ -13,9 +13,9 @@ type MVCCSmartContractDB struct {
 	accountState types.AccountStateDB
 	txIndex      Version
 
-	// ReadSet tracks the storage slots read by this transaction and their versions.
+	// ReadSet tracks the storage slots read by this transaction and their versions/writeIDs.
 	// Map of storageKey -> read version
-	ReadSet map[string]Version
+	ReadSet map[string]ReadVersion
 
 	// WriteSet tracks the storage slots modified by this transaction.
 	WriteSet map[string]bool
@@ -24,12 +24,12 @@ type MVCCSmartContractDB struct {
 	EventLogs []types.EventLog
 }
 
-func NewMVCCSmartContractDB(baseDB types.SmartContractDB, storageMap *MVCCStorageMap, txIndex uint32) *MVCCSmartContractDB {
+func NewMVCCSmartContractDB(baseDB types.SmartContractDB, storageMap *MVCCStorageMap, txIndex Version) *MVCCSmartContractDB {
 	return &MVCCSmartContractDB{
 		baseDB:     baseDB,
 		storageMap: storageMap,
 		txIndex:    Version(txIndex),
-		ReadSet:    make(map[string]Version),
+		ReadSet:    make(map[string]ReadVersion),
 		WriteSet:   make(map[string]bool),
 		EventLogs:  make([]types.EventLog, 0),
 	}
@@ -44,7 +44,7 @@ func (db *MVCCSmartContractDB) StorageValue(address common.Address, key []byte, 
 	sKey := string(key)
 	
 	// Check MVCC map first
-	val, version := db.storageMap.Read(address, sKey, db.txIndex)
+	val, version, writeID := db.storageMap.Read(address, sKey, db.txIndex)
 	
 	if val == nil {
 		// Read from base DB if not found in MVCC
@@ -53,11 +53,12 @@ func (db *MVCCSmartContractDB) StorageValue(address common.Address, key []byte, 
 			val = baseVal
 		}
 		version = BaseVersion
+		writeID = BaseWriteID
 	}
 
 	// Record the read for validation phase
 	fullKey := address.Hex() + sKey
-	db.ReadSet[fullKey] = version
+	db.ReadSet[fullKey] = ReadVersion{Version: version, WriteID: writeID}
 
 	return val, val != nil
 }
