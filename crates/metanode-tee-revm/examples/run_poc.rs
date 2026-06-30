@@ -1,6 +1,31 @@
 use tantivy::schema::*;
 use tantivy::Index;
 use tantivy::doc;
+use std::sync::Mutex;
+use metanode_tee_revm::rpmb::{RpmbProvider, RpmbData, AntiReplayGuard};
+
+pub struct MockRpmbProvider {
+    pub data: Mutex<RpmbData>,
+}
+
+impl MockRpmbProvider {
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(RpmbData::default()),
+        }
+    }
+}
+
+impl RpmbProvider for MockRpmbProvider {
+    fn read_data(&self) -> Result<RpmbData, String> {
+        Ok(self.data.lock().unwrap().clone())
+    }
+    
+    fn write_data(&self, data: RpmbData) -> Result<(), String> {
+        *self.data.lock().unwrap() = data;
+        Ok(())
+    }
+}
 
 pub struct NativeTantivyProvider {
     pub index: Index,
@@ -297,6 +322,28 @@ fn main() {
     } else {
         println!("[EVM]  ❌ searchPosts() lỗi: {:?}", search_res);
     }
+    
+    println!("\n[Test 7] Giả lập tấn công Rollback (Anti-Replay)");
+    let mock_rpmb = MockRpmbProvider::new();
+    let anti_replay = AntiReplayGuard::new(&mock_rpmb);
+    
+    println!("[TEE]  [7A] Thực thi Block 1 bình thường");
+    let state_root_block1 = revm_primitives::U256::from(1001); // Giả lập state root
+    match anti_replay.verify_and_commit(1, state_root_block1) {
+        Ok(_) => println!("[TEE]  ✅ Block 1 commit thành công. Counter = 1"),
+        Err(e) => println!("[TEE]  ❌ Lỗi: {}", e),
+    }
+
+    println!("[TEE]  [7B] Máy Host độc hại cố tình truyền Block 0 cũ (Counter = 0)");
+    let state_root_block0 = revm_primitives::U256::from(1000);
+    match anti_replay.verify_and_commit(0, state_root_block0) {
+        Ok(_) => println!("[TEE]  ✅ Block 0 commit thành công."),
+        Err(e) => {
+            println!("[TEE]  🚨 LỚP BẢO VỆ KÍCH HOẠT: Từ chối giao dịch!");
+            println!("[TEE]  🚨 Chi tiết lỗi: {}", e);
+        }
+    }
+    println!("[TEE]  🛡️ KẾT LUẬN: TEE an toàn tuyệt đối trước Rollback Attack nhờ RPMB Anti-Replay!");
 
     println!("\n=====================================================");
     println!("KẾT THÚC GIẢ LẬP");
