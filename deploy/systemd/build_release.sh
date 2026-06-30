@@ -73,11 +73,6 @@ cp -p "$PROJECT_ROOT/target/$TARGET_DIR/libmetanode.a" "$PROJECT_ROOT/consensus/
 cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
-# ─── 1.5. Build EVM Linker (C++) ─────────────────────────────────────────────
-log_step "Building EVM Linker (C++)"
-cd "$PROJECT_ROOT/execution/pkg/mvm"
-bash build.sh
-log_ok "EVM Linker built successfully."
 
 # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
 log_step "Building Go Execution Engine"
