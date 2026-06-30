@@ -11,4 +11,5 @@ blake3 = { version = "1.5", default-features = false }
 [dev-dependencies]
 tantivy = "0.22"
 tempfile = "3.10"
+hex = "0.4"
 

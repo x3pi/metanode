@@ -357,11 +357,9 @@ fn main() {
 
     println!("\n[Test 8] Giả lập Xác thực Fraud Proof bằng Nomt Trie");
     // Giả lập Host gửi kết quả search cho TEE kèm theo Merkle Proof của Nomt Trie
-    // Dữ liệu: value (danh sách ID) = "Product_ID_1,2,3"
     let search_result_data = b"Product_ID_1,2,3";
     let leaf_hash: [u8; 32] = blake3::hash(search_result_data).into();
     
-    // Giả lập Host cung cấp Sibling Hashes (Merkle Path)
     let sibling_1: [u8; 32] = blake3::hash(b"Sibling_A").into();
     let sibling_2: [u8; 32] = blake3::hash(b"Sibling_B").into();
     let merkle_proof = vec![sibling_1, sibling_2];
@@ -380,26 +378,29 @@ fn main() {
     let valid_state_root = current;
 
     println!("[Host] Gửi kết quả: \"Product_ID_1,2,3\"");
-    println!("[Host] Kèm Merkle Proof (độ dài {} siblings) và State Root...", merkle_proof.len());
+    println!("[Host] -> Mã băm dữ liệu (Leaf Hash): 0x{}", hex::encode(leaf_hash));
+    println!("[Host] -> Sibling 1 Hash: 0x{}", hex::encode(sibling_1));
+    println!("[Host] -> Sibling 2 Hash: 0x{}", hex::encode(sibling_2));
     
     println!("\n[TEE]  [8A] TEE Xác minh bằng chứng HỢP LỆ");
+    println!("[TEE]  Đọc State Root tin cậy từ RPMB: 0x{}", hex::encode(valid_state_root));
     use metanode_tee_revm::nomt_verifier::NomtVerifier;
     let is_valid = NomtVerifier::verify_proof(leaf_hash, &merkle_proof, valid_state_root);
     if is_valid {
-        println!("[TEE]  ✅ VERIFIED: Toán học xác nhận kết quả thuộc về State Root hợp lệ. TEE phê duyệt!");
+        println!("[TEE]  ✅ VERIFIED: Root tính toán KHỚP 100% với Root trong RPMB. TEE phê duyệt!");
     } else {
         println!("[TEE]  ❌ REJECTED");
     }
 
     println!("\n[TEE]  [8B] Hacker cố tình giấu kết quả (Fraud/Omission Attack)");
-    // Hacker sửa dữ liệu thành "Product_ID_1" (giấu bớt kết quả 2,3)
     let fake_data = b"Product_ID_1";
     let fake_leaf_hash: [u8; 32] = blake3::hash(fake_data).into();
     println!("[Host] Gửi kết quả BỊ LÀM GIẢ: \"Product_ID_1\"");
+    println!("[Host] -> Mã băm dữ liệu giả mạo: 0x{}", hex::encode(fake_leaf_hash));
     let is_valid_fake = NomtVerifier::verify_proof(fake_leaf_hash, &merkle_proof, valid_state_root);
     if !is_valid_fake {
         println!("[TEE]  🚨 LỚP BẢO VỆ KÍCH HOẠT: Merkle Proof Verification FAILED!");
-        println!("[TEE]  🚨 Root được băm từ dữ liệu giả mạo KHÔNG KHỚP với State Root tin cậy.");
+        println!("[TEE]  🚨 Root tính toán ra không khớp với State Root (0x{}) lưu trong RPMB.", hex::encode(valid_state_root));
     } else {
         println!("[TEE]  ✅ VERIFIED (Lỗi!)");
     }
