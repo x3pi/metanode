@@ -27,8 +27,9 @@ type TrueBlockSTM struct {
 	accountMap *mvcc.MVCCAccountMap
 	storageMap *mvcc.MVCCStorageMap
 
-	// status: 0 = Pending, 1 = Executed, 2 = Validating, 3 = Validated, 4 = Aborted
-	txStatus []int32
+	// txState tracks incarnation and status.
+	// top 32 bits: incarnation, bottom 32 bits: status (0=Pending, 1=Executed, 2=Validating, 3=Validated, 4=Aborted)
+	txState []uint64
 
 	// State Access Tracking
 	// readSets tracks which versions/writeIDs of accounts a transaction read
@@ -47,13 +48,21 @@ type TrueBlockSTM struct {
 	scResults []types.ExecuteSCResult
 }
 
+func packState(incarnation uint32, status int32) uint64 {
+	return (uint64(incarnation) << 32) | uint64(uint32(status))
+}
+
+func unpackState(state uint64) (incarnation uint32, status int32) {
+	return uint32(state >> 32), int32(state)
+}
+
 func NewTrueBlockSTM(txs []types.Transaction) *TrueBlockSTM {
 	numTxs := len(txs)
 	return &TrueBlockSTM{
 		txs:         txs,
 		accountMap:  mvcc.NewMVCCAccountMap(),
 		storageMap:  mvcc.NewMVCCStorageMap(),
-		txStatus:    make([]int32, numTxs),
+		txState:     make([]uint64, numTxs),
 		readSets:    make([]map[common.Address]mvcc.ReadVersion, numTxs),
 		writeSets:   make([]map[common.Address]bool, numTxs),
 		scReadSets:  make([]map[string]mvcc.ReadVersion, numTxs),
@@ -105,251 +114,256 @@ func (stm *TrueBlockSTM) Process(
 				case <-workerCtx.Done():
 					return
 				case txIndex := <-execCh:
-					// 1. Mark as Executing (Pending)
-					atomic.StoreInt32(&stm.txStatus[txIndex], 0)
+					func() {
+						defer func() {
+							if atomic.AddInt32(&activeTasks, -1) == 0 {
+								select {
+								case <-doneCh:
+								default:
+									close(doneCh)
+								}
+							}
+						}()
 
-					// CLEAR previous writes from MVCC to prevent ghost state!
-					stm.rwMu.RLock()
-					oldWriteSet := stm.writeSets[txIndex]
-					oldScWriteSet := stm.scWriteSets[txIndex]
-					stm.rwMu.RUnlock()
+						// 1. Mark as Executing (Pending)
+						state := atomic.LoadUint64(&stm.txState[txIndex])
+						inc, _ := unpackState(state)
+						atomic.StoreUint64(&stm.txState[txIndex], packState(inc+1, 0))
 
-					if oldWriteSet != nil {
-						for addr := range oldWriteSet {
-							stm.accountMap.Delete(addr, mvcc.Version(txIndex))
-						}
-					}
-					if oldScWriteSet != nil {
-						for sKey := range oldScWriteSet {
-							if len(sKey) >= 42 {
-								addr := common.HexToAddress(sKey[:42])
-								stm.storageMap.Delete(addr, sKey[42:], mvcc.Version(txIndex))
+						// CLEAR previous writes from MVCC to prevent ghost state!
+						stm.rwMu.RLock()
+						oldWriteSet := stm.writeSets[txIndex]
+						oldScWriteSet := stm.scWriteSets[txIndex]
+						stm.rwMu.RUnlock()
+
+						if oldWriteSet != nil {
+							for addr := range oldWriteSet {
+								stm.accountMap.Delete(addr, mvcc.Version(txIndex))
 							}
 						}
-					}
+						if oldScWriteSet != nil {
+							for sKey := range oldScWriteSet {
+								if len(sKey) >= 42 {
+									addr := common.HexToAddress(sKey[:42])
+									stm.storageMap.Delete(addr, sKey[42:], mvcc.Version(txIndex))
+								}
+							}
+						}
 
-					// 2. Initialize MVCC Wrapper
-					mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, mvcc.Version(txIndex))
-					scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, mvcc.Version(txIndex))
+						// 2. Initialize MVCC Wrapper
+						mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, mvcc.Version(txIndex))
+						scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, mvcc.Version(txIndex))
 
-					// 3. Thực thi Transaction theo từng loại (đầy đủ các loại giao dịch)
-					tx := stm.txs[txIndex]
-					toAddress := tx.ToAddress()
-					if tx.IsDeployContract() {
-						toAddress = common.Address{}
-					}
+						// 3. Thực thi Transaction theo từng loại (đầy đủ các loại giao dịch)
+						tx := stm.txs[txIndex]
+						toAddress := tx.ToAddress()
+						if tx.IsDeployContract() {
+							toAddress = common.Address{}
+						}
 
-					// Nonce Check (adds to ReadSet)
-					fromAccount, err := mvccDB.AccountState(tx.FromAddress())
-					if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
+						// Nonce Check (adds to ReadSet)
+						fromAccount, err := mvccDB.AccountState(tx.FromAddress())
+						if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
+							stm.rwMu.Lock()
+							stm.readSets[txIndex] = mvccDB.ReadSet
+							stm.writeSets[txIndex] = mvccDB.WriteSet
+							// Clear results on failure
+							stm.receipts[txIndex] = nil
+							stm.scResults[txIndex] = nil
+							stm.rwMu.Unlock()
+
+							for {
+								s := atomic.LoadUint64(&stm.txState[txIndex])
+								i, _ := unpackState(s)
+								if atomic.CompareAndSwapUint64(&stm.txState[txIndex], s, packState(i, 1)) {
+									break
+								}
+							}
+							atomic.AddInt32(&activeTasks, 1)
+							validateCh <- txIndex
+							return
+						}
+
+						var rcp types.Receipt
+						var exRs types.ExecuteSCResult
+
+						if toAddress == mt_common.VALIDATOR_CONTRACT_ADDRESS {
+							validatorHandler, err := GetValidatorHandler()
+							if err == nil {
+								rcp, exRs, _ = validatorHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, 0)
+							} else {
+								logger.Error("Lỗi khi lấy ValidatorHandler: %v", err)
+							}
+						} else if toAddress == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
+							ccHandler, err := cross_chain_handler.GetCrossChainHandler()
+							if err == nil {
+								rcp, exRs, _ = ccHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, 0)
+							} else {
+								logger.Error("Lỗi khi lấy CrossChainHandler: %v", err)
+							}
+						} else if toAddress == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+							// Logic account setting, e.g. setBlsPublicKey, setAccountType
+							logger.Info("Thực thi Account Setting cho TX %s", tx.Hash().Hex())
+						} else {
+							// Generate mvmId (0xFE + blockHash[:15] + txIndex)
+							var ethAddressBytes [20]byte
+							ethAddressBytes[0] = 0xFE
+							copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
+							binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(txIndex))
+							mvmId := common.Address(ethAddressBytes)
+
+							mvm.ClearMVMApi(mvmId)
+
+							mapMu.Lock()
+							mvmIdMap[tx.Hash()] = mvmId
+							mapMu.Unlock()
+
+							// Giao dịch Native hoặc Smart Contract
+							vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, 0, leaderAddr)
+							vmP.SetAccountStateDB(mvccDB)
+							vmP.SetSmartContractDB(scDB)
+
+							if tx.IsRegularTransaction() {
+								// Native Transfer
+								gasFee := big.NewInt(int64(mt_common.TRANSFER_GAS_COST * tx.MaxGasPrice()))
+								totalCost := new(big.Int).Add(tx.Amount(), gasFee)
+
+								errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+								if errSub != nil {
+									// Revert Native Transfer
+									rcp = receipt.NewReceipt(
+										tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
+										pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
+										mt_common.TRANSFER_GAS_COST, 0,
+										[]types.EventLog{}, 0, common.Hash{}, 0,
+									)
+								} else {
+									mvccDB.PlusOneNonce(tx.FromAddress())
+									mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
+									mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+									mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+
+									// Create receipt for native transfer
+									rcp = receipt.NewReceipt(
+										tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
+										pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+										mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
+										[]types.EventLog{}, 0, common.Hash{}, 0,
+									)
+								}
+							} else {
+								// Smart Contract
+								var err error
+								exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
+								if err != nil {
+									logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
+									rcp = receipt.NewReceipt(
+										tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+										pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
+										mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+									)
+								} else {
+									rcp = receipt.NewReceipt(
+										tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+										exRs.ReceiptStatus(), nil, exRs.Exception(),
+										mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+										[]types.EventLog{}, 0, common.Hash{}, 0,
+									)
+								}
+
+								if err == nil {
+									if exRs != nil {
+										rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
+										// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
+										if exRs.MapNonce() != nil {
+											for addrHex, newNonceBytes := range exRs.MapNonce() {
+												addr := common.HexToAddress(addrHex)
+												newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+												mvccDB.SetNonce(addr, newNonce)
+											}
+										}
+										if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+											if exRs.MapAddBalance() != nil {
+												for addrHex, addAmtBytes := range exRs.MapAddBalance() {
+													addr := common.HexToAddress(addrHex)
+													addAmt := big.NewInt(0).SetBytes(addAmtBytes)
+													mvccDB.AddBalance(addr, addAmt)
+												}
+											}
+											if exRs.MapSubBalance() != nil {
+												for addrHex, subAmtBytes := range exRs.MapSubBalance() {
+													addr := common.HexToAddress(addrHex)
+													subAmt := big.NewInt(0).SetBytes(subAmtBytes)
+													mvccDB.SubTotalBalance(addr, subAmt)
+												}
+											}
+											if exRs.MapStorageChange() != nil {
+												for addrHex, changes := range exRs.MapStorageChange() {
+													addr := common.HexToAddress(addrHex)
+													var keys [][]byte
+													var values [][]byte
+													for keyHex, valueBytes := range changes {
+														keys = append(keys, common.HexToHash(keyHex).Bytes())
+														values = append(values, valueBytes)
+													}
+													scDB.BatchSetStorageValues(addr, keys, values)
+												}
+											}
+										}
+									}
+									mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+									mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+								} else {
+									// Nếu err != nil, giữ lại rcp lỗi đã tạo bên trên, bỏ qua cập nhật trạng thái
+									if exRs != nil {
+										rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
+									}
+								}
+							}
+						}
+
+						// 4. Save Read/Write sets and Results
 						stm.rwMu.Lock()
+						stm.receipts[txIndex] = rcp
+						stm.scResults[txIndex] = exRs
 						stm.readSets[txIndex] = mvccDB.ReadSet
 						stm.writeSets[txIndex] = mvccDB.WriteSet
-						// Clear results on failure
-						stm.receipts[txIndex] = nil
-						stm.scResults[txIndex] = nil
+						stm.scReadSets[txIndex] = scDB.ReadSet
+						stm.scWriteSets[txIndex] = scDB.WriteSet
 						stm.rwMu.Unlock()
 
-						atomic.StoreInt32(&stm.txStatus[txIndex], 1)
-						atomic.AddInt32(&activeTasks, 1)
-						validateCh <- txIndex
-
-						if atomic.AddInt32(&activeTasks, -1) == 0 {
-							select {
-							case <-doneCh:
-							default:
-								close(doneCh)
-							}
-						}
-						continue
-					}
-
-					var rcp types.Receipt
-					var exRs types.ExecuteSCResult
-
-					if toAddress == mt_common.VALIDATOR_CONTRACT_ADDRESS {
-						validatorHandler, err := GetValidatorHandler()
-						if err == nil {
-							rcp, exRs, _ = validatorHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, 0)
-						} else {
-							logger.Error("Lỗi khi lấy ValidatorHandler: %v", err)
-						}
-					} else if toAddress == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-						ccHandler, err := cross_chain_handler.GetCrossChainHandler()
-						if err == nil {
-							rcp, exRs, _ = ccHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, 0)
-						} else {
-							logger.Error("Lỗi khi lấy CrossChainHandler: %v", err)
-						}
-					} else if toAddress == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-						// Logic account setting, e.g. setBlsPublicKey, setAccountType
-						logger.Info("Thực thi Account Setting cho TX %s", tx.Hash().Hex())
-					} else {
-						// Generate mvmId (0xFE + blockHash[:15] + txIndex)
-						var ethAddressBytes [20]byte
-						ethAddressBytes[0] = 0xFE
-						copy(ethAddressBytes[1:16], lastBlockHeader.LastBlockHash().Bytes()[:15])
-						binary.BigEndian.PutUint32(ethAddressBytes[16:], uint32(txIndex))
-						mvmId := common.Address(ethAddressBytes)
-
-						mvm.ClearMVMApi(mvmId)
-
-						mapMu.Lock()
-						mvmIdMap[tx.Hash()] = mvmId
-						mapMu.Unlock()
-
-						// Giao dịch Native hoặc Smart Contract
-						vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, 0, leaderAddr)
-						vmP.SetAccountStateDB(mvccDB)
-						vmP.SetSmartContractDB(scDB)
-
-						if tx.IsRegularTransaction() {
-							// Native Transfer
-							gasFee := big.NewInt(int64(mt_common.TRANSFER_GAS_COST * tx.MaxGasPrice()))
-							totalCost := new(big.Int).Add(tx.Amount(), gasFee)
-
-							errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
-							if errSub != nil {
-								// Revert Native Transfer
-								rcp = receipt.NewReceipt(
-									tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
-									pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
-									mt_common.TRANSFER_GAS_COST, 0,
-									[]types.EventLog{}, 0, common.Hash{}, 0,
-								)
-							} else {
-								mvccDB.PlusOneNonce(tx.FromAddress())
-								mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
-								mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
-								mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-
-								// Create receipt for native transfer
-								rcp = receipt.NewReceipt(
-									tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
-									pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-									mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
-									[]types.EventLog{}, 0, common.Hash{}, 0,
-								)
-							}
-						} else {
-							// Smart Contract
-							var err error
-							exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
-							if err != nil {
-								logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
-								rcp = receipt.NewReceipt(
-									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
-									pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-									mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
-								)
-							} else {
-								rcp = receipt.NewReceipt(
-									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
-									exRs.ReceiptStatus(), nil, exRs.Exception(),
-									mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
-									[]types.EventLog{}, 0, common.Hash{}, 0,
-								)
-							}
-
-							if err == nil {
-								if exRs != nil {
-									rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-									// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
-									if exRs.MapNonce() != nil {
-										for addrHex, newNonceBytes := range exRs.MapNonce() {
-											addr := common.HexToAddress(addrHex)
-											newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
-											mvccDB.SetNonce(addr, newNonce)
-										}
-									}
-									if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
-										if exRs.MapAddBalance() != nil {
-											for addrHex, addAmtBytes := range exRs.MapAddBalance() {
-												addr := common.HexToAddress(addrHex)
-												addAmt := big.NewInt(0).SetBytes(addAmtBytes)
-												mvccDB.AddBalance(addr, addAmt)
-											}
-										}
-										if exRs.MapSubBalance() != nil {
-											for addrHex, subAmtBytes := range exRs.MapSubBalance() {
-												addr := common.HexToAddress(addrHex)
-												subAmt := big.NewInt(0).SetBytes(subAmtBytes)
-												mvccDB.SubTotalBalance(addr, subAmt)
-											}
-										}
-										if exRs.MapStorageChange() != nil {
-											for addrHex, changes := range exRs.MapStorageChange() {
-												addr := common.HexToAddress(addrHex)
-												var keys [][]byte
-												var values [][]byte
-												for keyHex, valueBytes := range changes {
-													keys = append(keys, common.HexToHash(keyHex).Bytes())
-													values = append(values, valueBytes)
-												}
-												scDB.BatchSetStorageValues(addr, keys, values)
-											}
-										}
-									}
-								}
-								mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
-								mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-							} else {
-								// Nếu err != nil (lỗi hệ thống C++ chứ không phải revert logic hợp đồng),
-								// ta giữ lại rcp lỗi đã tạo bên trên, và bỏ qua cập nhật trạng thái (giống tx_executor.go)
-								if exRs != nil {
-									rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-								}
-							}
-						}
-					}
-
-					// 4. Save Read/Write sets and Results
-					stm.rwMu.Lock()
-					stm.receipts[txIndex] = rcp
-					stm.scResults[txIndex] = exRs
-					stm.readSets[txIndex] = mvccDB.ReadSet
-					stm.writeSets[txIndex] = mvccDB.WriteSet
-					stm.scReadSets[txIndex] = scDB.ReadSet
-					stm.scWriteSets[txIndex] = scDB.WriteSet
-					stm.rwMu.Unlock()
-
-					// 5. Mark as Executed
-					atomic.StoreInt32(&stm.txStatus[txIndex], 1)
-
-					// Cascade Validation: Any TX > txIndex that was already Validated (3)
-					// or Validating (2) must be downgraded and re-validated.
-					for j := int(txIndex) + 1; j < numTxs; j++ {
+						// 5. Mark as Executed
 						for {
-							st := atomic.LoadInt32(&stm.txStatus[j])
-							if st == 3 {
-								if atomic.CompareAndSwapInt32(&stm.txStatus[j], 3, 1) {
-									atomic.AddInt32(&activeTasks, 1)
-									validateCh <- uint32(j)
-									break
-								}
-							} else if st == 2 {
-								if atomic.CompareAndSwapInt32(&stm.txStatus[j], 2, 1) {
-									atomic.AddInt32(&activeTasks, 1)
-									validateCh <- uint32(j)
-									break
-								}
-							} else {
+							s := atomic.LoadUint64(&stm.txState[txIndex])
+							i, _ := unpackState(s)
+							if atomic.CompareAndSwapUint64(&stm.txState[txIndex], s, packState(i, 1)) {
 								break
 							}
 						}
-					}
 
-					// 6. Push to validation AFTER cascading is fully complete
-					atomic.AddInt32(&activeTasks, 1)
-					validateCh <- txIndex
-
-					if atomic.AddInt32(&activeTasks, -1) == 0 {
-						select {
-						case <-doneCh:
-						default:
-							close(doneCh)
+						// Cascade Validation: Any TX > txIndex that was already Validated (3)
+						// or Validating (2) must be downgraded and re-validated.
+						for j := int(txIndex) + 1; j < numTxs; j++ {
+							for {
+								s := atomic.LoadUint64(&stm.txState[j])
+								inc, st := unpackState(s)
+								if st == 3 || st == 2 {
+									// Increment inc to invalidate ongoing stale validation
+									if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
+										atomic.AddInt32(&activeTasks, 1)
+										validateCh <- uint32(j)
+										break
+									}
+								} else {
+									break
+								}
+							}
 						}
-					}
+
+						// 6. Push to validation AFTER cascading is fully complete
+						atomic.AddInt32(&activeTasks, 1)
+						validateCh <- txIndex
+					}()
 				}
 			}
 		}()
@@ -365,61 +379,71 @@ func (stm *TrueBlockSTM) Process(
 				case <-workerCtx.Done():
 					return
 				case txIndex := <-validateCh:
-					if !atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 1, 2) {
-						continue
-					}
+					func() {
+						defer func() {
+							if atomic.AddInt32(&activeTasks, -1) == 0 {
+								select {
+								case <-doneCh:
+								default:
+									close(doneCh)
+								}
+							}
+						}()
 
-					stm.rwMu.RLock()
-					rSet := stm.readSets[txIndex]
-					scRSet := stm.scReadSets[txIndex]
-					stm.rwMu.RUnlock()
+						state := atomic.LoadUint64(&stm.txState[txIndex])
+						inc, st := unpackState(state)
+						if st != 1 {
+							return
+						}
 
-					isValid := true
-					if rSet != nil {
-						for addr, readVer := range rSet {
-							_, highestVer, highestWriteID := stm.accountMap.Read(addr, mvcc.Version(txIndex))
-							if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
-								isValid = false
-								break
+						if !atomic.CompareAndSwapUint64(&stm.txState[txIndex], state, packState(inc, 2)) {
+							return
+						}
+
+						stm.rwMu.RLock()
+						rSet := stm.readSets[txIndex]
+						scRSet := stm.scReadSets[txIndex]
+						stm.rwMu.RUnlock()
+
+						isValid := true
+						if rSet != nil {
+							for addr, readVer := range rSet {
+								_, highestVer, highestWriteID := stm.accountMap.Read(addr, mvcc.Version(txIndex))
+								if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+									isValid = false
+									break
+								}
 							}
 						}
-					}
 
-					if isValid {
-						for sKey, readVer := range scRSet {
-							if len(sKey) < 42 {
-								continue
+						if isValid {
+							for sKey, readVer := range scRSet {
+								if len(sKey) < 42 {
+									continue
+								}
+								addrHex := sKey[:42]
+								keyStr := sKey[42:]
+								addr := common.HexToAddress(addrHex)
+
+								_, highestVer, highestWriteID := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
+								if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+									isValid = false
+									break
+								}
 							}
-							addrHex := sKey[:42]
-							keyStr := sKey[42:]
-							addr := common.HexToAddress(addrHex)
+						}
 
-							_, highestVer, highestWriteID := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
-							if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
-								isValid = false
-								break
+						if isValid {
+							// Mark as Validated (3)
+							atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 3))
+						} else {
+							// ABORT & RE-EXECUTE (100% No Fork Guarantee)
+							if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
+								atomic.AddInt32(&activeTasks, 1)
+								execCh <- txIndex
 							}
 						}
-					}
-
-					if isValid {
-						// Mark as Validated (3)
-						atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 2, 3)
-					} else {
-						// ABORT & RE-EXECUTE (100% No Fork Guarantee)
-						if atomic.CompareAndSwapInt32(&stm.txStatus[txIndex], 2, 4) {
-							atomic.AddInt32(&activeTasks, 1)
-							execCh <- txIndex
-						}
-					}
-
-					if atomic.AddInt32(&activeTasks, -1) == 0 {
-						select {
-						case <-doneCh:
-						default:
-							close(doneCh)
-						}
-					}
+					}()
 				}
 			}
 		}()
@@ -451,7 +475,6 @@ func (stm *TrueBlockSTM) Process(
 	finalStorage := stm.storageMap.ExportLatest()
 	for sKey, value := range finalStorage {
 		if len(sKey) >= 42 {
-			// Let's just use the full storageKey function which is addr.Hex() (42 chars) + key
 			addrStr := sKey[:42]
 			keyStr := sKey[42:]
 			baseScDB.SetStorageValue(common.HexToAddress(addrStr), []byte(keyStr), value)
