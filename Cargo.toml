@@ -26,7 +26,7 @@ members = [
     "crates/typed-store-error",
     "crates/typed-store-workspace-hack",
     # Tools
-    "crates/metanode-keytool",
+    "crates/metanode-keytool", "crates/metanode-tee-revm",
 ]
 resolver = "2"
 
