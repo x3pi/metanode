@@ -406,6 +406,66 @@ fn main() {
     }
     println!("\n[TEE]  🛡️ KẾT LUẬN: TEE kiểm chứng mọi truy vấn bằng Toán Học O(1) qua Nomt Trie!");
 
+    println!("\n[Test 9] Giả lập Xác thực Tài khoản (Account Trie Proof)");
+    // 1. Dữ liệu thực tế của một Tài khoản (Account) trên Blockchain
+    let nonce: u64 = 5;
+    let balance: u64 = 100; // 100 Token
+    let storage_root = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    let code_hash = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
+    
+    // Giả lập Serialize (RLP) tài khoản thành Bytes
+    let account_data = format!("{}:{}:{}:{}", nonce, balance, storage_root, code_hash);
+    let account_leaf_hash: [u8; 32] = blake3::hash(account_data.as_bytes()).into();
+
+    println!("[Host] Cấu trúc ví 0x123... (Lá):");
+    println!("[Host]   - Nonce: {}", nonce);
+    println!("[Host]   - Balance: {} Token", balance);
+    println!("[Host]   - StorageRoot: {}", storage_root);
+    println!("[Host]   - CodeHash: {}", code_hash);
+    println!("[Host] -> Leaf Hash: 0x{}", hex::encode(account_leaf_hash));
+
+    // 2. Giả lập Merkle Path (Siblings dọc theo đường đi của địa chỉ ví)
+    let acc_sibling_1: [u8; 32] = blake3::hash(b"Branch_A").into();
+    let acc_sibling_2: [u8; 32] = blake3::hash(b"Branch_B").into();
+    let acc_merkle_proof = vec![acc_sibling_1, acc_sibling_2];
+    
+    // Tính State Root HỢP LỆ
+    let mut acc_current = account_leaf_hash;
+    for sibling in &acc_merkle_proof {
+        let mut hasher = blake3::Hasher::new();
+        if acc_current.cmp(sibling) == core::cmp::Ordering::Less {
+            hasher.update(&acc_current); hasher.update(sibling);
+        } else {
+            hasher.update(sibling); hasher.update(&acc_current);
+        }
+        acc_current = hasher.finalize().into();
+    }
+    let valid_account_root = acc_current;
+
+    println!("\n[TEE]  [9A] Xác thực Số dư hợp lệ");
+    println!("[TEE]  Đọc State Root từ RPMB: 0x{}", hex::encode(valid_account_root));
+    let is_acc_valid = NomtVerifier::verify_proof(account_leaf_hash, &acc_merkle_proof, valid_account_root);
+    if is_acc_valid {
+        println!("[TEE]  ✅ VERIFIED: Số dư 100 Token là CHÍNH XÁC. Cho phép thực thi Smart Contract!");
+    }
+
+    println!("\n[TEE]  [9B] Tấn công sửa số dư (Hacker tự bơm tiền)");
+    // Hacker sửa Balance từ 100 thành 999999 Token!
+    let fake_balance: u64 = 999999;
+    let fake_account_data = format!("{}:{}:{}:{}", nonce, fake_balance, storage_root, code_hash);
+    let fake_account_leaf_hash: [u8; 32] = blake3::hash(fake_account_data.as_bytes()).into();
+    
+    println!("[Host] Hacker lén sửa số dư: Balance = {} Token", fake_balance);
+    println!("[Host] -> Mã băm ví giả mạo: 0x{}", hex::encode(fake_account_leaf_hash));
+    
+    let is_fake_acc_valid = NomtVerifier::verify_proof(fake_account_leaf_hash, &acc_merkle_proof, valid_account_root);
+    if !is_fake_acc_valid {
+        println!("[TEE]  🚨 LỚP BẢO VỆ KÍCH HOẠT: Merkle Proof Verification FAILED!");
+        println!("[TEE]  🚨 Phát hiện hành vi giả mạo số dư. Trạng thái không khớp với Root!");
+    }
+    
+    println!("\n[TEE]  🛡️ KẾT LUẬN: Bất kỳ thay đổi nhỏ nào (Dù chỉ 1 Wei) cũng làm thay đổi Leaf Hash, khiến Root bị lệch và bị TEE chặn đứng ngay lập tức!");
+
     println!("\n=====================================================");
     println!("KẾT THÚC GIẢ LẬP");
 }
