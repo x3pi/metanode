@@ -34,13 +34,21 @@ pub struct NativeTantivyProvider {
 }
 
 impl NativeTantivyProvider {
-    pub fn new() -> Self {
+    pub fn new(contract_address: &str) -> Self {
         let mut schema_builder = Schema::builder();
         let body_field = schema_builder.add_text_field("body", TEXT);
         let address_field = schema_builder.add_text_field("address", STORED);
         let schema = schema_builder.build();
         
-        let index = Index::create_in_ram(schema.clone());
+        let dir_name = format!("metanode_tantivy_data/{}", contract_address);
+        let path = std::path::Path::new(&dir_name);
+        std::fs::create_dir_all(&path).unwrap();
+        println!("[Tantivy-Host] 📂 Khởi tạo DB vật lý tại thư mục: {}", path.display());
+        
+        let index = match Index::open_in_dir(&path) {
+            Ok(idx) => idx,
+            Err(_) => Index::create_in_dir(&path, schema.clone()).unwrap(),
+        };
         let mut index_writer = index.writer(15_000_000).unwrap();
         
         // Nạp data giả lập cho Search Engine
@@ -204,7 +212,7 @@ fn main() {
     let caller_address = "0000000000000000000000000000000000000001".parse::<revm::primitives::Address>().unwrap();
     db.insert_account_info(caller_address, revm::primitives::AccountInfo { balance: revm::primitives::U256::from(100000000000000_u64), ..Default::default() });
 
-    let provider = std::sync::Arc::new(NativeTantivyProvider::new());
+    let provider = std::sync::Arc::new(NativeTantivyProvider::new("0x522B3294E6d06aA25Ad0f1B8891242E335D3B459"));
     
     let mut evm = revm::Evm::builder()
         .with_db(db)
@@ -467,5 +475,58 @@ fn main() {
     println!("\n[TEE]  🛡️ KẾT LUẬN: Bất kỳ thay đổi nhỏ nào (Dù chỉ 1 Wei) cũng làm thay đổi Leaf Hash, khiến Root bị lệch và bị TEE chặn đứng ngay lập tức!");
 
     println!("\n=====================================================");
+    println!("\n[Test 10] Tích hợp Nomt Trie thực tế (nomt DB + nomt_core)");
+    println!("[Host] Khởi tạo In-Memory Nomt DB...");
+    
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut opts = nomt::Options::new();
+    opts.path(temp_dir.path());
+    let db = nomt::Nomt::<nomt::hasher::Blake3Hasher>::open(opts).unwrap();
+    
+    #[derive(serde::Serialize)]
+    struct DummyAccount {
+        nonce: u64,
+        balance: [u64; 4],
+    }
+    
+    let account = DummyAccount {
+        nonce: 5,
+        balance: [100, 0, 0, 0],
+    };
+    
+    let b_data = bincode::serialize(&account).unwrap();
+    let value_hash: [u8; 32] = blake3::hash(&b_data).into();
+    
+    let address = revm_primitives::Address::from([0x22; 20]);
+    let key_path: [u8; 32] = blake3::hash(address.as_slice()).into();
+    
+    println!("[Host] Băm dữ liệu Ví: 0x{}", hex::encode(&value_hash));
+    println!("[Host] Băm địa chỉ (Key Path): 0x{}", hex::encode(&key_path));
+    
+    let session = db.begin_session(nomt::SessionParams::default());
+    let actuals = vec![(key_path, nomt::KeyReadWrite::Write(Some(b_data.clone())))];
+    let finished = session.finish(actuals).unwrap();
+    let state_root = finished.root().into_inner();
+    finished.commit(&db).unwrap();
+    
+    println!("[Host] Tạo Proof từ Nomt DB (Sparse Merkle Trie)...");
+    let session = db.begin_session(nomt::SessionParams::default());
+    let proof = session.prove(key_path).unwrap();
+    let proof_bytes = bincode::serialize(&proof).unwrap();
+    
+    println!("[TEE] Nhận được Proof thật. Tiến hành giải mã và xác thực bằng nomt-core...");
+    let is_valid = metanode_tee_revm::nomt_verifier::NomtVerifier::verify_nomt_core_proof(
+        &proof_bytes,
+        key_path,
+        value_hash,
+        state_root
+    );
+    
+    if is_valid {
+        println!("[TEE] ✅ VERIFIED: Xác thực Nomt Trie thành công 100% bằng thư viện nomt-core chuẩn!");
+    } else {
+        println!("[TEE] 🚨 LỚP BẢO VỆ KÍCH HOẠT: Xác thực Nomt Trie thất bại!");
+    }
+    println!("=====================================================\n");
     println!("KẾT THÚC GIẢ LẬP");
 }
