@@ -1,7 +1,6 @@
 use tantivy::schema::*;
-use tantivy::{Index, doc};
-use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::Index;
+use tantivy::doc;
 
 pub struct NativeTantivyProvider {
     pub index: Index,
@@ -42,7 +41,7 @@ impl NativeTantivyProvider {
 }
 
 impl metanode_tee_revm::search_provider::SearchProvider for NativeTantivyProvider {
-    fn search(&self, _db_name: &str, query_str: &str) -> Vec<revm::primitives::U256> {
+    fn search(&self, _db_name: &str, _query_str: &str) -> Vec<revm::primitives::U256> {
         // Mock return ID 1 to match the inserted "Macbook" product ID.
         vec![revm::primitives::U256::from(1)]
     }
