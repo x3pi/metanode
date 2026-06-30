@@ -171,9 +171,15 @@ func processNativeTransfersFastPath(
 					gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
 
 					// Route to lock-free fast path if NO parallel addresses are involved.
-					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe.
+					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe
+					// EXCEPT for NativeParallelAddresses which intentionally bypass UnionFind to allow parallelism.
+					// Those special addresses MUST use the locked version.
 					var err error
-					err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
+						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					} else {
+						err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					}
 
 					if err != nil {
 						if enableTrace {
@@ -269,9 +275,11 @@ func processNativeTransfersFastPath(
 	for _, res := range results {
 		// Update receipt block transaction indices
 		for i := range res.receipts {
-			res.receipts[i].SetTransactionIndex(0)
-			res.receipts[i].SetBlockTransactionIndex(blockTxIndex)
-			blockTxIndex++
+			if res.receipts[i] != nil {
+				res.receipts[i].SetTransactionIndex(blockTxIndex)
+				res.receipts[i].SetBlockTransactionIndex(blockTxIndex)
+				blockTxIndex++
+			}
 		}
 		allTransactions = append(allTransactions, res.txs...)
 		allReceipts = append(allReceipts, res.receipts...)

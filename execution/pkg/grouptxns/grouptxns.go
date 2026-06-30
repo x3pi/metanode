@@ -100,11 +100,27 @@ type GroupResult struct {
 	MvmIdMap         map[common.Hash]common.Address // Maps tx.Hash to its executing mvmId
 }
 
+// GroupKind classifies a group for dispatch to the optimal execution pipeline.
+type GroupKind uint8
+
+const (
+	// GroupKindNativeOnly — all txs are simple value transfers; use fast-path.
+	GroupKindNativeOnly GroupKind = iota
+	// GroupKindContractOnly — all txs are EVM/contract calls; use TrueBlockSTM.
+	GroupKindContractOnly
+	// GroupKindMixed — native transfers mixed with contract calls sharing addresses;
+	// must be serialized inside TrueBlockSTM to preserve correctness.
+	GroupKindMixed
+)
+
 // RelativeGroup đại diện cho một nhóm giao dịch liên quan
 type RelativeGroup struct {
 	GroupID   int
 	Items     []Item
 	Relatives []common.Address
+	// Kind is computed once during grouping and tells the dispatcher which
+	// execution pipeline to use.
+	Kind GroupKind
 }
 
 // TotalGas tính tổng gas của tất cả các item trong nhóm
@@ -321,18 +337,6 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 		return []RelativeGroup{}
 	}
 
-	// 🚨 FORK-SAFETY FIX: Only enable chunking for blocks with EVM/CrossChain transactions.
-	// Native Fast Path has NO conflict detection, so chunking interdependent Native transactions
-	// (e.g. A->B, B->C) into parallel groups causes race conditions and state divergence.
-	// TrueBlockSTM handles EVM txs and has built-in conflict detection, so chunking is safe there.
-	enableChunking := false
-	for _, item := range items {
-		if !item.Tx.IsRegularTransaction() {
-			enableChunking = true
-			break
-		}
-	}
-
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 1: Union-Find to merge TXs sharing any RelatedAddress
 	// ═══════════════════════════════════════════════════════════════
@@ -420,47 +424,89 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 6: CHUNKING HOT-CONTRACTS (MaxGroupSize = 100)
 	// ═══════════════════════════════════════════════════════════════
-	if enableChunking {
-		const MaxGroupSize = 100
-		var chunkedGroups []RelativeGroup
-		for _, g := range groups {
-			if len(g.Items) <= MaxGroupSize {
-				chunkedGroups = append(chunkedGroups, g)
-			} else {
-				startIndex := 0
-				for startIndex < len(g.Items) {
-					endIndex := startIndex + MaxGroupSize
-					if endIndex >= len(g.Items) {
-						endIndex = len(g.Items)
-					} else {
-						// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
-						// If we split them into parallel chunks, they will fail nonce validation.
-						// Find the sender of the last transaction in the proposed chunk.
-						lastSender := g.Items[endIndex-1].Tx.FromAddress()
-						
-						// Extend the chunk until the sender changes
-						for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
-							endIndex++
-						}
-					}
+	const MaxGroupSize = 100
+	var chunkedGroups []RelativeGroup
+	for _, g := range groups {
+		// Pre-classify the group to decide if it's safe to chunk
+		kind := classifyGroup(g.Items)
+		
+		// 🚨 FORK-SAFETY FIX: NEVER chunk NativeOnly groups!
+		// Native Fast Path has NO conflict detection (lock-free sharded). Chunking 
+		// interdependent Native txs into parallel groups causes severe race conditions.
+		// TrueBlockSTM handles EVM txs and has MVCC conflict detection, so chunking is safe there.
+		if kind == GroupKindNativeOnly || len(g.Items) <= MaxGroupSize {
+			g.Kind = kind // Ensure the original group gets its Kind set
+			chunkedGroups = append(chunkedGroups, g)
+		} else {
+			startIndex := 0
+			for startIndex < len(g.Items) {
+				endIndex := startIndex + MaxGroupSize
+				if endIndex >= len(g.Items) {
+					endIndex = len(g.Items)
+				} else {
+					// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
+					// If we split them into parallel chunks, they will fail nonce validation.
+					// Find the sender of the last transaction in the proposed chunk.
+					lastSender := g.Items[endIndex-1].Tx.FromAddress()
 					
-					chunk := RelativeGroup{
-						Items: g.Items[startIndex:endIndex],
+					// Extend the chunk until the sender changes
+					for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
+						endIndex++
 					}
-					chunkedGroups = append(chunkedGroups, chunk)
-					startIndex = endIndex
 				}
+				
+				chunk := RelativeGroup{
+					Items: g.Items[startIndex:endIndex],
+					Kind:  kind, // 🚨 INHERIT KIND: Do NOT recalculate!
+				}
+				chunkedGroups = append(chunkedGroups, chunk)
+				startIndex = endIndex
 			}
 		}
-		groups = chunkedGroups
 	}
+	groups = chunkedGroups
 
-	// Assign sequential GroupIDs after chunking
+	// Assign sequential GroupIDs after chunking. (Kind is already inherited)
 	for i := range groups {
 		groups[i].GroupID = i
 	}
 
 	return groups
+}
+
+// classifyGroup inspects items once and returns the appropriate GroupKind.
+func classifyGroup(items []Item) GroupKind {
+	hasNative := false
+	hasContract := false
+	for _, item := range items {
+		tx := item.Tx
+		isEvm := false
+
+		if !tx.IsRegularTransaction() {
+			isEvm = true
+		}
+		
+		to := tx.ToAddress()
+		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+			to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
+			to == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+			isEvm = true
+		}
+
+		if isEvm {
+			hasContract = true
+		} else {
+			hasNative = true
+		}
+
+		if hasNative && hasContract {
+			return GroupKindMixed
+		}
+	}
+	if hasContract {
+		return GroupKindContractOnly
+	}
+	return GroupKindNativeOnly
 }
 
 func GroupTransactionsByRelativeAddress(items []Item) ([]RelativeGroup, error) {
