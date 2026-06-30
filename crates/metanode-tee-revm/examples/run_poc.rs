@@ -327,23 +327,33 @@ fn main() {
     let mock_rpmb = MockRpmbProvider::new();
     let anti_replay = AntiReplayGuard::new(&mock_rpmb);
     
-    println!("[TEE]  [7A] Thực thi Block 1 bình thường");
+    let initial_state = mock_rpmb.read_data().unwrap();
+    println!("[TEE]  Trạng thái RPMB ban đầu: Counter = {}, StateRoot = {}", initial_state.monotonic_counter, initial_state.state_root);
+
+    println!("\n[TEE]  [7A] Thực thi Block 1 bình thường");
     let state_root_block1 = revm_primitives::U256::from(1001); // Giả lập state root
     match anti_replay.verify_and_commit(1, state_root_block1) {
-        Ok(_) => println!("[TEE]  ✅ Block 1 commit thành công. Counter = 1"),
+        Ok(_) => {
+            let current_state = mock_rpmb.read_data().unwrap();
+            println!("[TEE]  ✅ Block 1 commit thành công.");
+            println!("[TEE]  Cập nhật RPMB: Counter = {}, StateRoot = {}", current_state.monotonic_counter, current_state.state_root);
+        },
         Err(e) => println!("[TEE]  ❌ Lỗi: {}", e),
     }
 
-    println!("[TEE]  [7B] Máy Host độc hại cố tình truyền Block 0 cũ (Counter = 0)");
+    println!("\n[TEE]  [7B] Máy Host độc hại cố tình truyền Block 0 cũ (Counter = 0)");
     let state_root_block0 = revm_primitives::U256::from(1000);
+    println!("[Host] Cố gắng lừa TEE với Block 0 (Counter = 0, StateRoot = {})", state_root_block0);
     match anti_replay.verify_and_commit(0, state_root_block0) {
         Ok(_) => println!("[TEE]  ✅ Block 0 commit thành công."),
         Err(e) => {
+            let current_state = mock_rpmb.read_data().unwrap();
             println!("[TEE]  🚨 LỚP BẢO VỆ KÍCH HOẠT: Từ chối giao dịch!");
             println!("[TEE]  🚨 Chi tiết lỗi: {}", e);
+            println!("[TEE]  Trạng thái RPMB hiện tại VẪN ĐƯỢC GIỮ NGUYÊN: Counter = {}, StateRoot = {}", current_state.monotonic_counter, current_state.state_root);
         }
     }
-    println!("[TEE]  🛡️ KẾT LUẬN: TEE an toàn tuyệt đối trước Rollback Attack nhờ RPMB Anti-Replay!");
+    println!("\n[TEE]  🛡️ KẾT LUẬN: TEE an toàn tuyệt đối trước Rollback Attack nhờ RPMB Anti-Replay!");
 
     println!("\n=====================================================");
     println!("KẾT THÚC GIẢ LẬP");
