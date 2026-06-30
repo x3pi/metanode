@@ -231,3 +231,213 @@ pub fn run_peak_limit_test(target_memory_bytes: u32, gas_limit: u64) -> (bool, u
         Err(_) => (false, 0, debug_str),
     }
 }
+
+pub mod search_provider;
+
+use search_provider::SearchProvider;
+use alloc::sync::Arc;
+
+pub struct SearchInspector {
+    pub provider: Arc<dyn SearchProvider>,
+}
+
+impl<DB: revm::Database> revm::Inspector<DB> for SearchInspector {
+    fn call(
+        &mut self,
+        _context: &mut revm::EvmContext<DB>,
+        inputs: &mut revm::interpreter::CallInputs,
+    ) -> Option<revm::interpreter::CallOutcome> {
+        let data = inputs.input.as_ref();
+        
+        // Cần tối thiểu 128 bytes để chứa (Action, dbName_offset, arg3, dbName_length)
+        if data.len() >= 128 {
+            // Đọc offset của dbName (Luôn nằm ở bytes 32..64 vì Action chiếm 0..32)
+            let db_name_offset_u256 = U256::from_be_bytes::<32>(data[32..64].try_into().unwrap());
+            if db_name_offset_u256 < U256::from(100000) { // Limit sanity check
+                let offset = db_name_offset_u256.as_limbs()[0] as usize;
+                if offset + 32 <= data.len() {
+                    let db_name_len = U256::from_be_bytes::<32>(data[offset..offset+32].try_into().unwrap()).as_limbs()[0] as usize;
+                    if offset + 32 + db_name_len <= data.len() {
+                        let db_name_bytes = &data[offset+32 .. offset+32+db_name_len];
+                        
+                        // 1. Tính toán HASH: keccak256(caller + db_name)
+                        let mut payload = alloc::vec::Vec::new();
+                        payload.extend_from_slice(inputs.caller.as_slice());
+                        payload.extend_from_slice(db_name_bytes);
+                        let hash = revm::primitives::keccak256(&payload);
+                        
+                        let mut addr_bytes = [0u8; 20];
+                        addr_bytes.copy_from_slice(&hash[12..32]);
+                        let expected_target = revm::primitives::Address::from(addr_bytes);
+                        
+                        // 2. Kiểm tra nếu địa chỉ đích hoàn toàn khớp với địa chỉ được băm
+                        if expected_target == inputs.target_address {
+                            let action = U256::from_be_bytes::<32>(data[0..32].try_into().unwrap()).as_limbs()[0] as u8;
+                            
+                            let db_name = alloc::string::String::from_utf8_lossy(db_name_bytes).into_owned();
+                            
+                            // ACTION 0: SEARCH
+                            if action == 0 {
+                                let q_offset_u256 = U256::from_be_bytes::<32>(data[64..96].try_into().unwrap());
+                                let q_offset = q_offset_u256.as_limbs()[0] as usize;
+                                let mut query = alloc::string::String::new();
+                                if q_offset + 32 <= data.len() {
+                                    let q_len = U256::from_be_bytes::<32>(data[q_offset..q_offset+32].try_into().unwrap()).as_limbs()[0] as usize;
+                                    if q_offset + 32 + q_len <= data.len() {
+                                        query = alloc::string::String::from_utf8_lossy(&data[q_offset+32 .. q_offset+32+q_len]).into_owned();
+                                    }
+                                }
+                                
+                                let u256_results = self.provider.search(&db_name, &query);
+                                
+                                // Đóng gói mảng U256[] chuẩn ABI: [Offset = 0x20] [Length] [Items...]
+                                let mut out = alloc::vec::Vec::new();
+                                out.extend_from_slice(&U256::from(32).to_be_bytes::<32>());
+                                out.extend_from_slice(&U256::from(u256_results.len()).to_be_bytes::<32>());
+                                for val in u256_results {
+                                    out.extend_from_slice(&val.to_be_bytes::<32>());
+                                }
+                                
+                                return Some(revm::interpreter::CallOutcome {
+                                    result: revm::interpreter::InterpreterResult {
+                                        result: revm::interpreter::InstructionResult::Return,
+                                        output: revm::primitives::Bytes::from(out),
+                                        gas: revm::interpreter::Gas::new(inputs.gas_limit),
+                                    },
+                                    memory_offset: inputs.return_memory_offset.clone(),
+                                });
+                            } 
+                            // ACTION 1: INSERT
+                            else if action == 1 {
+                                let id = U256::from_be_bytes::<32>(data[64..96].try_into().unwrap());
+                                let m_offset_u256 = U256::from_be_bytes::<32>(data[96..128].try_into().unwrap());
+                                let m_offset = m_offset_u256.as_limbs()[0] as usize;
+                                let mut metadata = alloc::string::String::new();
+                                if m_offset + 32 <= data.len() {
+                                    let m_len = U256::from_be_bytes::<32>(data[m_offset..m_offset+32].try_into().unwrap()).as_limbs()[0] as usize;
+                                    if m_offset + 32 + m_len <= data.len() {
+                                        metadata = alloc::string::String::from_utf8_lossy(&data[m_offset+32 .. m_offset+32+m_len]).into_owned();
+                                    }
+                                }
+                                
+                                self.provider.insert(&db_name, id, &metadata);
+                                
+                                return Some(revm::interpreter::CallOutcome {
+                                    result: revm::interpreter::InterpreterResult {
+                                        result: revm::interpreter::InstructionResult::Return,
+                                        output: revm::primitives::Bytes::new(),
+                                        gas: revm::interpreter::Gas::new(10000),
+                                    },
+                                    memory_offset: inputs.return_memory_offset.clone(),
+                                });
+                            }
+                            // ACTION 2: DELETE
+                            else if action == 2 {
+                                let id = U256::from_be_bytes::<32>(data[64..96].try_into().unwrap());
+                                self.provider.delete(&db_name, id);
+                                
+                                return Some(revm::interpreter::CallOutcome {
+                                    result: revm::interpreter::InterpreterResult {
+                                        result: revm::interpreter::InstructionResult::Return,
+                                        output: revm::primitives::Bytes::new(),
+                                        gas: revm::interpreter::Gas::new(10000),
+                                    },
+                                    memory_offset: inputs.return_memory_offset.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+// Bài test 5: Airdrop dựa trên kết quả tìm kiếm Xapian (Dual-Environment)
+// Chúng ta sẽ giả lập một hợp đồng gọi STATICCALL tới 0x1000
+// Hợp đồng sau đó không thể lặp phức tạp bằng mã asm đơn giản, 
+// nên thay vì loop, PoC này chỉ yêu cầu hợp đồng gọi Xapian và nhận kết quả để in ra.
+pub fn run_airdrop_with_search(provider: Arc<dyn SearchProvider>) -> (bool, alloc::string::String) {
+    let mut db = CacheDB::new(EmptyDB::default());
+    
+    // Bytecode hợp đồng: 
+    // Gọi STATICCALL tới 0x1000, copy kết quả về return data và thoát.
+    // 60 00       - PUSH1 0x00 (ret length = 0, we'll copy later)
+    // 60 00       - PUSH1 0x00 (ret offset)
+    // 60 03       - PUSH1 0x03 (arg length = 3 bytes "VIP")
+    // 60 1c       - PUSH1 0x1C (arg offset, after code)
+    // 60 00       - PUSH1 0x00 (value = 0)
+    // 61 10 00    - PUSH2 0x1000 (Xapian address)
+    // 61 FF FF    - PUSH2 0xFFFF (Gas)
+    // FA          - STATICCALL
+    // 3d          - RETURNDATASIZE
+    // 60 00       - PUSH1 0x00
+    // 60 00       - PUSH1 0x00
+    // 3e          - RETURNDATACOPY
+    // 3d          - RETURNDATASIZE
+    // 60 00       - PUSH1 0x00
+    // F3          - RETURN
+    // Dữ liệu chữ "VIP": 56 49 50
+    let code: [u8; 27] = [
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x03, 0x60, 0x1A, 
+        0x60, 0x00, 0x61, 0x10, 0x00, 0x61, 0xFF, 0xFF, 
+        0xFA, 0x3D, 0x60, 0x00, 0x60, 0x00, 0x3E, 0x3D, 
+        0x60, 0x00, 0xF3
+    ];
+    let mut full_code = alloc::vec::Vec::new();
+    full_code.extend_from_slice(&code);
+    full_code.extend_from_slice(b"VIP"); // data ở offset 0x1A (26)
+
+    let contract_address = address!("0000000000000000000000000000000000000099");
+    
+    db.insert_account_info(
+        contract_address,
+        AccountInfo {
+            balance: U256::from(100000000000000_u64),
+            nonce: 1,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: Some(Bytecode::new_raw(Bytes::from(full_code))),
+        },
+    );
+    
+    db.insert_account_info(
+        address!("0000000000000000000000000000000000000001"),
+        AccountInfo {
+            balance: U256::from(100000000000000_u64),
+            ..Default::default()
+        },
+    );
+
+    let mut evm = Evm::builder()
+        .with_db(db)
+        .with_external_context(SearchInspector { provider })
+        .append_handler_register(revm::inspector_handle_register)
+        .modify_block_env(|block| {
+            block.basefee = U256::from(0);
+            block.gas_limit = U256::from(30_000_000); 
+        })
+        .build();
+
+    let tx = evm.tx_mut();
+    tx.caller = address!("0000000000000000000000000000000000000001");
+    tx.transact_to = TransactTo::Call(contract_address);
+    tx.value = U256::from(0);
+    tx.gas_limit = 1_000_000; 
+    tx.gas_price = U256::from(0);
+
+    let result = evm.transact();
+    let debug_str = alloc::format!("{:?}", result);
+    match result {
+        Ok(res) => {
+            match res.result {
+                ExecutionResult::Success { output, .. } => {
+                    let hex_out = alloc::format!("{:?}", output);
+                    (true, hex_out)
+                }
+                _ => (false, alloc::format!("Halt or Revert: {}", debug_str)),
+            }
+        },
+        Err(_) => (false, debug_str),
+    }
+}

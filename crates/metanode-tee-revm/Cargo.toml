@@ -6,3 +6,8 @@ edition = "2024"
 [dependencies]
 revm = { version = "14.0.0", default-features = false }
 revm-primitives = { version = "10.0.0", default-features = false }
+
+[dev-dependencies]
+tantivy = "0.22"
+tempfile = "3.10"
+
