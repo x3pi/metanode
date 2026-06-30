@@ -503,41 +503,41 @@ func (db *AccountStateDB) ExecuteNativeTransfer(
 }
 
 func (db *AccountStateDB) ExecuteNativeTransferLockFree(
-from, to common.Address,
-amount, gasFee *big.Int,
-txHash common.Hash,
-newDeviceKey common.Hash,
+	from, to common.Address,
+	amount, gasFee *big.Int,
+	txHash common.Hash,
+	newDeviceKey common.Hash,
 ) error {
-totalCost := new(big.Int).Add(amount, gasFee)
+	totalCost := new(big.Int).Add(amount, gasFee)
 
-as, err := db.getOrCreateAccountState(from)
-if err != nil {
- fmt.Errorf("sender account state error: %w", err)
-}
-if as == nil {
- errors.New("sender account state is nil")
-}
+	as, err := db.getOrCreateAccountState(from)
+	if err != nil {
+		return fmt.Errorf("sender account state error: %w", err)
+	}
+	if as == nil {
+		return errors.New("sender account state is nil")
+	}
 
-// SubTotalBalance in-place
-err = as.SubTotalBalance(totalCost)
-if err != nil {
- fmt.Errorf("SubTotalBalance: %w", err)
-}
+	// SubTotalBalance in-place
+	err = as.SubTotalBalance(totalCost)
+	if err != nil {
+		return fmt.Errorf("SubTotalBalance: %w", err)
+	}
 
-// Add nonce
-as.SetNonce(as.Nonce() + 1)
-if newDeviceKey != (common.Hash{}) {
-(newDeviceKey.Bytes())
-}
+	// Add nonce
+	as.SetNonce(as.Nonce() + 1)
+	if newDeviceKey != (common.Hash{}) {
+		as.SetNewDeviceKey(newDeviceKey)
+	}
 
-// Get receiver state
-asTo, err := db.getOrCreateAccountState(to)
-if err != nil {
- fmt.Errorf("receiver account state error: %w", err)
-}
-if asTo == nil {
- errors.New("receiver account state is nil")
-}
+	// Get receiver state
+	asTo, err := db.getOrCreateAccountState(to)
+	if err != nil {
+		return fmt.Errorf("receiver account state error: %w", err)
+	}
+	if asTo == nil {
+		return errors.New("receiver account state is nil")
+	}
 
 // AddBalance in-place
 asTo.AddBalance(amount)

@@ -6,10 +6,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/types"
-	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/types"
 )
 
 // mergeMvmResults combines all individual parallel execution results into one final delta
@@ -33,22 +33,42 @@ func mergeMvmResults(results []types.ExecuteSCResult, coinbase common.Address) t
 	for _, res := range results {
 		mergeMapBytesAdd(mapAddBalance, res.MapAddBalance())
 		mergeMapBytesAdd(mapSubBalance, res.MapSubBalance())
-		
-		for k, v := range res.MapNonce() { mapNonce[k] = v }
-		for k, v := range res.MapCodeHash() { mapCodeHash[k] = v }
-		for k, v := range res.MapCodeChange() { mapCodeChange[k] = v }
-		for k, v := range res.MapStorageRoot() { mapStorageRoot[k] = v }
-		for k, v := range res.MapStorageAddress() { mapStorageAddress[k] = v }
-		for k, v := range res.MapCreatorPubkey() { mapCreatorPubkey[k] = v }
-		for k, v := range res.MapPublicKeyBls() { mapPublicKeyBls[k] = v }
-		for k, v := range res.MapAccountType() { mapAccountType[k] = v }
-		for k, v := range res.MapNewDeviceKey() { mapNewDeviceKey[k] = v }
-		for k, v := range res.MapFullDbLogs() { mapFullDbLogs[k] = v }
-		
+
+		for k, v := range res.MapNonce() {
+			mapNonce[k] = v
+		}
+		for k, v := range res.MapCodeHash() {
+			mapCodeHash[k] = v
+		}
+		for k, v := range res.MapCodeChange() {
+			mapCodeChange[k] = v
+		}
+		for k, v := range res.MapStorageRoot() {
+			mapStorageRoot[k] = v
+		}
+		for k, v := range res.MapStorageAddress() {
+			mapStorageAddress[k] = v
+		}
+		for k, v := range res.MapCreatorPubkey() {
+			mapCreatorPubkey[k] = v
+		}
+		for k, v := range res.MapPublicKeyBls() {
+			mapPublicKeyBls[k] = v
+		}
+		for k, v := range res.MapAccountType() {
+			mapAccountType[k] = v
+		}
+		for k, v := range res.MapNewDeviceKey() {
+			mapNewDeviceKey[k] = v
+		}
+		for k, v := range res.MapFullDbLogs() {
+			mapFullDbLogs[k] = v
+		}
+
 		for k, v := range res.MapStorageAddressTouchedAddresses() {
 			mapStorageAddressTouchedAddresses[k] = append(mapStorageAddressTouchedAddresses[k], v...)
 		}
-		
+
 		for k, v := range res.MapNativeSmartContractUpdateStorage() {
 			mapNativeSmartContractUpdateStorage[k] = append(mapNativeSmartContractUpdateStorage[k], v...)
 		}
@@ -68,7 +88,7 @@ func mergeMvmResults(results []types.ExecuteSCResult, coinbase common.Address) t
 		mapAddBalance, mapSubBalance, mapNonce, mapCodeHash, mapStorageRoot,
 		mapStorageAddress, mapCreatorPubkey, mapStorageAddressTouchedAddresses, mapNativeSmartContractUpdateStorage, nil,
 	)
-	
+
 	merged.SetMapStorageChange(mapStorageChange)
 	merged.SetMapCodeChange(mapCodeChange)
 	merged.SetMapPublicKeyBls(mapPublicKeyBls)
@@ -91,51 +111,30 @@ func mergeMapBytesAdd(dest map[string][]byte, src map[string][]byte) {
 	}
 }
 
-// applyMergedExecuteResult applies a merged ExecuteSCResult directly to the global database.
-func applyMergedExecuteResult(
+// applyCodeAndStorageRootOnly applies ONLY code deployment changes from C++ EVM results.
+// This is used after TrueBlockSTM, which already commits account state (balance, nonce, etc.)
+// via MVCC ExportLatest. We must NOT re-apply nonce/balance here to avoid double-writes.
+// However, contract code deployment (CodeHash, CodeChange, StorageRoot, CreatorPubkey, etc.)
+// is NOT tracked by Block-STM's MVCC, so we must apply it here.
+func applyCodeAndStorageRootOnly(
 	chainState *blockchain.ChainState,
 	exRs types.ExecuteSCResult,
-) error {
+) {
 	accDB := chainState.GetAccountStateDB()
 	scDB := chainState.GetSmartContractDB()
 
-	// 🔒 [DOUBLE-BALANCE-FIX]
-	// We DO NOT apply MapAddBalance and MapSubBalance here!
-	// In Block-STM, balances are applied inline to `localAccountDB` in `tx_executor.go` 
-	// to ensure sequential state visibility. Those changes become `DirtyAccounts` 
-	// and are persisted to the global DB via `validationCache.FlushToGlobal()`.
-	// Applying them again here would cause a Double-Balance Bug!
-
-	// --- Nonce ---
-	if len(exRs.MapNonce()) > 0 {
-		sortedNonceAddrs := make([]string, 0, len(exRs.MapNonce()))
-		for addr := range exRs.MapNonce() {
-			sortedNonceAddrs = append(sortedNonceAddrs, addr)
-		}
-		sort.Strings(sortedNonceAddrs)
-		for _, address := range sortedNonceAddrs {
-			nonceBytes := exRs.MapNonce()[address]
-			fmtAddress := common.HexToAddress(address)
-			newNonce := big.NewInt(0).SetBytes(nonceBytes).Uint64()
-
-			// Apply directly
-			accDB.SetNonce(fmtAddress, newNonce)
-		}
-	}
-
-	// --- Code Hash ---
+	// --- Code Hash (contract deployment) ---
 	if len(exRs.MapCodeHash()) > 0 {
 		sortedAddrs := make([]string, 0, len(exRs.MapCodeHash()))
 		for addr := range exRs.MapCodeHash() {
 			sortedAddrs = append(sortedAddrs, addr)
 		}
 		sort.Strings(sortedAddrs)
-		
+
 		for _, address := range sortedAddrs {
 			codeHashBytes := exRs.MapCodeHash()[address]
 			fmtAddress := common.HexToAddress(address)
-			
-			// Try to get creator and storage from maps if available
+
 			var creatorKey []byte
 			var storageAddr common.Address
 			if mapCreator := exRs.MapCreatorPubkey(); mapCreator != nil {
@@ -144,7 +143,7 @@ func applyMergedExecuteResult(
 			if mapStorage := exRs.MapStorageAddress(); mapStorage != nil {
 				storageAddr = mapStorage[address]
 			}
-			
+
 			asState, _ := accDB.AccountState(fmtAddress)
 			if asState != nil {
 				asState.SetCreatorPublicKey(mt_common.PubkeyFromBytes(creatorKey))
@@ -152,7 +151,7 @@ func applyMergedExecuteResult(
 				asState.SetCodeHash(common.BytesToHash(codeHashBytes))
 				accDB.SetState(asState)
 			}
-			
+
 			if mapCodeChange := exRs.MapCodeChange(); mapCodeChange != nil {
 				if code, ok := mapCodeChange[address]; ok {
 					scDB.SetCode(fmtAddress, common.BytesToHash(codeHashBytes), code)
@@ -168,33 +167,15 @@ func applyMergedExecuteResult(
 			sortedAddrs = append(sortedAddrs, addr)
 		}
 		sort.Strings(sortedAddrs)
-		
+
 		for _, address := range sortedAddrs {
 			storageRoot := exRs.MapStorageRoot()[address]
 			fmtAddress := common.HexToAddress(address)
-			
+
 			asState, _ := accDB.AccountState(fmtAddress)
 			if asState != nil {
 				asState.SetStorageRoot(common.BytesToHash(storageRoot))
 				accDB.SetState(asState)
-			}
-		}
-	}
-
-	// --- Storage Change (Key-Value pairs) ---
-	if len(exRs.MapStorageChange()) > 0 {
-		sortedAddrs := make([]string, 0, len(exRs.MapStorageChange()))
-		for addr := range exRs.MapStorageChange() {
-			sortedAddrs = append(sortedAddrs, addr)
-		}
-		sort.Strings(sortedAddrs)
-		for _, address := range sortedAddrs {
-			fmtAddress := common.HexToAddress(address)
-			changes := exRs.MapStorageChange()[address]
-			
-			for keyHex, valueBytes := range changes {
-				key := common.HexToHash(keyHex)
-				scDB.SetStorageValue(fmtAddress, key.Bytes(), valueBytes)
 			}
 		}
 	}
@@ -209,7 +190,7 @@ func applyMergedExecuteResult(
 			}
 		}
 	}
-	
+
 	// --- Account Types ---
 	if len(exRs.MapAccountType()) > 0 {
 		for addrHex, accType := range exRs.MapAccountType() {
@@ -220,17 +201,4 @@ func applyMergedExecuteResult(
 			}
 		}
 	}
-
-	// --- New Device Keys ---
-	if len(exRs.MapNewDeviceKey()) > 0 {
-		for addrHex, key := range exRs.MapNewDeviceKey() {
-			asState, _ := accDB.AccountState(common.HexToAddress(addrHex))
-			if asState != nil {
-				asState.SetNewDeviceKey(common.BytesToHash(key))
-				accDB.SetState(asState)
-			}
-		}
-	}
-
-	return nil
 }

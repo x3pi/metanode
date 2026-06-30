@@ -209,11 +209,9 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 			lastGEI := storage.GetLastGlobalExecIndex()
 			if lastGEI >= nextExpectedGEI {
 				logger.Warn("⚠️ [COMMITTER] Fast-forwarding nextExpectedGEI from %d to %d (BlockSyncer caught up via P2P)", nextExpectedGEI, lastGEI+1)
-				// Clean up stale sessions that were skipped
-				// for i := nextExpectedGEI; i <= lastGEI; i++ {
-				// 	bp.speculativeExecutor.CleanGEI(i)
-				// }
-				// nextExpectedGEI = lastGEI + 1
+				// Xóa tất cả các session cũ bị bỏ qua trong một lần gọi
+				bp.speculativeExecutor.CleanGEI(lastGEI)
+				nextExpectedGEI = lastGEI + 1
 			}
 
 			specRes, exists := bp.speculativeExecutor.GetSpeculativeResult(nextExpectedGEI)

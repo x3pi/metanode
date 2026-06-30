@@ -22,6 +22,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -143,7 +144,12 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
-	if executeTransaction.IsCallContract() {
+	if executeTransaction.IsRegularTransaction() {
+		mvmResult = &mvm.MVMExecuteResult{
+			Status:  pb.RECEIPT_STATUS_RETURNED,
+			GasUsed: mt_common.TRANSFER_GAS_COST,
+		}
+	} else if executeTransaction.IsCallContract() {
 		mvmResult = mvmOffChain.Call(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.ToAddress().Bytes(),
@@ -164,9 +170,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 			false,
 			true,
 		)
-	}
-
-	if executeTransaction.IsDeployContract() {
+	} else if executeTransaction.IsDeployContract() {
 		if !executeTransaction.ValidDeployData() {
 			return nil, fmt.Errorf("deploy data is nil or invalid")
 		}
@@ -317,7 +321,12 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
-	if executeTransaction.IsCallContract() {
+	if executeTransaction.IsRegularTransaction() {
+		mvmResult = &mvm.MVMExecuteResult{
+			Status:  pb.RECEIPT_STATUS_RETURNED,
+			GasUsed: mt_common.TRANSFER_GAS_COST,
+		}
+	} else if executeTransaction.IsCallContract() {
 		mvmResult = mvmOffChain.Call(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.ToAddress().Bytes(),
@@ -338,8 +347,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 			false,
 			true,
 		)
-	}
-	if executeTransaction.IsDeployContract() {
+	} else if executeTransaction.IsDeployContract() {
 		if !executeTransaction.ValidDeployData() {
 			return nil, fmt.Errorf("deploy data is nil or invalid")
 		}
@@ -364,7 +372,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	}
 	logger.Info("MVM execution completed for transaction %v", mvmResult)
 	if mvmResult == nil {
-		logger.Fatal("mvmResult is null for transaction %s", executeTransaction.Hash().Hex())
+		return nil, fmt.Errorf("mvmResult is null for transaction %s", executeTransaction.Hash().Hex())
 	}
 
 	exRsE, err := vmP.MvmResultToExecuteResultOffChain(ctx, executeTransaction, mvmResult)
