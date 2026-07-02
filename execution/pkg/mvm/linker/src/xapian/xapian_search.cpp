@@ -83,11 +83,17 @@ decodeQuerySearchCallData(const std::vector<uint8_t> &call_data) {
 }
 
 XapianSearcher::XapianSearcher(const std::string &db_path)
-    : db(db_path)
+    : db_ptr(new Xapian::Database(db_path)), owns_db(true)
 {
     std::cerr << "Mở database '" << db_path << "'" << std::endl;
 }
-XapianSearcher::XapianSearcher(Xapian::Database database) : db(database) {}
+XapianSearcher::XapianSearcher(Xapian::Database* database) : db_ptr(database), owns_db(false) {}
+
+XapianSearcher::~XapianSearcher() {
+    if (owns_db) {
+        delete db_ptr;
+    }
+}
 
 // Phương thức tìm kiếm gốc
 std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
@@ -109,7 +115,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
   try {
     Xapian::QueryParser qp;
-    qp.set_database(db);
+    qp.set_database(*db_ptr);
     qp.set_default_op(default_op);
     qp.set_stemming_strategy(Xapian::QueryParser::STEM_SOME);
 
@@ -174,10 +180,9 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
         Xapian::Query(Xapian::Query::OP_VALUE_GE, 254, block_serialised);
 
     Xapian::Query has_slot254 =
-        Xapian::Query(Xapian::Query::OP_VALUE_RANGE,
+        Xapian::Query(Xapian::Query::OP_VALUE_GE,
                       254,   // Số hiệu slot
-                      "\0",  // Giá trị byte thấp nhất có thể
-                      "\xFF" // Giá trị byte cao nhất có thể
+                      std::string("\x00", 1) // Bất kỳ chuỗi có độ dài > 0 nào cũng >= "\x00"
         );
 
     Xapian::Query slot254_is_null = Xapian::Query(
@@ -200,7 +205,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
                                 combined_range_query);
     std::cerr << "final_query:  " << final_query.get_description() << std::endl;
 
-    Xapian::Enquire enquire(db);
+    Xapian::Enquire enquire(*db_ptr);
     enquire.set_query(final_query);
 
     if (sort_by_value_slot) {
@@ -401,48 +406,44 @@ CppSearchParams decodeSearchParams(const std::vector<uint8_t> &encodedData) {
 // }
 void XapianSearcher::dumpIndex() {
   try {
-    std::cout << "\n========== [DUMP XAPIAN INDEX] ==========" << std::endl;
+    std::cerr << "\n========== [DUMP XAPIAN INDEX] ==========" << std::endl;
 
     // 1. In toàn bộ từ khóa đang có trong CSDL
-    std::cout << "--- TẤT CẢ TỪ KHÓA (TERMS) ---" << std::endl;
-    for (Xapian::TermIterator it = db.allterms_begin(); it != db.allterms_end();
+    std::cerr << "--- TẤT CẢ TỪ KHÓA (TERMS) ---" << std::endl;
+    for (Xapian::TermIterator it = db_ptr->allterms_begin(); it != db_ptr->allterms_end();
          ++it) {
-      std::cout << "Term: " << *it << " | Tần suất: " << it.get_termfreq()
+      std::cerr << "Term: " << *it << " | Tần suất: " << it.get_termfreq()
                 << std::endl;
     }
 
     // 2. In toàn bộ chi tiết của từng Document
-    std::cout << "\n--- TẤT CẢ TÀI LIỆU (DOCUMENTS) ---" << std::endl;
-    Xapian::doccount last_docid = db.get_lastdocid();
-    std::cout << "Tong so Document (last_docid): " << last_docid << std::endl;
+    std::cerr << "\n--- TẤT CẢ TÀI LIỆU (DOCUMENTS) ---" << std::endl;
+    Xapian::doccount last_docid = db_ptr->get_lastdocid();
+    std::cerr << "Tong so Document (last_docid): " << last_docid << std::endl;
 
     for (Xapian::docid i = 1; i <= last_docid; ++i) {
       try {
-        Xapian::Document doc = db.get_document(i);
-        std::cout << "\n>> DocID: " << i << std::endl;
+        Xapian::Document doc = db_ptr->get_document(i);
+        std::cerr << "\n>> DocID: " << i << std::endl;
 
-        std::cout << "  [Data]: " << doc.get_data() << std::endl;
+        std::cerr << "   [Data]: " << doc.get_data() << std::endl;
 
-        std::cout << "  [Terms]: ";
-        for (Xapian::TermIterator it = doc.termlist_begin();
-             it != doc.termlist_end(); ++it) {
-          std::cout << *it << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "  [Values]: ";
+        // In các Values của Document
+        std::cerr << "   [Values]:" << std::endl;
         for (Xapian::ValueIterator vit = doc.values_begin();
              vit != doc.values_end(); ++vit) {
-          std::cout << "(Slot " << vit.get_valueno() << ": " << *vit << ") ";
+          std::cerr << "      - Slot " << vit.get_valueno() << " : " << *vit << std::endl;
         }
-        std::cout << std::endl;
 
-      } catch (const Xapian::DocNotFoundError &) {
-        std::cout << ">> DocID: " << i << " [DA BI XOA (DocNotFoundError)]"
-                  << std::endl;
+        // In các Terms của Document
+        std::cerr << "   [Terms]:" << std::endl;
+        for (Xapian::TermIterator tit = doc.termlist_begin(); tit != doc.termlist_end(); ++tit) {
+          std::cerr << "      - " << *tit << " (wdf: " << tit.get_wdf() << ")" << std::endl;
+        }
+      } catch (const Xapian::DocNotFoundError &e) {
+        std::cerr << "Lỗi khi doc get: " << e.get_msg() << std::endl;
       }
     }
-    std::cout << "========================================\n" << std::endl;
   } catch (const Xapian::Error &e) {
     std::cerr << "Lỗi khi dump Index: " << e.get_msg() << std::endl;
   }
