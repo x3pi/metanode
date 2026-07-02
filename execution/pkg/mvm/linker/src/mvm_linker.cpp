@@ -203,7 +203,7 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
                     bool is_off_chain = false) {
   mvm::Transaction tx(from, amount, gas_price, gas_limit, tx_hash, is_debug);
   MyLogger logger = MyLogger();
-  MyExtension extension = MyExtension(mvmId, is_off_chain);
+  MyExtension extension = MyExtension(mvmId, is_off_chain, &tx_hash);
   mvm::Processor p(gs, log_handler, extension, logger);
 
   try {
@@ -418,85 +418,8 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       }
     }
 
-    if (result.er == mvm::ExitReason::returned) {
-      unsigned char *mvmId_to_query = gs.get_block_context().mvmId;
-
-      if (isOffChain) {
-        // eth_call (off-chain): HỦY tất cả thay đổi, KHÔNG lưu xuống database
-        registry.cancelTransaction(mvmId_to_query);
-        registry.unregisterAllManagersForMvmId(mvmId_to_query);
-      } else {
-        // Transaction thật: commit và thu thập logs/hashes
-        registry.commitTransaction(mvmId_to_query);
-        std::map<mvm::Address, XapianLog::ComprehensiveLog> groupLogs =
-            registry.getGroupChangeLogsForMvmId(mvmId_to_query);
-
-        length_full_db_logs = groupLogs.size();
-        if (length_full_db_logs > 0) {
-          b_full_db_logs = new char *[length_full_db_logs]();
-          length_full_db_logs_data = new int[length_full_db_logs];
-          int i = 0;
-          for (const auto &pair : groupLogs) {
-            const mvm::Address &addr = pair.first;
-            const XapianLog::ComprehensiveLog &log = pair.second;
-            std::vector<uint8_t> serialized_log_data;
-            try {
-              serialized_log_data = log.serialize();
-            } catch (const std::exception &e) {
-              b_full_db_logs[i] = nullptr;
-              length_full_db_logs_data[i] = 0;
-              i++;
-              continue;
-            }
-
-            size_t serialized_size = serialized_log_data.size();
-            int element_size = 32 + serialized_size;
-
-            b_full_db_logs[i] = new char[element_size];
-            length_full_db_logs_data[i] = element_size;
-
-            mvm::to_big_endian(addr,
-                               reinterpret_cast<uint8_t *>(b_full_db_logs[i]));
-            memcpy(b_full_db_logs[i] + 32, serialized_log_data.data(),
-                   serialized_size);
-
-            i++;
-          }
-        }
-
-        std::map<mvm::Address, std::array<uint8_t, 32u>> groupHashes =
-            registry.getGroupHashForMvmId(mvmId_to_query);
-
-        length_full_db_hash = groupHashes.size();
-
-        if (length_full_db_hash > 0) {
-          b_full_db_hash = new char *[length_full_db_hash]();
-          length_full_db_hashes = new int[length_full_db_hash];
-
-          int i = 0;
-          for (const auto &pair : groupHashes) {
-            const mvm::Address &addr = pair.first;
-            const std::array<uint8_t, 32u> &hash_array = pair.second;
-
-            const int element_size = 64;
-            b_full_db_hash[i] = new char[element_size];
-            length_full_db_hashes[i] = element_size;
-
-            mvm::to_big_endian(addr,
-                               reinterpret_cast<uint8_t *>(b_full_db_hash[i]));
-            memcpy(b_full_db_hash[i] + 32, hash_array.data(), 32);
-            i++;
-          }
-        }
-      }
-
-    } else {
-      unsigned char *mvmId_to_query = gs.get_block_context().mvmId;
-      registry.cancelTransaction(mvmId_to_query);
-      if (isOffChain) {
-        registry.unregisterAllManagersForMvmId(mvmId_to_query);
-      }
-    }
+    // We no longer retrieve full db hashes or logs via registry here.
+    // Xapian changes are committed atomically in block_processor_commit.go.
 
     std::cerr << "[PROCESS_RESULT_DEBUG] Constructing pendingResult"
               << std::endl;
@@ -742,19 +665,6 @@ ExecuteResult *call(
   }
 }
 
-int commit_full_db(unsigned char *mvmId) {
-  std::cerr << "[DEBUG_COMMIT] commit_full_db CALLED for mvmId="
-            << mvm::to_hex_string(mvm::from_big_endian(mvmId, 20u))
-            << std::endl;
-  bool result = registry.commitChangesForMvmId(mvmId);
-  return (int)result;
-}
-
-int revert_full_db(unsigned char *mvmId) {
-
-  bool result = registry.revertChangesForMvmId(mvmId);
-  return (int)result;
-}
 
 ExecuteResult *
 execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
@@ -1408,10 +1318,19 @@ void updateStateBalance(unsigned char *b_address, unsigned char *b_balance) {
     State::getInstance(address)->setBalance(balance);
   }
 }
-void MVM_cancelTransaction(unsigned char *mvmId) {
-  registry.cancelTransaction(mvmId);
-  registry.unregisterAllManagersForMvmId(mvmId);
-}
-void MVM_commitAllXapian() {
+extern "C" void MVM_commitAllXapian() {
   XapianManager::commitAllInstances();
+}
+
+
+extern "C" void clear_xapian_tx_buffer(unsigned char *b_tx_hash) {
+    uint256_t txHash = mvm::from_big_endian((uint8_t *)b_tx_hash, 32u);
+    registry.clearBufferForTxHash(&txHash);
+}
+
+extern "C" void commit_xapian_tx_buffer(unsigned char *b_tx_hash) {
+    if (b_tx_hash) {
+        uint256_t txHash = mvm::from_big_endian((uint8_t *)b_tx_hash, 32u);
+        registry.commitBufferForTxHash(&txHash);
+    }
 }

@@ -12,15 +12,14 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -73,68 +72,23 @@ func (bp *BlockProcessor) commitWorker() {
 		// because `UpdateLastBlockNumber` can trigger an asynchronous node snapshot.
 		// ══════════════════════════════════════════════════════════════════
 		if job.ProcessResults != nil {
-			// OPTIMIZATION: Dedup mvmIds — multiple TXs to the same contract share
-			// one MVMApi instance. CommitFullDb/RevertFullDb only needs to be called
-			// once per contract, not once per TX.
-			committedMvmIds := make(map[common.Address]struct{}, 64)
-
-			for _, tx := range job.ProcessResults.Transactions {
-				isCall := tx.IsCallContract()
-				isDeploy := tx.IsDeployContract()
-
-				if (isCall || isDeploy) && !tx.GetReadOnly() && tx.ToAddress() != utils.GetAddressSelector(p_common.ACCOUNT_SETTING_ADDRESS_SELECT) && tx.ToAddress() != utils.GetAddressSelector(p_common.IDENTIFIER_STAKE) {
-					mvmId, exists := job.ProcessResults.MvmIdMap[tx.Hash()]
-					if !exists {
-						if isCall {
-							mvmId = tx.ToAddress()
-						}
-					}
-					// Skip if this mvmId was already committed/reverted
-					if _, done := committedMvmIds[mvmId]; done {
-						continue
-					}
-					committedMvmIds[mvmId] = struct{}{}
-				}
-			}
-
-			// ═══════════════════════════════════════════════════════════════
-			// PARALLEL XAPIAN FLUSH: Each mvmId has an isolated Xapian DB
-			// (separate directory on disk). CommitFullDb for mvmId_A has zero
-			// shared state with mvmId_B, so they can safely flush in parallel.
-			// For blocks with N contracts, this reduces commit time from
-			// N × flush_time to max(flush_time) — significant when N > 2.
-			// ═══════════════════════════════════════════════════════════════
-			if len(committedMvmIds) > 1 {
-				var xapianWg sync.WaitGroup
-				for mvmId := range committedMvmIds {
-					xapianWg.Add(1)
-					go func(id common.Address) {
-						defer xapianWg.Done()
-						mvmAPI := mvm.GetMVMApi(id)
-						if mvmAPI != nil {
-							mvmAPI.CommitFullDb()
-							mvm.UnprotectMVMApi(id)
-						}
-					}(mvmId)
-				}
-				xapianWg.Wait()
-			} else {
-				// Single mvmId — no goroutine overhead needed
-				for mvmId := range committedMvmIds {
-					mvmAPI := mvm.GetMVMApi(mvmId)
-					if mvmAPI != nil {
-						mvmAPI.CommitFullDb()
-						mvm.UnprotectMVMApi(mvmId)
+			// FLUSH XAPIAN TRANSACTIONS TO DISK
+			// We only commit to physical disk in commitWorker after consensus has finalized the block.
+			// This prevents Xapian DB from getting ahead of PebbleDB and prevents forks if the block is rejected.
+			for i, tx := range job.ProcessResults.Transactions {
+				// OPTIMIZATION: Only commit/clear Xapian buffers for Contract Creation or Contract Call.
+				// Pure token transfers (IsRegularTransaction) do not interact with Xapian.
+				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
+				if isContractInteraction {
+					if i < len(job.ProcessResults.Receipts) && job.ProcessResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
+						mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
+					} else {
+						mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 					}
 				}
 			}
-
-			// MEMORY OPTIMIZATION: Eagerly clear all committed MVMApi instances
-			// instead of relying solely on RemoveOldApiInstances() GC (50K threshold).
-			// Safe because no consumer reads MVMApi after commit/revert phase.
-			for mvmId := range committedMvmIds {
-				mvm.ClearMVMApi(mvmId)
-			}
+			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
+			// to prevent unbounded memory growth from cached EVM instances.
 			mvm.RemoveOldApiInstances()
 		}
 

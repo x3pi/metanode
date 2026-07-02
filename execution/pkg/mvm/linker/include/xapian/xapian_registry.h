@@ -90,6 +90,8 @@ public:
      * @return Một mảng 32 byte đại diện cho giá trị băm Keccak-256. Trả về một giá trị băm bằng không
      * nếu không tìm thấy trình quản lý nào hoặc nếu xảy ra lỗi.
      */
+    void clearBufferForTxHash(const uint256_t* txHash);
+    void commitBufferForTxHash(const uint256_t* txHash);
     std::map<mvm::Address, std::array<uint8_t, 32u>> getGroupHashForMvmId(unsigned char *mvmId) const;
 
     /**
@@ -100,7 +102,7 @@ public:
      * @return True nếu việc xác nhận thành công (hoặc không có trình quản lý nào cần xác nhận),
      * False nếu bất kỳ trình quản lý nào không xác nhận được hoặc nếu khóa mvmId không hợp lệ.
      */
-    bool commitChangesForMvmId(unsigned char *mvmId);
+    bool commitChangesForMvmId(unsigned char *mvmId, unsigned char *txHashes, int numHashes);
 
     /**
      * @brief Cố gắng hoàn tác các thay đổi chưa được xác nhận cho tất cả các XapianManager
@@ -128,13 +130,6 @@ public:
 
 
 private:
-    // --- Dữ liệu thành viên ---
-    // Bản đồ đồng thời cốt lõi lưu trữ dữ liệu registry.
-    tbb::concurrent_hash_map<std::string, std::vector<std::shared_ptr<XapianManager>>> m_mvmId_to_managers;
-
-    // --- Các hàm trợ giúp riêng (nếu cần) ---
-    // Ví dụ: Nếu getMvmIdKey chỉ được sử dụng nội bộ, nó có thể là private static:
-    // static std::string getMvmIdKey(unsigned char* mvmId);
 };
 
 extern XapianRegistry registry;

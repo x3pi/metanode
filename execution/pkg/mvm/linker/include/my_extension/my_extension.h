@@ -12,9 +12,10 @@ using Code = std::vector<uint8_t>;
 class MyExtension : public mvm::Extension {
 public:
   unsigned char *mvmId;
+  const uint256_t *txHash;
   bool isOffChain;
-  MyExtension(unsigned char *id, bool offChain = false)
-      : mvmId(id), isOffChain(offChain) {}
+  MyExtension(unsigned char *id, bool offChain = false, const uint256_t *hash = nullptr)
+      : mvmId(id), txHash(hash), isOffChain(offChain) {}
   mvm::Code CallGetApi(mvm::Code input);
   mvm::Code ExtractJsonField(mvm::Code input);
   mvm::Code Blst(mvm::Code input);
@@ -30,8 +31,8 @@ public:
   mvm::Code PointEvaluationVerify(mvm::Code input);
   mvm::Code SimpleDatabase(mvm::Code input, mvm::Address address);
   mvm::Code FullDatabase(mvm::Code input, mvm::Address address, bool isReset,
-                         uint256_t blockNumber);
+                         uint256_t blockNumber, mvm::GlobalState* gs = nullptr) override;
   mvm::Code FullDatabaseV1(mvm::Code input, mvm::Address address, bool isReset,
-                           uint256_t blockNumber);
+                           uint256_t blockNumber, mvm::GlobalState* gs = nullptr) override;
   mvm::Code PublicKeyFromPrivateKey(mvm::Code input);
 };

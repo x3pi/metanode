@@ -53,9 +53,11 @@ set(LINKER_SRCS
   src/my_extension/constants.cpp
   src/my_extension/utils.cpp
   src/xapian/xapian_manager.cpp
+  src/xapian/xapian_manager_resolve.cpp
   src/xapian/xapian_search.cpp
   src/xapian/xapian_registry.cpp
   src/xapian/xapian_log.cpp
+
   src/abi/encoding_utils.cpp
   src/cross_chain_precompile.cpp
 )

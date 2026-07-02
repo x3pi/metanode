@@ -15,6 +15,8 @@ const Address CROSS_CHAIN_ADDRESS = 0xB429C0B2; // Merged with Gateway CC
 /**
  * An account and its storage
  */
+struct GlobalState;
+
 struct Extension {
   virtual Code CallGetApi(Code input) = 0;
   virtual Code ExtractJsonField(Code input) = 0;
@@ -22,10 +24,11 @@ struct Extension {
   virtual Code Math(Code input) = 0;
   virtual Code Ecrecover(mvm::Code input) = 0;
   virtual Code SimpleDatabase(Code input, Address address) = 0;
+  
   virtual Code FullDatabase(Code input, Address address, bool isReset,
-                            uint256_t blockNumber) = 0;
+                            uint256_t blockNumber, GlobalState* gs = nullptr) = 0;
   virtual Code FullDatabaseV1(Code input, Address address, bool isReset,
-                              uint256_t blockNumber) = 0;
+                              uint256_t blockNumber, GlobalState* gs = nullptr) = 0;
   virtual Code Sha256(mvm::Code input) = 0;
   virtual Code EcAdd(mvm::Code input) = 0;
   virtual Code Ripemd160(mvm::Code input) = 0;
