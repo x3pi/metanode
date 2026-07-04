@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"os"
+
 	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -242,22 +244,24 @@ func VerifyTransaction(
 		} else {
 			if !isCrossChainBatchSubmit {
 				if !LoadVerifiedSignature(txHash) {
-					request := transaction.NewVerifyTransactionRequest(
-						tx.Hash(),
-						common.PubkeyFromBytes(as.PublicKeyBls()),
-						tx.Sign(),
-					)
-					if !request.Valid() {
-						logger.Error("BLS Verification Failed!")
-						logger.Error("  txHashHex: %s", txHash.Hex())
-						logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
-						logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
-						logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
-						logger.Error("  SenderSign: %x", tx.Sign().Bytes())
-						logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
-						if !tx.ValidEthSign() {
-							logger.Error("  ETH Verification also failed!")
-							return transaction.InvalidSign
+					if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") != "true" {
+						request := transaction.NewVerifyTransactionRequest(
+							tx.Hash(),
+							common.PubkeyFromBytes(as.PublicKeyBls()),
+							tx.Sign(),
+						)
+						if !request.Valid() {
+							logger.Error("BLS Verification Failed!")
+							logger.Error("  txHashHex: %s", txHash.Hex())
+							logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
+							logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
+							logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
+							logger.Error("  SenderSign: %x", tx.Sign().Bytes())
+							logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
+							if !tx.ValidEthSign() {
+								logger.Error("  ETH Verification also failed!")
+								return transaction.InvalidSign
+							}
 						}
 					}
 					// Only cache on successful validation
@@ -440,6 +444,11 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 	verifyFn := func(tx types.Transaction) {
 		txHash := tx.Hash()
 		if LoadVerifiedSignature(txHash) {
+			return
+		}
+
+		if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
+			StoreVerifiedSignature(txHash)
 			return
 		}
 
