@@ -467,7 +467,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
 }
 
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
     return doc.get_data();
@@ -478,7 +478,7 @@ std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t b
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-    std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+    std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
         return doc.get_value(slot);
@@ -488,7 +488,7 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
 
 // Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
 DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   DocumentInfo info;
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
@@ -500,7 +500,7 @@ DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint25
 // Lấy danh sách các term của document tại một block number
 std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocId,
                                                   uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   std::vector<std::string> terms;
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
