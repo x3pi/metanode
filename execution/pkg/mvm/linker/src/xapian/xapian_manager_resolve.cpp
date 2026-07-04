@@ -4,6 +4,7 @@
 
 // Helper function to insert into xapian_manager.cpp
 Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocIdStr) {
+    std::lock_guard<std::recursive_mutex> lock(db_mutex);
     if (virtualDocIdStr.empty()) return 0;
     try {
         // Parse the hex string to uint256_t

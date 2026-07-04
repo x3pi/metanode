@@ -120,6 +120,7 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 
                 // [FIX] BẮT BUỘC gọi db.commit() để lưu thay đổi xuống đĩa
                 try {
+                    std::lock_guard<std::recursive_mutex> db_lock(manager_ptr->db_mutex);
                     manager_ptr->db.commit();
                     std::cerr << "[DEBUG] commitBufferForTxHash DB COMMIT SUCCESS!" << std::endl;
                 } catch (const std::exception& e) {

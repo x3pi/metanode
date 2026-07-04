@@ -55,7 +55,7 @@ public:
   void acquireSearchSlot();
   void releaseSearchSlot();
 
-  mutable std::mutex db_mutex; // Mutex to protect all operations on db
+  mutable std::recursive_mutex db_mutex; // Mutex to protect all operations on db
 
   // Thêm thành viên để lưu khóa mvmId liên kết
 

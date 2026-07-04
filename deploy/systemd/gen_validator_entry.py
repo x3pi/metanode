@@ -407,8 +407,8 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
-    parser.add_argument("--consensus-max-txs-per-block", type=int, default=10000,
-                        help="Maximum number of transactions proposed in a single consensus block (default: 10000)")
+    parser.add_argument("--consensus-max-txs-per-block", type=int, default=50000,
+                        help="Maximum number of transactions proposed in a single consensus block (default: 50000)")
     return parser.parse_args()
 
 
