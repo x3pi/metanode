@@ -1,0 +1,1224 @@
+//! mtn-nomt-ffi: C-FFI bridge for NOMT (Nearly Optimal Merkle Trie)
+//!
+//! This crate provides a C-compatible API for Go (via CGo) to interact with NOMT.
+//! The API is designed around batch operations to minimize FFI call overhead.
+//!
+//! Thread Safety:
+//! - A single `NomtHandle` is created per node and lives for the entire epoch.
+//! - Multiple concurrent readers are supported via `nomt_read`.
+//! - Writes are batched: `nomt_session_begin` → N × `nomt_session_write` → `nomt_session_commit`.
+//! - Only one write session may be active at a time (enforced by NOMT internally).
+pub mod state_db;
+pub use state_db::RustStateDB;
+
+use libc::{c_char, c_int, size_t};
+pub use nomt::hasher::Blake3Hasher;
+use nomt::{KeyReadWrite, Nomt, Options};
+use std::ffi::CStr;
+use std::fs;
+use std::path::Path;
+use std::ptr;
+use std::slice;
+
+macro_rules! ffi_catch_unwind {
+    ($default:expr, $body:expr) => {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $body
+        })).unwrap_or_else(|err| {
+            eprintln!("[nomt_ffi] PANIC CAUGHT: {:?}", err);
+            $default
+        })
+    };
+}
+
+
+
+/// Opaque handle to the NOMT database instance.
+/// Wrapped in Mutex to safely share between Go goroutines.
+pub struct NomtHandle {
+    pub db: std::sync::Arc<Nomt<Blake3Hasher>>,
+}
+
+/// Opaque handle to a write session.
+/// Accumulates writes and commits them atomically.
+pub struct SessionHandle {
+    /// The true NOMT session, bound to a 'static lifetime because Go guarantees
+    /// the NomtHandle outlives the SessionHandle.
+    session: nomt::Session<Blake3Hasher>,
+    /// Accumulated writes: (key_path, value). Sorted before commit.
+    writes: Vec<([u8; 32], Option<Vec<u8>>)>,
+    /// Accumulated reads: (key_path, value). Used for ReadThenWrite semantics.
+    reads: Vec<([u8; 32], Option<Vec<u8>>)>,
+}
+
+/// Opaque handle to a finished session ready to be committed to disk.
+pub struct FinishedSessionHandle {
+    finished: nomt::FinishedSession,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATABASE LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Open a NOMT database at the given path.
+///
+/// Returns a pointer to NomtHandle on success, null on failure.
+/// The caller must eventually call `nomt_close` to free resources.
+///
+/// # Parameters
+/// - `path`: null-terminated C string for the database directory path
+/// - `commit_concurrency`: number of concurrent commit workers (1-64)
+/// - `page_cache_mb`: page cache size in MiB (default: 256)
+/// - `leaf_cache_mb`: leaf cache size in MiB (default: 256)
+fn get_num_pages_from_total_pages(total_pages: u64) -> Option<u32> {
+    if total_pages == 0 {
+        return None;
+    }
+    let mut num_pages = (total_pages * 4096 / 4097) as u32;
+    for _ in 0..5 {
+        let meta_pages = (num_pages + 4095) / 4096;
+        let got_total = num_pages as u64 + meta_pages as u64;
+        if got_total == total_pages {
+            return Some(num_pages);
+        } else if got_total < total_pages {
+            num_pages += 1;
+        } else {
+            if num_pages == 0 {
+                break;
+            }
+            num_pages -= 1;
+        }
+    }
+    None
+}
+
+/// Open a NOMT database at the given path.
+///
+/// Returns a pointer to NomtHandle on success, null on failure.
+/// The caller must eventually call `nomt_close` to free resources.
+///
+/// # Parameters
+/// - `path`: null-terminated C string for the database directory path
+/// - `commit_concurrency`: number of concurrent commit workers (1-64)
+/// - `page_cache_mb`: page cache size in MiB (default: 256)
+/// - `leaf_cache_mb`: leaf cache size in MiB (default: 256)
+#[no_mangle]
+pub unsafe extern "C" fn nomt_open(
+    path: *const c_char,
+    commit_concurrency: c_int,
+    page_cache_mb: c_int,
+    leaf_cache_mb: c_int,
+    hashtable_buckets: c_int,
+    preallocate_ht: c_int,
+) -> *mut NomtHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
+    if path.is_null() {
+        eprintln!("[nomt_ffi] nomt_open: null path");
+        return ptr::null_mut();
+    }
+
+    let c_str = unsafe { CStr::from_ptr(path) };
+    let path_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_open: invalid UTF-8 path: {}", e);
+            return ptr::null_mut();
+        }
+    };
+
+    let mut resolved_buckets = hashtable_buckets;
+    let ht_path = Path::new(path_str).join("ht");
+    if ht_path.exists() {
+        if let Ok(metadata) = fs::metadata(&ht_path) {
+            let file_size = metadata.len();
+            if file_size > 0 && file_size % 4096 == 0 {
+                let total_pages = file_size / 4096;
+                if let Some(num_pages) = get_num_pages_from_total_pages(total_pages) {
+                    eprintln!(
+                        "[nomt_ffi] Detected existing HT file for path '{}' with {} pages (requested {}). Overriding.",
+                        path_str, num_pages, hashtable_buckets
+                    );
+                    resolved_buckets = num_pages as c_int;
+                }
+            }
+        }
+    }
+
+    let mut opts = Options::new();
+    opts.path(path_str);
+
+    let concurrency = if commit_concurrency > 0 {
+        commit_concurrency as usize
+    } else {
+        4
+    };
+    opts.commit_concurrency(concurrency);
+
+    if page_cache_mb > 0 {
+        opts.page_cache_size(page_cache_mb as usize);
+    }
+    if leaf_cache_mb > 0 {
+        opts.leaf_cache_size(leaf_cache_mb as usize);
+    }
+
+    if resolved_buckets > 0 {
+        opts.hashtable_buckets(resolved_buckets as u32);
+    }
+
+    opts.preallocate_ht(preallocate_ht != 0);
+
+    // Enable page cache prepopulation for predictable worst-case performance
+    opts.prepopulate_page_cache(true);
+    opts.page_cache_upper_levels(3);
+
+    match Nomt::<Blake3Hasher>::open(opts) {
+        Ok(db) => {
+            let handle = Box::new(NomtHandle { db: std::sync::Arc::new(db) });
+            Box::into_raw(handle)
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_open failed: {}", e);
+            ptr::null_mut()
+        }
+    }
+
+    })
+}
+
+/// Close a NOMT database and free all resources.
+///
+/// # Safety
+/// The handle must have been created by `nomt_open` and not yet closed.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_close(handle: *mut NomtHandle) {
+    ffi_catch_unwind!((), {
+
+    if !handle.is_null() {
+        unsafe {
+            let _ = Box::from_raw(handle);
+        }
+    }
+
+    })
+}
+
+/// Get the current root hash of the trie.
+///
+/// # Parameters
+/// - `handle`: NOMT handle
+/// - `root_out`: pointer to a 32-byte buffer to receive the root hash
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || root_out.is_null() {
+        return -1;
+    }
+
+    let handle = unsafe { &*handle };
+    let root = handle.db.root();
+    let root_bytes = root.into_inner();
+
+    unsafe {
+        ptr::copy_nonoverlapping(root_bytes.as_ptr(), root_out, 32);
+    }
+    0
+
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// READ OPERATIONS (can be called concurrently)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Read a value from the database.
+///
+/// # Parameters
+/// - `handle`: NOMT handle
+/// - `key`: pointer to a 32-byte key (KeyPath)
+/// - `val_out`: pointer to a buffer to receive the value
+/// - `val_max_len`: maximum length of the output buffer
+/// - `val_actual_len`: pointer to receive the actual value length
+///
+/// # Returns
+/// - 0: key found, value written to val_out
+/// - 1: key not found (no value)
+/// - -1: error
+#[no_mangle]
+pub unsafe extern "C" fn nomt_read(
+    handle: *const NomtHandle,
+    key: *const u8,
+    val_out: *mut u8,
+    val_max_len: size_t,
+    val_actual_len: *mut size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || key.is_null() {
+        return -1;
+    }
+
+    let handle = unsafe { &*handle };
+    let key_path: [u8; 32] = unsafe {
+        let mut kp = [0u8; 32];
+        ptr::copy_nonoverlapping(key, kp.as_mut_ptr(), 32);
+        kp
+    };
+
+    match handle.db.read(key_path) {
+        Ok(Some(value)) => {
+            if val_out.is_null() || val_actual_len.is_null() {
+                return -1;
+            }
+            let len = value.len().min(val_max_len);
+            unsafe {
+                ptr::copy_nonoverlapping(value.as_ptr(), val_out, len);
+                *val_actual_len = value.len();
+            }
+            0
+        }
+        Ok(None) => {
+            if !val_actual_len.is_null() {
+                unsafe { *val_actual_len = 0; }
+            }
+            1 // not found
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_read error: {}", e);
+            -1
+        }
+    }
+
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WRITE SESSION (single-writer, batch commit)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Begin a new write session.
+///
+/// The returned handle accumulates writes. Call `nomt_session_commit`
+/// to atomically apply all writes and compute the new root hash.
+///
+/// # Returns
+/// Pointer to SessionHandle, or null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_begin(handle: *mut NomtHandle) -> *mut SessionHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let handle_ref = unsafe { &*handle };
+    // Transmute to 'static: this is safe because the Go garbage collector and FFI bridge
+    // strictly guarantee that the NomtHandle lives longer than any SessionHandle.
+    let handle_static: &'static NomtHandle = unsafe { std::mem::transmute(handle_ref) };
+    
+    let session = handle_static.db.begin_session(nomt::SessionParams::default());
+    
+    let session_handle = Box::new(SessionHandle {
+        session,
+        writes: Vec::with_capacity(64 * 1024), // pre-allocate for ~64k writes
+        reads: Vec::new(),
+    });
+    Box::into_raw(session_handle)
+
+    })
+}
+
+/// Dispatches a background asynchronous fetch to the NOMT threadpool to load 
+/// the Merkle authentication branch for this key.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_warm_up(
+    session: *mut SessionHandle,
+    key: *const u8,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if session.is_null() || key.is_null() {
+        return -1;
+    }
+
+    let session_ref = unsafe { &*session };
+    let key_path: [u8; 32] = unsafe {
+        let mut kp = [0u8; 32];
+        ptr::copy_nonoverlapping(key, kp.as_mut_ptr(), 32);
+        kp
+    };
+
+    session_ref.session.warm_up(key_path);
+    0
+
+    })
+}
+
+/// Add a read record to the session (for ReadThenWrite tracking).
+///
+/// This records the value that was read for a key BEFORE it gets written.
+/// During commit, keys that have both a read and a write will use
+/// ReadThenWrite semantics (needed by NOMT for rollback delta computation).
+///
+/// # Parameters
+/// - `session`: session handle
+/// - `key`: pointer to a 32-byte key
+/// - `val`: pointer to previous value bytes (null if key didn't exist)
+/// - `val_len`: length of the previous value (0 if key didn't exist)
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_record_read(
+    session: *mut SessionHandle,
+    key: *const u8,
+    val: *const u8,
+    val_len: size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if session.is_null() || key.is_null() {
+        return -1;
+    }
+
+    let session = unsafe { &mut *session };
+    let key_path: [u8; 32] = unsafe {
+        let mut kp = [0u8; 32];
+        ptr::copy_nonoverlapping(key, kp.as_mut_ptr(), 32);
+        kp
+    };
+
+    let value = if val.is_null() || val_len == 0 {
+        None
+    } else {
+        Some(unsafe { slice::from_raw_parts(val, val_len) }.to_vec())
+    };
+
+    session.reads.push((key_path, value));
+    0
+
+    })
+}
+
+/// Add a write to the session.
+///
+/// # Parameters
+/// - `session`: session handle
+/// - `key`: pointer to a 32-byte key
+/// - `val`: pointer to value bytes (null to delete the key)
+/// - `val_len`: length of the value (0 to delete)
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_write(
+    session: *mut SessionHandle,
+    key: *const u8,
+    val: *const u8,
+    val_len: size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if session.is_null() || key.is_null() {
+        return -1;
+    }
+
+    let session = unsafe { &mut *session };
+    let key_path: [u8; 32] = unsafe {
+        let mut kp = [0u8; 32];
+        ptr::copy_nonoverlapping(key, kp.as_mut_ptr(), 32);
+        kp
+    };
+
+    let value = if val.is_null() || val_len == 0 {
+        None
+    } else {
+        Some(unsafe { slice::from_raw_parts(val, val_len) }.to_vec())
+    };
+
+    session.writes.push((key_path, value));
+    0
+
+    })
+}
+
+/// Batch-add multiple writes to the session at once.
+///
+/// This is the high-performance path: Go collects all dirty accounts,
+/// marshals them, and passes them in a single FFI call to avoid
+/// per-account FFI overhead.
+///
+/// # Parameters
+/// - `session`: session handle
+/// - `keys`: pointer to N × 32-byte keys (contiguous)
+/// - `vals`: pointer to flattened values
+/// - `val_lens`: pointer to array of N value lengths
+/// - `count`: number of key-value pairs
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_batch_write(
+    session: *mut SessionHandle,
+    keys: *const u8,
+    vals: *const u8,
+    val_lens: *const size_t,
+    count: size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if session.is_null() || keys.is_null() || val_lens.is_null() {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    let session = unsafe { &mut *session };
+    session.writes.reserve(count);
+
+    unsafe {
+        let mut val_offset = 0;
+        for i in 0..count {
+            let mut kp = [0u8; 32];
+            ptr::copy_nonoverlapping(keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+            let val_len = *val_lens.add(i);
+
+            let value = if vals.is_null() || val_len == 0 {
+                None
+            } else {
+                let v = Some(slice::from_raw_parts(vals.add(val_offset), val_len).to_vec());
+                val_offset += val_len;
+                v
+            };
+
+            session.writes.push((kp, value));
+        }
+    }
+    0
+
+    })
+}
+
+/// Batch-add multiple read records to the session (for ReadThenWrite tracking).
+///
+/// # Parameters
+/// - `session`: session handle
+/// - `keys`: pointer to N × 32-byte keys (contiguous)
+/// - `vals`: pointer to flattened values
+/// - `val_lens`: pointer to array of N value lengths (0 if key didn't exist)
+/// - `count`: number of key-value pairs
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_batch_record_read(
+    session: *mut SessionHandle,
+    keys: *const u8,
+    vals: *const u8,
+    val_lens: *const size_t,
+    count: size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if session.is_null() || keys.is_null() || val_lens.is_null() {
+        return -1;
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    let session = unsafe { &mut *session };
+    session.reads.reserve(count);
+
+    unsafe {
+        let mut val_offset = 0;
+        for i in 0..count {
+            let mut kp = [0u8; 32];
+            ptr::copy_nonoverlapping(keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+            let val_len = *val_lens.add(i);
+
+            let value = if vals.is_null() || val_len == 0 {
+                None
+            } else {
+                let v = Some(slice::from_raw_parts(vals.add(val_offset), val_len).to_vec());
+                val_offset += val_len;
+                v
+            };
+
+            session.reads.push((kp, value));
+        }
+    }
+    0
+
+    })
+}
+
+
+/// Commit the session: apply all accumulated writes to the database
+/// and compute the new Merkle root.
+///
+/// After commit, the session handle is consumed and freed.
+///
+/// # Parameters
+/// - `handle`: NOMT database handle
+/// - `session`: session handle (consumed after this call)
+/// - `new_root_out`: pointer to a 32-byte buffer to receive the new root hash
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_commit(
+    handle: *mut NomtHandle,
+    session: *mut SessionHandle,
+    new_root_out: *mut u8,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || session.is_null() {
+        return -1;
+    }
+
+    let handle = unsafe { &*handle };
+    let session = unsafe { Box::from_raw(session) };
+
+    // Build a lookup map for reads (for ReadThenWrite semantics)
+    let mut read_map = std::collections::HashMap::with_capacity(session.reads.len());
+    for (key, val) in &session.reads {
+        read_map.insert(*key, val.clone());
+    }
+
+    // Build the actuals vector: sorted by KeyPath as required by NOMT
+    let mut actuals: Vec<([u8; 32], KeyReadWrite)> = Vec::with_capacity(session.writes.len());
+
+    for (key, new_val) in session.writes {
+        if let Some(old_val) = read_map.get(&key) {
+            // Key was read before being written → ReadThenWrite
+            actuals.push((key, KeyReadWrite::ReadThenWrite(old_val.clone(), new_val)));
+        } else {
+            // Key was only written (new key or blind overwrite)
+            actuals.push((key, KeyReadWrite::Write(new_val)));
+        }
+    }
+
+    // CRITICAL: NOMT requires actuals sorted by KeyPath
+    actuals.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Deduplicate: if the same key appears multiple times, keep only the last write
+    actuals.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            // Keep `b` (which comes earlier in sorted order after dedup_by semantics)
+            // Actually dedup_by removes `a` if closure returns true, keeping `b`.
+            // We want to keep the LAST write. Since we haven't reversed, and dedup_by
+            // keeps the first of duplicates, let's handle this by overwriting.
+            std::mem::swap(a, b);
+            true
+        } else {
+            false
+        }
+    });
+
+    // Finish the session and commit
+    match session.session.finish(actuals) {
+        Ok(finished) => {
+            let root = finished.root();
+            let root_bytes = root.into_inner();
+
+            match finished.commit(&handle.db) {
+                Ok(()) => {
+                    if !new_root_out.is_null() {
+                        unsafe {
+                            ptr::copy_nonoverlapping(
+                                root_bytes.as_ptr(),
+                                new_root_out,
+                                32,
+                            );
+                        }
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("[nomt_ffi] nomt_session_commit: commit failed: {}", e);
+                    -1
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_session_commit: finish failed: {}", e);
+            -1
+        }
+    }
+
+    })
+}
+
+/// Finish the session: compute the Merkle root but DO NOT write to disk yet.
+/// This is fast and CPU-bound.
+///
+/// # Returns
+/// Pointer to FinishedSessionHandle, or null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_finish(
+    handle: *mut NomtHandle,
+    session: *mut SessionHandle,
+    new_root_out: *mut u8,
+) -> *mut FinishedSessionHandle {
+    ffi_catch_unwind!(std::ptr::null_mut(), {
+
+    if handle.is_null() || session.is_null() {
+        return ptr::null_mut();
+    }
+
+    let _handle = unsafe { &*handle };
+    let session = unsafe { Box::from_raw(session) };
+
+    let mut read_map = std::collections::HashMap::with_capacity(session.reads.len());
+    for (key, val) in &session.reads {
+        read_map.insert(*key, val.clone());
+    }
+
+    let mut actuals: Vec<([u8; 32], KeyReadWrite)> = Vec::with_capacity(session.writes.len());
+
+    for (key, new_val) in session.writes {
+        if let Some(old_val) = read_map.get(&key) {
+            actuals.push((key, KeyReadWrite::ReadThenWrite(old_val.clone(), new_val)));
+        } else {
+            actuals.push((key, KeyReadWrite::Write(new_val)));
+        }
+    }
+
+    actuals.sort_by(|a, b| a.0.cmp(&b.0));
+    actuals.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            std::mem::swap(a, b);
+            true
+        } else {
+            false
+        }
+    });
+
+    match session.session.finish(actuals) {
+        Ok(finished) => {
+            let root = finished.root();
+            let root_bytes = root.into_inner();
+            if !new_root_out.is_null() {
+                unsafe {
+                    ptr::copy_nonoverlapping(root_bytes.as_ptr(), new_root_out, 32);
+                }
+            }
+            
+            let finished_handle = Box::new(FinishedSessionHandle { finished });
+            Box::into_raw(finished_handle)
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_session_finish failed: {}", e);
+            ptr::null_mut()
+        }
+    }
+
+    })
+}
+
+/// Commit a finished session to disk (Disk I/O bound).
+///
+/// # Returns
+/// 0 on success, -1 on test failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_commit_payload(
+    handle: *mut NomtHandle,
+    finished_session: *mut FinishedSessionHandle,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || finished_session.is_null() {
+        return -1;
+    }
+
+    let handle = unsafe { &*handle };
+    let finished_session = unsafe { Box::from_raw(finished_session) };
+
+    match finished_session.finished.commit(&handle.db) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_commit_payload failed: {}", e);
+            -1
+        }
+    }
+
+    })
+}
+
+/// Abort an uncommitted finished session.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_finished_session_abort(finished_session: *mut FinishedSessionHandle) {
+    ffi_catch_unwind!((), {
+
+    if !finished_session.is_null() {
+        unsafe {
+            let _ = Box::from_raw(finished_session);
+        }
+    }
+
+    })
+}
+
+/// Abort an uncommitted session and free its resources.
+///
+/// # Safety
+/// The session handle must have been created by `nomt_session_begin` and not yet committed.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_session_abort(session: *mut SessionHandle) {
+    ffi_catch_unwind!((), {
+
+    if !session.is_null() {
+        unsafe {
+            let _ = Box::from_raw(session);
+        }
+    }
+
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHECKPOINT (snapshot without close/reopen)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Recursively copy a directory tree using hard links for regular files
+/// (instant, O(1) per file) with `fs::copy` as fallback (e.g. cross-device).
+/// Skips `.lock` files which are OS advisory flocks, not data.
+fn recursive_copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
+    if let Err(e) = fs::create_dir_all(dest) {
+        return Err(format!("failed to create dir {:?}: {}", dest, e));
+    }
+
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("failed to read dir {:?}: {}", src, e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read dir entry in {:?}: {}", src, e))?;
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        // Skip .lock file (OS advisory flock, not data)
+        if filename_str == ".lock" {
+            continue;
+        }
+
+        let src_path = src.join(&filename);
+        let dest_path = dest.join(&filename);
+        let file_type = entry.file_type()
+            .map_err(|e| format!("failed to get file type for {:?}: {}", src_path, e))?;
+
+        if file_type.is_dir() {
+            // CRITICAL FIX: Recursively copy subdirectories (including `wal`).
+            // The old code skipped all subdirectories, causing WAL data loss and
+            // silent B-Tree corruption on restore.
+            recursive_copy_dir(&src_path, &dest_path)?;
+        } else if file_type.is_file() {
+            // Try hard_link first (instant, O(1), zero disk I/O).
+            // Falls back to fs::copy if hard_link fails (e.g. cross-device mount).
+            if fs::hard_link(&src_path, &dest_path).is_err() {
+                fs::copy(&src_path, &dest_path)
+                    .map_err(|e| format!("failed to copy {:?} -> {:?}: {}", src_path, dest_path, e))?;
+            }
+        }
+        // Skip symlinks and other special files
+    }
+
+    Ok(())
+}
+
+/// Create a filesystem-level checkpoint of the NOMT database by recursively
+/// copying all data files (including WAL subdirectories) to a destination.
+///
+/// The database remains OPEN during this operation — no close/reopen needed.
+/// This is safe because the caller (Go SnapshotManager) guarantees:
+///   1. PauseExecution() → no active sessions
+///   2. WaitForPersistence() → all disk I/O flushed
+///   3. h.mu.Lock() → exclusive access at Go level
+///
+/// Uses hard links for regular files (instant, O(1)) with fs::copy fallback.
+/// Recursively copies ALL subdirectories (including `wal`) to prevent corruption.
+/// Skips only `.lock` files (OS advisory flocks, not data).
+///
+/// # Parameters
+/// - `handle`: NOMT handle (must be valid/open)
+/// - `src_path`: null-terminated C string for the source database directory
+/// - `dest_path`: null-terminated C string for the destination directory
+///
+/// # Returns
+/// 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_checkpoint(
+    handle: *const NomtHandle,
+    src_path: *const c_char,
+    dest_path: *const c_char,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || src_path.is_null() || dest_path.is_null() {
+        eprintln!("[nomt_ffi] nomt_checkpoint: null argument");
+        return -1;
+    }
+
+    let src_str = match unsafe { CStr::from_ptr(src_path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint: invalid src path: {}", e);
+            return -1;
+        }
+    };
+
+    let dest_str = match unsafe { CStr::from_ptr(dest_path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint: invalid dest path: {}", e);
+            return -1;
+        }
+    };
+
+    let src = Path::new(src_str);
+    let dest = Path::new(dest_str);
+
+    match recursive_copy_dir(src, dest) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_checkpoint failed: {}", e);
+            -1
+        }
+    }
+
+    })
+}
+
+/// Generate a Merkle proof for the given key path.
+/// - `handle`: NOMT database handle
+/// - `key`: 32-byte key path
+/// - `proof_out`: Pointer to receive the allocated proof byte array
+/// - `proof_len`: Pointer to receive the length of the proof byte array
+///
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_generate_proof(
+    handle: *const NomtHandle,
+    key: *const u8,
+    proof_out: *mut *mut u8,
+    proof_len: *mut usize,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null() || key.is_null() || proof_out.is_null() || proof_len.is_null() {
+        eprintln!("[nomt_ffi] nomt_generate_proof: null pointer argument");
+        return -1;
+    }
+
+    let handle_ref = unsafe { &*handle };
+    let key_slice = unsafe { std::slice::from_raw_parts(key, 32) };
+    let mut key_path = [0u8; 32];
+    key_path.copy_from_slice(key_slice);
+
+    let session = handle_ref.db.begin_session(nomt::SessionParams::default());
+    match session.prove(key_path) {
+        Ok(proof) => {
+            match bincode::serialize(&proof) {
+                Ok(mut serialized) => {
+                    serialized.shrink_to_fit();
+                    let ptr = serialized.as_mut_ptr();
+                    let len = serialized.len();
+                    
+                    unsafe {
+                        *proof_out = ptr;
+                        *proof_len = len;
+                    }
+                    
+                    // Prevent Rust from freeing the vector
+                    std::mem::forget(serialized);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("[nomt_ffi] nomt_generate_proof: serialization failed: {}", e);
+                    -1
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[nomt_ffi] nomt_generate_proof: proof generation failed: {}", e);
+            -1
+        }
+    }
+
+    })
+}
+
+/// Free the proof byte array allocated by `nomt_generate_proof`.
+#[no_mangle]
+pub unsafe extern "C" fn nomt_free_proof(proof_ptr: *mut u8, len: usize) {
+    ffi_catch_unwind!((), {
+
+    if !proof_ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(proof_ptr, len, len);
+        }
+    }
+
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFIED STATE DB FFI APIs (SIMPLIFIED BRIDGE)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Opaque wrapper for RustStateDB
+pub struct RustStateDBHandle {
+    pub db: RustStateDB,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_open(
+    path: *const c_char,
+    commit_concurrency: c_int,
+    page_cache_mb: c_int,
+    leaf_cache_mb: c_int,
+    hashtable_buckets: c_int,
+    preallocate_ht: c_int,
+) -> *mut RustStateDBHandle {
+    ffi_catch_unwind!(ptr::null_mut(), {
+        if path.is_null() {
+            return ptr::null_mut();
+        }
+        let c_str = CStr::from_ptr(path);
+        let path_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        let concurrency = if commit_concurrency > 0 { commit_concurrency as usize } else { 4 };
+        let page_cache = if page_cache_mb > 0 { page_cache_mb as usize } else { 256 };
+        let leaf_cache = if leaf_cache_mb > 0 { leaf_cache_mb as usize } else { 256 };
+        let buckets = if hashtable_buckets > 0 { hashtable_buckets as u32 } else { 0 };
+        let preallocate = preallocate_ht != 0;
+
+        match RustStateDB::open(path_str, concurrency, page_cache, leaf_cache, buckets, preallocate) {
+            Ok(db) => Box::into_raw(Box::new(RustStateDBHandle { db })),
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_open failed: {}", e);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_open_from_handle(
+    handle: *mut NomtHandle,
+    path: *const c_char,
+) -> *mut RustStateDBHandle {
+    ffi_catch_unwind!(ptr::null_mut(), {
+        if handle.is_null() || path.is_null() {
+            return ptr::null_mut();
+        }
+        let handle = &*handle;
+        let c_str = CStr::from_ptr(path);
+        let path_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        let db = handle.db.clone();
+        Box::into_raw(Box::new(RustStateDBHandle {
+            db: RustStateDB {
+                db,
+                path: path_str.to_string(),
+                lock: std::sync::RwLock::new(()),
+            }
+        }))
+    })
+}
+
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_close(handle: *mut RustStateDBHandle) {
+    ffi_catch_unwind!((), {
+        if !handle.is_null() {
+            let _ = Box::from_raw(handle);
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_root(handle: *const RustStateDBHandle, root_out: *mut u8) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || root_out.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let r = handle.db.root();
+        ptr::copy_nonoverlapping(r.as_ptr(), root_out, 32);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_get(
+    handle: *const RustStateDBHandle,
+    key: *const u8,
+    val_out: *mut u8,
+    val_max_len: size_t,
+    val_actual_len: *mut size_t,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || key.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let mut key_path = [0u8; 32];
+        ptr::copy_nonoverlapping(key, key_path.as_mut_ptr(), 32);
+
+        match handle.db.read(key_path) {
+            Ok(Some(value)) => {
+                if val_out.is_null() || val_actual_len.is_null() {
+                    return -1;
+                }
+                let len = value.len().min(val_max_len);
+                ptr::copy_nonoverlapping(value.as_ptr(), val_out, len);
+                *val_actual_len = value.len();
+                0
+            }
+            Ok(None) => {
+                if !val_actual_len.is_null() {
+                    *val_actual_len = 0;
+                }
+                1 // not found
+            }
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_get failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_commit(
+    handle: *mut RustStateDBHandle,
+    // Flattened writes: N * 32-byte keys, followed by values
+    write_keys: *const u8,
+    write_vals: *const u8,
+    write_val_lens: *const size_t,
+    write_count: size_t,
+    // Flattened reads: M * 32-byte keys, followed by values (read-before-write)
+    read_keys: *const u8,
+    read_vals: *const u8,
+    read_val_lens: *const size_t,
+    read_count: size_t,
+    root_out: *mut u8,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() {
+            return -1;
+        }
+        let handle = &mut *handle;
+
+        // Parse writes
+        let mut writes = Vec::with_capacity(write_count);
+        if write_count > 0 && !write_keys.is_null() && !write_val_lens.is_null() {
+            let mut val_offset = 0;
+            for i in 0..write_count {
+                let mut kp = [0u8; 32];
+                ptr::copy_nonoverlapping(write_keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+                let val_len = *write_val_lens.add(i);
+                let value = if write_vals.is_null() || val_len == 0 {
+                    None
+                } else {
+                    let v = slice::from_raw_parts(write_vals.add(val_offset), val_len).to_vec();
+                    val_offset += val_len;
+                    Some(v)
+                };
+                writes.push((kp, value));
+            }
+        }
+
+        // Parse reads
+        let mut reads = Vec::with_capacity(read_count);
+        if read_count > 0 && !read_keys.is_null() && !read_val_lens.is_null() {
+            let mut val_offset = 0;
+            for i in 0..read_count {
+                let mut kp = [0u8; 32];
+                ptr::copy_nonoverlapping(read_keys.add(i * 32), kp.as_mut_ptr(), 32);
+
+                let val_len = *read_val_lens.add(i);
+                let value = if read_vals.is_null() || val_len == 0 {
+                    None
+                } else {
+                    let v = slice::from_raw_parts(read_vals.add(val_offset), val_len).to_vec();
+                    val_offset += val_len;
+                    Some(v)
+                };
+                reads.push((kp, value));
+            }
+        }
+
+        match handle.db.commit_session(handle.db.begin_session(), writes, reads) {
+            Ok(new_root) => {
+                if !root_out.is_null() {
+                    ptr::copy_nonoverlapping(new_root.as_ptr(), root_out, 32);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_commit failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_checkpoint(
+    handle: *const RustStateDBHandle,
+    dest_path: *const c_char,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() || dest_path.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        let c_str = CStr::from_ptr(dest_path);
+        let dest_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        match handle.db.checkpoint(dest_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_checkpoint failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn state_db_prune(handle: *mut RustStateDBHandle, old_epoch: u64) -> c_int {
+    ffi_catch_unwind!(-1, {
+        if handle.is_null() {
+            return -1;
+        }
+        let handle = &*handle;
+        match handle.db.prune(old_epoch) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[nomt_ffi] state_db_prune failed: {}", e);
+                -1
+            }
+        }
+    })
+}
+
+pub use nomt::Session;
+

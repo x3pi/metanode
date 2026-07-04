@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-24
+> **Last updated:** 2026-07-03
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -26,7 +26,8 @@ metanode/
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
-└── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+├── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+└── RUST_MIGRATION_STATUS.md ← Detailed report of Go-to-Rust migration status and roadmap
 ```
 
 ### Layer Interaction

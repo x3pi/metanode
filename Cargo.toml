@@ -3,7 +3,6 @@ members = [
     # Core consensus packages
     "consensus/metanode",
     "consensus/client",
-    "execution/pkg/nomt_ffi/rust_lib",
     "consensus/metanode/meta-consensus/core",
     "consensus/metanode/meta-consensus/types",
     "consensus/metanode/meta-consensus/config",
@@ -26,7 +25,7 @@ members = [
     "crates/typed-store-error",
     "crates/typed-store-workspace-hack",
     # Tools
-    "crates/metanode-keytool", "crates/metanode-tee-revm",
+    "crates/metanode-keytool", "crates/metanode-tee-revm", "crates/nomt_db",
 ]
 resolver = "2"
 

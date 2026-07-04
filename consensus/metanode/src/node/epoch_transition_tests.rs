@@ -740,6 +740,8 @@ fn test_committee_source_validate_epoch_match() {
         last_block: 1000,
         is_peer: false,
         peer_rpc_addresses: vec![],
+        rust_execution_enabled: true,
+        storage_path: None,
     };
 
     assert!(source.validate_epoch(5));
@@ -752,6 +754,8 @@ fn test_committee_source_validate_epoch_mismatch() {
         last_block: 1000,
         is_peer: false,
         peer_rpc_addresses: vec![],
+        rust_execution_enabled: true,
+        storage_path: None,
     };
 
     assert!(!source.validate_epoch(3));
@@ -765,9 +769,11 @@ fn test_committee_source_create_executor_client() {
         last_block: 0,
         is_peer: true,
         peer_rpc_addresses: vec!["10.0.0.1:8080".to_string()],
+        rust_execution_enabled: true,
+        storage_path: None,
     };
 
-    let client = source.create_executor_client("/tmp/test_send.sock");
+    let client = source.create_executor_client();
     // Client is created successfully (Arc<ExecutorClient>)
     // ExecutorClient::new passes enabled=true by default
     assert!(client.is_enabled());

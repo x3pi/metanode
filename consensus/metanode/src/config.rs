@@ -84,6 +84,9 @@ pub struct NodeConfig {
     /// This allows flexible testing with different commit node configurations
     #[serde(default)]
     pub executor_commit_enabled: bool,
+    /// Enable pure Rust-native execution engine instead of Go (default: true)
+    #[serde(default = "default_true")]
+    pub rust_execution_enabled: bool,
     #[serde(default)]
     pub consensus_max_num_transactions_in_block: Option<u64>,
 
@@ -361,6 +364,7 @@ impl NodeConfig {
                 moderate_lag_threshold: default_moderate_lag_threshold(),
                 severe_lag_threshold: default_severe_lag_threshold(),
                 tx_trace_enabled: false,
+                rust_execution_enabled: true,
             };
 
             // Save keys - use private_key_bytes and public key bytes

@@ -83,6 +83,10 @@ pub struct ExecutorClient {
     pub(crate) rpc_semaphore: Arc<tokio::sync::Semaphore>,
     /// Timestamp (ms) of the last gap query to Go Master to prevent FFI query flooding
     pub(crate) last_gap_query_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Enable pure Rust execution engine
+    pub(crate) rust_execution_enabled: bool,
+    /// CRITICAL FORK-SAFETY: Tracks the start timestamps (ms) of the epochs we have seen in Rust execution mode
+    pub(crate) epoch_start_timestamps: Arc<tokio::sync::Mutex<std::collections::BTreeMap<u64, u64>>>,
 }
 
 /// Production safety constants
@@ -181,7 +185,22 @@ impl ExecutorClient {
             last_processed_epoch: Arc::new(tokio::sync::Mutex::new(0)),
             rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             last_gap_query_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            rust_execution_enabled: true,
+            epoch_start_timestamps: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
+    }
+
+    /// Builder method to enable Rust-native execution engine
+    pub fn with_rust_execution(mut self, enabled: bool) -> Self {
+        self.rust_execution_enabled = enabled;
+        self
+    }
+
+    /// Set the start timestamp of a specific epoch in Rust execution mode
+    pub async fn set_epoch_timestamp(&self, epoch: u64, timestamp_ms: u64) {
+        let mut timestamps = self.epoch_start_timestamps.lock().await;
+        timestamps.insert(epoch, timestamp_ms);
+        info!("📅 [EXECUTOR CLIENT] Cached epoch {} start timestamp: {}ms", epoch, timestamp_ms);
     }
 
     /// Check if executor is enabled

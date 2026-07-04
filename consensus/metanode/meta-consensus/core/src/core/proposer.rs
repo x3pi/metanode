@@ -149,11 +149,15 @@ impl Core {
             // RELAXED thresholds break the feedback loop while still preventing OOM:
             //   - Moderate: 500 blocks (was 100) — light throttle, max 500ms
             //   - Severe: 1000 blocks (was 200) — matches authQueue capacity
-            let go_lag = self
+            let mut go_lag = self
                 .system_transaction_provider
                 .as_ref()
                 .map(|p| p.get_go_lag())
                 .unwrap_or(0);
+
+            if std::env::var("RUST_EXECUTION_ENABLED").unwrap_or_default() == "true" {
+                go_lag = 0;
+            }
 
             if go_lag >= 50000 { // Start throttling at moderate_lag_threshold (50000, was 500)
                 let extra_delay = if go_lag >= 100000 { // severe_lag_threshold (100000, was 1000)

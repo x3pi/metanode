@@ -1,1 +1,0 @@
-sed -i 's/let _upgrade_result = transition_mode_only(/let _upgrade_result = super::mode_transition::handle_synconly_upgrade_wait(/g' /home/abc/chain-n/metanode/consensus/metanode/src/node/transition/epoch_transition.rs

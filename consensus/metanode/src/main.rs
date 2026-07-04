@@ -47,6 +47,12 @@ async fn main() -> Result<()> {
         Commands::Start { config } => {
             let node_config = NodeConfig::load(&config)?;
 
+            if node_config.rust_execution_enabled {
+                std::env::set_var("RUST_EXECUTION_ENABLED", "true");
+            } else {
+                std::env::set_var("RUST_EXECUTION_ENABLED", "false");
+            }
+
             // Initialize tracing from config file
             let log_config = node_config.log.clone().unwrap_or_default();
             let level = log_config.level.clone();
@@ -77,8 +83,30 @@ async fn main() -> Result<()> {
             info!("Network address: {}", node_config.network_address);
 
             // Initialize and start the node
-            let startup_config = StartupConfig::new(node_config, registry, None);
+            let startup_config = StartupConfig::new(node_config.clone(), registry, None);
             let initialized_node = InitializedNode::initialize(startup_config).await?;
+
+            // Get transaction submitter from initialized node
+            let tx_submitter = { initialized_node.node.read().await.transaction_submitter() };
+
+            // JSON-RPC has been removed from consensus engine (mock RPC deleted).
+            // External clients should query the real Go Execution RPC instead.
+
+            // Start legacy TCP P2P server for tps_blast_cc compatibility
+            let tcp_port = 6200 + node_config.node_id as u16;
+            let tx_recycler = { initialized_node.node.read().await.tx_recycler() };
+            if let Err(e) = metanode::tcp_server::start_tcp_server(tcp_port, tx_submitter, tx_recycler).await {
+                tracing::error!("Failed to start TCP Transaction server: {}", e);
+            }
+
+            // Start new Rust native JSON-RPC server (replaces Go Master JSON RPC for block queries)
+            let json_rpc_port = 10746 + node_config.node_id as u16;
+            let storage_path = node_config.storage_path.clone();
+            tokio::spawn(async move {
+                if let Err(e) = metanode::execution::json_rpc::start_json_rpc_server(json_rpc_port, storage_path).await {
+                    tracing::error!("Failed to start JSON-RPC server on port {}: {}", json_rpc_port, e);
+                }
+            });
 
             // Run the main event loop
             initialized_node.run_main_loop().await?;

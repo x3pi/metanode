@@ -27,6 +27,16 @@ impl ExecutorClient {
         boundary_block: u64,
         boundary_gei: u64,
     ) -> Result<()> {
+        if self.rust_execution_enabled {
+            let mut last_ep = self.last_processed_epoch.lock().await;
+            *last_ep = new_epoch;
+            {
+                let mut timestamps = self.epoch_start_timestamps.lock().await;
+                timestamps.insert(new_epoch, epoch_start_timestamp_ms);
+            }
+            info!("Local Rust execution advanced epoch to {} with timestamp {}ms", new_epoch, epoch_start_timestamp_ms);
+            return Ok(());
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -147,6 +157,10 @@ impl ExecutorClient {
         &self,
         block_number: u64,
     ) -> Result<(bool, u64, String)> {
+        if self.rust_execution_enabled {
+            info!("Local Rust execution set consensus start block to {}", block_number);
+            return Ok((true, block_number, "RustExecutionBypass".to_string()));
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -188,6 +202,10 @@ impl ExecutorClient {
         &self,
         last_consensus_block: u64,
     ) -> Result<(bool, u64, String)> {
+        if self.rust_execution_enabled {
+            info!("Local Rust execution set sync start block to last_consensus={}", last_consensus_block);
+            return Ok((true, last_consensus_block, "RustExecutionBypass".to_string()));
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -232,6 +250,10 @@ impl ExecutorClient {
         target_block: u64,
         timeout_seconds: u64,
     ) -> Result<(bool, u64, String)> {
+        if self.rust_execution_enabled {
+            info!("Local Rust execution wait_for_sync_to_block target={}, timeout_seconds={}", target_block, timeout_seconds);
+            return Ok((true, target_block, "RustExecutionBypass".to_string()));
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }

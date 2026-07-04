@@ -2,7 +2,6 @@
 extern crate alloc;
 
 pub mod evm;
-pub mod ffi;
 pub mod rpmb;
 pub mod search_provider;
 pub mod nomt_verifier;

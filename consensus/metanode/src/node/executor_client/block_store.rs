@@ -35,7 +35,9 @@ pub async fn store_executable_block(
     tokio::fs::create_dir_all(&dir).await?;
 
     let file_path = dir.join(format!("{}.bin", global_exec_index));
-    tokio::fs::write(&file_path, data).await?;
+    let tmp_path = dir.join(format!("{}.bin.tmp", global_exec_index));
+    tokio::fs::write(&tmp_path, data).await?;
+    tokio::fs::rename(&tmp_path, &file_path).await?;
 
     debug!(
         "💾 [BLOCK STORE] Stored executable block GEI={} ({} bytes)",
@@ -64,7 +66,9 @@ pub async fn store_executable_blocks_batch(
             continue;
         }
         let file_path = dir.join(format!("{}.bin", gei));
-        tokio::fs::write(&file_path, data).await?;
+        let tmp_path = dir.join(format!("{}.bin.tmp", gei));
+        tokio::fs::write(&tmp_path, data).await?;
+        tokio::fs::rename(&tmp_path, &file_path).await?;
         stored += 1;
     }
 

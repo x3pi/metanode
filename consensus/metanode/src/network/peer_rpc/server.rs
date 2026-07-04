@@ -243,7 +243,8 @@ impl PeerRpcServer {
 
         let last_global_exec_index = shared_exec_index.load(std::sync::atomic::Ordering::SeqCst);
 
-        let state_root = crate::ffi::get_go_state_root();
+        // State root is not maintained globally in peer info anymore without Go.
+        let state_root = "0x0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
         let info = PeerInfoResponse {
             node_id,
@@ -741,8 +742,6 @@ impl PeerRpcServer {
             for tx_hex in &submit_req.transactions_hex {
                 match hex::decode(tx_hex) {
                     Ok(tx_bytes) => {
-                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
-                        crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_RECEIVED", "Transaction forwarded from peer, received by Rust peer RPC server");
                         all_tx_bytes.push(tx_bytes);
                     }
                     Err(e) => {
@@ -760,10 +759,6 @@ impl PeerRpcServer {
                 };
 
                 for chunk in chunks {
-                    for tx_bytes in &chunk {
-                        let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(tx_bytes);
-                        crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_SUBMITTED", "Transaction submitted to local Rust consensus from peer RPC");
-                    }
                     match submitter.submit(chunk).await {
                         Ok((_block_ref, _indices, _status_rx)) => {}
                         Err(e) => {

@@ -8,7 +8,7 @@ license = "Apache-2.0"
 [lib]
 name = "metanode"
 path = "src/lib.rs"
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 dashmap = "5.5.3"
@@ -65,15 +65,21 @@ prost = { workspace = true }
 sha3 = "0.10.6"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 socket2 = "0.5"  # For TCP socket keepalive support
+jsonrpsee = { version = "0.22", features = ["server", "macros"] }
 
 
 # CLI
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
 metanode-keytool = { path = "../../crates/metanode-keytool" }
+metanode-tee-revm = { path = "../../crates/metanode-tee-revm", features = ["std"] }
+nomt_db = { path = "../../crates/nomt_db" }
 once_cell = "1.21.3"
 futures = "0.3.31"
 rayon = "1.11.0"
 telemetry-subscribers = { version = "0.2.0", path = "../../crates/telemetry-subscribers" }
+ethers-core = "2.0.14"
+revm = "14.0.0"
+revm-primitives = "10.0.0"
 
 [build-dependencies]
 prost-build = "0.14.1"

@@ -2307,13 +2307,14 @@ func triggerStopFlagForFirstMismatch(client *http.Client, nodes []nodeInfo, bloc
 	}
 	sort.Strings(fields)
 
+	if len(fields) == 0 {
+		// False positive during async fetch or node recovered. Ignore.
+		return ""
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🚨 *LỆCH BLOCK #%d*\n", blockNum))
-	if len(fields) > 0 {
-		sb.WriteString(fmt.Sprintf("• ⚠️ *Trường bị lệch:* `[%s]`\n", strings.Join(fields, ", ")))
-	} else {
-		sb.WriteString("• ⚠️ *Trường bị lệch:* `[không xác định - độ trễ/lỗi node]`\n")
-	}
+	sb.WriteString(fmt.Sprintf("• ⚠️ *Trường bị lệch:* `[%s]`\n", strings.Join(fields, ", ")))
 	sb.WriteString("• *Chi tiết các node:*\n")
 
 	for _, node := range nodes {

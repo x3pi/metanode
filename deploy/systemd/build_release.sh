@@ -44,7 +44,6 @@ if [ "$BUILD_FAST" = true ]; then
 fi
 
 log_step "Checking Dependencies"
-command -v go &>/dev/null || log_err "Go compiler is not installed."
 command -v cargo &>/dev/null || log_err "Rust (cargo) is not installed."
 command -v tar &>/dev/null || log_err "tar command is missing."
 log_ok "Dependencies met."
@@ -56,44 +55,17 @@ mkdir -p "$RELEASE_DIR/bin"
 mkdir -p "$RELEASE_DIR/configs"
 mkdir -p "$RELEASE_DIR/cluster"
 
-# ─── 1. Build Rust (Consensus & FFI) ──────────────────────────────────────────
-log_step "Building Rust Consensus Engine & FFI"
-cd "$PROJECT_ROOT"
-# Build the FFI library first so Go execution engine can link against it
-cargo build $CARGO_FLAGS -p mtn-nomt-ffi
-
+# ─── 1. Build Rust (Consensus) ──────────────────────────────────────────────
+log_step "Building Rust Consensus Engine"
 cd "$PROJECT_ROOT/consensus/metanode"
 # Build the consensus engine
 cargo build $CARGO_FLAGS
-
-# FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
-mkdir -p "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR"
-cp -p "$PROJECT_ROOT/target/$TARGET_DIR/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR/libmetanode.a" 2>/dev/null || true
 
 cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$RELEASE_DIR/bin/"
 log_ok "Metanode binary copied to release."
 
 
-# ─── 2. Build Go (Execution) ────────────────────────────────────────────────
-log_step "Building Go Execution Engine"
-cd "$PROJECT_ROOT/execution/cmd/simple_chain"
-
-go clean -cache
-go build -a -o simple_chain .
-cp simple_chain "$RELEASE_DIR/bin/"
-log_ok "simple_chain binary copied to release."
-
-# ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
-log_step "Building Go RPC Proxy Client"
-cd "$PROJECT_ROOT/execution/cmd/rpc/cmd/rpc-client"
-go build -o rpc-client-bin .
-if [ ! -f certificate.pem ]; then
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
-fi
-cp rpc-client-bin "$RELEASE_DIR/bin/"
-cp certificate.pem "$RELEASE_DIR/bin/" 2>/dev/null || true
-cp private.key "$RELEASE_DIR/bin/" 2>/dev/null || true
-log_ok "rpc-client-bin and TLS certs copied to release."
+# ─── 2. Build Go (Execution) removed ───
 
 # ─── 4. Copy Configurations ─────────────────────────────────────────────────
 log_step "Collecting Scripts & Configurations"

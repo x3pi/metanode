@@ -30,6 +30,14 @@ use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};
 /// FORK-SAFETY: All nodes use the same threshold → deterministic split.
 pub const MAX_TXS_PER_GO_BLOCK: usize = 50_000;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+pub static KECCAK_TO_RAW_CACHE: Lazy<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
 impl ExecutorClient {
     /// Send committed sub-DAG to executor, with automatic fragmentation for large commits.
     ///
@@ -220,6 +228,7 @@ impl ExecutorClient {
                     leader_address: leader_address.clone(),
                     block_number,
                     commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            state_root: vec![],
                     // GO-AUTHORITATIVE GEI: Disabled because Rust now passes the correct GEI explicitly
                     is_authoritative_gei: false,
                     system_transactions: if is_last_frag {
@@ -234,10 +243,9 @@ impl ExecutorClient {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64,
-                    rust_ffi_delivery_timestamp_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
+                    rust_ffi_delivery_timestamp_ms: 0,
+                    block_stm_evm_duration_us: 0,
+                    block_stm_commit_duration_us: 0,
                 };
 
                 for tx_exe in &epoch_data.transactions {
@@ -315,6 +323,7 @@ impl ExecutorClient {
             leader_address,
             block_number,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            state_root: vec![],
             // GO-AUTHORITATIVE GEI: Disabled. Rust is the absolute authority for GEI.
             is_authoritative_gei: false,
             system_transactions: all_system_txs,
@@ -329,6 +338,8 @@ impl ExecutorClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            block_stm_evm_duration_us: 0,
+            block_stm_commit_duration_us: 0,
         };
 
         for tx_exe in &epoch_data.transactions {
@@ -684,7 +695,80 @@ impl ExecutorClient {
         // Phase 2: Write all blocks to FFI in a single batch (1 flush)
         {
             let mut sent_count = 0usize;
-            if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
+            if self.rust_execution_enabled {
+                use crate::execution::global_db::GLOBAL_NOMT_DB;
+                use revm::primitives::{Address, Bytes, U256};
+                use crate::execution::block_stm::BlockStmScheduler;
+
+                for (idx, data, epoch_val, commit_idx) in &mut batch {
+                    let mut executable_block = match super::proto::ExecutableBlock::decode(data.as_slice()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("⚠️ [RUST-EXEC] Failed to decode ExecutableBlock at GEI={}: {}", idx, e);
+                            continue;
+                        }
+                    };
+
+                    let mut txs_to_execute = Vec::new();
+                    for tx_exe in &executable_block.transactions {
+                        if tx_exe.digest.is_empty() { continue; }
+                        
+                        let tx_data = &tx_exe.digest;
+                        let (caller, target, calldata, gas_limit, value, nonce) = match crate::tcp_server::transaction_proto::Transaction::decode(tx_data.as_slice()) {
+                            Ok(tx_proto) => {
+                                if tx_proto.from_address.len() >= 20 {
+                                    let caller = Address::from_slice(&tx_proto.from_address[..20]);
+                                    let target = if tx_proto.to_address.len() >= 20 { Address::from_slice(&tx_proto.to_address[..20]) } else { Address::ZERO };
+                                    let calldata = Bytes::from(tx_proto.data.clone());
+                                    let value = if tx_proto.amount.is_empty() { U256::ZERO } else { 
+                                        let mut buf = [0u8; 32];
+                                        let copy_len = tx_proto.amount.len().min(32);
+                                        buf[32-copy_len..].copy_from_slice(&tx_proto.amount[..copy_len]);
+                                        U256::from_be_bytes(buf)
+                                    };
+                                    let gas_limit = tx_proto.max_gas;
+                                    let nonce = if tx_proto.nonce.is_empty() { 0 } else {
+                                        let mut buf = [0u8; 8];
+                                        let copy_len = tx_proto.nonce.len().min(8);
+                                        buf[8-copy_len..].copy_from_slice(&tx_proto.nonce[..copy_len]);
+                                        u64::from_be_bytes(buf)
+                                    };
+                                    (caller, target, calldata, gas_limit, value, nonce)
+                                } else {
+                                    tracing::warn!("⚠️ [RUST-EXEC] Protobuf decoded but from_address len is {}. Hex: {}", tx_proto.from_address.len(), hex::encode(&tx_data[..std::cmp::min(tx_data.len(), 32)]));
+                                    (Address::ZERO, Address::ZERO, Bytes::new(), 0, U256::ZERO, 0)
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("⚠️ [RUST-EXEC] Protobuf decode failed: {}", e);
+                                (Address::ZERO, Address::ZERO, Bytes::new(), 0, U256::ZERO, 0)
+                            }
+                        };
+                        txs_to_execute.push((caller, target, calldata, gas_limit, value, nonce));
+                    }
+
+                    let start_exec = std::time::Instant::now();
+                    let (state_root, evm_dur, commit_dur) = match BlockStmScheduler::execute_batch(GLOBAL_NOMT_DB.clone(), txs_to_execute) {
+                        Ok((root, e_dur, c_dur)) => {
+                            info!("💾 [RUST-EXEC] Pure Rust NOMT execution: gei={}, epoch={}, commit_idx={}, txs={}, StateRoot=0x{}, Duration={:?}",
+                                idx, epoch_val, commit_idx, executable_block.transactions.len(), hex::encode(root), start_exec.elapsed());
+                            (root.to_vec(), e_dur.as_micros() as u64, c_dur.as_micros() as u64)
+                        }
+                        Err(e) => {
+                            error!("❌ [RUST-EXEC] Pure Rust execution failed: {}", e);
+                            (vec![], 0, 0)
+                        }
+                    };
+
+                    executable_block.state_root = state_root;
+                    executable_block.block_stm_evm_duration_us = evm_dur;
+                    executable_block.block_stm_commit_duration_us = commit_dur;
+                    let mut updated_data = Vec::new();
+                    executable_block.encode(&mut updated_data).unwrap_or_default();
+                    *data = updated_data;
+                    sent_count += 1;
+                }
+            } else if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
                 for (idx, data, _, _) in &batch {
                     debug!(
                         "🚀 [TX-FLOW-TRACE] ▶ PHASE 4 FFI: cgo_execute_block() called | gei={}, payload_size={} bytes",
@@ -1017,6 +1101,7 @@ impl ExecutorClient {
             leader_address,
             block_number: 0,
             commit_hash: subdag.commit_ref.digest.into_inner().to_vec(),
+            state_root: vec![],
             // GO-AUTHORITATIVE GEI: Disabled
             is_authoritative_gei: false,
             system_transactions: all_system_txs,
@@ -1031,6 +1116,8 @@ impl ExecutorClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            block_stm_evm_duration_us: 0,
+            block_stm_commit_duration_us: 0,
         };
 
         let mut epoch_data_bytes = Vec::new();
@@ -1203,6 +1290,41 @@ impl ExecutorClient {
             }
         }
 
+        // Unpack batched protobuf Transactions if necessary
+        use prost::Message;
+        let mut expanded_txs = Vec::new();
+        for tx in all_txs_to_process {
+            let mut is_single = false;
+            if let Ok(single_tx) = crate::tcp_server::transaction_proto::Transaction::decode(tx.data()) {
+                if single_tx.from_address.len() == 20 {
+                    is_single = true;
+                }
+            }
+
+            if is_single {
+                expanded_txs.push(tx);
+                continue;
+            }
+
+            let mut is_batch = false;
+            if let Ok(batch) = crate::tcp_server::transaction_proto::Transactions::decode(tx.data()) {
+                if !batch.transactions.is_empty() {
+                    for inner_tx in batch.transactions {
+                        let mut buf = Vec::new();
+                        inner_tx.encode(&mut buf).unwrap_or_default();
+                        expanded_txs.push(consensus_core::Transaction::new(buf));
+                    }
+                    is_batch = true;
+                }
+            }
+
+            if !is_batch {
+                expanded_txs.push(tx);
+            }
+        }
+        let all_txs_to_process = expanded_txs;
+
+
         let mut all_transactions_with_hash: Vec<(&[u8], Vec<u8>)> = Vec::new();
         let mut system_transactions: Vec<Vec<u8>> = Vec::new();
         let mut skipped_count = 0;
@@ -1235,6 +1357,7 @@ impl ExecutorClient {
         let mut seen = std::collections::HashSet::new();
         for (tx_data, tx_hash) in all_transactions_with_hash {
             if seen.insert(tx_hash.clone()) {
+                KECCAK_TO_RAW_CACHE.lock().unwrap().insert(tx_hash.clone(), tx_data.to_vec());
                 unique_txs.push((tx_data, tx_hash));
             }
         }

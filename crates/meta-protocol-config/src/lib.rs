@@ -2259,7 +2259,7 @@ impl ProtocolConfig {
             256 * 1024
         } else {
             self.consensus_max_transactions_in_block_bytes
-                .unwrap_or(2 * 1024 * 1024)
+                .unwrap_or(32 * 1024 * 1024)
         }
     }
 

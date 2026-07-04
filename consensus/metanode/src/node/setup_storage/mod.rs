@@ -26,7 +26,7 @@ impl ConsensusNode {
             true,
             false,
             Some(config.storage_path.clone()),
-        ));
+        ).with_rust_execution(config.rust_execution_enabled));
 
         // SNAPSHOT RESTORE FIX: Go Master needs time to load DB after snapshot restore.
         // Go now has an explicit blockchainInitDone flag. is_ready=true means the block

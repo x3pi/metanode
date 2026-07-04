@@ -25,6 +25,10 @@ impl ConsensusNode {
             .map(|proxy| proxy.clone() as Arc<dyn TransactionSubmitter>)
     }
 
+    pub fn tx_recycler(&self) -> Option<Arc<crate::consensus::tx_recycler::TxRecycler>> {
+        self.tx_recycler.clone()
+    }
+
     pub async fn check_transaction_acceptance(&self) -> (bool, bool, String) {
         if self.authority.is_none() {
             return (false, false, "Node is still initializing".to_string());

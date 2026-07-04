@@ -1,0 +1,49 @@
+Created At: 2026-07-01T15:34:52Z
+Completed At: 2026-07-01T15:34:52Z
+File Path: `file:///home/abc/chain-n/metanode/consensus/metanode/src/node/executor_client/block_sending.rs`
+Total Lines: 1257
+Total Bytes: 61697
+Showing lines 700 to 740
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+700:             use crate::execution::global_db::GLOBAL_NOMT_DB;
+701: 
+702:             for (idx, data, epoch_val, commit_idx) in &mut batch {
+703:                 let mut executable_block = match super::proto::ExecutableBlock::decode(data.as_slice()) {
+704:                     Ok(b) => b,
+705:                     Err(e) => {
+706:                         warn!("⚠️ [RUST-EXEC] Failed to decode ExecutableBlock at GEI={}: {}", idx, e);
+707:                         continue;
+708:                     }
+709:                 };
+710: 
+711:                 let mut txs_to_execute = Vec::new();
+712:                 for tx_exe in &executable_block.transactions {
+713:                     if tx_exe.digest.is_empty() { continue; }
+714:                     
+715:                     let mut is_protobuf = false;
+716:                     let (caller, target, calldata, gas_limit, value) = match crate::tcp_server::transaction_proto::Transaction::decode(tx_exe.digest.as_slice()) {
+717:                         Ok(tx_proto) => {
+718:                             if tx_proto.from_address.len() >= 20 {
+719:                                 is_protobuf = true;
+720:                                 let caller = Address::from_slice(&tx_proto.from_address[..20]);
+721:                                 let target = if tx_proto.to_address.len() >= 20 { Address::from_slice(&tx_proto.to_address[..20]) } else { Address::ZERO };
+722:                                 let calldata = Bytes::from(tx_proto.data.clone());
+723:                                 let value = if tx_proto.amount.is_empty() { U256::ZERO } else { 
+724:                                     let mut buf = [0u8; 32];
+725:                                     let copy_len = tx_proto.amount.len().min(32);
+726:                                     buf[32-copy_len..].copy_from_slice(&tx_proto.amount[..copy_len]);
+727:                                     U256::from_be_bytes(buf)
+728:                                 };
+729:                                 let gas_limit = tx_proto.max_gas;
+730:                                 (caller, target, calldata, gas_limit, value)
+731:                             } else {
+732:                                 tracing::warn!("⚠️ [RUST-EXEC] Protobuf decoded but from_address len is {}. Digest len: {}, hex: {}", tx_proto.from_address.len(), tx_exe.digest.len(), hex::encode(&tx_exe.digest[..std::cmp::min(tx_exe.digest.len(), 32)]));
+733:                                 (Address::ZERO, Address::ZERO, Bytes::new(), 0, U256::ZERO)
+734:                             }
+735:                         }
+736:                         Err(e) => {
+737:                             tracing::warn!("⚠️ [RUST-EXEC] Protobuf decode failed: {}", e);
+738:                             (Address::ZERO, Address::ZERO, Bytes::new(), 0, U256::ZERO)
+739:                         }
+740:                     };
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

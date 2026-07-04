@@ -329,9 +329,9 @@ commit_sync_batches_ahead = {commit_batches_ahead}
 adaptive_catchup_enabled = true
 adaptive_delay_enabled = false
 adaptive_delay_ms = 20
-min_round_delay_ms = 25
+min_round_delay_ms = 150
 compact_blocks_enabled = true
-leader_timeout_ms = 200
+leader_timeout_ms = 300
 epoch_transition_optimization = "fast"
 enable_gradual_shutdown = true
 gradual_shutdown_user_cert_drain_secs = 2
@@ -407,8 +407,8 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
-    parser.add_argument("--consensus-max-txs-per-block", type=int, default=10000,
-                        help="Maximum number of transactions proposed in a single consensus block (default: 10000)")
+    parser.add_argument("--consensus-max-txs-per-block", type=int, default=50000,
+                        help="Maximum number of transactions proposed in a single consensus block (default: 50000)")
     return parser.parse_args()
 
 

@@ -2,5 +2,7 @@
 - name: Clean data and logs directories
   ansible.builtin.shell: |
     rm -rf "{{ metanode_install_dir }}/node-{{ item[0] }}/{{ item[1] }}"
-  loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
+    rm -rf "/dev/shm/node-{{ item[0] }}"
+  loop: "{{ active_nodes | product(['data', 'logs', '.data']) | list }}"
   failed_when: false
+

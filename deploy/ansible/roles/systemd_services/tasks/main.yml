@@ -30,7 +30,7 @@
     owner: metanode
     group: metanode
     mode: '0755'
-  loop: "{{ active_nodes | product(['metanode', 'simple_chain']) | list }}"
+  loop: "{{ active_nodes | product(['metanode']) | list }}"
 
 - name: Copy execution and consensus config
   ansible.builtin.copy:

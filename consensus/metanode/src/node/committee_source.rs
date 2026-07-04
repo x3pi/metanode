@@ -57,6 +57,10 @@ pub struct CommitteeSource {
     /// Peer RPC addresses for fallback when local is behind
     #[allow(dead_code)]
     pub peer_rpc_addresses: Vec<String>,
+    /// Enable pure Rust execution engine
+    pub rust_execution_enabled: bool,
+    /// Storage path for local database (used for Rust-native state recovery)
+    pub storage_path: Option<std::path::PathBuf>,
 }
 
 impl CommitteeSource {
@@ -72,7 +76,7 @@ impl CommitteeSource {
             true,
             false,
             None,
-        );
+        ).with_rust_execution(config.rust_execution_enabled);
 
         let local_epoch = local_client.get_current_epoch().await.unwrap_or(0);
         let local_block = local_client
@@ -94,6 +98,8 @@ impl CommitteeSource {
                 last_block: local_block,
                 is_peer: false,
                 peer_rpc_addresses: Vec::new(),
+                rust_execution_enabled: config.rust_execution_enabled,
+                storage_path: Some(config.storage_path.clone()),
             });
         }
 
@@ -151,6 +157,8 @@ impl CommitteeSource {
             last_block: best_block,
             is_peer,
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
+            rust_execution_enabled: config.rust_execution_enabled,
+            storage_path: Some(config.storage_path.clone()),
         })
     }
 
@@ -158,8 +166,8 @@ impl CommitteeSource {
         Arc::new(ExecutorClient::new(
             true,
             false,
-            None,
-        ))
+            self.storage_path.clone(),
+        ).with_rust_execution(self.rust_execution_enabled))
     }
 
     /// Fetch committee from this source using EPOCH BOUNDARY DATA
@@ -488,6 +496,8 @@ mod tests {
             last_block,
             is_peer,
             peer_rpc_addresses: Vec::new(),
+            rust_execution_enabled: true,
+            storage_path: None,
         }
     }
 
@@ -535,6 +545,8 @@ mod tests {
             last_block: 200,
             is_peer: true,
             peer_rpc_addresses: vec!["127.0.0.1:9000".to_string(), "127.0.0.1:9001".to_string()],
+            rust_execution_enabled: true,
+            storage_path: None,
         };
         assert_eq!(source.peer_rpc_addresses.len(), 2);
         assert!(source.validate_epoch(2));

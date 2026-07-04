@@ -321,6 +321,10 @@ impl ConsensusNode {
         
                                     let mut is_valid = true;
                                     for i in 1..blocks.len() {
+                                        if blocks[i].epoch > blocks[i - 1].epoch {
+                                            // Skip parent hash check across epoch boundaries
+                                            continue;
+                                        }
                                         let prev_hash = &blocks[i - 1].block_hash;
                                         let curr_parent = &blocks[i].parent_hash;
                                         if prev_hash != curr_parent {

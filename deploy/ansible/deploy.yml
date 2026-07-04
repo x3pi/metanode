@@ -90,7 +90,7 @@
     - name: Generate prometheus.yml dynamically for monitoring
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
-        dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
+        dest: "{{ project_root }}/deploy/prometheus/prometheus.yml"
         
     - name: Restart local Prometheus service
       ansible.builtin.shell: echo "1234@abcd" | sudo -S systemctl restart prometheus || true

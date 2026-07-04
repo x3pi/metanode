@@ -1,9 +1,0 @@
-[
-  {
-    "contract":"0xE9B9583511fE2Ce82d7e0E7Bc122D64360f09BDA",
-    "abi_path": "../abi/normal-test.json",
-    "action": "call",
-    "method": "getValue",
-    "args": []
-  }
-]

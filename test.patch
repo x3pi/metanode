@@ -1,0 +1,26 @@
+--- consensus/metanode/src/rpc.rs
++++ consensus/metanode/src/rpc.rs
+@@ -42,6 +42,9 @@
+ 
+     #[method(name = "eth_call")]
+     async fn eth_call(&self, call_obj: serde_json::Value, block: String) -> jsonrpsee::core::RpcResult<String>;
++
++    #[method(name = "mtn_getAccountState")]
++    async fn mtn_get_account_state(&self, address: String, block: String) -> jsonrpsee::core::RpcResult<serde_json::Value>;
+ }
+ 
+ pub struct EthApiImpl {
+@@ -136,6 +139,13 @@
+     async fn eth_call(&self, call_obj: serde_json::Value, _block: String) -> jsonrpsee::core::RpcResult<String> {
+         Ok("0x000000000000000000000000000000000000000000000000000000000000270f".to_string())
+     }
++
++    async fn mtn_get_account_state(&self, _address: String, _block: String) -> jsonrpsee::core::RpcResult<serde_json::Value> {
++        Ok(json!({
++            "nonce": 0,
++            "balance": "0x100000000000000000000000"
++        }))
++    }
+ }
+ 
+ pub async fn start_rpc_server(port: u16, tx_submitter: Option<Arc<dyn TransactionSubmitter>>) -> Result<(), Box<dyn std::error::Error>> {

@@ -32,6 +32,15 @@ fn main() {
         eprintln!("Warning: proto/validator_rpc.proto not found, skipping");
     }
 
+    // Build message.proto
+    let message_proto = std::path::Path::new("proto/message.proto");
+    if message_proto.exists() {
+        protos.push("proto/message.proto");
+        println!("cargo:rerun-if-changed=proto/message.proto");
+    } else {
+        eprintln!("Warning: proto/message.proto not found, skipping");
+    }
+
     if !protos.is_empty() {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         // Keep build output clean: avoid emitting `cargo:warning=` for normal progress logs.

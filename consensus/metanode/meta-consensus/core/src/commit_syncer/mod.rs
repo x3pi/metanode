@@ -967,6 +967,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                                 self.post_restore_stuck_ticks, self.post_restore_stuck_ticks
                                             );
                                             self.coordination_hub.set_schedule_recovery_pending(false);
+                                            self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
                                         } else {
                                             tracing::warn!(
                                                 "⚡ [POST-RESTORE-GUARD] ESCALATION (tick={}): \
@@ -1240,6 +1241,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                             retry_count + 1, my_commit, retry_count
                                         );
                                         hub.set_schedule_recovery_pending(false);
+                                        hub.recovery_barrier().set_schedule_pre_verified();
                                         // Fall through to Case C below (deadlock breaker)
                                     } else if retry_count >= 3 && !hash_verified {
                                         tracing::warn!(

@@ -1,0 +1,21 @@
+[package]
+name = "nomt_db"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nomt_db"
+crate-type = ["rlib"]
+
+[dependencies]
+nomt = { git = "https://github.com/thrumdev/nomt.git", features = ["blake3-hasher", "serde"] }
+nomt-core = { git = "https://github.com/thrumdev/nomt.git", features = ["std", "blake3-hasher", "serde"] }
+anyhow = "1.0"
+blake3 = "1.5"
+libc = "0.2"
+serde = { workspace = true, features = ["derive"] }
+bincode = "1.3.3"
+
+# [profile.release]
+# opt-level = 3
+# lto = "thin"

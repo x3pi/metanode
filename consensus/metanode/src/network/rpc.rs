@@ -246,104 +246,142 @@ impl RpcServer {
         // THỐNG NHẤT: Hỗ trợ cả Transactions (nhiều transactions) và Transaction (single transaction)
         // Go-sub LUÔN gửi pb.Transactions (nhiều transactions)
         // Rust client có thể gửi Transactions hoặc Transaction protobuf
-        let transactions_to_submit = match Transactions::decode(tx_data.as_slice()) {
-            Ok(transactions_msg) => {
-                // Format: pb.Transactions (nhiều transactions) - từ Go-sub
-                if transactions_msg.transactions.is_empty() {
-                    warn!("⚠️  [TX FLOW] Empty Transactions message received");
-                    if is_length_prefixed {
-                        Self::send_binary_response(stream, false, "Empty Transactions message")
-                            .await?;
-                    } else {
-                        let response = r#"{"success":false,"error":"Empty Transactions message"}"#;
-                        Self::send_response(stream, response, false).await?;
-                    }
-                    return Ok(());
-                }
+        let is_single_tx = if let Ok(single_tx) = Transaction::decode(tx_data.as_slice()) {
+            single_tx.from_address.len() == 20
+        } else {
+            false
+        };
 
-                debug!("📦 [TX FLOW] Received Transactions message with {} transactions, splitting into individual transactions", 
-                    transactions_msg.transactions.len());
-
-                // Split Transactions message into individual Transaction messages
-                // Mỗi transaction được encode riêng để submit vào consensus
-                let mut individual_txs = Vec::new();
-                for (idx, tx) in transactions_msg.transactions.iter().enumerate() {
-                    // Encode each Transaction as individual protobuf message
+        let transactions_to_submit = if is_single_tx {
+            match Transaction::decode(tx_data.as_slice()) {
+                Ok(tx) => {
+                    debug!("📦 [TX FLOW] Received single Transaction message (avoided false-positive Transactions match), encoding for consensus");
                     let mut buf = Vec::new();
                     if let Err(e) = tx.encode(&mut buf) {
-                        error!("❌ [TX FLOW] Failed to encode transaction[{}] from Transactions message: {}", idx, e);
-                        continue;
+                        error!("❌ [TX FLOW] Failed to encode single Transaction: {}", e);
+                        if is_length_prefixed {
+                            Self::send_binary_response(
+                                stream,
+                                false,
+                                &format!("Failed to encode Transaction: {}", e),
+                            )
+                            .await?;
+                        } else {
+                            let response = format!(
+                                r#"{{"success":false,"error":"Failed to encode Transaction: {}"}}"#,
+                                e.to_string().replace('"', "\"")
+                            );
+                            Self::send_response(stream, &response, false).await?;
+                        }
+                        return Ok(());
                     }
-                    individual_txs.push(buf);
+                    vec![buf]
                 }
-
-                if individual_txs.is_empty() {
-                    error!("❌ [TX FLOW] No valid transactions after encoding from Transactions message");
-                    if is_length_prefixed {
-                        Self::send_binary_response(
-                            stream,
-                            false,
-                            "No valid transactions after encoding",
-                        )
-                        .await?;
-                    } else {
-                        let response =
-                            r#"{"success":false,"error":"No valid transactions after encoding"}"#;
-                        Self::send_response(stream, response, false).await?;
-                    }
+                Err(e) => {
+                    error!("❌ [TX FLOW] Unexpected failure decoding single Transaction: {}", e);
                     return Ok(());
                 }
-
-                debug!("✅ [TX FLOW] Split Transactions message into {} individual transactions for consensus", individual_txs.len());
-                individual_txs
             }
-            Err(_) => {
-                // Không phải Transactions, thử decode như single Transaction
-                match Transaction::decode(tx_data.as_slice()) {
-                    Ok(tx) => {
-                        // Format: pb.Transaction (single transaction) - từ Rust client
-                        debug!("📦 [TX FLOW] Received single Transaction message, encoding for consensus");
-                        let mut buf = Vec::new();
-                        if let Err(e) = tx.encode(&mut buf) {
-                            error!("❌ [TX FLOW] Failed to encode single Transaction: {}", e);
-                            if is_length_prefixed {
-                                Self::send_binary_response(
-                                    stream,
-                                    false,
-                                    &format!("Failed to encode Transaction: {}", e),
-                                )
-                                .await?;
-                            } else {
-                                let response = format!(
-                                    r#"{{"success":false,"error":"Failed to encode Transaction: {}"}}"#,
-                                    e.to_string().replace('"', "\\\"")
-                                );
-                                Self::send_response(stream, &response, false).await?;
-                            }
-                            return Ok(());
-                        }
-                        vec![buf]
-                    }
-                    Err(e) => {
-                        // Không phải Transactions cũng không phải Transaction protobuf
-                        // Có thể là raw bytes từ Rust client (backward compatibility)
-                        error!("❌ [TX FLOW] Failed to decode as Transactions or Transaction protobuf: {}", e);
-                        error!(
-                            "❌ [TX FLOW] Data preview (first 100 bytes): {}",
-                            hex::encode(&tx_data[..tx_data.len().min(100)])
-                        );
-                        warn!("⚠️  [TX FLOW] Raw bytes received (not protobuf), this format is deprecated. Please use Transactions or Transaction protobuf.");
-
-                        // Backward compatibility: Thử xử lý như raw transaction data
-                        // Tạo một Transaction protobuf từ raw bytes (nếu có thể)
-                        // Hoặc reject với error message rõ ràng
+        } else {
+            match Transactions::decode(tx_data.as_slice()) {
+                Ok(transactions_msg) => {
+                    // Format: pb.Transactions (nhiều transactions) - từ Go-sub
+                    if transactions_msg.transactions.is_empty() {
+                        warn!("⚠️  [TX FLOW] Empty Transactions message received");
                         if is_length_prefixed {
-                            Self::send_binary_response(stream, false, "Invalid protobuf format. Expected Transactions or Transaction protobuf.").await?;
+                            Self::send_binary_response(stream, false, "Empty Transactions message")
+                                .await?;
                         } else {
-                            let response = r#"{"success":false,"error":"Invalid protobuf format. Expected Transactions or Transaction protobuf. Please use protobuf encoding."}"#;
+                            let response = r#"{"success":false,"error":"Empty Transactions message"}"#;
                             Self::send_response(stream, response, false).await?;
                         }
                         return Ok(());
+                    }
+
+                    debug!("📦 [TX FLOW] Received Transactions message with {} transactions, splitting into individual transactions", 
+                        transactions_msg.transactions.len());
+
+                    // Split Transactions message into individual Transaction messages
+                    // Mỗi transaction được encode riêng để submit vào consensus
+                    let mut individual_txs = Vec::new();
+                    for (idx, tx) in transactions_msg.transactions.iter().enumerate() {
+                        // Encode each Transaction as individual protobuf message
+                        let mut buf = Vec::new();
+                        if let Err(e) = tx.encode(&mut buf) {
+                            error!("❌ [TX FLOW] Failed to encode transaction[{}] from Transactions message: {}", idx, e);
+                            continue;
+                        }
+                        individual_txs.push(buf);
+                    }
+
+                    if individual_txs.is_empty() {
+                        error!("❌ [TX FLOW] No valid transactions after encoding from Transactions message");
+                        if is_length_prefixed {
+                            Self::send_binary_response(
+                                stream,
+                                false,
+                                "No valid transactions after encoding",
+                            )
+                            .await?;
+                        } else {
+                            let response =
+                                r#"{"success":false,"error":"No valid transactions after encoding"}"#;
+                            Self::send_response(stream, response, false).await?;
+                        }
+                        return Ok(());
+                    }
+
+                    debug!("✅ [TX FLOW] Split Transactions message into {} individual transactions for consensus", individual_txs.len());
+                    individual_txs
+                }
+                Err(e_plural) => {
+                    // Không phải Transactions, thử decode như single Transaction
+                    match Transaction::decode(tx_data.as_slice()) {
+                        Ok(tx) => {
+                            // Format: pb.Transaction (single transaction) - từ Rust client
+                            debug!("📦 [TX FLOW] Received single Transaction message via fallback, encoding for consensus");
+                            let mut buf = Vec::new();
+                            if let Err(e) = tx.encode(&mut buf) {
+                                error!("❌ [TX FLOW] Failed to encode single Transaction: {}", e);
+                                if is_length_prefixed {
+                                    Self::send_binary_response(
+                                        stream,
+                                        false,
+                                        &format!("Failed to encode Transaction: {}", e),
+                                    )
+                                    .await?;
+                                } else {
+                                    let response = format!(
+                                        r#"{{"success":false,"error":"Failed to encode Transaction: {}"}}"#,
+                                        e.to_string().replace('"', "\"")
+                                    );
+                                    Self::send_response(stream, &response, false).await?;
+                                }
+                                return Ok(());
+                            }
+                            vec![buf]
+                        }
+                        Err(e_single) => {
+                            // Không phải Transactions cũng không phải Transaction protobuf
+                            // Có thể là raw bytes từ Rust client (backward compatibility)
+                            error!("❌ [TX FLOW] Failed to decode as Transactions ({}) or Transaction protobuf ({}): {}", e_plural, e_single, e_single);
+                            error!(
+                                "❌ [TX FLOW] Data preview (first 100 bytes): {}",
+                                hex::encode(&tx_data[..tx_data.len().min(100)])
+                            );
+                            warn!("⚠️  [TX FLOW] Raw bytes received (not protobuf), this format is deprecated. Please use Transactions or Transaction protobuf.");
+
+                            // Backward compatibility: Thử xử lý như raw transaction data
+                            // Tạo một Transaction protobuf từ raw bytes (nếu có thể)
+                            // Hoặc reject với error message rõ ràng
+                            if is_length_prefixed {
+                                Self::send_binary_response(stream, false, "Invalid protobuf format. Expected Transactions or Transaction protobuf.").await?;
+                            } else {
+                                let response = r#"{"success":false,"error":"Invalid protobuf format. Expected Transactions or Transaction protobuf. Please use protobuf encoding."}"#;
+                                Self::send_response(stream, response, false).await?;
+                            }
+                            return Ok(());
+                        }
                     }
                 }
             }

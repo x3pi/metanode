@@ -1,9 +1,0 @@
-syntax = "proto3";
-option go_package = "github.com/meta-node-blockchain/meta-node/execution/pkg/proto";
-
-package proto;
-
-message TransactionBlockNumber {
-  bytes Hash = 1;
-  uint64 BlockNumber = 2;
-}

@@ -63,6 +63,12 @@ message ExecutableBlock {
     uint64 rust_dispatch_timestamp_ms = 14;
     // [NEW] Timestamp ngay trước khi Rust gọi FFI execute_block về Go
     uint64 rust_ffi_delivery_timestamp_ms = 15;
+    // [NEW] State Root after executing this block natively in Rust
+    bytes state_root = 16;
+    // [NEW] Duration of BlockSTM EVM parallel execution phase
+    uint64 block_stm_evm_duration_us = 17;
+    // [NEW] Duration of BlockSTM DB commit phase
+    uint64 block_stm_commit_duration_us = 18;
 }
 
 // Response from Go after processing an ExecutableBlock.

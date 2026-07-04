@@ -207,7 +207,7 @@ impl ConsensusNode {
                 config.executor_commit_enabled,
                 initial_next_expected,
                 Some(config.storage_path.clone()),
-            );
+            ).with_rust_execution(config.rust_execution_enabled);
             client.set_go_lag_handle(system_transaction_provider.go_lag_handle());
             Arc::new(client)
         } else {
@@ -215,7 +215,7 @@ impl ConsensusNode {
                 false,
                 false,
                 None,
-            ))
+            ).with_rust_execution(config.rust_execution_enabled))
         };
 
         let client_clone = executor_client_for_proc.clone();
@@ -276,6 +276,11 @@ impl ConsensusNode {
 
         let is_designated_validator = storage.is_in_committee;
         let start_as_validator = is_designated_validator;
+
+        executor_client_for_proc.set_epoch_timestamp(
+            storage.current_epoch,
+            storage.epoch_timestamp_ms,
+        ).await;
 
         if storage.current_epoch > 0 {
             system_transaction_provider.update_epoch(

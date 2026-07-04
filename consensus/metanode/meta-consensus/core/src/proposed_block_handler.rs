@@ -66,8 +66,11 @@ impl ProposedBlockHandler {
         if !self.context.protocol_config.mysticeti_fastpath() {
             return;
         }
-        if !self.coordination_hub.is_healthy() {
-            tracing::debug!("⏳ [PROPOSED BLOCK HANDLER] Ignoring proposed block because phase is {:?}", self.coordination_hub.get_phase());
+        
+        let phase = self.coordination_hub.get_phase();
+        use crate::coordination_hub::NodeConsensusPhase;
+        if matches!(phase, NodeConsensusPhase::Initializing | NodeConsensusPhase::StateSyncing) {
+            tracing::debug!("⏳ [PROPOSED BLOCK HANDLER] Ignoring proposed block because phase is {:?}", phase);
             return;
         }
         /* let _scope = tracing::info_span!("handle_proposed_block").entered(); */

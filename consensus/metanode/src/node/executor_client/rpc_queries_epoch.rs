@@ -22,6 +22,10 @@ impl ExecutorClient {
     /// Get current epoch from Go state
     /// Used to determine which epoch the network is currently in
     pub async fn get_current_epoch(&self) -> Result<u64> {
+        if self.rust_execution_enabled {
+            let last_ep = *self.last_processed_epoch.lock().await;
+            return Ok(last_ep);
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -88,6 +92,14 @@ impl ExecutorClient {
     /// Used to sync timestamp after epoch transitions
     /// NOTE: This endpoint may not be implemented in Go yet - returns error in that case
     pub async fn get_epoch_start_timestamp(&self, epoch: u64) -> Result<u64> {
+        if self.rust_execution_enabled {
+            let timestamps = self.epoch_start_timestamps.lock().await;
+            if let Some(&ts) = timestamps.get(&epoch) {
+                return Ok(ts);
+            }
+            let (_, ts, _) = self.load_local_validators().await.unwrap_or((vec![], 1772265024018, 0));
+            return Ok(ts);
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }
@@ -269,6 +281,16 @@ impl ExecutorClient {
         &self,
         epoch: u64,
     ) -> Result<(u64, u64, u64, Vec<ValidatorInfo>, u64, u64)> {
+        if self.rust_execution_enabled {
+            let (validators, mut ts, gei) = self.load_local_validators().await.unwrap_or((vec![], 1772265024018, 0));
+            {
+                let timestamps = self.epoch_start_timestamps.lock().await;
+                if let Some(&saved_ts) = timestamps.get(&epoch) {
+                    ts = saved_ts;
+                }
+            }
+            return Ok((epoch, ts, 0, validators, 900, gei));
+        }
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
         }

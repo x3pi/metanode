@@ -311,10 +311,10 @@ impl RustSyncNode {
                         let to_block = if peer_block > 0 {
                             std::cmp::min(from_block + batch_size - 1, peer_block)
                         } else {
-                            from_block + batch_size - 1
+                            0 // If peer_block is 0, do not fetch blocks
                         };
 
-                        if from_block > to_block {
+                        if to_block == 0 || from_block > to_block {
                             Vec::new()
                         } else {
                             info!("🚀 [SYNC-LOOP-DEBUG] About to fetch blocks {}..{} from peer {:?} via {} rpc addrs", from_block, to_block, peer_rpc_addresses, peer_rpc_addresses.len());
