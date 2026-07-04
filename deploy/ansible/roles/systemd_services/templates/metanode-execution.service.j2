@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=15s
 
 # Environment
-Environment=GOTRACEBACK=all
+Environment="GOTRACEBACK=all" "SKIP_MEMPOOL_SIG_VERIFY=true"
 # Default to validator, but synconly logic can be injected here based on variables
 Environment=NODE_TYPE={% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}synconly{% else %}validator{% endif %}
 

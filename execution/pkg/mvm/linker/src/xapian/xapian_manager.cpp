@@ -369,6 +369,7 @@ std::string XapianManager::set_data(const std::string& virtualDocId, const std::
     return virtualDocId;
 }
 Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash) {
+    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     Xapian::Document doc;
     bool found = false;
     
@@ -520,6 +521,7 @@ bool XapianManager::commit_changes() {
     return true; // Không có gì để commit
   }
   try {
+    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     db.commit(); // Thực hiện commit Xapian
     comprehensive_log.xapian_doc_logs
         .clear(); // Xóa các log đã staged sau khi commit thành công
@@ -539,6 +541,7 @@ void XapianManager::commitAllInstances() {
       std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
       if (!manager->has_started) {
         try {
+          std::lock_guard<std::recursive_mutex> db_lock(manager->db_mutex);
           manager->db.commit();
           manager->comprehensive_log.xapian_doc_logs.clear();
         } catch (...) {
@@ -685,6 +688,7 @@ struct CleanerStopper {
 // Áp dụng lại một danh sách các log entry vào database hiện tại
 bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay) {
     std::unique_lock<std::shared_mutex> db_lock(changes_mutex);
+    std::lock_guard<std::recursive_mutex> lock(db_mutex);
     for (const auto& entry : log_to_replay) {
         try {
             if (entry.op == XapianLog::Operation::NEW_DOC) {
@@ -751,6 +755,7 @@ bool XapianManager::revertUncommittedChanges() {
   }
   
   try {
+    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     // 1. Xóa các thay đổi đang chờ trong log
     comprehensive_log.xapian_doc_logs.clear();
 
