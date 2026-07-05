@@ -20,7 +20,8 @@ Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocId
 
         // Search by UUID term Q<clean_id>
         Xapian::Query query("Q" + clean_id);
-        Xapian::Enquire enquire(db);
+        
+        Xapian::Enquire enquire(read_db);
         enquire.set_query(query);
         Xapian::MSet matches = enquire.get_mset(0, 1);
         if (matches.empty()) {
