@@ -85,7 +85,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
     XapianManager::instances_mutex.lock_shared();
     for (auto& pair : XapianManager::instances) {
         if (auto manager_ptr = pair.second) {
-            std::lock_guard<std::mutex> lock(manager_ptr->tx_buffers_mutex);
+            std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
             manager_ptr->tx_buffers.erase(txHashStr);
             manager_ptr->tx_counters.erase(txHashStr);
         }
@@ -104,30 +104,32 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
         if (manager_ptr) {
             std::vector<XapianLog::LogEntry> buffer_logs;
             {
-                std::lock_guard<std::mutex> lock(manager_ptr->tx_buffers_mutex);
-                auto buf_it = manager_ptr->tx_buffers.find(txHashStr);
-                if (buf_it != manager_ptr->tx_buffers.end()) {
-                    buffer_logs = std::move(buf_it->second.xapian_doc_logs);
-                    manager_ptr->tx_buffers.erase(buf_it);
+                std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
+                auto it = manager_ptr->tx_buffers.find(txHashStr);
+                if (it != manager_ptr->tx_buffers.end()) {
+                    buffer_logs = std::move(it->second.xapian_doc_logs);
+                    manager_ptr->tx_buffers.erase(it);
                     manager_ptr->tx_counters.erase(txHashStr);
                 }
             }
             
             if (!buffer_logs.empty()) {
                 std::cerr << "[DEBUG] commitBufferForTxHash FOUND " << buffer_logs.size() << " logs for txHash: " << txHashStr << ". Committing!" << std::endl;
-                // Replay logs into the actual Xapian DB for this manager
+                
+                // Replay logs into the actual Xapian DB for this manager (replay_log will lock changes_mutex internally)
                 manager_ptr->replay_log(buffer_logs);
                 
                 // [FIX] BẮT BUỘC gọi db.commit() để lưu thay đổi xuống đĩa
                 try {
+                    std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                     manager_ptr->db.commit();
+                    manager_ptr->read_db.reopen();
                     std::cerr << "[DEBUG] commitBufferForTxHash DB COMMIT SUCCESS!" << std::endl;
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] commitBufferForTxHash DB COMMIT FAILED: " << e.what() << std::endl;
                 }
                 
                 // Append them to comprehensive_log so they can be extracted
-                std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                 manager_ptr->comprehensive_log.xapian_doc_logs.insert(
                     manager_ptr->comprehensive_log.xapian_doc_logs.end(),
                     std::make_move_iterator(buffer_logs.begin()),

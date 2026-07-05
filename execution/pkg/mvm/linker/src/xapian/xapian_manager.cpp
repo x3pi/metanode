@@ -120,6 +120,7 @@ XapianManager::XapianManager(const std::string &db_name,
                              const mvm::Address &addr)
     : db(mvm::createFullPath(addr, db_name).string(),
          Xapian::DB_CREATE_OR_OPEN), // Mở hoặc tạo database
+      read_db(mvm::createFullPath(addr, db_name).string()), // Khởi tạo read_db trỏ tới cùng thư mục
       address(addr),                 // Lưu địa chỉ liên kết
       last_access_time(
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập

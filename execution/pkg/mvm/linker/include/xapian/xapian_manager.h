@@ -6,6 +6,7 @@
 #include <iostream>
 #include <vector>
 #include <map>
+#include <tbb/concurrent_hash_map.h>
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>
@@ -42,6 +43,7 @@ public:
   static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
+  Xapian::Database read_db; // Read-only db for concurrent lock-free search
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
 
   // --- Concurrency Control ---
@@ -127,9 +129,9 @@ private:
   std::string db_name; // <-- Biến lưu đường dẫn DB Xapian
 
   // Bản đồ lưu tạm các thao tác Xapian cho mỗi transaction (dựa trên txHash)
+  std::unordered_map<std::string, XapianLog::ComprehensiveLog> tx_buffers;
   std::mutex tx_buffers_mutex;
-  std::map<std::string, XapianLog::ComprehensiveLog> tx_buffers;
-  std::map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
+  std::unordered_map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
   
   // Resolves a virtual docId (e.g. 256-bit UUID) to native Xapian uint32 docid
   Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr);

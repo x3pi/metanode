@@ -861,14 +861,14 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(&(manager->db));
+      XapianSearcher searcher(&(manager->read_db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1774,14 +1774,14 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(&(manager->db));
+      XapianSearcher searcher(&(manager->read_db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
