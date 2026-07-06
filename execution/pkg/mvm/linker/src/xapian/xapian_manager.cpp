@@ -369,6 +369,12 @@ std::string XapianManager::set_data(const std::string& virtualDocId, const std::
     return virtualDocId;
 }
 Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash) {
+    bool is_write_tx = (txHash != nullptr || writerHash != nullptr);
+    std::unique_lock<std::recursive_mutex> db_lock(db_mutex, std::defer_lock);
+    if (is_write_tx) {
+        db_lock.lock();
+    }
+
     Xapian::Document doc;
     bool found = false;
     
