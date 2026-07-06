@@ -219,15 +219,15 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 	}
 }
 
-// TransactionsWithAggSign returns transactions and aggregate sign
-// and clear transactions
 func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byte) {
 	var allTxs []types.Transaction
+	var totalDrained int64
 
 	for i := 0; i < NumShards; i++ {
 		shard := tp.shards[i]
 		shard.mu.Lock()
 		if len(shard.transactions) > 0 {
+			totalDrained += int64(len(shard.transactions))
 			allTxs = append(allTxs, shard.transactions...)
 			shard.transactions = make([]types.Transaction, 0)
 			shard.transactionKeys = make(map[txPoolKey]bool)
@@ -236,7 +236,7 @@ func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byt
 		shard.mu.Unlock()
 	}
 
-	atomic.StoreInt64(&tp.count, 0)
+	atomic.AddInt64(&tp.count, -totalDrained)
 
 	// Preserving original behavior: aggregate sign returns nil
 	return allTxs, nil
