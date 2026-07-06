@@ -71,7 +71,7 @@
           {{ nodes }}
 
     - name: Get filesystem type for metanode install directory
-      ansible.builtin.shell: "df -T {{ metanode_install_dir | dirname }} | awk 'NR==2 {print $2}'"
+      ansible.builtin.shell: "mkdir -p {{ metanode_install_dir }} && df -T {{ metanode_install_dir }} | awk 'NR==2 {print $2}'"
       register: fs_type
       changed_when: false
       when: active_nodes | length > 0 and ansible_action in ['start', 'setup']

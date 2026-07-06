@@ -261,7 +261,7 @@ std::string XapianManager::new_document(const std::string &data, uint256_t block
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         int doc_index = tx_counters[txHashStr]++; // Sinh ID tuần tự và tất định trong 1 transaction
         
         // Tạo virtualDocId tất định dựa trên txHash và doc_index
@@ -295,7 +295,7 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::DEL_DOC;
         entry.data = logData;
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return true;
@@ -312,7 +312,7 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
         entry.data = logData;
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -329,7 +329,7 @@ std::string XapianManager::add_term(const std::string& virtualDocId, const std::
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_TERM;
         entry.data = logData;
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -347,7 +347,7 @@ std::string XapianManager::index_text(const std::string& virtualDocId, const std
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::INDEX_TEXT;
         entry.data = logData;
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -363,13 +363,12 @@ std::string XapianManager::set_data(const std::string& virtualDocId, const std::
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::SET_DATA;
         entry.data = logData;
-        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
 }
 Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash) {
-    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     Xapian::Document doc;
     bool found = false;
     
@@ -385,7 +384,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
         found = false;
     }
     
-    std::lock_guard<std::mutex> buffer_lock(tx_buffers_mutex);
+    std::shared_lock<std::shared_mutex> buffer_lock(tx_buffers_mutex);
 
     // 1. Try to find in the writer transaction's buffer (provided by Block-STM dependency)
     if (writerHash != nullptr) {
