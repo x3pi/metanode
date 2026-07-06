@@ -127,7 +127,7 @@ private:
   std::string db_name; // <-- Biến lưu đường dẫn DB Xapian
 
   // Bản đồ lưu tạm các thao tác Xapian cho mỗi transaction (dựa trên txHash)
-  std::mutex tx_buffers_mutex;
+  std::shared_mutex tx_buffers_mutex;
   std::map<std::string, XapianLog::ComprehensiveLog> tx_buffers;
   std::map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
   
