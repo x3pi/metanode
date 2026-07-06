@@ -82,10 +82,6 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// logger.Info("broadcastEventsAndReceipts: preparing broadcast payload",
-	// 	"blockNumber", lastBlock.Header().BlockNumber(),
-	// 	"receiptCount", len(allReceipts),
-	// 	"eventLogCount", len(allEventLogs))
 
 	// Check if context is cancelled
 	select {
@@ -132,15 +128,6 @@ func (bp *BlockProcessor) broadcastEventsAndReceipts(lastBlock types.Block, allR
 				revertedCount++
 			}
 		}
-		// blockNum := lastBlock.Header().BlockNumber()
-		// logger.Info("📤 [RECEIPT BROADCAST] broadcastEventsAndReceipts: queuing receipts for broadcast to clients",
-		// 	"blockNumber", blockNum,
-		// 	"totalReceipts", len(allReceipts),
-		// 	"revertedReceipts", revertedCount,
-		// 	"successReceipts", len(allReceipts)-revertedCount)
-		// ✅ Child node will broadcast ALL receipts (including revert) to client connections
-		// logger.Info("🚀 [RECEIPT BROADCAST] Block #%d: broadcasting %d receipts",
-		// 	blockNum, len(allReceipts))
 		go bp.BroadCastReceipts(allReceipts)
 	} else {
 		// logger.Warn("⚠️  [RECEIPT BROADCAST] broadcastEventsAndReceipts: no receipts to broadcast for block #%d",

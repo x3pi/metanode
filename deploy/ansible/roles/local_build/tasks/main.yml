@@ -16,7 +16,7 @@
     python3 gen_validator_entry.py \
       --hostname "node-{{ item.node_id }}" \
       --node-id "{{ item.node_id }}" \
-      --node-type "{% if item.is_synconly | default(false) %}synconly{% else %}validator{% endif %}" {% if item.is_rpc | default(false) %}--is-rpc{% endif %} \
+      --node-type "{% if item.is_synconly | default(false) %}synconly{% else %}validator{% endif %}" {% if item.is_rpc | default(false) %}--is-rpc{% endif %} {% if item.snapshot_enabled | default(false) %}--snapshot-enabled{% endif %} \
       --ip "{{ item.ip }}" \
       --total-nodes "{{ cluster_nodes | length }}" \
       --peers-map "{{ peers_map }}" \

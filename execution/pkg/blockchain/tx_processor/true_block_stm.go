@@ -254,6 +254,7 @@ func (stm *TrueBlockSTM) Process(
 							} else {
 								// Smart Contract
 								var err error
+								mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 								exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
 								if err != nil {
 									logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
@@ -480,6 +481,7 @@ func (stm *TrueBlockSTM) Process(
 			baseScDB.SetStorageValue(common.HexToAddress(addrStr), []byte(keyStr), value)
 		}
 	}
+
 
 	// Collect receipts and results, calculate Total Gas Fee
 	totalGasFee := big.NewInt(0)

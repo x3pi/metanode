@@ -17,6 +17,9 @@ typedef struct {
 	bool success;
 } Value_return;
 
+extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void MVM_commitAllXapian();
 */
 import "C"
 import (
@@ -112,7 +115,16 @@ func CallReplayFullDbLogs(logs map[string][]byte) int {
 			C.free(ptr)
 		}
 	}()
-	for addrHex, logData := range logs {
+	
+	// Sắp xếp các địa chỉ (keys) để đảm bảo tính tuần tự (determinism)
+	var addrs []string
+	for addrHex := range logs {
+		addrs = append(addrs, addrHex)
+	}
+	sort.Strings(addrs)
+
+	for _, addrHex := range addrs {
+		logData := logs[addrHex]
 		fmt.Printf("  - Xử lý log cho địa chỉ hex: %s\n", addrHex)
 		processedAddrHex := strings.TrimPrefix(addrHex, "0x")
 		if len(processedAddrHex)%2 != 0 {
@@ -346,11 +358,7 @@ func ClearMVMApi(mvmId common.Address) {
 	instance, loaded := apiInstances.LoadAndDelete(mvmId)
 
 	// FORK-SAFETY FIX: BẮT BUỘC phải dọn dẹp state bên C++ EVM
-	// Nếu không, dirty logs từ VirtualExecution sẽ bị kẹt lại và cộng dồn vào Real Execution
-	// gây ra lệch DataHash (MapFullDbHash)
-	cBBmvmId := C.CBytes(mvmId.Bytes())
-	C.MVM_cancelTransaction((*C.uchar)(cBBmvmId))
-	C.free(unsafe.Pointer(cBBmvmId))
+	// (Note: C++ EVM state cleanup is now handled automatically by MyGlobalState lifecycle)
 
 	if !loaded {
 		return
@@ -994,26 +1002,7 @@ func (a *MVMApi) enforceStrictAccessLists() {
 func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
 	return a.rs
 }
-func (a *MVMApi) CommitFullDb() bool {
-	if a == nil {
-		return false
-	}
-	mvmId := a.key
-	cBBmvmId := C.CBytes(mvmId.Bytes())
-	defer C.free(unsafe.Pointer(cBBmvmId))
-	status := C.commit_full_db((*C.uchar)(cBBmvmId))
-	return status != 0
-}
-func (a *MVMApi) RevertFullDb() bool {
-	if a == nil {
-		return false
-	}
-	mvmId := a.key
-	cBBmvmId := C.CBytes(mvmId.Bytes())
-	defer C.free(unsafe.Pointer(cBBmvmId))
-	status := C.revert_full_db((*C.uchar)(cBBmvmId))
-	return status != 0
-}
+
 
 //export GlobalStateGet
 func GlobalStateGet(
@@ -1272,8 +1261,26 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 func ClearAllStateInstances() {
 	C.clearAllStateInstances()
 }
-
 // CommitAllXapian forces all XapianManager instances in C++ to commit their data to disk
 func CommitAllXapian() {
 	C.MVM_commitAllXapian()
 }
+func ClearXapianTxBuffer(txHash []byte) {
+if len(txHash) == 0 {
+return
+}
+cTxHash := C.CBytes(txHash)
+defer C.free(cTxHash)
+C.clear_xapian_tx_buffer((*C.uchar)(cTxHash))
+}
+
+func CommitXapianTxBuffer(txHash []byte) {
+if len(txHash) == 0 {
+return
+}
+cTxHash := C.CBytes(txHash)
+defer C.free(cTxHash)
+C.commit_xapian_tx_buffer((*C.uchar)(cTxHash))
+}
+
+

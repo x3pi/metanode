@@ -680,7 +680,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 	if !ok || blockNumber > storage.GetLastBlockNumber() {
 		// KIỂM TRA SPECULATIVE CACHE TRƯỚC KHI TRẢ VỀ NIL
 		if api.App.config.EnablePrivateGateway {
-			if cachedRcpt, found := SpeculativeReceiptCache.Load(searchHash); found {
+			if cachedRcpt, found := SpeculativeReceiptCache.Load(hashEth); found {
 				rcp := cachedRcpt.(*mt_proto.RpcReceipt)
 				logger.Info("[RPC-RECEIPT] Found Speculative Receipt for %s", searchHash.Hex())
 
@@ -695,7 +695,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 				}
 
 				resp := map[string]interface{}{
-					"transactionHash":   searchHash.Hex(),
+					"transactionHash":   hashEth.Hex(),
 					"transactionIndex":  "0x0",
 					"blockHash":         common.Hash{}.Hex(), // Pending
 					"blockNumber":       "0x0",               // Pending

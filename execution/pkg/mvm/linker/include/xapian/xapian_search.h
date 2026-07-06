@@ -72,8 +72,8 @@ class XapianSearcher
 {
 public:
     explicit XapianSearcher(const std::string &db_path);
-    explicit XapianSearcher(Xapian::Database database);
-    ~XapianSearcher() = default;
+    explicit XapianSearcher(Xapian::Database* database);
+    ~XapianSearcher();
     void dumpIndex();
 
     // --- Phương thức tìm kiếm gốc (Chữ ký cuối cùng) ---
@@ -100,7 +100,8 @@ public:
     std::vector<uint8_t> internalEncodeResultsArrayContent(const std::vector<SearchResult> &results);
 
 private:
-    Xapian::Database db;
+    Xapian::Database* db_ptr;
+    bool owns_db;
 };
 std::string getDbNameFromABI(const std::vector<uint8_t> &call_data);
 

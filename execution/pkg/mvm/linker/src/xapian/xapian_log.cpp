@@ -152,33 +152,33 @@ namespace XapianLog
                        // Serialize dữ liệu tương ứng với từng loại operation
                        if constexpr (std::is_same_v<T, NewDocData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.data);
                        }
                        else if constexpr (std::is_same_v<T, DelDocData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                        }
                        else if constexpr (std::is_same_v<T, AddValueData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                            BinaryEncoding::append_uint32_be(bytes, arg.slot);
                            BinaryEncoding::append_bool_u8(bytes, arg.is_serialised);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.value);
                        }
                        else if constexpr (std::is_same_v<T, AddTermData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.term);
                        }
                        else if constexpr (std::is_same_v<T, SetDataData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.data);
                        }
                        else if constexpr (std::is_same_v<T, IndexTextData>)
                        {
-                           BinaryEncoding::append_uint32_be(bytes, arg.docid);
+                           BinaryEncoding::append_length_prefixed_string(bytes, arg.docid);
                            BinaryEncoding::append_uint32_be(bytes, arg.wdf_inc);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.prefix);
                            BinaryEncoding::append_length_prefixed_string(bytes, arg.text);
@@ -216,7 +216,7 @@ namespace XapianLog
             case Operation::NEW_DOC:
             {
                 NewDocData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.data = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 entry.data = data; // Gán vào variant
                 break;
@@ -224,14 +224,14 @@ namespace XapianLog
             case Operation::DEL_DOC:
             {
                 DelDocData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 entry.data = data;
                 break;
             }
             case Operation::ADD_VALUE:
             {
                 AddValueData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.slot = BinaryEncoding::read_uint32_be(bytes, current_pos);
                 data.is_serialised = BinaryEncoding::read_bool_u8(bytes, current_pos);
                 data.value = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
@@ -241,7 +241,7 @@ namespace XapianLog
             case Operation::ADD_TERM:
             {
                 AddTermData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.term = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 entry.data = data;
                 break;
@@ -249,7 +249,7 @@ namespace XapianLog
             case Operation::SET_DATA:
             {
                 SetDataData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.data = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 entry.data = data;
                 break;
@@ -257,7 +257,7 @@ namespace XapianLog
             case Operation::INDEX_TEXT:
             {
                 IndexTextData data;
-                data.docid = BinaryEncoding::read_uint32_be(bytes, current_pos);
+                data.docid = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.wdf_inc = BinaryEncoding::read_uint32_be(bytes, current_pos);
                 data.prefix = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);
                 data.text = BinaryEncoding::read_length_prefixed_string(bytes, current_pos);

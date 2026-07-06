@@ -1503,11 +1503,11 @@ private:
         } else if (addr == FULL_DATABASE_ADDRESS) {
           precompile_output =
               extension.FullDatabase(input, ctxt->as.acc.get_address(), false,
-                                     gs.get_block_context().number);
+                                     gs.get_block_context().number, &gs);
         } else if (addr == FULL_DATABASE_ADDRESS_V1) {
           precompile_output =
               extension.FullDatabaseV1(input, ctxt->as.acc.get_address(), false,
-                                       gs.get_block_context().number);
+                                       gs.get_block_context().number, &gs);
         } else if (addr == CROSS_CHAIN_ADDRESS) {
           success = handle_cross_chain_precompile(
               gs, input, precompile_output, ctxt->as, value, log_handler,
