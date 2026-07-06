@@ -1,3 +1,4 @@
+#include <atomic>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
 #include "xapian/xapian_log.h" // Giả định chứa định nghĩa XapianLog::LogEntry
@@ -73,7 +74,7 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
 
     {
-        std::shared_lock<std::shared_mutex> read_lock(instances_mutex);
+        std::unique_lock<std::shared_mutex> read_lock(instances_mutex);
         auto it = instances.find(db_path_str);
         if (!isReset && it != instances.end())
         {
@@ -254,743 +255,265 @@ static std::string getMvmIdKey(const unsigned char *mvmId) {
 
 
 // Thêm một document mới vào database
-Xapian::docid XapianManager::new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch();
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        Xapian::Document doc;
-        doc.set_data(data); // Đặt dữ liệu thô cho document
-        // Thêm block number tạo document vào slot 253 (đã serialize)
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber));
-        doc.add_value(253, blockNb_serialised);
-
-        Xapian::docid id = db.add_document(doc); // Thêm document vào database
-
-        // FORK-SAFETY: Use deterministic logical ID based on db_name + docid
-        // instead of random UUID to ensure identical Xapian state across all nodes.
-        auto localId = db_name + "_" + std::to_string(id);
-        doc.add_term(LOGICAL_ID_GENERATED_PREFIX + localId);
-        db.replace_document(id, doc); // Update document with the deterministic term
-
-        // Ghi log thay đổi (staged)
+std::string XapianManager::new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    std::string virtualDocId;
+    
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        int doc_index = tx_counters[txHashStr]++; // Sinh ID tuần tự và tất định trong 1 transaction
+        
+        // Tạo virtualDocId tất định dựa trên txHash và doc_index
+        std::string input_for_hash = txHashStr + "_" + std::to_string(doc_index);
+        virtualDocId = mvm::keccak256(input_for_hash);
+        
+        XapianLog::NewDocData logData;
+        logData.docid = virtualDocId;
+        logData.data = data;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::NEW_DOC;
-        XapianLog::NewDocData logData;
-        logData.docid = id;  // Lưu docid được trả về
-        logData.data = data; // Lưu dữ liệu gốc
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        return id; // Trả về docid của document mới
+        
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
+    } else {
+        // Fallback cho trường hợp không có txHash (Off-chain / Test)
+        static std::atomic<uint64_t> virtual_doc_id_counter{4300000000ULL};
+        uint64_t v_id_num = virtual_doc_id_counter++;
+        virtualDocId = mvm::to_hex_string_fixed(intx::uint256(v_id_num), 64);
     }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0; /* Trả về 0 nếu có lỗi Xapian */
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0; /* Trả về 0 nếu có lỗi standard */
-    }
+    return virtualDocId;
 }
 
 
 // Đánh dấu một document là đã bị xóa (soft delete) tại một block number cụ thể
-bool XapianManager::delete_document(Xapian::docid did, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        // Lấy document hiện tại để đảm bảo nó tồn tại trước khi ghi log
-        Xapian::Document doc = db.get_document(did);
-        // Thêm block number xóa vào slot 254 (đã serialize)
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber));
-        doc.add_value(254, blockNb_serialised);
-        // Thay thế document cũ bằng document đã cập nhật (thêm slot 254)
-        db.replace_document(did, doc);
-        // Ghi log thay đổi (staged)
+bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        XapianLog::DelDocData logData;
+        logData.docid = virtualDocId;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::DEL_DOC;
-        XapianLog::DelDocData logData;
-        logData.docid = did;
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        
-        return true;
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return false; /* Document không tồn tại */
-    }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return false; /* Lỗi Xapian khác */
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return false; /* Lỗi standard */
-    }
+    return true;
 }
 
 // Thêm một value vào một slot của document, có xử lý versioning theo blockNumber
-Xapian::docid XapianManager::add_value(Xapian::docid did, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        Xapian::Document old_doc = db.get_document(did);                                           // Lấy phiên bản cũ
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber)); // Block number hiện tại
-        std::string existing_blockNb_serialised;
-        try
-        {
-            existing_blockNb_serialised = old_doc.get_value(253);
-        }
-        catch (...)
-        {
-        } // Lấy block number tạo của phiên bản cũ
-
-        std::string value_to_add = value;
-        std::string value_to_log = value;
-
-        // Serialize giá trị nếu được yêu cầu
-        if (isSerialise)
-        {
-            try
-            {
-                double num = std::stod(value);
-                value_to_add = Xapian::sortable_serialise(num);
-                value_to_log = value_to_add; // Log giá trị đã serialize
-            }
-            catch (const std::invalid_argument &)
-            {
-                if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-                    active_mvm_id.clear();
-                    tx_cond.notify_all();
-                }
-                return 0; /* Định dạng số không hợp lệ */
-            }
-            catch (const std::out_of_range &)
-            {
-                if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-                    active_mvm_id.clear();
-                    tx_cond.notify_all();
-                }
-                return 0; /* Số ngoài phạm vi */
-            }
-        }
-
-        Xapian::docid result_id = 0;
-
-        // Nếu block number hiện tại trùng với block number tạo của phiên bản cũ -> cập nhật tại chỗ
-        if (existing_blockNb_serialised == blockNb_serialised)
-        {
-            // Cùng block: update tại chỗ, trả về did gốc
-            old_doc.add_value(slot, value_to_add);
-            db.replace_document(did, old_doc);
-            result_id = did;
-        }
-        else // Nếu block number khác -> tạo phiên bản mới
-        {
-            // Khác block: tạo version mới, trả về docid mới
-            Xapian::Document new_version_doc = clone_document(old_doc);
-            new_version_doc.add_value(slot, value_to_add);
-            new_version_doc.add_value(253, blockNb_serialised);
-
-            old_doc.add_value(254, blockNb_serialised);
-            db.replace_document(did, old_doc);
-            result_id = db.add_document(new_version_doc); // Lấy docid mới
-        }
-        
-        // Ghi log thay đổi (staged)
+std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::valueno slot, const std::string &value, bool isSerialise, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        XapianLog::AddValueData logData;
+        logData.docid = virtualDocId;
+        logData.slot = slot;
+        logData.value = value;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
-        XapianLog::AddValueData logData;
-        logData.docid = did;
-        logData.slot = slot;
-        logData.value = value_to_log;
-        logData.is_serialised = isSerialise;
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        
-        return result_id;
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
+    return virtualDocId;
 }
 
 
 // Thêm một term vào document, có xử lý versioning theo blockNumber
-Xapian::docid XapianManager::add_term(Xapian::docid did, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        Xapian::Document old_doc = db.get_document(did);
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber));
-        std::string existing_blockNb_serialised;
-        try
-        {
-            existing_blockNb_serialised = old_doc.get_value(253);
-        }
-        catch (...)
-        {
-        }
-
-        Xapian::docid result_id = 0;
-
-        // Cập nhật tại chỗ hoặc tạo phiên bản mới
-        if (existing_blockNb_serialised == blockNb_serialised)
-        {
-            // Cùng block: update tại chỗ, trả về did gốc
-            old_doc.add_term(term);
-            db.replace_document(did, old_doc);
-            result_id = did;
-        }
-        else
-        {
-            // Khác block: tạo version mới, trả về docid mới
-            Xapian::Document new_version_doc = clone_document(old_doc);
-            new_version_doc.add_term(term);
-            new_version_doc.add_value(253, blockNb_serialised);
-
-            old_doc.add_value(254, blockNb_serialised);
-            db.replace_document(did, old_doc);
-            result_id = db.add_document(new_version_doc); // Lấy docid mới
-        }
-        
-        // Ghi log thay đổi (staged)
+std::string XapianManager::add_term(const std::string& virtualDocId, const std::string &term, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        XapianLog::AddTermData logData;
+        logData.docid = virtualDocId;
+        logData.term = term;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_TERM;
-        XapianLog::AddTermData logData;
-        logData.docid = did;
-        logData.term = term;
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        
-        return result_id;
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
+    return virtualDocId;
 }
 
 // Index một đoạn text vào document (thêm các term được tạo ra từ text)
-Xapian::docid XapianManager::index_text(Xapian::docid did, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        Xapian::Document old_doc = db.get_document(did);
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber));
-        std::string existing_blockNb_serialised;
-        try
-        {
-            existing_blockNb_serialised = old_doc.get_value(253);
-        }
-        catch (...)
-        {
-        }
-
-        Xapian::TermGenerator term_generator; // Cần tạo mới mỗi lần dùng
-        Xapian::docid result_id = 0;
-
-        // Cập nhật tại chỗ hoặc tạo phiên bản mới
-        if (existing_blockNb_serialised == blockNb_serialised)
-        {
-            // Cùng block: update tại chỗ, trả về did gốc
-            term_generator.set_document(old_doc);
-            term_generator.index_text(text_to_index, wdf_inc, prefix);
-            db.replace_document(did, old_doc);
-            result_id = did;
-        }
-        else
-        {
-            // Khác block: tạo version mới, trả về docid mới
-            Xapian::Document new_version_doc = clone_document(old_doc);
-            term_generator.set_document(new_version_doc);
-            term_generator.index_text(text_to_index, wdf_inc, prefix);
-            new_version_doc.add_value(253, blockNb_serialised);
-
-            old_doc.add_value(254, blockNb_serialised);
-            db.replace_document(did, old_doc);
-            result_id = db.add_document(new_version_doc); // Lấy docid mới
-        }
-        
-        // Ghi log thay đổi (staged)
-        XapianLog::LogEntry entry;
-        entry.op = XapianLog::Operation::INDEX_TEXT;
+std::string XapianManager::index_text(const std::string& virtualDocId, const std::string &text_to_index, Xapian::termcount wdf_inc, const std::string prefix, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         XapianLog::IndexTextData logData;
-        logData.docid = did;
+        logData.docid = virtualDocId;
         logData.text = text_to_index;
         logData.wdf_inc = wdf_inc;
         logData.prefix = prefix;
+        XapianLog::LogEntry entry;
+        entry.op = XapianLog::Operation::INDEX_TEXT;
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        
-        return result_id;
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0;
-    }
+    return virtualDocId;
 }
 
 // Đặt (ghi đè) dữ liệu thô cho một document, có xử lý versioning
-Xapian::docid XapianManager::set_data(Xapian::docid did, const std::string &new_data, uint256_t blockNumber, const unsigned char *mvmId)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::string mvm_key = getMvmIdKey(mvmId);
-    std::unique_lock<std::shared_mutex> lock(changes_mutex);
-    if (!mvm_key.empty()) {
-        while (!active_mvm_id.empty() && active_mvm_id != mvm_key) {
-            tx_cond.wait(lock);
-        }
-        if (active_mvm_id.empty()) {
-            active_mvm_id = mvm_key;
-        }
-    }
-
-    try
-    {
-        bool just_started = false;
-        if (!this->has_started)
-        {
-            db.begin_transaction(false);
-            this->has_started = true;
-            just_started = true;
-        }
-        Xapian::Document old_doc = db.get_document(did);
-        auto blockNb_serialised = Xapian::sortable_serialise(mvm::uint256_to_double(blockNumber));
-        std::string existing_blockNb_serialised;
-        try
-        {
-            existing_blockNb_serialised = old_doc.get_value(253);
-        }
-        catch (...)
-        {
-        }
-
-        Xapian::docid result_id = 0;
-
-        // Cập nhật tại chỗ hoặc tạo phiên bản mới
-        if (existing_blockNb_serialised == blockNb_serialised)
-        {
-            // Cùng block: update tại chỗ, trả về did gốc
-            old_doc.set_data(new_data);
-            db.replace_document(did, old_doc);
-            result_id = did;
-        }
-        else
-        {
-            // Khác block: tạo version mới, trả về docid mới
-            Xapian::Document new_version_doc = clone_document(old_doc); // Clone để giữ term/value cũ
-            new_version_doc.set_data(new_data);                         // Đặt dữ liệu mới
-            new_version_doc.add_value(253, blockNb_serialised);         // Đặt block number tạo
-
-            old_doc.add_value(254, blockNb_serialised); // Đánh dấu phiên bản cũ
-            db.replace_document(did, old_doc);
-            result_id = db.add_document(new_version_doc); // Thêm phiên bản mới, lấy docid mới
-        }
-        
-        // Ghi log thay đổi (staged)
+std::string XapianManager::set_data(const std::string& virtualDocId, const std::string &new_data, uint256_t blockNumber, const unsigned char *mvmId, const uint256_t *txHash) {
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        XapianLog::SetDataData logData;
+        logData.docid = virtualDocId;
+        logData.data = new_data;
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::SET_DATA;
-        XapianLog::SetDataData logData;
-        logData.docid = did; // Log tham chiếu đến docid gốc
-        logData.data = new_data;
         entry.data = logData;
-        if (just_started)
-        {
-            entry.command_type = XapianLog::CommandType::START;
-        }
-        comprehensive_log.push_back(entry);
-        
-        return result_id; // Trả về docid (cũ nếu cùng block, mới nếu khác block)
+        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0; // Document không tồn tại
-    }
-    catch (const Xapian::Error &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0; // Lỗi Xapian
-    }
-    catch (const std::exception &)
-    {
-        if (!this->has_started && !mvm_key.empty() && active_mvm_id == mvm_key) {
-            active_mvm_id.clear();
-            tx_cond.notify_all();
-        }
-        return 0; // Lỗi standard
-    }
+    return virtualDocId;
 }
+Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash) {
+    bool is_write_tx = (txHash != nullptr || writerHash != nullptr);
+    std::unique_lock<std::recursive_mutex> db_lock(db_mutex, std::defer_lock);
+    if (is_write_tx) {
+        db_lock.lock();
+    }
 
+    Xapian::Document doc;
+    bool found = false;
+    
+    try {
+        Xapian::docid did = resolveVirtualDocId(virtualDocId);
+        if (did != 0) {
+            doc = db.get_document(did);
+            found = true;
+        }
+    } catch (const Xapian::DocNotFoundError&) {
+        found = false;
+    } catch (...) {
+        found = false;
+    }
+    
+    std::shared_lock<std::shared_mutex> buffer_lock(tx_buffers_mutex);
 
-// Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
-DocumentInfo XapianManager::get_document(Xapian::docid did, uint256_t blockNumber)
-{
-    touch(); // Cập nhật thời gian truy cập
-    std::lock_guard<std::shared_mutex> lock(changes_mutex);
-    try
-    {
-        Xapian::Document doc = db.get_document(did);
-
-        // Kiểm tra xem document có bị "xóa" (đánh dấu ở slot 254) trước hoặc tại blockNumber không
-        std::string slot254_str = doc.get_value(254);
-        if (!slot254_str.empty())
-        {
-            double slot254_val = Xapian::sortable_unserialise(slot254_str);
-            if (slot254_val <= mvm::uint256_to_double(blockNumber))
-            {
-                return {"", "", ""}; // Bị loại do đã bị xóa
+    // 1. Try to find in the writer transaction's buffer (provided by Block-STM dependency)
+    if (writerHash != nullptr) {
+        std::string writerHashStr = mvm::to_hex_string_fixed(*writerHash, 64);
+        auto it = tx_buffers.find(writerHashStr);
+        if (it != tx_buffers.end()) {
+            const auto& entries = it->second.xapian_doc_logs;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                const auto& entry = entries[i];
+                if (entry.op == XapianLog::Operation::NEW_DOC) {
+                    auto data = std::get<XapianLog::NewDocData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        found = true;
+                        doc = Xapian::Document();
+                        doc.set_data(data.data);
+                    }
+                } else if (entry.op == XapianLog::Operation::SET_DATA) {
+                    auto data = std::get<XapianLog::SetDataData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        found = true;
+                        doc.set_data(data.data);
+                    }
+                } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
+                    auto data = std::get<XapianLog::AddValueData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        found = true;
+                        doc.add_value(data.slot, data.value);
+                    }
+                }
             }
         }
+    }
 
-        // Kiểm tra xem document có được tạo *sau* blockNumber không (dựa vào slot 253)
-        std::string slot253_str = doc.get_value(253);
-        if (!slot253_str.empty())
-        {
-            double slot253_val = Xapian::sortable_unserialise(slot253_str);
-            if (slot253_val > mvm::uint256_to_double(blockNumber))
-            {
-                // Phiên bản document này được tạo sau blockNumber truy vấn
-                return {"", "", ""}; // Bị loại do chưa tồn tại tại thời điểm đó
+    // 2. Try to find in current transaction's buffer (can overwrite writer's changes)
+    if (txHash != nullptr) {
+        std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
+        auto it = tx_buffers.find(txHashStr);
+        if (it != tx_buffers.end()) {
+            const auto& entries = it->second.xapian_doc_logs;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                const auto& entry = entries[i];
+                if (entry.op == XapianLog::Operation::NEW_DOC) {
+                    auto data = std::get<XapianLog::NewDocData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        found = true;
+                        doc = Xapian::Document();
+                        doc.set_data(data.data);
+                    }
+                } else if (entry.op == XapianLog::Operation::DEL_DOC) {
+                    auto data = std::get<XapianLog::DelDocData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        found = false;
+                        throw Xapian::DocNotFoundError("Document deleted in buffer");
+                    }
+                } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
+                    auto data = std::get<XapianLog::AddValueData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        doc.add_value(data.slot, data.value);
+                    }
+                } else if (entry.op == XapianLog::Operation::ADD_TERM) {
+                    auto data = std::get<XapianLog::AddTermData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        doc.add_term(data.term);
+                    }
+                } else if (entry.op == XapianLog::Operation::SET_DATA) {
+                    auto data = std::get<XapianLog::SetDataData>(entry.data);
+                    if (data.docid == virtualDocId) {
+                        doc.set_data(data.data);
+                    }
+                }
             }
         }
-
-        // Lấy các giá trị cần thiết (giả định slot 1, 2 có ý nghĩa cụ thể)
-        std::string author_val = doc.get_value(1);
-        std::string content_val = doc.get_value(2);
-        return {doc.get_data(), author_val, content_val};
     }
-    catch (const Xapian::DocNotFoundError &)
-    {
-        return {"", "", ""};
+    
+    if (!found) {
+        throw Xapian::DocNotFoundError("Document not found");
     }
-    catch (const Xapian::Error &)
-    {
-        return {"", "", ""};
-    }
+    
+    return doc;
 }
 
-
-// Lấy dữ liệu thô của document tại một block number
-std::string XapianManager::get_data(Xapian::docid did, uint256_t blockNumber) {
-  touch();
-  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
+std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
-    Xapian::Document doc = db.get_document(did);
-    // Kiểm tra slot 254 (đã bị xóa)
-    std::string slot254_str = doc.get_value(254);
-    if (!slot254_str.empty()) {
-      double slot254_val = Xapian::sortable_unserialise(slot254_str);
-      if (slot254_val <= mvm::uint256_to_double(blockNumber)) {
-        return "";
-      }
-    }
-    // Kiểm tra slot 253 (chưa được tạo)
-    std::string slot253_str = doc.get_value(253);
-    if (!slot253_str.empty()) {
-      double slot253_val = Xapian::sortable_unserialise(slot253_str);
-      if (slot253_val > mvm::uint256_to_double(blockNumber)) {
-        return "";
-      }
-    }
-    return doc.get_data(); // Trả về dữ liệu thô
-  } catch (const Xapian::DocNotFoundError &) {
-    return "";
-  } catch (const Xapian::Error &) {
-    return "";
-  }
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    return doc.get_data();
+  } catch (...) {}
+  return "";
 }
 
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
-std::string XapianManager::get_value(Xapian::docid did, Xapian::valueno slot,
-                                     bool isSerialise, uint256_t blockNumber) {
-  touch();
-  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
-  try {
-    Xapian::Document doc = db.get_document(did);
-    // Kiểm tra slot 254 (đã bị xóa)
-    std::string slot254_str = doc.get_value(254);
-    if (!slot254_str.empty()) {
-      double slot254_val = Xapian::sortable_unserialise(slot254_str);
-      if (slot254_val <= mvm::uint256_to_double(blockNumber)) {
-        return "";
-      }
-    }
-    // Kiểm tra slot 253 (chưa được tạo)
-    std::string slot253_str = doc.get_value(253);
-    if (!slot253_str.empty()) {
-      double slot253_val = Xapian::sortable_unserialise(slot253_str);
-      if (slot253_val > mvm::uint256_to_double(blockNumber)) {
-        return "";
-      }
-    }
+std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+    std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
+    try {
+        Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+        return doc.get_value(slot);
+    } catch (...) {}
+    return "";
+}
 
-    std::string data = doc.get_value(slot); // Lấy giá trị từ slot
-    // Nếu yêu cầu unserialize và có dữ liệu
-    if (isSerialise && !data.empty()) {
-      try {
-        double value = Xapian::sortable_unserialise(data); // Unserialize
-        // Chuyển double thành string với định dạng mong muốn
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(10) << value;
-        std::string str_val = oss.str();
-        // Xóa các số 0 thừa ở cuối phần thập phân
-        str_val.erase(str_val.find_last_not_of('0') + 1, std::string::npos);
-        // Xóa dấu '.' nếu nó là ký tự cuối cùng
-        if (!str_val.empty() && str_val.back() == '.')
-          str_val.pop_back();
-        return str_val;
-      } catch (const Xapian::Error &) {
-        return ""; /* Lỗi unserialize */
-      }
-    }
-    return data; // Trả về dữ liệu gốc nếu không unserialize hoặc không có dữ
-                 // liệu
-  } catch (const Xapian::DocNotFoundError &) {
-    return "";
-  } catch (const Xapian::Error &) {
-    return "";
-  }
+// Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
+DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
+  DocumentInfo info;
+  try {
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    info.data = doc.get_data();
+  } catch (...) {}
+  return info;
 }
 
 // Lấy danh sách các term của document tại một block number
-std::vector<std::string> XapianManager::get_terms(Xapian::docid did,
-                                                  uint256_t blockNumber) {
-  touch();
-  std::lock_guard<std::shared_mutex> db_lock(changes_mutex);
+std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocId,
+                                                  uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   std::vector<std::string> terms;
   try {
-    Xapian::Document doc = db.get_document(did);
-    // Kiểm tra slot 254 (đã bị xóa)
-    std::string slot254_str = doc.get_value(254);
-    if (!slot254_str.empty()) {
-      double slot254_val = Xapian::sortable_unserialise(slot254_str);
-      if (slot254_val <= mvm::uint256_to_double(blockNumber)) {
-        return {}; // Trả về vector rỗng
-      }
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    for (auto term_it = doc.termlist_begin(); term_it != doc.termlist_end(); ++term_it) {
+      terms.push_back(*term_it);
     }
-    // Kiểm tra slot 253 (chưa được tạo)
-    std::string slot253_str = doc.get_value(253);
-    if (!slot253_str.empty()) {
-      double slot253_val = Xapian::sortable_unserialise(slot253_str);
-      if (slot253_val > mvm::uint256_to_double(blockNumber)) {
-        return {}; // Trả về vector rỗng
-      }
-    }
-
-    // Lặp qua danh sách term và thêm vào vector kết quả
-    for (Xapian::TermIterator it = doc.termlist_begin();
-         it != doc.termlist_end(); ++it) {
-      terms.push_back(*it);
-    }
-  } catch (
-      const Xapian::DocNotFoundError &) { /* Trả về vector rỗng (đã khởi tạo) */
-  } catch (const Xapian::Error &) {       /* Trả về vector rỗng */
-  }
+  } catch (...) {}
   return terms;
 }
 
@@ -1003,6 +526,7 @@ bool XapianManager::commit_changes() {
     return true; // Không có gì để commit
   }
   try {
+    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     db.commit(); // Thực hiện commit Xapian
     comprehensive_log.xapian_doc_logs
         .clear(); // Xóa các log đã staged sau khi commit thành công
@@ -1015,13 +539,14 @@ bool XapianManager::commit_changes() {
 }
 
 void XapianManager::commitAllInstances() {
-  std::shared_lock<std::shared_mutex> lock(instances_mutex);
+  std::unique_lock<std::shared_mutex> lock(instances_mutex);
   for (auto &pair : instances) {
     auto manager = pair.second;
     if (manager) {
       std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
       if (!manager->has_started) {
         try {
+          std::lock_guard<std::recursive_mutex> db_lock(manager->db_mutex);
           manager->db.commit();
           manager->comprehensive_log.xapian_doc_logs.clear();
         } catch (...) {
@@ -1126,7 +651,7 @@ std::thread cleaner_thread([] {
     // Giai đoạn 1: Xác định các instance ứng viên để xóa (không giữ accessor
     // lâu)
     {
-                std::shared_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
+                std::unique_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
                 for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
                 {
                     // Kiểm tra con trỏ hợp lệ và trạng thái idle
@@ -1166,104 +691,62 @@ struct CleanerStopper {
 } // namespace
 
 // Áp dụng lại một danh sách các log entry vào database hiện tại
-bool XapianManager::replay_log(
-    const std::vector<XapianLog::LogEntry> &log_to_replay) {
-  touch();
-  std::lock_guard<std::mutex> db_lock(db_mutex);
-  if (log_to_replay.empty()) {
-    return true; // Không có gì để replay
-  }
-
-  std::lock_guard<std::shared_mutex> changes_lock(
-      changes_mutex); // Khóa log thay đổi trong suốt quá trình replay
-
-  // Quan trọng: Replay không nên thêm lại vào staged_changes_log
-  // Nó phải trực tiếp thay đổi trạng thái database
-
-  for (const auto &entry : log_to_replay) {
-    bool success_op = false;
-    try {
-      // Sử dụng std::visit để xử lý từng loại operation trong log entry
-      success_op = std::visit(
-          [this](
-              const auto &data_arg) -> bool { // Capture 'this' để truy cập 'db'
-            using T = std::decay_t<decltype(data_arg)>;
-            try {
-              // Logic replay cho từng loại operation
-              if constexpr (std::is_same_v<T, XapianLog::NewDocData>) {
+bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay) {
+    std::unique_lock<std::shared_mutex> db_lock(changes_mutex);
+    std::lock_guard<std::recursive_mutex> lock(db_mutex);
+    for (const auto& entry : log_to_replay) {
+        try {
+            if (entry.op == XapianLog::Operation::NEW_DOC) {
                 Xapian::Document doc;
-                doc.set_data(data_arg.data);
-                // Cần đảm bảo replay NEW_DOC xử lý đúng ID và các term/value
-                // mặc định nếu có
-                this->db.replace_document(
-                    data_arg.docid,
-                    doc); // Giả định replace hoạt động cho cả ID mới
-                return true;
-              } else if constexpr (std::is_same_v<T, XapianLog::DelDocData>) {
-                // Logic gốc dùng replace_document để soft delete. Replay nên
-                // làm tương tự. Nếu chỉ có docid trong log, cần fetch, thêm
-                // value 254 rồi replace. Hoặc nếu replay có nghĩa là xóa cứng:
-                this->db.delete_document(data_arg.docid);
-                return true;
-              } else if constexpr (std::is_same_v<T, XapianLog::AddValueData>) {
-                Xapian::Document doc = this->db.get_document(data_arg.docid);
-                doc.add_value(
-                    data_arg.slot,
-                    data_arg.value); // Giá trị trong log đã được xử lý
-                this->db.replace_document(data_arg.docid, doc);
-                return true;
-              } else if constexpr (std::is_same_v<T, XapianLog::AddTermData>) {
-                Xapian::Document doc = this->db.get_document(data_arg.docid);
-                doc.add_term(data_arg.term);
-                this->db.replace_document(data_arg.docid, doc);
-                return true;
-              } else if constexpr (std::is_same_v<T, XapianLog::SetDataData>) {
-                Xapian::Document doc = this->db.get_document(data_arg.docid);
-                doc.set_data(data_arg.data);
-                this->db.replace_document(data_arg.docid, doc);
-                return true;
-              } else if constexpr (std::is_same_v<T,
-                                                  XapianLog::IndexTextData>) {
-                Xapian::Document doc = this->db.get_document(data_arg.docid);
-                Xapian::TermGenerator tg;
-                tg.set_document(doc);
-                tg.index_text(data_arg.text, data_arg.wdf_inc, data_arg.prefix);
-                this->db.replace_document(data_arg.docid, doc);
-                return true;
-              } else if constexpr (std::is_same_v<T, std::monostate>) {
-                return true; // Bỏ qua monostate (có thể là log không hợp lệ)
-              }
-              return false; // Kiểu dữ liệu không xác định trong variant
-            } catch (const Xapian::DocNotFoundError &) {
-              // Xử lý khi document không tìm thấy trong lúc replay (có thể bỏ
-              // qua)
-              return true; // Theo logic gốc là bỏ qua lỗi này
-            } catch (const Xapian::Error &) {
-              return false; /* Lỗi Xapian khác */
+                doc.set_data(std::get<XapianLog::NewDocData>(entry.data).data);
+                std::string v_docid = std::get<XapianLog::NewDocData>(entry.data).docid;
+                std::string clean_id = v_docid;
+                if (clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
+                doc.add_term("Q" + clean_id);
+                db.add_document(doc);
+            } else if (entry.op == XapianLog::Operation::DEL_DOC) {
+                Xapian::docid did = resolveVirtualDocId(std::get<XapianLog::DelDocData>(entry.data).docid);
+                if (did > 0) db.delete_document(did);
+            } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
+                auto data = std::get<XapianLog::AddValueData>(entry.data);
+                Xapian::docid did = resolveVirtualDocId(data.docid);
+                if (did > 0) {
+                    Xapian::Document doc = db.get_document(did);
+                    doc.add_value(data.slot, data.value);
+                    db.replace_document(did, doc);
+                }
+            } else if (entry.op == XapianLog::Operation::ADD_TERM) {
+                auto data = std::get<XapianLog::AddTermData>(entry.data);
+                Xapian::docid did = resolveVirtualDocId(data.docid);
+                if (did > 0) {
+                    Xapian::Document doc = db.get_document(did);
+                    doc.add_term(data.term);
+                    db.replace_document(did, doc);
+                }
+            } else if (entry.op == XapianLog::Operation::SET_DATA) {
+                auto data = std::get<XapianLog::SetDataData>(entry.data);
+                Xapian::docid did = resolveVirtualDocId(data.docid);
+                if (did > 0) {
+                    Xapian::Document doc = db.get_document(did);
+                    doc.set_data(data.data);
+                    db.replace_document(did, doc);
+                }
+            } else if (entry.op == XapianLog::Operation::INDEX_TEXT) {
+                auto data = std::get<XapianLog::IndexTextData>(entry.data);
+                Xapian::docid did = resolveVirtualDocId(data.docid);
+                if (did > 0) {
+                    Xapian::Document doc = db.get_document(did);
+                    Xapian::TermGenerator termgenerator;
+                    termgenerator.set_stemmer(Xapian::Stem("english"));
+                    termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                    termgenerator.set_document(doc);
+                    termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+                    db.replace_document(did, doc);
+                }
             }
-          },
-          entry.data);
+        } catch (...) { return false; }
     }
-    // Catch các lỗi có thể xảy ra khi truy cập variant hoặc lỗi Xapian chung
-    catch (const std::bad_variant_access &) {
-      return false;
-    } catch (const Xapian::Error &) {
-      return false;
-    } catch (const std::exception &) {
-      return false;
-    } catch (...) {
-      return false;
-    }
-
-    // Nếu một operation thất bại, dừng replay và trả về false
-    if (!success_op) {
-      return false;
-    }
-  }
-  // Replay thành công tất cả các operation
-  // Hàm này không tự commit, caller phải gọi commit_changes() nếu muốn lưu kết
-  // quả replay
-  return true;
+    return true;
 }
 
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
@@ -1277,6 +760,7 @@ bool XapianManager::revertUncommittedChanges() {
   }
   
   try {
+    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     // 1. Xóa các thay đổi đang chờ trong log
     comprehensive_log.xapian_doc_logs.clear();
 
@@ -1288,20 +772,12 @@ bool XapianManager::revertUncommittedChanges() {
     // Mở lại database từ đường dẫn đã lưu
     db = Xapian::WritableDatabase(
         mvm::createFullPath(address, db_name).string(), Xapian::DB_OPEN);
-    active_mvm_id.clear();
-    tx_cond.notify_all();
     return true; // Revert thành công
   } catch (const Xapian::Error &) {
-    active_mvm_id.clear();
-    tx_cond.notify_all();
     return false; /* Lỗi Xapian khi đóng/mở lại DB */
   } catch (const std::exception &) {
-    active_mvm_id.clear();
-    tx_cond.notify_all();
     return false; /* Lỗi standard */
   } catch (...) {
-    active_mvm_id.clear();
-    tx_cond.notify_all();
     return false; /* Lỗi không xác định */
   }
 }

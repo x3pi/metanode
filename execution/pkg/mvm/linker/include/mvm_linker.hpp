@@ -154,8 +154,10 @@ noncePlusOne(unsigned char *b_from, unsigned long long gas_price,
              unsigned char *b_block_coinbase, unsigned char *mvmId,
              bool is_cache);
 
-extern int commit_full_db(unsigned char *mvmId);
+extern int commit_full_db(unsigned char *mvmId, unsigned char *txHashes, int numHashes);
 extern int revert_full_db(unsigned char *mvmId);
+extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries);
 
 struct Extension_return {

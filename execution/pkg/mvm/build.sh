@@ -1,3 +1,5 @@
+#!/bin/bash
+set -euo pipefail
 
 # cd 3rdparty
 # bash build.sh

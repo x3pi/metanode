@@ -55,37 +55,34 @@ public:
   void acquireSearchSlot();
   void releaseSearchSlot();
 
-  mutable std::mutex db_mutex; // Mutex to protect all operations on db
+  mutable std::recursive_mutex db_mutex; // Mutex to protect all operations on db
 
   // Thêm thành viên để lưu khóa mvmId liên kết
-  std::string associatedMvmIdKey;
-  std::mutex mvmIdKeyMutex; // Mutex để bảo vệ associatedMvmIdKey nếu cần truy
-                            // cập từ nhiều luồng
 
   // --- Constructor ---
   XapianManager(const std::string &db_path, const mvm::Address &addr);
 
   // --- Document Operations (Log changes before execution) ---
-  Xapian::docid new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
-  bool delete_document(Xapian::docid did, uint256_t blockNumber, const unsigned char *mvmId = nullptr);
-  Xapian::docid add_value(Xapian::docid did, Xapian::valueno slot,
+  std::string new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
+  bool delete_document(const std::string& virtualDocId, uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
+  std::string add_value(const std::string& virtualDocId, Xapian::valueno slot,
                           const std::string &value, bool isSerialise,
-                          uint256_t blockNumber, const unsigned char *mvmId = nullptr);
-  Xapian::docid add_term(Xapian::docid did, const std::string &term,
-                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
-  Xapian::docid set_data(Xapian::docid did, const std::string &data,
-                         uint256_t blockNumber, const unsigned char *mvmId = nullptr);
-  Xapian::docid index_text(Xapian::docid did, const std::string &text_to_index,
+                          uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
+  std::string add_term(const std::string& virtualDocId, const std::string &term,
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
+  std::string set_data(const std::string& virtualDocId, const std::string &data,
+                         uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
+  std::string index_text(const std::string& virtualDocId, const std::string &text_to_index,
                            Xapian::termcount wdf_inc, const std::string prefix,
-                           uint256_t blockNumber, const unsigned char *mvmId = nullptr);
+                           uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);
   Xapian::Document clone_document(const Xapian::Document &source_doc);
 
   // --- Read Operations ---
-  std::string get_data(Xapian::docid did, uint256_t blockNumber);
-  std::string get_value(Xapian::docid did, Xapian::valueno slot,
-                        bool isSerialise, uint256_t blockNumber);
-  std::vector<std::string> get_terms(Xapian::docid did, uint256_t blockNumber);
-  DocumentInfo get_document(Xapian::docid did, uint256_t blockNumber);
+  std::string get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
+  std::string get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
+  std::vector<std::string> get_terms(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
+  DocumentInfo get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
+  Xapian::Document get_overlayed_document(const std::string& virtualDocIdStr, const uint256_t* txHash, const uint256_t* writerHash = nullptr);
 
   // --- Commit and Change Tracking ---
   bool commit_changes();
@@ -105,30 +102,18 @@ public:
   void dump_all_documents(uint256_t blockNumber);
 
   // (Optional) Cung cấp getter/setter an toàn luồng nếu cần
-  std::string getAssociatedMvmIdKey() {
-    std::lock_guard<std::mutex> lock(mvmIdKeyMutex);
-    return associatedMvmIdKey;
-  }
 
   // Chỉ nên được gọi bởi registry
-  void setAssociatedMvmIdKeyInternal(const std::string &key) {
-    std::lock_guard<std::mutex> lock(mvmIdKeyMutex);
-    associatedMvmIdKey = key;
-  }
 
-  void clearAssociatedMvmIdKeyInternal() {
-    std::lock_guard<std::mutex> lock(mvmIdKeyMutex);
-    associatedMvmIdKey = "";
-  }
 
   bool replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay);
+  void apply_buffered_tx(const std::string& txHashStr);
+  void clear_buffer(const std::string& txHashStr);
 
   XapianLog::ComprehensiveLog extractComprehensiveChangeLogs();
   XapianLog::ComprehensiveLog removeLogsUntilNearestEndCommand();
   std::string getDbName() const; // <-- Thêm khai báo này
   bool has_started = false;
-  std::string active_mvm_id;
-  std::condition_variable_any tx_cond;
   friend class XapianRegistry; // Cho phép Registry truy cập changes_mutex
 
 private:
@@ -140,6 +125,19 @@ private:
   XapianLog::ComprehensiveLog comprehensive_log;
 
   std::string db_name; // <-- Biến lưu đường dẫn DB Xapian
+
+  // Bản đồ lưu tạm các thao tác Xapian cho mỗi transaction (dựa trên txHash)
+  std::shared_mutex tx_buffers_mutex;
+  std::map<std::string, XapianLog::ComprehensiveLog> tx_buffers;
+  std::map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
+  
+  // Resolves a virtual docId (e.g. 256-bit UUID) to native Xapian uint32 docid
+  Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr);
+  
+  // Áp dụng buffer vào một Xapian::Document ảo để mô phỏng (dùng khi get_data)
+  void replayBufferToDocument(Xapian::Document& doc, const XapianLog::ComprehensiveLog& buffer);
+
+  bool commitTransaction(unsigned char *txHashes, int numHashes);
 };
 
 #endif // XAPIAN_MANAGER_H

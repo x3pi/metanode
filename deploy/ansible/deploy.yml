@@ -12,7 +12,8 @@
             {%- for nid in hostvars[host]['node_ids'] -%}
               {%- set is_sync = (nid | int in hostvars[host]['synconly_nodes'] | default([])) or (hostvars[host]['is_synconly'] | default(false)) -%}
               {%- set is_rpc = (nid | int in hostvars[host]['rpc_nodes'] | default([])) or (hostvars[host]['is_rpc'] | default(false)) -%}
-              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync, 'is_rpc': is_rpc}) -%}
+              {%- set is_snapshot = (nid | int in hostvars[host]['snapshot_nodes'] | default([])) or (hostvars[host]['snapshot_enabled'] | default(false)) -%}
+              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync, 'is_rpc': is_rpc, 'snapshot_enabled': is_snapshot}) -%}
             {%- endfor -%}
           {%- endfor -%}
           {{ nodes }}
@@ -68,6 +69,31 @@
             {%- endif -%}
           {%- endfor -%}
           {{ nodes }}
+
+    - name: Get filesystem type for metanode install directory
+      ansible.builtin.shell: "mkdir -p {{ metanode_install_dir }} && df -T {{ metanode_install_dir }} | awk 'NR==2 {print $2}'"
+      register: fs_type
+      changed_when: false
+      when: active_nodes | length > 0 and ansible_action in ['start', 'setup']
+
+    - name: Check snapshot_enabled for each node
+      delegate_to: localhost
+      ansible.builtin.shell: "grep -q '\"snapshot_enabled\": true' {{ deploy_dir }}/node-{{ item }}_keys/execution.json && echo 'true' || echo 'false'"
+      loop: "{{ active_nodes }}"
+      register: snapshot_check
+      become: no
+      when: active_nodes | length > 0 and ansible_action in ['start', 'setup']
+
+    - name: Fail if snapshot enabled on unsupported filesystem
+      ansible.builtin.fail:
+        msg: |
+          [CẢNH BÁO] Hệ thống tệp ({{ fs_type.stdout | default('unknown') }}) không hỗ trợ reflink (Yêu cầu btrfs hoặc xfs).
+          Node {{ item.item }} được cấu hình 'snapshot_enabled: true'. Node sẽ bị crash nếu tiếp tục.
+          Hướng dẫn sửa lỗi: 
+          Vui lòng chạy script 'migrate-to-btrfs-lvm.sh' trên máy chủ đích để mount phân vùng BTRFS, 
+          hoặc tắt tính năng snapshot trong cấu hình deploy.
+      loop: "{{ snapshot_check.results }}"
+      when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and item.stdout is defined and item.stdout == 'true' and fs_type.stdout is defined and fs_type.stdout not in ['btrfs', 'xfs']"
   roles:
     - { role: stop_services, when: "active_nodes | length > 0" }
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }

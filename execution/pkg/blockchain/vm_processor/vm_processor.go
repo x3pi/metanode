@@ -182,11 +182,6 @@ func (vmP *VmProcessor) deploySmartContract(
 	mvmId common.Address,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
-	defer func() {
-		if !isCache {
-			mvm.ClearMVMApi(mvmId)
-		}
-	}()
 	var span *trace.Span = nil // Khởi tạo nil
 
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
@@ -332,11 +327,6 @@ func (vmP *VmProcessor) executeSmartContract(
 	mvmE *mvm.MVMApi,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
-	defer func() {
-		if !isCache {
-			mvm.ClearMVMApi(mvmE.GetKey())
-		}
-	}()
 	var span *trace.Span = nil // Khởi tạo nil
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
 

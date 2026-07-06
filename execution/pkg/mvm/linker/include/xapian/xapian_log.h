@@ -33,18 +33,18 @@ namespace XapianLog
     // Định nghĩa cấu trúc cho từng hành động
     struct NewDocData
     {
-        uint32_t docid;
+        std::string docid;
         std::string data;
     };
 
     struct DelDocData
     {
-        uint32_t docid;
+        std::string docid;
     };
 
     struct AddValueData
     {
-        uint32_t docid;
+        std::string docid;
         uint32_t slot;
         std::string value;
         bool is_serialised;
@@ -52,19 +52,19 @@ namespace XapianLog
 
     struct AddTermData
     {
-        uint32_t docid;
+        std::string docid;
         std::string term;
     };
 
     struct SetDataData
     {
-        uint32_t docid;
+        std::string docid;
         std::string data;
     };
 
     struct IndexTextData
     {
-        uint32_t docid;
+        std::string docid;
         std::string text;
         uint32_t wdf_inc;
         std::string prefix;
@@ -87,6 +87,7 @@ namespace XapianLog
         LogData data;
         bool is_begin_transaction = true;
         CommandType command_type = CommandType::NORMAL;
+        double blockNumber_double = 0;
         // --- Khai báo phương thức ---
         std::vector<uint8_t> serialize() const;
         static std::optional<LogEntry> deserialize(const std::vector<uint8_t> &bytes);

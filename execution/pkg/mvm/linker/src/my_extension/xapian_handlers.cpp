@@ -11,6 +11,9 @@
 #include "my_extension/utils.h"
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
+#include "mvm/globalstate.h"
+#include "mvm/crypto/sha256.hpp"
+#include <cstddef>
 #include "xapian/xapian_search.h"
 #include <arpa/inet.h>
 #include <filesystem>
@@ -48,8 +51,32 @@ extern std::vector<uint8_t> addOffsetPrefix(const std::vector<uint8_t> &input);
 extern std::string joinStringArgument(const std::vector<std::string> &parts);
 
 // Main function
+
+namespace mvm {
+static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Address& address, const std::string& dbName, const std::string& docIdStr, bool isRead, bool isWrite, const uint256_t* currentTxHash = nullptr) {
+    if (!gs) return 0;
+    std::string dataToHash = dbName;
+    if (!docIdStr.empty()) {
+        dataToHash += ":" + docIdStr;
+    }
+    std::byte hash[32];
+    mvm::crypto::sha256(hash, (const std::byte*)dataToHash.data(), dataToHash.length());
+    uint256_t key = intx::be::unsafe::load<uint256_t>((const uint8_t*)hash);
+    auto acc = gs->get(address);
+    if (isWrite) {
+        uint256_t valToStore = currentTxHash ? *currentTxHash : 1;
+        acc.st.store(key, valToStore);
+        // BẮT BUỘC phải gọi add_addresses_storage_change để Block-STM ghi nhận dependency này
+        gs->add_addresses_storage_change(address, key, valToStore);
+        return 0;
+    } else if (isRead) {
+        return acc.st.load(key);
+    }
+    return 0;
+}
+}
 mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
-                                    bool isReset, uint256_t blockNumber) {
+                                    bool isReset, uint256_t blockNumber, mvm::GlobalState* gs) {
   // Kiểm tra kích thước input hợp lệ
   if (input.size() < 4) {
     std::cerr << "Error: Input size too small!" << std::endl;
@@ -132,7 +159,6 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
           XapianManager::getInstance(extracted_str, address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
         std::cerr << "[DEBUG] XAPIAN_GET_OR_CREATE_DB: OK dbname="
                   << extracted_str << std::endl;
@@ -183,23 +209,23 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
       if (!this->isOffChain) {
-        registry.registerManager(this->mvmId, manager);
       }
 
-      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], "", false, true, this->txHash);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_NEW_DOCUMENT: dbname=" << dbname
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
                 << " newDocID=" << newDocID << std::endl;
 
-      if (newDocID == 0) {
+      if (newDocID.empty() || newDocID == "0") {
         std::cerr << "[ERROR] XAPIAN_NEW_DOCUMENT: new_document returned 0 "
                      "(failed to add document)"
                   << std::endl;
       }
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(newDocID);
+      std::string hexNumber = newDocID;
       // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
 
       return encodeArgument(uint256Abi, hexNumber);
@@ -245,8 +271,13 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
       auto docInfo =
-          manager->get_document(static_cast<int>(number), blockNumber);
+          manager->get_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
 
       return mvm::Code(32, 0);
     }
@@ -284,15 +315,16 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], "", false, true, this->txHash);
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
-          manager->delete_document(static_cast<int>(number), blockNumber, this->mvmId);
+          manager->delete_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -353,15 +385,14 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->add_term(static_cast<int>(number),
-                                       input_argument["term"], blockNumber, this->mvmId);
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
+      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_ADD_TERM_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -369,7 +400,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
                 << " returnedDocId=" << docInfo << std::endl;
 
-      if (docInfo == 0) {
+      if (docInfo.empty() || docInfo == "0") {
         std::cerr << "[ERROR] XAPIAN_ADD_TERM_DOCUMENT: add_term returned 0 "
                      "(document not found or Xapian error)"
                   << std::endl;
@@ -377,7 +408,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string hexNumber = docInfo;
       auto encodedData = encodeArgument(uint256Abi, hexNumber);
 
       return encodedData;
@@ -419,17 +450,17 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], std::to_string(static_cast<int>(docId)), false, true, this->txHash);
       auto docInfo =
-          manager->index_text(static_cast<int>(docId), input_argument["text"],
+          manager->index_text(mvm::to_hex_string_fixed(docId, 64), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
-                              input_argument["prefix"], blockNumber, this->mvmId);
+                              input_argument["prefix"], blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_INDEX_TEXT_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(docId)
@@ -438,7 +469,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
                 << " returnedDocId=" << docInfo << std::endl;
 
-      if (docInfo == 0) {
+      if (docInfo.empty() || docInfo == "0") {
         std::cerr
             << "[ERROR] XAPIAN_INDEX_TEXT_DOCUMENT: index_text returned 0 "
                "(failed to index)"
@@ -446,7 +477,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       // manager->dump_all_documents(blockNumber); // Removed to fix O(N^2) TPS degradation
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string hexNumber = docInfo;
       auto encodedData = encodeArgument(uint256Abi, hexNumber);
       return encodedData;
     }
@@ -487,15 +518,15 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbname, address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
                   << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
-          manager->set_data(static_cast<int>(number), rawData, blockNumber, this->mvmId);
+          manager->set_data(mvm::to_hex_string_fixed(number, 64), rawData, blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_SET_DATA_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -503,14 +534,14 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
                 << " returnedDocId=" << docInfo << std::endl;
 
-      if (docInfo == 0) {
+      if (docInfo.empty() || docInfo == "0") {
         std::cerr << "[ERROR] XAPIAN_SET_DATA_DOCUMENT: set_data returned 0 "
                      "(document not found or Xapian error)"
                   << std::endl;
       }
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string hexNumber = docInfo;
       return encodeArgument(uint256Abi, hexNumber);
     }
 
@@ -548,20 +579,20 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
       auto docInfo = manager->add_value(
-          hex_to_uint64(input_argument["docId"]),
+          mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
-          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string value = decimalToHex(docInfo);
+      std::string value = docInfo;
 
       auto encodedData = encodeArgument(uint256Abi, value);
       printHex(encodedData);
@@ -609,7 +640,12 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->get_data(static_cast<int>(number), blockNumber);
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      auto docInfo = manager->get_data(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
       auto encodedData = encodeArgument(stringAbi, docInfo);
@@ -656,7 +692,12 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->get_terms(static_cast<int>(number), blockNumber);
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      auto docInfo = manager->get_terms(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
       printDocInfo(docInfo);
 
       json stringArrayAbi = {{"type", "string[]"}};
@@ -707,10 +748,15 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
       auto docInfo = manager->get_value(
-          hex_to_uint64(input_argument["docId"]),
+          mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]),
-          input_argument["isSerialise"].get<bool>(), blockNumber);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
       auto encodedData = encodeArgument(stringAbi, docInfo);
@@ -817,7 +863,12 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
 
       std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      XapianSearcher searcher(Xapian::Database(manager->db));
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      XapianSearcher searcher(fullPath.string());
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -867,26 +918,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       std::vector<RangeFilter> range_filters =
           convertJsonToRangeFilters(decodedData["options"]);
 
-      std::cerr << "--- [XAPIAN_QUERY_SEARCH] ---" << std::endl;
-      std::cerr << "DB Name: " << dbName << std::endl;
-      std::cerr << "Queries: " << queries1[0] << std::endl;
-      std::cerr << "Offset: " << offset << ", Limit: " << limit << std::endl;
-      std::cerr << "Block Number: " << mvm::uint256_to_double(blockNumber)
-                << std::endl;
-
-      if (sort_by_value_slot.has_value()) {
-        std::cerr << "Sort by Slot: " << sort_by_value_slot.value()
-                  << (sort_ascending ? " (ASC)" : " (DESC)") << std::endl;
-      } else {
-        std::cerr << "Sort: NONE" << std::endl;
-      }
-
-      for (const auto &rf : range_filters) {
-        std::cerr << "Range Filter - Slot: " << rf.slot << std::endl;
-      }
-
-      std::cerr << "[searcher] Dumping Index..." << std::endl;
-      searcher.dumpIndex();
+      // searcher.dumpIndex();
 
       auto [results1, total1] = searcher.search(
           queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
@@ -937,7 +969,6 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
@@ -946,7 +977,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       }
       auto hash = manager->getChangeHash();
       auto log = manager->getChangeLogs();
-      auto status = registry.commitChangesForMvmId(this->mvmId);
+      auto status = true;
       json stringAbi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(status);
       auto encodedData = encodeArgument(stringAbi, hexNumber);
@@ -966,7 +997,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
 }
 
 mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
-                                      bool isReset, uint256_t blockNumber) {
+                                    bool isReset, uint256_t blockNumber, mvm::GlobalState* gs) {
   // Kiểm tra kích thước input hợp lệ
   if (input.size() < 4) {
     std::cerr << "Error: Input size too small!" << std::endl;
@@ -1037,7 +1068,6 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         // [PERF] Off-chain (eth_call) KHÔNG cần register vào registry
         // vì write đã bị guard chặn, và cancelTransaction không cần cleanup
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
@@ -1104,13 +1134,13 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0);
       }
       if (!this->isOffChain) {
-        registry.registerManager(this->mvmId, manager);
       }
 
-      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId);
+      mvm::injectVirtualDependency(gs, address, dbname, "", false, true, this->txHash);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(newDocID);
+      std::string hexNumber = newDocID;
       return encodeArgument(uint256Abi, hexNumber);
     }
 
@@ -1148,15 +1178,19 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
       auto docInfo =
-          manager->get_document(static_cast<int>(number), blockNumber);
+          manager->get_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
 
       return mvm::Code(32, 0);
     }
@@ -1194,15 +1228,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, "", false, true, this->txHash);
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
-          manager->delete_document(static_cast<int>(number), blockNumber, this->mvmId);
+          manager->delete_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -1263,19 +1298,18 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->add_term(static_cast<int>(number),
-                                       input_argument["term"], blockNumber, this->mvmId);
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
+      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string value = std::to_string(docInfo);
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string value = docInfo;
+      std::string hexNumber = docInfo;
       auto encodedData = encodeArgument(uint256Abi, hexNumber);
 
       return encodedData;
@@ -1317,21 +1351,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, std::to_string(static_cast<int>(docId)), false, true, this->txHash);
       auto docInfo =
-          manager->index_text(static_cast<int>(docId), input_argument["text"],
+          manager->index_text(mvm::to_hex_string_fixed(docId, 64), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
-                              input_argument["prefix"], blockNumber, this->mvmId);
+                              input_argument["prefix"], blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string value = std::to_string(docInfo);
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string value = docInfo;
+      std::string hexNumber = docInfo;
       auto encodedData = encodeArgument(uint256Abi, hexNumber);
       return encodedData;
     }
@@ -1399,18 +1433,18 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbname, address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
                   << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
-          manager->set_data(static_cast<int>(number), rawData, blockNumber, this->mvmId);
+          manager->set_data(mvm::to_hex_string_fixed(number, 64), rawData, blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string hexNumber = decimalToHex(docInfo);
+      std::string hexNumber = docInfo;
       return encodeArgument(uint256Abi, hexNumber);
     }
 
@@ -1448,20 +1482,20 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
       auto docInfo = manager->add_value(
-          hex_to_uint64(input_argument["docId"]),
+          mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
-          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
-      std::string value = decimalToHex(docInfo);
+      std::string value = docInfo;
 
       auto encodedData = encodeArgument(uint256Abi, value);
       printHex(encodedData);
@@ -1502,14 +1536,18 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->get_data(static_cast<int>(number), blockNumber);
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      auto docInfo = manager->get_data(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
 
       mvm::Code dataVec;
       size_t data_len = docInfo.size();
@@ -1562,14 +1600,18 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->get_terms(static_cast<int>(number), blockNumber);
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      auto docInfo = manager->get_terms(mvm::to_hex_string_fixed(number, 64), blockNumber, this->txHash, writerHash);
       printDocInfo(docInfo);
 
       json stringArrayAbi = {{"type", "string[]"}};
@@ -1613,17 +1655,21 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << input_argument["dbname"] << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
       auto docInfo = manager->get_value(
-          hex_to_uint64(input_argument["docId"]),
+          mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]),
-          input_argument["isSerialise"].get<bool>(), blockNumber);
+          input_argument["isSerialise"].get<bool>(), blockNumber, this->txHash, writerHash);
 
       json stringAbi = {{"type", "string"}};
       auto encodedData = encodeArgument(stringAbi, docInfo);
@@ -1730,7 +1776,12 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
 
       std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      XapianSearcher searcher(Xapian::Database(manager->db));
+      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
+      uint256_t* writerHash = nullptr;
+      if (writerHashValue != 0 && writerHashValue != 1) {
+          writerHash = &writerHashValue;
+      }
+      XapianSearcher searcher(fullPath.string());
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1787,6 +1838,8 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
           product_prefix_map, stem_lang, stop_words_list, offset, limit,
           sort_by_value_slot, sort_ascending, range_filters, blockNumber);
 
+      searcher.dumpIndex(); // Added dumpIndex for debugging
+
       auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
       std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;
 
@@ -1822,7 +1875,6 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                                                 address, isReset);
       if (manager) {
         if (!this->isOffChain) {
-          registry.registerManager(this->mvmId, manager);
         }
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
@@ -1831,7 +1883,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       }
       auto hash = manager->getChangeHash();
       auto log = manager->getChangeLogs();
-      auto status = registry.commitChangesForMvmId(this->mvmId);
+      auto status = true;
       json stringAbi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(status);
       auto encodedData = encodeArgument(stringAbi, hexNumber);
