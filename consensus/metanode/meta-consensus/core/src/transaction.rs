@@ -187,7 +187,7 @@ impl TransactionConsumer {
     // E.g., if there are already 25k pending or multiple FFI batches queued.
     pub(crate) fn has_sufficient_transactions(&self) -> bool {
         let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
-        pending_len >= 25000 || self.tx_receiver.len() >= 2
+        pending_len >= 45000
     }
 
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
@@ -309,14 +309,21 @@ impl TransactionConsumer {
 
         // Until we have reached the limit for the pull.
         // We may have already reached limit in the first iteration above, in which case we stop immediately.
+        let mut recv_count = 0;
         while self.pending_transactions.is_none() {
             if let Ok(t) = self.tx_receiver.try_recv() {
+                tracing::error!("🔥 [DEBUG] transaction_consumer.next() pulled a TransactionsGuard with {} txs!", t.transactions.len());
+                recv_count += 1;
                 self.pending_transactions = handle_txs(t);
             } else {
                 break;
             }
         }
         drop(handle_txs);
+
+        if transactions.len() > 0 || recv_count > 0 {
+            tracing::error!("🔥 [DEBUG] transaction_consumer.next() returning {} txs. recv_count: {}, limit_reached: {:?}", transactions.len(), recv_count, limit_reached);
+        }
 
         if !transactions.is_empty() {
             tracing::info!(

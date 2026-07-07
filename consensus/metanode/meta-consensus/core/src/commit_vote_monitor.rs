@@ -30,7 +30,7 @@ pub struct CommitVoteMonitor {
     context: Arc<Context>,
     state: Mutex<VoteState>,
     // Notifier for when quorum index might have advanced
-    pub quorum_advanced_notify: tokio::sync::Notify,
+    pub quorum_advanced_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Number of commit indices to retain in digest_history below the current
@@ -55,7 +55,7 @@ impl CommitVoteMonitor {
         Self {
             context,
             state: Mutex::new(state),
-            quorum_advanced_notify: tokio::sync::Notify::new(),
+            quorum_advanced_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

@@ -443,6 +443,8 @@ func PrepareTransactions(epochData *pb.ExecutableBlock) []types.Transaction {
 		return bytes.Compare(hashI.Bytes(), hashJ.Bytes()) < 0
 	})
 
+	fmt.Printf("✅ [PrepareTransactions] rawTxs: %d, dedupedTxs: %d\n", len(rawTxs), len(dedupedTxs))
+
 	return dedupedTxs
 }
 
@@ -526,14 +528,16 @@ func ParallelUnmarshalTransactions(txs []*pb.TransactionExe) []types.Transaction
 						continue
 					}
 				}
-				singleTx, err := transaction.UnmarshalTransaction(ms.Digest)
-				if err == nil {
+				singleTx, singleErr := transaction.UnmarshalTransaction(ms.Digest)
+				if singleErr == nil {
 					localTxs = append(localTxs, singleTx)
 					continue
 				}
 				multiTxs, err := transaction.UnmarshalTransactions(ms.Digest)
 				if err == nil {
 					localTxs = append(localTxs, multiTxs...)
+				} else {
+					fmt.Printf("❌ [SPECULATIVE] Failed to unmarshal transaction digest of len %d. First error: %v, Second error: %v\n", len(ms.Digest), singleErr, err)
 				}
 			}
 			chunks[workerID] = localTxs
