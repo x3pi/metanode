@@ -74,7 +74,7 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
 
     {
-        std::unique_lock<std::shared_mutex> read_lock(instances_mutex);
+        std::shared_lock<std::shared_mutex> read_lock(instances_mutex);
         auto it = instances.find(db_path_str);
         if (!isReset && it != instances.end())
         {
@@ -651,7 +651,7 @@ std::thread cleaner_thread([] {
     // Giai đoạn 1: Xác định các instance ứng viên để xóa (không giữ accessor
     // lâu)
     {
-                std::unique_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
+                std::shared_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
                 for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
                 {
                     // Kiểm tra con trỏ hợp lệ và trạng thái idle
