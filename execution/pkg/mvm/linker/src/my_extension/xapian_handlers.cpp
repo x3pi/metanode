@@ -868,7 +868,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(fullPath.string());
+      XapianSearcher searcher(&(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1781,7 +1781,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(fullPath.string());
+      XapianSearcher searcher(&(manager->db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
