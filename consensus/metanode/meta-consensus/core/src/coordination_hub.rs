@@ -173,6 +173,10 @@ pub struct ConsensusCoordinationHub {
     /// Takes (commit_index: u32, local_digest: [u8; 32]) → PeerAttestResult
     /// ═══════════════════════════════════════════════════════════════════
     peer_commit_attestation: Arc<RwLock<Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>>>,
+    
+    /// ZERO-TIMEOUT (May 2026): Notifier for when quorum index might have advanced.
+    /// This allows CommitProcessor to wake up instantly when new peer votes arrive.
+    quorum_advanced_notify: Arc<RwLock<Option<Arc<tokio::sync::Notify>>>>,
 }
 
 impl ConsensusCoordinationHub {
@@ -193,6 +197,7 @@ impl ConsensusCoordinationHub {
             digest_verifier: Arc::new(RwLock::new(None)),
             digest_data_checker: Arc::new(RwLock::new(None)),
             peer_commit_attestation: Arc::new(RwLock::new(None)),
+            quorum_advanced_notify: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -301,6 +306,19 @@ impl ConsensusCoordinationHub {
     /// CommitProcessor uses this to verify unattested local commits.
     pub fn get_peer_commit_attestation(&self) -> Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>> {
         let guard = self.peer_commit_attestation.read();
+        guard.clone()
+    }
+
+    /// ZERO-TIMEOUT (May 2026): Set the quorum advanced notifier.
+    /// Called from authority_node after CommitVoteMonitor creation.
+    pub fn set_quorum_advanced_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let mut guard = self.quorum_advanced_notify.write();
+        *guard = Some(notify);
+    }
+
+    /// ZERO-TIMEOUT (May 2026): Get a clone of the quorum advanced notifier.
+    pub fn get_quorum_advanced_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        let guard = self.quorum_advanced_notify.read();
         guard.clone()
     }
 
@@ -582,6 +600,7 @@ impl ConsensusCoordinationHub {
             digest_verifier: Arc::new(RwLock::new(None)),
             digest_data_checker: Arc::new(RwLock::new(None)),
             peer_commit_attestation: Arc::new(RwLock::new(None)),
+            quorum_advanced_notify: Arc::new(RwLock::new(None)),
         }
     }
 

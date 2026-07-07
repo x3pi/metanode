@@ -304,15 +304,11 @@ impl RustSyncNode {
                         CACHED_PEER_BLOCK.load(Ordering::Relaxed)
                     };
 
-                    if peer_block > 0 && from_block > peer_block {
-                        debug!("[RUST-SYNC] Our block ({}) is ahead of peer max block ({}). Skipping fetch.", go_block, peer_block);
+                    if from_block > peer_block {
+                        debug!("[RUST-SYNC] Our next block ({}) is > peer max block ({}). Skipping fetch.", from_block, peer_block);
                         Vec::new()
                     } else {
-                        let to_block = if peer_block > 0 {
-                            std::cmp::min(from_block + batch_size - 1, peer_block)
-                        } else {
-                            from_block + batch_size - 1
-                        };
+                        let to_block = std::cmp::min(from_block + batch_size - 1, peer_block);
 
                         if from_block > to_block {
                             Vec::new()

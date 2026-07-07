@@ -1,8 +1,10 @@
 package tx_processor
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
@@ -163,6 +166,12 @@ func (stm *TrueBlockSTM) Process(
 
 						// Nonce Check (adds to ReadSet)
 						fromAccount, err := mvccDB.AccountState(tx.FromAddress())
+						
+						// Allow ACCOUNT_SETTING_ADDRESS_SELECT to bypass nil account check for new registrations (e.g. tps_blast)
+						if fromAccount == nil && tx.GetNonce() == 0 && tx.ToAddress() == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+							fromAccount = mt_state.NewAccountState(tx.FromAddress())
+						}
+
 						if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
 							stm.rwMu.Lock()
 							stm.readSets[txIndex] = mvccDB.ReadSet
@@ -202,8 +211,91 @@ func (stm *TrueBlockSTM) Process(
 								logger.Error("Lỗi khi lấy CrossChainHandler: %v", err)
 							}
 						} else if toAddress == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
-							// Logic account setting, e.g. setBlsPublicKey, setAccountType
-							logger.Info("Thực thi Account Setting cho TX %s", tx.Hash().Hex())
+							dataInput := tx.CallData().Input()
+							if len(dataInput) < 4 {
+								logger.Error("Invalid calldata: less than 4 bytes for TX %s", tx.Hash().Hex())
+								err := fmt.Errorf("invalid calldata")
+								rcp = receipt.NewReceipt(
+									tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+									pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
+									mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+								)
+							} else {
+								selector := dataInput[:4]
+								fromAddr := tx.FromAddress()
+
+								if tx.GetNonce() == 0 && bytes.Equal(selector, utils.GetFunctionSelector("setBlsPublicKey(bytes)")) {
+									plk, err := UnpackSetBlsPublicKeyInput(dataInput)
+									if err != nil {
+										logger.Error("UnpackSetBlsPublicKeyInput failed for tx %s: %v", tx.Hash().Hex(), err)
+										rcp = receipt.NewReceipt(
+											tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+											pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
+											mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+										)
+									} else if fromAccount != nil && len(fromAccount.PublicKeyBls()) != 0 {
+										logger.Warn("PublicKeyBls already exists for %s, skipping tx %s", fromAddr.Hex(), tx.Hash().Hex())
+										rcp = receipt.NewReceipt(
+											tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+											pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("PublicKeyBls already exists"), pb.EXCEPTION_NONE,
+											mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+										)
+									} else {
+										if setErr := fromAccount.SetPublicKeyBls(plk); setErr != nil {
+											logger.Error("SetPublicKeyBls failed for tx %s: %v", tx.Hash().Hex(), setErr)
+											rcp = receipt.NewReceipt(
+												tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+												pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(setErr.Error()), pb.EXCEPTION_NONE,
+												mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+											)
+										} else {
+											mvccDB.PlusOneNonce(fromAddr)
+											mvccDB.SetLastHash(fromAddr, tx.Hash())
+											// Commit the mutated account into MVCC wrapper
+											stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount)
+											mvccDB.WriteSet[fromAddr] = true
+
+											rcp = receipt.NewReceipt(
+												tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+												pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+												mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+												[]types.EventLog{}, 0, common.Hash{}, 0,
+											)
+										}
+									}
+								} else if tx.GetNonce() != 0 && bytes.Equal(selector, utils.GetFunctionSelector("setAccountType(uint8)")) {
+									acType, err := UnpackSetAccountTypeInput(dataInput)
+									if err != nil {
+										logger.Error("UnpackSetAccountTypeInput failed for tx %s: %v", tx.Hash().Hex(), err)
+										rcp = receipt.NewReceipt(
+											tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+											pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
+											mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+										)
+									} else {
+										fromAccount.SetAccountType(acType)
+										mvccDB.PlusOneNonce(fromAddr)
+										mvccDB.SetLastHash(fromAddr, tx.Hash())
+										// Commit the mutated account into MVCC wrapper
+										stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount)
+										mvccDB.WriteSet[fromAddr] = true
+										
+										rcp = receipt.NewReceipt(
+											tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+											pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
+											mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+											[]types.EventLog{}, 0, common.Hash{}, 0,
+										)
+									}
+								} else {
+									logger.Warn("Unknown Account Setting selector or invalid nonce for TX %s", tx.Hash().Hex())
+									rcp = receipt.NewReceipt(
+										tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
+										pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("unknown account setting or invalid nonce"), pb.EXCEPTION_NONE,
+										mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+									)
+								}
+							}
 						} else {
 							// Generate mvmId (0xFE + blockHash[:15] + txIndex)
 							var ethAddressBytes [20]byte

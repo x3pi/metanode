@@ -471,6 +471,7 @@ where
                     .quorum_commit_digest(index)
                     .map(|d| d.into_inner())
             });
+            coordination_hub.set_quorum_advanced_notify(commit_vote_monitor.quorum_advanced_notify.clone());
         }
 
         // COLD-START-FIX (May 2026): Wire CommitVoteMonitor.has_any_digest_data() into
