@@ -108,9 +108,7 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
                 auto it = manager_ptr->tx_buffers.find(txHashStr);
                 if (it != manager_ptr->tx_buffers.end()) {
-                    buffer_logs = std::move(it->second.xapian_doc_logs);
-                    manager_ptr->tx_buffers.erase(it);
-                    manager_ptr->tx_counters.erase(txHashStr);
+                    buffer_logs = it->second.xapian_doc_logs; // COPY instead of move
                 }
             }
             
@@ -136,6 +134,13 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                     std::make_move_iterator(buffer_logs.begin()),
                     std::make_move_iterator(buffer_logs.end())
                 );
+                
+                // NOW it is safe to erase from tx_buffers, because read_db has the data
+                {
+                    std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
+                    manager_ptr->tx_buffers.erase(txHashStr);
+                    manager_ptr->tx_counters.erase(txHashStr);
+                }
             }
         }
     }

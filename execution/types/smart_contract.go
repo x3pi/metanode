@@ -36,6 +36,8 @@ type ExecuteSCResult interface {
 	MapNativeSmartContractUpdateStorage() map[common.Address][][2][]byte
 	MapStorageChange() map[string]map[string][]byte
 	SetMapStorageChange(m map[string]map[string][]byte)
+	MapStorageRead() map[string][][]byte
+	SetMapStorageRead(m map[string][][]byte)
 	MapFullDbLogs() map[string][]byte
 	SetMapFullDbLogs(map[string][]byte)
 	ReceiptStatus() pb.RECEIPT_STATUS

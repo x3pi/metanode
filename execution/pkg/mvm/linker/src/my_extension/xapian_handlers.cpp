@@ -12,6 +12,7 @@
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
 #include "mvm/globalstate.h"
+#include "my_global_state.h"
 #include "mvm/crypto/sha256.hpp"
 #include <cstddef>
 #include "xapian/xapian_search.h"
@@ -52,6 +53,11 @@ extern std::string joinStringArgument(const std::vector<std::string> &parts);
 
 // Main function
 
+#ifndef GETSTORAGEVALUE_RETURN_DEFINED
+#define GETSTORAGEVALUE_RETURN_DEFINED
+struct GetStorageValue_return { unsigned char *value; bool success; };
+#endif
+
 namespace mvm {
 static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Address& address, const std::string& dbName, const std::string& docIdStr, bool isRead, bool isWrite, const uint256_t* currentTxHash = nullptr) {
     if (!gs) return 0;
@@ -70,6 +76,26 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
         gs->add_addresses_storage_change(address, key, valToStore);
         return 0;
     } else if (isRead) {
+        if (auto my_gs = static_cast<mvm::MyGlobalState*>(gs)) {
+            auto [success, uncommitted_val] = my_gs->add_addresses_storage_read(address, key);
+            if (success) {
+                return uncommitted_val;
+            }
+        } else {
+            // Fallback for non-MyGlobalState instances (e.g. tests)
+            uint8_t b_address[32];
+            mvm::to_big_endian(address, b_address);
+            uint8_t b_key[32];
+            mvm::to_big_endian(key, b_key);
+            
+            auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
+            if (ret.success && ret.value != nullptr) {
+                uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
+                free(ret.value);
+                return uncommitted_val;
+            }
+        }
+
         return acc.st.load(key);
     }
     return 0;

@@ -293,6 +293,9 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
   uint8_t **b_storage_change = nullptr;
   int length_storage_change = 0;
   int *length_storages = nullptr;
+  uint8_t **b_storage_read = nullptr;
+  int length_storage_read = 0;
+  int *length_storages_read = nullptr;
   char **b_full_db_hash = nullptr;
   int length_full_db_hash = 0;
   int *length_full_db_hashes = nullptr;
@@ -418,6 +421,24 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       }
     }
 
+    // Storage reads
+    std::vector<std::vector<uint8_t>> storage_read = gs.get_storage_read(apply_to_cache);
+    length_storage_read = storage_read.size();
+    if (length_storage_read > 0) {
+      length_storages_read = new int[length_storage_read];
+      b_storage_read = new uint8_t *[length_storage_read]();
+      for (int i = 0; i < length_storage_read; ++i) {
+        length_storages_read[i] = storage_read[i].size();
+        if (length_storages_read[i] == 0) {
+          b_storage_read[i] = nullptr;
+          continue;
+        }
+        b_storage_read[i] = new uint8_t[length_storages_read[i]];
+        memcpy(b_storage_read[i], storage_read[i].data(),
+               length_storages_read[i]);
+      }
+    }
+
     // We no longer retrieve full db hashes or logs via registry here.
     // Xapian changes are committed atomically in block_processor_commit.go.
 
@@ -448,6 +469,9 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       b_storage_change : (char **)b_storage_change,
       length_storage_change : length_storage_change,
       length_storages : length_storages,
+      b_storage_read : (char **)b_storage_read,
+      length_storage_read : length_storage_read,
+      length_storages_read : length_storages_read,
       b_logs : b_logs,
       length_logs : length_logs,
       gas_used : result.gas_used
@@ -1064,6 +1088,14 @@ void freeResult(ExecuteResult *pendingResult) {
     delete[] pendingResult->b_storage_change;
   }
   delete[] pendingResult->length_storages;
+
+  if (pendingResult->b_storage_read) {
+    for (int i = 0; i < pendingResult->length_storage_read; ++i) {
+      delete[] pendingResult->b_storage_read[i];
+    }
+    delete[] pendingResult->b_storage_read;
+  }
+  delete[] pendingResult->length_storages_read;
 
   delete[] pendingResult->b_logs;
 

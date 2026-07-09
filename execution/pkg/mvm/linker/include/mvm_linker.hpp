@@ -52,6 +52,10 @@ struct ExecuteResult {
   int length_storage_change;
   int *length_storages;
 
+  char **b_storage_read;
+  int length_storage_read;
+  int *length_storages_read;
+
   char *b_logs;
   int length_logs;
 

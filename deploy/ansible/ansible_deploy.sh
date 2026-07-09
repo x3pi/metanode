@@ -238,9 +238,11 @@ else
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
-if [ -f "$MONITOR_SCRIPT" ]; then
+if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
     echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
     bash "$MONITOR_SCRIPT"
+elif [ "$ACTION" == "stop" ]; then
+    echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
 fi
 
 exit $ansible_exit

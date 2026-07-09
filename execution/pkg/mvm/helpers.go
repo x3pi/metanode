@@ -29,6 +29,7 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 	mapNonce := extractNonce(cExecuteResult)
 	mapCodeChange, mapCodeHash := extractCodeChange(cExecuteResult)
 	mapStorageChange := extractStorageChange(cExecuteResult)
+	mapStorageRead := extractStorageRead(cExecuteResult)
 	jEventLogs := extractEventLogs(cExecuteResult) // JSON logs từ log_handler
 
 	uptrEx := unsafe.Pointer(cExecuteResult.b_exmsg)
@@ -64,6 +65,7 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 		MapCodeChange:    mapCodeChange,
 		MapCodeHash:      mapCodeHash,
 		MapStorageChange: mapStorageChange,
+		MapStorageRead:   mapStorageRead,
 		JEventLogs:       jEventLogs, // JSON logs
 		Status:           status,
 		Exception:        exception,
@@ -252,6 +254,37 @@ func extractStorageChange(
 			key := hex.EncodeToString(addrWithStorageChanges[j*64 : j*64+32])
 			value := addrWithStorageChanges[j*64+32 : (j+1)*64]
 			mapStorageChange[address][key] = value
+		}
+	}
+
+	return
+}
+
+func extractStorageRead(
+	cExecuteResult *C.struct_ExecuteResult,
+) (
+	mapStorageRead map[string][][]byte,
+) {
+	mapStorageRead = make(map[string][][]byte, cExecuteResult.length_storage_read)
+
+	bStorageRead := unsafe.Slice(cExecuteResult.b_storage_read, cExecuteResult.length_storage_read)
+	cLengthStoragesRead := unsafe.Slice(cExecuteResult.length_storages_read, cExecuteResult.length_storage_read)
+	lengthStoragesRead := make([]int, cExecuteResult.length_storage_read)
+	for i, v := range cLengthStoragesRead {
+		lengthStoragesRead[i] = int(v)
+	}
+
+	for i, v := range lengthStoragesRead {
+		sprt := unsafe.Pointer(bStorageRead[i])
+		addrWithStorageReads := C.GoBytes(sprt, (C.int)(v))
+		address := hex.EncodeToString(addrWithStorageReads[12:32])
+		addrWithStorageReads = addrWithStorageReads[32:]
+		storageCount := (v - 32) / 32
+		mapStorageRead[address] = make([][]byte, storageCount)
+		for j := 0; j < storageCount; j++ {
+			// 32 bytes for key
+			key := addrWithStorageReads[j*32 : (j+1)*32]
+			mapStorageRead[address][j] = key
 		}
 	}
 
