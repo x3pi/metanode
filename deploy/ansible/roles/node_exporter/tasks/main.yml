@@ -4,6 +4,11 @@
     url: "https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz"
     dest: "/tmp/node_exporter.tar.gz"
     mode: '0644'
+    timeout: 60
+  register: result
+  until: result is success
+  retries: 5
+  delay: 5
 
 - name: Extract node_exporter
   ansible.builtin.unarchive:

@@ -141,7 +141,8 @@ pub(super) async fn setup_validator_consensus(
         } else {
             consensus_core::coordination_hub::PeerAttestResult::Insufficient // Not yet initialized
         }
-    });
+    })
+    .with_quorum_advanced_notify(node.coordination_hub.get_quorum_advanced_notify());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
         .with_committee_size(committee.size())

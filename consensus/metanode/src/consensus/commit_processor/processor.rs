@@ -34,6 +34,7 @@ pub struct CommitProcessorConfig {
     pub digest_verifier: Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>>,
     pub digest_data_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub peer_commit_attestation: Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>,
+    pub quorum_advanced_notify: Option<Arc<tokio::sync::Notify>>,
     pub moderate_lag_threshold: u64,
     pub severe_lag_threshold: u64,
 }
@@ -59,6 +60,7 @@ impl Default for CommitProcessorConfig {
             digest_verifier: None,
             digest_data_checker: None,
             peer_commit_attestation: None,
+            quorum_advanced_notify: None,
             moderate_lag_threshold: 100,
             severe_lag_threshold: 200,
         }
@@ -296,6 +298,11 @@ impl CommitProcessor {
         self
     }
 
+    pub fn with_quorum_advanced_notify(mut self, notify: Option<Arc<tokio::sync::Notify>>) -> Self {
+        self.config.quorum_advanced_notify = notify;
+        self
+    }
+
     pub fn with_lag_thresholds(mut self, moderate: u64, severe: u64) -> Self {
         self.config.moderate_lag_threshold = moderate;
         self.config.severe_lag_threshold = severe;
@@ -412,6 +419,7 @@ impl CommitProcessor {
             digest_verifier,
             digest_data_checker,
             peer_commit_attestation,
+            quorum_advanced_notify,
             moderate_lag_threshold,
             severe_lag_threshold,
         } = config;
@@ -1073,12 +1081,26 @@ impl CommitProcessor {
             // Fix 3 Revert: Use direct indefinite block (no 120s timeout) to enforce backpressure
             // QUORUM-GATE: Use select! with timeout when local commits are pending,
             // so we don't block forever waiting for new commits while quorum catches up.
+            // ZERO-TIMEOUT (May 2026): If we have pending local commits, we MUST wake up
+            // when new peer votes arrive to check if they have reached quorum.
+            // Using the `quorum_advanced_notify` replaces the 5ms timeout, making this
+            // fully data-driven.
             let recv_result = if !pending_local_commits.is_empty() {
-                tokio::select! {
-                    result = receiver.recv() => result,
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(5)) => {
-                        // Timeout — loop back to check quorum again
-                        continue;
+                if let Some(ref notify) = quorum_advanced_notify {
+                    tokio::select! {
+                        result = receiver.recv() => result,
+                        _ = notify.notified() => {
+                            // Woken up by a peer vote event — loop back to check quorum again
+                            continue;
+                        }
+                    }
+                } else {
+                    tokio::select! {
+                        result = receiver.recv() => result,
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(5)) => {
+                            // Timeout fallback (only if notifier missing)
+                            continue;
+                        }
                     }
                 }
             } else {

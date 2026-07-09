@@ -72,7 +72,7 @@ type TxAsyncQueue struct {
 }
 
 // DefaultAsyncQueueSize is the default buffer size for the pending tx channel.
-const DefaultAsyncQueueSize = 20000
+const DefaultAsyncQueueSize = 200000
 
 // resultTTL is how long completed tx results are kept before cleanup.
 // Clients have this window to poll eth_getTransactionReceipt.
