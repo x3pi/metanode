@@ -47,7 +47,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	defer ticker.Stop()
 
 	// LOCALHOST OPTIMIZATION: Max transactions per batch limit
-	const maxTransactionsPerBatch = MaxTransactionsPerBatch
+	const maxTransactionsPerBatch = 2000
 
 	// TBAB: Throughput-Based Adaptive Batching state
 	emaTPS := 0.0
@@ -140,9 +140,9 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// Block size capping: Limit total transactions processed per block tick to ~50000 txs.
+		// Block size capping: Limit total transactions processed per block tick to ~100000 txs.
 		// Return any excess transactions back to the pool to be processed in the next blocks.
-		const targetBlockSize = 50000
+		const targetBlockSize = 100000
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
