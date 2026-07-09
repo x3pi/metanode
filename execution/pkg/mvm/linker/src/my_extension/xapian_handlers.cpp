@@ -861,7 +861,7 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
@@ -1774,7 +1774,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
