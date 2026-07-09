@@ -87,9 +87,6 @@ func (bp *BlockProcessor) commitWorker() {
 					}
 				}
 			}
-			// COMMIT ALL XAPIAN CHANGES TO DISK FOR THIS BLOCK
-			mvm.CommitAllXapian()
-			
 			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
 			// to prevent unbounded memory growth from cached EVM instances.
 			mvm.RemoveOldApiInstances()
