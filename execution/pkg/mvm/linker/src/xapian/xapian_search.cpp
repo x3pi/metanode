@@ -217,10 +217,12 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
       }
     }
 
-    Xapian::MSet mset = enquire.get_mset(offset, limit);
-    estimated_total = mset.get_matches_estimated();
+    Xapian::MSet matches = enquire.get_mset(offset, limit);
+    std::cerr << "[DEBUG XapianSearcher] MSet matches size: " << matches.size() << " estimated total: " << matches.get_matches_estimated() << std::endl;
 
-    for (Xapian::MSetIterator i = mset.begin(); i != mset.end(); ++i) {
+    estimated_total = matches.get_matches_estimated();
+
+    for (Xapian::MSetIterator i = matches.begin(); i != matches.end(); ++i) {
 
       try {
         Xapian::Document doc = i.get_document();
