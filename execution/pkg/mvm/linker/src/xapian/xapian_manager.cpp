@@ -124,24 +124,27 @@ XapianManager::XapianManager(const std::string &db_name,
       last_access_time(
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập
       db_name(db_name)                       // Lưu tên database
-{}
-
-void XapianManager::acquireSearchSlot()
 {
-    std::unique_lock<std::mutex> lock(search_semaphore_mutex);
-    search_semaphore_cv.wait(lock, [this]() {
-        return active_searches < MAX_CONCURRENT_SEARCHES;
-    });
-    active_searches++;
+    update_read_db();
 }
 
-void XapianManager::releaseSearchSlot()
-{
-    std::lock_guard<std::mutex> lock(search_semaphore_mutex);
-    active_searches--;
-    search_semaphore_cv.notify_one();
+std::shared_ptr<Xapian::Database> XapianManager::get_read_db() {
+    std::shared_lock<std::shared_mutex> lock(read_db_mutex);
+    return read_db;
 }
 
+void XapianManager::update_read_db() {
+    std::unique_lock<std::shared_mutex> lock(read_db_mutex);
+    try {
+        read_db = std::make_shared<Xapian::Database>(mvm::createFullPath(address, db_name).string());
+    } catch (const Xapian::Error& e) {
+        std::cerr << "[XapianManager] Error updating read_db: " << e.get_msg() << std::endl;
+        throw std::runtime_error(e.get_msg());
+    } catch (const std::exception& e) {
+        std::cerr << "[XapianManager] Standard exception updating read_db: " << e.what() << std::endl;
+        throw;
+    }
+}
 
 // Lấy tên của database
 std::string XapianManager::getDbName() const { return this->db_name; }
@@ -528,6 +531,7 @@ bool XapianManager::commit_changes() {
   try {
     std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     db.commit(); // Thực hiện commit Xapian
+    update_read_db(); // Cập nhật read_db cho các luồng đọc mới
     comprehensive_log.xapian_doc_logs
         .clear(); // Xóa các log đã staged sau khi commit thành công
     return true;
@@ -543,15 +547,8 @@ void XapianManager::commitAllInstances() {
   for (auto &pair : instances) {
     auto manager = pair.second;
     if (manager) {
-      std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
       if (!manager->has_started) {
-        try {
-          std::lock_guard<std::recursive_mutex> db_lock(manager->db_mutex);
-          manager->db.commit();
-          manager->comprehensive_log.xapian_doc_logs.clear();
-        } catch (...) {
-          // Ignore errors during background flush
-        }
+        manager->commit_changes();
       }
     }
   }

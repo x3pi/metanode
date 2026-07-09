@@ -51,6 +51,7 @@ var (
 	protectedApiInstances sync.Map
 	apiInstanceCount      atomic.Int32
 	offChainCounter       uint64
+	ethCallSemaphore      = make(chan struct{}, 200)
 )
 
 type AccountStateDB interface {
@@ -461,6 +462,12 @@ func (a *MVMApi) Call(
 			a.rs = &MVMExecuteResult{}
 		}
 	}()
+
+	if isOffChain {
+		ethCallSemaphore <- struct{}{}
+		defer func() { <-ethCallSemaphore }()
+	}
+
 	bAmount := [32]byte{}
 	amount.FillBytes(bAmount[:])
 	cBSender := C.CBytes(bSender)

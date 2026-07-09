@@ -118,15 +118,7 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 // Replay logs into the actual Xapian DB for this manager
                 manager_ptr->replay_log(buffer_logs);
                 
-                // [FIX] BẮT BUỘC gọi db.commit() để lưu thay đổi xuống đĩa
-                try {
-                    std::lock_guard<std::recursive_mutex> db_lock(manager_ptr->db_mutex);
-                    manager_ptr->db.commit();
-                    std::cerr << "[DEBUG] commitBufferForTxHash DB COMMIT SUCCESS!" << std::endl;
-                } catch (const std::exception& e) {
-                    std::cerr << "[ERROR] commitBufferForTxHash DB COMMIT FAILED: " << e.what() << std::endl;
-                }
-                
+
                 // Append them to comprehensive_log so they can be extracted
                 std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                 manager_ptr->comprehensive_log.xapian_doc_logs.insert(

@@ -45,19 +45,16 @@ public:
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
 
   // --- Concurrency Control ---
-  // Giới hạn tối đa 4 luồng tìm kiếm chạy đồng thời trên mỗi database.
-  // Giúp bảo vệ tài nguyên CPU và File Descriptors khi chạy tải cao.
-  static constexpr int MAX_CONCURRENT_SEARCHES = 4;
-  int active_searches = 0;
-  std::mutex search_semaphore_mutex;
-  std::condition_variable search_semaphore_cv;
-
-  void acquireSearchSlot();
-  void releaseSearchSlot();
-
   mutable std::recursive_mutex db_mutex; // Mutex to protect all operations on db
 
   // Thêm thành viên để lưu khóa mvmId liên kết
+
+  // --- Read-only Database for Fast Concurrent Searches ---
+  std::shared_ptr<Xapian::Database> read_db;
+  std::shared_mutex read_db_mutex;
+
+  std::shared_ptr<Xapian::Database> get_read_db();
+  void update_read_db();
 
   // --- Constructor ---
   XapianManager(const std::string &db_path, const mvm::Address &addr);

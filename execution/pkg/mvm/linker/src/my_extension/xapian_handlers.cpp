@@ -861,84 +861,89 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
-      uint256_t* writerHash = nullptr;
-      if (writerHashValue != 0 && writerHashValue != 1) {
-          writerHash = &writerHashValue;
-      }
-      XapianSearcher searcher(&(manager->db));
-      std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
-      std::map<std::string, std::string> product_prefix_map =
-          convertJsonToMap(decodedData["options"]["prefixMap"]);
-      std::optional<std::vector<std::string>> stop_words_list =
-          convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
-
-      std::optional<std::string> stem_lang = std::nullopt;
-      Xapian::doccount offset = 0;
       try {
-        offset = hex_to_uint64(decodedData["options"]["offset"]);
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      // Gán limit với giá trị mặc định là 10
-      Xapian::doccount limit = 10;
-      try {
-        limit = hex_to_uint64(decodedData["options"]["limit"]);
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      // Gán sort_by_value_slot với giá trị mặc định là 0
-      std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
-      try {
-
-        auto sort_slot =
-            hex_to_int64(decodedData["options"]["sortByValueSlot"]);
-
-        if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+        auto read_db_ptr = manager->get_read_db();
+        if (!read_db_ptr) {
+            std::cerr << "Lỗi: read_db_ptr is null cho db " << dbName << std::endl;
+            return mvm::Code(32, 0);
         }
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
+        XapianSearcher searcher(read_db_ptr.get());
+        std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
+
+        std::map<std::string, std::string> product_prefix_map =
+            convertJsonToMap(decodedData["options"]["prefixMap"]);
+        std::optional<std::vector<std::string>> stop_words_list =
+            convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
+
+        std::optional<std::string> stem_lang = std::nullopt;
+        Xapian::doccount offset = 0;
+        try {
+          offset = hex_to_uint64(decodedData["options"]["offset"]);
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        // Gán limit với giá trị mặc định là 10
+        Xapian::doccount limit = 10;
+        try {
+          limit = hex_to_uint64(decodedData["options"]["limit"]);
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        // Gán sort_by_value_slot với giá trị mặc định là 0
+        std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
+        try {
+
+          auto sort_slot =
+              hex_to_int64(decodedData["options"]["sortByValueSlot"]);
+
+          if (sort_slot.has_value()) {
+            if (sort_slot >= 0)
+              sort_by_value_slot = sort_slot;
+          }
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        bool sort_ascending = true;
+
+        try {
+          sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        std::vector<RangeFilter> range_filters =
+            convertJsonToRangeFilters(decodedData["options"]);
+
+        // searcher.dumpIndex();
+
+        auto [results1, total1] = searcher.search(
+            queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
+            product_prefix_map, stem_lang, stop_words_list, offset, limit,
+            sort_by_value_slot, sort_ascending, range_filters, blockNumber);
+
+        std::cerr << "[searcher] Search completed." << std::endl;
+        std::cerr << "[searcher] Total estimated: " << total1 << std::endl;
+        std::cerr << "[searcher] Results size: " << results1.size() << std::endl;
+
+        for (size_t i = 0; i < results1.size(); ++i) {
+          std::cerr << "  Result[" << i << "]: DocID=" << results1[i].docid
+                    << ", Data=" << results1[i].data.substr(0, 100)
+                    << (results1[i].data.length() > 100 ? "..." : "")
+                    << std::endl;
+        }
+        std::cerr << "-----------------------------" << std::endl;
+
+        auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
+        return addOffsetPrefix(dataReturn);
+      } catch (const std::exception& e) {
+        std::cerr << "Lỗi XAPIAN_QUERY_SEARCH: " << e.what() << std::endl;
+        return mvm::Code(32, 0);
       }
-
-      bool sort_ascending = true;
-
-      try {
-        sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      std::vector<RangeFilter> range_filters =
-          convertJsonToRangeFilters(decodedData["options"]);
-
-      // searcher.dumpIndex();
-
-      auto [results1, total1] = searcher.search(
-          queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
-          product_prefix_map, stem_lang, stop_words_list, offset, limit,
-          sort_by_value_slot, sort_ascending, range_filters, blockNumber);
-
-      std::cerr << "[searcher] Search completed." << std::endl;
-      std::cerr << "[searcher] Total estimated: " << total1 << std::endl;
-      std::cerr << "[searcher] Results size: " << results1.size() << std::endl;
-
-      for (size_t i = 0; i < results1.size(); ++i) {
-        std::cerr << "  Result[" << i << "]: DocID=" << results1[i].docid
-                  << ", Data=" << results1[i].data.substr(0, 100)
-                  << (results1[i].data.length() > 100 ? "..." : "")
-                  << std::endl;
-      }
-      std::cerr << "-----------------------------" << std::endl;
-
-      auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
-      return addOffsetPrefix(dataReturn);
     }
 
     if (opCode == mvm::FunctionSelector::XAPIAN_COMMIT) {
@@ -1774,76 +1779,78 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
 
-      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
-      uint256_t* writerHash = nullptr;
-      if (writerHashValue != 0 && writerHashValue != 1) {
-          writerHash = &writerHashValue;
-      }
-      XapianSearcher searcher(&(manager->db));
-      std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
-      std::map<std::string, std::string> product_prefix_map =
-          convertJsonToMap(decodedData["options"]["prefixMap"]);
-      std::optional<std::vector<std::string>> stop_words_list =
-          convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
 
-      std::optional<std::string> stem_lang = std::nullopt;
-      Xapian::doccount offset = 0;
       try {
-        offset = hex_to_uint64(decodedData["options"]["offset"]);
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      // Gán limit với giá trị mặc định là 10
-      Xapian::doccount limit = 10;
-      try {
-        limit = hex_to_uint64(decodedData["options"]["limit"]);
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      // Gán sort_by_value_slot với giá trị mặc định là 0
-      std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
-      try {
-
-        auto sort_slot =
-            hex_to_int64(decodedData["options"]["sortByValueSlot"]);
-
-        if (sort_slot.has_value()) {
-          if (sort_slot >= 0)
-            sort_by_value_slot = sort_slot;
+        auto read_db_ptr = manager->get_read_db();
+        if (!read_db_ptr) {
+            std::cerr << "Lỗi: read_db_ptr is null cho db " << dbName << std::endl;
+            return mvm::Code(32, 0);
         }
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
+        XapianSearcher searcher(read_db_ptr.get());
+        std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
+
+        std::map<std::string, std::string> product_prefix_map =
+            convertJsonToMap(decodedData["options"]["prefixMap"]);
+        std::optional<std::vector<std::string>> stop_words_list =
+            convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
+
+        std::optional<std::string> stem_lang = std::nullopt;
+        Xapian::doccount offset = 0;
+        try {
+          offset = hex_to_uint64(decodedData["options"]["offset"]);
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        // Gán limit với giá trị mặc định là 10
+        Xapian::doccount limit = 10;
+        try {
+          limit = hex_to_uint64(decodedData["options"]["limit"]);
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        // Gán sort_by_value_slot với giá trị mặc định là 0
+        std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
+        try {
+
+          auto sort_slot =
+              hex_to_int64(decodedData["options"]["sortByValueSlot"]);
+
+          if (sort_slot.has_value()) {
+            if (sort_slot >= 0)
+              sort_by_value_slot = sort_slot;
+          }
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        bool sort_ascending = true;
+
+        try {
+          sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
+        } catch (...) {
+          // Giữ giá trị mặc định nếu có lỗi
+        }
+
+        std::vector<RangeFilter> range_filters =
+            convertJsonToRangeFilters(decodedData["options"]);
+
+        auto [results1, total1] = searcher.search(
+            queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
+            product_prefix_map, stem_lang, stop_words_list, offset, limit,
+            sort_by_value_slot, sort_ascending, range_filters, blockNumber);
+
+        auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
+        std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;
+
+        return addOffsetPrefix(dataReturn);
+      } catch (const std::exception& e) {
+        std::cerr << "Lỗi XAPIAN_QUERY_SEARCH_VIEW: " << e.what() << std::endl;
+        return mvm::Code(32, 0);
       }
-
-      bool sort_ascending = true;
-
-      try {
-        sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
-      } catch (...) {
-        // Giữ giá trị mặc định nếu có lỗi
-      }
-
-      std::vector<RangeFilter> range_filters =
-          convertJsonToRangeFilters(decodedData["options"]);
-
-     
-
-      auto [results1, total1] = searcher.search(
-          queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
-          product_prefix_map, stem_lang, stop_words_list, offset, limit,
-          sort_by_value_slot, sort_ascending, range_filters, blockNumber);
-
-      searcher.dumpIndex(); // Added dumpIndex for debugging
-
-      auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
-      std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;
-
-      return addOffsetPrefix(dataReturn);
     }
 
     if (opCode == mvm::FunctionSelector::XAPIAN_V1_COMMIT) {
