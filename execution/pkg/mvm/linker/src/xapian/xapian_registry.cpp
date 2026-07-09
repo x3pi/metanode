@@ -1,6 +1,7 @@
 #include "xapian_registry.h"
 #include "xapian/xapian_manager.h" // Giả định header cho XapianManager
 #include <mvm/util.h>              // Giả định header cho các tiện ích mvm
+#include "my_extension/utils.h"
 
 #include <tbb/concurrent_hash_map.h>
 #include <sstream>
@@ -123,7 +124,7 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 try {
                     std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                     manager_ptr->db.commit();
-                    manager_ptr->read_db.reopen();
+                    manager_ptr->read_db = Xapian::Database(mvm::createFullPath(manager_ptr->address, manager_ptr->getDbName()).string());
                     std::cerr << "[DEBUG] commitBufferForTxHash DB COMMIT SUCCESS!" << std::endl;
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] commitBufferForTxHash DB COMMIT FAILED: " << e.what() << std::endl;
