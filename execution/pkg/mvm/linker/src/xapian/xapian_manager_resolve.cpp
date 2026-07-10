@@ -3,7 +3,7 @@
 #include <string>
 
 // Helper function to insert into xapian_manager.cpp
-Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocIdStr) {
+Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocIdStr, bool use_read_db) {
     if (virtualDocIdStr.empty()) return 0;
     try {
         if (virtualDocIdStr.length() < 16) {
@@ -15,11 +15,16 @@ Xapian::docid XapianManager::resolveVirtualDocId(const std::string& virtualDocId
         
         std::string term = "Q" + clean_id;
         
-        // Use the WritableDatabase 'db' instead of 'read_db' so that newly 
-        // added (but uncommitted) documents can be resolved in the same transaction.
-        Xapian::PostingIterator it = db.postlist_begin(term);
-        if (it != db.postlist_end(term)) {
-            return *it;
+        if (use_read_db) {
+            Xapian::PostingIterator it = read_db.postlist_begin(term);
+            if (it != read_db.postlist_end(term)) {
+                return *it;
+            }
+        } else {
+            Xapian::PostingIterator it = db.postlist_begin(term);
+            if (it != db.postlist_end(term)) {
+                return *it;
+            }
         }
         return 0; // Not found
     } catch (...) {

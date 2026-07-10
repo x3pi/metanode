@@ -122,7 +122,39 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 try {
                     std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                     manager_ptr->db.commit();
-                    manager_ptr->read_db = Xapian::Database(mvm::createFullPath(manager_ptr->address, manager_ptr->getDbName()).string());
+                    
+                    try {
+                        manager_ptr->read_db.reopen();
+                    } catch (const std::exception& e) {
+                        std::cerr << "[ERROR] read_db.reopen() failed: " << e.what() << ", recreating..." << std::endl;
+                        try {
+                            manager_ptr->read_db = Xapian::Database(mvm::createFullPath(manager_ptr->address, manager_ptr->db_name).string());
+                        } catch (const std::exception& e2) {
+                            std::cerr << "[FATAL] Failed to recreate read_db: " << e2.what() << std::endl;
+                        }
+                    }
+                    
+                    // Reopen pool DBs sau khi commit để luồng search thấy data mới
+                    {
+                        std::lock_guard<std::mutex> pool_lock(manager_ptr->search_pool.pool_mutex);
+                        for (size_t i = 0; i < manager_ptr->search_pool.pool.size(); ++i) {
+                            if (manager_ptr->search_pool.pool[i] && !manager_ptr->search_pool.in_use[i]) {
+                                try { 
+                                    manager_ptr->search_pool.pool[i]->reopen(); 
+                                } catch (const std::exception& e) {
+                                    std::cerr << "[ERROR] search_pool[" << i << "]->reopen() failed: " << e.what() << ", recreating..." << std::endl;
+                                    delete manager_ptr->search_pool.pool[i];
+                                    try {
+                                        manager_ptr->search_pool.pool[i] = new Xapian::Database(mvm::createFullPath(manager_ptr->address, manager_ptr->db_name).string());
+                                    } catch (const std::exception& e2) {
+                                        std::cerr << "[FATAL] Failed to recreate search_pool[" << i << "]: " << e2.what() << std::endl;
+                                        manager_ptr->search_pool.pool[i] = nullptr;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     std::cerr << "[DEBUG] commitBufferForTxHash DB COMMIT SUCCESS!" << std::endl;
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] commitBufferForTxHash DB COMMIT FAILED: " << e.what() << std::endl;

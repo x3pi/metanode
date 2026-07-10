@@ -176,14 +176,14 @@ impl BlockManager {
         let elapsed = start.elapsed();
         if !blocks.is_empty() {
             let refs = blocks.iter().map(|b| format!("r{}/a{}", b.round(), b.author())).collect::<Vec<_>>().join(",");
-            tracing::warn!(
-                "⏱️ [PERF-RUST] try_accept_blocks_internal (committed: {}, blocks: [{}], accepted: {}): total={:?}, db_write={:?}",
-                committed,
-                refs,
-                accepted_blocks.len(),
-                elapsed,
-                db_total
-            );
+            // tracing::warn!(
+            //     "⏱️ [PERF-RUST] try_accept_blocks_internal (committed: {}, blocks: [{}], accepted: {}): total={:?}, db_write={:?}",
+            //     committed,
+            //     refs,
+            //     accepted_blocks.len(),
+            //     elapsed,
+            //     db_total
+            // );
         }
 
         // Figure out the new missing blocks

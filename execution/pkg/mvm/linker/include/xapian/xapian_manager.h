@@ -43,19 +43,25 @@ public:
   static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
-  Xapian::Database read_db; // Read-only db for concurrent lock-free search
+  Xapian::Database read_db; // Dùng cho get_overlayed_document (bảo vệ bởi changes_mutex)
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
 
-  // --- Concurrency Control ---
-  // Giới hạn tối đa 4 luồng tìm kiếm chạy đồng thời trên mỗi database.
-  // Giúp bảo vệ tài nguyên CPU và File Descriptors khi chạy tải cao.
+  // --- Search Database Pool ---
+  // Mỗi goroutine search cần Xapian::Database riêng (không thread-safe).
+  // Pool chứa sẵn MAX_CONCURRENT_SEARCHES Database objects, tái sử dụng thay vì create/destroy mỗi call.
   static constexpr int MAX_CONCURRENT_SEARCHES = 4;
-  int active_searches = 0;
-  std::mutex search_semaphore_mutex;
-  std::condition_variable search_semaphore_cv;
+  struct SearchDbPool {
+    std::vector<Xapian::Database*> pool; // Pre-created Database objects
+    std::vector<uint8_t> in_use;         // Non-zero nếu DB đang được dùng
+    std::mutex pool_mutex;
+    std::condition_variable pool_cv;
+  };
+  SearchDbPool search_pool;
 
-  void acquireSearchSlot();
-  void releaseSearchSlot();
+  // Lấy 1 Xapian::Database từ pool (đợi nếu tất cả đang bận).
+  // Caller PHẢI gọi releaseSearchDb(db) sau khi xong.
+  Xapian::Database* acquireSearchDb();
+  void releaseSearchDb(Xapian::Database* db);
 
   mutable std::mutex db_mutex; // Mutex to protect all operations on db
 
@@ -134,7 +140,7 @@ private:
   std::unordered_map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
   
   // Resolves a virtual docId (e.g. 256-bit UUID) to native Xapian uint32 docid
-  Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr);
+  Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr, bool use_read_db = true);
   
   // Áp dụng buffer vào một Xapian::Document ảo để mô phỏng (dùng khi get_data)
   void replayBufferToDocument(Xapian::Document& doc, const XapianLog::ComprehensiveLog& buffer);

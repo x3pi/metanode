@@ -120,28 +120,59 @@ XapianManager::XapianManager(const std::string &db_name,
                              const mvm::Address &addr)
     : db(mvm::createFullPath(addr, db_name).string(),
          Xapian::DB_CREATE_OR_OPEN), // Mở hoặc tạo database
-      read_db(mvm::createFullPath(addr, db_name).string()), // Khởi tạo read_db trỏ tới cùng thư mục
+      read_db(mvm::createFullPath(addr, db_name).string()), // Cho get_overlayed_document (dưới changes_mutex)
       address(addr),                 // Lưu địa chỉ liên kết
       last_access_time(
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập
       db_name(db_name)                       // Lưu tên database
-{}
-
-void XapianManager::acquireSearchSlot()
 {
-    std::unique_lock<std::mutex> lock(search_semaphore_mutex);
-    search_semaphore_cv.wait(lock, [this]() {
-        return active_searches < MAX_CONCURRENT_SEARCHES;
+    // Khởi tạo pool các Database objects để tái sử dụng cho concurrent search.
+    // Mỗi goroutine search lấy 1 DB từ pool → đảm bảo không có 2 goroutine dùng chung.
+    std::string db_path_str = mvm::createFullPath(addr, db_name).string();
+    search_pool.pool.resize(MAX_CONCURRENT_SEARCHES);
+    search_pool.in_use.resize(MAX_CONCURRENT_SEARCHES, false);
+    for (int i = 0; i < MAX_CONCURRENT_SEARCHES; ++i) {
+        try {
+            search_pool.pool[i] = new Xapian::Database(db_path_str);
+        } catch (...) {
+            search_pool.pool[i] = nullptr;
+        }
+    }
+}
+
+
+// Lấy 1 DB từ pool (blocking nếu tất cả đang bận).
+Xapian::Database* XapianManager::acquireSearchDb()
+{
+    std::unique_lock<std::mutex> lock(search_pool.pool_mutex);
+    search_pool.pool_cv.wait(lock, [this]() {
+        for (size_t i = 0; i < search_pool.in_use.size(); ++i)
+            if (!search_pool.in_use[i] && search_pool.pool[i] != nullptr)
+                return true;
+        return false;
     });
-    active_searches++;
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (!search_pool.in_use[i] && search_pool.pool[i] != nullptr) {
+            search_pool.in_use[i] = true;
+            return search_pool.pool[i];
+        }
+    }
+    return nullptr; // should never reach
 }
 
-void XapianManager::releaseSearchSlot()
+// Trả DB về pool sau khi search xong.
+void XapianManager::releaseSearchDb(Xapian::Database* db_returned)
 {
-    std::lock_guard<std::mutex> lock(search_semaphore_mutex);
-    active_searches--;
-    search_semaphore_cv.notify_one();
+    std::lock_guard<std::mutex> lock(search_pool.pool_mutex);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (search_pool.pool[i] == db_returned) {
+            search_pool.in_use[i] = false;
+            search_pool.pool_cv.notify_one();
+            return;
+        }
+    }
 }
+
 
 
 // Lấy tên của database
@@ -169,12 +200,12 @@ void XapianManager::dump_all_documents(uint256_t blockNumber) {
               << " (At Block: " << mvm::uint256_to_double(blockNumber)
               << ") ==========" << std::endl;
 
-    Xapian::doccount last_docid = db.get_lastdocid();
+    Xapian::doccount last_docid = read_db.get_lastdocid();
     std::cerr << "Total Documents (last_docid): " << last_docid << std::endl;
 
     for (Xapian::docid i = 1; i <= last_docid; ++i) {
       try {
-        Xapian::Document doc = db.get_document(i);
+        Xapian::Document doc = read_db.get_document(i);
         std::cerr << "\n--------------------------------------------------"
                   << std::endl;
         std::cerr << ">> DocID: " << i << std::endl;
@@ -376,7 +407,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
     try {
         Xapian::docid did = resolveVirtualDocId(virtualDocId);
         if (did != 0) {
-            doc = db.get_document(did);
+            doc = read_db.get_document(did);
             found = true;
         }
     } catch (const Xapian::DocNotFoundError&) {
@@ -468,7 +499,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
 }
 
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
     return doc.get_data();
@@ -479,7 +510,7 @@ std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t b
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-    std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+    std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
         return doc.get_value(slot);
@@ -489,7 +520,7 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
 
 // Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
 DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   DocumentInfo info;
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
@@ -501,7 +532,7 @@ DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint25
 // Lấy danh sách các term của document tại một block number
 std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocId,
                                                   uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::unique_lock<std::shared_mutex> read_lock(changes_mutex);
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   std::vector<std::string> terms;
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
@@ -522,15 +553,27 @@ bool XapianManager::commit_changes() {
   }
   try {
     db.commit(); // Thực hiện commit Xapian
+    read_db.reopen(); // Cập nhật read_db (dùng cho get_overlayed_document)
     comprehensive_log.xapian_doc_logs
         .clear(); // Xóa các log đã staged sau khi commit thành công
-    return true;
   } catch (const Xapian::Error &) {
     return false; // Commit thất bại
   } catch (const std::exception &) {
     return false; // Commit thất bại
   }
+  // Reopen tất cả pool DBs sau khi commit (ngoài changes_mutex scope không cần thiết).
+  // Làm riêng sau lock để tránh deadlock (pool_mutex có thể đang bị giữ bởi search goroutine).
+  {
+    std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+      if (search_pool.pool[i] && !search_pool.in_use[i]) {
+        try { search_pool.pool[i]->reopen(); } catch (...) {}
+      }
+    }
+  }
+  return true;
 }
+
 
 void XapianManager::commitAllInstances() {
   std::unique_lock<std::shared_mutex> lock(instances_mutex);
@@ -541,7 +584,15 @@ void XapianManager::commitAllInstances() {
       if (!manager->has_started) {
         try {
           manager->db.commit();
+          manager->read_db.reopen();
           manager->comprehensive_log.xapian_doc_logs.clear();
+          // Reopen pool DBs sau commit.
+          std::lock_guard<std::mutex> pool_lock(manager->search_pool.pool_mutex);
+          for (size_t i = 0; i < manager->search_pool.pool.size(); ++i) {
+            if (manager->search_pool.pool[i] && !manager->search_pool.in_use[i]) {
+              try { manager->search_pool.pool[i]->reopen(); } catch (...) {}
+            }
+          }
         } catch (...) {
           // Ignore errors during background flush
         }
@@ -549,6 +600,7 @@ void XapianManager::commitAllInstances() {
     }
   }
 }
+
 
 // Tính toán hash của các thay đổi đã được staged
 std::array<uint8_t, 32u> XapianManager::getChangeHash() {
@@ -697,11 +749,11 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 doc.add_term("Q" + clean_id);
                 db.add_document(doc);
             } else if (entry.op == XapianLog::Operation::DEL_DOC) {
-                Xapian::docid did = resolveVirtualDocId(std::get<XapianLog::DelDocData>(entry.data).docid);
+                Xapian::docid did = resolveVirtualDocId(std::get<XapianLog::DelDocData>(entry.data).docid, false);
                 if (did > 0) db.delete_document(did);
             } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
                 auto data = std::get<XapianLog::AddValueData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
+                Xapian::docid did = resolveVirtualDocId(data.docid, false);
                 if (did > 0) {
                     Xapian::Document doc = db.get_document(did);
                     doc.add_value(data.slot, data.value);
@@ -709,7 +761,7 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 }
             } else if (entry.op == XapianLog::Operation::ADD_TERM) {
                 auto data = std::get<XapianLog::AddTermData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
+                Xapian::docid did = resolveVirtualDocId(data.docid, false);
                 if (did > 0) {
                     Xapian::Document doc = db.get_document(did);
                     doc.add_term(data.term);
@@ -717,7 +769,7 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 }
             } else if (entry.op == XapianLog::Operation::SET_DATA) {
                 auto data = std::get<XapianLog::SetDataData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
+                Xapian::docid did = resolveVirtualDocId(data.docid, false);
                 if (did > 0) {
                     Xapian::Document doc = db.get_document(did);
                     doc.set_data(data.data);
@@ -725,7 +777,7 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
                 }
             } else if (entry.op == XapianLog::Operation::INDEX_TEXT) {
                 auto data = std::get<XapianLog::IndexTextData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
+                Xapian::docid did = resolveVirtualDocId(data.docid, false);
                 if (did > 0) {
                     Xapian::Document doc = db.get_document(did);
                     Xapian::TermGenerator termgenerator;
@@ -763,6 +815,7 @@ bool XapianManager::revertUncommittedChanges() {
     // Mở lại database từ đường dẫn đã lưu
     db = Xapian::WritableDatabase(
         mvm::createFullPath(address, db_name).string(), Xapian::DB_OPEN);
+    read_db.reopen();
     return true; // Revert thành công
   } catch (const Xapian::Error &) {
     return false; /* Lỗi Xapian khi đóng/mở lại DB */
