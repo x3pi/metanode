@@ -137,8 +137,8 @@ func (stm *TrueBlockSTM) Process(
 
 						// 1. Mark as Executing (Pending)
 						eCount := atomic.AddUint32(&execCount, 1)
-						if eCount%100000 == 0 {
-							logger.Warn("⚠️ [BLOCK-STM-DEBUG] Xung đột quá cao! Đã thực thi %d lần, Aborts: %d", eCount, atomic.LoadUint32(&abortCount))
+						if eCount%10000 == 0 {
+							logger.Warn("⚠️ [BLOCK-STM-DEBUG] Đã thực thi (Execution) %d lần, Aborts: %d", eCount, atomic.LoadUint32(&abortCount))
 						}
 						state := atomic.LoadUint64(&stm.txState[txIndex])
 						inc, _ := unpackState(state)
@@ -544,7 +544,11 @@ func (stm *TrueBlockSTM) Process(
 							atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 3))
 						} else {
 							// ABORT & RE-EXECUTE (100% No Fork Guarantee)
-							atomic.AddUint32(&abortCount, 1)
+							aCount := atomic.AddUint32(&abortCount, 1)
+							if aCount%10000 == 0 {
+								logger.Warn("⚠️ [BLOCK-STM-DEBUG] Đang bị Abort liên tục. Tổng aborts: %d, txIndex đang xét: %d", aCount, txIndex)
+							}
+							
 							if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
 								atomic.AddInt32(&activeTasks, 1)
 								execIn <- txIndex
