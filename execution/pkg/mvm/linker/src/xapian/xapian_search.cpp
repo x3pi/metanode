@@ -82,12 +82,11 @@ decodeQuerySearchCallData(const std::vector<uint8_t> &call_data) {
   return result;
 }
 
-XapianSearcher::XapianSearcher(const std::string &db_path)
-    : db_ptr(new Xapian::Database(db_path)), owns_db(true)
-{
-    std::cerr << "Mở database '" << db_path << "'" << std::endl;
-}
-XapianSearcher::XapianSearcher(Xapian::Database* database) : db_ptr(database), owns_db(false) {}
+XapianSearcher::XapianSearcher(const std::string& dbpath)
+    : db_ptr(new Xapian::Database(dbpath)), owns_db(true) {}
+
+XapianSearcher::XapianSearcher(Xapian::Database* db)
+    : db_ptr(db), owns_db(false) {}
 
 XapianSearcher::~XapianSearcher() {
     if (owns_db) {
@@ -113,6 +112,13 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
                    Xapian::QueryParser::FLAG_BOOLEAN |
                    Xapian::QueryParser::FLAG_BOOLEAN_ANY_CASE;
 
+  // Xapian: when writer commits during reader iteration, DatabaseModifiedError is thrown.
+  // Standard fix: reopen() then retry up to MAX_RETRY times.
+  static constexpr int MAX_RETRY = 3;
+  for (int retry = 0; retry <= MAX_RETRY; ++retry) {
+  results.clear();
+  estimated_total = 0;
+  bool need_retry = false;
   try {
     Xapian::QueryParser qp;
     qp.set_database(*db_ptr);
@@ -203,7 +209,6 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
     final_query = Xapian::Query(Xapian::Query::OP_FILTER, final_query,
                                 combined_range_query);
-    std::cerr << "final_query:  " << final_query.get_description() << std::endl;
 
     Xapian::Enquire enquire(*db_ptr);
     enquire.set_query(final_query);
@@ -253,11 +258,33 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
                   << std::endl;
       }
     }
-  } catch (const Xapian::Error &e) {
+  } catch (const Xapian::DatabaseModifiedError &e) {
+      std::cerr << "[XapianSearcher] DatabaseModifiedError, retry " << retry
+                << "/" << MAX_RETRY << ": " << e.get_msg() << std::endl;
+      try { 
+        db_ptr->reopen(); 
+        need_retry = true;
+      } catch (const std::exception& re) {
+        std::cerr << "[XapianSearcher] Database reopen failed: " << re.what() << std::endl;
+        break; // Do not retry if reopen fails, to avoid segfault with broken DB pointer
+      } catch (...) {
+        std::cerr << "[XapianSearcher] Database reopen failed with unknown error." << std::endl;
+        break;
+      }
+    } catch (const Xapian::Error &e) {
     std::cerr << "Lỗi Xapian trong quá trình search: " << e.get_msg()
               << std::endl;
-    throw;
+    // DO NOT THROW here! Throwing across CGO boundary causes Go runtime to crash with SIGSEGV/SIGABRT!
+    return {results, 0};
+  } catch (const std::exception &e) {
+    std::cerr << "C++ Exception trong quá trình search: " << e.what() << std::endl;
+    return {results, 0};
+  } catch (...) {
+    std::cerr << "Unknown C++ Exception trong quá trình search." << std::endl;
+    return {results, 0};
   }
+  if (!need_retry) break; // success, exit retry loop
+  } // end retry loop
   std::cerr << "Estimated_total: " << estimated_total << std::endl;
   return {results, estimated_total};
 }

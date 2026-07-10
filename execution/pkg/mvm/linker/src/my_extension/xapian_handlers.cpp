@@ -887,14 +887,25 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      Xapian::Database* pooled_db = manager->acquireSearchDb();
+      struct DbPoolGuard {
+          std::shared_ptr<XapianManager> m;
+          Xapian::Database* db;
+          DbPoolGuard(std::shared_ptr<XapianManager> mgr, Xapian::Database* d) : m(mgr), db(d) {}
+          ~DbPoolGuard() { if (db) m->releaseSearchDb(db); }
+      } pool_guard(manager, pooled_db);
+      if (!pooled_db) {
+          std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          return mvm::Code(32, 0);
+      }
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(&(manager->read_db));
+      XapianSearcher searcher(pooled_db);
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1800,14 +1811,25 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
-      std::unique_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      Xapian::Database* pooled_db = manager->acquireSearchDb();
+      struct DbPoolGuard {
+          std::shared_ptr<XapianManager> m;
+          Xapian::Database* db;
+          DbPoolGuard(std::shared_ptr<XapianManager> mgr, Xapian::Database* d) : m(mgr), db(d) {}
+          ~DbPoolGuard() { if (db) m->releaseSearchDb(db); }
+      } pool_guard(manager, pooled_db);
+      if (!pooled_db) {
+          std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          return mvm::Code(32, 0);
+      }
 
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
       uint256_t* writerHash = nullptr;
       if (writerHashValue != 0 && writerHashValue != 1) {
           writerHash = &writerHashValue;
       }
-      XapianSearcher searcher(&(manager->read_db));
+      XapianSearcher searcher(pooled_db);
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
@@ -1864,7 +1886,7 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
           product_prefix_map, stem_lang, stop_words_list, offset, limit,
           sort_by_value_slot, sort_ascending, range_filters, blockNumber);
 
-      searcher.dumpIndex(); // Added dumpIndex for debugging
+      // searcher.dumpIndex(); // Added dumpIndex for debugging
 
       auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
       std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;

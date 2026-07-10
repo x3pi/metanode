@@ -660,12 +660,12 @@ ExecuteResult *call(
   //  init env
   mvm::VectorLogHandler log_handler;
 
-  auto result = run(gs, false, caller_address, contract_address, amount,
-                    gas_price, gas_limit, log_handler, input, mvmId, readOnly,
-                    tx_hash, is_debug, is_off_chain);
-
-  // processResult có thể throw exception, cần catch
   try {
+    auto result = run(gs, false, caller_address, contract_address, amount,
+                      gas_price, gas_limit, log_handler, input, mvmId, readOnly,
+                      tx_hash, is_debug, is_off_chain);
+
+    // processResult có thể throw exception, cần catch
     ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain);
     return rs;
   } catch (const std::exception &e) {
@@ -733,12 +733,12 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
   mvm::MyGlobalState gs(blockContext, is_cache, relatedAddresses);
   mvm::VectorLogHandler log_handler;
 
-  auto result =
-      run(gs, false, caller_address, contract_address, amount, gas_price,
-          gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug);
-
-  // processResult có thể throw exception, cần catch
   try {
+    auto result =
+        run(gs, false, caller_address, contract_address, amount, gas_price,
+            gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug);
+
+    // processResult có thể throw exception, cần catch
     ExecuteResult *rs = processResult(result, gs, log_handler);
     return rs;
   } catch (const std::exception &e) {

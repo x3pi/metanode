@@ -365,7 +365,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 			lastBlockHeader.LeaderAddress(),
 			mvmId,
 			executeTransaction.Hash().Bytes(),
-			executeTransaction.GetReadOnly(),
+			executeTransaction.GetIsDebug(),
 			false,
 			true,
 		)
