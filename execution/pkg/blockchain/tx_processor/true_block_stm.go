@@ -36,16 +36,13 @@ type TrueBlockSTM struct {
 
 	// State Access Tracking
 	// readSets tracks which versions/writeIDs of accounts a transaction read
-	readSets []map[common.Address]mvcc.ReadVersion
+	readSets [][]mvcc.AccountReadRecord
 	// writeSets tracks which accounts a transaction modified
-	writeSets []map[common.Address]bool
+	writeSets [][]common.Address
 
 	// Smart Contract Tracking
-	scReadSets  []map[string]mvcc.ReadVersion
-	scWriteSets []map[string]bool
-
-	// Mutex to protect readSets/writeSets slices (the maps themselves belong to the TxIndex)
-	rwMu sync.RWMutex
+	scReadSets  [][]mvcc.SCReadRecord
+	scWriteSets [][]string
 
 	receipts  []types.Receipt
 	scResults []types.ExecuteSCResult
@@ -66,10 +63,10 @@ func NewTrueBlockSTM(txs []types.Transaction) *TrueBlockSTM {
 		accountMap:  mvcc.NewMVCCAccountMap(),
 		storageMap:  mvcc.NewMVCCStorageMap(),
 		txState:     make([]uint64, numTxs),
-		readSets:    make([]map[common.Address]mvcc.ReadVersion, numTxs),
-		writeSets:   make([]map[common.Address]bool, numTxs),
-		scReadSets:  make([]map[string]mvcc.ReadVersion, numTxs),
-		scWriteSets: make([]map[string]bool, numTxs),
+		readSets:    make([][]mvcc.AccountReadRecord, numTxs),
+		writeSets:   make([][]common.Address, numTxs),
+		scReadSets:  make([][]mvcc.SCReadRecord, numTxs),
+		scWriteSets: make([][]string, numTxs),
 		receipts:    make([]types.Receipt, numTxs),
 		scResults:   make([]types.ExecuteSCResult, numTxs),
 	}
@@ -145,18 +142,16 @@ func (stm *TrueBlockSTM) Process(
 						atomic.StoreUint64(&stm.txState[txIndex], packState(inc+1, 0))
 
 						// CLEAR previous writes from MVCC to prevent ghost state!
-						stm.rwMu.RLock()
 						oldWriteSet := stm.writeSets[txIndex]
 						oldScWriteSet := stm.scWriteSets[txIndex]
-						stm.rwMu.RUnlock()
 
 						if oldWriteSet != nil {
-							for addr := range oldWriteSet {
+							for _, addr := range oldWriteSet {
 								stm.accountMap.Delete(addr, mvcc.Version(txIndex))
 							}
 						}
 						if oldScWriteSet != nil {
-							for sKey := range oldScWriteSet {
+							for _, sKey := range oldScWriteSet {
 								if len(sKey) >= 42 {
 									addr := common.HexToAddress(sKey[:42])
 									stm.storageMap.Delete(addr, sKey[42:], mvcc.Version(txIndex))
@@ -184,13 +179,11 @@ func (stm *TrueBlockSTM) Process(
 						}
 
 						if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
-							stm.rwMu.Lock()
 							stm.readSets[txIndex] = mvccDB.ReadSet
 							stm.writeSets[txIndex] = mvccDB.WriteSet
 							// Clear results on failure
 							stm.receipts[txIndex] = nil
 							stm.scResults[txIndex] = nil
-							stm.rwMu.Unlock()
 
 							for {
 								s := atomic.LoadUint64(&stm.txState[txIndex])
@@ -264,7 +257,6 @@ func (stm *TrueBlockSTM) Process(
 											mvccDB.SetLastHash(fromAddr, tx.Hash())
 											// Commit the mutated account into MVCC wrapper
 											stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount)
-											mvccDB.WriteSet[fromAddr] = true
 
 											rcp = receipt.NewReceipt(
 												tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -289,7 +281,6 @@ func (stm *TrueBlockSTM) Process(
 										mvccDB.SetLastHash(fromAddr, tx.Hash())
 										// Commit the mutated account into MVCC wrapper
 										stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount)
-										mvccDB.WriteSet[fromAddr] = true
 										
 										rcp = receipt.NewReceipt(
 											tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -427,14 +418,12 @@ func (stm *TrueBlockSTM) Process(
 						}
 
 						// 4. Save Read/Write sets and Results
-						stm.rwMu.Lock()
 						stm.receipts[txIndex] = rcp
 						stm.scResults[txIndex] = exRs
 						stm.readSets[txIndex] = mvccDB.ReadSet
 						stm.writeSets[txIndex] = mvccDB.WriteSet
 						stm.scReadSets[txIndex] = scDB.ReadSet
 						stm.scWriteSets[txIndex] = scDB.WriteSet
-						stm.rwMu.Unlock()
 
 						// 5. Mark as Executed
 						for {
@@ -445,21 +434,62 @@ func (stm *TrueBlockSTM) Process(
 							}
 						}
 
-						// Cascade Validation: Any TX > txIndex that was already Validated (3)
-						// or Validating (2) must be downgraded and re-validated.
-						for j := int(txIndex) + 1; j < numTxs; j++ {
-							for {
-								s := atomic.LoadUint64(&stm.txState[j])
-								inc, st := unpackState(s)
-								if st == 3 || st == 2 {
-									// Increment inc to invalidate ongoing stale validation
-									if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
-										atomic.AddInt32(&activeTasks, 1)
-										validateIn <- uint32(j)
-										break
+						// Cascade Validation: Only for transactions that actually read what we just wrote!
+						newWriteSet := stm.writeSets[txIndex]
+						newScWriteSet := stm.scWriteSets[txIndex]
+
+						// 1. Invalidate Account Readers
+						if len(newWriteSet) > 0 {
+							for _, addr := range newWriteSet {
+								readers := stm.accountMap.GetReaders(addr)
+								for _, r := range readers {
+									j := uint32(r)
+									if j > txIndex {
+										for {
+											s := atomic.LoadUint64(&stm.txState[j])
+											inc, st := unpackState(s)
+											if st == 3 || st == 2 || st == 1 {
+												// Increment inc to invalidate ongoing stale validation
+												if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
+													atomic.AddInt32(&activeTasks, 1)
+													validateIn <- uint32(j)
+													break
+												}
+											} else {
+												break
+											}
+										}
 									}
-								} else {
-									break
+								}
+							}
+						}
+						
+						// 2. Invalidate SC Readers
+						if len(newScWriteSet) > 0 {
+							for _, fullKey := range newScWriteSet {
+								if len(fullKey) >= 42 {
+									addr := common.HexToAddress(fullKey[:42])
+									keyStr := fullKey[42:]
+									readers := stm.storageMap.GetReaders(addr, keyStr)
+									for _, r := range readers {
+										j := uint32(r)
+										if j > txIndex {
+											for {
+												s := atomic.LoadUint64(&stm.txState[j])
+												inc, st := unpackState(s)
+												if st == 3 || st == 2 || st == 1 {
+													// Increment inc to invalidate ongoing stale validation
+													if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
+														atomic.AddInt32(&activeTasks, 1)
+														validateIn <- uint32(j)
+														break
+													}
+												} else {
+													break
+												}
+											}
+										}
+									}
 								}
 							}
 						}
@@ -506,16 +536,14 @@ func (stm *TrueBlockSTM) Process(
 
 						atomic.AddUint32(&valCount, 1)
 
-						stm.rwMu.RLock()
 						rSet := stm.readSets[txIndex]
 						scRSet := stm.scReadSets[txIndex]
-						stm.rwMu.RUnlock()
 
 						isValid := true
 						if rSet != nil {
-							for addr, readVer := range rSet {
-								_, highestVer, highestWriteID := stm.accountMap.Read(addr, mvcc.Version(txIndex))
-								if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+							for _, readRec := range rSet {
+								_, highestVer, highestWriteID := stm.accountMap.Read(readRec.Address, mvcc.Version(txIndex))
+								if highestVer != readRec.Version || highestWriteID != readRec.WriteID {
 									isValid = false
 									break
 								}
@@ -523,16 +551,9 @@ func (stm *TrueBlockSTM) Process(
 						}
 
 						if isValid {
-							for sKey, readVer := range scRSet {
-								if len(sKey) < 42 {
-									continue
-								}
-								addrHex := sKey[:42]
-								keyStr := sKey[42:]
-								addr := common.HexToAddress(addrHex)
-
-								_, highestVer, highestWriteID := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
-								if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+							for _, readRec := range scRSet {
+								_, highestVer, highestWriteID := stm.storageMap.Read(readRec.Address, readRec.Key, mvcc.Version(txIndex))
+								if highestVer != readRec.Version || highestWriteID != readRec.WriteID {
 									isValid = false
 									break
 								}

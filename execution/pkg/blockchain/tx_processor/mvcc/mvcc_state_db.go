@@ -12,18 +12,25 @@ import (
 // MVCCAccountStateDB wraps the global AccountStateDB and the block's MVCC maps.
 // It intercepts all reads and writes for a specific transaction (TxIndex).
 // Any read is recorded in the ReadSet. Any write is recorded in the WriteSet and MVCC maps.
+// AccountReadRecord records a read dependency for a transaction
+type AccountReadRecord struct {
+	Address common.Address
+	Version Version
+	WriteID WriteID
+}
+
 type MVCCAccountStateDB struct {
 	baseDB     types.AccountStateDB
 	accountMap *MVCCAccountMap
 	txIndex    Version
 
-	// ReadSet tracks the version (txIndex) and WriteID of the state read by this transaction
-	ReadSet map[common.Address]ReadVersion
+	// ReadSet tracks the version and WriteID of the state read by this transaction
+	ReadSet []AccountReadRecord
 	// WriteSet tracks which addresses this transaction has modified
-	WriteSet map[common.Address]bool
+	WriteSet []common.Address
 
 	// localState caches reads/writes during execution
-	localState map[common.Address]types.AccountState
+	localState []types.AccountState
 }
 
 func NewMVCCAccountStateDB(baseDB types.AccountStateDB, accountMap *MVCCAccountMap, txIndex Version) *MVCCAccountStateDB {
@@ -31,16 +38,27 @@ func NewMVCCAccountStateDB(baseDB types.AccountStateDB, accountMap *MVCCAccountM
 		baseDB:     baseDB,
 		accountMap: accountMap,
 		txIndex:    txIndex,
-		ReadSet:    make(map[common.Address]ReadVersion),
-		WriteSet:   make(map[common.Address]bool),
-		localState: make(map[common.Address]types.AccountState),
+		ReadSet:    make([]AccountReadRecord, 0, 8),
+		WriteSet:   make([]common.Address, 0, 8),
+		localState: make([]types.AccountState, 0, 8),
 	}
+}
+
+func (db *MVCCAccountStateDB) markWrite(addr common.Address) {
+	for _, w := range db.WriteSet {
+		if w == addr {
+			return
+		}
+	}
+	db.WriteSet = append(db.WriteSet, addr)
 }
 
 // AccountState reads the state. First checks localState, then MVCC, then BaseDB.
 func (db *MVCCAccountStateDB) AccountState(addr common.Address) (types.AccountState, error) {
-	if state, ok := db.localState[addr]; ok {
-		return state, nil
+	for _, s := range db.localState {
+		if s.Address() == addr {
+			return s, nil
+		}
 	}
 
 	state, version, writeID := db.accountMap.Read(addr, db.txIndex)
@@ -53,9 +71,21 @@ func (db *MVCCAccountStateDB) AccountState(addr common.Address) (types.AccountSt
 		state = state.Copy()
 	}
 
-	db.localState[addr] = state
-	if _, ok := db.WriteSet[addr]; !ok {
-		db.ReadSet[addr] = ReadVersion{Version: version, WriteID: writeID}
+	if state != nil {
+		db.localState = append(db.localState, state)
+	}
+	
+	isWritten := false
+	for _, w := range db.WriteSet {
+		if w == addr {
+			isWritten = true
+			break
+		}
+	}
+	
+	if !isWritten {
+		db.ReadSet = append(db.ReadSet, AccountReadRecord{Address: addr, Version: version, WriteID: writeID})
+		db.accountMap.AddReader(addr, db.txIndex)
 	}
 	return state, nil
 }
@@ -75,7 +105,7 @@ func (db *MVCCAccountStateDB) AddBalance(addr common.Address, amount *big.Int) e
 	if state != nil {
 		state.AddBalance(amount)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -90,7 +120,7 @@ func (db *MVCCAccountStateDB) SubBalance(addr common.Address, amount *big.Int) e
 			return err
 		}
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -103,7 +133,7 @@ func (db *MVCCAccountStateDB) SetNonce(addr common.Address, nonce uint64) error 
 	if state != nil {
 		state.SetNonce(nonce)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -116,7 +146,7 @@ func (db *MVCCAccountStateDB) PlusOneNonce(addr common.Address) error {
 	if state != nil {
 		state.PlusOneNonce()
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -131,7 +161,7 @@ func (db *MVCCAccountStateDB) SubPendingBalance(addr common.Address, amount *big
 			return err
 		}
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -144,7 +174,7 @@ func (db *MVCCAccountStateDB) AddPendingBalance(addr common.Address, amount *big
 	if state != nil {
 		state.AddPendingBalance(amount)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -159,7 +189,7 @@ func (db *MVCCAccountStateDB) SubTotalBalance(addr common.Address, amount *big.I
 			return err
 		}
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -172,7 +202,7 @@ func (db *MVCCAccountStateDB) SetLastHash(addr common.Address, h common.Hash) er
 	if state != nil {
 		state.SetLastHash(h)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -185,7 +215,7 @@ func (db *MVCCAccountStateDB) SetNewDeviceKey(addr common.Address, h common.Hash
 	if state != nil {
 		state.SetNewDeviceKey(h)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -198,7 +228,7 @@ func (db *MVCCAccountStateDB) SetAccountType(addr common.Address, t pb.ACCOUNT_T
 	if state != nil {
 		state.SetAccountType(t)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -211,7 +241,7 @@ func (db *MVCCAccountStateDB) AddLogHash(addr common.Address, logsHash common.Ha
 	if state != nil {
 		state.AddLogHash(logsHash)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -228,7 +258,7 @@ func (db *MVCCAccountStateDB) SetCodeHash(addr common.Address, h common.Hash) er
 	if state != nil {
 		state.SetCodeHash(h)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -241,7 +271,7 @@ func (db *MVCCAccountStateDB) SetCreatorPublicKey(addr common.Address, pk p_comm
 	if state != nil {
 		state.SetCreatorPublicKey(pk)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -254,7 +284,7 @@ func (db *MVCCAccountStateDB) SetStorageRoot(addr common.Address, h common.Hash)
 	if state != nil {
 		state.SetStorageRoot(h)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -267,7 +297,7 @@ func (db *MVCCAccountStateDB) SetStorageAddress(addr common.Address, h common.Ad
 	if state != nil {
 		state.SetStorageAddress(h)
 	}
-	db.WriteSet[addr] = true
+	db.markWrite(addr)
 	db.accountMap.Write(addr, db.txIndex, safeCopy(state))
 	return nil
 }
@@ -277,8 +307,20 @@ func (db *MVCCAccountStateDB) Discard() error               { return nil }
 func (db *MVCCAccountStateDB) SetState(s types.AccountState) {
 	if s != nil {
 		addr := s.Address()
-		db.WriteSet[addr] = true
-		db.localState[addr] = s
+		db.markWrite(addr)
+		
+		found := false
+		for i, ls := range db.localState {
+			if ls.Address() == addr {
+				db.localState[i] = s
+				found = true
+				break
+			}
+		}
+		if !found {
+			db.localState = append(db.localState, s)
+		}
+		
 		db.accountMap.Write(addr, db.txIndex, safeCopy(s))
 	}
 }

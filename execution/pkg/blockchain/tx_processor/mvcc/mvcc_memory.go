@@ -40,6 +40,7 @@ type VersionedAccountState struct {
 	writeIDs       map[Version]WriteID
 	// highest version written so far (for fast path lookups)
 	highestVersion Version
+	readers        []Version
 }
 
 func NewVersionedAccountState() *VersionedAccountState {
@@ -47,6 +48,7 @@ func NewVersionedAccountState() *VersionedAccountState {
 		versions:       make(map[Version]types.AccountState),
 		writeIDs:       make(map[Version]WriteID),
 		highestVersion: BaseVersion,
+		readers:        make([]Version, 0, 4),
 	}
 }
 
@@ -65,6 +67,26 @@ func (v *VersionedAccountState) Delete(version Version) {
 	defer v.mu.Unlock()
 	delete(v.versions, version)
 	delete(v.writeIDs, version)
+}
+
+func (v *VersionedAccountState) AddReader(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	// Avoid duplicate readers for the same version
+	for _, r := range v.readers {
+		if r == version {
+			return
+		}
+	}
+	v.readers = append(v.readers, version)
+}
+
+func (v *VersionedAccountState) GetReaders() []Version {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	readers := make([]Version, len(v.readers))
+	copy(readers, v.readers)
+	return readers
 }
 
 // Read finds the highest version of the account state that is less than or equal to the requested version.
@@ -144,6 +166,21 @@ func (m *MVCCAccountMap) Write(addr common.Address, version Version, state types
 	v.Write(version, state)
 }
 
+func (m *MVCCAccountMap) AddReader(addr common.Address, version Version) {
+	v := m.getOrCreate(addr)
+	v.AddReader(version)
+}
+
+func (m *MVCCAccountMap) GetReaders(addr common.Address) []Version {
+	m.mu.RLock()
+	v, exists := m.accounts[addr]
+	m.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+	return v.GetReaders()
+}
+
 func (m *MVCCAccountMap) Delete(addr common.Address, version Version) {
 	m.mu.RLock()
 	v, exists := m.accounts[addr]
@@ -169,12 +206,14 @@ type VersionedStorage struct {
 	mu       sync.RWMutex
 	versions map[Version][]byte
 	writeIDs map[Version]WriteID
+	readers  []Version
 }
 
 func NewVersionedStorage() *VersionedStorage {
 	return &VersionedStorage{
 		versions: make(map[Version][]byte),
 		writeIDs: make(map[Version]WriteID),
+		readers:  make([]Version, 0, 4),
 	}
 }
 
@@ -190,6 +229,25 @@ func (v *VersionedStorage) Delete(version Version) {
 	defer v.mu.Unlock()
 	delete(v.versions, version)
 	delete(v.writeIDs, version)
+}
+
+func (v *VersionedStorage) AddReader(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, r := range v.readers {
+		if r == version {
+			return
+		}
+	}
+	v.readers = append(v.readers, version)
+}
+
+func (v *VersionedStorage) GetReaders() []Version {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	readers := make([]Version, len(v.readers))
+	copy(readers, v.readers)
+	return readers
 }
 
 func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteID) {
@@ -268,6 +326,22 @@ func (m *MVCCStorageMap) getOrCreate(addr common.Address, key string) *Versioned
 func (m *MVCCStorageMap) Write(addr common.Address, key string, version Version, value []byte) {
 	v := m.getOrCreate(addr, key)
 	v.Write(version, value)
+}
+
+func (m *MVCCStorageMap) AddReader(addr common.Address, key string, version Version) {
+	v := m.getOrCreate(addr, key)
+	v.AddReader(version)
+}
+
+func (m *MVCCStorageMap) GetReaders(addr common.Address, key string) []Version {
+	sKey := storageKey(addr, key)
+	m.mu.RLock()
+	v, exists := m.storage[sKey]
+	m.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+	return v.GetReaders()
 }
 
 func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version) {
