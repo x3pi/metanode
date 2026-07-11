@@ -17,6 +17,12 @@ type Version int64
 // Used to prevent ABA problems when a transaction re-executes and writes to the same Version.
 type WriteID uint64
 
+// EstimateMarker tracks which transaction plans to write to a location, allowing subsequent transactions to suspend and wait.
+type EstimateMarker struct {
+	Version Version
+	Wakeup  chan struct{}
+}
+
 const (
 	// BaseVersion is the version of data loaded from the global database (before any block transactions).
 	BaseVersion Version = -1
@@ -41,6 +47,7 @@ type VersionedAccountState struct {
 	// highest version written so far (for fast path lookups)
 	highestVersion Version
 	readers        []Version
+	estimates      []EstimateMarker
 }
 
 func NewVersionedAccountState() *VersionedAccountState {
@@ -49,6 +56,7 @@ func NewVersionedAccountState() *VersionedAccountState {
 		writeIDs:       make(map[Version]WriteID),
 		highestVersion: BaseVersion,
 		readers:        make([]Version, 0, 4),
+		estimates:      make([]EstimateMarker, 0, 2),
 	}
 }
 
@@ -89,12 +97,46 @@ func (v *VersionedAccountState) GetReaders() []Version {
 	return readers
 }
 
+func (v *VersionedAccountState) AddEstimate(version Version) chan struct{} {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, e := range v.estimates {
+		if e.Version == version {
+			return e.Wakeup
+		}
+	}
+	ch := make(chan struct{})
+	v.estimates = append(v.estimates, EstimateMarker{Version: version, Wakeup: ch})
+	return ch
+}
+
+func (v *VersionedAccountState) RemoveEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, e := range v.estimates {
+		if e.Version == version {
+			v.estimates = append(v.estimates[:i], v.estimates[i+1:]...)
+			close(e.Wakeup)
+			return
+		}
+	}
+}
+
 // Read finds the highest version of the account state that is less than or equal to the requested version.
+// It also checks if there are any EstimateMarkers strictly less than the requester. If so, it returns a Wakeup channel.
 // If the highest version is found, it returns the state and its version.
 // If no version is found (e.g., all versions are > requested version), it returns (nil, BaseVersion).
-func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState, Version, WriteID) {
+func (v *VersionedAccountState) Read(requestVersion Version, requester Version) (types.AccountState, Version, WriteID, chan struct{}) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	// 1. Check for estimates
+	// We must suspend if there is ANY estimate i such that i < requester
+	for _, e := range v.estimates {
+		if e.Version < requester {
+			return nil, BaseVersion, BaseWriteID, e.Wakeup
+		}
+	}
 
 	var bestVersion Version = BaseVersion
 	var bestState types.AccountState = nil
@@ -112,7 +154,7 @@ func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState
 		}
 	}
 
-	return bestState, bestVersion, bestWriteID
+	return bestState, bestVersion, bestWriteID, nil
 }
 
 // MVCCAccountMap stores all versioned account states for the block.
@@ -132,7 +174,7 @@ func (m *MVCCAccountMap) ExportLatest() map[common.Address]types.AccountState {
 	defer m.mu.RUnlock()
 	res := make(map[common.Address]types.AccountState)
 	for addr, vState := range m.accounts {
-		state, _, _ := vState.Read(MaxVersion)
+		state, _, _, _ := vState.Read(MaxVersion, MaxVersion)
 		if state != nil {
 			res[addr] = state
 		}
@@ -181,6 +223,20 @@ func (m *MVCCAccountMap) GetReaders(addr common.Address) []Version {
 	return v.GetReaders()
 }
 
+func (m *MVCCAccountMap) AddEstimate(addr common.Address, version Version) chan struct{} {
+	v := m.getOrCreate(addr)
+	return v.AddEstimate(version)
+}
+
+func (m *MVCCAccountMap) RemoveEstimate(addr common.Address, version Version) {
+	m.mu.RLock()
+	v, exists := m.accounts[addr]
+	m.mu.RUnlock()
+	if exists {
+		v.RemoveEstimate(version)
+	}
+}
+
 func (m *MVCCAccountMap) Delete(addr common.Address, version Version) {
 	m.mu.RLock()
 	v, exists := m.accounts[addr]
@@ -192,13 +248,14 @@ func (m *MVCCAccountMap) Delete(addr common.Address, version Version) {
 
 // Read gets the highest version of the state strictly less than requestVersion.
 // (Because a transaction with requestVersion = i should read the output of transaction i-1 or earlier).
-func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version, WriteID) {
+func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version, WriteID, chan struct{}) {
 	v := m.getOrCreate(addr)
 	// We read the version STRICTLY LESS THAN requestVersion
 	if requestVersion == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, nil
 	}
-	return v.Read(requestVersion - 1)
+	// Pass requestVersion as the requester identity to check estimates
+	return v.Read(requestVersion-1, requestVersion)
 }
 
 // VersionedStorage holds multiple versions of a smart contract storage value.
@@ -207,6 +264,7 @@ type VersionedStorage struct {
 	versions map[Version][]byte
 	writeIDs map[Version]WriteID
 	readers  []Version
+	estimates []EstimateMarker
 }
 
 func NewVersionedStorage() *VersionedStorage {
@@ -214,6 +272,7 @@ func NewVersionedStorage() *VersionedStorage {
 		versions: make(map[Version][]byte),
 		writeIDs: make(map[Version]WriteID),
 		readers:  make([]Version, 0, 4),
+		estimates: make([]EstimateMarker, 0, 2),
 	}
 }
 
@@ -250,9 +309,41 @@ func (v *VersionedStorage) GetReaders() []Version {
 	return readers
 }
 
-func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteID) {
+func (v *VersionedStorage) AddEstimate(version Version) chan struct{} {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, e := range v.estimates {
+		if e.Version == version {
+			return e.Wakeup
+		}
+	}
+	ch := make(chan struct{})
+	v.estimates = append(v.estimates, EstimateMarker{Version: version, Wakeup: ch})
+	return ch
+}
+
+func (v *VersionedStorage) RemoveEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, e := range v.estimates {
+		if e.Version == version {
+			v.estimates = append(v.estimates[:i], v.estimates[i+1:]...)
+			close(e.Wakeup)
+			return
+		}
+	}
+}
+
+func (v *VersionedStorage) Read(requestVersion Version, requester Version) ([]byte, Version, WriteID, chan struct{}) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	// 1. Check for estimates
+	for _, e := range v.estimates {
+		if e.Version < requester {
+			return nil, BaseVersion, BaseWriteID, e.Wakeup
+		}
+	}
 
 	var bestVersion Version = BaseVersion
 	var bestVal []byte = nil
@@ -270,7 +361,7 @@ func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteI
 		}
 	}
 
-	return bestVal, bestVersion, bestWriteID
+	return bestVal, bestVersion, bestWriteID, nil
 }
 
 // MVCCStorageMap stores all versioned storage values for the block.
@@ -290,7 +381,7 @@ func (m *MVCCStorageMap) ExportLatest() map[string][]byte {
 	defer m.mu.RUnlock()
 	res := make(map[string][]byte)
 	for sKey, vStorage := range m.storage {
-		val, _, _ := vStorage.Read(MaxVersion)
+		val, _, _, _ := vStorage.Read(MaxVersion, MaxVersion)
 		if val != nil {
 			res[sKey] = val
 		}
@@ -344,6 +435,21 @@ func (m *MVCCStorageMap) GetReaders(addr common.Address, key string) []Version {
 	return v.GetReaders()
 }
 
+func (m *MVCCStorageMap) AddEstimate(addr common.Address, key string, version Version) chan struct{} {
+	v := m.getOrCreate(addr, key)
+	return v.AddEstimate(version)
+}
+
+func (m *MVCCStorageMap) RemoveEstimate(addr common.Address, key string, version Version) {
+	sKey := storageKey(addr, key)
+	m.mu.RLock()
+	v, exists := m.storage[sKey]
+	m.mu.RUnlock()
+	if exists {
+		v.RemoveEstimate(version)
+	}
+}
+
 func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version) {
 	sKey := storageKey(addr, key)
 	m.mu.RLock()
@@ -354,12 +460,12 @@ func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version
 	}
 }
 
-func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version, WriteID) {
+func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version, WriteID, chan struct{}) {
 	v := m.getOrCreate(addr, key)
 	if requestVersion == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, nil
 	}
-	return v.Read(requestVersion - 1)
+	return v.Read(requestVersion-1, requestVersion)
 }
 
 // ReadVersion is used by read sets to track exactly which version of data was read

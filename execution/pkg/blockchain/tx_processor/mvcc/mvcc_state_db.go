@@ -61,7 +61,19 @@ func (db *MVCCAccountStateDB) AccountState(addr common.Address) (types.AccountSt
 		}
 	}
 
-	state, version, writeID := db.accountMap.Read(addr, db.txIndex)
+	var state types.AccountState
+	var version Version
+	var writeID WriteID
+	var wakeup chan struct{}
+
+	for {
+		state, version, writeID, wakeup = db.accountMap.Read(addr, db.txIndex)
+		if wakeup != nil {
+			<-wakeup // SUSPEND: wait for estimating transaction
+			continue
+		}
+		break
+	}
 	if state == nil {
 		s, _ := db.baseDB.AccountState(addr)
 		if s != nil {

@@ -43,6 +43,10 @@ type TrueBlockSTM struct {
 	// Smart Contract Tracking
 	scReadSets  [][]mvcc.SCReadRecord
 	scWriteSets [][]string
+	
+	// ESTIMATE Tracking
+	estimatedAccounts [][]common.Address
+	estimatedStorage  [][]string
 
 	receipts  []types.Receipt
 	scResults []types.ExecuteSCResult
@@ -63,12 +67,14 @@ func NewTrueBlockSTM(txs []types.Transaction) *TrueBlockSTM {
 		accountMap:  mvcc.NewMVCCAccountMap(),
 		storageMap:  mvcc.NewMVCCStorageMap(),
 		txState:     make([]uint64, numTxs),
-		readSets:    make([][]mvcc.AccountReadRecord, numTxs),
-		writeSets:   make([][]common.Address, numTxs),
-		scReadSets:  make([][]mvcc.SCReadRecord, numTxs),
-		scWriteSets: make([][]string, numTxs),
-		receipts:    make([]types.Receipt, numTxs),
-		scResults:   make([]types.ExecuteSCResult, numTxs),
+		readSets:         make([][]mvcc.AccountReadRecord, numTxs),
+		writeSets:        make([][]common.Address, numTxs),
+		scReadSets:       make([][]mvcc.SCReadRecord, numTxs),
+		scWriteSets:      make([][]string, numTxs),
+		estimatedAccounts: make([][]common.Address, numTxs),
+		estimatedStorage:  make([][]string, numTxs),
+		receipts:         make([]types.Receipt, numTxs),
+		scResults:        make([]types.ExecuteSCResult, numTxs),
 	}
 }
 
@@ -111,16 +117,18 @@ func (stm *TrueBlockSTM) Process(
 
 	var activeTasks int32 = int32(numTxs)
 
-	// Start Execution Workers (High concurrency, e.g., 16 workers)
-	for w := 0; w < 16; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-workerCtx.Done():
-					return
-				case txIndex := <-execOut:
+	// Start Execution Dispatcher (Spawns a goroutine per execution to prevent deadlock when suspending)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case txIndex := <-execOut:
+				wg.Add(1)
+				go func(txIndex uint32) {
+					defer wg.Done()
 					func() {
 						defer func() {
 							if atomic.AddInt32(&activeTasks, -1) == 0 {
@@ -417,6 +425,24 @@ func (stm *TrueBlockSTM) Process(
 							}
 						}
 
+						// 3.5 Clear any Estimates left by previous aborts of THIS transaction
+						if len(stm.estimatedAccounts[txIndex]) > 0 {
+							for _, addr := range stm.estimatedAccounts[txIndex] {
+								stm.accountMap.RemoveEstimate(addr, mvcc.Version(txIndex))
+							}
+							stm.estimatedAccounts[txIndex] = nil
+						}
+						if len(stm.estimatedStorage[txIndex]) > 0 {
+							for _, fullKey := range stm.estimatedStorage[txIndex] {
+								if len(fullKey) >= 42 {
+									addr := common.HexToAddress(fullKey[:42])
+									keyStr := fullKey[42:]
+									stm.storageMap.RemoveEstimate(addr, keyStr, mvcc.Version(txIndex))
+								}
+							}
+							stm.estimatedStorage[txIndex] = nil
+						}
+
 						// 4. Save Read/Write sets and Results
 						stm.receipts[txIndex] = rcp
 						stm.scResults[txIndex] = exRs
@@ -498,10 +524,10 @@ func (stm *TrueBlockSTM) Process(
 						atomic.AddInt32(&activeTasks, 1)
 						validateIn <- txIndex
 					}()
-				}
+				}(txIndex)
 			}
-		}()
-	}
+		}
+	}()
 
 	// Start Validation Workers (High priority, fast execution)
 	for w := 0; w < 8; w++ {
@@ -542,8 +568,8 @@ func (stm *TrueBlockSTM) Process(
 						isValid := true
 						if rSet != nil {
 							for _, readRec := range rSet {
-								_, highestVer, highestWriteID := stm.accountMap.Read(readRec.Address, mvcc.Version(txIndex))
-								if highestVer != readRec.Version || highestWriteID != readRec.WriteID {
+								_, highestVer, highestWriteID, wakeup := stm.accountMap.Read(readRec.Address, mvcc.Version(txIndex))
+								if wakeup != nil || highestVer != readRec.Version || highestWriteID != readRec.WriteID {
 									isValid = false
 									break
 								}
@@ -552,8 +578,8 @@ func (stm *TrueBlockSTM) Process(
 
 						if isValid {
 							for _, readRec := range scRSet {
-								_, highestVer, highestWriteID := stm.storageMap.Read(readRec.Address, readRec.Key, mvcc.Version(txIndex))
-								if highestVer != readRec.Version || highestWriteID != readRec.WriteID {
+								_, highestVer, highestWriteID, wakeup := stm.storageMap.Read(readRec.Address, readRec.Key, mvcc.Version(txIndex))
+								if wakeup != nil || highestVer != readRec.Version || highestWriteID != readRec.WriteID {
 									isValid = false
 									break
 								}
@@ -568,6 +594,27 @@ func (stm *TrueBlockSTM) Process(
 							aCount := atomic.AddUint32(&abortCount, 1)
 							if aCount%10000 == 0 {
 								logger.Warn("⚠️ [BLOCK-STM-DEBUG] Đang bị Abort liên tục. Tổng aborts: %d, txIndex đang xét: %d", aCount, txIndex)
+							}
+							
+							// ESTIMATE LOGIC: Add estimates for next execution
+							stm.estimatedAccounts[txIndex] = nil
+							stm.estimatedStorage[txIndex] = nil
+							
+							if len(stm.writeSets[txIndex]) > 0 {
+								for _, addr := range stm.writeSets[txIndex] {
+									stm.accountMap.AddEstimate(addr, mvcc.Version(txIndex))
+									stm.estimatedAccounts[txIndex] = append(stm.estimatedAccounts[txIndex], addr)
+								}
+							}
+							if len(stm.scWriteSets[txIndex]) > 0 {
+								for _, fullKey := range stm.scWriteSets[txIndex] {
+									if len(fullKey) >= 42 {
+										addr := common.HexToAddress(fullKey[:42])
+										keyStr := fullKey[42:]
+										stm.storageMap.AddEstimate(addr, keyStr, mvcc.Version(txIndex))
+										stm.estimatedStorage[txIndex] = append(stm.estimatedStorage[txIndex], fullKey)
+									}
+								}
 							}
 							
 							if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {

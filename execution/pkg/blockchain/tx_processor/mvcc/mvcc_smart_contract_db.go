@@ -59,8 +59,20 @@ func (db *MVCCSmartContractDB) Code(address common.Address) []byte {
 func (db *MVCCSmartContractDB) StorageValue(address common.Address, key []byte, customRoot ...*common.Hash) ([]byte, bool) {
 	sKey := string(key)
 	
+	var val []byte
+	var version Version
+	var writeID WriteID
+	var wakeup chan struct{}
+	
 	// Check MVCC map first
-	val, version, writeID := db.storageMap.Read(address, sKey, db.txIndex)
+	for {
+		val, version, writeID, wakeup = db.storageMap.Read(address, sKey, db.txIndex)
+		if wakeup != nil {
+			<-wakeup // SUSPEND: wait for estimating transaction
+			continue
+		}
+		break
+	}
 	
 	if val == nil {
 		// Read from base DB if not found in MVCC
