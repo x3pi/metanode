@@ -247,14 +247,14 @@ impl SignedBlockVerifier {
 
         let num_txs = txs.len();
         if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || num_txs > 0 {
-            tracing::warn!(
-                "⏱️ [PERF-RUST] verify_block_inner detail for author {} round {} (txs: {}): sig_verify={:?}, tx_check={:?}",
-                block.author(),
-                block.round(),
-                num_txs,
-                sig_elapsed,
-                tx_elapsed
-            );
+            // tracing::warn!(
+            //     "⏱️ [PERF-RUST] verify_block_inner detail for author {} round {} (txs: {}): sig_verify={:?}, tx_check={:?}",
+            //     block.author(),
+            //     block.round(),
+            //     num_txs,
+            //     sig_elapsed,
+            //     tx_elapsed
+            // );
         }
 
         Ok(())
@@ -344,14 +344,14 @@ impl BlockVerifier for SignedBlockVerifier {
 
         let num_txs = verified_block.tx_digests().len();
         if total_elapsed.as_micros() > 500 || num_txs > 0 {
-            tracing::warn!(
-                "⏱️ [PERF-RUST] verify_and_vote block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
-                verified_block.reference(),
-                num_txs,
-                total_elapsed,
-                verify_elapsed,
-                vote_elapsed
-            );
+            // tracing::warn!(
+            //     "⏱️ [PERF-RUST] verify_and_vote block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
+            //     verified_block.reference(),
+            //     num_txs,
+            //     total_elapsed,
+            //     verify_elapsed,
+            //     vote_elapsed
+            // );
         }
         Ok((verified_block, rejected_transactions))
     }
