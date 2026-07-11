@@ -10,7 +10,7 @@ User=metanode
 Group=metanode
 WorkingDirectory={{ metanode_install_dir }}/node-{{ item }}/bin
 
-ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/simple_chain -config={{ metanode_install_dir }}/node-{{ item }}/config/execution.json
+ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/simple_chain -config={{ metanode_install_dir }}/node-{{ item }}/config/execution.json --pprof-addr=0.0.0.0:606{{ item }}
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
