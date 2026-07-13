@@ -273,7 +273,6 @@ mvm::BlockContext CreateBlockContext(unsigned char *mvmId, uint64_t prevrandao,
 ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
                              mvm::VectorLogHandler &log_handler,
                              bool isOffChain = false) {
-  // std::cerr << "[PROCESS_RESULT_DEBUG] Entered processResult" << std::endl;
   // --- Khởi tạo tất cả các con trỏ là nullptr ban đầu ---
   char *b_output = nullptr;
   int length_output = 0;
@@ -306,7 +305,6 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
   ExecuteResult *pendingResult = nullptr; // Khởi tạo con trỏ kết quả là nullptr
 
   try {
-    // std::cerr << "[PROCESS_RESULT_DEBUG] About to process output" << std::endl;
     // --- Xử lý Output ---
     if (!result.output.empty()) {
       length_output = static_cast<int>(result.output.size());
@@ -442,7 +440,6 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     // We no longer retrieve full db hashes or logs via registry here.
     // Xapian changes are committed atomically in block_processor_commit.go.
 
-    // std::cerr << "[PROCESS_RESULT_DEBUG] Constructing pendingResult"
     //           << std::endl;
     pendingResult = new ExecuteResult{
       b_exitReason : (char)result.er,
@@ -477,7 +474,6 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       gas_used : result.gas_used
     };
 
-    // std::cerr << "[PROCESS_RESULT_DEBUG] Returning pendingResult" << std::endl;
     return pendingResult;
   } catch (const std::bad_alloc &e) {
     std::cerr << "[FATAL] Allocation failed during processResult: " << e.what()

@@ -247,14 +247,6 @@ impl SignedBlockVerifier {
 
         let num_txs = txs.len();
         if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || num_txs > 0 {
-            // tracing::warn!(
-            //     "⏱️ [PERF-RUST] verify_block_inner detail for author {} round {} (txs: {}): sig_verify={:?}, tx_check={:?}",
-            //     block.author(),
-            //     block.round(),
-            //     num_txs,
-            //     sig_elapsed,
-            //     tx_elapsed
-            // );
         }
 
         Ok(())
@@ -323,9 +315,9 @@ impl BlockVerifier for SignedBlockVerifier {
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
         let start = std::time::Instant::now();
         self.verify_block(&block)?;
-        let verify_elapsed = start.elapsed();
 
-        let vote_start = std::time::Instant::now();
+
+
         // If the block verification passed then we can produce the verified block, but we should only return it if the transaction verification passed as well.
         let verified_block = VerifiedBlock::new_verified(block, serialized_block);
 
@@ -339,19 +331,11 @@ impl BlockVerifier for SignedBlockVerifier {
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
-        let vote_elapsed = vote_start.elapsed();
+
         let total_elapsed = start.elapsed();
 
         let num_txs = verified_block.tx_digests().len();
         if total_elapsed.as_micros() > 500 || num_txs > 0 {
-            // tracing::warn!(
-            //     "⏱️ [PERF-RUST] verify_and_vote block {:?} (txs: {}): total={:?}, block_verify={:?}, tx_verify/vote={:?}",
-            //     verified_block.reference(),
-            //     num_txs,
-            //     total_elapsed,
-            //     verify_elapsed,
-            //     vote_elapsed
-            // );
         }
         Ok((verified_block, rejected_transactions))
     }

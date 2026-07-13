@@ -285,7 +285,7 @@ func main() {
 
 	// OOM PREVENTION: Proactive memory pressure relief goroutine.
 	// Monitors Sys memory and forces GC when approaching limits.
-	// go memoryPressureRelief(int64(actualMemLimitGB) << 30)
+	go memoryPressureRelief(int64(actualMemLimitGB) << 30)
 
 	rpcServer := startRPCServer(app)
 	handleExitSignals(app, rpcServer)
