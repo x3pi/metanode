@@ -159,7 +159,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
       }
     }
 
-    Xapian::Query safe_match_all(Xapian::Query::OP_VALUE_GE, 254, "");
+    Xapian::Query safe_match_all(std::string(""));
 
     Xapian::Query keyword_query =
         parsed_queries.empty()
@@ -195,8 +195,8 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
 
     Xapian::Query slot254_is_null = Xapian::Query(
         Xapian::Query::OP_AND_NOT,
-        safe_match_all, // Sử dụng safe_match_all thay cho MatchAll
-        has_slot254 // Loại trừ những tài liệu có giá trị ở slot 254
+        safe_match_all, // Sử dụng safe_match_all (std::string("")) an toàn
+        has_slot254 // Loại trừ những tài liệu có giá trị ở slot 254 (tức là đã bị xóa)
     );
     Xapian::Query slot254_filter =
         Xapian::Query(Xapian::Query::OP_OR, slot254_ge_block, slot254_is_null);
