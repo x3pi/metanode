@@ -43,7 +43,6 @@ public:
   static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
-  Xapian::Database read_db; // Dùng cho get_overlayed_document (bảo vệ bởi changes_mutex)
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
 
   // --- Search Database Pool ---
@@ -90,7 +89,7 @@ public:
   std::string get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
   std::vector<std::string> get_terms(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
   DocumentInfo get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash = nullptr, const uint256_t *writerHash = nullptr);
-  Xapian::Document get_overlayed_document(const std::string& virtualDocIdStr, const uint256_t* txHash, const uint256_t* writerHash = nullptr);
+  Xapian::Document get_overlayed_document(const std::string& virtualDocIdStr, const uint256_t* txHash, const uint256_t* writerHash = nullptr, Xapian::Database* search_db = nullptr);
 
   // --- Commit and Change Tracking ---
   bool commit_changes();
@@ -140,7 +139,7 @@ private:
   std::unordered_map<std::string, int> tx_counters; // Để sinh UUID tuần tự trong 1 giao dịch
   
   // Resolves a virtual docId (e.g. 256-bit UUID) to native Xapian uint32 docid
-  Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr, bool use_read_db = true);
+  Xapian::docid resolveVirtualDocId(const std::string& virtualDocIdStr, Xapian::Database* search_db = nullptr);
   
   // Áp dụng buffer vào một Xapian::Document ảo để mô phỏng (dùng khi get_data)
   void replayBufferToDocument(Xapian::Document& doc, const XapianLog::ComprehensiveLog& buffer);
