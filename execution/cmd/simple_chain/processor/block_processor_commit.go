@@ -81,7 +81,6 @@ func (bp *BlockProcessor) commitWorker() {
 				// Pure token transfers (IsRegularTransaction) do not interact with Xapian.
 				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
 				if isContractInteraction {
-					hasXapianChanges = true
 					if i < len(job.ProcessResults.Receipts) && job.ProcessResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
 						mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
 						hasContractInteraction = true
@@ -96,12 +95,6 @@ func (bp *BlockProcessor) commitWorker() {
 			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
 			// to prevent unbounded memory growth from cached EVM instances.
 			mvm.RemoveOldApiInstances()
-
-			// Ghi toàn bộ dữ liệu Xapian từ RAM xuống ổ cứng ngay sau khi xử lý xong các Tx trong block.
-			// Đảm bảo dữ liệu search luôn đồng bộ vật lý với state blockchain.
-			if hasXapianChanges {
-				mvm.CommitAllXapian()
-			}
 		}
 
 		// ══════════════════════════════════════════════════════════════════
