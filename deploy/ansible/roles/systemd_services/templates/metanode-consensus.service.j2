@@ -21,7 +21,7 @@ RestartSec=10s
 # Environment
 Environment=RUST_BACKTRACE=full
 LimitNOFILE=100000
-
+LimitCORE=infinity
 # Logging
 StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
 StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
