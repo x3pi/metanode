@@ -26,6 +26,7 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--restore-node N`| `none` (Không thực hiện khôi phục) | Cờ đặc biệt: Báo hiệu sẽ khôi phục dữ liệu cho Node `N`. Hệ thống sẽ tải Snapshot và giải nén vào thư mục `data`. Thường kết hợp với `--reset-all`. |
 | `--snapshot-url` | Rỗng (`""`) | Cung cấp đường link tải Snapshot (Ví dụ: `http://192.168.1.230:8604`). Bắt buộc đi kèm khi sử dụng `--restore-node`. |
 | `--open-ports` | `false` (Không mở port) | Gọi script cấu hình Firewall (UFW) trên Server để mở thông tất cả các cổng (P2P, RPC, Metrics...). Thường chỉ chạy 1 lần lúc cài đặt máy chủ mới. |
+| `--debug-cpp` | `false` | Ép trình biên dịch C++ (EVM Linker) build ở chế độ Debug (`-O0 -g`) thay vì Release (`-O3`). Dùng khi cần `gdb` dò lỗi CGO. |
 
 ---
 

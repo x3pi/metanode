@@ -75,8 +75,9 @@ public:
 
   // Thêm thành viên để lưu khóa mvmId liên kết
 
-  // --- Constructor ---
+  // --- Constructor and Destructor ---
   XapianManager(const std::string &db_path, const mvm::Address &addr);
+  ~XapianManager();
 
   // --- Document Operations (Log changes before execution) ---
   std::string new_document(const std::string &data, uint256_t blockNumber, const unsigned char *mvmId = nullptr, const uint256_t *txHash = nullptr);

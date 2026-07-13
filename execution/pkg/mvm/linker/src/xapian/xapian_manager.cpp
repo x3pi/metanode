@@ -140,6 +140,18 @@ XapianManager::XapianManager(const std::string &db_name,
     }
 }
 
+XapianManager::~XapianManager() {
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (search_pool.pool[i]) {
+            try {
+                search_pool.pool[i]->close();
+            } catch (...) {}
+            delete search_pool.pool[i];
+            search_pool.pool[i] = nullptr;
+        }
+    }
+}
+
 
 // Lấy 1 DB từ pool (đợi tối đa 5s, nếu tất cả đang bận hoặc hỏng thì trả về nullptr).
 // Trước khi trả về, nếu slot đó cũ hơn generation hiện tại (tức có commit xảy ra
@@ -766,7 +778,7 @@ std::thread cleaner_thread([] {
                 for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
                 {
                     // Kiểm tra con trỏ hợp lệ và trạng thái idle
-                    if (it->second && it->second->is_idle_for(std::chrono::minutes(5))) // Ngưỡng idle là 5 phút
+                    if (it->second && it->second->is_idle_for(std::chrono::minutes(1))) // Ngưỡng idle là 1 phút
                     {
                         // Kiểm tra use_count để xem có tham chiếu nào khác ngoài map không
                         std::shared_ptr<XapianManager> temp_ptr = it->second;
