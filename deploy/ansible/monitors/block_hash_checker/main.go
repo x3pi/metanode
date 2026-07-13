@@ -1953,6 +1953,39 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 		}
 		
 		bMismatches, bMatched, _, bSkipped, bNilBlocks, bEmptyBlocks := checkBatch(client, nodes, batchStart, batchEnd)
+		
+		if len(bMismatches) > 0 {
+			// CHỈ áp dụng chờ 5s nếu lỗi rẽ nhánh DÀNH RIÊNG cho node 4 (Sync Node)
+			isSyncNodeMismatchOnly := true
+			for _, m := range bMismatches {
+				refHash := ""
+				for nodeName, bi := range m.Blocks {
+					if nodeName == "m4" || nodeName == "node4" {
+						continue // Bỏ qua node 4 khi so sánh consensus
+					}
+					if bi.IsError() {
+						continue
+					}
+					if refHash == "" {
+						refHash = bi.Hash
+					} else if refHash != bi.Hash {
+						// Các node Validator (0,1,2,3) tự lệch nhau -> Lỗi hệ thống nghiêm trọng!
+						isSyncNodeMismatchOnly = false
+						break
+					}
+				}
+				if !isSyncNodeMismatchOnly {
+					break
+				}
+			}
+
+			if isSyncNodeMismatchOnly {
+				fmt.Printf(" ⏳ Phát hiện lệch hash trên Sync Node (m4/node4) tại block %d, chờ 5 giây và kiểm tra lại...\n", bMismatches[0].BlockNumber)
+				time.Sleep(5 * time.Second)
+				bMismatches, bMatched, _, bSkipped, bNilBlocks, bEmptyBlocks = checkBatch(client, nodes, batchStart, batchEnd)
+			}
+		}
+
 		mismatches = append(mismatches, bMismatches...)
 		matched += bMatched
 		skipped += bSkipped
@@ -1960,7 +1993,7 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 		emptyBlocks = append(emptyBlocks, bEmptyBlocks...)
 		
 		if len(mismatches) > 0 {
-			break // Dừng ngay nếu phát hiện lệch hash trong chunk này
+			break // Dừng ngay nếu phát hiện lệch hash thực sự trong chunk này
 		}
 	}
 

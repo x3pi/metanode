@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"runtime/debug"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -23,6 +24,11 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+func init() {
+	// Set MaxThreads to 100,000 to prevent CGO OS Thread exhaustion when Block-STM suspends txs
+	debug.SetMaxThreads(100000)
+}
 
 // TrueBlockSTM implements the deterministic parallel MVCC Block-STM.
 type TrueBlockSTM struct {

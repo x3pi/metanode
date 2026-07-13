@@ -38,7 +38,6 @@ std::string intToHex(int value) {
 vector<uint8_t> encodeInt(
     string n
 ) {
-    cout << "encodeInt: " << n << endl;
     vector<uint8_t> result(32, 0);
     vector<uint8_t> originBytes = hexStringToUint8Array(n);
     int start = 32 - originBytes.size();
