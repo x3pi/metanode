@@ -27,9 +27,11 @@ TARBALL_NAME="metanode-deploy.tar.gz"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 BUILD_FAST=false
+export ENABLE_DEBUG_CPP=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --fast) BUILD_FAST=true ;;
+        --debug-cpp) export ENABLE_DEBUG_CPP=true ;;
         *) log_err "Unknown parameter: $1" ;;
     esac
     shift

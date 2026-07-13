@@ -27,31 +27,6 @@ using MvmIdKeyMap = tbb::concurrent_hash_map<std::string, ManagerList>;
 // Namespace ẩn danh cho các hàm trợ giúp nội bộ
 namespace
 {
-
-    /**
-     * @brief Logic nội bộ để tạo khóa định danh từ mvmId.
-     * @param mvmId Con trỏ đến mảng byte mvmId (20 bytes).
-     * @return Chuỗi khóa định danh hoặc chuỗi rỗng nếu mvmId là null.
-     */
-    std::string generateMvmIdKeyInternal(const unsigned char *mvmId)
-    {
-        if (mvmId == nullptr)
-        {
-            return ""; // Trả về rỗng nếu đầu vào là null
-        }
-
-        std::stringstream ss;
-        ss << std::hex << std::setfill('0');
-        // Chuyển đổi 20 byte địa chỉ thành hex
-        for (size_t i = 0; i < 20; ++i)
-        {
-            ss << std::setw(2) << static_cast<int>(mvmId[i]);
-        }
-        // Thêm phần đệm 12 byte (24 ký tự '0') để đủ 32 byte (64 ký tự hex)
-        ss << std::string(24, '0');
-        return ss.str();
-    }
-
     /**
      * @brief Hàm trợ giúp nội bộ để nhóm các manager theo địa chỉ mvm::Address của chúng.
      * @param managers Danh sách các con trỏ manager cần nhóm.
@@ -76,6 +51,25 @@ namespace
 //----------------------------------------------------------------------------
 // Triển khai các phương thức của lớp XapianRegistry.
 //----------------------------------------------------------------------------
+
+std::string XapianRegistry::generateMvmIdKey(const unsigned char *mvmId)
+{
+    if (mvmId == nullptr)
+    {
+        return ""; // Trả về rỗng nếu đầu vào là null
+    }
+
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    // Chuyển đổi 20 byte địa chỉ thành hex
+    for (size_t i = 0; i < 20; ++i)
+    {
+        ss << std::setw(2) << static_cast<int>(mvmId[i]);
+    }
+    // Thêm phần đệm 12 byte (24 ký tự '0') để đủ 32 byte (64 ký tự hex)
+    ss << std::string(24, '0');
+    return ss.str();
+}
 
 
 
