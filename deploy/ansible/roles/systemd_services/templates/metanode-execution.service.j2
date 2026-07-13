@@ -24,7 +24,7 @@ Environment="GOTRACEBACK=all" "SKIP_MEMPOOL_SIG_VERIFY=true"
 Environment=NODE_TYPE={% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}synconly{% else %}validator{% endif %}
 
 LimitNOFILE=100000
-
+LimitCORE=infinity
 # Logging
 StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
 StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
