@@ -41,8 +41,8 @@ type ExecuteSCResult struct {
 	mapPublicKeyBls map[string][]byte
 	mapAccountType  map[string]uint8
 	mapNewDeviceKey map[string][]byte
-	
-	mapCodeChange map[string][]byte
+
+	mapCodeChange  map[string][]byte
 	mapStorageRead map[string][][]byte
 }
 

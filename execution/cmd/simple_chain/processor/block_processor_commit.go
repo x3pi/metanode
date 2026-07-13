@@ -3,23 +3,23 @@
 package processor
 
 import (
-	runtime_debug "runtime/debug"
 	"fmt"
+	runtime_debug "runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -42,8 +42,8 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		var startGC runtime_debug.GCStats
-			runtime_debug.ReadGCStats(&startGC)
-			start := time.Now()
+		runtime_debug.ReadGCStats(&startGC)
+		start := time.Now()
 		blockNum := job.Block.Header().BlockNumber()
 		txCount := len(job.Block.Transactions())
 
@@ -316,12 +316,12 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		totalDuration := time.Since(start)
-			var endGC runtime_debug.GCStats
-			runtime_debug.ReadGCStats(&endGC)
-			gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
-			pipeline.GlobalBlockTraceStore.AddGCPause(blockNum, gcPauseUs)
+		var endGC runtime_debug.GCStats
+		runtime_debug.ReadGCStats(&endGC)
+		gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
+		pipeline.GlobalBlockTraceStore.AddGCPause(blockNum, gcPauseUs)
 		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Microseconds())
-		
+
 		if txCount > 0 {
 			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | WaitGo: %dms | WaitRust: %dms | RustFFI: %dms (FFI: %dms) | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
 				trace.BlockNumber, trace.TxCount,
