@@ -791,10 +791,13 @@ std::thread cleaner_thread([] {
                 }
             }
 
-    // Giai đoạn 2: Thực hiện xóa các instance đã xác định
+    // Giai đoạn 2: Thực hiện xóa các instance đã xác định.
+    // onlyIfIdle=true để destroyInstance() tự re-kiểm tra idle/refcount một
+    // cách atomic ngay trước khi erase, phòng trường hợp có request mới
+    // (getInstance/search) xen vào giữa Giai đoạn 1 và Giai đoạn 2.
     for (const std::string &key : keys_to_erase) {
       // Gọi hàm destroyInstance để xử lý việc đóng DB, dọn dẹp và xóa khỏi map
-      XapianManager::destroyInstance(key);
+      XapianManager::destroyInstance(key, /*onlyIfIdle=*/true);
     }
   }
 });
@@ -904,7 +907,7 @@ bool XapianManager::revertUncommittedChanges() {
 }
 
 // Hủy một instance XapianManager và xóa nó khỏi map quản lý
-bool XapianManager::destroyInstance(const std::string &db_path_str)
+bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfIdle)
 {
     std::shared_ptr<XapianManager> instance_ptr;
 
@@ -913,12 +916,20 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
         auto it = instances.find(db_path_str);
         if (it != instances.end())
         {
-            // RE-CHECK TOCTOU: Đảm bảo không có luồng nào kịp mượn Database trong lúc ta đợi khóa
-            // use_count <= 1 (map) + 1 (it->second) = 2
-            if (it->second.use_count() > 2) {
-                return false; // Đã có luồng Search mượn mất rồi, hủy bỏ lệnh xóa!
+            if (onlyIfIdle)
+            {
+                // Re-kiểm tra atomic dưới cùng lock với erase: nếu có thread khác
+                // vừa lấy một tham chiếu mới (getInstance) hoặc vẫn đang giữ tham
+                // chiếu từ trước kể từ lần kiểm tra sơ bộ (Giai đoạn 1 ở cleaner
+                // thread), use_count() ở đây sẽ > 1 (chỉ map giữ tham chiếu là
+                // baseline = 1) và ta bỏ qua việc hủy để tránh đóng `db` trong
+                // lúc đang được sử dụng.
+                if (!it->second || !it->second->is_idle_for(std::chrono::minutes(1)) ||
+                    it->second.use_count() > 1)
+                {
+                    return false;
+                }
             }
-            
             instance_ptr = it->second; // Giữ một tham chiếu tạm thời
             instances.erase(it);
         }
@@ -928,26 +939,25 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
     {
         try
         {
-            // Dọn dẹp tài nguyên nội bộ trước khi xóa khỏi map
-            if (instance_ptr)
+            // Khóa changes_mutex trước khi đóng db, cùng quy ước với mọi thao
+            // tác khác ghi vào `db` (add_document/replace_document/commit/
+            // revertUncommittedChanges), để tránh race đóng db trong lúc một
+            // thread khác đang ghi vào nó.
+            std::unique_lock<std::shared_mutex> changes_lock(instance_ptr->changes_mutex);
+
+            // Bước 1: Đóng database Xapian tường minh
+            try
             {
-                // Khóa an toàn trước khi đóng DB để tránh đụng độ với các luồng khác
-                std::unique_lock<std::shared_mutex> db_lock(instance_ptr->changes_mutex);
-                
-                // Bước 1: Đóng database Xapian tường minh
-                try
-                {
-                    instance_ptr->db.close();
-                }
-                catch (const Xapian::Error &)
-                { /* Bỏ qua lỗi đóng DB */
-                }
-                catch (const std::exception &)
-                { /* Bỏ qua lỗi đóng DB */
-                }
-                catch (...)
-                { /* Bỏ qua lỗi đóng DB */
-                }
+                instance_ptr->db.close();
+            }
+            catch (const Xapian::Error &)
+            { /* Bỏ qua lỗi đóng DB */
+            }
+            catch (const std::exception &)
+            { /* Bỏ qua lỗi đóng DB */
+            }
+            catch (...)
+            { /* Bỏ qua lỗi đóng DB */
             }
 
             return true; // Trả về true nếu xóa thành công
@@ -961,7 +971,7 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
             return false;
         }
     }
-    
+
     return false; // Không tìm thấy instance để hủy
 }
 
