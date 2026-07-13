@@ -75,7 +75,7 @@ func (bp *BlockProcessor) commitWorker() {
 			// FLUSH XAPIAN TRANSACTIONS TO DISK
 			// We only commit to physical disk in commitWorker after consensus has finalized the block.
 			// This prevents Xapian DB from getting ahead of PebbleDB and prevents forks if the block is rejected.
-			hasXapianChanges := false
+			hasContractInteraction := false
 			for i, tx := range job.ProcessResults.Transactions {
 				// OPTIMIZATION: Only commit/clear Xapian buffers for Contract Creation or Contract Call.
 				// Pure token transfers (IsRegularTransaction) do not interact with Xapian.
@@ -84,10 +84,14 @@ func (bp *BlockProcessor) commitWorker() {
 					hasXapianChanges = true
 					if i < len(job.ProcessResults.Receipts) && job.ProcessResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
 						mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
+						hasContractInteraction = true
 					} else {
 						mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 					}
 				}
+			}
+			if hasContractInteraction {
+				mvm.CommitAllXapian()
 			}
 			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
 			// to prevent unbounded memory growth from cached EVM instances.

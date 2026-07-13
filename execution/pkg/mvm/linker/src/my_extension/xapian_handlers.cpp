@@ -900,12 +900,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
           return mvm::Code(32, 0);
       }
 
-      uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
-      uint256_t* writerHash = nullptr;
-      if (writerHashValue != 0 && writerHashValue != 1) {
-          writerHash = &writerHashValue;
-      }
-      XapianSearcher searcher(pooled_db);
+      mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
+      XapianSearcher searcher(&(manager->read_db));
       std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
       std::map<std::string, std::string> product_prefix_map =
