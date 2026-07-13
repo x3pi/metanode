@@ -111,7 +111,10 @@ public:
   // --- Idle Management ---
   void touch();
   bool is_idle_for(std::chrono::minutes duration);
-  static bool destroyInstance(const std::string &db_path); // Hàm hủy tức thì
+  // onlyIfIdle=true: re-kiểm tra idle/refcount một cách atomic (dưới cùng 1
+  // lock với việc erase khỏi map) trước khi hủy, để tránh race giữa lúc
+  // caller khác quyết định huỷ và lúc thực sự huỷ (TOCTOU).
+  static bool destroyInstance(const std::string &db_path, bool onlyIfIdle = false); // Hàm hủy tức thì
   bool saveAllAndCommit();
   bool revertUncommittedChanges();
   bool mvmCommitTransaction();
