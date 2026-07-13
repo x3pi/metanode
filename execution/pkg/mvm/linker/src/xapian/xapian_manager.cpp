@@ -913,6 +913,12 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
         auto it = instances.find(db_path_str);
         if (it != instances.end())
         {
+            // RE-CHECK TOCTOU: Đảm bảo không có luồng nào kịp mượn Database trong lúc ta đợi khóa
+            // use_count <= 1 (map) + 1 (it->second) = 2
+            if (it->second.use_count() > 2) {
+                return false; // Đã có luồng Search mượn mất rồi, hủy bỏ lệnh xóa!
+            }
+            
             instance_ptr = it->second; // Giữ một tham chiếu tạm thời
             instances.erase(it);
         }
@@ -925,6 +931,9 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
             // Dọn dẹp tài nguyên nội bộ trước khi xóa khỏi map
             if (instance_ptr)
             {
+                // Khóa an toàn trước khi đóng DB để tránh đụng độ với các luồng khác
+                std::unique_lock<std::shared_mutex> db_lock(instance_ptr->changes_mutex);
+                
                 // Bước 1: Đóng database Xapian tường minh
                 try
                 {
