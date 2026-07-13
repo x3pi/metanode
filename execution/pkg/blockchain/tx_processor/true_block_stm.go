@@ -88,22 +88,29 @@ func (stm *TrueBlockSTM) Process(
 
 	logger.Info("🚀 [BLOCK-STM] Khởi chạy %d TXs trên True MVCC Engine", numTxs)
 
+	var execCount, valCount, abortCount uint32
 	var wg sync.WaitGroup
-	execCh := make(chan uint32, numTxs*5) // buffer for re-executions
-	validateCh := make(chan uint32, numTxs*5)
+	execIn := make(chan uint32, numTxs*5) // buffer for re-executions
+	execOut := make(chan uint32, numTxs*5)
+	validateIn := make(chan uint32, numTxs*5)
+	validateOut := make(chan uint32, numTxs*5)
 	doneCh := make(chan struct{})
 
 	// mvmIdMap stores the mvmId generated for each tx hash
 	mvmIdMap := make(map[common.Hash]common.Address)
 	var mapMu sync.Mutex
 
-	// Inject all initial tasks
-	for i := 0; i < numTxs; i++ {
-		execCh <- uint32(i)
-	}
-
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
+
+	// Start unbounded queues
+	go runUnboundedQueue(workerCtx, execIn, execOut)
+	go runUnboundedQueue(workerCtx, validateIn, validateOut)
+
+	// Inject all initial tasks
+	for i := 0; i < numTxs; i++ {
+		execIn <- uint32(i)
+	}
 
 	var activeTasks int32 = int32(numTxs)
 
@@ -116,7 +123,7 @@ func (stm *TrueBlockSTM) Process(
 				select {
 				case <-workerCtx.Done():
 					return
-				case txIndex := <-execCh:
+				case txIndex := <-execOut:
 					func() {
 						defer func() {
 							if atomic.AddInt32(&activeTasks, -1) == 0 {
@@ -129,6 +136,10 @@ func (stm *TrueBlockSTM) Process(
 						}()
 
 						// 1. Mark as Executing (Pending)
+						eCount := atomic.AddUint32(&execCount, 1)
+						if eCount%10000 == 0 {
+							logger.Warn("⚠️ [BLOCK-STM-DEBUG] Đã thực thi (Execution) %d lần, Aborts: %d", eCount, atomic.LoadUint32(&abortCount))
+						}
 						state := atomic.LoadUint64(&stm.txState[txIndex])
 						inc, _ := unpackState(state)
 						atomic.StoreUint64(&stm.txState[txIndex], packState(inc+1, 0))
@@ -189,7 +200,7 @@ func (stm *TrueBlockSTM) Process(
 								}
 							}
 							atomic.AddInt32(&activeTasks, 1)
-							validateCh <- txIndex
+							validateIn <- txIndex
 							return
 						}
 
@@ -444,7 +455,7 @@ func (stm *TrueBlockSTM) Process(
 									// Increment inc to invalidate ongoing stale validation
 									if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
 										atomic.AddInt32(&activeTasks, 1)
-										validateCh <- uint32(j)
+										validateIn <- uint32(j)
 										break
 									}
 								} else {
@@ -455,7 +466,7 @@ func (stm *TrueBlockSTM) Process(
 
 						// 6. Push to validation AFTER cascading is fully complete
 						atomic.AddInt32(&activeTasks, 1)
-						validateCh <- txIndex
+						validateIn <- txIndex
 					}()
 				}
 			}
@@ -471,7 +482,7 @@ func (stm *TrueBlockSTM) Process(
 				select {
 				case <-workerCtx.Done():
 					return
-				case txIndex := <-validateCh:
+				case txIndex := <-validateOut:
 					func() {
 						defer func() {
 							if atomic.AddInt32(&activeTasks, -1) == 0 {
@@ -492,6 +503,8 @@ func (stm *TrueBlockSTM) Process(
 						if !atomic.CompareAndSwapUint64(&stm.txState[txIndex], state, packState(inc, 2)) {
 							return
 						}
+
+						atomic.AddUint32(&valCount, 1)
 
 						stm.rwMu.RLock()
 						rSet := stm.readSets[txIndex]
@@ -531,9 +544,14 @@ func (stm *TrueBlockSTM) Process(
 							atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 3))
 						} else {
 							// ABORT & RE-EXECUTE (100% No Fork Guarantee)
+							aCount := atomic.AddUint32(&abortCount, 1)
+							if aCount%10000 == 0 {
+								logger.Warn("⚠️ [BLOCK-STM-DEBUG] Đang bị Abort liên tục. Tổng aborts: %d, txIndex đang xét: %d", aCount, txIndex)
+							}
+							
 							if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
 								atomic.AddInt32(&activeTasks, 1)
-								execCh <- txIndex
+								execIn <- txIndex
 							}
 						}
 					}()
@@ -553,7 +571,7 @@ func (stm *TrueBlockSTM) Process(
 	workerCancel()
 	wg.Wait()
 
-	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB", numTxs)
+	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB. Stats: Execs=%d, Vals=%d, Aborts=%d", numTxs, atomic.LoadUint32(&execCount), atomic.LoadUint32(&valCount), atomic.LoadUint32(&abortCount))
 	baseAccountDB := chainState.GetAccountStateDB()
 
 	// 1. Commit Account States

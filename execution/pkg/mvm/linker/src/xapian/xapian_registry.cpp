@@ -91,7 +91,6 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
 void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
     if (!txHash) return;
     std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-    std::cerr << "[DEBUG] commitBufferForTxHash CALLED for txHash: " << txHashStr << std::endl;
     
     std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
     for (auto& pair : XapianManager::instances) {

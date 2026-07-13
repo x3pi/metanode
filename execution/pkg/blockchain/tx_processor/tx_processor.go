@@ -32,6 +32,8 @@ var (
 	// With 64MB PebbleDB memtables (down from 256MB), smaller batches flush faster without
 	// L0 compaction stalls. Keeps LazyPebbleDB memoryCache bounded during long-running tests.
 	FlushThresholdTxs uint64 = 100000
+
+
 )
 
 type ProcessResult struct {
@@ -47,6 +49,8 @@ type ProcessResult struct {
 	ModifiedAccounts []common.Address
 	FullDbLogs       []map[string][]byte
 }
+
+
 
 // ProcessTransactions processes a batch of transactions.
 // blockTime is the deterministic block timestamp (in seconds) from Rust consensus.
