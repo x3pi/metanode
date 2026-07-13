@@ -17,6 +17,16 @@ json decodeTuple(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
 vector<json> decodeArray(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength);
 vector<json> decodeSlice(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength);
 
+// Kiểm tra "start + need <= totalLength" một cách an toàn, không bị tràn số.
+// start/need đến từ calldata KHÔNG đáng tin cậy (do attacker kiểm soát); nếu cộng
+// trực tiếp trên uint32_t, một offset/length gần UINT32_MAX có thể khiến phép
+// cộng bị wrap-around về một giá trị nhỏ, làm bypass hoàn toàn điều kiện kiểm tra
+// và dẫn tới đọc dữ liệu ngoài vùng nhớ (out-of-bounds read / crash).
+// Cộng trên uint64_t trước rồi mới so sánh để loại bỏ khả năng tràn số này.
+inline bool abiOutOfBounds(uint64_t start, uint64_t need, uint32_t totalLength) {
+    return start + need > static_cast<uint64_t>(totalLength);
+}
+
 std::string replaceAllDoubleSlashes(const std::string& input, const std::string& target, const std::string& replacement) {
     std::string result = input;
     std::string::size_type pos = 0;
@@ -72,7 +82,7 @@ json decodeString(const uint8_t *bytes, uint32_t i, json abi, uint32_t totalLeng
         json result = json::object();
 //        cout << "DB String 1: " << bytes << endl;
         // Read the offset and length of the string
-        if (i + 32 > totalLength) {
+        if (abiOutOfBounds(i, 32, totalLength)) {
             throw std::out_of_range("Not enough bytes for string offset");
         }
         uint32_t offset = 0;
@@ -81,7 +91,7 @@ json decodeString(const uint8_t *bytes, uint32_t i, json abi, uint32_t totalLeng
             offset <<= 8;
             offset |= bytes[i + j];
         }
-        if (offset + 32 > totalLength) {
+        if (abiOutOfBounds(offset, 32, totalLength)) {
             throw std::out_of_range("Not enough bytes for string length");
         }
         uint32_t length = 0;
@@ -90,9 +100,9 @@ json decodeString(const uint8_t *bytes, uint32_t i, json abi, uint32_t totalLeng
             length <<= 8;
             length |= bytes[offset + j];
         }
-        
+
 //        cout << "DB String 2: " << length << endl;
-        if (offset + 32 + length > totalLength) {
+        if (abiOutOfBounds(offset, static_cast<uint64_t>(32) + length, totalLength)) {
             throw std::out_of_range("Not enough bytes for string data");
         }
         const uint8_t *string_bytes = bytes + offset + 32; // 32 bytes for string length
@@ -128,7 +138,7 @@ json decodeTuple(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
     const uint8_t* tuple_bytes;
     uint32_t new_total_length = totalLength;
     if(isDynamicType(abi)){
-        if (i + 32 > totalLength) {
+        if (abiOutOfBounds(i, 32, totalLength)) {
             throw std::out_of_range("Not enough bytes for tuple offset");
         }
         uint32_t offset = 0;
@@ -164,7 +174,7 @@ vector<json> decodeArray(const uint8_t* bytes, uint32_t i, json abi, uint32_t to
     const uint8_t* array_bytes;
     uint32_t new_total_length = totalLength;
     if (isDynamicType(newAbi)) {
-        if (i + 32 > totalLength) {
+        if (abiOutOfBounds(i, 32, totalLength)) {
             throw std::out_of_range("Not enough bytes for array offset");
         }
         uint32_t offset = 0;
@@ -194,7 +204,7 @@ vector<json> decodeArray(const uint8_t* bytes, uint32_t i, json abi, uint32_t to
 
 vector<json> decodeSlice(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength) {
     vector<json> rs;
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for slice offset");
     }
     uint32_t offset = 0;
@@ -203,7 +213,7 @@ vector<json> decodeSlice(const uint8_t* bytes, uint32_t i, json abi, uint32_t to
         offset |= bytes[i + j];
     }
 
-    if (offset + 32 > totalLength) {
+    if (abiOutOfBounds(offset, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for slice length");
     }
     uint32_t array_len = 0;
@@ -230,7 +240,7 @@ vector<json> decodeSlice(const uint8_t* bytes, uint32_t i, json abi, uint32_t to
 }
 
 json decodeFixedBytesTy(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength) {
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for fixed bytes");
     }
     const uint8_t* element_bytes = bytes + i;
@@ -248,7 +258,7 @@ json decodeFixedBytesTy(const uint8_t* bytes, uint32_t i, json abi, uint32_t tot
 }
 
 json decodeBool(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength) {
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for bool");
     }
     const uint8_t* element_bytes = bytes + i;
@@ -260,7 +270,7 @@ json decodeBool(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength
 }
 
 json decodeAddress(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength) {
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for address");
     }
     const uint8_t* element_bytes = bytes + i;
@@ -275,7 +285,7 @@ json decodeBytes(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
 //    cout << "DEBUG: decodeBytes bắt đầu với i = " << i << " và totalLength = " << totalLength << endl;
     
     // Kiểm tra đảm bảo có đủ dữ liệu cho 32 byte offset
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
 //        cout << "ERROR: Không đủ dữ liệu để đọc offset từ vị trí i." << endl;
         return json();
     }
@@ -288,7 +298,7 @@ json decodeBytes(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
 //    cout << "DEBUG: Tính được offset = " << offset << endl;
 
     // Kiểm tra đảm bảo có đủ dữ liệu cho 32 byte length từ offset
-    if (offset + 32 > totalLength) {
+    if (abiOutOfBounds(offset, 32, totalLength)) {
 //        cout << "ERROR: Offset vượt quá giới hạn mảng khi đọc length." << endl;
         return json();
     }
@@ -299,9 +309,9 @@ json decodeBytes(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
         length |= bytes[offset + j];
     }
 //    cout << "DEBUG: Tính được length = " << length << endl;
-    
+
     // Kiểm tra đảm bảo có đủ dữ liệu cho phần dữ liệu cần decode
-    if (offset + 32 + length > totalLength) {
+    if (abiOutOfBounds(offset, static_cast<uint64_t>(32) + length, totalLength)) {
 //        cout << "ERROR: Không đủ dữ liệu để đọc element_bytes." << endl;
         return json();
     }
@@ -314,7 +324,7 @@ json decodeBytes(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLengt
 
 
 json decodeInt(const uint8_t* bytes, uint32_t i, json abi, uint32_t totalLength) {
-    if (i + 32 > totalLength) {
+    if (abiOutOfBounds(i, 32, totalLength)) {
         throw std::out_of_range("Not enough bytes for int");
     }
     const uint8_t* element_bytes = bytes + i;

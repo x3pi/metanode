@@ -12,6 +12,7 @@
 #include <shared_mutex>
 #include <sstream>
 #include <condition_variable>
+#include <atomic>
 #include <filesystem>
 #include <chrono>     // Needed for time_point
 #include <mutex>      // Needed for mutex
@@ -52,12 +53,20 @@ public:
   struct SearchDbPool {
     std::vector<Xapian::Database*> pool; // Pre-created Database objects
     std::vector<uint8_t> in_use;         // Non-zero nếu DB đang được dùng
+    std::vector<uint64_t> last_gen;      // Generation mà slot này đã reopen() gần nhất
     std::mutex pool_mutex;
     std::condition_variable pool_cv;
   };
   SearchDbPool search_pool;
+  // Tăng lên mỗi khi db.commit() thành công. acquireSearchDb() so sánh với
+  // last_gen[i] của từng slot để biết slot đó có "cũ" hơn commit gần nhất hay
+  // không, và reopen() ngay trước khi giao cho caller — bất kể lúc commit
+  // slot đó đang bận hay rảnh. Nhờ vậy không còn cửa sổ race giữa
+  // "commit xong nhưng slot đang bận nên bỏ qua reopen".
+  std::atomic<uint64_t> db_generation{0};
 
-  // Lấy 1 Xapian::Database từ pool (đợi nếu tất cả đang bận).
+  // Lấy 1 Xapian::Database từ pool (đợi nếu tất cả đang bận), tự reopen()
+  // nếu slot đó đang cũ hơn generation hiện tại trước khi trả về.
   // Caller PHẢI gọi releaseSearchDb(db) sau khi xong.
   Xapian::Database* acquireSearchDb();
   void releaseSearchDb(Xapian::Database* db);

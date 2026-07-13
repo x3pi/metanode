@@ -130,6 +130,7 @@ XapianManager::XapianManager(const std::string &db_name,
     std::string db_path_str = mvm::createFullPath(addr, db_name).string();
     search_pool.pool.resize(MAX_CONCURRENT_SEARCHES);
     search_pool.in_use.resize(MAX_CONCURRENT_SEARCHES, false);
+    search_pool.last_gen.resize(MAX_CONCURRENT_SEARCHES, 0);
     for (int i = 0; i < MAX_CONCURRENT_SEARCHES; ++i) {
         try {
             search_pool.pool[i] = new Xapian::Database(db_path_str);
@@ -141,6 +142,10 @@ XapianManager::XapianManager(const std::string &db_name,
 
 
 // Lấy 1 DB từ pool (đợi tối đa 5s, nếu tất cả đang bận hoặc hỏng thì trả về nullptr).
+// Trước khi trả về, nếu slot đó cũ hơn generation hiện tại (tức có commit xảy ra
+// từ lần cuối slot này được dùng/reopen), ta reopen() ngay tại đây — bất kể lúc
+// commit slot này đang bận hay rảnh. Đây là điểm mấu chốt để không bao giờ giao
+// cho caller một Database đã stale so với dữ liệu đã commit trên đĩa.
 Xapian::Database* XapianManager::acquireSearchDb()
 {
     std::unique_lock<std::mutex> lock(search_pool.pool_mutex);
@@ -150,14 +155,35 @@ Xapian::Database* XapianManager::acquireSearchDb()
                 return true;
         return false;
     });
-    
+
     if (!acquired) {
         std::cerr << "[ERROR] acquireSearchDb: Timeout (5s) waiting for available DB, or all DBs are nullptr." << std::endl;
         return nullptr;
     }
-    
+
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
         if (!search_pool.in_use[i] && search_pool.pool[i] != nullptr) {
+            uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+            if (search_pool.last_gen[i] < current_gen) {
+                try {
+                    search_pool.pool[i]->reopen();
+                    search_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
+                              << ": " << e.what() << ", recreating..." << std::endl;
+                    delete search_pool.pool[i];
+                    search_pool.pool[i] = nullptr;
+                    try {
+                        search_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        search_pool.last_gen[i] = current_gen;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        continue; // slot vẫn nullptr, thử slot khác
+                    }
+                }
+            }
             search_pool.in_use[i] = true;
             return search_pool.pool[i];
         }
@@ -587,15 +613,22 @@ bool XapianManager::commit_changes() {
   } catch (const std::exception &) {
     return false; // Commit thất bại
   }
-  // Reopen tất cả pool DBs sau khi commit (ngoài changes_mutex scope không cần thiết).
-  // Làm riêng sau lock để tránh deadlock (pool_mutex có thể đang bị giữ bởi search goroutine).
+  // Đánh dấu có 1 generation mới — mọi slot trong search_pool có last_gen cũ hơn
+  // giá trị này sẽ tự reopen() ngay khi được acquireSearchDb() cấp phát,
+  // bất kể slot đó đang bận hay rảnh tại thời điểm commit này.
+  db_generation.fetch_add(1, std::memory_order_acq_rel);
+  // Best-effort: reopen ngay các slot đang rảnh để giảm độ trễ cho lần acquire
+  // kế tiếp. Không bắt buộc cho tính đúng đắn — acquireSearchDb() sẽ tự
+  // reopen lại các slot còn lại (kể cả slot đang bận lúc commit) khi cần.
   {
     std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
       if (search_pool.pool[i] && !search_pool.in_use[i]) {
         try {
-    db.commit();
-  } catch (...) {}
+          search_pool.pool[i]->reopen();
+          search_pool.last_gen[i] = current_gen;
+        } catch (...) {}
       }
     }
   }
@@ -613,11 +646,17 @@ void XapianManager::commitAllInstances() {
         try {
           manager->db.commit();
           manager->comprehensive_log.xapian_doc_logs.clear();
-          // Reopen pool DBs sau commit.
+          // Đánh dấu generation mới — xem giải thích trong commit_changes().
+          manager->db_generation.fetch_add(1, std::memory_order_acq_rel);
+          // Best-effort: reopen ngay các slot đang rảnh.
           std::lock_guard<std::mutex> pool_lock(manager->search_pool.pool_mutex);
+          uint64_t current_gen = manager->db_generation.load(std::memory_order_acquire);
           for (size_t i = 0; i < manager->search_pool.pool.size(); ++i) {
             if (manager->search_pool.pool[i] && !manager->search_pool.in_use[i]) {
-              try { manager->search_pool.pool[i]->reopen(); } catch (...) {}
+              try {
+                manager->search_pool.pool[i]->reopen();
+                manager->search_pool.last_gen[i] = current_gen;
+              } catch (...) {}
             }
           }
         } catch (...) {
