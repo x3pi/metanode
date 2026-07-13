@@ -3,7 +3,6 @@ package tx_processor
 	import (
 	"context"
 	"fmt"
-	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,37 +33,7 @@ var (
 	// L0 compaction stalls. Keeps LazyPebbleDB memoryCache bounded during long-running tests.
 	FlushThresholdTxs uint64 = 100000
 
-	// Memory Pools for zero-allocation parallel processing
-	txSlicePool = sync.Pool{
-		New: func() interface{} {
-			s := make([]types.Transaction, 0, 128)
-			return &s
-		},
-	}
-	receiptSlicePool = sync.Pool{
-		New: func() interface{} {
-			s := make([]types.Receipt, 0, 128)
-			return &s
-		},
-	}
-	scResultSlicePool = sync.Pool{
-		New: func() interface{} {
-			s := make([]types.ExecuteSCResult, 0, 128)
-			return &s
-		},
-	}
-	mvmIdMapPool = sync.Pool{
-		New: func() interface{} {
-			m := make(map[common.Hash]common.Address, 128)
-			return &m
-		},
-	}
-	failedSendersPool = sync.Pool{
-		New: func() interface{} {
-			m := make(map[common.Address]bool, 16)
-			return &m
-		},
-	}
+
 )
 
 type ProcessResult struct {
@@ -81,17 +50,7 @@ type ProcessResult struct {
 	FullDbLogs       []map[string][]byte
 }
 
-type groupResultExt struct {
-	txPtr         *[]types.Transaction
-	rcpPtr        *[]types.Receipt
-	exPtr         *[]types.ExecuteSCResult
-	mvmPtr        *map[common.Hash]common.Address
-	Error         error
-	DirtyAccounts []types.AccountState
-	TotalGasFee   *big.Int
-	readAccounts  map[common.Address]types.AccountState
-	readStorage   map[common.Address][]string
-}
+
 
 // ProcessTransactions processes a batch of transactions.
 // blockTime is the deterministic block timestamp (in seconds) from Rust consensus.
