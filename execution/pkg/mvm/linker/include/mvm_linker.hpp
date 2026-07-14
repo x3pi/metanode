@@ -181,6 +181,13 @@ void freeBatchResult(ExecuteBatchResultC *);
 
 void freePendingResult();
 
+#ifdef MVM_LINKER_BUILD
+struct GetStorageValue_return {
+  unsigned char *value;
+  bool success;
+};
+#endif
+
 extern struct GlobalStateGet_return GlobalStateGet(unsigned char *mvmId,
                                                    unsigned char *);
 extern struct GetStorageValue_return

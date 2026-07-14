@@ -128,27 +128,13 @@ XapianManager::XapianManager(const std::string &db_name,
     // Khởi tạo pool các Database objects để tái sử dụng cho concurrent search.
     // Mỗi goroutine search lấy 1 DB từ pool → đảm bảo không có 2 goroutine dùng chung.
     std::string db_path_str = mvm::createFullPath(addr, db_name).string();
-    search_pool.pool.resize(MAX_CONCURRENT_SEARCHES);
+    search_pool.pool.resize(MAX_CONCURRENT_SEARCHES, nullptr);
     search_pool.in_use.resize(MAX_CONCURRENT_SEARCHES, false);
     search_pool.last_gen.resize(MAX_CONCURRENT_SEARCHES, 0);
-    for (int i = 0; i < MAX_CONCURRENT_SEARCHES; ++i) {
-        try {
-            search_pool.pool[i] = new Xapian::Database(db_path_str);
-        } catch (...) {
-            search_pool.pool[i] = nullptr;
-        }
-    }
 
-    simple_read_pool.pool.resize(MAX_CONCURRENT_SIMPLE_READS);
+    simple_read_pool.pool.resize(MAX_CONCURRENT_SIMPLE_READS, nullptr);
     simple_read_pool.in_use.resize(MAX_CONCURRENT_SIMPLE_READS, false);
     simple_read_pool.last_gen.resize(MAX_CONCURRENT_SIMPLE_READS, 0);
-    for (int i = 0; i < MAX_CONCURRENT_SIMPLE_READS; ++i) {
-        try {
-            simple_read_pool.pool[i] = new Xapian::Database(db_path_str);
-        } catch (...) {
-            simple_read_pool.pool[i] = nullptr;
-        }
-    }
 }
 
 XapianManager::~XapianManager() {
@@ -183,20 +169,32 @@ Xapian::Database* XapianManager::acquireSearchDb()
     std::unique_lock<std::mutex> lock(search_pool.pool_mutex);
     bool acquired = search_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
         for (size_t i = 0; i < search_pool.in_use.size(); ++i)
-            if (!search_pool.in_use[i] && search_pool.pool[i] != nullptr)
+            if (!search_pool.in_use[i])
                 return true;
         return false;
     });
 
     if (!acquired) {
-        std::cerr << "[ERROR] acquireSearchDb: Timeout (5s) waiting for available DB, or all DBs are nullptr." << std::endl;
+        std::cerr << "[ERROR] acquireSearchDb: Timeout (5s) waiting for available DB." << std::endl;
         return nullptr;
     }
 
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
-        if (!search_pool.in_use[i] && search_pool.pool[i] != nullptr) {
-            uint64_t current_gen = db_generation.load(std::memory_order_acquire);
-            if (search_pool.last_gen[i] < current_gen) {
+        if (!search_pool.in_use[i]) {
+            if (search_pool.pool[i] == nullptr) {
+                // Lazy init
+                try {
+                    search_pool.pool[i] = new Xapian::Database(
+                        mvm::createFullPath(address, db_name).string());
+                    search_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
+                              << ": " << e.what() << std::endl;
+                    continue; // try next slot
+                }
+            } else if (search_pool.last_gen[i] < current_gen) {
+                // Reopen existing
                 try {
                     search_pool.pool[i]->reopen();
                     search_pool.last_gen[i] = current_gen;
@@ -212,7 +210,7 @@ Xapian::Database* XapianManager::acquireSearchDb()
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
-                        continue; // slot vẫn nullptr, thử slot khác
+                        continue;
                     }
                 }
             }
@@ -241,20 +239,32 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
     std::unique_lock<std::mutex> lock(simple_read_pool.pool_mutex);
     bool acquired = simple_read_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
         for (size_t i = 0; i < simple_read_pool.in_use.size(); ++i)
-            if (!simple_read_pool.in_use[i] && simple_read_pool.pool[i] != nullptr)
+            if (!simple_read_pool.in_use[i])
                 return true;
         return false;
     });
 
     if (!acquired) {
-        std::cerr << "[ERROR] acquireSimpleReadDb: Timeout (5s) waiting for available DB, or all DBs are nullptr." << std::endl;
+        std::cerr << "[ERROR] acquireSimpleReadDb: Timeout (5s) waiting for available DB." << std::endl;
         return nullptr;
     }
 
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
-        if (!simple_read_pool.in_use[i] && simple_read_pool.pool[i] != nullptr) {
-            uint64_t current_gen = db_generation.load(std::memory_order_acquire);
-            if (simple_read_pool.last_gen[i] < current_gen) {
+        if (!simple_read_pool.in_use[i]) {
+            if (simple_read_pool.pool[i] == nullptr) {
+                // Lazy init
+                try {
+                    simple_read_pool.pool[i] = new Xapian::Database(
+                        mvm::createFullPath(address, db_name).string());
+                    simple_read_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
+                              << ": " << e.what() << std::endl;
+                    continue; // try next slot
+                }
+            } else if (simple_read_pool.last_gen[i] < current_gen) {
+                // Reopen existing
                 try {
                     simple_read_pool.pool[i]->reopen();
                     simple_read_pool.last_gen[i] = current_gen;
@@ -270,7 +280,7 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
-                        continue; // slot vẫn nullptr, thử slot khác
+                        continue;
                     }
                 }
             }
@@ -644,12 +654,16 @@ struct ScopedSimpleReadDb {
 
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
   ScopedSimpleReadDb scopedDb(this);
-  if (!scopedDb.get()) return "";
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_data");
   std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     return doc.get_data();
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return "";
 }
 
@@ -657,12 +671,16 @@ std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t b
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
     ScopedSimpleReadDb scopedDb(this);
-    if (!scopedDb.get()) return "";
+    if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_value");
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
         Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
         return doc.get_value(slot);
-    } catch (...) {}
+    } catch (const Xapian::DocNotFoundError&) {
+        // Normal, ignore
+    } catch (...) {
+        throw;
+    }
     return "";
 }
 
@@ -670,12 +688,16 @@ std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::va
 DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
   ScopedSimpleReadDb scopedDb(this);
   DocumentInfo info;
-  if (!scopedDb.get()) return info;
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_document");
   std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     info.data = doc.get_data();
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return info;
 }
 
@@ -684,14 +706,18 @@ std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocI
                                                   uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
   ScopedSimpleReadDb scopedDb(this);
   std::vector<std::string> terms;
-  if (!scopedDb.get()) return terms;
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_terms");
   std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     for (auto term_it = doc.termlist_begin(); term_it != doc.termlist_end(); ++term_it) {
       terms.push_back(*term_it);
     }
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return terms;
 }
 
@@ -739,29 +765,8 @@ void XapianManager::commitAllInstances() {
   std::unique_lock<std::shared_mutex> lock(instances_mutex);
   for (auto &pair : instances) {
     auto manager = pair.second;
-    if (manager) {
-      std::lock_guard<std::shared_mutex> mgr_lock(manager->changes_mutex);
-      if (!manager->has_started) {
-        try {
-          manager->db.commit();
-          manager->comprehensive_log.xapian_doc_logs.clear();
-          // Đánh dấu generation mới — xem giải thích trong commit_changes().
-          manager->db_generation.fetch_add(1, std::memory_order_acq_rel);
-          // Best-effort: reopen ngay các slot đang rảnh.
-          std::lock_guard<std::mutex> pool_lock(manager->search_pool.pool_mutex);
-          uint64_t current_gen = manager->db_generation.load(std::memory_order_acquire);
-          for (size_t i = 0; i < manager->search_pool.pool.size(); ++i) {
-            if (manager->search_pool.pool[i] && !manager->search_pool.in_use[i]) {
-              try {
-                manager->search_pool.pool[i]->reopen();
-                manager->search_pool.last_gen[i] = current_gen;
-              } catch (...) {}
-            }
-          }
-        } catch (...) {
-          // Ignore errors during background flush
-        }
-      }
+    if (manager && !manager->has_started) {
+      manager->commit_changes();
     }
   }
 }
