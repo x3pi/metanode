@@ -164,7 +164,6 @@ func main() {
 				atomic.AddInt64(&retryFail, 1)
 				continue
 			}
-			internalTx.UpdateRelatedAddresses([][]byte{})
 			internalTx.UpdateDeriver(common.Hash{}, common.Hash{})
 			internalTx.SetSign(pKey)
 			bTx, err := internalTx.Marshal()

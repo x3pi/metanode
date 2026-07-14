@@ -180,7 +180,6 @@ func main() {
 		log.Fatalf("Failed to convert tx: %v", err)
 	}
 
-	internalTx.UpdateRelatedAddresses([][]byte{})
 	internalTx.UpdateDeriver(common.Hash{}, common.Hash{})
 	internalTx.SetSign(pKey)
 

@@ -90,8 +90,6 @@ func buildMetaTxFromEthTx(
 		return nil, nil, fmt.Errorf("unexpected transaction type from NewTransactionFromEth")
 	}
 
-	bRelatedAddresses := make([][]byte, 0)
-	metaTx.UpdateRelatedAddresses(bRelatedAddresses)
 	metaTx.UpdateDeriver(deviceKey, newDeviceKey)
 	metaTx.SetSign(blsPrivateKey)
 

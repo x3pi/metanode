@@ -137,7 +137,6 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxTCP(
 	rawNewDeviceKey := crypto.Keccak256(rawNewDeviceKeyBytes)
 	newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error build NewTransactionFromEth: %w", err)
@@ -145,7 +144,6 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxTCP(
 	if isSetNonce {
 		transaction.SetNonce(as.Nonce())
 	}
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(c.KeyPair.PrivateKey())
 
@@ -278,13 +276,10 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKeyTCP(
 
 	newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
-
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	// Cập nhật nonce từ account state
 	transaction.SetNonce(as.Nonce())

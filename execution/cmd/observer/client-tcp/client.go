@@ -853,8 +853,6 @@ func (client *Client) AddAccountForClient(privateKey string, chainId string) (ty
 
 	deviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
-
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
@@ -863,7 +861,6 @@ func (client *Client) AddAccountForClient(privateKey string, chainId string) (ty
 	fmt.Println(string(txByte))
 	logger.Info(transaction)
 
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(client.clientContext.KeyPair.PrivateKey())
 
@@ -893,14 +890,11 @@ func (client *Client) BuildTransactionTx0(
 
 	deviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
-
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
 
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(client.clientContext.KeyPair.PrivateKey())
 

@@ -16,10 +16,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
@@ -177,13 +177,11 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.NodeSyncingError.Code, fmt.Errorf(transaction.NodeSyncingError.Description)
 	}
 
-	// FORK-SAFETY: Ensure RelatedAddresses are ALWAYS populated before verification.
-	// Native TXs (e.g. BLS registration) need FromAddress and ToAddress in RelatedAddresses
-	// so the EVM's isAddressAllowed check passes during ProcessNonceOnly.
-	// This MUST be done centrally here — not per entry path — because P2P-forwarded TXs
-	// (ProcessTransactionsFromSub) call AddTransactionToPool directly.
-	tx.AddRelatedAddress(tx.FromAddress())
-	tx.AddRelatedAddress(tx.ToAddress())
+	// FORK-SAFETY: Native TXs (e.g. BLS registration) need FromAddress and
+	// ToAddress in RelatedAddresses so the EVM's isAddressAllowed check passes
+	// during ProcessNonceOnly. This is guaranteed unconditionally by
+	// Transaction.RelatedAddresses(), which always dynamically resolves to
+	// [FromAddress, ToAddress] — no explicit population call is needed here.
 
 	// Phase 1.5 (TPS Optimization): Cache Warming
 	// Pre-fetch both sender and recipient into trie LRU cache now,
@@ -304,8 +302,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 		if tx == nil {
 			continue
 		}
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
 		preloadSet[tx.FromAddress()] = struct{}{}
 		if !tx.IsDeployContract() {
 			preloadSet[tx.ToAddress()] = struct{}{}
@@ -591,7 +587,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	// the block processing hot path (~200-500ms per flush).
 	// CAS guard prevents concurrent flushes from racing.
 	currentCount := atomic.AddUint64(&tx_processor.GlobalTxProcessCounter, uint64(len(txs)))
-	
+
 	shouldFlush := false
 	var memSize uint64
 	sm := vp.chainState.GetStorageManager()
@@ -631,10 +627,6 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	}
 
 	startVirtual := time.Now()
-	for _, tx := range txs {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
-	}
 	virtualDuration := time.Since(startVirtual)
 
 	// OPTIMIZATION: Wait for PreloadAccounts concurrently (deterministic — safe for fork-safety)
@@ -719,7 +711,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	if len(txs) > 0 {
 		logger.Warn("⏱️  [BLOCK-PERF] Block #%d: TXs=%d | VirtualExec=%v | Consensus=%v | LockWait=%v | RealExec=%v",
 			blockNum, len(res.Transactions), virtualDuration.Round(time.Microsecond), consensusDuration.Round(time.Millisecond), lockWaitDuration.Round(time.Millisecond), execDuration.Round(time.Millisecond))
-			
+
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(res.Transactions), consensusDuration.Microseconds(), execDuration.Microseconds())
 	}
 
@@ -794,8 +786,6 @@ func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTi
 	for _, group := range groupedGroups {
 		for _, item := range group.Items {
 			tx := item.Tx
-			tx.AddRelatedAddress(tx.FromAddress())
-			tx.AddRelatedAddress(tx.ToAddress())
 			selectedTxs = append(selectedTxs, tx)
 		}
 	}
@@ -847,8 +837,8 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 		if len(allTxs) == 0 {
 			return allTxs
 		}
-        
-        startProcess := time.Now()
+
+		startProcess := time.Now()
 
 		var validTxs []types.Transaction
 		var futureTxs []types.Transaction

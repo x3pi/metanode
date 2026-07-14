@@ -637,12 +637,10 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 
 	newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(c.KeyPair.PrivateKey())
 
@@ -686,13 +684,10 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 
 	newDeviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-	bRelatedAddresses := make([][]byte, 0)
-
 	transaction, err := mt_transaction.NewTransactionFromEth(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error buidl  NewTransactionFromEth: %w", err)
 	}
-	transaction.UpdateRelatedAddresses(bRelatedAddresses)
 	transaction.UpdateDeriver(deviceKey, newDeviceKey)
 	transaction.SetSign(private)
 	// Create TransactionWithDeviceKey
