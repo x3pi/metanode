@@ -7,21 +7,23 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
-# Set C compiler flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mtune=native")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -finline-functions")
+# Add an option to easily toggle debug mode
+option(ENABLE_DEBUG "Enable debug compilation (O0, -g) instead of release (O3)" OFF)
 
-# Set C++ compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Os")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -finline-functions")
+if(ENABLE_DEBUG)
+    # Debug mode flags
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -DDEBUG_MODE -DMVM_LINKER_BUILD")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -DDEBUG_MODE -DMVM_LINKER_BUILD")
+    message(STATUS "MVM_LINKER is configured in DEBUG mode (ENABLE_DEBUG=ON)")
+else()
+    # Release mode flags
+    # NOTE: We keep `-g` combined with `-O3` here to preserve debug symbols.
+    # This ensures that if a std::abort() or crash occurs on-chain, the panic stack trace 
+    # will show exactly which function and line number caused it, without slowing down execution.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -g -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions -DMVM_LINKER_BUILD")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions -DMVM_LINKER_BUILD")
+    message(STATUS "MVM_LINKER is configured in RELEASE mode (ENABLE_DEBUG=OFF)")
+endif()
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # Common variables 

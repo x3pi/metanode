@@ -78,6 +78,7 @@ RESTORE_NODE="none"
 SNAPSHOT_URL=""
 OPEN_PORTS="false"
 BUILD_FAST="false"
+DEBUG_CPP="false"
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -99,6 +100,7 @@ while [[ "$#" -gt 0 ]]; do
         --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
         --open-ports) OPEN_PORTS="true" ;;
         --fast) BUILD_FAST="true" ;;
+        --debug-cpp) DEBUG_CPP="true" ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             exit 0
@@ -164,7 +166,7 @@ ${ROLES_OUTPUT}
 </pre>"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST}"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
@@ -238,9 +240,11 @@ else
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
-if [ -f "$MONITOR_SCRIPT" ]; then
+if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
     echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
     bash "$MONITOR_SCRIPT"
+elif [ "$ACTION" == "stop" ]; then
+    echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
 fi
 
 exit $ansible_exit

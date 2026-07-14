@@ -213,23 +213,19 @@ func registryFilePath(handlePath string, namespace string) string {
 
 var (
 	registryCacheMu sync.RWMutex
-	registryCache   = make(map[string]map[string][]byte) // key: dbPath + ":" + namespace
+	registryCache   = make(map[string]*sharedRegistry) // key: dbPath + ":" + namespace
 )
 
-// loadRegistryFromFile loads the knownKeys registry from a file or checks the memory cache first.
-// Returns an empty map if the file doesn't exist or is corrupt.
-func loadRegistryFromFile(handlePath string, namespace string) map[string][]byte {
+// getSharedRegistry loads the sharedRegistry from a file or checks the memory cache first.
+// It returns a pointer to the globally shared registry to prevent memory leaks from cloning.
+func getSharedRegistry(handlePath string, namespace string) *sharedRegistry {
 	cacheKey := handlePath + ":" + namespace
 
 	// Check memory cache first
 	registryCacheMu.RLock()
 	if cached, ok := registryCache[cacheKey]; ok {
-		cloned := make(map[string][]byte, len(cached))
-		for k, v := range cached {
-			cloned[k] = v
-		}
 		registryCacheMu.RUnlock()
-		return cloned
+		return cached
 	}
 	registryCacheMu.RUnlock()
 
@@ -238,59 +234,45 @@ func loadRegistryFromFile(handlePath string, namespace string) map[string][]byte
 	filePath := registryFilePath(handlePath, namespace)
 
 	data, err := os.ReadFile(filePath)
-	if err != nil {
-		// Cache the empty map so we don't keep doing failed reads
-		registryCacheMu.Lock()
-		registryCache[cacheKey] = knownKeys
-		registryCacheMu.Unlock()
-		return knownKeys // File not found or unreadable — start fresh
+	if err == nil {
+		offset := 0
+		for offset < len(data) {
+			if offset >= len(data) {
+				break
+			}
+			keyLen := int(data[offset])
+			offset++
+			if offset+keyLen > len(data) {
+				break
+			}
+			origKey := make([]byte, keyLen)
+			copy(origKey, data[offset:offset+keyLen])
+			offset += keyLen
+			hexKey := hex.EncodeToString(origKey)
+			knownKeys[hexKey] = origKey
+		}
 	}
 
-	offset := 0
-	for offset < len(data) {
-		if offset >= len(data) {
-			break
-		}
-		keyLen := int(data[offset])
-		offset++
-		if offset+keyLen > len(data) {
-			break
-		}
-		origKey := make([]byte, keyLen)
-		copy(origKey, data[offset:offset+keyLen])
-		offset += keyLen
-		hexKey := hex.EncodeToString(origKey)
-		knownKeys[hexKey] = origKey
-	}
+	reg := &sharedRegistry{keys: knownKeys}
 
-	// Update cache
+	// Update cache (handle concurrent creation)
 	registryCacheMu.Lock()
-	registryCache[cacheKey] = knownKeys
+	if existing, ok := registryCache[cacheKey]; ok {
+		registryCacheMu.Unlock()
+		return existing
+	}
+	registryCache[cacheKey] = reg
 	registryCacheMu.Unlock()
 
 	if len(knownKeys) > 0 {
 		logger.Info("[NomtStateTrie] ✅ Loaded %d known keys from registry FILE (namespace=%s)", len(knownKeys), namespace)
 	}
-	return knownKeys
+	return reg
 }
 
-// updateRegistryCache updates the in-memory registry cache without writing to disk.
+// updateRegistryCache is no longer needed because registryCache stores a pointer to sharedRegistry.
 func (n *NomtStateTrie) updateRegistryCache() {
-	n.registry.mu.RLock()
-	defer n.registry.mu.RUnlock()
-
-	dbPath := n.handle.GetPath()
-	namespace := string(n.namespace)
-	cacheKey := dbPath + ":" + namespace
-
-	cloned := make(map[string][]byte, len(n.registry.keys))
-	for k, v := range n.registry.keys {
-		cloned[k] = v
-	}
-
-	registryCacheMu.Lock()
-	registryCache[cacheKey] = cloned
-	registryCacheMu.Unlock()
+	// No-op
 }
 
 // persistRegistryToFile writes the knownKeys registry to a file asynchronously and updates the memory cache.
@@ -308,14 +290,9 @@ func (n *NomtStateTrie) persistRegistryToFile() {
 	}
 	n.registry.mu.RUnlock()
 
-	// Update the memory cache synchronously
+	// Memory cache is a pointer to the sharedRegistry, so it's already updated.
 	dbPath := n.handle.GetPath()
 	namespace := string(n.namespace)
-	cacheKey := dbPath + ":" + namespace
-
-	registryCacheMu.Lock()
-	registryCache[cacheKey] = cloned
-	registryCacheMu.Unlock()
 
 	filePath := registryFilePath(dbPath, namespace)
 
@@ -378,20 +355,16 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 	}
 
 	skipRegistry := strings.HasPrefix(namespace, "smart_contract_storage") || namespace == "transaction_state" || namespace == "receipts"
-	var knownKeys map[string][]byte
+	var reg *sharedRegistry
 
 	if skipRegistry {
-		knownKeys = make(map[string][]byte)
+		reg = &sharedRegistry{keys: make(map[string][]byte)}
 	} else {
-		// ═══════════════════════════════════════════════════════════════════════
-		// FORK-SAFE: Load registry from FILE first, fall back to NOMT for
-		// backward compatibility with databases created before the file-based
-		// registry fix.
-		// ═══════════════════════════════════════════════════════════════════════
-		knownKeys = loadRegistryFromFile(handle.GetPath(), namespace)
+		reg = getSharedRegistry(handle.GetPath(), namespace)
 
 		// Backward compatibility: if no file-based registry, try loading from NOMT
-		if len(knownKeys) == 0 {
+		reg.mu.Lock()
+		if len(reg.keys) == 0 {
 			regKey := registryKeyPath([]byte(namespace))
 			regData, found, readErr := handle.StateDbGet(regKey)
 			if readErr == nil && found && len(regData) > 0 {
@@ -409,13 +382,14 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 					copy(origKey, regData[offset:offset+keyLen])
 					offset += keyLen
 					hexKey := hex.EncodeToString(origKey)
-					knownKeys[hexKey] = origKey
+					reg.keys[hexKey] = origKey
 				}
-				logger.Info("[NomtStateTrie] ✅ Migrated %d known keys from NOMT registry to file (namespace=%s)", len(knownKeys), namespace)
+				logger.Info("[NomtStateTrie] ✅ Migrated %d known keys from NOMT registry to file (namespace=%s)", len(reg.keys), namespace)
 			} else {
 				logger.Info("[NomtStateTrie] ⚠️ No registry found for namespace=%s (fresh start)", namespace)
 			}
 		}
+		reg.mu.Unlock()
 	}
 
 	t := &NomtStateTrie{
@@ -424,7 +398,7 @@ func NewNomtStateTrie(handle *nomt_ffi.Handle, isHash bool, namespace string) *N
 		wDirty:            make(map[string]*nomtDirtyEntry),
 		wOldValues:        make(map[string][]byte),
 		wOldLoaded:        make(map[string]bool),
-		registry:          &sharedRegistry{keys: knownKeys},
+		registry:          reg,
 		isHash:            isHash,
 		isReplicationSync: false,
 		registryChanged:   false,
@@ -1170,12 +1144,17 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 
 	if !retrievedFromChangelog {
 		// Fallback to legacy retrieval from registry + storage/handle (if changelog is disabled or empty)
-		knownKeys := loadRegistryFromFile(n.handle.GetPath(), string(n.namespace))
+		reg := getSharedRegistry(n.handle.GetPath(), string(n.namespace))
+		reg.mu.RLock()
+		knownKeys := make(map[string][]byte, len(reg.keys))
+		for hexKey, origKey := range reg.keys {
+			knownKeys[hexKey] = origKey
+		}
+		reg.mu.RUnlock()
+		
 		n.registry.mu.RLock()
 		for hexKey, origKey := range n.registry.keys {
-			keyCopy := make([]byte, len(origKey))
-			copy(keyCopy, origKey)
-			knownKeys[hexKey] = keyCopy
+			knownKeys[hexKey] = origKey
 		}
 		n.registry.mu.RUnlock()
 
@@ -1261,7 +1240,9 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	n.registry.mu.Lock()
 	n.registry.keys = make(map[string][]byte)
 	for _, kv := range kvs {
-		n.registry.keys[hex.EncodeToString(kv[0])] = kv[0]
+		keyCopy := make([]byte, len(kv[0]))
+		copy(keyCopy, kv[0])
+		n.registry.keys[hex.EncodeToString(kv[0])] = keyCopy
 	}
 	n.registry.mu.Unlock()
 	n.registryChanged = true
