@@ -1,0 +1,50 @@
+name: Go CI (execution)
+
+# Minimal build/vet/test gate for the `execution` Go module, including the
+# CGO-linked MVM C++ linker it depends on. This is the baseline that was
+# previously missing entirely: go build/vet/test were all red on `dev` before
+# a handful of stale files (duplicate `func main`, a renamed test API, a few
+# stale test assumptions) were cleaned up. Keep this green — a red run here
+# means a real build/vet/test regression, not pre-existing debt.
+#
+# Scope: this repo also contains a Rust consensus crate
+# (consensus/metanode/meta-consensus) which is NOT covered here yet.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  go-build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: execution
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: execution/go.mod
+          cache-dependency-path: execution/go.sum
+
+      - name: Install native build dependencies (MVM C++ linker)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libtbb-dev libxapian-dev
+
+      - name: Build MVM C++ linker
+        working-directory: execution/pkg/mvm
+        run: bash build.sh
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
