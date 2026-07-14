@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -115,11 +114,21 @@ func ProcessTransactionsOptimistic(
 
 	// ─── No native groups: pure EVM block ─────────────────────────────────────
 	if len(nativeGroups) == 0 {
-		return runEvmPipeline(ctx, chainState, evmGroups, lastBlockHeader, leaderAddr)
+		return runEvmPipeline(ctx, chainState, evmGroups, lastBlockHeader, leaderAddr, blockTime)
 	}
 
-	// ─── Mixed block: run both pipelines CONCURRENTLY ─────────────────────────
-	// Result slot for every original group index.
+	// ─── Mixed block: run native fast-path, THEN TrueBlockSTM (sequential) ────
+	// FORK-SAFETY: these two pipelines both mutate chainState's global DBs.
+	// Static Union-Find grouping only guarantees disjoint addresses for what's
+	// known ahead of execution (tx.RelatedAddresses()/AccessList) — an EVM call
+	// can still touch an address discovered only at runtime (e.g. a transfer
+	// target read from contract storage), which could coincide with an address
+	// a concurrently-running native-transfer group is mutating (this includes
+	// the leader's own reward account, credited by both pipelines). Running
+	// them concurrently made that a real data race with node-dependent
+	// scheduling outcomes. Running them sequentially removes the hazard;
+	// native transfers are lock-sharded and fast, so the wall-clock cost of
+	// serializing is small relative to the correctness gained.
 	type groupResult struct {
 		txs      []types.Transaction
 		rcps     []types.Receipt
@@ -128,12 +137,8 @@ func ProcessTransactionsOptimistic(
 	}
 	results := make([]groupResult, len(groupedGroups))
 
-	var wg sync.WaitGroup
-
 	// Pipeline A – Native fast-path
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	{
 		txs, rcps, scRs, mvmMap := processNativeTransfersFastPath(
 			ctx, chainState, nativeGroups, nativeTxCount,
 			enableTrace, leaderAddr, skipSignatureVerify,
@@ -155,12 +160,10 @@ func ProcessTransactionsOptimistic(
 			}
 			off = end
 		}
-	}()
+	}
 
 	// Pipeline B – TrueBlockSTM for EVM / Mixed groups
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	{
 		flatEvmTxs := make([]types.Transaction, 0, evmTxCount)
 		groupStarts := make([]int, len(evmGroups))
 		for k, g := range evmGroups {
@@ -171,7 +174,7 @@ func ProcessTransactionsOptimistic(
 		}
 
 		rawTxs, rawRcps, rawScRs, rawMvmMap := NewTrueBlockSTM(flatEvmTxs).
-			Process(ctx, chainState, leaderAddr, lastBlockHeader)
+			Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 		for k, g := range evmGroups {
 			start := groupStarts[k]
@@ -205,9 +208,7 @@ func ProcessTransactionsOptimistic(
 		if mergedRs := mergeMvmResults(allScRs, leaderAddr); mergedRs != nil {
 			applyCodeAndStorageRootOnly(chainState, mergedRs)
 		}
-	}()
-
-	wg.Wait()
+	}
 
 	// ─── Merge in original group order (deterministic) ─────────────────────────
 	allTransactions := make([]types.Transaction, 0, totalTxs)
@@ -245,6 +246,7 @@ func runEvmPipeline(
 	evmGroups []grouptxns.RelativeGroup,
 	lastBlockHeader types.BlockHeader,
 	leaderAddr common.Address,
+	blockTime uint64,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -261,7 +263,7 @@ func runEvmPipeline(
 	}
 
 	rawTxs, rawRcps, rawScRs, rawMvmMap := NewTrueBlockSTM(flatTxs).
-		Process(ctx, chainState, leaderAddr, lastBlockHeader)
+		Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 	allTransactions := make([]types.Transaction, 0, totalEvmTxs)
 	allReceipts := make([]types.Receipt, 0, totalEvmTxs)
