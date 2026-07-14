@@ -2,6 +2,7 @@ package mvcc
 
 import (
 	"math"
+	"sort"
 	"sync"
         "sync/atomic"
 
@@ -35,9 +36,13 @@ func nextWriteID() WriteID {
 
 // VersionedAccountState holds multiple versions of an AccountState.
 type VersionedAccountState struct {
-	mu             sync.RWMutex
-	versions       map[Version]types.AccountState
-	writeIDs       map[Version]WriteID
+	mu       sync.RWMutex
+	versions map[Version]types.AccountState
+	writeIDs map[Version]WriteID
+	// sortedVersions is kept ascending and unique so Read can binary-search
+	// for the floor version instead of scanning every version on every read
+	// (hot accounts can accumulate one entry per TX in the block).
+	sortedVersions []Version
 	// highest version written so far (for fast path lookups)
 	highestVersion Version
 }
@@ -53,6 +58,9 @@ func NewVersionedAccountState() *VersionedAccountState {
 func (v *VersionedAccountState) Write(version Version, state types.AccountState) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, exists := v.versions[version]; !exists {
+		v.insertVersionLocked(version)
+	}
 	v.versions[version] = state
 	v.writeIDs[version] = nextWriteID()
 	if version > v.highestVersion {
@@ -60,9 +68,22 @@ func (v *VersionedAccountState) Write(version Version, state types.AccountState)
 	}
 }
 
+func (v *VersionedAccountState) insertVersionLocked(version Version) {
+	idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] >= version })
+	v.sortedVersions = append(v.sortedVersions, 0)
+	copy(v.sortedVersions[idx+1:], v.sortedVersions[idx:])
+	v.sortedVersions[idx] = version
+}
+
 func (v *VersionedAccountState) Delete(version Version) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, exists := v.versions[version]; exists {
+		idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] >= version })
+		if idx < len(v.sortedVersions) && v.sortedVersions[idx] == version {
+			v.sortedVersions = append(v.sortedVersions[:idx], v.sortedVersions[idx+1:]...)
+		}
+	}
 	delete(v.versions, version)
 	delete(v.writeIDs, version)
 }
@@ -74,23 +95,14 @@ func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	var bestVersion Version = BaseVersion
-	var bestState types.AccountState = nil
-	var bestWriteID WriteID = BaseWriteID
-	found := false
-
-	for ver, state := range v.versions {
-		if ver <= requestVersion {
-			if !found || ver > bestVersion {
-				bestVersion = ver
-				bestState = state
-				bestWriteID = v.writeIDs[ver]
-				found = true
-			}
-		}
+	// Floor search: index of the first version strictly greater than
+	// requestVersion, then step back one to get the floor entry.
+	idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] > requestVersion })
+	if idx == 0 {
+		return nil, BaseVersion, BaseWriteID
 	}
-
-	return bestState, bestVersion, bestWriteID
+	ver := v.sortedVersions[idx-1]
+	return v.versions[ver], ver, v.writeIDs[ver]
 }
 
 // MVCCAccountMap stores all versioned account states for the block.
@@ -169,6 +181,8 @@ type VersionedStorage struct {
 	mu       sync.RWMutex
 	versions map[Version][]byte
 	writeIDs map[Version]WriteID
+	// sortedVersions ascending/unique — see VersionedAccountState for why.
+	sortedVersions []Version
 }
 
 func NewVersionedStorage() *VersionedStorage {
@@ -181,6 +195,12 @@ func NewVersionedStorage() *VersionedStorage {
 func (v *VersionedStorage) Write(version Version, value []byte) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, exists := v.versions[version]; !exists {
+		idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] >= version })
+		v.sortedVersions = append(v.sortedVersions, 0)
+		copy(v.sortedVersions[idx+1:], v.sortedVersions[idx:])
+		v.sortedVersions[idx] = version
+	}
 	v.versions[version] = value
 	v.writeIDs[version] = nextWriteID()
 }
@@ -188,6 +208,12 @@ func (v *VersionedStorage) Write(version Version, value []byte) {
 func (v *VersionedStorage) Delete(version Version) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, exists := v.versions[version]; exists {
+		idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] >= version })
+		if idx < len(v.sortedVersions) && v.sortedVersions[idx] == version {
+			v.sortedVersions = append(v.sortedVersions[:idx], v.sortedVersions[idx+1:]...)
+		}
+	}
 	delete(v.versions, version)
 	delete(v.writeIDs, version)
 }
@@ -196,23 +222,12 @@ func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteI
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	var bestVersion Version = BaseVersion
-	var bestVal []byte = nil
-	var bestWriteID WriteID = BaseWriteID
-	found := false
-
-	for ver, val := range v.versions {
-		if ver <= requestVersion {
-			if !found || ver > bestVersion {
-				bestVersion = ver
-				bestVal = val
-				bestWriteID = v.writeIDs[ver]
-				found = true
-			}
-		}
+	idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] > requestVersion })
+	if idx == 0 {
+		return nil, BaseVersion, BaseWriteID
 	}
-
-	return bestVal, bestVersion, bestWriteID
+	ver := v.sortedVersions[idx-1]
+	return v.versions[ver], ver, v.writeIDs[ver]
 }
 
 // MVCCStorageMap stores all versioned storage values for the block.
