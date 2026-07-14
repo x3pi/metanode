@@ -290,11 +290,18 @@ func NewChainStateWithGenesis(
 	cs.currentBlockHeader.Store(&headerCopy)
 
 	// START SCRUBBER (Priority 3)
-	if accountDB := cs.GetAccountStateDB(); accountDB != nil {
-		if trieDB := accountDB.Trie(); trieDB != nil {
-			// Run a deep integrity check every 24 hours
-			scrubber := NewScrubber(trieDB, 24*time.Hour)
-			scrubber.Start()
+	// GIẢI THÍCH LÝ DO CẦN ĐIỀU KIỆN NÀY:
+	// - "skip_epoch_data" là cờ được truyền vào khi tạo các ChainState ảo (ví dụ qua lệnh eth_call).
+	// - Các State ảo này chỉ dùng tạm thời để đọc dữ liệu rồi bị thu hồi (Garbage Collected) ngay lập tức.
+	// - Nếu không chặn lại, mỗi lệnh eth_call sẽ sinh ra 1 Goroutine Scrubber chạy ngầm trọn đời (leak).
+	// - Câu lệnh `if` dưới đây đảm bảo chỉ có Node chính (lưu dữ liệu thật) mới được phép chạy Scrubber.
+	if backupPath != "skip_epoch_data" {
+		if accountDB := cs.GetAccountStateDB(); accountDB != nil {
+			if trieDB := accountDB.Trie(); trieDB != nil {
+				// Run a deep integrity check every 24 hours
+				scrubber := NewScrubber(trieDB, 24*time.Hour)
+				scrubber.Start()
+			}
 		}
 	}
 
