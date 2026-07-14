@@ -3,23 +3,23 @@
 package processor
 
 import (
-	runtime_debug "runtime/debug"
 	"fmt"
+	runtime_debug "runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -42,8 +42,8 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		var startGC runtime_debug.GCStats
-			runtime_debug.ReadGCStats(&startGC)
-			start := time.Now()
+		runtime_debug.ReadGCStats(&startGC)
+		start := time.Now()
 		blockNum := job.Block.Header().BlockNumber()
 		txCount := len(job.Block.Transactions())
 
@@ -75,6 +75,7 @@ func (bp *BlockProcessor) commitWorker() {
 			// FLUSH XAPIAN TRANSACTIONS TO DISK
 			// We only commit to physical disk in commitWorker after consensus has finalized the block.
 			// This prevents Xapian DB from getting ahead of PebbleDB and prevents forks if the block is rejected.
+			hasContractInteraction := false
 			for i, tx := range job.ProcessResults.Transactions {
 				// OPTIMIZATION: Only commit/clear Xapian buffers for Contract Creation or Contract Call.
 				// Pure token transfers (IsRegularTransaction) do not interact with Xapian.
@@ -82,14 +83,15 @@ func (bp *BlockProcessor) commitWorker() {
 				if isContractInteraction {
 					if i < len(job.ProcessResults.Receipts) && job.ProcessResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
 						mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
+						hasContractInteraction = true
 					} else {
 						mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 					}
 				}
 			}
-			// COMMIT ALL XAPIAN CHANGES TO DISK FOR THIS BLOCK
-			mvm.CommitAllXapian()
-			
+			if hasContractInteraction {
+				mvm.CommitAllXapian()
+			}
 			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
 			// to prevent unbounded memory growth from cached EVM instances.
 			mvm.RemoveOldApiInstances()
@@ -311,12 +313,12 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 
 		totalDuration := time.Since(start)
-			var endGC runtime_debug.GCStats
-			runtime_debug.ReadGCStats(&endGC)
-			gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
-			pipeline.GlobalBlockTraceStore.AddGCPause(blockNum, gcPauseUs)
+		var endGC runtime_debug.GCStats
+		runtime_debug.ReadGCStats(&endGC)
+		gcPauseUs := (endGC.PauseTotal - startGC.PauseTotal).Microseconds()
+		pipeline.GlobalBlockTraceStore.AddGCPause(blockNum, gcPauseUs)
 		trace := pipeline.GlobalBlockTraceStore.UpdateTotalBlockTime(blockNum, totalDuration.Microseconds())
-		
+
 		if txCount > 0 {
 			logger.Info("📊 [BLOCK-TRACE] Block #%d | TXs: %d | WaitGo: %dms | WaitRust: %dms | RustFFI: %dms (FFI: %dms) | EVM: %dms | Roots: %dms | Mem: %dms | DB: %dms | Total: %dms",
 				trace.BlockNumber, trace.TxCount,

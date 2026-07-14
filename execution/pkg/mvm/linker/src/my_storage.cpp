@@ -8,11 +8,6 @@
 #include "mvm/exception.h"
 #include "state.h"
 
-struct GetStorageValue_return
-{
-    unsigned char *value;
-    bool success;
-};
 namespace mvm
 {
     using ET = Exception::Type;

@@ -12,6 +12,7 @@
 #include "xapian/xapian_manager.h"
 #include "xapian/xapian_registry.h"
 #include "mvm/globalstate.h"
+#include "my_global_state.h"
 #include "mvm/crypto/sha256.hpp"
 #include <cstddef>
 #include "xapian/xapian_search.h"
@@ -70,6 +71,26 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
         gs->add_addresses_storage_change(address, key, valToStore);
         return 0;
     } else if (isRead) {
+        if (auto my_gs = dynamic_cast<mvm::MyGlobalState*>(gs)) {
+            auto [success, uncommitted_val] = my_gs->add_addresses_storage_read(address, key);
+            if (success) {
+                return uncommitted_val;
+            }
+        } else {
+            // Fallback for non-MyGlobalState instances (e.g. tests)
+            uint8_t b_address[32];
+            mvm::to_big_endian(address, b_address);
+            uint8_t b_key[32];
+            mvm::to_big_endian(key, b_key);
+            
+            auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
+            if (ret.success && ret.value != nullptr) {
+                uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
+                free(ret.value);
+                return uncommitted_val;
+            }
+        }
+
         return acc.st.load(key);
     }
     return 0;
@@ -267,8 +288,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         // FORK-SAFETY: Read-only operation — do NOT register with registry.
         // Registering would include this manager's (potentially stale)
         // comprehensive_log in the hash computation for this transaction.
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -317,8 +341,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], "", false, true, this->txHash);
@@ -387,8 +414,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
@@ -452,8 +482,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], std::to_string(static_cast<int>(docId)), false, true, this->txHash);
@@ -581,8 +614,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
@@ -861,89 +897,91 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      Xapian::Database* pooled_db = manager->acquireSearchDb();
+      struct DbPoolGuard {
+          std::shared_ptr<XapianManager> m;
+          Xapian::Database* db;
+          DbPoolGuard(std::shared_ptr<XapianManager> mgr, Xapian::Database* d) : m(mgr), db(d) {}
+          ~DbPoolGuard() { if (db) m->releaseSearchDb(db); }
+      } pool_guard(manager, pooled_db);
+      if (!pooled_db) {
+          std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          return mvm::Code(32, 0);
+      }
 
+      mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
+      XapianSearcher searcher(pooled_db);
+      std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
+
+      std::map<std::string, std::string> product_prefix_map =
+          convertJsonToMap(decodedData["options"]["prefixMap"]);
+      std::optional<std::vector<std::string>> stop_words_list =
+          convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
+
+      std::optional<std::string> stem_lang = std::nullopt;
+      Xapian::doccount offset = 0;
+      try {
+        offset = hex_to_uint64(decodedData["options"]["offset"]);
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      // Gán limit với giá trị mặc định là 10
+      Xapian::doccount limit = 10;
+      try {
+        limit = hex_to_uint64(decodedData["options"]["limit"]);
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      // Gán sort_by_value_slot với giá trị mặc định là 0
+      std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
+      try {
+
+        auto sort_slot =
+            hex_to_int64(decodedData["options"]["sortByValueSlot"]);
+
+        if (sort_slot.has_value()) {
+          if (sort_slot >= 0)
+            sort_by_value_slot = sort_slot;
+        }
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      bool sort_ascending = true;
 
       try {
-        auto read_db_ptr = manager->get_read_db();
-        if (!read_db_ptr) {
-            std::cerr << "Lỗi: read_db_ptr is null cho db " << dbName << std::endl;
-            return mvm::Code(32, 0);
-        }
-        XapianSearcher searcher(read_db_ptr.get());
-        std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
-
-        std::map<std::string, std::string> product_prefix_map =
-            convertJsonToMap(decodedData["options"]["prefixMap"]);
-        std::optional<std::vector<std::string>> stop_words_list =
-            convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
-
-        std::optional<std::string> stem_lang = std::nullopt;
-        Xapian::doccount offset = 0;
-        try {
-          offset = hex_to_uint64(decodedData["options"]["offset"]);
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        // Gán limit với giá trị mặc định là 10
-        Xapian::doccount limit = 10;
-        try {
-          limit = hex_to_uint64(decodedData["options"]["limit"]);
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        // Gán sort_by_value_slot với giá trị mặc định là 0
-        std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
-        try {
-
-          auto sort_slot =
-              hex_to_int64(decodedData["options"]["sortByValueSlot"]);
-
-          if (sort_slot.has_value()) {
-            if (sort_slot >= 0)
-              sort_by_value_slot = sort_slot;
-          }
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        bool sort_ascending = true;
-
-        try {
-          sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        std::vector<RangeFilter> range_filters =
-            convertJsonToRangeFilters(decodedData["options"]);
-
-        // searcher.dumpIndex();
-
-        auto [results1, total1] = searcher.search(
-            queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
-            product_prefix_map, stem_lang, stop_words_list, offset, limit,
-            sort_by_value_slot, sort_ascending, range_filters, blockNumber);
-
-        std::cerr << "[searcher] Search completed." << std::endl;
-        std::cerr << "[searcher] Total estimated: " << total1 << std::endl;
-        std::cerr << "[searcher] Results size: " << results1.size() << std::endl;
-
-        for (size_t i = 0; i < results1.size(); ++i) {
-          std::cerr << "  Result[" << i << "]: DocID=" << results1[i].docid
-                    << ", Data=" << results1[i].data.substr(0, 100)
-                    << (results1[i].data.length() > 100 ? "..." : "")
-                    << std::endl;
-        }
-        std::cerr << "-----------------------------" << std::endl;
-
-        auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
-        return addOffsetPrefix(dataReturn);
-      } catch (const std::exception& e) {
-        std::cerr << "Lỗi XAPIAN_QUERY_SEARCH: " << e.what() << std::endl;
-        return mvm::Code(32, 0);
+        sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
       }
+
+      std::vector<RangeFilter> range_filters =
+          convertJsonToRangeFilters(decodedData["options"]);
+
+      // searcher.dumpIndex();
+
+      auto [results1, total1] = searcher.search(
+          queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
+          product_prefix_map, stem_lang, stop_words_list, offset, limit,
+          sort_by_value_slot, sort_ascending, range_filters, blockNumber);
+
+      std::cerr << "[searcher] Search completed." << std::endl;
+      std::cerr << "[searcher] Total estimated: " << total1 << std::endl;
+      std::cerr << "[searcher] Results size: " << results1.size() << std::endl;
+
+      for (size_t i = 0; i < results1.size(); ++i) {
+        std::cerr << "  Result[" << i << "]: DocID=" << results1[i].docid
+                  << ", Data=" << results1[i].data.substr(0, 100)
+                  << (results1[i].data.length() > 100 ? "..." : "")
+                  << std::endl;
+      }
+      std::cerr << "-----------------------------" << std::endl;
+
+      auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
+      return addOffsetPrefix(dataReturn);
     }
 
     if (opCode == mvm::FunctionSelector::XAPIAN_COMMIT) {
@@ -976,8 +1014,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto hash = manager->getChangeHash();
@@ -994,8 +1035,16 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
               << std::endl;
   } catch (const std::exception &e) {
     std::cerr << "Error in operation: " << e.what() << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (...) {
     std::cerr << "Unknown error" << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed with unknown error. Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   }
 
   return mvm::Code(32, 0);
@@ -1185,8 +1234,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -1235,8 +1287,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, "", false, true, this->txHash);
@@ -1305,8 +1360,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
@@ -1358,8 +1416,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, std::to_string(static_cast<int>(docId)), false, true, this->txHash);
@@ -1489,8 +1550,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
@@ -1543,8 +1607,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -1607,8 +1674,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -1662,8 +1732,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), true, false, nullptr);
@@ -1779,78 +1852,83 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
+      std::shared_lock<std::shared_mutex> search_lock(manager->changes_mutex);
+      Xapian::Database* pooled_db = manager->acquireSearchDb();
+      struct DbPoolGuard {
+          std::shared_ptr<XapianManager> m;
+          Xapian::Database* db;
+          DbPoolGuard(std::shared_ptr<XapianManager> mgr, Xapian::Database* d) : m(mgr), db(d) {}
+          ~DbPoolGuard() { if (db) m->releaseSearchDb(db); }
+      } pool_guard(manager, pooled_db);
+      if (!pooled_db) {
+          std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          return mvm::Code(32, 0);
+      }
 
+      mvm::injectVirtualDependency(gs, address, dbName, "", true, false, nullptr);
+      XapianSearcher searcher(pooled_db);
+      std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
 
+      std::map<std::string, std::string> product_prefix_map =
+          convertJsonToMap(decodedData["options"]["prefixMap"]);
+      std::optional<std::vector<std::string>> stop_words_list =
+          convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
+
+      std::optional<std::string> stem_lang = std::nullopt;
+      Xapian::doccount offset = 0;
+      try {
+        offset = hex_to_uint64(decodedData["options"]["offset"]);
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      // Gán limit với giá trị mặc định là 10
+      Xapian::doccount limit = 10;
+      try {
+        limit = hex_to_uint64(decodedData["options"]["limit"]);
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      // Gán sort_by_value_slot với giá trị mặc định là 0
+      std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
+      try {
+
+        auto sort_slot =
+            hex_to_int64(decodedData["options"]["sortByValueSlot"]);
+
+        if (sort_slot.has_value()) {
+          if (sort_slot >= 0)
+            sort_by_value_slot = sort_slot;
+        }
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
+      }
+
+      bool sort_ascending = true;
 
       try {
-        auto read_db_ptr = manager->get_read_db();
-        if (!read_db_ptr) {
-            std::cerr << "Lỗi: read_db_ptr is null cho db " << dbName << std::endl;
-            return mvm::Code(32, 0);
-        }
-        XapianSearcher searcher(read_db_ptr.get());
-        std::vector<std::string> queries1 = {decodedData["options"]["queries"]};
-
-        std::map<std::string, std::string> product_prefix_map =
-            convertJsonToMap(decodedData["options"]["prefixMap"]);
-        std::optional<std::vector<std::string>> stop_words_list =
-            convertJsonToStopWordsList(decodedData["options"]["stopWords"]);
-
-        std::optional<std::string> stem_lang = std::nullopt;
-        Xapian::doccount offset = 0;
-        try {
-          offset = hex_to_uint64(decodedData["options"]["offset"]);
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        // Gán limit với giá trị mặc định là 10
-        Xapian::doccount limit = 10;
-        try {
-          limit = hex_to_uint64(decodedData["options"]["limit"]);
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        // Gán sort_by_value_slot với giá trị mặc định là 0
-        std::optional<Xapian::valueno> sort_by_value_slot = std::nullopt;
-        try {
-
-          auto sort_slot =
-              hex_to_int64(decodedData["options"]["sortByValueSlot"]);
-
-          if (sort_slot.has_value()) {
-            if (sort_slot >= 0)
-              sort_by_value_slot = sort_slot;
-          }
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        bool sort_ascending = true;
-
-        try {
-          sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
-        } catch (...) {
-          // Giữ giá trị mặc định nếu có lỗi
-        }
-
-        std::vector<RangeFilter> range_filters =
-            convertJsonToRangeFilters(decodedData["options"]);
-
-        auto [results1, total1] = searcher.search(
-            queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
-            product_prefix_map, stem_lang, stop_words_list, offset, limit,
-            sort_by_value_slot, sort_ascending, range_filters, blockNumber);
-
-        auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
-        std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;
-
-        return addOffsetPrefix(dataReturn);
-      } catch (const std::exception& e) {
-        std::cerr << "Lỗi XAPIAN_QUERY_SEARCH_VIEW: " << e.what() << std::endl;
-        return mvm::Code(32, 0);
+        sort_ascending = decodedData["options"]["sortAscending"].get<bool>();
+      } catch (...) {
+        // Giữ giá trị mặc định nếu có lỗi
       }
+
+      std::vector<RangeFilter> range_filters =
+          convertJsonToRangeFilters(decodedData["options"]);
+
+     
+
+      auto [results1, total1] = searcher.search(
+          queries1, Xapian::Query::OP_AND, Xapian::Query::OP_AND,
+          product_prefix_map, stem_lang, stop_words_list, offset, limit,
+          sort_by_value_slot, sort_ascending, range_filters, blockNumber);
+
+      // searcher.dumpIndex(); // Added dumpIndex for debugging
+
+      auto dataReturn = searcher.encodeSearchResultsPage(total1, results1);
+      std::cerr << "[searcher] results1 size: " << results1.size() << std::endl;
+
+      return addOffsetPrefix(dataReturn);
     }
 
     if (opCode == mvm::FunctionSelector::XAPIAN_V1_COMMIT) {
@@ -1884,8 +1962,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         if (!this->isOffChain) {
         }
       } else {
-        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
-                  << input_argument["dbname"] << std::endl;
+        std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       auto hash = manager->getChangeHash();
@@ -1899,8 +1980,16 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
     }
   } catch (const std::exception &e) {
     std::cerr << "Error in operation: " << e.what() << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (...) {
     std::cerr << "Unknown error" << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed with unknown error. Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   }
 
   return mvm::Code(32, 0);

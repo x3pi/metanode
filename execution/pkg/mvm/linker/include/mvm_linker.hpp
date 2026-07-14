@@ -52,6 +52,10 @@ struct ExecuteResult {
   int length_storage_change;
   int *length_storages;
 
+  char **b_storage_read;
+  int length_storage_read;
+  int *length_storages_read;
+
   char *b_logs;
   int length_logs;
 
@@ -176,6 +180,13 @@ void freeResult(struct ExecuteResult *);
 void freeBatchResult(ExecuteBatchResultC *);
 
 void freePendingResult();
+
+#ifdef MVM_LINKER_BUILD
+struct GetStorageValue_return {
+  unsigned char *value;
+  bool success;
+};
+#endif
 
 extern struct GlobalStateGet_return GlobalStateGet(unsigned char *mvmId,
                                                    unsigned char *);

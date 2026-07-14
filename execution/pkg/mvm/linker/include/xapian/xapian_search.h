@@ -68,11 +68,13 @@ struct RangeFilter
 };
 // --- Kết thúc struct nội bộ ---
 
-class XapianSearcher
-{
+class XapianSearcher {
 public:
-    explicit XapianSearcher(const std::string &db_path);
-    explicit XapianSearcher(Xapian::Database* database);
+  // Khởi tạo với đường dẫn (path) — tạo Xapian::Database riêng, owns it.
+  XapianSearcher(const std::string& dbpath);
+  // Khởi tạo với con trỏ Database đã tồn tại (non-owning) — dùng read_db của XapianManager.
+  // Caller phải đảm bảo db tồn tại trong suốt lifetime của XapianSearcher.
+  explicit XapianSearcher(Xapian::Database* db);
     ~XapianSearcher();
     void dumpIndex();
 

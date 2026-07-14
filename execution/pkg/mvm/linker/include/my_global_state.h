@@ -18,6 +18,7 @@ namespace mvm
 
         std::map<Address, Code> addresses_newly_deploy;
         std::map<Address, std::map<uint256_t, uint256_t>> addresses_storage_change;
+        std::map<Address, std::vector<uint256_t>> addresses_storage_read;
         std::map<Address, uint256_t> addresses_add_balance_change;
         std::map<Address, uint256_t> addresses_sub_balance_change;
         std::map<Address, uint256_t> addresses_nonce_change;
@@ -119,12 +120,14 @@ namespace mvm
          */
         virtual void add_addresses_newly_deploy(const Address &addr, const Code &code) override;
         virtual void add_addresses_storage_change(const Address &addr, const uint256_t &key, const uint256_t &value) override;
+        virtual std::pair<bool, uint256_t> add_addresses_storage_read(const Address &addr, const uint256_t &key);
         virtual void add_addresses_add_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void add_addresses_sub_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void set_addresses_nonce_change(const Address &addr, const uint256_t &nonce) override;
 
         const std::vector<std::vector<uint8_t>> get_newly_deploy(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_storage_change(bool apply_to_cache = true);
+        const std::vector<std::vector<uint8_t>> get_storage_read(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_add_balance_change(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_sub_balance_change(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_nonce_change(bool apply_to_cache = true);

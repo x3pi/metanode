@@ -125,26 +125,185 @@ XapianManager::XapianManager(const std::string &db_name,
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập
       db_name(db_name)                       // Lưu tên database
 {
-    update_read_db();
+    // Khởi tạo pool các Database objects để tái sử dụng cho concurrent search.
+    // Mỗi goroutine search lấy 1 DB từ pool → đảm bảo không có 2 goroutine dùng chung.
+    std::string db_path_str = mvm::createFullPath(addr, db_name).string();
+    search_pool.pool.resize(MAX_CONCURRENT_SEARCHES, nullptr);
+    search_pool.in_use.resize(MAX_CONCURRENT_SEARCHES, false);
+    search_pool.last_gen.resize(MAX_CONCURRENT_SEARCHES, 0);
+
+    simple_read_pool.pool.resize(MAX_CONCURRENT_SIMPLE_READS, nullptr);
+    simple_read_pool.in_use.resize(MAX_CONCURRENT_SIMPLE_READS, false);
+    simple_read_pool.last_gen.resize(MAX_CONCURRENT_SIMPLE_READS, 0);
 }
 
-std::shared_ptr<Xapian::Database> XapianManager::get_read_db() {
-    std::shared_lock<std::shared_mutex> lock(read_db_mutex);
-    return read_db;
-}
-
-void XapianManager::update_read_db() {
-    std::unique_lock<std::shared_mutex> lock(read_db_mutex);
-    try {
-        read_db = std::make_shared<Xapian::Database>(mvm::createFullPath(address, db_name).string());
-    } catch (const Xapian::Error& e) {
-        std::cerr << "[XapianManager] Error updating read_db: " << e.get_msg() << std::endl;
-        throw std::runtime_error(e.get_msg());
-    } catch (const std::exception& e) {
-        std::cerr << "[XapianManager] Standard exception updating read_db: " << e.what() << std::endl;
-        throw;
+XapianManager::~XapianManager() {
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (search_pool.pool[i]) {
+            try {
+                search_pool.pool[i]->close();
+            } catch (...) {}
+            delete search_pool.pool[i];
+            search_pool.pool[i] = nullptr;
+        }
+    }
+    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+        if (simple_read_pool.pool[i]) {
+            try {
+                simple_read_pool.pool[i]->close();
+            } catch (...) {}
+            delete simple_read_pool.pool[i];
+            simple_read_pool.pool[i] = nullptr;
+        }
     }
 }
+
+
+// Lấy 1 DB từ pool (đợi tối đa 5s, nếu tất cả đang bận hoặc hỏng thì trả về nullptr).
+// Trước khi trả về, nếu slot đó cũ hơn generation hiện tại (tức có commit xảy ra
+// từ lần cuối slot này được dùng/reopen), ta reopen() ngay tại đây — bất kể lúc
+// commit slot này đang bận hay rảnh. Đây là điểm mấu chốt để không bao giờ giao
+// cho caller một Database đã stale so với dữ liệu đã commit trên đĩa.
+Xapian::Database* XapianManager::acquireSearchDb()
+{
+    std::unique_lock<std::mutex> lock(search_pool.pool_mutex);
+    bool acquired = search_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
+        for (size_t i = 0; i < search_pool.in_use.size(); ++i)
+            if (!search_pool.in_use[i])
+                return true;
+        return false;
+    });
+
+    if (!acquired) {
+        std::cerr << "[ERROR] acquireSearchDb: Timeout (5s) waiting for available DB." << std::endl;
+        return nullptr;
+    }
+
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (!search_pool.in_use[i]) {
+            if (search_pool.pool[i] == nullptr) {
+                // Lazy init
+                try {
+                    search_pool.pool[i] = new Xapian::Database(
+                        mvm::createFullPath(address, db_name).string());
+                    search_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
+                              << ": " << e.what() << std::endl;
+                    continue; // try next slot
+                }
+            } else if (search_pool.last_gen[i] < current_gen) {
+                // Reopen existing
+                try {
+                    search_pool.pool[i]->reopen();
+                    search_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[ERROR] acquireSearchDb: reopen() failed for slot " << i
+                              << ": " << e.what() << ", recreating..." << std::endl;
+                    delete search_pool.pool[i];
+                    search_pool.pool[i] = nullptr;
+                    try {
+                        search_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        search_pool.last_gen[i] = current_gen;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        continue;
+                    }
+                }
+            }
+            search_pool.in_use[i] = true;
+            return search_pool.pool[i];
+        }
+    }
+    return nullptr;
+}
+
+// Trả DB về pool sau khi search xong.
+void XapianManager::releaseSearchDb(Xapian::Database* db_returned)
+{
+    std::lock_guard<std::mutex> lock(search_pool.pool_mutex);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (search_pool.pool[i] == db_returned) {
+            search_pool.in_use[i] = false;
+            search_pool.pool_cv.notify_one();
+            return;
+        }
+    }
+}
+
+Xapian::Database* XapianManager::acquireSimpleReadDb()
+{
+    std::unique_lock<std::mutex> lock(simple_read_pool.pool_mutex);
+    bool acquired = simple_read_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
+        for (size_t i = 0; i < simple_read_pool.in_use.size(); ++i)
+            if (!simple_read_pool.in_use[i])
+                return true;
+        return false;
+    });
+
+    if (!acquired) {
+        std::cerr << "[ERROR] acquireSimpleReadDb: Timeout (5s) waiting for available DB." << std::endl;
+        return nullptr;
+    }
+
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+        if (!simple_read_pool.in_use[i]) {
+            if (simple_read_pool.pool[i] == nullptr) {
+                // Lazy init
+                try {
+                    simple_read_pool.pool[i] = new Xapian::Database(
+                        mvm::createFullPath(address, db_name).string());
+                    simple_read_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
+                              << ": " << e.what() << std::endl;
+                    continue; // try next slot
+                }
+            } else if (simple_read_pool.last_gen[i] < current_gen) {
+                // Reopen existing
+                try {
+                    simple_read_pool.pool[i]->reopen();
+                    simple_read_pool.last_gen[i] = current_gen;
+                } catch (const std::exception& e) {
+                    std::cerr << "[ERROR] acquireSimpleReadDb: reopen() failed for slot " << i
+                              << ": " << e.what() << ", recreating..." << std::endl;
+                    delete simple_read_pool.pool[i];
+                    simple_read_pool.pool[i] = nullptr;
+                    try {
+                        simple_read_pool.pool[i] = new Xapian::Database(
+                            mvm::createFullPath(address, db_name).string());
+                        simple_read_pool.last_gen[i] = current_gen;
+                    } catch (const std::exception& e2) {
+                        std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
+                                  << ": " << e2.what() << std::endl;
+                        continue;
+                    }
+                }
+            }
+            simple_read_pool.in_use[i] = true;
+            return simple_read_pool.pool[i];
+        }
+    }
+    return nullptr;
+}
+
+void XapianManager::releaseSimpleReadDb(Xapian::Database* db_returned)
+{
+    std::lock_guard<std::mutex> lock(simple_read_pool.pool_mutex);
+    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+        if (simple_read_pool.pool[i] == db_returned) {
+            simple_read_pool.in_use[i] = false;
+            simple_read_pool.pool_cv.notify_one();
+            return;
+        }
+    }
+}
+
+
 
 // Lấy tên của database
 std::string XapianManager::getDbName() const { return this->db_name; }
@@ -264,7 +423,7 @@ std::string XapianManager::new_document(const std::string &data, uint256_t block
     if (txHash != nullptr) {
         std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
         
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         int doc_index = tx_counters[txHashStr]++; // Sinh ID tuần tự và tất định trong 1 transaction
         
         // Tạo virtualDocId tất định dựa trên txHash và doc_index
@@ -298,7 +457,7 @@ bool XapianManager::delete_document(const std::string& virtualDocId, uint256_t b
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::DEL_DOC;
         entry.data = logData;
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return true;
@@ -315,7 +474,7 @@ std::string XapianManager::add_value(const std::string& virtualDocId, Xapian::va
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_VALUE;
         entry.data = logData;
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -332,7 +491,7 @@ std::string XapianManager::add_term(const std::string& virtualDocId, const std::
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::ADD_TERM;
         entry.data = logData;
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -350,7 +509,7 @@ std::string XapianManager::index_text(const std::string& virtualDocId, const std
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::INDEX_TEXT;
         entry.data = logData;
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
@@ -366,25 +525,23 @@ std::string XapianManager::set_data(const std::string& virtualDocId, const std::
         XapianLog::LogEntry entry;
         entry.op = XapianLog::Operation::SET_DATA;
         entry.data = logData;
-        std::lock_guard<std::shared_mutex> lock2(tx_buffers_mutex);
+        std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         tx_buffers[txHashStr].xapian_doc_logs.push_back(entry);
     }
     return virtualDocId;
 }
-Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash) {
-    bool is_write_tx = (txHash != nullptr || writerHash != nullptr);
-    std::unique_lock<std::recursive_mutex> db_lock(db_mutex, std::defer_lock);
-    if (is_write_tx) {
-        db_lock.lock();
-    }
-
+Xapian::Document XapianManager::get_overlayed_document(const std::string& virtualDocId, const uint256_t *txHash, const uint256_t *writerHash, Xapian::Database* search_db) {
     Xapian::Document doc;
     bool found = false;
     
     try {
-        Xapian::docid did = resolveVirtualDocId(virtualDocId);
+        Xapian::docid did = resolveVirtualDocId(virtualDocId, search_db);
         if (did != 0) {
-            doc = db.get_document(did);
+            if (search_db != nullptr) {
+                doc = search_db->get_document(did);
+            } else {
+                doc = db.get_document(did);
+            }
             found = true;
         }
     } catch (const Xapian::DocNotFoundError&) {
@@ -393,7 +550,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
         found = false;
     }
     
-    std::shared_lock<std::shared_mutex> buffer_lock(tx_buffers_mutex);
+    std::lock_guard<std::mutex> buffer_lock(tx_buffers_mutex);
 
     // 1. Try to find in the writer transaction's buffer (provided by Block-STM dependency)
     if (writerHash != nullptr) {
@@ -475,48 +632,92 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
     return doc;
 }
 
+struct ScopedSearchDb {
+    XapianManager* manager;
+    Xapian::Database* db;
+    ScopedSearchDb(XapianManager* mgr) : manager(mgr), db(mgr->acquireSearchDb()) {}
+    ~ScopedSearchDb() {
+        if (db) manager->releaseSearchDb(db);
+    }
+    Xapian::Database* get() const { return db; }
+};
+
+struct ScopedSimpleReadDb {
+    XapianManager* manager;
+    Xapian::Database* db;
+    ScopedSimpleReadDb(XapianManager* mgr) : manager(mgr), db(mgr->acquireSimpleReadDb()) {}
+    ~ScopedSimpleReadDb() {
+        if (db) manager->releaseSimpleReadDb(db);
+    }
+    Xapian::Database* get() const { return db; }
+};
+
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  ScopedSimpleReadDb scopedDb(this);
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_data");
   std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
-    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     return doc.get_data();
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return "";
 }
 
 // Lấy giá trị từ một slot của document tại một block number, có tùy chọn
 // unserialize
 std::string XapianManager::get_value(const std::string& virtualDocId, Xapian::valueno slot, bool isSerialise, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+    ScopedSimpleReadDb scopedDb(this);
+    if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_value");
     std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
     try {
-        Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+        Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
         return doc.get_value(slot);
-    } catch (...) {}
+    } catch (const Xapian::DocNotFoundError&) {
+        // Normal, ignore
+    } catch (...) {
+        throw;
+    }
     return "";
 }
 
 // Lấy thông tin (data, value slot 1, value slot 2) của document tại một block number
 DocumentInfo XapianManager::get_document(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
+  ScopedSimpleReadDb scopedDb(this);
   DocumentInfo info;
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_document");
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
-    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     info.data = doc.get_data();
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return info;
 }
 
 // Lấy danh sách các term của document tại một block number
 std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocId,
                                                   uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
-  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
+  ScopedSimpleReadDb scopedDb(this);
   std::vector<std::string> terms;
+  if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_terms");
+  std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
-    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash);
+    Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
     for (auto term_it = doc.termlist_begin(); term_it != doc.termlist_end(); ++term_it) {
       terms.push_back(*term_it);
     }
-  } catch (...) {}
+  } catch (const Xapian::DocNotFoundError&) {
+    // Normal, ignore
+  } catch (...) {
+    throw;
+  }
   return terms;
 }
 
@@ -529,30 +730,47 @@ bool XapianManager::commit_changes() {
     return true; // Không có gì để commit
   }
   try {
-    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     db.commit(); // Thực hiện commit Xapian
-    update_read_db(); // Cập nhật read_db cho các luồng đọc mới
     comprehensive_log.xapian_doc_logs
         .clear(); // Xóa các log đã staged sau khi commit thành công
-    return true;
   } catch (const Xapian::Error &) {
     return false; // Commit thất bại
   } catch (const std::exception &) {
     return false; // Commit thất bại
   }
+  // Đánh dấu có 1 generation mới — mọi slot trong search_pool có last_gen cũ hơn
+  // giá trị này sẽ tự reopen() ngay khi được acquireSearchDb() cấp phát,
+  // bất kể slot đó đang bận hay rảnh tại thời điểm commit này.
+  db_generation.fetch_add(1, std::memory_order_acq_rel);
+  // Best-effort: reopen ngay các slot đang rảnh để giảm độ trễ cho lần acquire
+  // kế tiếp. Không bắt buộc cho tính đúng đắn — acquireSearchDb() sẽ tự
+  // reopen lại các slot còn lại (kể cả slot đang bận lúc commit) khi cần.
+  {
+    std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+      if (search_pool.pool[i] && !search_pool.in_use[i]) {
+        try {
+          search_pool.pool[i]->reopen();
+          search_pool.last_gen[i] = current_gen;
+        } catch (...) {}
+      }
+    }
+  }
+  return true;
 }
+
 
 void XapianManager::commitAllInstances() {
   std::unique_lock<std::shared_mutex> lock(instances_mutex);
   for (auto &pair : instances) {
     auto manager = pair.second;
-    if (manager) {
-      if (!manager->has_started) {
-        manager->commit_changes();
-      }
+    if (manager && !manager->has_started) {
+      manager->commit_changes();
     }
   }
 }
+
 
 // Tính toán hash của các thay đổi đã được staged
 std::array<uint8_t, 32u> XapianManager::getChangeHash() {
@@ -648,11 +866,11 @@ std::thread cleaner_thread([] {
     // Giai đoạn 1: Xác định các instance ứng viên để xóa (không giữ accessor
     // lâu)
     {
-                std::shared_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
+                std::unique_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
                 for (auto it = XapianManager::instances.begin(); it != XapianManager::instances.end(); ++it)
                 {
                     // Kiểm tra con trỏ hợp lệ và trạng thái idle
-                    if (it->second && it->second->is_idle_for(std::chrono::minutes(5))) // Ngưỡng idle là 5 phút
+                    if (it->second && it->second->is_idle_for(std::chrono::minutes(1))) // Ngưỡng idle là 1 phút
                     {
                         // Kiểm tra use_count để xem có tham chiếu nào khác ngoài map không
                         std::shared_ptr<XapianManager> temp_ptr = it->second;
@@ -665,10 +883,13 @@ std::thread cleaner_thread([] {
                 }
             }
 
-    // Giai đoạn 2: Thực hiện xóa các instance đã xác định
+    // Giai đoạn 2: Thực hiện xóa các instance đã xác định.
+    // onlyIfIdle=true để destroyInstance() tự re-kiểm tra idle/refcount một
+    // cách atomic ngay trước khi erase, phòng trường hợp có request mới
+    // (getInstance/search) xen vào giữa Giai đoạn 1 và Giai đoạn 2.
     for (const std::string &key : keys_to_erase) {
       // Gọi hàm destroyInstance để xử lý việc đóng DB, dọn dẹp và xóa khỏi map
-      XapianManager::destroyInstance(key);
+      XapianManager::destroyInstance(key, /*onlyIfIdle=*/true);
     }
   }
 });
@@ -690,7 +911,6 @@ struct CleanerStopper {
 // Áp dụng lại một danh sách các log entry vào database hiện tại
 bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay) {
     std::unique_lock<std::shared_mutex> db_lock(changes_mutex);
-    std::lock_guard<std::recursive_mutex> lock(db_mutex);
     for (const auto& entry : log_to_replay) {
         try {
             if (entry.op == XapianLog::Operation::NEW_DOC) {
@@ -757,7 +977,6 @@ bool XapianManager::revertUncommittedChanges() {
   }
   
   try {
-    std::lock_guard<std::recursive_mutex> db_lock(db_mutex);
     // 1. Xóa các thay đổi đang chờ trong log
     comprehensive_log.xapian_doc_logs.clear();
 
@@ -780,7 +999,7 @@ bool XapianManager::revertUncommittedChanges() {
 }
 
 // Hủy một instance XapianManager và xóa nó khỏi map quản lý
-bool XapianManager::destroyInstance(const std::string &db_path_str)
+bool XapianManager::destroyInstance(const std::string &db_path_str, bool onlyIfIdle)
 {
     std::shared_ptr<XapianManager> instance_ptr;
 
@@ -789,6 +1008,20 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
         auto it = instances.find(db_path_str);
         if (it != instances.end())
         {
+            if (onlyIfIdle)
+            {
+                // Re-kiểm tra atomic dưới cùng lock với erase: nếu có thread khác
+                // vừa lấy một tham chiếu mới (getInstance) hoặc vẫn đang giữ tham
+                // chiếu từ trước kể từ lần kiểm tra sơ bộ (Giai đoạn 1 ở cleaner
+                // thread), use_count() ở đây sẽ > 1 (chỉ map giữ tham chiếu là
+                // baseline = 1) và ta bỏ qua việc hủy để tránh đóng `db` trong
+                // lúc đang được sử dụng.
+                if (!it->second || !it->second->is_idle_for(std::chrono::minutes(1)) ||
+                    it->second.use_count() > 1)
+                {
+                    return false;
+                }
+            }
             instance_ptr = it->second; // Giữ một tham chiếu tạm thời
             instances.erase(it);
         }
@@ -798,23 +1031,25 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
     {
         try
         {
-            // Dọn dẹp tài nguyên nội bộ trước khi xóa khỏi map
-            if (instance_ptr)
+            // Khóa changes_mutex trước khi đóng db, cùng quy ước với mọi thao
+            // tác khác ghi vào `db` (add_document/replace_document/commit/
+            // revertUncommittedChanges), để tránh race đóng db trong lúc một
+            // thread khác đang ghi vào nó.
+            std::unique_lock<std::shared_mutex> changes_lock(instance_ptr->changes_mutex);
+
+            // Bước 1: Đóng database Xapian tường minh
+            try
             {
-                // Bước 1: Đóng database Xapian tường minh
-                try
-                {
-                    instance_ptr->db.close();
-                }
-                catch (const Xapian::Error &)
-                { /* Bỏ qua lỗi đóng DB */
-                }
-                catch (const std::exception &)
-                { /* Bỏ qua lỗi đóng DB */
-                }
-                catch (...)
-                { /* Bỏ qua lỗi đóng DB */
-                }
+                instance_ptr->db.close();
+            }
+            catch (const Xapian::Error &)
+            { /* Bỏ qua lỗi đóng DB */
+            }
+            catch (const std::exception &)
+            { /* Bỏ qua lỗi đóng DB */
+            }
+            catch (...)
+            { /* Bỏ qua lỗi đóng DB */
             }
 
             return true; // Trả về true nếu xóa thành công
@@ -828,7 +1063,7 @@ bool XapianManager::destroyInstance(const std::string &db_path_str)
             return false;
         }
     }
-    
+
     return false; // Không tìm thấy instance để hủy
 }
 

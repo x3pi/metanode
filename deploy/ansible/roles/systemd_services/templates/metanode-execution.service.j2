@@ -10,7 +10,7 @@ User=metanode
 Group=metanode
 WorkingDirectory={{ metanode_install_dir }}/node-{{ item }}/bin
 
-ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/simple_chain -config={{ metanode_install_dir }}/node-{{ item }}/config/execution.json
+ExecStart={{ metanode_install_dir }}/node-{{ item }}/bin/simple_chain -config={{ metanode_install_dir }}/node-{{ item }}/config/execution.json --pprof-addr=127.0.0.1:606{{ item }}
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # Allow 90s for DB to flush cleanly on shutdown (CRITICAL — prevents DB corruption)
@@ -19,12 +19,12 @@ Restart=on-failure
 RestartSec=15s
 
 # Environment
-Environment="GOTRACEBACK=all" "SKIP_MEMPOOL_SIG_VERIFY=true"
+Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true"
 # Default to validator, but synconly logic can be injected here based on variables
 Environment=NODE_TYPE={% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}synconly{% else %}validator{% endif %}
 
 LimitNOFILE=100000
-
+LimitCORE=infinity
 # Logging
 StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
 StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log

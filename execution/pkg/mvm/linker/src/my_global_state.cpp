@@ -311,6 +311,24 @@ void MyGlobalState::add_addresses_storage_change(const Address &addr,
   addresses_storage_change[addr][key] = value;
 };
 
+std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Address &addr,
+                                               const uint256_t &key) {
+  addresses_storage_read[addr].push_back(key);
+
+  uint8_t b_address[32];
+  mvm::to_big_endian(addr, b_address);
+  uint8_t b_key[32];
+  mvm::to_big_endian(key, b_key);
+  
+  auto ret = GetStorageValue(blockContext.mvmId, b_address + 12, b_key);
+  if (ret.success && ret.value != nullptr) {
+      uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
+      free(ret.value);
+      return {true, uncommitted_val};
+  }
+  return {false, 0};
+};
+
 void MyGlobalState::add_addresses_add_balance_change(const Address &addr,
                                                      const uint256_t &amount) {
   addresses_add_balance_change[addr] += amount;
@@ -376,6 +394,32 @@ const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_change(bool a
           KeyType keyE = State::toKeyType(b_key);
           State::getInstance(addr)->insertOrUpdate(keyE, value);
         });
+  }
+  return result;
+}
+
+const std::vector<std::vector<uint8_t>> MyGlobalState::get_storage_read(bool apply_to_cache) {
+  int size = addresses_storage_read.size();
+  std::vector<std::vector<uint8_t>> result(size);
+  int count = 0;
+
+  for (const auto &p : addresses_storage_read) {
+    int storage_size = 32 * p.second.size();
+    std::vector<uint8_t> storage(storage_size);
+    int storage_count = 0;
+
+    for (const auto &s : p.second) {
+      int idx = storage_count * 32;
+      mvm::to_big_endian(s, storage.data() + idx);
+      storage_count++;
+    }
+
+    std::vector<uint8_t> address_with_storage_read(32 + storage_size);
+    mvm::to_big_endian(p.first, address_with_storage_read.data());
+    std::memcpy(address_with_storage_read.data() + 32, storage.data(),
+                storage_size);
+    result[count] = address_with_storage_read;
+    count++;
   }
   return result;
 }
@@ -454,6 +498,7 @@ void MyGlobalState::Clear() {
 void MyGlobalState::clear_differences() {
     addresses_newly_deploy.clear();
     addresses_storage_change.clear();
+    addresses_storage_read.clear();
     addresses_add_balance_change.clear();
     addresses_sub_balance_change.clear();
     addresses_nonce_change.clear();

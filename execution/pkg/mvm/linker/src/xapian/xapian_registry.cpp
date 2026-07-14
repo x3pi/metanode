@@ -1,6 +1,7 @@
 #include "xapian_registry.h"
 #include "xapian/xapian_manager.h" // Giả định header cho XapianManager
 #include <mvm/util.h>              // Giả định header cho các tiện ích mvm
+#include "my_extension/utils.h"
 
 #include <tbb/concurrent_hash_map.h>
 #include <sstream>
@@ -26,31 +27,6 @@ using MvmIdKeyMap = tbb::concurrent_hash_map<std::string, ManagerList>;
 // Namespace ẩn danh cho các hàm trợ giúp nội bộ
 namespace
 {
-
-    /**
-     * @brief Logic nội bộ để tạo khóa định danh từ mvmId.
-     * @param mvmId Con trỏ đến mảng byte mvmId (20 bytes).
-     * @return Chuỗi khóa định danh hoặc chuỗi rỗng nếu mvmId là null.
-     */
-    std::string generateMvmIdKeyInternal(const unsigned char *mvmId)
-    {
-        if (mvmId == nullptr)
-        {
-            return ""; // Trả về rỗng nếu đầu vào là null
-        }
-
-        std::stringstream ss;
-        ss << std::hex << std::setfill('0');
-        // Chuyển đổi 20 byte địa chỉ thành hex
-        for (size_t i = 0; i < 20; ++i)
-        {
-            ss << std::setw(2) << static_cast<int>(mvmId[i]);
-        }
-        // Thêm phần đệm 12 byte (24 ký tự '0') để đủ 32 byte (64 ký tự hex)
-        ss << std::string(24, '0');
-        return ss.str();
-    }
-
     /**
      * @brief Hàm trợ giúp nội bộ để nhóm các manager theo địa chỉ mvm::Address của chúng.
      * @param managers Danh sách các con trỏ manager cần nhóm.
@@ -76,6 +52,25 @@ namespace
 // Triển khai các phương thức của lớp XapianRegistry.
 //----------------------------------------------------------------------------
 
+std::string XapianRegistry::generateMvmIdKey(const unsigned char *mvmId)
+{
+    if (mvmId == nullptr)
+    {
+        return ""; // Trả về rỗng nếu đầu vào là null
+    }
+
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    // Chuyển đổi 20 byte địa chỉ thành hex
+    for (size_t i = 0; i < 20; ++i)
+    {
+        ss << std::setw(2) << static_cast<int>(mvmId[i]);
+    }
+    // Thêm phần đệm 12 byte (24 ký tự '0') để đủ 32 byte (64 ký tự hex)
+    ss << std::string(24, '0');
+    return ss.str();
+}
+
 
 
 void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
@@ -85,7 +80,7 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
     XapianManager::instances_mutex.lock_shared();
     for (auto& pair : XapianManager::instances) {
         if (auto manager_ptr = pair.second) {
-            std::lock_guard<std::shared_mutex> lock(manager_ptr->tx_buffers_mutex);
+            std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
             manager_ptr->tx_buffers.erase(txHashStr);
             manager_ptr->tx_counters.erase(txHashStr);
         }
@@ -96,7 +91,6 @@ void XapianRegistry::clearBufferForTxHash(const uint256_t* txHash) {
 void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
     if (!txHash) return;
     std::string txHashStr = mvm::to_hex_string_fixed(*txHash, 64);
-    std::cerr << "[DEBUG] commitBufferForTxHash CALLED for txHash: " << txHashStr << std::endl;
     
     std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
     for (auto& pair : XapianManager::instances) {
@@ -104,28 +98,42 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
         if (manager_ptr) {
             std::vector<XapianLog::LogEntry> buffer_logs;
             {
-                std::lock_guard<std::shared_mutex> lock(manager_ptr->tx_buffers_mutex);
-                auto buf_it = manager_ptr->tx_buffers.find(txHashStr);
-                if (buf_it != manager_ptr->tx_buffers.end()) {
-                    buffer_logs = std::move(buf_it->second.xapian_doc_logs);
-                    manager_ptr->tx_buffers.erase(buf_it);
-                    manager_ptr->tx_counters.erase(txHashStr);
+                std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
+                auto it = manager_ptr->tx_buffers.find(txHashStr);
+                if (it != manager_ptr->tx_buffers.end()) {
+                    // BẮT BUỘC DÙNG COPY (Không dùng std::move)
+                    // Nếu dùng std::move, mảng bên trong tx_buffers sẽ lập tức bị rỗng.
+                    // Trong khoảng thời gian từ lúc move đến khi replay_log ghi xong vào Xapian DB,
+                    // các transaction song song khác trong Block-STM (cross-reading) nếu query txHash này
+                    // sẽ thấy mảng rỗng -> Phantom Read / sai lệch state.
+                    // Việc COPY đảm bảo dữ liệu luôn khả dụng trong tx_buffers cho tới khi DB gốc đã ghi xong.
+                    buffer_logs = it->second.xapian_doc_logs;
                 }
             }
             
             if (!buffer_logs.empty()) {
                 std::cerr << "[DEBUG] commitBufferForTxHash FOUND " << buffer_logs.size() << " logs for txHash: " << txHashStr << ". Committing!" << std::endl;
-                // Replay logs into the actual Xapian DB for this manager
+                
+                // Replay logs into the actual Xapian DB for this manager (replay_log will lock changes_mutex internally)
                 manager_ptr->replay_log(buffer_logs);
                 
 
+                
                 // Append them to comprehensive_log so they can be extracted
-                std::unique_lock<std::shared_mutex> comp_lock(manager_ptr->changes_mutex);
                 manager_ptr->comprehensive_log.xapian_doc_logs.insert(
                     manager_ptr->comprehensive_log.xapian_doc_logs.end(),
                     std::make_move_iterator(buffer_logs.begin()),
                     std::make_move_iterator(buffer_logs.end())
                 );
+                
+                // XÓA BUFFER (Sau khi dữ liệu đã nằm an toàn trong Xapian DB)
+                // Lúc này, các transaction khác có thể đọc trực tiếp từ DB qua `read_db`,
+                // nên việc xóa dữ liệu tạm trong `tx_buffers` là an toàn và không gây race condition.
+                {
+                    std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
+                    manager_ptr->tx_buffers.erase(txHashStr);
+                    manager_ptr->tx_counters.erase(txHashStr);
+                }
             }
         }
     }

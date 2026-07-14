@@ -22,6 +22,7 @@ type MVMExecuteResult struct {
 	MapCodeChange    map[string][]byte
 	MapCodeHash      map[string][]byte
 	MapStorageChange map[string]map[string][]byte
+	MapStorageRead   map[string][][]byte
 	MapPublicKeyBls  map[string][]byte // New for Block-STM
 	MapAccountType   map[string]uint8  // New for Block-STM
 	MapNewDeviceKey  map[string][]byte // New for Block-STM
