@@ -1240,7 +1240,9 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	n.registry.mu.Lock()
 	n.registry.keys = make(map[string][]byte)
 	for _, kv := range kvs {
-		n.registry.keys[hex.EncodeToString(kv[0])] = kv[0]
+		keyCopy := make([]byte, len(kv[0]))
+		copy(keyCopy, kv[0])
+		n.registry.keys[hex.EncodeToString(kv[0])] = keyCopy
 	}
 	n.registry.mu.Unlock()
 	n.registryChanged = true

@@ -101,7 +101,13 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                 std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
                 auto it = manager_ptr->tx_buffers.find(txHashStr);
                 if (it != manager_ptr->tx_buffers.end()) {
-                    buffer_logs = it->second.xapian_doc_logs; // COPY instead of move
+                    // BẮT BUỘC DÙNG COPY (Không dùng std::move)
+                    // Nếu dùng std::move, mảng bên trong tx_buffers sẽ lập tức bị rỗng.
+                    // Trong khoảng thời gian từ lúc move đến khi replay_log ghi xong vào Xapian DB,
+                    // các transaction song song khác trong Block-STM (cross-reading) nếu query txHash này
+                    // sẽ thấy mảng rỗng -> Phantom Read / sai lệch state.
+                    // Việc COPY đảm bảo dữ liệu luôn khả dụng trong tx_buffers cho tới khi DB gốc đã ghi xong.
+                    buffer_logs = it->second.xapian_doc_logs;
                 }
             }
             
@@ -120,7 +126,9 @@ void XapianRegistry::commitBufferForTxHash(const uint256_t* txHash) {
                     std::make_move_iterator(buffer_logs.end())
                 );
                 
-                // NOW it is safe to erase from tx_buffers, because read_db has the data
+                // XÓA BUFFER (Sau khi dữ liệu đã nằm an toàn trong Xapian DB)
+                // Lúc này, các transaction khác có thể đọc trực tiếp từ DB qua `read_db`,
+                // nên việc xóa dữ liệu tạm trong `tx_buffers` là an toàn và không gây race condition.
                 {
                     std::lock_guard<std::mutex> buffer_lock(manager_ptr->tx_buffers_mutex);
                     manager_ptr->tx_buffers.erase(txHashStr);
