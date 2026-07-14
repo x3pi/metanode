@@ -320,11 +320,6 @@ func (sp *StateProcessor) GetExecuteSCResultsHashCore(ctx context.Context, block
 		txs = append(txs, tx)
 	}
 
-	for _, tx := range txs {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
-	}
-
 	freeFeeMap := sp.blockProcessor.chainState.GetFreeFeeAddress()
 	if len(freeFeeMap) == 0 {
 		return common.Hash{}, errors.New("free fee address not found in chainState")

@@ -90,7 +90,6 @@ func fireAndForgetRegister(config *c_config.ClientConfig, accounts []*AccountInf
 		rawNewDeviceKey := crypto.Keccak256(rawNewDeviceKeyBytes)
 		deviceKey := crypto.Keccak256Hash(rawNewDeviceKey)
 
-		tx.UpdateRelatedAddresses([][]byte{})
 		tx.UpdateDeriver(deviceKey, newDeviceKey)
 		tx.SetSign(blsKeyPair.PrivateKey())
 

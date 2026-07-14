@@ -484,7 +484,7 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 
 	for _, tx := range transactions {
 		tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BATCH_UNMARSHALED", "Transaction received in batch from client")
-		
+
 		// Always save txHash → connection mapping for txHash-based receipt delivery and timing traces
 		if tp.env != nil {
 			tp.env.StoreTxHashConnEntry(tx.Hash(), TxHashConnEntry{
@@ -502,9 +502,6 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
 
 	for _, tx := range transactions {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
-
 		// Check cross-chain batchSubmit
 		if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
 			inputData := tx.CallData().Input()
@@ -544,7 +541,7 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 			}
 		}
 		var allErrors = make([]error, 0, len(processedTxs))
-		
+
 		for i := 0; i < len(processedTxs); i += maxChunkSize {
 			end := i + maxChunkSize
 			if end > len(processedTxs) {
@@ -554,7 +551,7 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 			chunkErrs := tp.AddTransactionsToPool(chunkTxs)
 			allErrors = append(allErrors, chunkErrs...)
 		}
-		
+
 		for i, err := range allErrors {
 			if err != nil {
 				tx_processor.GlobalTxTraceStore.UpdateTrace(processedTxs[i].Hash(), "MEMPOOL_ADD_FAILED", err.Error())
@@ -607,9 +604,6 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
 
-	tx.AddRelatedAddress(tx.FromAddress())
-	tx.AddRelatedAddress(tx.ToAddress())
-
 	// Check cross-chain batchSubmit
 	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
 	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
@@ -642,8 +636,6 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 
 func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) ([]byte, error) {
 	var output []byte
-	tx.AddRelatedAddress(tx.FromAddress())
-	tx.AddRelatedAddress(tx.ToAddress())
 
 	// Check cross-chain batchSubmit
 	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()

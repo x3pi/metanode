@@ -271,8 +271,7 @@ noWait := flag.Bool("no-wait", false, "Exit immediately after injection, do not 
 			continue
 		}
 
-		// 3. Update related addresses and sign with BLS key
-		internalTx.UpdateRelatedAddresses([][]byte{})
+		// 3. Sign with BLS key
 		internalTx.UpdateDeriver(common.Hash{}, common.Hash{})
 		internalTx.SetSign(pKey)
 

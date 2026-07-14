@@ -151,8 +151,6 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
 	}
 	for i, tx := range txs {
-		tx.AddRelatedAddress(tx.FromAddress())
-		tx.AddRelatedAddress(tx.ToAddress())
 		// Build grouping addresses: filter out native dispatch addresses
 		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
 		for _, addr := range tx.RelatedAddresses() {
@@ -716,7 +714,7 @@ func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[st
 		if tInjection > 0 && tReceipt >= tInjection {
 			totalEndToEnd += (tReceipt - tInjection)
 			countEndToEnd++
-			
+
 			if earliestReceipt == -1 || tReceipt < earliestReceipt {
 				earliestReceipt = tReceipt
 			}
@@ -748,7 +746,7 @@ func (api *MtnAPI) GetPerformanceMetrics(ctx context.Context, limit int) (map[st
 
 	tps := 0.0
 	if latestReceipt > earliestReceipt && countEndToEnd > 1 {
-		diffSecs := float64(latestReceipt - earliestReceipt) / 1000.0
+		diffSecs := float64(latestReceipt-earliestReceipt) / 1000.0
 		if diffSecs > 0 {
 			tps = float64(countEndToEnd) / diffSecs
 		}
