@@ -245,7 +245,7 @@ func (stm *TrueBlockSTM) runParallelSegment(
 				case <-workerCtx.Done():
 					return
 				case txIndex := <-validateOut:
-					stm.validateOne(txIndex, execIn, validateIn, &activeTasks, doneCh)
+					stm.validateOne(workerCtx, txIndex, execIn, validateIn, &activeTasks, doneCh)
 				}
 			}
 		}()
@@ -262,6 +262,19 @@ func (stm *TrueBlockSTM) runParallelSegment(
 	workerCancel()
 	wg.Wait()
 	return completed
+}
+
+// pushTask enqueues v onto ch, giving up when ctx is cancelled. Sends into the
+// unbounded-queue inlets can only block once the queue drainer goroutine has
+// exited (i.e. the context was cancelled while the inlet buffer was full);
+// without the ctx branch a worker stuck on such a send would never return and
+// runParallelSegment's wg.Wait() would hang forever. Skipping the send on
+// cancel is safe: the segment is being torn down and its result is discarded.
+func pushTask(ctx context.Context, ch chan<- uint32, v uint32) {
+	select {
+	case ch <- v:
+	case <-ctx.Done():
+	}
 }
 
 // execOne executes a single TX incarnation (native transfer, EVM call/deploy,
@@ -356,7 +369,7 @@ func (stm *TrueBlockSTM) execOne(
 			}
 		}
 		atomic.AddInt32(activeTasks, 1)
-		validateCh <- txIndex
+		pushTask(ctx, validateCh, txIndex)
 		return
 	}
 
@@ -598,17 +611,18 @@ func (stm *TrueBlockSTM) execOne(
 
 	// Targeted cascade invalidation: only TXs that actually read one of the
 	// addresses/slots this incarnation just wrote need to be re-validated.
-	stm.cascadeInvalidate(int(txIndex), mvccDB.WriteSet, scDB.WriteSet, validateCh, activeTasks, doneCh)
+	stm.cascadeInvalidate(ctx, int(txIndex), mvccDB.WriteSet, scDB.WriteSet, validateCh, activeTasks, doneCh)
 
 	// 6. Push to validation AFTER cascading is fully complete
 	atomic.AddInt32(activeTasks, 1)
-	validateCh <- txIndex
+	pushTask(ctx, validateCh, txIndex)
 }
 
 // validateOne checks whether txIndex's recorded read set is still consistent
 // with the highest committed version of everything it read. If not, it is
 // aborted and re-queued for execution.
 func (stm *TrueBlockSTM) validateOne(
+	ctx context.Context,
 	txIndex uint32,
 	execCh chan<- uint32,
 	validateCh chan<- uint32,
@@ -675,7 +689,7 @@ func (stm *TrueBlockSTM) validateOne(
 		// ABORT & RE-EXECUTE (100% No Fork Guarantee)
 		if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
 			atomic.AddInt32(activeTasks, 1)
-			execCh <- txIndex
+			pushTask(ctx, execCh, txIndex)
 		}
 	}
 }
@@ -744,6 +758,7 @@ func (stm *TrueBlockSTM) registerReaders(txIndex int, readSet map[common.Address
 // TXs that never read any of these keys are left untouched — unlike the
 // naive approach of rechecking every TX with index > txIndex.
 func (stm *TrueBlockSTM) cascadeInvalidate(
+	ctx context.Context,
 	txIndex int,
 	writeSet map[common.Address]bool,
 	scWriteSet map[string]bool,
@@ -784,7 +799,7 @@ func (stm *TrueBlockSTM) cascadeInvalidate(
 				// Increment inc to invalidate ongoing stale validation
 				if atomic.CompareAndSwapUint64(&stm.txState[j], s, packState(inc+1, 1)) {
 					atomic.AddInt32(activeTasks, 1)
-					validateCh <- uint32(j)
+					pushTask(ctx, validateCh, uint32(j))
 					break
 				}
 			} else {
