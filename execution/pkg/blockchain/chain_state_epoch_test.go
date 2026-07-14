@@ -141,23 +141,12 @@ func TestEpochDataBackupFilePersistence(t *testing.T) {
 	err := cs.SaveEpochData()
 	require.NoError(t, err, "SaveEpochData should not fail with backup file")
 
-	// Verify backup file exists and contains correct data
+	// Verify backup file exists.
+	// NOTE: SaveEpochData persists in RLP (not JSON) format — the round-trip
+	// below via LoadEpochData() (which transparently handles both RLP and
+	// legacy JSON, see its '{' prefix check) is the correct way to verify
+	// content, not a raw json.Unmarshal of the file.
 	require.FileExists(t, backupFile, "Backup file should exist")
-
-	fileData, err := os.ReadFile(backupFile)
-	require.NoError(t, err, "Should be able to read backup file")
-
-	var epochData EpochData
-	err = json.Unmarshal(fileData, &epochData)
-	require.NoError(t, err, "Should be able to unmarshal data from backup file")
-
-	assert.Equal(t, cs.currentEpoch, epochData.CurrentEpoch)
-	assert.Equal(t, cs.epochStartTimestampMs, epochData.EpochStartTimestampMs)
-	assert.Equal(t, len(cs.epochStartTimestamps), len(epochData.EpochStartTimestamps))
-
-	for epoch, timestamp := range cs.epochStartTimestamps {
-		assert.Equal(t, timestamp, epochData.EpochStartTimestamps[epoch])
-	}
 
 	// Create new ChainState to test loading
 	cs2 := &ChainState{
@@ -212,15 +201,17 @@ func TestForceSaveEpochData(t *testing.T) {
 	// Verify backup file was created
 	require.FileExists(t, backupFile, "Backup file should exist after force save")
 
-	// Verify content
-	fileData, err := os.ReadFile(backupFile)
-	require.NoError(t, err)
+	// Verify content via LoadEpochData(), which transparently decodes the
+	// RLP format SaveEpochData actually writes (with legacy-JSON fallback) —
+	// a raw json.Unmarshal of the file is not valid for the current format.
+	cs2 := &ChainState{
+		storageManager:       nil, // Force use backup file
+		epochStartTimestamps: make(map[uint64]uint64),
+	}
+	err := cs2.LoadEpochData()
+	require.NoError(t, err, "LoadEpochData should not fail with backup file")
 
-	var epochData EpochData
-	err = json.Unmarshal(fileData, &epochData)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(5), epochData.CurrentEpoch)
-	assert.Equal(t, uint64(1640995200000), epochData.EpochStartTimestampMs)
-	assert.Len(t, epochData.EpochStartTimestamps, 6)
+	assert.Equal(t, uint64(5), cs2.currentEpoch)
+	assert.Equal(t, uint64(1640995200000), cs2.epochStartTimestampMs)
+	assert.Len(t, cs2.epochStartTimestamps, 6)
 }

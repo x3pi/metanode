@@ -14,7 +14,6 @@ func TestPipelineStats_IncrAndSnapshot(t *testing.T) {
 	ps.IncrBlocksReceived(5)
 	ps.IncrTxsCommitted(80)
 	ps.SetPoolSize(10)
-	ps.SetPendingSize(3)
 	ps.SetLastBlock(42)
 	ps.SetLastCommitTimeUs(1500)
 

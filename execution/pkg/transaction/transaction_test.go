@@ -298,6 +298,11 @@ func TestTransaction_SetSignatureValues(t *testing.T) {
 	assert.Equal(t, s, gotS)
 }
 
+// AddRelatedAddress/UpdateRelatedAddresses/BRelatedAddresses are deprecated
+// no-ops: RelatedAddresses() now always resolves dynamically to
+// [FromAddress, ToAddress] (see GetRelatedAddresses), independent of these
+// setters. These tests document that behavior instead of exercising the old
+// accumulator, which no longer exists.
 func TestTransaction_AddRelatedAddress(t *testing.T) {
 	tx := makeTestTransaction().(*Transaction)
 	addr1 := common.HexToAddress("0x1111")
@@ -305,9 +310,11 @@ func TestTransaction_AddRelatedAddress(t *testing.T) {
 
 	tx.AddRelatedAddress(addr1)
 	tx.AddRelatedAddress(addr2)
-	tx.AddRelatedAddress(addr1) // duplicate, should not add
+	tx.AddRelatedAddress(addr1) // no-op regardless: setter is deprecated
 
-	assert.Len(t, tx.BRelatedAddresses(), 2, "should not add duplicate address")
+	assert.Empty(t, tx.BRelatedAddresses(), "BRelatedAddresses is a deprecated no-op")
+	assert.ElementsMatch(t, []common.Address{tx.FromAddress(), tx.ToAddress()}, tx.RelatedAddresses(),
+		"RelatedAddresses() always dynamically resolves to [From, To]")
 }
 
 func TestTransaction_UpdateRelatedAddresses(t *testing.T) {
@@ -316,8 +323,11 @@ func TestTransaction_UpdateRelatedAddresses(t *testing.T) {
 		common.HexToAddress("0x1111").Bytes(),
 		common.HexToAddress("0x2222").Bytes(),
 	}
-	tx.UpdateRelatedAddresses(addrs)
-	assert.Len(t, tx.BRelatedAddresses(), 2)
+	tx.UpdateRelatedAddresses(addrs) // no-op regardless: setter is deprecated
+
+	assert.Empty(t, tx.BRelatedAddresses(), "BRelatedAddresses is a deprecated no-op")
+	assert.ElementsMatch(t, []common.Address{tx.FromAddress(), tx.ToAddress()}, tx.RelatedAddresses(),
+		"RelatedAddresses() always dynamically resolves to [From, To]")
 }
 
 // ──────────────────────────────────────────────

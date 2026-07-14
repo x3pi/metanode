@@ -92,6 +92,18 @@ func (m *mockTx) GetNonce() uint64 {
 	return m.nonce
 }
 
+// ToAddress and IsRegularTransaction are called by classifyGroup() (via
+// GroupTransactionsDeterministic) even though this test only cares about
+// grouping/ordering by FromAddress+Nonce. types.Transaction is embedded as a
+// nil interface, so without these overrides classifyGroup panics with a nil
+// pointer dereference instead of exercising the code path under test.
+func (m *mockTx) ToAddress() common.Address {
+	return common.Address{}
+}
+func (m *mockTx) IsRegularTransaction() bool {
+	return true
+}
+
 // ============================================================================
 // TestGroupTransactionsDeterministic
 // Tests the FORK-SAFE grouping logic
