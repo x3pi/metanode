@@ -114,9 +114,7 @@ impl SignedBlockVerifier {
         }
 
         // Verify the block's signature.
-        let sig_start = std::time::Instant::now();
         block.verify_signature(&self.context)?;
-        let sig_elapsed = sig_start.elapsed();
 
         // Verify the block's ancestor refs are consistent with the block's round,
         // and total parent stakes reach quorum.
@@ -234,9 +232,7 @@ impl SignedBlockVerifier {
         }
         let batch: Vec<&[u8]> = txs.iter().map(|t| t.data()).collect();
 
-        let tx_start = std::time::Instant::now();
         self.check_transactions(&batch)?;
-        let tx_elapsed = tx_start.elapsed();
 
         // Enforce group size limit per block/commit
         if !crate::tx_group_filter::verify_group_limit(&txs, crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
@@ -245,9 +241,7 @@ impl SignedBlockVerifier {
             ));
         }
 
-        let num_txs = txs.len();
-        if sig_elapsed.as_micros() > 500 || tx_elapsed.as_micros() > 500 || num_txs > 0 {
-        }
+
 
         Ok(())
     }
@@ -313,7 +307,6 @@ impl BlockVerifier for SignedBlockVerifier {
         block: SignedBlock,
         serialized_block: Bytes,
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
-        let start = std::time::Instant::now();
         self.verify_block(&block)?;
 
 
@@ -332,11 +325,7 @@ impl BlockVerifier for SignedBlockVerifier {
             vec![]
         };
 
-        let total_elapsed = start.elapsed();
 
-        let num_txs = verified_block.tx_digests().len();
-        if total_elapsed.as_micros() > 500 || num_txs > 0 {
-        }
         Ok((verified_block, rejected_transactions))
     }
 

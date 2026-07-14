@@ -5,7 +5,6 @@
 #include "mvm/util.h"
 #include "mvm/gas.h"
 #include "mvm_linker.hpp"
-struct GetStorageValue_return { unsigned char *value; bool success; };
 #include "mvm/exception.h"
 #include "state.h"
 

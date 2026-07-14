@@ -181,16 +181,21 @@ func (stm *TrueBlockSTM) runParallelSegment(
 ) bool {
 	segSize := hi - lo
 
-	execCh := make(chan uint32, segSize*5)
-	validateCh := make(chan uint32, segSize*5)
+	execIn := make(chan uint32, segSize)
+	execOut := make(chan uint32, segSize)
+	validateIn := make(chan uint32, segSize)
+	validateOut := make(chan uint32, segSize)
 	doneCh := make(chan struct{})
 
 	for i := lo; i < hi; i++ {
-		execCh <- uint32(i)
+		execIn <- uint32(i)
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
+
+	go runUnboundedQueue(workerCtx, execIn, execOut)
+	go runUnboundedQueue(workerCtx, validateIn, validateOut)
 
 	var activeTasks int32 = int32(segSize)
 	var wg sync.WaitGroup
@@ -223,8 +228,8 @@ func (stm *TrueBlockSTM) runParallelSegment(
 				select {
 				case <-workerCtx.Done():
 					return
-				case txIndex := <-execCh:
-					stm.execOne(ctx, chainState, leaderAddr, lastBlockHeader, txIndex, execCh, validateCh, &activeTasks, doneCh)
+				case txIndex := <-execOut:
+					stm.execOne(ctx, chainState, leaderAddr, lastBlockHeader, txIndex, execIn, validateIn, &activeTasks, doneCh)
 				}
 			}
 		}()
@@ -239,8 +244,8 @@ func (stm *TrueBlockSTM) runParallelSegment(
 				select {
 				case <-workerCtx.Done():
 					return
-				case txIndex := <-validateCh:
-					stm.validateOne(txIndex, execCh, validateCh, &activeTasks, doneCh)
+				case txIndex := <-validateOut:
+					stm.validateOne(txIndex, execIn, validateIn, &activeTasks, doneCh)
 				}
 			}
 		}()

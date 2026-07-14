@@ -12,13 +12,16 @@ option(ENABLE_DEBUG "Enable debug compilation (O0, -g) instead of release (O3)" 
 
 if(ENABLE_DEBUG)
     # Debug mode flags
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -DDEBUG_MODE")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -DDEBUG_MODE")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -DDEBUG_MODE -DMVM_LINKER_BUILD")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -DDEBUG_MODE -DMVM_LINKER_BUILD")
     message(STATUS "MVM_LINKER is configured in DEBUG mode (ENABLE_DEBUG=ON)")
 else()
     # Release mode flags
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions")
+    # NOTE: We keep `-g` combined with `-O3` here to preserve debug symbols.
+    # This ensures that if a std::abort() or crash occurs on-chain, the panic stack trace 
+    # will show exactly which function and line number caused it, without slowing down execution.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -g -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions -DMVM_LINKER_BUILD")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -march=native -mtune=native -ffunction-sections -fdata-sections -finline-functions -DMVM_LINKER_BUILD")
     message(STATUS "MVM_LINKER is configured in RELEASE mode (ENABLE_DEBUG=OFF)")
 endif()
 

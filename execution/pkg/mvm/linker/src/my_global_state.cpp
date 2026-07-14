@@ -3,7 +3,6 @@
 #include "mvm/gas.h"
 #include "mvm/util.h"
 #include "mvm_linker.hpp"
-struct GetStorageValue_return { unsigned char *value; bool success; };
 #include "state.h"
 #include <iostream>
 

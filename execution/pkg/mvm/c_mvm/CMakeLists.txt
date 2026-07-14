@@ -5,16 +5,18 @@ project(mvm)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 # Set C compiler flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os -g")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")
+# NOTE: We keep `-g` combined with `-O3` in Release mode. 
+# This preserves debug symbols (function names & line numbers) for meaningful stack traces 
+# when the node crashes (e.g. std::abort fail-stop), without sacrificing execution speed.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -g")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mtune=native")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -finline-functions")
 
 # Set C++ compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Os -g")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+# NOTE: Same as above, `-O3 -g` ensures "shallow debugging" (stack traces) is available in production.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=native")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
