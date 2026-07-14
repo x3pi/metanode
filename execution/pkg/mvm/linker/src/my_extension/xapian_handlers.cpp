@@ -1035,8 +1035,16 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
               << std::endl;
   } catch (const std::exception &e) {
     std::cerr << "Error in operation: " << e.what() << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (...) {
     std::cerr << "Unknown error" << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed with unknown error. Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   }
 
   return mvm::Code(32, 0);
