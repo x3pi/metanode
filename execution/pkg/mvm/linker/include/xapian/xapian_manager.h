@@ -58,6 +58,20 @@ public:
     std::condition_variable pool_cv;
   };
   SearchDbPool search_pool;
+
+  // --- Simple Read Database Pool ---
+  // Pool lớn dành riêng cho các thao tác đọc nhẹ (get_data, get_value, get_document).
+  // Tách biệt khỏi SearchDbPool để tránh bị block bởi các câu lệnh full-text search nặng nề.
+  static constexpr int MAX_CONCURRENT_SIMPLE_READS = 64;
+  struct SimpleReadDbPool {
+    std::vector<Xapian::Database*> pool;
+    std::vector<uint8_t> in_use;
+    std::vector<uint64_t> last_gen;
+    std::mutex pool_mutex;
+    std::condition_variable pool_cv;
+  };
+  SimpleReadDbPool simple_read_pool;
+
   // Tăng lên mỗi khi db.commit() thành công. acquireSearchDb() so sánh với
   // last_gen[i] của từng slot để biết slot đó có "cũ" hơn commit gần nhất hay
   // không, và reopen() ngay trước khi giao cho caller — bất kể lúc commit
@@ -70,6 +84,9 @@ public:
   // Caller PHẢI gọi releaseSearchDb(db) sau khi xong.
   Xapian::Database* acquireSearchDb();
   void releaseSearchDb(Xapian::Database* db);
+
+  Xapian::Database* acquireSimpleReadDb();
+  void releaseSimpleReadDb(Xapian::Database* db);
 
   mutable std::mutex db_mutex; // Mutex to protect all operations on db
 
