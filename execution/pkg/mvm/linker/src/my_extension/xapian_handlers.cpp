@@ -1031,8 +1031,15 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       return encodedData;
     }
   } catch (const Xapian::Error &e) {
+    // Xapian::Error KHÔNG kế thừa std::exception nên phải abort riêng ở nhánh
+    // này — nếu không, lỗi Xapian on-chain sẽ âm thầm trả Code(32,0) và gây
+    // lệch state giữa các node (fork) thay vì fail-stop.
     std::cerr << "[ERROR] FullDatabase Xapian error: " << e.get_description()
               << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
+    }
   } catch (const std::exception &e) {
     std::cerr << "Error in operation: " << e.what() << std::endl;
     if (!this->isOffChain) {

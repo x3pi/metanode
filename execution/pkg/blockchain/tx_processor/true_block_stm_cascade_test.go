@@ -1,6 +1,7 @@
 package tx_processor
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 
@@ -82,7 +83,7 @@ func TestCascadeInvalidate_OnlyTargetsRegisteredReadersAfterWriter(t *testing.T)
 	doneCh := make(chan struct{})
 	var activeTasks int32
 
-	stm.cascadeInvalidate(1, map[common.Address]bool{addrX: true}, nil, validateCh, &activeTasks, doneCh)
+	stm.cascadeInvalidate(context.Background(), 1, map[common.Address]bool{addrX: true}, nil, validateCh, &activeTasks, doneCh)
 
 	close(validateCh)
 	pushed := map[uint32]bool{}
@@ -128,7 +129,7 @@ func TestCascadeInvalidate_NoRegisteredReadersIsNoop(t *testing.T) {
 	doneCh := make(chan struct{})
 	var activeTasks int32
 
-	stm.cascadeInvalidate(1, map[common.Address]bool{{0xEE}: true}, nil, validateCh, &activeTasks, doneCh)
+	stm.cascadeInvalidate(context.Background(), 1, map[common.Address]bool{{0xEE}: true}, nil, validateCh, &activeTasks, doneCh)
 
 	select {
 	case idx := <-validateCh:

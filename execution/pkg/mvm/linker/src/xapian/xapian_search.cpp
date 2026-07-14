@@ -263,27 +263,42 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
   } catch (const Xapian::DatabaseModifiedError &e) {
       std::cerr << "[XapianSearcher] DatabaseModifiedError, retry " << retry
                 << "/" << MAX_RETRY << ": " << e.get_msg() << std::endl;
-      try { 
-        db_ptr->reopen(); 
+      if (retry == MAX_RETRY) {
+        // Hết MAX_RETRY mà DB vẫn báo DatabaseModifiedError — không trả kết quả
+        // của lần chạy thất bại; ném lỗi để outer-catch của handler xử lý
+        // (on-chain: abort fail-stop, offchain: lỗi mềm).
+        throw std::runtime_error("XapianSearcher: search failed after max retries (DatabaseModifiedError persisted)");
+      }
+      try {
+        db_ptr->reopen();
         need_retry = true;
       } catch (const std::exception& re) {
+        // Reopen thất bại nghĩa là DB pointer đã hỏng — không được âm thầm trả
+        // kết quả một phần (partial): trên đường on-chain điều đó sẽ gây lệch
+        // state giữa các node. Ném lỗi để handler quyết định (on-chain: abort
+        // fail-stop, offchain: trả lỗi mềm). Cả 2 call site của search() đều
+        // nằm trong try/catch của FullDatabase/FullDatabaseV1 nên exception
+        // này KHÔNG văng qua biên CGO.
         std::cerr << "[XapianSearcher] Database reopen failed: " << re.what() << std::endl;
-        break; // Do not retry if reopen fails, to avoid segfault with broken DB pointer
+        throw std::runtime_error(std::string("XapianSearcher: reopen failed after DatabaseModifiedError: ") + re.what());
       } catch (...) {
         std::cerr << "[XapianSearcher] Database reopen failed with unknown error." << std::endl;
-        break;
+        throw std::runtime_error("XapianSearcher: reopen failed after DatabaseModifiedError (unknown error)");
       }
     } catch (const Xapian::Error &e) {
     std::cerr << "Lỗi Xapian trong quá trình search: " << e.get_msg()
               << std::endl;
-    // DO NOT THROW here! Throwing across CGO boundary causes Go runtime to crash with SIGSEGV/SIGABRT!
-    return {results, 0};
+    // Ném tiếp thay vì trả kết quả rỗng: kết quả rỗng do lỗi I/O cục bộ là
+    // không tất định (node lỗi thấy rỗng, node khác thấy dữ liệu) → fork.
+    // Exception được outer-catch của FullDatabase/FullDatabaseV1 xử lý
+    // (on-chain: std::abort fail-stop, offchain: Code(32,0)) — không qua CGO.
+    throw;
   } catch (const std::exception &e) {
     std::cerr << "C++ Exception trong quá trình search: " << e.what() << std::endl;
-    return {results, 0};
+    throw;
   } catch (...) {
     std::cerr << "Unknown C++ Exception trong quá trình search." << std::endl;
-    return {results, 0};
+    throw;
   }
   if (!need_retry) break; // success, exit retry loop
   } // end retry loop
