@@ -38,11 +38,11 @@ impl ConsensusNode {
         let clock = Arc::new(Clock::default());
         let transaction_verifier = Arc::new(NoopTransactionVerifier);
 
-        // Initialize persistent transaction directory
-        let tx_dir = config.storage_path.join("tx_payloads");
-        std::fs::create_dir_all(&tx_dir).ok();
-        let _ = consensus_core::TX_PAYLOAD_DIR.set(tx_dir);
-        
+        // Per-TX disk payload persistence removed — TxPayloadCache is now
+        // in-memory only. See consensus_core::transaction::TX_PAYLOAD_DIR
+        // doc comment for why (one-file-per-TX writes were a measured
+        // contributor to multi-second stalls under burst load).
+
         let dag_has_history = Self::check_dag_history(config, storage);
 
         // Recovery barrier activation logic
