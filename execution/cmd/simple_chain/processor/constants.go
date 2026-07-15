@@ -26,7 +26,7 @@ const (
 
 	// TxBatchSize is the number of transactions per batch in GenerateBlocksInBatch.
 	// TPS OPTIMIZATION: 500K -> 50000 to allow larger blocks under heavy load.
-	TxBatchSize = 50000
+	TxBatchSize = 4000
 
 	// BlockInBatch is the number of blocks to create from a single batch.
 	BlockInBatch = 10
