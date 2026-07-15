@@ -18,6 +18,25 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 use consensus_types::block::TxDigest;
 
+/// Previously configured the on-disk directory for per-transaction payload
+/// persistence (one file per TX digest) in TxPayloadCache, so BlockV3
+/// (compact block) reconstruction could recover a TX body after a restart
+/// even if it had been evicted from the in-memory cache. Removed: writing
+/// one file per TX synchronously (via spawn_blocking) made every submitted
+/// transaction do its own disk I/O, and at burst volume this queued tens of
+/// thousands of blocking-pool writes at once — a measured, primary
+/// contributor to multi-second consensus stalls under load.
+///
+/// Trade-off accepted by removing this: TxPayloadCache is now purely
+/// in-memory (bounded, LRU-evicted). If a node restarts and needs to
+/// reconstruct a compact block whose TX bodies were evicted or never cached
+/// locally, that TX body is unrecoverable from disk. In the normal
+/// operating case (no restart), this has no effect. If a TX body actually
+/// goes missing this way, the affected client's TX is simply not included /
+/// resolvable in that block and can be resubmitted — consistent with how
+/// this codebase already treats other transient TX loss (see tx_recycler).
+/// No longer read or written; kept only so any external code still calling
+/// `.set()` on it continues to compile without effect.
 pub static TX_PAYLOAD_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 pub struct TxPayloadCache {
@@ -46,42 +65,22 @@ impl TxPayloadCache {
         }
         self.queue.push_back(digest);
 
-        // Persist to disk if directory is configured
-        if let Some(dir) = TX_PAYLOAD_DIR.get().cloned() {
-            let file_name = digest.0.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-            let file_path = dir.join(file_name);
-            let tx_data = tx.clone().into_data();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn_blocking(move || {
-                    if !file_path.exists() {
-                        let _ = std::fs::write(file_path, tx_data);
-                    }
-                });
-            } else {
-                std::thread::spawn(move || {
-                    if !file_path.exists() {
-                        let _ = std::fs::write(file_path, tx_data);
-                    }
-                });
-            }
-        }
+        // DISK PERSISTENCE REMOVED (see TX_PAYLOAD_DIR doc comment): this
+        // used to spawn_blocking a std::fs::write per TX here, unconditionally,
+        // on every submitted transaction. Under a TX burst that meant tens of
+        // thousands of individual one-file-per-tx writes queued onto the
+        // tokio blocking pool at once — traced (via perf, sudo-authorized by
+        // the operator) to real multi-second stalls in consensus round
+        // advancement on this repo's single-box multi-node test rigs, visible
+        // as std::fs::write::inner dominating on-CPU samples during bursts.
+        // In-memory cache only now; see TX_PAYLOAD_DIR for the durability
+        // trade-off this accepts.
 
         self.map.insert(digest, tx);
     }
 
     pub fn get(&self, digest: &TxDigest) -> Option<Transaction> {
-        if let Some(tx) = self.map.get(digest) {
-            return Some(tx.clone());
-        }
-        // Try reading from disk
-        if let Some(dir) = TX_PAYLOAD_DIR.get() {
-            let file_name = digest.0.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-            let file_path = dir.join(file_name);
-            if let Ok(data) = std::fs::read(file_path) {
-                return Some(Transaction::new(data));
-            }
-        }
-        None
+        self.map.get(digest).cloned()
     }
 }
 

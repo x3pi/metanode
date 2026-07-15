@@ -224,7 +224,7 @@ impl TxRecycler {
     /// Load pending TXs from disk on startup
     pub async fn load_from_disk(&self, storage_path: &str) {
         let file_path = format!("{}/tx_recycler_pending.dat", storage_path);
-        if let Ok(data) = std::fs::read(&file_path) {
+        if let Ok(data) = tokio::fs::read(&file_path).await {
             let mut offset = 0;
             let mut loaded_count = 0;
             while offset + 32 < data.len() {
@@ -284,8 +284,21 @@ impl TxRecycler {
 
         let file_path = format!("{}/tx_recycler_pending.dat", storage_path);
         let temp_path = format!("{}.tmp", file_path);
-        if std::fs::write(&temp_path, data).is_ok() {
-            let _ = std::fs::rename(temp_path, file_path);
+        // ROOT CAUSE FIX: this is an async fn driven by a 5s interval.tick()
+        // background loop, but was calling std::fs::write/rename — SYNCHRONOUS
+        // blocking I/O — directly inside async context instead of via
+        // tokio::fs (async) or spawn_blocking. `data` serializes the entire
+        // recycler `pending` set, which after a TX burst can be tens of
+        // thousands of entries (multi-MB). The blocking write occupied one of
+        // the limited tokio worker threads for the duration of the write,
+        // and on this repo's single-box multi-node test rigs — where several
+        // node processes hit the same physical disk on the same 5s cadence —
+        // was traced to multi-second consensus round-advancement stalls that
+        // landed almost exactly every 5s after a burst. block_store.rs uses
+        // tokio::fs::write for the same kind of periodic snapshot write;
+        // mirror that here instead of std::fs.
+        if tokio::fs::write(&temp_path, data).await.is_ok() {
+            let _ = tokio::fs::rename(temp_path, file_path).await;
         }
     }
 }
