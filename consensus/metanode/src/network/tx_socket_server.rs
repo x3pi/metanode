@@ -255,8 +255,11 @@ impl TxSocketServer {
                                     let mut forwarded = false;
                                     let mut explicitly_rejected = false;
                                     let tx_hex_list: Vec<String> = transactions_to_submit.iter().map(hex::encode).collect();
+                                    // Delegated submission: this SyncOnly node cannot propose,
+                                    // so the receiving validator MUST submit to its consensus.
                                     let req = crate::network::peer_rpc::SubmitTransactionRequest {
                                         transactions_hex: tx_hex_list,
+                                        cache_only: false,
                                     };
                                     let body_arc_opt = match serde_json::to_string(&req) {
                                         Ok(body) => Some(std::sync::Arc::new(body)),
@@ -356,12 +359,20 @@ impl TxSocketServer {
 
             let mut all_succeeded = true;
             for (_chunk_idx, chunk_vec) in chunks_list.into_iter().enumerate() {
-                // Background mempool pre-propagation to peer validators to populate their caches
-                // and completely avoid missing transaction sync stalls during consensus voting.
+                // Background mempool pre-propagation to peer validators to populate their
+                // compact-block (BlockV3) reconstruction caches and avoid missing
+                // transaction fetch stalls during consensus voting.
+                // cache_only=true: this node submits the TXs to its OWN proposer below;
+                // peers must NOT also propose them. Before this flag, every peer
+                // re-submitted the same TXs into its own consensus → each TX proposed by
+                // up to `committee_size` validators → Go execution rejected the duplicate
+                // copies one-by-one via nonce checks (262K rejects per 150K real TXs),
+                // which dominated end-to-end latency.
                 if !broadcast_peers.is_empty() {
                     let tx_hex_list: Vec<String> = chunk_vec.iter().map(hex::encode).collect();
                     let req = crate::network::peer_rpc::SubmitTransactionRequest {
                         transactions_hex: tx_hex_list,
+                        cache_only: true,
                     };
                     match serde_json::to_string(&req) {
                         Ok(body) => {

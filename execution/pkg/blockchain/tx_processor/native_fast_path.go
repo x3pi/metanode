@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -58,6 +59,15 @@ func processNativeTransfersFastPath(
 	startFastPath := time.Now()
 	globalAccountDB := chainState.GetAccountStateDB()
 
+	// Rate-limit per-TX reject warnings. When duplicate TXs flood a block
+	// (e.g. the same TX proposed by multiple validators), logging one Warn
+	// line per reject becomes a real hot-path cost: a measured 50K-TX blast
+	// produced 262K reject lines, and the log formatting+I/O alone inflated
+	// ProcessTX by hundreds of ms per block. Log the first few, then only
+	// report the total at the end of the block.
+	const maxRejectLogsPerBlock = 5
+	var nonceRejectCount, verifyRejectCount atomic.Int64
+
 	// Pre-allocate result containers per group (indexed by original group order)
 	type groupResult struct {
 		txs       []types.Transaction
@@ -67,8 +77,15 @@ func processNativeTransfersFastPath(
 	}
 	results := make([]groupResult, len(groupedGroups))
 
-	// Use worker pool with NumCPU workers
-	numWorkers := runtime.NumCPU()
+	// Use worker pool sized to GOMAXPROCS (not raw NumCPU): when GOMAXPROCS
+	// is left at its default, GOMAXPROCS(0) == NumCPU(), so this is a no-op
+	// for normal one-node-per-machine deployments. When an operator caps
+	// GOMAXPROCS (e.g. co-located nodes sharing one machine — see main.go),
+	// this pool now shrinks to match instead of still spawning NumCPU()
+	// goroutines that each make blocking NOMT/CGO calls, which spin up OS
+	// threads independent of GOMAXPROCS and were traced to real scheduler
+	// contention under load even after GOMAXPROCS itself was capped.
+	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers > len(groupedGroups) {
 		numWorkers = len(groupedGroups)
 	}
@@ -137,7 +154,9 @@ func processNativeTransfersFastPath(
 						if enableTrace {
 							GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_VERIFY_REJECTED", errVerify.Description)
 						}
-						logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] %v for tx %s (From: %s)", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
+						if verifyRejectCount.Add(1) <= maxRejectLogsPerBlock {
+							logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] %v for tx %s (From: %s)", errVerify.Description, tx.Hash().Hex(), tx.FromAddress().Hex())
+						}
 						if errVerify.Code != 120001 { // InvalidNonce code
 							failedSenders[tx.FromAddress()] = true
 						}
@@ -151,7 +170,9 @@ func processNativeTransfersFastPath(
 							if enableTrace {
 								GlobalTxTraceStore.UpdateTrace(tx.Hash(), "BLOCK_NONCE_REJECTED", err.Error())
 							}
-							logger.Warn("❌ [FAST-PATH-NONCE-REJECT] %v for tx %s (From: %s)", err, tx.Hash().Hex(), tx.FromAddress().Hex())
+							if nonceRejectCount.Add(1) <= maxRejectLogsPerBlock {
+								logger.Warn("❌ [FAST-PATH-NONCE-REJECT] %v for tx %s (From: %s)", err, tx.Hash().Hex(), tx.FromAddress().Hex())
+							}
 							if tx.GetNonce() > as.Nonce() {
 								failedSenders[tx.FromAddress()] = true
 							}
@@ -303,6 +324,12 @@ func processNativeTransfersFastPath(
 		float64(len(allTransactions))/elapsed.Seconds(),
 		numWorkers,
 	)
+	if n := nonceRejectCount.Load(); n > maxRejectLogsPerBlock {
+		logger.Warn("❌ [FAST-PATH-NONCE-REJECT] total %d txs rejected by nonce check in this block (only first %d logged) — likely duplicate copies of already-committed txs", n, maxRejectLogsPerBlock)
+	}
+	if n := verifyRejectCount.Load(); n > maxRejectLogsPerBlock {
+		logger.Warn("❌ [FAST-PATH-VERIFY-REJECT] total %d txs rejected by verification in this block (only first %d logged)", n, maxRejectLogsPerBlock)
+	}
 
 	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap
 }

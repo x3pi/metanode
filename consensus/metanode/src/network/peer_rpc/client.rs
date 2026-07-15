@@ -635,6 +635,7 @@ async fn fetch_executable_block_batch(
 }
 
 /// Forward a batch of transactions to a validator node via /submit_transaction HTTP POST endpoint.
+/// The receiver submits them to its local consensus (delegated submission).
 pub async fn forward_transactions_to_peer(
     peer_address: &str,
     transactions: Vec<Vec<u8>>,
@@ -642,6 +643,7 @@ pub async fn forward_transactions_to_peer(
     let tx_hex_list: Vec<String> = transactions.iter().map(hex::encode).collect();
     let req = SubmitTransactionRequest {
         transactions_hex: tx_hex_list,
+        cache_only: false,
     };
     let body = serde_json::to_string(&req)?;
     forward_serialized_transactions_to_peer(peer_address, std::sync::Arc::new(body)).await
