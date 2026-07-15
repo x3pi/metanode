@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use mysten_metrics::start_prometheus_server;
+use mysten_metrics::RegistryService;
 use prometheus::Registry;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -71,9 +72,10 @@ impl InitializedNode {
         }
 
         // Start metrics server if enabled
+        let mut local_registry_service = None;
         let _metrics_addr = if node_config.enable_metrics {
             let metrics_addr = SocketAddr::from(([127, 0, 0, 1], node_config.metrics_port));
-            let _registry_service = start_prometheus_server(metrics_addr);
+            local_registry_service = Some(Arc::new(mysten_metrics::start_prometheus_server_with_registry(metrics_addr, registry.clone())));
             info!(
                 "Metrics server started at http://127.0.0.1:{}/metrics",
                 node_config.metrics_port
@@ -84,8 +86,11 @@ impl InitializedNode {
             None
         };
 
-        // Get registry from RegistryService if metrics is enabled, otherwise create a new one
-        let registry = if let Some(ref rs) = registry_service {
+        // Combine provided registry service or local one
+        let final_registry_service = registry_service.or(local_registry_service);
+
+        // Get registry from RegistryService if metrics is enabled, otherwise use the provided one
+        let registry = if let Some(ref rs) = final_registry_service {
             rs.default_registry()
         } else {
             registry
