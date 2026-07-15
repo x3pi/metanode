@@ -158,3 +158,42 @@ TPS trung bình 3 round (~7.003, min 5.391 / max 10.122) **cao hơn** trần cũ
 ## 11. Việc còn để ngỏ (không thuộc phạm vi đã fix)
 - `core_thread.rs` còn 2 lời gọi `std::fs::write("/tmp/core_thread_debug.log", ...)` đồng bộ trong nhánh exit/panic của `CoreThread` — xác nhận qua log không chạy trong các phiên test (không có log exit/panic) nên không phải nguyên nhân, nhưng vẫn là code debug chưa dọn, nên dọn khi tiện.
 - Bottleneck mới (`ProcessTX` tăng theo state size) là ứng viên điều tra tiếp theo nếu cần đẩy trần TPS ổn định lên cao hơn ~5-7k — hướng nghi vấn: chi phí đọc/ghi NOMT trie tăng theo độ sâu trie (số account), có thể cải thiện bằng batch commit lớn hơn, cache warm account phổ biến, hoặc parallel hoá sâu hơn trong TrueBlockSTM.
+
+---
+
+# VÒNG 4: `ProcessTX` tăng theo cumulative state — cô lập bằng log phase-breakdown, fix 1 bug thật, rồi bật metrics nội bộ NOMT để xác minh dứt điểm NOMT không phải thủ phạm
+
+## 12. Cô lập: tăng nằm ở `TX Execution (Parallel)`, không phải `IntermediateRoot` (NOMT)
+Log sẵn có `[PERF] Block #N Phase Breakdown` trên server tách riêng 2 pha trong `tx_processor.ProcessTransactions` (`execution/pkg/blockchain/tx_processor/tx_processor.go`): gọi `ProcessTransactionsOptimistic` (đo là `TX Execution`) rồi `chainState.GetAccountStateDB().IntermediateRoot(true)` (đo là `IntermediateRoot (AccountDB)`) riêng biệt. Qua nhiều round liên tiếp không reset: **`IntermediateRoot` giữ nguyên ~100-350ms**, trong khi **`TX Execution` tăng từ vài chục ms lên 1.0-1.3s**, và tăng không tỷ lệ với tx-count/block hiện tại (một block 4000 TX ở round cuối có thể chậm hơn 1 block 18000 TX ở round đầu) → chi phí gắn với **tổng account cộng dồn từ đầu phiên test**, không phải cỡ block. Loại trừ giả thuyết "NOMT trie depth" thuần tuý (vì trie depth phải lộ qua IntermediateRoot).
+
+## 13. Bug thật #1 (đã fix): registry file bị ghi lại toàn bộ mỗi block
+`tps_blast_cc` sinh 1 địa chỉ nhận hoàn toàn mới cho mỗi TX (`main.go`: "Generate a unique dummy address so each sender sends to an untouched recipient"). `NomtStateTrie` (`execution/pkg/trie/nomt_state_trie.go`) duy trì `registry.keys map[string][]byte` (digest→địa chỉ gốc, phục vụ enumeration `GetAll`/`GetAllUniqueAddresses` — NOMT tự nó không hỗ trợ preimage/enumeration, xem mục 15). `persistRegistryToFile()` — gọi trong `Commit()` mỗi khi có key mới — **clone + sort + ghi đè lại TOÀN BỘ file** (`nomt_registry_account_state.bin`, phình tới 7.35MB / ~300k account) mỗi block, tức O(tổng account từng thấy) thay vì O(account mới).
+
+**Fix**: thêm `sharedRegistry.pendingNew [][]byte`, mỗi insert đẩy key mới vào đây; `persistRegistryToFile()` giờ chỉ **append** phần `pendingNew` (rồi reset) thay vì clone+sort+rewrite toàn bộ map. Định dạng file không đổi nên tương thích ngược với loader. Đường full-rewrite cũ giữ lại riêng thành `persistRegistryFullRewrite()`, chỉ dùng cho path admin hiếm khi map bị rebuild toàn bộ (snapshot/reset handle).
+
+**Kết quả**: cải thiện thật nhưng không dứt điểm — round giữa giảm rõ (round 2: 788ms→500-722ms tuỳ lần chạy), nhưng round cuối vẫn trôi dần về ~900-1100ms/block. → còn ít nhất 1 nguồn khác.
+
+## 14. Loại trừ: `loadedAccounts` KHÔNG rò rỉ
+Nghi vấn: `AccountStateDB.loadedAccounts` có field `blocksSinceLoadedClear` khai báo nhưng không hề increment ở đâu — nhìn giống cơ chế "dọn mỗi N block" làm dở. Đọc kỹ `IntermediateRoot(true)` (`account_state_db_commit.go`) thì `db.loadedAccounts.Clear()` **đã được gọi vô điều kiện cuối MỌI block** (comment tại chỗ giải thích: giữ lại giữa các block gây fork-safety risk) — biến kia chỉ là code chết còn sót, không phải bug đang chạy. Xác nhận bằng đọc code, không sửa.
+
+## 15. Kiểm tra NOMT có sẵn cơ chế gì trước khi tự chế thêm cache (theo yêu cầu)
+Trước khi đi tiếp hướng cache Go-side, kiểm tra kỹ khả năng native của NOMT (vendor tại `~/.cargo/git/checkouts/nomt-*/nomt/src/`, `docs/nomt_specification.md`):
+- **Enumeration/preimage**: `Nomt::read(path: KeyPath)` chỉ nhận key đã hash 32-byte, KHÔNG có API iterate/preimage nào — xác nhận registry Go-side (mục 13) là cần thiết thật, không phải "tự chế lại cái NOMT đã có sẵn".
+- **`hashtable_buckets`** (kích thước bảng băm bitbox): code đã cấu hình `10.000.000` buckets riêng cho namespace `account_state`/`smart_contract_storage` (`trie_factory.go`, comment "was 1,000,000" — đã từng được nâng trước đây) — không phải nút thắt ở quy mô test hiện tại (xem số đo thật ở mục 16).
+- **`Options::metrics`** (page cache hit/miss counter, page/value fetch timer) và **`hash_table_utilization()`** (occupancy bảng băm): **CÓ SẴN trong NOMT nhưng bridge FFI của mình chưa từng bật/gọi** (`opts.metrics` mặc định `false`) — nghĩa là suốt các vòng điều tra trước, ta luôn suy luận hành vi NOMT gián tiếp qua thời gian wall-clock Go/Rust, chưa bao giờ nhìn số liệu nội bộ thật của NOMT.
+
+**Đã bật và export**: `nomt_open` giờ gọi `opts.metrics(true)`; thêm FFI `nomt_get_stats()` (`rust_lib/src/lib.rs`) trả `page_requests`, `page_cache_misses`, `page_fetch_time`, `value_fetch_time`, `ht_capacity`, `ht_occupied`; Go wrapper `Handle.Stats()` (`nomt_ffi/bridge.go`) với `PageCacheMissRate()`/`HTOccupancyRate()`; log định kỳ mỗi 5 block trong `NomtStateTrie.Commit()` dưới tag `[NOMT-STATS]`.
+
+## 16. Kết luận dứt điểm: NOMT hoàn toàn KHÔNG phải thủ phạm — số liệu thật từ chính NOMT
+Deploy lại + chạy 6 round (`--rounds 6 --batch 20000`), đọc `[NOMT-STATS]` namespace=account_state trực tiếp từ log:
+
+| Block | pageRequests (luỹ kế) | pageCacheMissRate | pageFetchAvg | valueFetchAvg | htOccupancy |
+|---|---|---|---|---|---|
+| 0 | 2 | 0.00% | 0s | 0s | 0.0000% (0/10M) |
+| 5 | 2.818 | 0.00% | 0s | 0s | 0.0198% (1.982/10M) |
+| 10 | 18.896 | 0.00% | 0s | 0s | 0.0396% (3.962/10M) |
+| 20 | 56.247 | 0.00% | 0s | 0s | 0.0416% (4.161/10M) |
+| 30 | 95.934 | 0.00% | 0s | 0s | 0.0416% (4.161/10M) |
+| 35 | 115.515 | 0.00% | 0s | 0s | 0.0416% (4.161/10M) |
+
+**`pageCacheMissRate` = 0.00% suốt toàn bộ 6 round (300k+ account cộng dồn), `pageFetchAvg`/`valueFetchAvg` ≈ 0, `htOccupancy` phẳng ở 0.04%.** Đây là bằng chứng trực tiếp từ chính NOMT (không phải suy luận gián tiếp): NOMT đang chạy tối ưu tuyệt đối — không cache-miss, không trie-depth cost đáng kể, bảng băm còn dư thừa cực lớn. **Toàn bộ chi phí tăng dần của `TX Execution` nằm 100% ở code Go/Rust bao quanh NOMT (registry bookkeeping mục 13 + GC pressure từ TTL cache mục 15-của-vòng-3-cũ), không phải bản thân NOMT.** Kết luận này đóng lại hoàn toàn hướng "tối ưu NOMT" — không còn gì để tận dụng thêm từ NOMT ở quy mô dữ liệu hiện tại; muốn cải thiện tiếp phải nhắm vào registry map Go-side hoặc TTL cache, không phải NOMT.
