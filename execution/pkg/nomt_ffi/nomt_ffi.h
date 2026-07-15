@@ -22,6 +22,7 @@ typedef struct FinishedSessionHandle FinishedSessionHandle;
 NomtHandle* nomt_open(const char* path, int commit_concurrency, int page_cache_mb, int leaf_cache_mb, int hashtable_buckets, int preallocate_ht);
 void nomt_close(NomtHandle* handle);
 int nomt_root(const NomtHandle* handle, uint8_t* root_out);
+int nomt_get_stats(const NomtHandle* handle, uint64_t* out_page_requests, uint64_t* out_page_cache_misses, uint64_t* out_page_fetch_time_ns, uint64_t* out_value_fetch_time_ns, uint64_t* out_ht_capacity, uint64_t* out_ht_occupied);
 
 /* Read operations (thread-safe, can be called concurrently) */
 int nomt_read(const NomtHandle* handle, const uint8_t* key, uint8_t* val_out, size_t val_max_len, size_t* val_actual_len);

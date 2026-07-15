@@ -171,6 +171,12 @@ pub unsafe extern "C" fn nomt_open(
     // Enable page cache prepopulation for predictable worst-case performance
     opts.prepopulate_page_cache(true);
 
+    // Enable NOMT's own internal metrics (page cache hit/miss counters, page/value
+    // fetch timers). Cheap atomic counters — negligible overhead — and gives direct
+    // visibility into whether NOMT's page cache is actually thrashing, instead of
+    // inferring it indirectly from Go/Rust wall-clock timings. Read via nomt_get_stats.
+    opts.metrics(true);
+
     match Nomt::<Blake3Hasher>::open(opts) {
         Ok(db) => {
             let handle = Box::new(NomtHandle { db: std::sync::Arc::new(db) });
@@ -224,6 +230,55 @@ pub unsafe extern "C" fn nomt_root(handle: *const NomtHandle, root_out: *mut u8)
 
     unsafe {
         ptr::copy_nonoverlapping(root_bytes.as_ptr(), root_out, 32);
+    }
+    0
+
+    })
+}
+
+/// Read NOMT's own internal diagnostics: page cache hit/miss counters, average
+/// page/value fetch times, and hashtable (bitbox) bucket occupancy.
+///
+/// Requires metrics to be enabled (done unconditionally in `nomt_open`). All
+/// timer values are in nanoseconds; a timer with zero recorded samples is
+/// reported as 0.
+///
+/// # Returns
+/// 0 on success, -1 on failure (null handle/pointers).
+#[no_mangle]
+pub unsafe extern "C" fn nomt_get_stats(
+    handle: *const NomtHandle,
+    out_page_requests: *mut u64,
+    out_page_cache_misses: *mut u64,
+    out_page_fetch_time_ns: *mut u64,
+    out_value_fetch_time_ns: *mut u64,
+    out_ht_capacity: *mut u64,
+    out_ht_occupied: *mut u64,
+) -> c_int {
+    ffi_catch_unwind!(-1, {
+
+    if handle.is_null()
+        || out_page_requests.is_null()
+        || out_page_cache_misses.is_null()
+        || out_page_fetch_time_ns.is_null()
+        || out_value_fetch_time_ns.is_null()
+        || out_ht_capacity.is_null()
+        || out_ht_occupied.is_null()
+    {
+        return -1;
+    }
+
+    let handle = unsafe { &*handle };
+    let metrics = handle.db.metrics();
+    let ht = handle.db.hash_table_utilization();
+
+    unsafe {
+        *out_page_requests = metrics.get_page_requests();
+        *out_page_cache_misses = metrics.get_page_cache_misses();
+        *out_page_fetch_time_ns = metrics.get_page_fetch_time().unwrap_or(0);
+        *out_value_fetch_time_ns = metrics.get_value_fetch_time().unwrap_or(0);
+        *out_ht_capacity = ht.capacity as u64;
+        *out_ht_occupied = ht.occupied as u64;
     }
     0
 
