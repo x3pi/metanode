@@ -606,7 +606,10 @@ pub const METRICS_ROUTE: &str = "/metrics";
 // A RegistryService is returned that can be used to get access in prometheus Registries.
 pub fn start_prometheus_server(addr: SocketAddr) -> RegistryService {
     let registry = Registry::new();
+    start_prometheus_server_with_registry(addr, registry)
+}
 
+pub fn start_prometheus_server_with_registry(addr: SocketAddr, registry: Registry) -> RegistryService {
     let registry_service = RegistryService::new(registry);
 
     if cfg!(msim) {
