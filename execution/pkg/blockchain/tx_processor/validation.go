@@ -432,7 +432,8 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 		return
 	}
 
-	numWorkers := runtime.NumCPU()
+	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
+	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers > 128 {
 		numWorkers = 128
 	}

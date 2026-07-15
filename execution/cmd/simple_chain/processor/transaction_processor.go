@@ -533,7 +533,8 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 		// or allow overriding via simple chain configuration.
 		maxChunkSize := tp.chainState.GetConfig().TxVerificationChunkSize
 		if maxChunkSize <= 0 {
-			maxChunkSize = runtime.NumCPU() * 50
+			// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
+			maxChunkSize = runtime.GOMAXPROCS(0) * 50
 			if maxChunkSize < 1000 {
 				maxChunkSize = 1000
 			} else if maxChunkSize > 5000 {

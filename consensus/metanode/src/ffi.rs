@@ -308,11 +308,40 @@ pub unsafe extern "C" fn metanode_start_consensus(
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Build the Tokio multi-threaded runtime
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
+            // Build the Tokio multi-threaded runtime.
+            //
+            // CPU co-location: when multiple node processes share one machine
+            // (e.g. this repo's single-box test rigs), Tokio's default of
+            // spawning num_cpus::get() worker threads per process means N
+            // co-located nodes collectively oversubscribe the shared cores up
+            // to Nx — independently of and in addition to Go's GOMAXPROCS,
+            // since this runtime is a separate thread pool from the Go
+            // scheduler even though both live in the same OS process via FFI.
+            // Reuse the GOMAXPROCS env var (already set per-node in the
+            // systemd unit for exactly this reason) as the worker-thread cap
+            // here too, so operators only need to tune one knob per node.
+            // Unset (typical single-node-per-machine deployments): Tokio's
+            // own num_cpus() default is used, unchanged.
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            if let Some(n) = std::env::var("GOMAXPROCS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
             {
+                builder.worker_threads(n);
+                // Tokio's spawn_blocking pool (used by dag_state/write.rs,
+                // commit_observer.rs, commit_finalizer, etc. — 11 call sites
+                // in this codebase) is a SEPARATE pool from worker_threads
+                // and defaults to up to 512 threads regardless of the cap
+                // above. Under a co-located-node burst this pool can spin up
+                // hundreds of short-lived OS threads on top of the already
+                // fair-shared worker threads, which is consistent with the
+                // 560 total OS threads observed at idle on this box (vs. the
+                // ~40 expected from worker_threads=20 + Go's GOMAXPROCS=20).
+                // Cap it to the same fair share.
+                builder.max_blocking_threads(n);
+            }
+            let rt = match builder.enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
                     error!("Failed to create tokio runtime: {}", e);

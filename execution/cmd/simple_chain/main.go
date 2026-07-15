@@ -112,8 +112,23 @@ func main() {
 	numCPU := runtime.NumCPU()
 	maxProcs := numCPU // Use 1x CPU cores, since hyperthreading is usually enough, and 104 is big enough
 
+	// Respect an explicit GOMAXPROCS override (e.g. when multiple nodes are
+	// co-located on the same machine, as in single-box test rigs). Go's
+	// runtime already reads this env var at process init, but that value is
+	// silently clobbered by the unconditional runtime.GOMAXPROCS(numCPU)
+	// call below unless we check for it here — with N node processes each
+	// defaulting to numCPU workers, they collectively oversubscribe the
+	// shared cores by up to Nx, causing multi-second scheduler stalls under
+	// load (observed: 104-core box, 5 co-located nodes, procs_running spiked
+	// to 85 during a TX burst, consensus round advancement stalled ~2s).
+	if v := os.Getenv("GOMAXPROCS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxProcs = n
+		}
+	}
+
 	oldMaxProcs := runtime.GOMAXPROCS(maxProcs)
-	logger.Info("[PERF] Increased GOMAXPROCS from %d to %d (NumCPU: %d)", oldMaxProcs, maxProcs, numCPU)
+	logger.Info("[PERF] Set GOMAXPROCS from %d to %d (NumCPU: %d)", oldMaxProcs, maxProcs, numCPU)
 
 	// PERFORMANCE OPTIMIZATION: Set default GC/memory limits.
 	// These defaults may be overridden by config after NewApp() loads JSON config.
