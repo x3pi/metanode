@@ -1498,6 +1498,21 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	tFinish := time.Since(tFinishStart)
 
 	logger.Info("[NOMT-COMMIT-PERF] dirty=%d | BeginSession=%v | BatchRecordRead=%v | BatchWrite=%v | Finish=%v", dirtyCount, tBegin, tRead, tWrite, tFinish)
+
+	// Periodically surface NOMT's own internal diagnostics (page cache hit rate,
+	// avg page/value fetch time, hashtable occupancy) instead of only inferring
+	// NOMT behavior from Go/Rust wall-clock wrappers. Gated to every 5 blocks
+	// per namespace to keep this cheap-but-non-zero FFI call off the hot path.
+	if n.currentCommitBlock%5 == 0 {
+		if stats, statsErr := n.handle.Stats(); statsErr == nil {
+			logger.Info("[NOMT-STATS] namespace=%s block=%d pageRequests=%d pageCacheMissRate=%.2f%% pageFetchAvg=%v valueFetchAvg=%v htOccupancy=%.4f%% (occupied=%d/cap=%d)",
+				string(n.namespace), n.currentCommitBlock,
+				stats.PageRequests, stats.PageCacheMissRate()*100,
+				time.Duration(stats.PageFetchTimeNs), time.Duration(stats.ValueFetchTimeNs),
+				stats.HTOccupancyRate()*100, stats.HTOccupied, stats.HTCapacity)
+		}
+	}
+
 	newRootHash := e_common.BytesToHash(newRoot[:])
 
 	n.sessionMu.Lock()

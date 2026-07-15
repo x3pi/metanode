@@ -397,6 +397,60 @@ func (h *Handle) Root() ([32]byte, error) {
 	return root, nil
 }
 
+// Stats holds NOMT's own internal diagnostics for a database instance:
+// page cache hit/miss counters, average page/value fetch latency, and
+// hashtable (bitbox) bucket occupancy. See nomt_get_stats in the Rust FFI.
+type Stats struct {
+	PageRequests     uint64
+	PageCacheMisses  uint64
+	PageFetchTimeNs  uint64
+	ValueFetchTimeNs uint64
+	HTCapacity       uint64
+	HTOccupied       uint64
+}
+
+// PageCacheMissRate returns the fraction of page requests that missed NOMT's
+// in-memory page cache, in [0,1]. Returns 0 if there were no requests yet.
+func (s Stats) PageCacheMissRate() float64 {
+	if s.PageRequests == 0 {
+		return 0
+	}
+	return float64(s.PageCacheMisses) / float64(s.PageRequests)
+}
+
+// HTOccupancyRate returns the hashtable (bitbox) bucket occupancy in [0,1].
+// NOMT's own docs note performance likely degrades beyond 0.9.
+func (s Stats) HTOccupancyRate() float64 {
+	if s.HTCapacity == 0 {
+		return 0
+	}
+	return float64(s.HTOccupied) / float64(s.HTCapacity)
+}
+
+// Stats reads NOMT's own internal metrics/utilization counters for this
+// database instance. Metrics collection is enabled unconditionally in
+// nomt_open, so this is always populated (page/value fetch timers read 0
+// until at least one request has been recorded).
+func (h *Handle) Stats() (Stats, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var s Stats
+	ret := C.nomt_get_stats(
+		h.ptr,
+		(*C.uint64_t)(&s.PageRequests),
+		(*C.uint64_t)(&s.PageCacheMisses),
+		(*C.uint64_t)(&s.PageFetchTimeNs),
+		(*C.uint64_t)(&s.ValueFetchTimeNs),
+		(*C.uint64_t)(&s.HTCapacity),
+		(*C.uint64_t)(&s.HTOccupied),
+	)
+	if ret != 0 {
+		return s, fmt.Errorf("nomt_ffi: failed to get stats")
+	}
+	return s, nil
+}
+
 // global pool to prevent memory churn on hot path reads
 var readBufPool = sync.Pool{
 	New: func() interface{} {
