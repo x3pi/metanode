@@ -102,30 +102,6 @@
       "hostname": "node-3",
       "authority_key": "pYhgRLMe32H7XbKo0U/lO9bE09TpHwCztb5qIXb0oGvIA/xL/20TwnoZhIEHOLhBA35DU9PbKcNJ2AEFMuOW79lqNmSHWBnc8MWRJbMN6m6goHgb1I7BhJc74A6U1yPW",
       "protocol_key": "q48Ki5GeSVWin2Z5Jt4HQl9Ig1C1yqQqwcht7rNCfP4="
-    },
-    {
-      "address": "0x42e067b0ceb410a585f24fead248dc9ce18abd3c",
-      "eth_private_key": "0x65221f7e221690653c12d7bd2aa47786c8d62b053ac12c77e363d92bd7dba2bc",
-      "primary_address": "192.168.1.230:6204",
-      "worker_address": "192.168.1.230:4016",
-      "p2p_address": "/ip4/192.168.1.230/tcp/9104",
-      "description": "Validator node-4",
-      "website": "",
-      "image": "",
-      "commission_rate": 5,
-      "min_self_delegation": "1000000000000000000",
-      "accumulated_rewards_per_share": "0",
-      "delegator_stakes": [
-        {
-          "address": "0x42e067b0ceb410a585f24fead248dc9ce18abd3c",
-          "amount": "1000000000000000000000"
-        }
-      ],
-      "total_staked_amount": "1000000000000000000000",
-      "network_key": "uzIjkTy7/kzOjjRerz4LIfgCwvA1icFXs2+lSGqskV0=",
-      "hostname": "node-4",
-      "authority_key": "t6Jhp+JAVyNf++wsCLyI2IvL1tSU0PvJRrA/DuXL6pX+3UiHC+cWSlzGXwnn/bpNAKjOgomzd8wDHh68IpvGjZnDFrb6f07fI6TbqDtK9QkdSqKZsg3XOUKGQexUwg9S",
-      "protocol_key": "XK7cRXdIY49HS7Ii3V3OTdfiQOplKHAJxqRX8O/AAPo="
     }
   ],
   "alloc": [
