@@ -18,6 +18,34 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+use std::collections::{HashSet, VecDeque};
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+const MAX_TX_CACHE_SIZE: usize = 200_000;
+
+static RECENT_TXS: Lazy<Mutex<(VecDeque<[u8; 32]>, HashSet<[u8; 32]>)>> = Lazy::new(|| {
+    Mutex::new((VecDeque::with_capacity(MAX_TX_CACHE_SIZE), HashSet::with_capacity(MAX_TX_CACHE_SIZE)))
+});
+
+fn is_duplicate(hash: &[u8; 32]) -> bool {
+    let mut cache = match RECENT_TXS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if cache.1.contains(hash) {
+        true
+    } else {
+        if cache.0.len() >= MAX_TX_CACHE_SIZE {
+            if let Some(old) = cache.0.pop_front() {
+                cache.1.remove(&old);
+            }
+        }
+        cache.0.push_back(*hash);
+        cache.1.insert(*hash);
+        false
+    }
+}
 
 use crate::node::executor_client::ExecutorClient;
 
@@ -727,6 +755,55 @@ impl PeerRpcServer {
 
         let tx_count = submit_req.transactions_hex.len();
 
+        // Pre-propagation mode (validator→validator): only populate the
+        // compact-block (BlockV3) reconstruction cache so this node can
+        // verify/reconstruct the origin validator's compact blocks without a
+        // fetch round-trip. Do NOT submit to the local proposer — the origin
+        // validator proposes these TXs itself; submitting here too made every
+        // validator propose the same TXs (up to committee_size duplicate
+        // copies per TX), which the Go execution layer then rejected
+        // one-by-one via nonce checks and which dominated E2E latency.
+        // Deliberately does not touch is_duplicate(): marking gossiped TXs as
+        // seen would make a later delegated submission (cache_only=false) of
+        // the same TX be skipped, losing it.
+        if submit_req.cache_only {
+            let mut cached = 0usize;
+            let mut decode_errors = Vec::new();
+            {
+                let mut cache = consensus_core::get_global_tx_cache().write();
+                for tx_hex in &submit_req.transactions_hex {
+                    match hex::decode(tx_hex) {
+                        Ok(tx_bytes) => {
+                            let tx = consensus_core::Transaction::new(tx_bytes);
+                            cache.insert(tx.digest(), tx);
+                            cached += 1;
+                        }
+                        Err(e) => decode_errors.push(format!("Hex decode error: {}", e)),
+                    }
+                }
+            }
+            info!(
+                "📡 [TX PRE-PROPAGATE] Cached {}/{} TX payloads from peer for compact-block reconstruction",
+                cached, tx_count
+            );
+            let response = SubmitTransactionResponse {
+                success: decode_errors.is_empty(),
+                count: cached,
+                error: if decode_errors.is_empty() {
+                    None
+                } else {
+                    Some(decode_errors.join("; "))
+                },
+            };
+            let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                json
+            );
+            let _ = stream.write_all(http_response.as_bytes()).await;
+            return;
+        }
+
         let mut submitter = None;
         if let Some(wrapped_node) = node {
             submitter = wrapped_node.read().await.transaction_submitter();
@@ -742,6 +819,15 @@ impl PeerRpcServer {
                 match hex::decode(tx_hex) {
                     Ok(tx_bytes) => {
                         let tx_hash = crate::types::tx_hash::calculate_transaction_hash_single(&tx_bytes);
+                        
+                        let mut hash_array = [0u8; 32];
+                        hash_array.copy_from_slice(&tx_hash);
+                        
+                        if is_duplicate(&hash_array) {
+                            // Skip duplicate TX
+                            continue;
+                        }
+
                         crate::ffi::update_go_tx_trace(&tx_hash, "RUST_PEER_RPC_RECEIVED", "Transaction forwarded from peer, received by Rust peer RPC server");
                         all_tx_bytes.push(tx_bytes);
                     }

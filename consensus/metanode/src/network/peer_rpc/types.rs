@@ -83,11 +83,25 @@ pub struct EpochBoundaryDataResponse {
 }
 
 /// Request for /submit_transaction endpoint (POST)
-/// Used by SyncOnly nodes to forward transactions to validators
+/// Used by SyncOnly nodes to forward transactions to validators, and by
+/// validators to pre-propagate TX payloads to peers (cache_only mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitTransactionRequest {
     /// Hex-encoded transactions data (batch)
     pub transactions_hex: Vec<String>,
+    /// When true, the receiver only inserts the TX payloads into its
+    /// compact-block (BlockV3) reconstruction cache and does NOT submit them
+    /// to its local consensus proposer. Used for validator→validator
+    /// pre-propagation: the origin validator already proposes these TXs
+    /// itself; having every peer also propose them multiplied each TX into
+    /// up to `committee_size` duplicate proposals, which the Go execution
+    /// layer then had to reject one-by-one via nonce checks (measured: 262K
+    /// rejects for 150K real TXs — the dominant E2E TPS bottleneck).
+    /// Defaults to false so requests from older senders (and SyncOnly
+    /// delegated submission, which MUST reach the proposer) keep the old
+    /// submit behavior.
+    #[serde(default)]
+    pub cache_only: bool,
 }
 
 /// Response for /submit_transaction endpoint
