@@ -203,7 +203,8 @@ func (stm *TrueBlockSTM) runParallelSegment(
 	// Scale worker counts to the machine instead of hardcoding 16/8: that
 	// under-uses large machines and oversubscribes small ones (e.g. CI
 	// runners), and each goroutine here is only useful up to available cores.
-	numCPU := runtime.NumCPU()
+	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
+	numCPU := runtime.GOMAXPROCS(0)
 	execWorkers := numCPU
 	if execWorkers < 1 {
 		execWorkers = 1

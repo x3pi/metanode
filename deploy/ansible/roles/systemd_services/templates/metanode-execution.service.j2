@@ -22,6 +22,15 @@ RestartSec=15s
 Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true"
 # Default to validator, but synconly logic can be injected here based on variables
 Environment=NODE_TYPE={% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}synconly{% else %}validator{% endif %}
+# CPU co-location: {{ active_nodes | length }} node processes share this machine's cores.
+# Each node's Go runtime otherwise defaults GOMAXPROCS to the FULL core count
+# (see execution/cmd/simple_chain/main.go), so N co-located nodes collectively
+# oversubscribe the shared cores up to Nx under load, stalling consensus round
+# advancement for multiple seconds during TX bursts (measured on a 104-core /
+# 5-node box: procs_running spiked to 85, ~2s round stalls). Cap per-node
+# GOMAXPROCS to a fair share, leaving headroom for the sibling Rust consensus
+# process and the OS. Override per-deployment via ansible var `gomaxprocs`.
+Environment=GOMAXPROCS={{ gomaxprocs | default(20) }}
 
 LimitNOFILE=100000
 LimitCORE=infinity

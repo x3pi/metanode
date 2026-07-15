@@ -455,7 +455,8 @@ func ParallelUnmarshalTransactions(txs []*pb.TransactionExe) []types.Transaction
 	}
 
 	numTxs := len(txs)
-	numWorkers := runtime.NumCPU()
+	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
+	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers > 16 {
 		numWorkers = 16
 	}
