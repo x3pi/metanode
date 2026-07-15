@@ -203,6 +203,12 @@ type sharedRegistry struct {
 	mu        sync.RWMutex
 	keys      map[string][]byte
 	persistMu sync.Mutex
+
+	// pendingNew holds raw keys inserted into `keys` since the last
+	// persistRegistryToFile() flush. Draining this instead of re-cloning
+	// the whole `keys` map keeps per-commit persistence O(new keys in this
+	// block) instead of O(total accounts ever seen) — see persistRegistryToFile.
+	pendingNew [][]byte
 }
 
 // registryFilePath returns the filesystem path for storing a namespace's key registry.
@@ -275,22 +281,91 @@ func (n *NomtStateTrie) updateRegistryCache() {
 	// No-op
 }
 
-// persistRegistryToFile writes the knownKeys registry to a file asynchronously and updates the memory cache.
+// persistRegistryToFile appends newly-registered keys to the registry file.
 // This is called after each Commit to ensure the registry is durable.
+//
+// PERF: this used to clone+sort+rewrite the ENTIRE `keys` map (O(total
+// accounts ever seen)) on every single commit. Under sustained load where
+// most transactions touch a brand-new address (e.g. the tps_blast_cc load
+// tester, which mints a fresh recipient per TX), that fired on nearly every
+// block, and with 150k+ accumulated accounts the clone+sort+7MB-rewrite
+// measurably added to "TX Execution" wall time (traced via block phase
+// logs: TX Execution grew 5-10x across a sustained test run while
+// IntermediateRoot — the actual Merkle root computation — stayed flat,
+// pointing at this registry bookkeeping rather than NOMT itself).
+//
+// Instead, only the keys added since the last flush (n.registry.pendingNew)
+// are appended to the file, making this O(new keys in this block) instead
+// of O(total accounts). The on-disk format is an unordered sequence of
+// length-prefixed keys, so appending is compatible with the existing
+// getSharedRegistry() loader without any format change; duplicate keys
+// across appends are harmless (the loader just overwrites the map entry
+// with the same value).
 func (n *NomtStateTrie) persistRegistryToFile() {
-	n.registry.mu.RLock()
-	if len(n.registry.keys) == 0 {
-		n.registry.mu.RUnlock()
+	n.registry.mu.Lock()
+	if len(n.registry.pendingNew) == 0 {
+		n.registry.mu.Unlock()
 		return
 	}
+	pending := n.registry.pendingNew
+	n.registry.pendingNew = nil
+	n.registry.mu.Unlock()
 
+	dbPath := n.handle.GetPath()
+	namespace := string(n.namespace)
+	filePath := registryFilePath(dbPath, namespace)
+
+	n.commitWg.Add(1)
+	go func(keys [][]byte, path string, reg *sharedRegistry) {
+		defer n.commitWg.Done()
+
+		var data []byte
+		for _, origKey := range keys {
+			if len(origKey) > 255 {
+				continue
+			}
+			data = append(data, byte(len(origKey)))
+			data = append(data, origKey...)
+		}
+		if len(data) == 0 {
+			return
+		}
+
+		// Prevent concurrent file writes for the same registry
+		reg.persistMu.Lock()
+		defer reg.persistMu.Unlock()
+
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			logger.Warn("[NomtStateTrie] Failed to open registry file %s for append: %v", path, err)
+			return
+		}
+		defer f.Close()
+		if _, err := f.Write(data); err != nil {
+			logger.Warn("[NomtStateTrie] Failed to append to registry file %s: %v", path, err)
+		}
+	}(pending, filePath, n.registry)
+}
+
+// persistRegistryFullRewrite clones, sorts, and atomically rewrites the
+// ENTIRE registry file from n.registry.keys. Unlike persistRegistryToFile,
+// this is O(total accounts) and is only meant for the rare administrative
+// path where the whole in-memory map was just rebuilt from scratch (e.g.
+// snapshot/handle reset), where an incremental append would be incomplete.
+func (n *NomtStateTrie) persistRegistryFullRewrite() {
+	n.registry.mu.Lock()
+	if len(n.registry.keys) == 0 {
+		n.registry.mu.Unlock()
+		return
+	}
 	cloned := make(map[string][]byte, len(n.registry.keys))
 	for k, v := range n.registry.keys {
 		cloned[k] = v
 	}
-	n.registry.mu.RUnlock()
+	// A full rewrite subsumes any not-yet-flushed incremental appends.
+	n.registry.pendingNew = nil
+	n.registry.mu.Unlock()
 
-	// Memory cache is a pointer to the sharedRegistry, so it's already updated.
 	dbPath := n.handle.GetPath()
 	namespace := string(n.namespace)
 
@@ -340,6 +415,9 @@ func (n *NomtStateTrie) RegisterKnownKey(key []byte) {
 		n.registry.keys = make(map[string][]byte)
 	}
 	hexKey := hex.EncodeToString(key)
+	if _, exists := n.registry.keys[hexKey]; !exists {
+		n.registry.pendingNew = append(n.registry.pendingNew, key)
+	}
 	n.registry.keys[hexKey] = key
 	logger.Debug("[NomtStateTrie] Registered recovered known key: %s", hexKey)
 }
@@ -732,6 +810,7 @@ func (n *NomtStateTrie) Update(key, value []byte) error {
 		n.registry.mu.Lock()
 		if _, exists := n.registry.keys[hexKey]; !exists {
 			n.registry.keys[hexKey] = keyCopy
+			n.registry.pendingNew = append(n.registry.pendingNew, keyCopy)
 			n.registryChanged = true
 		}
 		n.registry.mu.Unlock()
@@ -850,6 +929,7 @@ func (n *NomtStateTrie) BatchUpdate(keys, values [][]byte) error {
 		if !skipRegistry {
 			if _, exists := n.registry.keys[e.hexKey]; !exists {
 				n.registry.keys[e.hexKey] = e.originalKey
+				n.registry.pendingNew = append(n.registry.pendingNew, e.originalKey)
 				n.registryChanged = true
 			}
 		}
@@ -980,6 +1060,7 @@ func (n *NomtStateTrie) BatchUpdateWithCachedOldValues(keys, values, oldValues [
 		if !skipRegistry {
 			if _, exists := n.registry.keys[e.hexKey]; !exists {
 				n.registry.keys[e.hexKey] = e.originalKey
+				n.registry.pendingNew = append(n.registry.pendingNew, e.originalKey)
 				n.registryChanged = true
 			}
 		}
@@ -1258,8 +1339,9 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 	})
 	n.writerMu.Unlock()
 
-	// 4. Save registry to file
-	n.persistRegistryToFile()
+	// 4. Save registry to file (full rewrite: the whole map was just rebuilt,
+	// so there is no meaningful "pending" delta to append incrementally).
+	n.persistRegistryFullRewrite()
 
 	// 5. Populate keys/values into NOMT
 	if len(kvs) > 0 {
