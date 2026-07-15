@@ -283,7 +283,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "snapshot_source_dir": f"{install_dir}/data/execution",
         "snapshot_server_port": snapshot_port,
         "state_backend": "nomt",
-        "nomt_commit_concurrency": 64,
+        "nomt_commit_concurrency": args.nomt_commit_concurrency,
         "nomt_page_cache_mb": 4096,
         "nomt_leaf_cache_mb": 4096,
         "rust_config_path": f"{install_dir}/config/consensus.toml",
@@ -407,8 +407,18 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
-    parser.add_argument("--consensus-max-txs-per-block", type=int, default=50000,
-                        help="Maximum number of transactions proposed in a single consensus block (default: 50000)")
+    parser.add_argument("--consensus-max-txs-per-block", type=int, default=4000,
+                        help="Maximum number of transactions proposed in a single consensus block (default: 4000)")
+    parser.add_argument("--nomt-commit-concurrency", type=int, default=4,
+                        help="NOMT commit worker count per trie instance (default: 4, matching NOMT's own "
+                             "recommended default). Each node opens 2 NOMT instances, and each instance spins "
+                             "up ~2x this many dedicated OS threads (beatree-sync + nomt-commit thread pools) — "
+                             "independent of GOMAXPROCS/tokio tuning. The previous hardcoded value of 64 was "
+                             "sized for a single validator with exclusive access to a large machine; on a "
+                             "single-box rig running N co-located nodes it multiplies out to N x 2 x ~130 "
+                             "threads, which was traced to real CPU/scheduler contention (load average > 2x "
+                             "core count) during TX bursts. Raise this back up for genuine "
+                             "one-node-per-machine production deployments.")
     parser.add_argument("--snapshot-enabled", action="store_true",
                         help="Enable snapshotting (requires Btrfs/XFS)")
     return parser.parse_args()
@@ -505,6 +515,48 @@ def main():
                 print(f"\n  ❌ Failed to auto-merge into {genesis_target}: {e}")
         else:
             print(f"\n  ⚠️ Warning: Neither {genesis_target} nor {genesis_template} found. Could not auto-merge.")
+    else:
+        # synconly node: must NOT be a consensus committee member. If this
+        # hostname has a stale entry in genesis.json from a previous run
+        # (e.g. it used to be a validator, or was misconfigured), remove it.
+        # Leaving it in place silently inflates committee_size/quorum without
+        # the node ever running a consensus authority — every real validator
+        # then retries a doomed block-subscription to it forever, which was
+        # traced to periodic multi-second block-delivery stalls under load.
+        genesis_target = "genesis.json"
+        if os.path.exists(genesis_target):
+            try:
+                with open(genesis_target, "r") as gf:
+                    g_data = json.load(gf)
+
+                if "validators" in g_data:
+                    before = len(g_data["validators"])
+                    g_data["validators"] = [
+                        v for v in g_data["validators"] if v.get("hostname") != args.hostname
+                    ]
+                    removed = before - len(g_data["validators"])
+
+                    if removed > 0:
+                        with open(genesis_target, "w") as gf:
+                            json.dump(g_data, gf, indent=2)
+                            gf.write("\n")
+                        print(bold(yellow(
+                            f"\n  🧹 Removed stale validator entry for {args.hostname} from {genesis_target} "
+                            f"(now synconly, not a committee member)"
+                        )))
+
+                        target_dir = os.path.join("..", "execution", "cmd", "simple_chain")
+                        target_genesis = os.path.join(target_dir, "genesis.json")
+                        if os.path.exists(target_dir):
+                            shutil.copy2(genesis_target, target_genesis)
+                            print(bold(green(f"  ✅ Automatically copied to {target_genesis}")))
+                        else:
+                            configs_dir = "configs"
+                            if os.path.exists(configs_dir):
+                                shutil.copy2(genesis_target, os.path.join(configs_dir, "genesis.json"))
+                                print(bold(green(f"  ✅ Automatically copied to {configs_dir}/genesis.json")))
+            except Exception as e:
+                print(f"\n  ❌ Failed to prune stale entry from {genesis_target}: {e}")
 
     os.chmod(keys_dir, 0o700)
 
