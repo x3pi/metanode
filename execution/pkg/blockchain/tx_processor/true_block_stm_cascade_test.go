@@ -151,7 +151,7 @@ func TestCleanupStaleWrites_OnlyRemovesOrphanedAccountKeys(t *testing.T) {
 	stm.accountMap.Write(addrA, mvcc.Version(0), mt_state.NewAccountState(addrA))
 	stm.accountMap.Write(addrB, mvcc.Version(0), mt_state.NewAccountState(addrB))
 
-	_, _, widABefore := stm.accountMap.Read(addrA, 1)
+	_, _, widABefore, _ := stm.accountMap.Read(addrA, 1)
 
 	oldWriteSet := map[common.Address]bool{addrA: true, addrB: true}
 	newWriteSet := map[common.Address]bool{addrA: true} // B no longer written by the new incarnation
@@ -161,13 +161,13 @@ func TestCleanupStaleWrites_OnlyRemovesOrphanedAccountKeys(t *testing.T) {
 	// A: untouched by cleanup — same WriteID as before proves it wasn't
 	// deleted-then-rewritten (which would otherwise spuriously invalidate any
 	// reader who already validated against this exact value).
-	_, verA, widAAfter := stm.accountMap.Read(addrA, 1)
+	_, verA, widAAfter, _ := stm.accountMap.Read(addrA, 1)
 	if verA != 0 || widAAfter != widABefore {
 		t.Errorf("addrA should be untouched: verA=%d widBefore=%d widAfter=%d", verA, widABefore, widAAfter)
 	}
 
 	// B: orphaned by the new incarnation — must be cleaned up.
-	stateB, verB, _ := stm.accountMap.Read(addrB, 1)
+	stateB, verB, _, _ := stm.accountMap.Read(addrB, 1)
 	if stateB != nil || verB != mvcc.BaseVersion {
 		t.Errorf("addrB should have been cleaned up, got state=%v ver=%d", stateB, verB)
 	}
@@ -187,10 +187,10 @@ func TestCleanupStaleWrites_OnlyRemovesOrphanedStorageKeys(t *testing.T) {
 
 	stm.cleanupStaleWrites(0, nil, nil, oldSet, newSet)
 
-	if val, ver, _ := stm.storageMap.Read(addr, "slot1", 1); ver != 0 || string(val) != "v1" {
+	if val, ver, _, _ := stm.storageMap.Read(addr, "slot1", 1); ver != 0 || string(val) != "v1" {
 		t.Errorf("slot1 should be untouched, got val=%s ver=%d", val, ver)
 	}
-	if val, ver, _ := stm.storageMap.Read(addr, "slot2", 1); val != nil || ver != mvcc.BaseVersion {
+	if val, ver, _, _ := stm.storageMap.Read(addr, "slot2", 1); val != nil || ver != mvcc.BaseVersion {
 		t.Errorf("slot2 should have been cleaned up, got val=%v ver=%d", val, ver)
 	}
 }
@@ -203,7 +203,7 @@ func TestCleanupStaleWrites_EmptyOldWriteSetIsNoop(t *testing.T) {
 	// Nothing to clean up if there was no previous incarnation.
 	stm.cleanupStaleWrites(0, nil, map[common.Address]bool{addr: true}, nil, nil)
 
-	if state, ver, _ := stm.accountMap.Read(addr, 1); state == nil || ver != 0 {
+	if state, ver, _, _ := stm.accountMap.Read(addr, 1); state == nil || ver != 0 {
 		t.Errorf("expected addr to remain, got state=%v ver=%d", state, ver)
 	}
 }

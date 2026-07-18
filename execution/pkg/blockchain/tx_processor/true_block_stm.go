@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"runtime"
@@ -62,6 +63,12 @@ type TrueBlockSTM struct {
 	// mvmId generated per-TX, shared across the whole block.
 	mvmIdMapMu sync.Mutex
 	mvmIdMap   map[common.Hash]common.Address
+
+	// Suspend/Wakeup state
+	estimatedAccounts []map[common.Address]bool
+	estimatedStorage  []map[string]bool
+	waiters           [][]uint32
+	waitersMu         []sync.Mutex
 }
 
 func packState(incarnation uint32, status int32) uint64 {
@@ -75,19 +82,23 @@ func unpackState(state uint64) (incarnation uint32, status int32) {
 func NewTrueBlockSTM(txs []types.Transaction) *TrueBlockSTM {
 	numTxs := len(txs)
 	return &TrueBlockSTM{
-		txs:         txs,
-		accountMap:  mvcc.NewMVCCAccountMap(),
-		storageMap:  mvcc.NewMVCCStorageMap(),
-		txState:     make([]uint64, numTxs),
-		readSets:    make([]map[common.Address]mvcc.ReadVersion, numTxs),
-		writeSets:   make([]map[common.Address]bool, numTxs),
-		scReadSets:  make([]map[string]mvcc.ReadVersion, numTxs),
-		scWriteSets: make([]map[string]bool, numTxs),
-		receipts:    make([]types.Receipt, numTxs),
-		scResults:   make([]types.ExecuteSCResult, numTxs),
-		addrReaders: make(map[common.Address]map[int]struct{}),
-		scReaders:   make(map[string]map[int]struct{}),
-		mvmIdMap:    make(map[common.Hash]common.Address),
+		txs:               txs,
+		accountMap:        mvcc.NewMVCCAccountMap(),
+		storageMap:        mvcc.NewMVCCStorageMap(),
+		txState:           make([]uint64, numTxs),
+		readSets:          make([]map[common.Address]mvcc.ReadVersion, numTxs),
+		writeSets:         make([]map[common.Address]bool, numTxs),
+		scReadSets:        make([]map[string]mvcc.ReadVersion, numTxs),
+		scWriteSets:       make([]map[string]bool, numTxs),
+		receipts:          make([]types.Receipt, numTxs),
+		scResults:         make([]types.ExecuteSCResult, numTxs),
+		addrReaders:       make(map[common.Address]map[int]struct{}),
+		scReaders:         make(map[string]map[int]struct{}),
+		mvmIdMap:          make(map[common.Hash]common.Address),
+		estimatedAccounts: make([]map[common.Address]bool, numTxs),
+		estimatedStorage:  make([]map[string]bool, numTxs),
+		waiters:           make([][]uint32, numTxs),
+		waitersMu:         make([]sync.Mutex, numTxs),
 	}
 }
 
@@ -293,7 +304,59 @@ func (stm *TrueBlockSTM) execOne(
 	activeTasks *int32,
 	doneCh chan struct{},
 ) {
+	var suspended bool
+
+	// Take ownership of old estimates from a previous abort cycle.
+	// Use per-tx waitersMu instead of global rwMu to avoid deadlock.
+	stm.waitersMu[txIndex].Lock()
+	oldAccEstimates := stm.estimatedAccounts[txIndex]
+	oldStoreEstimates := stm.estimatedStorage[txIndex]
+	stm.estimatedAccounts[txIndex] = nil
+	stm.estimatedStorage[txIndex] = nil
+	stm.waitersMu[txIndex].Unlock()
+
 	defer func() {
+		if !suspended {
+			// Remove estimates from previous abort
+			if oldAccEstimates != nil {
+				for addr := range oldAccEstimates {
+					stm.accountMap.RemoveEstimate(addr, mvcc.Version(txIndex))
+				}
+			}
+			if oldStoreEstimates != nil {
+				for fullKey := range oldStoreEstimates {
+					if len(fullKey) >= 42 {
+						addr := common.HexToAddress(fullKey[:42])
+						keyStr := fullKey[42:]
+						stm.storageMap.RemoveEstimate(addr, keyStr, mvcc.Version(txIndex))
+					}
+				}
+			}
+
+			// Wake up waiters
+			stm.waitersMu[txIndex].Lock()
+			toWakeup := stm.waiters[txIndex]
+			stm.waiters[txIndex] = nil
+			stm.waitersMu[txIndex].Unlock()
+
+			for _, w := range toWakeup {
+				atomic.AddInt32(activeTasks, 1)
+				pushTask(ctx, execCh, w)
+			}
+		} else {
+			// If suspended, we didn't finish execution, so we MUST put the estimates
+			// back into the arrays. Otherwise they are lost and the next re-execution
+			// won't remove them, causing a livelock for anyone waiting on them!
+			stm.waitersMu[txIndex].Lock()
+			if stm.estimatedAccounts[txIndex] == nil {
+				stm.estimatedAccounts[txIndex] = oldAccEstimates
+			}
+			if stm.estimatedStorage[txIndex] == nil {
+				stm.estimatedStorage[txIndex] = oldStoreEstimates
+			}
+			stm.waitersMu[txIndex].Unlock()
+		}
+
 		if atomic.AddInt32(activeTasks, -1) == 0 {
 			select {
 			case <-doneCh:
@@ -344,6 +407,28 @@ func (stm *TrueBlockSTM) execOne(
 	}
 
 	if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
+		if errors.Is(err, mvcc.ErrEstimateHit) {
+			suspended = true
+			blockingVer := mvccDB.BlockingVersion
+			if blockingVer == mvcc.BaseVersion {
+				blockingVer = scDB.BlockingVersion
+			}
+			if blockingVer != mvcc.BaseVersion {
+				stm.waitersMu[blockingVer].Lock()
+				s := atomic.LoadUint64(&stm.txState[blockingVer])
+				_, st := unpackState(s)
+				if st != 0 {
+					stm.waitersMu[blockingVer].Unlock()
+					atomic.AddInt32(activeTasks, 1)
+					pushTask(ctx, execCh, txIndex)
+					return
+				}
+				stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
+				stm.waitersMu[blockingVer].Unlock()
+			}
+			return
+		}
+
 		stm.rwMu.Lock()
 		stm.readSets[txIndex] = mvccDB.ReadSet
 		stm.writeSets[txIndex] = mvccDB.WriteSet
@@ -518,7 +603,29 @@ func (stm *TrueBlockSTM) execOne(
 			var err error
 			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
+			
+			if scDB.BlockingVersion != mvcc.BaseVersion {
+				suspended = true
+				blockingVer := scDB.BlockingVersion
+				stm.waitersMu[blockingVer].Lock()
+				
+				// Prevent Race Condition: Check if blockingVer has already finished executing.
+				s := atomic.LoadUint64(&stm.txState[blockingVer])
+				_, st := unpackState(s)
+				if st != 0 {
+					stm.waitersMu[blockingVer].Unlock()
+					atomic.AddInt32(activeTasks, 1)
+					pushTask(ctx, execCh, txIndex)
+					return
+				}
+
+				stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
+				stm.waitersMu[blockingVer].Unlock()
+				return
+			}
+
 			if err != nil {
+
 				logger.Error("executeTransactionWithMvmId failed for tx %s: %v", tx.Hash().Hex(), err)
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
@@ -570,6 +677,25 @@ func (stm *TrueBlockSTM) execOne(
 									values = append(values, valueBytes)
 								}
 								scDB.BatchSetStorageValues(addr, keys, values)
+							}
+						}
+						if exRs.MapCodeHash() != nil {
+							mapCreator := exRs.MapCreatorPubkey()
+							mapStorage := exRs.MapStorageAddress()
+							for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
+								addr := common.HexToAddress(addrHex)
+								newCodeHash := common.BytesToHash(newCodeHashBytes)
+								mvccDB.SetCodeHash(addr, newCodeHash)
+								if mapCreator != nil {
+									if creatorBytes, ok := mapCreator[addrHex]; ok {
+										mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
+									}
+								}
+								if mapStorage != nil {
+									if storageAddr, ok := mapStorage[addrHex]; ok {
+										mvccDB.SetStorageAddress(addr, storageAddr)
+									}
+								}
 							}
 						}
 					}
@@ -658,7 +784,7 @@ func (stm *TrueBlockSTM) validateOne(
 	isValid := true
 	if rSet != nil {
 		for addr, readVer := range rSet {
-			_, highestVer, highestWriteID := stm.accountMap.Read(addr, mvcc.Version(txIndex))
+			_, highestVer, highestWriteID, _ := stm.accountMap.Read(addr, mvcc.Version(txIndex))
 			if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
 				isValid = false
 				break
@@ -675,7 +801,7 @@ func (stm *TrueBlockSTM) validateOne(
 			keyStr := sKey[42:]
 			addr := common.HexToAddress(addrHex)
 
-			_, highestVer, highestWriteID := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
+			_, highestVer, highestWriteID, _ := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
 			if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
 				isValid = false
 				break
@@ -689,6 +815,39 @@ func (stm *TrueBlockSTM) validateOne(
 	} else {
 		// ABORT & RE-EXECUTE (100% No Fork Guarantee)
 		if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
+			// ESTIMATE LOGIC: Add estimates for next execution
+			stm.rwMu.RLock()
+			writeSet := stm.writeSets[txIndex]
+			scWriteSet := stm.scWriteSets[txIndex]
+			stm.rwMu.RUnlock()
+
+			// Build estimate maps FIRST (local vars), then publish under per-tx lock.
+			var newAccEst map[common.Address]bool
+			var newStoreEst map[string]bool
+			if len(writeSet) > 0 {
+				newAccEst = make(map[common.Address]bool, len(writeSet))
+				for addr := range writeSet {
+					stm.accountMap.AddEstimate(addr, mvcc.Version(txIndex))
+					newAccEst[addr] = true
+				}
+			}
+			if len(scWriteSet) > 0 {
+				newStoreEst = make(map[string]bool, len(scWriteSet))
+				for fullKey := range scWriteSet {
+					if len(fullKey) >= 42 {
+						addr := common.HexToAddress(fullKey[:42])
+						keyStr := fullKey[42:]
+						stm.storageMap.AddEstimate(addr, keyStr, mvcc.Version(txIndex))
+						newStoreEst[fullKey] = true
+					}
+				}
+			}
+			// Publish under per-tx lock so execOne sees them atomically.
+			stm.waitersMu[txIndex].Lock()
+			stm.estimatedAccounts[txIndex] = newAccEst
+			stm.estimatedStorage[txIndex] = newStoreEst
+			stm.waitersMu[txIndex].Unlock()
+
 			atomic.AddInt32(activeTasks, 1)
 			pushTask(ctx, execCh, txIndex)
 		}

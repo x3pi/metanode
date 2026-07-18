@@ -61,9 +61,8 @@ namespace mvm
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
         if (!get_rs.success)
         {
-            throw Exception(ET::addressNotInRelated,
-                            "Address not in related addresses for SLOAD: " +
-                                mvm::address_to_hex_string(address));
+            cache[key] = 0;
+            return 0;
         }
         uint256_t value = mvm::from_big_endian(get_rs.value, 32u);
         cache[key] = value;
