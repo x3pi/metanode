@@ -45,6 +45,7 @@ type VersionedAccountState struct {
 	sortedVersions []Version
 	// highest version written so far (for fast path lookups)
 	highestVersion Version
+	estimates      []Version
 }
 
 func NewVersionedAccountState() *VersionedAccountState {
@@ -52,6 +53,7 @@ func NewVersionedAccountState() *VersionedAccountState {
 		versions:       make(map[Version]types.AccountState),
 		writeIDs:       make(map[Version]WriteID),
 		highestVersion: BaseVersion,
+		estimates:      make([]Version, 0, 2),
 	}
 }
 
@@ -88,21 +90,50 @@ func (v *VersionedAccountState) Delete(version Version) {
 	delete(v.writeIDs, version)
 }
 
+func (v *VersionedAccountState) AddEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, e := range v.estimates {
+		if e == version {
+			return
+		}
+	}
+	v.estimates = append(v.estimates, version)
+}
+
+func (v *VersionedAccountState) RemoveEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, e := range v.estimates {
+		if e == version {
+			v.estimates = append(v.estimates[:i], v.estimates[i+1:]...)
+			return
+		}
+	}
+}
+
 // Read finds the highest version of the account state that is less than or equal to the requested version.
 // If the highest version is found, it returns the state and its version.
 // If no version is found (e.g., all versions are > requested version), it returns (nil, BaseVersion).
-func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState, Version, WriteID) {
+func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState, Version, WriteID, Version) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	// 1. Check for estimates
+	for _, estVer := range v.estimates {
+		if estVer < requestVersion {
+			return nil, BaseVersion, BaseWriteID, estVer
+		}
+	}
 
 	// Floor search: index of the first version strictly greater than
 	// requestVersion, then step back one to get the floor entry.
 	idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] > requestVersion })
 	if idx == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, BaseVersion
 	}
 	ver := v.sortedVersions[idx-1]
-	return v.versions[ver], ver, v.writeIDs[ver]
+	return v.versions[ver], ver, v.writeIDs[ver], BaseVersion
 }
 
 // MVCCAccountMap stores all versioned account states for the block.
@@ -122,7 +153,7 @@ func (m *MVCCAccountMap) ExportLatest() map[common.Address]types.AccountState {
 	defer m.mu.RUnlock()
 	res := make(map[common.Address]types.AccountState)
 	for addr, vState := range m.accounts {
-		state, _, _ := vState.Read(MaxVersion)
+		state, _, _, _ := vState.Read(MaxVersion)
 		if state != nil {
 			res[addr] = state
 		}
@@ -165,13 +196,23 @@ func (m *MVCCAccountMap) Delete(addr common.Address, version Version) {
 	}
 }
 
+func (m *MVCCAccountMap) AddEstimate(addr common.Address, version Version) {
+	v := m.getOrCreate(addr)
+	v.AddEstimate(version)
+}
+
+func (m *MVCCAccountMap) RemoveEstimate(addr common.Address, version Version) {
+	v := m.getOrCreate(addr)
+	v.RemoveEstimate(version)
+}
+
 // Read gets the highest version of the state strictly less than requestVersion.
 // (Because a transaction with requestVersion = i should read the output of transaction i-1 or earlier).
-func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version, WriteID) {
+func (m *MVCCAccountMap) Read(addr common.Address, requestVersion Version) (types.AccountState, Version, WriteID, Version) {
 	v := m.getOrCreate(addr)
 	// We read the version STRICTLY LESS THAN requestVersion
 	if requestVersion == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, BaseVersion
 	}
 	return v.Read(requestVersion - 1)
 }
@@ -183,12 +224,14 @@ type VersionedStorage struct {
 	writeIDs map[Version]WriteID
 	// sortedVersions ascending/unique — see VersionedAccountState for why.
 	sortedVersions []Version
+	estimates      []Version
 }
 
 func NewVersionedStorage() *VersionedStorage {
 	return &VersionedStorage{
 		versions: make(map[Version][]byte),
 		writeIDs: make(map[Version]WriteID),
+		estimates: make([]Version, 0, 2),
 	}
 }
 
@@ -218,16 +261,45 @@ func (v *VersionedStorage) Delete(version Version) {
 	delete(v.writeIDs, version)
 }
 
-func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteID) {
+func (v *VersionedStorage) AddEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, e := range v.estimates {
+		if e == version {
+			return
+		}
+	}
+	v.estimates = append(v.estimates, version)
+}
+
+func (v *VersionedStorage) RemoveEstimate(version Version) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, e := range v.estimates {
+		if e == version {
+			v.estimates = append(v.estimates[:i], v.estimates[i+1:]...)
+			return
+		}
+	}
+}
+
+func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteID, Version) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	// 1. Check for estimates
+	for _, estVer := range v.estimates {
+		if estVer < requestVersion {
+			return nil, BaseVersion, BaseWriteID, estVer
+		}
+	}
+
 	idx := sort.Search(len(v.sortedVersions), func(i int) bool { return v.sortedVersions[i] > requestVersion })
 	if idx == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, BaseVersion
 	}
 	ver := v.sortedVersions[idx-1]
-	return v.versions[ver], ver, v.writeIDs[ver]
+	return v.versions[ver], ver, v.writeIDs[ver], BaseVersion
 }
 
 // MVCCStorageMap stores all versioned storage values for the block.
@@ -247,7 +319,7 @@ func (m *MVCCStorageMap) ExportLatest() map[string][]byte {
 	defer m.mu.RUnlock()
 	res := make(map[string][]byte)
 	for sKey, vStorage := range m.storage {
-		val, _, _ := vStorage.Read(MaxVersion)
+		val, _, _, _ := vStorage.Read(MaxVersion)
 		if val != nil {
 			res[sKey] = val
 		}
@@ -295,10 +367,21 @@ func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version
 	}
 }
 
-func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version, WriteID) {
+
+func (m *MVCCStorageMap) AddEstimate(addr common.Address, key string, version Version) {
+	v := m.getOrCreate(addr, key)
+	v.AddEstimate(version)
+}
+
+func (m *MVCCStorageMap) RemoveEstimate(addr common.Address, key string, version Version) {
+	v := m.getOrCreate(addr, key)
+	v.RemoveEstimate(version)
+}
+
+func (m *MVCCStorageMap) Read(addr common.Address, key string, requestVersion Version) ([]byte, Version, WriteID, Version) {
 	v := m.getOrCreate(addr, key)
 	if requestVersion == 0 {
-		return nil, BaseVersion, BaseWriteID
+		return nil, BaseVersion, BaseWriteID, BaseVersion
 	}
 	return v.Read(requestVersion - 1)
 }
