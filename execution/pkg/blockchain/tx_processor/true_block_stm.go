@@ -339,6 +339,11 @@ func (stm *TrueBlockSTM) execOne(
 			stm.waiters[txIndex] = nil
 			stm.waitersMu[txIndex].Unlock()
 
+			// Micro-optimization: Sort waiters by txIndex to minimize out-of-order execution
+			// if len(toWakeup) > 1 {
+			// 	slices.Sort(toWakeup)
+			// }
+
 			for _, w := range toWakeup {
 				atomic.AddInt32(activeTasks, 1)
 				pushTask(ctx, execCh, w)
@@ -417,7 +422,8 @@ func (stm *TrueBlockSTM) execOne(
 				stm.waitersMu[blockingVer].Lock()
 				s := atomic.LoadUint64(&stm.txState[blockingVer])
 				_, st := unpackState(s)
-				if st != 0 {
+				// if st == 1 /*TX_STATUS_EXECUTED*/ || st == 2 /*TX_STATUS_VALIDATING*/ || st == 3 /*TX_STATUS_VALIDATED*/ {
+				if st == 1 || st == 2 || st == 3 {
 					stm.waitersMu[blockingVer].Unlock()
 					atomic.AddInt32(activeTasks, 1)
 					pushTask(ctx, execCh, txIndex)
@@ -603,16 +609,17 @@ func (stm *TrueBlockSTM) execOne(
 			var err error
 			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
-			
+
 			if scDB.BlockingVersion != mvcc.BaseVersion {
 				suspended = true
 				blockingVer := scDB.BlockingVersion
 				stm.waitersMu[blockingVer].Lock()
-				
+
 				// Prevent Race Condition: Check if blockingVer has already finished executing.
 				s := atomic.LoadUint64(&stm.txState[blockingVer])
 				_, st := unpackState(s)
-				if st != 0 {
+				// if st == 1 /*TX_STATUS_EXECUTED*/ || st == 2 /*TX_STATUS_VALIDATING*/ || st == 3 /*TX_STATUS_VALIDATED*/ {
+				if st == 1 || st == 2 || st == 3 {
 					stm.waitersMu[blockingVer].Unlock()
 					atomic.AddInt32(activeTasks, 1)
 					pushTask(ctx, execCh, txIndex)
@@ -784,8 +791,8 @@ func (stm *TrueBlockSTM) validateOne(
 	isValid := true
 	if rSet != nil {
 		for addr, readVer := range rSet {
-			_, highestVer, highestWriteID, _ := stm.accountMap.Read(addr, mvcc.Version(txIndex))
-			if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+			_, highestVer, highestWriteID, blockingVer := stm.accountMap.Read(addr, mvcc.Version(txIndex))
+			if blockingVer != mvcc.BaseVersion || highestVer != readVer.Version || highestWriteID != readVer.WriteID {
 				isValid = false
 				break
 			}
@@ -801,8 +808,8 @@ func (stm *TrueBlockSTM) validateOne(
 			keyStr := sKey[42:]
 			addr := common.HexToAddress(addrHex)
 
-			_, highestVer, highestWriteID, _ := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
-			if highestVer != readVer.Version || highestWriteID != readVer.WriteID {
+			_, highestVer, highestWriteID, blockingVer := stm.storageMap.Read(addr, keyStr, mvcc.Version(txIndex))
+			if blockingVer != mvcc.BaseVersion || highestVer != readVer.Version || highestWriteID != readVer.WriteID {
 				isValid = false
 				break
 			}

@@ -1362,3 +1362,21 @@ extern "C" void commit_xapian_tx_buffer(unsigned char *b_tx_hash) {
         registry.commitBufferForTxHash(&txHash);
     }
 }
+
+extern "C" void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count) {
+    if (b_tx_hashes && count > 0) {
+        for (int i = 0; i < count; i++) {
+            uint256_t txHash = mvm::from_big_endian((uint8_t *)(b_tx_hashes + i * 32), 32u);
+            registry.clearBufferForTxHash(&txHash);
+        }
+    }
+}
+
+extern "C" void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count) {
+    if (b_tx_hashes && count > 0) {
+        for (int i = 0; i < count; i++) {
+            uint256_t txHash = mvm::from_big_endian((uint8_t *)(b_tx_hashes + i * 32), 32u);
+            registry.commitBufferForTxHash(&txHash);
+        }
+    }
+}
