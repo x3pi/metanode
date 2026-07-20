@@ -19,6 +19,8 @@ typedef struct {
 
 extern void clear_xapian_tx_buffer(unsigned char *b_tx_hash);
 extern void commit_xapian_tx_buffer(unsigned char *b_tx_hash);
+extern void clear_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
+extern void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int count);
 extern void MVM_commitAllXapian();
 */
 import "C"
@@ -1273,21 +1275,63 @@ func CommitAllXapian() {
 	C.MVM_commitAllXapian()
 }
 func ClearXapianTxBuffer(txHash []byte) {
-if len(txHash) == 0 {
-return
-}
-cTxHash := C.CBytes(txHash)
-defer C.free(cTxHash)
-C.clear_xapian_tx_buffer((*C.uchar)(cTxHash))
+	if len(txHash) == 0 {
+		return
+	}
+	cTxHash := C.CBytes(txHash)
+	defer C.free(cTxHash)
+	C.clear_xapian_tx_buffer((*C.uchar)(cTxHash))
 }
 
 func CommitXapianTxBuffer(txHash []byte) {
-if len(txHash) == 0 {
-return
+	if len(txHash) == 0 {
+		return
+	}
+	cTxHash := C.CBytes(txHash)
+	defer C.free(cTxHash)
+	C.commit_xapian_tx_buffer((*C.uchar)(cTxHash))
 }
-cTxHash := C.CBytes(txHash)
-defer C.free(cTxHash)
-C.commit_xapian_tx_buffer((*C.uchar)(cTxHash))
+
+func ClearXapianTxBufferBatch(txHashes [][]byte) {
+	if len(txHashes) == 0 {
+		return
+	}
+	// Flatten array of hashes
+	count := len(txHashes)
+	flattened := make([]byte, 0, count*32)
+	for _, hash := range txHashes {
+		if len(hash) != 32 {
+			continue // Should not happen, but safe guard
+		}
+		flattened = append(flattened, hash...)
+	}
+	if len(flattened) == 0 {
+		return
+	}
+	cTxHashes := C.CBytes(flattened)
+	defer C.free(cTxHashes)
+	C.clear_xapian_tx_buffer_batch((*C.uchar)(cTxHashes), C.int(len(flattened)/32))
+}
+
+func CommitXapianTxBufferBatch(txHashes [][]byte) {
+	if len(txHashes) == 0 {
+		return
+	}
+	// Flatten array of hashes
+	count := len(txHashes)
+	flattened := make([]byte, 0, count*32)
+	for _, hash := range txHashes {
+		if len(hash) != 32 {
+			continue // Should not happen, but safe guard
+		}
+		flattened = append(flattened, hash...)
+	}
+	if len(flattened) == 0 {
+		return
+	}
+	cTxHashes := C.CBytes(flattened)
+	defer C.free(cTxHashes)
+	C.commit_xapian_tx_buffer_batch((*C.uchar)(cTxHashes), C.int(len(flattened)/32))
 }
 
 

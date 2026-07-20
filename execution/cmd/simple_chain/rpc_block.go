@@ -30,7 +30,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	// note có thể metamask dùng hai trường blockHash blockNumber để ánh xạ vơi recipte
 	blockMap["hash"] = block.Header().Hash()
 	blockMap["number"] = hexutil.EncodeUint64(block.Header().BlockNumber())
-	blockMap["sha3Uncles"] = common.Hash{}
+	blockMap["sha3Uncles"] = eth_types.EmptyUncleHash
 	blockMap["miner"] = block.Header().LeaderAddress()
 	blockMap["parentHash"] = block.Header().LastBlockHash()                    // Hash của khối cha
 	blockMap["stateRoot"] = block.Header().AccountStatesRoot()                 // Root của Merkle Patricia Trie chứa trạng thái tài khoản
