@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -59,6 +60,9 @@ type TrueBlockSTM struct {
 	addrReaders   map[common.Address]map[int]struct{}
 	scReadersMu   sync.Mutex
 	scReaders     map[string]map[int]struct{}
+
+	// Statistics
+	abortCount int32
 
 	// mvmId generated per-TX, shared across the whole block.
 	mvmIdMapMu sync.Mutex
@@ -156,7 +160,7 @@ func (stm *TrueBlockSTM) Process(
 		segStart = i + 1
 	}
 
-	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB", numTxs)
+	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB | 📊 Đụng độ (Abort/Retry): %d lần", numTxs, atomic.LoadInt32(&stm.abortCount))
 	stm.commitToBase(chainState)
 
 	// Collect receipts and results, calculate Total Gas Fee
@@ -339,10 +343,13 @@ func (stm *TrueBlockSTM) execOne(
 			stm.waiters[txIndex] = nil
 			stm.waitersMu[txIndex].Unlock()
 
-			// Micro-optimization: Sort waiters by txIndex to minimize out-of-order execution
-			// if len(toWakeup) > 1 {
-			// 	slices.Sort(toWakeup)
-			// }
+			// Micro-optimization: Sort waiters by txIndex to minimize out-of-order execution.
+			// Việc sắp xếp (Sort) theo txIndex (tăng dần) đảm bảo các giao dịch đứng trước trong block
+			// sẽ được ưu tiên đẩy vào execCh trước, giúp giảm thiểu rủi ro chạy sai thứ tự
+			// và hạn chế tối đa các tình huống Abort/chạy lại lãng phí CPU.
+			if len(toWakeup) > 1 {
+				slices.Sort(toWakeup)
+			}
 
 			for _, w := range toWakeup {
 				atomic.AddInt32(activeTasks, 1)
@@ -413,6 +420,7 @@ func (stm *TrueBlockSTM) execOne(
 
 	if err != nil || fromAccount == nil || fromAccount.Nonce() != tx.GetNonce() {
 		if errors.Is(err, mvcc.ErrEstimateHit) {
+			atomic.AddInt32(&stm.abortCount, 1)
 			suspended = true
 			blockingVer := mvccDB.BlockingVersion
 			if blockingVer == mvcc.BaseVersion {
@@ -615,6 +623,7 @@ func (stm *TrueBlockSTM) execOne(
 				blockingVer = scDB.BlockingVersion
 			}
 			if blockingVer != mvcc.BaseVersion {
+				atomic.AddInt32(&stm.abortCount, 1)
 				suspended = true
 				stm.waitersMu[blockingVer].Lock()
 
@@ -719,6 +728,7 @@ func (stm *TrueBlockSTM) execOne(
 					blockingVer = scDB.BlockingVersion
 				}
 				if blockingVer != mvcc.BaseVersion {
+					atomic.AddInt32(&stm.abortCount, 1)
 					suspended = true
 					
 					// IMPORTANT: Save WriteSets so the next incarnation cleans up any partial writes
@@ -851,6 +861,7 @@ func (stm *TrueBlockSTM) validateOne(
 		// Mark as Validated (3)
 		atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 3))
 	} else {
+		atomic.AddInt32(&stm.abortCount, 1)
 		// ABORT & RE-EXECUTE (100% No Fork Guarantee)
 		if atomic.CompareAndSwapUint64(&stm.txState[txIndex], packState(inc, 2), packState(inc, 4)) {
 			// ESTIMATE LOGIC: Add estimates for next execution

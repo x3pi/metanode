@@ -235,8 +235,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       if (!this->isOffChain) {
       }
 
-      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], "", false, true, this->txHash);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_NEW_DOCUMENT: dbname=" << dbname
                 << " blockNumber=" << mvm::uint256_to_double(blockNumber)
@@ -352,9 +352,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], "", false, true, this->txHash);
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
           manager->delete_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -424,8 +424,8 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
+      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_ADD_TERM_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -492,11 +492,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], std::to_string(static_cast<int>(docId)), false, true, this->txHash);
       auto docInfo =
           manager->index_text(mvm::to_hex_string_fixed(docId, 64), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
                               input_argument["prefix"], blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], std::to_string(static_cast<int>(docId)), false, true, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_INDEX_TEXT_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(docId)
@@ -560,9 +560,9 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
                   << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
           manager->set_data(mvm::to_hex_string_fixed(number, 64), rawData, blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
 
       std::cerr << "[DEBUG] XAPIAN_SET_DATA_DOCUMENT: dbname=" << dbname
                 << " inputDocId=" << static_cast<int>(number)
@@ -624,11 +624,11 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
       auto docInfo = manager->add_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = docInfo;
@@ -1208,8 +1208,8 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       if (!this->isOffChain) {
       }
 
-      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
       mvm::injectVirtualDependency(gs, address, dbname, "", false, true, this->txHash);
+      auto newDocID = manager->new_document(rawData, blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = newDocID;
@@ -1313,9 +1313,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, "", false, true, this->txHash);
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
           manager->delete_document(mvm::to_hex_string_fixed(number, 64), blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = decimalToHex(docInfo);
@@ -1385,8 +1385,8 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
-      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
       mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
+      auto docInfo = manager->add_term(mvm::to_hex_string_fixed(number, 64), input_argument["term"], blockNumber, this->mvmId, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = docInfo;
@@ -1441,11 +1441,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, std::to_string(static_cast<int>(docId)), false, true, this->txHash);
       auto docInfo =
           manager->index_text(mvm::to_hex_string_fixed(docId, 64), input_argument["text"],
                               hex_to_uint64(input_argument["weight"]),
                               input_argument["prefix"], blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, dbname, std::to_string(static_cast<int>(docId)), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = docInfo;
@@ -1523,9 +1523,9 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
                   << std::endl;
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
       auto docInfo =
           manager->set_data(mvm::to_hex_string_fixed(number, 64), rawData, blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string hexNumber = docInfo;
@@ -1575,11 +1575,11 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         }
         return mvm::Code(32, 0); // Trả về lỗi
       }
+      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
       auto docInfo = manager->add_value(
           mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64),
           hex_to_uint64(input_argument["slot"]), input_argument["data"],
           input_argument["isSerialise"].get<bool>(), blockNumber, this->mvmId, this->txHash);
-      mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), false, true, this->txHash);
 
       json uint256Abi = {{"type", "uint256"}};
       std::string value = docInfo;
