@@ -720,6 +720,13 @@ func (stm *TrueBlockSTM) execOne(
 				}
 				if blockingVer != mvcc.BaseVersion {
 					suspended = true
+					
+					// IMPORTANT: Save WriteSets so the next incarnation cleans up any partial writes
+					stm.rwMu.Lock()
+					stm.writeSets[txIndex] = mvccDB.WriteSet
+					stm.scWriteSets[txIndex] = scDB.WriteSet
+					stm.rwMu.Unlock()
+
 					stm.waitersMu[blockingVer].Lock()
 					s := atomic.LoadUint64(&stm.txState[blockingVer])
 					_, st := unpackState(s)
