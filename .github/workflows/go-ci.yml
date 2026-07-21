@@ -30,11 +30,24 @@ jobs:
           go-version-file: execution/go.mod
           cache-dependency-path: execution/go.sum
 
+      - name: Setup Rust toolchain (NOMT FFI)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo (NOMT FFI)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
       - name: Install native build dependencies (MVM C++ linker)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake libtbb-dev libxapian-dev
+            build-essential cmake libtbb-dev libxapian-dev \
+            libmpfr-dev libgmp-dev uuid-dev libleveldb-dev
+
+      - name: Build NOMT Rust FFI library (libmtn_nomt.a, needed by CGO LDFLAGS)
+        working-directory: .
+        run: cargo build --release -p mtn-nomt-ffi
 
       - name: Build MVM C++ linker
         working-directory: execution/pkg/mvm
