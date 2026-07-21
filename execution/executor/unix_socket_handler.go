@@ -30,6 +30,7 @@ type RequestHandler struct {
 	unlockExecutionCallback            func()                                                                      // Callback to release BlockProcessor's ExecutionMutex lock
 	broadcastEventsAndReceiptsCallback func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) // Callback to broadcast transaction receipts on synced blocks
 	clearNoncesCacheCallback           func()                                                                      // Callback to clear expected nonces cache on block sync
+	cancelSpeculativeExecutionCallback func()                                                                      // Callback to cancel running speculative transactions
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -43,6 +44,11 @@ func NewRequestHandler(storageManager *storage.StorageManager, chainState *block
 // SetSnapshotManager configures the snapshot manager for the request handler
 func (rh *RequestHandler) SetSnapshotManager(sm *SnapshotManager) {
 	rh.snapshotManager = sm
+}
+
+// SetCancelSpeculativeExecutionCallback sets the callback to cancel speculative execution
+func (rh *RequestHandler) SetCancelSpeculativeExecutionCallback(cb func()) {
+	rh.cancelSpeculativeExecutionCallback = cb
 }
 
 func (rh *RequestHandler) getSnapshotManager() *SnapshotManager {
