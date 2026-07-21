@@ -610,9 +610,12 @@ func (stm *TrueBlockSTM) execOne(
 			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
 
-			if scDB.BlockingVersion != mvcc.BaseVersion {
+			blockingVer := mvccDB.BlockingVersion
+			if blockingVer == mvcc.BaseVersion {
+				blockingVer = scDB.BlockingVersion
+			}
+			if blockingVer != mvcc.BaseVersion {
 				suspended = true
-				blockingVer := scDB.BlockingVersion
 				stm.waitersMu[blockingVer].Lock()
 
 				// Prevent Race Condition: Check if blockingVer has already finished executing.
@@ -709,6 +712,27 @@ func (stm *TrueBlockSTM) execOne(
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+				
+				// Check again if applying state changes hit an estimate
+				blockingVer = mvccDB.BlockingVersion
+				if blockingVer == mvcc.BaseVersion {
+					blockingVer = scDB.BlockingVersion
+				}
+				if blockingVer != mvcc.BaseVersion {
+					suspended = true
+					stm.waitersMu[blockingVer].Lock()
+					s := atomic.LoadUint64(&stm.txState[blockingVer])
+					_, st := unpackState(s)
+					if st == 1 || st == 2 || st == 3 {
+						stm.waitersMu[blockingVer].Unlock()
+						atomic.AddInt32(activeTasks, 1)
+						pushTask(ctx, execCh, txIndex)
+						return
+					}
+					stm.waiters[blockingVer] = append(stm.waiters[blockingVer], uint32(txIndex))
+					stm.waitersMu[blockingVer].Unlock()
+					return
+				}
 			} else {
 				// Nếu err != nil, giữ lại rcp lỗi đã tạo bên trên, bỏ qua cập nhật trạng thái
 				if exRs != nil {
