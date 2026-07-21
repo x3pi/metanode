@@ -121,7 +121,7 @@ func (v *VersionedAccountState) Read(requestVersion Version) (types.AccountState
 
 	// 1. Check for estimates
 	for _, estVer := range v.estimates {
-		if estVer < requestVersion {
+		if estVer <= requestVersion {
 			return nil, BaseVersion, BaseWriteID, estVer
 		}
 	}
@@ -289,7 +289,7 @@ func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteI
 
 	// 1. Check for estimates
 	for _, estVer := range v.estimates {
-		if estVer < requestVersion {
+		if estVer <= requestVersion {
 			return nil, BaseVersion, BaseWriteID, estVer
 		}
 	}
