@@ -56,7 +56,17 @@ func (api *MetaAPI) NewPendingTransactions(ctx context.Context, fullTx *bool) (*
 			select {
 			case txs := <-txs:
 				for _, tx := range txs {
-					notifier.Notify(rpcSub.ID, tx.Hash())
+					ethHash := tx.Hash()
+					if _, r, s := tx.RawSignatureValues(); r != nil && s != nil && (r.Sign() != 0 || s.Sign() != 0) {
+						if ethTx := tx.ToEthTransaction(); ethTx != nil {
+							// Avoid needing common.Hash{} by checking if Hash is empty
+							h := ethTx.Hash()
+							if len(h.Bytes()) > 0 {
+								ethHash = h
+							}
+						}
+					}
+					notifier.Notify(rpcSub.ID, ethHash)
 				}
 			case <-rpcSub.Err():
 				return

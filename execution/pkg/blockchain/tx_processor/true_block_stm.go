@@ -721,7 +721,7 @@ func (stm *TrueBlockSTM) execOne(
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-				
+
 				// Check again if applying state changes hit an estimate
 				blockingVer = mvccDB.BlockingVersion
 				if blockingVer == mvcc.BaseVersion {
@@ -730,7 +730,7 @@ func (stm *TrueBlockSTM) execOne(
 				if blockingVer != mvcc.BaseVersion {
 					atomic.AddInt32(&stm.abortCount, 1)
 					suspended = true
-					
+
 					// IMPORTANT: Save WriteSets so the next incarnation cleans up any partial writes
 					stm.rwMu.Lock()
 					stm.writeSets[txIndex] = mvccDB.WriteSet
