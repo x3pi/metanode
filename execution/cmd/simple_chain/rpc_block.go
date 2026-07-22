@@ -30,7 +30,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	// note có thể metamask dùng hai trường blockHash blockNumber để ánh xạ vơi recipte
 	blockMap["hash"] = block.Header().Hash()
 	blockMap["number"] = hexutil.EncodeUint64(block.Header().BlockNumber())
-	blockMap["sha3Uncles"] = common.Hash{}
+	blockMap["sha3Uncles"] = eth_types.EmptyUncleHash
 	blockMap["miner"] = block.Header().LeaderAddress()
 	blockMap["parentHash"] = block.Header().LastBlockHash()                    // Hash của khối cha
 	blockMap["stateRoot"] = block.Header().AccountStatesRoot()                 // Root của Merkle Patricia Trie chứa trạng thái tài khoản
@@ -69,21 +69,11 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	transactions := make([]interface{}, 0, len(txHashes))
 	if !fullTx {
 		for _, txHash := range txHashes {
-			ethHash := txHash
-			if fetchTx != nil {
-				if tx, err := fetchTx(txHash); err == nil && tx != nil {
-					if ethTx := tx.ToEthTransaction(); ethTx != nil {
-						if h := ethTx.Hash(); h != (common.Hash{}) {
-							ethHash = h
-						}
-					}
-				}
-			}
-			transactions = append(transactions, ethHash.Hex())
-		}
-		blockMap["transactions"] = transactions
-		return blockMap, nil
-	}
+                        transactions = append(transactions, txHash.Hex())
+                }
+                blockMap["transactions"] = transactions
+                return blockMap, nil
+        }
 
 	if fetchTx == nil {
 		return nil, fmt.Errorf("fetchTx is nil while fullTx is requested")
@@ -130,9 +120,12 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 		v, r, s := tx.RawSignatureValues()
 
 		ethHash := tx.Hash()
-		if ethTx := tx.ToEthTransaction(); ethTx != nil {
-			if h := ethTx.Hash(); h != (common.Hash{}) {
-				ethHash = h
+		// Tính mã băm: nếu có chữ ký ETH (r và s khác 0) thì tính theo Ethereum, ngược lại tính theo Core (BLS)
+		if r != nil && s != nil && (r.Sign() != 0 || s.Sign() != 0) {
+			if ethTx := tx.ToEthTransaction(); ethTx != nil {
+				if h := ethTx.Hash(); h != (common.Hash{}) {
+					ethHash = h
+				}
 			}
 		}
 		txMap["hash"] = ethHash

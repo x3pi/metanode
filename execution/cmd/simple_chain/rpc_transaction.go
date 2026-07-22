@@ -132,9 +132,11 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	}
 
 	ethHash := tx.Hash()
-	if ethTx := tx.ToEthTransaction(); ethTx != nil {
-		if h := ethTx.Hash(); h != (common.Hash{}) {
-			ethHash = h
+	if r != nil && s != nil && (r.Sign() != 0 || s.Sign() != 0) {
+		if ethTx := tx.ToEthTransaction(); ethTx != nil {
+			if h := ethTx.Hash(); h != (common.Hash{}) {
+				ethHash = h
+			}
 		}
 	} else if hashEth != (common.Hash{}) && hashEth != tx.Hash() {
 		ethHash = hashEth

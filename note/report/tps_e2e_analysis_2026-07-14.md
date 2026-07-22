@@ -196,4 +196,30 @@ Deploy lại + chạy 6 round (`--rounds 6 --batch 20000`), đọc `[NOMT-STATS]
 | 30 | 95.934 | 0.00% | 0s | 0s | 0.0416% (4.161/10M) |
 | 35 | 115.515 | 0.00% | 0s | 0s | 0.0416% (4.161/10M) |
 
-**`pageCacheMissRate` = 0.00% suốt toàn bộ 6 round (300k+ account cộng dồn), `pageFetchAvg`/`valueFetchAvg` ≈ 0, `htOccupancy` phẳng ở 0.04%.** Đây là bằng chứng trực tiếp từ chính NOMT (không phải suy luận gián tiếp): NOMT đang chạy tối ưu tuyệt đối — không cache-miss, không trie-depth cost đáng kể, bảng băm còn dư thừa cực lớn. **Toàn bộ chi phí tăng dần của `TX Execution` nằm 100% ở code Go/Rust bao quanh NOMT (registry bookkeeping mục 13 + GC pressure từ TTL cache mục 15-của-vòng-3-cũ), không phải bản thân NOMT.** Kết luận này đóng lại hoàn toàn hướng "tối ưu NOMT" — không còn gì để tận dụng thêm từ NOMT ở quy mô dữ liệu hiện tại; muốn cải thiện tiếp phải nhắm vào registry map Go-side hoặc TTL cache, không phải NOMT.
+**`pageCacheMissRate` = 0.00% suốt toàn bộ 6 round (300k+ account cộng dồn), `pageFetchAvg`/`valueFetchAvg` ≈ 0, `htOccupancy` phẳng ở 0.04%.** Đây là bằng chứng trực tiếp từ chính NOMT (không phải suy luận gián tiếp): NOMT đang chạy tối ưu tuyệt đối — không cache-miss, không trie-depth cost đáng kể, bảng băm còn dư thừa cực lớn. **Toàn bộ chi phí tăng dần của `TX Execution` nằm 100% ở code Go/Rust bao quanh NOMT (registry bookkeeping mục 13 + GC pressure từ TTL cache mục 15-của-vòng-3-cũ), không phải bản thân NOMT.** 
+---
+
+# KẾT QUẢ ĐO ĐẠC GẦN ĐÂY NHẤT (SMART CONTRACT - KHÔNG CONFLICT)
+
+**Lệnh chạy:**
+```bash
+ go run main.go --config config-multi.json --count 50000 --batch 20000 -rounds=3 --conflict=false --load_balance=true
+```
+
+**Kết quả (Terminal):**
+```text
+╔═══════════════════════════════════════════════════╗
+║  📊 BENCHMARK SUMMARY
+╠═══════════════════════════════════════════════════╣
+║  🔄 Rounds         : 3
+║  📤 TXs per round  : 50000
+║  ─────────────────────────────────────────────────
+║  Round 1  TPS      : ~6088 tx/s
+║  Round 2  TPS      : ~5852 tx/s
+║  Round 3  TPS      : ~5963 tx/s
+║  ─────────────────────────────────────────────────
+║  📉 Min TPS        : ~5852 tx/s
+║  📈 Max TPS        : ~6088 tx/s
+║  📊 Avg TPS        : ~5968 tx/s
+╚═══════════════════════════════════════════════════╝
+```
