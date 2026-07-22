@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
@@ -66,36 +65,11 @@ func (bp *BlockProcessor) commitWorker() {
 			job.Block.Header().SetGlobalExecIndex(job.GlobalExecIndex)
 		}
 
-		// ══════════════════════════════════════════════════════════════════
-		// XAPIAN FLUSH FOR KEEPALIVE SNAPSHOTS
-		// MVM Xapian database changes must be flushed to disk before `SaveLastBlock`,
-		// because `UpdateLastBlockNumber` can trigger an asynchronous node snapshot.
-		// ══════════════════════════════════════════════════════════════════
-		if job.ProcessResults != nil {
-			// FLUSH XAPIAN TRANSACTIONS TO DISK
-			// We only commit to physical disk in commitWorker after consensus has finalized the block.
-			// This prevents Xapian DB from getting ahead of PebbleDB and prevents forks if the block is rejected.
-			hasContractInteraction := false
-			for i, tx := range job.ProcessResults.Transactions {
-				// OPTIMIZATION: Only commit/clear Xapian buffers for Contract Creation or Contract Call.
-				// Pure token transfers (IsRegularTransaction) do not interact with Xapian.
-				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
-				if isContractInteraction {
-					if i < len(job.ProcessResults.Receipts) && job.ProcessResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
-						mvm.CommitXapianTxBuffer(tx.Hash().Bytes())
-						hasContractInteraction = true
-					} else {
-						mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
-					}
-				}
-			}
-			if hasContractInteraction {
-				mvm.CommitAllXapian()
-			}
-			// MEMORY OPTIMIZATION: Periodically clean up old MVMApi instances
-			// to prevent unbounded memory growth from cached EVM instances.
-			mvm.RemoveOldApiInstances()
-		}
+		// Xapian commit has been moved to block_processor_processing.go (synchronous)
+		// to fix race condition with Block N+1 EVM execution.
+		// However, we clean up old MVM API instances here in the background
+		// since this is just memory management and doesn't affect consensus.
+		mvm.RemoveOldApiInstances()
 
 		// ══════════════════════════════════════════════════════════════════
 		// CRITICAL FIX: Use centralized CommitBlockState to atomically update ALL

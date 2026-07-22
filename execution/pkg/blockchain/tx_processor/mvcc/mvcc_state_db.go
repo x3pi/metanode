@@ -1,6 +1,7 @@
 package mvcc
 
 import (
+	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -12,28 +13,27 @@ import (
 // MVCCAccountStateDB wraps the global AccountStateDB and the block's MVCC maps.
 // It intercepts all reads and writes for a specific transaction (TxIndex).
 // Any read is recorded in the ReadSet. Any write is recorded in the WriteSet and MVCC maps.
+var ErrEstimateHit = errors.New("estimate hit")
+
 type MVCCAccountStateDB struct {
-	baseDB     types.AccountStateDB
-	accountMap *MVCCAccountMap
-	txIndex    Version
-
-	// ReadSet tracks the version (txIndex) and WriteID of the state read by this transaction
-	ReadSet map[common.Address]ReadVersion
-	// WriteSet tracks which addresses this transaction has modified
-	WriteSet map[common.Address]bool
-
-	// localState caches reads/writes during execution
-	localState map[common.Address]types.AccountState
+	baseDB          types.AccountStateDB
+	accountMap      *MVCCAccountMap
+	txIndex         Version
+	localState      map[common.Address]types.AccountState
+	ReadSet         map[common.Address]ReadVersion
+	WriteSet        map[common.Address]bool
+	BlockingVersion Version
 }
 
 func NewMVCCAccountStateDB(baseDB types.AccountStateDB, accountMap *MVCCAccountMap, txIndex Version) *MVCCAccountStateDB {
 	return &MVCCAccountStateDB{
-		baseDB:     baseDB,
-		accountMap: accountMap,
-		txIndex:    txIndex,
-		ReadSet:    make(map[common.Address]ReadVersion),
-		WriteSet:   make(map[common.Address]bool),
-		localState: make(map[common.Address]types.AccountState),
+		baseDB:          baseDB,
+		accountMap:      accountMap,
+		txIndex:         txIndex,
+		localState:      make(map[common.Address]types.AccountState),
+		ReadSet:         make(map[common.Address]ReadVersion),
+		WriteSet:        make(map[common.Address]bool),
+		BlockingVersion: BaseVersion,
 	}
 }
 
@@ -43,7 +43,11 @@ func (db *MVCCAccountStateDB) AccountState(addr common.Address) (types.AccountSt
 		return state, nil
 	}
 
-	state, version, writeID := db.accountMap.Read(addr, db.txIndex)
+	state, version, writeID, blockingVer := db.accountMap.Read(addr, db.txIndex)
+	if blockingVer != BaseVersion {
+		db.BlockingVersion = blockingVer
+		return nil, ErrEstimateHit
+	}
 	if state == nil {
 		s, _ := db.baseDB.AccountState(addr)
 		if s != nil {

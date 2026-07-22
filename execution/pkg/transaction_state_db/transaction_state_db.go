@@ -363,6 +363,9 @@ func (db *TransactionStateDB) Commit() (common.Hash, error) {
 func (db *TransactionStateDB) IntermediateRoot() (common.Hash, error) {
 	numDirty := len(db.dirtyTransactions)
 	if numDirty == 0 {
+		if db.originRootHash == (common.Hash{}) {
+			return p_trie.EmptyRootHash, nil
+		}
 		return db.trie.Hash(), nil
 	}
 

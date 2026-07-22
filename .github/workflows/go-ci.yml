@@ -38,16 +38,29 @@ jobs:
         with:
           workspaces: "."
 
+      - name: Cache C++ MVM builds
+        uses: actions/cache@v3
+        with:
+          path: |
+            execution/pkg/mvm/c_mvm/build
+            execution/pkg/mvm/linker/build
+          key: ${{ runner.os }}-mvm-cpp-${{ hashFiles('execution/pkg/mvm/**/*.cpp', 'execution/pkg/mvm/**/*.h', 'execution/pkg/mvm/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-mvm-cpp-
+
       - name: Install native build dependencies (MVM C++ linker)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake libtbb-dev libxapian-dev \
-            libmpfr-dev libgmp-dev uuid-dev libleveldb-dev
+            libmpfr-dev libgmp-dev uuid-dev libleveldb-dev libsecp256k1-dev protobuf-compiler
 
-      - name: Build NOMT Rust FFI library (libmtn_nomt.a, needed by CGO LDFLAGS)
+      - name: Build Rust libraries (libmtn_nomt.a and libmetanode.a)
         working-directory: .
-        run: cargo build --release -p mtn-nomt-ffi
+        run: |
+          cargo build --release -p mtn-nomt-ffi -p metanode
+          mkdir -p consensus/metanode/target/release
+          cp target/release/libmetanode.a consensus/metanode/target/release/
 
       - name: Build MVM C++ linker
         working-directory: execution/pkg/mvm

@@ -61,9 +61,16 @@ namespace mvm
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
         if (!get_rs.success)
         {
-            throw Exception(ET::addressNotInRelated,
-                            "Address not in related addresses for SLOAD: " +
-                                mvm::address_to_hex_string(address));
+            // [QUAN TRỌNG - BLOCK-STM FIX] 
+            // KHÔNG ĐƯỢC throw Exception ở đây! 
+            // get_rs.success = false xảy ra trong 2 trường hợp:
+            // 1. Storage slot hoàn toàn trống (chưa từng được ghi) -> EVM chuẩn bắt buộc trả về 0.
+            // 2. Giao dịch bị chặn (Suspend) bởi MVCC ở tầng Go.
+            // Nếu throw Exception, C++ sẽ kích hoạt std::abort() làm crash toàn bộ Node khi đọc slot trống.
+            // Việc trả về 0 khi bị Suspend cũng hoàn toàn AN TOÀN vì lớp Go sẽ kiểm tra cờ 
+            // BlockingVersion sau khi thực thi xong và tự động VỨT BỎ kết quả sai này để chạy lại.
+            cache[key] = 0;
+            return 0;
         }
         uint256_t value = mvm::from_big_endian(get_rs.value, 32u);
         cache[key] = value;

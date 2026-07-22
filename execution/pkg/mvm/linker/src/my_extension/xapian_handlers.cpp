@@ -53,6 +53,9 @@ extern std::string joinStringArgument(const std::vector<std::string> &parts);
 
 // Main function
 
+#include <cxxabi.h>
+#include <typeinfo>
+
 namespace mvm {
 static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Address& address, const std::string& dbName, const std::string& docIdStr, bool isRead, bool isWrite, const uint256_t* currentTxHash = nullptr) {
     if (!gs) return 0;
@@ -1047,7 +1050,15 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (...) {
-    std::cerr << "Unknown error" << std::endl;
+    std::type_info *t = abi::__cxa_current_exception_type();
+    if (t) {
+        int status;
+        char *demangled = abi::__cxa_demangle(t->name(), 0, 0, &status);
+        std::cerr << "Unknown error of type: " << (status == 0 ? demangled : t->name()) << std::endl;
+        free(demangled);
+    } else {
+        std::cerr << "Unknown error" << std::endl;
+    }
     if (!this->isOffChain) {
         std::cerr << "[FATAL] On-chain Xapian operation failed with unknown error. Aborting to prevent state fork!" << std::endl;
         std::abort();
@@ -1992,7 +2003,15 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (...) {
-    std::cerr << "Unknown error" << std::endl;
+    std::type_info *t = abi::__cxa_current_exception_type();
+    if (t) {
+        int status;
+        char *demangled = abi::__cxa_demangle(t->name(), 0, 0, &status);
+        std::cerr << "Unknown error of type: " << (status == 0 ? demangled : t->name()) << std::endl;
+        free(demangled);
+    } else {
+        std::cerr << "Unknown error" << std::endl;
+    }
     if (!this->isOffChain) {
         std::cerr << "[FATAL] On-chain Xapian operation failed with unknown error. Aborting to prevent state fork!" << std::endl;
         std::abort();
