@@ -145,17 +145,49 @@ func ProcessTransactionsOptimistic(
 		)
 		// processNativeTransfersFastPath returns flat results in group order;
 		// slice them back per group using each group's item count.
+		// NOTE FOR MAINTAINERS & AI: We explicitly calculate and bound-check individual
+		// end indices (txsEnd, rcpsEnd, scRsEnd) against slice lengths.
+		// If a transaction fails or omits a receipt/result, slice lengths may differ.
+		// Independent bounds checking prevents runtime panic ("slice bounds out of range")
+		// and ensures node stability during group slicing.
 		off := 0
 		for k, g := range nativeGroups {
 			n := len(g.Items)
 			end := off + n
-			if end > len(txs) {
-				end = len(txs)
+
+			// Clamp slicing boundaries to actual slice lengths to prevent out-of-bounds panics
+			txsEnd := end
+			if txsEnd > len(txs) {
+				txsEnd = len(txs)
 			}
+			rcpsEnd := end
+			if rcpsEnd > len(rcps) {
+				rcpsEnd = len(rcps)
+			}
+			scRsEnd := end
+			if scRsEnd > len(scRs) {
+				scRsEnd = len(scRs)
+			}
+
+			var tSlice []types.Transaction
+			var rSlice []types.Receipt
+			var sSlice []types.ExecuteSCResult
+
+			// Safely extract slices only if starting offset is within bounds
+			if off < txsEnd {
+				tSlice = txs[off:txsEnd]
+			}
+			if off < rcpsEnd {
+				rSlice = rcps[off:rcpsEnd]
+			}
+			if off < scRsEnd {
+				sSlice = scRs[off:scRsEnd]
+			}
+
 			results[nativeOrigIdx[k]] = groupResult{
-				txs:      txs[off:end],
-				rcps:     rcps[off:end],
-				scRs:     scRs[off:end],
+				txs:      tSlice,
+				rcps:     rSlice,
+				scRs:     sSlice,
 				mvmIdMap: mvmMap,
 			}
 			off = end
