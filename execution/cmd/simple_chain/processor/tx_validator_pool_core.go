@@ -658,10 +658,17 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	//   (e.g., multiple TXs to same contract) are serialized within a group.
 	// ═══════════════════════════════════════════════════════════════════════════
 	items := make([]grouptxns.Item, 0, len(txs))
+	// Optimize: Pre-allocate a single flat array to avoid per-tx memory allocation
+	allAddrs := make([]common.Address, 0, len(txs)*3)
+
 	for i, tx := range txs {
+		startIdx := len(allAddrs)
+		allAddrs = grouptxns.AppendDeterministicGroupAddrs(tx, allAddrs)
+		endIdx := len(allAddrs)
+		
 		items = append(items, grouptxns.Item{
 			ID:      i,
-			Array:   grouptxns.BuildDeterministicGroupAddrs(tx),
+			Array:   allAddrs[startIdx:endIdx:endIdx], // Fix capacity leak
 			GroupID: 0,
 			Tx:      tx,
 		})
@@ -725,109 +732,6 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	return res, execErr
 }
 
-// ProcessTransactionsInPool retrieves transactions from the pool and processes them
-func (vp *TxValidatorPool) ProcessTransactionsInPool(setEmptyBlock bool, blockTime uint64, leaderAddr common.Address, blockNum uint64) (
-	tx_processor.ProcessResult,
-	error,
-) {
-	var txs []types.Transaction
-	if setEmptyBlock {
-		txs = make([]types.Transaction, 0)
-	} else {
-		txs, _ = vp.transactionPool.TransactionsWithAggSign()
-	}
-
-	if len(txs) > 0 {
-
-		storage.SetCommitLock(true)
-	}
-
-	vp.removeOldExcludedItems()
-
-	var processedTxs []types.Transaction
-	processedTxs = append(processedTxs, txs...)
-	ev := mt_filters.NewTxsEvent{
-		Txs: processedTxs,
-	}
-	vp.eventSystem.TxsFeed.Send(ev)
-
-	items := make([]grouptxns.Item, 0, len(txs)+len(vp.excludedItems))
-	items = append(items, vp.excludedItems...)
-	for i, tx := range txs {
-		items = append(items, grouptxns.Item{
-			ID:        i + len(vp.excludedItems),
-			Array:     grouptxns.BuildDeterministicGroupAddrs(tx),
-			GroupID:   0,
-			Tx:        tx,
-			TimeStart: time.Now(),
-		})
-	}
-
-	groupedGroups, excludedItems, err := grouptxns.GroupAndLimitTransactionsOptimized(items, mt_common.MAX_GROUP_GAS, mt_common.MAX_TOTAL_GAS, mt_common.MAX_GROUP_TIME, mt_common.MAX_TOTAL_TIME)
-	vp.AddExcludedItems(excludedItems)
-
-	if err != nil {
-		logger.Error("GroupAndLimitTransactionsOptimized failed: %v", err)
-		return tx_processor.ProcessResult{}, fmt.Errorf("GroupAndLimitTransactionsOptimized failed: %w", err)
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// DETERMINISTIC RE-GROUPING (Proposer Path Alignment)
-	//
-	// Although GroupAndLimitTransactionsOptimized selected and limited the transactions
-	// to fit block size / gas constraints, we MUST execute them using the EXACT same
-	// deterministic grouping algorithm (GroupTransactionsDeterministic) and native
-	// address filtering as the validator / replay path.
-	//
-	// This ensures that:
-	//   1. The execution order of transaction groups matches the replay path.
-	//   2. Sequential GroupID assignment matches, yielding identical mvmId (C++ DB paths).
-	//   3. Receipts' GroupIndex and TransactionIndex are stamped identically.
-	//   4. The resulting stateRoot computed by the proposer matches the validator's.
-	// ═══════════════════════════════════════════════════════════════════════════
-	var selectedTxs []types.Transaction
-	for _, group := range groupedGroups {
-		for _, item := range group.Items {
-			tx := item.Tx
-			selectedTxs = append(selectedTxs, tx)
-		}
-	}
-
-	deterministicItems := make([]grouptxns.Item, 0, len(selectedTxs))
-	for i, tx := range selectedTxs {
-		deterministicItems = append(deterministicItems, grouptxns.Item{
-			ID:      i,
-			Array:   grouptxns.BuildDeterministicGroupAddrs(tx),
-			GroupID: 0,
-			Tx:      tx,
-		})
-	}
-
-	deterministicGroups := grouptxns.GroupTransactionsDeterministic(deterministicItems)
-
-	ctx := context.Background()
-
-	var baseCtx context.Context
-	var rootSpan *trace.Span
-	enableTrace := false
-	myCollector := trace.NewSpanCollector()
-
-	if enableTrace {
-		tracedCtx, actualSpan := trace.NewTrace(ctx, "ProcessBlockTransactions", map[string]interface{}{}, myCollector)
-		baseCtx = tracedCtx
-		rootSpan = actualSpan
-		defer rootSpan.End()
-		rootSpan.AddEvent("Starting transaction processing", nil)
-	} else {
-		baseCtx = ctx
-		rootSpan = nil
-	}
-	// FORK-SAFETY: Acquire EXCLUSIVE lock during real block execution (pool path).
-	vp.blockProcessingLock.Lock()
-	result, err := tx_processor.ProcessTransactions(baseCtx, vp.chainState, deterministicGroups, enableTrace, true, blockTime, leaderAddr, blockNum, false)
-	vp.blockProcessingLock.Unlock()
-	return result, err
-}
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding
 func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []types.Transaction {
@@ -997,77 +901,4 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 	return txs
 }
 
-// removeOldExcludedItems removes excluded items older than MAX_TIME_PENDING
-func (vp *TxValidatorPool) removeOldExcludedItems() (grouptxns.GroupResult, []grouptxns.Item) {
-	fiveMinutesAgo := time.Now().Add(-mt_common.MAX_TIME_PENDING * time.Minute)
-	newExcludedItems := make([]grouptxns.Item, 0)
 
-	gRs := grouptxns.GroupResult{
-		Transactions:     []types.Transaction{},
-		Receipts:         []types.Receipt{},
-		ExecuteSCResults: []types.ExecuteSCResult{},
-		Error:            nil,
-	}
-
-	for _, item := range vp.excludedItems {
-		b, _ := transaction.TimeoutPending.Marshal()
-
-		if item.TimeStart.After(fiveMinutesAgo) {
-			tx := item.Tx
-			newExcludedItems = append(newExcludedItems, item)
-			rcp := receipt.NewReceipt(
-				tx.Hash(),
-				tx.FromAddress(),
-				tx.ToAddress(),
-				tx.Amount(),
-				pb.RECEIPT_STATUS_TRANSACTION_ERROR,
-				b,
-				pb.EXCEPTION_NONE,
-				uint64(0),
-				uint64(0),
-				[]types.EventLog{},
-				uint64(0),
-				common.Hash{},
-				0,
-			)
-			gRs.Receipts = append(gRs.Receipts, rcp)
-			gRs.Transactions = append(gRs.Transactions, tx)
-		}
-	}
-	vp.excludedItems = newExcludedItems
-	return gRs, newExcludedItems
-}
-
-// ProcessAndPartitionTransactions groups and partitions transactions for parallel processing
-func (vp *TxValidatorPool) ProcessAndPartitionTransactions(n int) ([][]grouptxns.RelativeGroup, error) {
-	txs, _ := vp.transactionPool.TransactionsWithAggSign()
-
-	if len(txs) == 0 {
-		return nil, nil
-	}
-
-	items := make([]grouptxns.Item, 0, len(txs))
-	for i, tx := range txs {
-		items = append(items, grouptxns.Item{
-			ID:        i,
-			Array:     grouptxns.BuildDeterministicGroupAddrs(tx),
-			GroupID:   0,
-			Tx:        tx,
-			TimeStart: time.Now(),
-		})
-	}
-
-	relativeGroups, _, err := grouptxns.GroupAndLimitTransactionsOptimized(items, mt_common.MAX_GROUP_GAS, mt_common.MAX_TOTAL_GAS, mt_common.MAX_GROUP_TIME, mt_common.MAX_TOTAL_TIME)
-	if err != nil {
-		logger.Error("GroupAndLimitTransactionsOptimized failed:", err)
-		return nil, fmt.Errorf("GroupAndLimitTransactionsOptimized failed: %w", err)
-	}
-
-	partitionedGroups, err := grouptxns.PartitionRelativeGroups(relativeGroups, n)
-	if err != nil {
-		logger.Error("PartitionRelativeGroups failed:", err)
-		return nil, fmt.Errorf("PartitionRelativeGroups failed: %w", err)
-	}
-
-	return partitionedGroups, nil
-}
