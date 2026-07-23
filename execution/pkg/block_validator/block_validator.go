@@ -9,12 +9,10 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
-	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -91,26 +89,17 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 	}
 
 	items := make([]grouptxns.Item, 0, len(txs))
-	accountSettingAddr := utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT)
-	nativeParallelAddrs := map[common.Address]struct{}{
-		accountSettingAddr:                   {},
-		mt_common.VALIDATOR_CONTRACT_ADDRESS: {},
-	}
+	// Optimize: Pre-allocate a single flat array to avoid per-tx memory allocation
+	allAddrs := make([]common.Address, 0, len(txs)*3) 
+
 	for i, tx := range txs {
-		// Build grouping addresses: filter out native dispatch addresses
-		groupAddrs := make([]common.Address, 0, len(tx.RelatedAddresses()))
-		for _, addr := range tx.RelatedAddresses() {
-			if _, isNative := nativeParallelAddrs[addr]; !isNative {
-				groupAddrs = append(groupAddrs, addr)
-			}
-		}
-		// Safety: always have at least FromAddress
-		if len(groupAddrs) == 0 {
-			groupAddrs = append(groupAddrs, tx.FromAddress())
-		}
+		startIdx := len(allAddrs)
+		allAddrs = grouptxns.AppendDeterministicGroupAddrs(tx, allAddrs)
+		endIdx := len(allAddrs)
 		items = append(items, grouptxns.Item{
 			ID:      i,
-			Array:   groupAddrs,
+			// Fix memory leak and GC pressure by constraining slice capacity to its length
+			Array:   allAddrs[startIdx:endIdx:endIdx],
 			GroupID: 0,
 			Tx:      tx,
 		})
