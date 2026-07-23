@@ -1,7 +1,6 @@
 package grouptxns
 
 import (
-	"fmt"
 	"sort"
 	"time"
 
@@ -42,9 +41,12 @@ func IsNativeParallelAddress(addr common.Address) bool {
 
 // BuildDeterministicGroupAddrs builds the Array for UnionFind grouping
 func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
+	return AppendDeterministicGroupAddrs(tx, make([]common.Address, 0))
+}
 
-	groupAddrs := make([]common.Address, 0)
-
+// AppendDeterministicGroupAddrs extracts grouping addresses and appends them to a provided slice
+// to allow the caller to use a single flat backing array for memory optimization.
+func AppendDeterministicGroupAddrs(tx types.Transaction, out []common.Address) []common.Address {
 	var al e_types.AccessList
 	ethTx := tx.ToEthTransaction()
 	if ethTx != nil {
@@ -58,29 +60,36 @@ func BuildDeterministicGroupAddrs(tx types.Transaction) []common.Address {
 		isValueTransfer = true
 	}
 
+	startLen := len(out)
+
 	if hasAccessList && !isValueTransfer {
-		groupAddrs = append(groupAddrs, tx.FromAddress())
+		out = append(out, tx.FromAddress())
 		for _, tuple := range al {
+			// Skip contract address if it's a native parallel contract to allow concurrent execution
 			if !IsNativeParallelAddress(tuple.Address) {
-				groupAddrs = append(groupAddrs, tuple.Address)
+				out = append(out, tuple.Address)
 			}
+			// NOTE FOR MAINTAINERS & AI: Even if tuple.Address is a native parallel address,
+			// any specific StorageKeys listed in the AccessList MUST still be appended for grouping.
+			// Transactions accessing the exact same storage slots/keys have state conflicts
+			// and MUST be serialized within the same Union-Find group to prevent race conditions & state forks.
 			for _, key := range tuple.StorageKeys {
 				pseudoAddr := common.BytesToAddress(key.Bytes()[12:])
-				groupAddrs = append(groupAddrs, pseudoAddr)
+				out = append(out, pseudoAddr)
 			}
 		}
 	} else {
 		for _, addr := range tx.RelatedAddresses() {
 			if !IsNativeParallelAddress(addr) {
-				groupAddrs = append(groupAddrs, addr)
+				out = append(out, addr)
 			}
 		}
 	}
 
-	if len(groupAddrs) == 0 {
-		groupAddrs = append(groupAddrs, tx.FromAddress())
+	if len(out) == startLen {
+		out = append(out, tx.FromAddress())
 	}
-	return groupAddrs
+	return out
 }
 
 // UnionFind là cấu trúc dữ liệu Union-Find
@@ -175,152 +184,7 @@ func (uf *UnionFind) Union(i, j int) {
 		}
 	}
 }
-func GroupItems(items []Item) ([]Item, error) {
-	if len(items) == 0 {
-		return nil, fmt.Errorf("input slice is empty")
-	}
 
-	// Sử dụng map để ánh xạ địa chỉ -> danh sách các chỉ số của các item chứa địa chỉ đó
-	addressToIndices := make(map[string][]int)
-	for i, item := range items {
-		for _, addr := range item.Array {
-			addressToIndices[addr.Hex()] = append(addressToIndices[addr.Hex()], i)
-		}
-	}
-
-	// Khởi tạo Union-Find
-	uf := NewUnionFind(len(items))
-
-	// Liên kết các phần tử có địa chỉ chung
-	for _, indices := range addressToIndices {
-		for i := 1; i < len(indices); i++ {
-			uf.Union(indices[0], indices[i])
-		}
-	}
-
-	// Gán GroupID cho mỗi item dựa trên Union-Find
-	groupIDMap := make(map[int]int)
-	groupIDCounter := 1
-	for i := range items {
-		root := uf.Find(i)
-		if _, ok := groupIDMap[root]; !ok {
-			groupIDMap[root] = groupIDCounter
-			groupIDCounter++
-		}
-		items[i].GroupID = groupIDMap[root]
-	}
-
-	return items, nil
-}
-
-// groupByGroupID nhóm các phần tử theo GroupID
-func GroupByGroupID(items []Item) [][]Item {
-	groups := make(map[int][]Item)
-	for _, item := range items {
-		groups[item.GroupID] = append(groups[item.GroupID], item)
-	}
-
-	result := make([][]Item, 0, len(groups))
-	for _, group := range groups {
-		result = append(result, group)
-	}
-	return result
-}
-
-func GroupAndLimitTransactionsOptimized(items []Item, maxGroupGas uint64, maxTotalGas uint64, maxGroupTimes uint64, maxTotalTime uint64) ([]RelativeGroup, []Item, error) {
-
-	relativeGroups := []RelativeGroup{}
-	excludedItems := []Item{}
-	totalGas := uint64(0)
-	totalTime := uint64(0)
-
-	// Map ánh xạ địa chỉ tới groupID
-	addressToGroup := make(map[string]int)
-
-	for _, item := range items {
-		// Nếu giao dịch chỉ đọc, tạo nhóm riêng
-		if item.Tx.GetReadOnly() {
-			newGroup := RelativeGroup{
-				GroupID: len(relativeGroups),
-				Items:   []Item{item},
-			}
-			relativeGroups = append(relativeGroups, newGroup)
-			continue // Tiếp tục vòng lặp cho item tiếp theo
-		}
-
-		var selectedGroup *RelativeGroup
-
-		// Kiểm tra các nhóm có thể thêm item
-		for _, addr := range item.Array {
-			if groupID, exists := addressToGroup[addr.Hex()]; exists {
-				group := &relativeGroups[groupID]
-				newGas := group.TotalGas() + item.Tx.MaxGas()
-				newTime := group.TotalTime() + item.Tx.MaxTimeUse()
-
-				// Nếu nhóm này đủ điều kiện thì chọn
-				if newGas <= maxGroupGas && newTime <= maxGroupTimes {
-					selectedGroup = group
-					break
-				}
-			}
-		}
-
-		if selectedGroup != nil {
-			// Nếu tìm thấy nhóm phù hợp, thêm item vào nhóm
-			selectedGroup.Items = append(selectedGroup.Items, item)
-			// Sắp xếp lại Items theo TimeStart
-
-			for _, addr := range item.Array {
-				addressToGroup[addr.Hex()] = selectedGroup.GroupID
-			}
-		} else {
-			// Nếu không tìm thấy nhóm phù hợp, tạo nhóm mới
-			newGroup := RelativeGroup{
-				GroupID: len(relativeGroups),
-				Items:   []Item{item},
-			}
-			newGas := item.Tx.MaxGas()
-			newTime := item.Tx.MaxTimeUse()
-
-			// Kiểm tra các điều kiện giới hạn
-			if newGas <= maxGroupGas && newTime <= maxGroupTimes &&
-				totalGas+newGas <= maxTotalGas && totalTime+newTime <= maxTotalTime && len(relativeGroups) < 500000 {
-				relativeGroups = append(relativeGroups, newGroup)
-				for _, addr := range item.Array {
-					addressToGroup[addr.Hex()] = newGroup.GroupID
-				}
-				totalGas += newGas
-				totalTime += newTime
-			} else {
-				// Thêm vào danh sách loại bỏ nếu không hợp lệ
-				excludedItems = append(excludedItems, item)
-			}
-		}
-	}
-
-	// Sắp xếp từng nhóm con trong relativeGroups ưu tiên theo FromAddress và Nonce
-	for i := range relativeGroups {
-		sort.Slice(relativeGroups[i].Items, func(a, b int) bool {
-			cmp := relativeGroups[i].Items[a].Tx.FromAddress().Cmp(relativeGroups[i].Items[b].Tx.FromAddress())
-			if cmp != 0 {
-				return cmp < 0
-			}
-			nonceA := relativeGroups[i].Items[a].Tx.GetNonce()
-			nonceB := relativeGroups[i].Items[b].Tx.GetNonce()
-			if nonceA != nonceB {
-				return nonceA < nonceB
-			}
-			maxGasA := relativeGroups[i].Items[a].Tx.MaxGas()
-			maxGasB := relativeGroups[i].Items[b].Tx.MaxGas()
-			if maxGasA != maxGasB {
-				return maxGasA > maxGasB // Giảm dần theo MaxGas
-			}
-			return relativeGroups[i].Items[a].ID < relativeGroups[i].Items[b].ID
-		})
-	}
-
-	return relativeGroups, excludedItems, nil
-}
 
 // GroupTransactionsDeterministic groups TXs by shared RelatedAddresses for
 // FORK-SAFE parallel execution of Rust-committed blocks.
@@ -357,7 +221,8 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 2: Collect items into groups by Union-Find root
 	// ═══════════════════════════════════════════════════════════════
-	rootToItems := make(map[int][]Item, len(items))
+	// OPTIMIZATION: Use slice of slices instead of map to avoid hash overhead
+	rootToItems := make([][]Item, len(items))
 	for i := range items {
 		root := uf.Find(i)
 		rootToItems[root] = append(rootToItems[root], items[i])
@@ -366,11 +231,13 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// ═══════════════════════════════════════════════════════════════
 	// STEP 3: Convert to RelativeGroup slice
 	// ═══════════════════════════════════════════════════════════════
-	groups := make([]RelativeGroup, 0, len(rootToItems))
+	groups := make([]RelativeGroup, 0, len(items))
 	for _, groupItems := range rootToItems {
-		groups = append(groups, RelativeGroup{
-			Items: groupItems,
-		})
+		if len(groupItems) > 0 {
+			groups = append(groups, RelativeGroup{
+				Items: groupItems,
+			})
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -378,24 +245,43 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// Sort by FromAddress and Nonce ascending.
 	// This guarantees replay matches proposer execution order.
 	// ═══════════════════════════════════════════════════════════════
+	type sortItem struct {
+		item  Item
+		from  common.Address
+		nonce uint64
+		gas   uint64
+	}
+
 	for i := range groups {
-		sort.Slice(groups[i].Items, func(a, b int) bool {
-			cmp := groups[i].Items[a].Tx.FromAddress().Cmp(groups[i].Items[b].Tx.FromAddress())
+		if len(groups[i].Items) <= 1 {
+			continue // OPTIMIZE: Skip expensive reflection-based sorting for single-item groups
+		}
+		
+		items := make([]sortItem, len(groups[i].Items))
+		for j, it := range groups[i].Items {
+			items[j] = sortItem{
+				item:  it,
+				from:  it.Tx.FromAddress(),
+				nonce: it.Tx.GetNonce(),
+				gas:   it.Tx.MaxGas(),
+			}
+		}
+		sort.Slice(items, func(a, b int) bool {
+			cmp := items[a].from.Cmp(items[b].from)
 			if cmp != 0 {
 				return cmp < 0
 			}
-			nonceA := groups[i].Items[a].Tx.GetNonce()
-			nonceB := groups[i].Items[b].Tx.GetNonce()
-			if nonceA != nonceB {
-				return nonceA < nonceB
+			if items[a].nonce != items[b].nonce {
+				return items[a].nonce < items[b].nonce
 			}
-			maxGasA := groups[i].Items[a].Tx.MaxGas()
-			maxGasB := groups[i].Items[b].Tx.MaxGas()
-			if maxGasA != maxGasB {
-				return maxGasA > maxGasB // Giảm dần theo MaxGas
+			if items[a].gas != items[b].gas {
+				return items[a].gas > items[b].gas // Giảm dần theo MaxGas
 			}
-			return groups[i].Items[a].ID < groups[i].Items[b].ID
+			return items[a].item.ID < items[b].item.ID
 		})
+		for j := range items {
+			groups[i].Items[j] = items[j].item
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════
@@ -404,70 +290,42 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// This ensures all nodes process groups in the same order,
 	// which matters for deterministic mvmId assignment.
 	// ═══════════════════════════════════════════════════════════════
-	sort.Slice(groups, func(i, j int) bool {
-		// Each group has at least 1 item (guaranteed by construction)
-		minHashI := groups[i].Items[0].Tx.Hash()
-		for _, item := range groups[i].Items[1:] {
-			if item.Tx.Hash().Cmp(minHashI) < 0 {
-				minHashI = item.Tx.Hash()
+	type groupWithHash struct {
+		group   RelativeGroup
+		minHash common.Hash
+	}
+	
+	gwh := make([]groupWithHash, len(groups))
+	for i, g := range groups {
+		min := g.Items[0].Tx.Hash()
+		for _, item := range g.Items[1:] {
+			if item.Tx.Hash().Cmp(min) < 0 {
+				min = item.Tx.Hash()
 			}
 		}
-		minHashJ := groups[j].Items[0].Tx.Hash()
-		for _, item := range groups[j].Items[1:] {
-			if item.Tx.Hash().Cmp(minHashJ) < 0 {
-				minHashJ = item.Tx.Hash()
-			}
-		}
-		return minHashI.Cmp(minHashJ) < 0
+		gwh[i] = groupWithHash{group: g, minHash: min}
+	}
+
+	sort.Slice(gwh, func(i, j int) bool {
+		return gwh[i].minHash.Cmp(gwh[j].minHash) < 0
 	})
 
-	// ═══════════════════════════════════════════════════════════════
-	// STEP 6: CHUNKING HOT-CONTRACTS (MaxGroupSize = 100)
-	// ═══════════════════════════════════════════════════════════════
-	const MaxGroupSize = 100
-	var chunkedGroups []RelativeGroup
-	for _, g := range groups {
-		// Pre-classify the group to decide if it's safe to chunk
-		kind := classifyGroup(g.Items)
-		
-		// 🚨 FORK-SAFETY FIX: NEVER chunk NativeOnly groups!
-		// Native Fast Path has NO conflict detection (lock-free sharded). Chunking 
-		// interdependent Native txs into parallel groups causes severe race conditions.
-		// TrueBlockSTM handles EVM txs and has MVCC conflict detection, so chunking is safe there.
-		if kind == GroupKindNativeOnly || len(g.Items) <= MaxGroupSize {
-			g.Kind = kind // Ensure the original group gets its Kind set
-			chunkedGroups = append(chunkedGroups, g)
-		} else {
-			startIndex := 0
-			for startIndex < len(g.Items) {
-				endIndex := startIndex + MaxGroupSize
-				if endIndex >= len(g.Items) {
-					endIndex = len(g.Items)
-				} else {
-					// 🚨 FORK-SAFETY FIX: We MUST NOT split transactions from the same sender!
-					// If we split them into parallel chunks, they will fail nonce validation.
-					// Find the sender of the last transaction in the proposed chunk.
-					lastSender := g.Items[endIndex-1].Tx.FromAddress()
-					
-					// Extend the chunk until the sender changes
-					for endIndex < len(g.Items) && g.Items[endIndex].Tx.FromAddress() == lastSender {
-						endIndex++
-					}
-				}
-				
-				chunk := RelativeGroup{
-					Items: g.Items[startIndex:endIndex],
-					Kind:  kind, // 🚨 INHERIT KIND: Do NOT recalculate!
-				}
-				chunkedGroups = append(chunkedGroups, chunk)
-				startIndex = endIndex
-			}
-		}
+	for i := range gwh {
+		groups[i] = gwh[i].group
 	}
-	groups = chunkedGroups
 
-	// Assign sequential GroupIDs after chunking. (Kind is already inherited)
+	// ═══════════════════════════════════════════════════════════════
+	// STEP 6: CLASSIFY AND ASSIGN GROUP IDs
+	// NOTE: Chunking logic (breaking large groups into smaller ones) 
+	// was removed here because:
+	// 1. TrueBlockSTM flattens all EVM/Mixed groups into a single array 
+	//    anyway and uses MVCC + Index order to resolve conflicts.
+	// 2. NativeOnly groups were never chunked to avoid race conditions 
+	//    in the lock-free fast path.
+	// Therefore, chunking was completely redundant and only added overhead.
+	// ═══════════════════════════════════════════════════════════════
 	for i := range groups {
+		groups[i].Kind = classifyGroup(groups[i].Items)
 		groups[i].GroupID = i
 	}
 
@@ -509,130 +367,11 @@ func classifyGroup(items []Item) GroupKind {
 	return GroupKindNativeOnly
 }
 
-func GroupTransactionsByRelativeAddress(items []Item) ([]RelativeGroup, error) {
-	if len(items) == 0 {
-		return nil, fmt.Errorf("input slice is empty")
-	}
 
-	relativeGroups := []RelativeGroup{}
-	// Map ánh xạ địa chỉ tới groupID
-	addressToGroup := make(map[string]int)
-
-	for _, item := range items {
-		var targetGroup *RelativeGroup
-		foundGroup := false
-
-		// Tìm kiếm nhóm hiện có cho item này
-		for _, addr := range item.Array {
-			if groupID, exists := addressToGroup[addr.Hex()]; exists {
-				// Nếu đã tìm thấy một nhóm, chỉ cần hợp nhất vào nhóm đó
-				if foundGroup && targetGroup.GroupID != groupID {
-					// Logic để hợp nhất các nhóm nếu một item thuộc về nhiều nhóm
-					// Ở đây, ta sẽ hợp nhất vào nhóm có chỉ số nhỏ hơn
-					sourceGroup := &relativeGroups[groupID]
-					if targetGroup.GroupID > sourceGroup.GroupID {
-						targetGroup, sourceGroup = sourceGroup, targetGroup
-					}
-					// Chuyển tất cả item từ sourceGroup sang targetGroup
-					targetGroup.Items = append(targetGroup.Items, sourceGroup.Items...)
-					// Cập nhật lại addressToGroup cho các địa chỉ trong sourceGroup
-					for _, mergedItem := range sourceGroup.Items {
-						for _, mergedAddr := range mergedItem.Array {
-							addressToGroup[mergedAddr.Hex()] = targetGroup.GroupID
-						}
-					}
-					// Đánh dấu sourceGroup là rỗng để có thể xóa sau
-					sourceGroup.Items = nil
-				} else if !foundGroup {
-					targetGroup = &relativeGroups[groupID]
-					foundGroup = true
-				}
-			}
-		}
-
-		if !foundGroup {
-			// Nếu không tìm thấy nhóm nào, tạo nhóm mới
-			newGroup := RelativeGroup{
-				GroupID: len(relativeGroups),
-				Items:   []Item{},
-			}
-			relativeGroups = append(relativeGroups, newGroup)
-			targetGroup = &relativeGroups[len(relativeGroups)-1]
-		}
-
-		// Thêm item vào nhóm đã chọn (hoặc nhóm mới)
-		targetGroup.Items = append(targetGroup.Items, item)
-		// Cập nhật addressToGroup cho tất cả địa chỉ trong item
-		for _, addr := range item.Array {
-			addressToGroup[addr.Hex()] = targetGroup.GroupID
-		}
-	}
-
-	// Loại bỏ các nhóm rỗng đã được hợp nhất
-	finalGroups := []RelativeGroup{}
-	for _, group := range relativeGroups {
-		if len(group.Items) > 0 {
-			finalGroups = append(finalGroups, group)
-		}
-	}
-
-	// Sắp xếp các item trong mỗi nhóm
-	for i := range finalGroups {
-		sort.Slice(finalGroups[i].Items, func(a, b int) bool {
-			gasCmp := utils.CompareUint64(finalGroups[i].Items[a].Tx.MaxGas(), finalGroups[i].Items[b].Tx.MaxGas())
-			if gasCmp != 0 {
-				return gasCmp == -1 // Giảm dần theo MaxGas
-			}
-			nonceCmp := utils.CompareUint64(finalGroups[i].Items[a].Tx.GetNonce(), finalGroups[i].Items[b].Tx.GetNonce())
-			if nonceCmp != 0 {
-				return nonceCmp == 1 // Tăng dần theo Nonce
-			}
-			return finalGroups[i].Items[a].Tx.Hash().Cmp(finalGroups[i].Items[b].Tx.Hash()) == -1 // Tăng dần theo Hash
-		})
-	}
-
-	return finalGroups, nil
-}
 
 // PartitionRelativeGroups chia một mảng []RelativeGroup thành n phần nhỏ hơn.
 // Nếu số lượng phần tử nhỏ hơn n, nó sẽ được chia thành len(groups) phần.
-func PartitionRelativeGroups(groups []RelativeGroup, n int) ([][]RelativeGroup, error) {
-	if n <= 0 {
-		return nil, fmt.Errorf("số lượng phần chia (n) phải lớn hơn 0")
-	}
 
-	if len(groups) == 0 {
-		return [][]RelativeGroup{}, nil
-	}
-
-	// Nếu số lượng group ít hơn n, chia thành len(groups) phần
-	if len(groups) < n {
-		n = len(groups)
-	}
-
-	partitions := make([][]RelativeGroup, 0, n)
-	baseSize := len(groups) / n
-	remainder := len(groups) % n
-	current := 0
-
-	for i := 0; i < n; i++ {
-		size := baseSize
-		if remainder > 0 {
-			size++
-			remainder--
-		}
-
-		end := current + size
-		if end > len(groups) {
-			end = len(groups)
-		}
-
-		partitions = append(partitions, groups[current:end])
-		current = end
-	}
-
-	return partitions, nil
-}
 
 // ToProtoRelativeGroup chuyển đổi một struct RelativeGroup gốc sang Protobuf message.
 func ToProtoRelativeGroup(rg *RelativeGroup) *pb.RelativeGroup {
