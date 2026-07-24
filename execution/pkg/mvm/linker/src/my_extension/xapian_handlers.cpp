@@ -169,6 +169,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
           std::cerr
               << "[ERROR] XAPIAN_GET_OR_CREATE_DB: create_directories failed: "
               << ec.message() << " path=" << fullPath.string() << std::endl;
+          if (!this->isOffChain) {
+              std::cerr << "[FATAL] On-chain Xapian operation failed: create_directories failed: " << ec.message() << ". Aborting to prevent state fork!" << std::endl;
+              std::abort();
+          }
           return mvm::Code(32, 0);
         }
         std::cerr << "[DEBUG] XAPIAN_GET_OR_CREATE_DB: created directory: "
@@ -190,6 +194,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr
             << "[ERROR] XAPIAN_GET_OR_CREATE_DB: getInstance returned null for "
             << fullPath.string() << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << fullPath.string() << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0);
       }
       json uint256Abi = {{"type", "uint256"}};
@@ -230,6 +238,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbname, address, isReset);
       if (!manager) {
         std::cerr << "Failed to create XapianManager" << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0);
       }
       if (!this->isOffChain) {
@@ -558,6 +570,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
                   << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
@@ -677,6 +693,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "Lỗi[XAPIAN_GET_DATA_DOCUMENT]: Không thể lấy/tạo "
                      "XapianManager cho "
                   << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -729,6 +749,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "Lỗi[XAPIAN_GET_TERMS_DOCUMENT]: Không thể lấy/tạo "
                      "XapianManager cho "
                   << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(number, 64), true, false, nullptr);
@@ -785,6 +809,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::cerr << "Lỗi[XAPIAN_GET_VALUE_DOCUMENT]: Không thể lấy/tạo "
                      "XapianManager cho "
                   << input_argument["dbname"] << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << input_argument["dbname"] << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       uint256_t writerHashValue = mvm::injectVirtualDependency(gs, address, input_argument["dbname"], mvm::to_hex_string_fixed(intx::from_string<intx::uint256>("0x" + input_argument["docId"].get<std::string>()), 64), true, false, nullptr);
@@ -897,6 +925,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbName, address, isReset);
       if (!manager) {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbName << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
@@ -910,6 +942,10 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
       } pool_guard(manager, pooled_db);
       if (!pooled_db) {
           std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          if (!this->isOffChain) {
+              std::cerr << "[FATAL] On-chain Xapian operation failed: search pool exhausted. Aborting to prevent state fork!" << std::endl;
+              std::abort();
+          }
           return mvm::Code(32, 0);
       }
 
@@ -1144,6 +1180,10 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho "
                   << fullPath.string() << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << fullPath.string() << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       json uint256Abi = {{"type", "uint256"}};
@@ -1203,6 +1243,10 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbname, address, isReset);
       if (!manager) {
         std::cerr << "Failed to create XapianManager" << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0);
       }
       if (!this->isOffChain) {
@@ -1521,6 +1565,10 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       } else {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbname
                   << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbname << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
       mvm::injectVirtualDependency(gs, address, dbname, mvm::to_hex_string_fixed(number, 64), false, true, this->txHash);
@@ -1867,6 +1915,10 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto manager = XapianManager::getInstance(dbName, address, isReset);
       if (!manager) {
         std::cerr << "Lỗi: Không thể lấy/tạo XapianManager cho " << dbName << std::endl;
+        if (!this->isOffChain) {
+            std::cerr << "[FATAL] On-chain XapianManager::getInstance failed for " << dbName << ". Aborting to prevent fork." << std::endl;
+            std::abort();
+        }
         return mvm::Code(32, 0); // Trả về lỗi
       }
 
@@ -1880,6 +1932,10 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       } pool_guard(manager, pooled_db);
       if (!pooled_db) {
           std::cerr << "[Error] XapianManager search pool: pooled_db is null." << std::endl;
+          if (!this->isOffChain) {
+              std::cerr << "[FATAL] On-chain Xapian operation failed: search pool exhausted. Aborting to prevent state fork!" << std::endl;
+              std::abort();
+          }
           return mvm::Code(32, 0);
       }
 
@@ -1995,6 +2051,13 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
       auto encodedData = encodeArgument(stringAbi, hexNumber);
       printHex(encodedData);
       return encodedData;
+    }
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[ERROR] FullDatabaseV1 Xapian error: " << e.get_description()
+              << std::endl;
+    if (!this->isOffChain) {
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.get_description() << ". Aborting to prevent state fork!" << std::endl;
+        std::abort();
     }
   } catch (const std::exception &e) {
     std::cerr << "Error in operation: " << e.what() << std::endl;
