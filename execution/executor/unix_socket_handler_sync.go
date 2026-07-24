@@ -108,6 +108,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 	logger.Info("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Handling SyncBlocksRequest: block_count=%d", blockCount)
 
+	// Cancel any running speculative block execution since we are about to overwrite state with synced blocks
+	if rh.cancelSpeculativeExecutionCallback != nil {
+		rh.cancelSpeculativeExecutionCallback()
+		logger.Info("🛑 [SYNC] Canceled running speculative block executions before sync")
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// DEADLOCK PREVENTION (May 2026): Reject all sync requests during snapshot.
 	// HandleSyncBlocksRequest opens NOMT sessions that are NOT gated by snapshotGate

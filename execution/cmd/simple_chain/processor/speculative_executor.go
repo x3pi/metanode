@@ -45,19 +45,40 @@ type SpeculativeExecutor struct {
 	resultChan     chan *SpeculativeResult
 	activeSessions sync.Map      // Track speculative sessions by GEI
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
+
+	mu     sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
 func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &SpeculativeExecutor{
 		bp:             bp,
 		resultChan:     make(chan *SpeculativeResult, 1000),
 		concurrencySem: make(chan struct{}, 2), // Max 2 parallel speculative EVMs
+		ctx:            ctx,
+		cancel:         cancel,
 	}
+}
+
+// CancelAllSpeculative cancels all currently running speculative executions
+func (se *SpeculativeExecutor) CancelAllSpeculative() {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	if se.cancel != nil {
+		se.cancel()
+	}
+	se.ctx, se.cancel = context.WithCancel(context.Background())
 }
 
 // ExecuteSpeculative starts background execution of a commit
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
+	se.mu.Lock()
+	ctx := se.ctx
+	se.mu.Unlock()
+
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
 	go func() {
 		defer func() {
@@ -131,7 +152,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
 		startTime := time.Now()
-		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
+		accumulatedResults, execErr := tx_processor.ProcessTransactions(ctx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 
@@ -166,6 +187,12 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 	se.activeSessions.Range(func(key, value interface{}) bool {
 		k := key.(uint64)
 		if k <= gei {
+			res := value.(*SpeculativeResult)
+			if res != nil && res.ClonedState != nil {
+				// Abort any pending NOMT sessions in the cloned chain state
+				// to prevent deadlocks when block execution is skipped.
+				res.ClonedState.Close()
+			}
 			se.activeSessions.Delete(k)
 		}
 		return true
