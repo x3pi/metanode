@@ -188,10 +188,24 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 		k := key.(uint64)
 		if k <= gei {
 			res := value.(*SpeculativeResult)
-			if res != nil && res.ClonedState != nil {
-				// Abort any pending NOMT sessions in the cloned chain state
-				// to prevent deadlocks when block execution is skipped.
-				res.ClonedState.Close()
+			if res != nil {
+				if res.ClonedState != nil {
+					// Abort any pending NOMT sessions in the cloned chain state
+					// to prevent deadlocks when block execution is skipped.
+					res.ClonedState.Close()
+				}
+				if res.AuthRespCh != nil {
+					// Unblock the FFI thread that is waiting for this response
+					select {
+					case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+						Success:      true, // Treat as success to allow Rust to proceed
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+					}:
+					default:
+					}
+				}
 			}
 			se.activeSessions.Delete(k)
 		}
