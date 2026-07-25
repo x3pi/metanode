@@ -244,6 +244,19 @@ def main():
         "validators": validators_entries,
         "alloc": alloc_list
     }
+    
+    # BƠM CÁC VÍ CỐ ĐỊNH TỪ genesis.json.example VÀO ĐÂY
+    example_path = REPO_ROOT / "deploy" / "systemd" / "genesis.json.example"
+    if example_path.exists():
+        try:
+            with open(example_path, "r") as ef:
+                example_data = json.load(ef)
+                if "alloc" in example_data:
+                    genesis_data["alloc"].extend(example_data["alloc"])
+                    print(f"  💉 Injected {len(example_data['alloc'])} accounts from genesis.json.example")
+        except Exception as e:
+            print(yellow(f"  ⚠️ Warning: could not merge genesis.json.example allocs: {e}"))
+
     genesis_path = out_dir / "genesis.json"
     with open(genesis_path, "w") as f:
         json.dump(genesis_data, f, indent=2)
@@ -257,12 +270,12 @@ def main():
         os.makedirs(node_dir / "data" / "execution" / "db", exist_ok=True)
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
-        rpc_port = 8545 + node_id
-        primary_port = 6200 + node_id
-        dns_port = 9080 + node_id
-        peer_rpc_port = 19200 + node_id
-        consensus_port = 9000 + node_id
-        meta_rpc_port = 10100 + node_id
+        rpc_port = 8545
+        primary_port = 4200
+        dns_port = 9080
+        peer_rpc_port = 19200
+        consensus_port = 9000
+        meta_rpc_port = 10100
 
         # Node peers
         go_peers = [f"{args.ip}:{6200 + j}" for j in range(args.validators) if j != node_id]
@@ -272,7 +285,8 @@ def main():
             "debug": False,
             "go_mem_limit_gb": 8,
             "mvm_cache_enabled": False,
-            "enable_private_gateway": False,
+            "enable_private_gateway": True,
+            "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
             "chainId": args.chain_id,
             "private_key": bls["authority_key_private"],
             "address": eth["address"].lstrip("0x").lower(),
@@ -327,15 +341,18 @@ def main():
         peers_toml = ", ".join([f'"{p}"' for p in rust_peers])
         toml_content = f"""# Rust Consensus Configuration for Private Chain Node {node_id}
 node_id = {node_id}
-consensus_port = {consensus_port}
-peer_rpc_port = {peer_rpc_port}
-meta_node_rpc_port = {meta_rpc_port}
-
+network_address = "127.0.0.1:{consensus_port}"
+protocol_key_path = "{node_dir}/keys/protocol_key.json"
+network_key_path = "{node_dir}/keys/network_key.json"
 storage_path = "{node_dir}/data/consensus/db"
-keys_dir = "{node_dir}/keys"
-genesis_file = "{genesis_path}"
 
+enable_metrics = true
+metrics_port = {9100 + node_id}
+peer_rpc_port = {peer_rpc_port}
 peer_rpc_addresses = [{peers_toml}]
+executor_read_enabled = true
+executor_commit_enabled = true
+time_based_epoch_change = true
 """
         with open(node_dir / "node.toml", "w") as f:
             f.write(toml_content)
@@ -356,7 +373,7 @@ SIMPLE_CHAIN_BIN="{simple_chain_bin}"
 
 if [ ! -f "$SIMPLE_CHAIN_BIN" ]; then
     echo "🔨 Building simple_chain Go binary..."
-    (cd "{REPO_ROOT}/execution/cmd/simple_chain" && go build -o simple_chain main.go app.go backend.go mtn_api.go rpc_block.go rpc_transaction.go rpc_state.go debug_api.go startup_integrity_check.go app_blockchain.go app_network.go tx_async_queue.go)
+    (cd "{REPO_ROOT}/execution/cmd/simple_chain" && go build -o simple_chain .)
 fi
 
 """
@@ -377,7 +394,7 @@ echo "   Check logs in $DIR/node-0/logs/node-0.log"
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 echo "🛑 Stopping Metanode Private Chain..."
 
-for pid_file in "$DIR"/node-*/node-*.pid; do
+for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
     if [ -f "$pid_file" ]; then
         PID=$(cat "$pid_file")
         echo "  → Stopping node process PID $PID..."
@@ -387,6 +404,7 @@ for pid_file in "$DIR"/node-*/node-*.pid; do
 done
 
 pkill -f "simple_chain --config" 2>/dev/null || true
+pkill -f "metanode start --config" 2>/dev/null || true
 echo "✅ Private Chain stopped."
 """
 
