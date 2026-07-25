@@ -23,6 +23,7 @@ Một node hoàn chỉnh của Metanode chạy dưới dạng **systemd service*
 
 * **[⚡ Chạy Validator Node](./validator-setup)** — Hướng dẫn cài đặt, cấu hình và chạy một validator node độc lập.
 * **[🌐 Triển khai Private Chain](./private-chain-setup)** — Hướng dẫn khởi tạo và triển khai Private Chain (1 validator hoặc multi-validator).
+* **[📐 So sánh Kiến trúc & Lưu trữ Tệp](./private-chain-architecture)** — Đánh giá ưu nhược điểm các mô hình triển khai & giải pháp Upload/Download File.
 * **[🔄 Chạy Sync-Only Node](./synconly-setup)** — Full node đồng bộ dữ liệu mạng để làm RPC công khai hoặc phục vụ Explorer.
 * **[🚀 Triển khai Cụm Node Local](./deployment-guide)** — Hướng dẫn sử dụng bộ công cụ điều phối `systemd-cluster.sh` và `install-rpc-systemd.sh` trên cùng một máy chủ.
 * **[🔑 Quản lý Keys](./key-management)** — Sinh khóa, sao lưu, bảo mật và phân quyền các file keys.
