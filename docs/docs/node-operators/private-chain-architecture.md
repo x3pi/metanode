@@ -205,6 +205,22 @@ contract FileRegistry {
 - **Cosmos IBC:** [https://ibcprotocol.dev/](https://ibcprotocol.dev/)
 
 ### 📦 Giải pháp Lưu trữ Tệp Off-chain Doanh nghiệp
-- **MinIO High-Performance Object Storage:** [https://min.io/](https://min.io/) *(Phù hợp nhất cho Private Enterprise Cloud)*
-- **IPFS Private Cluster:** [https://ipfs.tech/](https://ipfs.tech/) *(Mạng lưu trữ phi tập trung riêng tư)*
+
+#### 🦀 Giải pháp Thuần Rust (Rust-Native Storage — Phù hợp nhất cho Metanode Ecosystem):
+1. **[Iroh (`n0-computer/iroh`)](https://iroh.computer/):**
+   - *Đặc điểm:* Hệ thống P2P Content-Addressed Blob Storage thế hệ mới viết 100% bằng **Rust**. Sử dụng hash tốc độ cao **BLAKE3** và giao thức truyền tải **QUIC**.
+   - *Ưu điểm:* Tốc độ truyền dữ liệu siêu nhanh, dung lượng footprint cực nhẹ, có thể nhúng trực tiếp dạng **Cargo Crate** vào binary của Metanode hoặc chạy daemon riêng.
+   - *Link:* [https://github.com/n0-computer/iroh](https://github.com/n0-computer/iroh)
+2. **[Garage Data (`GarageHQ`)](https://garagehq.uno/):**
+   - *Đặc điểm:* Hệ thống Object Storage phân tán tương thích S3 (S3-compatible) viết 100% bằng **Rust**.
+   - *Ưu điểm:* Thay thế hoàn hảo cho MinIO trong hệ sinh thái Rust, tiêu tốn ít RAM/CPU hơn MinIO nhiều lần, thiết kế đa trung tâm dữ liệu (Multi-datacenter) hiệu quả.
+   - *Link:* [https://garagehq.uno/](https://garagehq.uno/)
+3. **[Apache OpenDAL (`apache/opendal`)](https://opendal.apache.org/):**
+   - *Đặc điểm:* Thư viện Data Access Layer chuẩn của Apache viết bằng **Rust**, cho phép mã nguồn Rust kết nối đến bất kỳ dịch vụ lưu trữ nào (S3, MinIO, IPFS, Local Disk, RocksDB) qua một API duy nhất.
+   - *Link:* [https://github.com/apache/opendal](https://github.com/apache/opendal)
+
+#### 🌐 Các Giải pháp Đa Nền tảng / Cloud Khác:
+- **MinIO High-Performance Object Storage:** [https://min.io/](https://min.io/) *(Phù hợp cho Cloud Go/Java sẵn có)*
+- **IPFS Private Cluster:** [https://ipfs.tech/](https://ipfs.tech/) *(Mạng IPFS riêng tư)*
 - **Arweave DevDocs:** [https://www.arweave.org/](https://www.arweave.org/)
+
