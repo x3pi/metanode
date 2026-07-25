@@ -275,3 +275,40 @@ async fn main() -> anyhow::Result<()> {
 - **IPFS Private Cluster:** [https://ipfs.tech/](https://ipfs.tech/) *(Mạng IPFS riêng tư)*
 - **Arweave DevDocs:** [https://www.arweave.org/](https://www.arweave.org/)
 
+---
+
+## ⚡ Part 3: Đánh giá Năng lực Tải của 1 Server Thường (Capacity Estimation)
+
+Đối với một **Server thường tiêu chuẩn (Cấu hình: 8 vCPU, 32GB RAM, Ổ cứng NVMe SSD)**, khả năng chịu tải Upload/Download đồng thời phụ thuộc vào **4 yếu tố nút thắt (Bottlenecks)**:
+
+### 1. Nút thắt Băng thông Mạng (Network Bandwidth — Nút thắt lớn nhất!)
+Hầu hết các server hiện nay bị giới hạn bởi tốc độ card mạng chứ không phải CPU hay RAM.
+
+- **Trên đường truyền 1 Gbps (Tốc độ thực tế ~125 MB/s):**
+  - Nếu mỗi người dùng Upload/Download ở tốc độ **10 Mbps (~1.25 MB/s)**:
+    $$\text{Tối đa đồng thời} = \frac{1000 \text{ Mbps}}{10 \text{ Mbps}} = \mathbf{100 \text{ người cùng lúc}}$$
+  - Nếu mỗi người dùng ứng dụng di động/web tải nhẹ ở tốc độ **1 Mbps (~125 KB/s)**:
+    $$\text{Tối đa đồng thời} = \frac{1000 \text{ Mbps}}{1 \text{ Mbps}} = \mathbf{1,000 \text{ người cùng lúc}}$$
+- **Khi nâng cấp lên đường truyền 10 Gbps (~1,250 MB/s):**
+  - Số người dùng đồng thời ở tốc độ 10 Mbps/người sẽ đạt: **1,000 người cùng lúc**.
+
+### 2. Nút thắt Ổ cứng (Disk I/O Throughput)
+- **Ổ đĩa HDD cơ:** Tốc độ đọc/ghi ngẫu nhiên chỉ đạt ~20-50 MB/s $\implies$ Chỉ chịu được **15 - 30 người** upload/download đồng thời.
+- **Ổ đĩa NVMe SSD:** Tốc độ đọc/ghi lên tới 2,500 - 5,000 MB/s ($\approx$ 20-40 Gbps) $\implies$ **NVMe SSD không bao giờ là nút thắt** đối với card mạng 1 Gbps hay 10 Gbps.
+
+### 3. Nút thắt Bộ nhớ (RAM Connection Memory)
+- Khi sử dụng **Rust + Tokio async I/O (Iroh / Hyper)**: Chi phí bộ nhớ cho 1 socket kết nối chờ chỉ mất khoảng **4 KB - 16 KB RAM**.
+- Với 32GB RAM, server có thể duy trì **100,000 đến 300,000 kết nối chờ (Concurrent Open Sockets)** mà không bị sập RAM.
+
+---
+
+### 📊 Bảng Ước tính Năng lực Tải Theo Cấu hình Server
+
+| Cấu hình Server | Băng thông Mạng | Loại Ổ đĩa | Đồng thời (Tải 10 Mbps/người) | Đồng thời (Tải 1 Mbps/người) |
+| :--- | :--- | :--- | :--- | :--- |
+| **VPS Nhỏ (2 vCPU, 4GB RAM)** | 100 Mbps | SATA SSD | **10 người** | **100 người** |
+| **Server Thường (8 vCPU, 32GB RAM)** | 1 Gbps | NVMe SSD | **100 người** | **1,000 người** |
+| **Server Mạnh (16 vCPU, 64GB RAM)** | 10 Gbps | NVMe SSD | **1,000 người** | **10,000 người** |
+| **Cụm 5 Server (Load Balancer)** | 10 Gbps x 5 | NVMe Array | **5,000 người** | **50,000 người** |
+
+
