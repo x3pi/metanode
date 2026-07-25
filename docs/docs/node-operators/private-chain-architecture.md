@@ -211,6 +211,57 @@ contract FileRegistry {
    - *Đặc điểm:* Hệ thống P2P Content-Addressed Blob Storage thế hệ mới viết 100% bằng **Rust**. Sử dụng hash tốc độ cao **BLAKE3** và giao thức truyền tải **QUIC**.
    - *Ưu điểm:* Tốc độ truyền dữ liệu siêu nhanh, dung lượng footprint cực nhẹ, có thể nhúng trực tiếp dạng **Cargo Crate** vào binary của Metanode hoặc chạy daemon riêng.
    - *Link:* [https://github.com/n0-computer/iroh](https://github.com/n0-computer/iroh)
+
+---
+
+### 🚀 Cơ chế Upload & Download Tệp của Iroh trong Rust
+
+Iroh hoạt động theo mô hình **Content-Addressed Blob Store** kết hợp giao thức mạng **QUIC** và thuật toán băm **BLAKE3 (Bao Tree)**.
+
+#### 1. Quy trình Upload (Thêm File vào Iroh Blob Store)
+1. **Chia nhỏ & Tạo Hash (Chunking & Hashing):** Khi thêm tệp vào Iroh, dữ liệu được chia nhỏ thành các khối (chunks) và tạo cây băm **Bao (BLAKE3 Verified Tree)**.
+2. **Sinh Blob ID (BLAKE3 Hash):** Iroh trả về duy nhất một mã Hash 32-byte (Blob ID) đại diện cho tệp (ví dụ: `2b3a4f...`).
+3. **Lưu trữ Blob (Local Store):** Tệp được lưu trong bộ nhớ blob cục bộ của Iroh Node (`iroh-blobs`).
+4. **Tạo Ticket (Định danh kết nối):** Iroh có thể tạo ra một `BlobTicket` chứa `[Hash + NodeId + RelayAddresses]`. Ticket này đóng vai trò như một địa chỉ tải file an toàn xuyên qua NAT/Firewall.
+
+#### 2. Quy trình Download (Tải Tệp Verified qua P2P QUIC)
+1. **Thiết lập kết nối P2P (Hole Punching & Relay):** Node người tải sử dụng `NodeId` và `RelayUrl` từ Ticket để thiết lập kết nối QUIC trực tiếp tới Node chứa file (tự động xuyên qua NAT/Firewall bằng STUN/DERP).
+2. **Streaming & Xác thực BLAKE3 thời gian thực (Verified Streaming):** Khi các byte dữ liệu được truyền qua mạng QUIC, Iroh kiểm tra (verify) từng chunk byte dựa trên cây băm BLAKE3 **ngay lập tức trong lúc stream**.
+3. **Bảo mật tuyệt đối:** Nếu dữ liệu bị lỗi, sửa đổi hoặc hư hỏng trên đường truyền, Iroh sẽ phát hiện và từ chối chunk bị lỗi ngay lập tức trước khi ghi ra đĩa.
+
+---
+
+#### 💻 Mã nguồn Ví dụ Tích hợp Iroh bằng Rust (Cargo SDK)
+
+```rust
+use iroh::node::Node;
+use iroh_blobs::rpc::client::blobs::AddProgress;
+use tokio::fs::File;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Khởi tạo Iroh Node trực tiếp trong ứng dụng Rust
+    let node = Node::memory().spawn().await?;
+    let client = node.client();
+
+    // 📤 1. UPLOAD (Import File vào Iroh Blob Store)
+    let file_path = "./my_document.pdf";
+    let tag = client.blobs().add_from_path(file_path, false, SetTagOption::Auto).await?;
+    let blob_hash = tag.hash;
+    println!("✅ Upload thành công! File BLAKE3 Hash: {}", blob_hash);
+
+    // Lưu `blob_hash` này lên Smart Contract Private Chain `FileRegistry.sol`
+    // ...
+
+    // 📥 2. DOWNLOAD (Tải File dựa trên BLAKE3 Hash & NodeId)
+    let destination_path = "./downloaded_document.pdf";
+    client.blobs().download_to_path(blob_hash, destination_path).await?;
+    println!("✅ Download & Verify dữ liệu thành công ra file: {}", destination_path);
+
+    Ok(())
+}
+```
+
 2. **[Garage Data (`GarageHQ`)](https://garagehq.uno/):**
    - *Đặc điểm:* Hệ thống Object Storage phân tán tương thích S3 (S3-compatible) viết 100% bằng **Rust**.
    - *Ưu điểm:* Thay thế hoàn hảo cho MinIO trong hệ sinh thái Rust, tiêu tốn ít RAM/CPU hơn MinIO nhiều lần, thiết kế đa trung tâm dữ liệu (Multi-datacenter) hiệu quả.
