@@ -229,8 +229,6 @@ func (q *TxAsyncQueue) GetTxStatus(ethTxHash common.Hash) *txResult {
 // worker is a goroutine that consumes from the queue and processes transactions.
 func (q *TxAsyncQueue) worker(id int) {
 	defer q.wg.Done()
-	logger.Info("[TX_ASYNC] Worker %d started", id)
-
 	for ptx := range q.queue {
 		q.queueDepth.Add(-1)
 
@@ -252,6 +250,21 @@ func (q *TxAsyncQueue) worker(id int) {
 			})
 			logger.Error("[TX_ASYNC] Worker %d: tx %s failed: %v",
 				id, ptx.EthTxHash.Hex(), err)
+
+			// FIX: Update the SpeculativeReceiptCache so clients polling for receipt will get the error
+			if val, ok := SpeculativeReceiptCache.Load(ptx.EthTxHash); ok {
+				if wrapper, ok := val.(*SpeculativeReceiptWrapper); ok {
+					wrapper.Receipt.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+					wrapper.Receipt.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
+					wrapper.Receipt.Exception = err.Error()
+					SpeculativeReceiptCache.Store(ptx.EthTxHash, wrapper)
+				} else if rcp, ok := val.(*mt_proto.RpcReceipt); ok {
+					rcp.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+					rcp.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
+					rcp.Exception = err.Error()
+					SpeculativeReceiptCache.Store(ptx.EthTxHash, rcp)
+				}
+			}
 		} else {
 			q.processed.Add(1)
 			q.results.Store(ptx.EthTxHash, &txResult{
@@ -264,8 +277,6 @@ func (q *TxAsyncQueue) worker(id int) {
 		logger.Info("[TX_ASYNC] Worker %d: processed tx %s in %v (success=%v)",
 			id, ptx.EthTxHash.Hex(), elapsed, err == nil)
 	}
-
-	logger.Info("[TX_ASYNC] Worker %d stopped", id)
 }
 
 // processTransaction handles the actual submission of a pre-built MetaTx.
