@@ -198,7 +198,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     is_explorer = getattr(args, "is_explorer", False) or (args.node_type == "synconly")
     
     snapshot_enabled = getattr(args, "snapshot_enabled", False)
-    epochs_to_keep   = 5 if is_validator else 0
+    epochs_to_keep   = 0 if (not is_validator or is_rpc_node) else 5
     commit_batch_size= 500 if is_validator else 100
     commit_batches_ahead = 128 if is_validator else 64
 

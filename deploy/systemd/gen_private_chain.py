@@ -291,7 +291,7 @@ def main():
             "private_key": bls["authority_key_private"],
             "address": eth["address"].lstrip("0x").lower(),
             "log_path": str(node_dir / "logs" / "execution"),
-            "epochs_to_keep": 5,
+            "epochs_to_keep": 0,
             "backup_path": str(node_dir / "data" / "execution" / "backup"),
             "last_block_save_path": "/last_block.dat",
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
@@ -303,7 +303,7 @@ def main():
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
-            "connection_address": f"{args.ip}:{primary_port}",
+            "connection_address": f"0.0.0.0:{primary_port}",
             "dns_server_address": f"{args.ip}:{dns_port}",
             "version": "0.0.1.0",
             "rpc_port": f":{rpc_port}",
@@ -312,6 +312,8 @@ def main():
             "genesis_file_path": str(genesis_path),
             "rust_config_path": str(node_dir / "node.toml"),
             "snapshot_enabled": False,
+            "is_rpc_node": True,
+            "state_backend": "nomt",
             "Databases": {
                 "RootPath": str(node_dir / "data" / "execution" / "db"),
                 "DBEngine": "sharded",
