@@ -464,9 +464,32 @@ func (api *MetaAPI) GetSendRawTransaction(ctx context.Context, input hexutil.Byt
 //
 // Falls back to synchronous processing if the async queue is not available.
 var (
-	// Cache lưu trữ Receipt giả lập cho Speculative Execution (Key: ethTxHash, Value: *mt_proto.RpcReceipt)
+	// Cache lưu trữ Receipt giả lập cho Speculative Execution (Key: ethTxHash, Value: *SpeculativeReceiptWrapper)
 	SpeculativeReceiptCache sync.Map
 )
+
+type SpeculativeReceiptWrapper struct {
+	Receipt   *mt_proto.RpcReceipt
+	Timestamp time.Time
+}
+
+func init() {
+	// Goroutine dọn dẹp SpeculativeReceiptCache (Memory Leak Fix)
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			now := time.Now()
+			SpeculativeReceiptCache.Range(func(key, value interface{}) bool {
+				if wrapper, ok := value.(*SpeculativeReceiptWrapper); ok {
+					if now.Sub(wrapper.Timestamp) > 10*time.Minute {
+						SpeculativeReceiptCache.Delete(key)
+					}
+				}
+				return true
+			})
+		}
+	}()
+}
 
 // SendRawEthTransaction accepts a raw Ethereum-format transaction (the same
 // payload as eth_sendRawTransaction in MetaMask), converts it locally to a
@@ -498,6 +521,30 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 
 	// Fallback: synchronous processing (legacy path)
 	return api.sendRawEthTransactionSync(ctx, input)
+}
+
+// MarkSpeculativeReceiptFailed updates a pending speculative receipt with an error.
+// It uses copy-on-write to prevent data races with GetTransactionReceipt.
+func MarkSpeculativeReceiptFailed(hash common.Hash, err error) {
+	if val, ok := SpeculativeReceiptCache.Load(hash); ok {
+		if wrapper, ok := val.(*SpeculativeReceiptWrapper); ok {
+			// Copy-on-write to avoid data race
+			newWrapper := &SpeculativeReceiptWrapper{
+				Receipt:   proto.Clone(wrapper.Receipt).(*mt_proto.RpcReceipt),
+				Timestamp: wrapper.Timestamp,
+			}
+			newWrapper.Receipt.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+			newWrapper.Receipt.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
+			newWrapper.Receipt.Exception = err.Error()
+			SpeculativeReceiptCache.Store(hash, newWrapper)
+		} else if rcp, ok := val.(*mt_proto.RpcReceipt); ok {
+			newRcp := proto.Clone(rcp).(*mt_proto.RpcReceipt)
+			newRcp.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+			newRcp.BlockNumber = "0x1"
+			newRcp.Exception = err.Error()
+			SpeculativeReceiptCache.Store(hash, newRcp)
+		}
+	}
 }
 
 // sendRawEthTransactionSpeculative performs speculative execution for the Private Gateway
@@ -575,19 +622,24 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	}
 
 	// 9. Store in cache
-	SpeculativeReceiptCache.Store(ethTx.Hash(), mockReceipt)
+	SpeculativeReceiptCache.Store(ethTx.Hash(), &SpeculativeReceiptWrapper{
+		Receipt:   mockReceipt,
+		Timestamp: time.Now(),
+	})
+
+
 
 	// 10. Enqueue for real execution in the background
 	if api.App.txAsyncQueue != nil {
 		api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
 	} else {
-		go func() {
-			api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
-		}()
+		go func(hash common.Hash) {
+			_, errProc := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
+			if errProc != nil {
+				MarkSpeculativeReceiptFailed(hash, errProc)
+			}
+		}(ethTx.Hash())
 	}
-
-	logger.Info("[SpeculativeGateway] TX executed speculatively: ethHash=%s status=%d", ethTx.Hash().Hex(), status)
-
 	return ethTx.Hash(), nil
 }
 
@@ -683,7 +735,12 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		// KIỂM TRA SPECULATIVE CACHE TRƯỚC KHI TRẢ VỀ NIL
 		if api.App.config.EnablePrivateGateway {
 			if cachedRcpt, found := SpeculativeReceiptCache.Load(hashEth); found {
-				rcp := cachedRcpt.(*mt_proto.RpcReceipt)
+				var rcp *mt_proto.RpcReceipt
+				if wrapper, ok := cachedRcpt.(*SpeculativeReceiptWrapper); ok {
+					rcp = wrapper.Receipt
+				} else {
+					rcp = cachedRcpt.(*mt_proto.RpcReceipt)
+				}
 				logger.Info("[RPC-RECEIPT] Found Speculative Receipt for %s", searchHash.Hex())
 
 				statusStr := "0x0"
@@ -696,11 +753,16 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 					contractAddress = rcp.ContractAddress
 				}
 
+				blockNumber := rcp.BlockNumber
+				if blockNumber == "" {
+					blockNumber = "0x0"
+				}
+
 				resp := map[string]interface{}{
 					"transactionHash":   hashEth.Hex(),
 					"transactionIndex":  "0x0",
 					"blockHash":         common.Hash{}.Hex(), // Pending
-					"blockNumber":       "0x0",               // Pending
+					"blockNumber":       blockNumber,
 					"from":              common.HexToAddress(rcp.From).Hex(),
 					"cumulativeGasUsed": rcp.CumulativeGasUsed,
 					"gasUsed":           rcp.GasUsed,
@@ -711,6 +773,9 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 				}
 				if len(rcp.To) > 0 {
 					resp["to"] = common.HexToAddress(rcp.To).Hex()
+				}
+				if rcp.Exception != "" {
+					resp["revertReason"] = rcp.Exception
 				}
 				return resp, nil
 			}
