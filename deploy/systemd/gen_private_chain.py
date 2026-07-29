@@ -60,7 +60,7 @@ def find_metanode_bin(override=None):
         print(red(f"ERROR: metanode binary not found at: {override}"))
         sys.exit(1)
     for candidate in METANODE_BIN_CANDIDATES:
-        if candidate and candidate.exists():
+        if candidate and candidate.is_file():
             return str(candidate)
     return None
 
@@ -123,16 +123,9 @@ def generate_eth_dev_account():
             "address": pk.public_key.to_checksum_address()
         }
     except ImportError:
-        # Fallback using metanode keytool if eth_keys module is missing
-        pass
-    
-    # Simple random hex fallback for key export
-    raw_hex = secrets.token_hex(32)
-    # We can invoke simple_chain --tool-get-address or Rust keytool to get standard address
-    return {
-        "private_key": "0x" + raw_hex,
-        "address": "0x" + raw_hex[:40] # address placeholder fallback
-    }
+        print(red("ERROR: 'eth_keys' python module is required to generate dev accounts."))
+        print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate private chain configs for Metanode")
