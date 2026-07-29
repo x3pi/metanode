@@ -17,7 +17,7 @@ VALIDATORS=${1:-1}
 
 # Khởi tạo cấu hình mới
 echo "⚙️ Đang tạo cấu hình cho $VALIDATORS node(s) với Chain ID 991..."
-python3 gen_private_chain.py --validators $VALIDATORS --chain-id 991
+python3 gen_private_chain.py --validators $VALIDATORS --chain-id 991 --is-rpc
 
 # Khởi động mạng mới
 echo "🚀 Đang khởi động mạng..."
