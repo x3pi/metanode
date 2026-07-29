@@ -523,6 +523,30 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 	return api.sendRawEthTransactionSync(ctx, input)
 }
 
+// MarkSpeculativeReceiptFailed updates a pending speculative receipt with an error.
+// It uses copy-on-write to prevent data races with GetTransactionReceipt.
+func MarkSpeculativeReceiptFailed(hash common.Hash, err error) {
+	if val, ok := SpeculativeReceiptCache.Load(hash); ok {
+		if wrapper, ok := val.(*SpeculativeReceiptWrapper); ok {
+			// Copy-on-write to avoid data race
+			newWrapper := &SpeculativeReceiptWrapper{
+				Receipt:   proto.Clone(wrapper.Receipt).(*mt_proto.RpcReceipt),
+				Timestamp: wrapper.Timestamp,
+			}
+			newWrapper.Receipt.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+			newWrapper.Receipt.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
+			newWrapper.Receipt.Exception = err.Error()
+			SpeculativeReceiptCache.Store(hash, newWrapper)
+		} else if rcp, ok := val.(*mt_proto.RpcReceipt); ok {
+			newRcp := proto.Clone(rcp).(*mt_proto.RpcReceipt)
+			newRcp.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
+			newRcp.BlockNumber = "0x1"
+			newRcp.Exception = err.Error()
+			SpeculativeReceiptCache.Store(hash, newRcp)
+		}
+	}
+}
+
 // sendRawEthTransactionSpeculative performs speculative execution for the Private Gateway
 func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	// 1. Decode the Ethereum TX
@@ -603,6 +627,8 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		Timestamp: time.Now(),
 	})
 
+
+
 	// 10. Enqueue for real execution in the background
 	if api.App.txAsyncQueue != nil {
 		api.App.txAsyncQueue.EnqueueEthTransaction(ctx, input)
@@ -610,19 +636,7 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		go func(hash common.Hash) {
 			_, errProc := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
 			if errProc != nil {
-				if val, ok := SpeculativeReceiptCache.Load(hash); ok {
-					if wrapper, ok := val.(*SpeculativeReceiptWrapper); ok {
-						wrapper.Receipt.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
-						wrapper.Receipt.BlockNumber = "0x1"
-						wrapper.Receipt.Exception = errProc.Error()
-						SpeculativeReceiptCache.Store(hash, wrapper)
-					} else if rcp, ok := val.(*mt_proto.RpcReceipt); ok {
-						rcp.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
-						rcp.BlockNumber = "0x1"
-						rcp.Exception = errProc.Error()
-						SpeculativeReceiptCache.Store(hash, rcp)
-					}
-				}
+				MarkSpeculativeReceiptFailed(hash, errProc)
 			}
 		}(ethTx.Hash())
 	}

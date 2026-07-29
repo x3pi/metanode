@@ -252,19 +252,7 @@ func (q *TxAsyncQueue) worker(id int) {
 				id, ptx.EthTxHash.Hex(), err)
 
 			// FIX: Update the SpeculativeReceiptCache so clients polling for receipt will get the error
-			if val, ok := SpeculativeReceiptCache.Load(ptx.EthTxHash); ok {
-				if wrapper, ok := val.(*SpeculativeReceiptWrapper); ok {
-					wrapper.Receipt.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
-					wrapper.Receipt.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
-					wrapper.Receipt.Exception = err.Error()
-					SpeculativeReceiptCache.Store(ptx.EthTxHash, wrapper)
-				} else if rcp, ok := val.(*mt_proto.RpcReceipt); ok {
-					rcp.Status = mt_proto.RECEIPT_STATUS_TRANSACTION_ERROR
-					rcp.BlockNumber = "0x1" // Bypass client 'blockNumber > 0' check
-					rcp.Exception = err.Error()
-					SpeculativeReceiptCache.Store(ptx.EthTxHash, rcp)
-				}
-			}
+			MarkSpeculativeReceiptFailed(ptx.EthTxHash, err)
 		} else {
 			q.processed.Add(1)
 			q.results.Store(ptx.EthTxHash, &txResult{
