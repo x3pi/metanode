@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-06-24
+> **Last updated:** 2026-07-25
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -12,7 +12,7 @@ metanode/
 │   ├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
-│   └── systemd/            ← Systemd deployment scripts, key generator, and env templates
+│   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
 ├── consensus/          ← Rust consensus engine (BFT/DAG-based)
