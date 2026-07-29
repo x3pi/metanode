@@ -245,11 +245,15 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 
 		// Pruning default configuration (Pruned/Full mode)
 		if ConfigApp.Pruning.Mode == "" {
-			ConfigApp.Pruning.Mode = "full"
-			if ConfigApp.EpochsToKeep != nil && *ConfigApp.EpochsToKeep > 0 {
-				ConfigApp.Pruning.EpochsToKeep = *ConfigApp.EpochsToKeep
+			if ConfigApp.EpochsToKeep != nil && *ConfigApp.EpochsToKeep == 0 {
+				ConfigApp.Pruning.Mode = "archive"
 			} else {
-				ConfigApp.Pruning.EpochsToKeep = 128 // Default to keeping ~128 epochs
+				ConfigApp.Pruning.Mode = "full"
+				if ConfigApp.EpochsToKeep != nil && *ConfigApp.EpochsToKeep > 0 {
+					ConfigApp.Pruning.EpochsToKeep = *ConfigApp.EpochsToKeep
+				} else {
+					ConfigApp.Pruning.EpochsToKeep = 128 // Default to keeping ~128 epochs
+				}
 			}
 			ConfigApp.Pruning.PruneIntervalBlocks = 100
 		}

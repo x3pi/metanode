@@ -1622,6 +1622,7 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		isReplicationSync: n.isReplicationSync,
 		registryChanged:   n.registryChanged,
 		isHash:            n.isHash,
+		changelogDB:       n.changelogDB,
 	}
 	t.readView.Store(&nomtReadView{
 		dirty:      newDirty,

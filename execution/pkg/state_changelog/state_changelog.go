@@ -501,7 +501,7 @@ func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
 			return err
 		}
 		count++
-		
+
 		// Periodically commit the batch to prevent memory blowup
 		if count%10000 == 0 {
 			if err := batch.Commit(pebble.Sync); err != nil {
