@@ -136,6 +136,8 @@ def main():
     parser.add_argument("--alloc-balance", type=int, default=1000000, help="Initial MTN balance per account (default: 1000000)")
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
+    parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
+    parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Private Chain Initializer ===")))
@@ -284,7 +286,7 @@ def main():
             "private_key": bls["authority_key_private"],
             "address": eth["address"].lstrip("0x").lower(),
             "log_path": str(node_dir / "logs" / "execution"),
-            "epochs_to_keep": 5,
+            "epochs_to_keep": args.epochs_to_keep if args.epochs_to_keep is not None else (0 if args.is_rpc else 5),
             "backup_path": str(node_dir / "data" / "execution" / "backup"),
             "last_block_save_path": "/last_block.dat",
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
@@ -296,7 +298,7 @@ def main():
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
-            "connection_address": f"{args.ip}:{primary_port}",
+            "connection_address": f"0.0.0.0:{primary_port}",
             "dns_server_address": f"{args.ip}:{dns_port}",
             "version": "0.0.1.0",
             "rpc_port": f":{rpc_port}",
@@ -305,6 +307,8 @@ def main():
             "genesis_file_path": str(genesis_path),
             "rust_config_path": str(node_dir / "node.toml"),
             "snapshot_enabled": False,
+            "is_rpc_node": args.is_rpc,
+            "state_backend": "nomt",
             "Databases": {
                 "RootPath": str(node_dir / "data" / "execution" / "db"),
                 "DBEngine": "sharded",

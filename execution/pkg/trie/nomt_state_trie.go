@@ -1610,6 +1610,7 @@ func (n *NomtStateTrie) Copy() StateTrie {
 	for k, v := range n.wOldLoaded {
 		newOldLoaded[k] = v
 	}
+	lockedChangelogDB := n.changelogDB
 	n.writerMu.Unlock()
 
 	t := &NomtStateTrie{
@@ -1622,6 +1623,7 @@ func (n *NomtStateTrie) Copy() StateTrie {
 		isReplicationSync: n.isReplicationSync,
 		registryChanged:   n.registryChanged,
 		isHash:            n.isHash,
+		changelogDB:       lockedChangelogDB,
 	}
 	t.readView.Store(&nomtReadView{
 		dirty:      newDirty,
