@@ -487,11 +487,25 @@ func (db *AccountStateDB) Discard() (err error) {
 	}
 
 	db.muTrie.Lock()
+	
+	// Preserve ChangelogDB
+	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
-		if closer, ok := db.trie.(interface{ Close() }); ok {
-			closer.Close()
+		if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+			changelogDB = nomtTrie.GetChangelogDB()
+		}
+		if db.trie != newTrie {
+			if closer, ok := db.trie.(interface{ Close() }); ok {
+				closer.Close()
+			}
 		}
 	}
+	if changelogDB != nil {
+		if newNomt, ok := newTrie.(*p_trie.NomtStateTrie); ok {
+			newNomt.SetChangelogDB(changelogDB)
+		}
+	}
+
 	db.trie = newTrie
 	db.muTrie.Unlock()
 

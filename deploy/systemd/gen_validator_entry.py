@@ -198,7 +198,9 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     is_explorer = getattr(args, "is_explorer", False) or (args.node_type == "synconly")
     
     snapshot_enabled = getattr(args, "snapshot_enabled", False)
-    epochs_to_keep   = 5 if is_validator else 0
+    epochs_to_keep   = getattr(args, "epochs_to_keep", None)
+    if epochs_to_keep is None:
+        epochs_to_keep = 0 if is_rpc_node else 5
     commit_batch_size= 500 if is_validator else 100
     commit_batches_ahead = 128 if is_validator else 64
 
@@ -391,6 +393,7 @@ def parse_args():
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
+    parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     parser.add_argument("--is-explorer",  action="store_true", help="Enable Explorer for this node")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")

@@ -234,12 +234,15 @@ func (api *MetaAPI) GetBalance(ctx context.Context, address common.Address, bloc
 // GetCode returns the code stored at the given address in the state for the given block number.
 func (api *MetaAPI) GetCode(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	as, err := api.resolveAccountState(ctx, address, blockNrOrHash)
-	if err != nil || as == nil {
+	if err != nil {
 		return nil, err
+	}
+	if as == nil {
+		return hexutil.Bytes{}, nil
 	}
 	sc := as.SmartContractState()
 	if sc == nil {
-		return nil, fmt.Errorf("smartContractState is nil")
+		return hexutil.Bytes{}, nil
 	}
 	codeHash := as.SmartContractState().CodeHash()
 	code := api.App.chainState.GetSmartContractDB().GetCodeByCodeHash(address, codeHash)
@@ -251,13 +254,17 @@ func (api *MetaAPI) GetCode(ctx context.Context, address common.Address, blockNr
 // numbers are also allowed.
 func (api *MetaAPI) GetStorageAt(ctx context.Context, address common.Address, hexKey string, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	as, err := api.resolveAccountState(ctx, address, blockNrOrHash)
-	if err != nil || as == nil {
+	if err != nil {
 		return nil, err
+	}
+	emptyStorage := common.FromHex("0x0000000000000000000000000000000000000000000000000000000000000000")
+	if as == nil {
+		return emptyStorage, nil
 	}
 
 	asSc := as.SmartContractState()
 	if asSc == nil {
-		return nil, fmt.Errorf("smartContractState is nil")
+		return emptyStorage, nil
 	}
 
 	rootSc := asSc.StorageRoot()
@@ -269,7 +276,7 @@ func (api *MetaAPI) GetStorageAt(ctx context.Context, address common.Address, he
 	sValue, ok := api.App.chainState.GetSmartContractDB().StorageValue(address, key.Bytes(), &rootSc)
 
 	if !ok {
-		return nil, fmt.Errorf("smartContractState is nil")
+		return emptyStorage, nil
 	}
 	return sValue, nil
 }
