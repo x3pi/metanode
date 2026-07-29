@@ -237,6 +237,10 @@ impl ConsensusNode {
         
                     loop {
                         let mut sync_round = 0;
+                        if barrier_peers.is_empty() {
+                            tracing::info!("✅ [STARTUP-SYNC] No peers configured (single-node or seed). Skipping startup sync.");
+                            break;
+                        }
                         loop {
                             let mut max_peer_block = 0u64;
                             let mut max_peer_gei = 0u64;

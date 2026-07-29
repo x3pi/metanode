@@ -229,8 +229,6 @@ func (q *TxAsyncQueue) GetTxStatus(ethTxHash common.Hash) *txResult {
 // worker is a goroutine that consumes from the queue and processes transactions.
 func (q *TxAsyncQueue) worker(id int) {
 	defer q.wg.Done()
-	logger.Info("[TX_ASYNC] Worker %d started", id)
-
 	for ptx := range q.queue {
 		q.queueDepth.Add(-1)
 
@@ -252,6 +250,9 @@ func (q *TxAsyncQueue) worker(id int) {
 			})
 			logger.Error("[TX_ASYNC] Worker %d: tx %s failed: %v",
 				id, ptx.EthTxHash.Hex(), err)
+
+			// FIX: Update the SpeculativeReceiptCache so clients polling for receipt will get the error
+			MarkSpeculativeReceiptFailed(ptx.EthTxHash, err)
 		} else {
 			q.processed.Add(1)
 			q.results.Store(ptx.EthTxHash, &txResult{
@@ -264,8 +265,6 @@ func (q *TxAsyncQueue) worker(id int) {
 		logger.Info("[TX_ASYNC] Worker %d: processed tx %s in %v (success=%v)",
 			id, ptx.EthTxHash.Hex(), elapsed, err == nil)
 	}
-
-	logger.Info("[TX_ASYNC] Worker %d stopped", id)
 }
 
 // processTransaction handles the actual submission of a pre-built MetaTx.
