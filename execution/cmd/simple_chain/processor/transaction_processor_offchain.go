@@ -27,8 +27,15 @@ import (
 )
 
 func (v *TxVirtualExecutor) ProcessTransactionOffChain(tx types.Transaction) (types.ExecuteSCResult, error) {
-	if tx.IsCallContract() || tx.IsDeployContract() {
-		exRs, err := v.ExecuteTransactionOffChain(tx)
+	isSmartContract := false
+	if as, err := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress()); err == nil && as != nil {
+		if as.SmartContractState() != nil {
+			isSmartContract = true
+		}
+	}
+
+	if tx.IsCallContract() || tx.IsDeployContract() || isSmartContract {
+		exRs, err := v.ExecuteTransactionOffChain(tx, isSmartContract)
 		if err != nil {
 			logger.Error("Error executing transaction off-chain: %v", err)
 			return nil, err
@@ -44,8 +51,15 @@ func (v *TxVirtualExecutor) ProcessTransactionOffChain(tx types.Transaction) (ty
 
 // ProcessTransactionOffChainWithState supports executing off-chain transaction against a specific state root and block header
 func (v *TxVirtualExecutor) ProcessTransactionOffChainWithState(tx types.Transaction, stateRoot common.Hash, header types.BlockHeader) (types.ExecuteSCResult, error) {
-	if tx.IsCallContract() || tx.IsDeployContract() {
-		exRs, err := v.executeTransactionOffChainWithState(tx, stateRoot, header)
+	isSmartContract := false
+	if as, err := v.chainState.GetAccountStateDB().AccountState(tx.ToAddress()); err == nil && as != nil {
+		if as.SmartContractState() != nil {
+			isSmartContract = true
+		}
+	}
+
+	if tx.IsCallContract() || tx.IsDeployContract() || isSmartContract {
+		exRs, err := v.executeTransactionOffChainWithState(tx, stateRoot, header, isSmartContract)
 		if err != nil {
 			logger.Error("Error executing transaction off-chain with state: %v", err)
 			return nil, err
@@ -64,6 +78,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	executeTransaction types.Transaction,
 	stateRoot common.Hash,
 	header types.BlockHeader,
+	isSmartContract bool,
 ) (types.ExecuteSCResult, error) {
 
 	v.offChainExecutionLimiter <- struct{}{}
@@ -144,12 +159,12 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
-	if executeTransaction.IsRegularTransaction() {
+	if executeTransaction.IsRegularTransaction() && !isSmartContract {
 		mvmResult = &mvm.MVMExecuteResult{
 			Status:  pb.RECEIPT_STATUS_RETURNED,
 			GasUsed: mt_common.TRANSFER_GAS_COST,
 		}
-	} else if executeTransaction.IsCallContract() {
+	} else if executeTransaction.IsCallContract() || isSmartContract {
 		mvmResult = mvmOffChain.Call(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.ToAddress().Bytes(),
@@ -208,6 +223,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 // Nhật
 func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	executeTransaction types.Transaction,
+	isSmartContract bool,
 ) (types.ExecuteSCResult, error) {
 
 	v.offChainExecutionLimiter <- struct{}{}
@@ -321,12 +337,12 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
-	if executeTransaction.IsRegularTransaction() {
+	if executeTransaction.IsRegularTransaction() && !isSmartContract {
 		mvmResult = &mvm.MVMExecuteResult{
 			Status:  pb.RECEIPT_STATUS_RETURNED,
 			GasUsed: mt_common.TRANSFER_GAS_COST,
 		}
-	} else if executeTransaction.IsCallContract() {
+	} else if executeTransaction.IsCallContract() || isSmartContract {
 		mvmResult = mvmOffChain.Call(
 			executeTransaction.FromAddress().Bytes(),
 			executeTransaction.ToAddress().Bytes(),

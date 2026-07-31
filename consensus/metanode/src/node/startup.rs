@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use mysten_metrics::start_prometheus_server;
-use mysten_metrics::RegistryService;
 use prometheus::Registry;
 use std::net::SocketAddr;
 use std::sync::Arc;
