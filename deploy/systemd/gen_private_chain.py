@@ -60,7 +60,7 @@ def find_metanode_bin(override=None):
         print(red(f"ERROR: metanode binary not found at: {override}"))
         sys.exit(1)
     for candidate in METANODE_BIN_CANDIDATES:
-        if candidate and candidate.exists():
+        if candidate and candidate.is_file():
             return str(candidate)
     return None
 
@@ -123,16 +123,9 @@ def generate_eth_dev_account():
             "address": pk.public_key.to_checksum_address()
         }
     except ImportError:
-        # Fallback using metanode keytool if eth_keys module is missing
-        pass
-    
-    # Simple random hex fallback for key export
-    raw_hex = secrets.token_hex(32)
-    # We can invoke simple_chain --tool-get-address or Rust keytool to get standard address
-    return {
-        "private_key": "0x" + raw_hex,
-        "address": "0x" + raw_hex[:40] # address placeholder fallback
-    }
+        print(red("ERROR: 'eth_keys' python module is required to generate dev accounts."))
+        print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate private chain configs for Metanode")
@@ -144,6 +137,8 @@ def main():
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
     parser.add_argument("--rpc-port", type=int, default=8545, help="Base RPC Port (default: 8545)")
+    parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
+    parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Private Chain Initializer ===")))
@@ -293,7 +288,7 @@ def main():
             "private_key": bls["authority_key_private"],
             "address": eth["address"].lstrip("0x").lower(),
             "log_path": str(node_dir / "logs" / "execution"),
-            "epochs_to_keep": 0,
+            "epochs_to_keep": args.epochs_to_keep if args.epochs_to_keep is not None else (0 if args.is_rpc else 5),
             "backup_path": str(node_dir / "data" / "execution" / "backup"),
             "last_block_save_path": "/last_block.dat",
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
@@ -314,7 +309,7 @@ def main():
             "genesis_file_path": str(genesis_path),
             "rust_config_path": str(node_dir / "node.toml"),
             "snapshot_enabled": False,
-            "is_rpc_node": True,
+            "is_rpc_node": args.is_rpc,
             "state_backend": "nomt",
             "Databases": {
                 "RootPath": str(node_dir / "data" / "execution" / "db"),
