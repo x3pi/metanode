@@ -239,53 +239,68 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 		if span != nil { // GUARD
 			span.AddEvent("ExtractingDeployInfo", map[string]interface{}{"addresses": codeHashAddresses})
 		}
-		as := vmP.accountStateDB
-		if as != nil {
-			for a := range mvmRs.MapCodeHash {
-				addr := common.HexToAddress(a)
-				details := map[string]string{"address": a}
-				accountState, err := as.AccountState(addr)
-				if err != nil {
-					wrappedErr := fmt.Errorf("error getting account state for deployed contract %s: %w", a, err)
-					errMsg := wrappedErr.Error()
-					extractErrors = append(extractErrors, errMsg)
-					logger.Error(errMsg)
-					details["error"] = errMsg
-					deployInfoDetails[a] = details
-					continue
-				}
-				if accountState != nil {
-					scState := accountState.SmartContractState()
-					if scState == nil {
-						err := fmt.Errorf("smartContractState is nil for deployed contract %s", a)
-						errMsg := err.Error()
-						extractErrors = append(extractErrors, errMsg)
-						logger.Error(errMsg)
-						details["error"] = errMsg
-						deployInfoDetails[a] = details
-						continue
-					}
-					creatorKey := scState.CreatorPublicKey()
-					storageAddr := scState.StorageAddress()
-					mapCreatorPubkey[a] = creatorKey.Bytes()
-					mapStorageAddress[a] = storageAddr
-					details["creatorKey"] = hex.EncodeToString(creatorKey.Bytes())
-					details["storageAddr"] = storageAddr.Hex()
-					deployInfoDetails[a] = details
-				} else {
-					warnErr := fmt.Errorf("account state is nil for deployed contract %s", a)
-					warnMsg := warnErr.Error()
-					logger.Warn(warnMsg)
-					extractErrors = append(extractErrors, warnMsg)
-					details["error"] = warnMsg
-					deployInfoDetails[a] = details
+
+		var creatorPublicKey mt_common.PublicKey
+		var storageAddress common.Address
+		determinedDeployInfo := false
+		fatalError := false
+
+		if transaction.IsDeployContract() {
+			storageAddress = transaction.DeployData().StorageAddress()
+			if vmP.accountStateDB != nil {
+				senderState, err := vmP.accountStateDB.AccountState(transaction.FromAddress())
+				if err == nil && senderState != nil {
+					creatorPublicKey = mt_common.PubkeyFromBytes(senderState.PublicKeyBls())
 				}
 			}
+			determinedDeployInfo = true
+		} else if transaction.IsCallContract() {
+			if vmP.accountStateDB != nil {
+				originSmartContractAs, err := vmP.accountStateDB.AccountState(transaction.ToAddress())
+				if err != nil {
+					finalErr := fmt.Errorf("failed to get origin contract state %s for internal deploy: %w", transaction.ToAddress().Hex(), err)
+					fatalError = true
+					extractErrors = append(extractErrors, finalErr.Error())
+					logger.Error(finalErr.Error())
+				} else if originSmartContractAs == nil || originSmartContractAs.SmartContractState() == nil {
+					finalErr := errors.New("origin contract state " + transaction.ToAddress().Hex() + " is nil or not a contract for internal deploy")
+					fatalError = true
+					extractErrors = append(extractErrors, finalErr.Error())
+					logger.Error(finalErr.Error())
+				} else {
+					originScState := originSmartContractAs.SmartContractState()
+					creatorPublicKey = originScState.CreatorPublicKey()
+					storageAddress = originScState.StorageAddress()
+					determinedDeployInfo = true
+				}
+			} else {
+				finalErr := errors.New("account state db is nil")
+				fatalError = true
+				extractErrors = append(extractErrors, finalErr.Error())
+				logger.Error(finalErr.Error())
+			}
+		}
+
+		if determinedDeployInfo && !fatalError {
+			for a := range mvmRs.MapCodeHash {
+				mapCreatorPubkey[a] = creatorPublicKey.Bytes()
+				mapStorageAddress[a] = storageAddress
+
+				details := map[string]string{
+					"address":     a,
+					"creatorKey":  hex.EncodeToString(creatorPublicKey.Bytes()),
+					"storageAddr": storageAddress.Hex(),
+				}
+				deployInfoDetails[a] = details
+			}
 		} else {
-			err := fmt.Errorf("account state db is nil")
-			errMsg := err.Error()
-			extractErrors = append(extractErrors, errMsg)
-			logger.Error(errMsg)
+			for a := range mvmRs.MapCodeHash {
+				details := map[string]string{
+					"address": a,
+					"error":   "could not determine creator/storage info for deploy state",
+				}
+				deployInfoDetails[a] = details
+			}
 		}
 		if span != nil { // GUARD
 			if len(extractErrors) > 0 {
