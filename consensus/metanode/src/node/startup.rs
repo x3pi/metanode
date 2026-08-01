@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+
 use prometheus::Registry;
 use std::net::SocketAddr;
 use std::sync::Arc;
