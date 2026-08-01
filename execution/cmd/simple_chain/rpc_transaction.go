@@ -883,12 +883,15 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 					TxIndex:     uint(txIndex),
 					Index:       logIndex,
 				}
-				eventLogs = append(eventLogs, evL)
-				logIndex++
-
-				if len(eventLogs) > maxLogsPerRequest {
-					return nil, fmt.Errorf("log result exceeds maximum of %d entries", maxLogsPerRequest)
+				
+				// 🚀 OPTIMIZATION: Lọc (Early Filtering) ngay tại đây thay vì dồn hết vào mảng rồi mới lọc
+				if len(filters.FilterLogs([]*types.Log{evL}, beginBlock, endBlock, crit.Addresses, crit.Topics)) > 0 {
+					eventLogs = append(eventLogs, evL)
+					if len(eventLogs) > maxLogsPerRequest {
+						return nil, fmt.Errorf("log result exceeds maximum of %d entries", maxLogsPerRequest)
+					}
 				}
+				logIndex++
 			}
 		}
 
