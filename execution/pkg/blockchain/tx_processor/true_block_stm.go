@@ -144,7 +144,7 @@ func (stm *TrueBlockSTM) Process(
 		}
 
 		if i > segStart {
-			if !stm.runParallelSegment(ctx, chainState, leaderAddr, lastBlockHeader, segStart, i) {
+			if !stm.runParallelSegment(ctx, chainState, leaderAddr, lastBlockHeader, blockTime, segStart, i) {
 				return stm.txs, nil, nil, stm.mvmIdMap
 			}
 			stm.flushEventLogs(chainState, segStart, i)
@@ -192,6 +192,7 @@ func (stm *TrueBlockSTM) runParallelSegment(
 	chainState *blockchain.ChainState,
 	leaderAddr common.Address,
 	lastBlockHeader types.BlockHeader,
+	blockTime uint64,
 	lo, hi int,
 ) bool {
 	segSize := hi - lo
@@ -245,7 +246,7 @@ func (stm *TrueBlockSTM) runParallelSegment(
 				case <-workerCtx.Done():
 					return
 				case txIndex := <-execOut:
-					stm.execOne(ctx, chainState, leaderAddr, lastBlockHeader, txIndex, execIn, validateIn, &activeTasks, doneCh)
+					stm.execOne(workerCtx, chainState, leaderAddr, lastBlockHeader, blockTime, txIndex, execIn, validateIn, &activeTasks, doneCh)
 				}
 			}
 		}()
@@ -302,6 +303,7 @@ func (stm *TrueBlockSTM) execOne(
 	chainState *blockchain.ChainState,
 	leaderAddr common.Address,
 	lastBlockHeader types.BlockHeader,
+	blockTime uint64,
 	txIndex uint32,
 	execCh chan<- uint32,
 	validateCh chan<- uint32,
@@ -580,7 +582,7 @@ func (stm *TrueBlockSTM) execOne(
 		stm.mvmIdMapMu.Unlock()
 
 		// Giao dịch Native hoặc Smart Contract
-		vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, 0, leaderAddr)
+		vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, blockTime, leaderAddr)
 		vmP.SetAccountStateDB(mvccDB)
 		vmP.SetSmartContractDB(scDB)
 
