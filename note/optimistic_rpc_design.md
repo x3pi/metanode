@@ -60,7 +60,6 @@ Quá trình bắt đầu khi người dùng gửi một `eth_sendRawTransaction`
 - **Từ chối trong Virtual Execution nhưng thành công ở thực tế?** Gần như không xảy ra vì Virtual Execution chạy trên máy trạng thái y hệt.
 - **Thành công trong Virtual Execution nhưng thất bại khi chạy thật?** Có thể xảy ra nếu nhiều giao dịch thao tác trên cùng một biến state trong cùng một millisecond (Race condition). Khi đó State thật bị revert, nhưng UI đã báo thành công. (Chấp nhận sự đánh đổi này trong Private Chain / GameFi để đổi lấy UX).
 - **Tràn hàng đợi (Queue Full):** Nếu hàng đợi bị quá tải, RPC sẽ kích hoạt cơ chế Backpressure, chủ động trả về lỗi "System overloaded" ngay ở Bước 1.
-- **Dọn dẹp Memory Cache:** Các Mock Receipt chỉ tồn tại trong vòng 5 phút (Result TTL). Sau đó `resultCleanupLoop` sẽ tự động dọn rác để tránh tràn RAM.
 
 ---
 
