@@ -364,8 +364,6 @@ func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
 	// dẫn đến connection address = zero → TX bị reject sai.
 	// TX đã được validate bằng signature/nonce, không cần check connection init.
 	connAddr := request.Connection().Address()
-	logger.Debug("[TX-DK] ProcessTransactionFromClientWithDeviceKey called: connAddr=%s, remoteAddr=%s, bodySize=%d",
-		connAddr.Hex(), request.Connection().RemoteAddrSafe(), len(request.Message().Body()))
 
 	transactionWithDeviceKey := &pb.TransactionWithDeviceKey{}
 	err := proto.Unmarshal(request.Message().Body(), transactionWithDeviceKey)

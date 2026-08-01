@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math/big"
 	"os"
 	"runtime"
 	"sort"
@@ -20,13 +19,9 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/file_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -199,42 +194,6 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		}
 	}
 
-	// upload file
-	if tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(vp.chainState.GetConfig().OwnerFileStorageAddress)) {
-		fileHandler, err := file_handler.GetFileHandlerOnChain(vp.offChainProcessor, vp.storageManager, vp.chainState)
-		if err != nil {
-			logger.Error("GetFileHandler error: %v", err)
-			return transaction.UploadChunkError.Code, fmt.Errorf(transaction.UploadChunkError.Description)
-		}
-		isPrevent, err := fileHandler.HandleFileTransactionNoReceipt(context.Background(), tx)
-		if err != nil {
-			logger.Error("HandleFileTransactionNoReceipt error: %v", err)
-			return transaction.UploadChunkError.Code, fmt.Errorf(err.Error())
-		}
-		if isPrevent {
-			rcp := receipt.NewReceipt(
-				tx.Hash(),
-				tx.FromAddress(),
-				tx.ToAddress(),
-				big.NewInt(0),
-				pb.RECEIPT_STATUS_RETURNED, // trạng thái tạm thời: returned (thay đổi nếu cần)
-				[]byte{},                   // return data empty
-				pb.EXCEPTION_NONE,          // no exception
-				mt_common.MINIMUM_BASE_FEE,
-				uint64(0),          // gas used
-				[]types.EventLog{}, // event logs empty
-				uint64(0),
-				common.Hash{},
-				0,
-			)
-			rcp.SetRHash(tx.RHash())
-
-			if vp.env != nil {
-				vp.env.BroadCastReceipts([]types.Receipt{rcp})
-			}
-			return 0, nil
-		}
-	}
 	err := vp.transactionPool.AddTransaction(tx)
 	if err != nil {
 		logger.Error("❌ [TX FLOW] Failed to add transaction to pool: %v", err)
@@ -451,11 +410,6 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 				if errorsList[i] != nil {
 					continue
 				}
-
-				if tx.ToAddress() == file_handler.PredictContractAddress(common.HexToAddress(vp.chainState.GetConfig().OwnerFileStorageAddress)) {
-					errorsList[i] = fmt.Errorf(transaction.UploadChunkError.Description)
-					continue
-				}
 			}
 		}(start, end)
 	}
@@ -665,7 +619,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		startIdx := len(allAddrs)
 		allAddrs = grouptxns.AppendDeterministicGroupAddrs(tx, allAddrs)
 		endIdx := len(allAddrs)
-		
+
 		items = append(items, grouptxns.Item{
 			ID:      i,
 			Array:   allAddrs[startIdx:endIdx:endIdx], // Fix capacity leak
@@ -731,7 +685,6 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 
 	return res, execErr
 }
-
 
 // ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding
 func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []types.Transaction {
@@ -900,5 +853,3 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 	}
 	return txs
 }
-
-

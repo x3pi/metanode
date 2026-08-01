@@ -136,6 +136,7 @@ def main():
     parser.add_argument("--alloc-balance", type=int, default=1000000, help="Initial MTN balance per account (default: 1000000)")
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
+    parser.add_argument("--rpc-port", type=int, default=8545, help="Base RPC Port (default: 8545)")
     parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     args = parser.parse_args()
@@ -172,9 +173,9 @@ def main():
         validator_keys_list.append((bls, eth))
 
         eth_addr = eth["address"].lower()
-        p2p_port = 9000 + node_id
-        primary_port = 6200 + node_id
-        worker_port = 4012 + node_id
+        p2p_port = 10000 + node_id
+        primary_port = 4200 + node_id
+        worker_port = 5012 + node_id
 
         val_entry = {
             "address": eth_addr,
@@ -265,19 +266,20 @@ def main():
         os.makedirs(node_dir / "data" / "execution" / "db", exist_ok=True)
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
-        rpc_port = 8545
-        primary_port = 4200
-        dns_port = 9080
-        peer_rpc_port = 19200
-        consensus_port = 9000
-        meta_rpc_port = 10100
+        rpc_port = args.rpc_port
+        primary_port = 4200 + node_id
+        dns_port = 10080 + node_id
+        peer_rpc_port = 20200 + node_id
+        consensus_port = 10000 + node_id
+        meta_rpc_port = 11100 + node_id
 
         # Node peers
-        go_peers = [f"{args.ip}:{6200 + j}" for j in range(args.validators) if j != node_id]
-        rust_peers = [f"{args.ip}:{19200 + j}" for j in range(args.validators) if j != node_id]
+        go_peers = [f"{args.ip}:{7200 + j}" for j in range(args.validators) if j != node_id]
+        rust_peers = [f"{args.ip}:{20200 + j}" for j in range(args.validators) if j != node_id]
 
         exec_config = {
             "debug": False,
+            "tx_trace_enabled": False,
             "go_mem_limit_gb": 8,
             "mvm_cache_enabled": False,
             "enable_private_gateway": True,
@@ -344,7 +346,7 @@ network_key_path = "{node_dir}/keys/network_key.json"
 storage_path = "{node_dir}/data/consensus/db"
 
 enable_metrics = true
-metrics_port = {9100 + node_id}
+metrics_port = {10100 + node_id}
 peer_rpc_port = {peer_rpc_port}
 peer_rpc_addresses = [{peers_toml}]
 executor_read_enabled = true
@@ -376,13 +378,13 @@ fi
 """
     for node_id in range(args.validators):
         start_script_content += f"""
-echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{8545 + node_id})..."
+echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port})..."
 (cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
 """
 
     start_script_content += f"""
 echo "✅ Private Chain started successfully!"
-echo "   RPC URL: http://{args.ip}:8545"
+echo "   RPC URL: http://{args.ip}:{args.rpc_port}"
 echo "   Chain ID: {args.chain_id}"
 echo "   Check logs in $DIR/node-0/logs/node-0.log"
 """

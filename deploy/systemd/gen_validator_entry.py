@@ -229,6 +229,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
 
     exec_json = {
         "debug": False,
+        "tx_trace_enabled": False,
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
         "enable_private_gateway": True,

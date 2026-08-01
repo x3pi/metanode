@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -19,8 +20,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
+	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
 // MarshalBlockToMap converts a mt_types.Block to a map[string]interface{}.
@@ -69,11 +70,11 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	transactions := make([]interface{}, 0, len(txHashes))
 	if !fullTx {
 		for _, txHash := range txHashes {
-                        transactions = append(transactions, txHash.Hex())
-                }
-                blockMap["transactions"] = transactions
-                return blockMap, nil
-        }
+			transactions = append(transactions, txHash.Hex())
+		}
+		blockMap["transactions"] = transactions
+		return blockMap, nil
+	}
 
 	if fetchTx == nil {
 		return nil, fmt.Errorf("fetchTx is nil while fullTx is requested")
@@ -642,13 +643,10 @@ func (api *MetaAPI) GetRawTransactionByBlockHashAndIndex(ctx context.Context, bl
 
 }
 
-// EstimateGas returns the lowest possible gas limit that allows the transaction to run
-// successfully at block `blockNrOrHash`, or the latest block if `blockNrOrHash` is unspecified. It
-// returns error if the transaction would revert or if there are unexpected failures. The returned
-// value is capped by both `args.Gas` (if non-nil & non-zero) and the backend's RPCGasCap
-// configuration (if non-zero).
-// Note: Required blob gas is not computed in this method.
-func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage) (hexutil.Uint64, error) {
+// NOTE: `blockNr` is added merely for API compatibility with standard Ethereum JSON-RPC
+// clients (which pass 2 arguments: txObject and "latest"). The value is currently ignored,
+// and gas estimation always runs against the latest state off-chain.
+func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage, blockNr *rpc.BlockNumber) (hexutil.Uint64, error) {
 	var inputStr string
 	var txM *transaction.Transaction
 
@@ -724,7 +722,7 @@ func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage) (
 			api.App.config.ChainId.Uint64(),
 		).(*transaction.Transaction)
 
-		txM.SetReadOnly(true)
+		txM.SetReadOnly(false)
 	}
 
 	rs, err := api.App.transactionProcessor.ProcessTransactionOffChain(txM)
@@ -734,6 +732,11 @@ func (api *MetaAPI) EstimateGas(ctx context.Context, rawInput json.RawMessage) (
 	}
 	if rs == nil {
 		return hexutil.Uint64(mt_common.MINIMUM_BASE_FEE), nil
+	}
+	logger.Info("[EstimateGas] Status: %v, Exception: %v", rs.ReceiptStatus(), rs.Exception())
+	if rs.ReceiptStatus() != mt_proto.RECEIPT_STATUS_RETURNED {
+		logger.Info("[EstimateGas] execution reverted or threw")
+		return 0, newRevertError(rs.Return())
 	}
 	return hexutil.Uint64(rs.GasUsed() + mt_common.MINIMUM_BASE_FEE), nil
 }
@@ -827,12 +830,12 @@ func (api *MetaAPI) GetBlockTraces(ctx context.Context, startBlock uint64, endBl
 	if startBlock > endBlock {
 		return nil, fmt.Errorf("startBlock must be <= endBlock")
 	}
-	
+
 	// Limit query range to prevent massive responses
 	if endBlock-startBlock > 1000 {
 		return nil, fmt.Errorf("range too large, max 1000 blocks")
 	}
-	
+
 	traces := pipeline.GlobalBlockTraceStore.GetTraces(startBlock, endBlock)
 	return traces, nil
 }

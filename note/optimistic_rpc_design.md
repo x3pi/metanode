@@ -36,9 +36,12 @@ Quá trình bắt đầu khi người dùng gửi một `eth_sendRawTransaction`
 - Biên lai này có đầy đủ `gasUsed`, `status`, nhưng `blockNumber` và `blockHash` sẽ được đánh dấu là chưa hoàn thành (`0x0` hoặc Pending).
 - RPC trả về mã Hash của giao dịch cho người dùng.
 
-### Bước 4: Hàng Đợi Bất Đồng Bộ (Async Queue)
-- Đồng thời với Bước 3, bản gốc của giao dịch được đẩy vào một hàng đợi (Ví dụ: `TxAsyncQueue`).
-- Các Worker chạy nền (Background workers) sẽ bốc các giao dịch từ hàng đợi này và nhét vào bộ xử lý thực tế (`ProcessTransactionFromRpc`).
+### Bước 4: Chuyển Đổi Sang Xử Lý Đồng Bộ (Cập Nhật Kiến Trúc)
+> [!NOTE]
+> **Quyết định thiết kế:** Trước đây, hệ thống sử dụng một hàng đợi bất đồng bộ (`TxAsyncQueue`) để xử lý các giao dịch ở background. Tuy nhiên, hàng đợi này đã được gỡ bỏ hoàn toàn.
+> **Lý do:** Hệ thống cần trả về chính xác lỗi thực thi (execution errors) trực tiếp cho Client ngay trên kết nối RPC hiện tại (ví dụ: lỗi HTTP/WebSocket gốc). Nếu sử dụng Async Queue, kết nối gốc đã bị đóng trả về sớm, khiến việc báo lỗi ngược lại cho Client trở nên bất khả thi. Do đó, giao dịch hiện tại được đẩy trực tiếp (synchronous) vào bộ xử lý để có thể ném lỗi (throw error) ngay lập tức về cho người dùng.
+
+- Đồng thời với Bước 3, bản gốc của giao dịch được đưa thẳng vào bộ xử lý thực tế (`ProcessTransactionFromRpc`) thay vì qua hàng đợi trung gian.
 
 ### Bước 5: Chốt Giao Dịch Dưới Nền (Real Consensus)
 - Các Background Workers gửi giao dịch sang mạng lưới BFT Consensus (viết bằng Rust).
@@ -56,8 +59,7 @@ Quá trình bắt đầu khi người dùng gửi một `eth_sendRawTransaction`
 
 - **Từ chối trong Virtual Execution nhưng thành công ở thực tế?** Gần như không xảy ra vì Virtual Execution chạy trên máy trạng thái y hệt.
 - **Thành công trong Virtual Execution nhưng thất bại khi chạy thật?** Có thể xảy ra nếu nhiều giao dịch thao tác trên cùng một biến state trong cùng một millisecond (Race condition). Khi đó State thật bị revert, nhưng UI đã báo thành công. (Chấp nhận sự đánh đổi này trong Private Chain / GameFi để đổi lấy UX).
-- **Tràn hàng đợi (Queue Full):** Nếu `TxAsyncQueue` bị quá tải (Ví dụ: Buffer size 20,000), RPC sẽ kích hoạt cơ chế Backpressure, chủ động trả về lỗi "System overloaded" ngay ở Bước 1.
-- **Dọn dẹp Memory Cache:** Các Mock Receipt chỉ tồn tại trong vòng 5 phút (Result TTL). Sau đó `resultCleanupLoop` sẽ tự động dọn rác để tránh tràn RAM.
+- **Tràn hàng đợi (Queue Full):** Nếu hàng đợi bị quá tải, RPC sẽ kích hoạt cơ chế Backpressure, chủ động trả về lỗi "System overloaded" ngay ở Bước 1.
 
 ---
 

@@ -81,9 +81,6 @@ type App struct {
 	// BLS Key Store (merged from RPC client)
 	blsKeyStore *PrivateKeyStore
 
-	// Async transaction queue (separated send/receive streams)
-	txAsyncQueue *TxAsyncQueue
-
 	// Performance monitoring
 	handler          *network.Handler
 	metricsCollector *MetricsCollector
@@ -256,9 +253,6 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		}
 	}
 
-	// Initialize async transaction queue
-	app.txAsyncQueue = NewTxAsyncQueue(app, 0) // 0 = auto-detect worker count
-
 	return app, nil
 }
 
@@ -351,11 +345,6 @@ func (app *App) Run() error {
 			}
 		}
 	}()
-
-	// Start async transaction queue workers
-	if app.txAsyncQueue != nil {
-		app.txAsyncQueue.Start()
-	}
 
 	// Initialize and start pruning manager
 	if app.chainState != nil {
@@ -503,9 +492,6 @@ func (app *App) Stop() {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Phase 1: Stop non-critical services that don't need the context
-	if app.txAsyncQueue != nil {
-		app.txAsyncQueue.Stop()
-	}
 
 	if app.pruningManager != nil {
 		app.pruningManager.Stop()
