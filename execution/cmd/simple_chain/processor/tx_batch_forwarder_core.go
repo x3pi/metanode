@@ -223,13 +223,13 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				// PACING REMOVED: Bounded pipeline backpressure is already managed by Rust's Semaphore
 				// and channel buffer. Artificially sleeping here starves consensus.
 				/*
-				pacingDelay := time.Duration(len(batchTxs)) * 2 * time.Microsecond
-				if pacingDelay > 5*time.Millisecond {
-					pacingDelay = 5 * time.Millisecond
-				}
-				if pacingDelay > 0 {
-					time.Sleep(pacingDelay)
-				}
+					pacingDelay := time.Duration(len(batchTxs)) * 2 * time.Microsecond
+					if pacingDelay > 5*time.Millisecond {
+						pacingDelay = 5 * time.Millisecond
+					}
+					if pacingDelay > 0 {
+						time.Sleep(pacingDelay)
+					}
 				*/
 			}
 		}

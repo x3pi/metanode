@@ -71,7 +71,6 @@ main()                           main.go:49
 │   └── app.initRoutes()         app.go:235        ← đăng ký RPC handlers
 │
 ├── go app.Run()                 main.go:180       ← chạy trong goroutine riêng
-│   ├── app.txAsyncQueue.Start()                  ← worker xử lý tx bất đồng bộ
 │   ├── app.pruningManager.Start()                ← dọn dẹp state cũ định kỳ
 │   ├── go app.socketServer.Listen()              ← listen P2P connections
 │   └── app.blockProcessor.StartBackgroundWorkers()  ← commit worker, delivery worker
