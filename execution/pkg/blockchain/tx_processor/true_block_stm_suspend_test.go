@@ -58,7 +58,7 @@ func TestTrueBlockSTM_SuspendWakeupLogic(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Chạy execOne cho TX 1. Nó sẽ SLOAD tài khoản B, đụng estimate của TX 0, và tự suspend.
-		stm.execOne(ctx, cs, common.Address{}, blankHeader(), 1, execCh, validateCh, &activeTasks, doneCh)
+		stm.execOne(ctx, cs, common.Address{}, blankHeader(), 0, 1, execCh, validateCh, &activeTasks, doneCh)
 	}()
 
 	// Đợi 1 chút để đảm bảo TX 1 đã vào hàng chờ
@@ -77,7 +77,7 @@ func TestTrueBlockSTM_SuspendWakeupLogic(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stm.execOne(ctx, cs, common.Address{}, blankHeader(), 0, execCh, validateCh, &activeTasks, doneCh)
+		stm.execOne(ctx, cs, common.Address{}, blankHeader(), 0, 0, execCh, validateCh, &activeTasks, doneCh)
 	}()
 
 	// Đợi cả 2 goroutine kết thúc
