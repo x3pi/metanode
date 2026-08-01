@@ -639,13 +639,13 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 	// LAZY FALLBACK (June 2026): Rebuild transaction mapping from block DB.
 	// ═══════════════════════════════════════════════════════════════════════════
 	if bc.blockDatabase != nil {
-		logger.Info("⚠️ [LAZY-FALLBACK] Starting transaction walkback search for %s", txHash.Hex())
+		// logger.Debug("⚠️ [LAZY-FALLBACK] Starting transaction walkback search for %s", txHash.Hex())
 		blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
 		if ok {
 			logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
 			return blockNumber, true
 		}
-		logger.Info("❌ [LAZY-FALLBACK] Walkback search finished, transaction %s NOT found", txHash.Hex())
+		// logger.Debug("❌ [LAZY-FALLBACK] Walkback search finished, transaction %s NOT found", txHash.Hex())
 	}
 
 	return 0, false

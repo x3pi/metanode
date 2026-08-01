@@ -475,4 +475,4 @@ deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
 # Genesis dynamically generated files
 deploy/systemd/genesis.json
 note/commit_review_fc17b2d2_xapian_manager.md
-deploy/systemd/private_chain_data/
+deploy/systemd/single_chain_data/
