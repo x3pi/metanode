@@ -41,7 +41,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["difficulty"] = hexutil.EncodeUint64(0)
 	blockMap["gasLimit"] = hexutil.EncodeUint64(0)                           // Giới hạn gas của khối
 	blockMap["gasUsed"] = hexutil.EncodeUint64(0)                            // Gas đã sử dụng trong khối
-	blockMap["timestamp"] = hexutil.EncodeUint64(block.Header().TimeStamp()) // Thời gian tạo khối
+	blockMap["timestamp"] = hexutil.EncodeUint64(block.Header().TimeStamp() / 1000) // Thời gian tạo khối (giây)
 	blockMap["extraData"] = "0x"                                             // Dữ liệu bổ sung
 	blockMap["mixHash"] = common.Hash{}                                      // Hash của proof-of-work
 	blockMap["nonce"] = "0x0000000000000000"                                 // Nonce của khối
@@ -164,7 +164,7 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 //     only the transaction hash is returned.
 func (api *MetaAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
 	var blockData mt_types.Block // Corrected type
-	if number == rpc.LatestBlockNumber {
+	if number == rpc.LatestBlockNumber || number == rpc.FinalizedBlockNumber || number == rpc.SafeBlockNumber || number == rpc.PendingBlockNumber {
 		lastBlockNum := storage.GetLastBlockNumber()
 		if lastBlockNum > 0 {
 			hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(lastBlockNum)
@@ -298,7 +298,7 @@ func decodeBCSSystemTransaction(data []byte) map[string]interface{} {
 // Returns decoded, human-readable fields instead of raw BCS byte code.
 func (api *MetaAPI) GetSystemTransactionsByBlockNumber(ctx context.Context, number rpc.BlockNumber) []map[string]interface{} {
 	var blockNum uint64
-	if number == rpc.LatestBlockNumber {
+	if number == rpc.LatestBlockNumber || number == rpc.FinalizedBlockNumber || number == rpc.SafeBlockNumber || number == rpc.PendingBlockNumber {
 		blockNum = storage.GetLastBlockNumber()
 	} else {
 		if number.Int64() >= 0 && uint64(number.Int64()) > storage.GetLastBlockNumber() {
@@ -364,7 +364,7 @@ func (api *MetaAPI) BlockNumber() string {
 // GetTransactionByBlockNumberAndIndex returns the transaction for the given block number and index.
 func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) (*RPCTransaction, error) {
 	var blockData mt_types.Block // Corrected type
-	if blockNr == rpc.LatestBlockNumber {
+	if blockNr == rpc.LatestBlockNumber || blockNr == rpc.FinalizedBlockNumber || blockNr == rpc.SafeBlockNumber || blockNr == rpc.PendingBlockNumber {
 		lastBlockNum := storage.GetLastBlockNumber()
 		if lastBlockNum > 0 {
 			hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(lastBlockNum)
@@ -519,7 +519,7 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
 func (api *MetaAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockNr rpc.BlockNumber) *hexutil.Uint {
 	var blockData mt_types.Block // Corrected type
-	if blockNr == rpc.LatestBlockNumber {
+	if blockNr == rpc.LatestBlockNumber || blockNr == rpc.FinalizedBlockNumber || blockNr == rpc.SafeBlockNumber || blockNr == rpc.PendingBlockNumber {
 		lastBlockNum := storage.GetLastBlockNumber()
 		if lastBlockNum > 0 {
 			hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(lastBlockNum)
@@ -574,7 +574,7 @@ func (api *MetaAPI) GetBlockTransactionCountByHash(ctx context.Context, blockHas
 // GetRawTransactionByBlockNumberAndIndex returns the bytes of the transaction for the given block number and index.
 func (api *MetaAPI) GetRawTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) hexutil.Bytes {
 	var blockData mt_types.Block // Corrected type
-	if blockNr == rpc.LatestBlockNumber {
+	if blockNr == rpc.LatestBlockNumber || blockNr == rpc.FinalizedBlockNumber || blockNr == rpc.SafeBlockNumber || blockNr == rpc.PendingBlockNumber {
 		lastBlockNum := storage.GetLastBlockNumber()
 		if lastBlockNum > 0 {
 			hash, ok := blockchain.GetBlockChainInstance().GetBlockHashByNumber(lastBlockNum)

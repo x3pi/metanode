@@ -149,7 +149,7 @@ func (api *MetaAPI) processCallRequest(ctx context.Context, rawInput json.RawMes
 	isLatest := false
 	if blockNrOrHash.BlockNumber != nil {
 		bn := *blockNrOrHash.BlockNumber
-		if bn == rpc.LatestBlockNumber || bn == rpc.PendingBlockNumber {
+		if bn == rpc.LatestBlockNumber || bn == rpc.PendingBlockNumber || bn == rpc.FinalizedBlockNumber || bn == rpc.SafeBlockNumber {
 			isLatest = true
 		}
 	} else if blockNrOrHash.BlockHash == nil {
@@ -306,7 +306,7 @@ func (api *MetaAPI) GetAccountLastHash(ctx context.Context, address common.Addre
 func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Address, blockNrOrHash rpc.BlockNumberOrHash) (mt_types.AccountState, error) {
 
 	if blockNr, ok := blockNrOrHash.Number(); ok {
-		if blockNr == rpc.PendingBlockNumber || blockNr == rpc.LatestBlockNumber {
+		if blockNr == rpc.PendingBlockNumber || blockNr == rpc.LatestBlockNumber || blockNr == rpc.FinalizedBlockNumber || blockNr == rpc.SafeBlockNumber {
 			as, err := api.App.chainState.GetAccountStateDB().AccountStateReadOnly(address)
 			if err != nil {
 				return nil, err
