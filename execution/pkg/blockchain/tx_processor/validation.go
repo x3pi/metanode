@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -396,7 +397,10 @@ func VerifyTransaction(
 
 			// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
 			if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
-				return transaction.InvalidMaxGasPrice
+				return &transaction.TransactionError{
+					Code:        transaction.InvalidMaxGasPrice.Code,
+					Description: fmt.Sprintf("invalid max gas price, expected at least %d", common.MINIMUM_BASE_FEE),
+				}
 			}
 		}
 	}

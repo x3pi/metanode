@@ -24,6 +24,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -114,8 +115,7 @@ func (api *MetaAPI) initCaches() {
 	// ChainId never changes
 	api.cachedChainId = hexutil.Big(*api.App.config.ChainId)
 
-	// GasPrice is currently hardcoded at 0x3e8
-	gasPrice := big.NewInt(0x3e8)
+	gasPrice := big.NewInt(int64(mt_common.MINIMUM_BASE_FEE))
 	hexGasPrice := hexutil.Big(*gasPrice)
 	api.cachedGasPrice = &hexGasPrice
 
