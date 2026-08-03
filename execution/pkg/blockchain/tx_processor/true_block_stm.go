@@ -664,17 +664,40 @@ func (stm *TrueBlockSTM) execOne(
 
 			if err == nil {
 				if exRs != nil {
-					rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
-					// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
-					if exRs.MapNonce() != nil {
-						for addrHex, newNonceBytes := range exRs.MapNonce() {
-							addr := common.HexToAddress(addrHex)
-							newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
-							mvccDB.SetNonce(addr, newNonce)
+					receiptStatus := exRs.ReceiptStatus()
+					ret := exRs.Return()
+					exception := exRs.Exception()
+					gasUsed := exRs.GasUsed()
+					eventLogs := exRs.EventLogs()
+
+					// [FIX] Deduct Gas Fee from sender's balance
+					gasFee := new(big.Int).SetUint64(gasUsed * tx.MaxGasPrice())
+					canPayGas := true
+					if gasFee.Cmp(big.NewInt(0)) > 0 {
+						errSub := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
+						if errSub != nil {
+							canPayGas = false
+							receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+							ret = []byte("insufficient balance for gas")
+							exception = pb.EXCEPTION_NONE
+							eventLogs = nil
+							gasUsed = 0
 						}
 					}
-					if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
-						if exRs.MapAddBalance() != nil {
+
+					rcp.UpdateExecuteResult(receiptStatus, ret, exception, gasUsed, eventLogs)
+
+					if canPayGas {
+						// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
+						if exRs.MapNonce() != nil {
+							for addrHex, newNonceBytes := range exRs.MapNonce() {
+								addr := common.HexToAddress(addrHex)
+								newNonce := big.NewInt(0).SetBytes(newNonceBytes).Uint64()
+								mvccDB.SetNonce(addr, newNonce)
+							}
+						}
+						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+							if exRs.MapAddBalance() != nil {
 							for addrHex, addAmtBytes := range exRs.MapAddBalance() {
 								addr := common.HexToAddress(addrHex)
 								addAmt := big.NewInt(0).SetBytes(addAmtBytes)
@@ -720,6 +743,7 @@ func (stm *TrueBlockSTM) execOne(
 							}
 						}
 					}
+				} // end of canPayGas
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())

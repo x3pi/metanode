@@ -242,3 +242,75 @@ func TestProcessTransactionsOptimistic_MixedBlock_LeaderRewardNotLost(t *testing
 		t.Errorf("leader reward = %s, want %s (native fee + STM fee, no lost update)", leaderState.TotalBalance(), wantFee)
 	}
 }
+
+// ─── A3: Smart Contract Gas Deduction & Insufficient Balance Revert ───
+
+func TestTrueBlockSTM_SmartContractGasDeduction(t *testing.T) {
+	cs := newTestChainState(t)
+
+	senderGood := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	senderPoor := common.HexToAddress("0x6666666666666666666666666666666666666666")
+
+	// senderGood has 1,000,000 wei. Gas cost is ~20000.
+	seedAccount(t, cs, senderGood, big.NewInt(1_000_000), 0)
+	
+	// senderPoor has only 100 wei. Gas cost is ~20000, so it will fail to pay gas.
+	seedAccount(t, cs, senderPoor, big.NewInt(100), 0)
+
+	blsKey := make([]byte, 48)
+	for i := range blsKey {
+		blsKey[i] = byte(i + 1)
+	}
+	packedInput, _ := PackSetBlsPublicKey(blsKey)
+	callData := transaction.NewCallData(packedInput)
+	dataBytes, _ := callData.Marshal()
+	dummyContractAddr := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	
+	// MaxGasPrice is 1
+	txGood := newTx(senderGood, dummyContractAddr, 0, big.NewInt(0), dataBytes)
+	txPoor := newTx(senderPoor, dummyContractAddr, 0, big.NewInt(0), dataBytes)
+
+	items := []grouptxns.Item{
+		{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(txGood), Tx: txGood},
+		{ID: 1, Array: grouptxns.BuildDeterministicGroupAddrs(txPoor), Tx: txPoor},
+	}
+	groups := grouptxns.GroupTransactionsDeterministic(items)
+
+	leaderAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	allTxs, allRcps, _, _ := ProcessTransactionsOptimistic(
+		context.Background(), cs, groups, blankHeader(),
+		false, false, 999, leaderAddr, true,
+	)
+
+	if len(allTxs) != 2 || len(allRcps) != 2 {
+		t.Fatalf("expected 2 txs processed, got %d txs / %d receipts", len(allTxs), len(allRcps))
+	}
+
+	var rcpGood, rcpPoor types.Receipt
+	if allTxs[0].Hash() == txGood.Hash() {
+		rcpGood = allRcps[0]
+		rcpPoor = allRcps[1]
+	} else {
+		rcpGood = allRcps[1]
+		rcpPoor = allRcps[0]
+	}
+
+	if rcpGood.Status() != pb.RECEIPT_STATUS_TRANSACTION_ERROR {
+		t.Fatalf("txGood should have failed (dummy contract), got status %v", rcpGood.Status())
+	}
+	if rcpPoor.Status() != pb.RECEIPT_STATUS_TRANSACTION_ERROR {
+		t.Fatalf("txPoor should have failed with TRANSACTION_ERROR due to insufficient gas balance, got status %v", rcpPoor.Status())
+	}
+
+	goodState, _ := cs.GetAccountStateDB().AccountState(senderGood)
+	expectedGoodBalance := big.NewInt(1_000_000 - int64(rcpGood.GasUsed()))
+	if goodState.TotalBalance().Cmp(expectedGoodBalance) != 0 {
+		t.Errorf("senderGood balance = %s, want %s (gas deducted)", goodState.TotalBalance(), expectedGoodBalance)
+	}
+
+	poorState, _ := cs.GetAccountStateDB().AccountState(senderPoor)
+	if poorState.TotalBalance().Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("senderPoor balance = %s, want 100 (state reverted)", poorState.TotalBalance())
+	}
+}
