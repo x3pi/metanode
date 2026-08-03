@@ -588,10 +588,16 @@ func (stm *TrueBlockSTM) execOne(
 
 		if tx.IsRegularTransaction() {
 			// Native Transfer
-			gasFee := big.NewInt(int64(mt_common.TRANSFER_GAS_COST * tx.MaxGasPrice()))
+			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), new(big.Int).SetUint64(tx.MaxGasPrice()))
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
 			errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+			
+			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
+			mvccDB.PlusOneNonce(tx.FromAddress())
+			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
+			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+			
 			if errSub != nil {
 				// Revert Native Transfer
 				rcp = receipt.NewReceipt(
@@ -601,10 +607,7 @@ func (stm *TrueBlockSTM) execOne(
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
-				mvccDB.PlusOneNonce(tx.FromAddress())
 				mvccDB.AddBalance(tx.ToAddress(), tx.Amount())
-				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
-				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 
 				// Create receipt for native transfer
 				rcp = receipt.NewReceipt(
@@ -664,8 +667,31 @@ func (stm *TrueBlockSTM) execOne(
 
 			if err == nil {
 				if exRs != nil {
-					rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), exRs.EventLogs())
+					receiptStatus := exRs.ReceiptStatus()
+					ret := exRs.Return()
+					exception := exRs.Exception()
+					gasUsed := exRs.GasUsed()
+					eventLogs := exRs.EventLogs()
+
+					// [FIX] Deduct Gas Fee from sender's balance
+					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), new(big.Int).SetUint64(tx.MaxGasPrice()))
+					canPayGas := true
+					if gasFee.Cmp(big.NewInt(0)) > 0 {
+						errSub := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
+						if errSub != nil {
+							canPayGas = false
+							receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+							ret = []byte("insufficient balance for gas")
+							exception = pb.EXCEPTION_NONE
+							eventLogs = nil
+							gasUsed = 0
+						}
+					}
+
+					rcp.UpdateExecuteResult(receiptStatus, ret, exception, gasUsed, eventLogs)
+
 					// Apply state changes to wrapper DBs so Block-STM tracks Read/Write Sets correctly
+					// Always apply nonce updates even if canPayGas is false to prevent infinite replays
 					if exRs.MapNonce() != nil {
 						for addrHex, newNonceBytes := range exRs.MapNonce() {
 							addr := common.HexToAddress(addrHex)
@@ -673,8 +699,10 @@ func (stm *TrueBlockSTM) execOne(
 							mvccDB.SetNonce(addr, newNonce)
 						}
 					}
-					if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
-						if exRs.MapAddBalance() != nil {
+
+					if canPayGas {
+						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
+							if exRs.MapAddBalance() != nil {
 							for addrHex, addAmtBytes := range exRs.MapAddBalance() {
 								addr := common.HexToAddress(addrHex)
 								addAmt := big.NewInt(0).SetBytes(addAmtBytes)
@@ -720,6 +748,7 @@ func (stm *TrueBlockSTM) execOne(
 							}
 						}
 					}
+				} // end of canPayGas
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())

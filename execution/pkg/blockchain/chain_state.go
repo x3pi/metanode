@@ -492,6 +492,11 @@ func (cs *ChainState) GetConfig() *config.SimpleChainConfig {
 	return cs.config
 }
 
+// SetConfig sets the configuration for the ChainState
+func (cs *ChainState) SetConfig(cfg *config.SimpleChainConfig) {
+	cs.config = cfg
+}
+
 // GetAttestationInterval returns the state attestation interval (in blocks).
 // Returns 0 if attestation is disabled.
 func (cs *ChainState) GetAttestationInterval() uint64 {
