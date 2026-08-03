@@ -372,42 +372,38 @@ func VerifyTransaction(
 		return transaction.InvalidPendingUse
 	}
 
-	// nếu mà là giao dịch chuyển native token
-	// thì maxGas sẽ là định phí
-	// chỉ cho phép lơn hơn 10 lần phí cố định
-	// ngược lại nếu là smart contract thì phí lơn hơn tối đa là 10.000 lần
-	_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
-	if !isFree {
-		_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
-	}
-	if tx.GetNonce() == 0 || isCrossChainBatchSubmit {
-		isFree = true
-	}
-	if !isSubNodeLagging && !tx.ValidAmount(as) {
-		return transaction.InvalidAmount
+	// 4. KIỂM TRA PHÍ & SỐ DƯ (Bỏ qua nếu SubNode chưa đồng bộ đủ state)
+	if !isSubNodeLagging {
+		// 4.1. Kiểm tra số dư có đủ trả Amount cơ bản không
+		if !tx.ValidAmount(as) {
+			return transaction.InvalidAmount
+		}
+
+		// 4.2. Xác định giao dịch có được miễn phí không
+		_, isFree := chainState.GetFreeFeeAddress()[tx.ToAddress()]
+		if !isFree {
+			_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
+		}
+		if tx.GetNonce() == 0 || isCrossChainBatchSubmit {
+			isFree = true
+		}
+
+		if !isFree {
+			// 4.3. Kiểm tra số dư có đủ trả (MaxFee + Amount) không
+			if !tx.ValidMaxFee(as) {
+				return transaction.InvalidMaxFee
+			}
+
+			// 4.4. Kiểm tra MaxGasPrice > 0 (chống spam cơ bản)
+			if !tx.ValidMaxGasPrice(common.MINIMUM_BASE_FEE) {
+				return transaction.InvalidMaxGasPrice
+			}
+		}
 	}
 
-	if !isFree && !isSubNodeLagging && !tx.ValidMaxFee(as) {
-		return transaction.InvalidMaxFee
+	if !tx.ValidMaxGas() {
+		return transaction.InvalidMaxGas
 	}
-
-	// kiểm tra số dư có đủ cho max price
-	// maxFee := tx.MaxFee()
-	// if !isFree && maxFee.Cmp(big.NewInt(common.MINIMUM_BASE_FEE)) < 0 {
-	// 	logger.Error("maxFee", maxFee)
-	// 	return transaction.InvalidAmount
-	// }
-
-	// if !isFree && !tx.ValidAmountSpend(as, maxFee) {
-	// 	logger.Error("Error when execute transaction code 120003: maxFee")
-	// 	logger.Error("Error when execute transaction code 120003: detail as", as.Balance(), as.PendingBalance())
-	// 	logger.Error("Error when execute transaction code 120003: detail mf", maxFee, tx.Amount())
-	// 	return transaction.InvalidMaxGasPrice
-	// }
-
-	// if (!isFree && tx.ValidMaxGas() ) {
-	// 	return transaction.InvalidMaxGas
-	// }
 
 	// verify last hash
 
