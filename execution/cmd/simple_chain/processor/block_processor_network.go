@@ -48,6 +48,10 @@ func (bp *BlockProcessor) runUnixSocket() {
 		bp.ForceCommit()
 	})
 
+	if bp.speculativeExecutor != nil {
+		reqHandler.SetCancelSpeculativeExecutionCallback(bp.speculativeExecutor.CancelAllSpeculative)
+	}
+
 	// Inject UpdateLastBlock callback for architectural purity (Rust manages state)
 	reqHandler.SetUpdateLastBlockCallback(func(blk types.Block) {
 		bp.UpdateLastBlockAndHeader(blk)
