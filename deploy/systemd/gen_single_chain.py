@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-gen_private_chain.py — Private Chain Initializer and Configuration Generator.
+gen_single_chain.py — Single Chain Initializer and Configuration Generator.
 
 Generates complete genesis, validator keys, pre-funded developer accounts,
 Go execution configs, Rust consensus configs, and start/stop scripts for a
-Metanode Private Network (supporting 1 validator or N validators).
+Metanode Single Chain (supporting 1 validator).
 
 Usage:
-  python3 gen_private_chain.py \
+  python3 gen_single_chain.py \
     --chain-id 1337 \
     --validators 1 \
-    --output-dir ./private_chain_data \
+    --output-dir ./single_chain_data \
     --alloc-balance 1000000 \
     --dev-accounts 5
 
 Options:
-  --chain-id INT       EVM Chain ID for private network (default: 1337)
+  --chain-id INT       EVM Chain ID for single chain (default: 1337)
   --validators INT     Number of validator nodes (default: 1 for single validator)
   --ip IP              IP address for nodes (default: 127.0.0.1)
-  --output-dir DIR     Output directory for chain configs & data (default: ./private_chain_data)
+  --output-dir DIR     Output directory for chain configs & data (default: ./single_chain_data)
   --alloc-balance INT  Initial balance in MTN for pre-funded accounts (default: 1000000 MTN)
   --dev-accounts INT   Number of additional pre-funded dev ETH accounts (default: 5)
   --metanode-bin PATH  Path to metanode binary (auto-detected if omitted)
@@ -128,11 +128,11 @@ def generate_eth_dev_account():
         sys.exit(1)
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate private chain configs for Metanode")
+    parser = argparse.ArgumentParser(description="Generate single chain configs for Metanode")
     parser.add_argument("--chain-id", type=int, default=1337, help="EVM Chain ID (default: 1337)")
     parser.add_argument("--validators", type=int, default=1, help="Number of validators (default: 1)")
     parser.add_argument("--ip", default="127.0.0.1", help="Node IP address (default: 127.0.0.1)")
-    parser.add_argument("--output-dir", default="./private_chain_data", help="Output directory (default: ./private_chain_data)")
+    parser.add_argument("--output-dir", default="./single_chain_data", help="Output directory (default: ./single_chain_data)")
     parser.add_argument("--alloc-balance", type=int, default=1000000, help="Initial MTN balance per account (default: 1000000)")
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
@@ -141,7 +141,7 @@ def main():
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     args = parser.parse_args()
 
-    print(bold(cyan("\n=== 🌐 Metanode Private Chain Initializer ===")))
+    print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
     
     metanode_bin = find_metanode_bin(args.metanode_bin)
     if not metanode_bin:
@@ -183,7 +183,7 @@ def main():
             "primary_address": f"{args.ip}:{primary_port}",
             "worker_address": f"{args.ip}:{worker_port}",
             "p2p_address": f"/ip4/{args.ip}/tcp/{p2p_port}",
-            "description": f"Private Chain Validator node-{node_id}",
+            "description": f"Single Chain Validator node-{node_id}",
             "website": "",
             "image": "",
             "commission_rate": 5,
@@ -338,7 +338,7 @@ def main():
 
         # Build node.toml for Rust consensus
         peers_toml = ", ".join([f'"{p}"' for p in rust_peers])
-        toml_content = f"""# Rust Consensus Configuration for Private Chain Node {node_id}
+        toml_content = f"""# Rust Consensus Configuration for Single Chain Node {node_id}
 node_id = {node_id}
 network_address = "127.0.0.1:{consensus_port}"
 protocol_key_path = "{node_dir}/keys/protocol_key.json"
@@ -356,16 +356,16 @@ time_based_epoch_change = true
         with open(node_dir / "node.toml", "w") as f:
             f.write(toml_content)
 
-    # 5. Generate start_private_chain.sh & stop_private_chain.sh
-    start_sh = out_dir / "start_private_chain.sh"
-    stop_sh  = out_dir / "stop_private_chain.sh"
+    # 5. Generate start_single_chain.sh & stop_single_chain.sh
+    start_sh = out_dir / "start_single_chain.sh"
+    stop_sh  = out_dir / "stop_single_chain.sh"
 
     simple_chain_bin = REPO_ROOT / "execution" / "cmd" / "simple_chain" / "simple_chain"
     
     start_script_content = f"""#!/usr/bin/env bash
 set -e
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🚀 Starting Metanode Private Chain ({args.validators} validator node(s))..."
+echo "🚀 Starting Metanode Single Chain..."
 
 METANODE_BIN="{metanode_bin}"
 SIMPLE_CHAIN_BIN="{simple_chain_bin}"
@@ -383,7 +383,7 @@ echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port})..."
 """
 
     start_script_content += f"""
-echo "✅ Private Chain started successfully!"
+echo "✅ Single Chain started successfully!"
 echo "   RPC URL: http://{args.ip}:{args.rpc_port}"
 echo "   Chain ID: {args.chain_id}"
 echo "   Check logs in $DIR/node-0/logs/node-0.log"
@@ -391,7 +391,7 @@ echo "   Check logs in $DIR/node-0/logs/node-0.log"
 
     stop_script_content = f"""#!/usr/bin/env bash
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🛑 Stopping Metanode Private Chain..."
+echo "🛑 Stopping Metanode Single Chain..."
 
 for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
     if [ -f "$pid_file" ]; then
@@ -404,7 +404,7 @@ done
 
 pkill -f "simple_chain --config" 2>/dev/null || true
 pkill -f "metanode start --config" 2>/dev/null || true
-echo "✅ Private Chain stopped."
+echo "✅ Single Chain stopped."
 """
 
     with open(start_sh, "w") as f:
@@ -416,12 +416,12 @@ echo "✅ Private Chain stopped."
     os.chmod(stop_sh, 0o755)
 
     # 6. Print summary
-    print(bold(green("\n🎉 Private Chain Environment Initialized Successfully!")))
+    print(bold(green("\n🎉 Single Chain Environment Initialized Successfully!")))
     print(f"  • Genesis file:     {cyan(str(genesis_path))}")
     print(f"  • Dev Accounts:     {cyan(str(out_dir / 'dev_accounts.json'))}")
     print(f"  • Start Script:     {green(str(start_sh))}")
     print(f"  • Stop Script:      {red(str(stop_sh))}")
-    print(f"\n💡 To start the 1-validator private chain, run:")
+    print(f"\n💡 To start the single chain, run:")
     print(cyan(f"   bash {start_sh}\n"))
 
 if __name__ == "__main__":

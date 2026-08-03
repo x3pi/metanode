@@ -1103,7 +1103,7 @@ func (t *Transaction) ValidDeviceKey(fromAccountState types.AccountState) bool {
 }
 
 func (t *Transaction) ValidMaxGas() bool {
-	return t.MaxGas() >= p_common.TRANSFER_GAS_COST
+	return t.MaxGas() >= p_common.TRANSFER_GAS_COST && t.MaxGas() <= p_common.BLOCK_GAS_LIMIT
 }
 
 func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {

@@ -794,7 +794,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 		if crit.FromBlock != nil {
 			begin = crit.FromBlock.Int64()
 		}
-		if begin == rpc.LatestBlockNumber.Int64() {
+		if begin == rpc.LatestBlockNumber.Int64() || begin == rpc.PendingBlockNumber.Int64() || begin == rpc.FinalizedBlockNumber.Int64() || begin == rpc.SafeBlockNumber.Int64() {
 			beginBlock = new(big.Int).SetUint64(lastBlockNum)
 		} else {
 			beginBlock = new(big.Int).SetInt64(begin)
@@ -804,7 +804,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 		if crit.ToBlock != nil {
 			end = crit.ToBlock.Int64()
 		}
-		if end == rpc.LatestBlockNumber.Int64() {
+		if end == rpc.LatestBlockNumber.Int64() || end == rpc.PendingBlockNumber.Int64() || end == rpc.FinalizedBlockNumber.Int64() || end == rpc.SafeBlockNumber.Int64() {
 			endBlock = new(big.Int).SetUint64(lastBlockNum)
 		} else {
 			endBlock = new(big.Int).SetInt64(end)
