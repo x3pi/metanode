@@ -15,7 +15,7 @@ const (
 	BLOCK_GAS_LIMIT                       = 10000000000
 	OFF_CHAIN_GAS_LIMIT                   = 1000000000
 	BASE_FEE_INCREASE_GAS_USE_THRESH_HOLD = 5000000000
-	MINIMUM_BASE_FEE                      = 1000000
+	MINIMUM_BASE_FEE                      = 100000
 	BASE_FEE_CHANGE_PERCENTAGE            = 12.5
 	MAX_GASS_FEE                          = 5000000
 

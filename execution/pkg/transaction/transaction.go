@@ -1222,7 +1222,7 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		// skip check gas price for native smart contract
 		return true
 	}
-	return t.MaxGasPrice() > 0
+	return t.MaxGasPrice() >= currentGasPrice
 }
 
 func (t *Transaction) ValidAmountSpend(
