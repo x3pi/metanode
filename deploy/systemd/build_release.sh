@@ -91,16 +91,16 @@ cp simple_chain "$RELEASE_DIR/bin/"
 log_ok "simple_chain binary copied to release."
 
 # ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
-log_step "Building Go RPC Proxy Client"
-cd "$PROJECT_ROOT/execution/cmd/rpc/cmd/rpc-client"
-go build -o rpc-client-bin .
-if [ ! -f certificate.pem ]; then
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
-fi
-cp rpc-client-bin "$RELEASE_DIR/bin/"
-cp certificate.pem "$RELEASE_DIR/bin/" 2>/dev/null || true
-cp private.key "$RELEASE_DIR/bin/" 2>/dev/null || true
-log_ok "rpc-client-bin and TLS certs copied to release."
+# log_step "Building Go RPC Proxy Client"
+# cd "$PROJECT_ROOT/execution/cmd/rpc/cmd/rpc-client"
+# go build -o rpc-client-bin .
+# if [ ! -f certificate.pem ]; then
+#     openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout private.key -out certificate.pem -subj "/CN=localhost" 2>/dev/null
+# fi
+# cp rpc-client-bin "$RELEASE_DIR/bin/"
+# cp certificate.pem "$RELEASE_DIR/bin/" 2>/dev/null || true
+# cp private.key "$RELEASE_DIR/bin/" 2>/dev/null || true
+# log_ok "rpc-client-bin and TLS certs copied to release."
 
 # ─── 4. Copy Configurations ─────────────────────────────────────────────────
 log_step "Collecting Scripts & Configurations"
