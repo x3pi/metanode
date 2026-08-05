@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"log"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -34,6 +35,15 @@ const (
 	mappingCacheTTL          = 30 * time.Minute
 	walkbackNegativeCacheTTL = 2 * time.Second
 
+	// walkbackAcquireTimeout bounds how long a caller waits for a free
+	// walkback slot (see walkbackSem below) before giving up and treating the
+	// lookup as a miss. Keeps behavior elastic under load: when slots are
+	// free (normal operation) this never matters: acquisition is instant.
+	// When the system is flooded with walkback-triggering lookups, callers
+	// shed load quickly instead of queuing indefinitely and piling up
+	// goroutines doing expensive block-history scans in parallel.
+	walkbackAcquireTimeout = 200 * time.Millisecond
+
 	// Cấu hình Worker dọn dẹp
 	cleanupInterval = 1 * time.Minute // Quét dọn mỗi 1 phút
 )
@@ -42,7 +52,30 @@ var (
 	blockChainInstance *BlockChain
 	once               sync.Once
 	storeLimiter       = make(chan struct{}, 2000) // Tăng limit lên 2000 cho high concurrency
+
+	// walkbackSem bounds how many rebuildTxMappingByWalkback scans (each up
+	// to 2000 blocks deep) can run concurrently. Sized relative to
+	// GOMAXPROCS so it scales with the machine (and shrinks correctly when
+	// GOMAXPROCS is capped for co-located test nodes sharing one box — see
+	// main.go). Without this, a flood of eth_getTransactionReceipt polls for
+	// hashes that were never actually accepted (buggy client, or many
+	// still-pending hashes at once) can spawn thousands of concurrent scans,
+	// pegging all CPUs and stalling the Go committer loop — observed
+	// directly under a chaotic load-test run, see
+	// project_tx_dup_check_walkback_bottleneck memory.
+	walkbackSem = make(chan struct{}, walkbackSemCapacity())
 )
+
+func walkbackSemCapacity() int {
+	capacity := runtime.GOMAXPROCS(0) / 4
+	if capacity < 2 {
+		capacity = 2
+	}
+	if capacity > 16 {
+		capacity = 16
+	}
+	return capacity
+}
 
 // BlockChain quản lý bộ nhớ đệm và tương tác DB.
 // Sử dụng sync.Map cho concurrent read và Background Worker cho việc dọn dẹp.
@@ -636,7 +669,7 @@ func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, block
 // the moment it's accepted into the mempool, before the client can possibly
 // poll for its receipt. A just-submitted tx is guaranteed not to be in any
 // committed block yet, so the very first eth_getTransactionReceipt poll for
-// it would otherwise pay a full (up to walkbackMaxBlocks) block-history scan
+// it would otherwise pay a full (up to 2000-block) block-history scan
 // for a guaranteed miss — observed under sustained load as hundreds of
 // goroutines piled up in rebuildTxMappingByWalkback simultaneously, one per
 // distinct newly-pending hash. Seeding here means that guaranteed-miss walk
@@ -705,10 +738,22 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 	}
 
 	if bc.blockDatabase != nil {
-		blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
-		if ok {
-			logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
-			return blockNumber, true
+		// Elastic load-shedding: bound how many walkback scans run at once
+		// (walkbackSem, sized off GOMAXPROCS) and how long a caller waits for
+		// a free slot (walkbackAcquireTimeout). Under normal load a slot is
+		// free instantly; under a flood, callers give up quickly and are
+		// treated as a miss (negative-cached, same as a real miss) instead of
+		// piling up thousands of concurrent expensive scans.
+		select {
+		case walkbackSem <- struct{}{}:
+			blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
+			<-walkbackSem
+			if ok {
+				logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
+				return blockNumber, true
+			}
+		case <-time.After(walkbackAcquireTimeout):
+			logger.Warn("⚠️ [LAZY-FALLBACK] Walkback slot busy, shedding load for %s", txHash.Hex())
 		}
 		bc.walkbackNotFound.Store(txHash, time.Now().Add(walkbackNegativeCacheTTL))
 	}
