@@ -207,7 +207,7 @@ def main():
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "public_key_bls": bls["authority_key"]
+            "publicKeyBls": bls["authority_key"]
         })
 
     # 2. Generate pre-funded dev accounts
@@ -222,7 +222,11 @@ def main():
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "public_key_bls": ""
+            # Must match the gateway BLS keypair (gateway_bls_key below) so that
+            # standard eth_sendRawTransaction from these dev accounts passes the
+            # on-chain BLS registration check in eth_tx_converter.go — otherwise
+            # every tx is rejected with "no BLS public key registered on-chain".
+            "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
         })
 
     with open(out_dir / "dev_accounts.json", "w") as f:
@@ -266,7 +270,7 @@ def main():
         os.makedirs(node_dir / "data" / "execution" / "db", exist_ok=True)
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
-        rpc_port = args.rpc_port
+        rpc_port = args.rpc_port + node_id
         primary_port = 4200 + node_id
         dns_port = 10080 + node_id
         peer_rpc_port = 20200 + node_id
@@ -378,13 +382,13 @@ fi
 """
     for node_id in range(args.validators):
         start_script_content += f"""
-echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port})..."
+echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node_id})..."
 (cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
 """
 
     start_script_content += f"""
 echo "✅ Single Chain started successfully!"
-echo "   RPC URL: http://{args.ip}:{args.rpc_port}"
+echo "   Node-0 RPC URL: http://{args.ip}:{args.rpc_port}"
 echo "   Chain ID: {args.chain_id}"
 echo "   Check logs in $DIR/node-0/logs/node-0.log"
 """

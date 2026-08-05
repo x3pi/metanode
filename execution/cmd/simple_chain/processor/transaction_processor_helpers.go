@@ -215,7 +215,13 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 }
 
 func (tp *TransactionProcessor) backupDeviceKey(s storage.Storage, t types.Transaction, newDeviceKey []byte) error {
-	_, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHash(t.Hash())
+	// Fast-path-only duplicate check: a brand-new tx (the overwhelming majority
+	// of submissions) is never found in the cache/mapping-DB, so falling through
+	// to GetBlockNumberByTxHash's block-history walkback here would burn 25ms+
+	// per submission for no benefit — see project_tx_dup_check_walkback_bottleneck
+	// memory. The walkback's crash-recovery guarantee isn't needed for rejecting
+	// duplicates of a submission that hasn't been processed yet.
+	_, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(t.Hash())
 	if ok {
 		return fmt.Errorf("transaction already exists")
 	}
