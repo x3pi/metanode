@@ -198,14 +198,18 @@ func ProcessTransactionsOptimistic(
 	{
 		flatEvmTxs := make([]types.Transaction, 0, evmTxCount)
 		groupStarts := make([]int, len(evmGroups))
+		maxGroupSize := 0
 		for k, g := range evmGroups {
 			groupStarts[k] = len(flatEvmTxs)
+			if len(g.Items) > maxGroupSize {
+				maxGroupSize = len(g.Items)
+			}
 			for _, item := range g.Items {
 				flatEvmTxs = append(flatEvmTxs, item.Tx)
 			}
 		}
 
-		rawTxs, rawRcps, rawScRs, rawMvmMap := NewTrueBlockSTM(flatEvmTxs).
+		rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatEvmTxs, maxGroupSize, evmTxCount).
 			Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 		for k, g := range evmGroups {
@@ -286,15 +290,19 @@ func runEvmPipeline(
 	map[common.Hash]common.Address,
 ) {
 	totalEvmTxs := 0
+	maxGroupSize := 0
 	flatTxs := make([]types.Transaction, 0)
 	for _, g := range evmGroups {
+		if len(g.Items) > maxGroupSize {
+			maxGroupSize = len(g.Items)
+		}
 		for _, item := range g.Items {
 			flatTxs = append(flatTxs, item.Tx)
 		}
 		totalEvmTxs += len(g.Items)
 	}
 
-	rawTxs, rawRcps, rawScRs, rawMvmMap := NewTrueBlockSTM(flatTxs).
+	rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatTxs, maxGroupSize, totalEvmTxs).
 		Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 	allTransactions := make([]types.Transaction, 0, totalEvmTxs)
@@ -325,4 +333,35 @@ func runEvmPipeline(
 	}
 
 	return allTransactions, allReceipts, allExecuteSCResults, allMvmIdMap
+}
+
+// hotContentionMinTxs and hotContentionDominanceNum/Den gate the exec-worker
+// cap in newTrueBlockSTMForGroups: only bother for segments large enough that
+// abort-storm cost is the dominant risk, and only when one static conflict
+// group truly dominates the segment (isolated small hot spots alongside
+// plenty of unrelated TXs still benefit from parallelism).
+const hotContentionMinTxs = 200
+const hotContentionDominanceNum, hotContentionDominanceDen = 7, 10 // 70%
+
+// newTrueBlockSTMForGroups builds a TrueBlockSTM for flatTxs and caps it to a
+// single exec worker if maxGroupSize (the largest static conflict group
+// found by GroupTransactionsDeterministic) dominates totalTxs.
+//
+// HOT-CONTENTION FALLBACK: when one conflict group covers most of a segment
+// (e.g. thousands of TXs all calling the same counter contract), Block-STM's
+// speculative parallel execution guarantees most TXs run against a stale
+// version and get aborted — each abort re-runs the EVM call over CGO, which
+// is the expensive part, and turned a 10k-TX same-slot block into a
+// many-minute stall in practice. Capping to 1 exec worker makes dispatch
+// strictly sequential so nothing is ever aborted; see WithMaxExecWorkers for
+// why this doesn't change the result.
+func newTrueBlockSTMForGroups(flatTxs []types.Transaction, maxGroupSize, totalTxs int) *TrueBlockSTM {
+	stm := NewTrueBlockSTM(flatTxs)
+	if totalTxs >= hotContentionMinTxs &&
+		maxGroupSize*hotContentionDominanceDen >= totalTxs*hotContentionDominanceNum {
+		logger.Warn("⚠️ [BLOCK-STM] Dominant conflict group detected (%d/%d EVM txs) — capping to 1 exec worker to avoid an abort storm",
+			maxGroupSize, totalTxs)
+		stm = stm.WithMaxExecWorkers(1)
+	}
+	return stm
 }
