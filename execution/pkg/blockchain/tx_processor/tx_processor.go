@@ -112,6 +112,14 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	chainState.GetAccountStateDB().SetTrieCommitBlock(blockNum)
 	chainState.GetStakeStateDB().SetTrieCommitBlock(blockNum)
 
+	// Check for cancellation before calling IntermediateRoot
+	select {
+	case <-ctx.Done():
+		logger.Info("🛑 [TX-PROCESSOR] Execution canceled before IntermediateRoot")
+		return ProcessResult{Error: ctx.Err()}, ctx.Err()
+	default:
+	}
+
 	var irWg sync.WaitGroup
 	irWg.Add(2)
 
