@@ -261,8 +261,8 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		return nil
 	}
 
-	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation.
-	// Monotonic check: Prevent older blocks from overwriting newer synced state.
+	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
+	// Lắp thêm Race-Condition Guard (Tránh đè block cũ lên block mới)
 	currentLast := bp.GetLastBlock()
 	if currentLast == nil || bl.Header().BlockNumber() >= currentLast.Header().BlockNumber() {
 		bp.SetLastBlock(bl)

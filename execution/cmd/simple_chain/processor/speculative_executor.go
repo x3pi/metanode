@@ -37,6 +37,7 @@ type SpeculativeResult struct {
 	ExecuteErr      error
 	IsEpochBoundary bool
 	AuthRespCh      chan<- *pb.ExecuteBlockResponse
+	IsFinished      bool
 }
 
 // SpeculativeExecutor handles background execution of incoming consensus commits
@@ -227,6 +228,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
 			AuthRespCh:      authRespCh,
+			IsFinished:      true,
 		}
 
 		// Check if CleanGEI already swept this placeholder away
@@ -288,7 +290,11 @@ func (se *SpeculativeExecutor) GetSpeculativeResult(gei uint64) (*SpeculativeRes
 	if !ok {
 		return nil, false
 	}
-	return val.(*SpeculativeResult), true
+	res := val.(*SpeculativeResult)
+	if !res.IsFinished {
+		return nil, false
+	}
+	return res, true
 }
 
 // StartCommitterLoop starts the sequential committer loop
