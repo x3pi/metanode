@@ -87,7 +87,10 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
             mvm::to_big_endian(key, b_key);
             
             auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
-            if (ret.success && ret.value != nullptr) {
+            if (ret.status == 2) {
+                throw Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+            }
+            if (ret.status == 0 && ret.value != nullptr) {
                 uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
                 free(ret.value);
                 return uncommitted_val;

@@ -262,7 +262,18 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	}
 
 	// CRITICAL FORK-SAFETY: Update lastBlock IMMEDIATELY after block creation
-	bp.SetLastBlock(bl)
+	// Lắp thêm Race-Condition Guard (Tránh đè block cũ lên block mới)
+	currentLast := bp.GetLastBlock()
+	if currentLast == nil || bl.Header().BlockNumber() >= currentLast.Header().BlockNumber() {
+		bp.SetLastBlock(bl)
+	} else {
+		logger.Error("🚨 [FORK-SAFETY] Race condition: Attempting to commit older draft block #%d while current lastBlock is #%d. Discarding draft to prevent state corruption.",
+			bl.Header().BlockNumber(), currentLast.Header().BlockNumber())
+		
+		// BẮT BUỘC DỌN RÁC VÀ RETURN: Không được đẩy block cũ vào commitChannel
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
+	}
 	// currentBlockHeader and BlockNumberToHash mappings are safely updated
 	// synchronously inside CommitBlockState (via commitWorker) under commitMutex
 	// to guarantee no race condition with P2P sync blocks.

@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -43,6 +44,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/mvcc"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -1071,8 +1073,16 @@ func GlobalStateGet(
 	}
 
 	accountState, err := mvmApi.accountStateDb.AccountState(fAddress)
-	if err != nil || accountState == nil {
-		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState nil for %s, err=%v", fAddress.Hex(), err)
+	if err != nil {
+		if errors.Is(err, mvcc.ErrEstimateHit) {
+			logger.Debug("[GLOBAL_STATE_GET] Suspend: ErrEstimateHit for %s", fAddress.Hex())
+			return C.int(3), nil, nil, nil, 0
+		}
+		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState err for %s, err=%v", fAddress.Hex(), err)
+		return C.int(0), nil, nil, nil, 0
+	}
+	if accountState == nil {
+		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState nil for %s", fAddress.Hex())
 		return C.int(0), nil, nil, nil, 0
 	}
 
@@ -1132,12 +1142,12 @@ func GetStorageValue(
 	mvmId *C.uchar,
 	address *C.uchar,
 	key *C.uchar,
-) (value *C.uchar, success bool) {
+) (value *C.uchar, status C.int) {
 	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
 	fmvmId := common.BytesToAddress(bmvmId)
 	mvmApi := GetMVMApi(fmvmId)
 	if mvmApi == nil {
-		return nil, false
+		return nil, 0
 	}
 	bAddress := C.GoBytes(unsafe.Pointer(address), 20)
 	bKey := C.GoBytes(unsafe.Pointer(key), 32)
@@ -1152,9 +1162,21 @@ func GetStorageValue(
 
 	logger.Debug("GetStorageValue address: ", fAddress, hex.EncodeToString(bKey))
 	bValue, success := mvmApi.smartContractDb.StorageValue(fAddress, bKey)
+	
+	retStatus := 0
+	if !success {
+		retStatus = 1
+	}
+
+	if mvccDB, ok := mvmApi.smartContractDb.(*mvcc.MVCCSmartContractDB); ok {
+		if mvccDB.BlockingVersion != mvcc.BaseVersion {
+			retStatus = 2
+		}
+	}
+
 	cValue := C.CBytes(bValue)
 	// Không gửi con trỏ đi đâu cả, C++ sẽ tự quản lý.
-	return (*C.uchar)(cValue), success
+	return (*C.uchar)(cValue), C.int(retStatus)
 }
 
 //export GetBlockHash
