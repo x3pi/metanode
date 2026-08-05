@@ -8,8 +8,9 @@ echo "🛑 Đang dừng chain cũ..."
 if [ -f single_chain_data/stop_single_chain.sh ]; then
     bash single_chain_data/stop_single_chain.sh || true
 fi
-killall simple_chain 2>/dev/null || true
-killall metanode 2>/dev/null || true
+pkill -9 -f simple_chain 2>/dev/null || true
+pkill -9 -f metanode 2>/dev/null || true
+sleep 1
 
 # Parse flags
 CLEAN=0

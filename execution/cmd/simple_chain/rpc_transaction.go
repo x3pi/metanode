@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+
+
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -480,7 +482,7 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
 		}
 	}
-	
+
 	if api.App.config.EnablePrivateGateway {
 		return api.sendRawEthTransactionSpeculative(ctx, input)
 	}
@@ -504,13 +506,12 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		return common.Hash{}, fmt.Errorf("failed to derive sender: %w", err)
 	}
 
-	// 3. Determine BLS private key: Use GatewayBLSKey from config
-	var blsPrivateKey mt_common.PrivateKey
+	// 3. Determine BLS keypair: Use GatewayBLSKey from config
+	var blsKeyPair *bls.KeyPair
 	if api.App.config.GatewayBLSKey != "" {
-		kp := bls.NewKeyPair(common.FromHex(api.App.config.GatewayBLSKey))
-		blsPrivateKey = kp.PrivateKey()
+		blsKeyPair = api.cachedGatewayBLSKeyPair
 	} else {
-		blsPrivateKey = api.App.keyPair.PrivateKey()
+		blsKeyPair = api.App.keyPair
 	}
 
 	// 4. Get latest state root for account lookup
@@ -520,7 +521,7 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	metaTxData, metaTx, err := buildMetaTxFromEthTx(
 		ethTx,
 		api.App.config.ChainId,
-		blsPrivateKey,
+		blsKeyPair,
 		stateRoot,
 		api.App,
 	)
@@ -534,7 +535,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		return common.Hash{}, fmt.Errorf("failed to unmarshal TransactionWithDeviceKey: %w", err)
 	}
 
-
 	// 10. Execute real transaction synchronously to return errors to client
 	output, errRun := api.App.transactionProcessor.ProcessTransactionFromRpcWithDeviceKey(txD)
 	if errRun != nil {
@@ -545,8 +545,6 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 	if err := blockchain.GetBlockChainInstance().SetEthHashMapblsHash(ethTx.Hash(), metaTx.Hash()); err != nil {
 		logger.Warn("[SpeculativeGateway] SetEthHashMapblsHash failed: %v", err)
 	}
-
-	logger.Info("[SpeculativeGateway] TX executed speculatively without mock receipt: ethHash=%s", ethTx.Hash().Hex())
 
 	return ethTx.Hash(), nil
 }
@@ -567,22 +565,26 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 		return common.Hash{}, fmt.Errorf("failed to derive sender: %w", err)
 	}
 
-	// 3. Determine BLS private key: per-address from key store, or node default
-	var blsPrivateKey mt_common.PrivateKey
+	// 3. Determine BLS keypair: per-address from key store, or node default
+	var blsKeyPair *bls.KeyPair
 	if api.App.blsKeyStore != nil {
 		exists, _ := api.App.blsKeyStore.HasPrivateKey(fromAddress)
 		if exists {
-			pkStr, err := api.App.blsKeyStore.GetPrivateKey(fromAddress)
-			if err != nil {
-				return common.Hash{}, fmt.Errorf("failed to retrieve BLS key for %s: %w", fromAddress.Hex(), err)
+			if cached, ok := api.cachedBlsKeyPairs.Get(fromAddress); ok {
+				blsKeyPair = cached
+			} else {
+				pkStr, err := api.App.blsKeyStore.GetPrivateKey(fromAddress)
+				if err != nil {
+					return common.Hash{}, fmt.Errorf("failed to retrieve BLS key for %s: %w", fromAddress.Hex(), err)
+				}
+				blsKeyPair = bls.NewKeyPair(common.FromHex(pkStr))
+				api.cachedBlsKeyPairs.Add(fromAddress, blsKeyPair)
 			}
-			kp := bls.NewKeyPair(common.FromHex(pkStr))
-			blsPrivateKey = kp.PrivateKey()
 		} else {
-			blsPrivateKey = api.App.keyPair.PrivateKey()
+			blsKeyPair = api.App.keyPair
 		}
 	} else {
-		blsPrivateKey = api.App.keyPair.PrivateKey()
+		blsKeyPair = api.App.keyPair
 	}
 
 	// 4. Get latest state root for account lookup
@@ -592,7 +594,7 @@ func (api *MetaAPI) sendRawEthTransactionSync(ctx context.Context, input hexutil
 	metaTxData, metaTx, err := buildMetaTxFromEthTx(
 		ethTx,
 		api.App.config.ChainId,
-		blsPrivateKey,
+		blsKeyPair,
 		stateRoot,
 		api.App,
 	)
@@ -883,7 +885,7 @@ func (api *MetaAPI) GetLogs(ctx context.Context, crit filters.FilterCriteria) ([
 					TxIndex:     uint(txIndex),
 					Index:       logIndex,
 				}
-				
+
 				// 🚀 OPTIMIZATION: Lọc (Early Filtering) ngay tại đây thay vì dồn hết vào mảng rồi mới lọc
 				if len(filters.FilterLogs([]*types.Log{evL}, beginBlock, endBlock, crit.Addresses, crit.Topics)) > 0 {
 					eventLogs = append(eventLogs, evL)

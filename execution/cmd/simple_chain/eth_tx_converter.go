@@ -15,11 +15,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	mt_proto "github.com/meta-node-blockchain/meta-node/pkg/proto"
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	mt_transaction "github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 
@@ -34,7 +34,7 @@ import (
 func buildMetaTxFromEthTx(
 	ethTx *types.Transaction,
 	chainID *big.Int,
-	blsPrivateKey mt_common.PrivateKey,
+	blsKeyPair *bls.KeyPair,
 	stateRoot common.Hash,
 	app *App,
 ) ([]byte, *mt_transaction.Transaction, error) {
@@ -51,10 +51,23 @@ func buildMetaTxFromEthTx(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open account state trie: %w", err)
 	}
-	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, app.storageManager.GetStorageAccount())
-	as, err := accountStateDB.AccountState(fromAddress)
+	
+	var bData []byte
+	// Read directly from trie to avoid creating AccountStateDB and allocating 65k mutexes
+	if lf, ok := accountStateTrie.(interface{ GetLockFree(key []byte) ([]byte, error) }); ok {
+		bData, err = lf.GetLockFree(fromAddress.Bytes())
+	} else {
+		bData, err = accountStateTrie.Get(fromAddress.Bytes())
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)
+		return nil, nil, fmt.Errorf("failed to get account state from trie for %s: %w", fromAddress.Hex(), err)
+	}
+
+	as := state.NewAccountState(fromAddress)
+	if len(bData) > 0 {
+		if err := as.Unmarshal(bData); err != nil {
+			return nil, nil, fmt.Errorf("error unmarshalling %s from Trie: %w", fromAddress.Hex(), err)
+		}
 	}
 
 	// 3. Verify BLS public key is registered on-chain (skip for account setting TX)
@@ -62,10 +75,9 @@ func buildMetaTxFromEthTx(
 		if len(as.PublicKeyBls()) == 0 {
 			return nil, nil, fmt.Errorf("account %s has no BLS public key registered on-chain", fromAddress.Hex())
 		}
-		// Derive expected public key from the provided private key
-		kp := bls.NewKeyPair(blsPrivateKey[:])
-		if !bytes.Equal(as.PublicKeyBls(), kp.BytesPublicKey()) {
-			return nil, nil, fmt.Errorf("registered BLS public key does not match the signing key for %s, expected: %s, got: %s", fromAddress.Hex(), hex.EncodeToString(as.PublicKeyBls()), hex.EncodeToString(kp.BytesPublicKey()))
+		// Use the pre-computed public key from blsKeyPair
+		if !bytes.Equal(as.PublicKeyBls(), blsKeyPair.BytesPublicKey()) {
+			return nil, nil, fmt.Errorf("registered BLS public key does not match the signing key for %s, expected: %s, got: %s", fromAddress.Hex(), hex.EncodeToString(as.PublicKeyBls()), hex.EncodeToString(blsKeyPair.BytesPublicKey()))
 		}
 	}
 
@@ -91,7 +103,7 @@ func buildMetaTxFromEthTx(
 	}
 
 	metaTx.UpdateDeriver(deviceKey, newDeviceKey)
-	metaTx.SetSign(blsPrivateKey)
+	metaTx.SetSign(blsKeyPair.PrivateKey())
 
 	// 6. Marshal as TransactionWithDeviceKey proto
 	txWithDK := &mt_proto.TransactionWithDeviceKey{

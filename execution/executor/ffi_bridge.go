@@ -141,6 +141,8 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		return C.bool(false)
 	}
 
+	subDag.RustFfiDeliveryTimestampMs = uint64(time.Now().UnixMilli())
+
 	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d, authoritative=%v",
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
 

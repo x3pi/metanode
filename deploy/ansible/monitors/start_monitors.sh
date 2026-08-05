@@ -54,7 +54,10 @@ if [ "${1:-}" == "health" ]; then
         
         if [ -f "$RPC_JSON_PATH" ]; then
             while read -r node_key node_url; do
-                if ! curl -s -m 2 "$node_url" >/dev/null 2>&1; then
+                # Dùng timeout 10 giây và kiểm tra lại 2 lần tránh báo động giả khi node bận
+                if ! curl -s -m 10 "$node_url" >/dev/null 2>&1; then
+                    sleep 2
+                    if ! curl -s -m 10 "$node_url" >/dev/null 2>&1; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
@@ -88,6 +91,7 @@ Hệ thống đã tự động backup Crash Logs thành công!
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
 <code>sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                     fi
+                fi
                 else
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then
                         dead_nodes[$node_key]=0

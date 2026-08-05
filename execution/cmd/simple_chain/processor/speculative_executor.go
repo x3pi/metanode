@@ -75,6 +75,42 @@ func (se *SpeculativeExecutor) CancelAllSpeculative() {
 
 // ExecuteSpeculative starts background execution of a commit
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
+	gei := epochData.GetGlobalExecIndex()
+	
+	// CRITICAL FIX: If this GEI is already committed to DB (e.g., via P2P Sync), skip execution!
+	lastCommittedGEI := storage.GetLastGlobalExecIndex()
+	if gei > 0 && gei <= lastCommittedGEI {
+		logger.Warn("⏭️ [SPECULATIVE] Skipping execution for GEI=%d because it is already committed to DB (lastCommitted=%d). P2P Sync likely caught up.", gei, lastCommittedGEI)
+		if authRespCh != nil {
+			authRespCh <- &pb.ExecuteBlockResponse{
+				Success:      true,
+				ActualGei:    gei,
+				BlockNumber:  epochData.GetBlockNumber(),
+				GeisConsumed: 1, // Assume 1 for simplicity to prevent Rust stalls
+			}
+		}
+		return
+	}
+
+	// 1. Determine block number
+	blockNum := epochData.GetBlockNumber()
+	if blockNum == 0 {
+		// Fallback block number calculation if Rust doesn't provide
+		lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
+		if lastCommittedBlockNumber == 0 {
+			lastCommittedBlockNumber = storage.GetLastBlockNumber()
+		}
+		blockNum = lastCommittedBlockNumber + 1
+	}
+
+	// [FIX DEADLOCK RACE CONDITION]: Register placeholder immediately in main thread
+	// This ensures CleanGEI will always see this session and can unblock AuthRespCh
+	se.activeSessions.Store(gei, &SpeculativeResult{
+		GEI:        gei,
+		BlockNum:   blockNum,
+		AuthRespCh: authRespCh,
+	})
+
 	se.mu.Lock()
 	ctx := se.ctx
 	se.mu.Unlock()
@@ -85,20 +121,8 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			<-se.concurrencySem // Release concurrency slot
 		}()
 
-		gei := epochData.GetGlobalExecIndex()
 		commitIndex := epochData.GetCommitIndex()
 		epochNum := epochData.GetEpoch()
-
-		// 1. Determine block number
-		blockNum := epochData.GetBlockNumber()
-		if blockNum == 0 {
-			// Fallback block number calculation if Rust doesn't provide
-			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
-			if lastCommittedBlockNumber == 0 {
-				lastCommittedBlockNumber = storage.GetLastBlockNumber()
-			}
-			blockNum = lastCommittedBlockNumber + 1
-		}
 
 		// 2. Prepare transactions (Deduplicate and sort lexicographically by TxHash)
 		allTransactions := PrepareTransactions(epochData)
@@ -154,7 +178,40 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		startTime := time.Now()
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(ctx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
-		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
+		// ================= DETAILED CONSENSUS TRACE =================
+		goSendBatchTime := pipeline.LastSendBatchTimeNano.Load()
+		var consensusUs int64
+		if goSendBatchTime > 0 && epochData.GetCommitTimestampMs() > 0 && epochData.GetRustDispatchTimestampMs() > 0 {
+			commitUs := epochData.GetCommitTimestampMs() * 1000
+			dispatchUs := epochData.GetRustDispatchTimestampMs() * 1000
+
+			goSendBatchTimeUs := uint64(goSendBatchTime / 1000)
+			var rustMempoolProposeUs uint64
+			if commitUs > goSendBatchTimeUs {
+				rustMempoolProposeUs = commitUs - goSendBatchTimeUs
+			}
+
+			currentDispatchMs := epochData.GetRustDispatchTimestampMs()
+			prevDispatchMs := pipeline.LastRustDispatchTimestampMs.Swap(currentDispatchMs)
+			var rustDagConsensusUs uint64
+			if prevDispatchMs > 0 && currentDispatchMs > prevDispatchMs && (currentDispatchMs - prevDispatchMs) < 5000 {
+				rustDagConsensusUs = (currentDispatchMs - prevDispatchMs) * 1000
+			} else {
+				if dispatchUs > goSendBatchTimeUs {
+					rustDagConsensusUs = dispatchUs - goSendBatchTimeUs
+				}
+			}
+
+			ffiDeliveryMs := epochData.GetRustFfiDeliveryTimestampMs()
+			var rustDeliveryFFIUs uint64
+			if ffiDeliveryMs > 0 && ffiDeliveryMs >= currentDispatchMs {
+				rustDeliveryFFIUs = (ffiDeliveryMs - currentDispatchMs) * 1000
+			}
+
+			pipeline.GlobalBlockTraceStore.SetRustConsensusDetailedTime(blockNum, int64(rustMempoolProposeUs), int64(rustDagConsensusUs), int64(rustDeliveryFFIUs))
+			consensusUs = int64(rustDagConsensusUs)
+		}
+		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), consensusUs, execDuration.Microseconds())
 
 		res := &SpeculativeResult{
 			BlockNum:        blockNum,
@@ -170,6 +227,15 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
 			AuthRespCh:      authRespCh,
+		}
+
+		// Check if CleanGEI already swept this placeholder away
+		if _, exists := se.activeSessions.Load(gei); !exists {
+			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
+			if res.ClonedState != nil {
+				res.ClonedState.CloseSpeculative() // the Close function in 87da48ff handles NOMT payload discard correctly
+			}
+			return
 		}
 
 		se.activeSessions.Store(gei, res)
@@ -192,9 +258,10 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 				if res.ClonedState != nil {
 					// Abort any pending NOMT sessions in the cloned chain state
 					// to prevent deadlocks when block execution is skipped.
-					res.ClonedState.Close()
+					res.ClonedState.CloseSpeculative()
 				}
 				if res.AuthRespCh != nil {
+					logger.Warn("⚠️ [CleanGEI] Rescuing AuthRespCh for GEI=%d (Block %d) to prevent Rust FFI deadlock", res.GEI, res.BlockNum)
 					// Unblock the FFI thread that is waiting for this response
 					select {
 					case res.AuthRespCh <- &pb.ExecuteBlockResponse{
@@ -203,7 +270,9 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 						BlockNumber:  res.BlockNum,
 						GeisConsumed: 0,
 					}:
+						logger.Info("✅ [CleanGEI] Successfully sent fake success response for GEI=%d", res.GEI)
 					default:
+						logger.Warn("❌ [CleanGEI] Failed to send response for GEI=%d (channel full or closed)", res.GEI)
 					}
 				}
 			}

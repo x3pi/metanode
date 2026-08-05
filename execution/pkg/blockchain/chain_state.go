@@ -1492,3 +1492,20 @@ func (cs *ChainState) Close() {
 		cs.stakeChangelogDB.Close()
 	}
 }
+
+// CloseSpeculative releases in-memory trie sessions of a cloned ChainState
+// WITHOUT closing the shared changelog databases.
+func (cs *ChainState) CloseSpeculative() {
+	if asDB := cs.GetAccountStateDB(); asDB != nil {
+		asDB.Close()
+	}
+	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+		if closer, ok := stakeDB.Trie().(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+	if scDB := cs.GetSmartContractDB(); scDB != nil {
+		scDB.Discard()
+	}
+}
+

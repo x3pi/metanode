@@ -194,7 +194,14 @@ pub fn start_unified_epoch_monitor(
                     }
                 }
                 crate::node::NodeMode::Validator => {
-                    if current_phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy {
+                    if current_phase == consensus_core::coordination_hub::NodeConsensusPhase::Healthy 
+                        || current_phase == consensus_core::coordination_hub::NodeConsensusPhase::CatchingUp 
+                        || current_phase == consensus_core::coordination_hub::NodeConsensusPhase::Aligning 
+                    {
+                        if current_phase != consensus_core::coordination_hub::NodeConsensusPhase::Healthy {
+                            info!("✅ [EPOCH MONITOR] Breaking epoch deadlock! Triggering epoch transition while node is in {:?} phase.", current_phase);
+                        }
+                        
                         if let Err(e) = validator_transition::validator_multi_epoch_transition(
                             &client_arc,
                             &config_clone,

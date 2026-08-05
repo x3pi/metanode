@@ -21,7 +21,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	mt_trie "github.com/meta-node-blockchain/meta-node/pkg/trie"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	mt_types "github.com/meta-node-blockchain/meta-node/types"
@@ -421,12 +420,23 @@ func (api *MetaAPI) resolveAccountState(ctx context.Context, address common.Addr
 		return nil, err
 	}
 
-	accountStateDB := account_state_db.NewAccountStateDB(
-		accountStateTrie,
-		api.App.storageManager.GetStorageAccount(),
-	)
+	var bData []byte
+	if lf, ok := accountStateTrie.(interface{ GetLockFree(key []byte) ([]byte, error) }); ok {
+		bData, err = lf.GetLockFree(address.Bytes())
+	} else {
+		bData, err = accountStateTrie.Get(address.Bytes())
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get account state from trie for %s: %w", address.Hex(), err)
+	}
 
-	return accountStateDB.AccountState(address)
+	as := state.NewAccountState(address)
+	if len(bData) > 0 {
+		if err := as.Unmarshal(bData); err != nil {
+			return nil, fmt.Errorf("error unmarshalling %s from Trie: %w", address.Hex(), err)
+		}
+	}
+	return as, nil
 }
 
 // GetProof returns the Merkle proof for a given account address at a specific block.

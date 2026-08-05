@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -268,12 +269,32 @@ func (stm *TrueBlockSTM) runParallelSegment(
 		}()
 	}
 
+	logger.Info("⏳ [BLOCK-STM DEBUG] Start Segment [%d-%d] (size=%d, execWorkers=%d, validateWorkers=%d)", lo, hi, segSize, execWorkers, validateWorkers)
+
 	var completed bool
-	select {
-	case <-doneCh:
-		completed = true
-	case <-ctx.Done():
-		completed = false
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-doneCh:
+			completed = true
+		case <-ctx.Done():
+			completed = false
+		case <-ticker.C:
+			currentActive := atomic.LoadInt32(&activeTasks)
+			validatedCount := 0
+			for i := lo; i < hi; i++ {
+				s := atomic.LoadUint64(&stm.txState[i])
+				_, st := unpackState(s)
+				if st == 3 {
+					validatedCount++
+				}
+			}
+			logger.Info("⏳ [BLOCK-STM DEBUG] Segment [%d-%d]: Đang có %d active tasks, %d/%d TXs đã validated", lo, hi, currentActive, validatedCount, segSize)
+			continue // Wait for doneCh or ctx.Done()
+		}
+		break
 	}
 
 	workerCancel()

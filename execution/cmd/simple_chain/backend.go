@@ -20,8 +20,10 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -107,6 +109,9 @@ type MetaAPI struct {
 	cachedGasPrice       *hexutil.Big // Hardcoded value — set once at init
 	cachedMaxPriorityFee *hexutil.Big // Hardcoded value — set once at init
 
+	// ── Cached BLS KeyPairs (avoid expensive BN254 elliptic curve math) ──
+	cachedGatewayBLSKeyPair *bls.KeyPair
+	cachedBlsKeyPairs       *lru.Cache[common.Address, *bls.KeyPair]
 }
 
 // initCaches pre-computes values that never change or change rarely.
@@ -124,6 +129,14 @@ func (api *MetaAPI) initCaches() {
 	hexPriority := hexutil.Big(*priority)
 	api.cachedMaxPriorityFee = &hexPriority
 
+	// Pre-calculate Gateway BLS KeyPair to avoid elliptic curve math on hot path
+	if api.App.config.GatewayBLSKey != "" {
+		api.cachedGatewayBLSKeyPair = bls.NewKeyPair(common.FromHex(api.App.config.GatewayBLSKey))
+	} else {
+		api.cachedGatewayBLSKeyPair = api.App.keyPair
+	}
+
+	api.cachedBlsKeyPairs, _ = lru.New[common.Address, *bls.KeyPair](10000)
 }
 
 // decodeHash parses a hex-encoded 32-byte hash. The input may optionally

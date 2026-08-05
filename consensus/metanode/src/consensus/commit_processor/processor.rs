@@ -1432,16 +1432,16 @@ impl CommitProcessor {
                         let per_block: Vec<String> = subdag.blocks.iter().map(|b| {
                             format!("{}:{}", b.reference(), b.transactions().len())
                         }).collect();
-                        info!(
-                            "📊 [TX-AUDIT] commit_index={} | path={} | gei={} | epoch={} | \
-                             digest={} | txs={} | blocks={} | per_block=[{}] | \
-                             leader={:?} (auth_idx={}, eth={}) | decided_local={} | timestamp={}",
-                            commit_index, dispatch_path, gei, current_epoch,
-                            hex::encode(&commit_digest[..4]), total_txs_in_commit,
-                            subdag.blocks.len(), per_block.join(", "),
-                            subdag.leader, leader_author_idx, leader_eth_hex,
-                            subdag.decided_with_local_blocks, subdag.timestamp_ms
-                        );
+                        // info!(
+                        //     "📊 [TX-AUDIT] commit_index={} | path={} | gei={} | epoch={} | \
+                        //      digest={} | txs={} | blocks={} | per_block=[{}] | \
+                        //      leader={:?} (auth_idx={}, eth={}) | decided_local={} | timestamp={}",
+                        //     commit_index, dispatch_path, gei, current_epoch,
+                        //     hex::encode(&commit_digest[..4]), total_txs_in_commit,
+                        //     subdag.blocks.len(), per_block.join(", "),
+                        //     subdag.leader, leader_author_idx, leader_eth_hex,
+                        //     subdag.decided_with_local_blocks, subdag.timestamp_ms
+                        // );
 
                         // POST-DISPATCH DIGEST AUDIT: Cross-check dispatched content against quorum
                         if let Some(ref verifier) = digest_verifier {

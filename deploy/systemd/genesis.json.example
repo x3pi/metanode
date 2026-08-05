@@ -4,7 +4,7 @@
     "epoch": 0,
     "epoch_timestamp_ms": 1781315442000,
     "attestation_interval": 10,
-    "epoch_duration_seconds": 345600
+    "epoch_duration_seconds": 300
   },
   "validators": [
     {
