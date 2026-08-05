@@ -51,7 +51,25 @@ func buildMetaTxFromEthTx(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open account state trie: %w", err)
 	}
-	accountStateDB := account_state_db.NewAccountStateDB(accountStateTrie, app.storageManager.GetStorageAccount())
+
+	// Reuse one AccountStateDB per stateRoot across concurrent RPC calls instead of
+	// allocating a fresh one (with an empty loadedAccounts cache) per call — otherwise
+	// every single submission forces a fresh NOMT FFI read even when the same sender
+	// is hit repeatedly within the same block. Safe: AccountStateDB's internal caches
+	// are sharded/lock-protected for concurrent access (see getOrCreateAccountState).
+	trieCacheKey := stateRoot.Hex()
+	var accountStateDB *account_state_db.AccountStateDB
+	if app.blockProcessor != nil {
+		if cached, ok := app.blockProcessor.GetAccountStateDBCache(trieCacheKey); ok {
+			accountStateDB = cached
+		}
+	}
+	if accountStateDB == nil {
+		accountStateDB = account_state_db.NewAccountStateDB(accountStateTrie, app.storageManager.GetStorageAccount())
+		if app.blockProcessor != nil {
+			app.blockProcessor.SetAccountStateDBCache(trieCacheKey, accountStateDB)
+		}
+	}
 	as, err := accountStateDB.AccountState(fromAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get account state for %s: %w", fromAddress.Hex(), err)

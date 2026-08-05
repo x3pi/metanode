@@ -546,6 +546,15 @@ func (api *MetaAPI) sendRawEthTransactionSpeculative(ctx context.Context, input 
 		logger.Warn("[SpeculativeGateway] SetEthHashMapblsHash failed: %v", err)
 	}
 
+	// Pre-seed the walkback negative-cache: this tx was JUST accepted into the
+	// mempool, so it's guaranteed not to be in any committed block yet. Without
+	// this, the client's first eth_getTransactionReceipt poll (which can arrive
+	// immediately after this call returns) pays a full block-history walkback
+	// scan for a guaranteed miss — under sustained load this showed up as
+	// hundreds of goroutines piled up in rebuildTxMappingByWalkback at once.
+	blockchain.GetBlockChainInstance().MarkSubmittedPending(metaTx.Hash())
+	blockchain.GetBlockChainInstance().MarkSubmittedPending(ethTx.Hash())
+
 	logger.Info("[SpeculativeGateway] TX executed speculatively without mock receipt: ethHash=%s", ethTx.Hash().Hex())
 
 	return ethTx.Hash(), nil
