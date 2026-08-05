@@ -43,8 +43,20 @@ type SpeculativeResult struct {
 type SpeculativeExecutor struct {
 	bp             *BlockProcessor
 	resultChan     chan *SpeculativeResult
-	activeSessions sync.Map      // Track speculative sessions by GEI
+	activeSessions sync.Map      // Completed speculative results by GEI
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
+	inFlight       sync.Map      // GEI (uint64) -> *inFlightSession, executions currently running
+}
+
+// inFlightSession tracks the caller currently waiting on a GEI's speculative
+// execution. When Rust retries a block after the CGO response timeout in
+// ffi_bridge.go (executeBlockResponseTimeout) elapses, the original caller's
+// response channel is already abandoned — Rust gave up on it and is now
+// blocked on a brand-new channel for the retry. We only need to remember the
+// most recent one to respond to.
+type inFlightSession struct {
+	mu     sync.Mutex
+	respCh chan<- *pb.ExecuteBlockResponse
 }
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
@@ -56,15 +68,40 @@ func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 	}
 }
 
-// ExecuteSpeculative starts background execution of a commit
+// ExecuteSpeculative starts background execution of a commit. If a previous
+// call for the same GEI is still executing (Rust retried after the Go-side
+// CGO response timeout fired while the original attempt was still running —
+// see executeBlockResponseTimeout in ffi_bridge.go), this does NOT start a
+// second concurrent execution: two overlapping executions of the same GEI
+// share deterministic MVM/EVM handle IDs derived from the block content and
+// previously caused fatal "concurrent map writes" crashes. Instead the new
+// caller's response channel is attached to the one execution already running,
+// and this returns immediately.
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
+	gei := epochData.GetGlobalExecIndex()
+
+	session := &inFlightSession{respCh: authRespCh}
+	if existing, loaded := se.inFlight.LoadOrStore(gei, session); loaded {
+		existingSession := existing.(*inFlightSession)
+		existingSession.mu.Lock()
+		existingSession.respCh = authRespCh
+		existingSession.mu.Unlock()
+		logger.Warn("⏳ [SPECULATIVE] GEI=%d already executing — attaching retry's response channel instead of starting a duplicate execution", gei)
+		return
+	}
+
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
 	go func() {
 		defer func() {
 			<-se.concurrencySem // Release concurrency slot
 		}()
 
-		gei := epochData.GetGlobalExecIndex()
+		// Resolve to whichever caller is currently waiting (may have been
+		// replaced by a retry after this goroutine started but before it
+		// finishes) instead of the possibly-abandoned original channel.
+		defer func() {
+			se.inFlight.Delete(gei)
+		}()
 		commitIndex := epochData.GetCommitIndex()
 		epochNum := epochData.GetEpoch()
 
@@ -92,8 +129,11 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		csCopy, err := se.bp.chainState.CloneSpeculative(lastBlockHeader)
 		if err != nil {
 			logger.Error("❌ [SPECULATIVE] Failed to clone ChainState for GEI=%d: %v", gei, err)
-			if authRespCh != nil {
-				authRespCh <- &pb.ExecuteBlockResponse{
+			session.mu.Lock()
+			latestRespCh := session.respCh
+			session.mu.Unlock()
+			if latestRespCh != nil {
+				latestRespCh <- &pb.ExecuteBlockResponse{
 					Success:      false,
 					Error:        err.Error(),
 					ActualGei:    gei,
@@ -135,6 +175,10 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
 
+		session.mu.Lock()
+		latestRespCh := session.respCh
+		session.mu.Unlock()
+
 		res := &SpeculativeResult{
 			BlockNum:        blockNum,
 			GEI:             gei,
@@ -148,7 +192,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ClonedState:     csCopy,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
-			AuthRespCh:      authRespCh,
+			AuthRespCh:      latestRespCh,
 		}
 
 		se.activeSessions.Store(gei, res)
