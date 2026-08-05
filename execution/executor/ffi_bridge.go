@@ -58,6 +58,13 @@ var defaultRequestHandler *RequestHandler
 var defaultListenerBlockQueue chan *pb.ExecutableBlock
 var traceCallback func(hash common.Hash, step string, details string)
 
+// executeBlockResponseTimeout bounds how long cgo_execute_block waits for
+// the speculative-execution/commit pipeline to respond after a block has
+// been successfully enqueued. See the call site for why this must never be
+// unbounded — a stuck response here previously froze the entire Rust->Go
+// delivery pipeline permanently, with no self-recovery.
+const executeBlockResponseTimeout = 10 * time.Second
+
 // RegisterTraceCallback sets the callback function to update transaction traces in Go's memory
 func RegisterTraceCallback(cb func(hash common.Hash, step string, details string)) {
 	traceCallback = cb
@@ -155,12 +162,33 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		// If queue is full, Go is severely behind — drop block.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
-			// Wait for speculative executor to finish and return actual authoritative response
-			response := <-req.ResponseCh
-
-			// Set out payload
-			serializeAndSetResponse(response, outPayload, outLen)
-			return C.bool(true)
+			// Wait for speculative executor to finish and return actual authoritative response.
+			//
+			// BOUNDED WAIT (Aug 2026): previously this was an unbounded `<-req.ResponseCh`
+			// with no timeout at all. If anything downstream (ExecuteSpeculative's goroutine,
+			// StartCommitterLoop, commitSpeculativeResult) got stuck for any reason and never
+			// sent a response, this CGO call — and therefore the calling Rust goroutine
+			// (tokio::task::spawn_blocking, itself awaited with no timeout on the Rust side) —
+			// would block forever. Since Rust's block-sending pipeline sends one block at a
+			// time and waits for each CGO call to return before sending the next, one stuck
+			// response permanently froze the entire Rust->Go delivery pipeline (observed
+			// directly: 3-node cluster stalled 31+ minutes, consensus rounds kept advancing
+			// fine, only delivery to Go was stuck). A bounded wait here turns that into a
+			// bounded, visible failure that Rust's existing retry path already handles
+			// (record_send_failure -> circuit breaker / later resend), instead of a silent
+			// permanent hang requiring a manual restart.
+			select {
+			case response := <-req.ResponseCh:
+				serializeAndSetResponse(response, outPayload, outLen)
+				return C.bool(true)
+			case <-time.After(executeBlockResponseTimeout):
+				logger.Error("[FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
+				serializeAndSetResponse(&pb.ExecuteBlockResponse{
+					Success: false,
+					Error:   "timed out waiting for Go execution response",
+				}, outPayload, outLen)
+				return C.bool(false)
+			}
 		case <-time.After(5 * time.Second):
 			// Timeout if authoritative queue is completely blocked
 			logger.Error("[FFI BRIDGE] Timeout sending to authoritative queue")
