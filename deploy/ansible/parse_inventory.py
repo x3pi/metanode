@@ -90,14 +90,22 @@ if __name__ == '__main__':
         
     if target == 'json':
         import json
-        out = {"nodes": {}, "tcp_nodes": {}, "users": {}, "passes": {}}
+        out = {"nodes": {}, "tcp_nodes": {}}
         for nid, ip in node_map.items():
             key = f"m{nid}"
             out["nodes"][key] = f"http://{ip}:{10746 + nid}"
             out["tcp_nodes"][key] = f"{ip}:{6200 + nid}"
+        print(json.dumps(out, indent=2))
+        sys.exit(0)
+        
+    if target == 'auth':
+        import json
+        out = {"users": {}, "passes": {}}
+        for nid, ip in node_map.items():
+            key = f"m{nid}"
             out["users"][key] = user_map.get(nid, "your_user")
             out["passes"][key] = pass_map.get(nid, "your_password")
-        print(json.dumps(out, indent=2))
+        print(json.dumps(out))
         sys.exit(0)
         
     if target == 'roles':
