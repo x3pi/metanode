@@ -1,33 +1,39 @@
+# Ví dụ cấu hình cho nhiều máy (Mỗi máy 1 mật khẩu riêng biệt)
 all:
   children:
     metanode_cluster:
       vars:
         ansible_user: "abc"
-        ansible_ssh_pass: "1234@abcd"
-        ansible_become_pass: "1234@abcd"
       hosts:
-        192.168.1.230:
+        192.168.1.230_validator:
           node_ids: [4]
           is_synconly: true
-        192.168.1.231:
+          ansible_host: 192.168.1.230
+          ansible_ssh_pass: "MẬT_KHẨU_MÁY_230"
+          ansible_become_pass: "MẬT_KHẨU_MÁY_230"
+        
+        192.168.1.231_validator:
           node_ids: [3]
-        192.168.1.232:
-          node_ids: [2]
-        192.168.1.233:
-          node_ids: [1]
-        192.168.1.234:
-          node_ids: [0]
+          ansible_host: 192.168.1.231
+          ansible_ssh_pass: "MẬT_KHẨU_MÁY_231"
+          ansible_become_pass: "MẬT_KHẨU_MÁY_231"
 
-
-# 1 machine
-hosts:
-  192.168.1.234_sync:
-    node_ids: [4]
-    synconly_nodes: [4]
-    rpc_nodes: [4]
-    ansible_connection: local
-    ansible_host: 192.168.1.234
-  192.168.1.234_validator:
-    node_ids: [0,1,2,3]
-    ansible_connection: local
-    ansible_host: 192.168.1.234
+# ---------------------------------------------------------
+# Ví dụ cấu hình chạy TẤT CẢ trên 1 máy tính (Máy Local)
+# ---------------------------------------------------------
+# hosts:
+#   192.168.1.234_sync:
+#     node_ids: [4]
+#     synconly_nodes: [4]
+#     rpc_nodes: [4]
+#     ansible_connection: local # <- Chạy trực tiếp trên máy đang gõ lệnh deploy
+#     ansible_host: 192.168.1.234
+#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
+#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"
+#
+#   192.168.1.234_validator:
+#     node_ids: [0,1,2,3]
+#     ansible_connection: local # <- Bỏ dòng này nếu muốn dùng SSH thay vì cài trực tiếp
+#     ansible_host: 192.168.1.234
+#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
+#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"

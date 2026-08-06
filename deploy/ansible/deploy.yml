@@ -120,7 +120,8 @@
         dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
         
     - name: Restart local Prometheus service
-      ansible.builtin.shell: echo "1234@abcd" | sudo -S systemctl restart prometheus || true
+      ansible.builtin.shell: systemctl restart prometheus || true
+      become: true
       args:
         executable: /bin/bash
       ignore_errors: true
