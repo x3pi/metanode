@@ -1083,9 +1083,13 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (const std::exception &e) {
-    std::cerr << "Error in operation: " << e.what() << std::endl;
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {
-        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
   } catch (...) {
@@ -2063,9 +2067,13 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (const std::exception &e) {
-    std::cerr << "Error in operation: " << e.what() << std::endl;
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {
-        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
   } catch (...) {
