@@ -5,6 +5,7 @@
 # ║  Usage: ./ansible_deploy.sh [OPTIONS]                             ║
 # ║  Options:                                                         ║
 # ║    --start             Start nodes (re-distribute binaries)       ║
+# ║    --restart           Fast restart systemd services              ║
 # ║    --setup             Fresh setup (gen keys, clears data)        ║
 # ║    --stop              Stop nodes                                 ║
 # ║    --clean             Clear data before starting nodes           ║
@@ -92,6 +93,7 @@ fi
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --start) ACTION="start"; KEEP_DATA="true" ;;
+        --restart) ACTION="restart"; KEEP_DATA="true" ;;
         --reset-all) ACTION="setup"; KEEP_DATA="false" ;;
         --stop) ACTION="stop" ;;
         --clean) KEEP_DATA="false" ;;
@@ -130,7 +132,9 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" json > "/tmp/rpc_nodes.json" 2>/dev/null || true
 fi
 
-echo -e "\n🚀 Starting Ansible Deployment with:"
+ACTION_LABEL=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
+
+echo -e "\n🚀 Starting Ansible ${ACTION_LABEL} with:"
 echo "   Deployer Server IP: $DEPLOY_IP"
 echo "   Target Node IPs:    $TARGET_NODES_IPS"
 echo "   Source:             $DEPLOY_SOURCE"
@@ -149,7 +153,7 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     echo "$ROLES_OUTPUT"
 fi
 
-send_telegram_notification "🚀 <b>[DEPLOY]</b> Bắt đầu quá trình Ansible Deploy:
+send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trình Ansible ${ACTION_LABEL}:
 - Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Source: <code>${DEPLOY_SOURCE}</code>
@@ -198,7 +202,8 @@ if [ $ansible_exit -eq 0 ]; then
 
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
-    send_telegram_notification "✅ <b>[DEPLOY]</b> Quá trình Ansible Deploy (<code>${ACTION}</code>) từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+    send_telegram_notification "✅ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+- Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
 📋 <b>Node Roles:</b>
@@ -223,7 +228,8 @@ ${RPC_CONFIG}
   - <b>Execution logs:</b>
     <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"</code>"
 else
-    send_telegram_notification "❌ <b>[DEPLOY]</b> Quá trình Ansible Deploy (<code>${ACTION}</code>) từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+- Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
 🔍 <b>Lệnh lấy log kiểm tra lỗi:</b>

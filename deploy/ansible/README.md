@@ -73,11 +73,24 @@ Nếu bạn chỉ thay đổi mã nguồn hoặc chỉnh sửa service mà muố
 
 ### 4. Chỉ thao tác trên một Node duy nhất
 Bạn có thể kết hợp cờ `--only-node N` vào bất kỳ lệnh nào ở trên. Hệ thống sẽ tự động lọc thông tin và chỉ tác động đến duy nhất máy chủ chứa Node đó.
-**Ví dụ: Bạn chỉ muốn tắt riêng Node 2:**
+
+**Khởi động / Cập nhật riêng Node 2:**
+```bash
+./ansible_deploy.sh --start --only-node 2
+```
+
+**Tắt riêng Node 2:**
 ```bash
 ./ansible_deploy.sh --stop --only-node 2
 ```
-**Hoặc muốn cài đặt lại (xóa data) duy nhất Node 2 (trong khi các node khác chạy bình thường):**
+
+**Khởi động lại nhanh (Restart) Node 2:**
+Nếu bạn chỉ muốn restart dịch vụ (không copy/cập nhật lại code):
+```bash
+./ansible_deploy.sh --restart --only-node 2
+```
+
+**Cài đặt lại (xóa data) duy nhất Node 2 (trong khi các node khác chạy bình thường):**
 ```bash
 ./ansible_deploy.sh --reset-all --only-node 2
 ```
