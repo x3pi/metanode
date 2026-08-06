@@ -32,6 +32,7 @@
 - name: Deploy and Setup Metanode Cluster
   hosts: metanode_cluster
   become: yes
+  any_errors_fatal: true
   gather_facts: true
   pre_tasks:
     - name: Filter active nodes by target
