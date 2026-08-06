@@ -20,6 +20,8 @@ def parse_inventory(file_path):
     node_map = {}
     is_synconly_map = {}
     is_rpc_map = {}
+    user_map = {}
+    pass_map = {}
     for entry in entries:
         entry = entry.strip()
         if not entry:
@@ -32,6 +34,8 @@ def parse_inventory(file_path):
         node_ids = []
         synconly_nodes = []
         rpc_nodes = []
+        ansible_user = "your_user"
+        ansible_ssh_pass = "your_password"
         for line in lines[1:]:
             line = line.strip()
             if line.startswith('ansible_host:'):
@@ -49,6 +53,10 @@ def parse_inventory(file_path):
                 match = re.search(r'\[(.*?)\]', line)
                 if match:
                     rpc_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
+            elif line.startswith('ansible_user:'):
+                ansible_user = line.split(':', 1)[1].strip().strip('"').strip("'")
+            elif line.startswith('ansible_ssh_pass:'):
+                ansible_ssh_pass = line.split(':', 1)[1].strip().strip('"').strip("'")
         
         # clean up IP
         if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
@@ -60,8 +68,10 @@ def parse_inventory(file_path):
             node_map[nid] = ip
             is_synconly_map[nid] = (nid in synconly_nodes)
             is_rpc_map[nid] = (nid in rpc_nodes)
+            user_map[nid] = ansible_user
+            pass_map[nid] = ansible_ssh_pass
             
-    return node_map, is_synconly_map, is_rpc_map
+    return node_map, is_synconly_map, is_rpc_map, user_map, pass_map
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
@@ -76,7 +86,7 @@ if __name__ == '__main__':
         print(result)
         sys.exit(1)
         
-    node_map, is_synconly_map, is_rpc_map = result
+    node_map, is_synconly_map, is_rpc_map, user_map, pass_map = result
         
     if target == 'json':
         import json
@@ -86,6 +96,16 @@ if __name__ == '__main__':
             out["nodes"][key] = f"http://{ip}:{10746 + nid}"
             out["tcp_nodes"][key] = f"{ip}:{6200 + nid}"
         print(json.dumps(out, indent=2))
+        sys.exit(0)
+        
+    if target == 'auth':
+        import json
+        out = {"users": {}, "passes": {}}
+        for nid, ip in node_map.items():
+            key = f"m{nid}"
+            out["users"][key] = user_map.get(nid, "your_user")
+            out["passes"][key] = pass_map.get(nid, "your_password")
+        print(json.dumps(out))
         sys.exit(0)
         
     if target == 'roles':
