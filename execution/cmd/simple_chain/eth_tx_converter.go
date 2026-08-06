@@ -51,16 +51,16 @@ func buildMetaTxFromEthTx(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open account state trie: %w", err)
 	}
-	
 	var bData []byte
+	var errTrie error
 	// Read directly from trie to avoid creating AccountStateDB and allocating 65k mutexes
 	if lf, ok := accountStateTrie.(interface{ GetLockFree(key []byte) ([]byte, error) }); ok {
-		bData, err = lf.GetLockFree(fromAddress.Bytes())
+		bData, errTrie = lf.GetLockFree(fromAddress.Bytes())
 	} else {
-		bData, err = accountStateTrie.Get(fromAddress.Bytes())
+		bData, errTrie = accountStateTrie.Get(fromAddress.Bytes())
 	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get account state from trie for %s: %w", fromAddress.Hex(), err)
+	if errTrie != nil {
+		return nil, nil, fmt.Errorf("failed to get account state from trie for %s: %w", fromAddress.Hex(), errTrie)
 	}
 
 	as := state.NewAccountState(fromAddress)

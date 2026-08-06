@@ -32,6 +32,15 @@ pub(crate) struct LeaderSchedule {
     ///   3. `update_from_baseline_scores` injects network-verified scores.
     /// When `false`, the local committer MUST NOT run to prevent leader divergence.
     schedule_confirmed: Arc<std::sync::atomic::AtomicBool>,
+    /// BUGFIX (Aug 2026): commit index at which `update_leader_schedule_v2` last ran.
+    /// `commits_until_leader_schedule_update` uses this to tell "just crossed the
+    /// boundary, not yet handled" apart from "already handled this boundary" —
+    /// both cases have `last_commit_index % num_commits_per_schedule == 0`, and
+    /// without this marker the trigger condition (`commits_until_update == 0`)
+    /// was mathematically unreachable (see commit message for details), so
+    /// `CommitInfo` was never persisted and every restart paid a full-history
+    /// `scan_commits` cost. Sentinel `u64::MAX` means "never run yet".
+    last_scheduled_commit_index: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl LeaderSchedule {
@@ -49,6 +58,7 @@ impl LeaderSchedule {
             num_commits_per_schedule: Self::CONSENSUS_COMMITS_PER_SCHEDULE,
             leader_swap_table: Arc::new(RwLock::new(leader_swap_table)),
             schedule_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_scheduled_commit_index: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
         }
     }
 
@@ -153,6 +163,24 @@ impl LeaderSchedule {
         let last_commit_index = dag_state.read().last_commit_index() as u64;
         let commits_in_current_schedule = last_commit_index % self.num_commits_per_schedule;
 
+        // BUGFIX (Aug 2026): `commits_in_current_schedule` is always in
+        // [0, num_commits_per_schedule - 1], so `num_commits_per_schedule -
+        // commits_in_current_schedule` was always in [1, num_commits_per_schedule]
+        // and could NEVER be 0. The caller's `commits_until_update == 0` trigger
+        // was therefore unreachable — `update_leader_schedule_v2` (and the
+        // CommitInfo checkpoint it writes) never ran during normal operation.
+        // We're exactly on a boundary (commits_in_current_schedule == 0) when we
+        // haven't already processed it (last_scheduled_commit_index differs).
+        if last_commit_index > 0
+            && commits_in_current_schedule == 0
+            && self
+                .last_scheduled_commit_index
+                .load(std::sync::atomic::Ordering::Acquire)
+                != last_commit_index
+        {
+            return 0;
+        }
+
         (self.num_commits_per_schedule - commits_in_current_schedule) as usize
     }
 
@@ -178,6 +206,16 @@ impl LeaderSchedule {
             let reputation_scores = dag_state.calculate_scoring_subdag_scores();
 
             let last_commit_index = dag_state.scoring_subdag_commit_range();
+
+            // Record the boundary commit index we're processing at, so a
+            // subsequent same-index call to `commits_until_leader_schedule_update`
+            // (e.g. the caller re-reading the countdown right after this update
+            // to satisfy its `assert!(commits_until_update > 0)`) reports "one
+            // full cycle until next update" instead of re-triggering forever.
+            self.last_scheduled_commit_index.store(
+                dag_state.last_commit_index() as u64,
+                std::sync::atomic::Ordering::Release,
+            );
 
             (reputation_scores, last_commit_index)
         };

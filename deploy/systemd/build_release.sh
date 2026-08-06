@@ -90,7 +90,7 @@ go build -a -o simple_chain .
 cp simple_chain "$RELEASE_DIR/bin/"
 log_ok "simple_chain binary copied to release."
 
-# ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
+# # ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
 # log_step "Building Go RPC Proxy Client"
 # cd "$PROJECT_ROOT/execution/cmd/rpc/cmd/rpc-client"
 # go build -o rpc-client-bin .

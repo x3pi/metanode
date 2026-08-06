@@ -74,6 +74,29 @@ type TrueBlockSTM struct {
 	estimatedStorage  []map[string]bool
 	waiters           [][]uint32
 	waitersMu         []sync.Mutex
+
+	// maxExecWorkers caps how many TXs execute concurrently, when > 0.
+	// See WithMaxExecWorkers.
+	maxExecWorkers int
+}
+
+// WithMaxExecWorkers caps concurrent TX execution at n (validation stays
+// parallel). Intended for segments where static grouping (see block_stm.go's
+// ProcessTransactionsOptimistic) already found that one conflict group covers
+// most of the segment: speculatively executing many of its TXs in parallel
+// then guarantees most of them read a stale value and must be aborted and
+// re-run — each abort costs a full EVM/CGO round trip, which is the expensive
+// part. Capping to n=1 makes execution dispatch strictly in TX-index order,
+// so no TX ever runs before the ones before it have committed: nothing is
+// ever aborted, and cascadeInvalidate's per-commit scan always finds zero
+// downstream readers to re-validate (there aren't any TXs with a higher
+// index that have executed yet). The result is unchanged — Block-STM is
+// defined to converge to the same state as sequential execution — only the
+// wasted speculative work is removed. Call before Process(); a value <= 0
+// leaves the default (GOMAXPROCS-scaled) worker count untouched.
+func (stm *TrueBlockSTM) WithMaxExecWorkers(n int) *TrueBlockSTM {
+	stm.maxExecWorkers = n
+	return stm
 }
 
 func packState(incarnation uint32, status int32) uint64 {
@@ -223,6 +246,9 @@ func (stm *TrueBlockSTM) runParallelSegment(
 	// GOMAXPROCS(0), not NumCPU(): see native_fast_path.go for why.
 	numCPU := runtime.GOMAXPROCS(0)
 	execWorkers := numCPU
+	if stm.maxExecWorkers > 0 && stm.maxExecWorkers < execWorkers {
+		execWorkers = stm.maxExecWorkers
+	}
 	if execWorkers < 1 {
 		execWorkers = 1
 	}

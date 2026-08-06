@@ -44,9 +44,9 @@ type SpeculativeResult struct {
 type SpeculativeExecutor struct {
 	bp             *BlockProcessor
 	resultChan     chan *SpeculativeResult
-	activeSessions sync.Map      // Track speculative sessions by GEI
+	activeSessions sync.Map      // Completed speculative results by GEI
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
-
+	
 	mu     sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -74,7 +74,7 @@ func (se *SpeculativeExecutor) CancelAllSpeculative() {
 	se.ctx, se.cancel = context.WithCancel(context.Background())
 }
 
-// ExecuteSpeculative starts background execution of a commit
+// ExecuteSpeculative starts background execution of a commit. If a previous
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
 	gei := epochData.GetGlobalExecIndex()
 	
@@ -235,7 +235,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		if _, exists := se.activeSessions.Load(gei); !exists {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
 			if res.ClonedState != nil {
-				res.ClonedState.CloseSpeculative() // the Close function in 87da48ff handles NOMT payload discard correctly
+				res.ClonedState.CloseSpeculative() // the Close function handles NOMT payload discard correctly
 			}
 			return
 		}

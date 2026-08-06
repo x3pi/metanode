@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"log"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -29,9 +30,19 @@ const (
 	ethHashMapBlsHashPrefix = "ethHashMapBlsHashPrefix" // Tiền tố cho key
 
 	// Cấu hình TTL (Thời gian sống của cache)
-	txCacheTTL      = 2 * time.Minute
-	blockCacheTTL   = 10 * time.Minute
-	mappingCacheTTL = 30 * time.Minute
+	txCacheTTL               = 2 * time.Minute
+	blockCacheTTL            = 10 * time.Minute
+	mappingCacheTTL          = 30 * time.Minute
+	walkbackNegativeCacheTTL = 2 * time.Second
+
+	// walkbackAcquireTimeout bounds how long a caller waits for a free
+	// walkback slot (see walkbackSem below) before giving up and treating the
+	// lookup as a miss. Keeps behavior elastic under load: when slots are
+	// free (normal operation) this never matters: acquisition is instant.
+	// When the system is flooded with walkback-triggering lookups, callers
+	// shed load quickly instead of queuing indefinitely and piling up
+	// goroutines doing expensive block-history scans in parallel.
+	walkbackAcquireTimeout = 200 * time.Millisecond
 
 	// Cấu hình Worker dọn dẹp
 	cleanupInterval = 1 * time.Minute // Quét dọn mỗi 1 phút
@@ -41,7 +52,30 @@ var (
 	blockChainInstance *BlockChain
 	once               sync.Once
 	storeLimiter       = make(chan struct{}, 2000) // Tăng limit lên 2000 cho high concurrency
+
+	// walkbackSem bounds how many rebuildTxMappingByWalkback scans (each up
+	// to 2000 blocks deep) can run concurrently. Sized relative to
+	// GOMAXPROCS so it scales with the machine (and shrinks correctly when
+	// GOMAXPROCS is capped for co-located test nodes sharing one box — see
+	// main.go). Without this, a flood of eth_getTransactionReceipt polls for
+	// hashes that were never actually accepted (buggy client, or many
+	// still-pending hashes at once) can spawn thousands of concurrent scans,
+	// pegging all CPUs and stalling the Go committer loop — observed
+	// directly under a chaotic load-test run, see
+	// project_tx_dup_check_walkback_bottleneck memory.
+	walkbackSem = make(chan struct{}, walkbackSemCapacity())
 )
+
+func walkbackSemCapacity() int {
+	capacity := runtime.GOMAXPROCS(0) / 4
+	if capacity < 2 {
+		capacity = 2
+	}
+	if capacity > 16 {
+		capacity = 16
+	}
+	return capacity
+}
 
 // BlockChain quản lý bộ nhớ đệm và tương tác DB.
 // Sử dụng sync.Map cho concurrent read và Background Worker cho việc dọn dẹp.
@@ -53,6 +87,12 @@ type BlockChain struct {
 	blockNumberToHashCache *sync.Map
 	txHashToBlockNumber    *txHashToBlockNumberMap
 	ethHashMapBlsHash      *ethHashMapBlsHashMap
+	// Short-TTL negative cache for the LAZY FALLBACK walkback below: a pending
+	// (not-yet-included) tx is a *guaranteed* walkback miss on every single
+	// poll a client makes while waiting for its receipt — without this, each
+	// eth_getTransactionReceipt poll for a still-pending tx re-scans up to
+	// 2000 committed blocks. See project_tx_dup_check_walkback_bottleneck memory.
+	walkbackNotFound *sync.Map
 
 	blockDatabase  *block.BlockDatabase
 	storageManager *storage.StorageManager
@@ -164,6 +204,7 @@ func InitBlockChain(size int, blockDatabase *block.BlockDatabase, storageManager
 			blockNumberToHashCache: new(sync.Map),
 			txHashToBlockNumber:    newTxHashToBlockNumberMap(),
 			ethHashMapBlsHash:      newEthHashMapBlsHashMap(),
+			walkbackNotFound:       new(sync.Map),
 
 			dirtyStorage: newDirtyStorageMap(), // Khởi tạo pointer
 
@@ -212,6 +253,7 @@ func (bc *BlockChain) StartCleanupWorker() {
 				bc.pruneBlockNumberCache(now.Add(-mappingCacheTTL))
 				bc.pruneTxHashCache(now.Add(-mappingCacheTTL))
 				bc.pruneEthHashCache(now.Add(-mappingCacheTTL))
+				bc.pruneWalkbackNotFoundCache(now)
 			}
 		}
 	}()
@@ -271,6 +313,15 @@ func (bc *BlockChain) GetTxFromCache(txHash common.Hash) ([]byte, bool) {
 // ============================================================================
 // PRUNING LOGIC (Called by Worker only)
 // ============================================================================
+
+func (bc *BlockChain) pruneWalkbackNotFoundCache(now time.Time) {
+	bc.walkbackNotFound.Range(func(key, value any) bool {
+		if until, ok := value.(time.Time); !ok || now.After(until) {
+			bc.walkbackNotFound.Delete(key)
+		}
+		return true
+	})
+}
 
 func (bc *BlockChain) pruneTxCache(expireBefore time.Time) {
 	bc.txsCache.Range(func(key, value any) bool {
@@ -614,7 +665,31 @@ func (bc *BlockChain) SetTxHashMapBlockNumberBatch(txHashes []common.Hash, block
 	return nil
 }
 
-func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) {
+// MarkSubmittedPending pre-seeds the walkback negative-cache for a tx hash at
+// the moment it's accepted into the mempool, before the client can possibly
+// poll for its receipt. A just-submitted tx is guaranteed not to be in any
+// committed block yet, so the very first eth_getTransactionReceipt poll for
+// it would otherwise pay a full (up to 2000-block) block-history scan
+// for a guaranteed miss — observed under sustained load as hundreds of
+// goroutines piled up in rebuildTxMappingByWalkback simultaneously, one per
+// distinct newly-pending hash. Seeding here means that guaranteed-miss walk
+// never happens; the reactive negative-cache (set inside GetBlockNumberByTxHash
+// after a real walkback miss) continues to cover polls beyond the TTL if
+// confirmation takes longer than walkbackNegativeCacheTTL.
+func (bc *BlockChain) MarkSubmittedPending(txHash common.Hash) {
+	bc.walkbackNotFound.Store(txHash, time.Now().Add(walkbackNegativeCacheTTL))
+}
+
+// GetBlockNumberByTxHashFast checks only the in-memory cache and the direct
+// mapping-DB entry — O(1), no block-history scan. Suitable for hot paths that
+// need a cheap "have we already committed this tx" check (e.g. duplicate-tx
+// rejection for a brand-new submission), where the overwhelming majority of
+// lookups are genuine misses and a full history walk would be wasted work.
+// It does NOT see transactions whose mapping entry was lost (e.g. after a
+// crash before the mapping was flushed) — callers that need that guarantee
+// (RPC tx/receipt lookups for a hash a client claims already exists) should
+// use GetBlockNumberByTxHash instead.
+func (bc *BlockChain) GetBlockNumberByTxHashFast(txHash common.Hash) (uint64, bool) {
 	if value, ok := bc.txHashToBlockNumber.Load(txHash); ok {
 		if cached, ok := value.(cachedUint64); ok {
 			if time.Since(cached.addedAt) <= mappingCacheTTL {
@@ -635,17 +710,52 @@ func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) 
 		return blockNumber, true
 	}
 
+	return 0, false
+}
+
+func (bc *BlockChain) GetBlockNumberByTxHash(txHash common.Hash) (uint64, bool) {
+	if blockNumber, ok := bc.GetBlockNumberByTxHashFast(txHash); ok {
+		return blockNumber, true
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// LAZY FALLBACK (June 2026): Rebuild transaction mapping from block DB.
+	//
+	// Negative-cache guard (Aug 2026): a still-pending tx is a guaranteed
+	// walkback miss on every poll a client makes while waiting for its
+	// receipt (eth_getTransactionReceipt is typically polled every tens of
+	// ms until confirmed). Without this, that's a full up-to-2000-block scan
+	// per poll per pending tx. Cache "not found" for a short TTL so repeated
+	// polls for the same still-pending hash don't re-walk the chain; a real
+	// crash-recovery lookup (rare, and not latency-sensitive) still gets a
+	// fresh walkback once the short TTL expires.
 	// ═══════════════════════════════════════════════════════════════════════════
-	if bc.blockDatabase != nil {
-		// logger.Debug("⚠️ [LAZY-FALLBACK] Starting transaction walkback search for %s", txHash.Hex())
-		blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
-		if ok {
-			logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
-			return blockNumber, true
+	if v, ok := bc.walkbackNotFound.Load(txHash); ok {
+		if until, ok := v.(time.Time); ok && time.Now().Before(until) {
+			return 0, false
 		}
-		// logger.Debug("❌ [LAZY-FALLBACK] Walkback search finished, transaction %s NOT found", txHash.Hex())
+		bc.walkbackNotFound.Delete(txHash)
+	}
+
+	if bc.blockDatabase != nil {
+		// Elastic load-shedding: bound how many walkback scans run at once
+		// (walkbackSem, sized off GOMAXPROCS) and how long a caller waits for
+		// a free slot (walkbackAcquireTimeout). Under normal load a slot is
+		// free instantly; under a flood, callers give up quickly and are
+		// treated as a miss (negative-cached, same as a real miss) instead of
+		// piling up thousands of concurrent expensive scans.
+		select {
+		case walkbackSem <- struct{}{}:
+			blockNumber, ok := bc.rebuildTxMappingByWalkback(txHash)
+			<-walkbackSem
+			if ok {
+				logger.Info("✅ [LAZY-FALLBACK] Walkback search found transaction %s in block #%d", txHash.Hex(), blockNumber)
+				return blockNumber, true
+			}
+		case <-time.After(walkbackAcquireTimeout):
+			logger.Warn("⚠️ [LAZY-FALLBACK] Walkback slot busy, shedding load for %s", txHash.Hex())
+		}
+		bc.walkbackNotFound.Store(txHash, time.Now().Add(walkbackNegativeCacheTTL))
 	}
 
 	return 0, false
