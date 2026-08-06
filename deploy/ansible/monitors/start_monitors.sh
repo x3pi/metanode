@@ -61,14 +61,19 @@ if [ "${1:-}" == "health" ]; then
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            AUTH_JSON="{}"
+            if [ -f "${SCRIPT_DIR}/../parse_inventory.py" ] && [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
+                AUTH_JSON=$(python3 "${SCRIPT_DIR}/../parse_inventory.py" "${SCRIPT_DIR}/../inventory.yml" auth 2>/dev/null || echo "{}")
+            fi
+            
             while read -r node_key node_url; do
-                if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && ! curl -s -m 10 "$node_url" >/dev/null 2>&1; then
+                if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && { sleep 2; ! curl -s -m 10 "$node_url" >/dev/null 2>&1; }; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                         node_id=${node_key#m}
-                        ssh_user=$(jq -r ".users[\"$node_key\"] // \"your_user\"" "$RPC_JSON_PATH" 2>/dev/null)
-                        ssh_pass=$(jq -r ".passes[\"$node_key\"] // \"your_password\"" "$RPC_JSON_PATH" 2>/dev/null)
+                        ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
+                        ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
                         
                         crash_time=$(date +%Y%m%d_%H%M%S)
                         crash_dir="${SCRIPT_DIR}/logs_crash/node_${node_id}_crash_${crash_time}"
