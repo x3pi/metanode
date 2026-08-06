@@ -33,6 +33,14 @@ load_env_file "${SCRIPT_DIR}/../../.env"
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+
+# Tự động lấy token từ inventory.yml nếu có
+if [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
+    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "${SCRIPT_DIR}/../inventory.yml" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "${SCRIPT_DIR}/../inventory.yml" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+    if [ -n "$BOT_TOKEN" ]; then TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
+    if [ -n "$CHAT_ID" ]; then TELEGRAM_CHAT_ID="$CHAT_ID"; fi
+fi
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
 send_tele() {
@@ -53,14 +61,19 @@ if [ "${1:-}" == "health" ]; then
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            AUTH_JSON="{}"
+            if [ -f "${SCRIPT_DIR}/../parse_inventory.py" ] && [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
+                AUTH_JSON=$(python3 "${SCRIPT_DIR}/../parse_inventory.py" "${SCRIPT_DIR}/../inventory.yml" auth 2>/dev/null || echo "{}")
+            fi
+            
             while read -r node_key node_url; do
-                if ! curl -s -m 2 "$node_url" >/dev/null 2>&1; then
+                if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && { sleep 2; ! curl -s -m 10 "$node_url" >/dev/null 2>&1; }; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                         node_id=${node_key#m}
-                        ssh_user="abc"
-                        ssh_pass="1234@abcd"
+                        ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
+                        ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
                         
                         crash_time=$(date +%Y%m%d_%H%M%S)
                         crash_dir="${SCRIPT_DIR}/logs_crash/node_${node_id}_crash_${crash_time}"
@@ -86,7 +99,7 @@ if [ "${1:-}" == "health" ]; then
 
 Hệ thống đã tự động backup Crash Logs thành công!
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
-<code>sshpass -p \"1234@abcd\" scp -r abc@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
+<code>sshpass -p \"$ssh_pass\" scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                     fi
                 else
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then

@@ -221,8 +221,8 @@ func sendTelegramAlertDirect(message string, isCritical bool) {
 	}
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
-	if chatID == "" {
-		chatID = "-1003867050625"
+	if token == "" || chatID == "" {
+		return
 	}
 	ipInfo := getSystemIPInfo()
 
