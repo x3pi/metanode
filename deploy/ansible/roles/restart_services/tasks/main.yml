@@ -1,0 +1,21 @@
+---
+- name: Restart RPC Proxy services
+  ansible.builtin.systemd:
+    name: "metanode-rpc-{{ item }}"
+    state: restarted
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Restart Execution services
+  ansible.builtin.systemd:
+    name: "metanode-execution-{{ item }}"
+    state: restarted
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Restart Consensus services
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
+    state: restarted
+  loop: "{{ active_nodes }}"
+  failed_when: false
