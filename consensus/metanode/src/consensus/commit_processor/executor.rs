@@ -32,14 +32,47 @@ pub async fn dispatch_commit(
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
 
-    for block in subdag.blocks.iter() {
-        for tx in block.transactions().iter() {
-            let tx_data = tx.data();
-            // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-            if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                continue;
+    // BUG FIX: BlockV3 (compact block) stores only tx_digests() — its transactions()
+    // unconditionally returns &[] (see BlockAPI impl for BlockV3 in block.rs). Counting
+    // via transactions() alone therefore misclassifies every BlockV3 commit as empty,
+    // which triggers the FAST-SKIP branch below (`return Ok(0)`) and silently drops the
+    // commit's real, already-quorum-committed transactions without ever delivering them
+    // to Go — GEI never advances for that commit. Mirror the same tx_digests()-first
+    // lookup that build_sorted_transactions() (block_sending.rs) already uses on the
+    // actual send path, so the count here matches what will really be sent.
+    {
+        let cache = consensus_core::get_global_tx_cache().read();
+        for block in subdag.blocks.iter() {
+            let tx_digests = block.tx_digests();
+            if !tx_digests.is_empty() {
+                for digest in &tx_digests {
+                    match cache.get(digest) {
+                        Some(tx) => {
+                            let tx_data = tx.data();
+                            // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                            if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                                continue;
+                            }
+                            total_transactions += 1;
+                        }
+                        None => {
+                            // Not in cache yet — still count it as real so this commit
+                            // isn't wrongly fast-skipped. build_sorted_transactions()
+                            // will warn/skip it at actual send time if truly missing.
+                            total_transactions += 1;
+                        }
+                    }
+                }
+            } else {
+                for tx in block.transactions().iter() {
+                    let tx_data = tx.data();
+                    // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
+                    if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                        continue;
+                    }
+                    total_transactions += 1;
+                }
             }
-            total_transactions += 1;
         }
     }
 
