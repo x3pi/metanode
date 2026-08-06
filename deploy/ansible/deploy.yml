@@ -95,12 +95,13 @@
       loop: "{{ snapshot_check.results }}"
       when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and item.stdout is defined and item.stdout == 'true' and fs_type.stdout is defined and fs_type.stdout not in ['btrfs', 'xfs']"
   roles:
-    - { role: stop_services, when: "active_nodes | length > 0" }
+    - { role: stop_services, when: "active_nodes | length > 0 and ansible_action != 'restart'" }
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
     - { role: node_exporter, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
+    - { role: restart_services, when: "active_nodes | length > 0 and ansible_action == 'restart'" }
 
 - name: Post-deployment actions
   hosts: localhost
