@@ -561,12 +561,31 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 			if sm != nil {
 				go func(count uint64, size uint64) {
 					startFlush := time.Now()
+
+					// Watchdog: Cảnh báo nếu dọn RAM bị đứng quá 5 giây
+					doneFlush := make(chan struct{})
+					go func() {
+						timer := time.NewTimer(5 * time.Second)
+						defer timer.Stop()
+						for {
+							select {
+							case <-timer.C:
+								logger.Warn("🆘 [WATCHDOG-FLUSH] Tiến trình dọn RAM (FlushAll) đang BỊ ĐỨNG! Thời gian trôi qua: %v", time.Since(startFlush))
+								timer.Reset(5 * time.Second)
+							case <-doneFlush:
+								return
+							}
+						}
+					}()
+
 					if size > 0 {
 						logger.Warn("🧹 [AUTO-FLUSH] PebbleDB MemTableSize %d MB reached / %d TXs. Flushing LazyPebbleDB to disk async...", size/1024/1024, count)
 					} else {
 						logger.Warn("🧹 [AUTO-FLUSH] Reached %d TXs (threshold %d). Flushing LazyPebbleDB to disk async...", count, tx_processor.FlushThresholdTxs)
 					}
 					err := sm.FlushAll()
+					close(doneFlush) // Tắt watchdog khi xong
+
 					if err != nil {
 						logger.Error("❌ [AUTO-FLUSH] Failed to flush storage: %v", err)
 					} else {
@@ -668,7 +687,25 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	lockWaitDuration := time.Since(waitLockStart)
 
 	startExecution := time.Now()
+
+	// Watchdog: Cảnh báo nếu block xử lý quá chậm hoặc bị kẹt
+	doneExec := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				logger.Warn("🆘 [WATCHDOG-BLOCK] Block #%d (chứa %d TXs) ĐANG BỊ KẸT ở ProcessTransactions! Thời gian trôi qua: %v", blockNum, len(txs), time.Since(startExecution))
+				timer.Reset(5 * time.Second)
+			case <-doneExec:
+				return
+			}
+		}
+	}()
+
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum, false)
+	close(doneExec) // Tắt watchdog khi xong
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 
