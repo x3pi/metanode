@@ -59,11 +59,11 @@ namespace mvm
         }
 
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
-        if (get_rs.status == 2)
+        if (get_rs.status == STORAGE_SUSPEND)
         {
             throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
         }
-        if (get_rs.status == 1)
+        if (get_rs.status == STORAGE_NOT_FOUND)
         {
             // [QUAN TRỌNG - BLOCK-STM FIX] 
             // KHÔNG ĐƯỢC throw Exception ở đây! 
