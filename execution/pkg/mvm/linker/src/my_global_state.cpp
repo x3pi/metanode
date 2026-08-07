@@ -79,6 +79,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
+  if (accountQueryData.status == 3) {
+    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+  }
   if (accountQueryData.status == 2) {
     throw Exception(ET::addressNotInRelated,
                     "Address not in related addresses: " +
@@ -123,6 +126,9 @@ AccountState MyGlobalState::getUpdate(const Address &addr) {
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
+  if (accountQueryData.status == 3) {
+    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+  }
   if (accountQueryData.status == 2) {
     throw Exception(ET::addressNotInRelated,
                     "Address not in related addresses: " +
@@ -186,6 +192,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
+  if (accountQueryData.status == 3) {
+    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+  }
   if (accountQueryData.status == 2) {
     throw Exception(ET::addressNotInRelated,
                     "Address not in related addresses: " +
@@ -321,7 +330,10 @@ std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Addre
   mvm::to_big_endian(key, b_key);
   
   auto ret = GetStorageValue(blockContext.mvmId, b_address + 12, b_key);
-  if (ret.success && ret.value != nullptr) {
+  if (ret.status == 2) {
+      throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+  }
+  if (ret.status == 0 && ret.value != nullptr) {
       uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
       free(ret.value);
       return {true, uncommitted_val};

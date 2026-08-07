@@ -87,7 +87,10 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
             mvm::to_big_endian(key, b_key);
             
             auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
-            if (ret.success && ret.value != nullptr) {
+            if (ret.status == 2) {
+                throw Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+            }
+            if (ret.status == 0 && ret.value != nullptr) {
                 uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
                 free(ret.value);
                 return uncommitted_val;
@@ -1080,9 +1083,13 @@ mvm::Code MyExtension::FullDatabase(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (const std::exception &e) {
-    std::cerr << "Error in operation: " << e.what() << std::endl;
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {
-        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
   } catch (...) {
@@ -2060,9 +2067,13 @@ mvm::Code MyExtension::FullDatabaseV1(mvm::Code input, mvm::Address address,
         std::abort();
     }
   } catch (const std::exception &e) {
-    std::cerr << "Error in operation: " << e.what() << std::endl;
+    std::string errMsg = e.what();
+    if (errMsg.find("Block-STM: Estimate Hit (Suspend)") != std::string::npos || errMsg.find("Suspend") != std::string::npos) {
+        throw;
+    }
+    std::cerr << "Error in operation: " << errMsg << std::endl;
     if (!this->isOffChain) {
-        std::cerr << "[FATAL] On-chain Xapian operation failed: " << e.what() << ". Aborting to prevent state fork!" << std::endl;
+        std::cerr << "[FATAL] On-chain Xapian operation failed: " << errMsg << ". Aborting to prevent state fork!" << std::endl;
         std::abort();
     }
   } catch (...) {

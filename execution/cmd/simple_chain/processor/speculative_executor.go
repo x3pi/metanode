@@ -37,6 +37,11 @@ type SpeculativeResult struct {
 	ExecuteErr      error
 	IsEpochBoundary bool
 	AuthRespCh      chan<- *pb.ExecuteBlockResponse
+	// IsFinished distinguishes a real, completed result from the placeholder
+	// registered in activeSessions at dispatch time (see ExecuteSpeculative).
+	// Without this, GetSpeculativeResult could return the empty placeholder
+	// to the committer before execution has actually produced anything.
+	IsFinished bool
 }
 
 // SpeculativeExecutor handles background execution of incoming consensus commits
@@ -90,6 +95,28 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		return
 	}
 
+	// 1. Determine block number (computed up front so the placeholder below
+	// can carry an accurate BlockNum for CleanGEI's rescue response).
+	blockNum := epochData.GetBlockNumber()
+	if blockNum == 0 {
+		// Fallback block number calculation if Rust doesn't provide
+		lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
+		if lastCommittedBlockNumber == 0 {
+			lastCommittedBlockNumber = storage.GetLastBlockNumber()
+		}
+		blockNum = lastCommittedBlockNumber + 1
+	}
+
+	// [FIX DEADLOCK RACE CONDITION]: Register a placeholder immediately in the
+	// calling goroutine (IsFinished=false) so CleanGEI can always find and
+	// rescue this session — even if the goroutine below never reaches the
+	// point where it stores a real result (e.g. it hangs).
+	se.activeSessions.Store(gei, &SpeculativeResult{
+		GEI:        gei,
+		BlockNum:   blockNum,
+		AuthRespCh: authRespCh,
+	})
+
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
 	go func() {
 		defer func() {
@@ -104,17 +131,6 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		}()
 		commitIndex := epochData.GetCommitIndex()
 		epochNum := epochData.GetEpoch()
-
-		// 1. Determine block number
-		blockNum := epochData.GetBlockNumber()
-		if blockNum == 0 {
-			// Fallback block number calculation if Rust doesn't provide
-			lastCommittedBlockNumber := storage.GetLastAssignedBlockNumber()
-			if lastCommittedBlockNumber == 0 {
-				lastCommittedBlockNumber = storage.GetLastBlockNumber()
-			}
-			blockNum = lastCommittedBlockNumber + 1
-		}
 
 		// 2. Prepare transactions (Deduplicate and sort lexicographically by TxHash)
 		allTransactions := PrepareTransactions(epochData)
@@ -193,6 +209,18 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			ExecuteErr:      execErr,
 			IsEpochBoundary: isEpochBoundary,
 			AuthRespCh:      latestRespCh,
+			IsFinished:      true,
+		}
+
+		// If CleanGEI already swept the placeholder away (e.g. P2P sync
+		// caught up past this GEI while we were executing), don't resurrect
+		// it — discard the speculative clone and never push to resultChan.
+		if _, exists := se.activeSessions.Load(gei); !exists {
+			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d but session was aborted by CleanGEI", gei)
+			if res.ClonedState != nil {
+				res.ClonedState.CloseSpeculative()
+			}
+			return
 		}
 
 		se.activeSessions.Store(gei, res)
@@ -205,24 +233,56 @@ func (se *SpeculativeExecutor) ResultChan() <-chan *SpeculativeResult {
 	return se.resultChan
 }
 
-// CleanGEI cleans speculative results older than a GEI
+// CleanGEI cleans speculative results older than a GEI. For any session that
+// hasn't finished yet (still the dispatch-time placeholder, or a completed
+// result that lost the race against this sweep), it proactively releases the
+// cloned NOMT session and sends a best-effort rescue response on AuthRespCh
+// so the FFI caller isn't left waiting on the (still-present) ffi_bridge.go
+// response timeout for longer than necessary.
 func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 	se.activeSessions.Range(func(key, value interface{}) bool {
 		k := key.(uint64)
 		if k <= gei {
+			if res, ok := value.(*SpeculativeResult); ok && res != nil {
+				if res.ClonedState != nil {
+					res.ClonedState.CloseSpeculative()
+				}
+				if res.AuthRespCh != nil {
+					select {
+					case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+						Success:      true, // Treat as success so Rust proceeds instead of retrying/hanging.
+						ActualGei:    res.GEI,
+						BlockNumber:  res.BlockNum,
+						GeisConsumed: 0,
+					}:
+						logger.Info("✅ [CleanGEI] Sent rescue response for GEI=%d", res.GEI)
+					default:
+						// Buffered(1) channel already has a response, or nobody's
+						// listening anymore — safe to drop, matches ffi_bridge.go's
+						// own "response after timeout is silently absorbed" contract.
+					}
+				}
+			}
 			se.activeSessions.Delete(k)
 		}
 		return true
 	})
 }
 
-// GetSpeculativeResult returns speculative result by GEI if available
+// GetSpeculativeResult returns speculative result by GEI if available.
+// Returns false for a session that has only registered its dispatch-time
+// placeholder (IsFinished=false) — the committer must wait for the real
+// result rather than committing an empty/incomplete one.
 func (se *SpeculativeExecutor) GetSpeculativeResult(gei uint64) (*SpeculativeResult, bool) {
 	val, ok := se.activeSessions.Load(gei)
 	if !ok {
 		return nil, false
 	}
-	return val.(*SpeculativeResult), true
+	res := val.(*SpeculativeResult)
+	if !res.IsFinished {
+		return nil, false
+	}
+	return res, true
 }
 
 // StartCommitterLoop starts the sequential committer loop

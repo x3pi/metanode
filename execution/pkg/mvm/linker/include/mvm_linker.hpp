@@ -184,7 +184,7 @@ void freePendingResult();
 #ifdef MVM_LINKER_BUILD
 struct GetStorageValue_return {
   unsigned char *value;
-  bool success;
+  int status;
 };
 #endif
 
