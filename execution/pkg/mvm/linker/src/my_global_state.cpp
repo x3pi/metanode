@@ -339,10 +339,10 @@ std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Addre
   mvm::to_big_endian(key, b_key);
   
   auto ret = GetStorageValue(blockContext.mvmId, b_address + 12, b_key);
-  if (ret.status == 2) {
+  if (ret.status == STORAGE_SUSPEND) {
       throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
   }
-  if (ret.status == 1 && ret.value != nullptr) {
+  if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
       uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
       free(ret.value);
       return {true, uncommitted_val};

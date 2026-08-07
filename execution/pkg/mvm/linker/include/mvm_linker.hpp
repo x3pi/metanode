@@ -182,6 +182,12 @@ void freeBatchResult(ExecuteBatchResultC *);
 void freePendingResult();
 
 #ifdef MVM_LINKER_BUILD
+enum StorageStatus {
+    STORAGE_SUCCESS = 0,
+    STORAGE_NOT_FOUND = 1,
+    STORAGE_SUSPEND = 2
+};
+
 struct GetStorageValue_return {
   unsigned char *value;
   int status;
