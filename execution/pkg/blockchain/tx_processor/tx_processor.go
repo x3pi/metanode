@@ -89,7 +89,25 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// *** Call the new function for concurrent processing ***
 	startExec := time.Now()
+
+	// Watchdog for EVM/BlockSTM Execution
+	doneOpt := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				logger.Warn("🆘 [WATCHDOG-EVM] Block #%d (chứa %d groups) đang BỊ KẸT ở ProcessTransactionsOptimistic (Thực thi Smart Contract)! Thời gian: %v", blockNum, len(groupedGroups), time.Since(startExec))
+				timer.Reset(5 * time.Second)
+			case <-doneOpt:
+				return
+			}
+		}
+	}()
+
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	close(doneOpt)
 	execDuration := time.Since(startExec)
 	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
@@ -121,6 +139,23 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		return ProcessResult{Error: err}, fmt.Errorf("LateBindRoots SmartContractDB failed: %w", err)
 	}
 
+	// Watchdog for State Commit (TrieDB, AccountDB, StakeDB)
+	startStateIR := time.Now()
+	doneIR := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				logger.Warn("🆘 [WATCHDOG-STATE] Block #%d đang BỊ KẸT ở quá trình IntermediateRoot (Lưu State xuống NOMT/PebbleDB)! Thời gian: %v", blockNum, time.Since(startStateIR))
+				timer.Reset(5 * time.Second)
+			case <-doneIR:
+				return
+			}
+		}
+	}()
+
 	// Phase 1: AccountStateDB (Parallel)
 	go func() {
 		defer irWg.Done()
@@ -138,6 +173,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	}()
 
 	irWg.Wait()
+	close(doneIR)
 
 	if accountErr != nil {
 		logger.Error("Failed to get IntermediateRoot for AccountStateDB: %v", accountErr)
@@ -230,7 +266,26 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// *** Call the new function for concurrent processing ***
+	startExec := time.Now()
+
+	// Watchdog for EVM/BlockSTM Execution (Remote)
+	doneOpt := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				logger.Warn("🆘 [WATCHDOG-EVM-REMOTE] Block #%d đang BỊ KẸT ở ProcessTransactionsOptimistic (Sync/RPC Node)! Thời gian: %v", blockNum, time.Since(startExec))
+				timer.Reset(5 * time.Second)
+			case <-doneOpt:
+				return
+			}
+		}
+	}()
+
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	close(doneOpt)
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -264,6 +319,22 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		return ProcessResult{Error: err}, fmt.Errorf("LateBindRoots SmartContractDB failed: %w", err)
 	}
 
+	// Watchdog for State Commit (Remote)
+	doneIR := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				logger.Warn("🆘 [WATCHDOG-STATE-REMOTE] Block #%d đang BỊ KẸT ở IntermediateRoot (Sync/RPC Node)! Thời gian: %v", blockNum, time.Since(startRemoteIR))
+				timer.Reset(5 * time.Second)
+			case <-doneIR:
+				return
+			}
+		}
+	}()
+
 	go func() {
 		defer rootWg.Done()
 		root, accountErr = chainState.GetAccountStateDB().IntermediateRoot(true)
@@ -275,6 +346,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}()
 
 	rootWg.Wait()
+	close(doneIR)
 
 	if accountErr != nil {
 		logger.Error("Failed to get IntermediateRoot for AccountStateDB (Remote): %v", accountErr)
