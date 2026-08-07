@@ -96,6 +96,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
 
     insert({MyAccount(addr, balance, code, nonce),
             MyStorage(addr, blockContext.mvmId, isCache)});
+    if (accountQueryData.balance_p) free(accountQueryData.balance_p);
+    if (accountQueryData.code_p) free(accountQueryData.code_p);
+    if (accountQueryData.nonce) free(accountQueryData.nonce);
     const auto acc = accounts.find(addr);
     if (gas_tracker != nullptr) {
       gas_tracker->add_gas_used(getUnTouchedAddressGasCost());
@@ -144,6 +147,9 @@ AccountState MyGlobalState::getUpdate(const Address &addr) {
 
     insert({MyAccount(addr, balance, code, nonce),
             MyStorage(addr, blockContext.mvmId, isCache)});
+    if (accountQueryData.balance_p) free(accountQueryData.balance_p);
+    if (accountQueryData.code_p) free(accountQueryData.code_p);
+    if (accountQueryData.nonce) free(accountQueryData.nonce);
     const auto acc = accounts.find(addr);
     ClearProcessingPointers(blockContext.mvmId);
 
@@ -209,6 +215,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
 
     insert({MyAccount(addr, balance, code, nonce),
             MyStorage(addr, blockContext.mvmId, isCache)});
+    if (accountQueryData.balance_p) free(accountQueryData.balance_p);
+    if (accountQueryData.code_p) free(accountQueryData.code_p);
+    if (accountQueryData.nonce) free(accountQueryData.nonce);
     const auto acc = accounts.find(addr);
     if (gas_tracker != nullptr) {
       gas_tracker->add_gas_used(getUnTouchedAddressGasCost());
@@ -333,7 +342,7 @@ std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Addre
   if (ret.status == 2) {
       throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
   }
-  if (ret.status == 0 && ret.value != nullptr) {
+  if (ret.status == 1 && ret.value != nullptr) {
       uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);
       free(ret.value);
       return {true, uncommitted_val};

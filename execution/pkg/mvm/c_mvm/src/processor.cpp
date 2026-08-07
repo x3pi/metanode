@@ -177,9 +177,6 @@ public:
         native_logger(native_logger), gas_tracker(gas_tracker) {}
 
   ~_Processor() {
-    if (ctxt) {
-      delete ctxt;
-    }
     ctxts.clear();
   }
 
