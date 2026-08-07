@@ -77,7 +77,7 @@ public:
     void addBalance(const uint256_t &value);
     void subBalance(const uint256_t &value);
 
-    const std::vector<uint8_t> &getCode() const;
+    std::vector<uint8_t> getCode() const;
     void setCode(const std::vector<uint8_t> &newCode);
 
     uint256_t getNonce() const;

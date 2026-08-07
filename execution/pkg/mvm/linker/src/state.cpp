@@ -175,7 +175,7 @@ void State::subBalance(const uint256_t &value) {
   balance -= value;
 }
 
-const std::vector<uint8_t> &State::getCode() const {
+std::vector<uint8_t> State::getCode() const {
   std::lock_guard<std::mutex> lock(state_mutex);
   return code;
 }
