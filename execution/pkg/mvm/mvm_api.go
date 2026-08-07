@@ -1137,6 +1137,12 @@ func TestMemLeakGs(addresses []common.Address) {
 	)
 }
 
+const (
+	StorageStatusSuccess  C.int = 0
+	StorageStatusNotFound C.int = 1
+	StorageStatusSuspend  C.int = 2
+)
+
 //export GetStorageValue
 func GetStorageValue(
 	mvmId *C.uchar,
@@ -1163,14 +1169,14 @@ func GetStorageValue(
 	logger.Debug("GetStorageValue address: ", fAddress, hex.EncodeToString(bKey))
 	bValue, success := mvmApi.smartContractDb.StorageValue(fAddress, bKey)
 	
-	retStatus := 0
+	retStatus := StorageStatusSuccess
 	if !success {
-		retStatus = 1
+		retStatus = StorageStatusNotFound
 	}
 
 	if mvccDB, ok := mvmApi.smartContractDb.(*mvcc.MVCCSmartContractDB); ok {
 		if mvccDB.BlockingVersion != mvcc.BaseVersion {
-			retStatus = 2
+			retStatus = StorageStatusSuspend
 		}
 	}
 
