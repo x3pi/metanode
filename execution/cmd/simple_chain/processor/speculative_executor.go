@@ -114,7 +114,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 	if gei <= lastGEI {
 		logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) is already committed (lastGEI=%d), bypassing execution to unblock Rust", gei, blockNum, lastGEI)
 		se.inFlight.Delete(gei) // Clean up placeholder
-		
+
 		if authRespCh != nil {
 			var stateRoot []byte
 			bc := blockchain.GetBlockChainInstance()
@@ -135,7 +135,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				GeisConsumed: 1,
 				StateRoot:    stateRoot,
 			}
-			
+
 			select {
 			case authRespCh <- resp:
 			default:

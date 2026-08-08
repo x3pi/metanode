@@ -125,6 +125,9 @@ XapianManager::XapianManager(const std::string &db_name,
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập
       db_name(db_name)                       // Lưu tên database
 {
+    // Fix: Gán db_name cho comprehensive_log để truyền qua P2P Sync đúng đắn
+    comprehensive_log.db_name = db_name;
+
     // Khởi tạo pool các Database objects để tái sử dụng cho concurrent search.
     // Mỗi goroutine search lấy 1 DB từ pool → đảm bảo không có 2 goroutine dùng chung.
     std::string db_path_str = mvm::createFullPath(addr, db_name).string();
@@ -1073,6 +1076,7 @@ XapianLog::ComprehensiveLog XapianManager::extractComprehensiveChangeLogs()
     std::lock_guard<std::shared_mutex> lock(changes_mutex);
     XapianLog::ComprehensiveLog log_copy = std::move(comprehensive_log);
     comprehensive_log.xapian_doc_logs.clear();
+    comprehensive_log.db_name = this->db_name; // Restore db_name after std::move
     return log_copy;
 }
 

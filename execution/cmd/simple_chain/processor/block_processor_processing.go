@@ -15,23 +15,24 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
-	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
 // createBlockFromResults creates a block from processing results
 // CRITICAL FORK-SAFETY: commitTimestampMs should come from Rust consensus to ensure all nodes
 // produce identical block hashes. Pass 0 for backward compatibility (will use time.Now()).
@@ -368,6 +369,12 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		}
 
 		if hasContractInteraction {
+			// CRITICAL FIX: Extract Xapian logs for P2P Sync before they are cleared!
+			xapianLogs := mvm.ExportAllXapianLogs()
+			if xapianLogs != nil && len(xapianLogs) > 0 {
+				processResults.FullDbLogs = append(processResults.FullDbLogs, xapianLogs)
+			}
+
 			mvm.CommitAllXapian()
 		}
 	}
@@ -546,7 +553,6 @@ func (bp *BlockProcessor) postProcessBlock(lastBlock types.Block, txHashes []com
 			lastBlock.Header().ReceiptRoot().Hex(), blockNumber, err)
 		return
 	}
-
 
 	skippedCount := 0
 	indexDroppedCount := 0

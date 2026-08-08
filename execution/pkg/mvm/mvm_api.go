@@ -209,6 +209,40 @@ func CallUpdateStateBalance(address common.Address, balance *big.Int) {
 	C.updateStateBalance((*C.uchar)(unsafe.Pointer(&addrBytes[0])), (*C.uchar)(unsafe.Pointer(&balanceBytes[0])))
 }
 
+// ExportAllXapianLogs extracts the uncommitted Xapian logs from all active C++ instances.
+// This MUST be called BEFORE CommitAllXapian() during block processing,
+// so that the logs can be packaged into the BackUpDb for P2P Sync.
+func ExportAllXapianLogs() map[string][]byte {
+	cArray := C.MVM_exportAllXapianLogs()
+	defer C.MVM_freeExportedXapianLogs(cArray)
+
+	count := int(cArray.count)
+	if count == 0 {
+		return nil
+	}
+
+	result := make(map[string][]byte, count)
+	
+	// Create a Go slice backed by the C array
+	cDataSlice := unsafe.Slice(cArray.data, count)
+	
+	for i := 0; i < count; i++ {
+		cEntry := cDataSlice[i]
+		
+		// Parse address (20 bytes)
+		addressBytes := C.GoBytes(unsafe.Pointer(&cEntry.address[0]), 20)
+		addressHex := common.BytesToAddress(addressBytes).Hex()
+		
+		// Parse serialized logs
+		if cEntry.logs != nil && cEntry.logs_length > 0 {
+			logData := C.GoBytes(unsafe.Pointer(cEntry.logs), cEntry.logs_length)
+			result[addressHex] = logData
+		}
+	}
+	
+	return result
+}
+
 // ConfigureXapianBasePath sets XAPIAN_BASE_PATH env var so that C++ createFullPath()
 // picks it up via getenv(). Must be called before any MVM/Xapian operation.
 // CGo-direct approach (SetXapianBasePath) requires C++ rebuild; this is equivalent
