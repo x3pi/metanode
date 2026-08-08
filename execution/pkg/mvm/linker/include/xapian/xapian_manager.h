@@ -153,13 +153,13 @@ public:
   bool has_started = false;
   friend class XapianRegistry; // Cho phép Registry truy cập changes_mutex
 
+  // --- Change Tracking ---
+  XapianLog::ComprehensiveLog comprehensive_log;
+
 private:
   // --- Idle Tracking ---
   std::chrono::steady_clock::time_point last_access_time;
   std::mutex access_mutex;
-  // --- Change Tracking ---
-  // std::vector<XapianLog::LogEntry> staged_changes_log; // <-- Kiểu mới
-  XapianLog::ComprehensiveLog comprehensive_log;
 
   std::string db_name; // <-- Biến lưu đường dẫn DB Xapian
 

@@ -25,6 +25,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
+	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -561,12 +562,20 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 			if sm != nil {
 				go func(count uint64, size uint64) {
 					startFlush := time.Now()
+
+					// Watchdog: Cảnh báo nếu dọn RAM bị đứng quá 5 giây
+					stopWatchdogFlush := utils.StartWatchdog("FLUSH", 5*time.Second, func() string {
+						return "Tiến trình dọn RAM (FlushAll) đang BỊ ĐỨNG!"
+					})
+
 					if size > 0 {
 						logger.Warn("🧹 [AUTO-FLUSH] PebbleDB MemTableSize %d MB reached / %d TXs. Flushing LazyPebbleDB to disk async...", size/1024/1024, count)
 					} else {
 						logger.Warn("🧹 [AUTO-FLUSH] Reached %d TXs (threshold %d). Flushing LazyPebbleDB to disk async...", count, tx_processor.FlushThresholdTxs)
 					}
 					err := sm.FlushAll()
+					stopWatchdogFlush() // Tắt watchdog khi xong
+
 					if err != nil {
 						logger.Error("❌ [AUTO-FLUSH] Failed to flush storage: %v", err)
 					} else {
@@ -668,7 +677,14 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	lockWaitDuration := time.Since(waitLockStart)
 
 	startExecution := time.Now()
+
+	// Watchdog: Cảnh báo nếu block xử lý quá chậm hoặc bị kẹt
+	stopWatchdogExec := utils.StartWatchdog("BLOCK", 5*time.Second, func() string {
+		return fmt.Sprintf("Block #%d (chứa %d TXs) ĐANG BỊ KẸT ở ProcessTransactions!", blockNum, len(txs))
+	})
+
 	res, execErr := tx_processor.ProcessTransactions(baseCtx, vp.chainState, groupedGroups, enableTrace, true, blockTime, leaderAddr, blockNum, false)
+	stopWatchdogExec() // Tắt watchdog khi xong
 	vp.blockProcessingLock.Unlock()
 	execDuration := time.Since(startExecution)
 

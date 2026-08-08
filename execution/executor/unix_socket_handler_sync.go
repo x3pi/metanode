@@ -1017,7 +1017,8 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 				logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs (epoch sync) FAILED for batch %d/%d (%d entries) block #%d — Xapian DB may be OUT OF SYNC!", idx+1, len(backupDb.FullDbLogs), len(logMap), backupDb.BockNumber)
 			}
 		}
-		logger.Debug("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
+		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)
+		mvm.CommitAllXapian()
 	}
 
 	// Apply mapping batch
