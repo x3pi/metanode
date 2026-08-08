@@ -107,6 +107,43 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		blockNum = lastCommittedBlockNumber + 1
 	}
 
+	// [FIX]: Bypass speculative execution if already committed to DB.
+	// This prevents infinite FFI timeouts when Rust retries a block that Go already
+	// finished executing and committed (e.g. if the original execution took >10s).
+	lastGEI := storage.GetLastGlobalExecIndex()
+	if gei <= lastGEI {
+		logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) is already committed (lastGEI=%d), bypassing execution to unblock Rust", gei, blockNum, lastGEI)
+		se.inFlight.Delete(gei) // Clean up placeholder
+		
+		if authRespCh != nil {
+			var stateRoot []byte
+			bc := blockchain.GetBlockChainInstance()
+			if bc != nil && se.bp.chainState != nil {
+				if blockHash, ok := bc.GetBlockHashByNumber(blockNum); ok {
+					if blockDb := se.bp.chainState.GetBlockDatabase(); blockDb != nil {
+						if block, err := blockDb.GetBlockByHash(blockHash); err == nil && block != nil {
+							stateRoot = block.Header().AccountStatesRoot().Bytes()
+						}
+					}
+				}
+			}
+
+			resp := &pb.ExecuteBlockResponse{
+				Success:      true,
+				ActualGei:    gei,
+				BlockNumber:  blockNum,
+				GeisConsumed: 1,
+				StateRoot:    stateRoot,
+			}
+			
+			select {
+			case authRespCh <- resp:
+			default:
+			}
+		}
+		return
+	}
+
 	// [FIX DEADLOCK RACE CONDITION]: Register a placeholder immediately in the
 	// calling goroutine (IsFinished=false) so CleanGEI can always find and
 	// rescue this session — even if the goroutine below never reaches the
