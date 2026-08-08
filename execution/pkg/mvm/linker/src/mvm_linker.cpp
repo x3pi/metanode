@@ -1380,3 +1380,55 @@ extern "C" void commit_xapian_tx_buffer_batch(unsigned char *b_tx_hashes, int co
         }
     }
 }
+
+extern "C" struct ExportedXapianLogArray MVM_exportAllXapianLogs() {
+    ExportedXapianLogArray result;
+    result.data = nullptr;
+    result.count = 0;
+
+    std::vector<ExportedXapianLog> logs_vec;
+    std::shared_lock<std::shared_mutex> inst_lock(XapianManager::instances_mutex);
+
+    for (auto& pair : XapianManager::instances) {
+        auto manager = pair.second;
+        if (manager) {
+            std::lock_guard<std::shared_mutex> lock(manager->changes_mutex);
+            if (!manager->comprehensive_log.xapian_doc_logs.empty()) {
+                try {
+                    std::vector<uint8_t> serialized = manager->comprehensive_log.serialize();
+                    if (!serialized.empty()) {
+                        ExportedXapianLog log_entry;
+                        uint8_t temp_addr[32];
+                        mvm::to_big_endian(manager->address, temp_addr);
+                        memcpy(log_entry.address, temp_addr + 12, 20);
+                        log_entry.logs_length = serialized.size();
+                        log_entry.logs = new char[log_entry.logs_length];
+                        memcpy(log_entry.logs, serialized.data(), log_entry.logs_length);
+                        logs_vec.push_back(log_entry);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[ERROR] MVM_exportAllXapianLogs: Failed to serialize logs for " << manager->getDbName() << ": " << e.what() << std::endl;
+                }
+            }
+        }
+    }
+
+    if (!logs_vec.empty()) {
+        result.count = logs_vec.size();
+        result.data = new ExportedXapianLog[result.count];
+        for (int i = 0; i < result.count; i++) {
+            result.data[i] = logs_vec[i];
+        }
+    }
+
+    return result;
+}
+
+extern "C" void MVM_freeExportedXapianLogs(struct ExportedXapianLogArray array) {
+    if (array.data) {
+        for (int i = 0; i < array.count; i++) {
+            delete[] array.data[i].logs;
+        }
+        delete[] array.data;
+    }
+}

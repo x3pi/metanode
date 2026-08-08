@@ -21,7 +21,11 @@ RestartSec=15s
 # Environment
 Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true"
 # Default to validator, but synconly logic can be injected here based on variables
-Environment=NODE_TYPE={% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}synconly{% else %}validator{% endif %}
+{% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}
+Environment=NODE_TYPE=synconly
+{% else %}
+Environment=NODE_TYPE=validator
+{% endif %}
 # CPU co-location: {{ active_nodes | length }} node processes share this machine's cores.
 # Each node's Go runtime otherwise defaults GOMAXPROCS to the FULL core count
 # (see execution/cmd/simple_chain/main.go), so N co-located nodes collectively

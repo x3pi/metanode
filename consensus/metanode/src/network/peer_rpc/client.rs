@@ -290,16 +290,22 @@ pub async fn fetch_blocks_from_peer(
                 match fetch_block_batch(peer_addr, current_from, current_to).await {
                     Ok(blocks) => {
                         let expected = (current_to - current_from + 1) as usize;
-                        if blocks.len() < expected {
+                        if blocks.is_empty() {
                             warn!(
-                                "⚠️ [BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for range {}-{}",
-                                peer_addr, blocks.len(), expected, current_from, current_to
+                                "⚠️ [BLOCK-FETCH] Peer {} returned NO blocks for range {}-{}",
+                                peer_addr, current_from, current_to
                             );
                             last_err = Some(anyhow::anyhow!(
-                                "Incomplete blocks: got {}, expected {}",
-                                blocks.len(), expected
+                                "No blocks returned for range {}-{}",
+                                current_from, current_to
                             ));
                             continue;
+                        }
+                        if blocks.len() < expected {
+                            info!(
+                                "ℹ️ [BLOCK-FETCH] Peer {} returned partial blocks ({}/{}) for range {}-{}. Likely reached chain tip.",
+                                peer_addr, blocks.len(), expected, current_from, current_to
+                            );
                         }
                         info!(
                             "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
@@ -498,16 +504,22 @@ pub async fn fetch_executable_blocks_from_peer(
                 match fetch_executable_block_batch(peer_addr, current_from, current_to).await {
                     Ok(blocks) => {
                         let expected = (current_to - current_from + 1) as usize;
-                        if blocks.len() < expected {
+                        if blocks.is_empty() {
                             warn!(
-                                "⚠️ [EXEC-BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for GEI {}-{}",
-                                peer_addr, blocks.len(), expected, current_from, current_to
+                                "⚠️ [EXEC-BLOCK-FETCH] Peer {} returned NO blocks for GEI {}-{}",
+                                peer_addr, current_from, current_to
                             );
                             last_err = Some(anyhow::anyhow!(
-                                "Incomplete blocks: got {}, expected {}",
-                                blocks.len(), expected
+                                "No blocks returned for GEI {}-{}",
+                                current_from, current_to
                             ));
                             continue;
+                        }
+                        if blocks.len() < expected {
+                            info!(
+                                "ℹ️ [EXEC-BLOCK-FETCH] Peer {} returned partial blocks ({}/{}) for GEI {}-{}. Likely reached chain tip.",
+                                peer_addr, blocks.len(), expected, current_from, current_to
+                            );
                         }
                         info!(
                             "✅ [EXEC-BLOCK-FETCH] Got {} executable blocks (GEI {}-{}) from peer {}",

@@ -229,6 +229,21 @@ void updateStateNonce(unsigned char *b_address, unsigned long long nonce);
 void updateStateBalance(unsigned char *b_address, unsigned char *b_balance);
 extern void MVM_cancelTransaction(unsigned char *mvmId);
 extern void MVM_commitAllXapian();
+
+struct ExportedXapianLog {
+  unsigned char address[20];
+  char *logs;
+  int logs_length;
+};
+
+struct ExportedXapianLogArray {
+  struct ExportedXapianLog *data;
+  int count;
+};
+
+extern struct ExportedXapianLogArray MVM_exportAllXapianLogs();
+extern void MVM_freeExportedXapianLogs(struct ExportedXapianLogArray array);
+
 #ifdef __cplusplus
 }
 #endif
