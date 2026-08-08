@@ -290,23 +290,18 @@ pub async fn fetch_blocks_from_peer(
                 match fetch_block_batch(peer_addr, current_from, current_to).await {
                     Ok(blocks) => {
                         let expected = (current_to - current_from + 1) as usize;
-                        if blocks.is_empty() {
+                        if blocks.len() < expected {
                             warn!(
-                                "⚠️ [BLOCK-FETCH] Peer {} returned NO blocks for range {}-{}",
-                                peer_addr, current_from, current_to
+                                "⚠️ [BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for range {}-{}. Trying next peer.",
+                                peer_addr, blocks.len(), expected, current_from, current_to
                             );
                             last_err = Some(anyhow::anyhow!(
-                                "No blocks returned for range {}-{}",
+                                "Incomplete blocks returned for range {}-{}",
                                 current_from, current_to
                             ));
                             continue;
                         }
-                        if blocks.len() < expected {
-                            info!(
-                                "ℹ️ [BLOCK-FETCH] Peer {} returned partial blocks ({}/{}) for range {}-{}. Likely reached chain tip.",
-                                peer_addr, blocks.len(), expected, current_from, current_to
-                            );
-                        }
+                        
                         info!(
                             "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
                             blocks.len(), current_from, current_to, peer_addr
@@ -347,6 +342,19 @@ pub async fn fetch_blocks_from_peer(
     }
 
     let all_blocks: Vec<BlockData> = all_blocks_map.into_values().collect();
+
+    // Zero-Fork Invariant: Verify continuity to prevent silent data holes
+    let mut next_expected = from_block;
+    for block in &all_blocks {
+        if block.block_number != next_expected {
+            return Err(anyhow::anyhow!("Missing block {} in fetched range. Chunk fetch resulted in gaps.", next_expected));
+        }
+        next_expected += 1;
+    }
+    
+    if all_blocks.len() as u64 != total_blocks {
+        return Err(anyhow::anyhow!("Expected {} blocks, but got {}", total_blocks, all_blocks.len()));
+    }
 
     info!(
         "📦 [BLOCK-FETCH] Total: {} blocks fetched ({} to {})",

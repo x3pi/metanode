@@ -115,18 +115,77 @@ Hệ thống đã tự động backup Crash Logs thành công!
     exit 0
 fi
 
+# If arg is "resources", run the resource loop (Background worker)
+if [ "${1:-}" == "resources" ]; then
+    echo "Starting resource monitor loop..."
+    # Lịch sử cảnh báo để tránh spam liên tục (reset sau 1 tiếng hoặc tuỳ ý)
+    declare -A alert_history
+    
+    while true; do
+        if [ -f "$RPC_JSON_PATH" ]; then
+            AUTH_JSON="{}"
+            if [ -f "${SCRIPT_DIR}/../parse_inventory.py" ] && [ -f "${SCRIPT_DIR}/../inventory.yml" ]; then
+                AUTH_JSON=$(python3 "${SCRIPT_DIR}/../parse_inventory.py" "${SCRIPT_DIR}/../inventory.yml" auth 2>/dev/null || echo "{}")
+            fi
+            
+            while read -r node_key node_url; do
+                ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
+                ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
+                
+                # Fetch RAM (percent), CPU (percent usage = 100 - idle), and Disk (percent on /)
+                metrics=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ram=\$(free -m | awk 'NR==2{printf \"%.0f\", \$3*100/\$2 }'); cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print 100 - \$8}' | cut -d. -f1); disk=\$(df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'); echo \"\$ram \$cpu \$disk\"" 2>/dev/null)
+                
+                ram_usage=$(echo "$metrics" | awk '{print $1}')
+                cpu_usage=$(echo "$metrics" | awk '{print $2}')
+                disk_usage=$(echo "$metrics" | awk '{print $3}')
+                
+                if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
+                    if [[ "$ram_usage" -ge 94 ]] || [[ "$cpu_usage" -ge 96 ]] || [[ "$disk_usage" -ge 95 ]]; then
+                        # Chỉ gửi cảnh báo nếu trong vòng 30 phút qua chưa gửi cho node này
+                        current_time=$(date +%s)
+                        last_alert=${alert_history[$node_key]:-0}
+                        time_diff=$((current_time - last_alert))
+                        
+                        if [ "$time_diff" -ge 1800 ]; then
+                            alert_history[$node_key]=$current_time
+                            send_tele "🚨 <b>[FIRING: High Resource Usage]</b> 🚨
+<b>Node:</b> <code>$node_key</code>
+<b>IP:</b> <code>$ip</code>
+<b>RAM Usage:</b> ${ram_usage}%
+<b>CPU Usage:</b> ${cpu_usage}%
+<b>Disk Usage:</b> ${disk_usage}%
+<b>Severity:</b> Warning"
+                        fi
+                    else
+                        # Reset lịch sử nếu tài nguyên đã trở lại bình thường
+                        alert_history[$node_key]=0
+                    fi
+                fi
+            done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
+        fi
+        sleep 300 # Check every 5 minutes
+    done
+    exit 0
+fi
+
 echo "🔄 Đang khởi động lại các tiến trình giám sát (Monitors)..."
 
 # 1. Kill old processes
 pkill -f "go run main.go.*--no-stop-flag" || true
 pkill -f "block_hash_checker.*--daemon" || true
 pkill -f "start_monitors.sh health" || true
+pkill -f "start_monitors.sh resources" || true
 
 # 2. Start Health Monitor in background
 nohup /bin/bash "${SCRIPT_DIR}/start_monitors.sh" health > /dev/null 2>&1 &
 echo "✅ Đã bật Health Monitor (kiểm tra node sống/chết)"
 
-# 3. Start Block Hash Checker in background
+# 3. Start Resource Monitor in background
+nohup /bin/bash "${SCRIPT_DIR}/start_monitors.sh" resources > /dev/null 2>&1 &
+echo "✅ Đã bật Resource Monitor (kiểm tra RAM/CPU quá tải)"
+
+# 4. Start Block Hash Checker in background
 BLOCK_CHECKER_DIR="${SCRIPT_DIR}/block_hash_checker"
 if [ -d "$BLOCK_CHECKER_DIR" ]; then
     # Auto-copy dynamic RPC endpoints config to config-m-nodes.json

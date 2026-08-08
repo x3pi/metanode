@@ -128,6 +128,23 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				}
 			}
 
+			// ZERO-FORK INVARIANT: Never return Success: true with a nil StateRoot!
+			if stateRoot == nil {
+				logger.Warn("⚠️ [SPECULATIVE] Cannot find valid stateRoot for block #%d (gei=%d). Rejecting bypass to prevent Zero-Fork violation.", blockNum, gei)
+				resp := &pb.ExecuteBlockResponse{
+					Success:      false,
+					ActualGei:    gei,
+					BlockNumber:  blockNum,
+					GeisConsumed: 0,
+					StateRoot:    nil,
+				}
+				select {
+				case authRespCh <- resp:
+				default:
+				}
+				return
+			}
+
 			resp := &pb.ExecuteBlockResponse{
 				Success:      true,
 				ActualGei:    gei,
