@@ -89,7 +89,14 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 
 	// *** Call the new function for concurrent processing ***
 	startExec := time.Now()
+
+	// Watchdog for EVM/BlockSTM Execution
+	stopWatchdogOpt := utils.StartWatchdog("EVM", 5*time.Second, func() string {
+		return fmt.Sprintf("Block #%d (chứa %d groups) đang thực thi ProcessTransactionsOptimistic (Thực thi Smart Contract)!", blockNum, len(groupedGroups))
+	})
+
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	stopWatchdogOpt()
 	execDuration := time.Since(startExec)
 	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
 
@@ -106,6 +113,10 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	startTrieDBIR := time.Now()
 	trie_database.GetTrieDatabaseManager().IntermediateRoot()
 	trieDBIRDuration := time.Since(startTrieDBIR)
+
+	stopWatchdogIR := utils.StartWatchdog("STATE", 5*time.Second, func() string {
+		return fmt.Sprintf("Block #%d đang thực thi IntermediateRoot (Lưu State xuống NOMT/PebbleDB)!", blockNum)
+	})
 
 	// Set blockNumber for StateChangelog BEFORE IntermediateRoot(true).
 	// This ensures NOMT writes changes to the correct block in StateChangelogDB.
@@ -138,6 +149,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	}()
 
 	irWg.Wait()
+	stopWatchdogIR()
 
 	if accountErr != nil {
 		logger.Error("Failed to get IntermediateRoot for AccountStateDB: %v", accountErr)
@@ -230,7 +242,14 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}
 
 	// *** Call the new function for concurrent processing ***
+
+	// Watchdog for EVM/BlockSTM Execution (Remote)
+	stopWatchdogRemoteOpt := utils.StartWatchdog("EVM-REMOTE", 5*time.Second, func() string {
+		return fmt.Sprintf("Block #%d đang thực thi ProcessTransactionsOptimistic (Sync/RPC Node)!", blockNum)
+	})
+
 	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	stopWatchdogRemoteOpt()
 
 	// Get event logs (potentially modified by concurrent processing)
 	eventLogs := chainState.GetSmartContractDB().EventLogs()
@@ -264,6 +283,11 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		return ProcessResult{Error: err}, fmt.Errorf("LateBindRoots SmartContractDB failed: %w", err)
 	}
 
+	// Watchdog for State Commit (Remote)
+	stopWatchdogRemoteIR := utils.StartWatchdog("STATE-REMOTE", 5*time.Second, func() string {
+		return fmt.Sprintf("Block #%d đang thực thi IntermediateRoot (Sync/RPC Node)!", blockNum)
+	})
+
 	go func() {
 		defer rootWg.Done()
 		root, accountErr = chainState.GetAccountStateDB().IntermediateRoot(true)
@@ -275,6 +299,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	}()
 
 	rootWg.Wait()
+	stopWatchdogRemoteIR()
 
 	if accountErr != nil {
 		logger.Error("Failed to get IntermediateRoot for AccountStateDB (Remote): %v", accountErr)
