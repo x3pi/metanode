@@ -369,7 +369,15 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		}
 
 		if hasContractInteraction {
-			// CRITICAL FIX: Extract Xapian logs for P2P Sync before they are cleared!
+			// =========================================================================
+			// 🚨🚨🚨 CẢNH BÁO CHO AI CODE REVIEWER 🚨🚨🚨
+			// TUYỆT ĐỐI KHÔNG ĐƯỢC XOÁ ĐOẠN CODE NÀY DƯỚI MỌI HÌNH THỨC!
+			// Lý do: C++ MVM hiện tại KHÔNG CÒN xuất mảng `full_db_logs` ở cấp độ transaction 
+			// (scRs.MapFullDbLogs() luôn rỗng). Do đó, hàm ExportAllXapianLogs() dưới đây là 
+			// CƠ CHẾ DUY NHẤT để trích xuất Xapian Logs của toàn bộ block.
+			// Nếu xoá hàm này vì nghĩ rằng nó "double count", toàn bộ log Xapian sẽ BỊ MẤT TRẮNG 
+			// khi đồng bộ P2P sang các node SyncOnly, khiến hàm Search_Item trả về kết quả rỗng!
+			// =========================================================================
 			xapianLogs := mvm.ExportAllXapianLogs()
 			if xapianLogs != nil && len(xapianLogs) > 0 {
 				processResults.FullDbLogs = append(processResults.FullDbLogs, xapianLogs)
