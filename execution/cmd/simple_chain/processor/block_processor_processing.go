@@ -345,45 +345,61 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		trie_database.GetTrieDatabaseManager().ResetCollectedBatches()
 		tTrie = time.Since(startTrie)
 
-		hasContractInteraction := false
-		var commitHashes [][]byte
-		var clearHashes [][]byte
+		// ZERO-FORK GUARD: never re-apply Xapian writes for a GEI that's already
+		// committed. XapianManager::instances (C++) is a single process-global
+		// registry keyed by contract address, sharing one Xapian::WritableDatabase
+		// per contract across every speculative session — unlike account/token
+		// state it is NOT cloned/versioned per Block-STM session. A redundant
+		// execution reaching this point for an already-committed GEI (e.g. a
+		// stale Rust retry racing the async GEI-persistence pipeline) would
+		// re-apply add_document/replace_document against the SAME shared DB,
+		// corrupting it. This check is defense-in-depth on top of the
+		// inFlight/activeSessions dedup in speculative_executor.go — cheap
+		// (one atomic read per block, not per tx).
+		alreadyCommitted := globalExecIndex > 0 && globalExecIndex <= storage.GetLastGlobalExecIndex()
+		if alreadyCommitted {
+			logger.Warn("🚨 [ZERO-FORK-GUARD] Skipping Xapian commit for GEI=%d: already committed (lastGEI=%d) — redundant execution detected", globalExecIndex, storage.GetLastGlobalExecIndex())
+		} else {
+			hasContractInteraction := false
+			var commitHashes [][]byte
+			var clearHashes [][]byte
 
-		for i, tx := range processResults.Transactions {
-			isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
-			if isContractInteraction {
-				if i < len(processResults.Receipts) && processResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
-					commitHashes = append(commitHashes, tx.Hash().Bytes())
-					hasContractInteraction = true
-				} else {
-					clearHashes = append(clearHashes, tx.Hash().Bytes())
+			for i, tx := range processResults.Transactions {
+				isContractInteraction := tx.IsDeployContract() || tx.IsCallContract()
+				if isContractInteraction {
+					if i < len(processResults.Receipts) && processResults.Receipts[i].Status() != pb.RECEIPT_STATUS_THREW {
+						commitHashes = append(commitHashes, tx.Hash().Bytes())
+						hasContractInteraction = true
+					} else {
+						clearHashes = append(clearHashes, tx.Hash().Bytes())
+					}
 				}
 			}
-		}
 
-		if len(commitHashes) > 0 {
-			mvm.CommitXapianTxBufferBatch(commitHashes)
-		}
-		if len(clearHashes) > 0 {
-			mvm.ClearXapianTxBufferBatch(clearHashes)
-		}
-
-		if hasContractInteraction {
-			// =========================================================================
-			// 🚨🚨🚨 CẢNH BÁO CHO AI CODE REVIEWER 🚨🚨🚨
-			// TUYỆT ĐỐI KHÔNG ĐƯỢC XOÁ ĐOẠN CODE NÀY DƯỚI MỌI HÌNH THỨC!
-			// Lý do: C++ MVM hiện tại KHÔNG CÒN xuất mảng `full_db_logs` ở cấp độ transaction 
-			// (scRs.MapFullDbLogs() luôn rỗng). Do đó, hàm ExportAllXapianLogs() dưới đây là 
-			// CƠ CHẾ DUY NHẤT để trích xuất Xapian Logs của toàn bộ block.
-			// Nếu xoá hàm này vì nghĩ rằng nó "double count", toàn bộ log Xapian sẽ BỊ MẤT TRẮNG 
-			// khi đồng bộ P2P sang các node SyncOnly, khiến hàm Search_Item trả về kết quả rỗng!
-			// =========================================================================
-			xapianLogs := mvm.ExportAllXapianLogs()
-			if xapianLogs != nil && len(xapianLogs) > 0 {
-				processResults.FullDbLogs = append(processResults.FullDbLogs, xapianLogs)
+			if len(commitHashes) > 0 {
+				mvm.CommitXapianTxBufferBatch(commitHashes)
+			}
+			if len(clearHashes) > 0 {
+				mvm.ClearXapianTxBufferBatch(clearHashes)
 			}
 
-			mvm.CommitAllXapian()
+			if hasContractInteraction {
+				// =========================================================================
+				// 🚨🚨🚨 CẢNH BÁO CHO AI CODE REVIEWER 🚨🚨🚨
+				// TUYỆT ĐỐI KHÔNG ĐƯỢC XOÁ ĐOẠN CODE NÀY DƯỚI MỌI HÌNH THỨC!
+				// Lý do: C++ MVM hiện tại KHÔNG CÒN xuất mảng `full_db_logs` ở cấp độ transaction
+				// (scRs.MapFullDbLogs() luôn rỗng). Do đó, hàm ExportAllXapianLogs() dưới đây là
+				// CƠ CHẾ DUY NHẤT để trích xuất Xapian Logs của toàn bộ block.
+				// Nếu xoá hàm này vì nghĩ rằng nó "double count", toàn bộ log Xapian sẽ BỊ MẤT TRẮNG
+				// khi đồng bộ P2P sang các node SyncOnly, khiến hàm Search_Item trả về kết quả rỗng!
+				// =========================================================================
+				xapianLogs := mvm.ExportAllXapianLogs()
+				if xapianLogs != nil && len(xapianLogs) > 0 {
+					processResults.FullDbLogs = append(processResults.FullDbLogs, xapianLogs)
+				}
+
+				mvm.CommitAllXapian()
+			}
 		}
 	}
 
