@@ -177,12 +177,19 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			<-se.concurrencySem // Release concurrency slot
 		}()
 
-		// Resolve to whichever caller is currently waiting (may have been
-		// replaced by a retry after this goroutine started but before it
-		// finishes) instead of the possibly-abandoned original channel.
-		defer func() {
-			se.inFlight.Delete(gei)
-		}()
+		// NOTE: inFlight[gei] is intentionally NOT deleted here. Deleting it as
+		// soon as this goroutine returns raced against the asynchronous
+		// GEI-persistence pipeline (PushAsyncGEIUpdate -> geiUpdateChan ->
+		// geiWorker -> commitChannel -> storage.UpdateLastGlobalExecIndex),
+		// which can lag well behind the actual commit under load. A retry
+		// landing in that gap saw neither inFlight[gei] (already deleted) nor
+		// gei <= lastGEI (not yet updated) and fell through to a full,
+		// redundant re-execution — corrupting the global, non-versioned
+		// Xapian DB (XapianManager::instances is a single shared static
+		// registry, not cloned per speculative session like account/token
+		// state). inFlight[gei] is now deleted by CleanGEI instead, tying its
+		// lifetime to the committer's own authoritative completion signal
+		// instead of this goroutine's unrelated return timing.
 		commitIndex := epochData.GetCommitIndex()
 		epochNum := epochData.GetEpoch()
 
@@ -318,6 +325,12 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 				}
 			}
 			se.activeSessions.Delete(k)
+			// inFlight[k] is deleted here rather than by the execution goroutine
+			// itself: this is the single authoritative point where the committer
+			// (or a P2P-sync fast-forward) has confirmed GEI=k no longer needs
+			// local dedup, independent of the async GEI-persistence pipeline's
+			// lag. See the comment in ExecuteSpeculative's dispatch goroutine.
+			se.inFlight.Delete(k)
 		}
 		return true
 	})
