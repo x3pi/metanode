@@ -154,6 +154,10 @@ func (db *TransactionStateDB) GetTransaction(hash common.Hash) (types.Transactio
 	}
 
 	// if not exist in dirty then get from trie
+	if db.trie == nil {
+		logger.Error("Fatal: trie is nil for TransactionStateDB", hash)
+		return nil, fmt.Errorf("fatal: trie is nil for TransactionStateDB")
+	}
 	bData, _ := db.trie.Get(hash.Bytes())
 	if len(bData) == 0 {
 		// Sync nodes write transactions directly to db.db (PebbleDB) but bypass FFI NOMT trie.

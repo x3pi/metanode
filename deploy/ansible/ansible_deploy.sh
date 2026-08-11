@@ -182,6 +182,14 @@ echo -e "\n⏸ Tạm dừng Health Monitor trong quá trình Deploy để tránh
 pkill -f "start_monitors.sh health" || true
 pkill -f "block_hash_checker" || true
 
+if [ "$KEEP_DATA" == "false" ]; then
+    echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
+    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/ghost_blocks.log"
+    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/block_checker_daemon.log"
+    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
+    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/"*.csv
+fi
+
 cd "$SCRIPT_DIR"
 set +e
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
