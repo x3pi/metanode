@@ -52,7 +52,12 @@
       backing=$(losetup -n -O BACK-FILE "$dev" 2>/dev/null || true)
       if [ -n "$backing" ]; then
         dev="$backing"
+      else
+        dev=""
       fi
+    fi
+    if [ -z "$dev" ] && [ -f "/opt/metanode_cluster_btrfs.img" ]; then
+      dev="/opt/metanode_cluster_btrfs.img"
     fi
     echo "$dev"
   register: detected_btrfs_dev
@@ -68,10 +73,19 @@
     path: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}"
   register: btrfs_disk
 
+- name: Unmount all existing node data bind mounts before resetting
+  ansible.builtin.shell: |
+    for d in /opt/metanode/node-*/data; do
+      if mountpoint -q "$d"; then
+        umount "$d" || umount -l "$d" || true
+      fi
+    done
+  changed_when: false
+
 - name: Unmount /opt/metanode if it is mounted to BTRFS disk
   ansible.builtin.shell: |
     if mount | grep -q 'on /opt/metanode type btrfs'; then
-      umount -l /opt/metanode || true
+      umount /opt/metanode || umount -l /opt/metanode || true
     fi
     sed -i '\#{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }} /opt/metanode#d' /etc/fstab
   when: btrfs_disk.stat.exists
@@ -84,13 +98,19 @@
     mode: '0755'
   when: btrfs_disk.stat.exists
 
-- name: Mount BTRFS partition to /mnt/metanode_snapshots
-  ansible.builtin.mount:
-    path: /mnt/metanode_snapshots
-    src: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}"
-    fstype: btrfs
-    opts: "{{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }}"
-    state: mounted
+- name: Mount BTRFS partition to /mnt/metanode_snapshots (shell)
+  ansible.builtin.shell: |
+    if ! mountpoint -q /mnt/metanode_snapshots; then
+      mount -t btrfs -o "{{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }}" "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}" /mnt/metanode_snapshots
+    fi
+  when: btrfs_disk.stat.exists
+
+- name: Persist BTRFS partition in /etc/fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }} /mnt/metanode_snapshots btrfs {{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }} 0 0"
+    regexp: "^.* /mnt/metanode_snapshots "
+    state: present
   when: btrfs_disk.stat.exists
 
 - name: Extract node configuration for snapshot evaluation
