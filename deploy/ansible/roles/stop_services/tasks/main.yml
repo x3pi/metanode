@@ -1,23 +1,17 @@
 ---
-- name: Stop existing Consensus services to prevent file lock
-  ansible.builtin.systemd:
-    name: "metanode-consensus-{{ item }}"
-    state: stopped
-  loop: "{{ active_nodes }}"
+- name: Find all metanode services
+  ansible.builtin.shell: "systemctl list-unit-files | grep -E '^metanode-.*\\.service' | awk '{print $1}'"
+  register: all_metanode_services
+  changed_when: false
   failed_when: false
 
-- name: Stop existing Execution services to prevent file lock
+- name: Stop and disable all metanode services to prevent rogue nodes
   ansible.builtin.systemd:
-    name: "metanode-execution-{{ item }}"
+    name: "{{ item }}"
     state: stopped
-  loop: "{{ active_nodes }}"
-  failed_when: false
-
-- name: Stop existing RPC Proxy services
-  ansible.builtin.systemd:
-    name: "metanode-rpc-{{ item }}"
-    state: stopped
-  loop: "{{ active_nodes }}"
+    enabled: no
+  loop: "{{ all_metanode_services.stdout_lines }}"
+  when: all_metanode_services.stdout_lines | length > 0
   failed_when: false
 
 - name: Check if metanode or simple_chain processes are still running
