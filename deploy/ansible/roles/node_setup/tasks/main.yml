@@ -36,9 +36,36 @@
   loop: "{{ active_nodes }}"
   when: ansible_action == 'setup'
 
+- name: Auto-detect BTRFS device path for /opt/metanode
+  ansible.builtin.shell: |
+    dev=$(findmnt -n -o SOURCE /opt/metanode 2>/dev/null || true)
+    if [ -z "$dev" ]; then
+      dev=$(awk '$2 == "/opt/metanode" {print $1}' /etc/fstab 2>/dev/null || true)
+    fi
+    if [ -z "$dev" ]; then
+      dev=$(findmnt -n -o SOURCE /mnt/metanode_snapshots 2>/dev/null || true)
+    fi
+    if [ -z "$dev" ]; then
+      dev=$(awk '$2 == "/mnt/metanode_snapshots" {print $1}' /etc/fstab 2>/dev/null || true)
+    fi
+    if [[ "$dev" == /dev/loop* ]]; then
+      backing=$(losetup -n -O BACK-FILE "$dev" 2>/dev/null || true)
+      if [ -n "$backing" ]; then
+        dev="$backing"
+      fi
+    fi
+    echo "$dev"
+  register: detected_btrfs_dev
+  changed_when: false
+
+- name: Set btrfs_device_path dynamically if detected
+  set_fact:
+    btrfs_device_path: "{{ detected_btrfs_dev.stdout }}"
+  when: detected_btrfs_dev.stdout != ""
+
 - name: Check if BTRFS partition exists
   ansible.builtin.stat:
-    path: /dev/mapper/ubuntu--vg-metanode_data
+    path: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}"
   register: btrfs_disk
 
 - name: Unmount /opt/metanode if it is mounted to BTRFS disk
@@ -46,7 +73,7 @@
     if mount | grep -q 'on /opt/metanode type btrfs'; then
       umount -l /opt/metanode || true
     fi
-    sed -i '\#/dev/mapper/ubuntu--vg-metanode_data /opt/metanode#d' /etc/fstab
+    sed -i '\#{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }} /opt/metanode#d' /etc/fstab
   when: btrfs_disk.stat.exists
   changed_when: false
 
@@ -60,9 +87,9 @@
 - name: Mount BTRFS partition to /mnt/metanode_snapshots
   ansible.builtin.mount:
     path: /mnt/metanode_snapshots
-    src: /dev/mapper/ubuntu--vg-metanode_data
+    src: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}"
     fstype: btrfs
-    opts: defaults
+    opts: "{{ 'loop,defaults' if '.img' in (btrfs_device_path | default('')) else 'defaults' }}"
     state: mounted
   when: btrfs_disk.stat.exists
 
