@@ -36,4 +36,87 @@
   loop: "{{ active_nodes }}"
   when: ansible_action == 'setup'
 
+- name: Check if BTRFS partition exists
+  ansible.builtin.stat:
+    path: /dev/mapper/ubuntu--vg-metanode_data
+  register: btrfs_disk
 
+- name: Unmount /opt/metanode if it is mounted to BTRFS disk
+  ansible.builtin.shell: |
+    if mount | grep -q 'on /opt/metanode type btrfs'; then
+      umount -l /opt/metanode || true
+    fi
+    sed -i '\#/dev/mapper/ubuntu--vg-metanode_data /opt/metanode#d' /etc/fstab
+  when: btrfs_disk.stat.exists
+  changed_when: false
+
+- name: Ensure base snapshot mount directory exists
+  ansible.builtin.file:
+    path: /mnt/metanode_snapshots
+    state: directory
+    mode: '0755'
+  when: btrfs_disk.stat.exists
+
+- name: Mount BTRFS partition to /mnt/metanode_snapshots
+  ansible.builtin.mount:
+    path: /mnt/metanode_snapshots
+    src: /dev/mapper/ubuntu--vg-metanode_data
+    fstype: btrfs
+    opts: defaults
+    state: mounted
+  when: btrfs_disk.stat.exists
+
+- name: Extract node configuration for snapshot evaluation
+  set_fact:
+    node_configs: >-
+      {%- set configs = {} -%}
+      {%- for nid in active_nodes -%}
+        {%- for node in hostvars['localhost']['cluster_nodes'] -%}
+          {%- if node.node_id | string == nid | string -%}
+            {%- set _ = configs.update({nid | string: node}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ configs }}
+
+- name: Create bind mount source directories for snapshot-enabled nodes
+  ansible.builtin.file:
+    path: "/mnt/metanode_snapshots/node-{{ item }}"
+    state: directory
+    owner: metanode
+    group: metanode
+    mode: '0755'
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists and (node_configs[item | string].is_synconly or node_configs[item | string].snapshot_enabled)
+  ignore_errors: true
+
+- name: Create execution snapshot target directories
+  ansible.builtin.file:
+    path: "{{ metanode_install_dir }}/node-{{ item }}/data"
+    state: directory
+    owner: metanode
+    group: metanode
+    mode: '0755'
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists
+  ignore_errors: true
+
+- name: Setup Bind Mounts for snapshot-enabled nodes
+  ansible.builtin.mount:
+    path: "{{ metanode_install_dir }}/node-{{ item }}/data"
+    src: "/mnt/metanode_snapshots/node-{{ item }}"
+    opts: bind
+    fstype: none
+    state: mounted
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists and (node_configs[item | string].is_synconly or node_configs[item | string].snapshot_enabled)
+
+- name: Remove Bind Mounts for non-snapshot nodes
+  ansible.builtin.shell: |
+    if mount | grep -q "on {{ metanode_install_dir }}/node-{{ item }}/data type"; then
+      umount "{{ metanode_install_dir }}/node-{{ item }}/data" || true
+    fi
+    sed -i '\#{{ metanode_install_dir }}/node-{{ item }}/data#d' /etc/fstab
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists and not (node_configs[item | string].is_synconly or node_configs[item | string].snapshot_enabled)
+  changed_when: false
