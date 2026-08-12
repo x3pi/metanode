@@ -26,8 +26,69 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
+	mt_types "github.com/meta-node-blockchain/meta-node/types"
 	"google.golang.org/protobuf/proto"
 )
+
+// newCommittedRPCTransaction builds the standard RPCTransaction JSON representation for a
+// transaction that has already been included in a block. GetTransactionByHash,
+// GetTransactionByBlockNumberAndIndex and GetTransactionByBlockHashAndIndex all route through
+// this instead of each hand-rolling the struct literal — before this fix the three copies had
+// drifted: every committed tx was reported as Type=0 and GasFeeCap/GasTipCap/Accesses were
+// hardcoded nil regardless of the transaction's real type, and two of the three sites reported
+// the zero address instead of the deployed contract address for deploy transactions.
+func newCommittedRPCTransaction(
+	tx mt_types.Transaction,
+	blockHash common.Hash,
+	blockNumber uint64,
+	txIndex uint64,
+	ethHash common.Hash,
+) *RPCTransaction {
+	v, r, s := tx.RawSignatureValues()
+
+	toAddress := tx.ToAddress()
+	to := (*common.Address)(toAddress.Bytes())
+	if (toAddress == common.Address{}) {
+		// Contract deployment: report the actual deployed address, not the zero address.
+		deployed := crypto.CreateAddress(tx.FromAddress(), tx.GetNonce())
+		to = &deployed
+	}
+
+	var gasFeeCap, gasTipCap *hexutil.Big
+	if fc := tx.GasFeeCap(); fc != nil && fc.Sign() != 0 {
+		gasFeeCap = (*hexutil.Big)(fc)
+	}
+	if tc := tx.GasTipCap(); tc != nil && tc.Sign() != 0 {
+		gasTipCap = (*hexutil.Big)(tc)
+	}
+
+	txIndexHex := hexutil.Uint64(txIndex)
+
+	return &RPCTransaction{
+		BlockHash:           &blockHash,
+		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockNumber)),
+		From:                tx.FromAddress(),
+		Gas:                 hexutil.Uint64(tx.MaxGas()),
+		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
+		GasFeeCap:           gasFeeCap,
+		GasTipCap:           gasTipCap,
+		MaxFeePerBlobGas:    nil, // TODO(EIP-4844): wired once blob txs are supported
+		Hash:                ethHash,
+		Input:               tx.CallData().Input(),
+		Nonce:               hexutil.Uint64(tx.GetNonce()),
+		To:                  to,
+		TransactionIndex:    &txIndexHex,
+		Value:               (*hexutil.Big)(tx.Amount()),
+		Type:                hexutil.Uint64(tx.GetType()),
+		Accesses:            nil, // TODO(EIP-2930/1559 RPC surface): wire real access list
+		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())),
+		BlobVersionedHashes: nil, // TODO(EIP-4844): wired once blob txs are supported
+		V:                   (*hexutil.Big)(v),
+		R:                   (*hexutil.Big)(r),
+		S:                   (*hexutil.Big)(s),
+		YParity:             nil,
+	}
+}
 
 // GetTransactionByHash returns the transaction for the given hash
 func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Hash) (*RPCTransaction, error) {
@@ -108,12 +169,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	if tx == nil {
 		return nil, nil
 	}
-	v, r, s := tx.RawSignatureValues()
-	address := tx.ToAddress()
-	if (tx.ToAddress() == common.Address{}) {
-		address = crypto.CreateAddress(tx.FromAddress(), tx.GetNonce())
-
-	}
+	_, r, s := tx.RawSignatureValues()
 
 	var txIndexVal uint64
 	var found bool
@@ -141,30 +197,7 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 	}
 
 	// Nếu tìm thấy giao dịch có hash khớp, trả về nó
-	return &RPCTransaction{
-		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
-		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
-		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
-		GasFeeCap:           nil,
-		GasTipCap:           nil,
-		MaxFeePerBlobGas:    nil,
-		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
-		Nonce:               hexutil.Uint64(tx.GetNonce()),
-		To:                  (*common.Address)(address.Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
-		Value:               (*hexutil.Big)(tx.Amount()),
-		Type:                hexutil.Uint64(0),
-		Accesses:            nil,
-		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())),
-		BlobVersionedHashes: nil,
-		V:                   (*hexutil.Big)(v),
-		R:                   (*hexutil.Big)(r),
-		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
-	}, nil
+	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
 func (api *MetaAPI) SendTransaction(ctx context.Context, args TransactionArgs) (common.Hash, error) {
@@ -716,7 +749,7 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 
 	receiptMap := map[string]interface{}{
 		// "typeHash":          typeHash,
-		"type":              hexutil.EncodeUint64(2),
+		"type":              hexutil.EncodeUint64(uint64(tx.Type)),
 		"status":            swapStatusNumber(int32(rcp.Status().Number())),
 		"transactionHash":   hashEth,
 		"gasUsed":           hexutil.EncodeUint64(rcp.GasUsed()),

@@ -415,8 +415,6 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 	if tx == nil {
 		return nil, nil
 	}
-	v, r, s := tx.RawSignatureValues()
-
 	txIndexVal := uint64(index)
 	ethHash := tx.Hash()
 	if ethTx := tx.ToEthTransaction(); ethTx != nil {
@@ -424,30 +422,7 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 			ethHash = h
 		}
 	}
-	return &RPCTransaction{
-		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
-		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
-		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
-		GasFeeCap:           nil,
-		GasTipCap:           nil,
-		MaxFeePerBlobGas:    nil,
-		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
-		Nonce:               hexutil.Uint64(tx.GetNonce()),
-		To:                  (*common.Address)(tx.ToAddress().Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
-		Value:               (*hexutil.Big)(tx.Amount()),
-		Type:                hexutil.Uint64(0),
-		Accesses:            nil,
-		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())), // Chuyển đổi uint64 thành *hexutil.Big
-		BlobVersionedHashes: nil,
-		V:                   (*hexutil.Big)(v),
-		R:                   (*hexutil.Big)(r),
-		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
-	}, nil
+	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
@@ -481,8 +456,6 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 	if tx == nil {
 		return nil, nil
 	}
-	v, r, s := tx.RawSignatureValues()
-
 	txIndexVal := uint64(index)
 	ethHash := tx.Hash()
 	if ethTx := tx.ToEthTransaction(); ethTx != nil {
@@ -490,30 +463,7 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 			ethHash = h
 		}
 	}
-	return &RPCTransaction{
-		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
-		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
-		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
-		GasFeeCap:           nil,
-		GasTipCap:           nil,
-		MaxFeePerBlobGas:    nil,
-		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
-		Nonce:               hexutil.Uint64(tx.GetNonce()),
-		To:                  (*common.Address)(tx.ToAddress().Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
-		Value:               (*hexutil.Big)(tx.Amount()),
-		Type:                hexutil.Uint64(0),
-		Accesses:            nil,
-		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())),
-		BlobVersionedHashes: nil,
-		V:                   (*hexutil.Big)(v),
-		R:                   (*hexutil.Big)(r),
-		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
-	}, nil
+	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
