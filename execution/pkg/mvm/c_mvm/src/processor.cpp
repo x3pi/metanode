@@ -12,6 +12,7 @@
 #include "mvm/util.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -227,7 +228,13 @@ public:
       exec_code = move(input);
       calldata = vector<uint8_t>();
     } else {
-      exec_code = callee.acc.get_code();
+      // EIP-7702: this is the top-level entry point for a transaction whose
+      // `To` is called directly (as opposed to a CALL/CALLCODE/DELEGATECALL/
+      // STATICCALL opcode executed from within an already-running context,
+      // handled by call() below) — must resolve a delegation designator the
+      // same way, or a tx that calls a delegated EOA directly throws
+      // ErrInvalidCode the moment dispatch() hits the designator's 0xEF byte.
+      exec_code = resolve_delegated_code(callee.acc.get_code());
       calldata = move(input);
     }
 
@@ -1428,6 +1435,16 @@ private:
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+      // EIP-3541: deploying code starting with 0xEF is rejected — without
+      // this, a plain CREATE could forge a 23-byte EIP-7702 delegation
+      // designator (0xef0100 || address) at an address the deployer fully
+      // controls, impersonating a real 7702 authorization the account owner
+      // never signed. Treated like any other deploy failure: no code is
+      // set, caller sees 0 (failure) instead of the new address.
+      if (!output.empty() && output[0] == 0xEF) {
+        parentContext->s.push(0);
+        return;
+      }
       Address newAccAddr = newAcc.acc.get_address();
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
@@ -1446,6 +1463,37 @@ private:
     std::stringstream ss;
     ss << "0x" << std::hex << std::setw(40) << std::setfill('0') << address;
     return ss.str();
+  }
+
+  // EIP-7702 delegation designator: 0xef0100 || 20-byte address, exactly 23
+  // bytes. Written to an authority's code by SetCodeAuthorization processing
+  // (Go side) via the same SetCodeHash/code-store path used for real
+  // contract deploys — see FromEthSetCodeTx.
+  static bool is_delegation_designator(const Code &code) {
+    return code.size() == 23 && code[0] == 0xEF && code[1] == 0x01 &&
+           code[2] == 0x00;
+  }
+
+  static Address delegation_designator_address(const Code &code) {
+    uint8_t buf[32] = {0};
+    std::copy(code.begin() + 3, code.end(), buf + 12);
+    return from_big_endian(buf, sizeof(buf));
+  }
+
+  // Resolves `code` for CALL-family dispatch: if it's a delegation
+  // designator, returns the delegate's code (one hop only — a delegate whose
+  // own code is ALSO a designator resolves to empty, matching EIP-7702's "no
+  // chained delegation" rule). Otherwise returns `code` unchanged.
+  Code resolve_delegated_code(const Code &code) {
+    if (!is_delegation_designator(code)) {
+      return code;
+    }
+    const Address delegate = delegation_designator_address(code);
+    Code delegateCode = gs.get(delegate).acc.get_code();
+    if (is_delegation_designator(delegateCode)) {
+      return {};
+    }
+    return delegateCode;
   }
 
   void call() {
@@ -1556,7 +1604,18 @@ private:
       gs.add_addresses_add_balance_change(addr, value);
     }
 
-    if (!callee.acc.has_code()) {
+    // EIP-7702: if the callee's code is a delegation designator, CALL/
+    // CALLCODE/DELEGATECALL/STATICCALL must actually execute the delegate's
+    // code, not the 23-byte designator (which isn't valid bytecode — 0xEF
+    // isn't a real opcode, dispatch() would throw ErrInvalidCode on it).
+    // EXTCODESIZE/EXTCODEHASH/EXTCODECOPY are deliberately NOT routed through
+    // this: they call gs.get(addr).acc.get_code() directly elsewhere and so
+    // continue to see the raw designator unresolved, matching mainnet
+    // Ethereum (those opcodes report the 23-byte designator, not the
+    // delegate's code, for a 7702-delegated account).
+    Code executableCode = resolve_delegated_code(callee.acc.get_code());
+
+    if (executableCode.empty()) {
       ctxt->returnData.clear();
       ctxt->s.push(1);
       return;
@@ -1597,22 +1656,22 @@ private:
     switch (op) {
     case Opcode::CALL:
       push_context(ctxt->acc.get_address(), callee, move(input),
-                   callee.acc.get_code(), value, rh, hh, he,
+                   move(executableCode), value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::CALLCODE:
       push_context(ctxt->acc.get_address(), ctxt->as, move(input),
-                   callee.acc.get_code(), value, rh, hh, he,
+                   move(executableCode), value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::DELEGATECALL:
-      push_context(ctxt->caller, ctxt->as, move(input), callee.acc.get_code(),
+      push_context(ctxt->caller, ctxt->as, move(input), move(executableCode),
                    ctxt->call_value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::STATICCALL:
       push_context(ctxt->acc.get_address(), callee, move(input),
-                   callee.acc.get_code(), value, rh, hh, he, true);
+                   move(executableCode), value, rh, hh, he, true);
       break;
     default:
       throw UnexpectedState("Unknown call opcode.");
@@ -1714,6 +1773,11 @@ private:
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+      // EIP-3541 — see the identical check in opCreate()'s rh for why.
+      if (!output.empty() && output[0] == 0xEF) {
+        parentContext->s.push(0);
+        return;
+      }
       Address newAccAddr = newAcc.acc.get_address();
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);

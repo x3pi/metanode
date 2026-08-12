@@ -38,9 +38,30 @@ func NewMVCCSmartContractDB(baseDB types.SmartContractDB, storageMap *MVCCStorag
 	}
 }
 
+// Code reads a contract's code. Ordinary contract code is immutable during
+// execution (deployment goes through the C++ VM's own diff maps, applied
+// post-execution — see applyCodeAndStorageRootOnly), so the common case reads
+// straight from baseDB. EIP-7702 breaks that assumption: processAuthorizationList
+// (pkg/blockchain/tx_processor/authorization.go) writes an authority's
+// codeHash through the MVCC-tracked AccountStateDB (db.accountState, wired via
+// SetAccountStateDB) so it participates in conflict detection — but that write
+// is invisible to baseDB.Code() until commitToBase runs at a segment boundary.
+// Without consulting db.accountState first, a SetCode tx whose own top-level
+// call target is the address it just delegated would see stale (no) code.
 func (db *MVCCSmartContractDB) Code(address common.Address) []byte {
-	// Code is immutable in most cases during execution, read directly from baseDB
+	if db.accountState != nil {
+		if state, err := db.accountState.AccountState(address); err == nil && state != nil {
+			if scState := state.SmartContractState(); scState != nil {
+				return db.baseDB.GetCodeByCodeHash(address, scState.CodeHash())
+			}
+			return nil
+		}
+	}
 	return db.baseDB.Code(address)
+}
+
+func (db *MVCCSmartContractDB) GetCodeByCodeHash(address common.Address, codeHash common.Hash) []byte {
+	return db.baseDB.GetCodeByCodeHash(address, codeHash)
 }
 
 func (db *MVCCSmartContractDB) StorageValue(address common.Address, key []byte, customRoot ...*common.Hash) ([]byte, bool) {

@@ -41,6 +41,9 @@ func (m *mockTx) ToAddress() common.Address {
 func (m *mockTx) IsRegularTransaction() bool {
 	return true
 }
+func (m *mockTx) GetType() uint64 {
+	return 0
+}
 
 // ============================================================================
 // TestGroupTransactionsDeterministic

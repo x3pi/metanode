@@ -343,7 +343,15 @@ func classifyGroup(items []Item) GroupKind {
 		if !tx.IsRegularTransaction() {
 			isEvm = true
 		}
-		
+
+		// EIP-7702 SetCode txs must always run the authorization-list
+		// pipeline (delegation designator write, nonce bump) even when
+		// they carry no calldata and would otherwise look like a plain
+		// value transfer — the native fast-path never runs it.
+		if tx.GetType() == uint64(e_types.SetCodeTxType) {
+			isEvm = true
+		}
+
 		to := tx.ToAddress()
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
 			to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||

@@ -73,6 +73,8 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 			return err
 		}
 		return VerifyBlobSidecar(pTx)
+	case e_types.SetCodeTxType:
+		return FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
@@ -98,6 +100,8 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 		if err = FromEthBlobTx(ethTx, pTx); err == nil {
 			err = VerifyBlobSidecar(pTx)
 		}
+	case e_types.SetCodeTxType:
+		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
 	}
@@ -276,6 +280,9 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 
 	case e_types.BlobTxType: // EIP-4844
 		res = ToEthBlobTx(tx)
+
+	case e_types.SetCodeTxType: // EIP-7702
+		res = ToEthSetCodeTx(tx)
 
 	default:
 		return nil
@@ -943,6 +950,12 @@ func (t *Transaction) MaxFeePerBlobGas() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.MaxFeePerBlobGas)
 }
 
+// AuthorizationList returns the EIP-7702 authorization tuples this tx carries.
+// Empty for any non-SetCode transaction.
+func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
+	return t.proto.AuthorizationList
+}
+
 func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
@@ -1070,6 +1083,11 @@ func DerivePublicKeyFromEthTransaction(tx *e_types.Transaction, chainID *big.Int
 			return nil, fmt.Errorf("EIP-4844 transaction is missing a valid chainID")
 		}
 		signer = e_types.NewCancunSigner(tx.ChainId())
+	case e_types.SetCodeTxType:
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return nil, fmt.Errorf("EIP-7702 transaction is missing a valid chainID")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
 	default:
 		return nil, fmt.Errorf("unsupported transaction type: %d", txType)
 	}
@@ -1173,6 +1191,12 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 		}
 		// CancunSigner or a specific BlobTxSigner
 		signer = e_types.NewCancunSigner(tx.ChainId())
+
+	case e_types.SetCodeTxType: // EIP-7702
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return common.Address{}, fmt.Errorf("EIP-7702 transaction is missing a valid chainID for sender recovery")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
 
 	default:
 		return common.Address{}, fmt.Errorf("unsupported transaction type: %d", txType)
