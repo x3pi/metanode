@@ -241,18 +241,12 @@ public:
     push_context(caller, callee, move(calldata), move(exec_code), call_value,
                  rh, hh, eh, readOnly);
 
-    // add general gas use
-    try {
-      gas_tracker.add_gas_used(2100);
-      if (deploy) {
-        gas_tracker.add_gas_used(32000);
-      }
-    } catch (Exception &ex) {
-      ctxt->eh(ex);
-      pop_context();
-      result.gas_used = gas_tracker.get_gas_used();
-      return result;
-    }
+    // Intrinsic gas (base 21000/53000, calldata, access-list, EIP-7702
+    // auth-tuple cost) is computed and charged on the Go side (see
+    // vm_processor.computeIntrinsicGas / applyIntrinsicGas) and already
+    // subtracted from gas_tracker's budget (tx.gas_limit, set below) before
+    // this function runs — charging a flat 2100/32000 here on top of that
+    // would double-charge every transaction.
     auto sm_size = ctxt->prog.code.size();
     // run
     while (ctxt && ctxt->get_pc() < ctxt->prog.code.size()) {

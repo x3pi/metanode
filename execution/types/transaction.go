@@ -49,6 +49,11 @@ type Transaction interface {
 	MaxFeePerBlobGas() *big.Int
 	// EIP-7702 authorization list (type 0x04 SetCode transactions only).
 	AuthorizationList() []*pb.SetCodeAuthorization
+	// EthAccessList/EthAuthorizationList are go-ethereum-typed views of the
+	// same data as AccessList/AuthorizationList, used for intrinsic-gas
+	// accounting (core.IntrinsicGas takes go-ethereum types directly).
+	EthAccessList() e_types.AccessList
+	EthAuthorizationList() []e_types.SetCodeAuthorization
 	GetNonce() uint64
 	GetChainID() uint64
 	ClearCacheHash()
