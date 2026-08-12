@@ -262,6 +262,8 @@ func (mt *MockTransaction) EffectiveGasPrice() *big.Int           { return big.N
 func (mt *MockTransaction) BlobVersionedHashes() [][]byte         { return nil }
 func (mt *MockTransaction) MaxFeePerBlobGas() *big.Int            { return big.NewInt(0) }
 func (mt *MockTransaction) AuthorizationList() []*pb.SetCodeAuthorization { return nil }
+func (mt *MockTransaction) EthAccessList() e_types.AccessList             { return nil }
+func (mt *MockTransaction) EthAuthorizationList() []e_types.SetCodeAuthorization { return nil }
 func (mt *MockTransaction) GetNonce() uint64                      { return mt.nonce }
 func (mt *MockTransaction) GetChainID() uint64                    { return 1 }
 func (mt *MockTransaction) ClearCacheHash()                       {}

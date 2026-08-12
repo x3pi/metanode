@@ -236,11 +236,16 @@ func (vmP *VmProcessor) deploySmartContract(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.DeployData().Code(), true)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
 	)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 	if span != nil { // GUARD
 		span.AddEvent("MvmDeployFinished", map[string]interface{}{
 			"status":        mvmResult.Status.String(),
@@ -308,11 +313,16 @@ func (vmP *VmProcessor) readOnlyCall(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.CallData().Input(), false)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
 	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmCallReadOnlyFinished", map[string]interface{}{
@@ -383,10 +393,15 @@ func (vmP *VmProcessor) executeSmartContract(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.CallData().Input(), false)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
+	vmGas := vmGasBudget(intrinsicGas, maxGas)
 
 	if isCache {
 		mvmResult = mvmE.Execute( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
 			isCache,
@@ -394,12 +409,13 @@ func (vmP *VmProcessor) executeSmartContract(
 
 	} else {
 		mvmResult = mvmE.Call( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
 		)
 
 	}
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{

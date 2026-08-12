@@ -956,6 +956,21 @@ func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
 	return t.proto.AuthorizationList
 }
 
+// EthAccessList returns the tx's EIP-2930 access list converted to
+// go-ethereum's representation. Empty for tx types that don't carry one.
+// Used for intrinsic-gas accounting (see vm_processor.computeIntrinsicGas).
+func (t *Transaction) EthAccessList() e_types.AccessList {
+	return toEthAccessList(t.proto.AccessList)
+}
+
+// EthAuthorizationList returns the tx's EIP-7702 authorization list
+// converted to go-ethereum's representation. Empty for any non-SetCode
+// transaction. Used for intrinsic-gas accounting (see
+// vm_processor.computeIntrinsicGas).
+func (t *Transaction) EthAuthorizationList() []e_types.SetCodeAuthorization {
+	return ToEthAuthorizationList(t.proto.AuthorizationList)
+}
+
 func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
