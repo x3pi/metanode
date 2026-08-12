@@ -474,8 +474,19 @@ func (c *StateChangelogDB) GetHistoricalStates(addresses [][]byte, targetBlock u
 	return result
 }
 
-// PruneBeforeBlock deletes all changelog entries strictly BEFORE targetBlock,
-// except block 0 which contains the genesis state marker.
+// PruneBeforeBlock compacts changelog history for every address to its "floor"
+// relative to targetBlock: for each address it finds the most recent entry
+// strictly before targetBlock (the value that is still in effect at targetBlock)
+// and preserves it — along with the block-0 genesis entry — while deleting
+// everything strictly older than that floor entry.
+//
+// This is required for GetStateAt correctness: an address that hasn't changed
+// since before targetBlock must still resolve queries for any block >= targetBlock
+// to its last known value, not fall back to the (wrong) genesis value. Naively
+// deleting the whole [1, targetBlock) range per address — the previous
+// behavior — destroys exactly that floor entry for any address that went quiet
+// before the cutoff, corrupting historical reads for the entire retention window.
+//
 // targetBlock should be the boundary block of the epoch we want to keep.
 func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
 	addresses, err := c.GetAllUniqueAddresses()
@@ -486,17 +497,41 @@ func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	iter, err := c.db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
 	batch := c.db.NewBatch()
 	defer batch.Close()
 
 	count := 0
 	for _, addr := range addresses {
-		// startKey for block 1 (block 0 is preserved)
-		startKey := c.encodeKey(addr, 1)
-		// endKey for targetBlock (DeleteRange is exclusive, so it deletes < targetBlock)
-		endKey := c.encodeKey(addr, targetBlock)
+		prefix := c.encodeKeyPrefix(addr)
 
-		// Pebble DeleteRange handles the range deletion efficiently
+		// Find the most recent entry strictly before targetBlock (the "floor"
+		// entry) — it must be preserved so GetStateAt stays correct for every
+		// block >= targetBlock until this address's next recorded change.
+		floorBlock := uint64(0)
+		if iter.SeekLT(c.encodeKey(addr, targetBlock)) && bytes.HasPrefix(iter.Key(), prefix) {
+			key := iter.Key()
+			floorBlock = binary.BigEndian.Uint64(key[len(key)-8:])
+		}
+
+		// floorBlock <= 1 means either no entry exists before targetBlock, or
+		// the floor entry is already the genesis marker (block 0) / block 1 —
+		// nothing older to delete in either case.
+		if floorBlock <= 1 {
+			count++
+			continue
+		}
+
+		// Delete everything strictly between block 0 (genesis, always kept)
+		// and the floor entry (also kept) — DeleteRange's end is exclusive.
+		startKey := c.encodeKey(addr, 1)
+		endKey := c.encodeKey(addr, floorBlock)
+
 		if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
 			return err
 		}
@@ -517,6 +552,6 @@ func (c *StateChangelogDB) PruneBeforeBlock(targetBlock uint64) error {
 		}
 	}
 
-	logger.Info("🧹 [CHANGELOG] Pruned history before block %d for %d unique addresses in namespace %s", targetBlock, count, c.namespace)
+	logger.Info("🧹 [CHANGELOG] Compacted-to-floor history before block %d for %d unique addresses in namespace %s", targetBlock, count, c.namespace)
 	return nil
 }
