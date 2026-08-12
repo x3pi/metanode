@@ -186,7 +186,11 @@ func extractSignature(tx *pb.Transaction) (v, r, s *big.Int) {
 	if len(tx.S) > 0 {
 		s = new(big.Int).SetBytes(tx.S)
 	}
-	if len(tx.V) > 0 {
+	// big.Int.Bytes() elides leading zero bytes, so V==0 (a legitimate, common
+	// recovery-id value for EIP-2930/1559/4844 signers) encodes to an empty
+	// slice — not "V is absent". Gate on R/S's presence instead, mirroring the
+	// fix in pkg/transaction/eth_eip1559.go.
+	if r != nil || s != nil {
 		v = new(big.Int).SetBytes(tx.V)
 	}
 	return

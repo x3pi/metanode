@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
+	"github.com/meta-node-blockchain/meta-node/pkg/blob_store"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -74,6 +75,7 @@ type ChainState struct {
 	freeFeeAddress     map[common.Address]struct{}
 	changelogDB        *state_changelog.StateChangelogDB
 	stakeChangelogDB   *state_changelog.StateChangelogDB
+	blobStore          *blob_store.BlobStore
 
 	// commitMutex serializes all block state mutations in CommitBlockState
 	// to prevent concurrent corruption of the NOMT trie and DB batches.
@@ -194,6 +196,28 @@ func NewChainStateWithGenesis(
 		stakeChangelogDB = initChangelog(nomtTrie, "changelog_db_stake", "stake_db")
 	}
 
+	// Blob sidecars are only ever seen by whichever node a wallet submits an
+	// EIP-4844 tx to directly (consensus only carries the stripped tx, see
+	// Transaction.Sidecar in transaction.proto) — unlike the state changelog,
+	// every node exposes eth_sendRawTransaction, so this isn't gated behind
+	// the isRPC check initChangelog uses.
+	var blobStore *blob_store.BlobStore
+	if backupPath != "" && backupPath != "skip_epoch_data" {
+		var baseDir string
+		if config != nil && config.Databases.RootPath != "" {
+			baseDir = config.Databases.RootPath
+		} else {
+			baseDir = filepath.Dir(backupPath)
+		}
+		bPath := filepath.Join(baseDir, "history", "blob_store")
+		bs, bErr := blob_store.NewBlobStore(bPath, "blob")
+		if bErr != nil {
+			logger.Error("Failed to init BlobStore at %s: %v", bPath, bErr)
+		} else {
+			blobStore = bs
+		}
+	}
+
 	asDB := account_state_db.NewAccountStateDB(accountStateTrie, accountStorage)
 
 	stakeStateDB := stake_state_db.NewStakeStateDB(stakeStateTrie, stakeStorage)
@@ -217,6 +241,7 @@ func NewChainStateWithGenesis(
 		maxCachedEpochs:       maxCached,
 		changelogDB:           changelogDB,
 		stakeChangelogDB:      stakeChangelogDB,
+		blobStore:             blobStore,
 		currentEpoch:          0, // Start with epoch 0 (genesis)
 		epochStartTimestampMs: 0, // Will be set on first epoch advance
 		epochStartTimestamps:  make(map[uint64]uint64),
@@ -543,6 +568,12 @@ func (cs *ChainState) GetStakeChangelogDB() *state_changelog.StateChangelogDB {
 	return cs.stakeChangelogDB
 }
 
+// GetBlobStore returns the EIP-4844 blob sidecar store, or nil if this node
+// wasn't set up with a backup path (e.g. in-memory/test chains).
+func (cs *ChainState) GetBlobStore() *blob_store.BlobStore {
+	return cs.blobStore
+}
+
 func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
 	return cs.accountStateDB.Load()
 }
@@ -601,6 +632,7 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 		freeFeeAddress:        cs.freeFeeAddress,
 		changelogDB:           cs.changelogDB,
 		stakeChangelogDB:      cs.stakeChangelogDB,
+		blobStore:             cs.blobStore,
 		currentEpoch:          cs.currentEpoch,
 		epochStartTimestampMs: cs.epochStartTimestampMs,
 		backupPath:            cs.backupPath,
@@ -978,6 +1010,11 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 				if cs.stakeChangelogDB != nil {
 					if err := cs.stakeChangelogDB.PruneBeforeBlock(block); err != nil {
 						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune stake changelog: %v", err)
+					}
+				}
+				if cs.blobStore != nil {
+					if err := cs.blobStore.PruneBeforeBlock(block); err != nil {
+						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune blob store: %v", err)
 					}
 				}
 				logger.Info("✅ [CHANGELOG PRUNER] Finished pruning for epoch %d", epoch)
@@ -1490,6 +1527,9 @@ func (cs *ChainState) Close() {
 	}
 	if cs.stakeChangelogDB != nil {
 		cs.stakeChangelogDB.Close()
+	}
+	if cs.blobStore != nil {
+		cs.blobStore.Close()
 	}
 }
 

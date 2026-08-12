@@ -68,9 +68,11 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 	case e_types.DynamicFeeTxType:
 		// Giả định FromEthEIP1559Tx đã được định nghĩa
 		return FromEthEIP1559Tx(ethTx, pTx) //
-	// Thêm các case cho BlobTxType (EIP-4844) nếu cần
-	// case types.BlobTxType:
-	//     return FromEthBlobTx(ethTx, pTx) // Bạn sẽ cần tự định nghĩa hàm này
+	case e_types.BlobTxType:
+		if err := FromEthBlobTx(ethTx, pTx); err != nil {
+			return err
+		}
+		return VerifyBlobSidecar(pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
@@ -92,6 +94,10 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 		err = FromEthEIP2930Tx(ethTx, pTx)
 	case e_types.DynamicFeeTxType:
 		err = FromEthEIP1559Tx(ethTx, pTx)
+	case e_types.BlobTxType:
+		if err = FromEthBlobTx(ethTx, pTx); err == nil {
+			err = VerifyBlobSidecar(pTx)
+		}
 	default:
 		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
 	}
@@ -267,6 +273,10 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerDynamicFeeTx.S = big.NewInt(0)
 		}
 		res = e_types.NewTx(innerDynamicFeeTx)
+
+	case e_types.BlobTxType: // EIP-4844
+		res = ToEthBlobTx(tx)
+
 	default:
 		return nil
 	}
@@ -934,7 +944,7 @@ func (tx *Transaction) MaxFee() *big.Int {
 		price := big.NewInt(0).SetUint64(tx.MaxGasPrice())
 		return big.NewInt(0).Mul(maxGas, price)
 
-	case 2: // EIP-1559
+	case 2, 3: // EIP-1559, EIP-4844 (blob-gas fee is accounted separately, not here)
 		feeCap := tx.GasFeeCap()
 		return big.NewInt(0).Mul(maxGas, feeCap)
 

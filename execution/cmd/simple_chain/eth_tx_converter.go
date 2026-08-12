@@ -108,6 +108,25 @@ func buildMetaTxFromEthTx(
 		return nil, nil, fmt.Errorf("unexpected transaction type from NewTransactionFromEth")
 	}
 
+	// EIP-4844: NewTransactionFromEth already KZG-verified the sidecar (see
+	// transaction.VerifyBlobSidecar). Persist it to blob_store keyed by versioned
+	// hash, then strip it from the tx before it's signed/propagated/persisted —
+	// consensus and every other node only ever see the committed versioned
+	// hashes, never the raw blob bytes. See Transaction.Sidecar's comment in
+	// transaction.proto and blob_store's package doc for why this is safe.
+	if metaTxProto, ok := metaTx.Proto().(*mt_proto.Transaction); ok && metaTxProto.Type == uint64(types.BlobTxType) && metaTxProto.Sidecar != nil {
+		sidecar := metaTxProto.Sidecar
+		if bs := app.chainState.GetBlobStore(); bs != nil {
+			blockNumber := app.blockProcessor.GetLastBlock().Header().BlockNumber() + 1
+			for i, vh := range metaTxProto.BlobVersionedHashes {
+				if err := bs.Put(blockNumber, vh, sidecar.Commitments[i], sidecar.Proofs[i], sidecar.Blobs[i]); err != nil {
+					return nil, nil, fmt.Errorf("failed to persist blob sidecar: %w", err)
+				}
+			}
+		}
+		metaTxProto.Sidecar = nil
+	}
+
 	metaTx.UpdateDeriver(deviceKey, newDeviceKey)
 	metaTx.SetSign(blsPrivateKey)
 
