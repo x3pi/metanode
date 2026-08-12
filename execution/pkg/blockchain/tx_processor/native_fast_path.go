@@ -50,6 +50,8 @@ func processNativeTransfersFastPath(
 	enableTrace bool,
 	leaderAddr common.Address,
 	skipSignatureVerify bool,
+	lastBlockHeader types.BlockHeader,
+	blockTime uint64,
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -195,15 +197,28 @@ func processNativeTransfersFastPath(
 					// which previously made this fast path charge zero execution fee for them.
 					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), tx.EffectiveGasPrice())
 
+					// EIP-4844: blob fee is burned — deducted from the sender in the same
+					// call as gasFee (ExecuteNativeTransfer only takes one fee param), but
+					// kept out of totalGasFee below so it's never credited to the leader.
+					// Underpriced MaxFeePerBlobGas gets the same rejection path as any
+					// other ExecuteNativeTransfer error.
+					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+					totalFee := gasFee
+					if blobErr == nil && blobFee.Sign() > 0 {
+						totalFee = new(big.Int).Add(gasFee, blobFee)
+					}
+
 					// Route to lock-free fast path if NO parallel addresses are involved.
 					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe
 					// EXCEPT for NativeParallelAddresses which intentionally bypass UnionFind to allow parallelism.
 					// Those special addresses MUST use the locked version.
 					var err error
-					if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
-						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+					if blobErr != nil {
+						err = blobErr
+					} else if grouptxns.IsNativeParallelAddress(tx.FromAddress()) || grouptxns.IsNativeParallelAddress(toAddress) {
+						err = globalAccountDB.ExecuteNativeTransfer(tx.FromAddress(), toAddress, tx.Amount(), totalFee, tx.Hash(), tx.NewDeviceKey())
 					} else {
-						err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), gasFee, tx.Hash(), tx.NewDeviceKey())
+						err = globalAccountDB.ExecuteNativeTransferLockFree(tx.FromAddress(), toAddress, tx.Amount(), totalFee, tx.Hash(), tx.NewDeviceKey())
 					}
 
 					if err != nil {

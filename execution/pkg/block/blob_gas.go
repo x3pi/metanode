@@ -1,6 +1,8 @@
 package block
 
 import (
+	"math/big"
+
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -26,4 +28,14 @@ func NextExcessBlobGas(parentHeader types.BlockHeader, timestampMs uint64) uint6
 		&e_types.Header{ExcessBlobGas: &parentExcess, BlobGasUsed: &parentUsed},
 		timestampMs/1000,
 	)
+}
+
+// BlobBaseFeeAt returns the EIP-4844 blob base fee (price per unit of blob
+// gas) for a block built on top of parentHeader at timestampMs, per
+// consensus/misc/eip4844.CalcBlobFee. This is what a blob tx's
+// MaxFeePerBlobGas must be at least, and what actually gets charged per unit
+// of blob gas used — see Transaction.MaxFeePerBlobGas.
+func BlobBaseFeeAt(parentHeader types.BlockHeader, timestampMs uint64) *big.Int {
+	excess := NextExcessBlobGas(parentHeader, timestampMs)
+	return eip4844.CalcBlobFee(params.AllDevChainProtocolChanges, &e_types.Header{ExcessBlobGas: &excess})
 }

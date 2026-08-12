@@ -109,6 +109,7 @@ func ProcessTransactionsOptimistic(
 		return processNativeTransfersFastPath(
 			ctx, chainState, groupedGroups, totalTxs,
 			enableTrace, leaderAddr, skipSignatureVerify,
+			lastBlockHeader, blockTime,
 		)
 	}
 
@@ -142,6 +143,7 @@ func ProcessTransactionsOptimistic(
 		txs, rcps, scRs, mvmMap := processNativeTransfersFastPath(
 			ctx, chainState, nativeGroups, nativeTxCount,
 			enableTrace, leaderAddr, skipSignatureVerify,
+			lastBlockHeader, blockTime,
 		)
 		// processNativeTransfersFastPath returns flat results in group order;
 		// slice them back per group using each group's item count.
