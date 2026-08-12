@@ -641,15 +641,31 @@ func (stm *TrueBlockSTM) execOne(
 		if tx.IsRegularTransaction() {
 			// Native Transfer
 			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), tx.EffectiveGasPrice())
-			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
-			errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
-			
+			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
+			// reward, unlike gasFee above) — see blobFeeOrReject's doc. blobErr
+			// (underpriced MaxFeePerBlobGas) gets the exact same
+			// reject-but-still-advance-nonce treatment as insufficient balance
+			// below, since by the time we're here the tx already consumed a nonce
+			// slot from the sender's perspective.
+			blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
+			if blobErr == nil {
+				totalCost.Add(totalCost, blobFee)
+			}
+
+			var errSub error
+			if blobErr != nil {
+				errSub = blobErr
+			} else {
+				errSub = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+			}
+
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
 			mvccDB.PlusOneNonce(tx.FromAddress())
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-			
+
 			if errSub != nil {
 				// Revert Native Transfer
 				rcp = receipt.NewReceipt(
@@ -728,15 +744,31 @@ func (stm *TrueBlockSTM) execOne(
 					// [FIX] Deduct Gas Fee from sender's balance
 					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
 					canPayGas := true
-					if gasFee.Cmp(big.NewInt(0)) > 0 {
-						errSub := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
-						if errSub != nil {
-							canPayGas = false
-							receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
-							ret = []byte("insufficient balance for gas")
-							exception = pb.EXCEPTION_NONE
-							eventLogs = nil
-							gasUsed = 0
+
+					// EIP-4844: blob fee is burned — charged alongside gasFee in the same
+					// balance deduction, but (unlike gasFee) never enters the leader-reward
+					// totalGasFee computation later, which only re-derives from
+					// receipt.GasUsed() * EffectiveGasPrice(). See blobFeeOrReject's doc.
+					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+					if blobErr != nil {
+						canPayGas = false
+						receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+						ret = []byte(blobErr.Error())
+						exception = pb.EXCEPTION_NONE
+						eventLogs = nil
+						gasUsed = 0
+					} else {
+						totalFee := new(big.Int).Add(gasFee, blobFee)
+						if totalFee.Cmp(big.NewInt(0)) > 0 {
+							errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalFee)
+							if errSub != nil {
+								canPayGas = false
+								receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+								ret = []byte("insufficient balance for gas")
+								exception = pb.EXCEPTION_NONE
+								eventLogs = nil
+								gasUsed = 0
+							}
 						}
 					}
 
