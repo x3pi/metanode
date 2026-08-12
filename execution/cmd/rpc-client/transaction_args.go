@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -94,7 +95,10 @@ func (args *TransactionArgs) setCancunFeeDefaults(head *types.Header) {
 			excessBlobGas = *head.ExcessBlobGas
 		}
 		// ExcessBlobGas must be set for a Cancun block.
-		blobBaseFee := eip4844.CalcBlobFee(excessBlobGas)
+		// This chain has no hardfork-activation mechanism (every EIP is always active,
+		// see mvm's opcode.h), so use the "all forks active from genesis" config rather
+		// than a real per-network params.ChainConfig.
+		blobBaseFee := eip4844.CalcBlobFee(params.AllDevChainProtocolChanges, &types.Header{ExcessBlobGas: &excessBlobGas})
 		// Set the max fee to be 2 times larger than the previous block's blob base fee.
 		// The additional slack allows the tx to not become invalidated if the base
 		// fee is rising.
