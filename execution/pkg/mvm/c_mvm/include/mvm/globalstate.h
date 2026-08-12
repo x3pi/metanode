@@ -58,6 +58,15 @@ namespace mvm
     virtual std::vector<uint8_t> get_cross_chain_sender() = 0;
     virtual std::vector<uint8_t> get_cross_chain_source_id() = 0;
 
+    // EIP-4844: current tx's blob versioned hashes (BLOBHASH) and the current
+    // block's blob base fee (BLOBBASEFEE), both sourced from Go per-mvmId
+    // context (see MVMApi.SetBlobContext) rather than a BlockContext/Transaction
+    // ABI field, to avoid changing the FFI signature of every exported mvm_linker
+    // function. get_blob_hash returns 0 for an out-of-range index, matching
+    // EIP-4844's BLOBHASH rule.
+    virtual uint256_t get_blob_hash(uint64_t index) = 0;
+    virtual uint256_t get_blob_base_fee() = 0;
+
     virtual void add_addresses_newly_deploy(const Address &addr, const Code &code) = 0;
     virtual void add_addresses_storage_change(const Address &addr, const uint256_t &key, const uint256_t &value) = 0;
     virtual void add_addresses_add_balance_change(const Address &addr, const uint256_t &amount) = 0;

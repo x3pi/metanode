@@ -210,6 +210,13 @@ extern struct Value_return GetBlockHash(int);
 extern struct Value_return GetChainId();
 extern struct Value_return GetCrossChainSender(unsigned char *mvmId);
 extern struct Value_return GetCrossChainSourceId(unsigned char *mvmId);
+// EIP-4844: BLOBHASH/BLOBBASEFEE context is per-transaction/per-block, so
+// (unlike GetChainId) these need mvmId to look up the right MVMApi instance
+// — same reasoning as GetCrossChainSender above. index is the BLOBHASH stack
+// argument; out-of-range returns success=false, which the caller treats as 0
+// (see EIP-4844's BLOBHASH out-of-range rule).
+extern struct Value_return GetBlobHash(unsigned char *mvmId, unsigned long long index);
+extern struct Value_return GetBlobBaseFee(unsigned char *mvmId);
 
 // Redirect C++ cout/cerr sang file log riêng
 // name: tên process (ví dụ "master", "sub-write") → tạo file mvm_cpp_{name}.log

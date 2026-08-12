@@ -70,6 +70,10 @@ namespace mvm
         // Cross-chain precompile (address 263)
         virtual std::vector<uint8_t> get_cross_chain_sender() override;
         virtual std::vector<uint8_t> get_cross_chain_source_id() override;
+
+        // EIP-4844
+        virtual uint256_t get_blob_hash(uint64_t index) override;
+        virtual uint256_t get_blob_base_fee() override;
         void iterate_storage_changes(std::function<void(const Address &, const uint256_t &, const uint256_t &)> callback) const
         {
             for (const auto &pair : addresses_storage_change)

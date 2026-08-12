@@ -319,6 +319,25 @@ namespace mvm
         case SELFDESTRUCT:
        // use separated func to calculate
             return 0;
+        // --- Cancun (EIP-3855/1153/5656/4844) ---
+        // Previously all six fell through to `default: return 0` — this VM
+        // declares itself Cancun-targeted (see opcode.h) but charged zero gas
+        // for every one of them. Costs below match evm.codes' Cancun table.
+        case PUSH0:
+            return 2; // EIP-3855: same base tier as other zero-arg pushes (ADDRESS, CALLER, ...)
+        case TLOAD:
+            return 100; // EIP-1153: priced like a warm SLOAD
+        case TSTORE:
+            return 100; // EIP-1153: priced like a warm SSTORE
+        case BLOBHASH:
+            return 3; // EIP-4844
+        case BLOBBASEFEE:
+            return 2; // EIP-7516: same base tier as BASEFEE
+        case MCOPY:
+        // Static part only (3) — dynamic part (3 * word_count + memory
+        // expansion) is charged in processor.cpp's mcopy(), same split as
+        // CODECOPY/CALLDATACOPY above.
+            return 3;
         default:
             return 0;
         }

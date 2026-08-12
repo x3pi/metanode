@@ -89,14 +89,6 @@ private:
   using PcType = decltype(pc);
 
 public:
-  // PHASE-0 FIX: was declared with no initializer, so every read of this
-  // field before this fix returned indeterminate stack garbage instead of a
-  // real value (BLOBBASEFEE opcode). Since garbage differs across nodes /
-  // runs / compiler codegen, that was a live consensus-divergence (fork)
-  // risk. Zero-initialize until the real blob base fee is threaded in from
-  // the block context (see GetBlobBaseFee wiring).
-  uint256_t blob_base_fee{};
-
   using ReturnHandler = function<void(vector<uint8_t>)>;
   using HaltHandler = function<void()>;
   using ExceptionHandler = function<void(const Exception &)>;
@@ -281,7 +273,21 @@ public:
   }
 
 private:
-  std::unordered_map<uint256_t, uint256_t> transient_storage; // Bộ nhớ tạm
+  // PHASE-5 FIX: was a single flat map keyed only by slot, shared across every
+  // contract in the whole call stack — two unrelated contracts touching the
+  // "same" slot number (near-guaranteed, since slots are usually small
+  // sequential integers) silently aliased onto each other's transient
+  // storage. EIP-1153 requires transient storage to be per-address, exactly
+  // like persistent storage. Now keyed by (address, slot).
+  //
+  // NOT fixed here: neither this map nor persistent storage (see sstore(),
+  // which writes straight through with no undo) are rolled back when a
+  // nested CALL reverts (see the `he` handler in the CALL/CALLCODE/
+  // DELEGATECALL/STATICCALL dispatch, which already supports "callee
+  // reverted, caller keeps running" as a real path) — that would need a
+  // call-frame journal for ALL state mutation, not just transient storage,
+  // and is a separate, much larger pre-existing gap.
+  std::unordered_map<Address, std::unordered_map<uint256_t, uint256_t>> transient_storage;
 
   void push_context(const Address &caller, AccountState as,
                     vector<uint8_t> &&input, Program &&prog,
@@ -1077,60 +1083,64 @@ private:
   void msize() { ctxt->s.push(ctxt->get_used_mem() * 32); }
 
   void mcopy() {
-    // Lấy các tham số từ stack theo đúng thứ tự của EVM
+    // PHASE-5 FIX: this never charged gas at all — no static cost (fell into
+    // getGasCost's `default: return 0`), no dynamic per-word cost, and no
+    // memory-expansion cost despite resizing ctxt->mem. Dynamic part now
+    // mirrors CODECOPY/CALLDATACOPY exactly (getCopyOperationGasCost), the
+    // same formula EIP-5656 specifies for MCOPY.
+    uint64_t old_mem_word_size = ctxt->get_used_mem();
+
     const auto dest_offset = ctxt->s.pop64();
     const auto src_offset = ctxt->s.pop64();
     const auto length = ctxt->s.pop64();
 
-    // Không làm gì nếu length bằng 0
-    if (length == 0) {
-      return;
-    }
-
-    // Tự động mở rộng bộ nhớ nếu cần
-    uint64_t new_size = std::max(dest_offset + length, src_offset + length);
-    if (new_size > ctxt->mem.size()) {
-      ctxt->mem.resize(new_size, 0);
-    }
-
-    // Xử lý việc copy byte-by-byte như trong EVM
-    // MCOPY trong Solidity xử lý đúng các trường hợp chồng chéo bộ nhớ
-    if (dest_offset == src_offset || length == 0) {
-      // Không cần sao chép nếu vị trí giống nhau hoặc length = 0
-      return;
-    } else if (dest_offset > src_offset) {
-      // Copy từ cuối lên đầu để tránh ghi đè dữ liệu nguồn trong trường hợp
-      // chồng chéo
-      for (uint64_t i = length; i > 0; i--) {
-        ctxt->mem[dest_offset + i - 1] = ctxt->mem[src_offset + i - 1];
+    if (length > 0) {
+      // Tự động mở rộng bộ nhớ nếu cần
+      uint64_t new_size = std::max(dest_offset + length, src_offset + length);
+      if (new_size > ctxt->mem.size()) {
+        ctxt->mem.resize(new_size, 0);
       }
-    } else {
-      // Copy từ đầu xuống cuối (không có nguy cơ ghi đè dữ liệu nguồn)
-      for (uint64_t i = 0; i < length; i++) {
-        ctxt->mem[dest_offset + i] = ctxt->mem[src_offset + i];
+
+      // Xử lý việc copy byte-by-byte như trong EVM
+      // MCOPY trong Solidity xử lý đúng các trường hợp chồng chéo bộ nhớ
+      if (dest_offset != src_offset) {
+        if (dest_offset > src_offset) {
+          // Copy từ cuối lên đầu để tránh ghi đè dữ liệu nguồn trong trường
+          // hợp chồng chéo
+          for (uint64_t i = length; i > 0; i--) {
+            ctxt->mem[dest_offset + i - 1] = ctxt->mem[src_offset + i - 1];
+          }
+        } else {
+          // Copy từ đầu xuống cuối (không có nguy cơ ghi đè dữ liệu nguồn)
+          for (uint64_t i = 0; i < length; i++) {
+            ctxt->mem[dest_offset + i] = ctxt->mem[src_offset + i];
+          }
+        }
       }
     }
+
+    uint64_t new_mem_word_size = ctxt->get_used_mem();
+    uint64_t word_count = (length + 31) / 32;
+    gas_tracker.add_gas_used(getCopyOperationGasCost(
+        word_count, ctxt->last_mem_gas_cost, old_mem_word_size, new_mem_word_size));
   }
 
   void tLoad() {
     const auto key = ctxt->s.pop();
-    auto value = transient_storage[key];
+    auto value = transient_storage[ctxt->acc.get_address()][key];
     ctxt->s.push(value);
   }
   void tStore() {
     const auto key = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-    transient_storage[key] = value;
+    transient_storage[ctxt->acc.get_address()][key] = value;
   }
   uint256_t blob_hash(uint64_t index) {
-    // PHASE-0 FIX: this previously returned keccak256(native-endian bytes of
-    // index) — a value with no relationship to the transaction's actual
-    // blob versioned hashes, and dependent on host endianness. Blob
-    // versioned hashes aren't wired into the VM yet (see GetBlobHash
-    // wiring), so return a well-defined placeholder (0, matching the
-    // EIP-4844 out-of-range behavior) instead of a fake, misleading value.
-    (void)index;
-    return uint256_t{};
+    // Sourced from Go's per-mvmId blob context (MVMApi.SetBlobContext), not a
+    // BlockContext/Transaction ABI field — see the comment on
+    // GlobalState::get_blob_hash. Out-of-range index correctly yields 0
+    // rather than a fabricated value.
+    return gs.get_blob_hash(index);
   }
 
   void blobHash() {
@@ -1139,7 +1149,7 @@ private:
     ctxt->s.push(hash);
   }
   void blobBashFee() {
-    auto base_fee = ctxt->blob_base_fee;
+    auto base_fee = gs.get_blob_base_fee();
     ctxt->s.push(base_fee);
   }
   void mload() {
