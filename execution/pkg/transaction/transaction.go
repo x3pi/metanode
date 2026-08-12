@@ -1222,7 +1222,18 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		// skip check gas price for native smart contract
 		return true
 	}
-	return t.MaxGasPrice() >= currentGasPrice
+
+	// Legacy/EIP-2930 price the tx via the flat MaxGasPrice field; EIP-1559 (and
+	// later fee-cap-based types) leave MaxGasPrice at 0 by design and price via
+	// GasFeeCap instead (see FromEthEIP1559Tx) — mirrors the switch in MaxFee().
+	var price *big.Int
+	switch t.proto.Type {
+	case 0, 1: // Legacy, EIP-2930
+		price = new(big.Int).SetUint64(t.MaxGasPrice())
+	default: // EIP-1559 and later
+		price = t.GasFeeCap()
+	}
+	return price.Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
 }
 
 func (t *Transaction) ValidAmountSpend(
