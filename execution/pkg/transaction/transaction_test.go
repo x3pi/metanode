@@ -126,6 +126,34 @@ func TestTransaction_RHash(t *testing.T) {
 	assert.Equal(t, rHash, rHash2)
 }
 
+// TestTransaction_Hash_IncludesBlobAndAuthorizationFields guards against silently
+// dropping the EIP-4844/EIP-7702 fields from the hash preimage (Hash() and RHash()
+// must match the Rust-side calculate_single_transaction_hash — see tx_hash.rs).
+func TestTransaction_Hash_IncludesBlobAndAuthorizationFields(t *testing.T) {
+	base := makeTestTransaction().(*Transaction)
+	baseHash := base.Hash()
+	baseRHash := base.RHash()
+
+	withBlob := makeTestTransaction().(*Transaction)
+	withBlob.proto.BlobVersionedHashes = [][]byte{{0x01, 0xAA}}
+	assert.NotEqual(t, baseHash, withBlob.Hash(), "BlobVersionedHashes must affect Hash()")
+	assert.NotEqual(t, baseRHash, withBlob.RHash(), "BlobVersionedHashes must affect RHash()")
+
+	withFeeCap := makeTestTransaction().(*Transaction)
+	withFeeCap.proto.MaxFeePerBlobGas = []byte{0x03, 0xE8}
+	assert.NotEqual(t, baseHash, withFeeCap.Hash(), "MaxFeePerBlobGas must affect Hash()")
+
+	withAuth := makeTestTransaction().(*Transaction)
+	withAuth.proto.AuthorizationList = []*pb.SetCodeAuthorization{{ChainID: 1, Address: []byte{0x01}}}
+	assert.NotEqual(t, baseHash, withAuth.Hash(), "AuthorizationList must affect Hash()")
+
+	// Sidecar must NOT affect the hash — it's network representation, not committed data.
+	withSidecar := makeTestTransaction().(*Transaction)
+	withSidecar.proto.Sidecar = &pb.BlobSidecar{Blobs: [][]byte{{0xDE, 0xAD, 0xBE, 0xEF}}}
+	assert.Equal(t, baseHash, withSidecar.Hash(), "Sidecar must NOT affect Hash()")
+	assert.Equal(t, baseRHash, withSidecar.RHash(), "Sidecar must NOT affect RHash()")
+}
+
 // ──────────────────────────────────────────────
 // ClearCacheHash
 // ──────────────────────────────────────────────

@@ -681,6 +681,13 @@ func (t *Transaction) Hash() (hash common.Hash) {
 	hashPb.GasTipCap = t.proto.GasTipCap
 	hashPb.GasFeeCap = t.proto.GasFeeCap
 	hashPb.AccessList = t.proto.AccessList
+	hashPb.BlobVersionedHashes = t.proto.BlobVersionedHashes
+	hashPb.MaxFeePerBlobGas = t.proto.MaxFeePerBlobGas
+	hashPb.AuthorizationList = t.proto.AuthorizationList
+	// NOTE: t.proto.Sidecar is deliberately excluded — the tx only commits to
+	// BlobVersionedHashes above; the raw blob/commitment/proof data is network
+	// representation, verified separately via KZG, and can be pruned without
+	// changing this hash. See transaction.proto's comment on Transaction.Sidecar.
 
 	bufPtr := hashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -733,6 +740,13 @@ func (t *Transaction) RHash() common.Hash {
 	hashPb.GasTipCap = t.proto.GasTipCap
 	hashPb.GasFeeCap = t.proto.GasFeeCap
 	hashPb.AccessList = t.proto.AccessList
+	hashPb.BlobVersionedHashes = t.proto.BlobVersionedHashes
+	hashPb.MaxFeePerBlobGas = t.proto.MaxFeePerBlobGas
+	hashPb.AuthorizationList = t.proto.AuthorizationList
+	// NOTE: t.proto.Sidecar is deliberately excluded — the tx only commits to
+	// BlobVersionedHashes above; the raw blob/commitment/proof data is network
+	// representation, verified separately via KZG, and can be pruned without
+	// changing this hash. See transaction.proto's comment on Transaction.Sidecar.
 
 	bufPtr := hashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]

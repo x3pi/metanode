@@ -49,6 +49,18 @@ message Transaction {
   bytes GasTipCap = 20;
   bytes GasFeeCap = 21;
   repeated AccessTuple AccessList = 22;
+
+  // Thêm cho EIP-4844 (Blob, type 0x03) và EIP-7702 (SetCode, type 0x04).
+  // Tag 8 KHÔNG dùng được ở đây: các bản sao proto khác (consensus/, cmd/rpc/)
+  // đã dùng tag 8 cho RelatedAddresses dù bản canonical này bỏ trống nó.
+  repeated bytes BlobVersionedHashes = 23;
+  bytes MaxFeePerBlobGas = 24;
+  // Sidecar KHÔNG tham gia vào TransactionHashData/chữ ký — tx chỉ cam kết vào
+  // BlobVersionedHashes ở trên; sidecar là "network representation" được verify
+  // lại bằng KZG lúc nhận, và có thể bị prune theo retention window mà không
+  // làm đổi tx hash.
+  BlobSidecar Sidecar = 25;
+  repeated SetCodeAuthorization AuthorizationList = 26;
 }
 
 message AccessTuple {
@@ -56,6 +68,23 @@ message AccessTuple {
   repeated bytes StorageKeys = 2;
 }
 
+// BlobSidecar mang dữ liệu blob thô + bằng chứng KZG cho một Blob tx (EIP-4844).
+// Cố ý tách khỏi phần tham gia hash: xem ghi chú tại Transaction.Sidecar.
+message BlobSidecar {
+  repeated bytes Blobs = 1;
+  repeated bytes Commitments = 2;
+  repeated bytes Proofs = 3;
+}
+
+// SetCodeAuthorization là một mục trong authorization_list của SetCode tx (EIP-7702).
+message SetCodeAuthorization {
+  uint64 ChainID = 1;
+  bytes Address = 2;
+  uint64 Nonce = 3;
+  bytes YParity = 4;
+  bytes R = 5;
+  bytes S = 6;
+}
 
 message TransactionHashData {
   bytes FromAddress = 1;
@@ -76,6 +105,13 @@ message TransactionHashData {
   bytes GasTipCap = 16;
   bytes GasFeeCap = 17;
   repeated AccessTuple AccessList = 18;
+
+  // Thêm cho EIP-4844/EIP-7702 — phải tham gia hash vì đây là dữ liệu tx cam kết
+  // (không phải sidecar). Cùng thứ tự tag như trong Transaction ở trên nhưng
+  // đánh số riêng theo dãy tag còn trống của message này (19-21).
+  repeated bytes BlobVersionedHashes = 19;
+  bytes MaxFeePerBlobGas = 20;
+  repeated SetCodeAuthorization AuthorizationList = 21;
 }
 
 

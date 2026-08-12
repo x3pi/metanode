@@ -22,6 +22,12 @@ message BlockHeader{
   uint64 GlobalExecIndex = 11; // Maps Go block number → Rust commit index (for decoupled block numbering)
   uint64 CommitIndex = 12; // Rust consensus commit index
   bytes LogsBloom = 13;
+
+  // EIP-4844 blob-gas market. Computed deterministically from the parent
+  // header (see consensus/misc/eip4844.CalcExcessBlobGas) — every node must
+  // recompute and compare, not just trust the incoming value.
+  uint64 ExcessBlobGas = 14;
+  uint64 BlobGasUsed = 15;
 }
 
 message Block {
