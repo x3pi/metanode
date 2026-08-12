@@ -456,6 +456,12 @@ func (stm *TrueBlockSTM) execOne(
 	// 2. Initialize MVCC Wrapper
 	mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, mvcc.Version(txIndex))
 	scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, mvcc.Version(txIndex))
+	// EIP-7702: lets scDB.Code() see a delegation designator this same tx just
+	// wrote via processAuthorizationList before the account's codeHash is
+	// flushed to the real global AccountStateDB (see MVCCSmartContractDB.Code's
+	// doc) — needed for the "set delegation then immediately call through it"
+	// pattern in a single transaction.
+	scDB.SetAccountStateDB(mvccDB)
 
 	// 3. Thực thi Transaction theo từng loại (native, account-setting, hoặc EVM)
 	tx := stm.txs[txIndex]
@@ -638,9 +644,33 @@ func (stm *TrueBlockSTM) execOne(
 		vmP.SetAccountStateDB(mvccDB)
 		vmP.SetSmartContractDB(scDB)
 
+		// EIP-7702: apply authorization-list delegation designators before
+		// running the tx's own call, so a SetCode tx whose top-level call
+		// target is the address it just delegated (the "set + immediately
+		// call through it" pattern EIP-7702 sponsored-execution relies on)
+		// sees the new code. Writes go to mvccDB (nonce/codeHash — MVCC
+		// tracked, rolls back with the rest of the tx on abort) and to the
+		// real global SmartContractDB directly (code bytes are
+		// content-addressed by codeHash, so writing them outside the MVCC
+		// layer is always safe/idempotent — see processAuthorizationList's
+		// doc). authGasUsed is folded into gasUsed/gasFee below in both the
+		// native-transfer and smart-contract branches, exactly like any
+		// other execution gas (unlike blob gas it is NOT burned — the leader
+		// reward is re-derived later from receipt.GasUsed(), so it must be
+		// counted there for the leader to actually be paid for it).
+		// Guarded on AuthorizationList being non-empty (rather than always
+		// calling processAuthorizationList, which no-ops on an empty list
+		// anyway) so the overwhelming majority of non-SetCode txs skip
+		// touching chainState.GetConfig() entirely on this hot path.
+		var authGasUsed uint64
+		if len(tx.AuthorizationList()) > 0 {
+			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+		}
+
 		if tx.IsRegularTransaction() {
 			// Native Transfer
-			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), tx.EffectiveGasPrice())
+			totalGasUsed := mt_common.TRANSFER_GAS_COST + authGasUsed
+			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
 
 			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
 			// reward, unlike gasFee above) — see blobFeeOrReject's doc. blobErr
@@ -681,7 +711,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-					mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
+					mt_common.TRANSFER_GAS_COST, totalGasUsed,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
@@ -738,7 +768,10 @@ func (stm *TrueBlockSTM) execOne(
 					receiptStatus := exRs.ReceiptStatus()
 					ret := exRs.Return()
 					exception := exRs.Exception()
-					gasUsed := exRs.GasUsed()
+					// authGasUsed (EIP-7702 authorization-list intrinsic cost, see
+					// above) is folded in here so it's charged and credited to the
+					// leader identically to the VM's own gas usage.
+					gasUsed := exRs.GasUsed() + authGasUsed
 					eventLogs := exRs.EventLogs()
 
 					// [FIX] Deduct Gas Fee from sender's balance

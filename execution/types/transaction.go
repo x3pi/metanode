@@ -47,6 +47,8 @@ type Transaction interface {
 	// EIP-4844 blob-gas market fields.
 	BlobVersionedHashes() [][]byte
 	MaxFeePerBlobGas() *big.Int
+	// EIP-7702 authorization list (type 0x04 SetCode transactions only).
+	AuthorizationList() []*pb.SetCodeAuthorization
 	GetNonce() uint64
 	GetChainID() uint64
 	ClearCacheHash()

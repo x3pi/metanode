@@ -12,6 +12,7 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
@@ -335,7 +336,16 @@ func VerifyTransaction(
 			return transaction.InvalidCallData
 		}
 
-		if tx.IsCallContract() {
+		// EIP-7702: a SetCode tx's own call target may be an address it is
+		// delegating IN THIS SAME TX (the "set delegation, then immediately
+		// call through it" pattern sponsored-execution relies on) — at
+		// admission time that address is still a plain EOA with no code, so
+		// the "must already be a smart contract" check below would wrongly
+		// reject it. processAuthorizationList (pkg/blockchain/tx_processor/
+		// authorization.go) validates the authorization tuples themselves at
+		// execution time; if they turn out invalid the call simply hits a
+		// no-code address and no-ops, same as calling any other empty EOA.
+		if tx.IsCallContract() && tx.GetType() != uint64(e_types.SetCodeTxType) {
 			toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.ToAddress())
 			if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
 				logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())

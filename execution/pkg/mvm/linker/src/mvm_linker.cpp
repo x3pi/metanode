@@ -15,6 +15,7 @@
 #include "state.h"
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <fmt/format_header_only.h>
 #include <fstream>
 #include <iostream>
@@ -566,6 +567,19 @@ ExecuteResult *deploy(
               << " gas_used=" << result.gas_used
               << " output_size=" << result.output.size()
               << " exmsg=" << result.exmsg << std::endl;
+    // EIP-3541: reject deploying code starting with 0xEF, same rule as the
+    // nested CREATE/CREATE2 opcodes (see create()/create2() in
+    // processor.cpp) — without this, a top-level deploy transaction could
+    // forge a 23-byte EIP-7702 delegation designator (0xef0100 || address)
+    // at an address the deployer fully controls, impersonating an
+    // authorization the account owner never signed.
+    if (result.er == mvm::ExitReason::returned && !result.output.empty() &&
+        result.output[0] == 0xEF) {
+      result.er = mvm::ExitReason::threw;
+      result.ex = mvm::Exception::Type::ErrInvalidCode;
+      result.exmsg = "invalid code: must not begin with 0xef (EIP-3541)";
+      result.output.clear();
+    }
     if (result.er == mvm::ExitReason::returned) {
       auto code = result.output;
       gs.add_addresses_newly_deploy(contract_address, code);
