@@ -89,7 +89,13 @@ private:
   using PcType = decltype(pc);
 
 public:
-  uint256_t blob_base_fee;
+  // PHASE-0 FIX: was declared with no initializer, so every read of this
+  // field before this fix returned indeterminate stack garbage instead of a
+  // real value (BLOBBASEFEE opcode). Since garbage differs across nodes /
+  // runs / compiler codegen, that was a live consensus-divergence (fork)
+  // risk. Zero-initialize until the real blob base fee is threaded in from
+  // the block context (see GetBlobBaseFee wiring).
+  uint256_t blob_base_fee{};
 
   using ReturnHandler = function<void(vector<uint8_t>)>;
   using HaltHandler = function<void()>;
@@ -1117,13 +1123,14 @@ private:
     transient_storage[key] = value;
   }
   uint256_t blob_hash(uint64_t index) {
-    uint8_t input[8];
-    std::memcpy(input, &index, sizeof(index));
-
-    uint8_t hash[32];
-    keccak_256(input, sizeof(input), hash);
-
-    return from_big_endian(hash, sizeof(hash));
+    // PHASE-0 FIX: this previously returned keccak256(native-endian bytes of
+    // index) — a value with no relationship to the transaction's actual
+    // blob versioned hashes, and dependent on host endianness. Blob
+    // versioned hashes aren't wired into the VM yet (see GetBlobHash
+    // wiring), so return a well-defined placeholder (0, matching the
+    // EIP-4844 out-of-range behavior) instead of a fake, misleading value.
+    (void)index;
+    return uint256_t{};
   }
 
   void blobHash() {
