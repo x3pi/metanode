@@ -15,7 +15,7 @@ import (
 // GenerateBlockData generates block data
 // CRITICAL FORK-SAFETY: timestampSec should come from Rust consensus (commit_timestamp_ms / 1000)
 // to ensure all nodes produce identical block hashes. Only use 0 for backward compatibility.
-func GenerateBlockData(lastBlockHeader types.BlockHeader, validatorAddress common.Address, txs []types.Transaction, exrs []types.ExecuteSCResult, asRoot, stakeStatesRoot, receiptsRoot, txsRoot common.Hash, currentBlockNumber uint64, epoch uint64, timestampMs uint64, globalExecIndex uint64) (*block.Block, error) {
+func GenerateBlockData(lastBlockHeader types.BlockHeader, validatorAddress common.Address, txs []types.Transaction, exrs []types.ExecuteSCResult, asRoot, stakeStatesRoot, receiptsRoot, txsRoot common.Hash, currentBlockNumber uint64, epoch uint64, timestampMs uint64, globalExecIndex uint64, blobGasUsed uint64) (*block.Block, error) {
 	// CRITICAL FORK-SAFETY: Use consensus timestamp from Rust instead of time.Now()
 	// This ensures all nodes produce identical block hashes
 	if timestampMs == 0 {
@@ -24,6 +24,8 @@ func GenerateBlockData(lastBlockHeader types.BlockHeader, validatorAddress commo
 
 	previousHash := lastBlockHeader.Hash()
 	blockHeader := block.NewBlockHeader(previousHash, currentBlockNumber, asRoot, stakeStatesRoot, receiptsRoot, validatorAddress, timestampMs, txsRoot, epoch, globalExecIndex)
+	blockHeader.SetExcessBlobGas(block.NextExcessBlobGas(lastBlockHeader, timestampMs))
+	blockHeader.SetBlobGasUsed(blobGasUsed)
 	transactionsHash := make([]common.Hash, len(txs))
 	for i, tx := range txs {
 		transactionsHash[i] = tx.Hash()
@@ -35,13 +37,17 @@ func GenerateBlockData(lastBlockHeader types.BlockHeader, validatorAddress commo
 // GenerateBlockDataReadOnly generates read-only block data
 // CRITICAL FORK-SAFETY: timestampSec should come from Rust consensus (commit_timestamp_ms / 1000)
 // to ensure all nodes produce identical block hashes. Only use 0 for backward compatibility.
-func GenerateBlockDataReadOnly(validatorAddress common.Address, txs []types.Transaction, exrs []types.ExecuteSCResult, asRoot, stakeStatesRoot, receiptsRoot, txsRoot common.Hash, currentBlockNumber uint64, epoch uint64, timestampMs uint64, globalExecIndex uint64) (*block.Block, error) {
+func GenerateBlockDataReadOnly(validatorAddress common.Address, txs []types.Transaction, exrs []types.ExecuteSCResult, asRoot, stakeStatesRoot, receiptsRoot, txsRoot common.Hash, currentBlockNumber uint64, epoch uint64, timestampMs uint64, globalExecIndex uint64, blobGasUsed uint64) (*block.Block, error) {
 	// CRITICAL FORK-SAFETY: Use consensus timestamp from Rust instead of time.Now()
 	// This ensures all nodes produce identical block hashes
 	if timestampMs == 0 {
 		panic("FORK-SAFETY PREVENTION: time.Now() fallback is forbidden! Timestamp must be provided by consensus.")
 	}
 	blockHeader := block.NewBlockHeader(common.Hash{}, currentBlockNumber, asRoot, stakeStatesRoot, receiptsRoot, validatorAddress, timestampMs, txsRoot, epoch, globalExecIndex)
+	// Not a committed/authoritative block (no parent available here), so
+	// ExcessBlobGas is left at its zero default — only BlobGasUsed (used purely
+	// for informational/estimation purposes on this path) is set.
+	blockHeader.SetBlobGasUsed(blobGasUsed)
 	transactionsHash := make([]common.Hash, len(txs))
 	for i, tx := range txs {
 		transactionsHash[i] = tx.Hash()

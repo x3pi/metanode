@@ -932,26 +932,41 @@ func (t *Transaction) GasTipCap() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.GasTipCap)
 }
 
+// BlobVersionedHashes returns the EIP-4844 blob versioned hashes this tx commits
+// to. Empty for any non-blob transaction.
+func (t *Transaction) BlobVersionedHashes() [][]byte {
+	return t.proto.BlobVersionedHashes
+}
+
+// MaxFeePerBlobGas returns the EIP-4844 blob gas fee cap (0 for non-blob txs).
+func (t *Transaction) MaxFeePerBlobGas() *big.Int {
+	return big.NewInt(0).SetBytes(t.proto.MaxFeePerBlobGas)
+}
+
 func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
 
+// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
+// EXECUTION gas (never blob gas, which is priced/charged separately — see
+// MaxFeePerBlobGas). Legacy/EIP-2930 carry a real flat MaxGasPrice; EIP-1559
+// and EIP-4844 (and any later fee-cap-based type) leave MaxGasPrice at 0 by
+// design and price via GasFeeCap instead (see FromEthEIP1559Tx/FromEthBlobTx).
+// This is the single place that dispatch lives — MaxFee(), ValidMaxGasPrice(),
+// and every fee-charging call site all go through this so a new tx type only
+// needs to be taught the rule once.
+func (t *Transaction) EffectiveGasPrice() *big.Int {
+	switch t.proto.Type {
+	case 0, 1: // Legacy, EIP-2930
+		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
+	default: // EIP-1559, EIP-4844, and later fee-cap-based types
+		return t.GasFeeCap()
+	}
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
-
-	switch tx.proto.Type {
-	case 0, 1: // Legacy or EIP-2930
-		price := big.NewInt(0).SetUint64(tx.MaxGasPrice())
-		return big.NewInt(0).Mul(maxGas, price)
-
-	case 2, 3: // EIP-1559, EIP-4844 (blob-gas fee is accounted separately, not here)
-		feeCap := tx.GasFeeCap()
-		return big.NewInt(0).Mul(maxGas, feeCap)
-
-	default:
-		fmt.Println("Unknown transaction type.")
-		return big.NewInt(0)
-	}
+	return new(big.Int).Mul(maxGas, tx.EffectiveGasPrice())
 }
 
 func (t *Transaction) MaxTimeUse() uint64 {
@@ -1247,17 +1262,7 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		return true
 	}
 
-	// Legacy/EIP-2930 price the tx via the flat MaxGasPrice field; EIP-1559 (and
-	// later fee-cap-based types) leave MaxGasPrice at 0 by design and price via
-	// GasFeeCap instead (see FromEthEIP1559Tx) — mirrors the switch in MaxFee().
-	var price *big.Int
-	switch t.proto.Type {
-	case 0, 1: // Legacy, EIP-2930
-		price = new(big.Int).SetUint64(t.MaxGasPrice())
-	default: // EIP-1559 and later
-		price = t.GasFeeCap()
-	}
-	return price.Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
+	return t.EffectiveGasPrice().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
 }
 
 func (t *Transaction) ValidAmountSpend(
