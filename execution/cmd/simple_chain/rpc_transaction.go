@@ -12,7 +12,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	eth_params "github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -54,12 +56,43 @@ func newCommittedRPCTransaction(
 		to = &deployed
 	}
 
-	var gasFeeCap, gasTipCap *hexutil.Big
+	var gasFeeCap, gasTipCap, maxFeePerBlobGas *hexutil.Big
 	if fc := tx.GasFeeCap(); fc != nil && fc.Sign() != 0 {
 		gasFeeCap = (*hexutil.Big)(fc)
 	}
 	if tc := tx.GasTipCap(); tc != nil && tc.Sign() != 0 {
 		gasTipCap = (*hexutil.Big)(tc)
+	}
+	if bf := tx.MaxFeePerBlobGas(); bf != nil && bf.Sign() != 0 {
+		maxFeePerBlobGas = (*hexutil.Big)(bf)
+	}
+
+	var accesses *eth_types.AccessList
+	if al := tx.EthAccessList(); len(al) > 0 {
+		accesses = &al
+	}
+
+	var blobVersionedHashes []common.Hash
+	if bh := tx.BlobVersionedHashes(); len(bh) > 0 {
+		blobVersionedHashes = make([]common.Hash, len(bh))
+		for i, h := range bh {
+			blobVersionedHashes[i] = common.BytesToHash(h)
+		}
+	}
+
+	var authList []eth_types.SetCodeAuthorization
+	if al := tx.EthAuthorizationList(); len(al) > 0 {
+		authList = al
+	}
+
+	// yParity mirrors V for the post-EIP-155 tx types (1/2/3/4), where V is
+	// already the bare 0/1 recovery id rather than a chain-ID-offset value —
+	// see extractSignature's doc on why V's own length can't be trusted, but
+	// its VALUE for these types is exactly the parity bit.
+	var yParity *hexutil.Uint64
+	if tx.GetType() != eth_types.LegacyTxType && v != nil {
+		yp := hexutil.Uint64(v.Uint64())
+		yParity = &yp
 	}
 
 	txIndexHex := hexutil.Uint64(txIndex)
@@ -72,7 +105,7 @@ func newCommittedRPCTransaction(
 		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
 		GasFeeCap:           gasFeeCap,
 		GasTipCap:           gasTipCap,
-		MaxFeePerBlobGas:    nil, // TODO(EIP-4844): wired once blob txs are supported
+		MaxFeePerBlobGas:    maxFeePerBlobGas,
 		Hash:                ethHash,
 		Input:               tx.CallData().Input(),
 		Nonce:               hexutil.Uint64(tx.GetNonce()),
@@ -80,13 +113,14 @@ func newCommittedRPCTransaction(
 		TransactionIndex:    &txIndexHex,
 		Value:               (*hexutil.Big)(tx.Amount()),
 		Type:                hexutil.Uint64(tx.GetType()),
-		Accesses:            nil, // TODO(EIP-2930/1559 RPC surface): wire real access list
+		Accesses:            accesses,
 		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())),
-		BlobVersionedHashes: nil, // TODO(EIP-4844): wired once blob txs are supported
+		BlobVersionedHashes: blobVersionedHashes,
+		AuthorizationList:   authList,
 		V:                   (*hexutil.Big)(v),
 		R:                   (*hexutil.Big)(r),
 		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
+		YParity:             yParity,
 	}
 }
 
@@ -108,18 +142,47 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 				return nil, fmt.Errorf("failed to unmarshal transaction from cache: %w", err)
 			}
 			v, r, s := txE.RawSignatureValues()
-			signer := types.NewCancunSigner(api.App.config.ChainId)
+			// PragueSigner accepts every tx type this chain supports (Legacy
+			// through SetCode) — CancunSigner previously used here rejects
+			// SetCodeTxType outright (ErrTxTypeNotSupported), which made any
+			// pending EIP-7702 tx in the mempool cache silently look "not
+			// found" over RPC.
+			signer := types.NewPragueSigner(api.App.config.ChainId)
 
 			from, err := types.Sender(signer, txE)
 			if err != nil {
 				// According to Ethereum JSON-RPC specs, if a transaction is not found, it should return null, not an error.
 				return nil, nil
 			}
+
+			var maxFeePerBlobGas *hexutil.Big
+			if bf := txE.BlobGasFeeCap(); bf != nil && bf.Sign() != 0 {
+				maxFeePerBlobGas = (*hexutil.Big)(bf)
+			}
+			var accesses *eth_types.AccessList
+			if al := txE.AccessList(); len(al) > 0 {
+				accesses = &al
+			}
+			var blobVersionedHashes []common.Hash
+			if bh := txE.BlobHashes(); len(bh) > 0 {
+				blobVersionedHashes = bh
+			}
+			var authList []eth_types.SetCodeAuthorization
+			if al := txE.SetCodeAuthorizations(); len(al) > 0 {
+				authList = al
+			}
+			var yParity *hexutil.Uint64
+			if txE.Type() != eth_types.LegacyTxType && v != nil {
+				yp := hexutil.Uint64(v.Uint64())
+				yParity = &yp
+			}
+
 			return &RPCTransaction{
 				Gas:                 hexutil.Uint64(txE.Gas()),
 				GasPrice:            (*hexutil.Big)(txE.GasPrice()),
 				GasFeeCap:           (*hexutil.Big)(txE.GasFeeCap()),
 				GasTipCap:           (*hexutil.Big)(txE.GasTipCap()),
+				MaxFeePerBlobGas:    maxFeePerBlobGas,
 				Hash:                txE.Hash(),
 				Input:               txE.Data(),
 				Nonce:               hexutil.Uint64(txE.Nonce()),
@@ -129,12 +192,13 @@ func (api *MetaAPI) GetTransactionByHash(ctx context.Context, hashEth common.Has
 				V:                   (*hexutil.Big)(v),
 				R:                   (*hexutil.Big)(r),
 				S:                   (*hexutil.Big)(s),
-				YParity:             nil,
+				YParity:             yParity,
 				BlockHash:           nil,
 				BlockNumber:         nil,
-				Accesses:            nil,
+				Accesses:            accesses,
 				ChainID:             (*hexutil.Big)(txE.ChainId()),
-				BlobVersionedHashes: nil,
+				BlobVersionedHashes: blobVersionedHashes,
+				AuthorizationList:   authList,
 				From:                from,
 			}, nil
 		}
@@ -762,6 +826,13 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		"effectiveGasPrice": hexutil.EncodeUint64(rcp.GasFee()),
 		"from":              rcp.FromAddress(),
 		"cumulativeGasUsed": hexutil.EncodeUint64(mt_common.BLOCK_GAS_LIMIT),
+	}
+	// EIP-4844 receipt fields, present only for blob transactions (matches
+	// go-ethereum's own RPCReceipt: omitted entirely for non-blob types).
+	if len(tx.BlobVersionedHashes) > 0 {
+		blobGasUsed := uint64(len(tx.BlobVersionedHashes)) * eth_params.BlobTxBlobGasPerBlob
+		receiptMap["blobGasUsed"] = hexutil.EncodeUint64(blobGasUsed)
+		receiptMap["blobGasPrice"] = hexutil.EncodeBig(block.BlobBaseFeeForHeader(blockData.Header()))
 	}
 	// Thêm revertReason nếu tx bị lỗi (status != RETURNED)
 	if rcp.Return() != nil && len(rcp.Return()) > 0 && rcp.Status().Number() != 0 {

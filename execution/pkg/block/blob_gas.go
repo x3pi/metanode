@@ -39,3 +39,13 @@ func BlobBaseFeeAt(parentHeader types.BlockHeader, timestampMs uint64) *big.Int 
 	excess := NextExcessBlobGas(parentHeader, timestampMs)
 	return eip4844.CalcBlobFee(params.AllDevChainProtocolChanges, &e_types.Header{ExcessBlobGas: &excess})
 }
+
+// BlobBaseFeeForHeader returns the EIP-4844 blob base fee that actually
+// applied to transactions mined IN header's own block — as opposed to
+// BlobBaseFeeAt, which computes the fee for a block being built ON TOP OF a
+// parent. Used for reporting eth_getTransactionReceipt's blobGasPrice for an
+// already-mined blob tx.
+func BlobBaseFeeForHeader(header types.BlockHeader) *big.Int {
+	excess := header.ExcessBlobGas()
+	return eip4844.CalcBlobFee(params.AllDevChainProtocolChanges, &e_types.Header{ExcessBlobGas: &excess})
+}
