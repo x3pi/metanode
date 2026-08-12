@@ -298,6 +298,39 @@ std::vector<uint8_t> MyGlobalState::get_cross_chain_source_id() {
   return result;
 }
 
+uint256_t MyGlobalState::get_blob_hash(uint64_t index) {
+  unsigned char *currentMvmId = blockContext.mvmId;
+  if (currentMvmId == nullptr) {
+    return uint256_t{};
+  }
+  Value_return vr = GetBlobHash(currentMvmId, index);
+  // success=false covers both "no blob tx context set" and "index out of
+  // range" — EIP-4844 says BLOBHASH returns 0 for an out-of-range index, so
+  // both cases collapse to the same zero result here.
+  if (!vr.success || vr.data_p == nullptr) {
+    if (vr.data_p != nullptr) free(vr.data_p);
+    return uint256_t{};
+  }
+  uint256_t hash = mvm::bytes_to_uint256(vr.data_p);
+  free(vr.data_p);
+  return hash;
+}
+
+uint256_t MyGlobalState::get_blob_base_fee() {
+  unsigned char *currentMvmId = blockContext.mvmId;
+  if (currentMvmId == nullptr) {
+    return uint256_t{};
+  }
+  Value_return vr = GetBlobBaseFee(currentMvmId);
+  if (!vr.success || vr.data_p == nullptr) {
+    if (vr.data_p != nullptr) free(vr.data_p);
+    return uint256_t{};
+  }
+  uint256_t fee = mvm::bytes_to_uint256(vr.data_p);
+  free(vr.data_p);
+  return fee;
+}
+
 void MyGlobalState::insert(const StateEntry &p) {
   const auto ib = accounts.insert(std::make_pair(p.first.get_address(), p));
 

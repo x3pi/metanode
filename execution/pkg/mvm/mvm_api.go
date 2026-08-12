@@ -105,6 +105,14 @@ type MVMApi struct {
 	crossChainSender   common.Address // pkt.Sender (user gốc từ chain nguồn)
 	crossChainSourceId uint64         // pkt.SourceNationId
 	crossChainActive   bool           // có đang trong cross-chain call không
+
+	// EIP-4844 context (BLOBHASH / BLOBBASEFEE opcodes). Set once per tx
+	// execution alongside SetRelatedAddresses — see VmProcessor.ExecuteTransactionWithMvmId.
+	// blobVersionedHashes is empty for any non-blob tx; blobBaseFee is always
+	// set from the current block regardless of tx type, since BLOBBASEFEE is
+	// valid to call in any Cancun+ context.
+	blobVersionedHashes [][]byte
+	blobBaseFee         *uint256.Int
 }
 
 func CallReplayFullDbLogs(logs map[string][]byte) int {
@@ -454,6 +462,17 @@ func (a *MVMApi) SetRelatedAddresses(addresses []common.Address) {
 		a.currentRelatedAddresses.Store(v, struct{}{})
 	}
 }
+
+// SetBlobContext sets the EIP-4844 context for the BLOBHASH/BLOBBASEFEE
+// opcodes, consumed by the GetBlobHash/GetBlobBaseFee cgo exports below.
+// blobVersionedHashes may be nil for a non-blob tx (BLOBHASH then always
+// resolves to 0, matching EIP-4844's out-of-range rule). Called once per tx
+// execution alongside SetRelatedAddresses.
+func (a *MVMApi) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int) {
+	a.blobVersionedHashes = blobVersionedHashes
+	a.blobBaseFee = blobBaseFee
+}
+
 func (a *MVMApi) GetCurrentRelatedAddresses() []common.Address {
 	var addresses []common.Address
 	a.currentRelatedAddresses.Range(func(key, value interface{}) bool {
@@ -1320,6 +1339,49 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ✅ Returning sourceChainId: %d\n", mvmApi.crossChainSourceId)
 
 	data_p := (*C.uchar)(C.CBytes(sourceIdBytes[:]))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(32),
+		success:   true,
+	}
+}
+
+//export GetBlobHash
+func GetBlobHash(mvmId *C.uchar, index C.ulonglong) C.struct_Value_return {
+	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+	fmvmId := common.BytesToAddress(bmvmId)
+	mvmApi := GetMVMApi(fmvmId)
+
+	if mvmApi == nil {
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	i := uint64(index)
+	if i >= uint64(len(mvmApi.blobVersionedHashes)) {
+		// Out of range: EIP-4844 says BLOBHASH must resolve to 0, not error —
+		// the C++ side (MyGlobalState::get_blob_hash) treats success=false the
+		// same as "return 0", so this is correct either way.
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	hash := mvmApi.blobVersionedHashes[i]
+	data_p := (*C.uchar)(C.CBytes(hash))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(len(hash)),
+		success:   true,
+	}
+}
+
+//export GetBlobBaseFee
+func GetBlobBaseFee(mvmId *C.uchar) C.struct_Value_return {
+	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+	fmvmId := common.BytesToAddress(bmvmId)
+	mvmApi := GetMVMApi(fmvmId)
+
+	if mvmApi == nil || mvmApi.blobBaseFee == nil {
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	feeBytes := mvmApi.blobBaseFee.Bytes32()
+	data_p := (*C.uchar)(C.CBytes(feeBytes[:]))
 	return C.struct_Value_return{
 		data_p:    data_p,
 		data_size: C.int(32),

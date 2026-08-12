@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -56,6 +58,20 @@ func (vmP *VmProcessor) getLeaderAddress(lastBlockHeader types.BlockHeader) comm
 		return vmP.leaderAddr
 	}
 	return lastBlockHeader.LeaderAddress()
+}
+
+// currentBlobBaseFee computes the EIP-4844 blob base fee for the block
+// currently being executed, for the BLOBBASEFEE opcode (see MVMApi.SetBlobContext).
+// Uses the same block.BlobBaseFeeAt as the actual blob-fee charging in
+// tx_processor, so BLOBBASEFEE always agrees with what a blob tx is really
+// charged.
+func (vmP *VmProcessor) currentBlobBaseFee() *uint256.Int {
+	parentHeader := vmP.chainState.GetcurrentBlockHeader()
+	if parentHeader == nil {
+		return uint256.NewInt(0)
+	}
+	fee := block.BlobBaseFeeAt(*parentHeader, vmP.blockTime*1000)
+	return uint256.MustFromBig(fee)
 }
 
 // ExecuteTransactionWithMvmId thực thi giao dịch, sử dụng cờ tracingEnabled nội bộ.
@@ -114,6 +130,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
+		mvmROnly.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
 		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, mvmROnly)
 	} else {
 		if span != nil {
@@ -124,6 +141,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		}
 		mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
+		mvmE.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
 		if isCache {
 			defer mvm.UnprotectMVMApi(vmP.mvmId)
 		}
