@@ -139,6 +139,29 @@ func TestBlockHeader_ProtoRoundtrip(t *testing.T) {
 	assert.Equal(t, original.GlobalExecIndex(), restored.GlobalExecIndex())
 }
 
+// TestBlockHeader_ExcessBlobGas_AffectsHashAndRoundtrips guards the EIP-4844
+// blob-gas market fields: they must actually be consensus-binding (change the
+// hash) and must round-trip through Proto()/FromProto(), or a divergent
+// excessBlobGas between nodes would go undetected.
+func TestBlockHeader_ExcessBlobGas_AffectsHashAndRoundtrips(t *testing.T) {
+	h1 := makeTestHeader()
+	baseHash := h1.Hash()
+
+	h2 := makeTestHeader()
+	h2.SetExcessBlobGas(12345)
+	assert.NotEqual(t, baseHash, h2.Hash(), "ExcessBlobGas must affect Hash()")
+
+	h3 := makeTestHeader()
+	h3.SetBlobGasUsed(131072)
+	assert.NotEqual(t, baseHash, h3.Hash(), "BlobGasUsed must affect Hash()")
+
+	pbHeader := h2.Proto()
+	restored := &BlockHeader{}
+	restored.FromProto(pbHeader)
+	assert.Equal(t, uint64(12345), restored.ExcessBlobGas())
+	assert.Equal(t, h2.Hash(), restored.Hash())
+}
+
 func TestBlockHeader_String(t *testing.T) {
 	h := makeTestHeader()
 	s := h.String()

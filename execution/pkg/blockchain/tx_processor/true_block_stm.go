@@ -193,7 +193,7 @@ func (stm *TrueBlockSTM) Process(
 		if stm.receipts[i] != nil {
 			gasUsed := stm.receipts[i].GasUsed()
 			if gasUsed > 0 {
-				gasFee := new(big.Int).SetUint64(gasUsed * stm.txs[i].MaxGasPrice())
+				gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), stm.txs[i].EffectiveGasPrice())
 				totalGasFee.Add(totalGasFee, gasFee)
 			}
 		}
@@ -640,7 +640,7 @@ func (stm *TrueBlockSTM) execOne(
 
 		if tx.IsRegularTransaction() {
 			// Native Transfer
-			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), new(big.Int).SetUint64(tx.MaxGasPrice()))
+			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), tx.EffectiveGasPrice())
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 
 			errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
@@ -726,7 +726,7 @@ func (stm *TrueBlockSTM) execOne(
 					eventLogs := exRs.EventLogs()
 
 					// [FIX] Deduct Gas Fee from sender's balance
-					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), new(big.Int).SetUint64(tx.MaxGasPrice()))
+					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
 					canPayGas := true
 					if gasFee.Cmp(big.NewInt(0)) > 0 {
 						errSub := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)

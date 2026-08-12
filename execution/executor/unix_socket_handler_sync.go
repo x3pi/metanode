@@ -418,6 +418,30 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 						Error:           fmt.Sprintf("parent-hash mismatch at block %d: parentHash=%s but local block %d hash=%s", blockNum, actualParentHash.Hex(), prevBlockNum, expectedParentHash.Hex()),
 					}, nil
 				}
+
+				// EIP-4844 BLOB-GAS-MARKET CONSISTENCY CHECK: a peer-supplied block whose
+				// ExcessBlobGas doesn't match what we independently derive from our own
+				// parent header is just as much a fork signal as a parent-hash mismatch —
+				// every node must compute this field identically. Same remediation as
+				// above: roll back and force a resync of the mismatched block.
+				if parentBlock := bc.GetBlockByNumber(prevBlockNum); parentBlock != nil {
+					expectedExcessBlobGas := block.NextExcessBlobGas(parentBlock.Header(), header.TimeStamp())
+					if header.ExcessBlobGas() != expectedExcessBlobGas {
+						logger.Error("🚨 [SYNC-FORK-GUARD] ExcessBlobGas mismatch at block #%d! "+
+							"Synced block has ExcessBlobGas=%d, but expected %d from parent. "+
+							"Rolling back block counters to %d to force resync of the mismatched block.",
+							blockNum, header.ExcessBlobGas(), expectedExcessBlobGas, prevBlockNum-1)
+
+						storage.ResetAllBlockCounters(prevBlockNum - 1)
+						storage.ForceSetLastGlobalExecIndex(prevBlockNum - 1)
+
+						return &pb.SyncBlocksResponse{
+							SyncedCount:     executedCount,
+							LastSyncedBlock: lastExecutedBlock,
+							Error:           fmt.Sprintf("excessBlobGas mismatch at block %d: got=%d want=%d", blockNum, header.ExcessBlobGas(), expectedExcessBlobGas),
+						}, nil
+					}
+				}
 			}
 		}
 

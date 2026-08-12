@@ -189,7 +189,11 @@ func processNativeTransfersFastPath(
 					if isFree {
 						gasLimit = uint64(mt_common.MAX_GASS_FEE)
 					}
-					gasFee := new(big.Int).SetUint64(gasLimit * tx.MaxGasPrice())
+					// EffectiveGasPrice dispatches by tx type: flat MaxGasPrice for
+					// Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/later — tx.MaxGasPrice()
+					// alone is 0 by design for the latter (see EffectiveGasPrice's doc),
+					// which previously made this fast path charge zero execution fee for them.
+					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), tx.EffectiveGasPrice())
 
 					// Route to lock-free fast path if NO parallel addresses are involved.
 					// UnionFind guarantees disjoint addresses across groups, so lock-free is 100% safe

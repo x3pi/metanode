@@ -38,6 +38,7 @@ func TestGenerateBlockData_BasicCreation(t *testing.T) {
 		2,    // epoch
 		5000, // deterministic timestamp
 		0,    // globalExecIndex
+		0,    // blobGasUsed
 	)
 
 	require.NoError(t, err)
@@ -75,6 +76,7 @@ func TestGenerateBlockData_ZeroTimestampPanic(t *testing.T) {
 			1, 0,
 			0, // zero -> must panic
 			0, // globalExecIndex
+			0, // blobGasUsed
 		)
 	}, "zero timestamp must panic to prevent fork-safety issues")
 }
@@ -93,7 +95,7 @@ func TestGenerateBlockData_NoTransactions(t *testing.T) {
 		lastHeader, e_common.Address{},
 		nil, nil, // no transactions, no SC results
 		e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
-		1, 0, 1000, 0,
+		1, 0, 1000, 0, 0,
 	)
 
 	require.NoError(t, err)
@@ -115,7 +117,7 @@ func TestGenerateBlockDataReadOnly(t *testing.T) {
 		leaderAddr,
 		[]types.Transaction{tx1}, nil,
 		e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
-		42, 1, 9999, 0,
+		42, 1, 9999, 0, 0,
 	)
 
 	require.NoError(t, err)
@@ -141,6 +143,7 @@ func TestGenerateBlockDataReadOnly_ZeroTimestampPanic(t *testing.T) {
 			1, 0,
 			0, // zero -> must panic
 			0, // globalExecIndex
+			0, // blobGasUsed
 		)
 	}, "zero timestamp must panic to prevent fork-safety issues")
 }
@@ -167,7 +170,7 @@ func TestGenerateBlockData_MultipleTransactions(t *testing.T) {
 		lastHeader, e_common.Address{},
 		txs, nil,
 		e_common.Hash{}, e_common.Hash{}, e_common.Hash{}, e_common.Hash{},
-		1, 0, 1000, 0,
+		1, 0, 1000, 0, 0,
 	)
 
 	require.NoError(t, err)

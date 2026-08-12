@@ -377,6 +377,34 @@ func TestTransaction_MaxFee(t *testing.T) {
 	assert.Equal(t, big.NewInt(210000), maxFee)
 }
 
+// TestTransaction_EffectiveGasPrice_PerType guards the fix for a real bug: fee
+// charging (native_fast_path.go, true_block_stm.go) and MaxFee()/
+// ValidMaxGasPrice() must all price EIP-1559/EIP-4844 txs via GasFeeCap, not
+// the flat MaxGasPrice field — which FromEthEIP1559Tx/FromEthBlobTx deliberately
+// leave at 0. Before EffectiveGasPrice() existed, three separate call sites in
+// tx_processor charged literally zero execution gas fee for these tx types.
+func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		txType      uint64
+		maxGasPrice uint64
+		gasFeeCap   []byte
+		want        *big.Int
+	}{
+		{"legacy uses flat MaxGasPrice", 0, 42, nil, big.NewInt(42)},
+		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, big.NewInt(42)},
+		{"eip1559 uses GasFeeCap, not MaxGasPrice", 2, 0, big.NewInt(999).Bytes(), big.NewInt(999)},
+		{"eip4844 uses GasFeeCap, not MaxGasPrice", 3, 0, big.NewInt(777).Bytes(), big.NewInt(777)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tx := &Transaction{proto: &pb.Transaction{
+				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap,
+			}}
+			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+		})
+	}
+}
+
 // ──────────────────────────────────────────────
 // String
 // ──────────────────────────────────────────────

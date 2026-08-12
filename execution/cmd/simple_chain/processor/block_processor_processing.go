@@ -180,12 +180,14 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 			lastConfirmedBlock.Header(), blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
 			accountRoot, stakeRootForBlock, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampMs, globalExecIndex,
+			processResults.BlobGasUsed,
 		)
 	} else {
 		bl, err = GenerateBlockDataReadOnly(
 			blockLeaderAddress,
 			processResults.Transactions, processResults.ExecuteSCResults,
 			common.Hash{}, common.Hash{}, receiptsRoot, txsRoot, currentBlockNumber, epoch, timestampMs, globalExecIndex,
+			processResults.BlobGasUsed,
 		)
 	}
 	if err != nil {
@@ -662,6 +664,24 @@ func (bp *BlockProcessor) verifyDraftBlock(bl *block.Block, currentBlockNumber u
 		logger.Error("🚨 [REVERT-GATE] Block #%d has StakeStatesRoot=0x0 — stake trie corruption! (GEI=%d)",
 			currentBlockNumber, globalExecIndex)
 		return false
+	}
+
+	// CHECK 3: ExcessBlobGas must match an independent recomputation from the
+	// parent header. Unlike the trie roots above, this isn't NOMT-backed, so a
+	// mismatch here means the value was corrupted/lost in-memory between
+	// GenerateBlockData setting it and this check (e.g. a race), not trie
+	// corruption — but committing a wrong excessBlobGas is just as much a fork
+	// risk (every node must derive the identical value), so it gets the same
+	// "discard and let Rust retry" treatment.
+	if currentBlockNumber > 1 {
+		if parent := bp.GetLastBlock(); parent != nil {
+			expected := block.NextExcessBlobGas(parent.Header(), bl.Header().TimeStamp())
+			if bl.Header().ExcessBlobGas() != expected {
+				logger.Error("🚨 [REVERT-GATE] Block #%d has ExcessBlobGas=%d, expected %d from parent — blob-gas market desync! (GEI=%d)",
+					currentBlockNumber, bl.Header().ExcessBlobGas(), expected, globalExecIndex)
+				return false
+			}
+		}
 	}
 
 	return true

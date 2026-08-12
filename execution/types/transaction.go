@@ -41,6 +41,12 @@ type Transaction interface {
 	MaxFee() *big.Int
 	GasTipCap() *big.Int
 	GasFeeCap() *big.Int
+	// EffectiveGasPrice is the per-type-dispatched execution gas price: flat
+	// MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/later.
+	EffectiveGasPrice() *big.Int
+	// EIP-4844 blob-gas market fields.
+	BlobVersionedHashes() [][]byte
+	MaxFeePerBlobGas() *big.Int
 	GetNonce() uint64
 	GetChainID() uint64
 	ClearCacheHash()
