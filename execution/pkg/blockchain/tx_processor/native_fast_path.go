@@ -239,7 +239,7 @@ func processNativeTransfersFastPath(
 					rcp := receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+						tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 						[]types.EventLog{}, 0, common.Hash{}, 0,
 					)
 

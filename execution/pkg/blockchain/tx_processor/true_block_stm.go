@@ -544,7 +544,7 @@ func (stm *TrueBlockSTM) execOne(
 			rcp = receipt.NewReceipt(
 				tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 				pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-				mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+				tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 			)
 		} else {
 			selector := dataInput[:4]
@@ -557,14 +557,14 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else if fromAccount != nil && len(fromAccount.PublicKeyBls()) != 0 {
 					logger.Warn("PublicKeyBls already exists for %s, skipping tx %s", fromAddr.Hex(), tx.Hash().Hex())
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("PublicKeyBls already exists"), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else {
 					if setErr := fromAccount.SetPublicKeyBls(plk); setErr != nil {
@@ -572,7 +572,7 @@ func (stm *TrueBlockSTM) execOne(
 						rcp = receipt.NewReceipt(
 							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 							pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(setErr.Error()), pb.EXCEPTION_NONE,
-							mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+							tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 						)
 					} else {
 						mvccDB.PlusOneNonce(fromAddr)
@@ -587,7 +587,7 @@ func (stm *TrueBlockSTM) execOne(
 						rcp = receipt.NewReceipt(
 							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 							pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-							mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+							tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 							[]types.EventLog{}, 0, common.Hash{}, 0,
 						)
 					}
@@ -599,7 +599,7 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else {
 					fromAccount.SetAccountType(acType)
@@ -612,7 +612,7 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+						tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 						[]types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				}
@@ -621,7 +621,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("unknown account setting or invalid nonce"), pb.EXCEPTION_NONE,
-					mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+					tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
 		}
@@ -701,7 +701,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
-					mt_common.TRANSFER_GAS_COST, 0,
+					tx.EffectiveGasPrice().Uint64(), 0,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
@@ -711,7 +711,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-					mt_common.TRANSFER_GAS_COST, totalGasUsed,
+					tx.EffectiveGasPrice().Uint64(), totalGasUsed,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
@@ -752,13 +752,13 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-					mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+					tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					exRs.ReceiptStatus(), nil, exRs.Exception(),
-					mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+					tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}

@@ -209,7 +209,7 @@ func (v *TxVirtualExecutor) executeAndRespondReadTx(req readTxRequest) {
 		exRs.ReceiptStatus(),
 		exRs.Return(),
 		exRs.Exception(),
-		mt_common.MINIMUM_BASE_FEE,
+		tx.EffectiveGasPrice().Uint64(),
 		gasUsed,
 		exRs.EventLogs(),
 		uint64(0),

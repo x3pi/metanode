@@ -404,7 +404,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		exRsE.ReceiptStatus(),
 		exRsE.Return(),
 		exRsE.Exception(),
-		mt_common.MINIMUM_BASE_FEE,
+		executeTransaction.EffectiveGasPrice().Uint64(),
 		exRsE.GasUsed(),
 		exRsE.EventLogs(),
 		uint64(0),

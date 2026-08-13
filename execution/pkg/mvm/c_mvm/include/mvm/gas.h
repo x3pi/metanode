@@ -14,6 +14,14 @@ namespace mvm
         private:
             uint64_t max_gas;
             uint64_t gas_used;
+            // EIP-3529 gas refund counter (currently only fed by the
+            // SSTORE-clear refund — see _Processor::compute_sstore_refund_delta
+            // in processor.cpp). Signed so a call-frame journal entry can
+            // subtract back exactly what it added if that frame reverts;
+            // clamped at 0 after every update as a defensive floor, since a
+            // well-formed sequence of add/revoke deltas should never drive it
+            // negative on its own.
+            int64_t refund = 0;
         public:
             GasTracker(uint64_t max_gas) : max_gas(max_gas) {
                 gas_used = 0;
@@ -29,6 +37,15 @@ namespace mvm
 
             inline uint64_t get_gas_used() {
                 return gas_used;
+            }
+
+            inline void add_refund(int64_t delta) {
+                refund += delta;
+                if (refund < 0) refund = 0;
+            }
+
+            inline int64_t get_refund() const {
+                return refund;
             }
     };
 
