@@ -143,6 +143,52 @@ public:
 };
 
 /**
+ * Call-frame state journal.
+ *
+ * Every state mutation (storage, balance, code deploy, transient storage,
+ * logs — see each call site below) records an "undo" closure here BEFORE it
+ * mutates anything. mark() returns a checkpoint (just the current entry
+ * count); revert_to(m) runs and discards every undo closure recorded since
+ * that checkpoint, in reverse (LIFO) order, restoring exactly the state that
+ * existed at the checkpoint — regardless of how many opcodes or how deeply
+ * nested the reverted call frame's own sub-calls were, since a revert_to
+ * simply pops back to an index into one shared, flat, transaction-scoped
+ * stack.
+ *
+ * This fixes a real EVM-atomicity violation: previously, when a nested
+ * CALL/CALLCODE/DELEGATECALL/STATICCALL/CREATE/CREATE2 reverted (or threw
+ * any other exception — out of gas, invalid jump, etc.), the caller caught
+ * it and kept running, but any storage/balance/code/log/transient-storage
+ * changes the reverted callee (or its own nested calls) had already made
+ * were never undone.
+ *
+ * Deliberately NOT journaled: nonce increments (CREATE's creator-nonce bump
+ * survives a failed constructor on real Ethereum — it happens once, as an
+ * effect of the CALLER's own frame, not as part of the reverted sub-call —
+ * so leaving it unjournaled is the CORRECT behavior, not an oversight), gas
+ * consumption (never refunded on revert by design — gas_tracker is a single
+ * counter for the whole transaction and already behaves correctly without
+ * any change here), and the read-only address/storage-read "warm" tracking
+ * (EIP-2929 warmth persists for the rest of the transaction even if the
+ * call that first touched an address/slot reverts — matches real Ethereum).
+ */
+class StateJournal {
+  vector<function<void()>> entries;
+
+public:
+  size_t mark() const { return entries.size(); }
+
+  void record(function<void()> undo) { entries.push_back(move(undo)); }
+
+  void revert_to(size_t m) {
+    while (entries.size() > m) {
+      entries.back()();
+      entries.pop_back();
+    }
+  }
+};
+
+/**
  * implementation of the VM
  */
 class _Processor {
@@ -194,6 +240,11 @@ public:
     };
     auto hh = [&result]() { result.er = ExitReason::halted; };
     auto eh = [&](const Exception &ex_) {
+      // Defense in depth: the whole top-level transaction/call reverted, so
+      // every state mutation it made (at any nesting depth) must be undone.
+      // In practice Go already ignores the exported diff maps for a failed
+      // tx, but this keeps them actually empty rather than relying on that.
+      journal.revert_to(0);
       result.er = ExitReason::threw;
       result.ex = ex_.type;
       if (result.ex == ET::ErrExecutionReverted) {
@@ -281,14 +332,12 @@ private:
   // storage. EIP-1153 requires transient storage to be per-address, exactly
   // like persistent storage. Now keyed by (address, slot).
   //
-  // NOT fixed here: neither this map nor persistent storage (see sstore(),
-  // which writes straight through with no undo) are rolled back when a
-  // nested CALL reverts (see the `he` handler in the CALL/CALLCODE/
-  // DELEGATECALL/STATICCALL dispatch, which already supports "callee
-  // reverted, caller keeps running" as a real path) — that would need a
-  // call-frame journal for ALL state mutation, not just transient storage,
-  // and is a separate, much larger pre-existing gap.
+  // Rolled back on a reverted nested call via `journal` below — see tLoad/
+  // tStore and StateJournal's doc comment.
   std::unordered_map<Address, std::unordered_map<uint256_t, uint256_t>> transient_storage;
+
+  // See StateJournal's doc comment above this class.
+  StateJournal journal;
 
   void push_context(const Address &caller, AccountState as,
                     vector<uint8_t> &&input, Program &&prog,
@@ -309,6 +358,34 @@ private:
 
   uint16_t get_call_depth() const {
     return static_cast<uint16_t>(ctxts.size());
+  }
+
+  // Transfers `amount` from fromAcc to toAcc (mirroring the existing
+  // Account::pay_to + gs.add_addresses_*_balance_change pattern used at
+  // every balance-mutating call site — CALL's value transfer, CREATE/
+  // CREATE2's endowment, SELFDESTRUCT), and records a journal entry that
+  // restores both accounts' balances (and the corresponding diff-tracker
+  // entries) to their exact pre-transfer values if the enclosing call frame
+  // is later reverted. Absolute snapshot/restore rather than "transfer back
+  // the same amount" so it composes correctly under LIFO revert_to() no
+  // matter what other operations touch these same accounts in between.
+  void journaled_pay_to(const Address &fromAddr, const Address &toAddr,
+                        Account &fromAcc, Account &toAcc,
+                        const uint256_t &amount) {
+    if (amount == 0)
+      return;
+    uint256_t oldFromBalance = fromAcc.get_balance();
+    uint256_t oldToBalance = toAcc.get_balance();
+    fromAcc.pay_to(toAcc, amount);
+    gs.add_addresses_sub_balance_change(fromAddr, amount);
+    gs.add_addresses_add_balance_change(toAddr, amount);
+    journal.record([this, fromAddr, toAddr, oldFromBalance, oldToBalance,
+                    amount]() {
+      gs.get(fromAddr).acc.set_balance(oldFromBalance);
+      gs.get(toAddr).acc.set_balance(oldToBalance);
+      gs.undo_sub_balance_change(fromAddr, amount);
+      gs.undo_add_balance_change(toAddr, amount);
+    });
   }
 
   Opcode get_op() const {
@@ -1134,7 +1211,18 @@ private:
   void tStore() {
     const auto key = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-    transient_storage[ctxt->acc.get_address()][key] = value;
+    const Address addr = ctxt->acc.get_address();
+    auto &addrMap = transient_storage[addr];
+    const bool hadEntry = addrMap.find(key) != addrMap.end();
+    const uint256_t oldValue = hadEntry ? addrMap[key] : 0;
+    addrMap[key] = value;
+    journal.record([this, addr, key, hadEntry, oldValue]() {
+      auto &m = transient_storage[addr];
+      if (hadEntry)
+        m[key] = oldValue;
+      else
+        m.erase(key);
+    });
   }
   uint256_t blob_hash(uint64_t index) {
     // Sourced from Go's per-mvmId blob context (MVMApi.SetBlobContext), not a
@@ -1213,11 +1301,33 @@ private:
     }
     const auto k = ctxt->s.pop();
     const auto v = ctxt->s.pop();
-    gs.add_addresses_storage_change(ctxt->acc.get_address(), k, v);
+    const Address addr = ctxt->acc.get_address();
+
+    const bool hadDiffEntry = gs.has_storage_change(addr, k);
+    const uint256_t oldDiffValue =
+        hadDiffEntry ? gs.get_storage_change_value(addr, k) : 0;
+    const bool hadCacheEntry = ctxt->st.has_cached(k);
+    const uint256_t oldCacheValue =
+        hadCacheEntry ? ctxt->st.get_cached(k) : 0;
+
+    gs.add_addresses_storage_change(addr, k, v);
     if (!v)
       ctxt->st.remove(k);
     else
       ctxt->st.store(k, v, &gas_tracker);
+
+    journal.record([this, addr, k, hadDiffEntry, oldDiffValue, hadCacheEntry,
+                    oldCacheValue]() {
+      if (hadDiffEntry)
+        gs.add_addresses_storage_change(addr, k, oldDiffValue);
+      else
+        gs.erase_storage_change(addr, k);
+      Storage &st = gs.get(addr).st;
+      if (hadCacheEntry)
+        st.set_cached_raw(k, oldCacheValue);
+      else
+        st.erase_cached(k);
+    });
   }
 
   void codecopy() { copy_mem(ctxt->mem, ctxt->prog.code, Opcode::STOP); }
@@ -1324,9 +1434,11 @@ private:
     for (int i = 0; i < n; i++)
       topics[i] = ctxt->s.pop();
 
+    size_t logMark = log_handler.checkpoint();
     log_handler.handle(
         {ctxt->acc.get_address(), copy_from_mem(offset, size), topics});
     gas_tracker.add_gas_used(getLogGasCost(n, size));
+    journal.record([this, logMark]() { log_handler.rollback(logMark); });
   }
 
   void blockhash() {
@@ -1396,9 +1508,8 @@ private:
 
     auto recipient = gs.get(pop_addr(ctxt->s));
     auto amount = ctxt->acc.get_balance();
-    ctxt->acc.pay_to(recipient.acc, amount);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), amount);
-    gs.add_addresses_add_balance_change(recipient.acc.get_address(), amount);
+    journaled_pay_to(ctxt->acc.get_address(), recipient.acc.get_address(),
+                     ctxt->acc, recipient.acc, amount);
 
     result.er = ExitReason::returned;
 
@@ -1418,14 +1529,20 @@ private:
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
 
+    // Nonce increment deliberately NOT journaled: on real Ethereum the
+    // creator's nonce bump survives even if the constructor below reverts —
+    // it's an effect of the CALLER's own frame, not part of the reverted
+    // sub-call. See StateJournal's doc comment.
     ctxt->acc.increment_nonce();
     gs.set_addresses_nonce_change(ctxt->acc.get_address(), nonce + 1);
 
     decltype(auto) newAcc = gs.create(newAddress, contractValue, initCode, 0);
 
-    ctxt->acc.pay_to(newAcc.acc, contractValue);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), contractValue);
-    gs.add_addresses_add_balance_change(newAddress, contractValue);
+    // Mark AFTER the nonce increment (kept regardless) but BEFORE the
+    // endowment transfer (undone if this CREATE's constructor reverts).
+    size_t journalMark = journal.mark();
+    journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
+                     newAcc.acc, contractValue);
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
@@ -1440,13 +1557,32 @@ private:
         return;
       }
       Address newAccAddr = newAcc.acc.get_address();
+      Code oldCode = newAcc.acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(newAccAddr) : Code{};
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
       gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
+      // Recorded even on this success path: an ANCESTOR frame may still
+      // revert later (e.g. this CREATE succeeded but the caller that
+      // issued it hits a REVERT afterwards), which must undo this deploy
+      // too — see StateJournal's doc comment on LIFO composition.
+      journal.record([this, newAccAddr, oldCode, hadDeployEntry,
+                      oldDeployEntry]() {
+        gs.get(newAccAddr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(newAccAddr, oldDeployEntry);
+        else
+          gs.erase_newly_deploy(newAccAddr);
+      });
     };
     auto hh = [parentContext]() { parentContext->s.push(0); };
-    auto eh = [parentContext](const Exception &) { parentContext->s.push(0); };
+    auto eh = [parentContext, journalMark, this](const Exception &) {
+      journal.revert_to(journalMark);
+      parentContext->s.push(0);
+    };
 
     push_context(ctxt->acc.get_address(), newAcc, std::move(initCode),
                  newAcc.acc.get_code(), 0, rh, hh, eh,
@@ -1591,11 +1727,16 @@ private:
     }
 
     decltype(auto) callee = gs.get(addr);
+    // Marked BEFORE the value transfer: unlike CREATE's creator-nonce bump,
+    // a CALL's value transfer IS part of the message call being made and
+    // must be undone if the callee reverts (see StateJournal's doc
+    // comment) — this is the well-known EVM guarantee that a reverted
+    // external call never actually moves value.
+    size_t journalMark = journal.mark();
     if (value > 0) {
       gas_tracker.add_gas_used(getCallValueCost());
-      ctxt->acc.pay_to(callee.acc, value);
-      gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), value);
-      gs.add_addresses_add_balance_change(addr, value);
+      journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
+                       value);
     }
 
     // EIP-7702: if the callee's code is a delegation designator, CALL/
@@ -1627,7 +1768,9 @@ private:
       parentContext->returnData.clear();
       parentContext->s.push(1);
     };
-    auto he = [this, parentContext, offOut, sizeOut](const Exception &e) {
+    auto he = [this, parentContext, offOut, sizeOut,
+               journalMark](const Exception &e) {
+      journal.revert_to(journalMark);
       if (e.type == ET::ErrExecutionReverted) {
         const auto offset = ctxt->s.pop64();
         const auto size = ctxt->s.pop64();
@@ -1761,9 +1904,9 @@ private:
 
     decltype(auto) newAcc = gs.create(newAddress, endowment, input, 0);
 
-    ctxt->acc.pay_to(newAcc.acc, endowment);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), endowment);
-    gs.add_addresses_add_balance_change(newAddress, endowment);
+    size_t journalMark = journal.mark();
+    journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
+                     newAcc.acc, endowment);
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
@@ -1773,14 +1916,29 @@ private:
         return;
       }
       Address newAccAddr = newAcc.acc.get_address();
+      Code oldCode = newAcc.acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(newAccAddr) : Code{};
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
       gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
+      // See the matching comment in create()'s rh: recorded even on this
+      // success path since an ancestor frame may still revert later.
+      journal.record([this, newAccAddr, oldCode, hadDeployEntry,
+                      oldDeployEntry]() {
+        gs.get(newAccAddr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(newAccAddr, oldDeployEntry);
+        else
+          gs.erase_newly_deploy(newAccAddr);
+      });
     };
 
     auto hh = [parentContext]() { parentContext->s.push(0); };
-    auto eh = [parentContext, this](const Exception &e) {
+    auto eh = [parentContext, journalMark, this](const Exception &e) {
+      journal.revert_to(journalMark);
       parentContext->eh(e);
     };
 

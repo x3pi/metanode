@@ -129,6 +129,15 @@ namespace mvm
         virtual void add_addresses_sub_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void set_addresses_nonce_change(const Address &addr, const uint256_t &nonce) override;
 
+        virtual bool has_storage_change(const Address &addr, const uint256_t &key) override;
+        virtual uint256_t get_storage_change_value(const Address &addr, const uint256_t &key) override;
+        virtual void erase_storage_change(const Address &addr, const uint256_t &key) override;
+        virtual bool has_newly_deploy(const Address &addr) override;
+        virtual Code get_newly_deploy_value(const Address &addr) override;
+        virtual void erase_newly_deploy(const Address &addr) override;
+        virtual void undo_add_balance_change(const Address &addr, const uint256_t &amount) override;
+        virtual void undo_sub_balance_change(const Address &addr, const uint256_t &amount) override;
+
         const std::vector<std::vector<uint8_t>> get_newly_deploy(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_storage_change(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_storage_read(bool apply_to_cache = true);

@@ -558,4 +558,58 @@ void MyGlobalState::clear_differences() {
     addresses_nonce_change.clear();
 }
 
+// --- Journal support (see _Processor::StateJournal in processor.cpp) ---
+// These give the journal precise read/erase access to the diff-accumulator
+// maps above, so a reverted call frame can restore exactly the entry (or
+// absence of one) that existed before its own mutation, rather than only
+// being able to wipe every diff for the whole transaction at once (which is
+// all clear_differences() above offers).
+
+bool MyGlobalState::has_storage_change(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return false;
+    return it->second.find(key) != it->second.end();
+}
+
+uint256_t MyGlobalState::get_storage_change_value(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return 0;
+    auto it2 = it->second.find(key);
+    return it2 != it->second.end() ? it2->second : 0;
+}
+
+void MyGlobalState::erase_storage_change(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return;
+    it->second.erase(key);
+    if (it->second.empty()) addresses_storage_change.erase(it);
+}
+
+bool MyGlobalState::has_newly_deploy(const Address &addr) {
+    return addresses_newly_deploy.find(addr) != addresses_newly_deploy.end();
+}
+
+Code MyGlobalState::get_newly_deploy_value(const Address &addr) {
+    auto it = addresses_newly_deploy.find(addr);
+    return it != addresses_newly_deploy.end() ? it->second : Code{};
+}
+
+void MyGlobalState::erase_newly_deploy(const Address &addr) {
+    addresses_newly_deploy.erase(addr);
+}
+
+void MyGlobalState::undo_add_balance_change(const Address &addr, const uint256_t &amount) {
+    auto it = addresses_add_balance_change.find(addr);
+    if (it == addresses_add_balance_change.end()) return;
+    it->second -= amount;
+    if (it->second == 0) addresses_add_balance_change.erase(it);
+}
+
+void MyGlobalState::undo_sub_balance_change(const Address &addr, const uint256_t &amount) {
+    auto it = addresses_sub_balance_change.find(addr);
+    if (it == addresses_sub_balance_change.end()) return;
+    it->second -= amount;
+    if (it->second == 0) addresses_sub_balance_change.erase(it);
+}
+
 } // namespace mvm
