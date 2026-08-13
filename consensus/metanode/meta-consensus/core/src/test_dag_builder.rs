@@ -225,6 +225,19 @@ impl DagBuilder {
                 last_timestamp_ms,
             );
 
+            // linearize_sub_dag() is a pure read: it decides what to commit
+            // but doesn't mark anything as committed (production does that
+            // as a separate "ACTOR WRITE" step after linearize_sub_dag
+            // returns, once it no longer holds the DagState read lock — see
+            // linearizer/mod.rs's try_collect_sub_dag_and_commit). Without
+            // this, the next leader round's linearization would re-walk and
+            // re-include these same blocks, producing overlapping commits.
+            for block in &to_commit {
+                if let Some(entry) = storage.blocks.get_mut(&block.reference()) {
+                    entry.1 = true;
+                }
+            }
+
             // Update the last committed rounds
             for block in &to_commit {
                 self.last_committed_rounds[block.author()] =

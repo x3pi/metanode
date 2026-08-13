@@ -672,9 +672,16 @@ mod tests {
             dag_builder.last_committed_rounds.clone(),
             dag_state.read().last_committed_rounds()
         );
-        assert_eq!(1, dag_state.read().scoring_subdags_count());
+        // The scoring window is commits_per_schedule (300) wide, so with only
+        // 11 commits total the whole history (1..=11) falls inside the
+        // current, still-open window and all 11 subdags need scoring — not
+        // just commit 11 (the one beyond the CommitInfo-covered range 1..=10,
+        // which only governs `last_committed_rounds` recovery, a separate
+        // concern from the scoring window).
+        assert_eq!(11, dag_state.read().scoring_subdags_count());
         let recovered_scores = dag_state.read().calculate_scoring_subdag_scores();
-        let expected_scores = ReputationScores::new((11..=11).into(), vec![0, 0, 0, 0]);
+        let expected_scores =
+            ReputationScores::new((1..=11).into(), vec![33, 33, 33, 33]);
         assert_eq!(recovered_scores, expected_scores);
 
         let leader_schedule = LeaderSchedule::from_store(context.clone(), dag_state.clone());
