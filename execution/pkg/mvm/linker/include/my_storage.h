@@ -43,5 +43,7 @@ namespace mvm
     uint256_t get_cached(const uint256_t& key) override;
     void set_cached_raw(const uint256_t& key, const uint256_t& value) override;
     void erase_cached(const uint256_t& key) override;
+    std::map<uint256_t, uint256_t> snapshot_cached() override;
+    void clear_all_cached() override;
   };
 } // namespace mvm

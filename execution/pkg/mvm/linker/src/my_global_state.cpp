@@ -605,6 +605,16 @@ void MyGlobalState::undo_add_balance_change(const Address &addr, const uint256_t
     if (it->second == 0) addresses_add_balance_change.erase(it);
 }
 
+std::map<uint256_t, uint256_t> MyGlobalState::snapshot_storage_change(const Address &addr) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return {};
+    return it->second;
+}
+
+void MyGlobalState::clear_storage_change(const Address &addr) {
+    addresses_storage_change.erase(addr);
+}
+
 void MyGlobalState::undo_sub_balance_change(const Address &addr, const uint256_t &amount) {
     auto it = addresses_sub_balance_change.find(addr);
     if (it == addresses_sub_balance_change.end()) return;

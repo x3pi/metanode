@@ -87,6 +87,15 @@ namespace mvm
     virtual Code get_newly_deploy_value(const Address &addr) = 0;
     virtual void erase_newly_deploy(const Address &addr) = 0;
 
+    // EIP-6780 support (see selfdestruct() in processor.cpp): a SELFDESTRUCT
+    // of a contract created earlier in the SAME transaction fully clears its
+    // storage diff, not just its balance. snapshot_storage_change captures
+    // every (key, value) pair recorded for addr so the journal can restore
+    // them all if an ancestor call frame later reverts the SELFDESTRUCT.
+    virtual std::map<uint256_t, uint256_t>
+    snapshot_storage_change(const Address &addr) = 0;
+    virtual void clear_storage_change(const Address &addr) = 0;
+
     // add_addresses_add_balance_change/add_addresses_sub_balance_change
     // accumulate (+=), so undoing one is exactly subtracting the same
     // amount back out — no has_/erase_ pair needed the way storage/deploy

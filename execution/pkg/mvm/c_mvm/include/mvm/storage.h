@@ -6,6 +6,8 @@
 #include "bigint.h"
 #include "gas.h"
 
+#include <map>
+
 namespace mvm
 {
   /**
@@ -27,6 +29,12 @@ namespace mvm
     virtual uint256_t get_cached(const uint256_t& key) = 0;
     virtual void set_cached_raw(const uint256_t& key, const uint256_t& value) = 0;
     virtual void erase_cached(const uint256_t& key) = 0;
+
+    // EIP-6780 support (see selfdestruct() in processor.cpp): snapshot the
+    // whole in-VM cache before clearing it, so the journal can restore every
+    // entry if an ancestor call frame later reverts the SELFDESTRUCT.
+    virtual std::map<uint256_t, uint256_t> snapshot_cached() = 0;
+    virtual void clear_all_cached() = 0;
 
     virtual ~Storage() {}
   };

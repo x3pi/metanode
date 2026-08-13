@@ -24,6 +24,7 @@
 // #include <chrono>
 #include <filesystem> // Thư viện để thao tác với thư mục
 #include <unordered_map>
+#include <unordered_set>
 
 #include <intx/intx.hpp>
 
@@ -320,7 +321,20 @@ public:
       hh();
     }
 
-    result.gas_used = gas_tracker.get_gas_used();
+    // EIP-3529: refund is capped at gasUsed/5 (post-London; this VM has no
+    // hardfork-activation mechanism so the pre-London 1/2 cap never
+    // applies here — see params.AllDevChainProtocolChanges elsewhere in
+    // this codebase for the same "every EIP always active" choice) and
+    // applied once, here, for the whole top-level transaction — never
+    // per-nested-call-frame, since refunds are a transaction-wide budget
+    // reduction, not a per-call return value.
+    uint64_t used = gas_tracker.get_gas_used();
+    uint64_t refund = std::min<uint64_t>(
+        gas_tracker.get_refund() > 0
+            ? static_cast<uint64_t>(gas_tracker.get_refund())
+            : 0,
+        used / 5);
+    result.gas_used = used - refund;
     return result;
   }
 
@@ -338,6 +352,24 @@ private:
 
   // See StateJournal's doc comment above this class.
   StateJournal journal;
+
+  // EIP-2200/3529 "original value" tracking for the SSTORE gas refund (see
+  // sstore()/compute_sstore_refund_delta): the value a slot held at the
+  // START of this transaction, captured once on first touch and never
+  // updated again afterwards (deliberately NOT journaled/reverted — the
+  // "original" value is a fact about transaction start, unaffected by
+  // anything that happens, or gets undone, later in the same transaction).
+  std::unordered_map<Address, std::unordered_map<uint256_t, uint256_t>> original_storage_values;
+
+  // EIP-6780 support (see selfdestruct()): addresses a CREATE/CREATE2 was
+  // attempted for in THIS transaction, recorded the moment gs.create(...) is
+  // called (not only on successful constructor return) — matches "was this
+  // account created earlier in the same transaction" regardless of what the
+  // constructor goes on to do. Deliberately NOT journaled: even a reverted
+  // CREATE attempt leaves the address with no code (see StateJournal's
+  // rollback of the code-deploy entry), so a later SELFDESTRUCT on it can't
+  // do anything harmful either way — same reasoning as CREATE's nonce bump.
+  std::unordered_set<Address> created_this_tx;
 
   void push_context(const Address &caller, AccountState as,
                     vector<uint8_t> &&input, Program &&prog,
@@ -1294,6 +1326,54 @@ private:
     ctxt->s.push(ctxt->st.load(k, &gas_tracker));
   }
 
+  // EIP-3529's reduced clear-refund constant (was 15000 pre-London).
+  static constexpr int64_t SSTORE_CLEARS_SCHEDULE = 4800;
+
+  // Returns the value `addr`'s `key` slot held at the START of this
+  // transaction — captured once, on first touch, from `currentValue`
+  // (whatever the cache/state already resolved it to); returns the
+  // previously-captured value on every subsequent call for the same slot.
+  uint256_t original_storage_value(const Address &addr, const uint256_t &key,
+                                   const uint256_t &currentValue) {
+    auto &addrMap = original_storage_values[addr];
+    auto it = addrMap.find(key);
+    if (it != addrMap.end())
+      return it->second;
+    addrMap[key] = currentValue;
+    return currentValue;
+  }
+
+  // EIP-2200's refund bookkeeping, restricted to the "clear schedule" case
+  // (SSTORE-ing a slot to zero) — the dominant, EIP-3529-motivating case.
+  // Deliberately omits the "restore to original value" bonus refund
+  // (returning a slot to exactly its transaction-start value after one or
+  // more intermediate writes): that's real, spec-defined gas the user is
+  // technically owed back, but it's a rarer case and skipping it can only
+  // ever under-refund, never over-refund — safe to leave on the table
+  // rather than risk getting the full 3-way comparison subtly wrong in
+  // consensus-critical code.
+  static int64_t compute_sstore_refund_delta(const uint256_t &original,
+                                             const uint256_t &current,
+                                             const uint256_t &newVal) {
+    if (current == newVal)
+      return 0; // no-op write, no refund change
+    if (original == current) {
+      // first change to this slot this transaction
+      if (original != 0 && newVal == 0)
+        return SSTORE_CLEARS_SCHEDULE;
+      return 0;
+    }
+    // slot already changed at least once this transaction
+    int64_t delta = 0;
+    if (original != 0) {
+      if (current == 0)
+        delta -= SSTORE_CLEARS_SCHEDULE; // un-clearing: revoke the earlier refund
+      if (newVal == 0)
+        delta += SSTORE_CLEARS_SCHEDULE; // re-clearing: grant it again
+    }
+    return delta;
+  }
+
   void sstore() {
     if (ctxt->read_only) {
       throw Exception(ET::ErrWriteProtection,
@@ -1306,9 +1386,15 @@ private:
     const bool hadDiffEntry = gs.has_storage_change(addr, k);
     const uint256_t oldDiffValue =
         hadDiffEntry ? gs.get_storage_change_value(addr, k) : 0;
-    const bool hadCacheEntry = ctxt->st.has_cached(k);
-    const uint256_t oldCacheValue =
-        hadCacheEntry ? ctxt->st.get_cached(k) : 0;
+
+    // Fetch-and-cache the pre-write value with no gas charge here (SLOAD's
+    // own gas is billed separately when the program actually executes
+    // SLOAD; MyStorage::store() below re-derives the same now-cached value
+    // to compute SSTORE's own gas cost, so this doesn't trigger a second
+    // FFI/state round-trip). Guaranteed to leave the slot cached, which
+    // simplifies the journal restore below (always "had a cache entry").
+    const uint256_t oldValue = ctxt->st.load(k, nullptr);
+    const uint256_t originalValue = original_storage_value(addr, k, oldValue);
 
     gs.add_addresses_storage_change(addr, k, v);
     if (!v)
@@ -1316,17 +1402,19 @@ private:
     else
       ctxt->st.store(k, v, &gas_tracker);
 
-    journal.record([this, addr, k, hadDiffEntry, oldDiffValue, hadCacheEntry,
-                    oldCacheValue]() {
+    int64_t refundDelta = compute_sstore_refund_delta(originalValue, oldValue, v);
+    if (refundDelta != 0)
+      gas_tracker.add_refund(refundDelta);
+
+    journal.record([this, addr, k, hadDiffEntry, oldDiffValue, oldValue,
+                    refundDelta]() {
       if (hadDiffEntry)
         gs.add_addresses_storage_change(addr, k, oldDiffValue);
       else
         gs.erase_storage_change(addr, k);
-      Storage &st = gs.get(addr).st;
-      if (hadCacheEntry)
-        st.set_cached_raw(k, oldCacheValue);
-      else
-        st.erase_cached(k);
+      gs.get(addr).st.set_cached_raw(k, oldValue);
+      if (refundDelta != 0)
+        gas_tracker.add_refund(-refundDelta);
     });
   }
 
@@ -1506,10 +1594,44 @@ private:
                       "Cannot delete from read-only call");
     }
 
+    const Address addr = ctxt->acc.get_address();
     auto recipient = gs.get(pop_addr(ctxt->s));
     auto amount = ctxt->acc.get_balance();
-    journaled_pay_to(ctxt->acc.get_address(), recipient.acc.get_address(),
-                     ctxt->acc, recipient.acc, amount);
+    journaled_pay_to(addr, recipient.acc.get_address(), ctxt->acc,
+                     recipient.acc, amount);
+
+    // EIP-6780: SELFDESTRUCT only fully clears a contract's code and
+    // storage when it was created earlier in THIS SAME transaction —
+    // otherwise (a contract that already existed before this transaction
+    // began) it only ever moves the balance, per journaled_pay_to above.
+    // This VM declares itself Cancun-targeted (see opcode.h), so this is
+    // the correct, current-spec behavior rather than the older
+    // "SELFDESTRUCT always deletes the account" semantics.
+    if (created_this_tx.count(addr)) {
+      Code oldCode = ctxt->acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(addr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(addr) : Code{};
+      auto oldStorageDiff = gs.snapshot_storage_change(addr);
+      auto oldCache = ctxt->st.snapshot_cached();
+
+      ctxt->acc.set_code(Code{});
+      gs.erase_newly_deploy(addr);
+      gs.clear_storage_change(addr);
+      ctxt->st.clear_all_cached();
+
+      journal.record([this, addr, oldCode, hadDeployEntry, oldDeployEntry,
+                      oldStorageDiff, oldCache]() {
+        gs.get(addr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(addr, oldDeployEntry);
+        for (const auto &kv : oldStorageDiff)
+          gs.add_addresses_storage_change(addr, kv.first, kv.second);
+        Storage &st = gs.get(addr).st;
+        for (const auto &kv : oldCache)
+          st.set_cached_raw(kv.first, kv.second);
+      });
+    }
 
     result.er = ExitReason::returned;
 
@@ -1528,6 +1650,7 @@ private:
     auto nonce = ctxt->acc.get_nonce();
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
+    created_this_tx.insert(newAddress);
 
     // Nonce increment deliberately NOT journaled: on real Ethereum the
     // creator's nonce bump survives even if the constructor below reverts —
@@ -1901,6 +2024,19 @@ private:
 
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
+    created_this_tx.insert(newAddress);
+
+    // BUG FIX: unlike create() (CREATE), this never incremented the
+    // creator's own nonce — real Ethereum bumps it for CREATE2 exactly the
+    // same way (EIP-161), and any contract chaining multiple CREATE/CREATE2
+    // calls off its own nonce (or computing its own next CREATE address)
+    // would otherwise see a stale value. Deliberately NOT journaled, same
+    // reasoning as create()'s nonce bump: it's an effect of the CALLER's
+    // own frame that survives even if the spawned contract's constructor
+    // reverts, not part of the reverted sub-call itself.
+    auto callerNonce = ctxt->acc.get_nonce();
+    ctxt->acc.increment_nonce();
+    gs.set_addresses_nonce_change(ctxt->acc.get_address(), callerNonce + 1);
 
     decltype(auto) newAcc = gs.create(newAddress, endowment, input, 0);
 
