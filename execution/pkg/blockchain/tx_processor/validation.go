@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync"
@@ -17,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -145,29 +143,6 @@ func StartSignatureCacheCleanup(stopCh <-chan struct{}) {
 			}
 		}
 	}()
-}
-
-func callDataToAccountType(callData []byte) (pb.ACCOUNT_TYPE, *transaction.TransactionError) {
-
-	if len(callData) != 36 {
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
-	bytesFSelect := utils.GetFunctionSelector("setAccountType(int256)")
-	// Kiểm tra 4 byte đầu tiên phải bằng "0x61e1270b"
-	if !bytes.Equal(callData[:4], bytesFSelect) {
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
-	// Lấy 4 byte sau để xác định kiểu tài khoản
-	num := int32(binary.BigEndian.Uint32(callData[len(callData)-4:]))
-
-	switch num {
-	case 0:
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, nil
-	case 1:
-		return pb.ACCOUNT_TYPE_READ_WRITE_STRICT, nil
-	default:
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
 }
 
 func VerifyTransaction(
@@ -359,13 +334,6 @@ func VerifyTransaction(
 	if len(tx.Data()) > maxDataSize {
 		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
 		return transaction.InvalidData // Sử dụng lỗi InvalidData hoặc tạo lỗi mới nếu cần
-	}
-
-	if tx.ToAddress() == tx.FromAddress() && tx.GetNonce() != 0 {
-		_, erR := callDataToAccountType(tx.Data())
-		if erR != nil {
-			return erR
-		}
 	}
 
 	if !tx.ValidChainID(chainState.GetConfig().ChainId.Uint64()) {

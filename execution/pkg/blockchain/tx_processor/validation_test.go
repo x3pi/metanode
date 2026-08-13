@@ -1,103 +1,13 @@
 package tx_processor
 
 import (
-	"encoding/binary"
-
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 )
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Tests for callDataToAccountType
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-func TestCallDataToAccountType_ValidRegularAccount(t *testing.T) {
-	selector := utils.GetFunctionSelector("setAccountType(int256)")
-	callData := make([]byte, 36)
-	copy(callData[:4], selector)
-	// Last 4 bytes = 0 → REGULAR_ACCOUNT
-	binary.BigEndian.PutUint32(callData[32:], 0)
-
-	accountType, err := callDataToAccountType(callData)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if accountType != pb.ACCOUNT_TYPE_REGULAR_ACCOUNT {
-		t.Errorf("expected REGULAR_ACCOUNT, got %v", accountType)
-	}
-}
-
-func TestCallDataToAccountType_ValidReadWriteStrict(t *testing.T) {
-	selector := utils.GetFunctionSelector("setAccountType(int256)")
-	callData := make([]byte, 36)
-	copy(callData[:4], selector)
-	// Last 4 bytes = 1 → READ_WRITE_STRICT
-	binary.BigEndian.PutUint32(callData[32:], 1)
-
-	accountType, err := callDataToAccountType(callData)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if accountType != pb.ACCOUNT_TYPE_READ_WRITE_STRICT {
-		t.Errorf("expected READ_WRITE_STRICT, got %v", accountType)
-	}
-}
-
-func TestCallDataToAccountType_InvalidLength(t *testing.T) {
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		{"empty", []byte{}},
-		{"too_short", []byte{0x01, 0x02, 0x03}},
-		{"35_bytes", make([]byte, 35)},
-		{"37_bytes", make([]byte, 37)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := callDataToAccountType(tt.data)
-			if err != transaction.InvalidData {
-				t.Errorf("expected InvalidData error, got %v", err)
-			}
-		})
-	}
-}
-
-func TestCallDataToAccountType_WrongSelector(t *testing.T) {
-	callData := make([]byte, 36)
-	// Wrong selector bytes
-	callData[0] = 0xFF
-	callData[1] = 0xFF
-	callData[2] = 0xFF
-	callData[3] = 0xFF
-
-	_, err := callDataToAccountType(callData)
-	if err != transaction.InvalidData {
-		t.Errorf("expected InvalidData error for wrong selector, got %v", err)
-	}
-}
-
-func TestCallDataToAccountType_InvalidTypeValue(t *testing.T) {
-	selector := utils.GetFunctionSelector("setAccountType(int256)")
-	tests := []uint32{2, 3, 10, 255, 1000}
-
-	for _, val := range tests {
-		callData := make([]byte, 36)
-		copy(callData[:4], selector)
-		binary.BigEndian.PutUint32(callData[32:], val)
-
-		_, err := callDataToAccountType(callData)
-		if err != transaction.InvalidData {
-			t.Errorf("callDataToAccountType with value %d: expected InvalidData, got %v", val, err)
-		}
-	}
-}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Tests for GetValidatorHandler
