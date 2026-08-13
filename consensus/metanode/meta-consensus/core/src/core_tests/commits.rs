@@ -708,6 +708,8 @@ async fn try_commit_with_certified_commits_gced_blocks() {
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
+    let hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+    hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Bootstrapping);
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -723,7 +725,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         round_tracker,
         None,
         None,
-        crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(), // quorum_ready - always ready in tests
+        hub.clone(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced
@@ -732,6 +734,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         GENESIS_ROUND,
         "No block should have been created other than genesis"
     );
+    hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
 
     let dag_str = "DAG {
         Round 0 : { 5 },
