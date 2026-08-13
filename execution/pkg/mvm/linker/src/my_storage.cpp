@@ -98,6 +98,27 @@ namespace mvm
         return true;
     }
 
+    bool MyStorage::has_cached(const uint256_t &key)
+    {
+        return cache.find(key) != cache.end();
+    }
+
+    uint256_t MyStorage::get_cached(const uint256_t &key)
+    {
+        auto it = cache.find(key);
+        return it != cache.end() ? it->second : 0;
+    }
+
+    void MyStorage::set_cached_raw(const uint256_t &key, const uint256_t &value)
+    {
+        cache[key] = value;
+    }
+
+    void MyStorage::erase_cached(const uint256_t &key)
+    {
+        cache.erase(key);
+    }
+
     inline std::ostream &operator<<(std::ostream &os, const MyStorage &s)
     {
         return os;

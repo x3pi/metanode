@@ -72,5 +72,26 @@ namespace mvm
     virtual void add_addresses_add_balance_change(const Address &addr, const uint256_t &amount) = 0;
     virtual void add_addresses_sub_balance_change(const Address &addr, const uint256_t &amount) = 0;
     virtual void set_addresses_nonce_change(const Address &addr, const uint256_t &amount) = 0;
+
+    // Journal support (see _Processor::StateJournal in processor.cpp): lets
+    // a reverted call frame precisely undo what the add_addresses_*/
+    // set_addresses_* calls above recorded — has_*/get_*_value snapshot the
+    // prior entry (if any) before a mutation, erase_*/undo_* restore it (or
+    // remove the entry entirely if there was none) when that mutation needs
+    // to be rolled back.
+    virtual bool has_storage_change(const Address &addr, const uint256_t &key) = 0;
+    virtual uint256_t get_storage_change_value(const Address &addr, const uint256_t &key) = 0;
+    virtual void erase_storage_change(const Address &addr, const uint256_t &key) = 0;
+
+    virtual bool has_newly_deploy(const Address &addr) = 0;
+    virtual Code get_newly_deploy_value(const Address &addr) = 0;
+    virtual void erase_newly_deploy(const Address &addr) = 0;
+
+    // add_addresses_add_balance_change/add_addresses_sub_balance_change
+    // accumulate (+=), so undoing one is exactly subtracting the same
+    // amount back out — no has_/erase_ pair needed the way storage/deploy
+    // (last-write-wins) require.
+    virtual void undo_add_balance_change(const Address &addr, const uint256_t &amount) = 0;
+    virtual void undo_sub_balance_change(const Address &addr, const uint256_t &amount) = 0;
   };
 } // namespace mvm
