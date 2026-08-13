@@ -15,7 +15,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -313,17 +312,17 @@ func NewTransaction(
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, nonce)
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		Nonce:            nonceBytes,
-		ChainID:          chainId,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		Nonce:         nonceBytes,
+		ChainID:       chainId,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -345,16 +344,16 @@ func NewTransactionWithoutNonce(
 ) types.Transaction {
 
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		ChainID:          chainId,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		ChainID:       chainId,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -379,16 +378,16 @@ func NewTransactionOffChain(
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, nonce)
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		Nonce:            nonceBytes,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		Nonce:         nonceBytes,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -847,7 +846,6 @@ func (t *Transaction) Amount() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.Amount)
 }
 
-
 func (t *Transaction) UpdateDeriver(LastDeviceKey, NewDeviceKey common.Hash) {
 	t.proto.LastDeviceKey = LastDeviceKey.Bytes()
 	t.proto.NewDeviceKey = NewDeviceKey.Bytes()
@@ -878,17 +876,17 @@ func (t *Transaction) GetType() uint64 {
 
 func (t *Transaction) GetRelatedAddresses() []common.Address {
 	var relatedAddresses []common.Address
-	
+
 	// With optimistic execution, we only include the sender and receiver
 	// as base related addresses. Additional dependencies will be resolved dynamically.
 	fromAddr := t.FromAddress()
 	toAddr := t.ToAddress()
-	
+
 	relatedAddresses = append(relatedAddresses, fromAddr)
 	if toAddr != fromAddr {
 		relatedAddresses = append(relatedAddresses, toAddr)
 	}
-	
+
 	return relatedAddresses
 }
 
@@ -1237,57 +1235,8 @@ func (t *Transaction) ValidChainID(chainId uint64) bool {
 	return t.GetChainID() == chainId
 }
 
-func (t *Transaction) ValidNonce(fromAccountState types.AccountState) bool {
-	return t.GetNonce() == fromAccountState.Nonce()
-}
-
 func (t *Transaction) ValidMinTimeUse() bool {
 	return t.MaxTimeUse() >= p_common.MIN_TX_TIME && t.MaxTimeUse() <= p_common.MAX_GROUP_TIME
-}
-
-func (t *Transaction) ValidTx0(fromAccountState types.AccountState, chainId string) (bool, int64) {
-	if t.GetNonce() == 0 && len(fromAccountState.PublicKeyBls()) == 0 {
-		dataInput := t.CallData().Input()
-
-		if len(dataInput) != 113 {
-			return false, InvalidDataInputLengthForTx0.Code
-		}
-
-		message := append(append([]byte{}, dataInput[:48]...), []byte(chainId)...)
-		hash := crypto.Keccak256(message)
-
-		valid := bls.VerifySign(
-			p_common.PubkeyFromBytes(dataInput[:48]),
-			t.Sign(),
-			t.Hash().Bytes(),
-		)
-		if !valid {
-			return false, InvalidBLSSignatureForTx0.Code
-		}
-
-		pb, err := secp256k1.RecoverPubkey(hash, dataInput[48:])
-		if err != nil {
-			return false, FailedToRecoverPubkeyForTx0.Code
-		}
-
-		var addr common.Address
-		copy(addr[:], crypto.Keccak256(pb[1:])[12:])
-
-		if t.FromAddress() == t.ToAddress() && addr == t.FromAddress() {
-			return true, 0
-		} else {
-			return false, InvalidAddressMatchForTx0.Code
-		}
-	} else if t.GetNonce() == 0 && len(fromAccountState.PublicKeyBls()) != 0 {
-		return false, NonceZeroButPublicKeyNotEmpty.Code
-	}
-
-	return true, 0
-}
-
-func (t *Transaction) ValidDeviceKey(fromAccountState types.AccountState) bool {
-	return fromAccountState.DeviceKey() == common.Hash{} || // skip check device key if account state doesn't have device key
-		crypto.Keccak256Hash(t.LastDeviceKey().Bytes()) == fromAccountState.DeviceKey()
 }
 
 func (t *Transaction) ValidMaxGas() bool {
@@ -1334,16 +1283,6 @@ func (t *Transaction) ValidPendingUse(fromAccountState types.AccountState) bool 
 	return pendingUse.Cmp(pendingBalance) <= 0
 }
 
-func (t *Transaction) ValidDeploySmartContractToAccount(fromAccountState types.AccountState) bool {
-
-	validToAddress := crypto.CreateAddress(fromAccountState.Address(), fromAccountState.Nonce())
-
-	if validToAddress != t.ToAddress() {
-		logger.Warn("Not match deploy address", validToAddress, t.ToAddress())
-	}
-	return validToAddress == t.ToAddress()
-}
-
 func (t *Transaction) ValidDeployData() bool {
 	if t.IsDeployContract() {
 		if t.DeployData() == nil || len(t.DeployData().Code()) == 0 {
@@ -1361,30 +1300,6 @@ func (t *Transaction) ValidCallData() bool {
 			logger.Warn("Deploy data is nil")
 			return false
 		}
-	}
-	return true
-}
-
-func (t *Transaction) ValidOpenChannelToAccount(fromAccountState types.AccountState) bool {
-	// validToAddress := common.BytesToAddress(
-	// 	crypto.Keccak256(
-	// 		append(
-	// 			fromAccountState.Address().Bytes(),
-	// 			fromAccountState.LastHash().Bytes()...),
-	// 	)[12:],
-	// )
-	validToAddress := crypto.CreateAddress(fromAccountState.Address(), fromAccountState.Nonce())
-
-	if validToAddress != t.ToAddress() {
-		logger.Warn("Not match open channel address", validToAddress, t.ToAddress())
-	}
-	return validToAddress == t.ToAddress()
-}
-
-func (t *Transaction) ValidCallSmartContractToAccount(toAccountState types.AccountState) bool {
-	if t.IsCallContract() {
-		scState := toAccountState.SmartContractState()
-		return scState != nil
 	}
 	return true
 }
@@ -1444,19 +1359,19 @@ func UnmarshalTransactionsWithBlockNumber(b []byte) ([]types.Transaction, uint64
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	// Tạo một map để lưu trữ dữ liệu của transaction
 	data := map[string]interface{}{
-		"Hash":             hex.EncodeToString(t.Hash().Bytes()),
-		"FromAddress":      hex.EncodeToString(t.proto.FromAddress),
-		"ToAddress":        hex.EncodeToString(t.proto.ToAddress),
-		"Amount":           hex.EncodeToString(t.proto.Amount),
-		"MaxGas":           t.proto.MaxGas,
-		"MaxGasPrice":      t.proto.MaxGasPrice,
-		"MaxTimeUse":       t.proto.MaxTimeUse,
-		"Data":             hex.EncodeToString(t.proto.Data),
-		"LastDeviceKey":    hex.EncodeToString(t.proto.LastDeviceKey),
-		"NewDeviceKey":     hex.EncodeToString(t.proto.NewDeviceKey),
-		"Nonce":            t.GetNonce(),
-		"Sign":             hex.EncodeToString(t.proto.Sign),
-		"ReadOnly":         t.GetReadOnly(),
+		"Hash":          hex.EncodeToString(t.Hash().Bytes()),
+		"FromAddress":   hex.EncodeToString(t.proto.FromAddress),
+		"ToAddress":     hex.EncodeToString(t.proto.ToAddress),
+		"Amount":        hex.EncodeToString(t.proto.Amount),
+		"MaxGas":        t.proto.MaxGas,
+		"MaxGasPrice":   t.proto.MaxGasPrice,
+		"MaxTimeUse":    t.proto.MaxTimeUse,
+		"Data":          hex.EncodeToString(t.proto.Data),
+		"LastDeviceKey": hex.EncodeToString(t.proto.LastDeviceKey),
+		"NewDeviceKey":  hex.EncodeToString(t.proto.NewDeviceKey),
+		"Nonce":         t.GetNonce(),
+		"Sign":          hex.EncodeToString(t.proto.Sign),
+		"ReadOnly":      t.GetReadOnly(),
 	}
 
 	// Chuyển đổi map thành JSON

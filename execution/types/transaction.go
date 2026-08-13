@@ -81,18 +81,14 @@ type Transaction interface {
 	GetType() uint64
 
 	// verifiers
-	ValidTx0(fromAccountState AccountState, chainId string) (bool, int64)
 	ValidChainID(chainId uint64) bool
 	ValidSign(bPub common.PublicKey) bool
-	ValidDeviceKey(fromAccountState AccountState) bool
 	ValidMaxGas() bool
 	ValidMaxGasPrice(currentGasPrice uint64) bool
 	ValidAmount(fromAccountState AccountState) bool
 	ValidMaxFee(fromAccountState AccountState) bool
 	ValidAmountSpend(fromAccountState AccountState, spendAmount *big.Int) bool
 	ValidPendingUse(fromAccountState AccountState) bool
-	ValidDeploySmartContractToAccount(fromAccountState AccountState) bool
-	ValidCallSmartContractToAccount(toAccountState AccountState) bool
 	ValidDeployData() bool
 	ValidCallData() bool
 	//
