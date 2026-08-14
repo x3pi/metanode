@@ -503,6 +503,55 @@ type b1Context struct {
 	blobBaseFee      unsafe.Pointer // 32 bytes big-endian, or nil
 	crossChainSender unsafe.Pointer // 20 bytes, or nil
 	crossChainSource unsafe.Pointer // 8 bytes big-endian uint64, or nil
+	blockHashes      unsafe.Pointer // flat array of 32-byte hashes, or nil
+	blockHashCount   C.int
+}
+
+// maxBlockhashLookback matches BLOCKHASH's own EVM-spec window — a query
+// further back than this always resolves to 0, so fetching more would be
+// pure waste.
+const maxBlockhashLookback = 256
+
+// HasBlockhashOpcode reports whether code contains byte 0x40 (BLOCKHASH)
+// anywhere. Deliberately conservative, not a real disassembler: a 0x40 byte
+// sitting inside a PUSH's immediate data still counts, so this can
+// over-report (fetch block hashes a contract never actually queries) but
+// never under-report (skip fetching for one that does) — over-fetching is
+// wasted work, under-fetching would be a correctness bug, so the cheap
+// direction to err in is clear. Distinguishing real opcodes from push-data
+// would need a full bytecode walk for a purely load-bearing-on-performance
+// check; not worth it here.
+func HasBlockhashOpcode(code []byte) bool {
+	return bytes.IndexByte(code, 0x40) >= 0
+}
+
+// fetchRecentBlockHashes returns up to maxBlockhashLookback preceding block
+// hashes for blockNumber, most-recent-first (index 0 = blockNumber-1),
+// matching BLOCKHASH's own "how many blocks back" framing — see
+// block_context.h's block_hashes field doc. Stops at the first gap (a
+// blockNumber the chain doesn't have a mapping for) rather than fetching
+// a sparse/partial-with-holes array, since BLOCKHASH's replacement on the
+// C++ side (MyGlobalState::get_block_hash) indexes this contiguously by
+// distance from the current block and has no way to represent "unknown" at
+// a specific index other than the array simply not extending that far.
+func fetchRecentBlockHashes(blockNumber uint64) [][]byte {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil || blockNumber == 0 {
+		return nil
+	}
+	lookback := uint64(maxBlockhashLookback)
+	if blockNumber < lookback {
+		lookback = blockNumber
+	}
+	hashes := make([][]byte, 0, lookback)
+	for i := uint64(1); i <= lookback; i++ {
+		h, ok := bc.GetBlockHashByNumber(blockNumber - i)
+		if !ok {
+			break
+		}
+		hashes = append(hashes, h.Bytes())
+	}
+	return hashes
 }
 
 // buildB1Context reads this instance's already-set context (SetBlobContext/
@@ -510,8 +559,15 @@ type b1Context struct {
 // callbacks) plus the chain id — from the same config.ConfigApp.ChainId
 // global GetChainId's cgo export used to read, just fetched here instead of
 // via a mid-execution callback — and copies it into cgo-owned buffers.
+//
+// code/blockNumber are only used to decide whether BLOCKHASH's context is
+// worth fetching at all (see HasBlockhashOpcode's doc for why this one
+// field, unlike the others above, is NOT fetched unconditionally). Pass the
+// bytecode that's actually about to execute: the constructor for Deploy, or
+// the target contract's deployed code for Call/Execute.
+//
 // Caller MUST defer the returned value's free().
-func (a *MVMApi) buildB1Context() b1Context {
+func (a *MVMApi) buildB1Context(code []byte, blockNumber uint64) b1Context {
 	var ctx b1Context
 
 	// Defensive nil guard: the old GetChainId() callback read this exact
@@ -565,6 +621,23 @@ func (a *MVMApi) buildB1Context() b1Context {
 		ctx.crossChainSource = C.CBytes(b)
 	}
 
+	if HasBlockhashOpcode(code) {
+		hashes := fetchRecentBlockHashes(blockNumber)
+		if n := len(hashes); n > 0 {
+			flat := make([]byte, n*32)
+			for i, h := range hashes {
+				dst := flat[i*32 : i*32+32]
+				if len(h) >= 32 {
+					copy(dst, h[len(h)-32:])
+				} else {
+					copy(dst[32-len(h):], h)
+				}
+			}
+			ctx.blockHashes = C.CBytes(flat)
+			ctx.blockHashCount = C.int(n)
+		}
+	}
+
 	return ctx
 }
 
@@ -583,6 +656,9 @@ func (c *b1Context) free() {
 	}
 	if c.crossChainSource != nil {
 		C.free(c.crossChainSource)
+	}
+	if c.blockHashes != nil {
+		C.free(c.blockHashes)
 	}
 }
 
@@ -696,7 +772,7 @@ func (a *MVMApi) Call(
 	} else {
 		cBRelatedAddresses = nil
 	}
-	b1ctx := a.buildB1Context()
+	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
 	defer b1ctx.free()
 	cRs := C.call(
 		(*C.uchar)(cBSender),
@@ -725,6 +801,8 @@ func (a *MVMApi) Call(
 		(*C.uchar)(b1ctx.blobBaseFee),
 		(*C.uchar)(b1ctx.crossChainSender),
 		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
@@ -787,7 +865,7 @@ func (a *MVMApi) Execute(
 	defer C.free(unsafe.Pointer(cBTxHash))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 
-	b1ctx := a.buildB1Context()
+	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
 	defer b1ctx.free()
 	cRs := C.execute(
 		(*C.uchar)(cBSender),
@@ -815,6 +893,8 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(b1ctx.blobBaseFee),
 		(*C.uchar)(b1ctx.crossChainSender),
 		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
@@ -1164,7 +1244,7 @@ func (a *MVMApi) Deploy(
 	defer C.free(unsafe.Pointer(cBBlockCoinbase))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 	defer C.free(unsafe.Pointer(cBTxHash))
-	b1ctx := a.buildB1Context()
+	b1ctx := a.buildB1Context(bContractConstructor, blockNumber)
 	defer b1ctx.free()
 	cRs := C.deploy(
 		(*C.uchar)(cBSender),
@@ -1190,6 +1270,8 @@ func (a *MVMApi) Deploy(
 		(*C.uchar)(b1ctx.blobBaseFee),
 		(*C.uchar)(b1ctx.crossChainSender),
 		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2

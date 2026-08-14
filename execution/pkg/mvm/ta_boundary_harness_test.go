@@ -555,6 +555,76 @@ func TestTABoundary_CrossChain_SurvivesSerialization(t *testing.T) {
 	}
 }
 
+// TestTABoundary_BlockHash_SurvivesSerialization verifies B1's last
+// remaining callback, GetBlockHash/BLOCKHASH: a constructor querying
+// BLOCKHASH(blockNumber-1) must see the real hash delivered via
+// BlockContext.block_hashes, populated only because the constructor
+// bytecode contains opcode 0x40 (HasBlockhashOpcode, mvm_api.go) — not the
+// pre-B1 callback into blockchain.GetBlockChainInstance(). Seeds the
+// package-level BlockChain singleton via cache only (SetBlockNumberToHash
+// writes straight to blockNumberToHashCache — no real StorageManager I/O
+// needed for GetBlockHashByNumber's cache-hit path).
+func TestTABoundary_BlockHash_SurvivesSerialization(t *testing.T) {
+	blockchain.InitBlockChain(10, block.NewBlockDatabase(storage.NewDummyStorage("")), storage.NewStorageManager())
+	wantHash := common.HexToHash("0xfeed5eed00000000000000000000000000000000000000000000000000005eed")
+	if err := blockchain.GetBlockChainInstance().SetBlockNumberToHash(0, wantHash); err != nil {
+		t.Fatalf("SetBlockNumberToHash: %v", err)
+	}
+
+	cs := harnessChainState(t)
+	sender := common.HexToAddress("0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5")
+	mvmId := common.HexToAddress("0xa6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6")
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	// Constructor: PUSH1 0x00 BLOCKHASH PUSH1 0x00 MSTORE PUSH1 0x20
+	// PUSH1 0x00 RETURN — queries block 0 (blockNumber-1 below). Using
+	// blockNumber=1 keeps fetchRecentBlockHashes's lookback to exactly 1
+	// (only block 0), so it never probes an unseeded block number — real
+	// chains have no gaps in this range, only this synthetic harness would
+	// (a bare storage.NewStorageManager() has no real backing for
+	// GetBlockHashByNumber's cache-miss DB fallback to read from).
+	initCode := []byte{0x60, 0x00, 0x40, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
+
+	req := serializeRoundTrip(t, harnessDeployRequest{
+		Sender:      sender,
+		InitCode:    initCode,
+		GasPrice:    1,
+		GasLimit:    200_000,
+		BlockNumber: 1,
+		MvmId:       mvmId,
+		TxHash:      common.HexToHash("0xb10c40"),
+	})
+
+	var engine mvm.ExecutionEngine = mvm.GetOrCreateMVMApi(req.MvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(req.MvmId) })
+	engine.SetRelatedAddresses([]common.Address{req.Sender})
+
+	rs := engine.Deploy(
+		req.Sender.Bytes(), req.InitCode, big.NewInt(0),
+		req.GasPrice, req.GasLimit,
+		0, 30_000_000, 0, 0, req.BlockNumber, common.Address{},
+		req.MvmId, req.TxHash.Bytes(),
+		false, false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Deploy returned nil result")
+	}
+	rsWire := serializeRoundTrip(t, *rs)
+	if rsWire.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", rsWire.Status, rsWire.Exmsg)
+	}
+
+	wantAddr := crypto.CreateAddress(sender, 0)
+	gotCode, ok := rsWire.MapCodeChange[hexKey(wantAddr)]
+	if !ok {
+		t.Fatalf("MapCodeChange missing entry for deployed address %s; got keys %v",
+			wantAddr.Hex(), keysOf(rsWire.MapCodeChange))
+	}
+	if string(gotCode) != string(wantHash.Bytes()) {
+		t.Errorf("BLOCKHASH(0) result = %x, want %x", gotCode, wantHash.Bytes())
+	}
+}
+
 // TestTABoundary_NativeLogs_SurvivesSerialization verifies B2 end-to-end: a
 // constructor that runs BALANCE (the interpreter's only current
 // NativeLogger.LogString call site, processor.cpp's balance()/
