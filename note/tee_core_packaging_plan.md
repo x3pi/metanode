@@ -77,11 +77,35 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
 
 **Nguyên tắc xuyên suốt: không đổi logic mvm/Xapian, chỉ đổi CÁCH dữ liệu ra/vào ranh giới.**
 
-- **B1 — Gộp context Go→C++ thành 1 struct đầu vào duy nhất.** Trước khi gọi
-  `execute`/`executeBatch`, Go tự thu thập sẵn chain id, block hash liên quan, blob
-  hashes/base fee, cross-chain sender/source... đóng thành 1 `ExecutionContext` truyền vào
-  1 lần. Xoá dần `GetChainId`/`GetBlockHash`/`GetBlobHash`/`GetBlobBaseFee`/
-  `GetCrossChainSender`/`GetCrossChainSourceId` khỏi đường gọi giữa chừng.
+- [x] **B1 — Gộp context Go→C++ thành 1 struct đầu vào duy nhất.** ✅ Xong 5/6 (2026-08-14,
+  commit `3bd58b63`). `deploy`/`call`/`execute` (3 entry point chạy interpreter, KHÔNG đụng
+  `executeBatch`/`sendNative`/`processNativeMintBurn`/`noncePlusOne` vì chúng không bao giờ
+  chạm opcode liên quan) nay nhận thêm 6 tham số cuối (`MVM_B1_CONTEXT_PARAMS`, đều nullable
+  = "không cung cấp"), gộp vào `BlockContext` (mới: `chain_id`, `blob_versioned_hashes`,
+  `blob_base_fee`, `cross_chain_sender`, `cross_chain_source_id`) qua `ParseTxContext()` +
+  `CreateBlockContext()` (default arg — 4 call site không đụng không cần sửa gì).
+  `MyGlobalState`'s 5 getter (`get_chain_id`, `get_blob_hash`, `get_blob_base_fee`,
+  `get_cross_chain_sender`, `get_cross_chain_source_id`) đọc thẳng từ `blockContext` thay vì
+  gọi ngược Go. **`GetBlockHash` (BLOCKHASH) cố tình để lại** — cần mảng tới 256 hash, thiết
+  kế lớn hơn phạm vi đợt này, vẫn đọc từ `blockchain.GetBlockChainInstance()`.
+
+  **3 lỗi thật bắt được nhờ quy trình verify, không phải đoán:**
+  1. `get_cross_chain_sender`/`get_cross_chain_source_id` cần ABI-encode đúng 32 byte
+     (`cross_chain_precompile.cpp` check `source_bin.size() == 32` tường minh) — soi thẳng
+     code tiêu thụ thay vì đoán, tránh được lỗi âm thầm trả 8/20 byte.
+  2. `config.ConfigApp` có thể `nil` trong test — callback cũ chỉ đọc lười (chỉ khi bytecode
+     thật sự chạy CHAINID), code mới đọc mỗi lần gọi `Deploy`/`Call`/`Execute` bất kể có dùng
+     CHAINID không → crash toàn bộ test suite ngay lần chạy đầu (`go test ./...`), bắt được
+     và sửa bằng nil-guard phòng thủ trước khi coi là xong.
+  3. `Return` của 1 `Deploy` thành công là **địa chỉ CREATE-derived**, không phải bytes RETURN
+     gốc của constructor — phát hiện qua test đầu tiên fail với giá trị trông như address,
+     xác nhận bằng `crypto.CreateAddress`, sửa lại dùng `MapCodeChange` thay vì `Return`.
+
+  **Verify:** `bash pkg/mvm/build.sh` (rebuild C++) sạch; `go build/vet/test -count=1 ./...`
+  sạch toàn module; 5 test mới trong `ta_boundary_harness_test.go` (ChainId, Blob+BlobBaseFee,
+  CrossChain — CrossChain phải tự assemble 1 constructor thực hiện low-level CALL vì precompile
+  chỉ dispatch từ trong `is_precompile()` lúc xử lý opcode CALL, không phải từ entry point của
+  `deploy`/`call`/`execute`) ổn định qua `go test -count=3`.
 - **B2 — Gộp log ra thành buffer trả về, bỏ callback log inline.** `GoLogString`/
   `GoLogBytes` → C++ tự tích log vào buffer nội bộ, trả về cùng `ExecuteResult` khi hàm kết
   thúc; Go in log sau khi nhận kết quả. Rẻ, rủi ro thấp, giảm ngay 2/8 callback.
