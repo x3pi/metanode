@@ -313,6 +313,40 @@ async fn test_core_set_min_propose_round() {
     assert_eq!(our_ancestor_included.round, 10);
 }
 
+/// Polls `store` for a persisted commit at or above `expected_index`, giving real (non-virtual)
+/// wall-clock time to any in-flight `DagState::flush()` write between attempts.
+///
+/// `Core::try_new_block()` calls `dag_state.write().flush()` internally and hands the resulting
+/// ticket off to an async task (the block broadcaster) that awaits it before sending — but that
+/// ticket is never surfaced to callers, so tests have no handle to await it directly. A test-level
+/// `dag_state.write().flush()` called afterward reliably finds nothing pending (the internal call
+/// already drained the write queues) and returns `None`, so there is nothing to await — checking
+/// the store immediately races the still in-flight `spawn_blocking` write. Under
+/// `start_paused = true`, `tokio::time::sleep` doesn't reliably help either: the paused clock can
+/// auto-advance virtual timers near-instantly without giving the OS any real time to run the
+/// write thread. `spawn_blocking` + `std::thread::sleep` forces a genuine (small) wall-clock
+/// delay, which is what's actually needed here.
+async fn wait_for_commit_persisted(
+    store: &Arc<MemStore>,
+    expected_index: CommitIndex,
+) -> crate::commit::TrustedCommit {
+    for _ in 0..500 {
+        if let Ok(Some(commit)) = store.read_last_commit() {
+            if commit.index() >= expected_index {
+                return commit;
+            }
+        }
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+            .await
+            .unwrap();
+    }
+    panic!(
+        "Timed out waiting for commit index {expected_index} to be persisted to store \
+         (last seen: {:?})",
+        store.read_last_commit()
+    );
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_core_try_new_block_leader_timeout() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -394,19 +428,15 @@ async fn test_core_try_new_block_leader_timeout() {
         assert!(core_fixture.core.new_block(4, true).unwrap().is_some());
         assert_eq!(core_fixture.core.last_proposed_round(), 4);
 
-        // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
-        // write to actually land before reading it back through `store` below.
-        let flush_rx = core_fixture.dag_state.write().flush();
-        if let Some(rx) = flush_rx {
-            rx.await.unwrap();
-        }
-
-        // Check commits have been persisted to store
-        let last_commit = core_fixture
-            .store
-            .read_last_commit()
-            .unwrap()
-            .expect("last commit should be set");
+        // NOTE: try_new_block() (called internally by new_block() above) already ran its own
+        // dag_state.write().flush() before returning — capturing the commit decided a moment
+        // earlier via the add_blocks() call in the loop above, along with this round's blocks —
+        // and handed that ticket off to an internal broadcast task we have no handle to. A flush()
+        // called here would reliably find nothing pending (that internal call already drained
+        // everything) and its ticket would be a no-op; awaiting it does NOT wait for the real
+        // write. Poll the store instead, so this doesn't race the still in-flight spawn_blocking
+        // write.
+        let last_commit = wait_for_commit_persisted(&core_fixture.store, 1).await;
         // There are 1 leader rounds with rounds completed up to and including
         // round 4
         assert_eq!(last_commit.index(), 1);
