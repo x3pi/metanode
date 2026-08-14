@@ -196,7 +196,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 func (vmP *VmProcessor) deploySmartContract(
 	ctx context.Context, // Context từ caller
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	mvmId common.Address,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
@@ -272,7 +272,7 @@ func (vmP *VmProcessor) deploySmartContract(
 func (vmP *VmProcessor) readOnlyCall(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil
 	// var readOnlyCtx context.Context = ctx // Không cần tạo context mới nếu không dùng
@@ -352,7 +352,7 @@ func (vmP *VmProcessor) readOnlyCall(
 func (vmP *VmProcessor) executeSmartContract(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil
@@ -443,7 +443,7 @@ func (vmP *VmProcessor) executeSmartContract(
 func (vmP *VmProcessor) ProcessNativeMintBurn(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	operationType uint64, // 0: mint, 1: burn
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil        // Khởi tạo nil
@@ -531,7 +531,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 func (vmP *VmProcessor) sendNative(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil

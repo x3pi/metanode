@@ -120,7 +120,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdDebug(
 
 func (vmP *VmProcessor) callDebug(
 	ctx context.Context,
-	tx types.Transaction, mvmE *mvm.MVMApi,
+	tx types.Transaction, mvmE mvm.ExecutionEngine,
 ) types.ExecuteSCResult {
 	var span *trace.Span = nil             // Khởi tạo nil
 	var callDebugCtx context.Context = ctx // Mặc định dùng context vào
@@ -317,7 +317,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSub(
 }
 func (vmP *VmProcessor) onlyCall(
 	ctx context.Context,
-	tx types.Transaction, mvmE *mvm.MVMApi,
+	tx types.Transaction, mvmE mvm.ExecutionEngine,
 ) (types.ExecuteSCResult, bool) {
 	var span *trace.Span = nil // Khởi tạo nil
 	// var onlyCallCtx context.Context = ctx // Không cần nếu không truyền xuống
@@ -515,7 +515,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmIdSubDeploy(
 
 func (vmP *VmProcessor) onlyDeploy(
 	ctx context.Context,
-	tx types.Transaction, mvmE *mvm.MVMApi,
+	tx types.Transaction, mvmE mvm.ExecutionEngine,
 ) (types.ExecuteSCResult, bool) {
 	var span *trace.Span = nil // Khởi tạo nil
 	// var onlyDeployCtx context.Context = ctx // Không cần nếu không truyền xuống
