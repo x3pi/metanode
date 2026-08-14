@@ -727,6 +727,7 @@ func (a *MVMApi) Call(
 		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -816,6 +817,7 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -930,6 +932,7 @@ func (a *MVMApi) ExecuteBatch(
 		for i := 0; i < numInputs; i++ {
 			if cResultsSlice[i] != nil {
 				results[i] = extractExecuteResult(cResultsSlice[i])
+				FlushNativeLogs(results[i].NativeLogs) // TEE-packaging B2
 			} else {
 				results[i] = &MVMExecuteResult{}
 			}
@@ -994,6 +997,7 @@ func (a *MVMApi) SendNative(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -1050,6 +1054,7 @@ func (a *MVMApi) ProcessNativeMintBurn(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -1094,6 +1099,7 @@ func (a *MVMApi) NoncePlusOne(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -1186,6 +1192,7 @@ func (a *MVMApi) Deploy(
 		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs

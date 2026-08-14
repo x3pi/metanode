@@ -37,6 +37,7 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 
 	MapFullDbHash := extractMapFullDbHash(cExecuteResult)
 	mapFullDbLogs := extractFullDbLogs(cExecuteResult) // <-- Gọi hàm mới
+	nativeLogs := extractNativeLogs(cExecuteResult)    // TEE-packaging B2
 
 	uptrOut := unsafe.Pointer(cExecuteResult.b_output)
 	rt := C.GoBytes(uptrOut, cExecuteResult.length_output)
@@ -74,6 +75,7 @@ func extractExecuteResult(cExecuteResult *C.struct_ExecuteResult) *MVMExecuteRes
 		MapFullDbHash:    MapFullDbHash,
 		MapFullDbLogs:    mapFullDbLogs,
 		GasUsed:          gasUsed,
+		NativeLogs:       nativeLogs,
 	}
 	processDecodedLogs(MVMEx)
 
@@ -676,4 +678,38 @@ func processDecodedLogs(result *MVMExecuteResult) {
 			}
 		*/
 	}
+}
+
+// extractNativeLogs decodes ExecuteResult.b_native_logs — a packed binary
+// blob of repeated [4-byte LE flag][4-byte LE msg_len][msg bytes] records,
+// see processResult()'s doc comment (mvm_linker.cpp) for the exact wire
+// format — into the (flag, message) pairs the interpreter buffered via
+// NativeLogger during this call (TEE-packaging B2,
+// note/tee_core_packaging_plan.md).
+func extractNativeLogs(cExecuteResult *C.struct_ExecuteResult) []NativeLogEntry {
+	length := int(cExecuteResult.length_native_logs)
+	if length <= 0 || cExecuteResult.b_native_logs == nil {
+		return nil
+	}
+
+	blob := C.GoBytes(unsafe.Pointer(cExecuteResult.b_native_logs), C.int(length))
+
+	var entries []NativeLogEntry
+	off := 0
+	for off+8 <= len(blob) {
+		flag := int32(binary.LittleEndian.Uint32(blob[off : off+4]))
+		msgLen := int(binary.LittleEndian.Uint32(blob[off+4 : off+8]))
+		off += 8
+		if msgLen < 0 || off+msgLen > len(blob) {
+			// Malformed blob (shouldn't happen — written by processResult()
+			// in the same process) — stop rather than read out of bounds.
+			break
+		}
+		entries = append(entries, NativeLogEntry{
+			Flag:    flag,
+			Message: string(blob[off : off+msgLen]),
+		})
+		off += msgLen
+	}
+	return entries
 }

@@ -15,6 +15,16 @@ type LogsJson struct {
 	Logs []map[string]interface{}
 }
 
+// NativeLogEntry is one line the interpreter logged via NativeLogger during
+// a Call/Execute/Deploy (TEE-packaging B2, note/tee_core_packaging_plan.md)
+// — buffered in C++ (MyLogger) instead of calling back into Go mid-
+// execution, and handed back here as part of MVMExecuteResult. Flag matches
+// the same 0=INFO/1=DEBUG/2=DEBUGP/3=WARN/4=ERROR mapping GoLogString used.
+type NativeLogEntry struct {
+	Flag    int32
+	Message string
+}
+
 type MVMExecuteResult struct {
 	MapAddBalance    map[string][]byte
 	MapSubBalance    map[string][]byte
@@ -35,6 +45,7 @@ type MVMExecuteResult struct {
 	MapFullDbLogs    map[string][]byte // <<--- Kiểu dữ liệu mới
 	SimpleDbHash     []byte
 	GasUsed          uint64
+	NativeLogs       []NativeLogEntry
 }
 
 func (er *MVMExecuteResult) String() string {
