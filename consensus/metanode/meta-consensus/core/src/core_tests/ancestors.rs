@@ -151,8 +151,10 @@ async fn test_smart_ancestor_selection() {
         .find(|block| block.author() == AuthorityIndex::new_for_test(1))
         .unwrap()
         .reference();
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // Smart select should be triggered and no block should be proposed.
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
@@ -223,7 +225,7 @@ async fn test_smart_ancestor_selection() {
         .build();
     let blocks = builder.blocks(16..=16);
     // Wait for leader timeout to force blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // Smart select should be triggered and no block should be proposed.
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
@@ -287,7 +289,7 @@ async fn test_smart_ancestor_selection() {
         .collect::<Vec<_>>();
 
     // Have enough ancestor blocks to propose now.
-    sleep(context.parameters.min_round_delay).await;
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
     assert_eq!(core.last_proposed_block().round(), 23);

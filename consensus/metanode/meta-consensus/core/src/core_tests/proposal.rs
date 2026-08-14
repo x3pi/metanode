@@ -147,8 +147,10 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Adding one block now will trigger the creation of new block for round 1
     let block_1 = VerifiedBlock::new_for_test(TestBlock::new(1, 1).build());
     expected_ancestors.insert(block_1.reference());
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_1.clone(), vec![])]);
     _ = core.add_blocks(vec![block_1]);
@@ -161,8 +163,10 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Adding another block now forms a quorum for round 1, so block at round 2 will proposed
     let block_2 = VerifiedBlock::new_for_test(TestBlock::new(1, 2).build());
     expected_ancestors.insert(block_2.reference());
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_2.clone(), vec![1, 4])]);
     _ = core.add_blocks(vec![block_2.clone()]);
@@ -390,8 +394,12 @@ async fn test_core_try_new_block_leader_timeout() {
         assert!(core_fixture.core.new_block(4, true).unwrap().is_some());
         assert_eq!(core_fixture.core.last_proposed_round(), 4);
 
-        // Flush the DAG state to storage.
-        core_fixture.dag_state.write().flush();
+        // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
+        // write to actually land before reading it back through `store` below.
+        let flush_rx = core_fixture.dag_state.write().flush();
+        if let Some(rx) = flush_rx {
+            rx.await.unwrap();
+        }
 
         // Check commits have been persisted to store
         let last_commit = core_fixture
@@ -732,8 +740,10 @@ async fn test_core_compress_proposal_references() {
     // be applied the we should expect all the previous blocks to be referenced from round 0..=10. However, since compression
     // is applied only the last round's (10) blocks should be referenced + the authority's block of round 0.
     let core_fixture = &mut cores[excluded_authority];
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(default_params.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     core_fixture.add_blocks(all_blocks).unwrap();
 
