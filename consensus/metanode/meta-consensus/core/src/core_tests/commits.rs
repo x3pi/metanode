@@ -509,6 +509,15 @@ async fn test_filter_new_commits() {
     // We should have committed up to round 4
     assert_eq!(committed_sub_dags.len(), 4);
 
+    // filter_new_commits() falls back to checking the persisted store (not just the
+    // in-memory last_commit_index) for whether a commit index is already locally
+    // committed, so the just-committed rounds 1-4 need to actually be flushed before
+    // the checks below can see them as already-committed.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
+
     // Now validate the certified commits. We'll try 3 different scenarios:
     println!("Case 1. Provide certified commits that are all before the last committed round.");
 
@@ -557,16 +566,16 @@ async fn test_filter_new_commits() {
         .map(|(_, c)| c.clone())
         .collect::<Vec<_>>();
 
-    let err = core
+    // COLD-START (see filter_new_commits()): a gap between the last committed index
+    // and the first certified commit's index used to be a hard error
+    // (UnexpectedCertifiedCommitIndex), but that's expected to happen during
+    // snapshot restore when the node jumps forward, so it's now just a
+    // `tracing::warn!` and the gapped commit is returned anyway instead of rejected.
+    let certified_commits = core
         .filter_new_commits(certified_commits.clone())
-        .unwrap_err();
-    match err {
-        ConsensusError::UnexpectedCertifiedCommitIndex {
-            expected_commit_index: 5,
-            commit_index: 6,
-        } => (),
-        _ => panic!("Unexpected error: {:?}", err),
-    }
+        .unwrap();
+    assert_eq!(certified_commits.len(), 1);
+    assert_eq!(certified_commits.first().unwrap().reference().index, 6);
 }
 
 #[tokio::test]
@@ -612,8 +621,12 @@ async fn test_add_certified_commits() {
     // We should have committed up to round 4
     assert_eq!(committed_sub_dags.len(), 4);
 
-    // Flush the DAG state to storage.
-    core.dag_state.write().flush();
+    // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
+    // write to actually land before reading it back through `store` below.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
 
     println!("Case 1. Provide no certified commits. No commit should happen.");
 
@@ -645,8 +658,21 @@ async fn test_add_certified_commits() {
     core.add_certified_commits(CertifiedCommits::new(certified_commits.clone(), vec![]))
         .expect("Should not fail");
 
-    // Flush the DAG state to storage.
-    core.dag_state.write().flush();
+    // FORK-SAFETY (May 2026, try_commit()): once in "sync mode" (certified commits were
+    // provided), Core deliberately breaks out instead of opportunistically falling back to
+    // the local direct-decide rule for anything beyond the certified commits — mixing the
+    // two within the same call was deemed unsafe (own comment: "Fallback to the local
+    // committer during fast-forwarding is extremely dangerous"). So the direct-decide of
+    // leader rounds 9-10 from the extra accepted blocks now needs its own, separate,
+    // non-sync-mode try_commit() call.
+    core.try_commit(vec![]).unwrap();
+
+    // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
+    // write to actually land before reading it back through `store` below.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
 
     let commits = store.scan_commits((6..=10).into()).unwrap();
 
