@@ -41,6 +41,13 @@ use crate::{
 // TODO: Move to protocol config, and verify in BlockVerifier.
 const MAX_COMMIT_VOTES_PER_BLOCK: usize = 100;
 
+// [USER REQUIREMENT] Floor on the delay between proposals, even when `Parameters::min_round_delay`
+// is configured lower, to force block aggregation (see core/proposer.rs::try_new_block). Exposed
+// here (rather than as a local literal) so tests that drive proposal timing off
+// `Parameters::min_round_delay` alone don't silently race this floor.
+pub(crate) const MIN_PROPOSAL_AGGREGATION_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
 pub(crate) struct Core {
     pub(crate) context: Arc<Context>,
     /// The consumer to use in order to pull transactions to be included for the next proposals
