@@ -91,7 +91,11 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxTCP(
 	chainClient *connection_client.ConnectionClient,
 	topUpFunc func(toAddress common.Address) error,
 ) ([]byte, mt_types.Transaction, func(), error) {
-	sg := types.NewCancunSigner(ethTx.ChainId())
+	// PragueSigner accepts every tx type this chain supports (Legacy through
+	// SetCode) — CancunSigner previously used here rejected SetCodeTxType
+	// outright (ErrTxTypeNotSupported), which made any EIP-7702 tx submitted
+	// through this RPC proxy fail sender recovery before it ever got built.
+	sg := types.NewPragueSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress: %w", err)
@@ -239,7 +243,11 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKeyTCP(
 	topUpFunc func(toAddress common.Address) error,
 ) ([]byte, mt_types.Transaction, func(), error) {
 
-	sg := types.NewCancunSigner(ethTx.ChainId())
+	// PragueSigner accepts every tx type this chain supports (Legacy through
+	// SetCode) — CancunSigner previously used here rejected SetCodeTxType
+	// outright (ErrTxTypeNotSupported), which made any EIP-7702 tx submitted
+	// through this RPC proxy fail sender recovery before it ever got built.
+	sg := types.NewPragueSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err)

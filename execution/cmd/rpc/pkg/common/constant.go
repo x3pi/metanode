@@ -38,6 +38,16 @@ const (
 
 	// === HẰNG SỐ MỚI ===
 	RequestDirectory = "REQUEST_DIRECTORY"
+
+	// === EIP-4844 BLOB GAS MARKET ===
+	// Kept in sync by hand with execution/pkg/common/constant.go's copy (this is a
+	// separate, disconnected Go module — see execution/cmd/rpc's own go.mod).
+	// Matches go-ethereum's params.BlobTxBlobGasPerBlob / Cancun BlobConfig.
+	// This chain has no hardfork-activation mechanism, so these are fixed rather
+	// than schedule-dependent like upstream geth.
+	BLOB_GAS_PER_BLOB    uint64 = 131072 // 1 << 17
+	MAX_BLOBS_PER_TX            = 6
+	MAX_BLOBS_PER_BLOCK         = 6
 )
 
 var (
