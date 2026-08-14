@@ -4,6 +4,7 @@
 #include "mvm/util.h"
 #include "mvm_linker.hpp"
 #include "state.h"
+#include <algorithm>
 #include <iostream>
 
 struct GlobalStateGet_return {
@@ -262,73 +263,66 @@ uint256_t MyGlobalState::get_block_hash(int blockNumber) {
   return hash;
 }
 
+// --- TEE-packaging B1 (note/tee_core_packaging_plan.md): these 5 getters
+// used to call back into Go mid-execution (GetChainId/GetCrossChainSender/
+// GetCrossChainSourceId/GetBlobHash/GetBlobBaseFee). They now read straight
+// from blockContext, populated once by deploy/call/execute before the
+// interpreter starts — see block_context.h's doc comment on why. The old
+// //export Go functions still exist (pkg/mvm/mvm_api.go) but are no longer
+// called from here; left in place rather than deleted, since Go still
+// declares them and removing them is a separate, lower-value cleanup with
+// no correctness upside on its own.
+
 uint256_t MyGlobalState::get_chain_id() {
-  Value_return valueReturn = GetChainId();
-  uint256_t chainId = mvm::bytes_to_uint256(valueReturn.data_p);
-  return chainId;
+  return blockContext.chain_id;
 }
 
 std::vector<uint8_t> MyGlobalState::get_cross_chain_sender() {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
+  // Callers (cross_chain_precompile.cpp) require ABI-encoded address: 32
+  // bytes, 12 zero bytes then the 20-byte address — matches the pre-B1 Go
+  // callback's encoding exactly. blockContext.cross_chain_sender itself
+  // holds the plain 20-byte address (or is empty when inactive); the
+  // padding happens here, at the point of use, not in the context struct.
+  if (blockContext.cross_chain_sender.empty()) {
     return {};
   }
-  Value_return vr = GetCrossChainSender(currentMvmId);
-  if (!vr.success || vr.data_p == nullptr || vr.data_size <= 0) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return {};
-  }
-  std::vector<uint8_t> result(vr.data_p, vr.data_p + vr.data_size);
-  free(vr.data_p);
+  std::vector<uint8_t> result(32, 0);
+  size_t n = blockContext.cross_chain_sender.size();
+  size_t copyLen = n < 20 ? n : 20;
+  std::copy(blockContext.cross_chain_sender.begin(),
+            blockContext.cross_chain_sender.begin() + copyLen,
+            result.begin() + (32 - copyLen));
   return result;
 }
 
 std::vector<uint8_t> MyGlobalState::get_cross_chain_source_id() {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
+  // Callers (cross_chain_precompile.cpp) require exactly 32 bytes,
+  // big-endian — matches the pre-B1 Go callback's uint256.Bytes32()
+  // encoding exactly (source_bin.size() == 32 is checked explicitly at the
+  // consuming end, so this length is load-bearing, not cosmetic).
+  if (blockContext.cross_chain_sender.empty()) {
     return {};
   }
-  Value_return vr = GetCrossChainSourceId(currentMvmId);
-  if (!vr.success || vr.data_p == nullptr || vr.data_size <= 0) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return {};
+  std::vector<uint8_t> result(32, 0);
+  uint64_t sourceId = blockContext.cross_chain_source_id;
+  for (int i = 31; i >= 24; --i) {
+    result[i] = static_cast<uint8_t>(sourceId & 0xff);
+    sourceId >>= 8;
   }
-  std::vector<uint8_t> result(vr.data_p, vr.data_p + vr.data_size);
-  free(vr.data_p);
   return result;
 }
 
 uint256_t MyGlobalState::get_blob_hash(uint64_t index) {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
+  // EIP-4844: an out-of-range index resolves to 0, same as "no blob context
+  // at all" — both are simply "index not found" here.
+  if (index >= blockContext.blob_versioned_hashes.size()) {
     return uint256_t{};
   }
-  Value_return vr = GetBlobHash(currentMvmId, index);
-  // success=false covers both "no blob tx context set" and "index out of
-  // range" — EIP-4844 says BLOBHASH returns 0 for an out-of-range index, so
-  // both cases collapse to the same zero result here.
-  if (!vr.success || vr.data_p == nullptr) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return uint256_t{};
-  }
-  uint256_t hash = mvm::bytes_to_uint256(vr.data_p);
-  free(vr.data_p);
-  return hash;
+  return blockContext.blob_versioned_hashes[index];
 }
 
 uint256_t MyGlobalState::get_blob_base_fee() {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
-    return uint256_t{};
-  }
-  Value_return vr = GetBlobBaseFee(currentMvmId);
-  if (!vr.success || vr.data_p == nullptr) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return uint256_t{};
-  }
-  uint256_t fee = mvm::bytes_to_uint256(vr.data_p);
-  free(vr.data_p);
-  return fee;
+  return blockContext.blob_base_fee;
 }
 
 void MyGlobalState::insert(const StateEntry &p) {

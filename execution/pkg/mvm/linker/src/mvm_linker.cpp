@@ -252,11 +252,20 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
   }
 }
 
-mvm::BlockContext CreateBlockContext(unsigned char *mvmId, uint64_t prevrandao,
-                                     uint64_t gas_limit, uint64_t time,
-                                     uint64_t base_fee, uint256_t number,
-                                     uint256_t coinbase,
-                                     uint256_t tx_hash = 0) {
+mvm::BlockContext CreateBlockContext(
+    unsigned char *mvmId, uint64_t prevrandao, uint64_t gas_limit,
+    uint64_t time, uint64_t base_fee, uint256_t number, uint256_t coinbase,
+    uint256_t tx_hash = 0,
+    // TEE-packaging B1 (note/tee_core_packaging_plan.md): additive — every
+    // existing caller that doesn't pass these keeps getting the same
+    // zero-value BlockContext fields as before, so executeBatch/sendNative/
+    // processNativeMintBurn/noncePlusOne (which never reach the interpreter
+    // anyway) don't need to change at all.
+    uint256_t chain_id = 0,
+    const std::vector<uint256_t> &blob_versioned_hashes = {},
+    uint256_t blob_base_fee = 0,
+    const std::vector<uint8_t> &cross_chain_sender = {},
+    uint64_t cross_chain_source_id = 0) {
   mvm::BlockContext block_context;
   block_context.mvmId = mvmId;
   block_context.prevrandao = prevrandao;
@@ -267,7 +276,59 @@ mvm::BlockContext CreateBlockContext(unsigned char *mvmId, uint64_t prevrandao,
   block_context.coinbase = coinbase;
   block_context.tx_hash =
       tx_hash; // txHash của TX hiện tại — precompile dùng làm msgId
+  block_context.chain_id = chain_id;
+  block_context.blob_versioned_hashes = blob_versioned_hashes;
+  block_context.blob_base_fee = blob_base_fee;
+  block_context.cross_chain_sender = cross_chain_sender;
+  block_context.cross_chain_source_id = cross_chain_source_id;
   return block_context;
+}
+
+// TEE-packaging B1: parses the new context parameters shared by
+// deploy/call/execute (the 3 entry points that run the interpreter) out of
+// their raw cgo byte-buffer form. A null pointer / zero count means "not
+// supplied", matching each BlockContext field's zero-value default — see
+// block_context.h.
+struct ParsedTxContext {
+  uint256_t chain_id = 0;
+  std::vector<uint256_t> blob_versioned_hashes;
+  uint256_t blob_base_fee = 0;
+  std::vector<uint8_t> cross_chain_sender;
+  uint64_t cross_chain_source_id = 0;
+};
+
+ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
+                               unsigned char *b_blob_versioned_hashes,
+                               int blob_versioned_hashes_count,
+                               unsigned char *b_blob_base_fee,
+                               unsigned char *b_cross_chain_sender,
+                               unsigned char *b_cross_chain_source_id) {
+  ParsedTxContext ctx;
+  if (b_chain_id != nullptr) {
+    ctx.chain_id = mvm::from_big_endian((uint8_t *)b_chain_id, 32u);
+  }
+  if (b_blob_versioned_hashes != nullptr && blob_versioned_hashes_count > 0) {
+    ctx.blob_versioned_hashes.reserve(blob_versioned_hashes_count);
+    for (int i = 0; i < blob_versioned_hashes_count; ++i) {
+      ctx.blob_versioned_hashes.push_back(mvm::from_big_endian(
+          (uint8_t *)(b_blob_versioned_hashes + i * 32), 32u));
+    }
+  }
+  if (b_blob_base_fee != nullptr) {
+    ctx.blob_base_fee = mvm::from_big_endian((uint8_t *)b_blob_base_fee, 32u);
+  }
+  if (b_cross_chain_sender != nullptr) {
+    ctx.cross_chain_sender.assign(b_cross_chain_sender,
+                                  b_cross_chain_sender + 20);
+  }
+  if (b_cross_chain_source_id != nullptr) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+      v = (v << 8) | b_cross_chain_source_id[i];
+    }
+    ctx.cross_chain_source_id = v;
+  }
+  return ctx;
 }
 
 // --- Hàm processResult ---
@@ -521,7 +582,12 @@ ExecuteResult *deploy(
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
-    bool is_cache, bool is_off_chain) {
+    bool is_cache, bool is_off_chain,
+    // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+    unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+    int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+    unsigned char *b_cross_chain_sender,
+    unsigned char *b_cross_chain_source_id) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -537,9 +603,15 @@ ExecuteResult *deploy(
 
   uint256_t tx_hash = mvm::from_big_endian((uint8_t *)b_tx_hash, 32u);
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id);
   mvm::MyGlobalState gs(blockContext, is_cache);
 
   try {
@@ -635,7 +707,12 @@ ExecuteResult *call(
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, bool readOnly, unsigned char *b_tx_hash,
     bool is_debug, unsigned char *b_related_addresses,
-    int related_addresses_count, bool is_off_chain) {
+    int related_addresses_count, bool is_off_chain,
+    // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+    unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+    int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+    unsigned char *b_cross_chain_sender,
+    unsigned char *b_cross_chain_source_id) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -662,9 +739,15 @@ ExecuteResult *call(
     }
   }
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id);
 
   mvm::MyGlobalState gs(blockContext, false, relatedAddresses);
   //  init env
@@ -711,7 +794,12 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
         unsigned char
             *b_related_addresses, // Flatten array: addr1(20) + addr2(20) + ...
         int related_addresses_count, // Số lượng addresses
-        bool is_cache
+        bool is_cache,
+        // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+        unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+        int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+        unsigned char *b_cross_chain_sender,
+        unsigned char *b_cross_chain_source_id
 ) {
 
   uint256_t caller_address =
@@ -736,9 +824,15 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
     }
   }
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id);
 
   mvm::MyGlobalState gs(blockContext, is_cache, relatedAddresses);
   mvm::VectorLogHandler log_handler;
