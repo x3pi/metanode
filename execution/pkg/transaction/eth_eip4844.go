@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/holiman/uint256"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
@@ -109,6 +110,15 @@ func FromEthBlobTx(ethTx *types.Transaction, pTx *pb.Transaction) error {
 	blobHashes := ethTx.BlobHashes()
 	if len(blobHashes) == 0 {
 		return errors.New("EIP-4844 transaction must carry at least one blob hash")
+	}
+	// Reject at admission rather than accepting a tx that no honest block could ever
+	// commit (mainnet parity: MAX_BLOBS_PER_TX == MAX_BLOBS_PER_BLOCK, so a tx over
+	// the per-tx limit is unsatisfiable even alone) — see also
+	// tx_processor.computeBlobBudgetRejections for the separate per-BLOCK cap
+	// enforced later, once multiple blob txs are competing for the same block.
+	if len(blobHashes) > p_common.MAX_BLOBS_PER_TX {
+		return fmt.Errorf("EIP-4844 transaction carries %d blobs, exceeds the %d/tx limit",
+			len(blobHashes), p_common.MAX_BLOBS_PER_TX)
 	}
 
 	pTx.Type = types.BlobTxType

@@ -78,6 +78,26 @@ type TrueBlockSTM struct {
 	// maxExecWorkers caps how many TXs execute concurrently, when > 0.
 	// See WithMaxExecWorkers.
 	maxExecWorkers int
+
+	// blobBudgetRejected holds tx hashes computeBlobBudgetRejections() decided
+	// exceed the block's per-block blob-gas budget (see WithBlobBudgetRejected).
+	// nil (the zero value, used by every test constructing a TrueBlockSTM
+	// directly) means no rejections — every blob tx is treated as in-budget,
+	// matching pre-cap behavior.
+	blobBudgetRejected map[common.Hash]struct{}
+}
+
+// WithBlobBudgetRejected sets the precomputed per-block blob-gas budget
+// rejection set (see computeBlobBudgetRejections) execOne() consults via
+// blobFeeOrReject. Must be computed from the FULL block's tx order (spanning
+// both this engine's txs and any native-fast-path txs processed alongside it
+// in the same block) — a TrueBlockSTM only sees its own EVM-routed subset,
+// which on its own isn't enough to enforce a block-wide budget correctly.
+// Call before Process(); not setting this at all (nil) means no cap is
+// enforced by this instance.
+func (stm *TrueBlockSTM) WithBlobBudgetRejected(rejected map[common.Hash]struct{}) *TrueBlockSTM {
+	stm.blobBudgetRejected = rejected
+	return stm
 }
 
 // WithMaxExecWorkers caps concurrent TX execution at n (validation stays
@@ -678,7 +698,7 @@ func (stm *TrueBlockSTM) execOne(
 			// reject-but-still-advance-nonce treatment as insufficient balance
 			// below, since by the time we're here the tx already consumed a nonce
 			// slot from the sender's perspective.
-			blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+			blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime), stm.blobBudgetRejected)
 			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
 			if blobErr == nil {
 				totalCost.Add(totalCost, blobFee)
@@ -782,7 +802,7 @@ func (stm *TrueBlockSTM) execOne(
 					// balance deduction, but (unlike gasFee) never enters the leader-reward
 					// totalGasFee computation later, which only re-derives from
 					// receipt.GasUsed() * EffectiveGasPrice(). See blobFeeOrReject's doc.
-					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime), stm.blobBudgetRejected)
 					if blobErr != nil {
 						canPayGas = false
 						receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR

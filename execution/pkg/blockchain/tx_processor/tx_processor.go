@@ -55,11 +55,22 @@ type ProcessResult struct {
 
 // computeBlobGasUsed sums EIP-4844 blob gas across every blob tx in txs,
 // regardless of execution outcome — the blobs occupy block space whether the
-// tx succeeds or reverts.
+// tx succeeds or reverts. The one exception is a tx rejected for exceeding
+// the block's blob-gas budget (see computeBlobBudgetRejections): it never got
+// space in the first place, so it contributes zero, or the cap it enforces
+// would be meaningless (the very gas it's over budget by would still get
+// counted). Recomputing the rejection set here from the same final,
+// already-ordered txs list is deterministic and always agrees with whatever
+// the execution engines computed from their own (differently-built, but
+// order-equivalent) view of the same block.
 func computeBlobGasUsed(txs []types.Transaction) uint64 {
+	rejected := computeBlobBudgetRejections(txs)
 	var total uint64
 	for _, tx := range txs {
 		if tx == nil {
+			continue
+		}
+		if _, over := rejected[tx.Hash()]; over {
 			continue
 		}
 		total += mt_common.BLOB_GAS_PER_BLOB * uint64(len(tx.BlobVersionedHashes()))
