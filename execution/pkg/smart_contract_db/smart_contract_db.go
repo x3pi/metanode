@@ -96,7 +96,16 @@ func (db *SmartContractDB) Code(address common.Address) []byte {
 		logger.Error("Error getting account state")
 		return nil
 	}
-	codeHash := account.SmartContractState().CodeHash()
+	// A plain EOA (the common case — most addresses passed here are not
+	// contracts or EIP-7702-delegated accounts) has no SmartContractState at
+	// all; every other call site in this codebase checks this first
+	// (authorization.go, vm_processor_state.go, rpc_state.go's GetCode), this
+	// one didn't. Nil code is the correct answer for an EOA anyway.
+	scState := account.SmartContractState()
+	if scState == nil {
+		return nil
+	}
+	codeHash := scState.CodeHash()
 	code, err := db.codeStorage.Get(codeHash.Bytes())
 	if err != nil {
 		logger.Error("Error getting code from storage")

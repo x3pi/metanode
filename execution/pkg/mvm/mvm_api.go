@@ -473,6 +473,17 @@ func (a *MVMApi) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint2
 	a.blobBaseFee = blobBaseFee
 }
 
+// blobHashAt implements the BLOBHASH opcode's index lookup as plain Go, kept
+// separate from the GetBlobHash cgo export below so it's unit-testable
+// without going through the C boundary. EIP-4844: an out-of-range index must
+// resolve to 0 (ok=false here), never an error or garbage value.
+func (a *MVMApi) blobHashAt(index uint64) (hash []byte, ok bool) {
+	if index >= uint64(len(a.blobVersionedHashes)) {
+		return nil, false
+	}
+	return a.blobVersionedHashes[index], true
+}
+
 func (a *MVMApi) GetCurrentRelatedAddresses() []common.Address {
 	var addresses []common.Address
 	a.currentRelatedAddresses.Range(func(key, value interface{}) bool {
@@ -1355,14 +1366,13 @@ func GetBlobHash(mvmId *C.uchar, index C.ulonglong) C.struct_Value_return {
 	if mvmApi == nil {
 		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
 	}
-	i := uint64(index)
-	if i >= uint64(len(mvmApi.blobVersionedHashes)) {
+	hash, ok := mvmApi.blobHashAt(uint64(index))
+	if !ok {
 		// Out of range: EIP-4844 says BLOBHASH must resolve to 0, not error —
 		// the C++ side (MyGlobalState::get_blob_hash) treats success=false the
 		// same as "return 0", so this is correct either way.
 		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
 	}
-	hash := mvmApi.blobVersionedHashes[i]
 	data_p := (*C.uchar)(C.CBytes(hash))
 	return C.struct_Value_return{
 		data_p:    data_p,
