@@ -46,16 +46,16 @@ func CloseMVMCppLog() {
 	C.CloseCppFileLog()
 }
 
-//export GoLogString
-func GoLogString(
-	flag C.int,
-	cString *C.char,
-) {
-	message := C.GoString(cString)
-
-	// Thử ghi vào file MVM riêng trước
+// logAtFlag maps mvm's numeric log flag (0=INFO/1=DEBUG/2=DEBUGP/3=WARN/
+// 4=ERROR) to this package's own logger, trying the dedicated MVM file log
+// first and falling back to the normal logger — the single place both
+// GoLogString/GoLogBytes (still exported for cgo, no longer called from
+// C++, see MyLogger's doc comment in linker/include/my_logger.h) and the
+// TEE-packaging B2 post-return flush path (FlushNativeLogs below) route
+// through, so the two can never drift in how a given flag gets leveled.
+func logAtFlag(flag int, message string) {
 	var level string
-	switch int(flag) {
+	switch flag {
 	case 0:
 		level = "INFO"
 	case 1:
@@ -75,7 +75,7 @@ func GoLogString(
 	}
 
 	// Fallback: ghi vào logger bình thường nếu MVM file log tắt
-	switch int(flag) {
+	switch flag {
 	case 0:
 		logger.Info(message)
 	case 1:
@@ -89,6 +89,26 @@ func GoLogString(
 	}
 }
 
+// FlushNativeLogs (TEE-packaging B2, note/tee_core_packaging_plan.md)
+// prints everything the interpreter buffered during one Call/Execute/Deploy
+// (see MVMExecuteResult.NativeLogs), in the same order and at the same
+// levels GoLogString/GoLogBytes used to apply live, mid-execution — the
+// call sites in mvm_api.go invoke this once, after extractExecuteResult,
+// instead of C++ calling back into Go per log line.
+func FlushNativeLogs(entries []NativeLogEntry) {
+	for _, e := range entries {
+		logAtFlag(int(e.Flag), e.Message)
+	}
+}
+
+//export GoLogString
+func GoLogString(
+	flag C.int,
+	cString *C.char,
+) {
+	logAtFlag(int(flag), C.GoString(cString))
+}
+
 //export GoLogBytes
 func GoLogBytes(
 	flag C.int,
@@ -96,40 +116,5 @@ func GoLogBytes(
 	size C.int,
 ) {
 	bMessage := C.GoBytes(unsafe.Pointer(bytes), size)
-	hexStr := hex.EncodeToString(bMessage)
-
-	// Thử ghi vào file MVM riêng trước
-	var level string
-	switch int(flag) {
-	case 0:
-		level = "INFO"
-	case 1:
-		level = "DEBUG"
-	case 2:
-		level = "DEBUGP"
-	case 3:
-		level = "WARN"
-	case 4:
-		level = "ERROR"
-	default:
-		level = "INFO"
-	}
-
-	if mvmFileLog(level, hexStr) {
-		return // Đã ghi vào file MVM riêng
-	}
-
-	// Fallback: ghi vào logger bình thường
-	switch int(flag) {
-	case 0:
-		logger.Info(hexStr)
-	case 1:
-		logger.Debug(hexStr)
-	case 2:
-		logger.DebugP(hexStr)
-	case 3:
-		logger.Warn(hexStr)
-	case 4:
-		logger.Error(hexStr)
-	}
+	logAtFlag(int(flag), hex.EncodeToString(bMessage))
 }

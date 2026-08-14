@@ -32,6 +32,7 @@ package mvm_test
 import (
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -551,6 +552,71 @@ func TestTABoundary_CrossChain_SurvivesSerialization(t *testing.T) {
 	big.NewInt(0).SetUint64(sourceChainID).FillBytes(wantSourceID)
 	if string(gotSourceID) != string(wantSourceID) {
 		t.Errorf("getSourceChainId() = %x, want %x", gotSourceID, wantSourceID)
+	}
+}
+
+// TestTABoundary_NativeLogs_SurvivesSerialization verifies B2 end-to-end: a
+// constructor that runs BALANCE (the interpreter's only current
+// NativeLogger.LogString call site, processor.cpp's balance()/
+// opSelfBalance()) must have its log line show up in the JSON-round-tripped
+// MVMExecuteResult.NativeLogs, proving MyLogger's buffer (my_logger.h/.cpp)
+// -> ExecuteResult.b_native_logs (mvm_linker.cpp) -> extractNativeLogs
+// (helpers.go) pipeline carries it correctly, instead of the pre-B2
+// mid-execution GoLogString callback.
+func TestTABoundary_NativeLogs_SurvivesSerialization(t *testing.T) {
+	cs := harnessChainState(t)
+	sender := common.HexToAddress("0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1")
+	queried := common.HexToAddress("0xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2")
+	mvmId := common.HexToAddress("0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3")
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+	harnessSeedAccount(t, cs, queried, big.NewInt(4_321), 0)
+
+	// Constructor: PUSH20 <queried> BALANCE POP PUSH1 0 PUSH1 0 RETURN —
+	// triggers processor.cpp's balance()'s NativeLogger.LogString call,
+	// then returns empty (the balance value itself isn't what's under test
+	// here, only that the log line survived the round trip).
+	initCode := append([]byte{0x73}, queried.Bytes()...)
+	initCode = append(initCode, 0x31, 0x50, 0x60, 0x00, 0x60, 0x00, 0xf3)
+
+	req := serializeRoundTrip(t, harnessDeployRequest{
+		Sender:      sender,
+		InitCode:    initCode,
+		GasPrice:    1,
+		GasLimit:    200_000,
+		BlockNumber: 1,
+		MvmId:       mvmId,
+		TxHash:      common.HexToHash("0x109b0e"),
+	})
+
+	var engine mvm.ExecutionEngine = mvm.GetOrCreateMVMApi(req.MvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(req.MvmId) })
+	engine.SetRelatedAddresses([]common.Address{req.Sender, queried})
+
+	rs := engine.Deploy(
+		req.Sender.Bytes(), req.InitCode, big.NewInt(0),
+		req.GasPrice, req.GasLimit,
+		0, 30_000_000, 0, 0, req.BlockNumber, common.Address{},
+		req.MvmId, req.TxHash.Bytes(),
+		false, false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Deploy returned nil result")
+	}
+	rsWire := serializeRoundTrip(t, *rs)
+	if rsWire.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", rsWire.Status, rsWire.Exmsg)
+	}
+
+	found := false
+	for _, entry := range rsWire.NativeLogs {
+		if entry.Flag == 0 && strings.Contains(entry.Message, "Balance of") &&
+			strings.Contains(strings.ToLower(entry.Message), strings.ToLower(queried.Hex())) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("NativeLogs missing expected BALANCE log line for %s; got %+v", queried.Hex(), rsWire.NativeLogs)
 	}
 }
 

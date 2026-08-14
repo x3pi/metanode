@@ -195,13 +195,20 @@ void incrementSenderNonce(mvm::MyGlobalState &gs, const mvm::Address &from,
 }
 
 // Run input as an EVM transaction, check the result and return the output
+//
+// out_native_logs (TEE-packaging B2, see MyLogger's doc comment): if
+// non-null, receives everything the interpreter logged via NativeLogger
+// during this call, in call order — populated on every return path
+// (success and both catch blocks), since logger is local to this function
+// and its buffered_logs would otherwise be lost the moment run() returns.
 mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
                     const mvm::Address &from, const mvm::Address &to,
                     const uint256_t &amount, uint64_t gas_price,
                     uint64_t gas_limit, mvm::VectorLogHandler &log_handler,
                     const mvm::Code &input, unsigned char *mvmId, bool readOnly,
                     const uint256_t &tx_hash, bool is_debug,
-                    bool is_off_chain = false) {
+                    bool is_off_chain = false,
+                    std::vector<std::pair<int, std::string>> *out_native_logs = nullptr) {
   mvm::Transaction tx(from, amount, gas_price, gas_limit, tx_hash, is_debug);
   MyLogger logger = MyLogger();
   MyExtension extension = MyExtension(mvmId, is_off_chain, &tx_hash);
@@ -228,6 +235,9 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
     // my_global_state.cpp.
     incrementSenderNonce(gs, from, fromAc);
 
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
+    }
     return exec_result;
   } catch (const std::exception &e) {
     mvm::ExecResult error_result = handleException(e);
@@ -238,6 +248,9 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
       incrementSenderNonce(gs, from, fromAc);
     } catch (...) {
     }
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
+    }
     return error_result;
   } catch (...) {
     mvm::ExecResult error_result = handleUnknownException("run");
@@ -247,6 +260,9 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
       auto fromAc = gs.get(from, nullptr);
       incrementSenderNonce(gs, from, fromAc);
     } catch (...) {
+    }
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
     }
     return error_result;
   }
@@ -332,9 +348,17 @@ ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
 }
 
 // --- Hàm processResult ---
+// native_logs (TEE-packaging B2, default empty — sendNative/
+// processNativeMintBurn/noncePlusOne never run the interpreter, so they
+// never have any to pass and don't need to change): serialized into
+// ExecuteResult's b_native_logs as a packed binary blob of
+// [4-byte LE flag][4-byte LE msg_len][msg bytes] records, one per entry, in
+// call order — Go decodes and flushes them into its own logger after the
+// call returns instead of mid-execution. See MyLogger's doc comment.
 ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
                              mvm::VectorLogHandler &log_handler,
-                             bool isOffChain = false) {
+                             bool isOffChain = false,
+                             const std::vector<std::pair<int, std::string>> &native_logs = {}) {
   // --- Khởi tạo tất cả các con trỏ là nullptr ban đầu ---
   char *b_output = nullptr;
   int length_output = 0;
@@ -342,6 +366,8 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
   int length_exmsg = 0;
   char *b_logs = nullptr;
   int length_logs = 0;
+  char *b_native_logs = nullptr;
+  int length_native_logs = 0;
   uint8_t **b_add_balance_change = nullptr;
   int length_add_balance_change = 0;
   uint8_t **b_sub_balance_change = nullptr;
@@ -502,6 +528,35 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     // We no longer retrieve full db hashes or logs via registry here.
     // Xapian changes are committed atomically in block_processor_commit.go.
 
+    // TEE-packaging B2: serialize native_logs (see this function's own doc
+    // comment above for the wire format). Placed last, after every other
+    // exception-prone allocation above, so a failure here can't leave any
+    // OTHER field half-populated — if `new char[]` below throws
+    // std::bad_alloc, b_native_logs is simply never assigned, and the
+    // existing catch(std::bad_alloc) block's cleanup call is unaffected
+    // (it never knew about this field to begin with).
+    if (!native_logs.empty()) {
+      size_t total = 0;
+      for (const auto &entry : native_logs) {
+        total += 4 + 4 + entry.second.size();
+      }
+      b_native_logs = new char[total];
+      size_t off = 0;
+      for (const auto &entry : native_logs) {
+        int32_t flag = entry.first;
+        int32_t msgLen = static_cast<int32_t>(entry.second.size());
+        for (int b = 0; b < 4; ++b) {
+          b_native_logs[off++] = static_cast<char>((flag >> (8 * b)) & 0xff);
+        }
+        for (int b = 0; b < 4; ++b) {
+          b_native_logs[off++] = static_cast<char>((msgLen >> (8 * b)) & 0xff);
+        }
+        memcpy(b_native_logs + off, entry.second.data(), entry.second.size());
+        off += entry.second.size();
+      }
+      length_native_logs = static_cast<int>(total);
+    }
+
     //           << std::endl;
     pendingResult = new ExecuteResult{
       b_exitReason : (char)result.er,
@@ -533,6 +588,8 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       length_storages_read : length_storages_read,
       b_logs : b_logs,
       length_logs : length_logs,
+      b_native_logs : b_native_logs,
+      length_native_logs : length_native_logs,
       gas_used : result.gas_used
     };
 
@@ -614,6 +671,12 @@ ExecuteResult *deploy(
       txContext.cross_chain_sender, txContext.cross_chain_source_id);
   mvm::MyGlobalState gs(blockContext, is_cache);
 
+  // TEE-packaging B2: populated by run() on every return path (success and
+  // both its internal catch blocks), threaded into every processResult()
+  // call below including this function's own catch blocks — run()'s
+  // MyLogger.buffered_logs would otherwise be lost when run() returns.
+  std::vector<std::pair<int, std::string>> nativeLogs;
+
   try {
     //  init env
     mvm::VectorLogHandler log_handler;
@@ -633,7 +696,7 @@ ExecuteResult *deploy(
               << " gas_price=" << gas_price << std::endl;
     auto result = run(gs, true, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, contract_constructor,
-                      mvmId, false, tx_hash, is_debug, is_off_chain);
+                      mvmId, false, tx_hash, is_debug, is_off_chain, &nativeLogs);
     std::cerr << "[DEPLOY_DEBUG] exit_reason=" << (int)result.er
               << " exception=" << (int)result.ex
               << " gas_used=" << result.gas_used
@@ -665,7 +728,7 @@ ExecuteResult *deploy(
       result.output = truncated_address;
     }
 
-    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain);
+    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
 
     return rs;
   } catch (const std::exception &e) {
@@ -676,7 +739,7 @@ ExecuteResult *deploy(
       mvm::VectorLogHandler clean_log_handler;
 
       ExecuteResult *rs =
-          processResult(error_result, gs, clean_log_handler, is_off_chain);
+          processResult(error_result, gs, clean_log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -688,7 +751,7 @@ ExecuteResult *deploy(
       mvm::VectorLogHandler clean_log_handler;
 
       ExecuteResult *rs =
-          processResult(error_result, gs, clean_log_handler, is_off_chain);
+          processResult(error_result, gs, clean_log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -752,20 +815,21 @@ ExecuteResult *call(
   mvm::MyGlobalState gs(blockContext, false, relatedAddresses);
   //  init env
   mvm::VectorLogHandler log_handler;
+  std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
   try {
     auto result = run(gs, false, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, input, mvmId, readOnly,
-                      tx_hash, is_debug, is_off_chain);
+                      tx_hash, is_debug, is_off_chain, &nativeLogs);
 
     // processResult có thể throw exception, cần catch
-    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain);
+    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
     return rs;
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
       ExecuteResult *rs =
-          processResult(error_result, gs, log_handler, is_off_chain);
+          processResult(error_result, gs, log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -774,7 +838,7 @@ ExecuteResult *call(
     try {
       mvm::ExecResult error_result = handleUnknownException("call");
       ExecuteResult *rs =
-          processResult(error_result, gs, log_handler, is_off_chain);
+          processResult(error_result, gs, log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -836,19 +900,21 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
 
   mvm::MyGlobalState gs(blockContext, is_cache, relatedAddresses);
   mvm::VectorLogHandler log_handler;
+  std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
   try {
     auto result =
         run(gs, false, caller_address, contract_address, amount, gas_price,
-            gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug);
+            gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug,
+            false, &nativeLogs);
 
     // processResult có thể throw exception, cần catch
-    ExecuteResult *rs = processResult(result, gs, log_handler);
+    ExecuteResult *rs = processResult(result, gs, log_handler, false, nativeLogs);
     return rs;
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
-      ExecuteResult *rs = processResult(error_result, gs, log_handler);
+      ExecuteResult *rs = processResult(error_result, gs, log_handler, false, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -856,7 +922,7 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
   } catch (...) {
     try {
       mvm::ExecResult error_result = handleUnknownException("execute");
-      ExecuteResult *rs = processResult(error_result, gs, log_handler);
+      ExecuteResult *rs = processResult(error_result, gs, log_handler, false, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -912,18 +978,20 @@ executeBatch(ExecuteBatchInputC *inputs, int num_inputs,
         mvm::from_big_endian((uint8_t *)inputs[i].b_tx_hash, 32u);
 
     mvm::VectorLogHandler log_handler;
+    std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
     try {
       auto result = run(gs, false, caller_address, contract_address, amount,
                         inputs[i].gas_price, inputs[i].gas_limit, log_handler,
-                        input, mvmId, false, tx_hash, inputs[i].is_debug);
-      batch_rs->results[i] = processResult(result, gs, log_handler);
+                        input, mvmId, false, tx_hash, inputs[i].is_debug,
+                        false, &nativeLogs);
+      batch_rs->results[i] = processResult(result, gs, log_handler, false, nativeLogs);
     } catch (const std::exception &e) {
       mvm::ExecResult error_result = handleException(e);
-      batch_rs->results[i] = processResult(error_result, gs, log_handler);
+      batch_rs->results[i] = processResult(error_result, gs, log_handler, false, nativeLogs);
     } catch (...) {
       mvm::ExecResult error_result = handleUnknownException("executeBatch");
-      batch_rs->results[i] = processResult(error_result, gs, log_handler);
+      batch_rs->results[i] = processResult(error_result, gs, log_handler, false, nativeLogs);
     }
 
     // Clear difference arrays in gs to avoid leaking state changes into the
@@ -1202,6 +1270,7 @@ void freeResult(ExecuteResult *pendingResult) {
   delete[] pendingResult->length_storages_read;
 
   delete[] pendingResult->b_logs;
+  delete[] pendingResult->b_native_logs;
 
   delete pendingResult;
 }

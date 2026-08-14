@@ -79,9 +79,28 @@ void CloseCppFileLog() {
 }
 
 // ============================================================================
-// NativeLogger callback — gọi từ C++ MVM processor sang Go
+// NativeLogger — TEE-packaging B2: buffer instead of calling back into Go
+// mid-execution (GoLogString/GoLogBytes cgo exports still exist in
+// pkg/mvm/logger.go but are no longer invoked from here; left in place
+// rather than deleted, same reasoning as B1's now-unused GetChainId etc —
+// see my_global_state.cpp).
 // ============================================================================
 
-void MyLogger::LogString(int f, char *str) { GoLogString(f, str); }
+void MyLogger::LogString(int f, char *str) {
+  buffered_logs.emplace_back(f, std::string(str != nullptr ? str : ""));
+}
 
-void MyLogger::LogBytes(int f, unsigned char *d, int s) { GoLogBytes(f, d, s); }
+void MyLogger::LogBytes(int f, unsigned char *d, int s) {
+  // Hex-encode here so every buffered entry is plain text — matches what
+  // the pre-B2 GoLogBytes callback did before handing off to Go's logger.
+  static const char hexDigits[] = "0123456789abcdef";
+  std::string hexStr;
+  if (d != nullptr && s > 0) {
+    hexStr.reserve(static_cast<size_t>(s) * 2);
+    for (int i = 0; i < s; ++i) {
+      hexStr.push_back(hexDigits[(d[i] >> 4) & 0x0f]);
+      hexStr.push_back(hexDigits[d[i] & 0x0f]);
+    }
+  }
+  buffered_logs.emplace_back(f, hexStr);
+}

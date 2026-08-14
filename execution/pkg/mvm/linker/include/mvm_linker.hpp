@@ -59,6 +59,15 @@ struct ExecuteResult {
   char *b_logs;
   int length_logs;
 
+  // TEE-packaging B2 (note/tee_core_packaging_plan.md): everything the
+  // interpreter logged via NativeLogger during this call (previously sent
+  // live to Go via GoLogString/GoLogBytes callbacks), packed as repeated
+  // [4-byte LE flag][4-byte LE msg_len][msg bytes] records in call order.
+  // May be NULL (length 0) if nothing was logged. See MyLogger's doc
+  // comment (my_logger.h) and processResult()'s (mvm_linker.cpp).
+  char *b_native_logs;
+  int length_native_logs;
+
   unsigned long long gas_used;
 };
 
