@@ -907,18 +907,17 @@ async fn parameterized_test_commit_on_leader_schedule_change_boundary(
         // There are 31 leader rounds with rounds completed up to and including
         // round 33. Round 33 blocks will only include their own blocks, so there
         // should only be 30 commits.
-        // However on a leader schedule change boundary its is possible for a
+        // Historically, on a leader schedule change boundary it was possible for a
         // new leader to get selected for the same round if the leader elected
-        // gets swapped allowing for multiple leaders to be committed at a round.
-        // Meaning with multi leader per round explicitly set to 1 we will have 30,
-        // otherwise 31.
-        // NOTE: We used 31 leader rounds to specifically trigger the scenario
-        // where the leader schedule boundary occurred AND we had a swap to a new
-        // leader for the same round
-        let expected_commit_count = match num_leaders_per_round {
-            Some(1) => 30,
-            _ => 31,
-        };
+        // got swapped, allowing for multiple leaders to be committed at a round
+        // (30 with multi leader per round explicitly set to 1, otherwise 31).
+        // FORK-SAFETY (May 2026, leader_schedule.rs::elect_leader()): reputation-based
+        // swaps are now permanently disabled (restoring nodes after a mid-epoch
+        // snapshot can't recompute identical reputation scores, so applying swaps
+        // risks a fork), so the boundary-swap scenario this test was built to trigger
+        // can no longer happen — the schedule boundary alone no longer produces an
+        // extra commit, regardless of `num_leaders_per_round`.
+        let expected_commit_count = 30;
 
         // Flush the DAG state to storage.
         core_fixture.dag_state.write().flush();
