@@ -425,8 +425,11 @@ async fn test_core_signals() {
     for round in 1..=10 {
         let mut this_round_blocks = Vec::new();
 
-        // Wait for min round delay to allow blocks to be proposed.
-        sleep(default_params.min_round_delay).await;
+        // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+        // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+        // `min_round_delay` is configured lower, so wait for whichever is longer.
+        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
+            .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round

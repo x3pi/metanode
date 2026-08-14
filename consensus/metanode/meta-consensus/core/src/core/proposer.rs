@@ -179,7 +179,7 @@ impl Core {
 
             // [USER REQUIREMENT] Force 40K-50K block aggregation by increasing the base proposal delay.
             // Reduced to 20ms to speed up empty block proposals which carry CommitVotes.
-            let min_aggregation_delay = Duration::from_millis(100);
+            let min_aggregation_delay = crate::core::MIN_PROPOSAL_AGGREGATION_DELAY;
             
             // ADAPTIVE BYPASS: If the queue already has enough TXs waiting, propose immediately!
             let has_sufficient_txs = self.transaction_consumer.has_sufficient_transactions();
