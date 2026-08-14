@@ -52,6 +52,7 @@ func processNativeTransfersFastPath(
 	skipSignatureVerify bool,
 	lastBlockHeader types.BlockHeader,
 	blockTime uint64,
+	blobBudgetRejected map[common.Hash]struct{},
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -202,7 +203,7 @@ func processNativeTransfersFastPath(
 					// kept out of totalGasFee below so it's never credited to the leader.
 					// Underpriced MaxFeePerBlobGas gets the same rejection path as any
 					// other ExecuteNativeTransfer error.
-					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime))
+					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime), blobBudgetRejected)
 					totalFee := gasFee
 					if blobErr == nil && blobFee.Sign() > 0 {
 						totalFee = new(big.Int).Add(gasFee, blobFee)

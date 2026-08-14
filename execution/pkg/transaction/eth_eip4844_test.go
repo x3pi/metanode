@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/holiman/uint256"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
@@ -135,6 +136,44 @@ func TestFromEthBlobTx_RejectsContractCreation(t *testing.T) {
 	pTx := &pb.Transaction{}
 	if err := FromEthBlobTx(ethTx, pTx); err == nil {
 		t.Fatalf("FromEthBlobTx: expected zero-address (contract creation) blob tx to be rejected")
+	}
+}
+
+// TestFromEthBlobTx_RejectsTooManyBlobs guards the per-tx blob-count cap
+// (mt_common.MAX_BLOBS_PER_TX) added alongside the per-block budget in
+// tx_processor.computeBlobBudgetRejections — a tx over the per-tx limit is
+// unsatisfiable regardless of the per-block cap, so it's rejected here at
+// admission rather than ever reaching block-building.
+func TestFromEthBlobTx_RejectsTooManyBlobs(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	to := common.HexToAddress("0x00000000000000000000000000000000001234")
+
+	hashes := make([]common.Hash, mt_common.MAX_BLOBS_PER_TX+1)
+	for i := range hashes {
+		hashes[i] = common.Hash{0x01, byte(i)}
+	}
+
+	innerTx := &types.BlobTx{
+		ChainID:    uint256.NewInt(1337),
+		GasTipCap:  uint256.NewInt(1),
+		GasFeeCap:  uint256.NewInt(1),
+		Gas:        21000,
+		To:         to,
+		Value:      uint256.NewInt(0),
+		BlobFeeCap: uint256.NewInt(1),
+		BlobHashes: hashes,
+		// No Sidecar needed: FromEthBlobTx checks the blob count before any
+		// sidecar/KZG verification.
+	}
+	ethTx, err := types.SignNewTx(key, types.NewCancunSigner(big.NewInt(1337)), innerTx)
+	if err != nil {
+		t.Fatalf("SignNewTx: %v", err)
+	}
+
+	pTx := &pb.Transaction{}
+	if err := FromEthBlobTx(ethTx, pTx); err == nil {
+		t.Fatalf("FromEthBlobTx: expected a tx with %d blobs (limit %d) to be rejected",
+			len(hashes), mt_common.MAX_BLOBS_PER_TX)
 	}
 }
 
