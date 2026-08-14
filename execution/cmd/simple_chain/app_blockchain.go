@@ -1440,7 +1440,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 				Tx:      tx,
 			})
 		}
-		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, app.chainState.HasCode)
 
 		// 4. Process transactions
 		blockTimeSec := blk.Header().TimeStamp() / 1000

@@ -578,6 +578,24 @@ func (cs *ChainState) GetAccountStateDB() *account_state_db.AccountStateDB {
 	return cs.accountStateDB.Load()
 }
 
+// HasCode reports whether addr currently has code — a real deployed contract,
+// or an EIP-7702-delegated EOA. Matches grouptxns.HasCodeFunc's signature;
+// pass this method value directly to grouptxns.GroupTransactionsDeterministic
+// so a plain value-transfer to such an address is routed through the EVM
+// instead of the native fast-path (see HasCodeFunc's doc for the one case
+// this intentionally doesn't cover).
+func (cs *ChainState) HasCode(addr common.Address) bool {
+	asDB := cs.GetAccountStateDB()
+	if asDB == nil {
+		return false
+	}
+	as, err := asDB.AccountState(addr)
+	if err != nil || as == nil {
+		return false
+	}
+	return as.SmartContractState() != nil
+}
+
 // GetSmartContractDB trả về SmartContractDB.
 func (cs *ChainState) GetSmartContractDB() *smart_contract_db.SmartContractDB {
 	return cs.smartContractDB.Load()

@@ -104,8 +104,6 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 			Tx:      tx,
 		})
 	}
-	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
-
 	blockDatabase := block.NewBlockDatabase(bv.storageManager.GetStorageBlock())
 
 	chainState, err := blockchain.NewChainState(bv.storageManager, blockDatabase, oldBlockData.Header(), bv.chainState.GetConfig(), bv.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
@@ -113,6 +111,11 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
 	defer chainState.Close()
+
+	// Grouped after chainState is ready so classification can route a plain
+	// value-transfer to an already-code-bearing address through the EVM
+	// (see grouptxns.HasCodeFunc's doc).
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items, chainState.HasCode)
 
 	// Use the block's stored timestamp for deterministic replay during validation
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
