@@ -51,9 +51,12 @@ Ranh giới Go↔C++ hôm nay **không sạch một chiều** — có 2 luồng 
 | `GetCrossChainSender` | `mvm_api.go:1307` | đọc sender liên chain | ✅ B1, `3bd58b63` |
 | `GetCrossChainSourceId` | `mvm_api.go:1334` | đọc source id liên chain | ✅ B1, `3bd58b63` |
 | `GoLogString`/`GoLogBytes` | `logger.go:50`/`:93` | log ra ngoài giữa chừng | ✅ B2, `2e53df25` |
-| `ExtensionGetOrCreateSimpleDb` | `extension.go:288` | **mở 1 key-value DB runtime** cho precompile "SimpleDb" — không chỉ đọc context, còn đọc/ghi state phía Go giữa lúc contract đang chạy | ⏳ B3, chưa làm — cần quyết định của bạn |
+| `ExtensionGetOrCreateSimpleDb` | `extension.go:288` | đọc/ghi 1 trie thứ cấp thật (root nằm trong account state, ảnh hưởng consensus), key chọn động giữa lúc contract chạy | ⏸ B3, hoãn có chủ đích — cùng nhóm khó với `GlobalStateGet`, cần Merkle-witness đầy đủ, không phải đóng gói nhẹ |
 
-**Tất cả 7 hàm còn lại đã đóng (B1 6/6 + B2). Chỉ còn `ExtensionGetOrCreateSimpleDb` (B3).**
+**Tất cả 7 hàm còn lại đã đóng (B1 6/6 + B2). `ExtensionGetOrCreateSimpleDb` (B3) hoãn có chủ
+đích cùng `GlobalStateGet` — cả 2 không phải "callback đơn giản có thể đóng gói nhẹ", mà cần
+thiết kế Merkle-witness statelessness đầy đủ, một hạng mục riêng lớn hơn hẳn phạm vi B1-B2/
+B5-B6, làm sau khi kế hoạch đóng gói nhẹ này hoàn tất.**
 
 **Vì sao đây là vấn đề cho TA:** trong TA, gọi ngược Normal World giữa chừng = 1
 world-switch tốn kém mỗi lần, và phá vỡ nguyên tắc "gộp cả batch vào 1 lệnh" (session
@@ -143,11 +146,23 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
   module; test mới `TestTABoundary_NativeLogs_SurvivesSerialization` (deploy constructor chạy
   BALANCE — nơi duy nhất hiện tại gọi `NativeLogger.LogString` — kiểm log line sống sót qua
   `serializeRoundTrip`) pass ngay lần chạy đầu, ổn định qua `go test -count=3`.
-- **B3 — Xử lý riêng `ExtensionGetOrCreateSimpleDb` (khó nhất, cần quyết định của bạn).**
-  Hai hướng: (a) đưa hẳn key-value store này vào trong core C++ (nếu dữ liệu đủ nhỏ để sống
-  trong TA), hoặc (b) giữ ở Go nhưng chuyển từ "callback mid-execution" sang mô hình 2 pha
-  (Host đọc DB trước → đưa read-set vào input; ghi kết quả sau, khi core trả output) — không
-  có cách né việc quyết định, vì ảnh hưởng ngữ nghĩa hợp đồng đang dùng SimpleDb.
+- [x] **B3 — `ExtensionGetOrCreateSimpleDb`.** ✅ Đã đánh giá lại và HOÃN có chủ đích
+  (2026-08-14), không phải "chưa làm". 2 hướng (a)/(b) nêu ban đầu trong kế hoạch **đánh giá
+  thấp độ khó thật** — soi kỹ code (`extension.go:681-880`, `pkg/trie_database/`) mới phát
+  hiện: SimpleDb không phải cache key-value đơn giản, mà là **1 trie thứ cấp thật**
+  (`TrieDatabase`/`TrieDatabaseManager` riêng), root hash lưu ngay trong
+  `AccountState.SmartContractState()` (`SetTrieDatabaseMapValue`) — **ảnh hưởng trực tiếp
+  state root, đi vào consensus**. Đọc/ghi (`Get`/`Put`/`GetNextKeys`/`GetAllKeyValues`/
+  `SearchByValue`/xoá) dùng **key chọn động bởi chính logic contract đang chạy** (vd phân
+  trang qua `getNextKeys`) — không biết trước được để "gom vào input" như chain_id/blob.
+
+  **Kết luận: `ExtensionGetOrCreateSimpleDb` cùng nhóm khó với `GlobalStateGet`** (callback đọc
+  account-state hiện có, đã cố tình KHÔNG đụng ở B1 — xem mục 1, ghi chú "genuinely needs full
+  state-witness/statelessness redesign"). Cả 2 đều cần cơ chế Merkle-witness đầy đủ kiểu
+  Structured Query trong `tee_master_architecture.md` (Sorted Merkle Tree + non-membership
+  proof) — khối lượng công việc lớn hơn hẳn B1+B2 cộng lại, KHÔNG phải việc "đóng gói nhẹ"
+  đúng tinh thần B1-B2/B5-B6. Người dùng xác nhận hoãn (2026-08-14): không code thêm ở đợt
+  này, ghi nhận là 1 hạng mục riêng, lớn hơn, làm sau — không chặn phần còn lại của kế hoạch.
 - **B4 — Bọc lớp storage-abstraction quanh Xapian/`SetXapianBasePath`.** Không đổi Xapian,
   chỉ đổi đường vào: 1 interface storage mỏng thay cho path Host trực tiếp — cần xác nhận
   API lưu trữ thật của OHtee để bọc đúng.
