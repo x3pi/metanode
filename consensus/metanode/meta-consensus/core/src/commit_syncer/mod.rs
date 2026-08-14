@@ -2723,6 +2723,9 @@ mod tests {
         }
     }
 
+    // NOTE: despite the name, this test's minimal setup (votes only, no real committed DAG
+    // state) never reaches Healthy — see the STATE MACHINE comment further down — so what it
+    // actually now covers is the CatchingUp/"turbo" scheduling path, not a Healthy-gated pause.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn commit_syncer_start_and_pause_scheduling() {
         // SETUP
@@ -2813,26 +2816,42 @@ mod tests {
         // Fetches should be scheduled until the unhandled commits threshold.
         commit_syncer.try_schedule_once();
 
-        // Verify commit syncer is paused after scheduling 15 commits to index 25.
+        // STATE MACHINE (May 2026, cold_start.rs::determine_phase()): `update_state()` runs on
+        // every `try_schedule_once()` call and transitions Healthy -> CatchingUp whenever
+        // `lag > CATCHING_UP_ENTER_THRESHOLD` (2). `lag` is `quorum_commit - synced_commit_index`,
+        // and this test's `synced_commit_index` never advances (it only tracks the DAG's real
+        // `last_commit_index()`, and this test only injects votes, never real commits) — so as
+        // soon as quorum_commit jumps to 10, lag=10 > 2 and the syncer enters CatchingUp on this
+        // very first call, well before reaching this second one. The Healthy-only pause/threshold
+        // gate in the main scheduling loop therefore never applies here; instead the CatchingUp
+        // "turbo" path runs (4x batch size, 4x threshold, and an always-on "schedule the
+        // remaining partial batch" step) — which schedules everything up to the observed quorum
+        // (35) in one shot rather than pausing at the healthy threshold (25/30).
         assert_eq!(commit_syncer.unhandled_commits_threshold(), 25);
-        assert_eq!(commit_syncer.highest_scheduled_index(), Some(30));
-        let pending_fetches = commit_syncer.pending_fetches();
-        assert_eq!(pending_fetches.len(), 3);
+        assert_eq!(commit_syncer.highest_scheduled_index(), Some(35));
+        assert_eq!(
+            commit_syncer.pending_fetches(),
+            std::collections::BTreeSet::from([
+                CommitRange::new(1..=10),
+                CommitRange::new(11..=30),
+                CommitRange::new(31..=35),
+            ])
+        );
 
-        // Indicate commit index 25 is consumed, and try to schedule again.
+        // Indicate commit index 25 is consumed, and try to schedule again. Already fully
+        // scheduled up to the observed quorum, so nothing changes.
         commit_consumer_monitor.set_highest_handled_commit(25);
         commit_syncer.try_schedule_once();
 
-        // Verify commit syncer schedules fetches up to index 35.
-        assert_eq!(commit_syncer.highest_scheduled_index(), Some(30));
-        let pending_fetches = commit_syncer.pending_fetches();
-        assert_eq!(pending_fetches.len(), 3);
-
-        // Verify contiguous ranges are scheduled.
-        for (range, start) in pending_fetches.iter().zip((1..35).step_by(10)) {
-            assert_eq!(range.start(), start);
-            assert_eq!(range.end(), start + 9);
-        }
+        assert_eq!(commit_syncer.highest_scheduled_index(), Some(35));
+        assert_eq!(
+            commit_syncer.pending_fetches(),
+            std::collections::BTreeSet::from([
+                CommitRange::new(1..=10),
+                CommitRange::new(11..=30),
+                CommitRange::new(31..=35),
+            ])
+        );
     }
 }
 pub mod fetcher;
