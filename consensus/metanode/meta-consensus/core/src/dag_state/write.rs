@@ -167,12 +167,25 @@ impl DagState {
 
     /// Returns true if the block is committed. Only valid for blocks above the GC round.
     pub fn is_committed(&self, block_ref: &BlockRef) -> bool {
-        // FAST PATH: If the block's round is <= the last committed round for its author,
-        // it must have been committed (or is older than the network baseline).
-        if block_ref.round <= self.last_committed_rounds[block_ref.author] {
-            return true;
-        }
-
+        // NOTE: A "fast path" here used to return `true` whenever
+        // `block_ref.round <= self.last_committed_rounds[block_ref.author]`, reasoning that an
+        // author's blocks form a linear chain so committing a later round implies every earlier
+        // round by that author is committed too. That's false for an ORPHANED block: a round-N
+        // block that the same author's round-(N+1) block doesn't reference, which only gets
+        // pulled into a commit later via a *different* author's reference. `last_committed_rounds`
+        // only records the highest round for which *some* block by that author was included in
+        // *some* commit — not that every round up to it was. The fast path would then wrongly
+        // report the orphan as already committed, so `Linearizer::linearize_sub_dag()` would
+        // never walk into it and it (and its transactions) would silently never be committed by
+        // anyone — a deterministic (not fork-risk) but real liveness/data-loss bug.
+        //
+        // Removing it is safe: this method's contract is "only valid for blocks above the GC
+        // round" (checked by every caller before calling this), and eviction from
+        // `recent_blocks` only happens for round <= eviction_round, which is always
+        // <= gc_round (see `calculate_authority_eviction_round`/`eviction_round`). So a
+        // validly-queried block (round > gc_round) can never have been evicted, and the cache
+        // lookup below is a reliable, accurate check on its own — the fast path bought no real
+        // eviction-avoidance benefit, only unsoundness.
         match self.recent_blocks.get(block_ref) {
             Some(info) => info.committed,
             None => {
