@@ -127,6 +127,37 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
   trong phạm vi lookback của test) ổn định qua `go test -count=3`.
 
   **B1 đóng hoàn toàn — không còn callback C++→Go nào trong đường thực thi giữa chừng.**
+
+  **Review pass sau khi B1/B2/B5/B6 xong (2026-08-14, commit `b29d4af3`) — 4 finding thật, đã
+  sửa 3/4:**
+  1. **[SỬA]** `HasBlockhashOpcode` chỉ quét bytecode top-level, không thấy BLOCKHASH nằm sau 1
+     CALL lồng vào contract khác → im lặng trả về 0 thay vì hash thật, khác hành vi callback cũ
+     (đúng ở mọi độ sâu gọi). Sửa: quét thêm cả opcode họ CALL (0xf1/0xf2/0xf4/0xfa) — thấy 1
+     trong các opcode này thì coi như "có thể chạm BLOCKHASH ở đâu đó bên trong", fetch theo.
+     Lần sửa đầu dùng `bytes.IndexAny` với byte thô ≥0x80 — SAI vì hàm này decode theo UTF-8,
+     bắt được ngay khi build/test, đổi sang bảng tra `[256]bool` thuần.
+  2. **[SỬA]** `b_native_logs` cấp phát trước khi dựng `ExecuteResult`, nhưng
+     `cleanupProcessResultMemoryOnError` không hề nhận biết field này → leak nếu allocation sau
+     đó throw `bad_alloc`. Thêm vào chữ ký hàm cleanup + cả 3 call site.
+  3. **[SỬA — chỉ tài liệu]** `block_context.h` viết sai: "executeBatch không bao giờ chạy
+     interpreter" — thực ra CÓ gọi `run()` giống hệt deploy/call/execute. Sửa lại comment đúng
+     sự thật: hiện `executeBatch` không có Go caller thật nào (dead code), nên không phải bug
+     sống — nhưng nếu sau này dùng lại thì cần thiết kế context riêng cho từng item trong batch
+     (khác tx có thể khác blob/cross-chain context), không phải fix kiểu B1 đơn giản.
+  4. **[BỎ QUA, có ghi chú]** `buildB1Context` gọi `smartContractDb.Code()` cho Call/Execute,
+     trùng với lần đọc `GlobalStateGet` đã làm giữa chừng thực thi — dư 1 lần đọc cache/DB mỗi
+     lời gọi. Không sửa: cách sửa đòi hỏi tái cấu trúc luồng resolve account/code qua ranh giới
+     cgo, rủi ro cao hơn giá trị tiết kiệm (đọc cache đã ấm sẵn qua PreloadAccounts) — ghi rõ lý
+     do trong doc comment thay vì âm thầm bỏ qua.
+
+  Test mới: `TestHasBlockhashOpcode_DetectsCallFamily` (unit test thuần cho hàm quét). 1 lần
+  thử viết test E2E đầy đủ (2 contract thật, 1 nested CALL thật) bị chặn bởi hạn chế KHÔNG LIÊN
+  QUAN của harness: `storage.NewDummyStorage` khiến `SmartContractDB`'s `Get` luôn trả về
+  `(nil, nil)` bất kể đã `Commit()` gì — code contract thứ 2 cài thủ công giữa test không bao
+  giờ thấy được qua `GlobalStateGet` của 1 lời gọi sau — không phải lỗi của fix, bỏ hướng E2E,
+  dùng unit test làm bằng chứng thay thế.
+
+  Verify: rebuild C++ sạch, `go build/vet/test -count=1 ./...` sạch toàn module, 0 regression.
 - [x] **B2 — Gộp log ra thành buffer trả về, bỏ callback log inline.** ✅ Xong (2026-08-14,
   commit `2e53df25`). `MyLogger` (`my_logger.h`/`.cpp`) giờ tích `(flag, message)` vào
   `buffered_logs` thay vì gọi ngược `GoLogString`/`GoLogBytes`. `run()` (chokepoint duy nhất
