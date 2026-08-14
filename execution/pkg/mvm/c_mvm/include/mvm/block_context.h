@@ -31,13 +31,27 @@ namespace mvm
     // starts — matching the shape a real TA session command needs (all
     // context arrives with the call, nothing is fetched mid-flight).
     //
-    // Only populated by deploy/call/execute (the 3 entry points that run
-    // the interpreter and can therefore reach CHAINID/BLOBHASH/
-    // BLOBBASEFEE/the cross-chain precompile). executeBatch/sendNative/
+    // Only populated by deploy/call/execute. sendNative/
     // processNativeMintBurn/noncePlusOne never run the interpreter, so
-    // their BlockContext leaves these at their zero-value defaults, which
-    // is correct: those opcodes are unreachable from those entry points
-    // regardless.
+    // their BlockContext correctly leaves these at zero-value defaults —
+    // those opcodes are unreachable from those 3 entry points regardless.
+    //
+    // executeBatch is DIFFERENT (found by code review, 2026-08-14): it
+    // also calls run() — the same interpreter entry point as
+    // deploy/call/execute — per batch item, so CHAINID/BLOBHASH/
+    // BLOBBASEFEE/the cross-chain precompile/BLOCKHASH ARE reachable from
+    // it, but it does NOT yet receive this context (still calls
+    // CreateBlockContext with only the 7 pre-B1 positional args). Left
+    // unwired deliberately, not by oversight-turned-into-a-lie: as of this
+    // writing executeBatch has zero live Go callers (only its own
+    // MVMApi.ExecuteBatch wrapper defines it — see mvm_api.go), so this is
+    // dead-code-only exposure today. It's also not a mechanical B1-style
+    // fix if it's ever activated — items in one batch can be different
+    // transactions with different blob/cross-chain context, so wiring it
+    // properly needs per-item context fields on ExecuteBatchInputC, not
+    // just the single shared BlockContext deploy/call/execute use; chain_id
+    // is the one exception (chain-wide, not per-tx) that could be threaded
+    // through cheaply on its own if this path is ever brought into use.
     //
     uint256_t chain_id{};
 

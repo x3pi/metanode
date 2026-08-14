@@ -63,13 +63,20 @@ void cleanupProcessResultMemoryOnError(
     uint8_t **&b_code_change, int length_code_change, int *&length_codes,
     uint8_t **&b_storage_change, int length_storage_change,
     int *&length_storages, char **&b_full_db_hash, int length_full_db_hash,
-    int *&length_full_db_hashes) {
+    int *&length_full_db_hashes,
+    // TEE-packaging B2: found by code review — b_native_logs is allocated
+    // before pendingResult's construction (see this function's call sites
+    // below), so it needs cleaning up here too, same as every other buffer
+    // that can already exist by the time one of these catch blocks runs.
+    char *&b_native_logs) {
   std::cerr << "[CLEANUP] Cleaning up allocated memory due to error..."
             << std::endl;
   delete[] b_output;
   b_output = nullptr;
   delete[] b_exmsg;
   b_exmsg = nullptr;
+  delete[] b_native_logs;
+  b_native_logs = nullptr;
   delete[] b_logs;
   b_logs = nullptr;
 
@@ -615,7 +622,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   } catch (const std::exception &e) {
     std::cerr << "[ERROR] Standard exception during processResult: " << e.what()
@@ -626,7 +633,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   } catch (...) {
     std::cerr << "[ERROR] Unknown exception during processResult." << std::endl;
@@ -636,7 +643,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   }
 }

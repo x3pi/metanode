@@ -625,6 +625,50 @@ func TestTABoundary_BlockHash_SurvivesSerialization(t *testing.T) {
 	}
 }
 
+// TestHasBlockhashOpcode_DetectsCallFamily is the regression test for the
+// code-review finding on TestTABoundary_BlockHash above: HasBlockhashOpcode
+// originally only checked for byte 0x40 itself, so a caller with no 0x40 of
+// its OWN that reaches BLOCKHASH through a nested CALL into another
+// contract would get block_hashes=empty and silently see 0 — a real
+// regression from the pre-B1 callback, which worked at any call depth. It
+// now also treats any CALL-family opcode as "might reach BLOCKHASH
+// downstream" (see its doc comment for why CREATE/CREATE2 are deliberately
+// excluded).
+//
+// A full end-to-end version of this (2 real deployed contracts, a real
+// nested CALL) was attempted first but hits a wall unrelated to the fix
+// under test: harnessChainState's storage.NewDummyStorage backs SmartContractDB
+// with storage whose Get always returns (nil, nil) regardless of what was
+// Put/BatchPut/Committed — code manually installed via SetCode+Commit for
+// a second contract is therefore never visible to a later Deploy/Call's
+// GlobalStateGet callback in this harness, independent of whether
+// HasBlockhashOpcode's own logic is correct. A unit test of the scan
+// itself is what's actually load-bearing here.
+func TestHasBlockhashOpcode_DetectsCallFamily(t *testing.T) {
+	cases := []struct {
+		name string
+		code []byte
+		want bool
+	}{
+		{"empty", nil, false},
+		{"plain arithmetic, no BLOCKHASH or CALL", []byte{0x60, 0x01, 0x60, 0x02, 0x01, 0x00}, false},
+		{"direct BLOCKHASH", []byte{0x60, 0x00, 0x40}, true},
+		{"CALL (0xf1)", []byte{0x60, 0x00, 0xf1}, true},
+		{"CALLCODE (0xf2)", []byte{0x60, 0x00, 0xf2}, true},
+		{"DELEGATECALL (0xf4)", []byte{0x60, 0x00, 0xf4}, true},
+		{"STATICCALL (0xfa)", []byte{0x60, 0x00, 0xfa}, true},
+		{"CREATE (0xf0) alone does not count", []byte{0x60, 0x00, 0xf0}, false},
+		{"CREATE2 (0xf5) alone does not count", []byte{0x60, 0x00, 0xf5}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mvm.HasBlockhashOpcode(tc.code); got != tc.want {
+				t.Errorf("HasBlockhashOpcode(%x) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTABoundary_NativeLogs_SurvivesSerialization verifies B2 end-to-end: a
 // constructor that runs BALANCE (the interpreter's only current
 // NativeLogger.LogString call site, processor.cpp's balance()/
