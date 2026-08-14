@@ -200,7 +200,7 @@ func TestProcessTransactionsOptimistic_MixedBlock_LeaderRewardNotLost(t *testing
 		{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(nativeTx), Tx: nativeTx},
 		{ID: 1, Array: grouptxns.BuildDeterministicGroupAddrs(blsTx), Tx: blsTx},
 	}
-	groups := grouptxns.GroupTransactionsDeterministic(items)
+	groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
 
 	// Sanity-check the test actually exercises the mixed-block branch: one
 	// native-only group and one contract-classified group, both present.
@@ -274,7 +274,7 @@ func TestTrueBlockSTM_SmartContractGasDeduction(t *testing.T) {
 		{ID: 0, Array: grouptxns.BuildDeterministicGroupAddrs(txGood), Tx: txGood},
 		{ID: 1, Array: grouptxns.BuildDeterministicGroupAddrs(txPoor), Tx: txPoor},
 	}
-	groups := grouptxns.GroupTransactionsDeterministic(items)
+	groups := grouptxns.GroupTransactionsDeterministic(items, cs.HasCode)
 
 	leaderAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
 

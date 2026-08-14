@@ -1,6 +1,7 @@
 package grouptxns
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -65,7 +66,7 @@ func TestGroupTransactionsDeterministic(t *testing.T) {
 		{ID: 3, Array: []common.Address{common.HexToAddress("0x99")}, Tx: txC},
 	}
 
-	groups := GroupTransactionsDeterministic(items)
+	groups := GroupTransactionsDeterministic(items, nil)
 
 	// We expect 2 groups.
 	assert.Equal(t, 2, len(groups))
@@ -85,4 +86,70 @@ func TestGroupTransactionsDeterministic(t *testing.T) {
 	// Verify Group IDs
 	assert.Equal(t, 0, groups[0].GroupID)
 	assert.Equal(t, 1, groups[1].GroupID)
+}
+
+// mockValueTransferTx is a plain value-transfer tx (Amount > 0, no calldata),
+// the shape that would otherwise take the native fast-path.
+type mockValueTransferTx struct {
+	mockTx
+	to     common.Address
+	amount *big.Int
+}
+
+func (m *mockValueTransferTx) ToAddress() common.Address {
+	return m.to
+}
+
+func (m *mockValueTransferTx) Amount() *big.Int {
+	return m.amount
+}
+
+// ============================================================================
+// TestClassifyGroup_HasCodeFunc
+// A plain value-transfer to an address hasCode reports as code-bearing must
+// be classified as EVM (ContractOnly), not routed to the native fast-path —
+// see HasCodeFunc's doc comment for the mainnet-parity rationale.
+// ============================================================================
+func TestClassifyGroup_HasCodeFunc(t *testing.T) {
+	from := common.HexToAddress("0x11")
+	toWithCode := common.HexToAddress("0xc0de")
+	toPlain := common.HexToAddress("0x22")
+
+	txToContract := &mockValueTransferTx{
+		mockTx: mockTx{hash: common.HexToHash("0xa"), from: from, nonce: 1},
+		to:     toWithCode,
+		amount: big.NewInt(1),
+	}
+	txToPlainEOA := &mockValueTransferTx{
+		mockTx: mockTx{hash: common.HexToHash("0xb"), from: from, nonce: 2},
+		to:     toPlain,
+		amount: big.NewInt(1),
+	}
+
+	hasCode := func(addr common.Address) bool {
+		return addr == toWithCode
+	}
+
+	t.Run("routes to EVM when recipient has code", func(t *testing.T) {
+		kind := classifyGroup([]Item{{ID: 0, Tx: txToContract}}, hasCode)
+		assert.Equal(t, GroupKindContractOnly, kind)
+	})
+
+	t.Run("stays native when recipient has no code", func(t *testing.T) {
+		kind := classifyGroup([]Item{{ID: 0, Tx: txToPlainEOA}}, hasCode)
+		assert.Equal(t, GroupKindNativeOnly, kind)
+	})
+
+	t.Run("nil hasCode preserves old behavior (never routes on code presence)", func(t *testing.T) {
+		kind := classifyGroup([]Item{{ID: 0, Tx: txToContract}}, nil)
+		assert.Equal(t, GroupKindNativeOnly, kind)
+	})
+
+	t.Run("mixed group with one code-bearing recipient is Mixed", func(t *testing.T) {
+		kind := classifyGroup([]Item{
+			{ID: 0, Tx: txToContract},
+			{ID: 1, Tx: txToPlainEOA},
+		}, hasCode)
+		assert.Equal(t, GroupKindMixed, kind)
+	})
 }
