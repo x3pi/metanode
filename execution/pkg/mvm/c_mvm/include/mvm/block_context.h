@@ -39,10 +39,6 @@ namespace mvm
     // is correct: those opcodes are unreachable from those entry points
     // regardless.
     //
-    // GetBlockHash (BLOCKHASH opcode) deliberately NOT covered here yet —
-    // it needs an array of up to 256 preceding hashes rather than a single
-    // value, a larger design than this pass's scope; still goes through
-    // the old callback (see MyGlobalState::get_block_hash).
     uint256_t chain_id{};
 
     std::vector<uint256_t> blob_versioned_hashes;
@@ -53,6 +49,19 @@ namespace mvm
     // has-flag needed, this is already an unambiguous real value.
     std::vector<uint8_t> cross_chain_sender;
     uint64_t cross_chain_source_id{0};
+
+    // GetBlockHash/BLOCKHASH's replacement (last of the 6 callbacks,
+    // finished after the rest — see note/tee_core_packaging_plan.md).
+    // block_hashes[i] = hash of block (number - 1 - i), i.e. index 0 is the
+    // immediately preceding block, matching BLOCKHASH's own "how many
+    // blocks back" framing. Deliberately sparse/empty on the common path:
+    // the caller only populates this when the executing bytecode actually
+    // contains opcode 0x40 (see HasBlockhashOpcode, mvm_api.go) — unlike
+    // chain_id/blob context's single cheap reads, fetching up to 256 real
+    // hashes (cache lookups, or on a miss, real DB reads / O(N) walkback —
+    // see BlockChain.GetBlockHashByNumber) on every single call regardless
+    // of use would be real, avoidable overhead on the hot path.
+    std::vector<uint256_t> block_hashes;
   };
 
   inline bool operator==(const BlockContext &l, const BlockContext &r)

@@ -257,10 +257,30 @@ void MyGlobalState::set_block_context(const BlockContext &bc) {
   blockContext = bc;
 }
 
+// TEE-packaging B1, last of the 6 callbacks (note/tee_core_packaging_plan.md):
+// reads straight from blockContext.block_hashes instead of calling back
+// into Go. Also fixes a latent bug in the pre-B1 callback path: it never
+// checked GetBlockHash's `success` flag before calling bytes_to_uint256 on
+// its result pointer — an out-of-range query (success=false, data_p=null)
+// was undefined behavior, not a clean 0. EVM semantics (and the fix): a
+// queried block that is >= the current block, or further back than what
+// block_hashes holds (populated only up to 256 entries, see
+// HasBlockhashOpcode/mvm_api.go and block_context.h), resolves to 0.
 uint256_t MyGlobalState::get_block_hash(int blockNumber) {
-  Value_return valueReturn = GetBlockHash(blockNumber);
-  uint256_t hash = mvm::bytes_to_uint256(valueReturn.data_p);
-  return hash;
+  if (blockNumber < 0) {
+    return uint256_t{};
+  }
+  uint256_t queried = static_cast<uint64_t>(blockNumber);
+  uint256_t current = blockContext.number;
+  if (queried >= current) {
+    return uint256_t{};
+  }
+  uint256_t distance = current - queried; // >= 1
+  if (distance > blockContext.block_hashes.size()) {
+    return uint256_t{};
+  }
+  size_t idx = static_cast<size_t>(static_cast<uint64_t>(distance)) - 1;
+  return blockContext.block_hashes[idx];
 }
 
 // --- TEE-packaging B1 (note/tee_core_packaging_plan.md): these 5 getters

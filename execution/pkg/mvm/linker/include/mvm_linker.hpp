@@ -86,11 +86,21 @@ struct ExecuteResult {
 //   b_cross_chain_sender:     20 bytes, or NULL (NULL = not a cross-chain
 //                              precompile call)
 //   b_cross_chain_source_id:  8 bytes big-endian uint64, or NULL
+//   b_block_hashes:           flat array of block_hashes_count 32-byte
+//                              hashes (index 0 = hash of block
+//                              (current_number - 1), i.e. most recent
+//                              first), or NULL — only ever non-NULL when
+//                              the executing bytecode contains opcode 0x40
+//                              (BLOCKHASH), see HasBlockhashOpcode
+//                              (mvm_api.go); fetching this eagerly on every
+//                              call regardless of use would be real,
+//                              avoidable overhead unlike the other fields
 #define MVM_B1_CONTEXT_PARAMS                                                \
   unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,         \
       int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,       \
       unsigned char *b_cross_chain_sender,                                   \
-      unsigned char *b_cross_chain_source_id
+      unsigned char *b_cross_chain_source_id,                                \
+      unsigned char *b_block_hashes, int block_hashes_count
 
 struct ExecuteResult *deploy(
     // transaction data
