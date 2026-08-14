@@ -711,7 +711,11 @@ func (c *ClientRPC) BuildDeployTransaction(decoded DecodedCallObject) ([]byte, e
 func (c *ClientRPC) BuildTransactionWithDeviceKey(
 	ethTx *types.Transaction,
 ) ([]byte, mt_types.Transaction, func(), error) {
-	sg := types.NewCancunSigner(ethTx.ChainId())
+	// PragueSigner accepts every tx type this chain supports (Legacy through
+	// SetCode) — CancunSigner previously used here rejected SetCodeTxType
+	// outright (ErrTxTypeNotSupported), which made any EIP-7702 tx submitted
+	// through this RPC proxy fail sender recovery before it ever got built.
+	sg := types.NewPragueSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err)
@@ -770,7 +774,11 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTx(
 	isSetNonce bool,
 	topUpFunc func(toAddress common.Address) error,
 ) ([]byte, mt_types.Transaction, func(), error) {
-	sg := types.NewCancunSigner(ethTx.ChainId())
+	// PragueSigner accepts every tx type this chain supports (Legacy through
+	// SetCode) — CancunSigner previously used here rejected SetCodeTxType
+	// outright (ErrTxTypeNotSupported), which made any EIP-7702 tx submitted
+	// through this RPC proxy fail sender recovery before it ever got built.
+	sg := types.NewPragueSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err)
@@ -849,7 +857,11 @@ func (c *ClientRPC) BuildTransactionWithDeviceKeyFromEthTxAndBlsPrivateKey(
 	topUpFunc func(toAddress common.Address) error,
 ) ([]byte, mt_types.Transaction, func(), error) {
 
-	sg := types.NewCancunSigner(ethTx.ChainId())
+	// PragueSigner accepts every tx type this chain supports (Legacy through
+	// SetCode) — CancunSigner previously used here rejected SetCodeTxType
+	// outright (ErrTxTypeNotSupported), which made any EIP-7702 tx submitted
+	// through this RPC proxy fail sender recovery before it ever got built.
+	sg := types.NewPragueSigner(ethTx.ChainId())
 	fromAddress, err := sg.Sender(ethTx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("lỗi khi get fromAddress : %w", err) // Cập nhật thông báo lỗi
