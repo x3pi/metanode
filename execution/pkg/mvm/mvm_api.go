@@ -484,6 +484,108 @@ func (a *MVMApi) blobHashAt(index uint64) (hash []byte, ok bool) {
 	return a.blobVersionedHashes[index], true
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// TEE-PACKAGING B1 CONTEXT (see note/tee_core_packaging_plan.md)
+//
+// b1Context builds the cgo-owned buffers for the chain-id/blob/cross-chain
+// context that Call/Execute/Deploy now pass directly into C.call/execute/
+// deploy, instead of the C++ side calling back into Go mid-execution
+// (GetChainId/GetBlobHash/GetBlobBaseFee/GetCrossChainSender/
+// GetCrossChainSourceId — those //export functions still exist but are no
+// longer invoked from C++, see my_global_state.cpp). Every pointer here may
+// be nil, matching "not supplied" — see mvm_linker.hpp's MVM_B1_CONTEXT_PARAMS
+// doc comment and block_context.h for the exact semantics on the C++ side.
+// ═══════════════════════════════════════════════════════════════════════
+type b1Context struct {
+	chainID          unsafe.Pointer // 32 bytes big-endian, or nil
+	blobHashes       unsafe.Pointer // flat array of 32-byte hashes, or nil
+	blobHashCount    C.int
+	blobBaseFee      unsafe.Pointer // 32 bytes big-endian, or nil
+	crossChainSender unsafe.Pointer // 20 bytes, or nil
+	crossChainSource unsafe.Pointer // 8 bytes big-endian uint64, or nil
+}
+
+// buildB1Context reads this instance's already-set context (SetBlobContext/
+// SetCrossChainContext, called by the same callers that used to rely on the
+// callbacks) plus the chain id — from the same config.ConfigApp.ChainId
+// global GetChainId's cgo export used to read, just fetched here instead of
+// via a mid-execution callback — and copies it into cgo-owned buffers.
+// Caller MUST defer the returned value's free().
+func (a *MVMApi) buildB1Context() b1Context {
+	var ctx b1Context
+
+	// Defensive nil guard: the old GetChainId() callback read this exact
+	// same global with no guard, but it was only ever invoked lazily, on
+	// demand, if bytecode actually executed CHAINID — so a nil
+	// config.ConfigApp only crashed if BOTH conditions held. This function
+	// now runs unconditionally on every Call/Execute/Deploy, regardless of
+	// whether the tx touches CHAINID at all, so the same unconditional
+	// access would crash universally (e.g. every unit test that doesn't
+	// call config.Init first, not just ones exercising CHAINID) — caught
+	// by go test's full suite. Falling back to "not supplied" (chain_id=0
+	// on the C++ side) here is strictly safer than the old behavior, not
+	// just equivalent: config is always loaded before real tx processing
+	// starts in production, so this guard only ever engages in exactly the
+	// anomalous states (tests, any future out-of-order init) where the old
+	// code would have crashed the whole node instead.
+	if config.ConfigApp != nil {
+		if chainID := config.ConfigApp.ChainId; chainID != nil {
+			b := make([]byte, 32)
+			chainID.FillBytes(b)
+			ctx.chainID = C.CBytes(b)
+		}
+	}
+
+	if n := len(a.blobVersionedHashes); n > 0 {
+		flat := make([]byte, n*32)
+		for i, h := range a.blobVersionedHashes {
+			// Defensive: h is expected to already be exactly 32 bytes
+			// (EIP-4844 versioned hashes); right-align if it isn't, rather
+			// than panicking or silently misreading adjacent hashes.
+			dst := flat[i*32 : i*32+32]
+			if len(h) >= 32 {
+				copy(dst, h[len(h)-32:])
+			} else {
+				copy(dst[32-len(h):], h)
+			}
+		}
+		ctx.blobHashes = C.CBytes(flat)
+		ctx.blobHashCount = C.int(n)
+	}
+
+	if a.blobBaseFee != nil {
+		b := a.blobBaseFee.Bytes32()
+		ctx.blobBaseFee = C.CBytes(b[:])
+	}
+
+	if a.crossChainActive {
+		ctx.crossChainSender = C.CBytes(a.crossChainSender.Bytes())
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, a.crossChainSourceId)
+		ctx.crossChainSource = C.CBytes(b)
+	}
+
+	return ctx
+}
+
+func (c *b1Context) free() {
+	if c.chainID != nil {
+		C.free(c.chainID)
+	}
+	if c.blobHashes != nil {
+		C.free(c.blobHashes)
+	}
+	if c.blobBaseFee != nil {
+		C.free(c.blobBaseFee)
+	}
+	if c.crossChainSender != nil {
+		C.free(c.crossChainSender)
+	}
+	if c.crossChainSource != nil {
+		C.free(c.crossChainSource)
+	}
+}
+
 func (a *MVMApi) GetCurrentRelatedAddresses() []common.Address {
 	var addresses []common.Address
 	a.currentRelatedAddresses.Range(func(key, value interface{}) bool {
@@ -594,6 +696,8 @@ func (a *MVMApi) Call(
 	} else {
 		cBRelatedAddresses = nil
 	}
+	b1ctx := a.buildB1Context()
+	defer b1ctx.free()
 	cRs := C.call(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -615,6 +719,12 @@ func (a *MVMApi) Call(
 		(*C.uchar)(cBRelatedAddresses), // Mảng bytes (20 * count)
 		(C.int)(totalAddresses),
 		C._Bool(isOffChain),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
@@ -676,6 +786,8 @@ func (a *MVMApi) Execute(
 	defer C.free(unsafe.Pointer(cBTxHash))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 
+	b1ctx := a.buildB1Context()
+	defer b1ctx.free()
 	cRs := C.execute(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -696,6 +808,12 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(cBRelatedAddresses), // Mảng bytes (20 * count)
 		(C.int)(totalAddresses),        // Số lượng addresses
 		C._Bool(isCache),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)
@@ -1040,6 +1158,8 @@ func (a *MVMApi) Deploy(
 	defer C.free(unsafe.Pointer(cBBlockCoinbase))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 	defer C.free(unsafe.Pointer(cBTxHash))
+	b1ctx := a.buildB1Context()
+	defer b1ctx.free()
 	cRs := C.deploy(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractConstructor),
@@ -1058,6 +1178,12 @@ func (a *MVMApi) Deploy(
 		C._Bool(isDebug),
 		C._Bool(isCache),
 		C._Bool(isOffChain),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
 	)
 	a.rs = extractExecuteResult(cRs)
 	C.freeResult(cRs)

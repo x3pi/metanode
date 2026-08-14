@@ -17,18 +17,17 @@ package mvm_test
 // closest thing to "already speaks the TA command shape" this repo can
 // verify without real hardware.
 //
-// SCOPE, HONESTLY STATED: this harness only proves the boundary for
-// operations that don't depend on the 6 remaining C++->Go mid-execution
-// callbacks documented in note/tee_core_packaging_plan.md section 2B
-// (GetBlockHash, GetChainId, GetBlobHash, GetBlobBaseFee,
-// GetCrossChainSender, GetCrossChainSourceId) — i.e. it avoids the
-// BLOCKHASH/CHAINID/BLOBHASH/BLOBBASEFEE opcodes and cross-chain context.
-// Those callbacks reach into ambient global state that this harness
-// deliberately does NOT set up (blockchain.GetBlockChainInstance(),
-// config.ConfigApp — see GetBlockHash/GetChainId in mvm_api.go) precisely
-// because doing so would hide, not prove, the thing B1 needs to fix. Until
-// B1 lands, bytecode/txs exercising those opcodes remain unverified by this
-// harness on purpose.
+// SCOPE, UPDATED after B1 landed (note/tee_core_packaging_plan.md section
+// 2B): 5 of the 6 C++->Go mid-execution callbacks (GetChainId, GetBlobHash,
+// GetBlobBaseFee, GetCrossChainSender, GetCrossChainSourceId) are now
+// covered directly by TestTABoundary_ChainId_/_Blob_/_CrossChain_ below,
+// each driven through the same serializeRoundTrip as everything else in
+// this file. Only GetBlockHash (BLOCKHASH opcode) remains — deliberately
+// deferred in B1's own scope (needs an array of up to 256 hashes, not a
+// single value) and still reads from the ambient
+// blockchain.GetBlockChainInstance() singleton this harness does NOT set
+// up. BLOCKHASH-dependent bytecode remains unverified by this harness until
+// that deferred piece of B1 lands.
 
 import (
 	"encoding/json"
@@ -37,8 +36,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
@@ -118,6 +120,17 @@ type harnessNativeTransferRequest struct {
 type harnessDeployRequest struct {
 	Sender      common.Address
 	InitCode    []byte
+	GasPrice    uint64
+	GasLimit    uint64
+	BlockNumber uint64
+	MvmId       common.Address
+	TxHash      common.Hash
+}
+
+type harnessCallRequest struct {
+	Sender      common.Address
+	Contract    common.Address
+	Calldata    []byte
 	GasPrice    uint64
 	GasLimit    uint64
 	BlockNumber uint64
@@ -263,6 +276,281 @@ func TestTABoundary_Deploy_SurvivesSerialization(t *testing.T) {
 	}
 	if string(gotCode) != string(runtime) {
 		t.Errorf("deployed code = %x, want %x", gotCode, runtime)
+	}
+}
+
+// TestTABoundary_ChainId_SurvivesSerialization verifies B1's chain_id path
+// end-to-end: a constructor that runs CHAINID and returns it must see the
+// real chain id delivered via BlockContext (block_context.h), not the
+// pre-B1 mid-execution callback — proven by setting a distinctive
+// config.ConfigApp.ChainId, driving Deploy through a serialized request,
+// and checking the constructor's own RETURN data on the way back out.
+func TestTABoundary_ChainId_SurvivesSerialization(t *testing.T) {
+	prevConfig := config.ConfigApp
+	t.Cleanup(func() { config.ConfigApp = prevConfig })
+	config.ConfigApp = &config.SimpleChainConfig{ChainId: big.NewInt(778899)}
+
+	cs := harnessChainState(t)
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666f")
+	mvmId := common.HexToAddress("0x7777777777777777777777777777777777777a")
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	// Constructor: CHAINID PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN —
+	// returns the 32-byte value CHAINID pushed, nothing else.
+	initCode := []byte{0x46, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
+
+	req := serializeRoundTrip(t, harnessDeployRequest{
+		Sender:      sender,
+		InitCode:    initCode,
+		GasPrice:    1,
+		GasLimit:    200_000,
+		BlockNumber: 1,
+		MvmId:       mvmId,
+		TxHash:      common.HexToHash("0xc4a1d"),
+	})
+
+	var engine mvm.ExecutionEngine = mvm.GetOrCreateMVMApi(req.MvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(req.MvmId) })
+	engine.SetRelatedAddresses([]common.Address{req.Sender})
+
+	rs := engine.Deploy(
+		req.Sender.Bytes(), req.InitCode, big.NewInt(0),
+		req.GasPrice, req.GasLimit,
+		0, 30_000_000, 0, 0, req.BlockNumber, common.Address{},
+		req.MvmId, req.TxHash.Bytes(),
+		false, false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Deploy returned nil result")
+	}
+	rsWire := serializeRoundTrip(t, *rs)
+	if rsWire.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", rsWire.Status, rsWire.Exmsg)
+	}
+
+	// Return on a successful Deploy is the CREATE-derived contract address
+	// (confirmed empirically — not the constructor's raw RETURN bytes), so
+	// assert on MapCodeChange instead, same as the Deploy test above.
+	want := make([]byte, 32)
+	big.NewInt(778899).FillBytes(want)
+	wantAddr := crypto.CreateAddress(sender, 0)
+	gotCode, ok := rsWire.MapCodeChange[hexKey(wantAddr)]
+	if !ok {
+		t.Fatalf("MapCodeChange missing entry for deployed address %s; got keys %v",
+			wantAddr.Hex(), keysOf(rsWire.MapCodeChange))
+	}
+	if string(gotCode) != string(want) {
+		t.Errorf("CHAINID result = %x, want %x", gotCode, want)
+	}
+}
+
+// TestTABoundary_Blob_SurvivesSerialization verifies B1's blob path
+// end-to-end: BLOBHASH(0) inside a constructor must see the versioned hash
+// delivered via BlockContext, not the pre-B1 callback — proven the same
+// way as the chain-id test above. Also covers BLOBBASEFEE in the same
+// constructor, since it's a single-value passthrough structurally identical
+// to chain_id's (see buildB1Context in mvm_api.go) rather than needing its
+// own separate test.
+func TestTABoundary_Blob_SurvivesSerialization(t *testing.T) {
+	cs := harnessChainState(t)
+	sender := common.HexToAddress("0x8888888888888888888888888888888888888b")
+	mvmId := common.HexToAddress("0x9999999999999999999999999999999999999c")
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	versionedHash := make([]byte, 32)
+	versionedHash[0] = 0x01 // EIP-4844 KZG-commitment version byte
+	for i := 1; i < 32; i++ {
+		versionedHash[i] = byte(i)
+	}
+	const blobBaseFee = 7
+
+	// Constructor:
+	//   PUSH1 0x00 BLOBHASH PUSH1 0x00 MSTORE   -> memory[0:32]  = BLOBHASH(0)
+	//   BLOBBASEFEE PUSH1 0x20 MSTORE           -> memory[32:64] = BLOBBASEFEE
+	//   PUSH1 0x40 PUSH1 0x00 RETURN            -> return memory[0:64]
+	initCode := []byte{
+		0x60, 0x00, 0x49, 0x60, 0x00, 0x52,
+		0x4a, 0x60, 0x20, 0x52,
+		0x60, 0x40, 0x60, 0x00, 0xf3,
+	}
+	wantOutput := append(append([]byte{}, versionedHash...), make([]byte, 32)...)
+	wantOutput[63] = blobBaseFee
+
+	req := serializeRoundTrip(t, harnessDeployRequest{
+		Sender:      sender,
+		InitCode:    initCode,
+		GasPrice:    1,
+		GasLimit:    200_000,
+		BlockNumber: 1,
+		MvmId:       mvmId,
+		TxHash:      common.HexToHash("0xb10b"),
+	})
+
+	var engine mvm.ExecutionEngine = mvm.GetOrCreateMVMApi(req.MvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(req.MvmId) })
+	engine.SetRelatedAddresses([]common.Address{req.Sender})
+	engine.SetBlobContext([][]byte{versionedHash}, uint256.NewInt(blobBaseFee))
+
+	rs := engine.Deploy(
+		req.Sender.Bytes(), req.InitCode, big.NewInt(0),
+		req.GasPrice, req.GasLimit,
+		0, 30_000_000, 0, 0, req.BlockNumber, common.Address{},
+		req.MvmId, req.TxHash.Bytes(),
+		false, false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Deploy returned nil result")
+	}
+	rsWire := serializeRoundTrip(t, *rs)
+	if rsWire.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", rsWire.Status, rsWire.Exmsg)
+	}
+
+	// Return on a successful Deploy is the CREATE-derived contract address
+	// (confirmed empirically — not the constructor's raw RETURN bytes), so
+	// assert on MapCodeChange instead, same as the Deploy test above.
+	wantAddr := crypto.CreateAddress(sender, 0)
+	gotCode, ok := rsWire.MapCodeChange[hexKey(wantAddr)]
+	if !ok {
+		t.Fatalf("MapCodeChange missing entry for deployed address %s; got keys %v",
+			wantAddr.Hex(), keysOf(rsWire.MapCodeChange))
+	}
+	if string(gotCode) != string(wantOutput) {
+		t.Errorf("BLOBHASH(0)+BLOBBASEFEE result = %x, want %x", gotCode, wantOutput)
+	}
+}
+
+// buildCallWrapperInitCode hand-assembles a constructor that performs a
+// low-level CALL(selector-only calldata) against target, then RETURNs
+// whatever the sub-call returned — used to reach the cross-chain precompile,
+// since it only dispatches from is_precompile()'s check inside a CALL
+// opcode's handling (processor.cpp), not from deploy/call/execute's own
+// entry point. Because a successful Deploy's Return is the CREATE-derived
+// address rather than the constructor's raw RETURN bytes (see the ChainId/
+// Blob tests above), returning the sub-call's response INSTALLS it as this
+// wrapper's "code" — read back via MapCodeChange, not Return.
+func buildCallWrapperInitCode(target common.Address, calldata []byte) []byte {
+	if len(calldata) > 32 {
+		panic("buildCallWrapperInitCode: calldata must fit in one 32-byte word")
+	}
+	var code []byte
+	push := func(b ...byte) { code = append(code, b...) }
+
+	// PUSH32 <calldata, right-aligned in a 32-byte word> ; PUSH1 0 ; MSTORE
+	//   -> memory[0:32] holds it, with the calldata bytes themselves
+	//   landing at memory[32-len(calldata) : 32] (PUSH always zero-extends
+	//   on the LEFT/high-order side, so a short value's real bytes end up
+	//   at the END of the 32-byte word once MSTORE'd at offset 0 — argsOffset
+	//   below must account for that, not assume left-alignment).
+	padded := make([]byte, 32)
+	copy(padded[32-len(calldata):], calldata)
+	push(0x7f) // PUSH32
+	code = append(code, padded...)
+	push(0x60, 0x00) // PUSH1 0 (mstore offset)
+	push(0x52)       // MSTORE
+
+	argsOffset := byte(32 - len(calldata))
+	// CALL(gas, target, value=0, argsOffset, argsSize=len(calldata), retOffset=0, retSize=0)
+	push(0x60, 0x00)               // PUSH1 0   (retSize)
+	push(0x60, 0x00)               // PUSH1 0   (retOffset)
+	push(0x60, byte(len(calldata))) // PUSH1 argsSize
+	push(0x60, argsOffset)          // PUSH1 argsOffset
+	push(0x60, 0x00)               // PUSH1 0   (value)
+	push(0x73)                     // PUSH20 <target>
+	code = append(code, target.Bytes()...)
+	push(0x5a) // GAS
+	push(0xf1) // CALL
+	push(0x50) // POP (discard success flag)
+	// RETURNDATACOPY(destOffset=0, offset=0, size=RETURNDATASIZE); RETURN(0, RETURNDATASIZE)
+	push(0x3d)       // RETURNDATASIZE
+	push(0x60, 0x00) // PUSH1 0 (offset)
+	push(0x60, 0x00) // PUSH1 0 (destOffset)
+	push(0x3e)       // RETURNDATACOPY
+	push(0x3d)       // RETURNDATASIZE
+	push(0x60, 0x00) // PUSH1 0 (offset)
+	push(0xf3)       // RETURN
+	return code
+}
+
+// TestTABoundary_CrossChain_SurvivesSerialization verifies B1's
+// cross-chain-precompile path end-to-end — the trickiest of the 3, since
+// the precompile ABI-encodes both getters as 32-byte values
+// (cross_chain_precompile.cpp explicitly checks source_bin.size() == 32),
+// which my_global_state.cpp's replacement getters must reproduce exactly
+// even though BlockContext itself stores the plain unpadded values.
+func TestTABoundary_CrossChain_SurvivesSerialization(t *testing.T) {
+	cs := harnessChainState(t)
+	mvmId := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbe")
+
+	originalSender := common.HexToAddress("0xcccccccccccccccccccccccccccccccccccccf")
+	const sourceChainID = uint64(555)
+
+	var engine mvm.ExecutionEngine = mvm.GetOrCreateMVMApi(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	engine.SetCrossChainContext(originalSender, sourceChainID)
+	t.Cleanup(engine.ClearCrossChainContext)
+
+	// Each Deploy call here is fully independent — nonce changes from one
+	// call are never committed back into cs before the next, so reusing one
+	// sender for 2 deploys would collide on the same CREATE address
+	// (confirmed empirically: both would resolve to nonce=0's address).
+	// Using 2 distinct senders sidesteps that entirely rather than trying
+	// to predict/track a nonce this harness never actually commits.
+	callViaWrapper := func(sender common.Address, selectorSig string) []byte {
+		t.Helper()
+		harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+		selector := crypto.Keccak256([]byte(selectorSig))[:4]
+		initCode := buildCallWrapperInitCode(mt_common.CROSS_CHAIN_CONTRACT_ADDRESS, selector)
+
+		req := serializeRoundTrip(t, harnessDeployRequest{
+			Sender:      sender,
+			InitCode:    initCode,
+			GasPrice:    1,
+			GasLimit:    300_000,
+			BlockNumber: 1,
+			MvmId:       mvmId,
+			TxHash:      common.HexToHash("0xc7"),
+		})
+		engine.SetRelatedAddresses([]common.Address{req.Sender, mt_common.CROSS_CHAIN_CONTRACT_ADDRESS})
+
+		rs := engine.Deploy(
+			req.Sender.Bytes(), req.InitCode, big.NewInt(0),
+			req.GasPrice, req.GasLimit,
+			0, 30_000_000, 0, 0, req.BlockNumber, common.Address{},
+			req.MvmId, req.TxHash.Bytes(),
+			false, false, false,
+		)
+		if rs == nil {
+			t.Fatalf("Deploy(wrapper for %s) returned nil result", selectorSig)
+		}
+		rsWire := serializeRoundTrip(t, *rs)
+		if rsWire.Status != pb.RECEIPT_STATUS_RETURNED {
+			t.Fatalf("Deploy(wrapper for %s) status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)",
+				selectorSig, rsWire.Status, rsWire.Exmsg)
+		}
+		wrapperAddr := crypto.CreateAddress(sender, 0)
+		got, ok := rsWire.MapCodeChange[hexKey(wrapperAddr)]
+		if !ok {
+			t.Fatalf("MapCodeChange missing entry for wrapper address %s; got keys %v",
+				wrapperAddr.Hex(), keysOf(rsWire.MapCodeChange))
+		}
+		return got
+	}
+
+	gotSender := callViaWrapper(
+		common.HexToAddress("0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"), "getOriginalSender()")
+	wantSender := make([]byte, 32)
+	copy(wantSender[12:], originalSender.Bytes())
+	if string(gotSender) != string(wantSender) {
+		t.Errorf("getOriginalSender() = %x, want %x", gotSender, wantSender)
+	}
+
+	gotSourceID := callViaWrapper(
+		common.HexToAddress("0xd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"), "getSourceChainId()")
+	wantSourceID := make([]byte, 32)
+	big.NewInt(0).SetUint64(sourceChainID).FillBytes(wantSourceID)
+	if string(gotSourceID) != string(wantSourceID) {
+		t.Errorf("getSourceChainId() = %x, want %x", gotSourceID, wantSourceID)
 	}
 }
 

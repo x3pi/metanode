@@ -62,6 +62,27 @@ struct ExecuteResult {
   unsigned long long gas_used;
 };
 
+// TEE-packaging B1 (note/tee_core_packaging_plan.md) context parameters,
+// appended to deploy/call/execute's existing signatures — the 3 entry
+// points that run the interpreter and can therefore reach CHAINID/BLOBHASH/
+// BLOBBASEFEE/the cross-chain precompile. All may be NULL (and
+// blob_versioned_hashes_count may be 0), meaning "not supplied": chain_id
+// then resolves to 0, no blob context, no cross-chain context — see
+// ParseTxContext (mvm_linker.cpp) and BlockContext (mvm/block_context.h)
+// for the exact semantics.
+//   b_chain_id:               32 bytes big-endian, or NULL
+//   b_blob_versioned_hashes:  flat array of blob_versioned_hashes_count
+//                              32-byte hashes, or NULL
+//   b_blob_base_fee:          32 bytes big-endian, or NULL
+//   b_cross_chain_sender:     20 bytes, or NULL (NULL = not a cross-chain
+//                              precompile call)
+//   b_cross_chain_source_id:  8 bytes big-endian uint64, or NULL
+#define MVM_B1_CONTEXT_PARAMS                                                \
+  unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,         \
+      int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,       \
+      unsigned char *b_cross_chain_sender,                                   \
+      unsigned char *b_cross_chain_source_id
+
 struct ExecuteResult *deploy(
     // transaction data
     unsigned char *b_caller_address, unsigned char *b_contract_constructor,
@@ -72,7 +93,7 @@ struct ExecuteResult *deploy(
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
-    bool is_cache, bool is_off_chain);
+    bool is_cache, bool is_off_chain, MVM_B1_CONTEXT_PARAMS);
 
 struct ExecuteResult *call(
     // transaction data
@@ -88,7 +109,7 @@ struct ExecuteResult *call(
     unsigned char
         *b_related_addresses,    // Flatten array: addr1(20) + addr2(20) + ...
     int related_addresses_count, // Số lượng addresses
-    bool is_off_chain);
+    bool is_off_chain, MVM_B1_CONTEXT_PARAMS);
 
 struct ExecuteResult *execute(
     // transaction data
@@ -103,7 +124,8 @@ struct ExecuteResult *execute(
     unsigned char
         *b_related_addresses,   // Flatten array: addr1(20) + addr2(20) + ...
     int related_addresses_count, // Số lượng addresses
-    bool is_cache                // Thêm is_cache
+    bool is_cache,                // Thêm is_cache
+    MVM_B1_CONTEXT_PARAMS
 );
 
 typedef struct {
