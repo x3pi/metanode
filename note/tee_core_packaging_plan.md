@@ -44,8 +44,8 @@ Ranh giới Go↔C++ hôm nay **không sạch một chiều** — có 2 luồng 
 
 | Hàm | Định nghĩa Go | Vai trò |
 |---|---|---|
-| `GetChainId` | `mvm_api.go:1269` | đọc chain id |
-| `GetBlockHash` | `mvm_api.go:1253` | đọc block hash theo số |
+| `GetChainId` | `mvm_api.go:1269` | đọc chain id — **từ global `config.ConfigApp`, không theo mvmId** |
+| `GetBlockHash` | `mvm_api.go:1253` | đọc block hash theo số — **từ global singleton `blockchain.GetBlockChainInstance()`, không theo mvmId** |
 | `GetBlobHash` | `mvm_api.go:1361` | đọc versioned hash (EIP-4844) |
 | `GetBlobBaseFee` | `mvm_api.go:1385` | đọc blob base fee |
 | `GetCrossChainSender` | `mvm_api.go:1307` | đọc sender liên chain |
@@ -58,6 +58,10 @@ world-switch tốn kém mỗi lần, và phá vỡ nguyên tắc "gộp cả bat
 command kiểu GlobalPlatform vốn có hình dạng 1 lệnh vào → 1 kết quả ra, không thiết kế cho
 callback đồng bộ giữa chừng). `ExtensionGetOrCreateSimpleDb` nặng nhất vì nó không chỉ đọc
 context tĩnh mà đọc/ghi state runtime — cần quyết định thiết kế riêng (xem B3).
+`GetChainId`/`GetBlockHash` nặng thêm 1 bậc nữa: chúng đọc từ **global singleton**
+(`config.ConfigApp`, `blockchain.GetBlockChainInstance()`), không nhận `mvmId` để tra theo
+từng phiên — phát hiện khi viết harness B6 (2026-08-14), cần B1 thay bằng dữ liệu truyền
+thẳng vào input thay vì đọc singleton.
 
 **Lưu ý:** `GetChainId`/`GetBlobHash` được thêm theo đúng 1 tiền lệ cố ý từ trước ("callback
 về Go" — xem `project_evm_production_hardening` trong lịch sử làm việc) — tiền lệ đó hợp lý
@@ -101,10 +105,29 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
   cùng hàm, không thread qua helper khác — chưa có lợi ích rõ ràng để đổi ngay, để dành khi
   thật sự cần swap implementation). Verify: `go build && go vet && go test -count=1 ./...`
   toàn module, 0 regression, hành vi giữ nguyên 100% (thuần đổi kiểu tại compile-time).
-- **B6 — Giả lập ranh giới TA ngay trên Linux (kiểm chứng sớm).** Sau B1-B5, viết 1 harness
-  gọi `libmvm_linker.a` chỉ qua struct input/output serialize (không dùng con trỏ chia sẻ
-  trực tiếp nữa) — lộ ra chỗ nào code còn ngầm giả định chung address space, sửa trước khi
-  có phần cứng OHtee thật.
+- [x] **B6 — Giả lập ranh giới TA ngay trên Linux (kiểm chứng sớm).** ✅ Xong (2026-08-14,
+  commit `2f5ec128`). `pkg/mvm/ta_boundary_harness_test.go` (package `mvm_test`, external —
+  không rủi ro import cycle) ép request/kết quả qua vòng JSON marshal→unmarshal thật vào 1
+  struct hoàn toàn mới trước khi engine dùng/trước khi assert — bắt được bất kỳ chỗ nào còn
+  ngầm chia sẻ backing array (điều 1 lần copy Go value bình thường không lộ ra, nhưng world
+  switch thật sẽ vỡ). 2 test: `TestTABoundary_NativeTransfer_SurvivesSerialization` (đường
+  native fast-path) và `TestTABoundary_Deploy_SurvivesSerialization` (deploy 1 contract tối
+  giản, tự tay assemble bytecode CODECOPY+RETURN hằng số 42) — **cả 2 pass ngay lần chạy
+  đầu** trên engine cgo thật, không cần sửa lại bytecode.
+
+  **Phạm vi nói thẳng (ghi ngay trong doc comment của file, không giấu):** harness này chỉ
+  chứng minh ranh giới cho các đường KHÔNG phụ thuộc 6 callback C++→Go còn lại (mục 2B) —
+  cố tình không setup `blockchain.GetBlockChainInstance()`/`config.ConfigApp` (2 global mà
+  `GetBlockHash`/`GetChainId` đọc vào) vì che nó đi sẽ giấu mất đúng thứ B1 cần sửa, không
+  chứng minh gì cả. Bytecode dùng BLOCKHASH/CHAINID/BLOBHASH/BLOBBASEFEE/cross-chain context
+  vẫn CHƯA được kiểm chứng bởi harness này cho tới khi B1 xong.
+
+  **Lợi ích phụ:** đây cũng là bộ test đầu tiên của repo thực sự chạy bytecode EVM thật qua
+  ranh giới cgo (trước đây `pkg/mvm` không có test nào làm việc này — xác nhận qua lịch sử
+  làm việc `project_evm_production_hardening`), độc lập với động cơ TEE packaging.
+
+  Verify: `go build && go vet && go test -count=1 ./...` toàn module sạch; 2 test mới ổn
+  định qua `go test -count=5`.
 
 **Thứ tự ưu tiên đề xuất:** B5 trước tiên (rẻ nhất, an toàn nhất — xem mục 4), song song B1+B2
 (giảm ngay 6/8 callback). B3+B4 chờ quyết định thiết kế trước khi code.
