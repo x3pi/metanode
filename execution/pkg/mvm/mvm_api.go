@@ -512,17 +512,40 @@ type b1Context struct {
 // pure waste.
 const maxBlockhashLookback = 256
 
-// HasBlockhashOpcode reports whether code contains byte 0x40 (BLOCKHASH)
-// anywhere. Deliberately conservative, not a real disassembler: a 0x40 byte
-// sitting inside a PUSH's immediate data still counts, so this can
-// over-report (fetch block hashes a contract never actually queries) but
-// never under-report (skip fetching for one that does) — over-fetching is
-// wasted work, under-fetching would be a correctness bug, so the cheap
-// direction to err in is clear. Distinguishing real opcodes from push-data
-// would need a full bytecode walk for a purely load-bearing-on-performance
-// check; not worth it here.
+// blockhashRelevantOpcodes are the bytes that make HasBlockhashOpcode
+// report true: BLOCKHASH itself (0x40), plus every CALL-family opcode
+// (CALL/CALLCODE/DELEGATECALL/STATICCALL: 0xf1/0xf2/0xf4/0xfa). The
+// CALL-family bytes matter because they mean this code can hand control to
+// OTHER code this function was never given the chance to scan — a nested
+// call reaching a contract that itself uses BLOCKHASH would otherwise
+// silently see block_hashes as empty (0 for every query) with no way to
+// tell the difference from "genuinely no BLOCKHASH usage anywhere in this
+// call". CREATE/CREATE2 deliberately excluded: a newly-deployed
+// contract's constructor runs through its own separate Deploy() call,
+// which gets its own independent scan of the constructor bytecode — not a
+// gap this function needs to cover.
+var blockhashRelevantOpcodes = [256]bool{0x40: true, 0xf1: true, 0xf2: true, 0xf4: true, 0xfa: true}
+
+// HasBlockhashOpcode reports whether code might need BLOCKHASH context —
+// see blockhashRelevantOpcodes for exactly which bytes trigger this and
+// why. Deliberately conservative, not a real disassembler: any of these
+// bytes sitting inside a PUSH's immediate data still counts, so this can
+// over-report (fetch block hashes a contract never actually queries) — but
+// erring toward over-fetching is the only safe direction, since
+// under-fetching would silently corrupt BLOCKHASH's result rather than
+// just waste work. Note this is still a heuristic, not a proof: it cannot
+// see through a CALL target resolved by an address computed at runtime
+// (e.g. from storage) any better than it can see through push-data — it
+// only needs to notice that *some* CALL-family opcode is reachable, which
+// a plain byte scan does reliably regardless of how the target address
+// itself is computed.
 func HasBlockhashOpcode(code []byte) bool {
-	return bytes.IndexByte(code, 0x40) >= 0
+	for _, b := range code {
+		if blockhashRelevantOpcodes[b] {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchRecentBlockHashes returns up to maxBlockhashLookback preceding block
@@ -565,6 +588,17 @@ func fetchRecentBlockHashes(blockNumber uint64) [][]byte {
 // field, unlike the others above, is NOT fetched unconditionally). Pass the
 // bytecode that's actually about to execute: the constructor for Deploy, or
 // the target contract's deployed code for Call/Execute.
+//
+// Known, accepted cost (code review, 2026-08-14): for Call/Execute, the
+// caller fetches that target code via smartContractDb.Code() specifically
+// to feed this scan, duplicating the read the C++ side performs anyway via
+// the GlobalStateGet callback when it resolves the target account
+// mid-execution. Not fixed here: avoiding it would mean threading the
+// already-fetched code across the cgo boundary to replace GlobalStateGet's
+// own fetch for that one address — a real restructuring of the account/
+// code resolution path for a plain cache read's worth of savings (this
+// codebase already warms these reads via PreloadAccounts elsewhere), not
+// worth the added risk on a consensus-critical path for this pass.
 //
 // Caller MUST defer the returned value's free().
 func (a *MVMApi) buildB1Context(code []byte, blockNumber uint64) b1Context {
