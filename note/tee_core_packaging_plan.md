@@ -42,16 +42,18 @@ Ranh giới Go↔C++ hôm nay **không sạch một chiều** — có 2 luồng 
 ### B. C++ → Go (callback GIỮA CHỪNG lúc thực thi 1 tx) — nợ kỹ thuật thật, chặn đường lên TA
 8 hàm cgo `//export` mà C++ gọi ngược vào Go trong khi đang chạy:
 
-| Hàm | Định nghĩa Go | Vai trò |
-|---|---|---|
-| `GetChainId` | `mvm_api.go:1269` | đọc chain id — **từ global `config.ConfigApp`, không theo mvmId** |
-| `GetBlockHash` | `mvm_api.go:1253` | đọc block hash theo số — **từ global singleton `blockchain.GetBlockChainInstance()`, không theo mvmId** |
-| `GetBlobHash` | `mvm_api.go:1361` | đọc versioned hash (EIP-4844) |
-| `GetBlobBaseFee` | `mvm_api.go:1385` | đọc blob base fee |
-| `GetCrossChainSender` | `mvm_api.go:1307` | đọc sender liên chain |
-| `GetCrossChainSourceId` | `mvm_api.go:1334` | đọc source id liên chain |
-| `GoLogString`/`GoLogBytes` | `logger.go:50`/`:93` | log ra ngoài giữa chừng |
-| `ExtensionGetOrCreateSimpleDb` | `extension.go:288` | **mở 1 key-value DB runtime** cho precompile "SimpleDb" — không chỉ đọc context, còn đọc/ghi state phía Go giữa lúc contract đang chạy |
+| Hàm | Định nghĩa Go | Vai trò | Trạng thái |
+|---|---|---|---|
+| `GetChainId` | `mvm_api.go:1269` | đọc chain id — từ global `config.ConfigApp`, không theo mvmId | ✅ B1, `3bd58b63` |
+| `GetBlockHash` | `mvm_api.go:1253` | đọc block hash theo số — từ global singleton `blockchain.GetBlockChainInstance()`, không theo mvmId | ✅ B1, `c11b28c4` |
+| `GetBlobHash` | `mvm_api.go:1361` | đọc versioned hash (EIP-4844) | ✅ B1, `3bd58b63` |
+| `GetBlobBaseFee` | `mvm_api.go:1385` | đọc blob base fee | ✅ B1, `3bd58b63` |
+| `GetCrossChainSender` | `mvm_api.go:1307` | đọc sender liên chain | ✅ B1, `3bd58b63` |
+| `GetCrossChainSourceId` | `mvm_api.go:1334` | đọc source id liên chain | ✅ B1, `3bd58b63` |
+| `GoLogString`/`GoLogBytes` | `logger.go:50`/`:93` | log ra ngoài giữa chừng | ✅ B2, `2e53df25` |
+| `ExtensionGetOrCreateSimpleDb` | `extension.go:288` | **mở 1 key-value DB runtime** cho precompile "SimpleDb" — không chỉ đọc context, còn đọc/ghi state phía Go giữa lúc contract đang chạy | ⏳ B3, chưa làm — cần quyết định của bạn |
+
+**Tất cả 7 hàm còn lại đã đóng (B1 6/6 + B2). Chỉ còn `ExtensionGetOrCreateSimpleDb` (B3).**
 
 **Vì sao đây là vấn đề cho TA:** trong TA, gọi ngược Normal World giữa chừng = 1
 world-switch tốn kém mỗi lần, và phá vỡ nguyên tắc "gộp cả batch vào 1 lệnh" (session
@@ -77,17 +79,28 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
 
 **Nguyên tắc xuyên suốt: không đổi logic mvm/Xapian, chỉ đổi CÁCH dữ liệu ra/vào ranh giới.**
 
-- [x] **B1 — Gộp context Go→C++ thành 1 struct đầu vào duy nhất.** ✅ Xong 5/6 (2026-08-14,
-  commit `3bd58b63`). `deploy`/`call`/`execute` (3 entry point chạy interpreter, KHÔNG đụng
+- [x] **B1 — Gộp context Go→C++ thành 1 struct đầu vào duy nhất.** ✅ Xong hoàn toàn 6/6
+  (2026-08-14, commit `3bd58b63` cho 5/6 đầu + `c11b28c4` đóng nốt BLOCKHASH). `deploy`/
+  `call`/`execute` (3 entry point chạy interpreter, KHÔNG đụng
   `executeBatch`/`sendNative`/`processNativeMintBurn`/`noncePlusOne` vì chúng không bao giờ
-  chạm opcode liên quan) nay nhận thêm 6 tham số cuối (`MVM_B1_CONTEXT_PARAMS`, đều nullable
+  chạm opcode liên quan) nay nhận thêm 8 tham số cuối (`MVM_B1_CONTEXT_PARAMS`, đều nullable
   = "không cung cấp"), gộp vào `BlockContext` (mới: `chain_id`, `blob_versioned_hashes`,
-  `blob_base_fee`, `cross_chain_sender`, `cross_chain_source_id`) qua `ParseTxContext()` +
-  `CreateBlockContext()` (default arg — 4 call site không đụng không cần sửa gì).
-  `MyGlobalState`'s 5 getter (`get_chain_id`, `get_blob_hash`, `get_blob_base_fee`,
-  `get_cross_chain_sender`, `get_cross_chain_source_id`) đọc thẳng từ `blockContext` thay vì
-  gọi ngược Go. **`GetBlockHash` (BLOCKHASH) cố tình để lại** — cần mảng tới 256 hash, thiết
-  kế lớn hơn phạm vi đợt này, vẫn đọc từ `blockchain.GetBlockChainInstance()`.
+  `blob_base_fee`, `cross_chain_sender`, `cross_chain_source_id`, `block_hashes`) qua
+  `ParseTxContext()` + `CreateBlockContext()` (default arg — 4 call site không đụng không
+  cần sửa gì). `MyGlobalState`'s 6 getter đọc thẳng từ `blockContext` thay vì gọi ngược Go.
+
+  **`GetBlockHash`/BLOCKHASH (đóng sau, commit `c11b28c4`) — thiết kế khác hẳn 5 field kia,
+  KHÔNG fetch vô điều kiện.** Lý do: fetch tới 256 hash thật (mỗi cái là 1 cache lookup, hoặc
+  khi miss là 1 lần đọc DB thật / fallback O(N) walkback qua
+  `blockchain.GetBlockChainInstance().GetBlockHashByNumber`) trên MỌI lời gọi bất kể có dùng
+  hay không sẽ là overhead thật, tránh được — khác hẳn `chain_id`/blob context (chỉ 1 lần đọc
+  global rẻ). Giải pháp: `HasBlockhashOpcode` (mvm_api.go) quét byte `0x40` trong bytecode
+  SẮP chạy (code đã deploy cho Call/Execute qua `smartContractDb.Code()`, constructor cho
+  Deploy) trước — chỉ fetch khi có khả năng dùng thật. Quét cố tình bảo thủ (byte `0x40` nằm
+  trong dữ liệu PUSH vẫn tính là "có thể dùng") — over-fetch chỉ tốn công thừa, under-fetch
+  mới là lỗi thật, nên lệch về hướng an toàn có chủ đích. Bắt được thêm 1 bug tiềm ẩn của
+  code cũ khi thay: callback cũ KHÔNG kiểm tra cờ `success` trước khi đọc kết quả — query
+  ngoài phạm vi 256 block là undefined behavior, không phải trả về 0 sạch như code mới.
 
   **3 lỗi thật bắt được nhờ quy trình verify, không phải đoán:**
   1. `get_cross_chain_sender`/`get_cross_chain_source_id` cần ABI-encode đúng 32 byte
@@ -102,10 +115,15 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
      xác nhận bằng `crypto.CreateAddress`, sửa lại dùng `MapCodeChange` thay vì `Return`.
 
   **Verify:** `bash pkg/mvm/build.sh` (rebuild C++) sạch; `go build/vet/test -count=1 ./...`
-  sạch toàn module; 5 test mới trong `ta_boundary_harness_test.go` (ChainId, Blob+BlobBaseFee,
+  sạch toàn module; 6 test trong `ta_boundary_harness_test.go` (ChainId, Blob+BlobBaseFee,
   CrossChain — CrossChain phải tự assemble 1 constructor thực hiện low-level CALL vì precompile
   chỉ dispatch từ trong `is_precompile()` lúc xử lý opcode CALL, không phải từ entry point của
-  `deploy`/`call`/`execute`) ổn định qua `go test -count=3`.
+  `deploy`/`call`/`execute` —, và `BlockHash` (mới, commit `c11b28c4`, phải seed thẳng cache
+  của singleton `BlockChain` — lần chạy đầu crash vì bare `StorageManager` không có backing
+  thật cho nhánh fallback khi cache-miss, sửa bằng cách seed đúng đủ để không bao giờ miss
+  trong phạm vi lookback của test) ổn định qua `go test -count=3`.
+
+  **B1 đóng hoàn toàn — không còn callback C++→Go nào trong đường thực thi giữa chừng.**
 - [x] **B2 — Gộp log ra thành buffer trả về, bỏ callback log inline.** ✅ Xong (2026-08-14,
   commit `2e53df25`). `MyLogger` (`my_logger.h`/`.cpp`) giờ tích `(flag, message)` vào
   `buffered_logs` thay vì gọi ngược `GoLogString`/`GoLogBytes`. `run()` (chokepoint duy nhất
