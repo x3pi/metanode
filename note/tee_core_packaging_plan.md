@@ -106,9 +106,25 @@ riêng?) mới bọc đúng lớp trừu tượng (xem B4).
   CrossChain — CrossChain phải tự assemble 1 constructor thực hiện low-level CALL vì precompile
   chỉ dispatch từ trong `is_precompile()` lúc xử lý opcode CALL, không phải từ entry point của
   `deploy`/`call`/`execute`) ổn định qua `go test -count=3`.
-- **B2 — Gộp log ra thành buffer trả về, bỏ callback log inline.** `GoLogString`/
-  `GoLogBytes` → C++ tự tích log vào buffer nội bộ, trả về cùng `ExecuteResult` khi hàm kết
-  thúc; Go in log sau khi nhận kết quả. Rẻ, rủi ro thấp, giảm ngay 2/8 callback.
+- [x] **B2 — Gộp log ra thành buffer trả về, bỏ callback log inline.** ✅ Xong (2026-08-14,
+  commit `2e53df25`). `MyLogger` (`my_logger.h`/`.cpp`) giờ tích `(flag, message)` vào
+  `buffered_logs` thay vì gọi ngược `GoLogString`/`GoLogBytes`. `run()` (chokepoint duy nhất
+  mà `deploy`/`call`/`execute`/`executeBatch` đều đi qua) trích buffer ra qua 1 out-parameter
+  mới TRƯỚC khi return (ở cả nhánh thành công lẫn 2 catch block riêng, vì `logger` là biến cục
+  bộ, mất khi `run()` return) → `processResult()` đóng gói thành blob nhị phân
+  `[4-byte flag][4-byte len][msg]` lặp lại trên `ExecuteResult.b_native_logs` (field mới, free
+  trong `freeResult()` như mọi buffer khác). Go: `extractNativeLogs` (helpers.go) giải mã
+  thành `MVMExecuteResult.NativeLogs`; `logger.go` tách chung `logAtFlag()` cho cả
+  `GoLogString`/`GoLogBytes` (không còn được C++ gọi, giữ lại `//export` như tiền lệ B1) và
+  hàm mới `FlushNativeLogs()`, gọi 1 lần sau `extractExecuteResult` ở `Call`/`Execute`/`Deploy`/
+  `ExecuteBatch` — cùng thứ tự, cùng level như callback cũ, chỉ khác là sau khi return thay vì
+  giữa chừng. `sendNative`/`processNativeMintBurn`/`noncePlusOne` không đụng (không bao giờ
+  chạm interpreter nên luôn rỗng, `FlushNativeLogs(nil)` là no-op).
+
+  **Verify:** `bash pkg/mvm/build.sh` sạch; `go build/vet/test -count=1 ./...` sạch toàn
+  module; test mới `TestTABoundary_NativeLogs_SurvivesSerialization` (deploy constructor chạy
+  BALANCE — nơi duy nhất hiện tại gọi `NativeLogger.LogString` — kiểm log line sống sót qua
+  `serializeRoundTrip`) pass ngay lần chạy đầu, ổn định qua `go test -count=3`.
 - **B3 — Xử lý riêng `ExtensionGetOrCreateSimpleDb` (khó nhất, cần quyết định của bạn).**
   Hai hướng: (a) đưa hẳn key-value store này vào trong core C++ (nếu dữ liệu đủ nhỏ để sống
   trong TA), hoặc (b) giữ ở Go nhưng chuyển từ "callback mid-execution" sang mô hình 2 pha
