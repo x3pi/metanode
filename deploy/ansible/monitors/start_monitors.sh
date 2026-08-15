@@ -401,8 +401,12 @@ if [ "${1:-}" == "resources" ]; then
                     disk_usage=$(echo "$metrics" | awk '{print $3}')
                 fi
 
+                RAM_LIMIT=95
+                CPU_LIMIT=97
+                DISK_LIMIT=95
+
                 if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
-                    if [[ "$ram_usage" -ge 95 ]] || [[ "$cpu_usage" -ge 97 ]] || [[ "$disk_usage" -ge 95 ]]; then
+                    if [[ "$ram_usage" -ge "$RAM_LIMIT" ]] || [[ "$cpu_usage" -ge "$CPU_LIMIT" ]] || [[ "$disk_usage" -ge "$DISK_LIMIT" ]]; then
                         current_time=$(date +%s)
                         last_alert=${alert_history[$node_key]:-0}
                         time_diff=$((current_time - last_alert))
@@ -413,9 +417,9 @@ if [ "${1:-}" == "resources" ]; then
 ────────────────────────
 🎯 <b>MÁY BỊ QUÁ TẢI (Target Server):</b>
    • <b>IP:</b> <code>${ip}</code> (Node: <code>${node_key}</code>)
-   • <b>RAM:</b> ${ram_usage}% (ngưỡng: 94%)
-   • <b>CPU:</b> ${cpu_usage}% (ngưỡng: 96%)
-   • <b>Ổ đĩa (Disk):</b> ${disk_usage}% (ngưỡng: 10%)
+   • <b>RAM:</b> ${ram_usage}% (ngưỡng: ${RAM_LIMIT}%)
+   • <b>CPU:</b> ${cpu_usage}% (ngưỡng: ${CPU_LIMIT}%)
+   • <b>Ổ đĩa (Disk):</b> ${disk_usage}% (ngưỡng: ${DISK_LIMIT}%)
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
