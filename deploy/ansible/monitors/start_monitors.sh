@@ -58,9 +58,11 @@ PARSE_PY=$(get_parse_py)
 if [ -n "$INV_PATH" ]; then
     BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
     CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
-    if [ -n "$BOT_TOKEN" ]; then TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
-    if [ -n "$CHAT_ID" ]; then TELEGRAM_CHAT_ID="$CHAT_ID"; fi
+    if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
+    if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
 fi
+export TELEGRAM_BOT_TOKEN
+export TELEGRAM_CHAT_ID
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
 send_tele() {
@@ -130,12 +132,16 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
         fi
     fi
 
-    # 3. Chuẩn bị file copy sang các node
-    if [ -f "$INV_PATH" ] && [ ! -f "${SCRIPT_DIR}/inventory.yml" ]; then
-        cp "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
+    # 3. Chuẩn bị file copy sang các node (luôn luôn sync file mới nhất từ root, không để file cũ bị lệch IP)
+    if [ -f "$INV_PATH" ]; then
+        if [ "$(readlink -f "$INV_PATH" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/inventory.yml" 2>/dev/null)" ]; then
+            cp -f "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
+        fi
     fi
-    if [ -f "$PARSE_PY" ] && [ ! -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
-        cp "$PARSE_PY" "${SCRIPT_DIR}/parse_inventory.py"
+    if [ -f "$PARSE_PY" ]; then
+        if [ "$(readlink -f "$PARSE_PY" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/parse_inventory.py" 2>/dev/null)" ]; then
+            cp -f "$PARSE_PY" "${SCRIPT_DIR}/parse_inventory.py"
+        fi
     fi
 
     echo "📦 Đồng bộ gói Monitor sang tất cả các máy trong cụm..."
@@ -463,19 +469,20 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
         python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
     fi
 
-    if [ -f "$RPC_JSON_PATH" ]; then
-        cp "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
+    if [ -s "$RPC_JSON_PATH" ]; then
+        cp -f "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
     fi
     cd "$BLOCK_CHECKER_DIR" || exit 1
     
-    if [ ! -f "block_hash_checker" ] || [ "main.go" -nt "block_hash_checker" ]; then
+    if [ ! -f "block_hash_checker" ] && command -v go >/dev/null 2>&1; then
         go build -o block_hash_checker main.go || true
     fi
     
     if [ -f "block_hash_checker" ]; then
+        chmod +x "block_hash_checker"
         nohup ./block_hash_checker --watch --interval 5s --config config-m-nodes.json --daemon > block_checker_daemon.log 2>&1 &
         PID=$!
-        sleep 1
+        sleep 2
         
         if ! kill -0 $PID 2>/dev/null; then
             echo -e "\033[0;31m❌ [ERROR] Block Hash Monitor khởi động thất bại!\033[0m"
