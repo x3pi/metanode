@@ -139,8 +139,20 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
     fi
 
     echo "📦 Đồng bộ gói Monitor sang tất cả các máy trong cụm..."
-    ansible metanode_cluster -i "$INV_PATH" -b -m file -a "path=/opt/metanode/monitors state=directory mode=0777 owner=abc group=abc" >/dev/null 2>&1 || true
-    ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${SCRIPT_DIR}/ dest=/opt/metanode/monitors/ mode=preserve" >/dev/null 2>&1 || true
+    ansible metanode_cluster -i "$INV_PATH" -b -m file -a "path=/opt/metanode/monitors/block_hash_checker state=directory mode=0777 owner=abc group=abc" >/dev/null 2>&1 || true
+    ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${SCRIPT_DIR}/start_monitors.sh dest=/opt/metanode/monitors/start_monitors.sh mode=0755" >/dev/null 2>&1 || true
+    if [ -f "${SCRIPT_DIR}/inventory.yml" ]; then
+        ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${SCRIPT_DIR}/inventory.yml dest=/opt/metanode/monitors/inventory.yml mode=0644" >/dev/null 2>&1 || true
+    fi
+    if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
+        ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${SCRIPT_DIR}/parse_inventory.py dest=/opt/metanode/monitors/parse_inventory.py mode=0755" >/dev/null 2>&1 || true
+    fi
+    if [ -f "${SCRIPT_DIR}/.env" ]; then
+        ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${SCRIPT_DIR}/.env dest=/opt/metanode/monitors/.env mode=0600" >/dev/null 2>&1 || true
+    fi
+    if [ -d "$BLOCK_CHECKER_DIR" ]; then
+        ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${BLOCK_CHECKER_DIR}/ dest=/opt/metanode/monitors/block_hash_checker/ mode=preserve" >/dev/null 2>&1 || true
+    fi
 
     echo "🚀 Kích hoạt Monitor trên tất cả các máy trong cụm song song..."
     ansible metanode_cluster -i "$INV_PATH" -m shell -a "nohup /bin/bash /opt/metanode/monitors/start_monitors.sh </dev/null >/dev/null 2>&1 & sleep 1" >/dev/null 2>&1 || true
