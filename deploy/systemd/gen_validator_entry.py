@@ -294,11 +294,12 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "is_rpc_node": is_rpc_node,
         "explorer_db_path": f"{install_dir}/data/execution/explorer",
         "explorer_read_only_db_path": f"{install_dir}/data/execution/explorer-read-only",
+        "log_path": f"{install_dir}/logs/execution",
         "log": {
             "level": "info",
             "format": "text",
             "console_output": True,
-            "file_output": False
+            "file_output": True
         },
         "tx_trace_enabled": False
     }

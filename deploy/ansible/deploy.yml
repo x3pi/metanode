@@ -35,6 +35,15 @@
   any_errors_fatal: true
   gather_facts: true
   pre_tasks:
+    - name: Ensure monitoring tools (sshpass, jq) are installed
+      ansible.builtin.apt:
+        name:
+          - sshpass
+          - jq
+        state: present
+        update_cache: false
+      ignore_errors: true
+
     - name: Filter active nodes by target
       set_fact:
         target_active_nodes: >-

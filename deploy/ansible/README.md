@@ -26,6 +26,7 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--restore-node N`| `none` (Không thực hiện khôi phục) | Cờ đặc biệt: Báo hiệu sẽ khôi phục dữ liệu cho Node `N`. Hệ thống sẽ tải Snapshot và giải nén vào thư mục `data`. Thường kết hợp với `--reset-all`. |
 | `--snapshot-url` | Rỗng (`""`) | Cung cấp đường link tải Snapshot (Ví dụ: `http://192.168.1.230:8604`). Bắt buộc đi kèm khi sử dụng `--restore-node`. |
 | `--open-ports` | `false` (Không mở port) | Gọi script cấu hình Firewall (UFW) trên Server để mở thông tất cả các cổng (P2P, RPC, Metrics...). Thường chỉ chạy 1 lần lúc cài đặt máy chủ mới. |
+| `--all-monitors` | `false` (Chỉ chạy trên máy Master) | **Giám Sát Chéo Đa Máy (Mutual Cross-Monitoring):** Phân phối và bật bộ Monitor trên **TẤT CẢ các Server** trong `inventory.yml`. Mỗi Server sẽ chạy 1 bộ monitor ngầm để giám sát chéo tất cả các Node trong toàn mạng lưới, phòng ngừa trường hợp máy Master bị chết thì các máy khác vẫn cảnh báo Telegram bình thường. |
 | `--debug-cpp` | `false` | Ép trình biên dịch C++ (EVM Linker) build ở chế độ Debug (`-O0 -g`) thay vì Release (`-O3`). Dùng khi cần `gdb` dò lỗi CGO. |
 
 ---
@@ -119,6 +120,18 @@ Hệ thống Ansible giờ đây sẽ lo trọn gói việc khởi động **Pro
 **Lệnh này sẽ làm gì?**
 Thực thi script `open_ports.sh` trên từng máy chủ tương ứng để tự động thêm rule `ufw allow` cho tất cả các cổng cần thiết (Execution, Consensus, RPC, Snapshot, Metrics). Vì Firewall chỉ cần mở 1 lần duy nhất, bạn không cần dùng cờ này trong các lần cập nhật tiếp theo.
 
+### 7. Giám Sát Chéo Đa Máy (`--all-monitors`)
+Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
+```bash
+./ansible_deploy.sh --reset-all --all-monitors
+# Hoặc cập nhật giữ data:
+./ansible_deploy.sh --start --all-monitors
+```
+**Lệnh này sẽ làm gì?**
+- Hệ thống sẽ tự động đồng bộ thư mục `monitors` sang **TẤT CẢ các Server** có trong `inventory.yml`.
+- Mỗi máy Server sẽ chạy 1 cụm Monitor ngầm riêng biệt để **giám sát chéo toàn bộ các Node trong toàn mạng lưới**.
+- **Cơ chế dự phòng:** Nếu máy chủ Master (ví dụ `192.168.1.234`) bị sập nguồn hoặc mất mạng, tiến trình Monitor chạy trên các máy Slave (ví dụ `192.168.1.230`) vẫn sống và sẽ ngay lập tức bắn cảnh báo lên Telegram rằng Node 0 trên máy Master đã chết.
+
 ---
 
 ## Phần 2: Kiến Trúc Ansible Hoạt Động Như Thế Nào?
@@ -158,19 +171,31 @@ Toàn bộ 6 Role phía trên không hề chứa IP cứng (hardcode). Mọi c�
 
 Bộ công cụ Ansible deploy đi kèm bộ giám sát (Monitors) chạy ngầm nội bộ độc lập hoàn toàn, hỗ trợ giám sát sức khỏe cụm node và tính nhất quán của chuỗi khối.
 
-### 1. Bộ Giám Sát Cục Bộ (Monitors)
-Bộ giám sát nằm tại thư mục [deploy/ansible/monitors/](file:///home/abc/chain-n/metanode/deploy/ansible/monitors/) bao gồm:
-- **Health Monitor** (`start_monitors.sh health`): Liên tục kiểm tra các endpoint RPC của các node trong cụm. Nếu phát hiện node chết, tự động dùng `sshpass` kéo thư mục logs bị crash về máy master (lưu tại `monitors/logs_crash/`) và gửi cảnh báo đỏ lên Telegram.
+### 1. Bộ Giám Sát (Monitors)
+Bộ giám sát nằm tại thư mục [deploy/ansible/monitors/](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/monitors/) bao gồm:
+- **Health Monitor** (`start_monitors.sh health`): Liên tục kiểm tra các endpoint RPC của **TẤT CẢ các Node** trong cụm. Nếu phát hiện node chết, tự động dùng `sshpass` kéo thư mục logs bị crash về máy phát hiện (lưu tại `monitors/logs_crash/`) và gửi cảnh báo đỏ lên Telegram kèm IP máy phát hiện (`Detector Server`).
+- **Resource Monitor** (`start_monitors.sh resources`): Kiểm tra RAM, CPU, Disk usage trên toàn bộ các Server định kỳ mỗi 5 phút, cảnh báo Telegram khi tài nguyên vượt ngưỡng nguy hiểm (>= 94%).
 - **Block Hash Checker** (`block_hash_checker`): Một công cụ viết bằng Go chạy ở dạng Daemon liên tục so sánh chiều cao block, hash, parentHash, stateRoot... giữa các node với nhau để phát hiện sớm các hiện tượng phân nhánh (fork) hoặc lệch trạng thái, hỗ trợ gửi cảnh báo trực tiếp lên Telegram.
 
-Bộ giám sát này được tự động bật lại ở cuối mỗi phiên deploy thành công (chạy qua `ansible_deploy.sh`). Bạn có thể bật thủ công bất kỳ lúc nào bằng cách chạy:
-```bash
-cd deploy/ansible/monitors
-./start_monitors.sh
-```
+### 2. Các Lệnh Quản Lý Monitor Thủ Công
+- **Bật monitor trên máy hiện tại:**
+  ```bash
+  cd deploy/ansible/monitors
+  ./start_monitors.sh
+  ```
+- **Bật monitor chéo trên TẤT CẢ các máy Server:**
+  ```bash
+  cd deploy/ansible/monitors
+  ./start_monitors.sh --all-hosts
+  ```
+- **Dừng toàn bộ monitor trên TẤT CẢ các máy Server:**
+  ```bash
+  cd deploy/ansible/monitors
+  ./start_monitors.sh --stop-all
+  ```
 
-### 2. Dừng các tiến trình nền (`stop_all.sh`)
-Để tắt nhanh toàn bộ các công cụ nền đang chạy trên máy Master, hãy sử dụng tệp tiện ích [stop_all.sh](file:///home/abc/chain-n/metanode/deploy/ansible/stop_all.sh):
+### 3. Dừng các tiến trình nền (`stop_all.sh`)
+Để tắt nhanh toàn bộ các công cụ nền đang chạy trên máy Master, hãy sử dụng tệp tiện ích [stop_all.sh](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/stop_all.sh):
 - **Tắt monitors & watcher daemon:**
   ```bash
   ./stop_all.sh

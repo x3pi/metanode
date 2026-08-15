@@ -39,8 +39,8 @@ Environment=GOMAXPROCS={{ gomaxprocs | default(20) }}
 LimitNOFILE=100000
 LimitCORE=infinity
 # Logging
-StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
-StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
+StandardOutput=journal
+StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/panic.log
 SyslogIdentifier=metanode-execution-{{ item }}
 
 [Install]

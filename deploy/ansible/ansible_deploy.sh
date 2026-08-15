@@ -13,6 +13,7 @@
 # ║    --restore-node N    Restore node N from snapshot url           ║
 # ║    --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)  ║
 # ║    --open-ports        Open firewall ports for the nodes          ║
+# ║    --all-monitors      Run monitors mutually across ALL machines  ║
 # ╚═══════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -80,6 +81,7 @@ SNAPSHOT_URL=""
 OPEN_PORTS="false"
 BUILD_FAST="false"
 DEBUG_CPP="false"
+ALL_MONITORS="false"
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -106,8 +108,22 @@ while [[ "$#" -gt 0 ]]; do
         --open-ports) OPEN_PORTS="true" ;;
         --fast) BUILD_FAST="true" ;;
         --debug-cpp) DEBUG_CPP="true" ;;
+        --all-monitors|--monitor-all) ALL_MONITORS="true" ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --start             Start nodes (re-distribute binaries)"
+            echo "  --restart           Fast restart systemd services"
+            echo "  --reset-all         Fresh setup (gen keys, clears data)"
+            echo "  --stop              Stop nodes and monitors"
+            echo "  --clean             Clear data before starting nodes"
+            echo "  --only-node N       Only apply actions to node N"
+            echo "  --restore-node N    Restore node N from snapshot url"
+            echo "  --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)"
+            echo "  --open-ports        Open firewall ports for the nodes"
+            echo "  --all-monitors      Run monitors mutually across ALL machines"
+            echo "  --fast              Fast build (skip redundant steps)"
+            echo "  --debug-cpp         Enable debug mode for C++ MVM linker"
             exit 0
             ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
@@ -165,6 +181,7 @@ send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trì
 - Keep Data: <code>${KEEP_DATA}</code>
 - Restore Node: <code>${RESTORE_NODE}</code>
 - Open Ports: <code>${OPEN_PORTS}</code>
+- All Monitors: <code>${ALL_MONITORS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
 📋 <b>Node Roles:</b>
@@ -178,9 +195,13 @@ if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
 
-echo -e "\n⏸ Tạm dừng Health Monitor trong quá trình Deploy để tránh cảnh báo sai..."
-pkill -f "start_monitors.sh health" || true
-pkill -f "block_hash_checker" || true
+echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
+if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
+    bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop-all >/dev/null 2>&1 || true
+fi
+pkill -9 -f "start_monitors.sh" || true
+pkill -9 -f "block_hash_checker" || true
+pkill -9 -f "go run main.go.*--no-stop-flag" || true
 
 if [ "$KEEP_DATA" == "false" ]; then
     echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
@@ -232,12 +253,12 @@ ${RPC_CONFIG}
   - <b>Consensus logs:</b>
     <code>sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager</code>
   - <b>Execution logs:</b>
-    <code>tail -n 100 /opt/metanode/node-X/logs/execution/execution.log</code>
+    <code>tail -n 100 /opt/metanode/node-X/logs/execution/*/execution.log</code>
 • <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
   - <b>Consensus logs:</b>
     <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
   - <b>Execution logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"</code>"
+    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/*/execution.log\"</code>"
 else
     send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
@@ -248,20 +269,28 @@ else
   - <b>Consensus logs:</b>
     <code>sudo journalctl -u \"metanode-consensus-*\" -n 100 --no-pager</code>
   - <b>Execution logs:</b>
-    <code>tail -n 100 /opt/metanode/node-X/logs/execution/execution.log</code>
+    <code>tail -n 100 /opt/metanode/node-X/logs/execution/*/execution.log</code>
 • <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
   - <b>Consensus logs:</b>
     <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
   - <b>Execution logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/execution.log\"</code>"
+    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/*/execution.log\"</code>"
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
 if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
-    echo -e "\n▶️ Bật lại Health Monitor sau khi Deploy xong..."
-    bash "$MONITOR_SCRIPT"
+    if [ "$ALL_MONITORS" == "true" ]; then
+        echo -e "\n▶️ Bật Giám Sát Chéo Đa Máy (Mutual Cross-Monitors) trên TẤT CẢ các máy..."
+        bash "$MONITOR_SCRIPT" --all-hosts
+    else
+        echo -e "\n▶️ Bật lại Health Monitor cục bộ sau khi Deploy xong..."
+        bash "$MONITOR_SCRIPT"
+    fi
 elif [ "$ACTION" == "stop" ]; then
     echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
+    if [ "$ALL_MONITORS" == "true" ]; then
+        ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true" >/dev/null 2>&1 || true
+    fi
 fi
 
 exit $ansible_exit

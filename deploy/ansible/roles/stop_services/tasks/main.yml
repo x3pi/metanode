@@ -1,4 +1,11 @@
 ---
+- name: Stop any running monitoring processes on the node
+  ansible.builtin.shell: |
+    pkill -9 -f 'start_monitors.sh' || true
+    pkill -9 -f 'block_hash_checker' || true
+  failed_when: false
+  changed_when: false
+
 - name: Find all metanode services
   ansible.builtin.shell: "systemctl list-unit-files | grep -E '^metanode-.*\\.service' | awk '{print $1}'"
   register: all_metanode_services
