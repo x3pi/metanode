@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync"
@@ -12,11 +11,11 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
@@ -144,29 +143,6 @@ func StartSignatureCacheCleanup(stopCh <-chan struct{}) {
 			}
 		}
 	}()
-}
-
-func callDataToAccountType(callData []byte) (pb.ACCOUNT_TYPE, *transaction.TransactionError) {
-
-	if len(callData) != 36 {
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
-	bytesFSelect := utils.GetFunctionSelector("setAccountType(int256)")
-	// Kiểm tra 4 byte đầu tiên phải bằng "0x61e1270b"
-	if !bytes.Equal(callData[:4], bytesFSelect) {
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
-	// Lấy 4 byte sau để xác định kiểu tài khoản
-	num := int32(binary.BigEndian.Uint32(callData[len(callData)-4:]))
-
-	switch num {
-	case 0:
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, nil
-	case 1:
-		return pb.ACCOUNT_TYPE_READ_WRITE_STRICT, nil
-	default:
-		return pb.ACCOUNT_TYPE_REGULAR_ACCOUNT, transaction.InvalidData
-	}
 }
 
 func VerifyTransaction(
@@ -335,7 +311,16 @@ func VerifyTransaction(
 			return transaction.InvalidCallData
 		}
 
-		if tx.IsCallContract() {
+		// EIP-7702: a SetCode tx's own call target may be an address it is
+		// delegating IN THIS SAME TX (the "set delegation, then immediately
+		// call through it" pattern sponsored-execution relies on) — at
+		// admission time that address is still a plain EOA with no code, so
+		// the "must already be a smart contract" check below would wrongly
+		// reject it. processAuthorizationList (pkg/blockchain/tx_processor/
+		// authorization.go) validates the authorization tuples themselves at
+		// execution time; if they turn out invalid the call simply hits a
+		// no-code address and no-ops, same as calling any other empty EOA.
+		if tx.IsCallContract() && tx.GetType() != uint64(e_types.SetCodeTxType) {
 			toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.ToAddress())
 			if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
 				logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())
@@ -349,13 +334,6 @@ func VerifyTransaction(
 	if len(tx.Data()) > maxDataSize {
 		logger.Error("Transaction data size exceeds limit", "hash", tx.Hash().Hex(), "size", len(tx.Data()), "limit", maxDataSize)
 		return transaction.InvalidData // Sử dụng lỗi InvalidData hoặc tạo lỗi mới nếu cần
-	}
-
-	if tx.ToAddress() == tx.FromAddress() && tx.GetNonce() != 0 {
-		_, erR := callDataToAccountType(tx.Data())
-		if erR != nil {
-			return erR
-		}
 	}
 
 	if !tx.ValidChainID(chainState.GetConfig().ChainId.Uint64()) {

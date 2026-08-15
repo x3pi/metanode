@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
+	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 
@@ -46,6 +47,35 @@ type ProcessResult struct {
 	TrieDBSnapshots  map[common.Hash]*trie_database.TrieDatabaseSnapshot
 	ModifiedAccounts []common.Address
 	FullDbLogs       []map[string][]byte
+	// BlobGasUsed is the EIP-4844 blob gas consumed by this batch: BLOB_GAS_PER_BLOB
+	// times the number of blob versioned hashes across every included blob tx,
+	// counted regardless of tx success (blob space is committed either way).
+	BlobGasUsed uint64
+}
+
+// computeBlobGasUsed sums EIP-4844 blob gas across every blob tx in txs,
+// regardless of execution outcome — the blobs occupy block space whether the
+// tx succeeds or reverts. The one exception is a tx rejected for exceeding
+// the block's blob-gas budget (see computeBlobBudgetRejections): it never got
+// space in the first place, so it contributes zero, or the cap it enforces
+// would be meaningless (the very gas it's over budget by would still get
+// counted). Recomputing the rejection set here from the same final,
+// already-ordered txs list is deterministic and always agrees with whatever
+// the execution engines computed from their own (differently-built, but
+// order-equivalent) view of the same block.
+func computeBlobGasUsed(txs []types.Transaction) uint64 {
+	rejected := computeBlobBudgetRejections(txs)
+	var total uint64
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		if _, over := rejected[tx.Hash()]; over {
+			continue
+		}
+		total += mt_common.BLOB_GAS_PER_BLOB * uint64(len(tx.BlobVersionedHashes()))
+	}
+	return total
 }
 
 // ProcessTransactions processes a batch of transactions.
@@ -200,6 +230,7 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
 		FullDbLogs:       allFullDbLogs,
+		BlobGasUsed:      computeBlobGasUsed(allTransactions),
 	}
 	return processResult, nil
 }
@@ -337,6 +368,7 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		TrieDBSnapshots:  trie_database.GetTrieDatabaseManager().SnapshotAllTrieDatabases(),
 		ModifiedAccounts: modifiedAccounts,
 		FullDbLogs:       allFullDbLogs,
+		BlobGasUsed:      computeBlobGasUsed(allTransactions),
 	}
 	// Send result to channel
 	// Consider if sending on the channel should happen outside the lock if it blocks

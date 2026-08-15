@@ -59,8 +59,48 @@ struct ExecuteResult {
   char *b_logs;
   int length_logs;
 
+  // TEE-packaging B2 (note/tee_core_packaging_plan.md): everything the
+  // interpreter logged via NativeLogger during this call (previously sent
+  // live to Go via GoLogString/GoLogBytes callbacks), packed as repeated
+  // [4-byte LE flag][4-byte LE msg_len][msg bytes] records in call order.
+  // May be NULL (length 0) if nothing was logged. See MyLogger's doc
+  // comment (my_logger.h) and processResult()'s (mvm_linker.cpp).
+  char *b_native_logs;
+  int length_native_logs;
+
   unsigned long long gas_used;
 };
+
+// TEE-packaging B1 (note/tee_core_packaging_plan.md) context parameters,
+// appended to deploy/call/execute's existing signatures — the 3 entry
+// points that run the interpreter and can therefore reach CHAINID/BLOBHASH/
+// BLOBBASEFEE/the cross-chain precompile. All may be NULL (and
+// blob_versioned_hashes_count may be 0), meaning "not supplied": chain_id
+// then resolves to 0, no blob context, no cross-chain context — see
+// ParseTxContext (mvm_linker.cpp) and BlockContext (mvm/block_context.h)
+// for the exact semantics.
+//   b_chain_id:               32 bytes big-endian, or NULL
+//   b_blob_versioned_hashes:  flat array of blob_versioned_hashes_count
+//                              32-byte hashes, or NULL
+//   b_blob_base_fee:          32 bytes big-endian, or NULL
+//   b_cross_chain_sender:     20 bytes, or NULL (NULL = not a cross-chain
+//                              precompile call)
+//   b_cross_chain_source_id:  8 bytes big-endian uint64, or NULL
+//   b_block_hashes:           flat array of block_hashes_count 32-byte
+//                              hashes (index 0 = hash of block
+//                              (current_number - 1), i.e. most recent
+//                              first), or NULL — only ever non-NULL when
+//                              the executing bytecode contains opcode 0x40
+//                              (BLOCKHASH), see HasBlockhashOpcode
+//                              (mvm_api.go); fetching this eagerly on every
+//                              call regardless of use would be real,
+//                              avoidable overhead unlike the other fields
+#define MVM_B1_CONTEXT_PARAMS                                                \
+  unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,         \
+      int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,       \
+      unsigned char *b_cross_chain_sender,                                   \
+      unsigned char *b_cross_chain_source_id,                                \
+      unsigned char *b_block_hashes, int block_hashes_count
 
 struct ExecuteResult *deploy(
     // transaction data
@@ -72,7 +112,7 @@ struct ExecuteResult *deploy(
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
-    bool is_cache, bool is_off_chain);
+    bool is_cache, bool is_off_chain, MVM_B1_CONTEXT_PARAMS);
 
 struct ExecuteResult *call(
     // transaction data
@@ -88,7 +128,7 @@ struct ExecuteResult *call(
     unsigned char
         *b_related_addresses,    // Flatten array: addr1(20) + addr2(20) + ...
     int related_addresses_count, // Số lượng addresses
-    bool is_off_chain);
+    bool is_off_chain, MVM_B1_CONTEXT_PARAMS);
 
 struct ExecuteResult *execute(
     // transaction data
@@ -103,7 +143,8 @@ struct ExecuteResult *execute(
     unsigned char
         *b_related_addresses,   // Flatten array: addr1(20) + addr2(20) + ...
     int related_addresses_count, // Số lượng addresses
-    bool is_cache                // Thêm is_cache
+    bool is_cache,                // Thêm is_cache
+    MVM_B1_CONTEXT_PARAMS
 );
 
 typedef struct {
@@ -210,6 +251,13 @@ extern struct Value_return GetBlockHash(int);
 extern struct Value_return GetChainId();
 extern struct Value_return GetCrossChainSender(unsigned char *mvmId);
 extern struct Value_return GetCrossChainSourceId(unsigned char *mvmId);
+// EIP-4844: BLOBHASH/BLOBBASEFEE context is per-transaction/per-block, so
+// (unlike GetChainId) these need mvmId to look up the right MVMApi instance
+// — same reasoning as GetCrossChainSender above. index is the BLOBHASH stack
+// argument; out-of-range returns success=false, which the caller treats as 0
+// (see EIP-4844's BLOBHASH out-of-range rule).
+extern struct Value_return GetBlobHash(unsigned char *mvmId, unsigned long long index);
+extern struct Value_return GetBlobBaseFee(unsigned char *mvmId);
 
 // Redirect C++ cout/cerr sang file log riêng
 // name: tên process (ví dụ "master", "sub-write") → tạo file mvm_cpp_{name}.log

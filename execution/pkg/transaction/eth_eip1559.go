@@ -186,7 +186,16 @@ func extractSignature(tx *pb.Transaction) (v, r, s *big.Int) {
 	if len(tx.S) > 0 {
 		s = new(big.Int).SetBytes(tx.S)
 	}
-	if len(tx.V) > 0 {
+	// big.Int.Bytes() elides leading zero bytes entirely, so a V of 0 encodes
+	// to an EMPTY byte slice — and V==0 is a legitimate, common value (~50% of
+	// signatures) for the recovery-id-style V used by EIP-2930/1559/4844
+	// signers, not "V is absent". Gating on len(tx.V) here previously made
+	// extractSignature return v=nil for those signatures, which every caller
+	// treats as "unsigned" and discards R/S too — silently producing a
+	// zero-signature reconstruction (wrong tx hash, wrong sender) roughly half
+	// the time. Use R/S's presence as the actual signedness signal instead:
+	// if either is present, V must be read too (0 is a valid value for it).
+	if r != nil || s != nil {
 		v = new(big.Int).SetBytes(tx.V)
 	}
 	return

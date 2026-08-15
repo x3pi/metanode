@@ -41,6 +41,19 @@ type Transaction interface {
 	MaxFee() *big.Int
 	GasTipCap() *big.Int
 	GasFeeCap() *big.Int
+	// EffectiveGasPrice is the per-type-dispatched execution gas price: flat
+	// MaxGasPrice for Legacy/EIP-2930, GasFeeCap for EIP-1559/EIP-4844/later.
+	EffectiveGasPrice() *big.Int
+	// EIP-4844 blob-gas market fields.
+	BlobVersionedHashes() [][]byte
+	MaxFeePerBlobGas() *big.Int
+	// EIP-7702 authorization list (type 0x04 SetCode transactions only).
+	AuthorizationList() []*pb.SetCodeAuthorization
+	// EthAccessList/EthAuthorizationList are go-ethereum-typed views of the
+	// same data as AccessList/AuthorizationList, used for intrinsic-gas
+	// accounting (core.IntrinsicGas takes go-ethereum types directly).
+	EthAccessList() e_types.AccessList
+	EthAuthorizationList() []e_types.SetCodeAuthorization
 	GetNonce() uint64
 	GetChainID() uint64
 	ClearCacheHash()
@@ -68,18 +81,14 @@ type Transaction interface {
 	GetType() uint64
 
 	// verifiers
-	ValidTx0(fromAccountState AccountState, chainId string) (bool, int64)
 	ValidChainID(chainId uint64) bool
 	ValidSign(bPub common.PublicKey) bool
-	ValidDeviceKey(fromAccountState AccountState) bool
 	ValidMaxGas() bool
 	ValidMaxGasPrice(currentGasPrice uint64) bool
 	ValidAmount(fromAccountState AccountState) bool
 	ValidMaxFee(fromAccountState AccountState) bool
 	ValidAmountSpend(fromAccountState AccountState, spendAmount *big.Int) bool
 	ValidPendingUse(fromAccountState AccountState) bool
-	ValidDeploySmartContractToAccount(fromAccountState AccountState) bool
-	ValidCallSmartContractToAccount(toAccountState AccountState) bool
 	ValidDeployData() bool
 	ValidCallData() bool
 	//

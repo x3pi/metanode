@@ -42,11 +42,25 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         let signed_block: SignedBlock =
             bcs::from_bytes(&serialized_block.block).map_err(ConsensusError::MalformedBlock)?;
 
-        // CRITICAL FIX: The `peer` identity derived from `remote_addr` is unreliable 
+        // CRITICAL FIX: The `peer` identity derived from `remote_addr` is unreliable
         // (especially for local testing where ephemeral ports are used, or when TLS client certs are not used).
         // A peer might be assigned dummy index 0, which would cause legitimate blocks to be rejected here.
-        // We REMOVE the `peer != signed_block.author()` check and rely entirely on the Ed25519 signature 
+        // We REMOVE the `peer != signed_block.author()` check and rely entirely on the Ed25519 signature
         // to authenticate the block's origin. The `verify_and_vote` call immediately below strictly enforces this.
+        //
+        // REMOTE-PANIC FIX: `signed_block.author()` is attacker-controlled — it comes straight
+        // off the wire and hasn't been through `verify_and_vote()`/`verify_block_inner()` yet
+        // (which does check `is_valid_index` before anything else). Indexing the committee with
+        // it directly, as this used to, let any peer crash the authority service by sending a
+        // block with an out-of-range author index. `verify_and_vote()` below would have rejected
+        // it anyway (via ConsensusError::InvalidAuthorityIndex) — just do that check first
+        // instead of panicking on the way to it.
+        if !self.context.committee.is_valid_index(signed_block.author()) {
+            return Err(ConsensusError::InvalidAuthorityIndex {
+                index: signed_block.author(),
+                max: self.context.committee.size() - 1,
+            });
+        }
         let peer_hostname = &self.context.committee.authority(signed_block.author()).hostname;
 
         // Reject blocks failing validations.

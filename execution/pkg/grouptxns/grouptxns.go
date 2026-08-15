@@ -122,6 +122,30 @@ const (
 	GroupKindMixed
 )
 
+// HasCodeFunc reports whether addr currently has code — a real deployed
+// contract, or an EIP-7702-delegated EOA. Used by classifyGroup to route a
+// plain value-transfer (no calldata) through the EVM instead of the native
+// fast-path when its recipient has code to run, matching mainnet Ethereum's
+// "any value-CALL to an address with code invokes it" semantics — the native
+// fast-path moves balance directly and never gives the recipient's
+// receive()/fallback/delegate a chance to run at all.
+//
+// KNOWN LIMITATION: this is checked against chain state as of the START of
+// the batch being classified (grouping happens before any of its own txs
+// execute), so it does NOT see code an EARLIER tx in the SAME batch
+// deploys/delegates — that narrower case would need conflict detection to
+// treat "this address might gain code during this batch" as a dependency,
+// which the current Union-Find grouping (based on declared
+// RelatedAddresses()/AccessList) doesn't do. Every address that already had
+// code BEFORE this batch (the common case — the vast majority of contracts
+// and any EIP-7702 delegation from an earlier block) is still handled
+// correctly.
+//
+// May be nil, in which case classifyGroup falls back to its previous
+// behavior (never checks code presence) — every call site not yet updated to
+// pass one keeps working exactly as before.
+type HasCodeFunc func(common.Address) bool
+
 // RelativeGroup đại diện cho một nhóm giao dịch liên quan
 type RelativeGroup struct {
 	GroupID   int
@@ -196,7 +220,7 @@ func (uf *UnionFind) Union(i, j int) {
 //  4. Groups sorted by smallest TX hash → deterministic group order
 //  5. NO TX is ever dropped (no gas/time limits)
 //  6. NO time.Now() or any non-deterministic input
-func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
+func GroupTransactionsDeterministic(items []Item, hasCode HasCodeFunc) []RelativeGroup {
 	if len(items) == 0 {
 		return []RelativeGroup{}
 	}
@@ -325,7 +349,7 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 	// Therefore, chunking was completely redundant and only added overhead.
 	// ═══════════════════════════════════════════════════════════════
 	for i := range groups {
-		groups[i].Kind = classifyGroup(groups[i].Items)
+		groups[i].Kind = classifyGroup(groups[i].Items, hasCode)
 		groups[i].GroupID = i
 	}
 
@@ -333,7 +357,7 @@ func GroupTransactionsDeterministic(items []Item) []RelativeGroup {
 }
 
 // classifyGroup inspects items once and returns the appropriate GroupKind.
-func classifyGroup(items []Item) GroupKind {
+func classifyGroup(items []Item, hasCode HasCodeFunc) GroupKind {
 	hasNative := false
 	hasContract := false
 	for _, item := range items {
@@ -343,11 +367,30 @@ func classifyGroup(items []Item) GroupKind {
 		if !tx.IsRegularTransaction() {
 			isEvm = true
 		}
-		
+
+		// EIP-7702 SetCode txs must always run the authorization-list
+		// pipeline (delegation designator write, nonce bump) even when
+		// they carry no calldata and would otherwise look like a plain
+		// value transfer — the native fast-path never runs it.
+		if tx.GetType() == uint64(e_types.SetCodeTxType) {
+			isEvm = true
+		}
+
 		to := tx.ToAddress()
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
 			to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
 			to == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
+			isEvm = true
+		}
+
+		// A plain value-transfer to an address that already has code (a real
+		// contract, or an EIP-7702-delegated EOA) must run through the EVM so
+		// its receive()/fallback/delegate actually executes — see
+		// HasCodeFunc's doc for what this does and doesn't cover. Only
+		// checked when not already routed to the EVM for another reason,
+		// both because it's redundant then and to skip the state lookup on
+		// the hot path when it can't change the outcome.
+		if !isEvm && hasCode != nil && hasCode(to) {
 			isEvm = true
 		}
 

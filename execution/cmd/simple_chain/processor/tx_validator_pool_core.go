@@ -637,7 +637,7 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 		})
 	}
 
-	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items, vp.chainState.HasCode)
 
 	logger.Info("🔒 [FORK-SAFETY] Deterministic grouping: %d TXs → %d parallel groups (bypassed GroupAndLimit)", len(txs), len(groupedGroups))
 

@@ -23,11 +23,16 @@ namespace mvm
     {
         if (gas_tracker)
         {
+            // BUG FIX: this previously only charged when value == old_value
+            // (the no-op case, correctly billed at getSstoreGasCost's 100-gas
+            // base) and charged NOTHING when the value actually changed —
+            // meaning every real SSTORE write (the 20000/2900-gas cases
+            // getSstoreGasCost already computes) was free. getSstoreGasCost
+            // itself already handles the unchanged-value case internally
+            // (early-returns just the 100 base), so the condition here was
+            // both wrong and redundant — call it unconditionally.
             uint256_t old_value = load(key);
-            if (value == old_value)
-            {
-                gas_tracker->add_gas_used(getSstoreGasCost(old_value, value));
-            }
+            gas_tracker->add_gas_used(getSstoreGasCost(old_value, value));
         }
         cache[key] = value;
     }
@@ -96,6 +101,37 @@ namespace mvm
             return false;
         cache[key] = 0;
         return true;
+    }
+
+    bool MyStorage::has_cached(const uint256_t &key)
+    {
+        return cache.find(key) != cache.end();
+    }
+
+    uint256_t MyStorage::get_cached(const uint256_t &key)
+    {
+        auto it = cache.find(key);
+        return it != cache.end() ? it->second : 0;
+    }
+
+    void MyStorage::set_cached_raw(const uint256_t &key, const uint256_t &value)
+    {
+        cache[key] = value;
+    }
+
+    void MyStorage::erase_cached(const uint256_t &key)
+    {
+        cache.erase(key);
+    }
+
+    std::map<uint256_t, uint256_t> MyStorage::snapshot_cached()
+    {
+        return cache;
+    }
+
+    void MyStorage::clear_all_cached()
+    {
+        cache.clear();
     }
 
     inline std::ostream &operator<<(std::ostream &os, const MyStorage &s)

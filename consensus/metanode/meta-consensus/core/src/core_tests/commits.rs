@@ -342,8 +342,11 @@ async fn test_leader_schedule_change() {
     for round in 1..=30 {
         let mut this_round_blocks = Vec::new();
 
-        // Wait for min round delay to allow blocks to be proposed.
-        sleep(default_params.min_round_delay).await;
+        // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+        // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+        // `min_round_delay` is configured lower, so wait for whichever is longer.
+        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
+            .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round
@@ -506,6 +509,15 @@ async fn test_filter_new_commits() {
     // We should have committed up to round 4
     assert_eq!(committed_sub_dags.len(), 4);
 
+    // filter_new_commits() falls back to checking the persisted store (not just the
+    // in-memory last_commit_index) for whether a commit index is already locally
+    // committed, so the just-committed rounds 1-4 need to actually be flushed before
+    // the checks below can see them as already-committed.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
+
     // Now validate the certified commits. We'll try 3 different scenarios:
     println!("Case 1. Provide certified commits that are all before the last committed round.");
 
@@ -554,16 +566,16 @@ async fn test_filter_new_commits() {
         .map(|(_, c)| c.clone())
         .collect::<Vec<_>>();
 
-    let err = core
+    // COLD-START (see filter_new_commits()): a gap between the last committed index
+    // and the first certified commit's index used to be a hard error
+    // (UnexpectedCertifiedCommitIndex), but that's expected to happen during
+    // snapshot restore when the node jumps forward, so it's now just a
+    // `tracing::warn!` and the gapped commit is returned anyway instead of rejected.
+    let certified_commits = core
         .filter_new_commits(certified_commits.clone())
-        .unwrap_err();
-    match err {
-        ConsensusError::UnexpectedCertifiedCommitIndex {
-            expected_commit_index: 5,
-            commit_index: 6,
-        } => (),
-        _ => panic!("Unexpected error: {:?}", err),
-    }
+        .unwrap();
+    assert_eq!(certified_commits.len(), 1);
+    assert_eq!(certified_commits.first().unwrap().reference().index, 6);
 }
 
 #[tokio::test]
@@ -609,8 +621,12 @@ async fn test_add_certified_commits() {
     // We should have committed up to round 4
     assert_eq!(committed_sub_dags.len(), 4);
 
-    // Flush the DAG state to storage.
-    core.dag_state.write().flush();
+    // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
+    // write to actually land before reading it back through `store` below.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
 
     println!("Case 1. Provide no certified commits. No commit should happen.");
 
@@ -642,8 +658,21 @@ async fn test_add_certified_commits() {
     core.add_certified_commits(CertifiedCommits::new(certified_commits.clone(), vec![]))
         .expect("Should not fail");
 
-    // Flush the DAG state to storage.
-    core.dag_state.write().flush();
+    // FORK-SAFETY (May 2026, try_commit()): once in "sync mode" (certified commits were
+    // provided), Core deliberately breaks out instead of opportunistically falling back to
+    // the local direct-decide rule for anything beyond the certified commits — mixing the
+    // two within the same call was deemed unsafe (own comment: "Fallback to the local
+    // committer during fast-forwarding is extremely dangerous"). So the direct-decide of
+    // leader rounds 9-10 from the extra accepted blocks now needs its own, separate,
+    // non-sync-mode try_commit() call.
+    core.try_commit(vec![]).unwrap();
+
+    // Flush the DAG state to storage, and wait for the (async, spawn_blocking-backed)
+    // write to actually land before reading it back through `store` below.
+    let flush_rx = core.dag_state.write().flush();
+    if let Some(rx) = flush_rx {
+        rx.await.unwrap();
+    }
 
     let commits = store.scan_commits((6..=10).into()).unwrap();
 
@@ -708,6 +737,8 @@ async fn try_commit_with_certified_commits_gced_blocks() {
 
     let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
+    let hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+    hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Bootstrapping);
     let mut core = Core::new(
         context.clone(),
         leader_schedule,
@@ -723,7 +754,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         round_tracker,
         None,
         None,
-        crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(), // quorum_ready - always ready in tests
+        hub.clone(), // quorum_ready - always ready in tests
     );
 
     // No new block should have been produced
@@ -732,6 +763,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
         GENESIS_ROUND,
         "No block should have been created other than genesis"
     );
+    hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
 
     let dag_str = "DAG {
         Round 0 : { 5 },
@@ -821,8 +853,11 @@ async fn parameterized_test_commit_on_leader_schedule_change_boundary(
     for round in 1..=33 {
         let mut this_round_blocks = Vec::new();
 
-        // Wait for min round delay to allow blocks to be proposed.
-        sleep(default_params.min_round_delay).await;
+        // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+        // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+        // `min_round_delay` is configured lower, so wait for whichever is longer.
+        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
+            .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round
@@ -898,18 +933,17 @@ async fn parameterized_test_commit_on_leader_schedule_change_boundary(
         // There are 31 leader rounds with rounds completed up to and including
         // round 33. Round 33 blocks will only include their own blocks, so there
         // should only be 30 commits.
-        // However on a leader schedule change boundary its is possible for a
+        // Historically, on a leader schedule change boundary it was possible for a
         // new leader to get selected for the same round if the leader elected
-        // gets swapped allowing for multiple leaders to be committed at a round.
-        // Meaning with multi leader per round explicitly set to 1 we will have 30,
-        // otherwise 31.
-        // NOTE: We used 31 leader rounds to specifically trigger the scenario
-        // where the leader schedule boundary occurred AND we had a swap to a new
-        // leader for the same round
-        let expected_commit_count = match num_leaders_per_round {
-            Some(1) => 30,
-            _ => 31,
-        };
+        // got swapped, allowing for multiple leaders to be committed at a round
+        // (30 with multi leader per round explicitly set to 1, otherwise 31).
+        // FORK-SAFETY (May 2026, leader_schedule.rs::elect_leader()): reputation-based
+        // swaps are now permanently disabled (restoring nodes after a mid-epoch
+        // snapshot can't recompute identical reputation scores, so applying swaps
+        // risks a fork), so the boundary-swap scenario this test was built to trigger
+        // can no longer happen — the schedule boundary alone no longer produces an
+        // extra commit, regardless of `num_leaders_per_round`.
+        let expected_commit_count = 30;
 
         // Flush the DAG state to storage.
         core_fixture.dag_state.write().flush();

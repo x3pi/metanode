@@ -25,7 +25,7 @@ func HandleRevertedTransaction(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_TRANSACTION_ERROR, revertData, pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+		tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 		nil, 0, common.Hash{}, 0,
 	)
 	// 3. Tăng nonce và cập nhật các thông tin tài khoản khác
@@ -58,7 +58,7 @@ func HandleSuccessTransaction(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_RETURNED, returnData, pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+		tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
 	vmP := vm_processor.NewVmProcessor(chainState, mvmId, enableTrace, blockTime, common.Address{})

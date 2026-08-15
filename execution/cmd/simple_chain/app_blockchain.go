@@ -924,7 +924,10 @@ func (app *App) initGenesisBlock(blockDatabase *block.BlockDatabase) error {
 		logger.Warn("⚠️ [GENESIS] No timestamp in genesis.json, using 0")
 	}
 
-	// Create genesis block with timestamp from genesis.json
+	// Create genesis block with timestamp from genesis.json.
+	// ExcessBlobGas/BlobGasUsed (EIP-4844) are intentionally left at their zero
+	// default — NewBlockHeader has no params for them, so genesis always starts
+	// the blob-gas market at 0/0, matching every node deterministically.
 	app.startLastBlock = block.NewBlock(
 		block.NewBlockHeader(
 			e_common.Hash{},
@@ -1437,7 +1440,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 				Tx:      tx,
 			})
 		}
-		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, app.chainState.HasCode)
 
 		// 4. Process transactions
 		blockTimeSec := blk.Header().TimeStamp() / 1000

@@ -12,6 +12,7 @@
 #include "mvm/util.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -23,6 +24,7 @@
 // #include <chrono>
 #include <filesystem> // Thư viện để thao tác với thư mục
 #include <unordered_map>
+#include <unordered_set>
 
 #include <intx/intx.hpp>
 
@@ -89,8 +91,6 @@ private:
   using PcType = decltype(pc);
 
 public:
-  uint256_t blob_base_fee;
-
   using ReturnHandler = function<void(vector<uint8_t>)>;
   using HaltHandler = function<void()>;
   using ExceptionHandler = function<void(const Exception &)>;
@@ -140,6 +140,52 @@ public:
 
   auto get_used_mem() const {
     return (mem.size() + Consts::WORD_SIZE - 1) / Consts::WORD_SIZE;
+  }
+};
+
+/**
+ * Call-frame state journal.
+ *
+ * Every state mutation (storage, balance, code deploy, transient storage,
+ * logs — see each call site below) records an "undo" closure here BEFORE it
+ * mutates anything. mark() returns a checkpoint (just the current entry
+ * count); revert_to(m) runs and discards every undo closure recorded since
+ * that checkpoint, in reverse (LIFO) order, restoring exactly the state that
+ * existed at the checkpoint — regardless of how many opcodes or how deeply
+ * nested the reverted call frame's own sub-calls were, since a revert_to
+ * simply pops back to an index into one shared, flat, transaction-scoped
+ * stack.
+ *
+ * This fixes a real EVM-atomicity violation: previously, when a nested
+ * CALL/CALLCODE/DELEGATECALL/STATICCALL/CREATE/CREATE2 reverted (or threw
+ * any other exception — out of gas, invalid jump, etc.), the caller caught
+ * it and kept running, but any storage/balance/code/log/transient-storage
+ * changes the reverted callee (or its own nested calls) had already made
+ * were never undone.
+ *
+ * Deliberately NOT journaled: nonce increments (CREATE's creator-nonce bump
+ * survives a failed constructor on real Ethereum — it happens once, as an
+ * effect of the CALLER's own frame, not as part of the reverted sub-call —
+ * so leaving it unjournaled is the CORRECT behavior, not an oversight), gas
+ * consumption (never refunded on revert by design — gas_tracker is a single
+ * counter for the whole transaction and already behaves correctly without
+ * any change here), and the read-only address/storage-read "warm" tracking
+ * (EIP-2929 warmth persists for the rest of the transaction even if the
+ * call that first touched an address/slot reverts — matches real Ethereum).
+ */
+class StateJournal {
+  vector<function<void()>> entries;
+
+public:
+  size_t mark() const { return entries.size(); }
+
+  void record(function<void()> undo) { entries.push_back(move(undo)); }
+
+  void revert_to(size_t m) {
+    while (entries.size() > m) {
+      entries.back()();
+      entries.pop_back();
+    }
   }
 };
 
@@ -195,6 +241,11 @@ public:
     };
     auto hh = [&result]() { result.er = ExitReason::halted; };
     auto eh = [&](const Exception &ex_) {
+      // Defense in depth: the whole top-level transaction/call reverted, so
+      // every state mutation it made (at any nesting depth) must be undone.
+      // In practice Go already ignores the exported diff maps for a failed
+      // tx, but this keeps them actually empty rather than relying on that.
+      journal.revert_to(0);
       result.er = ExitReason::threw;
       result.ex = ex_.type;
       if (result.ex == ET::ErrExecutionReverted) {
@@ -229,25 +280,25 @@ public:
       exec_code = move(input);
       calldata = vector<uint8_t>();
     } else {
-      exec_code = callee.acc.get_code();
+      // EIP-7702: this is the top-level entry point for a transaction whose
+      // `To` is called directly (as opposed to a CALL/CALLCODE/DELEGATECALL/
+      // STATICCALL opcode executed from within an already-running context,
+      // handled by call() below) — must resolve a delegation designator the
+      // same way, or a tx that calls a delegated EOA directly throws
+      // ErrInvalidCode the moment dispatch() hits the designator's 0xEF byte.
+      exec_code = resolve_delegated_code(callee.acc.get_code());
       calldata = move(input);
     }
 
     push_context(caller, callee, move(calldata), move(exec_code), call_value,
                  rh, hh, eh, readOnly);
 
-    // add general gas use
-    try {
-      gas_tracker.add_gas_used(2100);
-      if (deploy) {
-        gas_tracker.add_gas_used(32000);
-      }
-    } catch (Exception &ex) {
-      ctxt->eh(ex);
-      pop_context();
-      result.gas_used = gas_tracker.get_gas_used();
-      return result;
-    }
+    // Intrinsic gas (base 21000/53000, calldata, access-list, EIP-7702
+    // auth-tuple cost) is computed and charged on the Go side (see
+    // vm_processor.computeIntrinsicGas / applyIntrinsicGas) and already
+    // subtracted from gas_tracker's budget (tx.gas_limit, set below) before
+    // this function runs — charging a flat 2100/32000 here on top of that
+    // would double-charge every transaction.
     auto sm_size = ctxt->prog.code.size();
     // run
     while (ctxt && ctxt->get_pc() < ctxt->prog.code.size()) {
@@ -270,12 +321,55 @@ public:
       hh();
     }
 
-    result.gas_used = gas_tracker.get_gas_used();
+    // EIP-3529: refund is capped at gasUsed/5 (post-London; this VM has no
+    // hardfork-activation mechanism so the pre-London 1/2 cap never
+    // applies here — see params.AllDevChainProtocolChanges elsewhere in
+    // this codebase for the same "every EIP always active" choice) and
+    // applied once, here, for the whole top-level transaction — never
+    // per-nested-call-frame, since refunds are a transaction-wide budget
+    // reduction, not a per-call return value.
+    uint64_t used = gas_tracker.get_gas_used();
+    uint64_t refund = std::min<uint64_t>(
+        gas_tracker.get_refund() > 0
+            ? static_cast<uint64_t>(gas_tracker.get_refund())
+            : 0,
+        used / 5);
+    result.gas_used = used - refund;
     return result;
   }
 
 private:
-  std::unordered_map<uint256_t, uint256_t> transient_storage; // Bộ nhớ tạm
+  // PHASE-5 FIX: was a single flat map keyed only by slot, shared across every
+  // contract in the whole call stack — two unrelated contracts touching the
+  // "same" slot number (near-guaranteed, since slots are usually small
+  // sequential integers) silently aliased onto each other's transient
+  // storage. EIP-1153 requires transient storage to be per-address, exactly
+  // like persistent storage. Now keyed by (address, slot).
+  //
+  // Rolled back on a reverted nested call via `journal` below — see tLoad/
+  // tStore and StateJournal's doc comment.
+  std::unordered_map<Address, std::unordered_map<uint256_t, uint256_t>> transient_storage;
+
+  // See StateJournal's doc comment above this class.
+  StateJournal journal;
+
+  // EIP-2200/3529 "original value" tracking for the SSTORE gas refund (see
+  // sstore()/compute_sstore_refund_delta): the value a slot held at the
+  // START of this transaction, captured once on first touch and never
+  // updated again afterwards (deliberately NOT journaled/reverted — the
+  // "original" value is a fact about transaction start, unaffected by
+  // anything that happens, or gets undone, later in the same transaction).
+  std::unordered_map<Address, std::unordered_map<uint256_t, uint256_t>> original_storage_values;
+
+  // EIP-6780 support (see selfdestruct()): addresses a CREATE/CREATE2 was
+  // attempted for in THIS transaction, recorded the moment gs.create(...) is
+  // called (not only on successful constructor return) — matches "was this
+  // account created earlier in the same transaction" regardless of what the
+  // constructor goes on to do. Deliberately NOT journaled: even a reverted
+  // CREATE attempt leaves the address with no code (see StateJournal's
+  // rollback of the code-deploy entry), so a later SELFDESTRUCT on it can't
+  // do anything harmful either way — same reasoning as CREATE's nonce bump.
+  std::unordered_set<Address> created_this_tx;
 
   void push_context(const Address &caller, AccountState as,
                     vector<uint8_t> &&input, Program &&prog,
@@ -296,6 +390,34 @@ private:
 
   uint16_t get_call_depth() const {
     return static_cast<uint16_t>(ctxts.size());
+  }
+
+  // Transfers `amount` from fromAcc to toAcc (mirroring the existing
+  // Account::pay_to + gs.add_addresses_*_balance_change pattern used at
+  // every balance-mutating call site — CALL's value transfer, CREATE/
+  // CREATE2's endowment, SELFDESTRUCT), and records a journal entry that
+  // restores both accounts' balances (and the corresponding diff-tracker
+  // entries) to their exact pre-transfer values if the enclosing call frame
+  // is later reverted. Absolute snapshot/restore rather than "transfer back
+  // the same amount" so it composes correctly under LIFO revert_to() no
+  // matter what other operations touch these same accounts in between.
+  void journaled_pay_to(const Address &fromAddr, const Address &toAddr,
+                        Account &fromAcc, Account &toAcc,
+                        const uint256_t &amount) {
+    if (amount == 0)
+      return;
+    uint256_t oldFromBalance = fromAcc.get_balance();
+    uint256_t oldToBalance = toAcc.get_balance();
+    fromAcc.pay_to(toAcc, amount);
+    gs.add_addresses_sub_balance_change(fromAddr, amount);
+    gs.add_addresses_add_balance_change(toAddr, amount);
+    journal.record([this, fromAddr, toAddr, oldFromBalance, oldToBalance,
+                    amount]() {
+      gs.get(fromAddr).acc.set_balance(oldFromBalance);
+      gs.get(toAddr).acc.set_balance(oldToBalance);
+      gs.undo_sub_balance_change(fromAddr, amount);
+      gs.undo_add_balance_change(toAddr, amount);
+    });
   }
 
   Opcode get_op() const {
@@ -1071,59 +1193,75 @@ private:
   void msize() { ctxt->s.push(ctxt->get_used_mem() * 32); }
 
   void mcopy() {
-    // Lấy các tham số từ stack theo đúng thứ tự của EVM
+    // PHASE-5 FIX: this never charged gas at all — no static cost (fell into
+    // getGasCost's `default: return 0`), no dynamic per-word cost, and no
+    // memory-expansion cost despite resizing ctxt->mem. Dynamic part now
+    // mirrors CODECOPY/CALLDATACOPY exactly (getCopyOperationGasCost), the
+    // same formula EIP-5656 specifies for MCOPY.
+    uint64_t old_mem_word_size = ctxt->get_used_mem();
+
     const auto dest_offset = ctxt->s.pop64();
     const auto src_offset = ctxt->s.pop64();
     const auto length = ctxt->s.pop64();
 
-    // Không làm gì nếu length bằng 0
-    if (length == 0) {
-      return;
-    }
-
-    // Tự động mở rộng bộ nhớ nếu cần
-    uint64_t new_size = std::max(dest_offset + length, src_offset + length);
-    if (new_size > ctxt->mem.size()) {
-      ctxt->mem.resize(new_size, 0);
-    }
-
-    // Xử lý việc copy byte-by-byte như trong EVM
-    // MCOPY trong Solidity xử lý đúng các trường hợp chồng chéo bộ nhớ
-    if (dest_offset == src_offset || length == 0) {
-      // Không cần sao chép nếu vị trí giống nhau hoặc length = 0
-      return;
-    } else if (dest_offset > src_offset) {
-      // Copy từ cuối lên đầu để tránh ghi đè dữ liệu nguồn trong trường hợp
-      // chồng chéo
-      for (uint64_t i = length; i > 0; i--) {
-        ctxt->mem[dest_offset + i - 1] = ctxt->mem[src_offset + i - 1];
+    if (length > 0) {
+      // Tự động mở rộng bộ nhớ nếu cần
+      uint64_t new_size = std::max(dest_offset + length, src_offset + length);
+      if (new_size > ctxt->mem.size()) {
+        ctxt->mem.resize(new_size, 0);
       }
-    } else {
-      // Copy từ đầu xuống cuối (không có nguy cơ ghi đè dữ liệu nguồn)
-      for (uint64_t i = 0; i < length; i++) {
-        ctxt->mem[dest_offset + i] = ctxt->mem[src_offset + i];
+
+      // Xử lý việc copy byte-by-byte như trong EVM
+      // MCOPY trong Solidity xử lý đúng các trường hợp chồng chéo bộ nhớ
+      if (dest_offset != src_offset) {
+        if (dest_offset > src_offset) {
+          // Copy từ cuối lên đầu để tránh ghi đè dữ liệu nguồn trong trường
+          // hợp chồng chéo
+          for (uint64_t i = length; i > 0; i--) {
+            ctxt->mem[dest_offset + i - 1] = ctxt->mem[src_offset + i - 1];
+          }
+        } else {
+          // Copy từ đầu xuống cuối (không có nguy cơ ghi đè dữ liệu nguồn)
+          for (uint64_t i = 0; i < length; i++) {
+            ctxt->mem[dest_offset + i] = ctxt->mem[src_offset + i];
+          }
+        }
       }
     }
+
+    uint64_t new_mem_word_size = ctxt->get_used_mem();
+    uint64_t word_count = (length + 31) / 32;
+    gas_tracker.add_gas_used(getCopyOperationGasCost(
+        word_count, ctxt->last_mem_gas_cost, old_mem_word_size, new_mem_word_size));
   }
 
   void tLoad() {
     const auto key = ctxt->s.pop();
-    auto value = transient_storage[key];
+    auto value = transient_storage[ctxt->acc.get_address()][key];
     ctxt->s.push(value);
   }
   void tStore() {
     const auto key = ctxt->s.pop();
     const auto value = ctxt->s.pop();
-    transient_storage[key] = value;
+    const Address addr = ctxt->acc.get_address();
+    auto &addrMap = transient_storage[addr];
+    const bool hadEntry = addrMap.find(key) != addrMap.end();
+    const uint256_t oldValue = hadEntry ? addrMap[key] : 0;
+    addrMap[key] = value;
+    journal.record([this, addr, key, hadEntry, oldValue]() {
+      auto &m = transient_storage[addr];
+      if (hadEntry)
+        m[key] = oldValue;
+      else
+        m.erase(key);
+    });
   }
   uint256_t blob_hash(uint64_t index) {
-    uint8_t input[8];
-    std::memcpy(input, &index, sizeof(index));
-
-    uint8_t hash[32];
-    keccak_256(input, sizeof(input), hash);
-
-    return from_big_endian(hash, sizeof(hash));
+    // Sourced from Go's per-mvmId blob context (MVMApi.SetBlobContext), not a
+    // BlockContext/Transaction ABI field — see the comment on
+    // GlobalState::get_blob_hash. Out-of-range index correctly yields 0
+    // rather than a fabricated value.
+    return gs.get_blob_hash(index);
   }
 
   void blobHash() {
@@ -1132,7 +1270,7 @@ private:
     ctxt->s.push(hash);
   }
   void blobBashFee() {
-    auto base_fee = ctxt->blob_base_fee;
+    auto base_fee = gs.get_blob_base_fee();
     ctxt->s.push(base_fee);
   }
   void mload() {
@@ -1188,6 +1326,54 @@ private:
     ctxt->s.push(ctxt->st.load(k, &gas_tracker));
   }
 
+  // EIP-3529's reduced clear-refund constant (was 15000 pre-London).
+  static constexpr int64_t SSTORE_CLEARS_SCHEDULE = 4800;
+
+  // Returns the value `addr`'s `key` slot held at the START of this
+  // transaction — captured once, on first touch, from `currentValue`
+  // (whatever the cache/state already resolved it to); returns the
+  // previously-captured value on every subsequent call for the same slot.
+  uint256_t original_storage_value(const Address &addr, const uint256_t &key,
+                                   const uint256_t &currentValue) {
+    auto &addrMap = original_storage_values[addr];
+    auto it = addrMap.find(key);
+    if (it != addrMap.end())
+      return it->second;
+    addrMap[key] = currentValue;
+    return currentValue;
+  }
+
+  // EIP-2200's refund bookkeeping, restricted to the "clear schedule" case
+  // (SSTORE-ing a slot to zero) — the dominant, EIP-3529-motivating case.
+  // Deliberately omits the "restore to original value" bonus refund
+  // (returning a slot to exactly its transaction-start value after one or
+  // more intermediate writes): that's real, spec-defined gas the user is
+  // technically owed back, but it's a rarer case and skipping it can only
+  // ever under-refund, never over-refund — safe to leave on the table
+  // rather than risk getting the full 3-way comparison subtly wrong in
+  // consensus-critical code.
+  static int64_t compute_sstore_refund_delta(const uint256_t &original,
+                                             const uint256_t &current,
+                                             const uint256_t &newVal) {
+    if (current == newVal)
+      return 0; // no-op write, no refund change
+    if (original == current) {
+      // first change to this slot this transaction
+      if (original != 0 && newVal == 0)
+        return SSTORE_CLEARS_SCHEDULE;
+      return 0;
+    }
+    // slot already changed at least once this transaction
+    int64_t delta = 0;
+    if (original != 0) {
+      if (current == 0)
+        delta -= SSTORE_CLEARS_SCHEDULE; // un-clearing: revoke the earlier refund
+      if (newVal == 0)
+        delta += SSTORE_CLEARS_SCHEDULE; // re-clearing: grant it again
+    }
+    return delta;
+  }
+
   void sstore() {
     if (ctxt->read_only) {
       throw Exception(ET::ErrWriteProtection,
@@ -1195,11 +1381,41 @@ private:
     }
     const auto k = ctxt->s.pop();
     const auto v = ctxt->s.pop();
-    gs.add_addresses_storage_change(ctxt->acc.get_address(), k, v);
+    const Address addr = ctxt->acc.get_address();
+
+    const bool hadDiffEntry = gs.has_storage_change(addr, k);
+    const uint256_t oldDiffValue =
+        hadDiffEntry ? gs.get_storage_change_value(addr, k) : 0;
+
+    // Fetch-and-cache the pre-write value with no gas charge here (SLOAD's
+    // own gas is billed separately when the program actually executes
+    // SLOAD; MyStorage::store() below re-derives the same now-cached value
+    // to compute SSTORE's own gas cost, so this doesn't trigger a second
+    // FFI/state round-trip). Guaranteed to leave the slot cached, which
+    // simplifies the journal restore below (always "had a cache entry").
+    const uint256_t oldValue = ctxt->st.load(k, nullptr);
+    const uint256_t originalValue = original_storage_value(addr, k, oldValue);
+
+    gs.add_addresses_storage_change(addr, k, v);
     if (!v)
       ctxt->st.remove(k);
     else
       ctxt->st.store(k, v, &gas_tracker);
+
+    int64_t refundDelta = compute_sstore_refund_delta(originalValue, oldValue, v);
+    if (refundDelta != 0)
+      gas_tracker.add_refund(refundDelta);
+
+    journal.record([this, addr, k, hadDiffEntry, oldDiffValue, oldValue,
+                    refundDelta]() {
+      if (hadDiffEntry)
+        gs.add_addresses_storage_change(addr, k, oldDiffValue);
+      else
+        gs.erase_storage_change(addr, k);
+      gs.get(addr).st.set_cached_raw(k, oldValue);
+      if (refundDelta != 0)
+        gas_tracker.add_refund(-refundDelta);
+    });
   }
 
   void codecopy() { copy_mem(ctxt->mem, ctxt->prog.code, Opcode::STOP); }
@@ -1306,9 +1522,11 @@ private:
     for (int i = 0; i < n; i++)
       topics[i] = ctxt->s.pop();
 
+    size_t logMark = log_handler.checkpoint();
     log_handler.handle(
         {ctxt->acc.get_address(), copy_from_mem(offset, size), topics});
     gas_tracker.add_gas_used(getLogGasCost(n, size));
+    journal.record([this, logMark]() { log_handler.rollback(logMark); });
   }
 
   void blockhash() {
@@ -1376,11 +1594,44 @@ private:
                       "Cannot delete from read-only call");
     }
 
+    const Address addr = ctxt->acc.get_address();
     auto recipient = gs.get(pop_addr(ctxt->s));
     auto amount = ctxt->acc.get_balance();
-    ctxt->acc.pay_to(recipient.acc, amount);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), amount);
-    gs.add_addresses_add_balance_change(recipient.acc.get_address(), amount);
+    journaled_pay_to(addr, recipient.acc.get_address(), ctxt->acc,
+                     recipient.acc, amount);
+
+    // EIP-6780: SELFDESTRUCT only fully clears a contract's code and
+    // storage when it was created earlier in THIS SAME transaction —
+    // otherwise (a contract that already existed before this transaction
+    // began) it only ever moves the balance, per journaled_pay_to above.
+    // This VM declares itself Cancun-targeted (see opcode.h), so this is
+    // the correct, current-spec behavior rather than the older
+    // "SELFDESTRUCT always deletes the account" semantics.
+    if (created_this_tx.count(addr)) {
+      Code oldCode = ctxt->acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(addr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(addr) : Code{};
+      auto oldStorageDiff = gs.snapshot_storage_change(addr);
+      auto oldCache = ctxt->st.snapshot_cached();
+
+      ctxt->acc.set_code(Code{});
+      gs.erase_newly_deploy(addr);
+      gs.clear_storage_change(addr);
+      ctxt->st.clear_all_cached();
+
+      journal.record([this, addr, oldCode, hadDeployEntry, oldDeployEntry,
+                      oldStorageDiff, oldCache]() {
+        gs.get(addr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(addr, oldDeployEntry);
+        for (const auto &kv : oldStorageDiff)
+          gs.add_addresses_storage_change(addr, kv.first, kv.second);
+        Storage &st = gs.get(addr).st;
+        for (const auto &kv : oldCache)
+          st.set_cached_raw(kv.first, kv.second);
+      });
+    }
 
     result.er = ExitReason::returned;
 
@@ -1399,26 +1650,62 @@ private:
     auto nonce = ctxt->acc.get_nonce();
     Address newAddress =
         generate_address(ctxt->acc.get_address(), ctxt->acc.get_nonce());
+    created_this_tx.insert(newAddress);
 
+    // Nonce increment deliberately NOT journaled: on real Ethereum the
+    // creator's nonce bump survives even if the constructor below reverts —
+    // it's an effect of the CALLER's own frame, not part of the reverted
+    // sub-call. See StateJournal's doc comment.
     ctxt->acc.increment_nonce();
     gs.set_addresses_nonce_change(ctxt->acc.get_address(), nonce + 1);
 
     decltype(auto) newAcc = gs.create(newAddress, contractValue, initCode, 0);
 
-    ctxt->acc.pay_to(newAcc.acc, contractValue);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), contractValue);
-    gs.add_addresses_add_balance_change(newAddress, contractValue);
+    // Mark AFTER the nonce increment (kept regardless) but BEFORE the
+    // endowment transfer (undone if this CREATE's constructor reverts).
+    size_t journalMark = journal.mark();
+    journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
+                     newAcc.acc, contractValue);
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+      // EIP-3541: deploying code starting with 0xEF is rejected — without
+      // this, a plain CREATE could forge a 23-byte EIP-7702 delegation
+      // designator (0xef0100 || address) at an address the deployer fully
+      // controls, impersonating a real 7702 authorization the account owner
+      // never signed. Treated like any other deploy failure: no code is
+      // set, caller sees 0 (failure) instead of the new address.
+      if (!output.empty() && output[0] == 0xEF) {
+        parentContext->s.push(0);
+        return;
+      }
       Address newAccAddr = newAcc.acc.get_address();
+      Code oldCode = newAcc.acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(newAccAddr) : Code{};
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
       gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
+      // Recorded even on this success path: an ANCESTOR frame may still
+      // revert later (e.g. this CREATE succeeded but the caller that
+      // issued it hits a REVERT afterwards), which must undo this deploy
+      // too — see StateJournal's doc comment on LIFO composition.
+      journal.record([this, newAccAddr, oldCode, hadDeployEntry,
+                      oldDeployEntry]() {
+        gs.get(newAccAddr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(newAccAddr, oldDeployEntry);
+        else
+          gs.erase_newly_deploy(newAccAddr);
+      });
     };
     auto hh = [parentContext]() { parentContext->s.push(0); };
-    auto eh = [parentContext](const Exception &) { parentContext->s.push(0); };
+    auto eh = [parentContext, journalMark, this](const Exception &) {
+      journal.revert_to(journalMark);
+      parentContext->s.push(0);
+    };
 
     push_context(ctxt->acc.get_address(), newAcc, std::move(initCode),
                  newAcc.acc.get_code(), 0, rh, hh, eh,
@@ -1429,6 +1716,37 @@ private:
     std::stringstream ss;
     ss << "0x" << std::hex << std::setw(40) << std::setfill('0') << address;
     return ss.str();
+  }
+
+  // EIP-7702 delegation designator: 0xef0100 || 20-byte address, exactly 23
+  // bytes. Written to an authority's code by SetCodeAuthorization processing
+  // (Go side) via the same SetCodeHash/code-store path used for real
+  // contract deploys — see FromEthSetCodeTx.
+  static bool is_delegation_designator(const Code &code) {
+    return code.size() == 23 && code[0] == 0xEF && code[1] == 0x01 &&
+           code[2] == 0x00;
+  }
+
+  static Address delegation_designator_address(const Code &code) {
+    uint8_t buf[32] = {0};
+    std::copy(code.begin() + 3, code.end(), buf + 12);
+    return from_big_endian(buf, sizeof(buf));
+  }
+
+  // Resolves `code` for CALL-family dispatch: if it's a delegation
+  // designator, returns the delegate's code (one hop only — a delegate whose
+  // own code is ALSO a designator resolves to empty, matching EIP-7702's "no
+  // chained delegation" rule). Otherwise returns `code` unchanged.
+  Code resolve_delegated_code(const Code &code) {
+    if (!is_delegation_designator(code)) {
+      return code;
+    }
+    const Address delegate = delegation_designator_address(code);
+    Code delegateCode = gs.get(delegate).acc.get_code();
+    if (is_delegation_designator(delegateCode)) {
+      return {};
+    }
+    return delegateCode;
   }
 
   void call() {
@@ -1532,14 +1850,30 @@ private:
     }
 
     decltype(auto) callee = gs.get(addr);
+    // Marked BEFORE the value transfer: unlike CREATE's creator-nonce bump,
+    // a CALL's value transfer IS part of the message call being made and
+    // must be undone if the callee reverts (see StateJournal's doc
+    // comment) — this is the well-known EVM guarantee that a reverted
+    // external call never actually moves value.
+    size_t journalMark = journal.mark();
     if (value > 0) {
       gas_tracker.add_gas_used(getCallValueCost());
-      ctxt->acc.pay_to(callee.acc, value);
-      gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), value);
-      gs.add_addresses_add_balance_change(addr, value);
+      journaled_pay_to(ctxt->acc.get_address(), addr, ctxt->acc, callee.acc,
+                       value);
     }
 
-    if (!callee.acc.has_code()) {
+    // EIP-7702: if the callee's code is a delegation designator, CALL/
+    // CALLCODE/DELEGATECALL/STATICCALL must actually execute the delegate's
+    // code, not the 23-byte designator (which isn't valid bytecode — 0xEF
+    // isn't a real opcode, dispatch() would throw ErrInvalidCode on it).
+    // EXTCODESIZE/EXTCODEHASH/EXTCODECOPY are deliberately NOT routed through
+    // this: they call gs.get(addr).acc.get_code() directly elsewhere and so
+    // continue to see the raw designator unresolved, matching mainnet
+    // Ethereum (those opcodes report the 23-byte designator, not the
+    // delegate's code, for a 7702-delegated account).
+    Code executableCode = resolve_delegated_code(callee.acc.get_code());
+
+    if (executableCode.empty()) {
       ctxt->returnData.clear();
       ctxt->s.push(1);
       return;
@@ -1557,7 +1891,9 @@ private:
       parentContext->returnData.clear();
       parentContext->s.push(1);
     };
-    auto he = [this, parentContext, offOut, sizeOut](const Exception &e) {
+    auto he = [this, parentContext, offOut, sizeOut,
+               journalMark](const Exception &e) {
+      journal.revert_to(journalMark);
       if (e.type == ET::ErrExecutionReverted) {
         const auto offset = ctxt->s.pop64();
         const auto size = ctxt->s.pop64();
@@ -1580,22 +1916,22 @@ private:
     switch (op) {
     case Opcode::CALL:
       push_context(ctxt->acc.get_address(), callee, move(input),
-                   callee.acc.get_code(), value, rh, hh, he,
+                   move(executableCode), value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::CALLCODE:
       push_context(ctxt->acc.get_address(), ctxt->as, move(input),
-                   callee.acc.get_code(), value, rh, hh, he,
+                   move(executableCode), value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::DELEGATECALL:
-      push_context(ctxt->caller, ctxt->as, move(input), callee.acc.get_code(),
+      push_context(ctxt->caller, ctxt->as, move(input), move(executableCode),
                    ctxt->call_value, rh, hh, he,
                    ctxt->read_only ? true : false);
       break;
     case Opcode::STATICCALL:
       push_context(ctxt->acc.get_address(), callee, move(input),
-                   callee.acc.get_code(), value, rh, hh, he, true);
+                   move(executableCode), value, rh, hh, he, true);
       break;
     default:
       throw UnexpectedState("Unknown call opcode.");
@@ -1688,24 +2024,57 @@ private:
 
     Address newAddress =
         generate_contract_address_2(ctxt->acc.get_address(), salt, input);
+    created_this_tx.insert(newAddress);
+
+    // BUG FIX: unlike create() (CREATE), this never incremented the
+    // creator's own nonce — real Ethereum bumps it for CREATE2 exactly the
+    // same way (EIP-161), and any contract chaining multiple CREATE/CREATE2
+    // calls off its own nonce (or computing its own next CREATE address)
+    // would otherwise see a stale value. Deliberately NOT journaled, same
+    // reasoning as create()'s nonce bump: it's an effect of the CALLER's
+    // own frame that survives even if the spawned contract's constructor
+    // reverts, not part of the reverted sub-call itself.
+    auto callerNonce = ctxt->acc.get_nonce();
+    ctxt->acc.increment_nonce();
+    gs.set_addresses_nonce_change(ctxt->acc.get_address(), callerNonce + 1);
 
     decltype(auto) newAcc = gs.create(newAddress, endowment, input, 0);
 
-    ctxt->acc.pay_to(newAcc.acc, endowment);
-    gs.add_addresses_sub_balance_change(ctxt->acc.get_address(), endowment);
-    gs.add_addresses_add_balance_change(newAddress, endowment);
+    size_t journalMark = journal.mark();
+    journaled_pay_to(ctxt->acc.get_address(), newAddress, ctxt->acc,
+                     newAcc.acc, endowment);
 
     auto parentContext = ctxt;
     auto rh = [newAcc, parentContext, this](vector<uint8_t> output) {
+      // EIP-3541 — see the identical check in opCreate()'s rh for why.
+      if (!output.empty() && output[0] == 0xEF) {
+        parentContext->s.push(0);
+        return;
+      }
       Address newAccAddr = newAcc.acc.get_address();
+      Code oldCode = newAcc.acc.get_code();
+      bool hadDeployEntry = gs.has_newly_deploy(newAccAddr);
+      Code oldDeployEntry =
+          hadDeployEntry ? gs.get_newly_deploy_value(newAccAddr) : Code{};
       newAcc.acc.set_code(move(output));
       parentContext->s.push(newAccAddr);
       gs.add_addresses_newly_deploy(newAccAddr, output);
       gas_tracker.add_gas_used(getCodeDepositCost(output.size()));
+      // See the matching comment in create()'s rh: recorded even on this
+      // success path since an ancestor frame may still revert later.
+      journal.record([this, newAccAddr, oldCode, hadDeployEntry,
+                      oldDeployEntry]() {
+        gs.get(newAccAddr).acc.set_code(Code(oldCode));
+        if (hadDeployEntry)
+          gs.add_addresses_newly_deploy(newAccAddr, oldDeployEntry);
+        else
+          gs.erase_newly_deploy(newAccAddr);
+      });
     };
 
     auto hh = [parentContext]() { parentContext->s.push(0); };
-    auto eh = [parentContext, this](const Exception &e) {
+    auto eh = [parentContext, journalMark, this](const Exception &e) {
+      journal.revert_to(journalMark);
       parentContext->eh(e);
     };
 

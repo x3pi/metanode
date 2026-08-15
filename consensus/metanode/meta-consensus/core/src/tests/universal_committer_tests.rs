@@ -478,15 +478,20 @@ async fn indirect_skip() {
         panic!("Expected a committed leader")
     };
 
-    // Ensure we skip the leader of wave 2 after it had been marked undecided directly.
-    // This happens because we do not have enough votes in voting round of wave 2
-    // for the certificates of decision round wave 2 to form a certified link to
-    // the leader of wave 2.
-    if let DecidedLeader::Skip(leader) = sequence[1] {
-        assert_eq!(leader.authority, leader_wave_2);
-        assert_eq!(leader.round, leader_round_wave_2);
+    // The leader of wave 2 is marked undecided directly, but ends up
+    // indirectly COMMITTED, not skipped: this scenario has exactly f+1
+    // votes for it, split across multiple potential certificates rather
+    // than concentrated in one. Under the Mysticeti-bug fix in
+    // try_indirect_decide (base_committer.rs, commit ae5b1973 — aggregate
+    // votes across ALL potential certificates instead of requiring one to
+    // independently reach the threshold), that's now correctly enough to
+    // certify the leader, where the older, narrower check used to skip it.
+    if let DecidedLeader::Commit(ref block, direct) = sequence[1] {
+        assert_eq!(block.round(), leader_round_wave_2);
+        assert_eq!(block.author(), leader_wave_2);
+        assert!(!direct);
     } else {
-        panic!("Expected a skipped leader")
+        panic!("Expected a committed leader")
     }
 
     // Ensure we commit the 3rd leader directly.

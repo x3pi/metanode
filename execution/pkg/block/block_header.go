@@ -39,6 +39,8 @@ type BlockHeader struct {
 	globalExecIndex    uint64 // Maps Go block number → Rust consensus commit index
 	commitIndex        uint64 // Rust consensus commit index
 	logsBloom          []byte // Bloom Filter for Event Logs
+	excessBlobGas      uint64 // EIP-4844 blob-gas market
+	blobGasUsed        uint64 // EIP-4844 blob-gas market
 }
 
 func NewBlockHeader(
@@ -135,6 +137,22 @@ func (b *BlockHeader) SetLogsBloom(bloom []byte) {
 	b.logsBloom = bloom
 }
 
+func (b *BlockHeader) ExcessBlobGas() uint64 {
+	return b.excessBlobGas
+}
+
+func (b *BlockHeader) SetExcessBlobGas(v uint64) {
+	b.excessBlobGas = v
+}
+
+func (b *BlockHeader) BlobGasUsed() uint64 {
+	return b.blobGasUsed
+}
+
+func (b *BlockHeader) SetBlobGasUsed(v uint64) {
+	b.blobGasUsed = v
+}
+
 func (b *BlockHeader) Marshal() ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(b.Proto())
 }
@@ -173,6 +191,8 @@ func (b *BlockHeader) Hash() common.Hash {
 	pbHeader.Epoch = b.epoch
 	pbHeader.GlobalExecIndex = b.globalExecIndex
 	pbHeader.LogsBloom = b.logsBloom
+	pbHeader.ExcessBlobGas = b.excessBlobGas
+	pbHeader.BlobGasUsed = b.blobGasUsed
 
 	bufPtr := blockHashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -198,6 +218,8 @@ func (b *BlockHeader) Proto() *pb.BlockHeader {
 		GlobalExecIndex:   b.globalExecIndex,
 		CommitIndex:       b.commitIndex,
 		LogsBloom:         b.logsBloom,
+		ExcessBlobGas:     b.excessBlobGas,
+		BlobGasUsed:       b.blobGasUsed,
 	}
 }
 
@@ -215,6 +237,8 @@ func (b *BlockHeader) FromProto(pbBlockHeader *pb.BlockHeader) {
 	b.globalExecIndex = pbBlockHeader.GlobalExecIndex
 	b.commitIndex = pbBlockHeader.CommitIndex
 	b.logsBloom = pbBlockHeader.LogsBloom
+	b.excessBlobGas = pbBlockHeader.ExcessBlobGas
+	b.blobGasUsed = pbBlockHeader.BlobGasUsed
 }
 
 func (b *BlockHeader) SetAccountStatesRoot(hash common.Hash) {

@@ -64,6 +64,10 @@ func (v *ValidationStateCache) Code(address common.Address) []byte {
 	return v.parentSmartContractDB.Code(address)
 }
 
+func (v *ValidationStateCache) GetCodeByCodeHash(address common.Address, codeHash common.Hash) []byte {
+	return v.parentSmartContractDB.GetCodeByCodeHash(address, codeHash)
+}
+
 // -----------------------------------------------------------------------------
 // Accumulate Methods (Used to merge accepted speculative results)
 // -----------------------------------------------------------------------------

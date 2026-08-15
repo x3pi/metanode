@@ -105,6 +105,14 @@ type MVMApi struct {
 	crossChainSender   common.Address // pkt.Sender (user gốc từ chain nguồn)
 	crossChainSourceId uint64         // pkt.SourceNationId
 	crossChainActive   bool           // có đang trong cross-chain call không
+
+	// EIP-4844 context (BLOBHASH / BLOBBASEFEE opcodes). Set once per tx
+	// execution alongside SetRelatedAddresses — see VmProcessor.ExecuteTransactionWithMvmId.
+	// blobVersionedHashes is empty for any non-blob tx; blobBaseFee is always
+	// set from the current block regardless of tx type, since BLOBBASEFEE is
+	// valid to call in any Cancun+ context.
+	blobVersionedHashes [][]byte
+	blobBaseFee         *uint256.Int
 }
 
 func CallReplayFullDbLogs(logs map[string][]byte) int {
@@ -454,6 +462,240 @@ func (a *MVMApi) SetRelatedAddresses(addresses []common.Address) {
 		a.currentRelatedAddresses.Store(v, struct{}{})
 	}
 }
+
+// SetBlobContext sets the EIP-4844 context for the BLOBHASH/BLOBBASEFEE
+// opcodes, consumed by the GetBlobHash/GetBlobBaseFee cgo exports below.
+// blobVersionedHashes may be nil for a non-blob tx (BLOBHASH then always
+// resolves to 0, matching EIP-4844's out-of-range rule). Called once per tx
+// execution alongside SetRelatedAddresses.
+func (a *MVMApi) SetBlobContext(blobVersionedHashes [][]byte, blobBaseFee *uint256.Int) {
+	a.blobVersionedHashes = blobVersionedHashes
+	a.blobBaseFee = blobBaseFee
+}
+
+// blobHashAt implements the BLOBHASH opcode's index lookup as plain Go, kept
+// separate from the GetBlobHash cgo export below so it's unit-testable
+// without going through the C boundary. EIP-4844: an out-of-range index must
+// resolve to 0 (ok=false here), never an error or garbage value.
+func (a *MVMApi) blobHashAt(index uint64) (hash []byte, ok bool) {
+	if index >= uint64(len(a.blobVersionedHashes)) {
+		return nil, false
+	}
+	return a.blobVersionedHashes[index], true
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEE-PACKAGING B1 CONTEXT (see note/tee_core_packaging_plan.md)
+//
+// b1Context builds the cgo-owned buffers for the chain-id/blob/cross-chain
+// context that Call/Execute/Deploy now pass directly into C.call/execute/
+// deploy, instead of the C++ side calling back into Go mid-execution
+// (GetChainId/GetBlobHash/GetBlobBaseFee/GetCrossChainSender/
+// GetCrossChainSourceId — those //export functions still exist but are no
+// longer invoked from C++, see my_global_state.cpp). Every pointer here may
+// be nil, matching "not supplied" — see mvm_linker.hpp's MVM_B1_CONTEXT_PARAMS
+// doc comment and block_context.h for the exact semantics on the C++ side.
+// ═══════════════════════════════════════════════════════════════════════
+type b1Context struct {
+	chainID          unsafe.Pointer // 32 bytes big-endian, or nil
+	blobHashes       unsafe.Pointer // flat array of 32-byte hashes, or nil
+	blobHashCount    C.int
+	blobBaseFee      unsafe.Pointer // 32 bytes big-endian, or nil
+	crossChainSender unsafe.Pointer // 20 bytes, or nil
+	crossChainSource unsafe.Pointer // 8 bytes big-endian uint64, or nil
+	blockHashes      unsafe.Pointer // flat array of 32-byte hashes, or nil
+	blockHashCount   C.int
+}
+
+// maxBlockhashLookback matches BLOCKHASH's own EVM-spec window — a query
+// further back than this always resolves to 0, so fetching more would be
+// pure waste.
+const maxBlockhashLookback = 256
+
+// blockhashRelevantOpcodes are the bytes that make HasBlockhashOpcode
+// report true: BLOCKHASH itself (0x40), plus every CALL-family opcode
+// (CALL/CALLCODE/DELEGATECALL/STATICCALL: 0xf1/0xf2/0xf4/0xfa). The
+// CALL-family bytes matter because they mean this code can hand control to
+// OTHER code this function was never given the chance to scan — a nested
+// call reaching a contract that itself uses BLOCKHASH would otherwise
+// silently see block_hashes as empty (0 for every query) with no way to
+// tell the difference from "genuinely no BLOCKHASH usage anywhere in this
+// call". CREATE/CREATE2 deliberately excluded: a newly-deployed
+// contract's constructor runs through its own separate Deploy() call,
+// which gets its own independent scan of the constructor bytecode — not a
+// gap this function needs to cover.
+var blockhashRelevantOpcodes = [256]bool{0x40: true, 0xf1: true, 0xf2: true, 0xf4: true, 0xfa: true}
+
+// HasBlockhashOpcode reports whether code might need BLOCKHASH context —
+// see blockhashRelevantOpcodes for exactly which bytes trigger this and
+// why. Deliberately conservative, not a real disassembler: any of these
+// bytes sitting inside a PUSH's immediate data still counts, so this can
+// over-report (fetch block hashes a contract never actually queries) — but
+// erring toward over-fetching is the only safe direction, since
+// under-fetching would silently corrupt BLOCKHASH's result rather than
+// just waste work. Note this is still a heuristic, not a proof: it cannot
+// see through a CALL target resolved by an address computed at runtime
+// (e.g. from storage) any better than it can see through push-data — it
+// only needs to notice that *some* CALL-family opcode is reachable, which
+// a plain byte scan does reliably regardless of how the target address
+// itself is computed.
+func HasBlockhashOpcode(code []byte) bool {
+	for _, b := range code {
+		if blockhashRelevantOpcodes[b] {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchRecentBlockHashes returns up to maxBlockhashLookback preceding block
+// hashes for blockNumber, most-recent-first (index 0 = blockNumber-1),
+// matching BLOCKHASH's own "how many blocks back" framing — see
+// block_context.h's block_hashes field doc. Stops at the first gap (a
+// blockNumber the chain doesn't have a mapping for) rather than fetching
+// a sparse/partial-with-holes array, since BLOCKHASH's replacement on the
+// C++ side (MyGlobalState::get_block_hash) indexes this contiguously by
+// distance from the current block and has no way to represent "unknown" at
+// a specific index other than the array simply not extending that far.
+func fetchRecentBlockHashes(blockNumber uint64) [][]byte {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil || blockNumber == 0 {
+		return nil
+	}
+	lookback := uint64(maxBlockhashLookback)
+	if blockNumber < lookback {
+		lookback = blockNumber
+	}
+	hashes := make([][]byte, 0, lookback)
+	for i := uint64(1); i <= lookback; i++ {
+		h, ok := bc.GetBlockHashByNumber(blockNumber - i)
+		if !ok {
+			break
+		}
+		hashes = append(hashes, h.Bytes())
+	}
+	return hashes
+}
+
+// buildB1Context reads this instance's already-set context (SetBlobContext/
+// SetCrossChainContext, called by the same callers that used to rely on the
+// callbacks) plus the chain id — from the same config.ConfigApp.ChainId
+// global GetChainId's cgo export used to read, just fetched here instead of
+// via a mid-execution callback — and copies it into cgo-owned buffers.
+//
+// code/blockNumber are only used to decide whether BLOCKHASH's context is
+// worth fetching at all (see HasBlockhashOpcode's doc for why this one
+// field, unlike the others above, is NOT fetched unconditionally). Pass the
+// bytecode that's actually about to execute: the constructor for Deploy, or
+// the target contract's deployed code for Call/Execute.
+//
+// Known, accepted cost (code review, 2026-08-14): for Call/Execute, the
+// caller fetches that target code via smartContractDb.Code() specifically
+// to feed this scan, duplicating the read the C++ side performs anyway via
+// the GlobalStateGet callback when it resolves the target account
+// mid-execution. Not fixed here: avoiding it would mean threading the
+// already-fetched code across the cgo boundary to replace GlobalStateGet's
+// own fetch for that one address — a real restructuring of the account/
+// code resolution path for a plain cache read's worth of savings (this
+// codebase already warms these reads via PreloadAccounts elsewhere), not
+// worth the added risk on a consensus-critical path for this pass.
+//
+// Caller MUST defer the returned value's free().
+func (a *MVMApi) buildB1Context(code []byte, blockNumber uint64) b1Context {
+	var ctx b1Context
+
+	// Defensive nil guard: the old GetChainId() callback read this exact
+	// same global with no guard, but it was only ever invoked lazily, on
+	// demand, if bytecode actually executed CHAINID — so a nil
+	// config.ConfigApp only crashed if BOTH conditions held. This function
+	// now runs unconditionally on every Call/Execute/Deploy, regardless of
+	// whether the tx touches CHAINID at all, so the same unconditional
+	// access would crash universally (e.g. every unit test that doesn't
+	// call config.Init first, not just ones exercising CHAINID) — caught
+	// by go test's full suite. Falling back to "not supplied" (chain_id=0
+	// on the C++ side) here is strictly safer than the old behavior, not
+	// just equivalent: config is always loaded before real tx processing
+	// starts in production, so this guard only ever engages in exactly the
+	// anomalous states (tests, any future out-of-order init) where the old
+	// code would have crashed the whole node instead.
+	if config.ConfigApp != nil {
+		if chainID := config.ConfigApp.ChainId; chainID != nil {
+			b := make([]byte, 32)
+			chainID.FillBytes(b)
+			ctx.chainID = C.CBytes(b)
+		}
+	}
+
+	if n := len(a.blobVersionedHashes); n > 0 {
+		flat := make([]byte, n*32)
+		for i, h := range a.blobVersionedHashes {
+			// Defensive: h is expected to already be exactly 32 bytes
+			// (EIP-4844 versioned hashes); right-align if it isn't, rather
+			// than panicking or silently misreading adjacent hashes.
+			dst := flat[i*32 : i*32+32]
+			if len(h) >= 32 {
+				copy(dst, h[len(h)-32:])
+			} else {
+				copy(dst[32-len(h):], h)
+			}
+		}
+		ctx.blobHashes = C.CBytes(flat)
+		ctx.blobHashCount = C.int(n)
+	}
+
+	if a.blobBaseFee != nil {
+		b := a.blobBaseFee.Bytes32()
+		ctx.blobBaseFee = C.CBytes(b[:])
+	}
+
+	if a.crossChainActive {
+		ctx.crossChainSender = C.CBytes(a.crossChainSender.Bytes())
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, a.crossChainSourceId)
+		ctx.crossChainSource = C.CBytes(b)
+	}
+
+	if HasBlockhashOpcode(code) {
+		hashes := fetchRecentBlockHashes(blockNumber)
+		if n := len(hashes); n > 0 {
+			flat := make([]byte, n*32)
+			for i, h := range hashes {
+				dst := flat[i*32 : i*32+32]
+				if len(h) >= 32 {
+					copy(dst, h[len(h)-32:])
+				} else {
+					copy(dst[32-len(h):], h)
+				}
+			}
+			ctx.blockHashes = C.CBytes(flat)
+			ctx.blockHashCount = C.int(n)
+		}
+	}
+
+	return ctx
+}
+
+func (c *b1Context) free() {
+	if c.chainID != nil {
+		C.free(c.chainID)
+	}
+	if c.blobHashes != nil {
+		C.free(c.blobHashes)
+	}
+	if c.blobBaseFee != nil {
+		C.free(c.blobBaseFee)
+	}
+	if c.crossChainSender != nil {
+		C.free(c.crossChainSender)
+	}
+	if c.crossChainSource != nil {
+		C.free(c.crossChainSource)
+	}
+	if c.blockHashes != nil {
+		C.free(c.blockHashes)
+	}
+}
+
 func (a *MVMApi) GetCurrentRelatedAddresses() []common.Address {
 	var addresses []common.Address
 	a.currentRelatedAddresses.Range(func(key, value interface{}) bool {
@@ -564,6 +806,8 @@ func (a *MVMApi) Call(
 	} else {
 		cBRelatedAddresses = nil
 	}
+	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
+	defer b1ctx.free()
 	cRs := C.call(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -585,8 +829,17 @@ func (a *MVMApi) Call(
 		(*C.uchar)(cBRelatedAddresses), // Mảng bytes (20 * count)
 		(C.int)(totalAddresses),
 		C._Bool(isOffChain),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -646,6 +899,8 @@ func (a *MVMApi) Execute(
 	defer C.free(unsafe.Pointer(cBTxHash))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 
+	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
+	defer b1ctx.free()
 	cRs := C.execute(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -666,8 +921,17 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(cBRelatedAddresses), // Mảng bytes (20 * count)
 		(C.int)(totalAddresses),        // Số lượng addresses
 		C._Bool(isCache),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -782,6 +1046,7 @@ func (a *MVMApi) ExecuteBatch(
 		for i := 0; i < numInputs; i++ {
 			if cResultsSlice[i] != nil {
 				results[i] = extractExecuteResult(cResultsSlice[i])
+				FlushNativeLogs(results[i].NativeLogs) // TEE-packaging B2
 			} else {
 				results[i] = &MVMExecuteResult{}
 			}
@@ -846,6 +1111,7 @@ func (a *MVMApi) SendNative(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -902,6 +1168,7 @@ func (a *MVMApi) ProcessNativeMintBurn(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -946,6 +1213,7 @@ func (a *MVMApi) NoncePlusOne(
 		C._Bool(isCache),
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -1010,6 +1278,8 @@ func (a *MVMApi) Deploy(
 	defer C.free(unsafe.Pointer(cBBlockCoinbase))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 	defer C.free(unsafe.Pointer(cBTxHash))
+	b1ctx := a.buildB1Context(bContractConstructor, blockNumber)
+	defer b1ctx.free()
 	cRs := C.deploy(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractConstructor),
@@ -1028,8 +1298,17 @@ func (a *MVMApi) Deploy(
 		C._Bool(isDebug),
 		C._Bool(isCache),
 		C._Bool(isOffChain),
+		(*C.uchar)(b1ctx.chainID),
+		(*C.uchar)(b1ctx.blobHashes),
+		b1ctx.blobHashCount,
+		(*C.uchar)(b1ctx.blobBaseFee),
+		(*C.uchar)(b1ctx.crossChainSender),
+		(*C.uchar)(b1ctx.crossChainSource),
+		(*C.uchar)(b1ctx.blockHashes),
+		b1ctx.blockHashCount,
 	)
 	a.rs = extractExecuteResult(cRs)
+	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
 	a.enforceStrictAccessLists()
 	return a.rs
@@ -1320,6 +1599,48 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ✅ Returning sourceChainId: %d\n", mvmApi.crossChainSourceId)
 
 	data_p := (*C.uchar)(C.CBytes(sourceIdBytes[:]))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(32),
+		success:   true,
+	}
+}
+
+//export GetBlobHash
+func GetBlobHash(mvmId *C.uchar, index C.ulonglong) C.struct_Value_return {
+	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+	fmvmId := common.BytesToAddress(bmvmId)
+	mvmApi := GetMVMApi(fmvmId)
+
+	if mvmApi == nil {
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	hash, ok := mvmApi.blobHashAt(uint64(index))
+	if !ok {
+		// Out of range: EIP-4844 says BLOBHASH must resolve to 0, not error —
+		// the C++ side (MyGlobalState::get_blob_hash) treats success=false the
+		// same as "return 0", so this is correct either way.
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	data_p := (*C.uchar)(C.CBytes(hash))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(len(hash)),
+		success:   true,
+	}
+}
+
+//export GetBlobBaseFee
+func GetBlobBaseFee(mvmId *C.uchar) C.struct_Value_return {
+	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+	fmvmId := common.BytesToAddress(bmvmId)
+	mvmApi := GetMVMApi(fmvmId)
+
+	if mvmApi == nil || mvmApi.blobBaseFee == nil {
+		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
+	}
+	feeBytes := mvmApi.blobBaseFee.Bytes32()
+	data_p := (*C.uchar)(C.CBytes(feeBytes[:]))
 	return C.struct_Value_return{
 		data_p:    data_p,
 		data_size: C.int(32),

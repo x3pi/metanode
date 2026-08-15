@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -56,6 +58,20 @@ func (vmP *VmProcessor) getLeaderAddress(lastBlockHeader types.BlockHeader) comm
 		return vmP.leaderAddr
 	}
 	return lastBlockHeader.LeaderAddress()
+}
+
+// currentBlobBaseFee computes the EIP-4844 blob base fee for the block
+// currently being executed, for the BLOBBASEFEE opcode (see MVMApi.SetBlobContext).
+// Uses the same block.BlobBaseFeeAt as the actual blob-fee charging in
+// tx_processor, so BLOBBASEFEE always agrees with what a blob tx is really
+// charged.
+func (vmP *VmProcessor) currentBlobBaseFee() *uint256.Int {
+	parentHeader := vmP.chainState.GetcurrentBlockHeader()
+	if parentHeader == nil {
+		return uint256.NewInt(0)
+	}
+	fee := block.BlobBaseFeeAt(*parentHeader, vmP.blockTime*1000)
+	return uint256.MustFromBig(fee)
 }
 
 // ExecuteTransactionWithMvmId thực thi giao dịch, sử dụng cờ tracingEnabled nội bộ.
@@ -114,6 +130,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
+		mvmROnly.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
 		mvmRs, execErr = vmP.readOnlyCall(execCtx, tx, mvmROnly)
 	} else {
 		if span != nil {
@@ -124,6 +141,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		}
 		mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
+		mvmE.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
 		if isCache {
 			defer mvm.UnprotectMVMApi(vmP.mvmId)
 		}
@@ -178,7 +196,7 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 func (vmP *VmProcessor) deploySmartContract(
 	ctx context.Context, // Context từ caller
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	mvmId common.Address,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
@@ -218,11 +236,16 @@ func (vmP *VmProcessor) deploySmartContract(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.DeployData().Code(), true)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
 	mvmResult := mvmE.Deploy( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.DeployData().Code(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmId, tx.Hash().Bytes(), tx.GetIsDebug(), isCache, false,
 	)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 	if span != nil { // GUARD
 		span.AddEvent("MvmDeployFinished", map[string]interface{}{
 			"status":        mvmResult.Status.String(),
@@ -249,7 +272,7 @@ func (vmP *VmProcessor) deploySmartContract(
 func (vmP *VmProcessor) readOnlyCall(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil
 	// var readOnlyCtx context.Context = ctx // Không cần tạo context mới nếu không dùng
@@ -290,11 +313,16 @@ func (vmP *VmProcessor) readOnlyCall(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.CallData().Input(), false)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
 	mvmResult := mvmE.Call( // Luôn gọi MVM
-		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+		tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGasBudget(intrinsicGas, maxGas),
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), true, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), true,
 	)
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmCallReadOnlyFinished", map[string]interface{}{
@@ -324,7 +352,7 @@ func (vmP *VmProcessor) readOnlyCall(
 func (vmP *VmProcessor) executeSmartContract(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil
@@ -365,10 +393,15 @@ func (vmP *VmProcessor) executeSmartContract(
 	if isFree {
 		maxGas = uint64(mt_common.MAX_GASS_FEE)
 	}
+	intrinsicGas, err := computeIntrinsicGas(tx, tx.CallData().Input(), false)
+	if err != nil {
+		return nil, fmt.Errorf("computing intrinsic gas: %w", err)
+	}
+	vmGas := vmGasBudget(intrinsicGas, maxGas)
 
 	if isCache {
 		mvmResult = mvmE.Execute( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(),
 			isCache,
@@ -376,12 +409,13 @@ func (vmP *VmProcessor) executeSmartContract(
 
 	} else {
 		mvmResult = mvmE.Call( // Luôn gọi MVM
-			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), maxGas,
+			tx.FromAddress().Bytes(), tx.ToAddress().Bytes(), tx.CallData().Input(), tx.Amount(), tx.MaxGasPrice(), vmGas,
 			lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 			lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(), false, tx.Hash().Bytes(), tx.RelatedAddresses(), tx.GetIsDebug(), false,
 		)
 
 	}
+	applyIntrinsicGas(mvmResult, intrinsicGas, maxGas)
 
 	if span != nil { // GUARD
 		span.AddEvent("MvmExecuteFinished", map[string]interface{}{
@@ -409,7 +443,7 @@ func (vmP *VmProcessor) executeSmartContract(
 func (vmP *VmProcessor) ProcessNativeMintBurn(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	operationType uint64, // 0: mint, 1: burn
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil        // Khởi tạo nil
@@ -497,7 +531,7 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 func (vmP *VmProcessor) sendNative(
 	ctx context.Context,
 	tx types.Transaction,
-	mvmE *mvm.MVMApi,
+	mvmE mvm.ExecutionEngine,
 	isCache bool,
 ) (*mvm.MVMExecuteResult, error) {
 	var span *trace.Span = nil // Khởi tạo nil

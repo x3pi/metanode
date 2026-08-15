@@ -1,13 +1,14 @@
 ---
-source: meta-consensus/config/tests/parameters_test.rs
+source: consensus/metanode/meta-consensus/config/tests/parameters_test.rs
+assertion_line: 8
 expression: parameters
 ---
 leader_timeout:
   secs: 0
-  nanos: 200000000
+  nanos: 100000000
 min_round_delay:
   secs: 0
-  nanos: 50000000
+  nanos: 25000000
 max_forward_time_drift:
   secs: 0
   nanos: 500000000
@@ -18,11 +19,11 @@ sync_last_known_own_block_timeout:
   nanos: 0
 round_prober_interval_ms: 5000
 round_prober_request_timeout_ms: 4000
-propagation_delay_stop_proposal_threshold: 5
+propagation_delay_stop_proposal_threshold: 50
 dag_state_cached_rounds: 500
-commit_sync_parallel_fetches: 8
-commit_sync_batch_size: 100
-commit_sync_batches_ahead: 32
+commit_sync_parallel_fetches: 12
+commit_sync_batch_size: 200
+commit_sync_batches_ahead: 48
 tonic:
   keepalive_interval:
     secs: 10
@@ -31,3 +32,4 @@ tonic:
   excessive_message_size: 16777216
   message_size_limit: 67108864
 adaptive_delay_enabled: true
+compact_blocks_enabled: false

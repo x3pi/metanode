@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
+	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/trace"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -264,6 +265,19 @@ func (vmP *VmProcessor) MvmResultToExecuteResult(
 					logger.Error(finalErr.Error())
 				} else if originSmartContractAs == nil || originSmartContractAs.SmartContractState() == nil {
 					finalErr := errors.New("origin contract state " + transaction.ToAddress().Hex() + " is nil or not a contract for internal deploy")
+					fatalError = true
+					extractErrors = append(extractErrors, finalErr.Error())
+					logger.Error(finalErr.Error())
+				} else if _, isDelegation := e_types.ParseDelegation(vmP.smartContractDB.Code(transaction.ToAddress())); isDelegation {
+					// EIP-7702: ToAddress is a delegated EOA, not a real deployed contract.
+					// SmartContractState() exists (it holds the delegation designator's
+					// codeHash), but CreatorPublicKey()/StorageAddress() were never set on
+					// it — SetCodeHash only ever touches the code hash, leaving those at
+					// their zero/empty defaults (see AccountState.SetCodeHash). Trusting
+					// them below would silently tag any contract this delegate's code
+					// CREATEs with bogus empty creator/storage metadata instead of failing
+					// loudly like the case above.
+					finalErr := errors.New("origin address " + transaction.ToAddress().Hex() + " is an EIP-7702 delegated EOA, not a real deployed contract; internal deploy through a delegated EOA is not supported")
 					fatalError = true
 					extractErrors = append(extractErrors, finalErr.Error())
 					logger.Error(finalErr.Error())
@@ -725,6 +739,13 @@ func (vmP *VmProcessor) UpdateStateDB(
 				fatalError = true
 			} else if originSmartContractAs == nil || originSmartContractAs.SmartContractState() == nil {
 				finalErr = errors.New("origin contract state " + transaction.ToAddress().Hex() + " is nil or not a contract for internal deploy")
+				fatalError = true
+			} else if _, isDelegation := e_types.ParseDelegation(vmP.smartContractDB.Code(transaction.ToAddress())); isDelegation {
+				// See the identical check's comment in MvmResultToExecuteResult above —
+				// a delegated EOA's SmartContractState() has no real CreatorPublicKey/
+				// StorageAddress to inherit; fail loudly instead of silently using zero
+				// values for anything this delegate's code CREATEs.
+				finalErr = errors.New("origin address " + transaction.ToAddress().Hex() + " is an EIP-7702 delegated EOA, not a real deployed contract; internal deploy through a delegated EOA is not supported")
 				fatalError = true
 			} else {
 				originScState := originSmartContractAs.SmartContractState()

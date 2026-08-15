@@ -179,7 +179,7 @@ impl Core {
 
             // [USER REQUIREMENT] Force 40K-50K block aggregation by increasing the base proposal delay.
             // Reduced to 20ms to speed up empty block proposals which carry CommitVotes.
-            let min_aggregation_delay = Duration::from_millis(100);
+            let min_aggregation_delay = crate::core::MIN_PROPOSAL_AGGREGATION_DELAY;
             
             // ADAPTIVE BYPASS: If the queue already has enough TXs waiting, propose immediately!
             let has_sufficient_txs = self.transaction_consumer.has_sufficient_transactions();
@@ -584,12 +584,24 @@ impl Core {
         }
 
         let Some(last_known_proposed_round) = self.last_known_proposed_round else {
-            // First boot: allow proposing even without synced proposed round
+            // Not yet safe to propose: `sync_last_known_own_block` is active
+            // and we haven't learned (from a peer quorum, or the trivial
+            // single-node local path) what round we may have already
+            // proposed at in a past life. Proposing now — even against an
+            // empty local DAG — risks equivocating against a real block
+            // this authority's key already committed to before local
+            // storage was lost (disaster-recovery/re-provision case).
+            // start_fetch_own_last_block_task() (synchronizer/scheduler.rs)
+            // runs independently and resolves this for every case,
+            // including a genuinely fresh network, so this is a bounded
+            // wait, not a stall.
             info!(
-                "🚀 [BOOTSTRAP] Allowing proposal at round {} without last_known_proposed_round",
-                clock_round
+                "Skip proposing for round {clock_round}: last_known_proposed_round not yet resolved"
             );
-            return true;
+            core_skipped_proposals
+                .with_label_values(&["awaiting_last_known_proposed_round"])
+                .inc();
+            return false;
         };
         
         if clock_round <= last_known_proposed_round {

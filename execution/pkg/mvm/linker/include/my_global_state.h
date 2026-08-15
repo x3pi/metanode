@@ -70,6 +70,10 @@ namespace mvm
         // Cross-chain precompile (address 263)
         virtual std::vector<uint8_t> get_cross_chain_sender() override;
         virtual std::vector<uint8_t> get_cross_chain_source_id() override;
+
+        // EIP-4844
+        virtual uint256_t get_blob_hash(uint64_t index) override;
+        virtual uint256_t get_blob_base_fee() override;
         void iterate_storage_changes(std::function<void(const Address &, const uint256_t &, const uint256_t &)> callback) const
         {
             for (const auto &pair : addresses_storage_change)
@@ -124,6 +128,17 @@ namespace mvm
         virtual void add_addresses_add_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void add_addresses_sub_balance_change(const Address &addr, const uint256_t &amount) override;
         virtual void set_addresses_nonce_change(const Address &addr, const uint256_t &nonce) override;
+
+        virtual bool has_storage_change(const Address &addr, const uint256_t &key) override;
+        virtual uint256_t get_storage_change_value(const Address &addr, const uint256_t &key) override;
+        virtual void erase_storage_change(const Address &addr, const uint256_t &key) override;
+        virtual bool has_newly_deploy(const Address &addr) override;
+        virtual Code get_newly_deploy_value(const Address &addr) override;
+        virtual void erase_newly_deploy(const Address &addr) override;
+        virtual std::map<uint256_t, uint256_t> snapshot_storage_change(const Address &addr) override;
+        virtual void clear_storage_change(const Address &addr) override;
+        virtual void undo_add_balance_change(const Address &addr, const uint256_t &amount) override;
+        virtual void undo_sub_balance_change(const Address &addr, const uint256_t &amount) override;
 
         const std::vector<std::vector<uint8_t>> get_newly_deploy(bool apply_to_cache = true);
         const std::vector<std::vector<uint8_t>> get_storage_change(bool apply_to_cache = true);

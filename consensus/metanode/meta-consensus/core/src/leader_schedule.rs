@@ -672,9 +672,16 @@ mod tests {
             dag_builder.last_committed_rounds.clone(),
             dag_state.read().last_committed_rounds()
         );
-        assert_eq!(1, dag_state.read().scoring_subdags_count());
+        // The scoring window is commits_per_schedule (300) wide, so with only
+        // 11 commits total the whole history (1..=11) falls inside the
+        // current, still-open window and all 11 subdags need scoring — not
+        // just commit 11 (the one beyond the CommitInfo-covered range 1..=10,
+        // which only governs `last_committed_rounds` recovery, a separate
+        // concern from the scoring window).
+        assert_eq!(11, dag_state.read().scoring_subdags_count());
         let recovered_scores = dag_state.read().calculate_scoring_subdag_scores();
-        let expected_scores = ReputationScores::new((11..=11).into(), vec![0, 0, 0, 0]);
+        let expected_scores =
+            ReputationScores::new((1..=11).into(), vec![33, 33, 33, 33]);
         assert_eq!(recovered_scores, expected_scores);
 
         let leader_schedule = LeaderSchedule::from_store(context.clone(), dag_state.clone());
@@ -797,8 +804,25 @@ mod tests {
             context.clone(),
             Arc::new(MemStore::new()),
         )));
+        let leader = BlockRef::new(1, AuthorityIndex::ZERO, BlockDigest::MIN);
+
+        // `commits_until_leader_schedule_update` reads DagState's own commit-index
+        // bookkeeping (`last_commit`), which is populated by `add_commit`, not by
+        // `add_scoring_subdags` (that only feeds the separate reputation-scoring
+        // window). Without this, `last_commit_index()` stayed 0 regardless of the
+        // scoring subdag below, making the test's "1 commit already processed"
+        // setup a no-op.
+        dag_state.write().add_commit(TrustedCommit::new_for_test(
+            1,
+            CommitDigest::MIN,
+            context.clock.timestamp_utc_ms(),
+            leader,
+            vec![leader],
+            1, // global_exec_index for test
+        ));
+
         let unscored_subdags = vec![CommittedSubDag::new(
-            BlockRef::new(1, AuthorityIndex::ZERO, BlockDigest::MIN),
+            leader,
             vec![],
             context.clock.timestamp_utc_ms(),
             CommitRef::new(1, CommitDigest::MIN),
@@ -925,9 +949,17 @@ mod tests {
         assert!(leader_swap_table
             .bad_nodes
             .contains_key(&AuthorityIndex::new_for_test(0)));
+
+        // FORK-SAFETY (May 2026, elect_leader()): reputation-based swaps are
+        // permanently disabled — restoring nodes after a mid-epoch snapshot lose the
+        // historical DAG blocks needed to recompute identical reputation scores as
+        // continuous nodes, so applying swaps would fork the chain. The swap table
+        // above is still built correctly (asserted above), it's just never consulted
+        // by elect_leader() anymore, so round 4's leader stays the deterministic
+        // stake/round-based pick (authority 0) instead of the swapped-in one.
         assert_eq!(
             leader_schedule.elect_leader(4, 0),
-            AuthorityIndex::new_for_test(2)
+            AuthorityIndex::new_for_test(0)
         );
     }
 
@@ -1067,9 +1099,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(
-        expected = "The new LeaderSwapTable has an invalid CommitRange. Old LeaderSwapTable CommitRange(11..=20) vs new LeaderSwapTable CommitRange(21..=25)"
-    )]
+    // SCHEDULE-GAP (see update_leader_swap_table()): a non-contiguous CommitRange
+    // used to be a hard panic, but that's expected to happen after a STARTUP-SYNC
+    // gap, so it's now just a `tracing::warn!` and the new table is still applied.
+    // This test used to assert the old panic; now it asserts the graceful
+    // degradation instead — the update succeeds despite the gap.
     async fn test_update_bad_leader_swap_table() {
         // // telemetry_subscribers::init_for_testing();
         let context = Arc::new(Context::new_for_test(4).0);
@@ -1104,7 +1138,13 @@ mod tests {
         let leader_swap_table =
             LeaderSwapTable::new_inner(context.clone(), swap_stake_threshold, 0, reputation_scores);
 
-        // Update leader from old swap table to new invalid swap table
+        // Update leader from old swap table to new non-contiguous ("invalid") swap
+        // table. Doesn't panic anymore (see SCHEDULE-GAP comment above) — the table
+        // is still applied.
         leader_schedule.update_leader_swap_table(leader_swap_table.clone());
+        assert_eq!(
+            leader_schedule.leader_swap_table.read().reputation_scores.commit_range,
+            (21..=25).into()
+        );
     }
 }

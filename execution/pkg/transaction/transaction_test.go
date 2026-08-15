@@ -126,6 +126,34 @@ func TestTransaction_RHash(t *testing.T) {
 	assert.Equal(t, rHash, rHash2)
 }
 
+// TestTransaction_Hash_IncludesBlobAndAuthorizationFields guards against silently
+// dropping the EIP-4844/EIP-7702 fields from the hash preimage (Hash() and RHash()
+// must match the Rust-side calculate_single_transaction_hash — see tx_hash.rs).
+func TestTransaction_Hash_IncludesBlobAndAuthorizationFields(t *testing.T) {
+	base := makeTestTransaction().(*Transaction)
+	baseHash := base.Hash()
+	baseRHash := base.RHash()
+
+	withBlob := makeTestTransaction().(*Transaction)
+	withBlob.proto.BlobVersionedHashes = [][]byte{{0x01, 0xAA}}
+	assert.NotEqual(t, baseHash, withBlob.Hash(), "BlobVersionedHashes must affect Hash()")
+	assert.NotEqual(t, baseRHash, withBlob.RHash(), "BlobVersionedHashes must affect RHash()")
+
+	withFeeCap := makeTestTransaction().(*Transaction)
+	withFeeCap.proto.MaxFeePerBlobGas = []byte{0x03, 0xE8}
+	assert.NotEqual(t, baseHash, withFeeCap.Hash(), "MaxFeePerBlobGas must affect Hash()")
+
+	withAuth := makeTestTransaction().(*Transaction)
+	withAuth.proto.AuthorizationList = []*pb.SetCodeAuthorization{{ChainID: 1, Address: []byte{0x01}}}
+	assert.NotEqual(t, baseHash, withAuth.Hash(), "AuthorizationList must affect Hash()")
+
+	// Sidecar must NOT affect the hash — it's network representation, not committed data.
+	withSidecar := makeTestTransaction().(*Transaction)
+	withSidecar.proto.Sidecar = &pb.BlobSidecar{Blobs: [][]byte{{0xDE, 0xAD, 0xBE, 0xEF}}}
+	assert.Equal(t, baseHash, withSidecar.Hash(), "Sidecar must NOT affect Hash()")
+	assert.Equal(t, baseRHash, withSidecar.RHash(), "Sidecar must NOT affect RHash()")
+}
+
 // ──────────────────────────────────────────────
 // ClearCacheHash
 // ──────────────────────────────────────────────
@@ -347,6 +375,34 @@ func TestTransaction_MaxFee(t *testing.T) {
 	maxFee := tx.MaxFee()
 	// Legacy type: maxGas * maxGasPrice = 21000 * 10 = 210000
 	assert.Equal(t, big.NewInt(210000), maxFee)
+}
+
+// TestTransaction_EffectiveGasPrice_PerType guards the fix for a real bug: fee
+// charging (native_fast_path.go, true_block_stm.go) and MaxFee()/
+// ValidMaxGasPrice() must all price EIP-1559/EIP-4844 txs via GasFeeCap, not
+// the flat MaxGasPrice field — which FromEthEIP1559Tx/FromEthBlobTx deliberately
+// leave at 0. Before EffectiveGasPrice() existed, three separate call sites in
+// tx_processor charged literally zero execution gas fee for these tx types.
+func TestTransaction_EffectiveGasPrice_PerType(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		txType      uint64
+		maxGasPrice uint64
+		gasFeeCap   []byte
+		want        *big.Int
+	}{
+		{"legacy uses flat MaxGasPrice", 0, 42, nil, big.NewInt(42)},
+		{"eip2930 uses flat MaxGasPrice", 1, 42, nil, big.NewInt(42)},
+		{"eip1559 uses GasFeeCap, not MaxGasPrice", 2, 0, big.NewInt(999).Bytes(), big.NewInt(999)},
+		{"eip4844 uses GasFeeCap, not MaxGasPrice", 3, 0, big.NewInt(777).Bytes(), big.NewInt(777)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tx := &Transaction{proto: &pb.Transaction{
+				Type: c.txType, MaxGasPrice: c.maxGasPrice, GasFeeCap: c.gasFeeCap,
+			}}
+			assert.Equal(t, c.want, tx.EffectiveGasPrice())
+		})
+	}
 }
 
 // ──────────────────────────────────────────────

@@ -253,8 +253,18 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 			Tx:      tx,
 		})
 	}
-	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
 	blockDatabase := block.NewBlockDatabase(api.App.storageManager.GetStorageBlock())
+
+	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "skip_epoch_data")
+	if err != nil {
+		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
+	}
+	defer chainState.Close()
+
+	// Grouped after chainState is ready so classification can route a plain
+	// value-transfer to an already-code-bearing address through the EVM
+	// (see grouptxns.HasCodeFunc's doc).
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items, chainState.HasCode)
 	myCollector := trace.NewSpanCollector()
 
 	tracedCtx, rootSpan := trace.NewTrace(ctx, "ProcessBlockTransactions", map[string]interface{}{
@@ -264,11 +274,6 @@ func (api *DebugApi) TraceBlock(ctx context.Context, blockNumber uint64) ([]*tra
 	// QUAN TRỌNG: Phải gọi End() trước khi cố gắng lấy span từ exporter
 	defer rootSpan.End()
 
-	chainState, err := blockchain.NewChainState(api.App.storageManager, blockDatabase, oldBlockData.Header(), api.App.config, FreeFeeAddresses, "skip_epoch_data")
-	if err != nil {
-		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)
-	}
-	defer chainState.Close()
 	processResult, err := tx_processor.ProcessTransactions(tracedCtx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress(), blockNumber, false)
 	if err != nil {
 		return nil, fmt.Errorf("TraceBlock: failed to create chainState for block %d: %w", blockNumber, err)

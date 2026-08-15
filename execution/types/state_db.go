@@ -50,6 +50,12 @@ type AccountStateDB interface {
 
 type SmartContractDB interface {
 	Code(address common.Address) []byte
+	// GetCodeByCodeHash reads code straight from content-addressed storage,
+	// bypassing the address→codeHash lookup Code() does. Used by
+	// MVCCSmartContractDB.Code to read a codeHash that is only visible in the
+	// tx-scoped MVCC account view (not yet committed to the real global
+	// AccountStateDB) — see its doc.
+	GetCodeByCodeHash(address common.Address, codeHash common.Hash) []byte
 	StorageValue(address common.Address, key []byte, customRoot ...*common.Hash) ([]byte, bool)
 	SetAccountStateDB(asdb AccountStateDB)
 	SetBlockNumber(blockNumber uint64)

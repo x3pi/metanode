@@ -85,6 +85,7 @@ mod tests {
     use super::*;
     use fastcrypto::ed25519::Ed25519KeyPair;
     use fastcrypto::traits::KeyPair;
+    use fastcrypto::traits::ToFromBytes;
     use rustls::client::danger::ServerCertVerifier as _;
     use rustls::pki_types::ServerName;
     use rustls::pki_types::UnixTime;
@@ -164,7 +165,8 @@ mod tests {
         let allowed = Ed25519KeyPair::generate(&mut rng);
         let disallowed = Ed25519KeyPair::generate(&mut rng);
 
-        let allowed_public_keys = BTreeSet::from([allowed.public().to_owned()]);
+        let allowed_public_keys: BTreeSet<[u8; 32]> =
+            BTreeSet::from([allowed.public().as_bytes().try_into().unwrap()]);
         let allowed_cert = SelfSignedCertificate::new(allowed.private(), SUI_VALIDATOR_SERVER_NAME);
 
         let disallowed_cert =
@@ -206,7 +208,9 @@ mod tests {
         let public_key = keypair.public().to_owned();
         let cert = SelfSignedCertificate::new(keypair.private(), "not-sui");
 
-        let allowlist = AllowPublicKeys::new(BTreeSet::from([public_key.clone()]));
+        let allowlist = AllowPublicKeys::new(BTreeSet::from([
+            public_key.as_bytes().try_into().unwrap(),
+        ]));
         let client_verifier =
             ClientCertVerifier::new(allowlist.clone(), SUI_VALIDATOR_SERVER_NAME.to_string());
 
@@ -298,7 +302,9 @@ mod tests {
         client.get(&server_url).send().await.unwrap_err();
 
         // Insert the client's public key into the allowlist and verify the request is successful
-        allowlist.update(BTreeSet::from([client_public_key.clone()]));
+        allowlist.update(BTreeSet::from([
+            client_public_key.as_bytes().try_into().unwrap(),
+        ]));
 
         let res = client.get(&server_url).send().await.unwrap();
         let body = res.text().await.unwrap();
