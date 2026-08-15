@@ -242,7 +242,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				Tx:    tx,
 			})
 		}
-		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, csCopy.HasCode)
 
 		// (Wait for preload removed)
 
@@ -497,7 +497,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 				Tx:    tx,
 			})
 		}
-		groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, csCopy.HasCode)
 
 		// (Wait removed)
 

@@ -21,7 +21,6 @@ import (
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
@@ -34,8 +33,6 @@ type Filter struct {
 
 	block      *common.Hash // Block hash if filtering a single block
 	begin, end int64        // Range interval if filtering multiple blocks
-
-	matcher *bloombits.Matcher
 }
 
 // NewBlockFilter creates a new filter which directly inspects the contents of

@@ -147,8 +147,10 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Adding one block now will trigger the creation of new block for round 1
     let block_1 = VerifiedBlock::new_for_test(TestBlock::new(1, 1).build());
     expected_ancestors.insert(block_1.reference());
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_1.clone(), vec![])]);
     _ = core.add_blocks(vec![block_1]);
@@ -161,8 +163,10 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Adding another block now forms a quorum for round 1, so block at round 2 will proposed
     let block_2 = VerifiedBlock::new_for_test(TestBlock::new(1, 2).build());
     expected_ancestors.insert(block_2.reference());
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(context.parameters.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_2.clone(), vec![1, 4])]);
     _ = core.add_blocks(vec![block_2.clone()]);
@@ -309,6 +313,40 @@ async fn test_core_set_min_propose_round() {
     assert_eq!(our_ancestor_included.round, 10);
 }
 
+/// Polls `store` for a persisted commit at or above `expected_index`, giving real (non-virtual)
+/// wall-clock time to any in-flight `DagState::flush()` write between attempts.
+///
+/// `Core::try_new_block()` calls `dag_state.write().flush()` internally and hands the resulting
+/// ticket off to an async task (the block broadcaster) that awaits it before sending — but that
+/// ticket is never surfaced to callers, so tests have no handle to await it directly. A test-level
+/// `dag_state.write().flush()` called afterward reliably finds nothing pending (the internal call
+/// already drained the write queues) and returns `None`, so there is nothing to await — checking
+/// the store immediately races the still in-flight `spawn_blocking` write. Under
+/// `start_paused = true`, `tokio::time::sleep` doesn't reliably help either: the paused clock can
+/// auto-advance virtual timers near-instantly without giving the OS any real time to run the
+/// write thread. `spawn_blocking` + `std::thread::sleep` forces a genuine (small) wall-clock
+/// delay, which is what's actually needed here.
+async fn wait_for_commit_persisted(
+    store: &Arc<MemStore>,
+    expected_index: CommitIndex,
+) -> crate::commit::TrustedCommit {
+    for _ in 0..500 {
+        if let Ok(Some(commit)) = store.read_last_commit() {
+            if commit.index() >= expected_index {
+                return commit;
+            }
+        }
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+            .await
+            .unwrap();
+    }
+    panic!(
+        "Timed out waiting for commit index {expected_index} to be persisted to store \
+         (last seen: {:?})",
+        store.read_last_commit()
+    );
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_core_try_new_block_leader_timeout() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -390,15 +428,15 @@ async fn test_core_try_new_block_leader_timeout() {
         assert!(core_fixture.core.new_block(4, true).unwrap().is_some());
         assert_eq!(core_fixture.core.last_proposed_round(), 4);
 
-        // Flush the DAG state to storage.
-        core_fixture.dag_state.write().flush();
-
-        // Check commits have been persisted to store
-        let last_commit = core_fixture
-            .store
-            .read_last_commit()
-            .unwrap()
-            .expect("last commit should be set");
+        // NOTE: try_new_block() (called internally by new_block() above) already ran its own
+        // dag_state.write().flush() before returning — capturing the commit decided a moment
+        // earlier via the add_blocks() call in the loop above, along with this round's blocks —
+        // and handed that ticket off to an internal broadcast task we have no handle to. A flush()
+        // called here would reliably find nothing pending (that internal call already drained
+        // everything) and its ticket would be a no-op; awaiting it does NOT wait for the real
+        // write. Poll the store instead, so this doesn't race the still in-flight spawn_blocking
+        // write.
+        let last_commit = wait_for_commit_persisted(&core_fixture.store, 1).await;
         // There are 1 leader rounds with rounds completed up to and including
         // round 4
         assert_eq!(last_commit.index(), 1);
@@ -732,8 +770,10 @@ async fn test_core_compress_proposal_references() {
     // be applied the we should expect all the previous blocks to be referenced from round 0..=10. However, since compression
     // is applied only the last round's (10) blocks should be referenced + the authority's block of round 0.
     let core_fixture = &mut cores[excluded_authority];
-    // Wait for min round delay to allow blocks to be proposed.
-    sleep(default_params.min_round_delay).await;
+    // Wait for min round delay to allow blocks to be proposed. Core also enforces a
+    // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
+    // `min_round_delay` is configured lower, so wait for whichever is longer.
+    sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
     // add blocks to trigger proposal.
     core_fixture.add_blocks(all_blocks).unwrap();
 

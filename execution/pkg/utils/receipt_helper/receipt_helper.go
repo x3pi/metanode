@@ -61,7 +61,7 @@ func CreateErrorReceipt(tx types.Transaction, toAddress common.Address, err erro
 	return receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+		tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 	)
 }
 
@@ -94,7 +94,7 @@ func HandleRevertedTx(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_TRANSACTION_ERROR, revertData, pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+		tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 		nil, 0, common.Hash{}, 0,
 	)
 
@@ -124,7 +124,7 @@ func HandleSuccessTx(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_RETURNED, returnData, pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+		tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
 	exRs, err := ExecuteNonceAndFinalize(ctx, chainState, tx, mvmId, enableTrace, blockTime)
@@ -152,7 +152,7 @@ func HandleSuccessTxWithExRs(
 	rcp := receipt.NewReceipt(
 		tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 		pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-		mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+		tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 		eventLogs, 0, common.Hash{}, 0,
 	)
 	rcp.UpdateExecuteResult(

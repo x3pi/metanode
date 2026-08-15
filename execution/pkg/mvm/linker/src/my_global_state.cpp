@@ -4,6 +4,7 @@
 #include "mvm/util.h"
 #include "mvm_linker.hpp"
 #include "state.h"
+#include <algorithm>
 #include <iostream>
 
 struct GlobalStateGet_return {
@@ -256,46 +257,92 @@ void MyGlobalState::set_block_context(const BlockContext &bc) {
   blockContext = bc;
 }
 
+// TEE-packaging B1, last of the 6 callbacks (note/tee_core_packaging_plan.md):
+// reads straight from blockContext.block_hashes instead of calling back
+// into Go. Also fixes a latent bug in the pre-B1 callback path: it never
+// checked GetBlockHash's `success` flag before calling bytes_to_uint256 on
+// its result pointer — an out-of-range query (success=false, data_p=null)
+// was undefined behavior, not a clean 0. EVM semantics (and the fix): a
+// queried block that is >= the current block, or further back than what
+// block_hashes holds (populated only up to 256 entries, see
+// HasBlockhashOpcode/mvm_api.go and block_context.h), resolves to 0.
 uint256_t MyGlobalState::get_block_hash(int blockNumber) {
-  Value_return valueReturn = GetBlockHash(blockNumber);
-  uint256_t hash = mvm::bytes_to_uint256(valueReturn.data_p);
-  return hash;
+  if (blockNumber < 0) {
+    return uint256_t{};
+  }
+  uint256_t queried = static_cast<uint64_t>(blockNumber);
+  uint256_t current = blockContext.number;
+  if (queried >= current) {
+    return uint256_t{};
+  }
+  uint256_t distance = current - queried; // >= 1
+  if (distance > blockContext.block_hashes.size()) {
+    return uint256_t{};
+  }
+  size_t idx = static_cast<size_t>(static_cast<uint64_t>(distance)) - 1;
+  return blockContext.block_hashes[idx];
 }
 
+// --- TEE-packaging B1 (note/tee_core_packaging_plan.md): these 5 getters
+// used to call back into Go mid-execution (GetChainId/GetCrossChainSender/
+// GetCrossChainSourceId/GetBlobHash/GetBlobBaseFee). They now read straight
+// from blockContext, populated once by deploy/call/execute before the
+// interpreter starts — see block_context.h's doc comment on why. The old
+// //export Go functions still exist (pkg/mvm/mvm_api.go) but are no longer
+// called from here; left in place rather than deleted, since Go still
+// declares them and removing them is a separate, lower-value cleanup with
+// no correctness upside on its own.
+
 uint256_t MyGlobalState::get_chain_id() {
-  Value_return valueReturn = GetChainId();
-  uint256_t chainId = mvm::bytes_to_uint256(valueReturn.data_p);
-  return chainId;
+  return blockContext.chain_id;
 }
 
 std::vector<uint8_t> MyGlobalState::get_cross_chain_sender() {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
+  // Callers (cross_chain_precompile.cpp) require ABI-encoded address: 32
+  // bytes, 12 zero bytes then the 20-byte address — matches the pre-B1 Go
+  // callback's encoding exactly. blockContext.cross_chain_sender itself
+  // holds the plain 20-byte address (or is empty when inactive); the
+  // padding happens here, at the point of use, not in the context struct.
+  if (blockContext.cross_chain_sender.empty()) {
     return {};
   }
-  Value_return vr = GetCrossChainSender(currentMvmId);
-  if (!vr.success || vr.data_p == nullptr || vr.data_size <= 0) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return {};
-  }
-  std::vector<uint8_t> result(vr.data_p, vr.data_p + vr.data_size);
-  free(vr.data_p);
+  std::vector<uint8_t> result(32, 0);
+  size_t n = blockContext.cross_chain_sender.size();
+  size_t copyLen = n < 20 ? n : 20;
+  std::copy(blockContext.cross_chain_sender.begin(),
+            blockContext.cross_chain_sender.begin() + copyLen,
+            result.begin() + (32 - copyLen));
   return result;
 }
 
 std::vector<uint8_t> MyGlobalState::get_cross_chain_source_id() {
-  unsigned char *currentMvmId = blockContext.mvmId;
-  if (currentMvmId == nullptr) {
+  // Callers (cross_chain_precompile.cpp) require exactly 32 bytes,
+  // big-endian — matches the pre-B1 Go callback's uint256.Bytes32()
+  // encoding exactly (source_bin.size() == 32 is checked explicitly at the
+  // consuming end, so this length is load-bearing, not cosmetic).
+  if (blockContext.cross_chain_sender.empty()) {
     return {};
   }
-  Value_return vr = GetCrossChainSourceId(currentMvmId);
-  if (!vr.success || vr.data_p == nullptr || vr.data_size <= 0) {
-    if (vr.data_p != nullptr) free(vr.data_p);
-    return {};
+  std::vector<uint8_t> result(32, 0);
+  uint64_t sourceId = blockContext.cross_chain_source_id;
+  for (int i = 31; i >= 24; --i) {
+    result[i] = static_cast<uint8_t>(sourceId & 0xff);
+    sourceId >>= 8;
   }
-  std::vector<uint8_t> result(vr.data_p, vr.data_p + vr.data_size);
-  free(vr.data_p);
   return result;
+}
+
+uint256_t MyGlobalState::get_blob_hash(uint64_t index) {
+  // EIP-4844: an out-of-range index resolves to 0, same as "no blob context
+  // at all" — both are simply "index not found" here.
+  if (index >= blockContext.blob_versioned_hashes.size()) {
+    return uint256_t{};
+  }
+  return blockContext.blob_versioned_hashes[index];
+}
+
+uint256_t MyGlobalState::get_blob_base_fee() {
+  return blockContext.blob_base_fee;
 }
 
 void MyGlobalState::insert(const StateEntry &p) {
@@ -523,6 +570,70 @@ void MyGlobalState::clear_differences() {
     addresses_add_balance_change.clear();
     addresses_sub_balance_change.clear();
     addresses_nonce_change.clear();
+}
+
+// --- Journal support (see _Processor::StateJournal in processor.cpp) ---
+// These give the journal precise read/erase access to the diff-accumulator
+// maps above, so a reverted call frame can restore exactly the entry (or
+// absence of one) that existed before its own mutation, rather than only
+// being able to wipe every diff for the whole transaction at once (which is
+// all clear_differences() above offers).
+
+bool MyGlobalState::has_storage_change(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return false;
+    return it->second.find(key) != it->second.end();
+}
+
+uint256_t MyGlobalState::get_storage_change_value(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return 0;
+    auto it2 = it->second.find(key);
+    return it2 != it->second.end() ? it2->second : 0;
+}
+
+void MyGlobalState::erase_storage_change(const Address &addr, const uint256_t &key) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return;
+    it->second.erase(key);
+    if (it->second.empty()) addresses_storage_change.erase(it);
+}
+
+bool MyGlobalState::has_newly_deploy(const Address &addr) {
+    return addresses_newly_deploy.find(addr) != addresses_newly_deploy.end();
+}
+
+Code MyGlobalState::get_newly_deploy_value(const Address &addr) {
+    auto it = addresses_newly_deploy.find(addr);
+    return it != addresses_newly_deploy.end() ? it->second : Code{};
+}
+
+void MyGlobalState::erase_newly_deploy(const Address &addr) {
+    addresses_newly_deploy.erase(addr);
+}
+
+void MyGlobalState::undo_add_balance_change(const Address &addr, const uint256_t &amount) {
+    auto it = addresses_add_balance_change.find(addr);
+    if (it == addresses_add_balance_change.end()) return;
+    it->second -= amount;
+    if (it->second == 0) addresses_add_balance_change.erase(it);
+}
+
+std::map<uint256_t, uint256_t> MyGlobalState::snapshot_storage_change(const Address &addr) {
+    auto it = addresses_storage_change.find(addr);
+    if (it == addresses_storage_change.end()) return {};
+    return it->second;
+}
+
+void MyGlobalState::clear_storage_change(const Address &addr) {
+    addresses_storage_change.erase(addr);
+}
+
+void MyGlobalState::undo_sub_balance_change(const Address &addr, const uint256_t &amount) {
+    auto it = addresses_sub_balance_change.find(addr);
+    if (it == addresses_sub_balance_change.end()) return;
+    it->second -= amount;
+    if (it->second == 0) addresses_sub_balance_change.erase(it);
 }
 
 } // namespace mvm

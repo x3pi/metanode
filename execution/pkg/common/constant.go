@@ -46,6 +46,14 @@ const (
 	// 101 = CC_EXECUTE: đủ 2/3 vote, master sẽ execute CrossChainHandler
 	TX_TYPE_CC_SIG_ACK uint64 = 100
 	TX_TYPE_CC_EXECUTE uint64 = 101
+
+	// === EIP-4844 BLOB GAS MARKET ===
+	// Matches go-ethereum's params.BlobTxBlobGasPerBlob / Cancun BlobConfig.
+	// This chain has no hardfork-activation mechanism (see mvm's opcode.h),
+	// so these are fixed rather than schedule-dependent like upstream geth.
+	BLOB_GAS_PER_BLOB    uint64 = 131072 // 1 << 17
+	MAX_BLOBS_PER_TX            = 6
+	MAX_BLOBS_PER_BLOCK         = 6
 )
 
 var (

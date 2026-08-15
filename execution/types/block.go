@@ -47,6 +47,15 @@ type BlockHeader interface {
 	SetCommitIndex(uint64)
 	LogsBloom() []byte
 	SetLogsBloom([]byte)
+
+	// EIP-4844 blob-gas market. ExcessBlobGas is computed deterministically
+	// from the parent header (see consensus/misc/eip4844.CalcExcessBlobGas)
+	// — every node must recompute and compare it, never just trust an
+	// incoming value.
+	ExcessBlobGas() uint64
+	SetExcessBlobGas(uint64)
+	BlobGasUsed() uint64
+	SetBlobGasUsed(uint64)
 }
 
 type ConfirmedBlockData interface {

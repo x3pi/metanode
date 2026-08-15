@@ -52,9 +52,10 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 	case e_types.DynamicFeeTxType:
 		// Giả định FromEthEIP1559Tx đã được định nghĩa
 		return FromEthEIP1559Tx(ethTx, pTx) //
-	// Thêm các case cho BlobTxType (EIP-4844) nếu cần
-	// case types.BlobTxType:
-	//     return FromEthBlobTx(ethTx, pTx) // Bạn sẽ cần tự định nghĩa hàm này
+	case e_types.BlobTxType:
+		return FromEthBlobTx(ethTx, pTx)
+	case e_types.SetCodeTxType:
+		return FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
@@ -76,6 +77,10 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 		err = FromEthEIP2930Tx(ethTx, pTx)
 	case e_types.DynamicFeeTxType:
 		err = FromEthEIP1559Tx(ethTx, pTx)
+	case e_types.BlobTxType:
+		err = FromEthBlobTx(ethTx, pTx)
+	case e_types.SetCodeTxType:
+		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
 	}
@@ -227,6 +232,10 @@ func (t *Transaction) ToEthTransaction() *e_types.Transaction { // SỬA: Kiểu
 			innerDynamicFeeTx.S = big.NewInt(0)
 		}
 		return e_types.NewTx(innerDynamicFeeTx)
+	case e_types.BlobTxType: // EIP-4844
+		return ToEthBlobTx(tx)
+	case e_types.SetCodeTxType: // EIP-7702
+		return ToEthSetCodeTx(tx)
 	default:
 		return nil
 	}
@@ -776,6 +785,23 @@ func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
 
+// BlobVersionedHashes returns the EIP-4844 blob versioned hashes this tx commits
+// to. Empty for any non-blob transaction.
+func (t *Transaction) BlobVersionedHashes() [][]byte {
+	return t.proto.BlobVersionedHashes
+}
+
+// MaxFeePerBlobGas returns the EIP-4844 blob gas fee cap (0 for non-blob txs).
+func (t *Transaction) MaxFeePerBlobGas() *big.Int {
+	return big.NewInt(0).SetBytes(t.proto.MaxFeePerBlobGas)
+}
+
+// AuthorizationList returns the EIP-7702 authorization tuples this tx carries.
+// Empty for any non-SetCode transaction.
+func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
+	return t.proto.AuthorizationList
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
 
@@ -912,6 +938,11 @@ func DerivePublicKeyFromEthTransaction(tx *e_types.Transaction, chainID *big.Int
 			return nil, fmt.Errorf("EIP-4844 transaction is missing a valid chainID")
 		}
 		signer = e_types.NewCancunSigner(tx.ChainId())
+	case e_types.SetCodeTxType:
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return nil, fmt.Errorf("EIP-7702 transaction is missing a valid chainID")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
 	default:
 		return nil, fmt.Errorf("unsupported transaction type: %d", txType)
 	}
@@ -1024,6 +1055,12 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 		}
 		// CancunSigner or a specific BlobTxSigner
 		signer = e_types.NewCancunSigner(tx.ChainId())
+
+	case e_types.SetCodeTxType: // EIP-7702
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return common.Address{}, fmt.Errorf("EIP-7702 transaction is missing a valid chainID for sender recovery")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
 
 	default:
 		return common.Address{}, fmt.Errorf("unsupported transaction type: %d", txType)
@@ -1193,7 +1230,14 @@ func (t *Transaction) ValidOpenChannelToAccount(fromAccountState types.AccountSt
 }
 
 func (t *Transaction) ValidCallSmartContractToAccount(toAccountState types.AccountState) bool {
-	if t.IsCallContract() {
+	// EIP-7702: a SetCode tx's own top-level call can target the address it
+	// just delegated in the same tx — that address has no SmartContractState
+	// yet at admission time (the designator is only written during execution,
+	// see pkg/blockchain/tx_processor/authorization.go), so it would otherwise
+	// fail this check even though it's a legitimate "set + immediately call
+	// through it" pattern. Mirrors the equivalent carve-out in the main
+	// execution module's validation.go.
+	if t.IsCallContract() && t.proto.Type != uint64(e_types.SetCodeTxType) {
 		scState := toAccountState.SmartContractState()
 		return scState != nil
 	}

@@ -713,8 +713,13 @@ async fn test_flush_and_recovery() {
         .flat_map(|commit| commit.blocks())
         .collect::<BTreeSet<_>>();
 
-    // Flush commits from the dag state
-    dag_state.flush();
+    // Flush commits from the dag state — flush() hands back a ticket that resolves once
+    // the (spawn_blocking-backed) write actually lands; must be awaited before reading the
+    // store back below, or the read races the write. This was the source of this test's
+    // flakiness (passed when the blocking write happened to win the race, failed otherwise).
+    if let Some(rx) = dag_state.flush() {
+        rx.await.unwrap();
+    }
 
     // Verify the store has blocks up to round 12, and commits up to index 8.
     let store_blocks = store
@@ -1367,8 +1372,12 @@ async fn test_last_finalized_commit() {
         (commit_ref, rejected_transactions.clone())
     );
 
-    // WHEN flushing the DAG state
-    dag_state.flush();
+    // WHEN flushing the DAG state — flush() hands back a ticket that resolves once the
+    // (spawn_blocking-backed) write actually lands; must be awaited before reading the
+    // store back below, or the read races the write and sees nothing.
+    if let Some(rx) = dag_state.flush() {
+        rx.await.unwrap();
+    }
 
     // THEN the commit and rejected transactions should be written to storage
     let last_finalized_commit = store.read_last_finalized_commit().unwrap();

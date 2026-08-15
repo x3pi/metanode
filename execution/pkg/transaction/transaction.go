@@ -15,7 +15,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -68,9 +67,13 @@ func FromEthTransaction(ethTx *e_types.Transaction, pTx *pb.Transaction) error {
 	case e_types.DynamicFeeTxType:
 		// Giả định FromEthEIP1559Tx đã được định nghĩa
 		return FromEthEIP1559Tx(ethTx, pTx) //
-	// Thêm các case cho BlobTxType (EIP-4844) nếu cần
-	// case types.BlobTxType:
-	//     return FromEthBlobTx(ethTx, pTx) // Bạn sẽ cần tự định nghĩa hàm này
+	case e_types.BlobTxType:
+		if err := FromEthBlobTx(ethTx, pTx); err != nil {
+			return err
+		}
+		return VerifyBlobSidecar(pTx)
+	case e_types.SetCodeTxType:
+		return FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return errors.New("FromEthTransaction: loại giao dịch Ethereum không được hỗ trợ")
 	}
@@ -92,6 +95,12 @@ func NewTransactionFromEth(ethTx *e_types.Transaction) (types.Transaction, error
 		err = FromEthEIP2930Tx(ethTx, pTx)
 	case e_types.DynamicFeeTxType:
 		err = FromEthEIP1559Tx(ethTx, pTx)
+	case e_types.BlobTxType:
+		if err = FromEthBlobTx(ethTx, pTx); err == nil {
+			err = VerifyBlobSidecar(pTx)
+		}
+	case e_types.SetCodeTxType:
+		err = FromEthSetCodeTx(ethTx, pTx)
 	default:
 		return nil, errors.New("NewTransactionFromEth: unsupported Ethereum transaction type")
 	}
@@ -267,6 +276,13 @@ func (t *Transaction) ToEthTransaction() (ethTx *e_types.Transaction) { // SỬA
 			innerDynamicFeeTx.S = big.NewInt(0)
 		}
 		res = e_types.NewTx(innerDynamicFeeTx)
+
+	case e_types.BlobTxType: // EIP-4844
+		res = ToEthBlobTx(tx)
+
+	case e_types.SetCodeTxType: // EIP-7702
+		res = ToEthSetCodeTx(tx)
+
 	default:
 		return nil
 	}
@@ -296,17 +312,17 @@ func NewTransaction(
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, nonce)
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		Nonce:            nonceBytes,
-		ChainID:          chainId,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		Nonce:         nonceBytes,
+		ChainID:       chainId,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -328,16 +344,16 @@ func NewTransactionWithoutNonce(
 ) types.Transaction {
 
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		ChainID:          chainId,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		ChainID:       chainId,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -362,16 +378,16 @@ func NewTransactionOffChain(
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, nonce)
 	proto := &pb.Transaction{
-		FromAddress:      fromAddress.Bytes(),
-		ToAddress:        toAddress.Bytes(),
-		Amount:           amount.Bytes(),
-		MaxGas:           maxGas,
-		MaxGasPrice:      maxGasPrice,
-		MaxTimeUse:       maxTimeUse,
-		Data:             data,
-		LastDeviceKey:    lastDeviceKey.Bytes(),
-		NewDeviceKey:     newDeviceKey.Bytes(),
-		Nonce:            nonceBytes,
+		FromAddress:   fromAddress.Bytes(),
+		ToAddress:     toAddress.Bytes(),
+		Amount:        amount.Bytes(),
+		MaxGas:        maxGas,
+		MaxGasPrice:   maxGasPrice,
+		MaxTimeUse:    maxTimeUse,
+		Data:          data,
+		LastDeviceKey: lastDeviceKey.Bytes(),
+		NewDeviceKey:  newDeviceKey.Bytes(),
+		Nonce:         nonceBytes,
 	}
 	tx := &Transaction{
 		proto: proto,
@@ -681,6 +697,13 @@ func (t *Transaction) Hash() (hash common.Hash) {
 	hashPb.GasTipCap = t.proto.GasTipCap
 	hashPb.GasFeeCap = t.proto.GasFeeCap
 	hashPb.AccessList = t.proto.AccessList
+	hashPb.BlobVersionedHashes = t.proto.BlobVersionedHashes
+	hashPb.MaxFeePerBlobGas = t.proto.MaxFeePerBlobGas
+	hashPb.AuthorizationList = t.proto.AuthorizationList
+	// NOTE: t.proto.Sidecar is deliberately excluded — the tx only commits to
+	// BlobVersionedHashes above; the raw blob/commitment/proof data is network
+	// representation, verified separately via KZG, and can be pruned without
+	// changing this hash. See transaction.proto's comment on Transaction.Sidecar.
 
 	bufPtr := hashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -733,6 +756,13 @@ func (t *Transaction) RHash() common.Hash {
 	hashPb.GasTipCap = t.proto.GasTipCap
 	hashPb.GasFeeCap = t.proto.GasFeeCap
 	hashPb.AccessList = t.proto.AccessList
+	hashPb.BlobVersionedHashes = t.proto.BlobVersionedHashes
+	hashPb.MaxFeePerBlobGas = t.proto.MaxFeePerBlobGas
+	hashPb.AuthorizationList = t.proto.AuthorizationList
+	// NOTE: t.proto.Sidecar is deliberately excluded — the tx only commits to
+	// BlobVersionedHashes above; the raw blob/commitment/proof data is network
+	// representation, verified separately via KZG, and can be pruned without
+	// changing this hash. See transaction.proto's comment on Transaction.Sidecar.
 
 	bufPtr := hashBufferPool.Get().(*[]byte)
 	buf := (*bufPtr)[:0]
@@ -816,7 +846,6 @@ func (t *Transaction) Amount() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.Amount)
 }
 
-
 func (t *Transaction) UpdateDeriver(LastDeviceKey, NewDeviceKey common.Hash) {
 	t.proto.LastDeviceKey = LastDeviceKey.Bytes()
 	t.proto.NewDeviceKey = NewDeviceKey.Bytes()
@@ -847,17 +876,17 @@ func (t *Transaction) GetType() uint64 {
 
 func (t *Transaction) GetRelatedAddresses() []common.Address {
 	var relatedAddresses []common.Address
-	
+
 	// With optimistic execution, we only include the sender and receiver
 	// as base related addresses. Additional dependencies will be resolved dynamically.
 	fromAddr := t.FromAddress()
 	toAddr := t.ToAddress()
-	
+
 	relatedAddresses = append(relatedAddresses, fromAddr)
 	if toAddr != fromAddr {
 		relatedAddresses = append(relatedAddresses, toAddr)
 	}
-	
+
 	return relatedAddresses
 }
 
@@ -908,26 +937,62 @@ func (t *Transaction) GasTipCap() *big.Int {
 	return big.NewInt(0).SetBytes(t.proto.GasTipCap)
 }
 
+// BlobVersionedHashes returns the EIP-4844 blob versioned hashes this tx commits
+// to. Empty for any non-blob transaction.
+func (t *Transaction) BlobVersionedHashes() [][]byte {
+	return t.proto.BlobVersionedHashes
+}
+
+// MaxFeePerBlobGas returns the EIP-4844 blob gas fee cap (0 for non-blob txs).
+func (t *Transaction) MaxFeePerBlobGas() *big.Int {
+	return big.NewInt(0).SetBytes(t.proto.MaxFeePerBlobGas)
+}
+
+// AuthorizationList returns the EIP-7702 authorization tuples this tx carries.
+// Empty for any non-SetCode transaction.
+func (t *Transaction) AuthorizationList() []*pb.SetCodeAuthorization {
+	return t.proto.AuthorizationList
+}
+
+// EthAccessList returns the tx's EIP-2930 access list converted to
+// go-ethereum's representation. Empty for tx types that don't carry one.
+// Used for intrinsic-gas accounting (see vm_processor.computeIntrinsicGas).
+func (t *Transaction) EthAccessList() e_types.AccessList {
+	return toEthAccessList(t.proto.AccessList)
+}
+
+// EthAuthorizationList returns the tx's EIP-7702 authorization list
+// converted to go-ethereum's representation. Empty for any non-SetCode
+// transaction. Used for intrinsic-gas accounting (see
+// vm_processor.computeIntrinsicGas).
+func (t *Transaction) EthAuthorizationList() []e_types.SetCodeAuthorization {
+	return ToEthAuthorizationList(t.proto.AuthorizationList)
+}
+
 func (t *Transaction) MaxGasPrice() uint64 {
 	return t.proto.MaxGasPrice
 }
 
+// EffectiveGasPrice returns the price-per-gas-unit this tx actually pays for
+// EXECUTION gas (never blob gas, which is priced/charged separately — see
+// MaxFeePerBlobGas). Legacy/EIP-2930 carry a real flat MaxGasPrice; EIP-1559
+// and EIP-4844 (and any later fee-cap-based type) leave MaxGasPrice at 0 by
+// design and price via GasFeeCap instead (see FromEthEIP1559Tx/FromEthBlobTx).
+// This is the single place that dispatch lives — MaxFee(), ValidMaxGasPrice(),
+// and every fee-charging call site all go through this so a new tx type only
+// needs to be taught the rule once.
+func (t *Transaction) EffectiveGasPrice() *big.Int {
+	switch t.proto.Type {
+	case 0, 1: // Legacy, EIP-2930
+		return big.NewInt(0).SetUint64(t.proto.MaxGasPrice)
+	default: // EIP-1559, EIP-4844, and later fee-cap-based types
+		return t.GasFeeCap()
+	}
+}
+
 func (tx *Transaction) MaxFee() *big.Int {
 	maxGas := big.NewInt(0).SetUint64(tx.MaxGas())
-
-	switch tx.proto.Type {
-	case 0, 1: // Legacy or EIP-2930
-		price := big.NewInt(0).SetUint64(tx.MaxGasPrice())
-		return big.NewInt(0).Mul(maxGas, price)
-
-	case 2: // EIP-1559
-		feeCap := tx.GasFeeCap()
-		return big.NewInt(0).Mul(maxGas, feeCap)
-
-	default:
-		fmt.Println("Unknown transaction type.")
-		return big.NewInt(0)
-	}
+	return new(big.Int).Mul(maxGas, tx.EffectiveGasPrice())
 }
 
 func (t *Transaction) MaxTimeUse() uint64 {
@@ -1031,6 +1096,11 @@ func DerivePublicKeyFromEthTransaction(tx *e_types.Transaction, chainID *big.Int
 			return nil, fmt.Errorf("EIP-4844 transaction is missing a valid chainID")
 		}
 		signer = e_types.NewCancunSigner(tx.ChainId())
+	case e_types.SetCodeTxType:
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return nil, fmt.Errorf("EIP-7702 transaction is missing a valid chainID")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
 	default:
 		return nil, fmt.Errorf("unsupported transaction type: %d", txType)
 	}
@@ -1135,6 +1205,12 @@ func DeriveSenderFromEthTransaction(tx *e_types.Transaction, chainID *big.Int) (
 		// CancunSigner or a specific BlobTxSigner
 		signer = e_types.NewCancunSigner(tx.ChainId())
 
+	case e_types.SetCodeTxType: // EIP-7702
+		if tx.ChainId() == nil || tx.ChainId().Sign() <= 0 {
+			return common.Address{}, fmt.Errorf("EIP-7702 transaction is missing a valid chainID for sender recovery")
+		}
+		signer = e_types.NewPragueSigner(tx.ChainId())
+
 	default:
 		return common.Address{}, fmt.Errorf("unsupported transaction type: %d", txType)
 	}
@@ -1159,57 +1235,8 @@ func (t *Transaction) ValidChainID(chainId uint64) bool {
 	return t.GetChainID() == chainId
 }
 
-func (t *Transaction) ValidNonce(fromAccountState types.AccountState) bool {
-	return t.GetNonce() == fromAccountState.Nonce()
-}
-
 func (t *Transaction) ValidMinTimeUse() bool {
 	return t.MaxTimeUse() >= p_common.MIN_TX_TIME && t.MaxTimeUse() <= p_common.MAX_GROUP_TIME
-}
-
-func (t *Transaction) ValidTx0(fromAccountState types.AccountState, chainId string) (bool, int64) {
-	if t.GetNonce() == 0 && len(fromAccountState.PublicKeyBls()) == 0 {
-		dataInput := t.CallData().Input()
-
-		if len(dataInput) != 113 {
-			return false, InvalidDataInputLengthForTx0.Code
-		}
-
-		message := append(append([]byte{}, dataInput[:48]...), []byte(chainId)...)
-		hash := crypto.Keccak256(message)
-
-		valid := bls.VerifySign(
-			p_common.PubkeyFromBytes(dataInput[:48]),
-			t.Sign(),
-			t.Hash().Bytes(),
-		)
-		if !valid {
-			return false, InvalidBLSSignatureForTx0.Code
-		}
-
-		pb, err := secp256k1.RecoverPubkey(hash, dataInput[48:])
-		if err != nil {
-			return false, FailedToRecoverPubkeyForTx0.Code
-		}
-
-		var addr common.Address
-		copy(addr[:], crypto.Keccak256(pb[1:])[12:])
-
-		if t.FromAddress() == t.ToAddress() && addr == t.FromAddress() {
-			return true, 0
-		} else {
-			return false, InvalidAddressMatchForTx0.Code
-		}
-	} else if t.GetNonce() == 0 && len(fromAccountState.PublicKeyBls()) != 0 {
-		return false, NonceZeroButPublicKeyNotEmpty.Code
-	}
-
-	return true, 0
-}
-
-func (t *Transaction) ValidDeviceKey(fromAccountState types.AccountState) bool {
-	return fromAccountState.DeviceKey() == common.Hash{} || // skip check device key if account state doesn't have device key
-		crypto.Keccak256Hash(t.LastDeviceKey().Bytes()) == fromAccountState.DeviceKey()
 }
 
 func (t *Transaction) ValidMaxGas() bool {
@@ -1222,7 +1249,8 @@ func (t *Transaction) ValidMaxGasPrice(currentGasPrice uint64) bool {
 		// skip check gas price for native smart contract
 		return true
 	}
-	return t.MaxGasPrice() >= currentGasPrice
+
+	return t.EffectiveGasPrice().Cmp(new(big.Int).SetUint64(currentGasPrice)) >= 0
 }
 
 func (t *Transaction) ValidAmountSpend(
@@ -1255,16 +1283,6 @@ func (t *Transaction) ValidPendingUse(fromAccountState types.AccountState) bool 
 	return pendingUse.Cmp(pendingBalance) <= 0
 }
 
-func (t *Transaction) ValidDeploySmartContractToAccount(fromAccountState types.AccountState) bool {
-
-	validToAddress := crypto.CreateAddress(fromAccountState.Address(), fromAccountState.Nonce())
-
-	if validToAddress != t.ToAddress() {
-		logger.Warn("Not match deploy address", validToAddress, t.ToAddress())
-	}
-	return validToAddress == t.ToAddress()
-}
-
 func (t *Transaction) ValidDeployData() bool {
 	if t.IsDeployContract() {
 		if t.DeployData() == nil || len(t.DeployData().Code()) == 0 {
@@ -1282,30 +1300,6 @@ func (t *Transaction) ValidCallData() bool {
 			logger.Warn("Deploy data is nil")
 			return false
 		}
-	}
-	return true
-}
-
-func (t *Transaction) ValidOpenChannelToAccount(fromAccountState types.AccountState) bool {
-	// validToAddress := common.BytesToAddress(
-	// 	crypto.Keccak256(
-	// 		append(
-	// 			fromAccountState.Address().Bytes(),
-	// 			fromAccountState.LastHash().Bytes()...),
-	// 	)[12:],
-	// )
-	validToAddress := crypto.CreateAddress(fromAccountState.Address(), fromAccountState.Nonce())
-
-	if validToAddress != t.ToAddress() {
-		logger.Warn("Not match open channel address", validToAddress, t.ToAddress())
-	}
-	return validToAddress == t.ToAddress()
-}
-
-func (t *Transaction) ValidCallSmartContractToAccount(toAccountState types.AccountState) bool {
-	if t.IsCallContract() {
-		scState := toAccountState.SmartContractState()
-		return scState != nil
 	}
 	return true
 }
@@ -1365,19 +1359,19 @@ func UnmarshalTransactionsWithBlockNumber(b []byte) ([]types.Transaction, uint64
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	// Tạo một map để lưu trữ dữ liệu của transaction
 	data := map[string]interface{}{
-		"Hash":             hex.EncodeToString(t.Hash().Bytes()),
-		"FromAddress":      hex.EncodeToString(t.proto.FromAddress),
-		"ToAddress":        hex.EncodeToString(t.proto.ToAddress),
-		"Amount":           hex.EncodeToString(t.proto.Amount),
-		"MaxGas":           t.proto.MaxGas,
-		"MaxGasPrice":      t.proto.MaxGasPrice,
-		"MaxTimeUse":       t.proto.MaxTimeUse,
-		"Data":             hex.EncodeToString(t.proto.Data),
-		"LastDeviceKey":    hex.EncodeToString(t.proto.LastDeviceKey),
-		"NewDeviceKey":     hex.EncodeToString(t.proto.NewDeviceKey),
-		"Nonce":            t.GetNonce(),
-		"Sign":             hex.EncodeToString(t.proto.Sign),
-		"ReadOnly":         t.GetReadOnly(),
+		"Hash":          hex.EncodeToString(t.Hash().Bytes()),
+		"FromAddress":   hex.EncodeToString(t.proto.FromAddress),
+		"ToAddress":     hex.EncodeToString(t.proto.ToAddress),
+		"Amount":        hex.EncodeToString(t.proto.Amount),
+		"MaxGas":        t.proto.MaxGas,
+		"MaxGasPrice":   t.proto.MaxGasPrice,
+		"MaxTimeUse":    t.proto.MaxTimeUse,
+		"Data":          hex.EncodeToString(t.proto.Data),
+		"LastDeviceKey": hex.EncodeToString(t.proto.LastDeviceKey),
+		"NewDeviceKey":  hex.EncodeToString(t.proto.NewDeviceKey),
+		"Nonce":         t.GetNonce(),
+		"Sign":          hex.EncodeToString(t.proto.Sign),
+		"ReadOnly":      t.GetReadOnly(),
 	}
 
 	// Chuyển đổi map thành JSON

@@ -35,11 +35,20 @@ namespace mvm
   {
     virtual ~LogHandler() = default;
     virtual void handle(LogEntry&&) = 0;
+
+    // Journal support (see _Processor::StateJournal in processor.cpp):
+    // checkpoint() returns a mark before a LOG opcode is handled; rollback(m)
+    // discards every log handled since that mark, in order, if the call
+    // frame that emitted them ends up reverting.
+    virtual size_t checkpoint() = 0;
+    virtual void rollback(size_t mark) = 0;
   };
 
   struct NullLogHandler : public LogHandler
   {
     virtual void handle(LogEntry&&) override {}
+    virtual size_t checkpoint() override { return 0; }
+    virtual void rollback(size_t) override {}
   };
 
   struct VectorLogHandler : public LogHandler
@@ -50,6 +59,12 @@ namespace mvm
     virtual void handle(LogEntry&& e) override
     {
       logs.emplace_back(e);
+    }
+    virtual size_t checkpoint() override { return logs.size(); }
+    virtual void rollback(size_t mark) override
+    {
+      if (mark < logs.size())
+        logs.resize(mark);
     }
   };
 }

@@ -169,7 +169,7 @@ func (api *MtnAPI) GetExecuteSCResultsHash(ctx context.Context, blockNumber hexu
 			Tx:      tx,
 		})
 	}
-	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items, chainState.HasCode)
 
 	// 7. Process transactions using ProcessTransactionsRemote
 	processResult, err := tx_processor.ProcessTransactionsRemote(ctx, chainState, groupedGroups, true, false, uint64(time.Now().Unix()), blockData.Header().LeaderAddress(), uint64(blockNumber), true)

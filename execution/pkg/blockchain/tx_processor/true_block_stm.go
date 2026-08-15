@@ -78,6 +78,26 @@ type TrueBlockSTM struct {
 	// maxExecWorkers caps how many TXs execute concurrently, when > 0.
 	// See WithMaxExecWorkers.
 	maxExecWorkers int
+
+	// blobBudgetRejected holds tx hashes computeBlobBudgetRejections() decided
+	// exceed the block's per-block blob-gas budget (see WithBlobBudgetRejected).
+	// nil (the zero value, used by every test constructing a TrueBlockSTM
+	// directly) means no rejections — every blob tx is treated as in-budget,
+	// matching pre-cap behavior.
+	blobBudgetRejected map[common.Hash]struct{}
+}
+
+// WithBlobBudgetRejected sets the precomputed per-block blob-gas budget
+// rejection set (see computeBlobBudgetRejections) execOne() consults via
+// blobFeeOrReject. Must be computed from the FULL block's tx order (spanning
+// both this engine's txs and any native-fast-path txs processed alongside it
+// in the same block) — a TrueBlockSTM only sees its own EVM-routed subset,
+// which on its own isn't enough to enforce a block-wide budget correctly.
+// Call before Process(); not setting this at all (nil) means no cap is
+// enforced by this instance.
+func (stm *TrueBlockSTM) WithBlobBudgetRejected(rejected map[common.Hash]struct{}) *TrueBlockSTM {
+	stm.blobBudgetRejected = rejected
+	return stm
 }
 
 // WithMaxExecWorkers caps concurrent TX execution at n (validation stays
@@ -193,7 +213,7 @@ func (stm *TrueBlockSTM) Process(
 		if stm.receipts[i] != nil {
 			gasUsed := stm.receipts[i].GasUsed()
 			if gasUsed > 0 {
-				gasFee := new(big.Int).SetUint64(gasUsed * stm.txs[i].MaxGasPrice())
+				gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), stm.txs[i].EffectiveGasPrice())
 				totalGasFee.Add(totalGasFee, gasFee)
 			}
 		}
@@ -456,6 +476,12 @@ func (stm *TrueBlockSTM) execOne(
 	// 2. Initialize MVCC Wrapper
 	mvccDB := mvcc.NewMVCCAccountStateDB(chainState.GetAccountStateDB(), stm.accountMap, mvcc.Version(txIndex))
 	scDB := mvcc.NewMVCCSmartContractDB(chainState.GetSmartContractDB(), stm.storageMap, mvcc.Version(txIndex))
+	// EIP-7702: lets scDB.Code() see a delegation designator this same tx just
+	// wrote via processAuthorizationList before the account's codeHash is
+	// flushed to the real global AccountStateDB (see MVCCSmartContractDB.Code's
+	// doc) — needed for the "set delegation then immediately call through it"
+	// pattern in a single transaction.
+	scDB.SetAccountStateDB(mvccDB)
 
 	// 3. Thực thi Transaction theo từng loại (native, account-setting, hoặc EVM)
 	tx := stm.txs[txIndex]
@@ -538,7 +564,7 @@ func (stm *TrueBlockSTM) execOne(
 			rcp = receipt.NewReceipt(
 				tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 				pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-				mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+				tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 			)
 		} else {
 			selector := dataInput[:4]
@@ -551,14 +577,14 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else if fromAccount != nil && len(fromAccount.PublicKeyBls()) != 0 {
 					logger.Warn("PublicKeyBls already exists for %s, skipping tx %s", fromAddr.Hex(), tx.Hash().Hex())
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("PublicKeyBls already exists"), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else {
 					if setErr := fromAccount.SetPublicKeyBls(plk); setErr != nil {
@@ -566,7 +592,7 @@ func (stm *TrueBlockSTM) execOne(
 						rcp = receipt.NewReceipt(
 							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 							pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(setErr.Error()), pb.EXCEPTION_NONE,
-							mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+							tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 						)
 					} else {
 						mvccDB.PlusOneNonce(fromAddr)
@@ -581,7 +607,7 @@ func (stm *TrueBlockSTM) execOne(
 						rcp = receipt.NewReceipt(
 							tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 							pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-							mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+							tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 							[]types.EventLog{}, 0, common.Hash{}, 0,
 						)
 					}
@@ -593,7 +619,7 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+						tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				} else {
 					fromAccount.SetAccountType(acType)
@@ -606,7 +632,7 @@ func (stm *TrueBlockSTM) execOne(
 					rcp = receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+						tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 						[]types.EventLog{}, 0, common.Hash{}, 0,
 					)
 				}
@@ -615,7 +641,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte("unknown account setting or invalid nonce"), pb.EXCEPTION_NONE,
-					mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+					tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
 		}
@@ -638,24 +664,64 @@ func (stm *TrueBlockSTM) execOne(
 		vmP.SetAccountStateDB(mvccDB)
 		vmP.SetSmartContractDB(scDB)
 
+		// EIP-7702: apply authorization-list delegation designators before
+		// running the tx's own call, so a SetCode tx whose top-level call
+		// target is the address it just delegated (the "set + immediately
+		// call through it" pattern EIP-7702 sponsored-execution relies on)
+		// sees the new code. Writes go to mvccDB (nonce/codeHash — MVCC
+		// tracked, rolls back with the rest of the tx on abort) and to the
+		// real global SmartContractDB directly (code bytes are
+		// content-addressed by codeHash, so writing them outside the MVCC
+		// layer is always safe/idempotent — see processAuthorizationList's
+		// doc). authGasUsed is folded into gasUsed/gasFee below in both the
+		// native-transfer and smart-contract branches, exactly like any
+		// other execution gas (unlike blob gas it is NOT burned — the leader
+		// reward is re-derived later from receipt.GasUsed(), so it must be
+		// counted there for the leader to actually be paid for it).
+		// Guarded on AuthorizationList being non-empty (rather than always
+		// calling processAuthorizationList, which no-ops on an empty list
+		// anyway) so the overwhelming majority of non-SetCode txs skip
+		// touching chainState.GetConfig() entirely on this hot path.
+		var authGasUsed uint64
+		if len(tx.AuthorizationList()) > 0 {
+			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+		}
+
 		if tx.IsRegularTransaction() {
 			// Native Transfer
-			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(mt_common.TRANSFER_GAS_COST), new(big.Int).SetUint64(tx.MaxGasPrice()))
-			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
+			totalGasUsed := mt_common.TRANSFER_GAS_COST + authGasUsed
+			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
 
-			errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
-			
+			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
+			// reward, unlike gasFee above) — see blobFeeOrReject's doc. blobErr
+			// (underpriced MaxFeePerBlobGas) gets the exact same
+			// reject-but-still-advance-nonce treatment as insufficient balance
+			// below, since by the time we're here the tx already consumed a nonce
+			// slot from the sender's perspective.
+			blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime), stm.blobBudgetRejected)
+			totalCost := new(big.Int).Add(tx.Amount(), gasFee)
+			if blobErr == nil {
+				totalCost.Add(totalCost, blobFee)
+			}
+
+			var errSub error
+			if blobErr != nil {
+				errSub = blobErr
+			} else {
+				errSub = mvccDB.SubTotalBalance(tx.FromAddress(), totalCost)
+			}
+
 			// Always update nonce and state hashes even if balance deduction fails (prevents infinite replay)
 			mvccDB.PlusOneNonce(tx.FromAddress())
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
-			
+
 			if errSub != nil {
 				// Revert Native Transfer
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(errSub.Error()), pb.EXCEPTION_NONE,
-					mt_common.TRANSFER_GAS_COST, 0,
+					tx.EffectiveGasPrice().Uint64(), 0,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
@@ -665,7 +731,7 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), tx.ToAddress(), tx.Amount(),
 					pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-					mt_common.TRANSFER_GAS_COST, mt_common.TRANSFER_GAS_COST,
+					tx.EffectiveGasPrice().Uint64(), totalGasUsed,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
@@ -706,13 +772,13 @@ func (stm *TrueBlockSTM) execOne(
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					pb.RECEIPT_STATUS_TRANSACTION_ERROR, []byte(err.Error()), pb.EXCEPTION_NONE,
-					mt_common.MINIMUM_BASE_FEE, 0, []types.EventLog{}, 0, common.Hash{}, 0,
+					tx.EffectiveGasPrice().Uint64(), 0, []types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			} else {
 				rcp = receipt.NewReceipt(
 					tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 					exRs.ReceiptStatus(), nil, exRs.Exception(),
-					mt_common.MINIMUM_BASE_FEE, mt_common.TRANSFER_GAS_COST,
+					tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
 					[]types.EventLog{}, 0, common.Hash{}, 0,
 				)
 			}
@@ -722,21 +788,40 @@ func (stm *TrueBlockSTM) execOne(
 					receiptStatus := exRs.ReceiptStatus()
 					ret := exRs.Return()
 					exception := exRs.Exception()
-					gasUsed := exRs.GasUsed()
+					// authGasUsed (EIP-7702 authorization-list intrinsic cost, see
+					// above) is folded in here so it's charged and credited to the
+					// leader identically to the VM's own gas usage.
+					gasUsed := exRs.GasUsed() + authGasUsed
 					eventLogs := exRs.EventLogs()
 
 					// [FIX] Deduct Gas Fee from sender's balance
-					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), new(big.Int).SetUint64(tx.MaxGasPrice()))
+					gasFee := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), tx.EffectiveGasPrice())
 					canPayGas := true
-					if gasFee.Cmp(big.NewInt(0)) > 0 {
-						errSub := mvccDB.SubTotalBalance(tx.FromAddress(), gasFee)
-						if errSub != nil {
-							canPayGas = false
-							receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
-							ret = []byte("insufficient balance for gas")
-							exception = pb.EXCEPTION_NONE
-							eventLogs = nil
-							gasUsed = 0
+
+					// EIP-4844: blob fee is burned — charged alongside gasFee in the same
+					// balance deduction, but (unlike gasFee) never enters the leader-reward
+					// totalGasFee computation later, which only re-derives from
+					// receipt.GasUsed() * EffectiveGasPrice(). See blobFeeOrReject's doc.
+					blobFee, blobErr := blobFeeOrReject(tx, blockBlobBaseFee(lastBlockHeader, blockTime), stm.blobBudgetRejected)
+					if blobErr != nil {
+						canPayGas = false
+						receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+						ret = []byte(blobErr.Error())
+						exception = pb.EXCEPTION_NONE
+						eventLogs = nil
+						gasUsed = 0
+					} else {
+						totalFee := new(big.Int).Add(gasFee, blobFee)
+						if totalFee.Cmp(big.NewInt(0)) > 0 {
+							errSub := mvccDB.SubTotalBalance(tx.FromAddress(), totalFee)
+							if errSub != nil {
+								canPayGas = false
+								receiptStatus = pb.RECEIPT_STATUS_TRANSACTION_ERROR
+								ret = []byte("insufficient balance for gas")
+								exception = pb.EXCEPTION_NONE
+								eventLogs = nil
+								gasUsed = 0
+							}
 						}
 					}
 

@@ -902,19 +902,26 @@ mod tests {
                 context.protocol_config.max_transactions_in_block_bytes()
             );
 
-            // first batch should contain all transactions from 0..10. The softbundle it is to big to fit as well, so it's parked.
+            // `next()`'s packing (see handle_txs() above) is greedy per-transaction, not
+            // atomic per-submit_no_wait()-call: a multi-tx submission can be split across
+            // batches, with as many of its transactions as fit going into the current one
+            // and the rest carried over as `pending_transactions`. So the 5-tx bundle
+            // (10..15) isn't parked as a whole once it doesn't fully fit after 0..10 —
+            // transactions 10-13 (4 more, 56 bytes) still fit under the 200-byte limit
+            // (140 + 56 = 196), only transaction 14 doesn't and gets carried over.
             if batch_index == 0 {
-                assert_eq!(transactions.len(), 10);
+                assert_eq!(transactions.len(), 14);
                 for (i, transaction) in transactions.iter().enumerate() {
                     let t: String = bcs::from_bytes(transaction.data()).unwrap();
                     assert_eq!(format!("transaction {}", i).to_string(), t);
                 }
-            // second batch will contain the soft bundle and the additional last transaction.
+            // second batch contains the carried-over end of the bundle (transaction 14)
+            // and the additional individually-submitted transaction 15.
             } else if batch_index == 1 {
-                assert_eq!(transactions.len(), 6);
+                assert_eq!(transactions.len(), 2);
                 for (i, transaction) in transactions.iter().enumerate() {
                     let t: String = bcs::from_bytes(transaction.data()).unwrap();
-                    assert_eq!(format!("transaction {}", i + 10).to_string(), t);
+                    assert_eq!(format!("transaction {}", i + 14).to_string(), t);
                 }
             } else {
                 panic!("Unexpected batch index");

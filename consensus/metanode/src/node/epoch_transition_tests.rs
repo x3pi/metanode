@@ -767,7 +767,7 @@ fn test_committee_source_create_executor_client() {
         peer_rpc_addresses: vec!["10.0.0.1:8080".to_string()],
     };
 
-    let client = source.create_executor_client("/tmp/test_send.sock");
+    let client = source.create_executor_client();
     // Client is created successfully (Arc<ExecutorClient>)
     // ExecutorClient::new passes enabled=true by default
     assert!(client.is_enabled());

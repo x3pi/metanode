@@ -96,7 +96,16 @@ func (db *SmartContractDB) Code(address common.Address) []byte {
 		logger.Error("Error getting account state")
 		return nil
 	}
-	codeHash := account.SmartContractState().CodeHash()
+	// A plain EOA (the common case — most addresses passed here are not
+	// contracts or EIP-7702-delegated accounts) has no SmartContractState at
+	// all; every other call site in this codebase checks this first
+	// (authorization.go, vm_processor_state.go, rpc_state.go's GetCode), this
+	// one didn't. Nil code is the correct answer for an EOA anyway.
+	scState := account.SmartContractState()
+	if scState == nil {
+		return nil
+	}
+	codeHash := scState.CodeHash()
 	code, err := db.codeStorage.Get(codeHash.Bytes())
 	if err != nil {
 		logger.Error("Error getting code from storage")
@@ -105,7 +114,17 @@ func (db *SmartContractDB) Code(address common.Address) []byte {
 	return code
 }
 
+// GetCodeByCodeHash reads content-addressed code. Checks pendingCode first:
+// Commit() only flushes pendingCode into codeStorage once per block (see
+// block_processor_commit.go), so code written earlier in the SAME block
+// (e.g. an EIP-7702 delegation designator written by
+// processAuthorizationList, read back via MVCCSmartContractDB.Code for the
+// "set delegation then immediately call through it" pattern) would otherwise
+// be invisible until the next block.
 func (db *SmartContractDB) GetCodeByCodeHash(address common.Address, codeHash common.Hash) []byte {
+	if v, ok := db.pendingCode.Load(codeHash); ok {
+		return v.([]byte)
+	}
 	code, err := db.codeStorage.Get(codeHash.Bytes())
 	if err != nil {
 		logger.Error("Error getting code from storage")

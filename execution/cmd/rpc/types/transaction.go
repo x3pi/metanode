@@ -45,6 +45,10 @@ type Transaction interface {
 	GetChainID() uint64
 	ClearCacheHash()
 	ToEthTransaction() *e_types.Transaction
+	// EIP-4844/EIP-7702: empty/zero for any tx type that doesn't carry them.
+	BlobVersionedHashes() [][]byte
+	MaxFeePerBlobGas() *big.Int
+	AuthorizationList() []*pb.SetCodeAuthorization
 
 	ValidEthSign() bool
 	GetIsDebug() bool

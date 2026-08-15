@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -12,6 +13,7 @@ import (
 	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -47,8 +49,8 @@ func MarshalBlockToMap(block mt_types.Block, fullTx bool, fetchTx func(common.Ha
 	blockMap["nonce"] = "0x0000000000000000"                                 // Nonce của khối
 	blockMap["baseFeePerGas"] = hexutil.EncodeUint64(0)                      // Phí cơ bản trên mỗi gas (EIP-1559)
 	blockMap["withdrawalsRoot"] = trie.EmptyRootHash                         // Root của Merkle Patricia Trie chứa các giao dịch rút tiền (EIP-3675)
-	blockMap["blobGasUsed"] = hexutil.EncodeUint64(0)                        // Gas đã sử dụng cho blobs (EIP-4844)
-	blockMap["excessBlobGas"] = hexutil.EncodeUint64(0)                      // Gas dư thừa cho blobs (EIP-4844)
+	blockMap["blobGasUsed"] = hexutil.EncodeUint64(block.Header().BlobGasUsed())     // Gas đã sử dụng cho blobs (EIP-4844)
+	blockMap["excessBlobGas"] = hexutil.EncodeUint64(block.Header().ExcessBlobGas()) // Gas dư thừa cho blobs (EIP-4844)
 	blockMap["parentBeaconBlockRoot"] = common.Hash{}                        // Root của khối beacon cha (trong trường hợp sharding)
 	blockMap["totalDifficulty"] = hexutil.EncodeUint64(0)                    // Tổng độ khó của chuỗi cho đến khối này
 
@@ -415,8 +417,6 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 	if tx == nil {
 		return nil, nil
 	}
-	v, r, s := tx.RawSignatureValues()
-
 	txIndexVal := uint64(index)
 	ethHash := tx.Hash()
 	if ethTx := tx.ToEthTransaction(); ethTx != nil {
@@ -424,30 +424,7 @@ func (api *MetaAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blo
 			ethHash = h
 		}
 	}
-	return &RPCTransaction{
-		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
-		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
-		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
-		GasFeeCap:           nil,
-		GasTipCap:           nil,
-		MaxFeePerBlobGas:    nil,
-		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
-		Nonce:               hexutil.Uint64(tx.GetNonce()),
-		To:                  (*common.Address)(tx.ToAddress().Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
-		Value:               (*hexutil.Big)(tx.Amount()),
-		Type:                hexutil.Uint64(0),
-		Accesses:            nil,
-		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())), // Chuyển đổi uint64 thành *hexutil.Big
-		BlobVersionedHashes: nil,
-		V:                   (*hexutil.Big)(v),
-		R:                   (*hexutil.Big)(r),
-		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
-	}, nil
+	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
@@ -481,8 +458,6 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 	if tx == nil {
 		return nil, nil
 	}
-	v, r, s := tx.RawSignatureValues()
-
 	txIndexVal := uint64(index)
 	ethHash := tx.Hash()
 	if ethTx := tx.ToEthTransaction(); ethTx != nil {
@@ -490,30 +465,7 @@ func (api *MetaAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, block
 			ethHash = h
 		}
 	}
-	return &RPCTransaction{
-		BlockHash:           (*common.Hash)(blockData.Header().Hash().Bytes()),
-		BlockNumber:         (*hexutil.Big)(new(big.Int).SetUint64(blockData.Header().BlockNumber())),
-		From:                tx.FromAddress(),
-		Gas:                 hexutil.Uint64(tx.MaxGas()),
-		GasPrice:            (*hexutil.Big)(new(big.Int).SetUint64(tx.MaxGasPrice())),
-		GasFeeCap:           nil,
-		GasTipCap:           nil,
-		MaxFeePerBlobGas:    nil,
-		Hash:                ethHash,
-		Input:               tx.CallData().Input(),
-		Nonce:               hexutil.Uint64(tx.GetNonce()),
-		To:                  (*common.Address)(tx.ToAddress().Bytes()),
-		TransactionIndex:    (*hexutil.Uint64)(&txIndexVal),
-		Value:               (*hexutil.Big)(tx.Amount()),
-		Type:                hexutil.Uint64(0),
-		Accesses:            nil,
-		ChainID:             (*hexutil.Big)(new(big.Int).SetUint64(tx.GetChainID())),
-		BlobVersionedHashes: nil,
-		V:                   (*hexutil.Big)(v),
-		R:                   (*hexutil.Big)(r),
-		S:                   (*hexutil.Big)(s),
-		YParity:             nil,
-	}, nil
+	return newCommittedRPCTransaction(tx, blockData.Header().Hash(), blockData.Header().BlockNumber(), txIndexVal, ethHash), nil
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
@@ -771,55 +723,99 @@ type feeHistoryResult struct {
 	BlobGasUsedRatio []float64        `json:"blobGasUsedRatio,omitempty"`
 }
 
-// Giả sử bạn có một hàm để lấy số khối từ lastBlock
-func getOldestBlock(ctx context.Context, lastBlock rpc.BlockNumber) *big.Int {
-
-	// Đây chỉ là một trình giữ chỗ. Bạn cần thay thế nó bằng logic thực tế
-	// để lấy số khối từ lastBlock. Điều này có thể liên quan đến việc truy vấn
-	// một cơ sở dữ liệu hoặc sử dụng một số API khác.
-	// Ví dụ: nếu lastBlock là "latest", bạn có thể truy vấn số khối mới nhất.
-	// Nếu lastBlock là một số cụ thể, bạn có thể sử dụng số đó.
-	// Ở đây, chúng ta chỉ trả về một giá trị được mã hóa cứng.
-	return big.NewInt(lastBlock.Int64())
-}
-
-// FeeHistory returns the fee market history.
+// FeeHistory returns the fee market history. This chain has no EIP-1559
+// dynamic base-fee adjustment (see MarshalBlockToMap's hardcoded
+// baseFeePerGas=0 and the flat mt_common.MINIMUM_BASE_FEE gate used for
+// pricing validation elsewhere) — baseFeePerGas is reported flat, but
+// gasUsedRatio, blob fields, and reward percentiles are all computed from
+// real per-block data instead of the placeholder values this used to
+// return.
 func (api *MetaAPI) FeeHistory(ctx context.Context, blockCount math.HexOrDecimal64, lastBlock rpc.BlockNumber, rewardPercentiles []float64) (*feeHistoryResult, error) {
-	oldestBlock := getOldestBlock(ctx, api.convertBlockNumber(lastBlock.Int64()))
+	lastBlockNum := uint64(api.convertBlockNumber(lastBlock.Int64()))
+	count := uint64(blockCount)
+	if count == 0 {
+		return nil, fmt.Errorf("blockCount must be > 0")
+	}
+	if count > lastBlockNum+1 {
+		count = lastBlockNum + 1
+	}
+	oldestBlockNum := lastBlockNum - count + 1
+	wantRewards := len(rewardPercentiles) > 0
 
-	// Tạo một phiên bản của feeHistoryResult
 	result := &feeHistoryResult{
-		OldestBlock: (*hexutil.Big)(oldestBlock),
-		Reward: [][]*hexutil.Big{
-			{(*hexutil.Big)(new(big.Int).SetInt64(1)), (*hexutil.Big)(new(big.Int).SetInt64(2)), (*hexutil.Big)(new(big.Int).SetInt64(3))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(4)), (*hexutil.Big)(new(big.Int).SetInt64(5)), (*hexutil.Big)(new(big.Int).SetInt64(6))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(7)), (*hexutil.Big)(new(big.Int).SetInt64(8)), (*hexutil.Big)(new(big.Int).SetInt64(9))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(10)), (*hexutil.Big)(new(big.Int).SetInt64(11)), (*hexutil.Big)(new(big.Int).SetInt64(12))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(13)), (*hexutil.Big)(new(big.Int).SetInt64(14)), (*hexutil.Big)(new(big.Int).SetInt64(15))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(16)), (*hexutil.Big)(new(big.Int).SetInt64(17)), (*hexutil.Big)(new(big.Int).SetInt64(18))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(19)), (*hexutil.Big)(new(big.Int).SetInt64(20)), (*hexutil.Big)(new(big.Int).SetInt64(21))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(22)), (*hexutil.Big)(new(big.Int).SetInt64(23)), (*hexutil.Big)(new(big.Int).SetInt64(24))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(25)), (*hexutil.Big)(new(big.Int).SetInt64(26)), (*hexutil.Big)(new(big.Int).SetInt64(27))},
-			{(*hexutil.Big)(new(big.Int).SetInt64(28)), (*hexutil.Big)(new(big.Int).SetInt64(29)), (*hexutil.Big)(new(big.Int).SetInt64(30))},
-		},
-		BaseFee: []*hexutil.Big{
-			(*hexutil.Big)(new(big.Int).SetInt64(256)), (*hexutil.Big)(new(big.Int).SetInt64(257)), (*hexutil.Big)(new(big.Int).SetInt64(258)),
-			(*hexutil.Big)(new(big.Int).SetInt64(259)), (*hexutil.Big)(new(big.Int).SetInt64(260)), (*hexutil.Big)(new(big.Int).SetInt64(261)),
-			(*hexutil.Big)(new(big.Int).SetInt64(262)), (*hexutil.Big)(new(big.Int).SetInt64(263)), (*hexutil.Big)(new(big.Int).SetInt64(264)),
-			(*hexutil.Big)(new(big.Int).SetInt64(265)),
-		},
-		GasUsedRatio: []float64{
-			0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
-		},
-		BlobBaseFee: []*hexutil.Big{
-			(*hexutil.Big)(new(big.Int).SetInt64(512)), (*hexutil.Big)(new(big.Int).SetInt64(513)), (*hexutil.Big)(new(big.Int).SetInt64(514)),
-			(*hexutil.Big)(new(big.Int).SetInt64(515)), (*hexutil.Big)(new(big.Int).SetInt64(516)), (*hexutil.Big)(new(big.Int).SetInt64(517)),
-			(*hexutil.Big)(new(big.Int).SetInt64(518)), (*hexutil.Big)(new(big.Int).SetInt64(519)), (*hexutil.Big)(new(big.Int).SetInt64(520)),
-			(*hexutil.Big)(new(big.Int).SetInt64(521)),
-		},
-		BlobGasUsedRatio: []float64{
-			0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
-		},
+		OldestBlock:      (*hexutil.Big)(new(big.Int).SetUint64(oldestBlockNum)),
+		BaseFee:          make([]*hexutil.Big, 0, count+1),
+		GasUsedRatio:     make([]float64, 0, count),
+		BlobBaseFee:      make([]*hexutil.Big, 0, count+1),
+		BlobGasUsedRatio: make([]float64, 0, count),
+	}
+	if wantRewards {
+		result.Reward = make([][]*hexutil.Big, 0, count)
+	}
+
+	maxBlobGasPerBlock := float64(mt_common.MAX_BLOBS_PER_BLOCK * mt_common.BLOB_GAS_PER_BLOB)
+	var lastHeader mt_types.BlockHeader
+	for n := oldestBlockNum; n <= lastBlockNum; n++ {
+		blk := blockchain.GetBlockChainInstance().GetBlockByNumber(n)
+		if blk == nil {
+			break // history doesn't go back that far (e.g. pruned) — return what we have
+		}
+		header := blk.Header()
+		lastHeader = header
+
+		result.BaseFee = append(result.BaseFee, (*hexutil.Big)(new(big.Int).SetUint64(mt_common.MINIMUM_BASE_FEE)))
+		result.BlobBaseFee = append(result.BlobBaseFee, (*hexutil.Big)(block.BlobBaseFeeForHeader(header)))
+		result.BlobGasUsedRatio = append(result.BlobGasUsedRatio, float64(header.BlobGasUsed())/maxBlobGasPerBlock)
+
+		txHashes := blk.Transactions()
+		var totalGasUsed uint64
+		var effectivePrices []*big.Int
+		if len(txHashes) > 0 {
+			if rcpDb, err := receipt.NewReceiptsFromRoot(header.ReceiptRoot(), api.App.storageManager.GetStorageReceipt()); err == nil {
+				for _, h := range txHashes {
+					rcp, err := rcpDb.GetReceipt(h)
+					if err != nil {
+						continue
+					}
+					totalGasUsed += rcp.GasUsed()
+					if wantRewards {
+						effectivePrices = append(effectivePrices, new(big.Int).SetUint64(rcp.GasFee()))
+					}
+				}
+			}
+		}
+		result.GasUsedRatio = append(result.GasUsedRatio, float64(totalGasUsed)/float64(mt_common.BLOCK_GAS_LIMIT))
+
+		if wantRewards {
+			sort.Slice(effectivePrices, func(i, j int) bool { return effectivePrices[i].Cmp(effectivePrices[j]) < 0 })
+			row := make([]*hexutil.Big, len(rewardPercentiles))
+			for i := range rewardPercentiles {
+				if len(effectivePrices) == 0 {
+					row[i] = (*hexutil.Big)(big.NewInt(0))
+					continue
+				}
+				idx := int(rewardPercentiles[i] / 100 * float64(len(effectivePrices)-1))
+				if idx < 0 {
+					idx = 0
+				}
+				if idx >= len(effectivePrices) {
+					idx = len(effectivePrices) - 1
+				}
+				row[i] = (*hexutil.Big)(effectivePrices[idx])
+			}
+			result.Reward = append(result.Reward, row)
+		}
+	}
+
+	// feeHistory reports N+1 baseFee/blobBaseFee entries: the trailing one
+	// is the fee that would apply to the block AFTER lastBlock. Since this
+	// chain's base fee is flat, that's just another MINIMUM_BASE_FEE; the
+	// blob base fee is recomputed from the last real header we saw (it's
+	// deterministic from excessBlobGas, so this is the same value the chain
+	// itself would compute for the next block).
+	result.BaseFee = append(result.BaseFee, (*hexutil.Big)(new(big.Int).SetUint64(mt_common.MINIMUM_BASE_FEE)))
+	if lastHeader != nil {
+		result.BlobBaseFee = append(result.BlobBaseFee, (*hexutil.Big)(block.BlobBaseFeeForHeader(lastHeader)))
 	}
 
 	return result, nil

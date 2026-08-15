@@ -44,6 +44,23 @@ func ProcessTransactionsOptimistic(
 		return nil, nil, nil, nil
 	}
 
+	// ─── Per-block blob-gas budget (EIP-4844 parity with mainnet's hard cap) ──
+	// Computed once, from the full block's original group order (spanning both
+	// the native-fast-path and EVM pipelines below — a blob tx can land in
+	// either one), and passed as a read-only map into both. See
+	// computeBlobBudgetRejections' doc for why this must be block-wide, not
+	// computed independently per pipeline.
+	var blobBudgetRejected map[common.Hash]struct{}
+	{
+		flatOrdered := make([]types.Transaction, 0, totalTxs)
+		for _, group := range groupedGroups {
+			for _, item := range group.Items {
+				flatOrdered = append(flatOrdered, item.Tx)
+			}
+		}
+		blobBudgetRejected = computeBlobBudgetRejections(flatOrdered)
+	}
+
 	// ─── Partition by Kind (O(n) over groups, no item re-scan) ───────────────
 	nativeGroups := make([]grouptxns.RelativeGroup, 0, len(groupedGroups))
 	nativeOrigIdx := make([]int, 0, len(groupedGroups))
@@ -109,12 +126,13 @@ func ProcessTransactionsOptimistic(
 		return processNativeTransfersFastPath(
 			ctx, chainState, groupedGroups, totalTxs,
 			enableTrace, leaderAddr, skipSignatureVerify,
+			lastBlockHeader, blockTime, blobBudgetRejected,
 		)
 	}
 
 	// ─── No native groups: pure EVM block ─────────────────────────────────────
 	if len(nativeGroups) == 0 {
-		return runEvmPipeline(ctx, chainState, evmGroups, lastBlockHeader, leaderAddr, blockTime)
+		return runEvmPipeline(ctx, chainState, evmGroups, lastBlockHeader, leaderAddr, blockTime, blobBudgetRejected)
 	}
 
 	// ─── Mixed block: run native fast-path, THEN TrueBlockSTM (sequential) ────
@@ -142,6 +160,7 @@ func ProcessTransactionsOptimistic(
 		txs, rcps, scRs, mvmMap := processNativeTransfersFastPath(
 			ctx, chainState, nativeGroups, nativeTxCount,
 			enableTrace, leaderAddr, skipSignatureVerify,
+			lastBlockHeader, blockTime, blobBudgetRejected,
 		)
 		// processNativeTransfersFastPath returns flat results in group order;
 		// slice them back per group using each group's item count.
@@ -209,7 +228,7 @@ func ProcessTransactionsOptimistic(
 			}
 		}
 
-		rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatEvmTxs, maxGroupSize, evmTxCount).
+		rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatEvmTxs, maxGroupSize, evmTxCount, blobBudgetRejected).
 			Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 		for k, g := range evmGroups {
@@ -283,6 +302,7 @@ func runEvmPipeline(
 	lastBlockHeader types.BlockHeader,
 	leaderAddr common.Address,
 	blockTime uint64,
+	blobBudgetRejected map[common.Hash]struct{},
 ) (
 	[]types.Transaction,
 	[]types.Receipt,
@@ -302,7 +322,7 @@ func runEvmPipeline(
 		totalEvmTxs += len(g.Items)
 	}
 
-	rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatTxs, maxGroupSize, totalEvmTxs).
+	rawTxs, rawRcps, rawScRs, rawMvmMap := newTrueBlockSTMForGroups(flatTxs, maxGroupSize, totalEvmTxs, blobBudgetRejected).
 		Process(ctx, chainState, leaderAddr, lastBlockHeader, blockTime)
 
 	allTransactions := make([]types.Transaction, 0, totalEvmTxs)
@@ -355,8 +375,8 @@ const hotContentionDominanceNum, hotContentionDominanceDen = 7, 10 // 70%
 // many-minute stall in practice. Capping to 1 exec worker makes dispatch
 // strictly sequential so nothing is ever aborted; see WithMaxExecWorkers for
 // why this doesn't change the result.
-func newTrueBlockSTMForGroups(flatTxs []types.Transaction, maxGroupSize, totalTxs int) *TrueBlockSTM {
-	stm := NewTrueBlockSTM(flatTxs)
+func newTrueBlockSTMForGroups(flatTxs []types.Transaction, maxGroupSize, totalTxs int, blobBudgetRejected map[common.Hash]struct{}) *TrueBlockSTM {
+	stm := NewTrueBlockSTM(flatTxs).WithBlobBudgetRejected(blobBudgetRejected)
 	if totalTxs >= hotContentionMinTxs &&
 		maxGroupSize*hotContentionDominanceDen >= totalTxs*hotContentionDominanceNum {
 		logger.Warn("⚠️ [BLOCK-STM] Dominant conflict group detected (%d/%d EVM txs) — capping to 1 exec worker to avoid an abort storm",

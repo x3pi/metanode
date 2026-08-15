@@ -250,61 +250,57 @@ func (mt *MockTransaction) BRelatedAddresses() [][]byte   { return nil }
 func (mt *MockTransaction) RelatedAddresses() []e_common.Address {
 	return []e_common.Address{mt.fromAddr, mt.toAddr}
 }
-func (mt *MockTransaction) Data() []byte                          { return mt.data }
-func (mt *MockTransaction) Fee(_ uint64) *big.Int                 { return big.NewInt(0) }
-func (mt *MockTransaction) MaxGas() uint64                        { return 21000 }
-func (mt *MockTransaction) MaxGasPrice() uint64                   { return 1 }
-func (mt *MockTransaction) MaxTimeUse() uint64                    { return 0 }
-func (mt *MockTransaction) MaxFee() *big.Int                      { return big.NewInt(0) }
-func (mt *MockTransaction) GasTipCap() *big.Int                   { return big.NewInt(0) }
-func (mt *MockTransaction) GasFeeCap() *big.Int                   { return big.NewInt(0) }
-func (mt *MockTransaction) GetNonce() uint64                      { return mt.nonce }
-func (mt *MockTransaction) GetChainID() uint64                    { return 1 }
-func (mt *MockTransaction) ClearCacheHash()                       {}
-func (mt *MockTransaction) GetNonce32Bytes() []byte               { return make([]byte, 32) }
-func (mt *MockTransaction) Marshal() ([]byte, error)              { return mt.data, nil }
-func (mt *MockTransaction) Unmarshal(b []byte) error              { mt.data = b; return nil }
-func (mt *MockTransaction) Proto() protoreflect.ProtoMessage      { return nil }
-func (mt *MockTransaction) FromProto(_ protoreflect.ProtoMessage) {}
-func (mt *MockTransaction) String() string                        { return mt.hash.Hex() }
-func (mt *MockTransaction) SetSign(_ common.PrivateKey)           {}
-func (mt *MockTransaction) SetSignBytes(_ []byte)                 {}
-func (mt *MockTransaction) SetNonce(n uint64)                     { mt.nonce = n }
-func (mt *MockTransaction) SetFromAddress(addr e_common.Address)  { mt.fromAddr = addr }
-func (mt *MockTransaction) SetToAddress(addr e_common.Address)    { mt.toAddr = addr }
-func (mt *MockTransaction) CopyTransaction() types.Transaction    { return mt }
-func (mt *MockTransaction) SetIsDebug(_ bool)                     {}
-func (mt *MockTransaction) GetIsDebug() bool                      { return false }
-func (mt *MockTransaction) ValidEthSign() bool                    { return true }
-func (mt *MockTransaction) UpdateRelatedAddresses(_ [][]byte)     {}
-func (mt *MockTransaction) AddRelatedAddress(_ e_common.Address)  {}
-func (mt *MockTransaction) UpdateDeriver(_, _ e_common.Hash)      {}
-func (mt *MockTransaction) SetReadOnly(v bool)                    { mt.isReadOnly = v }
-func (mt *MockTransaction) GetReadOnly() bool                     { return mt.isReadOnly }
-func (mt *MockTransaction) SetType(t uint64)                      { mt.txType = t }
-func (mt *MockTransaction) GetType() uint64                       { return mt.txType }
-func (mt *MockTransaction) ValidTx0(_ types.AccountState, _ string) (bool, int64) {
-	return true, 0
-}
-func (mt *MockTransaction) ValidChainID(_ uint64) bool        { return true }
-func (mt *MockTransaction) ValidSign(_ common.PublicKey) bool { return true }
-func (mt *MockTransaction) ValidDeviceKey(_ types.AccountState) bool {
-	return true
-}
-func (mt *MockTransaction) ValidMaxGas() bool                     { return true }
-func (mt *MockTransaction) ValidMaxGasPrice(_ uint64) bool        { return true }
-func (mt *MockTransaction) ValidAmount(_ types.AccountState) bool { return true }
-func (mt *MockTransaction) ValidMaxFee(_ types.AccountState) bool { return true }
+func (mt *MockTransaction) Data() []byte                                         { return mt.data }
+func (mt *MockTransaction) Fee(_ uint64) *big.Int                                { return big.NewInt(0) }
+func (mt *MockTransaction) MaxGas() uint64                                       { return 21000 }
+func (mt *MockTransaction) MaxGasPrice() uint64                                  { return 1 }
+func (mt *MockTransaction) MaxTimeUse() uint64                                   { return 0 }
+func (mt *MockTransaction) MaxFee() *big.Int                                     { return big.NewInt(0) }
+func (mt *MockTransaction) GasTipCap() *big.Int                                  { return big.NewInt(0) }
+func (mt *MockTransaction) GasFeeCap() *big.Int                                  { return big.NewInt(0) }
+func (mt *MockTransaction) EffectiveGasPrice() *big.Int                          { return big.NewInt(1) }
+func (mt *MockTransaction) BlobVersionedHashes() [][]byte                        { return nil }
+func (mt *MockTransaction) MaxFeePerBlobGas() *big.Int                           { return big.NewInt(0) }
+func (mt *MockTransaction) AuthorizationList() []*pb.SetCodeAuthorization        { return nil }
+func (mt *MockTransaction) EthAccessList() e_types.AccessList                    { return nil }
+func (mt *MockTransaction) EthAuthorizationList() []e_types.SetCodeAuthorization { return nil }
+func (mt *MockTransaction) GetNonce() uint64                                     { return mt.nonce }
+func (mt *MockTransaction) GetChainID() uint64                                   { return 1 }
+func (mt *MockTransaction) ClearCacheHash()                                      {}
+func (mt *MockTransaction) GetNonce32Bytes() []byte                              { return make([]byte, 32) }
+func (mt *MockTransaction) Marshal() ([]byte, error)                             { return mt.data, nil }
+func (mt *MockTransaction) Unmarshal(b []byte) error                             { mt.data = b; return nil }
+func (mt *MockTransaction) Proto() protoreflect.ProtoMessage                     { return nil }
+func (mt *MockTransaction) FromProto(_ protoreflect.ProtoMessage)                {}
+func (mt *MockTransaction) String() string                                       { return mt.hash.Hex() }
+func (mt *MockTransaction) SetSign(_ common.PrivateKey)                          {}
+func (mt *MockTransaction) SetSignBytes(_ []byte)                                {}
+func (mt *MockTransaction) SetNonce(n uint64)                                    { mt.nonce = n }
+func (mt *MockTransaction) SetFromAddress(addr e_common.Address)                 { mt.fromAddr = addr }
+func (mt *MockTransaction) SetToAddress(addr e_common.Address)                   { mt.toAddr = addr }
+func (mt *MockTransaction) CopyTransaction() types.Transaction                   { return mt }
+func (mt *MockTransaction) SetIsDebug(_ bool)                                    {}
+func (mt *MockTransaction) GetIsDebug() bool                                     { return false }
+func (mt *MockTransaction) ValidEthSign() bool                                   { return true }
+func (mt *MockTransaction) UpdateRelatedAddresses(_ [][]byte)                    {}
+func (mt *MockTransaction) AddRelatedAddress(_ e_common.Address)                 {}
+func (mt *MockTransaction) UpdateDeriver(_, _ e_common.Hash)                     {}
+func (mt *MockTransaction) SetReadOnly(v bool)                                   { mt.isReadOnly = v }
+func (mt *MockTransaction) GetReadOnly() bool                                    { return mt.isReadOnly }
+func (mt *MockTransaction) SetType(t uint64)                                     { mt.txType = t }
+func (mt *MockTransaction) GetType() uint64                                      { return mt.txType }
+func (mt *MockTransaction) ValidChainID(_ uint64) bool                           { return true }
+func (mt *MockTransaction) ValidSign(_ common.PublicKey) bool                    { return true }
+func (mt *MockTransaction) ValidMaxGas() bool                                    { return true }
+func (mt *MockTransaction) ValidMaxGasPrice(_ uint64) bool                       { return true }
+func (mt *MockTransaction) ValidAmount(_ types.AccountState) bool                { return true }
+func (mt *MockTransaction) ValidMaxFee(_ types.AccountState) bool                { return true }
 func (mt *MockTransaction) ValidAmountSpend(_ types.AccountState, _ *big.Int) bool {
 	return true
 }
 func (mt *MockTransaction) ValidPendingUse(_ types.AccountState) bool { return true }
-func (mt *MockTransaction) ValidDeploySmartContractToAccount(_ types.AccountState) bool {
-	return true
-}
-func (mt *MockTransaction) ValidCallSmartContractToAccount(_ types.AccountState) bool { return true }
-func (mt *MockTransaction) ValidDeployData() bool                                     { return true }
-func (mt *MockTransaction) ValidCallData() bool                                       { return true }
+func (mt *MockTransaction) ValidDeployData() bool                     { return true }
+func (mt *MockTransaction) ValidCallData() bool                       { return true }
 func (mt *MockTransaction) RawSignatureValues() (v, r, s *big.Int) {
 	return big.NewInt(0), big.NewInt(0), big.NewInt(0)
 }

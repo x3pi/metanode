@@ -15,6 +15,7 @@
 #include "state.h"
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <fmt/format_header_only.h>
 #include <fstream>
 #include <iostream>
@@ -62,13 +63,20 @@ void cleanupProcessResultMemoryOnError(
     uint8_t **&b_code_change, int length_code_change, int *&length_codes,
     uint8_t **&b_storage_change, int length_storage_change,
     int *&length_storages, char **&b_full_db_hash, int length_full_db_hash,
-    int *&length_full_db_hashes) {
+    int *&length_full_db_hashes,
+    // TEE-packaging B2: found by code review — b_native_logs is allocated
+    // before pendingResult's construction (see this function's call sites
+    // below), so it needs cleaning up here too, same as every other buffer
+    // that can already exist by the time one of these catch blocks runs.
+    char *&b_native_logs) {
   std::cerr << "[CLEANUP] Cleaning up allocated memory due to error..."
             << std::endl;
   delete[] b_output;
   b_output = nullptr;
   delete[] b_exmsg;
   b_exmsg = nullptr;
+  delete[] b_native_logs;
+  b_native_logs = nullptr;
   delete[] b_logs;
   b_logs = nullptr;
 
@@ -194,13 +202,20 @@ void incrementSenderNonce(mvm::MyGlobalState &gs, const mvm::Address &from,
 }
 
 // Run input as an EVM transaction, check the result and return the output
+//
+// out_native_logs (TEE-packaging B2, see MyLogger's doc comment): if
+// non-null, receives everything the interpreter logged via NativeLogger
+// during this call, in call order — populated on every return path
+// (success and both catch blocks), since logger is local to this function
+// and its buffered_logs would otherwise be lost the moment run() returns.
 mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
                     const mvm::Address &from, const mvm::Address &to,
                     const uint256_t &amount, uint64_t gas_price,
                     uint64_t gas_limit, mvm::VectorLogHandler &log_handler,
                     const mvm::Code &input, unsigned char *mvmId, bool readOnly,
                     const uint256_t &tx_hash, bool is_debug,
-                    bool is_off_chain = false) {
+                    bool is_off_chain = false,
+                    std::vector<std::pair<int, std::string>> *out_native_logs = nullptr) {
   mvm::Transaction tx(from, amount, gas_price, gas_limit, tx_hash, is_debug);
   MyLogger logger = MyLogger();
   MyExtension extension = MyExtension(mvmId, is_off_chain, &tx_hash);
@@ -227,6 +242,9 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
     // my_global_state.cpp.
     incrementSenderNonce(gs, from, fromAc);
 
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
+    }
     return exec_result;
   } catch (const std::exception &e) {
     mvm::ExecResult error_result = handleException(e);
@@ -236,6 +254,9 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
       auto fromAc = gs.get(from, nullptr);
       incrementSenderNonce(gs, from, fromAc);
     } catch (...) {
+    }
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
     }
     return error_result;
   } catch (...) {
@@ -247,15 +268,28 @@ mvm::ExecResult run(mvm::MyGlobalState &gs, bool deploy,
       incrementSenderNonce(gs, from, fromAc);
     } catch (...) {
     }
+    if (out_native_logs != nullptr) {
+      *out_native_logs = std::move(logger.buffered_logs);
+    }
     return error_result;
   }
 }
 
-mvm::BlockContext CreateBlockContext(unsigned char *mvmId, uint64_t prevrandao,
-                                     uint64_t gas_limit, uint64_t time,
-                                     uint64_t base_fee, uint256_t number,
-                                     uint256_t coinbase,
-                                     uint256_t tx_hash = 0) {
+mvm::BlockContext CreateBlockContext(
+    unsigned char *mvmId, uint64_t prevrandao, uint64_t gas_limit,
+    uint64_t time, uint64_t base_fee, uint256_t number, uint256_t coinbase,
+    uint256_t tx_hash = 0,
+    // TEE-packaging B1 (note/tee_core_packaging_plan.md): additive — every
+    // existing caller that doesn't pass these keeps getting the same
+    // zero-value BlockContext fields as before, so executeBatch/sendNative/
+    // processNativeMintBurn/noncePlusOne (which never reach the interpreter
+    // anyway) don't need to change at all.
+    uint256_t chain_id = 0,
+    const std::vector<uint256_t> &blob_versioned_hashes = {},
+    uint256_t blob_base_fee = 0,
+    const std::vector<uint8_t> &cross_chain_sender = {},
+    uint64_t cross_chain_source_id = 0,
+    const std::vector<uint256_t> &block_hashes = {}) {
   mvm::BlockContext block_context;
   block_context.mvmId = mvmId;
   block_context.prevrandao = prevrandao;
@@ -266,13 +300,84 @@ mvm::BlockContext CreateBlockContext(unsigned char *mvmId, uint64_t prevrandao,
   block_context.coinbase = coinbase;
   block_context.tx_hash =
       tx_hash; // txHash của TX hiện tại — precompile dùng làm msgId
+  block_context.chain_id = chain_id;
+  block_context.blob_versioned_hashes = blob_versioned_hashes;
+  block_context.blob_base_fee = blob_base_fee;
+  block_context.cross_chain_sender = cross_chain_sender;
+  block_context.cross_chain_source_id = cross_chain_source_id;
+  block_context.block_hashes = block_hashes;
   return block_context;
 }
 
+// TEE-packaging B1: parses the new context parameters shared by
+// deploy/call/execute (the 3 entry points that run the interpreter) out of
+// their raw cgo byte-buffer form. A null pointer / zero count means "not
+// supplied", matching each BlockContext field's zero-value default — see
+// block_context.h.
+struct ParsedTxContext {
+  uint256_t chain_id = 0;
+  std::vector<uint256_t> blob_versioned_hashes;
+  uint256_t blob_base_fee = 0;
+  std::vector<uint8_t> cross_chain_sender;
+  uint64_t cross_chain_source_id = 0;
+  std::vector<uint256_t> block_hashes;
+};
+
+ParsedTxContext ParseTxContext(unsigned char *b_chain_id,
+                               unsigned char *b_blob_versioned_hashes,
+                               int blob_versioned_hashes_count,
+                               unsigned char *b_blob_base_fee,
+                               unsigned char *b_cross_chain_sender,
+                               unsigned char *b_cross_chain_source_id,
+                               unsigned char *b_block_hashes,
+                               int block_hashes_count) {
+  ParsedTxContext ctx;
+  if (b_chain_id != nullptr) {
+    ctx.chain_id = mvm::from_big_endian((uint8_t *)b_chain_id, 32u);
+  }
+  if (b_blob_versioned_hashes != nullptr && blob_versioned_hashes_count > 0) {
+    ctx.blob_versioned_hashes.reserve(blob_versioned_hashes_count);
+    for (int i = 0; i < blob_versioned_hashes_count; ++i) {
+      ctx.blob_versioned_hashes.push_back(mvm::from_big_endian(
+          (uint8_t *)(b_blob_versioned_hashes + i * 32), 32u));
+    }
+  }
+  if (b_blob_base_fee != nullptr) {
+    ctx.blob_base_fee = mvm::from_big_endian((uint8_t *)b_blob_base_fee, 32u);
+  }
+  if (b_cross_chain_sender != nullptr) {
+    ctx.cross_chain_sender.assign(b_cross_chain_sender,
+                                  b_cross_chain_sender + 20);
+  }
+  if (b_block_hashes != nullptr && block_hashes_count > 0) {
+    ctx.block_hashes.reserve(block_hashes_count);
+    for (int i = 0; i < block_hashes_count; ++i) {
+      ctx.block_hashes.push_back(
+          mvm::from_big_endian((uint8_t *)(b_block_hashes + i * 32), 32u));
+    }
+  }
+  if (b_cross_chain_source_id != nullptr) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+      v = (v << 8) | b_cross_chain_source_id[i];
+    }
+    ctx.cross_chain_source_id = v;
+  }
+  return ctx;
+}
+
 // --- Hàm processResult ---
+// native_logs (TEE-packaging B2, default empty — sendNative/
+// processNativeMintBurn/noncePlusOne never run the interpreter, so they
+// never have any to pass and don't need to change): serialized into
+// ExecuteResult's b_native_logs as a packed binary blob of
+// [4-byte LE flag][4-byte LE msg_len][msg bytes] records, one per entry, in
+// call order — Go decodes and flushes them into its own logger after the
+// call returns instead of mid-execution. See MyLogger's doc comment.
 ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
                              mvm::VectorLogHandler &log_handler,
-                             bool isOffChain = false) {
+                             bool isOffChain = false,
+                             const std::vector<std::pair<int, std::string>> &native_logs = {}) {
   // --- Khởi tạo tất cả các con trỏ là nullptr ban đầu ---
   char *b_output = nullptr;
   int length_output = 0;
@@ -280,6 +385,8 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
   int length_exmsg = 0;
   char *b_logs = nullptr;
   int length_logs = 0;
+  char *b_native_logs = nullptr;
+  int length_native_logs = 0;
   uint8_t **b_add_balance_change = nullptr;
   int length_add_balance_change = 0;
   uint8_t **b_sub_balance_change = nullptr;
@@ -440,6 +547,35 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
     // We no longer retrieve full db hashes or logs via registry here.
     // Xapian changes are committed atomically in block_processor_commit.go.
 
+    // TEE-packaging B2: serialize native_logs (see this function's own doc
+    // comment above for the wire format). Placed last, after every other
+    // exception-prone allocation above, so a failure here can't leave any
+    // OTHER field half-populated — if `new char[]` below throws
+    // std::bad_alloc, b_native_logs is simply never assigned, and the
+    // existing catch(std::bad_alloc) block's cleanup call is unaffected
+    // (it never knew about this field to begin with).
+    if (!native_logs.empty()) {
+      size_t total = 0;
+      for (const auto &entry : native_logs) {
+        total += 4 + 4 + entry.second.size();
+      }
+      b_native_logs = new char[total];
+      size_t off = 0;
+      for (const auto &entry : native_logs) {
+        int32_t flag = entry.first;
+        int32_t msgLen = static_cast<int32_t>(entry.second.size());
+        for (int b = 0; b < 4; ++b) {
+          b_native_logs[off++] = static_cast<char>((flag >> (8 * b)) & 0xff);
+        }
+        for (int b = 0; b < 4; ++b) {
+          b_native_logs[off++] = static_cast<char>((msgLen >> (8 * b)) & 0xff);
+        }
+        memcpy(b_native_logs + off, entry.second.data(), entry.second.size());
+        off += entry.second.size();
+      }
+      length_native_logs = static_cast<int>(total);
+    }
+
     //           << std::endl;
     pendingResult = new ExecuteResult{
       b_exitReason : (char)result.er,
@@ -471,6 +607,8 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
       length_storages_read : length_storages_read,
       b_logs : b_logs,
       length_logs : length_logs,
+      b_native_logs : b_native_logs,
+      length_native_logs : length_native_logs,
       gas_used : result.gas_used
     };
 
@@ -484,7 +622,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   } catch (const std::exception &e) {
     std::cerr << "[ERROR] Standard exception during processResult: " << e.what()
@@ -495,7 +633,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   } catch (...) {
     std::cerr << "[ERROR] Unknown exception during processResult." << std::endl;
@@ -505,7 +643,7 @@ ExecuteResult *processResult(mvm::ExecResult result, mvm::MyGlobalState &gs,
         length_sub_balance_change, b_nonce_change, length_nonce_change,
         b_code_change, length_code_change, length_codes, b_storage_change,
         length_storage_change, length_storages, b_full_db_hash,
-        length_full_db_hash, length_full_db_hashes);
+        length_full_db_hash, length_full_db_hashes, b_native_logs);
     throw;
   }
 }
@@ -520,7 +658,13 @@ ExecuteResult *deploy(
     unsigned long long block_time, unsigned long long block_base_fee,
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, unsigned char *b_tx_hash, bool is_debug,
-    bool is_cache, bool is_off_chain) {
+    bool is_cache, bool is_off_chain,
+    // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+    unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+    int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+    unsigned char *b_cross_chain_sender,
+    unsigned char *b_cross_chain_source_id,
+    unsigned char *b_block_hashes, int block_hashes_count) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -536,10 +680,24 @@ ExecuteResult *deploy(
 
   uint256_t tx_hash = mvm::from_big_endian((uint8_t *)b_tx_hash, 32u);
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
+      b_block_hashes, block_hashes_count);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id,
+      txContext.block_hashes);
   mvm::MyGlobalState gs(blockContext, is_cache);
+
+  // TEE-packaging B2: populated by run() on every return path (success and
+  // both its internal catch blocks), threaded into every processResult()
+  // call below including this function's own catch blocks — run()'s
+  // MyLogger.buffered_logs would otherwise be lost when run() returns.
+  std::vector<std::pair<int, std::string>> nativeLogs;
 
   try {
     //  init env
@@ -560,12 +718,25 @@ ExecuteResult *deploy(
               << " gas_price=" << gas_price << std::endl;
     auto result = run(gs, true, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, contract_constructor,
-                      mvmId, false, tx_hash, is_debug, is_off_chain);
+                      mvmId, false, tx_hash, is_debug, is_off_chain, &nativeLogs);
     std::cerr << "[DEPLOY_DEBUG] exit_reason=" << (int)result.er
               << " exception=" << (int)result.ex
               << " gas_used=" << result.gas_used
               << " output_size=" << result.output.size()
               << " exmsg=" << result.exmsg << std::endl;
+    // EIP-3541: reject deploying code starting with 0xEF, same rule as the
+    // nested CREATE/CREATE2 opcodes (see create()/create2() in
+    // processor.cpp) — without this, a top-level deploy transaction could
+    // forge a 23-byte EIP-7702 delegation designator (0xef0100 || address)
+    // at an address the deployer fully controls, impersonating an
+    // authorization the account owner never signed.
+    if (result.er == mvm::ExitReason::returned && !result.output.empty() &&
+        result.output[0] == 0xEF) {
+      result.er = mvm::ExitReason::threw;
+      result.ex = mvm::Exception::Type::ErrInvalidCode;
+      result.exmsg = "invalid code: must not begin with 0xef (EIP-3541)";
+      result.output.clear();
+    }
     if (result.er == mvm::ExitReason::returned) {
       auto code = result.output;
       gs.add_addresses_newly_deploy(contract_address, code);
@@ -579,7 +750,7 @@ ExecuteResult *deploy(
       result.output = truncated_address;
     }
 
-    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain);
+    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
 
     return rs;
   } catch (const std::exception &e) {
@@ -590,7 +761,7 @@ ExecuteResult *deploy(
       mvm::VectorLogHandler clean_log_handler;
 
       ExecuteResult *rs =
-          processResult(error_result, gs, clean_log_handler, is_off_chain);
+          processResult(error_result, gs, clean_log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -602,7 +773,7 @@ ExecuteResult *deploy(
       mvm::VectorLogHandler clean_log_handler;
 
       ExecuteResult *rs =
-          processResult(error_result, gs, clean_log_handler, is_off_chain);
+          processResult(error_result, gs, clean_log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -621,7 +792,13 @@ ExecuteResult *call(
     unsigned char *b_block_number, unsigned char *b_block_coinbase,
     unsigned char *mvmId, bool readOnly, unsigned char *b_tx_hash,
     bool is_debug, unsigned char *b_related_addresses,
-    int related_addresses_count, bool is_off_chain) {
+    int related_addresses_count, bool is_off_chain,
+    // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+    unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+    int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+    unsigned char *b_cross_chain_sender,
+    unsigned char *b_cross_chain_source_id,
+    unsigned char *b_block_hashes, int block_hashes_count) {
   // format argument to right data type
   uint256_t caller_address =
       mvm::from_big_endian((uint8_t *)b_caller_address, 20u);
@@ -648,27 +825,36 @@ ExecuteResult *call(
     }
   }
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
+      b_block_hashes, block_hashes_count);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id,
+      txContext.block_hashes);
 
   mvm::MyGlobalState gs(blockContext, false, relatedAddresses);
   //  init env
   mvm::VectorLogHandler log_handler;
+  std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
   try {
     auto result = run(gs, false, caller_address, contract_address, amount,
                       gas_price, gas_limit, log_handler, input, mvmId, readOnly,
-                      tx_hash, is_debug, is_off_chain);
+                      tx_hash, is_debug, is_off_chain, &nativeLogs);
 
     // processResult có thể throw exception, cần catch
-    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain);
+    ExecuteResult *rs = processResult(result, gs, log_handler, is_off_chain, nativeLogs);
     return rs;
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
       ExecuteResult *rs =
-          processResult(error_result, gs, log_handler, is_off_chain);
+          processResult(error_result, gs, log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -677,7 +863,7 @@ ExecuteResult *call(
     try {
       mvm::ExecResult error_result = handleUnknownException("call");
       ExecuteResult *rs =
-          processResult(error_result, gs, log_handler, is_off_chain);
+          processResult(error_result, gs, log_handler, is_off_chain, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -697,7 +883,13 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
         unsigned char
             *b_related_addresses, // Flatten array: addr1(20) + addr2(20) + ...
         int related_addresses_count, // Số lượng addresses
-        bool is_cache
+        bool is_cache,
+        // TEE-packaging B1 context (see ParseTxContext) — all may be nullptr
+        unsigned char *b_chain_id, unsigned char *b_blob_versioned_hashes,
+        int blob_versioned_hashes_count, unsigned char *b_blob_base_fee,
+        unsigned char *b_cross_chain_sender,
+        unsigned char *b_cross_chain_source_id,
+        unsigned char *b_block_hashes, int block_hashes_count
 ) {
 
   uint256_t caller_address =
@@ -722,25 +914,35 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
     }
   }
 
-  mvm::BlockContext blockContext =
-      CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
-                         block_base_fee, block_number, block_coinbase, tx_hash);
+  ParsedTxContext txContext = ParseTxContext(
+      b_chain_id, b_blob_versioned_hashes, blob_versioned_hashes_count,
+      b_blob_base_fee, b_cross_chain_sender, b_cross_chain_source_id,
+      b_block_hashes, block_hashes_count);
+
+  mvm::BlockContext blockContext = CreateBlockContext(
+      mvmId, block_prevrandao, block_gas_limit, block_time, block_base_fee,
+      block_number, block_coinbase, tx_hash, txContext.chain_id,
+      txContext.blob_versioned_hashes, txContext.blob_base_fee,
+      txContext.cross_chain_sender, txContext.cross_chain_source_id,
+      txContext.block_hashes);
 
   mvm::MyGlobalState gs(blockContext, is_cache, relatedAddresses);
   mvm::VectorLogHandler log_handler;
+  std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
   try {
     auto result =
         run(gs, false, caller_address, contract_address, amount, gas_price,
-            gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug);
+            gas_limit, log_handler, input, mvmId, false, tx_hash, is_debug,
+            false, &nativeLogs);
 
     // processResult có thể throw exception, cần catch
-    ExecuteResult *rs = processResult(result, gs, log_handler);
+    ExecuteResult *rs = processResult(result, gs, log_handler, false, nativeLogs);
     return rs;
   } catch (const std::exception &e) {
     try {
       mvm::ExecResult error_result = handleException(e);
-      ExecuteResult *rs = processResult(error_result, gs, log_handler);
+      ExecuteResult *rs = processResult(error_result, gs, log_handler, false, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -748,7 +950,7 @@ execute(unsigned char *b_caller_address, unsigned char *b_contract_address,
   } catch (...) {
     try {
       mvm::ExecResult error_result = handleUnknownException("execute");
-      ExecuteResult *rs = processResult(error_result, gs, log_handler);
+      ExecuteResult *rs = processResult(error_result, gs, log_handler, false, nativeLogs);
       return rs;
     } catch (...) {
       return createSafeErrorResult();
@@ -804,18 +1006,20 @@ executeBatch(ExecuteBatchInputC *inputs, int num_inputs,
         mvm::from_big_endian((uint8_t *)inputs[i].b_tx_hash, 32u);
 
     mvm::VectorLogHandler log_handler;
+    std::vector<std::pair<int, std::string>> nativeLogs; // TEE-packaging B2
 
     try {
       auto result = run(gs, false, caller_address, contract_address, amount,
                         inputs[i].gas_price, inputs[i].gas_limit, log_handler,
-                        input, mvmId, false, tx_hash, inputs[i].is_debug);
-      batch_rs->results[i] = processResult(result, gs, log_handler);
+                        input, mvmId, false, tx_hash, inputs[i].is_debug,
+                        false, &nativeLogs);
+      batch_rs->results[i] = processResult(result, gs, log_handler, false, nativeLogs);
     } catch (const std::exception &e) {
       mvm::ExecResult error_result = handleException(e);
-      batch_rs->results[i] = processResult(error_result, gs, log_handler);
+      batch_rs->results[i] = processResult(error_result, gs, log_handler, false, nativeLogs);
     } catch (...) {
       mvm::ExecResult error_result = handleUnknownException("executeBatch");
-      batch_rs->results[i] = processResult(error_result, gs, log_handler);
+      batch_rs->results[i] = processResult(error_result, gs, log_handler, false, nativeLogs);
     }
 
     // Clear difference arrays in gs to avoid leaking state changes into the
@@ -1094,6 +1298,7 @@ void freeResult(ExecuteResult *pendingResult) {
   delete[] pendingResult->length_storages_read;
 
   delete[] pendingResult->b_logs;
+  delete[] pendingResult->b_native_logs;
 
   delete pendingResult;
 }

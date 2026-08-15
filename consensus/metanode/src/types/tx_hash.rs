@@ -49,6 +49,11 @@ fn calculate_single_transaction_hash(tx: Transaction) -> Vec<u8> {
         gas_tip_cap: tx.gas_tip_cap,
         gas_fee_cap: tx.gas_fee_cap,
         access_list: tx.access_list,
+        blob_versioned_hashes: tx.blob_versioned_hashes,
+        max_fee_per_blob_gas: tx.max_fee_per_blob_gas,
+        authorization_list: tx.authorization_list,
+        // tx.sidecar is deliberately excluded — must match Go's Transaction.Hash()/RHash(),
+        // which only commit to blob_versioned_hashes, not the raw blob/commitment/proof data.
     };
 
     // Encode TransactionHashData to protobuf bytes

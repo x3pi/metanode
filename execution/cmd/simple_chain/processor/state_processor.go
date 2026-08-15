@@ -355,7 +355,7 @@ func (sp *StateProcessor) GetExecuteSCResultsHashCore(ctx context.Context, block
 			Tx:      tx,
 		})
 	}
-	groupedGroups := grouptxns.GroupTransactionsDeterministic(items)
+	groupedGroups := grouptxns.GroupTransactionsDeterministic(items, chainState.HasCode)
 
 	// Use the block's stored timestamp for deterministic replay
 	blockTimeSec := blockData.Header().TimeStamp() / 1000 // Convert ms→s
