@@ -63,7 +63,15 @@ public:
     }
 
     friend constexpr bool operator==(
-        const BaseFieldElem& e1, const BaseFieldElem& e2) noexcept = default;
+        const BaseFieldElem& e1, const BaseFieldElem& e2) noexcept
+    {
+        return e1.m_value == e2.m_value;
+    }
+    friend constexpr bool operator!=(
+        const BaseFieldElem& e1, const BaseFieldElem& e2) noexcept
+    {
+        return !(e1 == e2);
+    }
 };
 
 /// Implements extension field over the base field or other extension fields.
@@ -134,7 +142,18 @@ struct ExtFieldElem
     }
 
     friend constexpr bool operator==(
-        const ExtFieldElem& e1, const ExtFieldElem& e2) noexcept = default;
+        const ExtFieldElem& e1, const ExtFieldElem& e2) noexcept
+    {
+        for (size_t i = 0; i < DEGREE; ++i) {
+            if (!(e1.coeffs[i] == e2.coeffs[i])) return false;
+        }
+        return true;
+    }
+    friend constexpr bool operator!=(
+        const ExtFieldElem& e1, const ExtFieldElem& e2) noexcept
+    {
+        return !(e1 == e2);
+    }
 
     friend constexpr ExtFieldElem operator*(const ExtFieldElem& e, const Base& s) noexcept
     {

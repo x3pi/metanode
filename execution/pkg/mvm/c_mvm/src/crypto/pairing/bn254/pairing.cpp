@@ -129,7 +129,7 @@ Fq12 final_exp(const Fq12& v) noexcept
 }
 }  // namespace
 
-std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pairs) noexcept
+std::optional<bool> pairing_check(const std::vector<std::pair<Point, ExtPoint>>& pairs) noexcept
 {
     if (pairs.empty())
         return true;

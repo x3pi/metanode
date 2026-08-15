@@ -9,8 +9,6 @@
 #include <bit>
 #include <cassert>
 #include <climits>
-#include <compare>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -312,13 +310,7 @@ public:
     friend constexpr bool operator>(uint x, uint y) noexcept { return y < x; }
     friend constexpr bool operator>=(uint x, uint y) noexcept { return !(x < y); }
 
-    friend constexpr std::strong_ordering operator<=>(uint x, uint y) noexcept
-    {
-        if (x == y)
-            return std::strong_ordering::equal;
 
-        return (x < y) ? std::strong_ordering::less : std::strong_ordering::greater;
-    }
 
     friend constexpr uint operator~(uint x) noexcept { return {~x[0], ~x[1]}; }
     friend constexpr uint operator|(uint x, uint y) noexcept { return {x[0] | y[0], x[1] | y[1]}; }
@@ -344,7 +336,8 @@ public:
         return 0;
     }
 
-    friend constexpr uint operator<<(uint x, std::integral auto shift) noexcept
+    template<typename Integral, typename = std::enable_if_t<std::is_integral_v<Integral>>>
+    friend constexpr uint operator<<(uint x, Integral shift) noexcept
     {
         static_assert(sizeof(shift) <= sizeof(uint64_t));
         return x << static_cast<uint64_t>(shift);
@@ -377,7 +370,8 @@ public:
         return 0;
     }
 
-    friend constexpr uint operator>>(uint x, std::integral auto shift) noexcept
+    template<typename Integral, typename = std::enable_if_t<std::is_integral_v<Integral>>>
+    friend constexpr uint operator>>(uint x, Integral shift) noexcept
     {
         static_assert(sizeof(shift) <= sizeof(uint64_t));
         return x >> static_cast<uint64_t>(shift);
@@ -462,9 +456,16 @@ constexpr uint128 umul(uint64_t x, uint64_t y) noexcept
     return {lo, hi};
 }
 
-constexpr unsigned clz(std::unsigned_integral auto x) noexcept
+template <typename Unsigned, typename = std::enable_if_t<std::is_unsigned_v<Unsigned>>>
+constexpr unsigned clz(Unsigned x) noexcept
 {
-    return static_cast<unsigned>(std::countl_zero(x));
+    if (x == 0) return sizeof(Unsigned) * 8;
+    if constexpr (sizeof(Unsigned) == 8)
+        return static_cast<unsigned>(__builtin_clzll(x));
+    else if constexpr (sizeof(Unsigned) == 4)
+        return static_cast<unsigned>(__builtin_clz(x));
+    else
+        return static_cast<unsigned>(__builtin_clz(x)) - (32 - sizeof(Unsigned) * 8);
 }
 
 constexpr unsigned clz(uint128 x) noexcept
@@ -847,7 +848,7 @@ inline std::string to_string(uint<N> x, int base = 10)
         s.push_back(char(c));
         x = res.quot;
     }
-    std::ranges::reverse(s);
+    std::reverse(s.begin(), s.end());
     return s;
 }
 
@@ -1034,13 +1035,7 @@ public:
     friend constexpr bool operator>=(const uint& x, const uint& y) noexcept { return !(x < y); }
     friend constexpr bool operator<=(const uint& x, const uint& y) noexcept { return !(y < x); }
 
-    friend constexpr std::strong_ordering operator<=>(const uint& x, const uint& y) noexcept
-    {
-        if (x == y)
-            return std::strong_ordering::equal;
 
-        return (x < y) ? std::strong_ordering::less : std::strong_ordering::greater;
-    }
 
     friend constexpr uint operator<<(const uint& x, uint64_t shift) noexcept
     {
@@ -1090,7 +1085,8 @@ public:
         }
     }
 
-    friend constexpr uint operator<<(const uint& x, std::integral auto shift) noexcept
+    template<typename Integral, typename = std::enable_if_t<std::is_integral_v<Integral>>>
+    friend constexpr uint operator<<(const uint& x, Integral shift) noexcept
     {
         static_assert(sizeof(shift) <= sizeof(uint64_t));
         return x << static_cast<uint64_t>(shift);
@@ -1157,7 +1153,8 @@ public:
         }
     }
 
-    friend constexpr uint operator>>(const uint& x, std::integral auto shift) noexcept
+    template<typename Integral, typename = std::enable_if_t<std::is_integral_v<Integral>>>
+    friend constexpr uint operator>>(const uint& x, Integral shift) noexcept
     {
         static_assert(sizeof(shift) <= sizeof(uint64_t));
         return x >> static_cast<uint64_t>(shift);
@@ -1387,7 +1384,9 @@ constexpr uint64_t udivrem_by1(uint64_t u[], int len, uint64_t d) noexcept
     auto it = &u[len - 2];
     while (true)
     {
-        std::tie(*it, rem) = udivrem_2by1({*it, rem}, d, reciprocal);
+        auto _res = udivrem_2by1({*it, rem}, d, reciprocal);
+        *it = _res.quot;
+        rem = _res.rem;
         if (it == &u[0])
             break;
         --it;
@@ -1414,7 +1413,9 @@ constexpr uint128 udivrem_by2(uint64_t u[], int len, uint128 d) noexcept
     auto it = &u[len - 3];
     while (true)
     {
-        std::tie(*it, rem) = udivrem_3by2(rem[1], rem[0], *it, d, reciprocal);
+        auto _res = udivrem_3by2(rem[1], rem[0], *it, d, reciprocal);
+        *it = _res.quot;
+        rem = _res.rem;
         if (it == &u[0])
             break;
         --it;
@@ -1430,8 +1431,11 @@ constexpr bool add(uint64_t s[], const uint64_t x[], const uint64_t y[], int len
     INTX_REQUIRE(len >= 2);
 
     bool carry = false;
-    for (int i = 0; i < len; ++i)
-        std::tie(s[i], carry) = addc(x[i], y[i], carry);
+    for (int i = 0; i < len; ++i) {
+        auto _res = addc(x[i], y[i], carry);
+        s[i] = _res.value;
+        carry = _res.carry;
+    }
     return carry;
 }
 
@@ -1477,13 +1481,19 @@ constexpr void udivrem_knuth(
         }
         else
         {
-            uint128 rhat;
-            std::tie(qhat, rhat) = udivrem_3by2(u2, u1, u0, divisor, reciprocal);
+            auto _res1 = udivrem_3by2(u2, u1, u0, divisor, reciprocal);
+            qhat = _res1.quot;
+            auto rhat = _res1.rem;
 
             bool carry{};
             const auto overflow = submul(&u[j], &u[j], d, dlen - 2, qhat);
-            std::tie(u[j + dlen - 2], carry) = subc(rhat[0], overflow);
-            std::tie(u[j + dlen - 1], carry) = subc(rhat[1], carry);
+            auto _res2 = subc(rhat[0], overflow);
+            u[j + dlen - 2] = _res2.value;
+            carry = _res2.carry;
+            
+            auto _res3 = subc(rhat[1], carry);
+            u[j + dlen - 1] = _res3.value;
+            carry = _res3.carry;
 
             if (INTX_UNLIKELY(carry))
             {

@@ -8,6 +8,17 @@
 #include <bit>
 #include <cstdint>
 #include <utility>
+#include <type_traits>
+#include <cstring>
+
+namespace {
+template <class To, class From>
+To my_bit_cast(const From& src) noexcept {
+    To dst;
+    std::memcpy(&dst, &src, sizeof(To));
+    return dst;
+}
+}
 
 #if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 180000
 // libc++ before version 18 has incorrect std::rotl signature
@@ -20,13 +31,13 @@ namespace mvm::crypto
 namespace
 {
 // TODO(C++23): Use std::byteswap.
-template <std::integral T>
+template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
 constexpr T byteswap(T value) noexcept
 {
     static_assert(std::has_unique_object_representations_v<T>, "T may not have padding bits");
-    auto value_representation = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
-    std::ranges::reverse(value_representation);
-    return std::bit_cast<T>(value_representation);
+    auto value_representation = my_bit_cast<std::array<std::byte, sizeof(T)>>(value);
+    std::reverse(value_representation.begin(), value_representation.end());
+    return my_bit_cast<T>(value_representation);
 }
 
 /// @file
@@ -119,11 +130,14 @@ constexpr int rotate_amount[L][N] = {
 };
 
 /// Converts native representation to/from little-endian.
-inline auto to_le(std::integral auto x) noexcept
+template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+inline auto to_le(T x) noexcept
 {
-    if constexpr (std::endian::native == std::endian::big)
-        return byteswap(x);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return byteswap(x);
+#else
     return x;
+#endif
 }
 
 template <typename T>
@@ -131,12 +145,14 @@ inline T load_le(const std::byte* data) noexcept
 {
     std::array<std::byte, sizeof(T)> bytes{};
     std::copy_n(data, sizeof(T), bytes.begin());
-    return to_le(std::bit_cast<T>(bytes));
+    return to_le(my_bit_cast<T>(bytes));
 }
 
-inline std::byte* store_le(std::byte* out, std::integral auto x) noexcept
+template<typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+inline std::byte* store_le(std::byte* out, T x) noexcept
 {
-    return std::ranges::copy(std::bit_cast<std::array<std::byte, sizeof(x)>>(to_le(x)), out).out;
+    auto arr = my_bit_cast<std::array<std::byte, sizeof(x)>>(to_le(x));
+    return std::copy(arr.begin(), arr.end(), out);
 }
 
 template <size_t J>
@@ -158,10 +174,14 @@ inline void step(State z[L], const std::byte* block) noexcept
         const auto d = z[i][3];
         const auto e = z[i][4];
 
+        auto rotate_left = [](uint32_t val, int amount) {
+            return (val << amount) | (val >> (32 - amount));
+        };
+
         z[i][0] = e;
-        z[i][1] = std::rotl(a + f(b, c, d) + w + k, s) + e;
+        z[i][1] = rotate_left(a + f(b, c, d) + w + k, s) + e;
         z[i][2] = b;
-        z[i][3] = std::rotl(c, 10);
+        z[i][3] = rotate_left(c, 10);
         z[i][4] = d;
     }
 }

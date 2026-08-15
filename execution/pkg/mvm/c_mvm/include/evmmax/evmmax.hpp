@@ -90,16 +90,23 @@ public:
         for (size_t i = 0; i != S; ++i)
         {
             uint64_t c = 0;
-            for (size_t j = 0; j != S; ++j)
-                std::tie(c, t[j]) = addmul(t[j], x[j], y[i], c);
+            for (size_t j = 0; j != S; ++j) {
+                auto _res1 = addmul(t[j], x[j], y[i], c);
+                c = _res1.first;
+                t[j] = _res1.second;
+            }
             auto tmp = intx::addc(t[S], c);
             t[S] = tmp.value;
             const auto d = tmp.carry;  // TODO: Carry is 0 for sparse modulus.
 
             const auto m = t[0] * m_mod_inv;
-            std::tie(c, std::ignore) = addmul(t[0], m, mod[0], 0);
-            for (size_t j = 1; j != S; ++j)
-                std::tie(c, t[j - 1]) = addmul(t[j], m, mod[j], c);
+            auto _res2 = addmul(t[0], m, mod[0], 0);
+            c = _res2.first;
+            for (size_t j = 1; j != S; ++j) {
+                auto _res3 = addmul(t[j], m, mod[j], c);
+                c = _res3.first;
+                t[j - 1] = _res3.second;
+            }
             tmp = intx::addc(t[S], c);
             t[S - 1] = tmp.value;
             t[S] = d + tmp.carry;  // TODO: Carry is 0 for sparse modulus.

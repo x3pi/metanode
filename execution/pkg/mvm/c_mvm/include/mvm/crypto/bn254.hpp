@@ -5,7 +5,7 @@
 
 #include "ecc.hpp"
 #include <optional>
-#include <span>
+
 #include <vector>
 
 namespace evmmax::bn254
@@ -40,6 +40,6 @@ Point mul(const Point& pt, const uint256& c) noexcept;
 ///               followed by a point from twisted curve G2 group over extension field Fq^2.
 /// @return       `true` when  ∏e(vG2[i], vG1[i]) == 1 for i in [0, n] else `false`.
 ///               std::nullopt on error.
-std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pairs) noexcept;
+std::optional<bool> pairing_check(const std::vector<std::pair<Point, ExtPoint>>& pairs) noexcept;
 
 }  // namespace evmmax::bn254
