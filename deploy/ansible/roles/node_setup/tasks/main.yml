@@ -48,18 +48,27 @@
     if [ -z "$dev" ]; then
       dev=$(awk '$2 == "/mnt/metanode_snapshots" {print $1}' /etc/fstab 2>/dev/null || true)
     fi
-    if [[ "$dev" == /dev/loop* ]]; then
-      backing=$(losetup -n -O BACK-FILE "$dev" 2>/dev/null || true)
-      if [ -n "$backing" ]; then
-        dev="$backing"
-      else
-        dev=""
-      fi
-    fi
+    case "$dev" in
+      /dev/loop*)
+        backing=$(losetup -n -O BACK-FILE "$dev" 2>/dev/null || true)
+        if [ -n "$backing" ] && [ -f "$backing" ]; then
+          dev="$backing"
+        else
+          dev=""
+        fi
+        ;;
+      *)
+        if [ -n "$dev" ] && [ ! -b "$dev" ] && [ ! -f "$dev" ]; then
+          dev=""
+        fi
+        ;;
+    esac
     if [ -z "$dev" ] && [ -f "/opt/metanode_cluster_btrfs.img" ]; then
       dev="/opt/metanode_cluster_btrfs.img"
     fi
     echo "$dev"
+  args:
+    executable: /bin/bash
   register: detected_btrfs_dev
   changed_when: false
 
@@ -71,6 +80,8 @@
 - name: Check if BTRFS partition exists
   ansible.builtin.stat:
     path: "{{ btrfs_device_path | default('/dev/mapper/ubuntu--vg-metanode_data') }}"
+    get_checksum: false
+    get_mime: false
   register: btrfs_disk
 
 - name: Unmount all existing node data bind mounts before resetting
