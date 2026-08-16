@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-07-25
+> **Last updated:** 2026-08-16
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -250,6 +250,13 @@ metanode/
 | `mvm_api.go` | 1,331 | Meta VM API layer and C-FFI wrapper |
 | `extension.go` | 880 | MVM custom extension precompiles |
 | `helpers.go` | 646 | MVM execution helpers |
+| `engine.go` | — | `ExecutionEngine` interface — seam between Go host and the execution core (cgo today; see `execution_mode.go`) |
+| `execution_mode.go` | — | Runtime switch between `cgo` (in-process) and `trustzone` (TA-loopback today, real TA in GĐ3) execution backends, config-driven — see `note/tee_dual_mode_execution_plan.md` |
+| `tzproto/mvm_tz_protocol.h` | — | CA↔TA wire protocol — pure C, shared by the Go loopback (`tz_codec.go`/`tz_channel.go`, GĐ2, live) and the future TA C++ build (GĐ3) |
+| `tzproto/README.md` | — | Protocol state machine, full command table, `status==3` unwind analysis |
+| `tz_channel.go` | — | `tzChannel`: real spinlock-CAS shared control block (`mvm_tz_channel_t`) over a `C.malloc`'d page — GĐ2's x86 stand-in for GĐ3's driver-owned shared page |
+| `tz_codec.go` | — | Encode/decode between Go-native values and the `mvm_tz_protocol.h` wire format, for `ExecuteResult`, all 6 live forward commands, `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (§5b), and the 6 live reverse-callback commands (`GlobalStateGet`/`GetStorageValue`/`Extension*`, §2.1 — codec only; not yet wired into the loopback engine, needs a 2nd `libmvm_linker.a` build routing those calls through the wire instead of cgo, real hardware territory, GĐ3) |
+| `tz_loopback_engine.go` | — | `tzLoopbackEngine`: `ExecutionEngine` impl that round-trips every forward command through the real wire codec + channel, looped back to a real `*MVMApi` in-process — wired in as `execution_mode=trustzone`'s current backend |
 
 ### `execution/pkg/storage/` — Storage & DB Engines
 | File | Lines | Role |
@@ -257,6 +264,7 @@ metanode/
 | `pebble_db.go` | 681 | High I/O PebbleDB wrapper with WAL sync |
 | `batchstore.go` | 649 | DB batch operations and backups |
 | `simpledb.go` | 600 | Simple local KV storage interface |
+| `xapian_full_db_logs_index.go` | — | Address-indexed `full_db_logs` cache (last-write-wins) alongside `BackUpDb`'s block-indexed store — lets a TrustZone TA ask Host "latest full_db_logs for address X" without scanning block history (`note/tee_dual_mode_execution_plan.md` §5b) |
 
 ### `cmd/rpc/` — RPC API Gateway
 | Module | Role |

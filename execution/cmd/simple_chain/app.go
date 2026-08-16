@@ -131,6 +131,10 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	// Set state trie backend from config (must be before any trie creation)
 	mt_trie.SetStateBackend(app.config.StateBackend)
 
+	// Set EVM execution mode from config (must be before any transaction
+	// processing). See note/tee_dual_mode_execution_plan.md.
+	mvm.SetExecutionMode(app.config.ExecutionMode)
+
 	// Initialize NOMT database if backend is "nomt" (must be before any NewStateTrie calls)
 	if mt_trie.GetStateBackend() == mt_trie.BackendNOMT {
 		nomtPath := config.JoinPathIfNotURL(app.config.Databases.RootPath, "/consensus/nomt_db")
