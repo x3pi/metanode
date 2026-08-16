@@ -166,6 +166,12 @@ type SimpleChainConfig struct {
 	// CAUTION: Changing backend requires data resync. All nodes must use the same backend.
 	StateBackend string `json:"state_backend,omitempty"`
 
+	// EVM execution backend: "cgo" (default, in-process via cgo) or "trustzone" (mvm+Xapian
+	// core runs inside a TrustZone TA, Go host talks to it over a session/shared-memory
+	// boundary). See note/tee_dual_mode_execution_plan.md. Purely a where-it-runs switch —
+	// does not change the trust model (no TEE-held signing key, no RPMB anti-replay).
+	ExecutionMode string `json:"execution_mode,omitempty"`
+
 	// NOMT (Nearly Optimal Merkle Trie) configuration — only used when state_backend = "nomt"
 	NomtCommitConcurrency int `json:"nomt_commit_concurrency,omitempty"` // Number of concurrent commit workers (default: 4)
 	NomtPageCacheMB       int `json:"nomt_page_cache_mb,omitempty"`      // Page cache in MiB (default: 512)
