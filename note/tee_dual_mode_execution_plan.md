@@ -883,22 +883,41 @@ tranh trực tiếp" (per-CPU + guard), nhưng **chưa xác nhận được** h�
 `smc_smp.c`/lịch sử schedule, hoặc — thực tế hơn — test trên board thật, đúng cách bug gốc
 từng được phát hiện: không đọc code trước mà lường được).
 
-### 9.5 Câu hỏi thiết kế còn mở: CA khám phá địa chỉ shared-page của TA metanode bằng cách nào
+### 9.5 CA khám phá địa chỉ shared-page của TA metanode bằng cách nào — ĐÃ XÁC NHẬN (2026-08-17)
 
 Vì tách riêng hoàn toàn khỏi `all_ring_buffer` (theo yêu cầu người dùng), CA không có kênh nào
-sẵn để đọc `cma_index`/`entry_index` TA metanode vừa `push_pages()`. Hướng khả thi nhất (chưa
-implement): TA metanode luôn dùng 1 `cma_index` cố định (ví dụ không trùng
-`TZASC_NR_MODEL`/`TZASC_NR_NPU_SCRATCH`) và luôn là allocation ĐẦU TIÊN trên bank đó lúc TA
-khởi động (trước khi nhận request nào) → `entry_index` deterministic (cần xác nhận
-`push_pages_ex`/`cma_alloc` thật sự cấp `entry_index` tuần tự từ 0, chưa đọc kỹ phần này) — CA
-không cần handshake sống, chỉ cần biết trước cặp `(cma_index, entry_index)` cố định để
-`SET_PAGES` mmap thẳng.
+sẵn để đọc `cma_index`/`entry_index` TA metanode vừa `push_pages()`. Đọc trực tiếp
+`tc_client_driver.c`'s `tzasc_cma_push_pages_with_index()` (kernel-side, service thật cho
+`push_pages_ex`'s SMC) xác nhận:
+```c
+struct tzasc_cma_meta *g_tzasc_cma_meta = g_tzasc_cma_meta_arr + cma_index; // 1 meta/count RIÊNG mỗi bank
+...
+entry = &g_tzasc_cma_meta->entry[g_tzasc_cma_meta->count];
+ret = g_tzasc_cma_meta->count++;   // entry_index = count TRƯỚC khi tăng
+```
+`entry_index` cấp **tuần tự tuyệt đối từ 0** cho mỗi `cma_index` riêng — deterministic thật,
+không suy đoán. Cũng phát hiện đoạn này có `spin_lock_irqsave(&tzasc_cma_lock, ...)` bảo vệ
+`count++` — comment ghi rõ đây là fix cho 1 bug thật (race CA-ioctl vs TA-SMC-relay từng gây
+corruption dữ liệu tensor) — bookkeeping này đã an toàn với gọi đồng thời từ nhiều nguồn.
+
+**Hệ quả**: `entry_index=0` chỉ deterministic nếu TA metanode là người gọi `push_pages()`
+**đầu tiên** trên `cma_index` nó chọn — vì tensor pool LLM có thể tràn vào bất kỳ bank nào
+trong 4 bank khi model đủ lớn (không bank nào chắc chắn "sạch"). **Giải pháp chốt**: TA
+metanode phải launch + tự `push_pages()` xong **TRƯỚC KHI `llama-cli` launch** trong
+`chanmgr` — khớp đúng ràng buộc §9.3 (launch metanode phải xảy ra trước đoạn `llama-cli` do
+`waitpid()` block vĩnh viễn sau đó). Lúc đó chưa có gì đụng TZASC, `entry_index=0` chắc chắn
+đúng suốt phiên boot — CA không cần handshake sống, chỉ cần biết trước cặp
+`(cma_index, entry_index)=(N, 0)` cố định để `SET_PAGES` mmap thẳng, N là bank dành riêng cho
+metanode (đề xuất: bank không phải `TZASC_NR_MODEL`/`TZASC_NR_NPU_SCRATCH` để giảm khả năng
+tràn vào, dù không tuyệt đối loại trừ nếu model rất lớn).
 
 ### 9.6 Việc CHƯA làm — rõ ràng, không tự nhận đã xong
 
 - Chưa viết bất kỳ file `.cpp`/`.c` nào cho TA metanode thật (main() riêng, dispatch loop).
-- Chưa sửa `chanmgr/main.c` để launch process TA metanode.
-- Chưa xác nhận `push_pages_ex`/`cma_alloc`'s entry_index có thật sự deterministic/tuần tự.
+- Chưa sửa `chanmgr/main.c` để launch process TA metanode **trước** đoạn launch `llama-cli`
+  (ràng buộc thứ tự — xem §9.5 — không phải tùy chọn).
 - Chưa có cách nào build+test được phần này ngoài board thật (không có mock/loopback cho tầng
   kernel/SMC — khác hẳn GĐ2's loopback, vốn hoạt động hoàn toàn trên x86).
 - 7 reverse-callback (đã có wire codec Go từ mục 8) vẫn hoàn toàn chưa có phía TA thật.
+- §9.4's rủi ro (2 TA cùng gọi `wait_switch_req` trên CPU khác nhau) vẫn chưa giải quyết được
+  — không liên quan tới câu hỏi entry_index đã đóng ở §9.5, đây là rủi ro RIÊNG, còn mở.
