@@ -132,27 +132,94 @@ func (lc *LogCleaner) CleanOldEpochLogs() error {
 		})
 	}
 
-	if len(epochs) <= lc.maxEpochsToKeep {
+	if len(epochs) > lc.maxEpochsToKeep {
+		// Sắp xếp theo epoch giảm dần (mới nhất trước)
+		sort.Slice(epochs, func(i, j int) bool {
+			return epochs[i].epoch > epochs[j].epoch
+		})
+
+		// Xóa các epoch cũ (ngoài N epoch gần nhất)
+		deletedCount := 0
+		var freedBytes int64
+		for i := lc.maxEpochsToKeep; i < len(epochs); i++ {
+			ep := epochs[i]
+			// Tính size trước khi xóa
+			size := dirSize(ep.path)
+			log.Printf("🧹 [LOG-CLEANER] Đang xóa logs epoch %d: %s (%.1f MB)\n",
+				ep.epoch, ep.path, float64(size)/(1024*1024))
+			if err := os.RemoveAll(ep.path); err != nil {
+				log.Printf("🧹 [LOG-CLEANER] Không thể xóa %s: %v\n", ep.path, err)
+				continue
+			}
+			deletedCount++
+			freedBytes += size
+		}
+
+		if deletedCount > 0 {
+			log.Printf("🧹 [LOG-CLEANER] ✅ Đã xóa %d epoch dirs cũ, giải phóng %.1f MB\n",
+				deletedCount, float64(freedBytes)/(1024*1024))
+		}
+	} else if len(epochs) > 0 {
 		log.Printf("🧹 [LOG-CLEANER] Chỉ có %d epoch dirs, không cần xóa (giữ %d)\n", len(epochs), lc.maxEpochsToKeep)
-		return nil
 	}
 
-	// Sắp xếp theo epoch giảm dần (mới nhất trước)
-	sort.Slice(epochs, func(i, j int) bool {
-		return epochs[i].epoch > epochs[j].epoch
+	// Xóa các thư mục log theo ngày cũ (YYYY-MM-DD), giữ lại N ngày gần nhất
+	lc.cleanDailyDateDirs()
+
+	// Xóa thư mục date cũ (YYYY/MM/DD) nếu còn sót từ hệ thống cũ
+	lc.cleanLegacyDateDirs()
+
+	log.Println("🧹 [LOG-CLEANER] Hoàn thành dọn dẹp logs.")
+	return nil
+}
+
+// cleanDailyDateDirs dọn dẹp các thư mục log theo ngày (YYYY-MM-DD), chỉ giữ lại N ngày gần nhất
+func (lc *LogCleaner) cleanDailyDateDirs() {
+	entries, err := os.ReadDir(lc.logDir)
+	if err != nil {
+		return
+	}
+
+	type dateEntry struct {
+		date time.Time
+		name string
+		path string
+	}
+	var dateDirs []dateEntry
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		t, err := time.Parse("2006-01-02", name)
+		if err == nil {
+			dateDirs = append(dateDirs, dateEntry{
+				date: t,
+				name: name,
+				path: filepath.Join(lc.logDir, name),
+			})
+		}
+	}
+
+	if len(dateDirs) <= lc.maxEpochsToKeep {
+		return
+	}
+
+	// Sắp xếp ngày giảm dần (mới nhất trước)
+	sort.Slice(dateDirs, func(i, j int) bool {
+		return dateDirs[i].date.After(dateDirs[j].date)
 	})
 
-	// Xóa các epoch cũ (ngoài N epoch gần nhất)
 	deletedCount := 0
 	var freedBytes int64
-	for i := lc.maxEpochsToKeep; i < len(epochs); i++ {
-		ep := epochs[i]
-		// Tính size trước khi xóa
-		size := dirSize(ep.path)
-		log.Printf("🧹 [LOG-CLEANER] Đang xóa logs epoch %d: %s (%.1f MB)\n",
-			ep.epoch, ep.path, float64(size)/(1024*1024))
-		if err := os.RemoveAll(ep.path); err != nil {
-			log.Printf("🧹 [LOG-CLEANER] Không thể xóa %s: %v\n", ep.path, err)
+	for i := lc.maxEpochsToKeep; i < len(dateDirs); i++ {
+		d := dateDirs[i]
+		size := dirSize(d.path)
+		log.Printf("🧹 [LOG-CLEANER] Đang xóa logs theo ngày cũ (%s): %s (%.1f MB)\n",
+			d.name, d.path, float64(size)/(1024*1024))
+		if err := os.RemoveAll(d.path); err != nil {
+			log.Printf("🧹 [LOG-CLEANER] Không thể xóa %s: %v\n", d.path, err)
 			continue
 		}
 		deletedCount++
@@ -160,15 +227,9 @@ func (lc *LogCleaner) CleanOldEpochLogs() error {
 	}
 
 	if deletedCount > 0 {
-		log.Printf("🧹 [LOG-CLEANER] ✅ Đã xóa %d epoch dirs cũ, giải phóng %.1f MB\n",
+		log.Printf("🧹 [LOG-CLEANER] ✅ Đã xóa %d thư mục log ngày cũ, giải phóng %.1f MB\n",
 			deletedCount, float64(freedBytes)/(1024*1024))
 	}
-
-	// Xóa thư mục date cũ (YYYY/MM/DD) nếu còn sót từ hệ thống cũ
-	lc.cleanLegacyDateDirs()
-
-	log.Println("🧹 [LOG-CLEANER] Hoàn thành dọn dẹp logs.")
-	return nil
 }
 
 // StartPeriodicCleanup bắt đầu cleanup định kỳ (mỗi giờ mặc định)

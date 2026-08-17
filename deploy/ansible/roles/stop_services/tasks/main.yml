@@ -24,10 +24,10 @@
 
 - name: Stop and disable legacy metanode services for targeted nodes
   ansible.builtin.systemd:
-    name: "metanode-{{ item }}"
+    name: "{{ item[1] }}-{{ item[0] }}"
     state: stopped
     enabled: no
-  loop: "{{ active_nodes }}"
+  loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
   failed_when: false
 
 - name: Check if targeted node processes are running

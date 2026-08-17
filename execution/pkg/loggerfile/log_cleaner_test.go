@@ -182,3 +182,43 @@ func TestGlobalLogCleaner(t *testing.T) {
 	// Clear
 	SetGlobalLogCleaner(lc)
 }
+
+func TestCleanOldEpochLogs_DailyDateDirsCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dates := []string{
+		"2026-08-10",
+		"2026-08-11",
+		"2026-08-12",
+		"2026-08-13",
+		"2026-08-14",
+	}
+
+	for _, d := range dates {
+		dir := filepath.Join(tmpDir, d)
+		os.MkdirAll(dir, 0755)
+		os.WriteFile(filepath.Join(dir, "execution.log"), []byte("log data"), 0644)
+	}
+
+	lc := NewLogCleaner(tmpDir)
+	lc.SetMaxEpochsToKeep(2) // Giữ 2 ngày gần nhất: 2026-08-14 và 2026-08-13
+
+	err := lc.CleanOldEpochLogs()
+	if err != nil {
+		t.Fatalf("CleanOldEpochLogs failed: %v", err)
+	}
+
+	// 2026-08-14 and 2026-08-13 should exist
+	for _, kept := range []string{"2026-08-14", "2026-08-13"} {
+		if _, err := os.Stat(filepath.Join(tmpDir, kept)); os.IsNotExist(err) {
+			t.Errorf("expected date dir %s to be kept, but it was deleted", kept)
+		}
+	}
+
+	// Older dates should be deleted
+	for _, deleted := range []string{"2026-08-10", "2026-08-11", "2026-08-12"} {
+		if _, err := os.Stat(filepath.Join(tmpDir, deleted)); !os.IsNotExist(err) {
+			t.Errorf("expected date dir %s to be deleted, but it still exists", deleted)
+		}
+	}
+}

@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=15s
 
 # Environment
-Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true" "RUST_BACKTRACE=full"
+Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true"
 # Default to validator, but synconly logic can be injected here based on variables
 {% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}
 Environment=NODE_TYPE=synconly

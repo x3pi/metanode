@@ -38,15 +38,22 @@
 
 - name: Auto-detect BTRFS device path for /opt/metanode
   ansible.builtin.shell: |
-    dev=$(findmnt -n -o SOURCE /opt/metanode 2>/dev/null || true)
-    if [ -z "$dev" ]; then
-      dev=$(awk '$2 == "/opt/metanode" {print $1}' /etc/fstab 2>/dev/null || true)
+    fstype=$(findmnt -n -o FSTYPE /opt/metanode 2>/dev/null || true)
+    dev=""
+    if [ "$fstype" = "btrfs" ]; then
+      dev=$(findmnt -n -o SOURCE /opt/metanode 2>/dev/null || true)
     fi
     if [ -z "$dev" ]; then
-      dev=$(findmnt -n -o SOURCE /mnt/metanode_snapshots 2>/dev/null || true)
+      snap_fstype=$(findmnt -n -o FSTYPE /mnt/metanode_snapshots 2>/dev/null || true)
+      if [ "$snap_fstype" = "btrfs" ]; then
+        dev=$(findmnt -n -o SOURCE /mnt/metanode_snapshots 2>/dev/null || true)
+      fi
     fi
     if [ -z "$dev" ]; then
-      dev=$(awk '$2 == "/mnt/metanode_snapshots" {print $1}' /etc/fstab 2>/dev/null || true)
+      dev=$(awk '$2 == "/opt/metanode" && $3 == "btrfs" {print $1}' /etc/fstab 2>/dev/null || true)
+    fi
+    if [ -z "$dev" ]; then
+      dev=$(awk '$2 == "/mnt/metanode_snapshots" && $3 == "btrfs" {print $1}' /etc/fstab 2>/dev/null || true)
     fi
     case "$dev" in
       /dev/loop*)
