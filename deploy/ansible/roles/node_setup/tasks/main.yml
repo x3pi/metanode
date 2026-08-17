@@ -137,6 +137,20 @@
       {%- endfor -%}
       {{ configs }}
 
+- name: Validate BTRFS availability for snapshot-enabled nodes
+  ansible.builtin.fail:
+    msg: |
+      [CẢNH BÁO / LỖI DEPLOY] Node {{ item }} được cấu hình snapshot (snapshot_enabled hoặc synconly),
+      nhưng không tìm thấy phân vùng hoặc file BTRFS (btrfs_device_path: '{{ btrfs_device_path | default("") }}')
+      và thư mục cài đặt {{ metanode_install_dir }} (fs_type: '{{ fs_type.stdout | default("unknown") }}') không nằm trên hệ thống tệp BTRFS/XFS.
+      Node sẽ bị crash khi runtime nếu tiếp tục.
+      Hướng dẫn khắc phục: Vui lòng cấu hình phân vùng BTRFS (hoặc tạo file loop /opt/metanode_cluster_btrfs.img) trước khi deploy, hoặc tắt snapshot.
+  loop: "{{ active_nodes }}"
+  when: >
+    (node_configs[item | string].is_synconly or node_configs[item | string].snapshot_enabled)
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
 - name: Create bind mount source directories for snapshot-enabled nodes
   ansible.builtin.file:
     path: "/mnt/metanode_snapshots/node-{{ item }}"
