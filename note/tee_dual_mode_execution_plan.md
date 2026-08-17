@@ -911,13 +911,59 @@ metanode phải launch + tự `push_pages()` xong **TRƯỚC KHI `llama-cli` lau
 metanode (đề xuất: bank không phải `TZASC_NR_MODEL`/`TZASC_NR_NPU_SCRATCH` để giảm khả năng
 tràn vào, dù không tuyệt đối loại trừ nếu model rất lớn).
 
-### 9.6 Việc CHƯA làm — rõ ràng, không tự nhận đã xong
+### 9.6 Implement thật lần đầu (2026-08-17) — tách biệt hoàn toàn khỏi LLM TA
 
-- Chưa viết bất kỳ file `.cpp`/`.c` nào cho TA metanode thật (main() riêng, dispatch loop).
-- Chưa sửa `chanmgr/main.c` để launch process TA metanode **trước** đoạn launch `llama-cli`
-  (ràng buộc thứ tự — xem §9.5 — không phải tùy chọn).
-- Chưa có cách nào build+test được phần này ngoài board thật (không có mock/loopback cho tầng
-  kernel/SMC — khác hẳn GĐ2's loopback, vốn hoạt động hoàn toàn trên x86).
-- 7 reverse-callback (đã có wire codec Go từ mục 8) vẫn hoàn toàn chưa có phía TA thật.
-- §9.4's rủi ro (2 TA cùng gọi `wait_switch_req` trên CPU khác nhau) vẫn chưa giải quyết được
-  — không liên quan tới câu hỏi entry_index đã đóng ở §9.5, đây là rủi ro RIÊNG, còn mở.
+Theo yêu cầu tường minh của người dùng ("tách việc chạy xử lý block metanode trong trustzone
+và việc llm trong trustzone ra 2 phần rõ ràng"): viết `execution/pkg/mvm/ta/mvm_ta_main.cpp`
+(metanode repo) — **zero dependency** vào `tz-llm-trustzone/tz-llm/llama.cpp` (không include,
+không link, không chung struct/process). Chỉ dùng chung header SDK chcore-libc (API công khai
+của hệ điều hành) + tái hiện độc lập cơ chế `push_pages`/`usys_map_tzasc_cma_pmo` (không gọi
+lại code của project kia).
+
+- **Channel setup**: `push_pages_ex` (tự viết, không phụ thuộc `alloc-stage-chcore.cpp`) +
+  `usys_map_tzasc_cma_pmo` — đúng chuỗi API đã xác nhận ở §9.2, dùng `MVM_TZASC_CMA_INDEX=1`
+  (né `TZASC_NR_MODEL`/`TZASC_NR_NPU_SCRATCH`).
+- **Dispatch loop**: busy-poll thuần túy trên cờ atomic (`usys_yield()` giữa các lần check) —
+  **cố tình không dùng `usys_tee_wait_switch_req` ở bất kỳ đâu**, né hẳn rủi ro §9.4 thay vì cố
+  chứng minh nó an toàn.
+- **6 reverse-callback thật** (`GlobalStateGet`/`GetStorageValue`/`ExtensionCallGetApi`/
+  `ExtensionExtractJsonField`/`ExtensionBlst`/`ExtensionGetOrCreateSimpleDb`): implement đầy đủ,
+  round-trip qua cùng channel (nested round-trip trong lúc xử lý forward command).
+- **`MVM_TZ_CMD_CALL`**: round-trip đầy đủ, gọi `call()` thật (chữ ký xác nhận trực tiếp từ
+  `mvm_linker.hpp`, phát hiện + tự sửa 1 lỗi thật lúc viết: thiếu tham số `b_block_number`
+  32-byte big-endian, đã convert từ `req.block_number` uint64 đúng theo cách Go làm
+  `big.NewInt(...).FillBytes(...)`). `ExecuteResult` encode đầy đủ cho status/exception/
+  gas_used/output/exmsg + 3 mảng state-change đơn giản nhất (`add_balance_change`/
+  `sub_balance_change`/`nonce_change`, dạng `[32B addr left-pad][32B value]`, xác nhận qua đọc
+  `extractAddBalance`/`extractSubBalance` thật trong `mvm_api.go`).
+- **CHƯA làm, ghi rõ TODO trong code**: encode đầy đủ cho `code_change`/`storage_change`/
+  `storage_read`/`full_db_hash`/`full_db_logs`/`event_logs`/`native_logs` (đếm đúng số lượng,
+  chưa ghi entry — không sai dữ liệu, chỉ trả rỗng). 5 forward command còn lại (Execute/Deploy/
+  SendNative/ProcessNativeMintBurn/NoncePlusOne) chưa wire (cơ chế giống hệt Call, hoãn lại).
+
+**Verify thật đã làm được (không cần board)**: compile sạch bằng toolchain cross GCC13.3.0
+thật (0 lỗi, AArch64 ELF). Link full-stack (mvm+linker+5 lib+Xapian+TBB+zlib+`libc.a` thật của
+chcore-libc) → **0 undefined symbol** — xác nhận toàn bộ thiết kế logic/symbol-graph đúng.
+**Lưu ý trung thực**: bản link này KHÔNG phải build deploy được (trộn runtime musl-cross-make
+với `libc.a` thật của chcore trong cùng 1 binary — sai ABI cho phần cứng thật) — chỉ để verify
+symbol graph. Build thật cần đúng toolchain GCC9+specs-wrapper qua Docker pipeline như LLM TA
+(`build-llama-docker.sh`'s `build-chcore`), **chưa làm**.
+
+**Patch `chanmgr/main.c`** (tz-llm-trustzone repo): thêm launch `/mvm_ta` qua `create_process()`
+**đồng bộ, ngay trước** đoạn launch `llama-cli` (chỉ `waitpid()` đẩy sang thread riêng, không
+block `main()`) — đúng ràng buộc thứ tự §9.5. **CHƯA compile được** — cần môi trường build
+`chanmgr`/chcore đầy đủ, chưa dựng trong phiên này; lần build thật đầu tiên sẽ lộ ra bất kỳ lỗi
+cú pháp/API nào.
+
+**Việc CHƯA làm, rõ ràng**:
+- Chưa build được `chanmgr/main.c`'s patch (chỉ viết theo đọc code, chưa compile).
+- Chưa tích hợp `mvm_ta` vào pipeline Docker thật (`build-chcore`) — chưa có target build thật.
+- Chưa test trên board thật bất kỳ phần nào ở mục này.
+- Encode đầy đủ cho 7/10 loại mảng state-change còn lại + 5 forward command còn lại.
+- §9.4's rủi ro wait_switch_req — nay đã NÉ HẲN bằng thiết kế busy-poll, không còn áp dụng cho
+  cơ chế của metanode nữa (nhưng vẫn là rủi ro thật cho `llama-cli`'s riêng, không phải việc
+  của metanode giải quyết).
+
+File: `metanode/execution/pkg/mvm/ta/{mvm_ta_main.cpp,README.md}` (mới),
+`tz-llm-trustzone/tz-llm/tee_os_kernel/user/system-services/system-servers/chanmgr/main.c`
+(sửa, chưa compile).
