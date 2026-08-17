@@ -30,9 +30,11 @@ package mvm_test
 // that deferred piece of B1 lands.
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"math/big"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -47,6 +49,7 @@ import (
 	mt_state "github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	mt_types "github.com/meta-node-blockchain/meta-node/types"
 )
 
 // serializeRoundTrip forces v through a real JSON marshal/unmarshal cycle
@@ -91,6 +94,63 @@ func harnessChainState(t *testing.T) *blockchain.ChainState {
 		t.Fatalf("harnessChainState: %v", err)
 	}
 	return cs
+}
+
+// harnessMemoryStorage adapts storage.NewMemoryDb() (a real Get/Put, unlike
+// DummyStorage) to the full storage.Storage interface — MemoryDB predates
+// GetBackupPath/BatchDelete being added to that interface and was never
+// updated for them; not worth changing production code just for this
+// harness, so fill the 2 missing methods in locally instead.
+type harnessMemoryStorage struct {
+	*storage.MemoryDB
+}
+
+func (harnessMemoryStorage) GetBackupPath() string { return "" }
+func (h harnessMemoryStorage) BatchDelete(keys [][]byte) error {
+	for _, k := range keys {
+		if err := h.MemoryDB.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// harnessChainStateWithCodeStorage is harnessChainState, but backs
+// SmartContractDB's code store with a real in-memory KV (harnessMemoryStorage)
+// instead of the no-op DummyStorage. Needed only by tests that Deploy and
+// then later re-read the code back out via SmartContractDB.Code() (e.g. a
+// Call into a just-deployed contract): plain DummyStorage silently discards
+// every Put, so Code() would always see nil there — fine for every other
+// test in this file, which only ever inspects the *ExecuteResult* returned
+// by Deploy, never re-reads code from the DB.
+//
+// Returns the codeStorage instance too, alongside cs: applyExecuteResultTo-
+// ChainState writes deployed code directly into it rather than going
+// through SmartContractDB.SetCode()+Commit() — see that function's doc
+// comment for why (Commit()'s CommitAllStorage() step does a storage-root
+// consistency check unrelated to code storage at all, and this harness has
+// no reason to exercise that machinery just to make Code() see fresh code).
+func harnessChainStateWithCodeStorage(t *testing.T) (*blockchain.ChainState, harnessMemoryStorage) {
+	t.Helper()
+
+	prevBackend := trie.GetStateBackend()
+	trie.SetStateBackend(trie.BackendMPT)
+	t.Cleanup(func() { trie.SetStateBackend(prevBackend) })
+
+	accountStorage := storage.NewDummyStorage("")
+	codeStorage := harnessMemoryStorage{storage.NewMemoryDb()}
+	scStorage := storage.NewDummyStorage("")
+
+	header := block.NewBlockHeader(
+		common.Hash{}, 0, common.Hash{}, common.Hash{}, common.Hash{},
+		common.Address{}, 0, common.Hash{}, 0,
+	)
+
+	cs, err := blockchain.NewChainStateRemote(header, accountStorage, codeStorage, scStorage, map[common.Address]struct{}{})
+	if err != nil {
+		t.Fatalf("harnessChainStateWithCodeStorage: %v", err)
+	}
+	return cs, codeStorage
 }
 
 func harnessSeedAccount(t *testing.T, cs *blockchain.ChainState, addr common.Address, balance *big.Int, nonce uint64) {
@@ -731,6 +791,593 @@ func TestTABoundary_NativeLogs_SurvivesSerialization(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("NativeLogs missing expected BALANCE log line for %s; got %+v", queried.Hex(), rsWire.NativeLogs)
+	}
+}
+
+// ─── GĐ2 (note/tee_dual_mode_execution_plan.md): cgo vs trustzone-loopback ───
+//
+// These tests run the SAME logical transaction through mvm.NewExecutionEngine
+// twice — once under execution_mode=cgo, once under execution_mode=
+// trustzone — each on its own freshly-seeded ChainState (never the same tx
+// on both: both engines WRITE to their AccountStateDb/SmartContractDb, so
+// sharing one ChainState between the two runs would double-apply the same
+// balance/code change — see the plan's explicit "2 lượt chạy tách biệt,
+// không chung 1 tx" design decision). The trustzone run exercises the real
+// wire codec (tz_codec.go) and the real spinlock-CAS channel (tz_channel.go)
+// end to end, looped back to a real *MVMApi (tz_loopback_engine.go) — not a
+// shortcut.
+//
+// Addresses (mvmId, sender, ...) for every test below come from
+// nextTestAddr(), never hardcoded literals: the C++ side's State singleton
+// (note/tee_dual_mode_execution_plan.md section 4) is process-global and
+// keys at least some state (confirmed: the isCache=true/Execute path) by
+// CONTRACT ADDRESS alone, persisting across completely unrelated Go-level
+// ChainState instances within the same test binary process. A hardcoded,
+// reused address silently leaks one sub-run's (or one `-count=N` repeat's)
+// state into the next — caught by TestTABoundary_TrustzoneLoopback_
+// MatchesCgo_Execute under `-count=3` before this fix (cgo side alone
+// returned 1, then 2, then 3 across 3 repeats of the identical hardcoded
+// sender). Globally-unique addresses per call sidestep the whole class of
+// bug instead of relying on remembering to pick yet another fresh literal.
+var testAddrSeq int64
+
+// nextTestAddr must stay well clear of the low integer range (0x01..0x09 is
+// the EVM precompile range — ecrecover, sha256, etc.) — an earlier version
+// used common.BigToAddress(big.NewInt(n)) directly, which handed out
+// 0x00...01, 0x00...02, ... and made the C++ side treat "sender"/"mvmId"
+// as precompile addresses instead of plain accounts (seeded balance/nonce
+// silently didn't apply: "insufficient balance for sendNative", nonce
+// starting from 0 instead of the seeded value). Fixed high byte + counter
+// in the low 8 bytes keeps every generated address unambiguously outside
+// that range.
+func nextTestAddr() common.Address {
+	n := atomic.AddInt64(&testAddrSeq, 1)
+	var addr common.Address
+	addr[0] = 0xfe
+	binary.BigEndian.PutUint64(addr[12:], uint64(n))
+	return addr
+}
+
+func runNativeTransferViaMode(t *testing.T, mode string, mvmId, from, to common.Address, amount *big.Int) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs := harnessChainState(t)
+	harnessSeedAccount(t, cs, from, big.NewInt(1_000_000), 0)
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	engine.SetRelatedAddresses([]common.Address{from, to})
+
+	rs := engine.SendNative(
+		from.Bytes(), to.Bytes(), amount,
+		1, 21000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, false,
+	)
+	if rs == nil {
+		t.Fatalf("SendNative (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+// TestTABoundary_TrustzoneLoopback_MatchesCgo_NativeTransfer is GĐ2's core
+// verification: the trustzone-loopback engine must produce the same
+// ExecuteResult as the real cgo engine for the same logical transaction.
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_NativeTransfer(t *testing.T) {
+	from := nextTestAddr()
+	to := nextTestAddr()
+	amount := big.NewInt(1_234)
+
+	cgoRs := runNativeTransferViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), from, to, amount)
+	tzRs := runNativeTransferViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), from, to, amount)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+	if tzRs.GasUsed != cgoRs.GasUsed {
+		t.Errorf("trustzone GasUsed = %d, want %d (cgo)", tzRs.GasUsed, cgoRs.GasUsed)
+	}
+
+	toKey := hexKey(to)
+	fromKey := hexKey(from)
+
+	cgoAdd, ok := cgoRs.MapAddBalance[toKey]
+	if !ok {
+		t.Fatalf("cgo: MapAddBalance missing entry for recipient %s", toKey)
+	}
+	tzAdd, ok := tzRs.MapAddBalance[toKey]
+	if !ok {
+		t.Fatalf("trustzone: MapAddBalance missing entry for recipient %s; got keys %v", toKey, keysOf(tzRs.MapAddBalance))
+	}
+	if string(tzAdd) != string(cgoAdd) {
+		t.Errorf("MapAddBalance[recipient]: trustzone=%x, cgo=%x", tzAdd, cgoAdd)
+	}
+
+	cgoSub, ok := cgoRs.MapSubBalance[fromKey]
+	if !ok {
+		t.Fatalf("cgo: MapSubBalance missing entry for sender %s", fromKey)
+	}
+	tzSub, ok := tzRs.MapSubBalance[fromKey]
+	if !ok {
+		t.Fatalf("trustzone: MapSubBalance missing entry for sender %s; got keys %v", fromKey, keysOf(tzRs.MapSubBalance))
+	}
+	if string(tzSub) != string(cgoSub) {
+		t.Errorf("MapSubBalance[sender]: trustzone=%x, cgo=%x", tzSub, cgoSub)
+	}
+}
+
+func runDeployViaMode(t *testing.T, mode string, mvmId, sender common.Address, initCode []byte, txHash common.Hash) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs := harnessChainState(t)
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	engine.SetRelatedAddresses([]common.Address{sender})
+
+	rs := engine.Deploy(
+		sender.Bytes(), initCode, big.NewInt(0),
+		1, 200_000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, txHash.Bytes(),
+		false, false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Deploy (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+// TestTABoundary_TrustzoneLoopback_MatchesCgo_Deploy is the CREATE-path
+// counterpart of the native-transfer comparison above: same init code, same
+// sender/nonce (so the same CREATE-derived address), run once per mode on
+// its own ChainState, deployed runtime code compared byte-for-byte.
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_Deploy(t *testing.T) {
+	sender := nextTestAddr()
+	// Same minimal CREATE pattern as TestTABoundary_Deploy_SurvivesSerialization.
+	runtime := []byte{0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
+	initCode := append([]byte{
+		0x60, byte(len(runtime)),
+		0x60, 0x0c,
+		0x60, 0x00,
+		0x39,
+		0x60, byte(len(runtime)),
+		0x60, 0x00,
+		0xf3,
+	}, runtime...)
+	txHash := common.HexToHash("0xfeedface")
+
+	cgoRs := runDeployViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), sender, initCode, txHash)
+	tzRs := runDeployViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), sender, initCode, txHash)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+
+	wantAddr := crypto.CreateAddress(sender, 0)
+	cgoCode, ok := cgoRs.MapCodeChange[hexKey(wantAddr)]
+	if !ok {
+		t.Fatalf("cgo: MapCodeChange missing entry for %s", wantAddr.Hex())
+	}
+	tzCode, ok := tzRs.MapCodeChange[hexKey(wantAddr)]
+	if !ok {
+		t.Fatalf("trustzone: MapCodeChange missing entry for %s; got keys %v", wantAddr.Hex(), keysOf(tzRs.MapCodeChange))
+	}
+	if string(tzCode) != string(cgoCode) {
+		t.Errorf("MapCodeChange[deployed]: trustzone=%x, cgo=%x", tzCode, cgoCode)
+	}
+	if string(tzCode) != string(runtime) {
+		t.Errorf("trustzone deployed code = %x, want %x", tzCode, runtime)
+	}
+}
+
+// applyExecuteResultToChainState applies the balance/nonce/code changes of
+// an MVMExecuteResult directly onto cs's AccountStateDB/SmartContractDB,
+// mirroring (a simplified, harness-scoped version of) true_block_stm.go's
+// own apply step. Needed whenever a test chains multiple engine calls on the
+// same ChainState (e.g. Call into a just-Deployed contract) — without this,
+// the contract's code would never actually land in SmartContractDB and the
+// second call would see an empty account, not a real "committed between
+// txs" state.
+func applyExecuteResultToChainState(t *testing.T, cs *blockchain.ChainState, codeStorage harnessMemoryStorage, rs *mvm.MVMExecuteResult) {
+	t.Helper()
+	asDB := cs.GetAccountStateDB()
+	scDB := cs.GetSmartContractDB()
+
+	getOrNew := func(addr common.Address) mt_types.AccountState {
+		as, err := asDB.AccountState(addr)
+		if err != nil || as == nil {
+			return asDB.NewAccountState(addr)
+		}
+		return as
+	}
+
+	for addrHex, nonceBytes := range rs.MapNonce {
+		addr := common.HexToAddress(addrHex)
+		as := getOrNew(addr)
+		as.SetNonce(new(big.Int).SetBytes(nonceBytes).Uint64())
+		asDB.SetState(as)
+	}
+	for addrHex, addAmt := range rs.MapAddBalance {
+		addr := common.HexToAddress(addrHex)
+		as := getOrNew(addr)
+		as.AddBalance(new(big.Int).SetBytes(addAmt))
+		asDB.SetState(as)
+	}
+	for addrHex, subAmt := range rs.MapSubBalance {
+		addr := common.HexToAddress(addrHex)
+		as := getOrNew(addr)
+		if err := as.SubTotalBalance(new(big.Int).SetBytes(subAmt)); err != nil {
+			t.Fatalf("applyExecuteResultToChainState: SubTotalBalance(%s): %v", addr.Hex(), err)
+		}
+		asDB.SetState(as)
+	}
+	for addrHex, code := range rs.MapCodeChange {
+		addr := common.HexToAddress(addrHex)
+		codeHash := crypto.Keccak256Hash(code)
+		if h, ok := rs.MapCodeHash[addrHex]; ok {
+			codeHash = common.BytesToHash(h)
+		}
+		// Write straight into codeStorage instead of SmartContractDB.
+		// SetCode()+Commit(): SetCode() only stages into pendingCode, and
+		// Code(address) (what a later Call/Execute's code lookup actually
+		// reads) never consults pendingCode — only the flushed codeStorage
+		// (see smart_contract_db.go's Code() vs GetCodeByCodeHash() doc
+		// comment) — so *some* flush is required. But scDB.Commit() also
+		// runs CommitAllStorage(), which does an unrelated storage-root
+		// consistency check (AccountState.SmartContractState().StorageRoot()
+		// vs the freshly committed trie root) that a bare "just deployed,
+		// no storage touched yet" contract fails in this harness (expected
+		// zero-hash vs the real empty-MPT root) — this harness has no
+		// reason to exercise that machinery just to make Code() see code.
+		if err := codeStorage.Put(codeHash.Bytes(), code); err != nil {
+			t.Fatalf("applyExecuteResultToChainState: codeStorage.Put(%s): %v", addr.Hex(), err)
+		}
+		as := getOrNew(addr)
+		as.SetCodeHash(codeHash)
+		asDB.SetState(as)
+	}
+	for addrHex, changes := range rs.MapStorageChange {
+		addr := common.HexToAddress(addrHex)
+		var keys, values [][]byte
+		for keyHex, value := range changes {
+			keys = append(keys, common.HexToHash(keyHex).Bytes())
+			values = append(values, value)
+		}
+		// No Commit() needed here either: SmartContractDB.StorageValue()
+		// (a later Call/Execute's storage read) reads through the same
+		// live, cached smartContractStorageTries entry BatchSetStorageValues
+		// just wrote into — both operate on the same in-memory trie object
+		// within one SmartContractDB instance, no flush required to make a
+		// write visible to a later read on that same instance.
+		if err := scDB.BatchSetStorageValues(addr, keys, values); err != nil {
+			t.Fatalf("applyExecuteResultToChainState: BatchSetStorageValues(%s): %v", addr.Hex(), err)
+		}
+	}
+}
+
+func runCallViaMode(t *testing.T, mode string, mvmId, sender common.Address, initCode []byte, deployTxHash, callTxHash common.Hash) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs, codeStorage := harnessChainStateWithCodeStorage(t)
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	contractAddr := crypto.CreateAddress(sender, 0)
+	engine.SetRelatedAddresses([]common.Address{sender, contractAddr})
+
+	deployRs := engine.Deploy(
+		sender.Bytes(), initCode, big.NewInt(0),
+		1, 200_000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, deployTxHash.Bytes(),
+		false, false, false,
+	)
+	if deployRs == nil || deployRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("Deploy (mode=%s) failed: status=%v exmsg=%q", mode, deployRs.Status, deployRs.Exmsg)
+	}
+	applyExecuteResultToChainState(t, cs, codeStorage, deployRs)
+
+	rs := engine.Call(
+		sender.Bytes(), contractAddr.Bytes(), nil, big.NewInt(0),
+		1, 200_000,
+		0, 30_000_000, 0, 0, 2, common.Address{},
+		mvmId, false, callTxHash.Bytes(), []common.Address{sender, contractAddr},
+		false, false,
+	)
+	if rs == nil {
+		t.Fatalf("Call (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+// TestTABoundary_TrustzoneLoopback_MatchesCgo_Call deploys a tiny "load,
+// increment, store, return" contract (exercises SLOAD+SSTORE, not just a
+// constant RETURN like the Deploy comparison above) then Calls it — a
+// second, dependent engine call on the same ChainState, requiring
+// applyExecuteResultToChainState to have really landed the deployed code.
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_Call(t *testing.T) {
+	// Distinct sender per mode, not just distinct mvmId: the C++ side's
+	// State singleton (note/tee_dual_mode_execution_plan.md section 4) is
+	// process-global and keys at least some state by CONTRACT ADDRESS, not
+	// by mvmId/ChainState instance — reusing the same sender (and therefore
+	// the same CREATE-derived contract address) across the two sub-runs
+	// leaks the first run's storage into the second, silently. Caught by
+	// TestTABoundary_TrustzoneLoopback_MatchesCgo_Execute below before this
+	// fix; applying the same isolation here defensively.
+	senderCgo := nextTestAddr()
+	senderTz := nextTestAddr()
+	// Runtime: PUSH1 0 SLOAD PUSH1 1 ADD DUP1 PUSH1 0 SSTORE PUSH1 0 MSTORE
+	// PUSH1 0x20 PUSH1 0 RETURN — storage[0]++ then returns the new value.
+	runtime := []byte{
+		0x60, 0x00, 0x54, 0x60, 0x01, 0x01, 0x80, 0x60, 0x00, 0x55,
+		0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+	}
+	initCode := append([]byte{
+		0x60, byte(len(runtime)),
+		0x60, 0x0c,
+		0x60, 0x00,
+		0x39,
+		0x60, byte(len(runtime)),
+		0x60, 0x00,
+		0xf3,
+	}, runtime...)
+	deployTxHash := common.HexToHash("0xdeadc0de")
+	callTxHash := common.HexToHash("0xca11c0de")
+
+	cgoRs := runCallViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), senderCgo, initCode, deployTxHash, callTxHash)
+	tzRs := runCallViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), senderTz, initCode, deployTxHash, callTxHash)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo Call status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone Call status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+
+	wantVal := make([]byte, 32)
+	wantVal[31] = 1
+	if string(cgoRs.Return) != string(wantVal) {
+		t.Fatalf("cgo Call Return = %x, want %x (SLOAD(0)+1 of empty slot)", cgoRs.Return, wantVal)
+	}
+	if string(tzRs.Return) != string(cgoRs.Return) {
+		t.Errorf("Call Return: trustzone=%x, cgo=%x", tzRs.Return, cgoRs.Return)
+	}
+}
+
+func runExecuteViaMode(t *testing.T, mode string, mvmId, sender common.Address, initCode []byte, deployTxHash, execTxHash common.Hash) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs, codeStorage := harnessChainStateWithCodeStorage(t)
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000_000), 0)
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	contractAddr := crypto.CreateAddress(sender, 0)
+	engine.SetRelatedAddresses([]common.Address{sender, contractAddr})
+
+	deployRs := engine.Deploy(
+		sender.Bytes(), initCode, big.NewInt(0),
+		1, 200_000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, deployTxHash.Bytes(),
+		false, false, false,
+	)
+	if deployRs == nil || deployRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("Deploy (mode=%s) failed: status=%v exmsg=%q", mode, deployRs.Status, deployRs.Exmsg)
+	}
+	applyExecuteResultToChainState(t, cs, codeStorage, deployRs)
+
+	// isCache=true routes through Execute (see vm_processor.go's
+	// executeSmartContract), the "committed"/cached-nonce sibling of Call.
+	rs := engine.Execute(
+		sender.Bytes(), contractAddr.Bytes(), nil, big.NewInt(0),
+		1, 200_000,
+		0, 30_000_000, 0, 0, 2, common.Address{},
+		mvmId, execTxHash.Bytes(), []common.Address{sender, contractAddr},
+		false, true,
+	)
+	if rs == nil {
+		t.Fatalf("Execute (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+// TestTABoundary_TrustzoneLoopback_MatchesCgo_Execute is the Execute
+// (isCache=true) counterpart of the Call comparison above — same deployed
+// contract, same SLOAD+SSTORE runtime, different entry point method.
+//
+// Distinct sender per mode (see the comment in the Call test above): this
+// test is what originally caught the C++-side State singleton keying on
+// contract address across the two sub-runs — with a single shared sender,
+// the trustzone sub-run silently inherited the cgo sub-run's already-
+// incremented storage[0] and returned 2 instead of 1.
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_Execute(t *testing.T) {
+	senderCgo := nextTestAddr()
+	senderTz := nextTestAddr()
+	runtime := []byte{
+		0x60, 0x00, 0x54, 0x60, 0x01, 0x01, 0x80, 0x60, 0x00, 0x55,
+		0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+	}
+	initCode := append([]byte{
+		0x60, byte(len(runtime)),
+		0x60, 0x0c,
+		0x60, 0x00,
+		0x39,
+		0x60, byte(len(runtime)),
+		0x60, 0x00,
+		0xf3,
+	}, runtime...)
+	deployTxHash := common.HexToHash("0xdeadc0d0")
+	execTxHash := common.HexToHash("0xe4ec0100")
+
+	cgoRs := runExecuteViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), senderCgo, initCode, deployTxHash, execTxHash)
+	tzRs := runExecuteViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), senderTz, initCode, deployTxHash, execTxHash)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo Execute status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone Execute status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+
+	wantVal := make([]byte, 32)
+	wantVal[31] = 1
+	if string(cgoRs.Return) != string(wantVal) {
+		t.Fatalf("cgo Execute Return = %x, want %x (SLOAD(0)+1 of empty slot)", cgoRs.Return, wantVal)
+	}
+	if string(tzRs.Return) != string(cgoRs.Return) {
+		t.Errorf("Execute Return: trustzone=%x, cgo=%x", tzRs.Return, cgoRs.Return)
+	}
+}
+
+func runMintBurnViaMode(t *testing.T, mode string, mvmId, from, to common.Address, amount *big.Int, operationType uint64) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs := harnessChainState(t)
+	if operationType == 1 { // burn: 'from' must actually hold the balance
+		harnessSeedAccount(t, cs, from, big.NewInt(1_000_000), 0)
+	}
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	engine.SetRelatedAddresses([]common.Address{from, to})
+
+	rs := engine.ProcessNativeMintBurn(
+		from.Bytes(), to.Bytes(), amount, operationType,
+		1, 21000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, false,
+	)
+	if rs == nil {
+		t.Fatalf("ProcessNativeMintBurn (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+// TestTABoundary_TrustzoneLoopback_MatchesCgo_ProcessNativeMintBurn covers
+// the mint operation (operationType=0) — the same system-address-as-'from'
+// shape vm_processor.go's ProcessNativeMintBurn uses for real mint txs.
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_ProcessNativeMintBurn(t *testing.T) {
+	systemAddr := common.HexToAddress("0x000000000000000000000000000000000000MINT")
+	to := nextTestAddr()
+	amount := big.NewInt(777_777)
+
+	cgoRs := runMintBurnViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), systemAddr, to, amount, 0)
+	tzRs := runMintBurnViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), systemAddr, to, amount, 0)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo ProcessNativeMintBurn status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone ProcessNativeMintBurn status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+
+	toKey := hexKey(to)
+	cgoAdd, ok := cgoRs.MapAddBalance[toKey]
+	if !ok {
+		t.Fatalf("cgo: MapAddBalance missing entry for mint recipient %s", toKey)
+	}
+	tzAdd, ok := tzRs.MapAddBalance[toKey]
+	if !ok {
+		t.Fatalf("trustzone: MapAddBalance missing entry for mint recipient %s; got keys %v", toKey, keysOf(tzRs.MapAddBalance))
+	}
+	if string(tzAdd) != string(cgoAdd) {
+		t.Errorf("MapAddBalance[recipient]: trustzone=%x, cgo=%x", tzAdd, cgoAdd)
+	}
+	if new(big.Int).SetBytes(cgoAdd).Cmp(amount) != 0 {
+		t.Errorf("cgo MapAddBalance[recipient] = %s, want %s", new(big.Int).SetBytes(cgoAdd), amount)
+	}
+}
+
+func runNoncePlusOneViaMode(t *testing.T, mode string, mvmId, sender common.Address, startNonce uint64) mvm.MVMExecuteResult {
+	t.Helper()
+	prevMode := mvm.GetExecutionMode()
+	mvm.SetExecutionMode(mode)
+	t.Cleanup(func() { mvm.SetExecutionMode(prevMode) })
+
+	cs := harnessChainState(t)
+	harnessSeedAccount(t, cs, sender, big.NewInt(1_000_000), startNonce)
+
+	engine := mvm.NewExecutionEngine(mvmId, cs.GetSmartContractDB(), cs.GetAccountStateDB(), false)
+	t.Cleanup(func() { mvm.ClearMVMApi(mvmId) })
+	engine.SetRelatedAddresses([]common.Address{sender})
+
+	rs := engine.NoncePlusOne(
+		sender.Bytes(),
+		1, 21000,
+		0, 30_000_000, 0, 0, 1, common.Address{},
+		mvmId, false,
+	)
+	if rs == nil {
+		t.Fatalf("NoncePlusOne (mode=%s) returned nil result", mode)
+	}
+	return serializeRoundTrip(t, *rs)
+}
+
+func TestTABoundary_TrustzoneLoopback_MatchesCgo_NoncePlusOne(t *testing.T) {
+	sender := nextTestAddr()
+	const startNonce = 41
+
+	cgoRs := runNoncePlusOneViaMode(t, mvm.ModeCgo,
+		nextTestAddr(), sender, startNonce)
+	tzRs := runNoncePlusOneViaMode(t, mvm.ModeTrustzone,
+		nextTestAddr(), sender, startNonce)
+
+	if cgoRs.Status != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("cgo NoncePlusOne status = %v, want RECEIPT_STATUS_RETURNED (exmsg=%q)", cgoRs.Status, cgoRs.Exmsg)
+	}
+	if tzRs.Status != cgoRs.Status {
+		t.Fatalf("trustzone NoncePlusOne status = %v, want %v (cgo) (exmsg=%q)", tzRs.Status, cgoRs.Status, tzRs.Exmsg)
+	}
+
+	senderKey := hexKey(sender)
+	cgoNonce, ok := cgoRs.MapNonce[senderKey]
+	if !ok {
+		t.Fatalf("cgo: MapNonce missing entry for sender %s", senderKey)
+	}
+	tzNonce, ok := tzRs.MapNonce[senderKey]
+	if !ok {
+		t.Fatalf("trustzone: MapNonce missing entry for sender %s; got keys %v", senderKey, keysOf(tzRs.MapNonce))
+	}
+	if string(tzNonce) != string(cgoNonce) {
+		t.Errorf("MapNonce[sender]: trustzone=%x, cgo=%x", tzNonce, cgoNonce)
+	}
+	if new(big.Int).SetBytes(cgoNonce).Uint64() != startNonce+1 {
+		t.Errorf("cgo MapNonce[sender] = %d, want %d", new(big.Int).SetBytes(cgoNonce).Uint64(), startNonce+1)
 	}
 }
 

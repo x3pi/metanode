@@ -120,6 +120,7 @@ Hệ thống Ansible giờ đây sẽ lo trọn gói việc khởi động **Pro
 **Lệnh này sẽ làm gì?**
 Thực thi script `open_ports.sh` trên từng máy chủ tương ứng để tự động thêm rule `ufw allow` cho tất cả các cổng cần thiết (Execution, Consensus, RPC, Snapshot, Metrics). Vì Firewall chỉ cần mở 1 lần duy nhất, bạn không cần dùng cờ này trong các lần cập nhật tiếp theo.
 
+<<<<<<< HEAD
 ### 7. Giám Sát Chéo Đa Máy (`--all-monitors`)
 Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 ```bash
@@ -132,6 +133,8 @@ Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 - Mỗi máy Server sẽ chạy 1 cụm Monitor ngầm riêng biệt để **giám sát chéo toàn bộ các Node trong toàn mạng lưới**.
 - **Cơ chế dự phòng:** Nếu máy chủ Master (ví dụ `192.168.1.234`) bị sập nguồn hoặc mất mạng, tiến trình Monitor chạy trên các máy Slave (ví dụ `192.168.1.230`) vẫn sống và sẽ ngay lập tức bắn cảnh báo lên Telegram rằng Node 0 trên máy Master đã chết.
 
+=======
+>>>>>>> ac01ea78599f2df6964c42344e3ee17e4fd51b63
 ---
 
 ## Phần 2: Kiến Trúc Ansible Hoạt Động Như Thế Nào?
@@ -172,7 +175,7 @@ Toàn bộ 6 Role phía trên không hề chứa IP cứng (hardcode). Mọi c�
 Bộ công cụ Ansible deploy đi kèm bộ giám sát (Monitors) chạy ngầm nội bộ độc lập hoàn toàn, hỗ trợ giám sát sức khỏe cụm node và tính nhất quán của chuỗi khối.
 
 ### 1. Bộ Giám Sát (Monitors)
-Bộ giám sát nằm tại thư mục [deploy/ansible/monitors/](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/monitors/) bao gồm:
+Bộ giám sát nằm tại thư mục [deploy/ansible/monitors/](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible/monitors/) bao gồm:
 - **Health Monitor** (`start_monitors.sh health`): Liên tục kiểm tra các endpoint RPC của **TẤT CẢ các Node** trong cụm. Nếu phát hiện node chết, tự động dùng `sshpass` kéo thư mục logs bị crash về máy phát hiện (lưu tại `monitors/logs_crash/`) và gửi cảnh báo đỏ lên Telegram kèm IP máy phát hiện (`Detector Server`).
 - **Resource Monitor** (`start_monitors.sh resources`): Kiểm tra RAM, CPU, Disk usage trên toàn bộ các Server định kỳ mỗi 5 phút, cảnh báo Telegram khi tài nguyên vượt ngưỡng nguy hiểm (>= 94%).
 - **Block Hash Checker** (`block_hash_checker`): Một công cụ viết bằng Go chạy ở dạng Daemon liên tục so sánh chiều cao block, hash, parentHash, stateRoot... giữa các node với nhau để phát hiện sớm các hiện tượng phân nhánh (fork) hoặc lệch trạng thái, hỗ trợ gửi cảnh báo trực tiếp lên Telegram.
@@ -195,7 +198,7 @@ Bộ giám sát nằm tại thư mục [deploy/ansible/monitors/](file:///home/a
   ```
 
 ### 3. Dừng các tiến trình nền (`stop_all.sh`)
-Để tắt nhanh toàn bộ các công cụ nền đang chạy trên máy Master, hãy sử dụng tệp tiện ích [stop_all.sh](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/stop_all.sh):
+Để tắt nhanh toàn bộ các công cụ nền đang chạy trên máy Master, hãy sử dụng tệp tiện ích [stop_all.sh](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible/stop_all.sh):
 - **Tắt monitors & watcher daemon:**
   ```bash
   ./stop_all.sh

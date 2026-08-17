@@ -626,6 +626,20 @@ func (bp *BlockProcessor) persistBackupDbAsync(job CommitJob) {
 		FullDbLogs:                fullDbLogs,
 	}
 
+	// Xapian/State TZ-mode persistence (plan §5b, 2026-08-16): keep a small
+	// address-indexed index of the latest full_db_logs alongside the
+	// block-indexed BackUpDb write below — see pkg/storage/
+	// xapian_full_db_logs_index.go's doc comment for why the block-indexed
+	// store alone isn't enough for a TA's point lookup after a restart.
+	// Same pass, same data, just also written under a per-address key.
+	for _, logMap := range fullDbLogs {
+		for addrHex, logBytes := range logMap {
+			if errPut := storage.PutLatestFullDbLogsForAddress(bp.storageManager.GetStorageBackupDb(), addrHex, logBytes); errPut != nil {
+				logger.Error("❌ [BACKUP] Failed to persist latest full_db_logs for address %s (block #%d): %v", addrHex, blockNum, errPut)
+			}
+		}
+	}
+
 	backupBytes, err := storage.SerializeBackupDb(backupData)
 	if err == nil {
 		primaryKey := []byte(fmt.Sprintf("block_data_topic-%d", blockNum))
