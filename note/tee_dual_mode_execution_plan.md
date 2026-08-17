@@ -987,3 +987,45 @@ gây ra). **Patch `chanmgr/main.c` build thật thành công, không còn là "c
 File: `metanode/execution/pkg/mvm/ta/{mvm_ta_main.cpp,README.md}` (mới, verify link x86),
 `tz-llm-trustzone/tz-llm/tee_os_kernel/user/system-services/system-servers/chanmgr/main.c`
 (sửa, **build TEE-OS thật thành công, xác nhận 2026-08-17**).
+
+### 9.7 `mvm_ta` — build DEPLOYABLE thật thành công (2026-08-17, tiếp nối "có tiếp tục")
+
+Phần link x86 ở mục 9.6 (trộn runtime musl-cross-make với `libc.a` thật của chcore) chỉ để
+verify symbol graph, KHÔNG phải build deploy được — tự ghi rõ điều này. Tiếp tục điều tra để
+có bản build thật, tìm ra và giải quyết đúng gốc rễ:
+
+- **Nguyên nhân gốc thật của lỗi `_Float32`** (đã gặp từ trước trong lịch sử dự án, tưởng đã
+  hiểu — hoá ra chưa đúng): `_Float32`/`_Float64`/`_Float128` là C++ TYPE (không chỉ macro giới
+  hạn `__FLT32_DIG__`) chỉ được GCC's C++ frontend hỗ trợ **từ GCC 13 trở lên**. Compiler thật
+  trong Docker (`musl-gcc` bọc `aarch64-linux-gnu-gcc-11`) là **GCC 11.4.0** — predefine macro
+  `__FLT32_DIG__` (kích hoạt nhánh code dùng `_Float32`) nhưng KHÔNG có type đó → lỗi
+  "not declared". Xác nhận qua test tối giản (`#include <chrono>` alone) trước khi đụng build
+  thật — không suy đoán.
+- **Fix thật**: build 1 toolchain musl-cross-make THỨ HAI, ghim `GCC_VER=11.5.0` (bản gần nhất
+  có sẵn hash trong musl-cross-make, khớp GCC 11.4.0 thật — cùng major.minor, ABI/header
+  libstdc++ tương thích). Stage header/lib giống hệt cách cũ, TÁI DÙNG nguyên `3rdparty/` (5 lib
+  C thuần, ABI ổn định qua các version GCC) — **trừ GMP/MPFR phải build lại với `--with-pic`**
+  (bản gốc không position-independent, link thật của chcore là PIE binary — lộ ra qua lỗi
+  `relocation R_AARCH64_ADR_PREL_PG_HI21 ... can not be used when making a shared object`).
+- **Build command thật**: `c_mvm`+`linker` qua CMake với `CMAKE_C_COMPILER`/`CXX_COMPILER` =
+  `musl-gcc` thật (`chcore-libc/bin/musl-gcc`, đúng ABI musl syscall/struct), `CMAKE_AR`/
+  `RANLIB` = `aarch64-linux-gnu-ar`/`-ranlib` hệ thống (`musl-ar` có sẵn nhưng không có
+  `musl-ranlib` tương ứng). `mvm_ta_main.cpp` compile trực tiếp bằng `musl-gcc`, cần `-I` đúng
+  `tz-llm/tee_os_kernel/.../chcore-libc/musl-libc/install/include` thật của repo host (bản baked
+  sẵn trong Docker image `chcore-libc/include/chcore/` là snapshot CŨ, thiếu `llm.h`/
+  `TZASC_NR`). Link cuối cùng cũng qua `musl-gcc`, `--start-group/--end-group` toàn bộ
+  `libmvm_linker.a`+`libmvm.a`+5 lib 3rdparty+Xapian+TBB+zlib, rồi `-L.../lib libstdc++.so
+  libgcc_s.so` — đúng y hệt cách repo này tự link `llama-cli` (chỉ khác version libstdc++).
+- **Kết quả xác nhận thật**: `mvm_ta` — executable AArch64 PIE thật (`readelf -h`: `Type: DYN`,
+  `Machine: AArch64`), 42.9MB, **0 undefined symbol, `FINAL_LINK_EXIT=0`**. Không còn trộn
+  runtime, không còn hack verify-only — đây là tooling hình dạng production thật. Cần
+  `libstdc++.so.6.0.29`/`libgcc_s.so.1` đi kèm lúc runtime (giống hệt `llama-cli` cần bản `.so`
+  riêng trong ramdisk).
+- **1 rủi ro còn mở, chưa kiểm chứng**: `libxapian.a`/`libtbb.a` link vào bản thật này **vẫn là
+  bản build với toolchain GCC13.3.0 cũ** (không rebuild lại với GCC11.5.0) — chưa gặp lỗi
+  `_Float32` vì chúng không transitively include `<chrono>`'s C++20 format/stream integration,
+  nhưng đây là 1 giả định chưa kiểm chứng đầy đủ về ABI libstdc++ ổn định qua các version GCC.
+  Đáng làm rõ trước khi tin tưởng hoàn toàn (không chỉ "link không lỗi" mà "đúng runtime").
+- **Vẫn CHƯA test trên board thật** — đây là mốc "build/link đúng", không phải "đúng runtime".
+  File thật: `tz-llm-trustzone/scripts/kick-the-tires/cpp13-metanode-deps/{README.md,
+  mvm_toolchain_chcore_real.cmake}` — đã commit (`d339fa2bb`).
