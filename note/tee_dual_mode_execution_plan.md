@@ -1029,3 +1029,42 @@ có bản build thật, tìm ra và giải quyết đúng gốc rễ:
 - **Vẫn CHƯA test trên board thật** — đây là mốc "build/link đúng", không phải "đúng runtime".
   File thật: `tz-llm-trustzone/scripts/kick-the-tires/cpp13-metanode-deps/{README.md,
   mvm_toolchain_chcore_real.cmake}` — đã commit (`d339fa2bb`).
+
+### 9.8 `mvm_ta` staged vào `oh_tee/apps` — xác nhận qua build thật (2026-08-17, "tích hợp mvm_ta vào oh_tee/apps đi")
+
+Bước tiếp theo bắt buộc để `chanmgr`'s `create_process("/mvm_ta")` (patch §9.6) thật sự tìm
+thấy binary: `mvm_ta` phải nằm trong `oh_tee/apps/` trước khi `build_tee.sh` chạy, vì
+`build_tee.sh` làm `cp oh_tee/apps/* ramdisk-dir` **trước** `make` (không điều kiện).
+
+- **2 file sửa trong `tz-llm-trustzone`** (giữ đúng nguyên tắc tách biệt — chỉ tái dùng cơ chế
+  staging có sẵn, không đụng code/struct LLM):
+  - `scripts/kick-the-tires/oh-builder-hdf.sh`: thêm 1 bind mount
+    `cpp13-metanode-deps/mvm_ta_output:/home/vectorxj/mvm_ta_build:ro`.
+  - `scripts/kick-the-tires/chcore-extracted.sh`: thêm 1 khối `if [ -f
+    "$MVM_TA_BUILD/mvm_ta" ]; then cp ... ../oh_tee/apps/; fi` — copy `mvm_ta` +
+    `libstdc++.so.6.0.29` + symlink `libstdc++.so.6` + `libgcc_s.so.1`, đặt ngay sau khối
+    re-copy `llama-cli` có sẵn, trước `./build_tee.sh`. Y hệt pattern cũ, chỉ khác tên file.
+- **Verify bằng build thật, không chỉ đọc code**: chạy `chcore.sh` trực tiếp qua
+  `oh-builder-hdf.sh` (image `vectorxj0553/tz-llm-oh-builder:latest`), bỏ qua
+  `linux.sh`/uboot vì chỉ 2 script staging đổi (không phải TA/kernel source) — xác nhận
+  `mvm_ta` (42,955,336 bytes, khớp md5 bản build ở §9.7) xuất hiện đúng trong CẢ
+  `oh_tee/apps/` lẫn `ramdisk-dir/`.
+- **1 lỗi build không liên quan gặp trong lần chạy verify này**: `make` (bên trong
+  `build_tee.sh`, sau bước copy ramdisk-dir) báo `clang: Command not found` khi build
+  `procmgr`'s `read_procmgr_elf_tool` — do script verify tự viết gọi thẳng `chcore.sh` mà
+  không export `PATH` trỏ `/home/tools/clang_linux-x86_64-36cd05-20221030/bin` (việc
+  `build-oh-docker.sh` thật luôn làm trước khi gọi `chcore.sh`). Xác nhận `clang` binary có
+  thật trong image (`ls /home/tools/clang_.../bin/clang` OK) — chỉ là thiếu PATH trong lần
+  gọi tắt, không phải regression từ 2 file vừa sửa. Full pipeline thật (qua `rebuild.sh` →
+  `build-oh-docker.sh`) không có lỗi này vì nó tự export PATH đúng.
+- **Sự cố phụ trong lúc verify, đã xử lý**: `build_tee.sh` chạy `make clean` trên
+  `tee_os_kernel` — vì thư mục này bind-mount THẲNG vào repo host (không phải bản copy), lệnh
+  này xoá mất 4 file đã track trong git (`kernel/incbin_promgr_bin.S`, `kernel/linker.ld`,
+  `kernel/linker.ld.S`, `procmgr/read_procmgr_elf_tool` — build artifact được commit sẵn để
+  tiện dùng). Phục hồi ngay bằng `git checkout --` trước khi commit gì khác — không phải lỗi
+  do 2 file sửa ở đây, là hệ quả biết trước của cách `oh-builder-hdf.sh` mount thư mục.
+- **Đã commit**: `861a2f08d` (`tz-llm-trustzone`).
+- **Còn lại, CHƯA làm**: chạy full pipeline thật (`rebuild.sh`) để ra `boot.img` mới có
+  `mvm_ta`, rồi đi hết quy trình build/flash/test 8 bước của `CLAUDE.md` trên phần cứng thật
+  — chưa được yêu cầu, sẽ cần định hướng rõ ràng từ người dùng trước khi bắt đầu (rủi ro/thời
+  gian đáng kể, đụng tới flash board thật).
