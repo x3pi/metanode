@@ -391,12 +391,14 @@ sạch (2/2), `PROJECT_STRUCTURE.md` đã cập nhật.
     `CMAKE_TOOLCHAIN_FILE`, không sửa 1 dòng nào trong `c_mvm`/`linker` C++ source). Kết quả:
     `libmvm.a` 23MB + `libmvm_linker.a` 63MB, 18+ object file, kiến trúc `elf64-littleaarch64`
     thật, xác nhận qua `objdump`.
-    - **1 thay đổi build-flag** (không phải source, chỉ CMakeLists.txt, và chỉ trên bản build
-      thử — chưa áp vào repo thật): `-march=native -mtune=native` (hardcode không điều kiện
-      trong cả `c_mvm/CMakeLists.txt` và `linker/CMakeLists.txt`) không hợp lệ khi cross-compile
-      từ x86_64 sang aarch64 — cần đổi thành `-march=armv8-a -mtune=generic` (hoặc gate theo
-      target thật) cho nhánh build aarch64. Đây là việc thật cần làm ở GĐ3 chính thức, KHÔNG
-      phải lỗi C++/logic.
+    - **1 thay đổi build-flag** — **ĐÃ ÁP VÀO REPO THẬT (2026-08-16, commit `a2d28941`)**: 
+      `-march=native -mtune=native` (hardcode không điều kiện trong cả `c_mvm/CMakeLists.txt`
+      và `linker/CMakeLists.txt`) không hợp lệ khi cross-compile từ x86_64 sang aarch64 — đã
+      bọc trong `if(CMAKE_CROSSCOMPILING)`, dùng `-march=armv8-a -mtune=generic` khi cross,
+      giữ nguyên `native` khi build x86 (verify: build lại native, output không đổi). Không
+      phải lỗi C++/logic — thuần túy build-flag. Xem mục "Patch `-march=native`..." bên dưới
+      để biết đầy đủ (kể cả 1 sự cố tự phát hiện+tự sửa lúc verify: `install()` hardcode path
+      cũng bị lộ ra, đã vá cùng lúc).
     - **Phụ thuộc ngoài chưa vendor trong metanode, cần header (build thật cần cả lib) cho
       aarch64/musl**: `tbb` (Intel TBB — xem đánh giá riêng ngay dưới, **quyết định cuối cùng:
       cross-build thật, ĐÃ build thử thành công** — đảo ngược so với kết luận "thay shim" ban
@@ -720,9 +722,16 @@ sạch (2/2), `PROJECT_STRUCTURE.md` đã cập nhật.
       đúng header cần** (`tbb/`, `oneapi/`, `mpfr.h`, `gmp.h`, `secp256k1*.h`, `uuid/uuid.h`)
       vào 1 thư mục cô lập riêng, không trỏ `/usr/include` bừa bãi. Không có lỗi nào trong nhóm
       này là lỗi thật của mvm/toolchain — toàn bộ là do cách tôi tự ghép flags, đã sửa xong.
-    - **Việc thật còn lại cho GĐ3**: cross-build tbb/mpfr/gmp/secp256k1/uuid cho chcore/musl
-      (không chỉ header), rồi tích hợp toàn bộ vào pipeline `rebuild.sh`/`repack.sh` thật của
-      chcore, thay `.cpp/aarch64/` bằng toolchain 13.3.0, và giải quyết vụ `-march=native`.
+    - **Việc thật còn lại cho GĐ3 lúc viết đoạn này (2026-08-16 sáng)**: cross-build
+      tbb/mpfr/gmp/secp256k1/uuid cho chcore/musl (không chỉ header), tích hợp vào
+      `tz-llm-trustzone`, và giải quyết `-march=native`. **CẬP NHẬT — tất cả đã xong trong
+      cùng ngày** (xem các mục bên dưới theo thứ tự thời gian): 5 lib cross-build thật (mục
+      "CROSS-BUILD THẬT ĐÃ XONG" + BLST sau đó), tích hợp vào `tz-llm-trustzone` qua image
+      `cpp13-metanode-deps` (song song, không đụng `.cpp/aarch64` production), `-march=native`
+      đã patch vào CMakeLists.txt thật (commit `a2d28941`). **Vẫn CHƯA làm**: chưa "thay
+      `.cpp/aarch64` bằng toolchain 13.3.0" — quyết định cuối (người dùng chọn) là KHÔNG thay,
+      giữ song song; và chưa tích hợp vào `rebuild.sh`/`repack.sh` thật (cần 1 TA CMake target
+      thật trước, hiện chưa có target đó — xem mục 8 và phần "Chưa làm / còn mở").
   - [x] **Xapian qua proxy I/O — THIẾT KẾ persist-qua-Host (2026-08-16)**: xem mục 5b ngay
     dưới. Kết luận chính: **phần "lưu" đã chạy sẵn 100%, không cần code mới** — chỉ "nạp lại"
     (load) là việc thật cần làm, và chỉ cần nối dây thêm (struct wire đã có sẵn từ GĐ1).
@@ -813,3 +822,83 @@ codec Go tương ứng (khác `GET_LATEST_FULL_DB_LOGS`, id 107, đã có codec 
   cheat bằng cách dùng `*MVMApi` trực tiếp trong cùng process, nơi cgo export vẫn hoạt động
   bình thường bất kể `execution_mode`. Giá trị của việc làm trước: khi có TA thật, codec wire
   đã sẵn sàng + unit-tested, không cần viết lại từ đầu lúc đó.
+
+## 9. Kiến trúc TA thật trên board — điều tra sâu 2026-08-17, TÁCH RIÊNG khỏi LLM TA
+
+Theo yêu cầu tường minh của người dùng: **TA metanode phải là 1 process hoàn toàn độc lập**,
+không chia sẻ code path/state/struct nào với LLM TA (`tz-llm-trustzone`'s `llama.cpp`). Mục
+này ghi lại kiến trúc thật đã xác nhận qua đọc trực tiếp kernel + driver source (không suy
+đoán), làm nền cho lần implement tiếp theo.
+
+### 9.1 Đường dẫn generic driver — có tồn tại nhưng KHÔNG dùng được (đã tự sửa sai)
+
+Ban đầu tưởng `tzdriver` có sẵn đường dẫn generic chuẩn GlobalPlatform (`TC_NS_CLIENT_IOCTL_
+SES_OPEN_REQ`/`SEND_CMD_REQ`/`LOAD_APP_REQ`, nhận `uuid` bất kỳ — struct `tc_ns_client_context`
+thật có field `uuid[UUID_LEN]`). **Đọc kỹ hơn phát hiện đường này chết**: `tc_init()`
+(`tzdriver/core/tc_client_driver.c`) gọi `llm_client_init()` (đăng ký `g_llm_ns_client_fops`,
+chỉ xử lý 7 ioctl `LLM_CLIENT_IOCTL_*`, id 24-30) rồi **`return` sớm** — code generic
+(`tc_ns_client_init()`, đăng ký `g_tc_ns_client_fops` + gọi `tc_teeos_init()`) không bao giờ
+chạy. **Đề xuất ban đầu "bỏ return sớm" là SAI** — `tc_ns_client_init()` gọi lại
+`load_hw_info()`/`load_reserved_mem()`/`tc_teeos_init()` (SMC context, reserved mempool...) —
+chạy cả 2 sẽ **double-init phần cứng secure-world**, đúng loại lỗi CLAUDE.md cảnh báo gây
+corruption. Tự phát hiện và dừng lại trước khi viết patch nào — không đề xuất lại hướng này.
+
+### 9.2 Cơ chế shared-memory thật, ĐÃ CHỨNG MINH hoạt động — tái dùng được, không cần sửa kernel
+
+Đọc `alloc-stage-chcore.cpp` (TA-side, dùng để stream model weight — chạy ổn định trên board
+này) xác nhận chuỗi API thật để TA tự xin + map 1 vùng CMA vào không gian địa chỉ của chính
+nó, không cần ioctl phía CA:
+```cpp
+vaddr_t vaddr = chcore_alloc_vaddr(size);              // reserve 1 dải vaddr trống trong TA
+int entry_index = push_pages_ex(size, cma_index, soft); // SMC xin vùng CMA vật lý (đã proven)
+unsigned long paddr = tzasc_cma_meta_arr[cma_index].entry[entry_index].paddr;
+usys_map_tzasc_cma_pmo(vaddr, size, paddr);              // map paddr vào vaddr — giờ dùng được như con trỏ thường
+```
+`push_pages_ex` dùng `usys_tee_switch_req` (KHÁC `usys_tee_wait_switch_req`) — 1 request/reply
+đơn, không phải vòng lặp chờ sự kiện. Phía CA muốn cùng vùng vật lý thì `LLM_CLIENT_IOCTL_
+SET_PAGES` (đã có, đã proven — `alloc-stage.cpp`/`io-backend.cpp` dùng hàng ngày cho weight
+streaming) mmap đúng `cma_index`+`entry_index`. **Toàn bộ chuỗi này không đụng 1 dòng kernel
+nào cả** — thuần túy gọi lại API TA/CA userspace đã có sẵn.
+
+### 9.3 `chanmgr` đã chạy nhiều process độc lập thật — xác nhận qua source
+
+`chanmgr/main.c` dùng `create_process()` cho **cả `/rknpu.srv` VÀ `llama-cli`** — 2 process
+chcore riêng biệt, xác nhận chcore là multi-process OS thật, không giới hạn 1 TA/boot như giả
+định ban đầu. **Nhưng**: launch `llama-cli` xong, `chanmgr`'s main thread gọi
+`waitpid(pid, NULL, 0)` — **block vĩnh viễn** vì `llama-cli` chạy `while(true)` vô hạn (đúng
+thiết kế phục vụ nhiều request). Hệ quả: launch TA metanode phải xảy ra **trước** đoạn
+`llama-cli`, hoặc từ 1 pthread riêng bên trong `chanmgr` (spawn trước, `waitpid` riêng, không
+đụng logic launch `llama-cli` hiện có) — chưa viết patch, chỉ xác nhận đúng chỗ cần sửa.
+
+### 9.4 Rủi ro thật còn mở, CHƯA giải quyết được chỉ bằng đọc code
+
+`sys_tee_wait_switch_req` (kernel, `spd/teed/smc.c`) dùng state **per-CPU**
+(`smc_percpu_structs[cpu_id]`), có guard `-EINVAL` nếu 2 thread cùng CPU tranh làm
+`waiting_thread` — không phải race ngầm, lỗi sạch. Nhưng **bug lịch sử thật** (STATUS.md mục
+4) là lỗi **thứ tự**: nhiều lời gọi `wait_switch_req` từ các nguồn khác nhau tiêu thụ nhầm SMC
+event của nhau, gây `paddr=0` → **crash kernel thật đã xảy ra trên board này**. TA metanode có
+vòng lặp `wait_switch_req` RIÊNG (không dùng chung với `main.cpp`'s) — an toàn ở mức "không
+tranh trực tiếp" (per-CPU + guard), nhưng **chưa xác nhận được** hành vi khi 2 TA cùng lúc gọi
+`wait_switch_req` trên các CPU khác nhau có genuinely độc lập hay không (cần đọc thêm
+`smc_smp.c`/lịch sử schedule, hoặc — thực tế hơn — test trên board thật, đúng cách bug gốc
+từng được phát hiện: không đọc code trước mà lường được).
+
+### 9.5 Câu hỏi thiết kế còn mở: CA khám phá địa chỉ shared-page của TA metanode bằng cách nào
+
+Vì tách riêng hoàn toàn khỏi `all_ring_buffer` (theo yêu cầu người dùng), CA không có kênh nào
+sẵn để đọc `cma_index`/`entry_index` TA metanode vừa `push_pages()`. Hướng khả thi nhất (chưa
+implement): TA metanode luôn dùng 1 `cma_index` cố định (ví dụ không trùng
+`TZASC_NR_MODEL`/`TZASC_NR_NPU_SCRATCH`) và luôn là allocation ĐẦU TIÊN trên bank đó lúc TA
+khởi động (trước khi nhận request nào) → `entry_index` deterministic (cần xác nhận
+`push_pages_ex`/`cma_alloc` thật sự cấp `entry_index` tuần tự từ 0, chưa đọc kỹ phần này) — CA
+không cần handshake sống, chỉ cần biết trước cặp `(cma_index, entry_index)` cố định để
+`SET_PAGES` mmap thẳng.
+
+### 9.6 Việc CHƯA làm — rõ ràng, không tự nhận đã xong
+
+- Chưa viết bất kỳ file `.cpp`/`.c` nào cho TA metanode thật (main() riêng, dispatch loop).
+- Chưa sửa `chanmgr/main.c` để launch process TA metanode.
+- Chưa xác nhận `push_pages_ex`/`cma_alloc`'s entry_index có thật sự deterministic/tuần tự.
+- Chưa có cách nào build+test được phần này ngoài board thật (không có mock/loopback cho tầng
+  kernel/SMC — khác hẳn GĐ2's loopback, vốn hoạt động hoàn toàn trên x86).
+- 7 reverse-callback (đã có wire codec Go từ mục 8) vẫn hoàn toàn chưa có phía TA thật.
