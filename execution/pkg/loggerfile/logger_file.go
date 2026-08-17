@@ -213,13 +213,14 @@ func ResolveLogFilePath(root, epoch, fileName string) (string, error) {
 type FileLogger struct {
 	file         *os.File
 	filePath     string // Full path đến file log hiện tại
-	baseName     string // Tên file gốc (vd: "App.log")
+	baseName     string // Tên file gốc (vd: "execution.log")
 	epochDir     string // Thư mục epoch hiện tại
 	entries      []LogEntry
 	mutex        sync.Mutex
-	maxFileSize  int64 // Kích thước tối đa trước khi rotate (bytes)
-	maxLogFiles  int   // Số file cũ tối đa giữ lại
-	bytesWritten int64 // Số bytes đã ghi từ lần rotate cuối
+	maxFileSize  int64  // Kích thước tối đa trước khi rotate (bytes)
+	maxLogFiles  int    // Số file cũ tối đa giữ lại
+	bytesWritten int64  // Số bytes đã ghi từ lần rotate cuối
+	currentDate  string // Ngày hiện tại của log (vd: "2006-01-02")
 }
 
 // getEpochDir trả về tên thư mục epoch hiện tại: "epoch_N"
@@ -229,14 +230,25 @@ func getEpochDir() string {
 }
 
 // NewFileLogger tạo mới một FileLogger
-// Log được tổ chức theo epoch: logs/epoch_N/App.log
-// Tự động rotate khi file vượt quá 50MB
+// Log được tổ chức theo thư mục ngày: logs/YYYY-MM-DD/<filename>.log
+// Tự động tạo thư mục ngày và rotate khi file vượt quá 200MB
 func NewFileLogger(filePath string) (*FileLogger, error) {
 	logDir := globalLogDir
 	epochDir := getEpochDir()
-	fullPath := filepath.Join(logDir, epochDir, filePath)
 
-	// Tạo thư mục logs theo epoch nếu chưa tồn tại
+	currentDate := time.Now().Format("2006-01-02")
+	ext := filepath.Ext(filePath)
+	nameWithoutExt := strings.TrimSuffix(filePath, ext)
+	nameWithoutExt = strings.TrimRight(nameWithoutExt, "_")
+	if ext == "" {
+		ext = ".log"
+	}
+	cleanFileName := fmt.Sprintf("%s%s", nameWithoutExt, ext)
+
+	// Đặt file log vào thư mục ngày: logs/[epoch]/YYYY-MM-DD/<file>.log
+	fullPath := filepath.Join(logDir, epochDir, currentDate, cleanFileName)
+
+	// Tạo thư mục logs theo ngày nếu chưa tồn tại
 	dir := filepath.Dir(fullPath)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err := os.MkdirAll(dir, os.ModePerm)
@@ -259,13 +271,30 @@ func NewFileLogger(filePath string) (*FileLogger, error) {
 	return &FileLogger{
 		file:         file,
 		filePath:     fullPath,
-		baseName:     filePath,
+		baseName:     cleanFileName,
 		epochDir:     epochDir,
 		entries:      make([]LogEntry, 0),
 		maxFileSize:  DefaultMaxLogFileSize,
 		maxLogFiles:  DefaultMaxLogFiles,
 		bytesWritten: currentSize,
+		currentDate:  currentDate,
 	}, nil
+}
+
+// FilePath trả về đường dẫn đầy đủ đến file log hiện tại
+func (fl *FileLogger) FilePath() string {
+	if fl == nil {
+		return ""
+	}
+	return fl.filePath
+}
+
+// CurrentDate trả về chuỗi ngày (YYYY-MM-DD) của file log hiện tại
+func (fl *FileLogger) CurrentDate() string {
+	if fl == nil {
+		return ""
+	}
+	return fl.currentDate
 }
 
 // SetMaxFileSize cấu hình kích thước tối đa file log (bytes)

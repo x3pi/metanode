@@ -1,52 +1,60 @@
 ---
-- name: Stop existing Consensus services to prevent file lock
-  ansible.builtin.systemd:
-    name: "metanode-consensus-{{ item }}"
-    state: stopped
-  loop: "{{ active_nodes }}"
-  failed_when: false
-
-- name: Stop existing Execution services to prevent file lock
-  ansible.builtin.systemd:
-    name: "metanode-execution-{{ item }}"
-    state: stopped
-  loop: "{{ active_nodes }}"
-  failed_when: false
-
-- name: Stop existing RPC Proxy services
-  ansible.builtin.systemd:
-    name: "metanode-rpc-{{ item }}"
-    state: stopped
-  loop: "{{ active_nodes }}"
-  failed_when: false
-
-- name: Check if metanode or simple_chain processes are still running
-  ansible.builtin.shell: "pgrep -x metanode || pgrep -x simple_chain || pgrep -x rpc-client-bin"
-  register: process_check
+- name: Stop any running monitoring processes on the node
+  ansible.builtin.shell: |
+    pkill -9 -f 'start_monitors.sh' || true
+    pkill -9 -f 'block_hash_checker' || true
   failed_when: false
   changed_when: false
 
-- name: Send SIGTERM to remaining processes to allow graceful shutdown
+- name: Stop and disable targeted metanode execution services
+  ansible.builtin.systemd:
+    name: "metanode-execution-{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Stop and disable targeted metanode consensus services
+  ansible.builtin.systemd:
+    name: "metanode-consensus-{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ active_nodes }}"
+  failed_when: false
+
+- name: Stop and disable legacy metanode services for targeted nodes
+  ansible.builtin.systemd:
+    name: "{{ item[1] }}-{{ item[0] }}"
+    state: stopped
+    enabled: no
+  loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
+  failed_when: false
+
+- name: Check if targeted node processes are running
   ansible.builtin.shell: |
-    pkill -15 -x metanode || true
-    pkill -15 -x simple_chain || true
-    pkill -15 -x rpc-client-bin || true
-  when: process_check.rc == 0
+    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || false
+  loop: "{{ active_nodes }}"
+  register: node_process_check
+  failed_when: false
+  changed_when: false
+
+- name: Send SIGTERM to targeted node processes for graceful shutdown
+  ansible.builtin.shell: |
+    pkill -15 -f "node-{{ item }}/bin" || true
+    pkill -15 -f "node-{{ item }}/config" || true
+  loop: "{{ active_nodes }}"
+  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
   failed_when: false
 
 - name: Wait 10 seconds for graceful database flush
   ansible.builtin.pause:
     seconds: 10
-  when: process_check.rc == 0
+  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
 
-- name: Force kill any stubborn Consensus processes (SIGKILL)
-  ansible.builtin.shell: "pkill -9 -x metanode || true"
+- name: Force kill any stubborn targeted node processes (SIGKILL)
+  ansible.builtin.shell: |
+    pkill -9 -f "node-{{ item }}/bin" || true
+    pkill -9 -f "node-{{ item }}/config" || true
+  loop: "{{ active_nodes }}"
   failed_when: false
 
-- name: Force kill any stubborn Execution processes (SIGKILL)
-  ansible.builtin.shell: "pkill -9 -x simple_chain || true"
-  failed_when: false
-
-- name: Force kill any stubborn RPC processes (SIGKILL)
-  ansible.builtin.shell: "pkill -9 -x rpc-client-bin || true"
-  failed_when: false

@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-16
+> **Last updated:** 2026-05-17
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -181,96 +181,24 @@ metanode/
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
 
 ### `cmd/simple_chain/processor/` — Core Block Processing
-| File | Lines | Role |
-|------|-------|------|
-| `block_processor_core.go` | 1,014 | Main block processor loop |
-| `block_processor_sync.go` | **1,284** | **Peer sync / state recovery** ⚠️ |
-| `explorer_history_sync.go`| [DELETED] | ❌ OBSOLETE  Explorer historical data healing sync |
-| `block_processor_commit.go` | 681 | Block commit pipeline |
-| `block_processor_processing.go` | 780 | Tx execution pipeline |
-| `block_processor_network.go` | 1,123 | Network message handling |
-| `block_processor_batch.go` | 401 | Batch tx processing |
-| `block_processor_attestation.go` | 488 | BLS attestation logic |
-| `block_processor_epoch.go` | 182 | Epoch transition handling |
-| `block_processor_state.go` | 173 | State root verification |
-| `block_processor_broadcast.go` | 410 | Block broadcasting |
-| `block_processor_receipt.go` | 347 | Receipt processing |
-| `block_processor_indexing.go` | 166 | Block indexing |
-| `block_processor_monitoring.go` | 158 | Health monitoring |
-| `block_processor_logs.go` | 279 | Log handling |
-| `tx_batch_forwarder_core.go` | 211 | Tx batch → consensus forwarding |
-| `tx_validator_pool_core.go` | 845 | Tx validation pool |
-| `tx_virtual_executor_core.go` | 237 | Virtual/offchain tx execution |
-| `transaction_processor.go` | 651 | Core tx processing |
-| `transaction_virtual_processor.go` | 457 | Virtual tx processing |
-| `state_processor.go` | 630 | State transition processor |
-| `vote_recovery.go` | 257 | Vote/quorum recovery |
-| `gei_authority.go` | 234 | Go-authoritative GEI singleton |
-| `speculative_executor.go` | 470 | Speculative execution pipeline (optimistic parallel EVM) |
-
-### `execution/executor/` — FFI/IPC Boundary ⚠️ CRITICAL
-| File | Lines | Role |
-|------|-------|------|
-| `unix_socket_handler_epoch.go` | **2,364** | Epoch-related IPC handlers (block processing, GEI, commit) |
-| `snapshot_manager.go` | 1,206 | State snapshot management |
-| `go_rust_integration_test.go` | 645 | Go↔Rust integration tests |
-| `epoch_transition_integration_test.go` | 615 | Epoch transition tests |
-| `snapshot_server.go` | 604 | Snapshot HTTP server |
-| `ffi_bridge.go` | 389 | FFI bridge to Rust (C-ABI) |
-| `unix_socket_handler_router.go` | 322 | UDS request routing |
-| `no_fork_invariant_test.go` | 329 | Fork-safety invariant tests |
-| `listener.go` | 259 | Block commit reception from Rust |
-| `unix_socket.go` | 201 | UDS server setup |
-| `unix_socket_handler.go` | 190 | Base UDS handler |
-| `snapshot_init.go` | 223 | Snapshot initialization |
-| `committee_notifier.go` | 188 | Committee change notifications |
-| `socket_abstraction.go` | 142 | Socket abstraction layer |
-
-### `execution/pkg/blockchain/tx_processor/` — Transaction Executor Layer
-| File | Lines | Role |
-|------|-------|------|
-| `tx_processor.go` | 1,172 | **Concurrent Executor Engine** using Actor Model (Channel-based routing) by Smart Contract address to eliminate data races. |
-| `tx_trace.go` | 80 | Lightweight, in-memory ring-buffered transaction trace database (20,000 tx capacity) for debugging lifecycle steps. |
-| `validation.go` | ~323 | Core transaction verification and sanity checks. |
-
-### `execution/pkg/account_state_db/` — Account State Management
-| File | Lines | Role |
-|------|-------|------|
-| `account_state_db_commit.go` | 1,034 | **CommitPipeline** — parallel state root calculation, trie swap |
-| `account_state_db.go` | 1,072 | Account state CRUD operations |
-
-### `execution/pkg/blockchain/vm_processor/` — VM Execution Layer
-| File | Lines | Role |
-|------|-------|------|
-| `vm_processor_state.go` | 1,153 | EVM state transition processing |
-
-### `execution/pkg/mvm/` — Meta Virtual Machine
-| File | Lines | Role |
-|------|-------|------|
-| `mvm_api.go` | 1,331 | Meta VM API layer and C-FFI wrapper |
-| `extension.go` | 880 | MVM custom extension precompiles |
-| `helpers.go` | 646 | MVM execution helpers |
-| `engine.go` | — | `ExecutionEngine` interface — seam between Go host and the execution core (cgo today; see `execution_mode.go`) |
-| `execution_mode.go` | — | Runtime switch between `cgo` (in-process) and `trustzone` (TA-loopback today, real TA in GĐ3) execution backends, config-driven — see `note/tee_dual_mode_execution_plan.md` |
-| `tzproto/mvm_tz_protocol.h` | — | CA↔TA wire protocol — pure C, shared by the Go loopback (`tz_codec.go`/`tz_channel.go`, GĐ2, live) and the future TA C++ build (GĐ3) |
-| `tzproto/README.md` | — | Protocol state machine, full command table, `status==3` unwind analysis |
-| `tz_channel.go` | — | `tzChannel`: real spinlock-CAS shared control block (`mvm_tz_channel_t`) over a `C.malloc`'d page — GĐ2's x86 stand-in for GĐ3's driver-owned shared page |
-| `tz_codec.go` | — | Encode/decode between Go-native values and the `mvm_tz_protocol.h` wire format, for `ExecuteResult`, all 6 live forward commands, `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (§5b), and the 6 live reverse-callback commands (`GlobalStateGet`/`GetStorageValue`/`Extension*`, §2.1 — codec only; not yet wired into the loopback engine, needs a 2nd `libmvm_linker.a` build routing those calls through the wire instead of cgo, real hardware territory, GĐ3) |
-| `tz_loopback_engine.go` | — | `tzLoopbackEngine`: `ExecutionEngine` impl that round-trips every forward command through the real wire codec + channel, looped back to a real `*MVMApi` in-process — wired in as `execution_mode=trustzone`'s current backend |
-
-### `execution/pkg/storage/` — Storage & DB Engines
-| File | Lines | Role |
-|------|-------|------|
-| `pebble_db.go` | 681 | High I/O PebbleDB wrapper with WAL sync |
-| `batchstore.go` | 649 | DB batch operations and backups |
-| `simpledb.go` | 600 | Simple local KV storage interface |
-| `xapian_full_db_logs_index.go` | — | Address-indexed `full_db_logs` cache (last-write-wins) alongside `BackUpDb`'s block-indexed store — lets a TrustZone TA ask Host "latest full_db_logs for address X" without scanning block history (`note/tee_dual_mode_execution_plan.md` §5b) |
-
-### `cmd/rpc/` — RPC API Gateway
-| Module | Role |
-|--------|------|
-| `cmd/rpc-client/internal/proxy/` | HTTP/WS Proxy. Intercepts specific RPCs (like `eth_getTransactionCount`) and directly queries Go `AccountStateDB` via TCP to bypass stale C++ caches. |
-| `tcp-rpc/client-tcp/` | Go implementation of RPC TCP Client for high-performance direct queries. |
+| File | Role |
+|------|------|
+| `block_processor_core.go` | Main block processor loop |
+| `block_processor_sync.go` | **Peer sync / state recovery** ⚠️ |
+| `block_processor_commit.go` | Block commit pipeline |
+| `block_processor_processing.go` | Tx execution pipeline |
+| `block_processor_network.go` | Network message handling |
+| `block_processor_batch.go` | Batch tx processing |
+| `block_processor_attestation.go` | BLS attestation logic |
+| `block_processor_epoch.go` | Epoch transition handling |
+| `block_processor_state.go` | State root verification |
+| `tx_batch_forwarder_core.go` | Tx batch → consensus forwarding |
+| `tx_validator_pool_core.go` | Tx validation pool |
+| `tx_virtual_executor_core.go` | Virtual/offchain tx execution |
+| `transaction_processor.go` | Core tx processing |
+| `transaction_virtual_processor.go` | Virtual tx processing |
+| `state_processor.go` | State transition processor |
+| `vote_recovery.go` | Vote/quorum recovery |
 
 ### `pkg/` — Shared Packages (Critical Ones)
 | Package | Role | Concurrency Risk |

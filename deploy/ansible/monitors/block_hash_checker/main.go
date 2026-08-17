@@ -38,7 +38,10 @@ func clearLoggedBlocks() {
 
 func loadEnvFallback() {
 	paths := []string{
+		".env",
+		"../.env",
 		"../../.env",
+		"../../../.env",
 	}
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
@@ -61,13 +64,50 @@ func loadEnvFallback() {
 			}
 		}
 	}
+
+	// Fallback to inventory.yml if TELEGRAM_BOT_TOKEN is still missing
+	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" {
+		invPaths := []string{
+			"inventory.yml",
+			"../inventory.yml",
+			"../../inventory.yml",
+			"../../../inventory.yml",
+		}
+		for _, invPath := range invPaths {
+			data, err := os.ReadFile(invPath)
+			if err == nil {
+				lines := strings.Split(string(data), "\n")
+				for _, line := range lines {
+					trimmed := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmed, "telegram_bot_token:") {
+						parts := strings.SplitN(trimmed, ":", 2)
+						if len(parts) == 2 {
+							token := strings.TrimSpace(parts[1])
+							token = strings.Trim(token, `"' `)
+							if token != "" && os.Getenv("TELEGRAM_BOT_TOKEN") == "" {
+								os.Setenv("TELEGRAM_BOT_TOKEN", token)
+							}
+						}
+					} else if strings.HasPrefix(trimmed, "telegram_chat_id:") {
+						parts := strings.SplitN(trimmed, ":", 2)
+						if len(parts) == 2 {
+							chatId := strings.TrimSpace(parts[1])
+							chatId = strings.Trim(chatId, `"' `)
+							if chatId != "" && os.Getenv("TELEGRAM_CHAT_ID") == "" {
+								os.Setenv("TELEGRAM_CHAT_ID", chatId)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 func init() {
 	loadEnvFallback()
 	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" {
-		fmt.Println("❌ LỖI NGHIÊM TRỌNG: Không tìm thấy TELEGRAM_BOT_TOKEN! Vui lòng tạo file .env hoặc cấu hình biến môi trường trước khi chạy.")
-		os.Exit(1)
+		fmt.Println("⚠️ [CẢNH BÁO] Không tìm thấy TELEGRAM_BOT_TOKEN trong .env hoặc inventory.yml. Tính năng gửi thông báo Telegram sẽ bị tắt.")
 	}
 	loadLoggedBlocks()
 }
@@ -389,8 +429,22 @@ func main() {
 	daemonMode = *daemon
 
 	if *nodesFlag == "" {
-		configData, err := os.ReadFile(*configFlag)
-		if err == nil {
+		candidateConfigs := []string{
+			*configFlag,
+			"config-m-nodes.json",
+			"/tmp/rpc_nodes.json",
+			"config.json",
+			"../config-m-nodes.json",
+			"/opt/metanode/monitors/block_hash_checker/config-m-nodes.json",
+		}
+		for _, cfgPath := range candidateConfigs {
+			if cfgPath == "" {
+				continue
+			}
+			configData, err := os.ReadFile(cfgPath)
+			if err != nil || len(configData) == 0 {
+				continue
+			}
 			var config struct {
 				NodesRaw json.RawMessage `json:"nodes"`
 			}
@@ -414,13 +468,14 @@ func main() {
 					}
 				}
 				if *nodesFlag != "" {
-					fmt.Printf("📂 Load nodes từ %s (%d nodes)\n", *configFlag, len(strings.Split(*nodesFlag, ",")))
+					fmt.Printf("📂 Load nodes từ %s (%d nodes)\n", cfgPath, len(strings.Split(*nodesFlag, ",")))
+					break
 				}
 			}
 		}
 
 		if *nodesFlag == "" {
-			fmt.Printf("❌ Thiếu --nodes flag và không tìm thấy cấu hình hợp lệ trong %s\n", *configFlag)
+			fmt.Printf("❌ Thiếu --nodes flag và không tìm thấy cấu hình hợp lệ trong %s hoặc /tmp/rpc_nodes.json\n", *configFlag)
 			fmt.Println()
 			fmt.Println("Cách dùng:")
 			fmt.Println(`  # Quét 1 lần:`)

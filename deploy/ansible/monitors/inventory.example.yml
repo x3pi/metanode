@@ -1,0 +1,22 @@
+all:
+  children:
+    metanode_cluster:
+      vars:
+        telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+        telegram_chat_id: "YOUR_TELEGRAM_CHAT_ID"
+      hosts:
+        192.168.1.100_validator:
+          node_ids: [0]
+          rpc_nodes: [0]
+          ansible_connection: local
+          ansible_host: 192.168.1.100
+          ansible_user: "your_user"
+          ansible_ssh_pass: "your_password"
+          ansible_become_pass: "your_password"
+        192.168.1.101_validator:
+          node_ids: [1,2]
+          rpc_nodes: [1,2]
+          ansible_host: 192.168.1.101
+          ansible_user: "your_user"
+          ansible_ssh_pass: "your_password"
+          ansible_become_pass: "your_password"

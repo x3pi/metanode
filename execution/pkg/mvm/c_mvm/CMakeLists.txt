@@ -9,7 +9,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # This preserves debug symbols (function names & line numbers) for meaningful stack traces 
 # when the node crashes (e.g. std::abort fail-stop), without sacrificing execution speed.
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -g")
-
 # `-march=native`/`-mtune=native` only make sense when the compiler runs on
 # the same machine it targets. When cross-compiling (e.g. the chcore/musl TA
 # target — see metanode/note/tee_dual_mode_execution_plan.md, GĐ3), "native"

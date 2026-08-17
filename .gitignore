@@ -314,6 +314,7 @@ pkg/storage/coverage.out
 # Project specific
 *.py
 !deploy/systemd/**/*.py
+!deploy/ansible/**/*.py
 deploy/systemd/*_keys/
 deploy/systemd/*.env
 !deploy/systemd/*.env.example
@@ -468,9 +469,14 @@ deploy/ansible/monitors/block_hash_checker/mismatches_*.csv
 execution/cmd/rpc-client/rpc-client
 execution/cmd/rpc-client/rpc-client-bin
 
-# Ignore local inventory configurations
+# Ignore local inventory configurations & secrets
 deploy/ansible/inventory.yml
+deploy/ansible/monitors/inventory.yml
+**/inventory.yml
+!**/inventory.example.yml
+!**/inventory.sample.yml
 deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
+deploy/ansible/monitors/parse_inventory.py
 
 # Genesis dynamically generated files
 deploy/systemd/genesis.json

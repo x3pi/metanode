@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -645,9 +644,9 @@ func stopSizeCheckLocked() {
 	}
 }
 
-// checkAndRotateBySize kiểm tra kích thước file log hiện tại
-// Nếu vượt quá giới hạn, rotate files rồi tạo mới
-// Rotation: App.log → App.log.1 → App.log.2 → App.log.3 (xóa .3 nếu có)
+// checkAndRotateBySize kiểm tra ngày và kích thước file log hiện tại
+// 1. Nếu sang ngày mới: đóng file cũ, mở file log của ngày mới
+// 2. Nếu vượt quá giới hạn kích thước trong ngày: rotate files .1, .2... rồi tạo mới
 func checkAndRotateBySize() {
 	fileLoggerMu.Lock()
 	defer fileLoggerMu.Unlock()
@@ -662,7 +661,26 @@ func checkAndRotateBySize() {
 		return
 	}
 
-	// Kiểm tra kích thước
+	// 1. Kiểm tra ngày hiện tại — nếu sang ngày mới thì rotate theo ngày
+	today := time.Now().Format("2006-01-02")
+	if fileLoggerInstance.CurrentDate() != today {
+		removeOutputLocked(oldFile)
+		fileLoggerInstance.Close()
+
+		newLogger, err := loggerfile.NewFileLogger(fileLoggerFileName)
+		if err != nil {
+			fmt.Printf("🔄 [LOG-ROTATE] Error creating new logger for new date %s: %v\n", today, err)
+			fileLoggerInstance = nil
+			return
+		}
+
+		fileLoggerInstance = newLogger
+		attachFileLoggerOutputLocked()
+		fmt.Printf("🔄 [LOG-ROTATE] Switched to new log file for date: %s (%s)\n", today, newLogger.FilePath())
+		return
+	}
+
+	// 2. Kiểm tra kích thước file
 	info, err := oldFile.Stat()
 	if err != nil {
 		return
@@ -672,10 +690,7 @@ func checkAndRotateBySize() {
 		return // Chưa cần rotate
 	}
 
-	// Tính đường dẫn file log hiện tại
-	logDir := loggerfile.GetGlobalLogDir()
-	epochDir := fmt.Sprintf("epoch_%d", loggerfile.GetGlobalEpoch())
-	currentPath := filepath.Join(logDir, epochDir, fileLoggerFileName)
+	currentPath := fileLoggerInstance.FilePath()
 
 	// Đóng file hiện tại trước khi rename
 	removeOutputLocked(oldFile)

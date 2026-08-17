@@ -259,7 +259,7 @@ func main() {
 
 	if app.config.Log.FileOutput {
 		initializeLogCleaner(logDir, app.config.EpochsToKeep)
-		if _, err := logger.EnableFileLog("App.log"); err != nil {
+		if _, err := logger.EnableFileLog("execution.log"); err != nil {
 			logger.Error("enable file log failed: %v", err)
 			fatal.Exit("Fatal exit from main.go")
 		}

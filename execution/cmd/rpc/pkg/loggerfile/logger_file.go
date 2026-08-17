@@ -218,9 +218,8 @@ type FileLogger struct {
 
 // NewFileLogger tạo mới một FileLogger
 func NewFileLogger(filePath string) (*FileLogger, error) {
-	// Tự động tạo cấu trúc thư mục theo ngày
 	logDir := globalLogDir
-	dateDir := time.Now().Format("2006/01/02")
+	dateDir := time.Now().Format("2006-01-02")
 	fullPath := filepath.Join(logDir, dateDir, filePath)
 
 	// Tạo thư mục logs theo ngày nếu chưa tồn tại
