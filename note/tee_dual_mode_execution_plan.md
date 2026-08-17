@@ -951,19 +951,39 @@ symbol graph. Build thật cần đúng toolchain GCC9+specs-wrapper qua Docker 
 
 **Patch `chanmgr/main.c`** (tz-llm-trustzone repo): thêm launch `/mvm_ta` qua `create_process()`
 **đồng bộ, ngay trước** đoạn launch `llama-cli` (chỉ `waitpid()` đẩy sang thread riêng, không
-block `main()`) — đúng ràng buộc thứ tự §9.5. **CHƯA compile được** — cần môi trường build
-`chanmgr`/chcore đầy đủ, chưa dựng trong phiên này; lần build thật đầu tiên sẽ lộ ra bất kỳ lỗi
-cú pháp/API nào.
+block `main()`) — đúng ràng buộc thứ tự §9.5.
 
-**Việc CHƯA làm, rõ ràng**:
-- Chưa build được `chanmgr/main.c`'s patch (chỉ viết theo đọc code, chưa compile).
-- Chưa tích hợp `mvm_ta` vào pipeline Docker thật (`build-chcore`) — chưa có target build thật.
-- Chưa test trên board thật bất kỳ phần nào ở mục này.
+**BUILD THẬT ĐÃ XÁC NHẬN (2026-08-17)** — chạy trực tiếp `tee_os_kernel/build/build_tee.sh`
+qua Docker image `vectorxj0553/tz-llm-oh-builder:latest` (đúng target build TEE-OS thật, không
+phải toàn bộ `rebuild.sh` — bỏ qua `linux.sh`/uboot vì chỉ đổi 1 file `tee_os_kernel`, không có
+gì phía llama.cpp/kernel Linux cần build lại, đúng theo hướng dẫn CLAUDE.md "Changed only
+tz-llm/tee_os_kernel... skip step 1"). Script này tự chạy `make clean && make -j$(nproc)` —
+build **toàn bộ** TEE-OS, không chỉ `chanmgr`. Kết quả: `[exited with code 0]`, **0 dòng
+`error:`** trong toàn bộ log — `chanmgr` build sạch (thấy rõ dòng code mới
+`if (__ipc_tls.chanmgr_ipc_struct == NULL) {` chạy qua compiler không lỗi), rồi build tiếp
+`procmgr`, `kernel/` (nhiều warning nhưng toàn bộ đều **có sẵn từ trước**, ở các file tôi không
+đụng vào — `object/memory.c`, `opteed/smc.c`, `mmparse.c`, `irq.c` — không phải do patch này
+gây ra). **Patch `chanmgr/main.c` build thật thành công, không còn là "chưa compile được".**
+
+**Việc CHƯA làm, rõ ràng (vẫn còn thật)**:
+- Build thành công ở đây là build TEE-OS **đứng riêng** — chưa chạy `rebuild.sh` đầy đủ (cần
+  cả `linux.sh` bracket theo đúng thứ tự FIT-hash, xem `build-oh-docker.sh`'s comment), nên
+  **chưa có `boot.img`/`uboot_repacked.img` mới** để flash. Đây là bước tiếp theo, không phải
+  đã xong.
+- `mvm_ta` binary **chưa tồn tại** — `create_process(1, {"/mvm_ta"}, NULL)` trong patch sẽ thất
+  bại (log rõ ràng, không fatal, theo đúng code đã viết) cho đến khi có 1 target build thật tạo
+  ra binary đó và đặt vào `oh_tee/apps/mvm_ta` (chưa tích hợp vào pipeline Docker, xem mục dưới
+  — file `mvm_ta_main.cpp` mới chỉ verify link-sạch trên x86, chưa build bằng đúng toolchain
+  GCC9+specs-wrapper của chcore thật).
+- Chưa tích hợp `mvm_ta` vào pipeline Docker thật (`build-chcore`/`build-llama-docker.sh`'s
+  tương tự) — chưa có target build thật tạo ra binary `mvm_ta` cho chcore.
+- Chưa test trên board thật bất kỳ phần nào ở mục này (kể cả launch-order/`entry_index=0`
+  giả định — chỉ verify được khi có binary `mvm_ta` thật để boot thử).
 - Encode đầy đủ cho 7/10 loại mảng state-change còn lại + 5 forward command còn lại.
 - §9.4's rủi ro wait_switch_req — nay đã NÉ HẲN bằng thiết kế busy-poll, không còn áp dụng cho
   cơ chế của metanode nữa (nhưng vẫn là rủi ro thật cho `llama-cli`'s riêng, không phải việc
   của metanode giải quyết).
 
-File: `metanode/execution/pkg/mvm/ta/{mvm_ta_main.cpp,README.md}` (mới),
+File: `metanode/execution/pkg/mvm/ta/{mvm_ta_main.cpp,README.md}` (mới, verify link x86),
 `tz-llm-trustzone/tz-llm/tee_os_kernel/user/system-services/system-servers/chanmgr/main.c`
-(sửa, chưa compile).
+(sửa, **build TEE-OS thật thành công, xác nhận 2026-08-17**).
