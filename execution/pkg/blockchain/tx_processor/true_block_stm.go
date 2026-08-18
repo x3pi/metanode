@@ -1,3 +1,4 @@
+
 package tx_processor
 
 import (
@@ -11,7 +12,6 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -316,36 +316,11 @@ func (stm *TrueBlockSTM) runParallelSegment(
 	}
 
 	var completed bool
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-	startTime := time.Now()
-
-	for {
-		select {
-		case <-doneCh:
-			completed = true
-		case <-ctx.Done():
-			completed = false
-		case <-ticker.C:
-			elapsed := time.Since(startTime)
-			if elapsed > 15*time.Second {
-				buf := make([]byte, 1<<20)
-				n := runtime.Stack(buf, true)
-				logger.Error("HANG DETECTED! Segment [%d-%d] activeTasks=%d. Goroutine dump:\n%s", lo, hi, atomic.LoadInt32(&activeTasks), string(buf[:n]))
-			}
-			currentActive := atomic.LoadInt32(&activeTasks)
-			validatedCount := 0
-			for i := lo; i < hi; i++ {
-				s := atomic.LoadUint64(&stm.txState[i])
-				_, st := unpackState(s)
-				if st == 3 {
-					validatedCount++
-				}
-			}
-			logger.Info("⏳ [BLOCK-STM DEBUG] Segment [%d-%d]: %d active tasks, %d/%d TXs validated so far", lo, hi, currentActive, validatedCount, segSize)
-			continue // Wait for doneCh or ctx.Done()
-		}
-		break
+	select {
+	case <-doneCh:
+		completed = true
+	case <-ctx.Done():
+		completed = false
 	}
 
 	workerCancel()

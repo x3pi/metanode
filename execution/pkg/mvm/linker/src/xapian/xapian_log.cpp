@@ -335,6 +335,8 @@ namespace XapianLog
             if (current_pos + sizeof(uint32_t) > data.size())
                 throw std::out_of_range("Không thể đọc số lượng xapian_doc_logs");
             uint32_t xapian_logs_count = BinaryEncoding::read_uint32_be(data, current_pos);
+            if (xapian_logs_count > data.size())
+                throw std::out_of_range("xapian_logs_count vượt quá kích thước dữ liệu");
             logs.xapian_doc_logs.reserve(xapian_logs_count); // Cấp phát trước bộ nhớ
 
             // Lặp để đọc từng log entry

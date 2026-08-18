@@ -155,6 +155,7 @@ public:
 
   // --- Change Tracking ---
   XapianLog::ComprehensiveLog comprehensive_log;
+  std::atomic<bool> has_uncommitted_writes{false};
 
 private:
   // --- Idle Tracking ---

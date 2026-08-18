@@ -18,6 +18,8 @@
 #include <uuid/uuid.h> // Cần header của libuuid
 #include <variant>     // Cần cho std::visit, std::monostate
 #include <vector>
+#include <map>
+#include <set>
 
 // Map lưu trữ các instance XapianManager, khóa là đường dẫn database
 std::unordered_map<std::string, std::shared_ptr<XapianManager>> XapianManager::instances;
@@ -429,9 +431,9 @@ std::string XapianManager::new_document(const std::string &data, uint256_t block
         std::lock_guard<std::mutex> lock2(tx_buffers_mutex);
         int doc_index = tx_counters[txHashStr]++; // Sinh ID tuần tự và tất định trong 1 transaction
         
-        // Tạo virtualDocId tất định dựa trên txHash và doc_index
+        // Tạo virtualDocId tất định dựa trên txHash và doc_index (luôn có tiền tố 0x chuẩn uint256)
         std::string input_for_hash = txHashStr + "_" + std::to_string(doc_index);
-        virtualDocId = mvm::keccak256(input_for_hash);
+        virtualDocId = "0x" + mvm::keccak256(input_for_hash);
         
         XapianLog::NewDocData logData;
         logData.docid = virtualDocId;
@@ -727,35 +729,50 @@ std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocI
 // Commit các thay đổi đã được staged vào database Xapian
 bool XapianManager::commit_changes() {
   touch(); // Cập nhật thời gian truy cập
-  std::lock_guard<std::shared_mutex> lock(
-      changes_mutex); // Khóa để kiểm tra và xóa staged_changes_log
-  if (comprehensive_log.xapian_doc_logs.empty()) {
-    return true; // Không có gì để commit
+  std::lock_guard<std::shared_mutex> lock(changes_mutex);
+  bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
+  if (!has_writes && comprehensive_log.xapian_doc_logs.empty()) {
+    return true; // Không có thay đổi nào cần commit -> Thoát ngay lập tức (zero-cost)
   }
   try {
-    db.commit(); // Thực hiện commit Xapian
-    comprehensive_log.xapian_doc_logs
-        .clear(); // Xóa các log đã staged sau khi commit thành công
-  } catch (const Xapian::Error &) {
-    return false; // Commit thất bại
-  } catch (const std::exception &) {
-    return false; // Commit thất bại
+    db.commit(); // Thực hiện commit Xapian (áp dụng cả comprehensive_log và replay_log)
+    comprehensive_log.xapian_doc_logs.clear(); // Xóa các log đã staged sau khi commit thành công
+    has_uncommitted_writes.store(false, std::memory_order_release);
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[Xapian Commit ERROR] Xapian::Error in commit_changes: " << e.get_msg() << std::endl;
+    return false;
+  } catch (const std::exception &e) {
+    std::cerr << "[Xapian Commit ERROR] std::exception in commit_changes: " << e.what() << std::endl;
+    return false;
+  } catch (...) {
+    std::cerr << "[Xapian Commit ERROR] Unknown exception in commit_changes" << std::endl;
+    return false;
   }
-  // Đánh dấu có 1 generation mới — mọi slot trong search_pool có last_gen cũ hơn
-  // giá trị này sẽ tự reopen() ngay khi được acquireSearchDb() cấp phát,
-  // bất kể slot đó đang bận hay rảnh tại thời điểm commit này.
+  // Đánh dấu có 1 generation mới
   db_generation.fetch_add(1, std::memory_order_acq_rel);
-  // Best-effort: reopen ngay các slot đang rảnh để giảm độ trễ cho lần acquire
-  // kế tiếp. Không bắt buộc cho tính đúng đắn — acquireSearchDb() sẽ tự
-  // reopen lại các slot còn lại (kể cả slot đang bận lúc commit) khi cần.
+  uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+
+  // Best-effort: reopen ngay các slot đang rảnh trong search_pool
   {
     std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
-    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
       if (search_pool.pool[i] && !search_pool.in_use[i]) {
         try {
           search_pool.pool[i]->reopen();
           search_pool.last_gen[i] = current_gen;
+        } catch (...) {}
+      }
+    }
+  }
+
+  // Best-effort: reopen ngay các slot đang rảnh trong simple_read_pool
+  {
+    std::lock_guard<std::mutex> pool_lock(simple_read_pool.pool_mutex);
+    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+      if (simple_read_pool.pool[i] && !simple_read_pool.in_use[i]) {
+        try {
+          simple_read_pool.pool[i]->reopen();
+          simple_read_pool.last_gen[i] = current_gen;
         } catch (...) {}
       }
     }
@@ -911,77 +928,146 @@ struct CleanerStopper {
 } stopper_instance;
 } // namespace
 
-// Áp dụng lại một danh sách các log entry vào database hiện tại
+// Áp dụng lại một danh sách các log entry vào database hiện tại với Doc Coalescing
 bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_replay) {
+    if (log_to_replay.empty()) return true;
     std::unique_lock<std::shared_mutex> db_lock(changes_mutex);
-    for (const auto& entry : log_to_replay) {
-        try {
+    has_uncommitted_writes.store(true, std::memory_order_release);
+
+    // Document staging cache for batch coalescing (tối ưu hóa gom các thao tác trên cùng 1 docid trong 1 block)
+    std::map<std::string, Xapian::Document> modified_docs;
+    std::set<std::string> deleted_docs;
+
+    auto normalize_docid = [](const std::string& id) -> std::string {
+        if (id.length() >= 2 && (id[0] == '0' && (id[1] == 'x' || id[1] == 'X'))) return id;
+        return "0x" + id;
+    };
+
+    auto get_or_load_doc = [&](const std::string& v_docid) -> Xapian::Document& {
+        std::string nid = normalize_docid(v_docid);
+        auto it = modified_docs.find(nid);
+        if (it != modified_docs.end()) {
+            return it->second;
+        }
+
+        Xapian::Document doc;
+        Xapian::docid did = resolveVirtualDocId(nid);
+        bool loaded = false;
+        if (did > 0) {
+            try {
+                doc = db.get_document(did);
+                loaded = true;
+            } catch (const Xapian::DocNotFoundError&) {
+                loaded = false;
+            } catch (const std::exception& e) {
+                std::cerr << "[Xapian Replay WARN] get_document(" << did << ") error: " << e.what() << std::endl;
+                loaded = false;
+            }
+        }
+
+        if (!loaded) {
+            std::string clean_id = nid;
+            if (clean_id.length() >= 2 && clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
+            doc.add_term("Q" + clean_id);
+            std::cerr << "[Xapian Replay INFO] docid '" << nid << "' not present in local DB (did=0). Initializing in memory with term Q" << clean_id << std::endl;
+        }
+
+        auto inserted = modified_docs.emplace(nid, std::move(doc));
+        deleted_docs.erase(nid);
+        return inserted.first->second;
+    };
+
+    try {
+        for (const auto& entry : log_to_replay) {
             if (entry.op == XapianLog::Operation::NEW_DOC) {
-                Xapian::Document doc;
-                doc.set_data(std::get<XapianLog::NewDocData>(entry.data).data);
-                std::string v_docid = std::get<XapianLog::NewDocData>(entry.data).docid;
-                std::string clean_id = v_docid;
-                if (clean_id.substr(0, 2) == "0x") clean_id = clean_id.substr(2);
-                doc.add_term("Q" + clean_id);
-                db.add_document(doc);
+                auto data = std::get<XapianLog::NewDocData>(entry.data);
+                std::string nid = normalize_docid(data.docid);
+                Xapian::Document& doc = get_or_load_doc(nid);
+                doc.set_data(data.data);
             } else if (entry.op == XapianLog::Operation::DEL_DOC) {
-                Xapian::docid did = resolveVirtualDocId(std::get<XapianLog::DelDocData>(entry.data).docid);
-                if (did > 0) db.delete_document(did);
+                auto data = std::get<XapianLog::DelDocData>(entry.data);
+                std::string nid = normalize_docid(data.docid);
+                modified_docs.erase(nid);
+                deleted_docs.insert(nid);
             } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
                 auto data = std::get<XapianLog::AddValueData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
-                if (did > 0) {
-                    Xapian::Document doc = db.get_document(did);
-                    doc.add_value(data.slot, data.value);
-                    db.replace_document(did, doc);
-                }
+                std::string nid = normalize_docid(data.docid);
+                Xapian::Document& doc = get_or_load_doc(nid);
+                doc.add_value(data.slot, data.value);
             } else if (entry.op == XapianLog::Operation::ADD_TERM) {
                 auto data = std::get<XapianLog::AddTermData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
-                if (did > 0) {
-                    Xapian::Document doc = db.get_document(did);
-                    doc.add_term(data.term);
-                    db.replace_document(did, doc);
-                }
+                std::string nid = normalize_docid(data.docid);
+                Xapian::Document& doc = get_or_load_doc(nid);
+                doc.add_term(data.term);
             } else if (entry.op == XapianLog::Operation::SET_DATA) {
                 auto data = std::get<XapianLog::SetDataData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
-                if (did > 0) {
-                    Xapian::Document doc = db.get_document(did);
-                    doc.set_data(data.data);
-                    db.replace_document(did, doc);
-                }
+                std::string nid = normalize_docid(data.docid);
+                Xapian::Document& doc = get_or_load_doc(nid);
+                doc.set_data(data.data);
             } else if (entry.op == XapianLog::Operation::INDEX_TEXT) {
                 auto data = std::get<XapianLog::IndexTextData>(entry.data);
-                Xapian::docid did = resolveVirtualDocId(data.docid);
-                if (did > 0) {
-                    Xapian::Document doc = db.get_document(did);
-                    Xapian::TermGenerator termgenerator;
-                    termgenerator.set_stemmer(Xapian::Stem("english"));
-                    termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
-                    termgenerator.set_document(doc);
-                    termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
-                    db.replace_document(did, doc);
+                std::string nid = normalize_docid(data.docid);
+                Xapian::Document& doc = get_or_load_doc(nid);
+                Xapian::TermGenerator termgenerator;
+                termgenerator.set_stemmer(Xapian::Stem("english"));
+                termgenerator.set_stemming_strategy(Xapian::TermGenerator::STEM_SOME);
+                termgenerator.set_document(doc);
+                termgenerator.index_text(data.text, data.wdf_inc, data.prefix);
+            }
+        }
+
+        // Apply deletions
+        for (const auto& v_docid : deleted_docs) {
+            Xapian::docid did = resolveVirtualDocId(v_docid);
+            if (did > 0) {
+                try {
+                    db.delete_document(did);
+                } catch (const std::exception& e) {
+                    std::cerr << "[Xapian Replay WARN] delete_document(" << did << ") error: " << e.what() << std::endl;
                 }
             }
-        } catch (...) { return false; }
+        }
+
+        // Apply coalesced modified documents (1 write per docid, avoiding B-Tree saturation)
+        for (auto& pair : modified_docs) {
+            const std::string& v_docid = pair.first;
+            Xapian::Document& doc = pair.second;
+            Xapian::docid did = resolveVirtualDocId(v_docid);
+            if (did > 0) {
+                db.replace_document(did, doc);
+            } else {
+                Xapian::docid new_did = db.add_document(doc);
+                std::cerr << "[Xapian Replay INFO] Persisted new document on disk for '" << v_docid << "' -> assigned internal did=" << new_did << std::endl;
+            }
+        }
+        return true;
+    } catch (const Xapian::Error& e) {
+        std::cerr << "[Xapian Replay ERROR] Xapian::Error in replay_log: " << e.get_msg() << " (context: " << e.get_context() << ")" << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "[Xapian Replay ERROR] std::exception in replay_log: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[Xapian Replay ERROR] Unknown exception in replay_log" << std::endl;
+        return false;
     }
-    return true;
 }
 
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
 // lại DB
 bool XapianManager::revertUncommittedChanges() {
   std::unique_lock<std::shared_mutex> lock(changes_mutex); // Khóa để thao tác an toàn
+  bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
   
   // FORK-SAFETY: Return immediately if there are no uncommitted changes
-  if (comprehensive_log.xapian_doc_logs.empty()) {
+  if (!has_writes && comprehensive_log.xapian_doc_logs.empty()) {
       return true;
   }
   
   try {
-    // 1. Xóa các thay đổi đang chờ trong log
+    // 1. Xóa các thay đổi đang chờ trong log và reset cờ dirty
     comprehensive_log.xapian_doc_logs.clear();
+    has_uncommitted_writes.store(false, std::memory_order_release);
 
     // 2. Đóng và mở lại database để hủy các thay đổi chưa commit trong bộ nhớ
     // Xapian

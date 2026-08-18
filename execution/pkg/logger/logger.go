@@ -417,8 +417,8 @@ func SyncFileLog() {
 	syncFileOutputs()
 }
 
-// RedirectStderrToFile redirect stderr của Go runtime vào log file
-// Đảm bảo unrecovered panic và runtime fatal error được ghi vào file
+// RedirectStderrToFile redirect cả stdout và stderr của tiến trình (kể cả C/C++ runtime) vào log file
+// Đảm bảo unrecovered panic, runtime fatal error, và toàn bộ C++ cout/cerr được ghi vào execution.log
 // Gọi SAU EnableFileLog()
 func RedirectStderrToFile() error {
 	fileLoggerMu.Lock()
@@ -433,14 +433,19 @@ func RedirectStderrToFile() error {
 		return fmt.Errorf("file logger has no file")
 	}
 
+	fd := int(logFile.Fd())
+
+	// Redirect stdout (fd 1) đến file log
+	if err := syscall.Dup2(fd, int(os.Stdout.Fd())); err != nil {
+		return fmt.Errorf("failed to redirect stdout: %w", err)
+	}
+
 	// Redirect stderr (fd 2) đến file log
-	// Go runtime sẽ in panic/fatal vào stderr → giờ sẽ vào file
-	err := syscall.Dup2(int(logFile.Fd()), int(os.Stderr.Fd()))
-	if err != nil {
+	if err := syscall.Dup2(fd, int(os.Stderr.Fd())); err != nil {
 		return fmt.Errorf("failed to redirect stderr: %w", err)
 	}
 
-	log.Printf("📝 [LOG] Stderr redirected to log file — runtime panics will be captured")
+	log.Printf("📝 [LOG] Stdout & Stderr redirected to log file — all Go and C++ logs will be captured")
 	return nil
 }
 
