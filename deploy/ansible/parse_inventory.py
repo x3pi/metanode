@@ -90,11 +90,19 @@ if __name__ == '__main__':
         
     if target == 'json':
         import json
-        out = {"nodes": {}, "tcp_nodes": {}}
+        out = {
+            "nodes": {},
+            "roles": {},
+            "tcp_nodes": {}
+        }
         for nid, ip in node_map.items():
             key = f"m{nid}"
-            out["nodes"][key] = f"http://{ip}:{10746 + nid}"
-            out["tcp_nodes"][key] = f"{ip}:{6200 + nid}"
+            url = f"http://{ip}:{10746 + nid}"
+            tcp = f"{ip}:{6200 + nid}"
+            is_sync = is_synconly_map.get(nid, False)
+            out["nodes"][key] = url
+            out["roles"][key] = "synconly" if is_sync else "validator"
+            out["tcp_nodes"][key] = tcp
         print(json.dumps(out, indent=2))
         sys.exit(0)
         

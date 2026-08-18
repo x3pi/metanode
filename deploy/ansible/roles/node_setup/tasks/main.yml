@@ -157,7 +157,6 @@
     (node_configs[item | string].is_synconly or node_configs[item | string].snapshot_enabled)
     and not btrfs_disk.stat.exists
     and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
-
 - name: Create bind mount source directories for snapshot-enabled nodes
   ansible.builtin.file:
     path: "/mnt/metanode_snapshots/node-{{ item }}"

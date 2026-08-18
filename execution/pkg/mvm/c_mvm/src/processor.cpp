@@ -241,35 +241,31 @@ public:
     };
     auto hh = [&result]() { result.er = ExitReason::halted; };
     auto eh = [&](const Exception &ex_) {
-      // Defense in depth: the whole top-level transaction/call reverted, so
-      // every state mutation it made (at any nesting depth) must be undone.
-      // In practice Go already ignores the exported diff maps for a failed
-      // tx, but this keeps them actually empty rather than relying on that.
       journal.revert_to(0);
       result.er = ExitReason::threw;
       result.ex = ex_.type;
-      if (result.ex == ET::ErrExecutionReverted) {
-        const auto offset = ctxt->s.pop64();
-        const auto size = ctxt->s.pop64();
-        if (size != 0) {
-          auto revert_data = copy_from_mem(offset, size);
-          result.output = move(revert_data);
-        }
-        // ✅ Ưu tiên sử dụng exception message từ returnData (từ nested call)
-        // Nếu returnData không rỗng, nó có thể chứa exception message gốc từ
-        // nested call (được lưu bằng mvm::to_bytes(e.what()) trong exception
-        // handler của nested call)
-        if (!ctxt->returnData.empty()) {
-          // Decode exception message từ returnData (raw bytes từ mvm::to_bytes)
-          std::string original_msg(ctxt->returnData.begin(),
-                                   ctxt->returnData.end());
-          result.exmsg = original_msg;
+      try {
+        if (result.ex == ET::ErrExecutionReverted) {
+          if (ctxt && ctxt->s.size() >= 2) {
+            const auto offset = ctxt->s.pop64();
+            const auto size = ctxt->s.pop64();
+            if (size != 0) {
+              auto revert_data = copy_from_mem(offset, size);
+              result.output = move(revert_data);
+            }
+          }
+          if (ctxt && !ctxt->returnData.empty()) {
+            std::string original_msg(ctxt->returnData.begin(),
+                                     ctxt->returnData.end());
+            result.exmsg = original_msg;
+          } else {
+            result.exmsg = ex_.what();
+          }
         } else {
-          // Nếu returnData rỗng, sử dụng exception message mặc định
+          result.output = mvm::encode_revert_string(ex_.what());
           result.exmsg = ex_.what();
         }
-      } else {
-        result.output = mvm::encode_revert_string(ex_.what());
+      } catch (...) {
         result.exmsg = ex_.what();
       }
     };

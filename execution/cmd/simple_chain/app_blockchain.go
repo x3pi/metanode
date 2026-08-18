@@ -536,6 +536,37 @@ func (app *App) initBlockchain() error {
 						}
 					}
 
+					// 🛡️ FORWARD PROBE: If backward search didn't find a matching block, check if NOMT root
+					// is ahead of LevelDB's startLastBlock (e.g. crash happened during sync block apply after
+					// NOMT updated its root but before LevelDB lastblock pointer was updated).
+					if !found {
+						currentLastBn := app.startLastBlock.Header().BlockNumber()
+						for bn := currentLastBn + 1; bn <= currentLastBn + 100; bn++ {
+							key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+							data, err := app.storageManager.GetStorageMapping().Get(key)
+							if err != nil || data == nil || len(data) != 32 {
+								break // no more forward blocks in mapping
+							}
+							blockHash := e_common.BytesToHash(data)
+							blk, err := blockDatabase.GetBlockByHash(blockHash)
+							if err != nil || blk == nil {
+								break
+							}
+							if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
+								correctedGEI := blk.Header().GlobalExecIndex()
+								logger.Warn("🛡️ [STARTUP] ✅ Found matching FORWARD block #%d in LevelDB (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height forward!",
+									bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
+								app.startLastBlock = blk
+								storage.ResetAllBlockCounters(bn)
+								storage.ForceSetLastGlobalExecIndex(correctedGEI)
+								storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+								storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
+								found = true
+								break
+							}
+						}
+					}
+
 					if !found {
 						if trie.GetStateBackend() == trie.BackendNOMT {
 							logger.Warn("🛡️ [STARTUP] ⚠️ No matching block found in LevelDB for NOMT roots. Wiping NOMT database and resetting block tip to genesis to force clean sync!")
