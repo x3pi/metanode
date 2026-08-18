@@ -299,7 +299,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "level": "info",
             "format": "text",
             "console_output": True,
-            "file_output": True
+            "file_output": False
         },
         "tx_trace_enabled": False
     }

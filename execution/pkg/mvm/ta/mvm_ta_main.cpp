@@ -16,31 +16,46 @@
 // the Go host (pkg/mvm/tz_codec.go/tz_channel.go). See that header for
 // the full design rationale.
 //
-// Scope of this first real-hardware increment (honest, not overstated):
+// Scope as of 2026-08-17 (honest, not overstated):
 //   - Channel setup (push_pages + map_tzasc_cma_pmo) — full.
 //   - Dispatch loop (busy-poll, no wait_switch_req — see the design note
 //     in mvm_reverse_round_trip's doc comment) — full.
-//   - MVM_TZ_CMD_CALL: full round trip, including the 6 reverse-callback
-//     shims routed back over this same channel.
+//   - MVM_TZ_CMD_CALL (read-only/eth_call path) and MVM_TZ_CMD_EXECUTE
+//     (the REAL state-changing tx entry point block processing actually
+//     uses — mvm_api.go's Execute(), called once per tx by
+//     true_block_stm.go): both full round trips, including the 6
+//     reverse-callback shims routed back over this same channel.
 //   - ExecuteResult encoding: status/exception/gas_used/output/exmsg and
-//     the 3 simplest state-change arrays (add_balance_change,
-//     sub_balance_change, nonce_change — all a uniform [20-byte addr]
-//     [32-byte value] shape, mirroring tz_codec.go's writeAddrValueMap
-//     exactly) are fully wired. code_change/storage_change/storage_read/
-//     full_db_hash/full_db_logs/event_logs/native_logs are NOT yet wired
-//     -- their counts are read correctly from the real ExecuteResult but
-//     encoded as 0 entries for now (TODO, tracked in the plan doc, NOT
-//     silently wrong: a future caller reading a real code/storage change
-//     off this wire will get an empty result, not corrupted data).
-//   - MVM_TZ_CMD_EXECUTE/DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
-//     NONCE_PLUS_ONE: NOT yet wired (mechanically identical to CALL's
-//     pattern once ExecuteResult encoding above is complete — deferred,
-//     not attempted this pass to avoid rushing unverifiable code).
+//     the state-change arrays that actually matter for "did this block
+//     change state" — add_balance_change/sub_balance_change/nonce_change
+//     (uniform [20-byte addr][32-byte value]), full_db_hash (same shape),
+//     code_change ([20-byte addr][data_len][code bytes]), storage_change
+//     ([20-byte addr][pair_count][(32-byte key+32-byte value)*pair_count])
+//     and storage_read ([20-byte addr][key_count][32-byte key*key_count])
+//     are all fully wired now, byte layouts cross-checked against
+//     pkg/mvm/helpers.go's real extraction code (extractCodeChange/
+//     extractStorageChange/extractStorageRead/extractMapFullDbHash), not
+//     guessed from the protocol header's prose alone.
+//     full_db_logs/event_logs/native_logs/public_key_bls/account_type/
+//     new_device_key are NOT yet wired -- counts are read correctly from
+//     the real ExecuteResult but encoded as 0 entries for now (TODO,
+//     tracked in the plan doc; the latter 3 are confirmed dead/unpopulated
+//     in pkg/mvm today regardless). NOT silently wrong: a future caller
+//     reading a real full_db_logs/event off this wire gets an empty
+//     result, not corrupted data.
+//   - MVM_TZ_CMD_DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
+//     NONCE_PLUS_ONE: NOT yet wired (mechanically identical to CALL/
+//     EXECUTE's pattern — deferred, not attempted this pass to avoid
+//     rushing unverifiable code).
 //
-// NONE of this has run on real hardware yet. Every syscall/struct-layout
+// Built successfully (stripped, 5.1MB) and flashed to real hardware
+// 2026-08-17 (DEPLOYED_STATE.md, tz-llm-trustzone) — but chanmgr's
+// create_process("/mvm_ta") has NOT yet been observed to actually fire at
+// runtime (needs a CA to open the first secure-world session). This file's
+// *logic* has NEVER executed on real hardware. Every syscall/struct-layout
 // choice here is grounded in a real, already-proven-on-this-board call
 // site (cited in each comment) — but the *composition* of them for this
-// new purpose is unverified until an actual build+flash+test cycle.
+// new purpose is unverified until an actual runtime invocation.
 
 #include "mvm_tz_protocol.h"
 #include "mvm_linker.hpp"
@@ -402,26 +417,31 @@ static void mvm_encode_execute_result(const ExecuteResult *r,
     hdr_out->has_simple_db_hash = 0; // TODO: not yet threaded through from ExecuteResult
     hdr_out->gas_used = (uint64_t)r->gas_used;
 
-    hdr_out->full_db_hash_count = 0;       // TODO
+    hdr_out->full_db_hash_count = (uint32_t)r->length_full_db_hash;
     hdr_out->full_db_logs_count = 0;       // TODO
     hdr_out->add_balance_change_count = (uint32_t)r->length_add_balance_change;
     hdr_out->nonce_change_count = (uint32_t)r->length_nonce_change;
     hdr_out->sub_balance_change_count = (uint32_t)r->length_sub_balance_change;
-    hdr_out->code_change_count = 0;        // TODO
-    hdr_out->storage_change_count = 0;     // TODO
-    hdr_out->storage_read_count = 0;       // TODO
-    hdr_out->public_key_bls_count = 0;     // TODO
-    hdr_out->account_type_count = 0;       // TODO
-    hdr_out->new_device_key_count = 0;     // TODO
+    hdr_out->code_change_count = (uint32_t)r->length_code_change;
+    hdr_out->storage_change_count = (uint32_t)r->length_storage_change;
+    hdr_out->storage_read_count = (uint32_t)r->length_storage_read;
+    hdr_out->public_key_bls_count = 0;     // TODO (confirmed dead today, see protocol header)
+    hdr_out->account_type_count = 0;       // TODO (confirmed dead today, see protocol header)
+    hdr_out->new_device_key_count = 0;     // TODO (confirmed dead today, see protocol header)
 
     w->writeBytes(r->b_exmsg, (uint32_t)r->length_exmsg);
     w->writeBytes(r->b_output, (uint32_t)r->length_output);
-    // full_db_hash, full_db_logs: TODO, 0 entries written (counts above are 0)
 
-    // add_balance_change / nonce_change / sub_balance_change: each entry
-    // is a 64-byte [32-byte left-padded address][32-byte value] buffer
-    // (confirmed via mvm_api.go's extractAddBalance/extractSubBalance —
-    // identical shape for nonce_change), matching writeAddrValueMap's
+    // full_db_hash: each entry is a 64-byte [32-byte left-padded
+    // address][32-byte hash] buffer (confirmed via helpers.go's
+    // extractMapFullDbHash: expectedLen=64, addr=bytes[12:32],
+    // hash=bytes[32:64]) — same shape as add_balance_change, so reuse the
+    // lambda below.
+
+    // add_balance_change / nonce_change / sub_balance_change / full_db_hash:
+    // each entry is a 64-byte [32-byte left-padded address][32-byte value]
+    // buffer (confirmed via helpers.go's extractAddBalance/extractSubBalance/
+    // extractMapFullDbHash — identical shape), matching writeAddrValueMap's
     // wire shape exactly: [20-byte addr][32-byte value], so we slice the
     // address's last 20 bytes out of the 32-byte left-padded field.
     auto write_addr_value_array = [&](char **arr, int count) {
@@ -431,12 +451,59 @@ static void mvm_encode_execute_result(const ExecuteResult *r,
             w->writeRaw(entry + 32, 32); // value
         }
     };
+    write_addr_value_array(r->full_db_hash, r->length_full_db_hash);
+    // full_db_logs: TODO, 0 entries written (count above is 0)
     write_addr_value_array(r->b_add_balance_change, r->length_add_balance_change);
     write_addr_value_array(r->b_nonce_change, r->length_nonce_change);
     write_addr_value_array(r->b_sub_balance_change, r->length_sub_balance_change);
 
-    // code_change, storage_change, storage_read, public_key_bls,
-    // account_type, new_device_key: TODO, 0 entries written.
+    // code_change: entry buffer is [32-byte left-padded address][code
+    // bytes], entry LENGTH (length_codes[i]) INCLUDES the 32-byte address
+    // prefix (confirmed via helpers.go's extractCodeChange: v=length_codes[i]
+    // is the buffer's total byte count, code=addrWithCode[32:]). Wire shape
+    // per mvm_tz_protocol.h: [20-byte addr][uint32_t data_len][data_len bytes].
+    for (int i = 0; i < r->length_code_change; i++) {
+        const uint8_t *entry = (const uint8_t *)r->b_code_change[i];
+        int total_len = r->length_codes[i];
+        int data_len = total_len - 32;
+        w->writeRaw(entry + 12, 20);       // address
+        w->writeU32((uint32_t)data_len);
+        if (data_len > 0) w->writeRaw(entry + 32, (uint32_t)data_len);
+    }
+
+    // storage_change: entry buffer is [32-byte left-padded address]
+    // [pair_count * (32-byte key + 32-byte value)], entry LENGTH
+    // (length_storages[i]) EXCLUDES the 32-byte address prefix (confirmed
+    // via helpers.go's extractStorageChange: v=length_storages[i], buffer
+    // actually read is v+32 bytes, storageCount=v/64). Wire shape:
+    // [20-byte addr][uint32_t pair_count][pair_count*(32-byte key+32-byte value)].
+    for (int i = 0; i < r->length_storage_change; i++) {
+        const uint8_t *entry = (const uint8_t *)r->b_storage_change[i];
+        int data_len = r->length_storages[i]; // excludes addr prefix, per above
+        uint32_t pair_count = (uint32_t)(data_len / 64);
+        w->writeRaw(entry + 12, 20);       // address
+        w->writeU32(pair_count);
+        if (data_len > 0) w->writeRaw(entry + 32, (uint32_t)data_len); // pairs follow the addr
+    }
+
+    // storage_read: entry buffer is [32-byte left-padded address]
+    // [key_count * 32-byte key], entry LENGTH (length_storages_read[i])
+    // INCLUDES the 32-byte address prefix (confirmed via helpers.go's
+    // extractStorageRead: v=length_storages_read[i] is the total buffer
+    // size, storageCount=(v-32)/32). Wire shape:
+    // [20-byte addr][uint32_t key_count][key_count*32-byte key].
+    for (int i = 0; i < r->length_storage_read; i++) {
+        const uint8_t *entry = (const uint8_t *)r->b_storage_read[i];
+        int total_len = r->length_storages_read[i];
+        int keys_len = total_len - 32;
+        uint32_t key_count = (uint32_t)(keys_len / 32);
+        w->writeRaw(entry + 12, 20);       // address
+        w->writeU32(key_count);
+        if (keys_len > 0) w->writeRaw(entry + 32, (uint32_t)keys_len);
+    }
+
+    // public_key_bls, account_type, new_device_key: TODO, 0 entries
+    // written — confirmed dead in pkg/mvm today (protocol header comment).
     // simple_db_hash: not written (has_simple_db_hash=0 above).
 
     // event_logs_json: TODO — write an empty JSON array so the blob
@@ -517,6 +584,77 @@ static void mvm_dispatch_call(const uint8_t *req_header, uint32_t req_header_len
     if (related_flat) free(related_flat);
 }
 
+// ───────────────────────── MVM_TZ_CMD_EXECUTE dispatch ─────────────────────────
+// The REAL state-changing transaction entry point (calls C++ execute(), not
+// call()) — this is what actual block processing uses (mirrors
+// mvm_api.go's Execute(), which every tx in a block goes through, unlike
+// Call() which is the read-only/eth_call path with no committed state
+// change). Structurally identical to mvm_dispatch_call() above except:
+// no read_only/is_off_chain fields (execute() has neither), is_cache
+// instead, and calls execute() rather than call().
+static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_len,
+    const uint8_t *req_blob, uint32_t req_blob_len,
+    BlobWriter *resp_blob_writer, mvm_tz_execute_result_hdr_t *resp_hdr_out) {
+
+    if (req_header_len != sizeof(mvm_tz_execute_req_t)) {
+        fprintf(stderr, "[mvm_ta] EXECUTE: bad header_len=%u want=%zu\n",
+            req_header_len, sizeof(mvm_tz_execute_req_t));
+        abort();
+    }
+    mvm_tz_execute_req_t req;
+    memcpy(&req, req_header, sizeof(req));
+
+    BlobReader r{req_blob, req_blob_len};
+    uint32_t n;
+    const uint8_t *b_sender = r.readBytes(&n);            // [0] bSender (20)
+    const uint8_t *b_contract = r.readBytes(&n);           // [1] bContractAddress (20)
+    uint32_t input_len;
+    const uint8_t *b_input = r.readBytes(&input_len);      // [2] bInput
+    const uint8_t *b_tx_hash = r.readBytes(&n);             // [3] bTxHash (32)
+
+    unsigned char *related_flat = nullptr;
+    if (req.related_addresses_count > 0) {
+        related_flat = (unsigned char *)malloc(20u * req.related_addresses_count);
+        for (uint32_t i = 0; i < req.related_addresses_count; i++) {
+            uint32_t alen;
+            const uint8_t *a = r.readBytes(&alen); // [4..] relatedAddresses, 20 each
+            memcpy(related_flat + i * 20, a, 20);
+        }
+    }
+
+    // Same blockNumber big.Int-FillBytes conversion as mvm_dispatch_call
+    // (mvm_api.go's Execute() does the identical
+    // big.NewInt(int64(blockNumber)).FillBytes(...) before calling C.execute).
+    uint8_t b_block_number[32] = {0};
+    {
+        uint64_t bn = req.block_number;
+        for (int i = 0; i < 8; i++) {
+            b_block_number[31 - i] = (uint8_t)(bn & 0xff);
+            bn >>= 8;
+        }
+    }
+
+    // MVM_B1_CONTEXT_PARAMS: not yet threaded through this protocol
+    // version — pass all-NULL, same as mvm_dispatch_call.
+    ExecuteResult *rs = execute(
+        (unsigned char *)b_sender, (unsigned char *)b_contract,
+        (unsigned char *)b_input, (int)input_len,
+        (unsigned char *)req.amount,
+        req.gas_price, req.gas_limit,
+        req.block_prevrandao, req.block_gas_limit, req.block_time, req.block_base_fee,
+        b_block_number, (unsigned char *)req.block_coinbase,
+        (unsigned char *)req.mvm_id, (unsigned char *)b_tx_hash,
+        req.is_debug != 0,
+        related_flat, (int)req.related_addresses_count,
+        req.is_cache != 0,
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+    );
+
+    mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
+    freeResult(rs);
+    if (related_flat) free(related_flat);
+}
+
 // ───────────────────────── main dispatch loop ─────────────────────────
 //
 // Design note (see mvm_reverse_round_trip's comment for the full
@@ -561,7 +699,10 @@ static void mvm_ta_run(void) {
         case MVM_TZ_CMD_CALL:
             mvm_dispatch_call(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
             break;
-        // MVM_TZ_CMD_EXECUTE/DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
+        case MVM_TZ_CMD_EXECUTE:
+            mvm_dispatch_execute(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
+            break;
+        // MVM_TZ_CMD_DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
         // NONCE_PLUS_ONE: not yet wired (see this file's top comment) —
         // fall through to the default error response below.
         default:
