@@ -12,7 +12,7 @@
             {%- for nid in hostvars[host]['node_ids'] -%}
               {%- set is_sync = (nid | int in hostvars[host]['synconly_nodes'] | default([])) or (hostvars[host]['is_synconly'] | default(false)) -%}
               {%- set is_rpc = (nid | int in hostvars[host]['rpc_nodes'] | default([])) or (hostvars[host]['is_rpc'] | default(false)) -%}
-              {%- set is_snapshot = (nid | int in hostvars[host]['snapshot_nodes'] | default([])) or (hostvars[host]['snapshot_enabled'] | default(false)) or is_sync -%}
+              {%- set is_snapshot = (nid | int in hostvars[host]['snapshot_nodes'] | default([])) or (hostvars[host]['snapshot_enabled'] | default(false)) -%}
               {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync, 'is_rpc': is_rpc, 'snapshot_enabled': is_snapshot}) -%}
             {%- endfor -%}
           {%- endfor -%}

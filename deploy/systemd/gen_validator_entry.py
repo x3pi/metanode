@@ -198,9 +198,7 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     is_explorer = getattr(args, "is_explorer", False) or (args.node_type == "synconly")
     
     snapshot_enabled = getattr(args, "snapshot_enabled", False)
-    epochs_to_keep   = getattr(args, "epochs_to_keep", None)
-    if epochs_to_keep is None:
-        epochs_to_keep = 0 if is_rpc_node else 5
+    epochs_to_keep   = getattr(args, "epochs_to_keep", 5)
     commit_batch_size= 500 if is_validator else 100
     commit_batches_ahead = 128 if is_validator else 64
 
@@ -263,16 +261,16 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "db_type": 2,
         "genesis_file_path": f"{install_dir}/config/genesis.json",
         "snapshot_enabled": snapshot_enabled,
-        "snapshot_frequency_blocks": 50,
-        "snapshot_block_offset": 0,
-        "snapshot_max_snapshots": 3,
+        "snapshot_frequency_blocks": getattr(args, "snapshot_frequency_blocks", 500),
+        "snapshot_block_offset": getattr(args, "snapshot_block_offset", 0),
+        "snapshot_max_snapshots": getattr(args, "snapshot_max_snapshots", 1),
         "Databases": {
             "RootPath": f"{install_dir}/data/execution/db",
             "DBEngine": "sharded",
             "Version": "0.0.1.0",
             "BLSPrivateKey": bls_private_hex,
             "SnapshotPath": f"{install_dir}/data/execution/snapshots",
-            "MaxPartSizeMB": 100,
+            "MaxPartSizeMB": getattr(args, "max_part_size_mb", 600),
             "ArchiveBaseName": "snapshot_archive",
             "pebble_cache_size_mb": 4096,
             "pebble_mem_table_size_mb": 256
@@ -395,7 +393,7 @@ def parse_args():
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
-    parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
+    parser.add_argument("--epochs-to-keep", type=int, default=5, help="Number of epochs to keep (default: 5)")
     parser.add_argument("--is-explorer",  action="store_true", help="Enable Explorer for this node")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
@@ -426,6 +424,14 @@ def parse_args():
                              "one-node-per-machine production deployments.")
     parser.add_argument("--snapshot-enabled", action="store_true",
                         help="Enable snapshotting (requires Btrfs/XFS)")
+    parser.add_argument("--snapshot-frequency-blocks", type=int, default=500,
+                        help="Frequency of blocks between periodic snapshots (default: 500)")
+    parser.add_argument("--snapshot-max-snapshots", type=int, default=1,
+                        help="Maximum number of snapshots to keep (default: 1)")
+    parser.add_argument("--max-part-size-mb", type=int, default=600,
+                        help="Max part size in MB for snapshot archive (default: 600)")
+    parser.add_argument("--epoch-duration-seconds", type=int, default=600,
+                        help="Epoch duration in seconds (default: 600 = 10 min)")
     return parser.parse_args()
 
 
@@ -497,6 +503,9 @@ def main():
                     
                     if not updated:
                         g_data["validators"].append(entry)
+
+                    if getattr(args, "epoch_duration_seconds", None):
+                        g_data["epoch_duration_seconds"] = args.epoch_duration_seconds
                     
                     with open(genesis_target, "w") as gf:
                         json.dump(g_data, gf, indent=2)
