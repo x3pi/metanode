@@ -68,6 +68,10 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <ctime>
+#include <cerrno>
+#include <pthread.h>
+#include <atomic>
 
 // PAGE_SIZE/ROUND_UP already come from chcore/defs.h (included via
 // chcore/syscall.h below) — don't redefine, just use them.
@@ -93,46 +97,429 @@ static mvm_tz_channel_t *g_channel = nullptr;
 // load version needs; if this one call fails there is nothing else
 // competing for the pool yet, so failure means something is genuinely
 // wrong, not "try again".
+// Confirmed root cause, live on hardware, 2026-08-18: two INDEPENDENT,
+// confirmed race conditions can silently and PERMANENTLY swallow this
+// TA's push_pages() SMC request during early boot, each losing the
+// parked thread's pointer forever with no way for anyone -- TA-side or
+// driver-side -- to resume it (see plan doc §9.13 for the full
+// evidence trail):
+//   1. kernel/arch/aarch64/trustzone/spd/opteed/smc.c's
+//      sys_tee_switch_req() has a per-CPU bool not_first_smc[cpu] gate:
+//      the FIRST-EVER call on a given CPU is unconditionally consumed as
+//      a one-time "CPU entry done" boot handshake, discarding whatever
+//      real payload the caller sent.
+//   2. tzdriver/core/tc_client_driver.c's llm_tee_os_init() (Linux
+//      kernel module_init time) runs its OWN, completely separate
+//      boot-time SHM-handshake probe loop that only checks
+//      out.ret==SMC_EXIT_PREEMPTED and otherwise discards ANY other
+//      response (including a genuine SMC_EXIT_SHADOW meant for this TA)
+//      without reading out.target/exit_reason at all.
+//
+// A prior fix attempt (single/double/24x "priming" calls before the
+// real request, then a wall-clock-bounded wait) was tried and RETRACTED
+// after finding, live, that it doesn't reduce risk -- it multiplies it:
+// EVERY individual SMC call (priming or real) has its own independent
+// chance of being swallowed by either race, so issuing more of them only
+// increases the cumulative probability that at least one gets
+// permanently stuck. Confirmed live: the 24x-priming loop itself got
+// stuck mid-loop on one of its own priming calls, hanging the whole TA.
+//
+// REDESIGNED (2026-08-19, see plan doc §9.18): no priming calls at all
+// -- instead, mvm_push_pages_resilient() below runs each push_pages()
+// ATTEMPT on its own fresh, disposable pthread, watched by THIS thread
+// with a bounded wall-clock timeout. If an attempt's worker doesn't
+// report done within the timeout, it's presumed swallowed: abandon that
+// worker (deliberately leaked, detached, whatever result struct it might
+// still eventually write to left allocated) and retry on a brand new
+// thread. This works BECAUSE both hazards are bounded and resolve
+// themselves given enough real elapsed time regardless of what mvm_ta
+// does (chanmgr's own idle threads eventually all run; llm_tee_os_init()
+// gives up after its own ~15s/300-attempt cap) -- so each successive
+// retry, spaced apart by real wall-clock time via its own watchdog
+// window, has a progressively higher chance of landing after both races
+// have already resolved on their own. Doesn't touch tc_client_driver.c/
+// opteed/smc.c/chanmgr's own code at all -- stays entirely inside this
+// TA's own scope, per the project's standing separation requirement.
 static int mvm_push_pages(unsigned long size, int cma_index) {
     struct smc_registers req = {0};
     req.x1 = SMC_EXIT_SHADOW;
     req.x2 = 1;
     req.x3 = ROUND_UP(size, PAGE_SIZE) | (unsigned long)cma_index;
-    return (int)usys_tee_switch_req(&req);
+    fprintf(stderr, "[mvm_ta] mvm_push_pages: about to call usys_tee_switch_req "
+        "(x1=%#lx x2=%#lx x3=%#lx)\n", req.x1, req.x2, req.x3);
+    fflush(stderr);
+    int ret = (int)usys_tee_switch_req(&req);
+    fprintf(stderr, "[mvm_ta] mvm_push_pages: usys_tee_switch_req returned %d (%#x)\n",
+        ret, (unsigned int)ret);
+    fflush(stderr);
+    return ret;
 }
 
-// Reserve + map metanode's dedicated shared channel. MUST run before
-// anything else in this whole boot touches TZASC memory: entry_index is
-// only guaranteed to be 0 (see plan §9.5 — read directly from
+// STRATEGIC RE-EVALUATION (2026-08-19, plan doc §9.20): everything below
+// replaces the watchdog+retry-with-fresh-thread machinery from §9.18/
+// §9.19 (24x priming, 20x retries, nested 30x meta-verify loops). That
+// approach worked in principle but kept growing in complexity chasing
+// symptoms, and its OWN complexity produced a new, unexplained bug live
+// (the watchdog itself failed to time out as designed after ~10 spawned
+// threads had accumulated) -- a sign of solving the wrong problem: making
+// individual swallow-prone SMC calls resilient, rather than simply not
+// making them during the swallow-prone window at all.
+//
+// SECOND RE-EVALUATION (2026-08-19, same day, plan §9.21): the first pass
+// below still had a "wait a fixed number of seconds, then give up loudly"
+// shape (kMaxWaitSec: 90 -> observed insufficient on hardware -> bumped
+// to 240 with no better justification than "bigger guess"). That is
+// exactly the class of bug it looks like: nothing in this system --
+// neither this TA nor anything documented about chanmgr/Normal-World
+// boot timing -- gives an actual upper bound on how long it takes before
+// the first real Normal-World-initiated yielding SMC happens. Any
+// concrete number here is a guess about board/load conditions on THIS
+// test run, not a fact. Picking a bigger guess after the first one fails
+// just delays the same failure, it doesn't fix it.
+//
+// Corrected principle: NEVER treat elapsed wall-clock time alone as
+// grounds to declare failure. Only two kinds of signal are trustworthy:
+// (a) a VERIFIED positive result (the specific meta entry this push
+// claims to own actually has the right size -- plan §9.19), or (b) an
+// explicit negative result from the platform (a real error code, not a
+// timeout). Elapsed time may only ever be used to decide "try again" /
+// "log a heartbeat so this is diagnosable", never "give up". Below:
+// - mvm_wait_for_boot_settled() polls forever (safe: issues zero SMCs of
+//   its own, so nothing it does can be swallowed) until the meta array
+//   write lands, with only a throttled heartbeat log, no cap.
+// - mvm_push_pages_resilient() attempts push_pages() with a fresh
+//   disposable worker+watchdog on every apparent stall/swallow, retrying
+//   indefinitely until the entry is independently verified -- a
+//   watchdog "timeout" here only ever means "try again", never "abort".
+//
+// Root cause recap (plan §9.13): TWO independent races can permanently
+// swallow an SMC this TA sends during early boot --
+// opteed/smc.c's per-CPU not_first_smc handshake, and tzdriver's
+// llm_tee_os_init() boot-time SHM-handshake probe loop (Linux kernel
+// module_init time, bounded: up to 300 attempts / ~50ms apart / ~15s
+// worst case, THEN IT EXITS FOR GOOD). Both are one-shot, self-resolving
+// boot-time phenomena -- neither recurs once its own window has passed.
+// Confirmed independently: llama-cli's own main() (examples/main/
+// main.cpp) blocks on usys_tee_wait_switch_req() for a REAL CA-sent task
+// before it ever touches TZASC for tensor data -- i.e. llm_tee_os_init()
+// exists specifically to deliver THAT handshake reliably, and its whole
+// probe loop is done and gone long before any real inference could ever
+// be requested. There is no rush to push before some fixed "boot is
+// still forming" instant; there is only a rush to push before llama-cli
+// ITSELF starts loading tensors into the same cma_index range (plan
+// §9.5), which requires a real external trigger this test setup doesn't
+// send automatically.
+//
+// New design: WAIT (safely, no SMC at all -- see
+// mvm_wait_for_boot_settled() below) until both hazards' windows have
+// almost certainly closed, THEN issue exactly ONE push_pages() attempt,
+// watched by exactly ONE disposable thread (kept, not removed --
+// converts "silently parked forever" into a loud, diagnosable FATAL
+// instead of a silent hang; still cheaper and far simpler than the
+// retry-with-fresh-thread version since it's no longer the PRIMARY
+// mechanism, just a safety net for an attempt expected to succeed).
+
+// Shared between the single push_pages() attempt's worker thread and the
+// watchdog that spawns it. Heap-allocated and, if the attempt times out,
+// DELIBERATELY never freed -- the worker may still be parked and could
+// still write to it arbitrarily far in the future; freeing it then would
+// be a use-after-free.
+struct mvm_push_attempt {
+    std::atomic<bool> done{false};
+    int entry_index = -1;
+};
+
+static void *mvm_push_worker(void *arg) {
+    mvm_push_attempt *att = (mvm_push_attempt *)arg;
+    int idx = mvm_push_pages(MVM_CHANNEL_SIZE, MVM_TZASC_CMA_INDEX);
+    att->entry_index = idx;
+    att->done.store(true, std::memory_order_release);
+    return nullptr;
+}
+
+// Safe wait: no SMC issued by this TA at all, so nothing here can be
+// swallowed -- just cheap, yield-paced polling of
+// usys_map_tzasc_cma_meta() (a plain secure-world-internal syscall,
+// proven earlier this session to correctly return -EAGAIN vs 0 without
+// any swallow risk of its own). Waits for that global write to land
+// (proof SOME Normal-World-initiated yielding SMC has happened -- in
+// practice, chanmgr's own idle-thread priming, independent of anything
+// this TA does). NO CAP: this board has been observed to take highly
+// variable, unbounded-in-practice time to reach that point (14s in one
+// boot, still not landed after 240s in another, for reasons entirely
+// outside this TA -- whatever Normal-World activity happens to trigger
+// the first yielding SMC). Since polling here is provably zero-risk,
+// there is no safety reason to ever give up -- only a throttled
+// heartbeat so a long wait is diagnosable on UART instead of silent.
+// PRIORITY FIX (2026-08-19, plan §9.22): root-caused live via UART + kernel
+// source reading after 3 consecutive clean (correct-baud, verified non-stale)
+// boots each stalled 25-30+ minutes with ZERO Normal-World boot text ever
+// appearing, far beyond anything seen before. chanmgr's OWN "idle" threads
+// (kernel/sched/sched.c's per-CPU TYPE_IDLE/TYPE_SHADOW slots, both created
+// at IDLE_PRIO=MIN_PRIO=0 -- kernel/include/sched/sched.h) are what actually
+// hand control to Normal World: chanmgr/main.c's idle() thread body lowers
+// itself to prio 1 via usys_set_prio(0, 1) then loops calling the real
+// blocking usys_tee_switch_req() -- THAT loop is what lets Normal World run.
+// pbrr (kernel/sched/policy_pbrr.c) is priority-based: it always prefers any
+// higher-priority ready thread over a lower one. This function's own poll
+// loop was running at chcore-libc's DEFAULT_PRIO=10 (never explicitly set),
+// so on whichever CPU it landed on (kernel's own throttled kinfo print
+// showed it pinned to "CPU 0" every single time), it perpetually outranked
+// and starved that CPU's priority-1 idle/SMC-yield thread -- silently
+// preventing Normal World from ever getting scheduled there at all. This
+// matches an ALREADY-DOCUMENTED finding from earlier this exact session
+// (plan §9.11 point 3: "spin nhanh ... có thể tự chặn Normal World ... một
+// dạng bế tắc tự gây ra") that this redesign accidentally reintroduced by
+// removing the old cap without also addressing the underlying starvation.
+// Fix: lower this thread's OWN priority to 1 (matching chanmgr's idle()
+// threads exactly -- proven-safe, extensively used elsewhere in this same
+// codebase, e.g. chcore-libc's own futex.c prio_spin_lock()) for the
+// duration of this passive wait, restoring the prior priority once landed
+// so the real work in mvm_push_pages_resilient() below gets normal
+// scheduling again. usys_set_prio(0, prio): cap=0 always means "self".
+static void mvm_wait_for_boot_settled(unsigned long meta_vaddr) {
+    const long kHeartbeatIntervalSec = 20; // diagnostic only -- never a give-up threshold
+    // ROUND 6 RETRACTED (2026-08-19, plan §9.22): tried usys_tee_wait_switch_req()
+    // for pacing, on the theory that it's the same primitive llama-cli's own
+    // main() already uses successfully. CONFIRMED FATAL live on hardware,
+    // immediately, first boot: `usys_tee_wait_switch_req` has a per-CPU
+    // SINGLE-WAITER slot (kernel `BUG: sys_tee_wait_switch_req:142 on (expr)
+    // percpu->waiting_thread`) -- the instant llama-cli's own process reached
+    // its own "SHM INIT: Main thread is waiting for smc" call on the SAME CPU
+    // mvm_ta was already parked on, the kernel hit a hard BUG_ON and the
+    // whole board froze (UART output stopped completely, required a fresh
+    // flash to recover). This is strictly worse than every prior round's
+    // "silently slow" symptom -- a genuine crash, not just a stall. This
+    // primitive is confirmed UNSAFE for mvm_ta to use at all while llama-cli
+    // (or anything else) might concurrently hold or want the same per-CPU
+    // slot -- do not retry this without first fixing the shared kernel code
+    // itself (out of scope, see the project's own separation requirement).
+    //
+    // Reverting to round 5: plain usys_set_prio(0, 1) once, matching
+    // chanmgr's own idle-thread pattern exactly, then a plain usys_yield()
+    // spin -- the only variant actually PROVEN, repeatedly, live, to do no
+    // harm (5/5 clean boots let Linux boot in ~13s). This round's only
+    // change from round 5 is patience: give it a genuinely long,
+    // uninterrupted run this time instead of abandoning it early again.
+    //
+    // In hindsight this exact hazard was ALREADY documented elsewhere in
+    // this same file before round 6 ever happened -- mvm_reverse_round_trip's
+    // and mvm_ta_run's own design-note comments below explicitly call out
+    // "the shared per-CPU SMC rendezvous that llama.cpp's own main.cpp wait
+    // loop also uses" as a "previously-hardware-crash-causing hazard" and
+    // deliberately busy-poll instead for exactly that reason. Round 6 should
+    // have cross-referenced that before ever trying usys_tee_wait_switch_req()
+    // here -- noting it now so this mistake isn't repeated a third time.
+    usys_set_prio(0, 1);
+    struct timespec t_start, t_now;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    long last_heartbeat_s = 0;
+    for (;;) {
+        if (usys_map_tzasc_cma_meta(meta_vaddr) == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t_now);
+            fprintf(stderr, "[mvm_ta] mvm_wait_for_boot_settled: meta write "
+                "landed after %lds\n", t_now.tv_sec - t_start.tv_sec);
+            fflush(stderr);
+            return;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t_now);
+        long elapsed_s = t_now.tv_sec - t_start.tv_sec;
+        if (elapsed_s - last_heartbeat_s >= kHeartbeatIntervalSec) {
+            last_heartbeat_s = elapsed_s;
+            fprintf(stderr, "[mvm_ta] mvm_wait_for_boot_settled: still waiting "
+                "for meta write to land (%lds so far, no cap -- this is "
+                "expected to be slow and variable, not stuck)\n", elapsed_s);
+            fflush(stderr);
+        }
+        usys_yield();
+    }
+}
+
+// Attempt push_pages(), retried with a fresh disposable worker+watchdog on
+// every apparent stall, until independently verified successful. A
+// watchdog "timeout" here means only "this specific attempt is probably
+// swallowed or abnormally slow -- try again", NEVER "give up": there is
+// no known bound on how many attempts this might take, so none is
+// assumed (plan §9.21). This is safe to retry indefinitely because, per
+// plan §9.13, a genuinely swallowed attempt has NO server-side effect
+// (the whole nature of both known races is that the request is discarded
+// -- treated as an unrelated boot handshake -- before it ever reaches the
+// real push_pages logic), so retrying cannot double-count or corrupt
+// anything. Worst case, a merely-slow (not actually swallowed) abandoned
+// attempt also eventually lands later and just consumes one otherwise-
+// unused meta-array slot -- harmless.
+static int mvm_push_pages_resilient(unsigned long meta_vaddr) {
+    const long kRetryPaceSec = 15; // how long to wait on ONE attempt before trying a
+                                    // fresh one -- NOT a give-up bound. Too short just
+                                    // means occasional redundant (harmless) retries.
+    const int kMetaVerifyAttempts = 20; // quick, cheap yield-paced checks -- once a push
+                                         // has genuinely landed the write is visible
+                                         // essentially immediately (plan §9.12); this
+                                         // paces for memory-visibility, not boot timing.
+
+    struct tzasc_cma_meta *meta_arr_check = (struct tzasc_cma_meta *)meta_vaddr;
+    // This function's own loops below use plain usys_yield() at whatever
+    // priority is current, NOT usys_tee_wait_switch_req() -- see the
+    // "NOT usys_tee_wait_switch_req() here, deliberately" comment at the
+    // watchdog loop below for why (confirmed live: that primitive triggers
+    // a fatal kernel BUG_ON, "percpu->waiting_thread", when two threads
+    // -- ours and llama-cli's -- try to wait on it concurrently on the
+    // same CPU; see mvm_wait_for_boot_settled()'s own retraction comment
+    // for the full incident). By the time this function runs, boot has
+    // already settled (mvm_wait_for_boot_settled() already returned), so
+    // the Normal-World-starvation risk that motivates priority-1 usys_yield()
+    // in THAT function is much smaller here -- this function does not
+    // lower its own priority.
+
+    for (long attempt_num = 1; ; attempt_num++) {
+        mvm_push_attempt *att = new mvm_push_attempt();
+        pthread_t worker;
+        if (pthread_create(&worker, nullptr, mvm_push_worker, att) != 0) {
+            fprintf(stderr, "[mvm_ta] FATAL: pthread_create(push worker) failed\n");
+            abort();
+        }
+        pthread_detach(worker);
+        fprintf(stderr, "[mvm_ta] push_pages: attempt #%ld started\n", attempt_num);
+        fflush(stderr);
+
+        // NOT usys_tee_wait_switch_req() here, deliberately: `worker` above
+        // has its OWN outstanding usys_tee_switch_req() (a send-then-block
+        // call) in flight for the real push_pages() attempt. If this
+        // watchdog thread also parked in the RECEIVE-only wait, it could
+        // consume the response meant for the worker's own pending call
+        // (plan §9.13's exact swallow-race shape, but between our own two
+        // threads this time) -- silently orphaning a worker that would
+        // otherwise have succeeded. This loop only needs to pace checking a
+        // purely local atomic flag, so plain usys_yield() is correct here;
+        // by this point Linux has already booted successfully (this
+        // function only runs after mvm_wait_for_boot_settled() returns), so
+        // the earlier boot-starvation risk that motivated round 6 for THAT
+        // function does not apply to this one the same way.
+        struct timespec t_start, t_now;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+        bool completed = false;
+        for (;;) {
+            if (att->done.load(std::memory_order_acquire)) {
+                completed = true;
+                break;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t_now);
+            if (t_now.tv_sec - t_start.tv_sec >= kRetryPaceSec) {
+                break; // stop waiting on THIS attempt and try a fresh one -- not a failure
+            }
+            usys_yield();
+        }
+
+        if (!completed) {
+            // `att` and its worker thread are deliberately abandoned (leaked), not
+            // freed/joined -- see the struct's own comment for why. If this attempt
+            // wasn't actually swallowed, just slow, it may still complete later;
+            // per this function's own header comment that's harmless.
+            fprintf(stderr, "[mvm_ta] push_pages: attempt #%ld did not complete "
+                "within %lds, retrying with a fresh attempt (not a failure)\n",
+                attempt_num, kRetryPaceSec);
+            fflush(stderr);
+            continue;
+        }
+
+        int idx = att->entry_index;
+        if (idx < 0) {
+            fprintf(stderr, "[mvm_ta] push_pages: attempt #%ld returned error %d, "
+                "retrying\n", attempt_num, idx);
+            fflush(stderr);
+            continue;
+        }
+
+        // Verify it's genuine (plan §9.19: entry_index alone, or even a successful
+        // array-level map, are BOTH insufficient proof on their own -- only the
+        // specific entry's own .size field is conclusive proof this exact push
+        // actually landed).
+        bool verified = false;
+        for (int mattempt = 0; mattempt < kMetaVerifyAttempts; mattempt++) {
+            if (usys_map_tzasc_cma_meta(meta_vaddr) == 0
+                && meta_arr_check[MVM_TZASC_CMA_INDEX].entry[idx].size >= MVM_CHANNEL_SIZE) {
+                verified = true;
+                break;
+            }
+            usys_yield();
+        }
+
+        if (!verified) {
+            fprintf(stderr, "[mvm_ta] push_pages: attempt #%ld reported "
+                "entry_index=%d but entry.size never verified after %d tries -- "
+                "fake success (plan §9.19), retrying with a fresh attempt\n",
+                attempt_num, idx, kMetaVerifyAttempts);
+            fflush(stderr);
+            continue;
+        }
+
+        if (idx != 0) {
+            // Not fatal: correctness only needs THIS verified slot, not index 0
+            // specifically. A nonzero index just means something else (e.g. real
+            // tensor loading, since MVM_TZASC_CMA_INDEX collides with the model-
+            // tensor cycling range -- plan §9.5) already used this cma_index's
+            // slot 0 before this attempt landed.
+            fprintf(stderr, "[mvm_ta] push_pages: WARNING attempt #%ld succeeded "
+                "at entry_index=%d, not the usual 0 -- proceeding, this specific "
+                "entry is independently verified genuine\n", attempt_num, idx);
+            fflush(stderr);
+        }
+
+        fprintf(stderr, "[mvm_ta] push_pages succeeded on attempt #%ld "
+            "(entry_index=%d, entry.size verified)\n", attempt_num, idx);
+        fflush(stderr);
+        return idx; // `att` deliberately left allocated -- harmless, tiny, one-time
+    }
+}
+
+// Reserve + map metanode's dedicated shared channel. entry_index is
+// USUALLY 0 (see plan §9.5 — read directly from
 // tzasc_cma_push_pages_with_index()'s kernel source: entry_index =
-// g_tzasc_cma_meta->count, pre-increment, per cma_index) if this is
-// truly the FIRST allocation on MVM_TZASC_CMA_INDEX. chanmgr must launch
-// this TA before it launches llama-cli — see the plan doc for the
-// chanmgr.c patch this depends on.
+// g_tzasc_cma_meta->count, pre-increment, per cma_index) as long as this
+// runs before llama-cli's OWN tensor-loading pipeline ever touches
+// MVM_TZASC_CMA_INDEX -- confirmed NOT to require racing to be the
+// literal first SMC of the whole boot (see the retraction trail in plan
+// doc §9.9-§9.19 for the long way this was found out): llama-cli's own
+// main() blocks on a real CA-sent task before it ever loads tensor data,
+// so metanode's channel setup has the entire early-boot window, not a
+// fixed instant, to complete safely in. It is no longer treated as a hard
+// requirement, though (plan §9.21) -- see mvm_push_pages_resilient()'s own
+// handling of a nonzero index. See mvm_wait_for_boot_settled() and
+// mvm_push_pages_resilient() above for the current (2026-08-19, plan
+// §9.21) mechanism: wait, with no time cap, using only safe non-SMC
+// polling, for proof Normal World has started; THEN attempt the real push,
+// retried with a fresh disposable thread on every apparent stall, until
+// independently verified successful -- no step in this path ever gives up
+// based on elapsed time alone.
 static void mvm_channel_init(void) {
     unsigned long meta_vaddr = chcore_alloc_vaddr(PAGE_SIZE << 10);
     if (meta_vaddr == 0) {
         fprintf(stderr, "[mvm_ta] FATAL: chcore_alloc_vaddr(meta) failed\n");
         abort();
     }
-    if (usys_map_tzasc_cma_meta(meta_vaddr) != 0) {
-        fprintf(stderr, "[mvm_ta] FATAL: usys_map_tzasc_cma_meta failed\n");
-        abort();
-    }
     struct tzasc_cma_meta *meta_arr = (struct tzasc_cma_meta *)meta_vaddr;
+    mvm_wait_for_boot_settled(meta_vaddr);
+    int entry_index = mvm_push_pages_resilient(meta_vaddr);
+    // By this point mvm_push_pages_resilient() has already internally
+    // confirmed usys_map_tzasc_cma_meta(meta_vaddr) == 0 and the specific
+    // winning entry's .size for this exact entry_index -- no separate
+    // retry block needed here anymore.
 
-    int entry_index = mvm_push_pages(MVM_CHANNEL_SIZE, MVM_TZASC_CMA_INDEX);
-    if (entry_index != 0) {
-        // Loud and immediate rather than a silent later mismatch: the
-        // CA's discovery of this channel assumes (cma_index, 0) with no
-        // live handshake (plan §9.5) — a nonzero entry_index here means
-        // the launch-order constraint was violated (something else
-        // already allocated on this bank first).
+    // Defensive check, added 2026-08-18 after finding this exact failure
+    // mode escape undetected on the TA side: with the old (backwards)
+    // map/push order, push_pages() returned a "successful" entry_index=0
+    // while the kernel's own CMA metadata entry silently carried
+    // size==0, only ever surfacing later as an opaque mmap(EINVAL) on
+    // the CA side (dmesg: "entry->size=0"). Catch it here instead,
+    // immediately and loudly, so a regression of this kind fails at the
+    // TA's own boot rather than requiring a separate CA-side repro.
+    unsigned long entry_size = meta_arr[MVM_TZASC_CMA_INDEX].entry[entry_index].size;
+    if (entry_size < MVM_CHANNEL_SIZE) {
         fprintf(stderr,
-            "[mvm_ta] FATAL: push_pages returned entry_index=%d, want 0 — "
-            "launch-order constraint violated (something already used "
-            "cma_index=%d before this TA started)\n",
-            entry_index, MVM_TZASC_CMA_INDEX);
+            "[mvm_ta] FATAL: push_pages entry_index=%d has size=%#lx, want "
+            ">= %#lx — CMA metadata wasn't actually populated (regression "
+            "of the 2026-08-18 map/push ordering fix?)\n",
+            entry_index, entry_size, (unsigned long)MVM_CHANNEL_SIZE);
         abort();
     }
 
@@ -665,7 +1052,22 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
 // documented ordering hazard (plan §9.4) entirely rather than trying to
 // prove it safe.
 static void mvm_ta_run(void) {
-    static uint8_t resp_blob_scratch[MVM_TZ_BLOB_REGION_SIZE];
+    // Heap-allocated, NOT static BSS arrays: 3 x ~4MiB of static BSS here
+    // inflated this executable's own RW LOAD segment to ~8.5MB (vs
+    // llama-cli's ~8KB), which map_library() must reserve virtual address
+    // space for during the INITIAL image load (chcore_alloc_vaddr(map_len)
+    // in dynlink.c) -- a plausible contributor to a real, confirmed
+    // "Not a valid dynamic program" rejection at launch (2026-08-17, see
+    // plan doc §9.10). Allocating on the heap at startup instead keeps the
+    // executable's own static image small; the memory is still reserved
+    // (just later, via malloc, not baked into the ELF's own MemSiz).
+    static uint8_t *resp_blob_scratch = (uint8_t *)malloc(MVM_TZ_BLOB_REGION_SIZE);
+    static uint8_t *req_header_copy = (uint8_t *)malloc(512);
+    static uint8_t *req_blob_copy = (uint8_t *)malloc(MVM_TZ_BLOB_REGION_SIZE);
+    if (!resp_blob_scratch || !req_header_copy || !req_blob_copy) {
+        fprintf(stderr, "[mvm_ta] FATAL: malloc failed for dispatch scratch buffers\n");
+        abort();
+    }
 
     for (;;) {
         while (!mvm_tz_flag_cas(&g_channel->request_ready, 1, 0)) {
@@ -680,9 +1082,7 @@ static void mvm_ta_run(void) {
         // reverse-callback round trip reuses blob_region for its own
         // traffic (mvm_reverse_round_trip is only safe to call AFTER
         // this point, never before).
-        static uint8_t req_header_copy[512];
-        static uint8_t req_blob_copy[MVM_TZ_BLOB_REGION_SIZE];
-        if (header_len > sizeof(req_header_copy)) {
+        if (header_len > 512) {
             mvm_tz_spinlock_unlock(&g_channel->lock);
             fprintf(stderr, "[mvm_ta] FATAL: forward header_len=%u exceeds scratch cap\n", header_len);
             abort();
@@ -691,7 +1091,7 @@ static void mvm_ta_run(void) {
         memcpy(req_blob_copy, g_channel->blob_region + header_len, blob_len);
         mvm_tz_spinlock_unlock(&g_channel->lock);
 
-        BlobWriter w{resp_blob_scratch, sizeof(resp_blob_scratch)};
+        BlobWriter w{resp_blob_scratch, MVM_TZ_BLOB_REGION_SIZE};
         mvm_tz_execute_result_hdr_t resp_hdr = {0};
         bool handled = true;
 
@@ -734,6 +1134,16 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[mvm_ta] starting\n");
     fflush(stdout);
+
+    // NOTE (2026-08-18): this used to pin the thread to CPU 0 here,
+    // guessing the g_tzasc_cma_meta_paddr==0 BUG_ON was a cross-core
+    // visibility/page-table problem. That guess was wrong (see the much
+    // longer retraction in mvm_channel_init()) -- it's a boot-ordering
+    // race (this TA launches before the writer has ever run, on any
+    // core), fixed properly there with a retry loop. CPU affinity is
+    // irrelevant to that fix, so removed rather than left in as dead
+    // weight that implies a diagnosis we've since disproven.
+
     mvm_channel_init();
     mvm_ta_run();
     return 0; // unreachable

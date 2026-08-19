@@ -41,6 +41,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sched.h>
 
 // ─── driver ioctl/struct definitions ───
 // Byte-identical copy of tz-llm-trustzone's tzdriver/tc_ns_client.h
@@ -60,6 +62,28 @@ static_assert(sizeof(struct llm_client_op_pages) == 24,
 #define TC_NS_CLIENT_IOC_MAGIC 't'
 #define LLM_CLIENT_IOCTL_SET_PAGES \
     _IOWR(TC_NS_CLIENT_IOC_MAGIC, 27, struct llm_client_op_pages)
+// Cmd 24, byte-identical to tz-llm-trustzone/llama.cpp/examples/main/
+// fake_ca.cpp's own #define -- the relay/service ioctl. Added 2026-08-18
+// after finding, via real hardware + kernel source reading (dmesg showing
+// "entry->size=0" no matter what order mvm_ta called its own two
+// syscalls in), that mvm_ta's push_pages() is TA-*initiated*
+// (usys_tee_switch_req(SMC_EXIT_SHADOW)) and structurally cannot
+// complete until SOME Normal-World thread is actively looping on this
+// exact ioctl -- see tzdriver/core/tc_client_driver.c's
+// smc_call_cpu_resume(), only ever called from llm_run()'s
+// LLM_CLIENT_IOCTL_RUN handler, itself only ever invoked by userspace
+// "ca_thread" pthreads (fake_ca.cpp's own, for the LLM TA). Nothing
+// analogous previously existed in this file -- mvm_ta's push_pages() SMC
+// request just sat parked (blocked, not spinning) with nothing servicing
+// it until this relay thread was added.
+#define LLM_CLIENT_IOCTL_RUN \
+    _IOWR(TC_NS_CLIENT_IOC_MAGIC, 24, int)
+enum smc_loop_exit {
+    SMC_LOOP_EXIT_FINISH = 1,
+    SMC_LOOP_EXIT_NPU_SUBMIT,
+    SMC_LOOP_EXIT_NPU_DONE,
+    SMC_LOOP_EXIT_IO_STEP,
+};
 
 // mvm_ta_main.cpp's own channel placement (mvm_ta_main.cpp:
 // MVM_TZASC_CMA_INDEX=1, entry_index guaranteed 0 by the launch-order
@@ -68,6 +92,37 @@ static_assert(sizeof(struct llm_client_op_pages) == 24,
 #define MVM_TZASC_ENTRY_INDEX 0
 
 static mvm_tz_channel_t *g_channel = nullptr;
+static volatile bool g_relay_stop = false;
+
+// Mirrors fake_ca.cpp's ca_thread() minus the LLM-specific
+// ca_backend_io_step()/[SECURE_LOGIT_DIAG] polling (mvm_ta doesn't use
+// the io-frontend/logit-diag mechanisms those exist for -- this relay's
+// only job is to keep calling the kernel's SMC-servicing ioctl so
+// whatever mvm_ta is blocked on inside a yielding SMC eventually gets
+// answered). Same idle-backoff logic (rate-limit sleeping once genuinely
+// idle) for the same documented reason: an unthrottled busy-poll loop on
+// this exact ioctl has previously starved wifi/display board-wide within
+// minutes even with zero kernel soft-lockup.
+static void *ca_relay_thread(void *arg) {
+    int fd = *(int *)arg;
+    printf("[mvm_ca_test] relay thread started (fd=%d)\n", fd);
+    fflush(stdout);
+    unsigned int consecutive_idle = 0;
+    const unsigned int idle_backoff_threshold = 2000;
+    while (!g_relay_stop) {
+        int out_cmd = -1;
+        ioctl(fd, LLM_CLIENT_IOCTL_RUN, &out_cmd);
+        if (out_cmd == SMC_LOOP_EXIT_FINISH) {
+            if (++consecutive_idle > idle_backoff_threshold) {
+                usleep(1000);
+            }
+        } else {
+            consecutive_idle = 0;
+        }
+        sched_yield();
+    }
+    return nullptr;
+}
 
 // ─── reverse-call handling (TA -> this CA) ───
 // Answers only what a single native-value-transfer EXECUTE between two
@@ -142,6 +197,23 @@ int main(void) {
     printf("[mvm_ca_test] opening %s\n", DEVICE_NAME);
     int fd = open(DEVICE_NAME, O_RDWR);
     if (fd < 0) { perror("open"); return 1; }
+
+    // Start the relay thread FIRST, before anything else: mvm_ta has
+    // been sitting parked inside its own push_pages() SMC call since
+    // chanmgr launched it near boot (minutes before this program ever
+    // runs) -- that request only completes once this ioctl loop is
+    // actually running. It costs nothing to start early (idle-backoff
+    // keeps it cheap once there's nothing to service).
+    pthread_t relay_tid;
+    if (pthread_create(&relay_tid, nullptr, ca_relay_thread, &fd) != 0) {
+        perror("pthread_create(ca_relay_thread)");
+        return 1;
+    }
+    // Give push_pages a moment to actually land before SET_PAGES checks
+    // for it -- SET_PAGES itself doesn't depend on push having landed
+    // (it just seeds file->private_data), but this makes the intent
+    // (and any early failure) visible in the log in the right order.
+    usleep(200 * 1000);
 
     struct llm_client_op_pages set_req = {0};
     set_req.cma_index = MVM_TZASC_CMA_INDEX;
@@ -233,15 +305,53 @@ int main(void) {
         uint64_t last_seq = (uint64_t)-1;
         int which = -1; // 0 = response_ready fired, 1 = request_ready fired
         while (which < 0) {
-            uint8_t exp = 1;
-            if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                which = 0;
-                break;
+            // Same fix, mirrored (2026-08-20): must PEEK direction before
+            // consuming response_ready too. handle_reverse_call() (below,
+            // from a PRIOR round) sets response_ready=1 itself when
+            // answering a TA-initiated reverse call, at which point
+            // direction is still TA_TO_HOST (mvm_ta's own
+            // mvm_reverse_round_trip() set it when it initiated that
+            // reverse call, and answering never flips it). Without this
+            // check, this exact loop -- one iteration after the one that
+            // called handle_reverse_call() -- raced ahead and consumed
+            // that self-set response_ready before mvm_ta's own
+            // mvm_reverse_round_trip() wait loop ever saw it, again
+            // permanently stealing our own signal. Confirmed live:
+            // produced "response_ready set but direction=TA_TO_HOST --
+            // protocol confusion, aborting" immediately after answering
+            // the first genuine reverse call. Only a response_ready seen
+            // WITH direction==HOST_TO_TA is genuinely the TA's final
+            // answer to our own forward command.
+            if (__atomic_load_n(&g_channel->response_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 0;
+                    break;
+                }
             }
-            exp = 1;
-            if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                which = 1;
-                break;
+            // BUG FIX (2026-08-20, found live on hardware -- see plan doc
+            // §9.24): must PEEK direction BEFORE attempting to consume
+            // request_ready, not after. This same loop is what set
+            // request_ready=1 for our OWN outbound forward command a few
+            // lines above (direction==HOST_TO_TA at that point) -- without
+            // this check, our own next CAS attempt below would race ahead
+            // and consume that self-set flag before mvm_ta's own dispatch
+            // loop ever sees it, permanently stealing our own request and
+            // silently hanging mvm_ta forever (it never gets to see the
+            // forward command at all). Confirmed live: this exact race
+            // produced "[mvm_ca_test] reverse call cmd=2" -- cmd=2 is
+            // MVM_TZ_CMD_EXECUTE, i.e. literally reading back our own
+            // just-sent forward request's cmd field, not any real reverse
+            // call from the TA. Only attempt the consuming CAS once
+            // direction confirms this is genuinely TA-initiated.
+            if (__atomic_load_n(&g_channel->request_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_TA_TO_HOST) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 1;
+                    break;
+                }
             }
             uint64_t seq = g_channel->seq;
             if (seq != last_seq) {
@@ -319,5 +429,7 @@ int main(void) {
     }
 
     printf("\n[mvm_ca_test] DONE\n");
+    g_relay_stop = true;
+    pthread_join(relay_tid, nullptr);
     return 0;
 }
