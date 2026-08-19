@@ -1442,16 +1442,26 @@ thay vì fabricate dữ liệu giả. Test lại thành công round-trip **lần
 reboot board** — `mvm_ta`'s dispatch loop chính bền vững qua nhiều lệnh (`seq` tăng đúng 7→9→11),
 kết quả giống hệt lần đầu.
 
-**Phát hiện cần làm rõ (chưa điều tra)**: đọc lại `mvm_tz_protocol.h` thấy comment ghi "Xapian
-file I/O proxy... removed 2026-08-16: Plan §5's InMemory-backend build (confirmed working end
-to end, same day) ruled that out — there is no file to proxy." — **mâu thuẫn** với đánh giá
-trước đó trong session này (coi Xapian-trong-TA là "chưa triển khai, rủi ro cao nhất"). Cần đọc
-lại kỹ note liên quan (tìm "Plan §5" / InMemory backend) trước khi tiếp tục đánh giá Giai đoạn 3
-— có thể phần này đã được giải quyết từ trước, không còn là việc mở.
+**ĐÍNH CHÍNH (cùng ngày, sau khi đọc lại kỹ)**: đánh giá "Xapian-trong-TA chưa triển khai, rủi
+ro cao nhất" ở trên **SAI** — đã bị lẫn với 1 phần khác của kế hoạch chưa đọc kỹ. Thực tế (đã
+xác minh bằng build thật 2026-08-16, xem mục "Xapian: DB_BACKEND_INMEMORY" phía trên):
+- Xapian dùng backend `InMemory` — không chạm filesystem — nên **không cần lệnh reverse-call
+  proxy file I/O nào cả** (giả định ban đầu của GĐ1 là sai, đã tự sửa từ trước).
+- `libxapian.a` đã cross-build sạch cho đúng toolchain chcore/musl, smoke test link thành công
+  thật (không phải giả định).
+- Việc còn thiếu thật sự CHỈ có: 1 lệnh reverse-callback mới
+  (`MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`, struct wire `mvm_tz_replay_full_db_logs_req_t` đã
+  thiết kế sẵn) cho chiều "TA restart → nạp lại dữ liệu từ Host", cộng 1 hàm Go codec nhỏ
+  (~30-40 dòng, theo đúng mẫu 9 lệnh lifecycle khác đã có). Chiều "lưu" (TA→Host) đã tự động
+  hoạt động qua `encodeExecuteResult`/`block_processor_commit.go` có sẵn, không cần code mới.
+- Rủi ro thật còn lại (chưa đo): 1 lỗ hổng hiệu năng Go-side (`GetStorageBackupDb()` tối ưu
+  tra cứu theo block number, không tối ưu theo địa chỉ — cần thêm 1 index nhỏ).
 
-**Việc tiếp theo**:
-1. Điều tra làm rõ mâu thuẫn Xapian ở trên trước khi lập kế hoạch Giai đoạn 3.
-2. Viết 1 test EXECUTE có gọi contract code thật (không chỉ native transfer) để exercise các
+**Việc tiếp theo (đã điều chỉnh, nhỏ hơn nhiều so với đánh giá cũ)**:
+1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
+2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
+3. Viết 1 test EXECUTE có gọi contract code thật (không chỉ native transfer) để exercise các
    reverse-call còn lại (storage, extension) với dữ liệu thật, không chỉ "empty".
-3. Đo dung lượng index+heap+State map có vừa trần bộ nhớ secure hay không (nếu Xapian thật sự
-   còn là việc mở, xem mục 1).
+4. Tích hợp `libxapian.a` thật (đã build sẵn) + `libmvm_linker.a` vào `mvm_ta`'s build thật
+   (hiện `mvm_ta` chưa link Xapian, chỉ mới link EVM core) — đo dung lượng heap+index có vừa
+   trần bộ nhớ secure hay không sau khi tích hợp thật.
