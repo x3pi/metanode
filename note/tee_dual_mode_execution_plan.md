@@ -1432,10 +1432,26 @@ nonce_change:       0x1111...1111 nonce=1  (sender)
 chứng đầu tiên cho thấy EVM interpreter thật của metanode chạy đúng bên trong TrustZone secure
 world, qua toàn bộ pipeline CA↔TA.**
 
-**Việc tiếp theo (chưa bắt đầu)**:
-1. Mở rộng `mvm_ca_test.cpp`/CA thật xử lý đủ 6 lệnh reverse còn sống (mới có 2/6:
-   `GLOBAL_STATE_GET`, `GET_STORAGE_VALUE` — còn thiếu `EXTENSION_CALL_GET_API`,
-   `EXTENSION_EXTRACT_JSON_FIELD`, `EXTENSION_BLST`, `EXTENSION_GET_OR_CREATE_SIMPLE_DB`).
-2. Giai đoạn 3 của kế hoạch tổng: Xapian + `libmvm_linker.a` thật vào TA — TA không có
-   filesystem POSIX, cần thiết kế lệnh reverse-call mới cho Xapian file I/O, và đo trước dung
-   lượng index+heap+State map có vừa trần bộ nhớ secure hay không (rủi ro cao nhất còn lại).
+**CẬP NHẬT (cùng ngày): đủ 6/6 reverse-call đã có handler trong `mvm_ca_test.cpp`**
+
+Thêm handler cho 4 lệnh còn thiếu (`EXTENSION_CALL_GET_API`/`EXTENSION_EXTRACT_JSON_FIELD`/
+`EXTENSION_BLST` — chung 1 shape blob-only [output bytes]; `EXTENSION_GET_OR_CREATE_SIMPLE_DB`
+— cũng blob-only theo `mvm_tz_protocol.h`) — mỗi lệnh trả về kết quả "rỗng nhưng hợp lệ" (4-byte
+length-prefix = 0, đúng convention `Extension_return{nullptr,0}` = thất bại/không có dữ liệu)
+thay vì fabricate dữ liệu giả. Test lại thành công round-trip **lần thứ 2 liên tiếp, KHÔNG cần
+reboot board** — `mvm_ta`'s dispatch loop chính bền vững qua nhiều lệnh (`seq` tăng đúng 7→9→11),
+kết quả giống hệt lần đầu.
+
+**Phát hiện cần làm rõ (chưa điều tra)**: đọc lại `mvm_tz_protocol.h` thấy comment ghi "Xapian
+file I/O proxy... removed 2026-08-16: Plan §5's InMemory-backend build (confirmed working end
+to end, same day) ruled that out — there is no file to proxy." — **mâu thuẫn** với đánh giá
+trước đó trong session này (coi Xapian-trong-TA là "chưa triển khai, rủi ro cao nhất"). Cần đọc
+lại kỹ note liên quan (tìm "Plan §5" / InMemory backend) trước khi tiếp tục đánh giá Giai đoạn 3
+— có thể phần này đã được giải quyết từ trước, không còn là việc mở.
+
+**Việc tiếp theo**:
+1. Điều tra làm rõ mâu thuẫn Xapian ở trên trước khi lập kế hoạch Giai đoạn 3.
+2. Viết 1 test EXECUTE có gọi contract code thật (không chỉ native transfer) để exercise các
+   reverse-call còn lại (storage, extension) với dữ liệu thật, không chỉ "empty".
+3. Đo dung lượng index+heap+State map có vừa trần bộ nhớ secure hay không (nếu Xapian thật sự
+   còn là việc mở, xem mục 1).

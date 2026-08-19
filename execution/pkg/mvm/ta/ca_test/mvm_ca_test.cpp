@@ -166,6 +166,41 @@ static void handle_reverse_call(void) {
         resp_blob_len = 0;
         break;
     }
+    // Added 2026-08-20 (plan §9.24 follow-up): all 4 remaining live reverse
+    // commands, so a future test exercising contract code (not just a pure
+    // EOA->EOA native transfer) doesn't hit the FATAL default case. None of
+    // these are exercised by THIS test's own transaction (no code at either
+    // synthetic address), so each returns the documented "no result"
+    // shape -- a real, correctly-formed response, just an empty one -- for
+    // now, rather than any speculative fabricated data (matches this
+    // function's own stated policy: fail loud/return "not found" over
+    // guessing). Filling in a REAL local HTTP client / JSON parser / BLST
+    // call / key-value store here is future work once an actual contract-
+    // calling test needs one of these to return real data.
+    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
+    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
+    case MVM_TZ_RCMD_EXTENSION_BLST: {
+        // No fixed header for these 3 (mvm_tz_protocol.h line ~512) --
+        // response is just the blob stream: [0] output bytes. Empty output
+        // (a bare 4-byte zero length prefix) is the documented
+        // Extension_return{nullptr,0} failure case.
+        uint32_t zero_len = 0;
+        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        resp_hdr_len = 0;
+        resp_blob_len = sizeof(zero_len);
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
+        // Same blob-only shape (mvm_tz_protocol.h line ~521): response
+        // blob is [0] output bytes. Empty output here means "no secondary
+        // DB result" -- correct for this test, which never calls a
+        // contract that touches a secondary Xapian-backed DB.
+        uint32_t zero_len = 0;
+        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        resp_hdr_len = 0;
+        resp_blob_len = sizeof(zero_len);
+        break;
+    }
     default:
         printf("[mvm_ca_test] FATAL: unhandled reverse cmd=%d -- aborting cleanly "
                "instead of hanging mvm_ta forever\n", cmd);
