@@ -1068,3 +1068,431 @@ thấy binary: `mvm_ta` phải nằm trong `oh_tee/apps/` trước khi `build_te
   `mvm_ta`, rồi đi hết quy trình build/flash/test 8 bước của `CLAUDE.md` trên phần cứng thật
   — chưa được yêu cầu, sẽ cần định hướng rõ ràng từ người dùng trước khi bắt đầu (rủi ro/thời
   gian đáng kể, đụng tới flash board thật).
+
+### 9.9 Chạy thật lần đầu trên phần cứng — TEXTREL bug, đã fix (2026-08-17→18)
+
+`mvm_ta` chạy thật lần đầu trên board bị secure-world loader từ chối với lỗi mơ hồ "Not a
+valid dynamic program". Sau khi loại trừ 2 giả thuyết sai (TLS, kích thước BSS — cả 2 đều
+được "sửa" nhưng không phải nguyên nhân thật), dùng `-Wl,-z,text` làm cờ chẩn đoán tại link
+time tìm ra nguyên nhân thật: `libxapian.a`/`libz.a` (build từ phiên trước, dùng GCC13.3.0)
+không được build với `-fPIC`, gây `DT_TEXTREL` — loader của chcore từ chối bất kỳ ELF nào cần
+`mprotect(RWX)` để áp text relocation. Fix: build lại cả 2 thư viện với `-fPIC` thật từ
+source gốc (`scripts/kick-the-tires/cpp13-metanode-deps/xapian_zlib_pic_rebuild/build_pic.sh`).
+Xác nhận qua UART: `[mvm_ta] starting` xuất hiện lần đầu tiên trên phần cứng thật.
+
+### 9.10 Bug thứ nhất, đã fix + xác nhận: race điều kiện khởi động (`g_tzasc_cma_meta_paddr`)
+
+Sau TEXTREL fix, `mvm_ta` crash ngay với `BUG_ON(g_tzasc_cma_meta_paddr == 0)`
+(`kernel/object/memory.c`'s `sys_map_tzasc_cma_meta()`). Bốn giả thuyết sai liên tiếp (reorder
+gọi hàm, `smp_wmb`/`smp_rmb`, `arch_flush_cache` CLEAN/INVALIDATE, ghim CPU affinity) đều coi
+đây là vấn đề visibility/cache giữa 2 core — sai. **Nguyên nhân thật**: `chanmgr` launch
+`mvm_ta` đồng bộ, ngay lập tức, **trước khi Normal-World Linux tồn tại** — trong khi
+`g_tzasc_cma_meta_paddr` chỉ được ghi bởi `tzasc_cma_meta_init()`, chỉ đạt tới được từ SMC
+yield **đầu tiên do Normal World khởi tạo** (`handle_yield_smc()`) — về mặt cấu trúc không
+thể xảy ra trước khi Linux boot đủ xa để gửi 1 SMC như vậy. Bằng chứng UART: dòng
+`[mvm_ta] starting` và lần đọc thất bại luôn nằm **trước** banner `Booting Linux on physical
+CPU`, còn lần ghi thật luôn nằm **sau**, cách nhau 14–50s tùy lần boot (không cố định).
+
+**Fix (đã xác nhận đúng trên phần cứng)**: kernel trả `-EAGAIN` thay vì `BUG_ON` khi
+`g_tzasc_cma_meta_paddr==0`; `mvm_ta` tự retry. Bản thân cơ chế retry đã trải qua 3 lần sửa
+lỗi tự gây ra trong lúc tìm cơ chế chờ đúng (xem 9.11) trước khi ổn định — nhưng **kết quả
+cuối**: `BUG_ON` không còn xảy ra, xác nhận nhiều lần qua UART.
+
+### 9.11 3 lần tự sửa lỗi trong lúc tìm cơ chế "chờ" đúng cho retry loop
+
+1. **`nanosleep()`** giữa các lần retry: không tin cậy ở giai đoạn boot cực sớm này (chưa
+   từng được dùng ở đây trong toàn bộ codebase) — live trên hardware: loop im lặng hoàn toàn
+   sau lần in đầu tiên, không thành công, không FATAL sau 60s — chỉ ra loop bị kẹt bên trong
+   chính `nanosleep()`. Bỏ.
+2. **`usys_yield()` spin thuần với cap theo SỐ LẦN LẶP** (20 triệu lần): số lần lặp không
+   phải proxy an toàn cho thời gian thực — live: 20 triệu lần chạy hết trong vài giây (nhanh
+   hơn dự đoán rất nhiều), FATAL abort trước khi write kịp đến. Bỏ.
+3. **`usys_yield()` spin thuần với cap theo THỜI GIAN THỰC** (`clock_gettime`, 90s): tự nó lại
+   gây ra 1 lỗi mới nghiêm trọng hơn — cả `usys_map_tzasc_cma_meta()` lẫn `usys_yield()` đều
+   là syscall THUẦN nội bộ secure-world, không bao giờ world-switch sang Normal World. Spin
+   nhanh trên 1 CPU **có thể tự chặn Normal World chạy trên đúng core đó** — live: chờ đủ 90s
+   mà write chưa từng đến (lâu hơn hẳn mọi lần quan sát trước 14–50s), một dạng bế tắc tự gây
+   ra. Bỏ.
+4. **Lỗi tự gây thêm, phát hiện giữa các lần trên**: dòng `kinfo` debug thêm vào
+   `sys_map_tzasc_cma_meta()` (không throttle) khi kết hợp với spin nhanh → flood UART hàng
+   chục nghìn dòng/giây → rủi ro soft-lockup thật (đã dừng kịp bằng power-cycle, chưa gây hư
+   hại). Fix: throttle 1/200000. Riêng biệt: `%#lx` trong `kinfo` không được `kinfo()` của
+   chcore hỗ trợ đúng (in ra literal `lx`) — dùng `%lx` (không `#`) thay thế.
+
+**Fix cuối cùng, đúng**: quay lại thứ tự `push_pages()` TRƯỚC `usys_map_tzasc_cma_meta()`
+(giống fix attempt #1 ban đầu, nhưng lý do khác hẳn — xem 9.12) — vì `usys_tee_switch_req()`
+(cơ chế `push_pages()` dùng) là round-trip THẬT, block đúng cách (TS_INTER, không tốn CPU),
+world-switch sang Normal World thật — không có rủi ro tự chặn như spin thuần.
+
+### 9.12 Bug thứ hai, đã fix + xác nhận: thứ tự `push_pages()`/`usys_map_tzasc_cma_meta()`
+
+Lý thuyết ban đầu ("map trước, push sau", mirror `alloc-stage-chcore.cpp`'s `tzasc_cma_init()`
+gọi trong `push_pages_ex()`) hoá ra sai cho trường hợp `mvm_ta`: cơ chế đó chỉ đúng cho
+`llama-cli` vì nó launch SAU KHI Normal World đã boot xong — lúc nó gọi `push_pages_ex()` lần
+đầu, `tzasc_cma_meta_init()` đã chạy từ trước (do hoạt động khác). `mvm_ta` không có điều kiện
+đó. **Fix đúng, đã xác nhận**: gọi `push_pages()` TRƯỚC — round trip thật của nó tự đảm bảo
+ít nhất 1 SMC yield do Normal World khởi tạo đã xảy ra trước khi nó return, nên
+`usys_map_tzasc_cma_meta()` gọi ngay sau đó chắc chắn thành công (không cần retry loop phức
+tạp — chỉ giữ 1 safety net nhỏ, có giới hạn).
+
+### 9.13 Bug thứ ba, ĐÃ TÌM RA NHƯNG CHƯA FIX ĐƯỢC AN TOÀN: SMC response bị "nuốt"
+
+Sau 2 fix trên, `mvm_ca_test` (tool test CA tự viết, có relay-thread mirror đúng
+`fake_ca.cpp`'s `ca_thread`/`LLM_CLIENT_IOCTL_RUN`) vẫn không mmap được kênh — `dmesg` báo
+`entry->size=0`. Đào sâu tìm ra **2 nguyên nhân độc lập, cả 2 đều là race điều kiện khởi động
+sớm, và cả 2 đều nằm trong code kernel/driver DÙNG CHUNG với `llama-cli`**:
+
+1. **`not_first_smc[cpu]` (kernel, `opteed/smc.c`'s `sys_tee_switch_req()`)**: gate mỗi-CPU,
+   coi lệnh `sys_tee_switch_req` ĐẦU TIÊN trên 1 CPU là handshake "CPU entry done" (do
+   `chanmgr`'s 16 idle-thread mồi từ đầu `main()`), bỏ qua payload thật nếu có. `mvm_ta`
+   launch đủ sớm để đôi khi CHÍNH request `push_pages()` thật của nó là lệnh đầu tiên trên
+   CPU đó — bị nuốt thành handshake, mất payload thật. Đã thử fix bằng cách "mồi" trước
+   (`mvm_prime_smc()`) — nhưng thread `mvm_ta` **di chuyển CPU giữa các round-trip** (xác nhận
+   qua scheduler đang dùng là `pbrr`, không phải `rr` — `pbrr`'s hàng đợi ready là 1 hàng đợi
+   TOÀN CỤC dùng chung cho mọi CPU, `find_runnable_thread()` không hề đọc `affinity` khi chọn
+   thread tiếp theo — `usys_set_affinity()` **không có tác dụng thực tế** dưới scheduler này).
+   Sửa bằng cách mồi nhiều lần (24 lần, > 3×`PLAT_CPU_NUM`) để phủ hết khả năng di chuyển —
+   xác nhận qua UART: request thật cuối cùng đạt `not_first_smc=1` (không còn bị nuốt kiểu
+   này).
+2. **`llm_tee_os_init()` (tzdriver, `tc_client_driver.c`, Linux kernel module_init time)**:
+   vòng lặp probe SHM-handshake RIÊNG của chính driver, độc lập hoàn toàn với cơ chế relay
+   (`smc_call_cpu_resume()`). Vòng lặp này gọi `do_smc_transport()` với payload riêng
+   (paddr SHM), chỉ kiểm tra `out.ret == SMC_EXIT_PREEMPTED` hay không — **không hề đọc
+   `out.target`/`exit_reason`** — bất kỳ response nào khác PREEMPTED (kể cả `SMC_EXIT_SHADOW`
+   mang theo con trỏ thread thật của `mvm_ta`) đều bị coi là "chưa khớp marker, thử lại",
+   **nuốt mất payload thật vĩnh viễn** — không ai còn cách nào đánh thức lại thread đó. Đây
+   là race đã có tiền lệ với chính `llama-cli` (comment "BUG FIX 2026-08-08" trong code driver
+   xác nhận 1 dạng tương tự đã từng gây hang dài hạn cho LLM TA).
+
+**Vì sao chưa fix**: fix đúng đắn cho #2 đòi hỏi sửa `tc_client_driver.c` — code driver dùng
+chung, đang phục vụ `llama-cli` production. Theo đúng nguyên tắc tách biệt dự án (đã chốt với
+người dùng), không đụng vào code này mà không có kế hoạch test kỹ trên cả 2 đường
+(`-s 0`/`-s 1`) của LLM TA.
+
+**Thử "mồi thêm nhiều lần + chờ đủ thời gian thực (25s) trước khi push_pages() thật" — THẤT
+BẠI, và quan trọng hơn: PHÁT HIỆN RA MỘT NGUYÊN LÝ KIẾN TRÚC**: mỗi lệnh SMC riêng lẻ (kể cả
+lệnh "mồi" vô hại) đều có rủi ro bị nuốt bởi #1 hoặc #2. Xác nhận live: chính vòng lặp mồi
+(24+ lần, chạy tới >300 lần thực tế trước khi kẹt) cuối cùng cũng bị kẹt vĩnh viễn ở 1 lệnh
+mồi nào đó — **gọi càng nhiều lệnh SMC càng làm TĂNG xác suất tích luỹ bị kẹt, không giảm**.
+Không thể giải quyết bằng "thử thêm" trong phạm vi `mvm_ta`.
+
+### 9.14 Hướng đi tiếp theo (chưa làm, cần quyết định của người dùng ở phiên sau)
+
+1. **Chấp nhận sửa code driver dùng chung** (`llm_tee_os_init()` forward đúng
+   `SMC_EXIT_SHADOW` thay vì bỏ qua, lý tưởng nhất là hợp nhất với dispatch table của
+   `smc_call_cpu_resume()`), kèm test đầy đủ `llama-cli` trên cả `-s 0` và `-s 1` sau đó
+   (đúng golden rule của `CLAUDE.md`).
+2. **Redesign multi-thread trong `mvm_ta`**: pattern retry-with-fresh-thread — nếu 1 luồng
+   gọi SMC bị kẹt quá lâu (watchdog), spawn luồng mới thử lại, chấp nhận rò rỉ luồng cũ bị
+   kẹt. Không cần đụng driver chung, nhưng phức tạp hơn nhiều, tự nó cũng không loại bỏ hoàn
+   toàn rủi ro (chỉ giảm ảnh hưởng khi rủi ro xảy ra).
+3. **Không launch `mvm_ta` sớm như hiện tại** — cần `chanmgr`'s launch order đổi (cũng là
+   code dùng chung, dù nhỏ hơn tzdriver).
+
+### 9.15 Trạng thái board hiện tại (cuối phiên 2026-08-18)
+
+Board đang chạy bản build có **fix #1 (`not_first_smc` priming 24 lần) + fix #2 (chờ 25s thực)
+— bản này ĐÃ XÁC NHẬN BỊ KẸT** (do chính hiện tượng mô tả ở 9.13) trong lần test cuối. Cần
+power-cycle + xác nhận lại trạng thái trước khi tiếp tục bất kỳ thay đổi nào ở phiên sau —
+đừng giả định từ tên file, đọc kỹ UART thật.
+
+Backup các bản build `mvm_ta` trước đó (theo timestamp fix) còn lưu ở
+`scripts/kick-the-tires/cpp13-metanode-deps/mvm_ta_output_2026-08-18-*-old/` — hữu ích nếu
+cần so sánh/rollback.
+
+**Đa nền tảng (yêu cầu người dùng, 2026-08-18, chưa triển khai)**: xem
+`[[metanode-multi-hardware-design-goal]]` trong memory — cần trừu tượng hoá các hằng số
+đặc thù board (`PLAT_CPU_NUM`, layout TZASC, ioctl number của `tzdriver`) trước khi tính tới
+hỗ trợ phần cứng khác, sau khi vấn đề correctness ở 9.13 được giải quyết.
+
+### 9.20 Đánh giá lại kiến trúc + thiết kế mới, đơn giản hoá (2026-08-19)
+
+Sau khi thử watchdog+retry-with-fresh-thread (§9.18/9.19) và tự nó phát sinh 1 bug mới không
+rõ nguyên nhân (watchdog không fire đúng thiết kế sau khi tích lũy ~10 thread) — người dùng
+yêu cầu dừng lại, đánh giá tổng thể hướng đi thay vì tiếp tục vá triệu chứng.
+
+**Phát hiện chiến lược quan trọng khi đọc lại code `llama-cli` (chỉ đọc, không share)**:
+`examples/main/main.cpp`'s `main()` gọi `usys_tee_wait_switch_req()` 2 lần liên tiếp NGAY ĐẦU,
+chờ CA gửi task thật (`task_queue->inner_model_path`) rồi mới biết load model nào — **load
+tensor (chạm TZASC) chỉ xảy ra khi có request inference thật, không tự động lúc boot**. Điều
+này chứng minh ràng buộc "`mvm_ta` phải launch trước `llama-cli`" (§9.5) trên thực tế chỉ cần
+đúng "trước khi `llama-cli` bắt đầu load tensor" — một cửa sổ thời gian RẤT rộng (yêu cầu
+trigger bên ngoài thật), không phải "phải là SMC đầu tiên của toàn hệ thống" như thiết kế cũ
+giả định.
+
+Cũng xác nhận: không có TZASC index nào "rảnh" cho metanode — `TZASC_NR=4`, index 0-2 dùng
+cho model tensor (`cma_index_counter % TZASC_NR_MODEL`), index 3 dành cho NPU scratch. Tăng
+`TZASC_NR` để có index riêng là rủi ro cao (đụng 4 vị trí đồng bộ theo CLAUDE.md) — không
+chọn hướng này.
+
+**Thiết kế mới (thay thế hoàn toàn §9.18/9.19)**: bỏ hết vòng lặp mồi + 20 lần retry + verify
+lồng nhau. Thay bằng 2 bước rõ ràng:
+1. `mvm_wait_for_boot_settled()`: chờ AN TOÀN, không gọi bất kỳ SMC nào (chỉ poll
+   `usys_map_tzasc_cma_meta()` — syscall thuần nội bộ, không rủi ro bị "nuốt") tới khi write
+   toàn cục `g_tzasc_cma_meta_paddr` xuất hiện (bằng chứng Normal World đã tiến đủ xa), cộng
+   thêm biên độ an toàn cố định (25s) v để chắc chắn vượt qua cửa sổ probe tối đa ~15s của
+   `llm_tee_os_init()`.
+2. `mvm_push_pages_resilient()`: CHỈ 1 lần gọi `push_pages()` thật, giám sát bởi ĐÚNG 1 luồng
+   phụ (không phải retry loop) — nếu timeout hoặc "fake success" (đã biết 2 dạng: entry_index
+   trùng 0 do handshake ON_DONE; map mảng toàn cục thành công nhưng entry riêng vẫn size=0) thì
+   FATAL rõ ràng thay vì lặp lại — sau bước chờ ở trên, việc này được kỳ vọng hiếm khi xảy ra;
+   nếu vẫn xảy ra thường xuyên, đó là tín hiệu cần điều tra tiếp, không phải che giấu bằng
+   retry vô hạn.
+
+Giữ nguyên tuyệt đối nguyên tắc tách biệt dự án: toàn bộ thay đổi chỉ nằm trong
+`metanode/execution/pkg/mvm/ta/mvm_ta_main.cpp`, không đụng `chanmgr.c`/`tc_client_driver.c`/
+`opteed/smc.c`. Việc đọc `llama-cli`'s `main.cpp` chỉ để hiểu cơ chế OS dùng chung, không
+link/share code.
+
+**Test trên phần cứng của thiết kế §9.20 (kMaxWaitSec cố định)**: THẤT BẠI 2 lần liên tiếp
+cùng ngày — `kMaxWaitSec=90` hết giờ trước khi meta write kịp landed; tăng lên `240` build lại
+thì bị người dùng chặn lại trước khi kịp flash/test, đúng lúc đó nhận phản hồi trực tiếp:
+"cần xem xét thiết kế không phụ thuộc hardcode thời gian nào cả hệ thống đâu lương trước việc
+delay bao lâu đâu" — tức: hệ thống không hề biết trước độ trễ thật là bao lâu, nên mọi hằng số
+thời gian dùng để QUYẾT ĐỊNH THẤT BẠI (không phải để nhịp lại/log) đều là đoán mò về điều kiện
+board/tải lúc chạy, không phải sự thật — đoán số lớn hơn sau khi đoán nhỏ thất bại chỉ trì hoãn
+đúng lỗi đó, không sửa nó.
+
+## §9.21 — Thiết kế lại: không dùng elapsed time làm căn cứ từ bỏ
+
+Nguyên tắc sửa lại: elapsed wall-clock time chỉ được dùng để quyết định "thử lại" / "in
+heartbeat cho dễ chẩn đoán" — KHÔNG BAO GIỜ dùng để quyết định "từ bỏ, FATAL abort". Chỉ tin
+hai loại tín hiệu: (a) một kết quả DƯƠNG đã được xác minh độc lập (entry cụ thể của push này
+thật sự có đúng size — §9.19), hoặc (b) một mã lỗi thật từ platform (không phải timeout).
+
+Áp dụng cho 2 hàm trong `mvm_ta_main.cpp`:
+- **`mvm_wait_for_boot_settled()`**: bỏ hẳn `kMaxWaitSec`/nhánh FATAL. Vòng lặp này chỉ poll
+  `usys_map_tzasc_cma_meta()` — một syscall thuần secure-world-internal, ĐÃ XÁC NHẬN không hề
+  phát SMC nên không có rủi ro bị swallow — nên hoàn toàn an toàn để chờ vô hạn định. Chỉ còn
+  heartbeat log throttle mỗi 20s để chẩn đoán qua UART, không còn cap.
+- **`mvm_push_pages_resilient()`**: đổi từ "1 lần thử + FATAL nếu watchdog hết giờ" sang vòng
+  lặp thử lại vô hạn định với thread mới mỗi lần watchdog "hết giờ" (đổi tên biến từ
+  `kWatchdogTimeoutSec` thành `kRetryPaceSec` để phản ánh đúng ngữ nghĩa: hết giờ = "thử lại",
+  không phải "từ bỏ"). An toàn để retry vô hạn vì (§9.13): một request bị swallow thật sự
+  KHÔNG có side-effect phía server (bị coi nhầm là boot handshake, không bao giờ chạm tới logic
+  push_pages thật) — nên retry không bao giờ double-count hay hỏng dữ liệu; trường hợp xấu nhất
+  là 1 attempt chậm (không thật sự bị swallow) cũng landed muộn sau đó, chỉ tốn 1 slot
+  meta-array vô hại. Đồng thời bỏ luôn yêu cầu cứng `entry_index==0` (best-effort, không phải
+  bất biến đúng-sai) — chỉ cảnh báo (WARNING, không abort) nếu khác 0, miễn slot đó được xác
+  minh độc lập là genuine.
+
+Các hằng số còn lại trong code (`kRetryPaceSec=15`, `kMetaVerifyAttempts=20`,
+`kHeartbeatIntervalSec=20`) không phải là ngưỡng thất bại — chỉ là nhịp polling/log, sai số
+ước lượng chỉ gây thử lại dư thừa vô hại, không bao giờ gây abort sai.
+
+**Build**: biên dịch sạch qua `docker run` thủ công (image
+`vectorxj0553/tz-llm-llama-builder:cpp13-metanode-deps`, mount thẳng `metanode/execution/pkg`
++ `tz-llm/tee_os_kernel/.../chcore-libc/musl-libc/install/include`), không TEXTREL, md5 khác
+bản trước — promote vào `mvm_ta_output/`, đang chạy `rebuild.sh` → `repack.sh` → flash → test
+trên phần cứng.
+
+**Chưa test trên phần cứng** — đang build/flash lần đầu của thiết kế §9.21 này.
+
+## §9.22 — §9.21 test thật: root-cause KHÁC hoàn toàn dự đoán (priority scheduling, không phải swallow race)
+
+Test đầu tiên của §9.21: `mvm_wait_for_boot_settled()` (không cap thời gian) hit `>1800s` mà
+`g_tzasc_cma_meta_paddr` **chưa từng landed** — vượt xa mọi lần quan sát trước (14-50s bình
+thường). Kiểm tra kỹ: **hoàn toàn không có dòng log Linux/Normal World nào xuất hiện** suốt
+thời gian đó. Ban đầu nghi UART/baud rate (đúng một phần — ModemManager re-enumerate reset
+baud về 9600 sau mỗi lần board mất nguồn, xem memory `host-uart-baud-reset-gotcha` — đã tốn
+nhiều thời gian điều tra nhầm hướng này trước khi tìm ra vấn đề thật).
+
+**Root cause thật, xác nhận qua đọc kernel source + live evidence**: scheduler `pbrr`
+(Priority-Based Round-Robin) là **ưu tiên tuyệt đối** — luồng priority cao hơn LUÔN thắng
+luồng priority thấp hơn khi cả hai ready. `chanmgr/main.c`'s 16 luồng `idle()` tự hạ priority
+xuống 1 (`usys_set_prio(0, 1)`) rồi lặp gọi `usys_tee_switch_req()` thật — **đây chính là cơ
+chế duy nhất nhường CPU cho Normal World boot**. `mvm_wait_for_boot_settled()`'s vòng lặp
+`usys_yield()` chạy ở priority mặc định (10, không set) — **triệt tiêu hoàn toàn** 16 luồng
+priority-1 đó trên bất kỳ CPU nào nó rơi vào → Normal World không bao giờ được nhường CPU để
+boot. Đây CHÍNH LÀ hiện tượng đã tự phát hiện và bỏ 1 lần trước đó (§9.11 mục 3: cap-90s spin
+cũng tự gây bế tắc) — thiết kế §9.21 vô tình tái tạo lại đúng bug đó khi bỏ cap mà quên khắc
+phục nguyên nhân gốc.
+
+**Fix vòng 1 (thành công)**: `usys_set_prio(0, 1)` một lần ở đầu `mvm_wait_for_boot_settled()`,
+khớp priority của `chanmgr`'s idle threads. Kết quả: Linux boot **13 giây**, driver handshake
+(`llm_tee_os_init`) thành công **ngay lần thử đầu tiên** — cải thiện triệt để, xác nhận 5-6 lần
+liên tiếp.
+
+**Vấn đề mới lộ ra sau fix**: `mvm_ta` bản thân KHÔNG tiến triển được (không cả heartbeat) sau
+20-30 phút — vì ở priority 1 nó cạnh tranh trực tiếp với chính 16 luồng idle đang bận đó. Thử
+3 vòng sửa thêm, TẤT CẢ đều thất bại/không chứng minh được:
+- **Toggle priority quanh mỗi lần check**: lỗi logic — hạ priority *trước khi* `usys_yield()`
+  nên coi như không đổi gì (điều quyết định là priority *lúc yield*, không phải lúc đang chạy).
+- **Toggle theo counter (1/1000 vòng ở priority thường)**: counter tự nó không đếm nổi vì
+  luồng đói quá, vô dụng — không có cả heartbeat sau 5+ phút.
+- **`nanosleep()`** (đã bỏ 1 lần rất sớm trong session, nghi treo): đọc lại kỹ kernel source
+  (`kernel/irq/timer.c`: `sys_clock_nanosleep`/`enqueue_sleeper`/`sleep_timer_cb`) thấy cơ chế
+  trông hợp lệ (per-CPU timer list, IRQ-driven, có lock chống race đã biết) — thử lại có căn
+  cứ, nhưng **vẫn không chứng minh được hoạt động** (0 tiến triển sau 6+ phút, kể cả bản chẩn
+  đoán in từng bước trước/sau lệnh gọi).
+
+**Fix cuối (round 6, do người dùng chỉ định trực tiếp): `usys_tee_wait_switch_req()`** — cơ
+chế SMC-based blocking mà `llama-cli` đã dùng thành công (proven). **CRASH KERNEL THẬT ngay
+lần test đầu tiên**: `BUG: sys_tee_wait_switch_req:142 on (expr) percpu->waiting_thread` —
+primitive này chỉ cho **đúng 1 luồng chờ mỗi CPU**; `mvm_ta` và `llama-cli` cùng chờ trên đó
+→ `BUG_ON`, board treo cứng hoàn toàn (UART ngừng hẳn). Hazard này **đã được biết và tránh sẵn**
+ở chỗ khác trong chính `mvm_ta_main.cpp` (`mvm_reverse_round_trip`/`mvm_ta_run`'s comment gọi
+đây là "previously-hardware-crash-causing hazard") — chỉ là quên đối chiếu trước khi thử lại.
+Xem memory `usys-tee-wait-switch-req-percpu-crash`. **Kết luận: không bao giờ dùng lại
+primitive này từ `mvm_ta`.** Revert về fix vòng 1 (`usys_set_prio(0,1)` + `usys_yield()` thuần).
+
+**Phát hiện kiến trúc quan trọng nhất, giải thích toàn bộ bí ẩn "chờ mãi không tiến triển"**:
+đọc `mvm_ca_test.cpp`'s comment có sẵn (thêm 2026-08-18, trước cả session đang bàn) tiết lộ:
+`push_pages()` (SMC do TA tự khởi tạo qua `usys_tee_switch_req(SMC_EXIT_SHADOW)`) **về mặt cấu
+trúc không thể hoàn tất được cho tới khi có một luồng Normal-World đang chủ động lặp gọi ioctl
+`LLM_CLIENT_IOCTL_RUN`** (qua `smc_call_cpu_resume()` trong `tzdriver`) — đây chính là job của
+`mvm_ca_test.cpp`'s `ca_relay_thread()`. Nghĩa là: **chờ đợi bao lâu ở phía TA cũng vô ích nếu
+không có ai phục vụ phía CA** — không phải vấn đề priority/scheduling như tưởng suốt session.
+`llama-cli` có cơ chế tương đương riêng (`fake_ca.cpp`'s `ca_thread`) — **cùng dùng chung ioctl
+`LLM_CLIENT_IOCTL_RUN`** — đây chính là nguồn gốc thật của MỌI xung đột quan sát được (kể cả
+crash `usys_tee_wait_switch_req` ở trên): chạy `mvm_ca_test` trong khi `llama-cli` sống sẽ luôn
+có nguy cơ SMC bị giao nhầm cho `llama-cli`, crash nó (`invalid prompt` → page fault → thoát).
+
+## §9.23 — Fix kiến trúc triệt để: `mvm_launcher.srv` hoàn toàn độc lập khỏi `chanmgr`/`llama-cli`
+
+Theo yêu cầu người dùng ("tạo hẳn riêng đi") — thay vì #ifdef bên trong `chanmgr/main.c`, tạo
+**binary hoàn toàn mới**, launch **độc lập** ở tầng cao hơn:
+
+1. **`chanmgr/main.c` revert 100% về nguyên trạng** — xoá sạch mọi code metanode từng thêm
+   (launch `/mvm_ta`, `mvm_ta_waiter`). Không còn dấu vết nào của metanode trong file này nữa.
+2. **`mvm_launcher.srv`** — binary mới, thư mục riêng
+   (`tee_os_kernel/user/system-services/system-servers/mvm_launcher/`), chỉ làm 2 việc: spawn
+   16 luồng idle priority-1 (copy y hệt pattern đã chứng minh của `chanmgr`, không link/share
+   code) + `create_process("/mvm_ta")` + `waitpid()`. Không có logic channel/IPC nào của
+   `chanmgr`, không biết gì về `llama-cli`.
+3. **`procmgr.c`'s `boot_default_apps()`** — điểm launch tiến trình cấp cao nhất toàn hệ
+   thống (nơi `chanmgr.srv` vốn được launch từ đó). Thêm cờ `#define METANODE_ONLY_BOOT`
+   (hiện đang bật): khi bật, launch `mvm_launcher.srv` THAY VÌ `chanmgr.srv` — 2 deployment
+   loại trừ lẫn nhau hoàn toàn, không còn ai cùng dùng `LLM_CLIENT_IOCTL_RUN` nữa. Đổi lại
+   (comment `#define` đó) để build về chế độ `tz-llm` gốc (chanmgr+llama-cli) khi cần — pipeline
+   build chưa có cơ chế truyền CFLAGS riêng theo target nên đây tạm thời là toggle thủ công tại
+   1 chỗ duy nhất, có thể thay bằng build-flag thật sau.
+4. `tee_os_kernel/Makefile`: đăng ký `mvm_launcher.srv` vào `USER_TARGETS`/
+   `USER_TARGET_DIR_MAP`/`ramdisk:` dependency, theo đúng mẫu `chanmgr.srv`.
+
+**Kết quả test trên phần cứng — THÀNH CÔNG HOÀN TOÀN, round-trip `MVM_TZ_CMD_EXECUTE` đầu
+tiên trong lịch sử project**:
+```
+[procmgr] Launching mvm_launcher...
+main 56: mvm_launcher main entry
+main 74: launched metanode TA, pid=4
+[mvm_ta] push_pages succeeded on attempt #3 (entry_index=0, entry.size verified)
+[mvm_ta] channel ready: cma_index=1 entry_index=0 paddr=0x150000000 vaddr=0x300002aac000 size=0x401000
+```
+```
+[mvm_ca_test] mapped OK. protocol_version=1 (want 1)
+[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE: sender=0x11..11 recipient=0x22..22 amount=100wei
+[mvm_ca_test] reverse call cmd=2 header_len=136 blob_len=136
+[mvm_ca_test] FATAL: unhandled reverse cmd=2 -- aborting cleanly instead of hanging mvm_ta forever
+```
+`push_pages()` mất 3 lần thử (2 lần đầu chưa có relay servicer, lần 3 mới có `mvm_ca_test`'s
+relay chạy — khớp đúng phát hiện §9.22). Reverse cmd=2 chưa xử lý là giới hạn của
+`mvm_ca_test` (công cụ test, không phải `mvm_ta`) — thoát sạch, không crash/treo `mvm_ta`.
+Linux boot vẫn ổn định 13s, WiFi kết nối bình thường — `mvm_launcher.srv`'s launch không ảnh
+hưởng gì tới boot flow chung.
+
+## §9.24 — "reverse cmd=2" thực ra là bug race condition trong `mvm_ca_test.cpp`, không phải TA
+
+Điều tra dòng `reverse call cmd=2` ở §9.23: **KHÔNG phải reverse call thật từ `mvm_ta`** — là
+self-race trong chính `mvm_ca_test.cpp`'s dispatch loop. Cả `request_ready` VÀ `response_ready`
+đều là flag DÙNG CHUNG 2 chiều (CA→TA và TA→CA) — nhưng vòng poll của CA (`for (round...) {
+while (which<0) { ... } }`) tự CAS-consume các flag này ngay sau khi CHÍNH NÓ vừa set, KHÔNG
+kiểm tra `direction` trước, nên tự đọc lại tín hiệu của chính mình:
+
+1. **`request_ready` self-race**: CA set `request_ready=1` để gửi `MVM_TZ_CMD_EXECUTE` (dòng
+   ~293) → vòng poll NGAY SAU đó tự CAS-consume flag đó trước khi `mvm_ta` kịp thấy → đọc
+   `g_channel->cmd` vẫn là `MVM_TZ_CMD_EXECUTE=2` (giá trị CA vừa ghi, chưa bị `mvm_ta` ghi đè
+   bằng ID reverse thật) → in nhầm "reverse call cmd=2". Hậu quả nghiêm trọng hơn cả log sai:
+   `mvm_ta`'s dispatch loop (cũng CAS-consume `request_ready`) **không bao giờ thấy được** tín
+   hiệu đó nữa (đã bị CA "đánh cắp") → `mvm_ta` treo vĩnh viễn chờ 1 request không bao giờ tới.
+2. **`response_ready` self-race** (đối xứng, lộ ra sau khi fix #1): sau khi `handle_reverse_call()`
+   trả lời 1 reverse call thật (set `response_ready=1`, `direction` vẫn là `TA_TO_HOST` vì
+   không ai flip lại), vòng poll kế tiếp tự CAS-consume flag đó, thấy `direction==TA_TO_HOST`
+   (không phải `HOST_TO_TA`) → `FATAL: response_ready set but direction=TA_TO_HOST -- protocol
+   confusion`.
+
+**Fix (cả 2, cùng pattern)**: PEEK `g_channel->direction` bằng atomic load **trước khi** thử
+CAS-consume flag — chỉ tiêu thụ nếu `direction` xác nhận đây thật sự là tín hiệu từ phía bên
+kia (`request_ready`: chỉ consume khi `direction==TA_TO_HOST`; `response_ready`: chỉ consume
+khi `direction==HOST_TO_TA`). Nếu peek thấy `direction` không khớp — đó là tín hiệu CỦA CHÍNH
+MÌNH chưa được bên kia tiêu thụ, để nguyên, tiếp tục poll.
+
+**Kết quả sau fix — round-trip EVM execution HOÀN CHỈNH VÀ ĐÚNG kết quả** (build lại
+`mvm_ca_test.cpp` bằng `aarch64-linux-gnu-g++ -std=c++17 -static -O2`, binary mới push lên
+board qua `hdc file send`, test trên fresh boot):
+```
+=== ExecuteResult ===
+status=1 exception=0 gas_used=0
+add_balance_change: 0x2222...2222 += 100   (recipient)
+sub_balance_change: 0x1111...1111 -= 100   (sender)
+nonce_change:       0x1111...1111 nonce=1  (sender)
+```
+Đúng chuẩn native transfer EVM: trừ sender, cộng recipient, tăng nonce — 2 vòng reverse-call
+`GLOBAL_STATE_GET` (cmd=101, cho sender lẫn recipient) xử lý sạch sẽ, không lỗi. **Đây là bằng
+chứng đầu tiên cho thấy EVM interpreter thật của metanode chạy đúng bên trong TrustZone secure
+world, qua toàn bộ pipeline CA↔TA.**
+
+**CẬP NHẬT (cùng ngày): đủ 6/6 reverse-call đã có handler trong `mvm_ca_test.cpp`**
+
+Thêm handler cho 4 lệnh còn thiếu (`EXTENSION_CALL_GET_API`/`EXTENSION_EXTRACT_JSON_FIELD`/
+`EXTENSION_BLST` — chung 1 shape blob-only [output bytes]; `EXTENSION_GET_OR_CREATE_SIMPLE_DB`
+— cũng blob-only theo `mvm_tz_protocol.h`) — mỗi lệnh trả về kết quả "rỗng nhưng hợp lệ" (4-byte
+length-prefix = 0, đúng convention `Extension_return{nullptr,0}` = thất bại/không có dữ liệu)
+thay vì fabricate dữ liệu giả. Test lại thành công round-trip **lần thứ 2 liên tiếp, KHÔNG cần
+reboot board** — `mvm_ta`'s dispatch loop chính bền vững qua nhiều lệnh (`seq` tăng đúng 7→9→11),
+kết quả giống hệt lần đầu.
+
+**ĐÍNH CHÍNH (cùng ngày, sau khi đọc lại kỹ)**: đánh giá "Xapian-trong-TA chưa triển khai, rủi
+ro cao nhất" ở trên **SAI** — đã bị lẫn với 1 phần khác của kế hoạch chưa đọc kỹ. Thực tế (đã
+xác minh bằng build thật 2026-08-16, xem mục "Xapian: DB_BACKEND_INMEMORY" phía trên):
+- Xapian dùng backend `InMemory` — không chạm filesystem — nên **không cần lệnh reverse-call
+  proxy file I/O nào cả** (giả định ban đầu của GĐ1 là sai, đã tự sửa từ trước).
+- `libxapian.a` đã cross-build sạch cho đúng toolchain chcore/musl, smoke test link thành công
+  thật (không phải giả định).
+- Việc còn thiếu thật sự CHỈ có: 1 lệnh reverse-callback mới
+  (`MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`, struct wire `mvm_tz_replay_full_db_logs_req_t` đã
+  thiết kế sẵn) cho chiều "TA restart → nạp lại dữ liệu từ Host", cộng 1 hàm Go codec nhỏ
+  (~30-40 dòng, theo đúng mẫu 9 lệnh lifecycle khác đã có). Chiều "lưu" (TA→Host) đã tự động
+  hoạt động qua `encodeExecuteResult`/`block_processor_commit.go` có sẵn, không cần code mới.
+- Rủi ro thật còn lại (chưa đo): 1 lỗ hổng hiệu năng Go-side (`GetStorageBackupDb()` tối ưu
+  tra cứu theo block number, không tối ưu theo địa chỉ — cần thêm 1 index nhỏ).
+
+## §9.25 — Test contract code thật: NULL pointer crash thật trong EVM interpreter
+
+Viết test EXECUTE gọi contract thật (không cần `MVM_TZ_CMD_DEPLOY`, chưa wire trong `mvm_ta` —
+giả lập "địa chỉ đã có code" ngay từ phía CA: `GlobalStateGet`'s response cho MỘT địa chỉ cụ
+thể (`g_contract_addr`) trả `status=1` kèm bytecode thật trong blob, thay vì luôn trả
+`status=0`). Bytecode dùng: `PUSH1 0x2a PUSH1 0x00 SSTORE PUSH1 0x00 SLOAD PUSH1 0x00 MSTORE
+PUSH1 0x20 PUSH1 0x00 RETURN` (lưu 42 vào slot 0, đọc lại, trả về — chuẩn EVM đơn giản, không
+đặc thù metanode).
+
+**Kết quả**: `mvm_ca_test` gửi thành công code thật (`GlobalStateGet: returning REAL code (16
+bytes)`), nhưng `mvm_ta` **crash NULL pointer thật** ngay sau đó:
+```
+handle_trans_fault: no vmr found for va 0x0!
+do_page_fault: faulting ip is 0x3000005ed38c (real IP), faulting address is 0x0, fsc is trans_fault
+Thread ... CMD: /mvm_ta
+```
+`mvm_launcher.srv` **chưa in "metanode TA exited"** — `waitpid()` chưa trả về, chưa rõ toàn bộ
+process có bị kernel kill hẳn hay chỉ 1 luồng chết còn luồng khác vẫn "sống" ở mức OS (khớp
+CLAUDE.md's cảnh báo: lỗi bên trong TA không luôn abort sạch).
+
+**Chưa điều tra sâu** (cần session riêng, đụng core EVM interpreter C++ của metanode, không
+nên vá vội): có thể do (a) bytecode/test tự viết thiếu field nào đó interpreter cần (ví dụ:
+context/environment object chưa init đầy đủ khi không qua đường DEPLOY thật), (b) bug thật
+trong interpreter khi xử lý SSTORE/SLOAD lần đầu trên 1 địa chỉ "giả lập có code", hoặc (c) vấn
+đề trong cách `GlobalStateGet`'s response được `mvm_ta` parse (blob layout). Test 1 (native
+transfer, không chạm contract code) vẫn chạy hoàn hảo trên CÙNG bản build — xác nhận bug chỉ
+liên quan tới đường thực thi contract code, không phải hạ tầng channel/protocol.
+
+**Việc tiếp theo**:
+0. **ƯU TIÊN CAO NHẤT (mới, §9.25)**: điều tra crash NULL pointer thật trong EVM interpreter
+   khi xử lý contract code — cần debug core C++ (`libmvm_linker.a`/`c_mvm`), có thể cần thêm
+   log/breakpoint tại `faulting IP 0x3000005ed38c` tương ứng symbol nào trong `mvm_ta` (dùng
+   `addr2line`/`objdump` trên bản build **không strip** để tra ngược). Đây là blocker thật cho
+   mọi việc liên quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
+1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
+2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
+3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — phát hiện crash ở mục 0.
+4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
+   binary thật) — xác minh RUNTIME cần đợi mục 0 (crash) được giải quyết trước.

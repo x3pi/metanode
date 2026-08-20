@@ -41,6 +41,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sched.h>
 
 // ─── driver ioctl/struct definitions ───
 // Byte-identical copy of tz-llm-trustzone's tzdriver/tc_ns_client.h
@@ -60,6 +62,28 @@ static_assert(sizeof(struct llm_client_op_pages) == 24,
 #define TC_NS_CLIENT_IOC_MAGIC 't'
 #define LLM_CLIENT_IOCTL_SET_PAGES \
     _IOWR(TC_NS_CLIENT_IOC_MAGIC, 27, struct llm_client_op_pages)
+// Cmd 24, byte-identical to tz-llm-trustzone/llama.cpp/examples/main/
+// fake_ca.cpp's own #define -- the relay/service ioctl. Added 2026-08-18
+// after finding, via real hardware + kernel source reading (dmesg showing
+// "entry->size=0" no matter what order mvm_ta called its own two
+// syscalls in), that mvm_ta's push_pages() is TA-*initiated*
+// (usys_tee_switch_req(SMC_EXIT_SHADOW)) and structurally cannot
+// complete until SOME Normal-World thread is actively looping on this
+// exact ioctl -- see tzdriver/core/tc_client_driver.c's
+// smc_call_cpu_resume(), only ever called from llm_run()'s
+// LLM_CLIENT_IOCTL_RUN handler, itself only ever invoked by userspace
+// "ca_thread" pthreads (fake_ca.cpp's own, for the LLM TA). Nothing
+// analogous previously existed in this file -- mvm_ta's push_pages() SMC
+// request just sat parked (blocked, not spinning) with nothing servicing
+// it until this relay thread was added.
+#define LLM_CLIENT_IOCTL_RUN \
+    _IOWR(TC_NS_CLIENT_IOC_MAGIC, 24, int)
+enum smc_loop_exit {
+    SMC_LOOP_EXIT_FINISH = 1,
+    SMC_LOOP_EXIT_NPU_SUBMIT,
+    SMC_LOOP_EXIT_NPU_DONE,
+    SMC_LOOP_EXIT_IO_STEP,
+};
 
 // mvm_ta_main.cpp's own channel placement (mvm_ta_main.cpp:
 // MVM_TZASC_CMA_INDEX=1, entry_index guaranteed 0 by the launch-order
@@ -68,12 +92,72 @@ static_assert(sizeof(struct llm_client_op_pages) == 24,
 #define MVM_TZASC_ENTRY_INDEX 0
 
 static mvm_tz_channel_t *g_channel = nullptr;
+static volatile bool g_relay_stop = false;
+
+// Mirrors fake_ca.cpp's ca_thread() minus the LLM-specific
+// ca_backend_io_step()/[SECURE_LOGIT_DIAG] polling (mvm_ta doesn't use
+// the io-frontend/logit-diag mechanisms those exist for -- this relay's
+// only job is to keep calling the kernel's SMC-servicing ioctl so
+// whatever mvm_ta is blocked on inside a yielding SMC eventually gets
+// answered). Same idle-backoff logic (rate-limit sleeping once genuinely
+// idle) for the same documented reason: an unthrottled busy-poll loop on
+// this exact ioctl has previously starved wifi/display board-wide within
+// minutes even with zero kernel soft-lockup.
+static void *ca_relay_thread(void *arg) {
+    int fd = *(int *)arg;
+    printf("[mvm_ca_test] relay thread started (fd=%d)\n", fd);
+    fflush(stdout);
+    unsigned int consecutive_idle = 0;
+    const unsigned int idle_backoff_threshold = 2000;
+    while (!g_relay_stop) {
+        int out_cmd = -1;
+        ioctl(fd, LLM_CLIENT_IOCTL_RUN, &out_cmd);
+        if (out_cmd == SMC_LOOP_EXIT_FINISH) {
+            if (++consecutive_idle > idle_backoff_threshold) {
+                usleep(1000);
+            }
+        } else {
+            consecutive_idle = 0;
+        }
+        sched_yield();
+    }
+    return nullptr;
+}
+
+// ─── blob writer (mirrors mvm_ta_main.cpp's BlobWriter) ───
+struct BlobWriter {
+    uint8_t *buf;
+    uint32_t off = 0;
+    void writeRaw(const void *p, uint32_t n) { memcpy(buf + off, p, n); off += n; }
+    void writeU32(uint32_t v) { writeRaw(&v, 4); }
+    void writeBytes(const void *p, uint32_t n) { writeU32(n); if (n) writeRaw(p, n); }
+};
 
 // ─── reverse-call handling (TA -> this CA) ───
 // Answers only what a single native-value-transfer EXECUTE between two
 // never-before-seen synthetic addresses can plausibly need. Anything else
 // aborts loudly (a clean, diagnosable failure) rather than silently
 // hanging or fabricating wrong data.
+// Contract-call test (2026-08-20, plan §9.24 follow-up): to exercise a
+// REAL contract's code path (SSTORE/SLOAD -> real GetStorageValue traffic,
+// not the "shouldn't fire" stub) without needing MVM_TZ_CMD_DEPLOY (not
+// wired in mvm_ta yet -- see that file's own comment), simulate "this
+// address already has code" entirely from the CA side: GlobalStateGet's
+// response for ONE specific address returns status=1 with real bytecode
+// in the code blob. mvm_ta's own EVM interpreter (unmodified, already
+// proven via cgo mode) does the rest -- this only fakes what a real
+// Host's state lookup would have returned for an already-deployed
+// contract, nothing about mvm_ta's own logic is being test-specific here.
+static const uint8_t g_contract_addr[20] = {
+    0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,
+    0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33};
+// PUSH1 0x2a PUSH1 0x00 SSTORE PUSH1 0x00 SLOAD PUSH1 0x00 MSTORE
+// PUSH1 0x20 PUSH1 0x00 RETURN -- store 42 at slot 0, read it back,
+// return it. Plain, well-known EVM bytecode, not metanode-specific.
+static const uint8_t g_contract_code[] = {
+    0x60,0x2a, 0x60,0x00, 0x55, 0x60,0x00, 0x54,
+    0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3};
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -91,24 +175,82 @@ static void handle_reverse_call(void) {
 
     switch (cmd) {
     case MVM_TZ_RCMD_GLOBAL_STATE_GET: {
-        // Every address in this test is synthetic/never-before-seen ->
-        // status=0 ("not found, create fresh") is the only correct answer.
-        mvm_tz_global_state_get_resp_t resp = {0};
-        resp.status = 0;
-        memcpy(resp_buf, &resp, sizeof(resp));
-        resp_hdr_len = sizeof(resp);
-        resp_blob_len = 0; // status==0 -> no blob per protocol header
+        // mvm_tz_global_state_get_req_t: [0] mvm_id(20) [1] address(20).
+        const uint8_t *req_address = hdr_copy + 20;
+        if (header_len >= 40 && memcmp(req_address, g_contract_addr, 20) == 0) {
+            // The one address this test deliberately gives real code to.
+            // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
+            // [2] code (length-prefixed).
+            mvm_tz_global_state_get_resp_t resp = {0};
+            resp.status = 1;
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            BlobWriter w{resp_buf + resp_hdr_len};
+            uint8_t zero32[32] = {0};
+            w.writeRaw(zero32, 32); // balance = 0
+            w.writeRaw(zero32, 32); // nonce = 0
+            w.writeBytes(g_contract_code, sizeof(g_contract_code));
+            resp_blob_len = w.off;
+            printf("[mvm_ca_test] GlobalStateGet: returning REAL code (%zu bytes) "
+                "for contract address\n", sizeof(g_contract_code));
+            fflush(stdout);
+        } else {
+            // Every other address in this test is synthetic/never-before-seen
+            // -> status=0 ("not found, create fresh") is the correct answer.
+            mvm_tz_global_state_get_resp_t resp = {0};
+            resp.status = 0;
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            resp_blob_len = 0; // status==0 -> no blob per protocol header
+        }
         break;
     }
     case MVM_TZ_RCMD_GET_STORAGE_VALUE: {
-        // Shouldn't fire for a pure EOA->EOA native transfer (no code at
-        // either address) -- included so a wrong assumption fails loud
-        // (STORAGE_NOT_FOUND=1) rather than hanging.
+        // Genuinely fires now for the contract's own SLOAD/SSTORE traffic.
+        // Every slot in this test is fresh (first-ever write) -> NOT_FOUND=1
+        // is the correct answer for the pre-write read; the SSTORE itself
+        // updates mvm_ta's own in-process State/Xapian, no reverse call
+        // needed for the write side.
         mvm_tz_get_storage_value_resp_t resp = {0};
         resp.status = 1;
         memcpy(resp_buf, &resp, sizeof(resp));
         resp_hdr_len = sizeof(resp);
         resp_blob_len = 0;
+        break;
+    }
+    // Added 2026-08-20 (plan §9.24 follow-up): all 4 remaining live reverse
+    // commands, so a future test exercising contract code (not just a pure
+    // EOA->EOA native transfer) doesn't hit the FATAL default case. None of
+    // these are exercised by THIS test's own transaction (no code at either
+    // synthetic address), so each returns the documented "no result"
+    // shape -- a real, correctly-formed response, just an empty one -- for
+    // now, rather than any speculative fabricated data (matches this
+    // function's own stated policy: fail loud/return "not found" over
+    // guessing). Filling in a REAL local HTTP client / JSON parser / BLST
+    // call / key-value store here is future work once an actual contract-
+    // calling test needs one of these to return real data.
+    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
+    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
+    case MVM_TZ_RCMD_EXTENSION_BLST: {
+        // No fixed header for these 3 (mvm_tz_protocol.h line ~512) --
+        // response is just the blob stream: [0] output bytes. Empty output
+        // (a bare 4-byte zero length prefix) is the documented
+        // Extension_return{nullptr,0} failure case.
+        uint32_t zero_len = 0;
+        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        resp_hdr_len = 0;
+        resp_blob_len = sizeof(zero_len);
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
+        // Same blob-only shape (mvm_tz_protocol.h line ~521): response
+        // blob is [0] output bytes. Empty output here means "no secondary
+        // DB result" -- correct for this test, which never calls a
+        // contract that touches a secondary Xapian-backed DB.
+        uint32_t zero_len = 0;
+        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        resp_hdr_len = 0;
+        resp_blob_len = sizeof(zero_len);
         break;
     }
     default:
@@ -129,62 +271,27 @@ static void handle_reverse_call(void) {
     mvm_tz_flag_set(&g_channel->response_ready, 1);
 }
 
-// ─── blob writer (mirrors mvm_ta_main.cpp's BlobWriter) ───
-struct BlobWriter {
-    uint8_t *buf;
-    uint32_t off = 0;
-    void writeRaw(const void *p, uint32_t n) { memcpy(buf + off, p, n); off += n; }
-    void writeU32(uint32_t v) { writeRaw(&v, 4); }
-    void writeBytes(const void *p, uint32_t n) { writeU32(n); if (n) writeRaw(p, n); }
-};
 
-int main(void) {
-    printf("[mvm_ca_test] opening %s\n", DEVICE_NAME);
-    int fd = open(DEVICE_NAME, O_RDWR);
-    if (fd < 0) { perror("open"); return 1; }
-
-    struct llm_client_op_pages set_req = {0};
-    set_req.cma_index = MVM_TZASC_CMA_INDEX;
-    set_req.entry_index = MVM_TZASC_ENTRY_INDEX;
-    set_req.size = 0; // not used by SET_PAGES, only by PUSH_PAGES
-    set_req.offset = 0;
-    if (ioctl(fd, LLM_CLIENT_IOCTL_SET_PAGES, &set_req) != 0) {
-        perror("ioctl SET_PAGES");
-        return 1;
-    }
-    printf("[mvm_ca_test] SET_PAGES OK (cma_index=%d entry_index=%d)\n",
-        MVM_TZASC_CMA_INDEX, MVM_TZASC_ENTRY_INDEX);
-
-    unsigned long channel_size = (sizeof(mvm_tz_channel_t) + 0xfffUL) & ~0xfffUL;
-    printf("[mvm_ca_test] mmap size=%#lx\n", channel_size);
-    void *addr = mmap(NULL, channel_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (addr == MAP_FAILED) { perror("mmap"); return 1; }
-    g_channel = (mvm_tz_channel_t *)addr;
-
-    printf("[mvm_ca_test] mapped OK. protocol_version=%u (want %u)\n",
-        g_channel->protocol_version, MVM_TZ_PROTOCOL_VERSION);
-    if (g_channel->protocol_version != MVM_TZ_PROTOCOL_VERSION) {
-        printf("[mvm_ca_test] FATAL: protocol_version mismatch -- mvm_ta hasn't "
-               "initialized this page (wrong entry_index?) or a real bug. Aborting, "
-               "not guessing.\n");
-        return 1;
-    }
-
-    // ─── build MVM_TZ_CMD_EXECUTE request: trivial native transfer ───
-    // sender=0x11*20, contract(recipient)=0x22*20, amount=100 wei,
-    // empty input (pure value transfer, no bytecode execution), tx_hash=
-    // arbitrary nonzero 32 bytes, relatedAddresses=[sender,recipient]
-    // (declares the expected read/write set -- avoids GlobalStateGet's
-    // status==2 "addressNotInRelated" path, see my_global_state.cpp).
-    uint8_t sender[20], recipient[20], tx_hash[32];
-    memset(sender, 0x11, 20);
-    memset(recipient, 0x22, 20);
+// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
+// the result. Factored out (2026-08-20) so main() can run it twice: once
+// for the original EOA->EOA native transfer, once for a real contract
+// call (see g_contract_addr/g_contract_code above) -- same protocol
+// mechanics either way, just a different recipient/amount/input. Returns
+// 0 on success, 1 on any failure (mirrors main()'s own prior return
+// convention exactly, just reusable now). ───
+static int run_execute_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20],
+    uint64_t amount, const uint8_t *input, uint32_t input_len) {
+    uint8_t tx_hash[32];
     memset(tx_hash, 0xAB, 32);
 
     mvm_tz_execute_req_t req = {0};
-    req.amount[31] = 100; // 100 wei, big-endian
+    req.amount[24] = (uint8_t)(amount >> 56); req.amount[25] = (uint8_t)(amount >> 48);
+    req.amount[26] = (uint8_t)(amount >> 40); req.amount[27] = (uint8_t)(amount >> 32);
+    req.amount[28] = (uint8_t)(amount >> 24); req.amount[29] = (uint8_t)(amount >> 16);
+    req.amount[30] = (uint8_t)(amount >> 8);  req.amount[31] = (uint8_t)(amount);
     req.gas_price = 1;
-    req.gas_limit = 21000;
+    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
     req.block_prevrandao = 0;
     req.block_gas_limit = 30000000;
     req.block_time = (uint64_t)time(nullptr);
@@ -200,12 +307,12 @@ int main(void) {
     BlobWriter w{blob_scratch};
     w.writeBytes(sender, 20);
     w.writeBytes(recipient, 20);
-    w.writeBytes(nullptr, 0); // empty input
+    w.writeBytes(input, input_len);
     w.writeBytes(tx_hash, 32);
     w.writeBytes(sender, 20);    // relatedAddresses[0]
     w.writeBytes(recipient, 20); // relatedAddresses[1]
 
-    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE: sender=0x11..11 recipient=0x22..22 amount=100wei\n");
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
     fflush(stdout);
 
     mvm_tz_spinlock_lock(&g_channel->lock);
@@ -220,28 +327,27 @@ int main(void) {
 
     mvm_tz_flag_set(&g_channel->request_ready, 1);
 
-    // ─── dispatch loop: consume nested reverse calls until the real
-    // response (direction==HOST_TO_TA, meaning "this is the answer to my
-    // own forward command") arrives. Watches BOTH flags in one loop --
-    // watching them sequentially (response_ready first, request_ready
-    // only after giving up) would spuriously time out whenever a nested
-    // reverse call happens well within the window, since that only ever
-    // flips request_ready, never response_ready. ───
     const int TIMEOUT_S = 60;
     for (int round = 0; ; round++) {
         time_t start = time(nullptr);
         uint64_t last_seq = (uint64_t)-1;
-        int which = -1; // 0 = response_ready fired, 1 = request_ready fired
+        int which = -1;
         while (which < 0) {
-            uint8_t exp = 1;
-            if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                which = 0;
-                break;
+            if (__atomic_load_n(&g_channel->response_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 0;
+                    break;
+                }
             }
-            exp = 1;
-            if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                which = 1;
-                break;
+            if (__atomic_load_n(&g_channel->request_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_TA_TO_HOST) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 1;
+                    break;
+                }
             }
             uint64_t seq = g_channel->seq;
             if (seq != last_seq) {
@@ -255,7 +361,7 @@ int main(void) {
                        TIMEOUT_S, round, (unsigned long long)last_seq);
                 return 1;
             }
-            usleep(10000); // 10ms poll -- this is a probe tool, not the TA's own hot loop
+            usleep(10000);
         }
         if (which == 0) {
             if (g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
@@ -270,10 +376,9 @@ int main(void) {
         handle_reverse_call();
     }
 
-    // ─── decode ExecuteResult ───
     mvm_tz_execute_result_hdr_t hdr;
     memcpy(&hdr, g_channel->blob_region, sizeof(hdr));
-    printf("\n=== ExecuteResult ===\n");
+    printf("\n=== ExecuteResult (%s) ===\n", label);
     printf("status=%u exception=%u gas_used=%llu\n", hdr.status, hdr.exception, (unsigned long long)hdr.gas_used);
     printf("add_balance_change_count=%u sub_balance_change_count=%u nonce_change_count=%u\n",
         hdr.add_balance_change_count, hdr.sub_balance_change_count, hdr.nonce_change_count);
@@ -285,10 +390,15 @@ int main(void) {
     auto readU32 = [&](void) { uint32_t v; memcpy(&v, blob + off, 4); off += 4; return v; };
     auto skipBytes = [&](void) { uint32_t n = readU32(); off += n; return n; };
 
-    skipBytes(); // exmsg
-    skipBytes(); // output
+    uint32_t output_len = 0;
+    {
+        skipBytes(); // exmsg
+        uint32_t save_off = off;
+        output_len = readU32();
+        off = save_off;
+        skipBytes(); // output (re-consumed properly below)
+    }
     for (uint32_t i = 0; i < hdr.full_db_hash_count; i++) off += 52;
-    for (uint32_t i = 0; i < hdr.full_db_logs_count; i++) { /* not wired yet, count should be 0 */ }
 
     printf("\n-- add_balance_change --\n");
     for (uint32_t i = 0; i < hdr.add_balance_change_count; i++) {
@@ -317,7 +427,98 @@ int main(void) {
         printf("\n");
         off += 52;
     }
+    printf("-- storage_change --\n");
+    for (uint32_t i = 0; i < hdr.storage_change_count; i++) {
+        printf("  addr=");
+        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
+        off += 20;
+        uint32_t pair_count = readU32();
+        printf(" pair_count=%u\n", pair_count);
+        for (uint32_t p = 0; p < pair_count; p++) {
+            printf("    key=");
+            for (int j = 0; j < 32; j++) printf("%02x", blob[off + j]);
+            printf(" value=");
+            for (int j = 0; j < 32; j++) printf("%02x", blob[off + 32 + j]);
+            printf("\n");
+            off += 64;
+        }
+    }
+    (void)output_len;
+    printf("(status=%u, exception=%u -- %s)\n", hdr.status, hdr.exception,
+        hdr.exception ? "reverted/exception" : "success");
+    return 0;
+}
+
+int main(void) {
+    printf("[mvm_ca_test] opening %s\n", DEVICE_NAME);
+    int fd = open(DEVICE_NAME, O_RDWR);
+    if (fd < 0) { perror("open"); return 1; }
+
+    // Start the relay thread FIRST, before anything else: mvm_ta has
+    // been sitting parked inside its own push_pages() SMC call since
+    // chanmgr launched it near boot (minutes before this program ever
+    // runs) -- that request only completes once this ioctl loop is
+    // actually running. It costs nothing to start early (idle-backoff
+    // keeps it cheap once there's nothing to service).
+    pthread_t relay_tid;
+    if (pthread_create(&relay_tid, nullptr, ca_relay_thread, &fd) != 0) {
+        perror("pthread_create(ca_relay_thread)");
+        return 1;
+    }
+    // Give push_pages a moment to actually land before SET_PAGES checks
+    // for it -- SET_PAGES itself doesn't depend on push having landed
+    // (it just seeds file->private_data), but this makes the intent
+    // (and any early failure) visible in the log in the right order.
+    usleep(200 * 1000);
+
+    struct llm_client_op_pages set_req = {0};
+    set_req.cma_index = MVM_TZASC_CMA_INDEX;
+    set_req.entry_index = MVM_TZASC_ENTRY_INDEX;
+    set_req.size = 0; // not used by SET_PAGES, only by PUSH_PAGES
+    set_req.offset = 0;
+    if (ioctl(fd, LLM_CLIENT_IOCTL_SET_PAGES, &set_req) != 0) {
+        perror("ioctl SET_PAGES");
+        return 1;
+    }
+    printf("[mvm_ca_test] SET_PAGES OK (cma_index=%d entry_index=%d)\n",
+        MVM_TZASC_CMA_INDEX, MVM_TZASC_ENTRY_INDEX);
+
+    unsigned long channel_size = (sizeof(mvm_tz_channel_t) + 0xfffUL) & ~0xfffUL;
+    printf("[mvm_ca_test] mmap size=%#lx\n", channel_size);
+    void *addr = mmap(NULL, channel_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) { perror("mmap"); return 1; }
+    g_channel = (mvm_tz_channel_t *)addr;
+
+    printf("[mvm_ca_test] mapped OK. protocol_version=%u (want %u)\n",
+        g_channel->protocol_version, MVM_TZ_PROTOCOL_VERSION);
+    if (g_channel->protocol_version != MVM_TZ_PROTOCOL_VERSION) {
+        printf("[mvm_ca_test] FATAL: protocol_version mismatch -- mvm_ta hasn't "
+               "initialized this page (wrong entry_index?) or a real bug. Aborting, "
+               "not guessing.\n");
+        return 1;
+    }
+
+    // ─── test 1: trivial EOA->EOA native transfer (already proven this
+    // session) ───
+    uint8_t sender[20], recipient[20];
+    memset(sender, 0x11, 20);
+    memset(recipient, 0x22, 20);
+    if (run_execute_and_print("native transfer", sender, recipient, 100, nullptr, 0) != 0) {
+        return 1;
+    }
+
+    // ─── test 2 (2026-08-20, plan §9.24 follow-up): real contract call.
+    // recipient = g_contract_addr, whose GlobalStateGet response
+    // (handle_reverse_call() above) is special-cased to return real
+    // SSTORE/SLOAD/RETURN bytecode -- see that code's own comment for why
+    // this doesn't need MVM_TZ_CMD_DEPLOY. amount=0, empty calldata (the
+    // bytecode itself takes no branch on input). ───
+    if (run_execute_and_print("contract call (SSTORE/SLOAD)", sender, g_contract_addr, 0, nullptr, 0) != 0) {
+        return 1;
+    }
 
     printf("\n[mvm_ca_test] DONE\n");
+    g_relay_stop = true;
+    pthread_join(relay_tid, nullptr);
     return 0;
 }
