@@ -12,6 +12,7 @@
 #include "mvm/util.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <exception>
 #include <fstream>
@@ -43,6 +44,17 @@ template <> struct hash<intx::uint<256>> {
 } // namespace std
 
 using namespace std;
+
+// 2026-08-20 (plan §9.26/§9.27): see mvm_linker.hpp's doc comment on
+// MVM_SetDebugFileLoggingEnabled() for the full story -- saveDebugInfo()
+// below does real filesystem I/O, which the secure-world TA build has none
+// of. Defaults to true (matches every existing cgo/Go caller's behavior
+// unchanged); mvm_ta_main.cpp is the one caller that turns it off.
+static std::atomic<bool> g_debug_file_logging_enabled{true};
+
+extern "C" void MVM_SetDebugFileLoggingEnabled(bool enabled) {
+  g_debug_file_logging_enabled.store(enabled, std::memory_order_relaxed);
+}
 
 namespace mvm {
 
@@ -536,6 +548,12 @@ private:
   }
 
   void saveDebugInfo(const Transaction &tx, uint8_t op, const Context *ctxt) {
+    // 2026-08-20: see MVM_SetDebugFileLoggingEnabled()'s doc comment
+    // (mvm_linker.hpp) -- this function does real filesystem I/O, which
+    // crashes hard (not a graceful error) on the secure-world TA build.
+    if (!g_debug_file_logging_enabled.load(std::memory_order_relaxed)) {
+      return;
+    }
 
     // Thư mục lưu trữ file log
     const std::string directory = "./tx_debug/";

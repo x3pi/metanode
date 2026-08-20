@@ -72,6 +72,7 @@
 #include <cerrno>
 #include <pthread.h>
 #include <atomic>
+#include <vector>
 
 // PAGE_SIZE/ROUND_UP already come from chcore/defs.h (included via
 // chcore/syscall.h below) — don't redefine, just use them.
@@ -619,6 +620,15 @@ static void mvm_reverse_round_trip(
         abort();
     }
 
+    // 2026-08-20 (plan §9.26 follow-up): bracketing diagnostics for the
+    // NULL ptr crash investigation -- cheap, UART-only (no file I/O per
+    // CLAUDE.md), left in deliberately loud so a future run can grep for
+    // exactly which reverse-call round trip was in flight (or never even
+    // started) when the fault hit.
+    fprintf(stderr, "[mvm_ta][DIAG] round_trip ENTER cmd=%d req_header_len=%u req_blob_len=%u\n",
+        cmd, req_header_len, req_blob_len);
+    fflush(stderr);
+
     mvm_tz_spinlock_lock(&g_channel->lock);
     if (req_header_len) memcpy(g_channel->blob_region, req_header, req_header_len);
     if (req_blob_len) memcpy(g_channel->blob_region + req_header_len, req_blob, req_blob_len);
@@ -648,6 +658,10 @@ static void mvm_reverse_round_trip(
     *resp_blob_len_out = g_channel->blob_len;
     *resp_blob_out = g_channel->blob_region + hlen; // valid until the NEXT round trip reuses the region
     mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    fprintf(stderr, "[mvm_ta][DIAG] round_trip EXIT cmd=%d resp_header_len=%u resp_blob_len=%u\n",
+        cmd, hlen, *resp_blob_len_out);
+    fflush(stderr);
 }
 
 // ─────────────────── the 6 live reverse-callback shims ───────────────────
@@ -709,6 +723,9 @@ GlobalStateGet_return GlobalStateGet(unsigned char *mvmId, unsigned char *addres
             memcpy(ret.code_p, code, code_len);
         }
     }
+    fprintf(stderr, "[mvm_ta][DIAG] GlobalStateGet RETURN status=%d code_length=%d code_p=%p balance_p=%p nonce=%p\n",
+        ret.status, ret.code_length, (void *)ret.code_p, (void *)ret.balance_p, (void *)ret.nonce);
+    fflush(stderr);
     return ret;
 }
 
@@ -731,6 +748,9 @@ GetStorageValue_return GetStorageValue(unsigned char *mvmId, unsigned char *addr
         ret.value = (unsigned char *)malloc(32);
         memcpy(ret.value, resp_blob, 32);
     }
+    fprintf(stderr, "[mvm_ta][DIAG] GetStorageValue RETURN status=%d value=%p\n",
+        ret.status, (void *)ret.value);
+    fflush(stderr);
     return ret;
 }
 
@@ -790,6 +810,80 @@ Extension_return ExtensionGetOrCreateSimpleDb(unsigned char *bytes, int size, un
 }
 
 } // extern "C"
+
+// ─── MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS (plan §5b, 2026-08-16; wired up
+// 2026-08-20, plan §9.28) ───
+//
+// TA-initiated, lazy, per-address pull of previously-saved full_db_logs —
+// the TZ-mode counterpart of what cgo mode already does via
+// mvm.CallReplayFullDbLogs during node sync (executor/
+// unix_socket_handler_sync.go:1039), just reached over the reverse-
+// callback channel instead of a direct Go call. Not one of the "6 live
+// reverse-callback shims" above because it has no direct 1:1 cgo-callback
+// equivalent — it's a plain internal helper (no extern "C"/no existing
+// libmvm_linker.a call site expects this exact name), callable whenever
+// TA-side code decides a given address's Xapian-backed full-database state
+// might be stale/missing for this (freshly-booted, in-memory-only) TA
+// session.
+//
+// NOT YET auto-triggered from any interpreter code path — deciding exactly
+// where ("the first time a Xapian lookup for `address` comes up empty",
+// per the protocol header's own doc comment) requires tracing
+// xapian_handlers.cpp's actual DB-open/lookup call sites plus a
+// per-session "already fetched for this address" dedupe (to avoid a
+// reverse round trip on every single touch), which is real, separate
+// design work — see plan doc §9.28's "Việc tiếp theo". This function is
+// the reverse-call mechanics half only: issue the round trip, decode the
+// response, feed it into ReplayFullDbLogs(). Returns ReplayFullDbLogs's
+// own return value (nonzero = success per mvm_linker.cpp:1367), or 1
+// (no-op success, nothing to do) if the Host had zero entries for this
+// address — not a failure, just "nothing new since last time".
+static int mvm_fetch_and_replay_full_db_logs(const unsigned char address[20]) {
+    mvm_tz_get_latest_full_db_logs_req_t req = {0};
+    memcpy(req.address, address, 20);
+
+    // Response reuses mvm_tz_replay_full_db_logs_req_t's shape (see that
+    // struct's own doc comment in mvm_tz_protocol.h for why one struct
+    // serves both the forward bulk-push command and this reverse pull).
+    mvm_tz_replay_full_db_logs_req_t resp_hdr = {0};
+    uint32_t resp_hdr_len = 0, resp_blob_len = 0;
+    const uint8_t *resp_blob = nullptr;
+    mvm_reverse_round_trip(MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS,
+        &req, sizeof(req), nullptr, 0,
+        &resp_hdr, sizeof(resp_hdr), &resp_hdr_len, &resp_blob, &resp_blob_len);
+
+    if (resp_hdr.entry_count == 0) {
+        return 1; // nothing to replay -- success, not a failure
+    }
+
+    // Blob layout: entry_count records of [20-byte address, RAW, no length
+    // prefix][log_len (u32)][log bytes] -- matches tz_codec.go's
+    // writeAddrBytesMap exactly (encodeReplayFullDbLogsResp reuses it), NOT
+    // BlobReader::readBytes' usual "everything is length-prefixed"
+    // convention, since the address field's length is already fixed/known.
+    BlobReader r{resp_blob, resp_blob_len};
+    std::vector<LogReplayEntryC> entries;
+    entries.reserve(resp_hdr.entry_count);
+    for (uint32_t i = 0; i < resp_hdr.entry_count; i++) {
+        if (r.off + 20 > r.len) {
+            fprintf(stderr, "[mvm_ta] FATAL: full_db_logs entry %u: BlobReader underflow (address)\n", i);
+            abort();
+        }
+        const uint8_t *addr_p = r.buf + r.off; // zero-copy: stable for the
+        r.off += 20;                            // round trip's duration
+        uint32_t log_len = 0;
+        const uint8_t *log_p = r.readBytes(&log_len);
+
+        LogReplayEntryC entry;
+        entry.address_ptr = const_cast<unsigned char *>(addr_p);
+        entry.address_len = 20;
+        entry.log_data_ptr = const_cast<unsigned char *>(log_p);
+        entry.log_data_len = (int)log_len;
+        entries.push_back(entry);
+    }
+
+    return ReplayFullDbLogs(entries.data(), (int)entries.size());
+}
 
 // ───────────────────────── ExecuteResult encoding ─────────────────────────
 // Mirrors tz_codec.go's encodeExecuteResult field-for-field (see that
@@ -1023,6 +1117,17 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
 
     // MVM_B1_CONTEXT_PARAMS: not yet threaded through this protocol
     // version — pass all-NULL, same as mvm_dispatch_call.
+    //
+    // 2026-08-20 (plan §9.26 follow-up): the single most valuable
+    // diagnostic bracket for the NULL ptr crash investigation -- if
+    // "execute() CALLING" prints but "execute() RETURNED" never does, the
+    // fault is genuinely inside the interpreter itself (execute()/c_mvm),
+    // not in any of this file's own reverse-callback plumbing (which is
+    // already independently bracketed above in mvm_reverse_round_trip/
+    // GlobalStateGet/GetStorageValue).
+    fprintf(stderr, "[mvm_ta][DIAG] execute() CALLING contract=%02x%02x...%02x input_len=%d\n",
+        b_contract[0], b_contract[1], b_contract[19], (int)input_len);
+    fflush(stderr);
     ExecuteResult *rs = execute(
         (unsigned char *)b_sender, (unsigned char *)b_contract,
         (unsigned char *)b_input, (int)input_len,
@@ -1036,6 +1141,9 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
         req.is_cache != 0,
         nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
     );
+    fprintf(stderr, "[mvm_ta][DIAG] execute() RETURNED rs=%p exitReason=%d exception=%d gas_used=%llu\n",
+        (void *)rs, rs ? rs->b_exitReason : -1, rs ? rs->b_exception : -1, rs ? rs->gas_used : 0ULL);
+    fflush(stderr);
 
     mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
     freeResult(rs);
@@ -1130,6 +1238,27 @@ static void mvm_ta_run(void) {
     }
 }
 
+// 2026-08-20 (plan §9.29): a Xapian InMemory-backend hardware selftest
+// (mvm_ta_xapian_inmemory_selftest()) was added and run here -- it crashed
+// mvm_ta immediately at startup on real hardware (faulting address 0x82,
+// confirmed via UART on the very next boot). Removed rather than debugged
+// in place: getting the board back to a known-good boot was the priority
+// once the crash was confirmed NOT to be a flash/idbloader-level problem
+// (a full golden-image recovery + reflash of the exact same image still
+// crashed identically, and Linux/kernel/procmgr all boot fine up to the
+// point mvm_launcher launches mvm_ta -- the crash is inside this TA
+// binary specifically). Root cause NOT YET DETERMINED: could be the
+// selftest's own code (e.g. mvm::Address/mvm::from_big_endian usage) or a
+// genuine difference in the cross-compiled (musl/aarch64) libxapian.a's
+// InMemory backend support vs. the x86 system libxapian the equivalent
+// host-side test (scratchpad-only, not checked in) verified cleanly. See
+// memory mvm-ta-evm-interpreter-nullptr-crash's sibling notes / plan doc
+// §9.29 for the investigation to redo before re-attempting this selftest
+// on hardware -- next time, add printf bracketing INSIDE the selftest
+// body (before/after each Xapian call) rather than only around it, so a
+// crash pinpoints the exact call immediately instead of needing a second
+// round.
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[mvm_ta] starting\n");
@@ -1143,6 +1272,15 @@ int main(int argc, char **argv) {
     // core), fixed properly there with a retry loop. CPU affinity is
     // irrelevant to that fix, so removed rather than left in as dead
     // weight that implies a diagnosis we've since disproven.
+
+    // 2026-08-20 (plan §9.26/§9.27): root-caused the NULL ptr crash from a
+    // real contract-code EXECUTE -- the interpreter's saveDebugInfo() (only
+    // reached once dispatch() actually runs, i.e. never by a pure
+    // native-transfer tx) does real filesystem I/O for any tx with
+    // is_debug=1, which this TA build has none of. See
+    // MVM_SetDebugFileLoggingEnabled()'s doc comment (mvm_linker.hpp) and
+    // memory mvm-ta-evm-interpreter-nullptr-crash for the full story.
+    MVM_SetDebugFileLoggingEnabled(false);
 
     mvm_channel_init();
     mvm_ta_run();

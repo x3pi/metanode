@@ -1486,13 +1486,218 @@ transfer, không chạm contract code) vẫn chạy hoàn hảo trên CÙNG bả
 liên quan tới đường thực thi contract code, không phải hạ tầng channel/protocol.
 
 **Việc tiếp theo**:
-0. **ƯU TIÊN CAO NHẤT (mới, §9.25)**: điều tra crash NULL pointer thật trong EVM interpreter
-   khi xử lý contract code — cần debug core C++ (`libmvm_linker.a`/`c_mvm`), có thể cần thêm
-   log/breakpoint tại `faulting IP 0x3000005ed38c` tương ứng symbol nào trong `mvm_ta` (dùng
-   `addr2line`/`objdump` trên bản build **không strip** để tra ngược). Đây là blocker thật cho
-   mọi việc liên quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
-1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
+0. ~~Điều tra crash NULL pointer~~ **ĐÃ GIẢI QUYẾT — xem §9.27.**
+1. ~~Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`~~
+   **ĐÃ LÀM (§9.28)** — cơ chế reverse-call viết xong đầy đủ; auto-trigger vào interpreter vẫn
+   là việc riêng, chưa làm (xem §9.28's ghi chú).
 2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
-3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — phát hiện crash ở mục 0.
+3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — chạy đúng, xem §9.27.
 4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
-   binary thật) — xác minh RUNTIME cần đợi mục 0 (crash) được giải quyết trước.
+   binary thật) — xác minh RUNTIME giờ không còn bị chặn bởi crash, có thể làm tiếp.
+5. exercise storage/extension reverse-calls với dữ liệu THẬT (hiện tất cả đang trả về "empty
+   nhưng hợp lệ" cho 4 lệnh extension) — có thể bắt đầu vì contract execution đã chạy được thật
+   (bao gồm cả `GET_STORAGE_VALUE` cho SLOAD, xem §9.27).
+6. **MỚI (§9.28)**: thiết kế + wire auto-trigger thật cho `mvm_fetch_and_replay_full_db_logs()`
+   vào đúng điểm trong `xapian_handlers.cpp` (khi 1 địa chỉ được Xapian tra lần đầu trong phiên
+   TA, chưa có dữ liệu cục bộ) + dedupe per-session (tránh round-trip lặp lại mỗi lần chạm cùng
+   1 địa chỉ).
+
+## §9.27 — Root cause thật của §9.25/§9.26: `saveDebugInfo()` ghi file khi TA không có filesystem
+
+Tiếp tục thu hẹp bằng bracketing `fprintf(stderr,...)` trực tiếp trên hardware (không phải qua
+rebuild-để-symbolicate, đã xác nhận là ngõ cụt ở §9.26) — 4 vòng build→flash→reboot liên tiếp,
+mỗi vòng thu hẹp phạm vi crash xuống một tầng:
+
+1. Bracket trong `mvm_ta_main.cpp` (`GlobalStateGet`/`round_trip`): crash xảy ra NGAY SAU khi
+   `GlobalStateGet` trả về thành công `status=1 code_length=16` với pointer hợp lệ — tức là toàn
+   bộ wire-marshal (`BlobWriter`/`BlobReader`) hoạt động đúng, loại được giả thuyết (b) của §9.26.
+2. Bracket trong `linker/src/my_global_state.cpp`'s `MyGlobalState::get()` (nhánh `status==1`):
+   TOÀN BỘ nhánh này chạy xong sạch (in tới tận `status==1 branch RETURN`) — bug KHÔNG nằm ở đây,
+   nằm ở bước SAU khi hàm này return, bên trong `run()` (`mvm_linker.cpp`) gọi vào
+   `_Processor::run()`.
+3. Bracket trong `c_mvm/src/processor.cpp`'s `_Processor::run()`: in "about to enter dispatch
+   loop, sm_size=16" thành công, nhưng KHÔNG bao giờ thấy "dispatch loop EXITED normally" —
+   crash nằm bên trong vòng lặp dispatch, ngay ở lần gọi `dispatch()` ĐẦU TIÊN (opcode PUSH1).
+   Vòng này bị nhiễu UART nặng do 1 print debug rác từ session khác (`[MVMDBG] sys_tee_switch_req
+   entry`, thêm 2026-08-18 cho 1 điều tra khác đã đóng từ lâu, in ra ở MỌI lần SMC world-switch) —
+   silence dòng này (comment, không xoá) trong `smc.c` mới đọc được log sạch ở vòng tiếp theo.
+   Xem thêm memory `uart-diagnostic-noise-garbles-capture`.
+4. Đọc `dispatch()` (`processor.cpp`): TRƯỚC switch-case xử lý opcode, có gọi
+   `saveDebugInfo(tx, op, ctxt)` khi `tx.is_debug == true` — **đây chính là lệnh EVM đầu tiên,
+   `mvm_ca_test.cpp` luôn set `req.is_debug = 1`**. Đọc `saveDebugInfo()`: làm I/O file THẬT —
+   `std::filesystem::exists()`/`create_directories()`, `std::ofstream outFile(...)` ghi trace mỗi
+   opcode vào `./tx_debug/*.log`. **Đây chính là bug**: TA không có filesystem POSIX (đã ghi rõ
+   trong CLAUDE.md từ trước) — và đường code này CHƯA TỪNG được thực thi ở bất kỳ test nào trước
+   đó, vì native-transfer-only `EXECUTE` không bao giờ vào tới vòng lặp `dispatch()` (exec_code
+   rỗng, điều kiện vòng lặp `false` ngay từ đầu).
+
+**Fix**: thêm `MVM_SetDebugFileLoggingEnabled(bool)` (khai báo `mvm_linker.hpp`, định nghĩa
+`processor.cpp` bằng `static std::atomic<bool>` module-level, mặc định `true` — không đổi hành vi
+đường cgo/Go hiện có). `saveDebugInfo()` early-return nếu bị tắt. `mvm_ta_main.cpp`'s `main()`
+gọi hàm này với `false` ngay đầu, trước `mvm_channel_init()`/`mvm_ta_run()`.
+
+**Xác nhận trên hardware, 2 lần liên tiếp** (build→flash→reboot riêng mỗi lần): lần 1 với các
+print chẩn đoán còn nguyên, lần 2 sau khi dọn sạch print (giữ lại các print nhẹ hơn trong
+`mvm_ta_main.cpp`, xoá hết print per-opcode/per-statement trong `processor.cpp`/
+`my_global_state.cpp`) — cả 2 lần cho kết quả GIỐNG HỆT nhau:
+```
+=== ExecuteResult (contract call (SSTORE/SLOAD)) ===
+status=0 exception=0 gas_used=20229
+nonce_change_count=1 storage_change_count=1
+storage_change: addr=3333...33 key=0x00 value=0x2a
+[mvm_ca_test] DONE
+```
+`value=0x2a` (=42 decimal) khớp chính xác với bytecode test (`PUSH1 0x2a ... SSTORE`) — semantics
+đúng, không chỉ "không crash". `cmd=102` (`GET_STORAGE_VALUE`, cho SLOAD) cũng lần đầu tiên xuất
+hiện và trả lời đúng trong round-trip này. Mốc GĐ3 cốt lõi — thực thi contract code EVM thật qua
+toàn bộ pipeline TrustZone TA — **đã đạt được và xác nhận**.
+
+Chi tiết đầy đủ: memory `mvm-ta-evm-interpreter-nullptr-crash` (đã cập nhật thành RESOLVED).
+
+## §9.26 — Thu hẹp root cause của §9.25: dựng lại harness x86 in-process, loại 4 giả thuyết
+
+Thử symbolicate `faulting IP 0x3000005ed38c` bằng cách rebuild `mvm_ta` không strip trong cùng
+container — **ngõ cụt thật sự**: dù giữ nguyên `-DCMAKE_BUILD_TYPE=Release` (chỉ thêm `-g`),
+`.text` của bản rebuild lệch bản đã deploy ngay từ offset `0x24` (khác byte đầu tiên) — rebuild
+không reproducible bit-for-bit (nghi do thứ tự member trong static archive không determinist),
+nên không thể tra ngược địa chỉ crash qua rebuild. Bài học: muốn symbolicate thật, phải thêm
+`-g`/bỏ strip **ngay trong lần build gốc** (sửa `build_mvm_ta.sh`), không thể làm sau.
+
+**Hướng nhanh hơn nhiều**: dựng harness x86 in-process gọi thẳng `execute()` — không cần TA,
+không cần board, không cần cross-toolchain, vì bug nằm trong C++ thuần
+(`libmvm_linker.a`/`c_mvm`), không phải logic riêng cho chcore. Link thẳng vào
+`linker/build/lib/static/libmvm_linker.a` + `c_mvm/build/lib/static/libmvm.a` (bản x86 in-tree,
+build Release+`-g` mặc định của cgo path — không cần rebuild) + `libsecp256k1`/`libblst` x86 có
+sẵn trên máy. File: `metanode/execution/pkg/mvm/ta/host_repro/host_repro.cpp` (README riêng
+trong cùng thư mục).
+
+**Kết quả — KHÔNG tái hiện được crash**: gọi `execute()` với đúng bytecode + `GlobalStateGet`
+fabrication y hệt `mvm_ca_test.cpp`, kể cả đúng thứ tự 2 lần gọi (native transfer trước, contract
+call sau, cùng process/mvm_id) — chạy sạch dưới gdb, `exitReason=0 exception=0`. Loại được, là
+nguyên nhân DUY NHẤT:
+- Bug logic chung trong interpreter khi xử lý SSTORE/SLOAD.
+- Corruption state singleton giữa 2 lần gọi `execute()` liên tiếp cùng process.
+- Xapian (xác nhận thêm: `my_storage.cpp`'s đường SSTORE/SLOAD zero reference tới Xapian —
+  chưa từng là giả thuyết sống được sau khi kiểm tra).
+- Stack size nhỏ trên TA: `chcore/defs.h`'s `MAIN_THREAD_STACK_SIZE`/
+  `CHCORE_PTHREAD_DEFAULT_STACK_SIZE` đều resolve 8MB trên build 64-bit — cùng bậc với default
+  của glibc, không phải "TA có stack nhỏ hơn" như nghi ngờ ban đầu.
+
+**Còn lại, CHƯA test**: (a) codegen riêng của musl-gcc (GCC11 cross) tại đúng điểm crash — harness
+x86 không bắt được bug riêng của compiler cross; (b) chính code wire-marshal
+(`BlobWriter`/`BlobReader`) trong `mvm_ta_main.cpp` — harness dùng stub trả dữ liệu trực tiếp,
+bỏ qua hoàn toàn đường marshal thật đó (dù code này abort() rõ ràng khi lệch size, không phải
+kiểu lỗi im lặng NULL-deref, nên xác suất thấp hơn). Bước tiếp theo cần: hoặc thêm `printf` chẩn
+đoán quanh reverse-round-trip trong `mvm_ta_main.cpp` rồi build→flash→reboot 1 lần nữa trên board
+thật, hoặc disassemble trực tiếp object cross-build tại điểm crash — không việc nào làm tiếp
+được chỉ bằng x86.
+
+## §9.28 — Viết cơ chế reverse-call cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (mục 1 cũ)
+
+Go-side codec cho cmd này (`encodeGetLatestFullDbLogsReq`/`decodeGetLatestFullDbLogsReq` +
+`encodeReplayFullDbLogsResp`/`decodeReplayFullDbLogsResp`, `tz_codec.go`) hoá ra **đã viết sẵn
+từ trước** (2026-08-16), kèm test round-trip (`tz_codec_full_db_logs_test.go`) — không cần làm
+lại. Phần thật sự thiếu: **TA-side handler** (`mvm_ta_main.cpp`) chưa hề gọi tới cmd này (0 kết
+quả grep) và `mvm_ca_test.cpp` cũng chưa xử lý (sẽ rơi vào nhánh FATAL nếu có ai gửi).
+
+**Đã viết**: `mvm_fetch_and_replay_full_db_logs(const unsigned char address[20])` trong
+`mvm_ta_main.cpp` — build request (`mvm_tz_get_latest_full_db_logs_req_t`, chỉ 20-byte address),
+gửi round trip, decode response (tái dùng shape `mvm_tz_replay_full_db_logs_req_t`: header
+`entry_count` + blob `entry_count` bản ghi `[20-byte address RAW, không length-prefix][log_len
+u32][log bytes]` — khớp chính xác `tz_codec.go`'s `writeAddrBytesMap`, KHÔNG dùng quy ước
+length-prefix-cho-mọi-field thông thường của `BlobReader::readBytes`), dựng mảng
+`LogReplayEntryC[]`, gọi `ReplayFullDbLogs()` — y hệt cách cgo mode dùng `mvm.CallReplayFullDbLogs`
+lúc node sync. Trả về giá trị `ReplayFullDbLogs` (khác 0 = thành công), hoặc `1` (thành công,
+không có gì để replay) nếu `entry_count==0` — KHÔNG phải lỗi.
+
+Thêm case tương ứng trong `mvm_ca_test.cpp`'s `handle_reverse_call()` cho cmd=107: trả về
+`entry_count=0` (hợp lệ, giống style 4 case extension stub trước đó).
+
+**Cố ý CHƯA làm** (khác các reverse-call khác): auto-trigger tự động vào interpreter. Comment
+protocol header mô tả điều kiện gọi là "lần đầu trong phiên TA mà 1 tra cứu Xapian cho địa chỉ
+này ra rỗng" — cần lần theo đúng chỗ trong `xapian_handlers.cpp` (2096 dòng, DB Xapian
+per-address được mở/tra ở đâu) + thêm dedupe theo phiên (tránh gọi lại mỗi lần chạm cùng địa
+chỉ) — đây là quyết định thiết kế thật, không nên đoán bừa. Hàm viết xong hoàn toàn ĐÚNG giao
+thức và sẵn sàng gọi, chỉ chưa có nơi gọi.
+
+**Xác nhận build**: compile sạch cả 2 phía (musl-gcc cross cho `mvm_ta_main.cpp`, thật trong
+container; `aarch64-linux-gnu-g++` cho `mvm_ca_test.cpp`, local). Link đầy đủ `mvm_ta` (dùng lại
+`libmvm_linker.a`/`libmvm.a` không đổi từ build trước) ra **md5 giống hệt bit-for-bit** bản đang
+chạy trên board (`d76124f4f8878c17bd21ea43dd5b9f47`) — vì hàm mới là `static`, chưa ai gọi, GCC
+`-O2` loại bỏ hoàn toàn (dead code elimination thật, không phải suy đoán). Do đó **không cần
+flash lại** — board hiện tại đã chạy code tương đương tuyệt đối. Không cần vòng build→flash→
+reboot nào cho thay đổi này.
+
+### §9.28 follow-up (cùng ngày) — Storage reverse-call với dữ liệu THẬT (mục 5 "Việc tiếp theo")
+
+Được hỏi phạm vi trước khi làm (5 lệnh storage/extension đòi hỏi mức công sức rất khác nhau —
+extension cần bytecode CALL + ABI encode/decode thật + `CALL_GET_API` cần gọi HTTP thật ra
+ngoài) — chọn làm `GET_STORAGE_VALUE` trước (an toàn, không network, không ABI), 4 lệnh
+extension để riêng cho vòng sau khi đã rõ `argument_encode`'s format thật.
+
+Thêm địa chỉ test thứ 3, `g_storage_test_addr` (0x44 lặp 20 lần), bytecode bare SLOAD (không
+SSTORE trước — khác hẳn test 2's SSTORE-rồi-SLOAD-trong-cùng-tx, vốn không bao giờ rời khỏi
+cache in-process của `mvm_ta`, không thật sự exercise round-trip). `GetStorageValue` case trong
+`mvm_ca_test.cpp` giờ check `(address, key)`: khớp `(g_storage_test_addr, slot 0)` → trả
+`status=0` (SUCCESS) kèm giá trị thật `0x1337`; mọi `(address,key)` khác giữ nguyên `NOT_FOUND`
+(không phá 2 test cũ). Cũng sửa `run_execute_and_print()` để in luôn RETURN output bytes (trước
+đây parse rồi bỏ, `(void)output_len`) — cần thiết để verify bằng mắt giá trị trả về đúng.
+
+**Xác nhận trên hardware**: `GetStorageValue: returning REAL value 0x1337` → RETURN output =
+`...1337` khớp chính xác. 2 test cũ (native transfer, SSTORE/SLOAD) vẫn `status=0 exception=0`
+không đổi — không regression. Chỉ cần build lại `mvm_ca_test` (aarch64-linux-gnu-g++, không đụng
+`mvm_ta`) + push qua `hdc` + chạy trên board đang chạy sẵn — **không cần flash/reboot** vì thay
+đổi hoàn toàn nằm ở phía test tool, không phải TA.
+
+## §9.29 — Fix Xapian InMemory backend cho TA (chuẩn bị cho auto-trigger §9.28 mục 6)
+
+Trước khi wire auto-trigger cho `mvm_fetch_and_replay_full_db_logs()`, phát hiện `XapianManager`
+chưa từng thực sự hỗ trợ chạy trong TA: constructor luôn mở DB qua path thật trên đĩa
+(`Xapian::WritableDatabase(path, DB_CREATE_OR_OPEN)`), không có nhánh InMemory nào trong code
+ứng dụng thật (`grep DB_BACKEND_INMEMORY` ra 0 kết quả trong `execution/`) — "InMemory đã proven"
+ghi nhận 2026-08-16 chỉ là smoke test độc lập, chưa nối vào `XapianManager` thật.
+
+**Fix 3 lớp** (`xapian_manager.cpp`/`.h`, `my_extension/utils.h`/`.cpp`):
+1. Constructor: `openXapianDb()` chọn `Xapian::WritableDatabase(std::string(),
+   DB_BACKEND_INMEMORY)` khi `IsXapianBasePathEmpty()` (TA không bao giờ gọi `SetXapianBasePath`),
+   giữ nguyên nhánh path-based khi có base path (cgo/Linux thường).
+2. `acquireSearchDb()`/`acquireSimpleReadDb()`: pool nhiều handle đọc đồng thời (mở lại cùng
+   path) không có ý nghĩa với InMemory (không có path) và cũng không cần (TA tuần tự hoá, không
+   bao giờ đọc đồng thời) — bypass thẳng `&db` trong chế độ InMemory.
+3. `revertUncommittedChanges()`: **phát hiện kiến trúc cứng, xác nhận qua đọc source Xapian thật**
+   — `InMemoryDatabase::commit()`/`::cancel()` đều là no-op tuyệt đối, `close()` xoá sạch dữ liệu
+   vĩnh viễn — cách revert cũ (đóng+mở lại từ đĩa) KHÔNG THỂ áp dụng cho InMemory bằng API Xapian.
+   Thêm `undo_snapshot_` (pre-image từng docid, capture lười lần đầu chạm trong `replay_log()`),
+   revert InMemory tự tay replay ngược lại thay vì đóng/mở.
+
+**Xác nhận trên x86 rất kỹ** (cả 2 chế độ trong 1 harness, `xapian_inmemory_test.cpp`,
+scratchpad-only): InMemory mode (open/ghi/đọc-trước-commit/revert-xoá-đúng/commit-rồi-revert-vẫn-
+còn — pass hết) VÀ disk mode (xác nhận, bằng cách so với code GỐC qua `git stash`, rằng 1 hành vi
+"get_data() trước commit không thấy gì qua reader pool" là đặc điểm CÓ SẴN từ trước của Glass
+backend, không phải regression).
+
+**Trên hardware thật: THẤT BẠI, chưa root-cause, đã gỡ bỏ**. Thêm self-test tạm
+(`mvm_ta_xapian_inmemory_selftest()`, cùng logic x86) chạy lúc TA khởi động — **crash `mvm_ta`
+NGAY LẬP TỨC mỗi lần boot** (`faulting address 0x82`, IP nằm ở vùng nhớ `0x400000062000-
+4000000d0000` — KHÁC hẳn mọi crash khác trong session này, vốn luôn `0x300...`). Ban đầu tưởng
+nghiêm trọng hơn nhiều (board im lặng hoàn toàn UART/HDMI đen sau lần flash đầu) — chạy
+`recover-golden-image.sh` + reflash lại ĐÚNG bản đó tái hiện crash y hệt, sạch sẽ (xác nhận đây
+là bug thật, xác định, không phải hỏng flash/idbloader; lần "im lặng hoàn toàn" trước đó hoá ra
+là sự cố rời rạc không liên quan — lần power-cycle NGAY SAU đó boot U-Boot/kernel/Linux bình
+thường, chỉ riêng `mvm_ta` crash). **Chưa xác định được root cause** — gỡ bỏ hẳn self-test (hàm +
+call site + include tạm) để đưa board về trạng thái ổn định đã biết thay vì tiếp tục điều tra
+trong cùng phiên; xác nhận 3 test cũ (native transfer, SSTORE/SLOAD, GET_STORAGE_VALUE thật) vẫn
+chạy đúng với fix 3-lớp còn nguyên, chỉ bỏ self-test.
+
+**Phát hiện phụ**: 6 tiến trình `cat /dev/ttyUSB0` cũ chồng chéo từ các lần capture trước (chưa
+bao giờ bị kill) từng làm 1 lần capture tưởng "board im lặng hoàn toàn" — thật ra chỉ là các
+process cũ tranh nhau đọc byte. `pkill -f "cat /dev/ttyUSB0"` trước MỌI lần bắt log mới. Xem
+memory `zombie-uart-readers-steal-bytes`.
+
+Chi tiết đầy đủ: memory `xapian-inmemory-ta-backend-fix`.
+
+**Việc tiếp theo cho fix Xapian**: KHÔNG coi fix này là "đã xác nhận trên hardware" — core fix
+(constructor/pool/revert) tin là đúng (khớp x86 tuyệt đối) nhưng CHƯA có bằng chứng thật trên
+musl/aarch64. Trước khi thử lại self-test: bracket TỪNG lệnh gọi Xapian riêng lẻ (không chỉ
+trước/sau cả hàm), và cân nhắc khả năng lỗi nằm ở chính `mvm::Address`/`mvm::from_big_endian`
+(chưa từng dùng đúng shape này trên TA trước đây) chứ không phải Xapian.

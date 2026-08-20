@@ -19,6 +19,7 @@
 #include <string>     // Needed for std::string
 #include <vector>     // Needed for std::vector
 #include <functional> // Needed for std::hash
+#include <optional>   // Needed for undo_snapshot_ (InMemory-mode revert, see plan §9.29)
 #include <mvm/address.h>
 #include "xapian_log.h" // <-- Include file định nghĩa LogEntry
 class XapianRegistry; // Forward declaration
@@ -176,6 +177,21 @@ private:
   void replayBufferToDocument(Xapian::Document& doc, const XapianLog::ComprehensiveLog& buffer);
 
   bool commitTransaction(unsigned char *txHashes, int numHashes);
+
+  // 2026-08-20 (plan §9.29): InMemory-mode-only undo tracking for
+  // revertUncommittedChanges() -- see that function's own doc comment for
+  // why this exists (Xapian::InMemory's commit()/cancel() are BOTH hard
+  // no-ops, confirmed via Xapian's own backends/inmemory/
+  // inmemory_database.cc source, so the disk-mode close()+reopen trick
+  // cannot apply there at all). Keyed by normalized virtual docid string
+  // (matching replay_log()'s own normalize_docid); std::nullopt means "did
+  // not exist before this uncommitted batch" (so revert must delete it,
+  // not restore it). Populated lazily, once per docid, on first touch
+  // since the last commit/revert (see replay_log()'s get_or_load_doc
+  // lambda); cleared on both commit and revert. Never populated (and
+  // never consulted) in cgo/disk mode -- zero behavior/overhead change
+  // there.
+  std::map<std::string, std::optional<Xapian::Document>> undo_snapshot_;
 };
 
 #endif // XAPIAN_MANAGER_H

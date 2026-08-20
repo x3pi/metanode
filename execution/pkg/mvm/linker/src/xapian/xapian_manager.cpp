@@ -117,11 +117,32 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
     }
 }
 
+// 2026-08-20 (plan §9.29): opens the real on-disk Glass-backed database
+// (cgo mode, base path set from config.json) OR an in-memory-only
+// Xapian::InMemory database (TA mode, no base path -- no filesystem at
+// all, confirmed via the exact same crash class as the saveDebugInfo()
+// fix, see memory mvm-ta-evm-interpreter-nullptr-crash). Both branches
+// return a Xapian::WritableDatabase (InMemory::open()'s own declared
+// return type), so this can sit directly in the mem-initializer-list
+// below unchanged. See IsXapianBasePathEmpty()'s own doc comment
+// (my_extension/utils.h) for why checking this at runtime, not a
+// build-time flag, is correct here.
+static Xapian::WritableDatabase openXapianDb(const mvm::Address &addr,
+                                             const std::string &db_name) {
+  if (mvm::IsXapianBasePathEmpty()) {
+    // Equivalent to (deprecated) Xapian::InMemory::open() -- calling the
+    // underlying constructor directly avoids -Wdeprecated-declarations.
+    return Xapian::WritableDatabase(std::string(), Xapian::DB_BACKEND_INMEMORY);
+  }
+  return Xapian::WritableDatabase(mvm::createFullPath(addr, db_name).string(),
+                                  Xapian::DB_CREATE_OR_OPEN);
+}
+
 // Constructor của XapianManager
 XapianManager::XapianManager(const std::string &db_name,
                              const mvm::Address &addr)
-    : db(mvm::createFullPath(addr, db_name).string(),
-         Xapian::DB_CREATE_OR_OPEN), // Mở hoặc tạo database
+    : db(openXapianDb(addr, db_name)), // Mở hoặc tạo database (path-based
+                                       // hoặc InMemory, xem openXapianDb)
       address(addr),                 // Lưu địa chỉ liên kết
       last_access_time(
           std::chrono::steady_clock::now()), // Khởi tạo thời gian truy cập
@@ -171,6 +192,23 @@ XapianManager::~XapianManager() {
 // cho caller một Database đã stale so với dữ liệu đã commit trên đĩa.
 Xapian::Database* XapianManager::acquireSearchDb()
 {
+    // 2026-08-20 (plan §9.29): the pool below exists to hand out
+    // independent read-only Database handles re-opened from the same
+    // on-disk path, for concurrent search from multiple threads. Neither
+    // half of that makes sense for Xapian::InMemory (no path to reopen
+    // from) -- and the TA's own execution model never has concurrent
+    // interpreter threads anyway (single serialized dispatch loop, see
+    // note/tee_dual_mode_execution_plan.md's "Hệ quả thiết kế then chốt"
+    // #3), so there's no real pooling need to replace, just bypass. `db`
+    // (WritableDatabase, IS-A Database) is used directly -- safe since
+    // there is never more than one caller in flight in this mode.
+    // releaseSearchDb() already no-ops safely on a pointer it doesn't
+    // recognize (it just doesn't find a matching pool slot), so no paired
+    // change is needed there.
+    if (mvm::IsXapianBasePathEmpty()) {
+        return &db;
+    }
+
     std::unique_lock<std::mutex> lock(search_pool.pool_mutex);
     bool acquired = search_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
         for (size_t i = 0; i < search_pool.in_use.size(); ++i)
@@ -241,6 +279,12 @@ void XapianManager::releaseSearchDb(Xapian::Database* db_returned)
 
 Xapian::Database* XapianManager::acquireSimpleReadDb()
 {
+    // Same InMemory bypass as acquireSearchDb() above -- see that
+    // function's comment for the full reasoning.
+    if (mvm::IsXapianBasePathEmpty()) {
+        return &db;
+    }
+
     std::unique_lock<std::mutex> lock(simple_read_pool.pool_mutex);
     bool acquired = simple_read_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
         for (size_t i = 0; i < simple_read_pool.in_use.size(); ++i)
@@ -738,6 +782,11 @@ bool XapianManager::commit_changes() {
     db.commit(); // Thực hiện commit Xapian (áp dụng cả comprehensive_log và replay_log)
     comprehensive_log.xapian_doc_logs.clear(); // Xóa các log đã staged sau khi commit thành công
     has_uncommitted_writes.store(false, std::memory_order_release);
+    // 2026-08-20 (plan §9.29): these writes are now permanent (db.commit()
+    // succeeded) -- the InMemory-mode undo snapshot for them is no longer
+    // needed. No-op (empty map) in cgo/disk mode. See
+    // revertUncommittedChanges()'s own doc comment for the full picture.
+    undo_snapshot_.clear();
   } catch (const Xapian::Error &e) {
     std::cerr << "[Xapian Commit ERROR] Xapian::Error in commit_changes: " << e.get_msg() << std::endl;
     return false;
@@ -943,8 +992,33 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
         return "0x" + id;
     };
 
+    // 2026-08-20 (plan §9.29): InMemory-mode-only pre-image capture for
+    // revertUncommittedChanges() -- see undo_snapshot_'s own doc comment
+    // (xapian_manager.h) for the full design. Cheap early-return in
+    // cgo/disk mode (the common case), so zero added cost there.
+    const bool undo_tracking_needed = mvm::IsXapianBasePathEmpty();
+    auto capture_undo_if_needed = [&](const std::string& nid) {
+        if (!undo_tracking_needed) return;
+        if (undo_snapshot_.find(nid) != undo_snapshot_.end()) return; // already captured this batch
+        Xapian::docid did = resolveVirtualDocId(nid);
+        if (did > 0) {
+            try {
+                undo_snapshot_[nid] = clone_document(db.get_document(did));
+                return;
+            } catch (const Xapian::DocNotFoundError&) {
+                // fall through -- treat as "did not exist"
+            } catch (const std::exception&) {
+                // fall through -- best-effort: treat as "did not exist"
+                // rather than skip tracking it entirely (leaving a gap
+                // revert couldn't undo would be worse)
+            }
+        }
+        undo_snapshot_[nid] = std::nullopt; // did not exist before this batch
+    };
+
     auto get_or_load_doc = [&](const std::string& v_docid) -> Xapian::Document& {
         std::string nid = normalize_docid(v_docid);
+        capture_undo_if_needed(nid);
         auto it = modified_docs.find(nid);
         if (it != modified_docs.end()) {
             return it->second;
@@ -987,6 +1061,7 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
             } else if (entry.op == XapianLog::Operation::DEL_DOC) {
                 auto data = std::get<XapianLog::DelDocData>(entry.data);
                 std::string nid = normalize_docid(data.docid);
+                capture_undo_if_needed(nid); // doesn't go through get_or_load_doc
                 modified_docs.erase(nid);
                 deleted_docs.insert(nid);
             } else if (entry.op == XapianLog::Operation::ADD_VALUE) {
@@ -1069,8 +1144,46 @@ bool XapianManager::revertUncommittedChanges() {
     comprehensive_log.xapian_doc_logs.clear();
     has_uncommitted_writes.store(false, std::memory_order_release);
 
-    // 2. Đóng và mở lại database để hủy các thay đổi chưa commit trong bộ nhớ
-    // Xapian
+    if (mvm::IsXapianBasePathEmpty()) {
+      // 2026-08-20 (plan §9.29): Xapian::InMemory's commit()/cancel() are
+      // BOTH hard no-ops -- confirmed by reading Xapian's own source
+      // (backends/inmemory/inmemory_database.cc: "We implicitly commit
+      // each modification right away, so nothing to do here" for both).
+      // So the close()+reopen-from-disk trick below isn't just
+      // inconvenient for InMemory, it's architecturally impossible:
+      // InMemoryDatabase::close() destroys ALL data unconditionally
+      // (there is no "disk" underneath to reload from -- close() clears
+      // every internal map and marks the db closed for good). Manually
+      // replay the pre-image snapshot captured by replay_log()'s
+      // capture_undo_if_needed() instead: restore what existed before
+      // this uncommitted batch, delete what didn't exist before it. See
+      // undo_snapshot_'s own doc comment (xapian_manager.h) for the full
+      // design and how/when it's populated.
+      for (auto &entry : undo_snapshot_) {
+        const std::string &nid = entry.first;
+        std::optional<Xapian::Document> &pre_image = entry.second;
+        Xapian::docid did = resolveVirtualDocId(nid);
+        if (pre_image.has_value()) {
+          if (did > 0) {
+            db.replace_document(did, *pre_image);
+          } else {
+            // Existed before this batch, but resolveVirtualDocId can't
+            // find it now -- shouldn't happen (nothing removes a doc's
+            // own "Q<id>" term without also deleting the doc itself), but
+            // re-add rather than silently drop real pre-existing data if
+            // it ever does.
+            db.add_document(*pre_image);
+          }
+        } else if (did > 0) {
+          db.delete_document(did); // did not exist before this batch
+        }
+      }
+      undo_snapshot_.clear();
+      return true;
+    }
+
+    // 2. cgo/disk mode (unchanged): đóng và mở lại database để hủy các
+    // thay đổi chưa commit trong bộ nhớ Xapian
     db.close();                      // Đóng kết nối hiện tại
     db = Xapian::WritableDatabase(); // Gán bằng đối tượng rỗng để giải phóng
                                      // tài nguyên cũ
