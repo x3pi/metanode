@@ -1815,3 +1815,36 @@ VALID`, RETURN = 32 byte ABI `bool(true)`.
 
 **Còn lại**: EXTRACT_JSON_FIELD (cần JSON parser thật phía CA-test); CALL_GET_API (để sau, chưa
 cần HTTP thật theo yêu cầu người dùng).
+
+### §9.31 follow-up 2 (cùng ngày) — EXTRACT_JSON_FIELD extension reverse-call với dữ liệu THẬT
+
+Lệnh thứ 3 trong 4 lệnh extension. Khác 2 lệnh trước: `extension.go`'s `ExtensionExtractJsonField`
+thật KHÔNG dùng go-ethereum's `abi` package (không verify selector qua `MethodById`) — chỉ tự
+decode qua `argument_encode.DecodeStringInput(bCallData[4:], idx)`, nhưng encoding dây vẫn đúng
+chuẩn ABI string (offset+length+pad) hệt các lệnh khác — xác nhận qua đọc source Go thật, không
+đoán.
+
+**Cách làm**:
+1. Địa chỉ contract thứ 5 (`g_json_test_addr`, 0x77×20) — cùng mẫu forwarder, target precompile
+   258 (`EXTRACT_JSON_FIELD_EXTENSION`).
+2. `json_extract_flat_field()` — JSON extractor tối giản tự viết (không dùng thư viện ngoài,
+   khớp chủ trương KISS/YAGNI của dự án cho 1 test tool chẩn đoán): chỉ parse object JSON phẳng
+   1 tầng, format giá trị đúng quy tắc Go thật (`fmt.Sprintf("%v", ...)`: string trả nguyên văn
+   không dấu ngoặc kép, bool → `"1"`/`"0"` theo đúng remap tường minh trong `extension.go`, số →
+   literal text). Không phải parser JSON tổng quát (không hỗ trợ nested/array — đúng phạm vi test
+   này cần).
+3. `abi_encode_bytes_ret()` mới — giống `abi_encode_string_ret` của SimpleDb nhưng KHÔNG giới hạn
+   32 byte (JSON blob có thể dài hơn 1 word) — khớp chính xác `argument_encode.EncodeSingleString`
+   thật (`encoder.go`: offset=32, length, data).
+4. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD`: decode 2 arg qua
+   `abi_decode_bytes_args` (không phải `abi_decode_string_args` — JSON test string 40 byte, vượt
+   giới hạn 32 byte của bản dành cho SimpleDb), KHÔNG gatekeep theo selector (khớp hành vi Go thật
+   — hàm thật cũng không check).
+
+**Xác nhận trên hardware, không cần reboot/flash**: reverse call cmd=104 blob_len=228, input
+`json={"status":"ok","value":123,"flag":true} field=value`, trích đúng `"123"`, RETURN = 96 byte
+ABI string offset(0x20)+length(3)+`"123"` (hex `313233`).
+
+**Còn lại duy nhất**: CALL_GET_API — để sau theo đúng yêu cầu người dùng (chưa cần HTTP thật).
+Cả 3/4 lệnh extension còn lại (GET_OR_CREATE_SIMPLE_DB, BLST, EXTRACT_JSON_FIELD) đã có dữ liệu
+thật, xác nhận trên hardware.

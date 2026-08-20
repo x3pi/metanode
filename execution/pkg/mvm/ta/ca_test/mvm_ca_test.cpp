@@ -438,6 +438,103 @@ static bool blst_verify_sign(const std::vector<uint8_t> &pk,
     return r == BLST_SUCCESS;
 }
 
+// ─── EXTRACT_JSON_FIELD (2026-08-20, plan §9.31 follow-up: third of the
+// 4 extension reverse-calls with real data) ───
+//
+// Same calldata-forwarder pattern as g_simpledb_forwarder_code/
+// g_blst_forwarder_code, targeting precompile 258 (0x0102 =
+// EXTRACT_JSON_FIELD_EXTENSION). A FIFTH synthetic contract address.
+static const uint8_t g_json_test_addr[20] = {
+    0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,
+    0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77};
+static const uint8_t g_json_forwarder_code[] = {
+    0x36, 0x60,0x00, 0x60,0x00, 0x37,
+    0x60,0x00, 0x60,0x00,
+    0x36, 0x60,0x00, 0x60,0x00,
+    0x61,0x01,0x02,                             // PUSH2 0x0102 (addr=258=EXTRACT_JSON_FIELD_EXTENSION)
+    0x5a, 0xf1, 0x50,
+    0x3d, 0x60,0x00, 0x60,0x00, 0x3e,
+    0x3d, 0x60,0x00, 0xf3
+};
+
+// extractJsonField(string,string) -- extension.go's real
+// ExtensionExtractJsonField doesn't verify this selector against an ABI
+// (it just does bCallData[4:], any 4-byte prefix works), so this is
+// picked for realism (real `cast sig` value) rather than something the
+// Host actually checks -- matches this test's own stated policy of using
+// real tooling over invented values wherever one exists.
+static const uint32_t EXTRACT_JSON_FIELD_SELECTOR = 0x8da776da;
+
+// Single-value ABI "bytes"/"string" return encoder (offset+length+
+// right-padded data, NO 32-byte cap unlike abi_encode_string_ret above --
+// a JSON blob or extracted field can exceed one word). Matches
+// argument_encode.EncodeSingleString's real byte layout exactly
+// (encoder.go: start=32, length, then the raw bytes).
+static uint32_t abi_encode_bytes_ret(const std::vector<uint8_t> &data, uint8_t *out) {
+    uint32_t len = (uint32_t)data.size();
+    uint32_t padded = ((len + 31) / 32) * 32;
+    abi_write_u256_be(out, 32);
+    abi_write_u256_be(out + 32, len);
+    memcpy(out + 64, data.data(), len);
+    if (padded > len) memset(out + 64 + len, 0, padded - len);
+    return 64 + padded;
+}
+
+// Minimal, scope-limited JSON field extractor -- parses a FLAT top-level
+// JSON object ({"key":"value","key2":123,"key3":true,...}, no nesting,
+// no unicode escapes) and returns the named field's value formatted the
+// same way extension.go's real ExtractJsonField does for a scalar value:
+// string -> raw (unquoted) text; bool -> "1"/"0" (that function's own
+// explicit true/false remap); number/null -> its literal JSON text
+// (matches Go's fmt.Sprintf("%v", ...) for a JSON-unmarshaled number,
+// which prints an integer-valued float64 without a decimal point). NOT a
+// general JSON parser -- this test only ever feeds it well-formed flat
+// JSON, so it doesn't replicate extension.go's array-JSON/nested-object
+// fallback branches.
+static bool json_extract_flat_field(const std::string &json,
+    const std::string &field, std::string &out) {
+    size_t i = json.find('{');
+    if (i == std::string::npos) return false;
+    i++;
+    size_t n = json.size();
+    while (i < n) {
+        while (i < n && (json[i] == ' ' || json[i] == '\n' || json[i] == '\t' || json[i] == ',')) i++;
+        if (i >= n || json[i] == '}') break;
+        if (json[i] != '"') return false;
+        i++;
+        size_t key_start = i;
+        while (i < n && json[i] != '"') i++;
+        if (i >= n) return false;
+        std::string key = json.substr(key_start, i - key_start);
+        i++; // closing quote
+        while (i < n && (json[i] == ' ' || json[i] == ':')) i++;
+        bool is_string_value = false;
+        std::string value_str;
+        if (i < n && json[i] == '"') {
+            is_string_value = true;
+            i++;
+            size_t val_start = i;
+            while (i < n && json[i] != '"') i++; // no escape handling
+            if (i >= n) return false;
+            value_str = json.substr(val_start, i - val_start);
+            i++; // closing quote
+        } else {
+            size_t val_start = i;
+            while (i < n && json[i] != ',' && json[i] != '}') i++;
+            value_str = json.substr(val_start, i - val_start);
+            while (!value_str.empty() && (value_str.back() == ' ' || value_str.back() == '\n')) value_str.pop_back();
+        }
+        if (key == field) {
+            if (is_string_value) out = value_str;
+            else if (value_str == "true") out = "1";
+            else if (value_str == "false") out = "0";
+            else out = value_str;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -471,6 +568,9 @@ static void handle_reverse_call(void) {
         } else if (header_len >= 40 && memcmp(req_address, g_blst_test_addr, 20) == 0) {
             code = g_blst_forwarder_code;
             code_len = sizeof(g_blst_forwarder_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_json_test_addr, 20) == 0) {
+            code = g_json_forwarder_code;
+            code_len = sizeof(g_json_forwarder_code);
         }
         if (code) {
             // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
@@ -537,28 +637,69 @@ static void handle_reverse_call(void) {
     // commands, so a future test exercising contract code (not just a pure
     // EOA->EOA native transfer) doesn't hit the FATAL default case. None of
     // these are exercised by THIS test's own transaction (no code at either
-    // synthetic address), so each returns the documented "no result"
-    // shape -- a real, correctly-formed response, just an empty one -- for
-    // now, rather than any speculative fabricated data (matches this
+    // synthetic address), so this returns the documented "no result"
+    // shape -- a real, correctly-formed response, just an empty one --
+    // for now, rather than any speculative fabricated data (matches this
     // function's own stated policy: fail loud/return "not found" over
-    // guessing). Filling in a REAL local HTTP client / JSON parser here
-    // is future work once an actual contract-calling test needs one of
-    // these to return real data (BLST got real data 2026-08-20, plan
-    // §9.31 follow-up -- see its own case below).
-    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
-    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD: {
-        // No fixed header for these 2 (mvm_tz_protocol.h line ~512) --
-        // response is just the raw output bytes verbatim, length via the
-        // channel's own blob_len field (NOT length-prefixed -- confirmed
-        // 2026-08-20, plan §9.31, by reading mvm_reverse_round_trip's
-        // actual response handling in mvm_ta_main.cpp, not the older doc
-        // comment here which wrongly implied a prefix). The true
+    // guessing). Filling in a REAL HTTP client here is future work, left
+    // for last on purpose (BLST/EXTRACT_JSON_FIELD/GET_OR_CREATE_SIMPLE_DB
+    // all got real data first, 2026-08-20, plan §9.31 -- see their own
+    // cases below/above).
+    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API: {
+        // No fixed header (mvm_tz_protocol.h line ~512) -- response is
+        // just the raw output bytes verbatim, length via the channel's
+        // own blob_len field (NOT length-prefixed -- confirmed 2026-08-20,
+        // plan §9.31, by reading mvm_reverse_round_trip's actual response
+        // handling in mvm_ta_main.cpp, not the older doc comment here
+        // which wrongly implied a prefix). The true
         // Extension_return{nullptr,0} failure case is resp_blob_len=0,
         // full stop -- a previous version of this stub wrote a 4-byte
         // all-zero blob instead (harmless only because nothing exercised
-        // these cmds yet).
+        // this cmd yet).
         resp_hdr_len = 0;
         resp_blob_len = 0;
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD: {
+        // 2026-08-20 (plan §9.31 follow-up): real data, third of the 4
+        // extension reverse-calls (see g_json_test_addr/
+        // json_extract_flat_field's own comments above). Blob = raw ABI
+        // calldata for extractJsonField(string,string) -- same shape
+        // extension.go's real ExtensionExtractJsonField decodes via
+        // argument_encode.DecodeStringInput(bCallData[4:], idx) (NOT
+        // go-ethereum's abi package for this one, but the wire encoding
+        // is identical standard ABI string encoding either way).
+        resp_hdr_len = 0;
+        resp_blob_len = 0; // default: Extension_return{nullptr,0}
+        if (blob_len >= 4) {
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::vector<uint8_t>> byte_args;
+            // extension.go's real handler never checks the selector
+            // (just skips 4 bytes) -- match that here rather than
+            // gatekeeping on EXTRACT_JSON_FIELD_SELECTOR, so this stays
+            // a faithful stand-in for the real Host.
+            if (abi_decode_bytes_args(args, args_len, 2, byte_args)) {
+                std::string json((const char*)byte_args[0].data(), byte_args[0].size());
+                std::string field((const char*)byte_args[1].data(), byte_args[1].size());
+                std::string value;
+                if (json_extract_flat_field(json, field, value)) {
+                    resp_blob_len = abi_encode_bytes_ret(
+                        std::vector<uint8_t>(value.begin(), value.end()), resp_buf);
+                    printf("[mvm_ca_test] ExtractJsonField: json=%s field=%s -> \"%s\"\n",
+                        json.c_str(), field.c_str(), value.c_str());
+                } else {
+                    printf("[mvm_ca_test] ExtractJsonField: field \"%s\" not found in json=%s "
+                        "-- returning empty (Extension_return{nullptr,0})\n",
+                        field.c_str(), json.c_str());
+                }
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] ExtractJsonField: malformed calldata (blob_len=%u) "
+                    "-- returning empty (Extension_return{nullptr,0})\n", blob_len);
+                fflush(stdout);
+            }
+        }
         break;
     }
     case MVM_TZ_RCMD_EXTENSION_BLST: {
@@ -990,6 +1131,26 @@ int main(void) {
         };
         uint32_t len = abi_encode_bytes_args(BLST_VERIFY_SIGN_SELECTOR, args, calldata);
         if (run_execute_and_print("blst verifySign", sender, g_blst_test_addr,
+                0, calldata, len) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 7 (2026-08-20, plan §9.31 follow-up): EXTRACT_JSON_FIELD
+    // extension reverse-call with REAL data -- g_json_test_addr's
+    // forwarder calls extractJsonField(json, "value") against a flat
+    // JSON object, expecting the numeric field's literal text back.
+    // Expect RETURN to ABI-decode to "123" (json_extract_flat_field's own
+    // number-formatting rule: literal JSON text, no quotes). ───
+    {
+        static uint8_t calldata[512];
+        const std::string json_str = "{\"status\":\"ok\",\"value\":123,\"flag\":true}";
+        std::vector<std::vector<uint8_t>> args = {
+            std::vector<uint8_t>(json_str.begin(), json_str.end()),
+            std::vector<uint8_t>({'v','a','l','u','e'}),
+        };
+        uint32_t len = abi_encode_bytes_args(EXTRACT_JSON_FIELD_SELECTOR, args, calldata);
+        if (run_execute_and_print("extract json field", sender, g_json_test_addr,
                 0, calldata, len) != 0) {
             return 1;
         }
