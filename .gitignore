@@ -483,3 +483,9 @@ deploy/systemd/genesis.json
 note/commit_review_fc17b2d2_xapian_manager.md
 deploy/systemd/single_chain_data/
 private_chain_3node/
+
+# aarch64 cross-compile (scripts/build-aarch64.sh) — extracted arm64 xapian
+# .deb (never apt-installed, see that script's own comment) and its output
+# binary.
+.aarch64-xapian-extract/
+simple_chain-aarch64
