@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -39,6 +40,25 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract/argument_encode"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
+
+// extensionCallGetApiCallCount counts every real invocation of
+// extensionCallGetApiCore (ModeCgo/ModeTrustzone only — see that core's own
+// doc comment; ModeTrustzoneHardware never reaches it). Added 2026-08-20 for
+// note/tee_dual_mode_execution_plan.md's "Giai đoạn 4" real-block replay
+// tool (cmd/tool/tz_replay_check): CALL_GET_API's real HTTP response is a
+// known, pre-existing non-determinism source (see plan doc mục "Hệ quả
+// thiết kế then chốt" #3) that must be excluded from any byte-for-byte
+// comparison between two independent replay runs — this counter is how the
+// tool detects, per block, whether that exclusion applies. Not used by any
+// other production code path.
+var extensionCallGetApiCallCount atomic.Uint64
+
+// ExtensionCallGetApiCallCount returns the running total of real
+// extensionCallGetApiCore invocations since process start. See
+// extensionCallGetApiCallCount's doc comment for why this exists.
+func ExtensionCallGetApiCallCount() uint64 {
+	return extensionCallGetApiCallCount.Load()
+}
 
 // extensionCallGetApiCore is the pure-Go core of ExtensionCallGetApi,
 // extracted 2026-08-20 (plan §9's "Giai đoạn 3b") for the same reason as
@@ -57,6 +77,7 @@ import (
 // "no data") than under ModeCgo/ModeTrustzone (real HTTP) — a known,
 // accepted gap, not a bug to fix.
 func extensionCallGetApiCore(bCallData []byte) []byte {
+	extensionCallGetApiCallCount.Add(1)
 	logger.Debug("Calling get api data ", hex.EncodeToString(bCallData))
 	url := argument_encode.DecodeStringInput(bCallData[4:], 0)
 	// Add safe HTTP client with SSRF protection and timeout
