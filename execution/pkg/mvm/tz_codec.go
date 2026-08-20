@@ -519,12 +519,12 @@ func encodeCallReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_call_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bSender)
-	writeFixed20(w, bContractAddress)
+	w.writeBytes(bSender)
+	w.writeBytes(bContractAddress)
 	w.writeBytes(bInput)
-	writeFixed32(w, bTxHash)
+	w.writeBytes(bTxHash)
 	for _, a := range relatedAddresses {
-		w.writeRaw(a[:])
+		w.writeBytes(a[:])
 	}
 	return header, w.buf
 }
@@ -556,22 +556,22 @@ func decodeCallReq(header, blob []byte) (
 	relatedCount := int(req.related_addresses_count)
 
 	r := &blobReader{buf: blob}
-	if bSender, err = r.readRaw(20); err != nil {
+	if bSender, err = r.readBytes(); err != nil {
 		return
 	}
-	if bContractAddress, err = r.readRaw(20); err != nil {
+	if bContractAddress, err = r.readBytes(); err != nil {
 		return
 	}
 	if bInput, err = r.readBytes(); err != nil {
 		return
 	}
-	if bTxHash, err = r.readRaw(32); err != nil {
+	if bTxHash, err = r.readBytes(); err != nil {
 		return
 	}
 	relatedAddresses = make([]common.Address, relatedCount)
 	for i := 0; i < relatedCount; i++ {
 		var ab []byte
-		if ab, err = r.readRaw(20); err != nil {
+		if ab, err = r.readBytes(); err != nil {
 			return
 		}
 		relatedAddresses[i] = common.BytesToAddress(ab)
@@ -603,12 +603,12 @@ func encodeExecuteReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_execute_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bSender)
-	writeFixed20(w, bContractAddress)
+	w.writeBytes(bSender)
+	w.writeBytes(bContractAddress)
 	w.writeBytes(bInput)
-	writeFixed32(w, bTxHash)
+	w.writeBytes(bTxHash)
 	for _, a := range relatedAddresses {
-		w.writeRaw(a[:])
+		w.writeBytes(a[:])
 	}
 	return header, w.buf
 }
@@ -639,22 +639,22 @@ func decodeExecuteReq(header, blob []byte) (
 	relatedCount := int(req.related_addresses_count)
 
 	r := &blobReader{buf: blob}
-	if bSender, err = r.readRaw(20); err != nil {
+	if bSender, err = r.readBytes(); err != nil {
 		return
 	}
-	if bContractAddress, err = r.readRaw(20); err != nil {
+	if bContractAddress, err = r.readBytes(); err != nil {
 		return
 	}
 	if bInput, err = r.readBytes(); err != nil {
 		return
 	}
-	if bTxHash, err = r.readRaw(32); err != nil {
+	if bTxHash, err = r.readBytes(); err != nil {
 		return
 	}
 	relatedAddresses = make([]common.Address, relatedCount)
 	for i := 0; i < relatedCount; i++ {
 		var ab []byte
-		if ab, err = r.readRaw(20); err != nil {
+		if ab, err = r.readBytes(); err != nil {
 			return
 		}
 		relatedAddresses[i] = common.BytesToAddress(ab)
@@ -685,9 +685,9 @@ func encodeDeployReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_deploy_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bSender)
+	w.writeBytes(bSender)
 	w.writeBytes(bContractConstructor)
-	writeFixed32(w, bTxHash)
+	w.writeBytes(bTxHash)
 	return header, w.buf
 }
 
@@ -716,13 +716,13 @@ func decodeDeployReq(header, blob []byte) (
 	isOffChain = u8ToBool(req.is_off_chain)
 
 	r := &blobReader{buf: blob}
-	if bSender, err = r.readRaw(20); err != nil {
+	if bSender, err = r.readBytes(); err != nil {
 		return
 	}
 	if bContractConstructor, err = r.readBytes(); err != nil {
 		return
 	}
-	if bTxHash, err = r.readRaw(32); err != nil {
+	if bTxHash, err = r.readBytes(); err != nil {
 		return
 	}
 	return
@@ -749,8 +749,8 @@ func encodeSendNativeReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_send_native_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bSender)
-	writeFixed20(w, bContractAddress)
+	w.writeBytes(bSender)
+	w.writeBytes(bContractAddress)
 	return header, w.buf
 }
 
@@ -777,10 +777,10 @@ func decodeSendNativeReq(header, blob []byte) (
 	isCache = u8ToBool(req.is_cache)
 
 	r := &blobReader{buf: blob}
-	if bSender, err = r.readRaw(20); err != nil {
+	if bSender, err = r.readBytes(); err != nil {
 		return
 	}
-	if bContractAddress, err = r.readRaw(20); err != nil {
+	if bContractAddress, err = r.readBytes(); err != nil {
 		return
 	}
 	return
@@ -808,8 +808,8 @@ func encodeProcessNativeMintBurnReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_process_native_mint_burn_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bFrom)
-	writeFixed20(w, bTo)
+	w.writeBytes(bFrom)
+	w.writeBytes(bTo)
 	return header, w.buf
 }
 
@@ -837,10 +837,10 @@ func decodeProcessNativeMintBurnReq(header, blob []byte) (
 	isCache = u8ToBool(req.is_cache)
 
 	r := &blobReader{buf: blob}
-	if bFrom, err = r.readRaw(20); err != nil {
+	if bFrom, err = r.readBytes(); err != nil {
 		return
 	}
-	if bTo, err = r.readRaw(20); err != nil {
+	if bTo, err = r.readBytes(); err != nil {
 		return
 	}
 	return
@@ -865,7 +865,7 @@ func encodeNoncePlusOneReq(
 	header = C.GoBytes(unsafe.Pointer(&req), C.int(C.sizeof_mvm_tz_nonce_plus_one_req_t))
 
 	w := &blobWriter{}
-	writeFixed20(w, bSender)
+	w.writeBytes(bSender)
 	return header, w.buf
 }
 
@@ -891,7 +891,7 @@ func decodeNoncePlusOneReq(header, blob []byte) (
 	isCache = u8ToBool(req.is_cache)
 
 	r := &blobReader{buf: blob}
-	if bSender, err = r.readRaw(20); err != nil {
+	if bSender, err = r.readBytes(); err != nil {
 		return
 	}
 	return
@@ -1164,16 +1164,16 @@ func copyToCBytes(dst []C.uint8_t, src []byte) {
 	}
 }
 
-// writeFixed20/writeFixed32 zero-pad or truncate to the fixed width — the
-// same defensive posture common.BytesToAddress already uses, so a caller
-// passing a shorter slice (shouldn't happen, but mirrors existing
-// leniency elsewhere in pkg/mvm) doesn't panic.
-func writeFixed20(w *blobWriter, b []byte) {
-	var a [20]byte
-	copy(a[:], b)
-	w.writeRaw(a[:])
-}
-
+// writeFixed32 zero-pads or truncates to 32 bytes — the same defensive
+// posture common.BytesToAddress already uses, so a caller passing a
+// shorter slice (shouldn't happen, but mirrors existing leniency
+// elsewhere in pkg/mvm) doesn't panic. Only used for the reverse-call
+// response fields (balance/nonce/storage value) that are genuinely raw
+// fixed-width per the TA's own wire format — NOT for the 6 forward
+// command request blobs (those are length-prefixed via writeBytes, see
+// plan §9's "Giai đoạn 3b" framing-bug fix, 2026-08-20: a sibling
+// writeFixed20 used to exist here for exactly that purpose and was
+// removed once it lost its last call site).
 func writeFixed32(w *blobWriter, b []byte) {
 	var a [32]byte
 	copy(a[:], b)
