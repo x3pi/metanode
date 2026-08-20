@@ -1327,7 +1327,6 @@ func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
 	return a.rs
 }
 
-
 // globalStateGetCore is the pure-Go core of GlobalStateGet, extracted
 // 2026-08-20 (plan §9's "Giai đoạn 3b") so the real-hardware reverse-call
 // dispatcher can call it directly and encode the result over the wire

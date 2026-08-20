@@ -1040,8 +1040,8 @@ func decodeGetStorageValueResp(header, blob []byte) (status int32, value []byte,
 // error path) — a real 0-length success payload is not distinguishable from
 // that today, matching the existing cgo behavior's own ambiguity, not a new
 // limitation introduced here.
-func encodeExtensionBytesReq(input []byte) (blob []byte)  { return input }
-func decodeExtensionBytesReq(blob []byte) (input []byte)  { return blob }
+func encodeExtensionBytesReq(input []byte) (blob []byte)   { return input }
+func decodeExtensionBytesReq(blob []byte) (input []byte)   { return blob }
 func encodeExtensionBytesResp(output []byte) (blob []byte) { return output }
 func decodeExtensionBytesResp(blob []byte) (output []byte) { return blob }
 
