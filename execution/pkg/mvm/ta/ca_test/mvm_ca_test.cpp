@@ -29,6 +29,7 @@
 // freshly booted TA with no prior state).
 
 #include "mvm_tz_protocol.h"
+#include "blst.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -323,6 +324,120 @@ static const uint8_t g_simpledb_forwarder_code[] = {
     0xf3                    // RETURN mem[0:rds]
 };
 
+// ─── BLST (2026-08-20, plan §9.31 follow-up: second of the 4 extension
+// reverse-calls with real data) ───
+//
+// Same calldata-forwarder pattern as g_simpledb_forwarder_code above, just
+// targeting precompile 259 (0x0103 = BLST) instead of 261. A FOURTH
+// synthetic contract address (0x66x20) -- kept separate from
+// g_simpledb_test_addr rather than reused, so each test's GlobalStateGet
+// case stays a simple 1:1 address->code lookup.
+static const uint8_t g_blst_test_addr[20] = {
+    0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+    0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66};
+static const uint8_t g_blst_forwarder_code[] = {
+    0x36, 0x60,0x00, 0x60,0x00, 0x37,           // CALLDATASIZE/PUSH1 0/PUSH1 0/CALLDATACOPY
+    0x60,0x00, 0x60,0x00,                       // PUSH1 0 (retSize) / PUSH1 0 (retOffset)
+    0x36, 0x60,0x00, 0x60,0x00,                 // CALLDATASIZE(argsSize)/PUSH1 0(argsOffset)/PUSH1 0(value)
+    0x61,0x01,0x03,                             // PUSH2 0x0103 (addr=259=BLST)
+    0x5a, 0xf1, 0x50,                           // GAS / CALL / POP
+    0x3d, 0x60,0x00, 0x60,0x00, 0x3e,           // RETURNDATASIZE/PUSH1 0/PUSH1 0/RETURNDATACOPY
+    0x3d, 0x60,0x00, 0xf3                       // RETURNDATASIZE/PUSH1 0/RETURN
+};
+
+// verifySign(bytes,bytes,bytes) returns (bool) -- real selector via
+// `cast sig` (foundry), matches extension.go's blstAbiStr exactly (the
+// real cgo implementation's ABI). Args are ABI "bytes" not "string", but
+// the wire encoding is identical (offset+length+right-padded-data) --
+// see abi_encode_bytes_args/abi_decode_bytes_args below, which (unlike
+// abi_encode_string_args/abi_decode_string_args above) support
+// >32-byte args since a compressed G2 signature is 96 bytes.
+static const uint32_t BLST_VERIFY_SIGN_SELECTOR = 0xee57fa59;
+
+static uint32_t abi_encode_bytes_args(uint32_t selector,
+    const std::vector<std::vector<uint8_t>> &args, uint8_t *out) {
+    out[0] = (uint8_t)(selector >> 24); out[1] = (uint8_t)(selector >> 16);
+    out[2] = (uint8_t)(selector >> 8);  out[3] = (uint8_t)selector;
+    uint32_t n = (uint32_t)args.size();
+    uint32_t off = 4 + n * 32;
+    uint32_t data_cursor = n * 32;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t len = (uint32_t)args[i].size();
+        uint32_t padded = ((len + 31) / 32) * 32;
+        abi_write_u256_be(out + 4 + i * 32, data_cursor);
+        abi_write_u256_be(out + off, len);
+        memcpy(out + off + 32, args[i].data(), len);
+        if (padded > len) memset(out + off + 32 + len, 0, padded - len);
+        off += 32 + padded;
+        data_cursor += 32 + padded;
+    }
+    return off;
+}
+
+static bool abi_decode_bytes_args(const uint8_t *args, uint32_t args_len,
+    uint32_t n, std::vector<std::vector<uint8_t>> &out) {
+    out.clear();
+    for (uint32_t i = 0; i < n; i++) {
+        if ((uint64_t)(i + 1) * 32 > args_len) return false;
+        uint32_t rel_off = abi_read_u256_be(args + i * 32);
+        if ((uint64_t)rel_off + 32 > args_len) return false;
+        uint32_t len = abi_read_u256_be(args + rel_off);
+        if ((uint64_t)rel_off + 32 + len > args_len) return false;
+        out.emplace_back(args + rel_off + 32, args + rel_off + 32 + len);
+    }
+    return true;
+}
+
+// Real (self-verified, see /tmp scratch gen_vector.cpp -- not checked in,
+// throwaway generator built against this repo's own vendored
+// pkg/bls/blst/{src,build,bindings} for an x86_64 host tool) BLS12-381
+// min-pubkey-size test vector: sk derived from a fixed IKM via
+// blst_keygen, pk = sk_to_pk_in_g1 compressed (48 bytes), sig =
+// sign_pk_in_g1 over g_blst_test_msg using the SAME DST metanode's own
+// pkg/bls/bls.go uses (dstMinPk), compressed (96 bytes). Not a randomly
+// invented blob -- confirmed valid via blst_core_verify_pk_in_g1 before
+// being embedded here.
+static const uint8_t g_blst_test_pubkey[48] = {
+    0xa9,0x4b,0xe7,0x25,0xaa,0x82,0x37,0x3c,0xeb,0xc0,0x22,0x08,
+    0x6b,0x9e,0xe2,0x14,0x32,0x02,0x6c,0x25,0x80,0xc1,0x7f,0x9d,
+    0xa0,0x26,0x5f,0xd3,0x8c,0xf9,0xe7,0x16,0xdb,0x04,0x1b,0x2d,
+    0x7e,0xd7,0x12,0x8e,0xaa,0x73,0x65,0xcc,0x88,0x86,0x96,0x3a,
+};
+static const uint8_t g_blst_test_sig[96] = {
+    0x93,0xd0,0xdc,0xc2,0x83,0x51,0xfb,0xd6,0xf7,0x2b,0xe6,0x95,
+    0x49,0xb3,0x50,0xa9,0xda,0x3f,0x80,0x8b,0x7b,0xcc,0x33,0x05,
+    0xc1,0x40,0x1a,0xcc,0x2a,0xf8,0x64,0x4a,0x1f,0xf8,0xda,0x1d,
+    0x90,0x1f,0xb7,0x67,0x96,0x91,0x9b,0xfe,0x60,0xf0,0xe3,0x27,
+    0x07,0x9b,0x83,0x4b,0x95,0x4e,0x78,0xd8,0xe0,0x82,0xf1,0x42,
+    0xbf,0x8d,0x35,0x6e,0x6d,0x04,0xb6,0x5d,0x27,0x34,0x4e,0xcb,
+    0x22,0x25,0xde,0xba,0x6b,0xb1,0x34,0x3c,0xcd,0x2d,0xdd,0xbb,
+    0xeb,0xb2,0xa5,0x04,0x24,0xa9,0xe9,0x79,0x32,0x51,0x69,0xad,
+};
+static const char g_blst_test_msg[] = "mvm_ca_test BLST real data (plan section 9.31)";
+static const uint32_t g_blst_test_msg_len = 46;
+
+// Same DST as metanode's own pkg/bls/bls.go (dstMinPk) -- the real
+// verifier MUST use the identical DST the signer used, or verification
+// fails even for a genuinely valid signature.
+static const uint8_t g_blst_dst[] = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+
+// Real BLS12-381 signature verification via libblst -- mirrors
+// pkg/bls/bls.go's VerifySign exactly (min-pubkey-size scheme: pk in G1,
+// sig in G2; sig group-checked, pk NOT group-checked, matching Go's
+// VerifyCompressed(sigGroupcheck=true, pkValidate=false) call).
+static bool blst_verify_sign(const std::vector<uint8_t> &pk,
+    const std::vector<uint8_t> &sig, const std::vector<uint8_t> &msg) {
+    if (pk.size() != 48 || sig.size() != 96) return false;
+    blst_p1_affine pk_aff;
+    if (blst_p1_uncompress(&pk_aff, pk.data()) != BLST_SUCCESS) return false;
+    blst_p2_affine sig_aff;
+    if (blst_p2_uncompress(&sig_aff, sig.data()) != BLST_SUCCESS) return false;
+    if (!blst_p2_affine_in_g2(&sig_aff)) return false; // sig group check
+    BLST_ERROR r = blst_core_verify_pk_in_g1(&pk_aff, &sig_aff, true,
+        msg.data(), msg.size(), g_blst_dst, sizeof(g_blst_dst) - 1, nullptr, 0);
+    return r == BLST_SUCCESS;
+}
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -353,6 +468,9 @@ static void handle_reverse_call(void) {
         } else if (header_len >= 40 && memcmp(req_address, g_simpledb_test_addr, 20) == 0) {
             code = g_simpledb_forwarder_code;
             code_len = sizeof(g_simpledb_forwarder_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_blst_test_addr, 20) == 0) {
+            code = g_blst_forwarder_code;
+            code_len = sizeof(g_blst_forwarder_code);
         }
         if (code) {
             // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
@@ -423,13 +541,13 @@ static void handle_reverse_call(void) {
     // shape -- a real, correctly-formed response, just an empty one -- for
     // now, rather than any speculative fabricated data (matches this
     // function's own stated policy: fail loud/return "not found" over
-    // guessing). Filling in a REAL local HTTP client / JSON parser / BLST
-    // call / key-value store here is future work once an actual contract-
-    // calling test needs one of these to return real data.
+    // guessing). Filling in a REAL local HTTP client / JSON parser here
+    // is future work once an actual contract-calling test needs one of
+    // these to return real data (BLST got real data 2026-08-20, plan
+    // §9.31 follow-up -- see its own case below).
     case MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
-    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
-    case MVM_TZ_RCMD_EXTENSION_BLST: {
-        // No fixed header for these 3 (mvm_tz_protocol.h line ~512) --
+    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD: {
+        // No fixed header for these 2 (mvm_tz_protocol.h line ~512) --
         // response is just the raw output bytes verbatim, length via the
         // channel's own blob_len field (NOT length-prefixed -- confirmed
         // 2026-08-20, plan §9.31, by reading mvm_reverse_round_trip's
@@ -438,10 +556,42 @@ static void handle_reverse_call(void) {
         // Extension_return{nullptr,0} failure case is resp_blob_len=0,
         // full stop -- a previous version of this stub wrote a 4-byte
         // all-zero blob instead (harmless only because nothing exercised
-        // these 3 cmds yet), fixed here alongside GET_OR_CREATE_SIMPLE_DB
-        // getting real data for the first time.
+        // these cmds yet).
         resp_hdr_len = 0;
         resp_blob_len = 0;
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_BLST: {
+        // 2026-08-20 (plan §9.31 follow-up): real data, second of the 4
+        // extension reverse-calls (see g_blst_test_addr/blst_verify_sign's
+        // own comments above). Same blob-only shape as CALL_GET_API/
+        // EXTRACT_JSON_FIELD (no fixed header) -- blob = raw ABI calldata
+        // for verifySign(bytes,bytes,bytes), the exact ABI extension.go's
+        // real ExtensionBlst decodes via blstAbi.MethodById/
+        // Inputs.UnpackIntoMap.
+        resp_hdr_len = 0;
+        resp_blob_len = 0; // default: Extension_return{nullptr,0}
+        if (blob_len >= 4) {
+            uint32_t selector = ((uint32_t)blob_copy[0] << 24) | ((uint32_t)blob_copy[1] << 16)
+                | ((uint32_t)blob_copy[2] << 8) | (uint32_t)blob_copy[3];
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::vector<uint8_t>> byte_args;
+            if (selector == BLST_VERIFY_SIGN_SELECTOR
+                    && abi_decode_bytes_args(args, args_len, 3, byte_args)) {
+                bool ok = blst_verify_sign(byte_args[0], byte_args[1], byte_args[2]);
+                resp_blob_len = abi_encode_bool(ok, resp_buf);
+                printf("[mvm_ca_test] BLST verifySign: pk=%zuB sig=%zuB msg=%zuB -> %s\n",
+                    byte_args[0].size(), byte_args[1].size(), byte_args[2].size(),
+                    ok ? "VALID" : "invalid");
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] BLST: unrecognized selector=0x%08x or malformed "
+                    "args (blob_len=%u) -- returning empty (Extension_return{nullptr,0})\n",
+                    selector, blob_len);
+                fflush(stdout);
+            }
+        }
         break;
     }
     case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
@@ -822,6 +972,25 @@ int main(void) {
             {"db1", "key1"}, calldata);
         if (run_execute_and_print("simpledb get", sender, g_simpledb_test_addr,
                 0, calldata, len, /*is_cache=*/true) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 6 (2026-08-20, plan §9.31 follow-up): BLST extension
+    // reverse-call with REAL data -- g_blst_test_addr's forwarder calls
+    // verifySign(pk, sig, msg) with a genuine, self-verified BLS12-381
+    // signature (see g_blst_test_pubkey/g_blst_test_sig's own comment).
+    // Expect RETURN = ABI bool(true) (32 bytes, last byte 0x01). ───
+    {
+        static uint8_t calldata[512];
+        std::vector<std::vector<uint8_t>> args = {
+            std::vector<uint8_t>(g_blst_test_pubkey, g_blst_test_pubkey + 48),
+            std::vector<uint8_t>(g_blst_test_sig, g_blst_test_sig + 96),
+            std::vector<uint8_t>(g_blst_test_msg, g_blst_test_msg + g_blst_test_msg_len),
+        };
+        uint32_t len = abi_encode_bytes_args(BLST_VERIFY_SIGN_SELECTOR, args, calldata);
+        if (run_execute_and_print("blst verifySign", sender, g_blst_test_addr,
+                0, calldata, len) != 0) {
             return 1;
         }
     }

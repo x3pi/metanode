@@ -1777,3 +1777,41 @@ rebuild/flash):
 
 **Việc tiếp theo**: BLST (deterministic, có `libblst.a` sẵn) hoặc EXTRACT_JSON_FIELD tiếp theo;
 CALL_GET_API (cần gọi HTTP thật) để lại sau cùng theo đúng yêu cầu người dùng.
+
+### §9.31 follow-up (cùng ngày) — BLST extension reverse-call với dữ liệu THẬT
+
+Lệnh thứ 2 trong 4 lệnh extension. Xác thực chữ ký BLS12-381 THẬT qua `libblst` (không phải giả
+lập/mock) — khớp chính xác scheme metanode dùng thật (`pkg/bls/bls.go`'s `VerifySign`:
+min-pubkey-size, pubkey G1 nén 48 byte, chữ ký G2 nén 96 byte, cùng DST
+`BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`).
+
+**Cách làm**:
+1. Địa chỉ contract thứ 4 (`g_blst_test_addr`, 0x66×20) — cùng mẫu "calldata forwarder" như
+   SimpleDb, chỉ đổi target sang precompile 259 (BLST).
+2. Test vector THẬT (không phải blob random): dùng chính source `pkg/bls/blst` đã vendor sẵn
+   trong repo metanode, build 1 tool offline trên x86_64 host (`gen_vector.cpp`, scratchpad-only,
+   không commit) để tạo sk/pk/sig/msg qua `blst_keygen`/`blst_sk_to_pk_in_g1`/`blst_hash_to_g2`/
+   `blst_sign_pk_in_g1`, tự verify lại bằng chính `blst_core_verify_pk_in_g1` trước khi in ra —
+   đảm bảo vector nhúng vào `mvm_ca_test.cpp` là chữ ký hợp lệ thật, không phải đoán.
+3. `abi_encode_bytes_args`/`abi_decode_bytes_args` mới (khác với
+   `abi_encode_string_args`/`abi_decode_string_args` của SimpleDb) — hỗ trợ arg nhiều chunk
+   (>32 byte, cần cho chữ ký 96 byte), cùng nguyên lý ABI offset+length+pad. Selector
+   `verifySign(bytes,bytes,bytes)` = `0xee57fa59` (qua `cast sig` thật, khớp `extension.go`'s
+   `blstAbiStr`).
+4. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_BLST`: decode ABI thật, gọi
+   `blst_verify_sign()` (wrap `blst_p1_uncompress`/`blst_p2_uncompress`/`blst_p2_affine_in_g2`
+   group-check/`blst_core_verify_pk_in_g1` — đúng thứ tự semantics của Go's
+   `VerifyCompressed(sigGroupcheck=true, pkValidate=false)`), trả ABI `bool` thật.
+5. **Phát hiện kỹ thuật đáng chú ý**: `libblst.a` cross-build cho aarch64/musl (dùng cho TA,
+   `cpp11-stage-extracted/aarch64/3rdparty/lib/libblst.a`) **link sạch vào binary aarch64/glibc**
+   (`aarch64-linux-gnu-g++ -static`) — xác nhận qua `nm -u` trước khi thử: blst hoàn toàn không
+   phụ thuộc libc (chỉ gọi symbol nội bộ của chính nó), nên không bị vấn đề lệch ABI như Xapian ở
+   §9.30 (Xapian ném C++ exception xuyên biên GCC-version; blst không dùng exception/RTTI C++ ở
+   tầng C API này).
+
+**Xác nhận trên hardware, không cần reboot/flash** (chỉ CA-test side): reverse call cmd=105
+blob_len=420 (khớp tính toán ABI: 4+96+64+128+64), `BLST verifySign: pk=48B sig=96B msg=46B ->
+VALID`, RETURN = 32 byte ABI `bool(true)`.
+
+**Còn lại**: EXTRACT_JSON_FIELD (cần JSON parser thật phía CA-test); CALL_GET_API (để sau, chưa
+cần HTTP thật theo yêu cầu người dùng).
