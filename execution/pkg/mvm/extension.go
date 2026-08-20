@@ -42,14 +42,20 @@ import (
 
 // extensionCallGetApiCore is the pure-Go core of ExtensionCallGetApi,
 // extracted 2026-08-20 (plan §9's "Giai đoạn 3b") for the same reason as
-// mvm_api.go's globalStateGetCore — mechanical, zero behavior change.
-// nil return means the Extension_return{nullptr,0} failure case (matches
-// the //export wrapper's own convention below). NOTE: this makes a real
-// HTTP GET out to the network (SSRF-blocked to non-loopback/private
-// targets, 5s timeout) — the reverse-call dispatcher this core is being
-// extracted FOR does not call it yet (CALL_GET_API is deliberately
-// deferred, per the standing decision not to wire live HTTP through the
-// hardware bridge in this pass).
+// mvm_api.go's globalStateGetCore — mechanical, zero behavior change. It
+// still backs the cgo path (//export ExtensionCallGetApi below, used by
+// ModeCgo/ModeTrustzone) unchanged. nil return means the
+// Extension_return{nullptr,0} failure case (matches the //export
+// wrapper's own convention below). NOTE: this makes a real HTTP GET out
+// to the network (SSRF-blocked to non-loopback/private targets, 5s
+// timeout) — as of 2026-08-20 this is a PERMANENT scope decision, not a
+// "not yet": tz_hardware_reverse_dispatch.go's dispatchReverseCall
+// deliberately does NOT call this core for the real hardware bridge
+// (ModeTrustzoneHardware) — see that file's own comment on the
+// EXTENSION_CALL_GET_API case for why. Any contract relying on this
+// precompile behaves differently under ModeTrustzoneHardware (always
+// "no data") than under ModeCgo/ModeTrustzone (real HTTP) — a known,
+// accepted gap, not a bug to fix.
 func extensionCallGetApiCore(bCallData []byte) []byte {
 	logger.Debug("Calling get api data ", hex.EncodeToString(bCallData))
 	url := argument_encode.DecodeStringInput(bCallData[4:], 0)

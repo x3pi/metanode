@@ -5,11 +5,12 @@ package mvm
 // so the unexported dispatcher and codec functions are reachable
 // directly, same convention as tz_codec_reverse_callbacks_test.go.
 //
-// Deliberately excludes MVM_TZ_RCMD_EXTENSION_CALL_GET_API: per the
-// user's own standing instruction this session ("chưa cần làm call http
-// thật đâu nhé"), no test here should make a real network call — see
-// extensionCallGetApiCore's own doc comment for why that command isn't
-// exercised end-to-end yet.
+// TestDispatchReverseCall_ExtensionCallGetApi_UnsupportedByDesign below
+// pins that MVM_TZ_RCMD_EXTENSION_CALL_GET_API is a permanent no-op on
+// this bridge (2026-08-20 decision) — it does NOT make a real network
+// call, by design, not merely "not implemented yet". See
+// tz_hardware_reverse_dispatch.go's own comment on that case, and
+// extensionCallGetApiCore's doc comment in extension.go.
 //
 // Uses the cmd*Test Go constants from tz_hardware_reverse_dispatch.go
 // instead of C.MVM_TZ_RCMD_* directly: Go's cgo does not support
@@ -240,6 +241,26 @@ func TestDispatchReverseCall_GetStorageValue_UnknownMvmId(t *testing.T) {
 	}
 	if status != 0 {
 		t.Fatalf("status = %d, want 0 (documented nil-mvmApi quirk)", status)
+	}
+}
+
+func TestDispatchReverseCall_ExtensionCallGetApi_UnsupportedByDesign(t *testing.T) {
+	// Pins the 2026-08-20 decision: EXTENSION_CALL_GET_API is a permanent
+	// no-op on the hardware bridge, not "not implemented yet". A URL calldata
+	// that WOULD make a real HTTP GET if extensionCallGetApiCore were ever
+	// invoked here (it deliberately is not -- if this test ever needed
+	// network access to pass, that would itself be the regression) --
+	// asserting an empty response is enough to prove the dispatcher took
+	// the unsupported branch instead of the real-HTTP one.
+	calldata := []byte("http://169.254.169.254/should-never-be-fetched")
+	respHeader, respBlob := dispatchReverseCall(cmdExtensionCallGetApiTest, nil, calldata)
+
+	if respHeader != nil {
+		t.Fatalf("respHeader = %v, want nil", respHeader)
+	}
+	out := decodeExtensionBytesResp(respBlob)
+	if out != nil {
+		t.Fatalf("output = %v, want nil (unsupported-by-design empty response)", out)
 	}
 }
 

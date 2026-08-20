@@ -19,6 +19,7 @@ import "github.com/meta-node-blockchain/meta-node/pkg/logger"
 const (
 	cmdGlobalStateGetTest               = C.MVM_TZ_RCMD_GLOBAL_STATE_GET
 	cmdGetStorageValueTest              = C.MVM_TZ_RCMD_GET_STORAGE_VALUE
+	cmdExtensionCallGetApiTest          = C.MVM_TZ_RCMD_EXTENSION_CALL_GET_API
 	cmdExtensionExtractJsonFieldTest    = C.MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD
 	cmdExtensionBlstTest                = C.MVM_TZ_RCMD_EXTENSION_BLST
 	cmdExtensionGetOrCreateSimpleDbTest = C.MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB
@@ -72,9 +73,17 @@ func dispatchReverseCall(cmd C.mvm_tz_cmd_t, header, blob []byte) (respHeader, r
 		return encodeGetStorageValueResp(status, value)
 
 	case C.MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
-		input := decodeExtensionBytesReq(blob)
-		out := extensionCallGetApiCore(input)
-		return nil, encodeExtensionBytesResp(out)
+		// Deliberately NOT calling extensionCallGetApiCore (real outbound
+		// HTTP) here -- CALL_GET_API is a scope decision, not a "not yet":
+		// this bridge does not and will not support live HTTP calls issued
+		// from inside a TA round trip (an EVM call blocking on real network
+		// I/O, under tzSessionMu, with a 60s hardware round-trip timeout
+		// racing a 5s HTTP timeout, is a footgun this project chooses not
+		// to carry). A contract that depends on this precompile will
+		// reliably see "no data" on the hardware path -- same shape as any
+		// other not-found/failure response on this channel, not a crash.
+		logger.Warn("[TZ_HW] dispatchReverseCall: EXTENSION_CALL_GET_API is not supported over the hardware bridge (by design) -- returning empty")
+		return nil, encodeExtensionBytesResp(nil)
 
 	case C.MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
 		input := decodeExtensionBytesReq(blob)
