@@ -25,6 +25,20 @@ const (
 	// client (GĐ3) will need its own ModeTZHardware-style addition here
 	// later, not a change to this one.
 	ModeTrustzone = "trustzone"
+	// ModeTrustzoneHardware routes execution through tzHardwareEngine
+	// (tz_hardware_engine.go) — GĐ3b's real hardware bridge: the SAME wire
+	// codec and shared-channel protocol as ModeTrustzone, but the "TA side"
+	// is a genuine separate mvm_ta process on the board, reached over
+	// /dev/tc_ns_client (tz_hardware_channel.go), not an in-process call.
+	// Deliberately a SEPARATE constant from ModeTrustzone rather than a
+	// reuse of it: the existing loopback test suite
+	// (TestTABoundary_TrustzoneLoopback_*) depends on ModeTrustzone's
+	// synchronous, deterministic, no-hardware-required behavior, and this
+	// mode has neither property (real world-switch, real timeout, real TA
+	// state). Only Call/Execute are real on this path today — the TA does
+	// not implement Deploy/SendNative/ProcessNativeMintBurn/NoncePlusOne/
+	// ExecuteBatch yet (see tz_hardware_engine.go's own doc comments).
+	ModeTrustzoneHardware = "trustzone-hardware"
 )
 
 // Global execution mode setting. Set once at startup from config
@@ -40,6 +54,9 @@ func SetExecutionMode(mode string) {
 	case ModeTrustzone:
 		globalExecutionMode = ModeTrustzone
 		logger.Warn("⚠️ [MVM] Execution mode set to: TRUSTZONE (GĐ2 x86 loopback -- see note/tee_dual_mode_execution_plan.md; NOT a real TA yet, that's GĐ3)")
+	case ModeTrustzoneHardware:
+		globalExecutionMode = ModeTrustzoneHardware
+		logger.Warn("⚠️ [MVM] Execution mode set to: TRUSTZONE-HARDWARE (GĐ3b real TA bridge over /dev/tc_ns_client -- only Call/Execute are wired on the TA side today, everything else panics)")
 	case ModeCgo, "":
 		// Empty config: keep the global default (cgo) -- matches
 		// trie_factory.go's own empty-string handling.
@@ -73,6 +90,8 @@ func NewExecutionEngine(
 	switch globalExecutionMode {
 	case ModeTrustzone:
 		return newTZLoopbackEngine(key, smartContractDb, accountStateDb, extendedMode)
+	case ModeTrustzoneHardware:
+		return newTZHardwareEngine(key, smartContractDb, accountStateDb, extendedMode)
 	default: // ModeCgo
 		return GetOrCreateMVMApi(key, smartContractDb, accountStateDb, extendedMode)
 	}
