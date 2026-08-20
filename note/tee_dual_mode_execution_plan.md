@@ -2230,12 +2230,77 @@ mất ~2 phút 20 giây, không lỗi gì**, thấp hơn nhiều so với lo ng�
 tái lập được qua 1 script** — điểm chặn cứng nhất trước khi Go CA (`ModeTrustzoneHardware`, GĐ3b)
 chạy thật trên board đã được tháo gỡ hoàn toàn.
 
-**Còn lại trước khi chạy thật trên board** (chưa làm, phiên sau):
-- Board cần có sẵn `.so` runtime cho 6 lib (xapian/tbb/leveldb/gmp/mpfr/uuid) — Orange Pi 5 Max
-  chạy hệ điều hành nào, có sẵn các gói này chưa, cần kiểm tra trực tiếp trên board (không đoán).
-- Đóng gói + đẩy `simple_chain-aarch64` lên board (qua SSD/`hdc`, tuỳ kênh nào board đang dùng),
-  chạy thử với `execution_mode=trustzone-hardware`.
-- Toàn bộ checklist vận hành board đã có sẵn từ `tz-llm-trustzone` (reboot mỗi lần đổi binary,
-  1 tiến trình secure-world tại 1 thời điểm, v.v. — board vật lý này CHUNG với dự án
-  `tz-llm-trustzone`, board hiện đang ở trạng thái ổn định "round 2" theo `DEPLOYED_STATE.md` của
-  dự án đó, cần thận trọng).
+## §9.39 — Chạy THẬT lần đầu tiên metanode Go binary trên board (2026-08-21, cùng ngày với §9.37/§9.38)
+
+Người dùng yêu cầu tiếp tục ngay. Trước khi đẩy lên board, xác minh trực tiếp qua `hdc shell`
+(board đang kết nối sẵn ở `192.168.1.254:8710` — hdcd đã bật từ phiên `tz-llm-trustzone` trước
+đó, không persist qua reboot nhưng board chưa reboot) — **không đoán, không giả định "chắc là
+Ubuntu ARM" như kế hoạch GĐ1/GĐ2 âm thầm giả định**:
+
+**Phát hiện quan trọng, thay đổi hướng đi**: `uname -a` → `Linux localhost 5.10.110 ... aarch64`
+(đúng kernel Normal World của `tz-llm-trustzone`'s `linux-5.10-opi`) nhưng **userspace là
+OpenHarmony tuỳ biến, KHÔNG PHẢI glibc Linux chuẩn**: không có `/lib/aarch64-linux-gnu/`, không
+có `/lib64/ld-linux-aarch64.so.1` — libc thật của hệ này là `/system/lib64/libc.so` (OpenHarmony-
+specific). Binary `aarch64-linux-gnu` (glibc, dynamically linked) từ `scripts/build-aarch64.sh`
+**không chạy được nguyên trạng** trên hệ này — thiếu cả dynamic linker lẫn glibc runtime, chưa
+nói tới 6 lib C++ (xapian/tbb/leveldb/gmp/mpfr/uuid). Đây chính là lý do dự án `tz-llm-trustzone`
+phải dùng `-static` cho `mvm_ca_test` — cùng một vấn đề, chỉ khác cách giải quyết ở đây.
+
+**Giải pháp đã chọn — đóng gói "portable" thay vì build static hoàn toàn**: `tbb`/`xapian`
+không có bản `.a` (static) từ apt (đã xác nhận ở §9.37), nên build static hoàn toàn cần build lại
+2 lib đó từ nguồn — việc lớn hơn nhiều. Thay vào đó, đóng gói binary cùng TOÀN BỘ thư viện runtime
+nó cần (kể cả glibc/libstdc++ của chính nó) và tự chỉ định dynamic linker tường minh lúc chạy —
+kỹ thuật "self-contained portable Linux binary" chuẩn (như AppImage/Nix): kernel Linux của board
+tương thích ABI syscall với BẤT KỲ ELF aarch64 nào, chỉ có userspace (libc) là khác — đóng gói
+đúng phần đó là đủ, không cần đụng gì tới kernel/OS thật của board.
+
+```
+<lib64/ld-linux-aarch64.so.1> --library-path <lib64/> <simple_chain> [args]
+```
+
+**Danh sách lib cần** — 9 lib từ `aarch64-linux-gnu-readelf -d <binary> | grep NEEDED` + 1 lib
+phát hiện thêm qua thử-lỗi thật trên board (`libz.so.1` — phụ thuộc bắc cầu của `libxapian`,
+không nằm trong NEEDED trực tiếp của binary chính, chỉ lộ ra khi chạy thật): `libxapian.so.30`,
+`libstdc++.so.6`, `libgmp.so.10`, `libmpfr.so.6`, `libtbb.so.12`, `libuuid.so.1`, `libm.so.6`,
+`libgcc_s.so.1`, `libc.so.6`, `libz.so.1` — cộng `ld-linux-aarch64.so.1` (dynamic linker) — tất cả
+lấy thẳng từ `/usr/lib/aarch64-linux-gnu/`/`/lib/aarch64-linux-gnu/` trên máy dev (cùng nguồn
+`apt install ...:arm64` đã dùng để cross-compile ở §9.37).
+
+**Xác nhận THẬT trên phần cứng, không phải suy đoán**: mount `/data/ssd` (`mount -t ext4
+/dev/block/nvme0n1p1 /data/ssd` — không persist qua reboot, đúng quy trình đã biết), đẩy bundle
+136MB qua `hdc file send`, chạy:
+```
+./lib64/ld-linux-aarch64.so.1 --library-path ./lib64 ./simple_chain \
+  -tool-get-address 2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b
+```
+→ in đúng `0x97126B71376F7e55fBA904FdaA9dF0dBd396612f` — **1 phép tính secp256k1+keccak thật**
+(không phải "không crash" suông, dùng đúng cờ `-tool-get-address` có sẵn trong `main.go` để test
+mà không cần config/genesis đầy đủ). Chạy lại lần 2 → kết quả giống hệt (deterministic). Board
+hoàn toàn ổn định sau đó (`uptime`: 11h40, RAM 11G trống, load bình thường) — không có tác dụng
+phụ nào lên phần TrustZone/TA của `tz-llm-trustzone` (chỉ chạy 1 ELF Normal World userspace bình
+thường qua `hdc shell`, không đụng flash/OP-TEE/reboot).
+
+**Thêm MỚI `scripts/package-for-board.sh`**: tự động hoá đóng gói bundle (binary + 10 lib +
+linker) + tuỳ chọn đẩy/smoke-test qua `hdc` (`--push [remote dir]`). Đã tự chạy thử CHÍNH script
+này (không phải các lệnh tay trước đó) → kết quả khớp đúng địa chỉ mong đợi, xác nhận script tự
+nó (không chỉ quy trình thủ công) hoạt động đúng.
+
+**Dọn dẹp**: xoá thư mục test trùng lặp trên board (`/data/ssd/metanode_scripttest`), giữ lại
+`/data/ssd/metanode_test` (bundle đầu tiên) làm nơi test tiếp theo. `.board_bundle/`/
+`simple_chain-aarch64` đã gitignore, không lọt vào git.
+
+**Với §9.37+§9.38+§9.39: toàn bộ hành trình "Go CA chạy thật trên board" đã có bằng chứng đầu-
+cuối thật trên phần cứng** — điểm chặn cứng nhất trước khi `ModeTrustzoneHardware` có ý nghĩa
+thực tế đã được tháo gỡ hoàn toàn trong 1 phiên.
+
+**Còn lại** (chưa làm, phiên sau):
+- Chạy **full node thật** trên board (cần `config.json`/`genesis.json` thật đẩy lên board, đúng
+  quy trình private-chain đã dùng ở GĐ4 §9.36 nhưng chạy trên board thay vì máy dev) — hôm nay
+  mới xác nhận binary tự nó chạy được (`-tool-get-address`), chưa chạy 1 node thật với I/O mạng
+  thật trên board.
+- Test thật `ModeTrustzoneHardware` (cần TA C++ wire nốt 5 lệnh forward còn thiếu — xem tổng kết
+  "còn thiếu cho production" đã trao đổi với người dùng trước đó trong phiên).
+- Toàn bộ checklist vận hành board đã có sẵn từ `tz-llm-trustzone` (reboot mỗi lần đổi binary
+  TA/kernel, 1 tiến trình secure-world tại 1 thời điểm, bật lại hdcd sau mỗi reboot, v.v. — board
+  vật lý này CHUNG với dự án đó, cần thận trọng, đặc biệt nếu sau này cần chạy `simple_chain` và
+  `mvm_ta`/`llama-cli` đồng thời).
