@@ -1733,6 +1733,50 @@ Gỡ self-test lần 2 sau khi root-cause xong, rebuild+reflash board về lại
 3-lớp còn nguyên, không có self-test) — xem `DEPLOYED_STATE.md` cho checkpoint xác nhận sạch.
 Chi tiết đầy đủ + cách áp dụng: memory `xapian-inmemory-ta-backend-fix` (đã cập nhật).
 
+## §9.32 — Round 3 (thử fix thật): rebuild `libtbb.a` bằng GCC 11.5.0 — BẤT ỔN trên hardware, REVERT, chưa kết luận
+
+Thử làm fix thật cho §9.30. Phát hiện quan trọng khi kiểm tra lại: đọc `.comment` section thật
+(`readelf -p .comment`) của `libxapian.a`/`libz.a` đang dùng cho thấy chúng **ĐÃ LÀ GCC 11.4.0**
+từ trước (round-1 TEXTREL fix 2026-08-17, `xapian_zlib_pic_rebuild/build_pic.sh`, dùng đúng
+musl-gcc thật) — đính chính lại §9.30's kết luận (dựa vào doc cũ, không tự kiểm tra) rằng cả 3 lib
+đều GCC13. **Chỉ `libtbb.a` còn lệch GCC 13.3.0.** Vì `xapian_manager.h`/`xapian_registry.h`/
+`state.h` đều dùng thẳng `tbb::concurrent_hash_map`, TBB lệch version là ứng viên hợp lý hơn cho
+crash exception-ABI đã thấy, không nhất thiết phải là Xapian tự nó.
+
+Rebuild `libtbb.a` (oneTBB 2021.11.0, source vẫn còn nguyên trong scratchpad phiên trước) bằng
+đúng toolchain GCC 11.5.0 (`/home/pi/musl-cross-build-scratch-gcc11`, cùng toolchain đã stage
+header libstdc++ cho build này) — build sạch, `.comment` xác nhận GCC 11.5.0, PIC/no-TEXTREL xác
+nhận qua `-Wl,-z,text` shared-object link, `mvm_ta` relink thành công. Thêm self-test round 3
+(bracket per-call như round 2) tái hiện đúng kịch bản x86-proven (getInstance/new_document/
+commitBufferForTxHash/get_data-trước-revert/revertUncommittedChanges/get_data-sau-revert — lệnh
+cuối chính là lệnh crash ở round 2) để kiểm chứng thật.
+
+**Kết quả: BẤT ỔN trên hardware, KHÔNG kết luận được, đã REVERT.** Flash round-3 lần đầu → board
+im lặng hoàn toàn → hoá ra idbloader/GPT hỏng (`[Vendor ERROR]: Boot device type is invalid!`) →
+`recover-golden-image.sh` sửa xong → power-cycle lần 1: boot thật sự tiến xa (DDR → U-Boot → ATF →
+OP-TEE → `[ChCore] create initial thread done`) rồi KẸT tại `SYS_rt_sigprocmask` → 2 lần cắm
+nguồn tiếp theo: im lặng hoàn toàn (tệ hơn, không cả tới DDR banner). So sánh FIT sub-image xác
+nhận U-Boot/ATF/fdt giống hệt bản trước, chỉ optee (chứa mvm_ta+libtbb.a mới) khác.
+
+**Đánh giá nguyên nhân**: điểm kẹt xảy ra RẤT SỚM trong ChCore kernel — trước cả khi `chanmgr`
+launch `mvm_ta`. Về cơ chế, `libtbb.a`/`mvm_ta`/self-test round 3 không thể là nguyên nhân trực
+tiếp ở giai đoạn này (chưa chạy tới). Khớp hơn với rủi ro kênh flash USB flaky đã biết từ trước
+(tz-llm-trustzone's CLAUDE.md: ~10-20% lỗi mỗi lần ghi; majority-vote-3 chỉ bảo vệ phần
+uboot/boot_linux, không bảo vệ idbloader/GPT). Revert checkpoints về bản round-2 ổn định trước đó,
+flash lại qua đúng kênh đó → boot sạch ngay lần đầu, uptime 7+ phút xác nhận qua `hdc` — củng cố
+(không chứng minh tuyệt đối, mới 1 lần thử) giả thuyết kênh-flash hơn lỗi nội dung.
+
+**Theo yêu cầu người dùng: dừng lại, không thử lại round-3 trong phiên này.** `libtbb.a` GCC11.5.0
+đã build sẵn, giữ làm artifact cho lần thử sau
+(`scripts/kick-the-tires/cpp13-metanode-deps/libtbb.a` hiện là bản GCC11.5.0, backup GCC13.3.0 ở
+`libtbb.a.gcc13-backup` cùng thư mục) — nhưng board hiện tại đang chạy bản round-2 (không có fix
+TBB, không có self-test). Xem `tz-llm-trustzone/DEPLOYED_STATE.md` cho trạng thái chính xác.
+
+**Việc tiếp theo nếu quay lại**: thử lại round-3 với biện pháp an toàn hơn — verify md5 ngay sau
+flash trước khi power-cycle (loại trừ ghi lỗi độc lập với hành vi boot), và/hoặc thử flash round-3
+nhiều lần để xem tỷ lệ thất bại có khớp với ~10-20% kênh-flash đã biết hay cao bất thường (nếu cao
+bất thường mới nên nghi ngờ lại nội dung).
+
 ## §9.31 — Extension reverse-call đầu tiên với dữ liệu THẬT: `GET_OR_CREATE_SIMPLE_DB` (2026-08-20)
 
 Trong 4 lệnh extension reverse-call còn lại (`CALL_GET_API`/`EXTRACT_JSON_FIELD`/`BLST`/

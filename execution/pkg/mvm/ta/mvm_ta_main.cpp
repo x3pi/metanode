@@ -1266,6 +1266,90 @@ static void mvm_ta_run(void) {
 // which would hit the exact same ABI issue the first time it needs to
 // distinguish "found" from "not found") until Xapian is rebuilt with a
 // matching GCC generation.
+//
+// 2026-08-20 (round 3, same day): CORRECTION to the above -- re-checked
+// the actual .comment section (embedded compiler version string) of the
+// CURRENTLY-DEPLOYED libxapian.a/libz.a via readelf before rebuilding
+// anything, instead of trusting the 2026-08-17 build notes referenced
+// above. Both are ALREADY GCC 11.4.0 (matching musl-gcc, not 13.3.0 as
+// documented) -- xapian_zlib_pic_rebuild/build_pic.sh's 2026-08-17
+// TEXTREL fix used the real chcore musl-gcc and evidently rebuilt both
+// cleanly with it, but nobody re-checked the compiler version after that
+// fix landed, so the earlier (now-stale) documentation was never
+// corrected. The ACTUAL remaining mismatch was libtbb.a alone, still
+// GCC 13.3.0 (never touched by that TEXTREL fix, which only covered
+// zlib+xapian). This matters here specifically because
+// xapian_manager.h/xapian_registry.h/state.h all use
+// tbb::concurrent_hash_map directly -- a GCC13-built TBB linked
+// alongside GCC11-built code that constructs/throws C++ exceptions
+// (Xapian::DocNotFoundError included) is a plausible corruptor of
+// process-wide exception handling, not something scoped to Xapian's own
+// throw sites. Rebuilt libtbb.a from the same oneTBB 2021.11.0 source
+// (scripts/kick-the-tires/cpp13-metanode-deps still has cpp13/gcc13
+// backed up as libtbb.a.gcc13-backup) using the SAME GCC 11.5.0
+// musl-cross toolchain that stages this build's own libstdc++ headers
+// (/home/pi/musl-cross-build-scratch-gcc11 on the host) -- confirmed via
+// readelf the new libtbb.a is GCC 11.5.0, confirmed PIC/no-TEXTREL via a
+// -Wl,-z,text shared-object link, and the full mvm_ta relink against it
+// succeeded cleanly. Round-3 selftest below re-runs the EXACT x86-proven
+// scenario (getInstance/new_document/commitBufferForTxHash/get_data-
+// before-revert/revertUncommittedChanges/get_data-after-revert, the one
+// whose last call previously crashed) with the same per-call bracketing
+// as round 2, to confirm on real hardware whether the TBB rebuild alone
+// fixes it -- remove this selftest once confirmed either way, per the
+// same restore-board-stability discipline used after rounds 1 and 2.
+#include "xapian/xapian_manager.h"
+#include "xapian/xapian_registry.h"
+#include "mvm/address.h"
+#include "mvm/util.h"
+
+static void mvm_ta_xapian_inmemory_selftest3(void) {
+    fprintf(stderr, "[xapian_selftest3] START\n"); fflush(stderr);
+
+    uint8_t raw_addr[20];
+    memset(raw_addr, 0x55, sizeof(raw_addr));
+    mvm::Address real_addr = mvm::from_big_endian(raw_addr, 20u);
+
+    std::shared_ptr<XapianManager> manager;
+    fprintf(stderr, "[xapian_selftest3] about to getInstance\n"); fflush(stderr);
+    try {
+        manager = XapianManager::getInstance("test_db", real_addr, false);
+    } catch (const Xapian::Error &e) {
+        fprintf(stderr, "[xapian_selftest3] getInstance THREW Xapian::Error: %s\n", e.get_msg().c_str());
+        fflush(stderr);
+        return;
+    } catch (...) {
+        fprintf(stderr, "[xapian_selftest3] getInstance THREW (unknown)\n"); fflush(stderr);
+        return;
+    }
+    fprintf(stderr, "[xapian_selftest3] getInstance OK, manager=%p\n", (void*)manager.get()); fflush(stderr);
+    if (!manager) return;
+
+    uint256_t tx_hash = 0x1111;
+    fprintf(stderr, "[xapian_selftest3] about to new_document\n"); fflush(stderr);
+    std::string docid = manager->new_document("hello-inmemory", 1, nullptr, &tx_hash);
+    fprintf(stderr, "[xapian_selftest3] new_document OK docid=%s\n", docid.c_str()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to commitBufferForTxHash\n"); fflush(stderr);
+    registry.commitBufferForTxHash(&tx_hash);
+    fprintf(stderr, "[xapian_selftest3] commitBufferForTxHash OK\n"); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to get_data (before revert)\n"); fflush(stderr);
+    std::string data_before = manager->get_data(docid, 1, nullptr, nullptr);
+    fprintf(stderr, "[xapian_selftest3] get_data before revert OK = \"%s\"\n", data_before.c_str()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to revertUncommittedChanges\n"); fflush(stderr);
+    bool revert_ok = manager->revertUncommittedChanges();
+    fprintf(stderr, "[xapian_selftest3] revertUncommittedChanges OK = %d\n", (int)revert_ok); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to get_data (after revert) -- "
+        "THIS IS THE CALL THAT CRASHED IN ROUND 2\n"); fflush(stderr);
+    std::string data_after = manager->get_data(docid, 1, nullptr, nullptr);
+    fprintf(stderr, "[xapian_selftest3] get_data after revert OK = \"%s\" (empty=%d, expect empty=1)\n",
+        data_after.c_str(), (int)data_after.empty()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] DONE -- all calls returned without crashing\n"); fflush(stderr);
+}
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -1289,6 +1373,16 @@ int main(int argc, char **argv) {
     // MVM_SetDebugFileLoggingEnabled()'s doc comment (mvm_linker.hpp) and
     // memory mvm-ta-evm-interpreter-nullptr-crash for the full story.
     MVM_SetDebugFileLoggingEnabled(false);
+
+    // 2026-08-20 (round 3, plan §9.32): mvm_ta_xapian_inmemory_selftest3()
+    // was called here to verify the GCC-11.5.0-rebuilt libtbb.a fix -- NOT
+    // re-enabled after that flash attempt hit board-level instability
+    // (idbloader corruption, then a much-earlier ChCore-kernel hang) that
+    // never reached the point of actually running this selftest (chanmgr
+    // launches mvm_ta near the end of boot; the hangs were all well
+    // before that). Inconclusive, not root-caused to this change or
+    // ruled out -- see the function's own doc comment and plan §9.32 for
+    // the full story before re-enabling.
 
     mvm_channel_init();
     mvm_ta_run();
