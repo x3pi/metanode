@@ -652,37 +652,24 @@ async fn poll_go_until_synced(
                     last_progress_time = std::time::Instant::now();
                 }
 
-                // STUCK DETECTION: No progress for 60s
+                // STUCK DETECTION: Periodic warning if Go is executing a heavy block
                 if last_progress_time.elapsed() > no_progress_timeout {
-                    if remaining <= 10 {
-                        // Small gap + stuck → safe to proceed
+                    let ffi_queue_depth = crate::ffi::get_ffi_tx_queue_depth();
+                    if ffi_queue_depth > 1000 {
                         warn!(
-                            "🚨 [SYNC POLL] Go stuck for {:?} at gei={} (expected={}, gap={}). \
-                             Gap is small — proceeding safely.",
-                            last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining
+                            "🚨 [SYNC POLL] Go executing block for {:?} (gei={}), FFI queue is saturated ({} items). \
+                             Transient backpressure during high TPS, waiting for Go to finish...",
+                            last_progress_time.elapsed(), go_last_gei, ffi_queue_depth
                         );
-                        break;
                     } else {
-                        // Large gap + stuck → log critical but keep waiting
-                        // (DO NOT exit — "thà pending chứ không fork")
-                        let ffi_queue_depth = crate::ffi::get_ffi_tx_queue_depth();
-                        if ffi_queue_depth > 1000 {
-                            warn!(
-                                "🚨 [SYNC POLL] Go appears stuck for {:?} (gei={}), BUT FFI queue is saturated ({} items). \
-                                 This is transient backpressure during high TPS, NOT a deadlock. Waiting...",
-                                last_progress_time.elapsed(), go_last_gei, ffi_queue_depth
-                            );
-                        } else {
-                            error!(
-                                "🚨 [SYNC POLL] CRITICAL: Go has made NO PROGRESS for {:?}! \
-                                 gei={}, expected={}, gap={}, ffi_queue_depth={}. Go may be stuck. \
-                                 Investigate: check Go logs, NOMT state, commitWorker.",
-                                last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining, ffi_queue_depth
-                            );
-                        }
-                        // Reset timer to avoid spamming this error every 100ms
-                        last_progress_time = std::time::Instant::now();
+                        error!(
+                            "🚨 [SYNC POLL] Go executing heavy block for {:?} (current gei={}, expected={}, gap={}, ffi_queue_depth={}). \
+                             Continuing to wait for Go to finish boundary block (thà pending chứ không fork)...",
+                            last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining, ffi_queue_depth
+                        );
                     }
+                    // Reset timer to avoid spamming this warning every loop iteration
+                    last_progress_time = std::time::Instant::now();
                 }
 
                 // Trigger ForceCommit every 3 seconds to flush Go's pipeline

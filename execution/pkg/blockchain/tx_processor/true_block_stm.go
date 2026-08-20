@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -629,6 +630,7 @@ func (stm *TrueBlockSTM) execOne(
 		mvmId := common.Address(ethAddressBytes)
 
 		mvm.ClearMVMApi(mvmId)
+		mvm.ProtectMVMApi(mvmId)
 
 		stm.mvmIdMapMu.Lock()
 		stm.mvmIdMap[tx.Hash()] = mvmId
@@ -714,7 +716,12 @@ func (stm *TrueBlockSTM) execOne(
 			// Smart Contract
 			var err error
 			mvm.ClearXapianTxBuffer(tx.Hash().Bytes())
+			txExecStart := time.Now()
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
+			txExecDuration := time.Since(txExecStart)
+			if txExecDuration > 100*time.Millisecond {
+				logger.Warn("⏱️ [SLOW-TX] Tx [%d/%d] %s took %v in MVM execution", txIndex, len(stm.txs), tx.Hash().Hex()[:10], txExecDuration)
+			}
 
 			blockingVer := mvccDB.BlockingVersion
 			if blockingVer == mvcc.BaseVersion {

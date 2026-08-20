@@ -20,6 +20,11 @@
       --ip "{{ item.ip }}" \
       --total-nodes "{{ cluster_nodes | length }}" \
       --peers-map "{{ peers_map }}" \
+      --snapshot-frequency-blocks "{{ snapshot_frequency_blocks | default(500) }}" \
+      --snapshot-max-snapshots "{{ snapshot_max_snapshots | default(2) }}" \
+      --max-part-size-mb "{{ snapshot_max_part_size_mb | default(600) }}" \
+      --epoch-duration-seconds "{{ epoch_duration_seconds | default(600) }}" \
+      --epochs-to-keep "{{ item.epochs_to_keep | default(0) }}" \
       --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
       --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
       --metanode-bin "{{ deploy_dir }}/../../target/release/metanode"

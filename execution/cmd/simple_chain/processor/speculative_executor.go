@@ -305,6 +305,13 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 		k := key.(uint64)
 		if k <= gei {
 			if res, ok := value.(*SpeculativeResult); ok && res != nil {
+				// ZERO-FORK FIX: Only clean sessions that have finished execution.
+				// If a session is still executing (!res.IsFinished), do NOT abort it!
+				// Let it finish and commit its transactions safely.
+				if !res.IsFinished {
+					logger.Debug("⏳ [CleanGEI] Skipping active in-flight session GEI=%d (still executing)", k)
+					return true
+				}
 				if res.ClonedState != nil {
 					res.ClonedState.CloseSpeculative()
 				}

@@ -12,8 +12,26 @@
             {%- for nid in hostvars[host]['node_ids'] -%}
               {%- set is_sync = (nid | int in hostvars[host]['synconly_nodes'] | default([])) or (hostvars[host]['is_synconly'] | default(false)) -%}
               {%- set is_rpc = (nid | int in hostvars[host]['rpc_nodes'] | default([])) or (hostvars[host]['is_rpc'] | default(false)) -%}
-              {%- set is_snapshot = (nid | int in hostvars[host]['snapshot_nodes'] | default([])) or (hostvars[host]['snapshot_enabled'] | default(false)) or is_sync -%}
-              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync, 'is_rpc': is_rpc, 'snapshot_enabled': is_snapshot}) -%}
+              {%- set is_snapshot = (nid | int in hostvars[host]['snapshot_nodes'] | default([])) or (hostvars[host]['snapshot_enabled'] | default(false)) -%}
+              {%- set host_prune_nodes = hostvars[host]['prune_nodes'] | default([]) -%}
+              {%- set host_epochs_map = hostvars[host]['prune_epochs_map'] | default({}) -%}
+              {%- set host_default_keep = hostvars[host]['epochs_to_keep'] | default(epochs_to_keep | default(0)) -%}
+              {%- if (nid | string in host_epochs_map) -%}
+                {%- set node_keep = host_epochs_map[nid | string] | int -%}
+              {%- elif (nid | int in host_epochs_map) -%}
+                {%- set node_keep = host_epochs_map[nid | int] | int -%}
+              {%- elif 'prune_nodes' in hostvars[host] -%}
+                {%- if (nid | int in host_prune_nodes) -%}
+                  {%- set node_keep = hostvars[host]['prune_epochs_to_keep'] | default(5) | int -%}
+                {%- else -%}
+                  {%- set node_keep = 0 -%}
+                {%- endif -%}
+              {%- elif is_rpc or is_sync -%}
+                {%- set node_keep = 0 -%}
+              {%- else -%}
+                {%- set node_keep = host_default_keep | int -%}
+              {%- endif -%}
+              {%- set _ = nodes.append({'node_id': nid, 'ip': hostvars[host]['ansible_host'] | default(host), 'is_synconly': is_sync, 'is_rpc': is_rpc, 'snapshot_enabled': is_snapshot, 'epochs_to_keep': node_keep}) -%}
             {%- endfor -%}
           {%- endfor -%}
           {{ nodes }}

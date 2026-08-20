@@ -2,6 +2,7 @@ package pruning
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -23,8 +24,9 @@ type PruningManager struct {
 	cancel     context.CancelFunc
 	ctx        context.Context
 
-	lastPrunedEpoch uint64
-	lastPrunedBlock uint64
+	lastPrunedEpoch atomic.Uint64
+	lastPrunedBlock atomic.Uint64
+	pruningInFlight atomic.Bool
 }
 
 func NewPruningManager(cfg *config.PruningConfig, cs ChainState) *PruningManager {
@@ -83,9 +85,14 @@ func (pm *PruningManager) pruneTick() {
 	// Check if we need to prune old epochs
 	if pm.config.EpochsToKeep > 0 && currentEpoch > uint64(pm.config.EpochsToKeep) {
 		targetPruneEpoch := currentEpoch - uint64(pm.config.EpochsToKeep)
-		if targetPruneEpoch > pm.lastPrunedEpoch {
-			pm.pruneEpoch(targetPruneEpoch)
-			pm.lastPrunedEpoch = targetPruneEpoch
+		if targetPruneEpoch > pm.lastPrunedEpoch.Load() {
+			if pm.pruningInFlight.CompareAndSwap(false, true) {
+				go func() {
+					defer pm.pruningInFlight.Store(false)
+					pm.pruneEpoch(targetPruneEpoch)
+					pm.lastPrunedEpoch.Store(targetPruneEpoch)
+				}()
+			}
 		}
 	}
 }
@@ -174,9 +181,9 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 		bc.DeleteBlockHashMapping(bNum)
 		prunedCount++
 
-		// Prevent CPU/IO hogging by sleeping briefly every 100 blocks
-		if prunedCount%100 == 0 {
-			time.Sleep(10 * time.Millisecond)
+		// Prevent CPU/IO hogging by sleeping briefly every 20 blocks
+		if prunedCount%20 == 0 {
+			time.Sleep(15 * time.Millisecond)
 		}
 	}
 
