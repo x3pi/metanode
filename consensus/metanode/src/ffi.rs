@@ -300,8 +300,10 @@ pub unsafe extern "C" fn metanode_start_consensus(
         }));
 
 
-/// Custom writer that forwards Rust tracing logs to Go logger via CGo callback
-struct GoLogWriter;
+/// Custom writer that forwards Rust tracing logs to Go logger via CGo callback with dynamic log levels
+struct GoLogWriter {
+    level: i32,
+}
 
 impl std::io::Write for GoLogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -311,7 +313,7 @@ impl std::io::Write for GoLogWriter {
             if let Some(callbacks) = GO_CALLBACKS.get() {
                 if let Some(log_func) = callbacks.log_message {
                     if let Ok(c_msg) = std::ffi::CString::new(trimmed) {
-                        log_func(1, c_msg.as_ptr(), trimmed.len());
+                        log_func(self.level, c_msg.as_ptr(), trimmed.len());
                     }
                 }
             }
@@ -324,17 +326,29 @@ impl std::io::Write for GoLogWriter {
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogWriter {
+struct GoLogMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
     type Writer = GoLogWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        GoLogWriter
+        GoLogWriter { level: 1 } // Default to Info
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let level = match *meta.level() {
+            tracing::Level::ERROR => 3,
+            tracing::Level::WARN => 2,
+            tracing::Level::INFO => 1,
+            tracing::Level::DEBUG | tracing::Level::TRACE => 0,
+        };
+        GoLogWriter { level }
     }
 }
         // Initialize tracing for FFI thread (captured into execution.log via Go callback)
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_writer(GoLogWriter)
+            .with_writer(GoLogMakeWriter)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| "info".into()),

@@ -330,12 +330,23 @@ func (se *SpeculativeExecutor) ResultChan() <-chan *SpeculativeResult {
 	return se.resultChan
 }
 
-// CleanGEI cleans speculative results older than a GEI. For any session that
-// hasn't finished yet (still the dispatch-time placeholder, or a completed
-// result that lost the race against this sweep), it proactively releases the
-// cloned NOMT session and sends a best-effort rescue response on AuthRespCh
-// so the FFI caller isn't left waiting on the (still-present) ffi_bridge.go
-// response timeout for longer than necessary.
+// CleanGEI cleans speculative results older than or equal to a target GEI.
+//
+// ARCHITECTURAL NOTE: Why `if !res.IsFinished` was intentionally removed:
+// 1. CleanGEI(gei) is only invoked when `storage.GetLastGlobalExecIndex() >= gei` (either
+//    by the committer loop after a successful commit, or when fast-forwarding because
+//    P2P BlockSyncer already caught up and persisted blocks directly to DB).
+// 2. Therefore, for all k <= gei, the ground-truth state for block k is ALREADY finalized
+//    in the DB. Any in-flight background goroutine executing EVM for k is computing on an
+//    obsolete snapshot; its result will be discarded anyway.
+// 3. If we skipped in-flight sessions (`if !res.IsFinished { return true }`), when those
+//    goroutines finish later, the committer has already advanced past k. The session remains
+//    orphaned in activeSessions forever, its cloned NOMT state is never closed, leaving
+//    `h.activeCount > 0` and causing all future sessions to deadlock indefinitely in `sync.Cond.Wait`.
+// 4. By proactively deleting the session and unblocking Rust with `Success: true, GeisConsumed: 0`,
+//    Rust knows the block is safely handled (since DB already has it), and the goroutine, upon
+//    completing, will detect that `gei <= lastCommittedGEI` (or that it was swept) and immediately
+//    close its speculative NOMT state without deadlock.
 func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 	se.activeSessions.Range(func(key, value interface{}) bool {
 		k := key.(uint64)
@@ -539,6 +550,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 
 		accumulatedResults, commitErr = tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, res.LeaderAddr, res.BlockNum, true)
 		if commitErr != nil {
+			if csCopy != nil {
+				csCopy.CloseSpeculative()
+			}
 			commitErr = fmt.Errorf("sequential re-execution failed: %w", commitErr)
 			return commitErr
 		}
