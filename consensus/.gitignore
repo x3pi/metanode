@@ -19,8 +19,7 @@
 **/*.rs.bk
 **/*.pdb
 
-# Cargo.lock (only ignore in workspace root, keep in individual crates if needed)
-Cargo.lock
+
 
 # Compiled binaries and libraries
 **/*.exe
