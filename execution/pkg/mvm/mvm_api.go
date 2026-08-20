@@ -1,8 +1,22 @@
 package mvm
 
 /*
-#cgo CFLAGS: -w -O3 -march=native -mtune=native
-#cgo CXXFLAGS: -std=c++17 -w -O3 -march=native -mtune=native
+#cgo CFLAGS: -w -O3
+#cgo CXXFLAGS: -std=c++17 -w -O3
+// -march=native/-mtune=native only make sense when the compiler runs on the
+// same machine it targets -- meaningless (and rejected outright by gcc/g++)
+// under a cross toolchain like aarch64-linux-gnu-gcc. Mirrors the same
+// CMAKE_CROSSCOMPILING guard already in c_mvm/CMakeLists.txt and
+// linker/CMakeLists.txt (added 2026-08-16 for the chcore/musl TA target) --
+// this is the Go-side cgo equivalent, added 2026-08-21 while cross-compiling
+// pkg/mvm for the real board (aarch64-linux-gnu, NOT the musl/chcore TA
+// target -- see note/tee_dual_mode_execution_plan.md's cross-compile
+// section). Default (no explicit GOARCH, i.e. the host's own arch) still
+// gets the amd64 line on this development machine, unchanged from before.
+#cgo linux,amd64 CFLAGS: -march=native -mtune=native
+#cgo linux,arm64 CFLAGS: -march=armv8-a -mtune=generic
+#cgo linux,amd64 CXXFLAGS: -march=native -mtune=native
+#cgo linux,arm64 CXXFLAGS: -march=armv8-a -mtune=generic
 #cgo LDFLAGS: -lgmp -lmpfr -lm -ltbb -lxapian -L./linker/build/lib/static -lleveldb -lmvm_linker -L./c_mvm/build/lib/static -lmvm -lstdc++ -luuid
 #cgo CPPFLAGS: -I./linker/build/include
 #include "mvm_linker.hpp"
