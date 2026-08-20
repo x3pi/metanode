@@ -2008,3 +2008,33 @@ là khoảng lệch hành vi thật so với cgo mode cho bất kỳ tx nào dù
 `ModeTrustzoneHardware` — chưa phải bug (giao thức v1 chưa hứa hỗ trợ), nhưng cần quyết định rõ
 (mở rộng giao thức, hay chấp nhận giới hạn và tài liệu hoá) trước khi coi TZ-hardware mode "đúng"
 cho production theo đúng tinh thần mục 7 (Không tuyên bố hoàn thành khi...) của file này.
+
+## §9.35 — Chốt: `CALL_GET_API` KHÔNG hỗ trợ qua hardware bridge (quyết định vĩnh viễn, 2026-08-20)
+
+Từ §9.31 (2026-08-20), `CALL_GET_API` (trong 4 lệnh extension reverse-call) đã bị để lại sau
+cùng theo yêu cầu người dùng ("chưa cần làm call http thật đâu nhé") — nhưng khi rà lại
+`dispatchReverseCall` (`tz_hardware_reverse_dispatch.go`, viết trong §9.34) để chuẩn bị tổng kết
+production-readiness, phát hiện code thực tế **đã gọi thẳng** `extensionCallGetApiCore` (HTTP GET
+thật) cho case này — lệch với comment cũ của chính nó ("dispatcher does not call it yet"). Người
+dùng chốt dứt khoát hôm nay: **bỏ, không hỗ trợ `CALL_GET_API`** — không phải "để sau" nữa mà là
+quyết định phạm vi vĩnh viễn cho `ModeTrustzoneHardware`.
+
+**Lý do kỹ thuật** (không chỉ theo yêu cầu suông): 1 EVM call block chờ HTTP thật bên trong 1
+round-trip hardware — dưới `tzSessionMu` (tuần tự hoá toàn bộ phiên), với TA timeout 60s đua với
+HTTP timeout 5s — là rủi ro không đáng giữ cho 1 tính năng vốn đã không-determinism (2 lần gọi
+HTTP có thể trả nội dung khác nhau, xem mục "Hệ quả thiết kế then chốt" #3 — đúng lý do
+`CALL_GET_API` bị loại khỏi tập so byte-for-byte ở Giai đoạn 4 ngay từ đầu).
+
+**Đã sửa**: `dispatchReverseCall`'s case `EXTENSION_CALL_GET_API` không còn gọi core nữa — trả
+response rỗng + log rõ "not supported ... by design", cùng dạng với các đường "not-found/failure"
+khác trên kênh này (không phải crash). `extensionCallGetApiCore` (`extension.go`) vẫn giữ nguyên
+100%, vẫn phục vụ `ModeCgo`/`ModeTrustzone` qua `//export ExtensionCallGetApi` — chỉ đường hardware
+bridge mất tính năng này. Thêm 1 test chốt hành vi (`..._UnsupportedByDesign`, dùng cả 1 URL SSRF
+độc hại để chứng minh không hề chạm mạng).
+
+**Hệ quả cho production**: 1 hợp đồng dùng precompile `CALL_GET_API` sẽ chạy khác nhau tuỳ mode —
+có dữ liệu thật trên `ModeCgo`/`ModeTrustzone`, luôn "không có dữ liệu" trên `ModeTrustzoneHardware`.
+Đây là giới hạn đã biết và chấp nhận, không phải lỗ hổng cần vá thêm.
+
+Xác nhận sạch: `go build`/`go vet`/`gofmt -l` (không đụng 2 file vốn đã lệch format từ trước,
+`mvm_api.go`/`ta_boundary_harness_test.go`) sạch; `go test -count=3 ./pkg/mvm/...` sạch.
