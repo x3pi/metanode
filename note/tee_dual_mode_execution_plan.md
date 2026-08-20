@@ -1627,3 +1627,24 @@ chạy trên board (`d76124f4f8878c17bd21ea43dd5b9f47`) — vì hàm mới là `
 `-O2` loại bỏ hoàn toàn (dead code elimination thật, không phải suy đoán). Do đó **không cần
 flash lại** — board hiện tại đã chạy code tương đương tuyệt đối. Không cần vòng build→flash→
 reboot nào cho thay đổi này.
+
+### §9.28 follow-up (cùng ngày) — Storage reverse-call với dữ liệu THẬT (mục 5 "Việc tiếp theo")
+
+Được hỏi phạm vi trước khi làm (5 lệnh storage/extension đòi hỏi mức công sức rất khác nhau —
+extension cần bytecode CALL + ABI encode/decode thật + `CALL_GET_API` cần gọi HTTP thật ra
+ngoài) — chọn làm `GET_STORAGE_VALUE` trước (an toàn, không network, không ABI), 4 lệnh
+extension để riêng cho vòng sau khi đã rõ `argument_encode`'s format thật.
+
+Thêm địa chỉ test thứ 3, `g_storage_test_addr` (0x44 lặp 20 lần), bytecode bare SLOAD (không
+SSTORE trước — khác hẳn test 2's SSTORE-rồi-SLOAD-trong-cùng-tx, vốn không bao giờ rời khỏi
+cache in-process của `mvm_ta`, không thật sự exercise round-trip). `GetStorageValue` case trong
+`mvm_ca_test.cpp` giờ check `(address, key)`: khớp `(g_storage_test_addr, slot 0)` → trả
+`status=0` (SUCCESS) kèm giá trị thật `0x1337`; mọi `(address,key)` khác giữ nguyên `NOT_FOUND`
+(không phá 2 test cũ). Cũng sửa `run_execute_and_print()` để in luôn RETURN output bytes (trước
+đây parse rồi bỏ, `(void)output_len`) — cần thiết để verify bằng mắt giá trị trả về đúng.
+
+**Xác nhận trên hardware**: `GetStorageValue: returning REAL value 0x1337` → RETURN output =
+`...1337` khớp chính xác. 2 test cũ (native transfer, SSTORE/SLOAD) vẫn `status=0 exception=0`
+không đổi — không regression. Chỉ cần build lại `mvm_ca_test` (aarch64-linux-gnu-g++, không đụng
+`mvm_ta`) + push qua `hdc` + chạy trên board đang chạy sẵn — **không cần flash/reboot** vì thay
+đổi hoàn toàn nằm ở phía test tool, không phải TA.

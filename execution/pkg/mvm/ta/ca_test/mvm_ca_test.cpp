@@ -158,6 +158,31 @@ static const uint8_t g_contract_code[] = {
     0x60,0x2a, 0x60,0x00, 0x55, 0x60,0x00, 0x54,
     0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3};
 
+// 2026-08-20 (plan §9.28 follow-up): a SEPARATE contract address whose
+// bytecode does a BARE SLOAD (no SSTORE first, in this tx or any prior
+// one) -- unlike g_contract_addr's test above, this one exercises
+// GET_STORAGE_VALUE's REVERSE-CALL path with a real, non-trivial,
+// pre-existing value the Host (this CA test tool) fabricates, instead of
+// always answering NOT_FOUND for a slot this same tx just wrote. This is
+// the actual "storage reverse-call with real data" case: a value that
+// genuinely round-trips over the wire (GET_STORAGE_VALUE resp blob ->
+// my_storage.cpp's load() -> SLOAD's stack result -> MSTORE -> RETURN),
+// not just mvm_ta's own in-process SSTORE-then-SLOAD cache.
+static const uint8_t g_storage_test_addr[20] = {
+    0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44,
+    0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44,0x44};
+// PUSH1 0x00 SLOAD PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN --
+// read slot 0 (never written this tx), return it.
+static const uint8_t g_storage_read_code[] = {
+    0x60,0x00, 0x54, 0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3};
+// The value handle_reverse_call() answers GET_STORAGE_VALUE with for
+// (g_storage_test_addr, slot 0) -- 0x1337 (4919 decimal), chosen to be
+// unmistakable in the printed result (not 0, not something a bug could
+// produce by accident like a leftover 0x2a from the other test).
+static const uint8_t g_storage_test_value[32] = {
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x13,0x37};
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -177,8 +202,16 @@ static void handle_reverse_call(void) {
     case MVM_TZ_RCMD_GLOBAL_STATE_GET: {
         // mvm_tz_global_state_get_req_t: [0] mvm_id(20) [1] address(20).
         const uint8_t *req_address = hdr_copy + 20;
+        const uint8_t *code = nullptr;
+        size_t code_len = 0;
         if (header_len >= 40 && memcmp(req_address, g_contract_addr, 20) == 0) {
-            // The one address this test deliberately gives real code to.
+            code = g_contract_code;
+            code_len = sizeof(g_contract_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_storage_test_addr, 20) == 0) {
+            code = g_storage_read_code;
+            code_len = sizeof(g_storage_read_code);
+        }
+        if (code) {
             // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
             // [2] code (length-prefixed).
             mvm_tz_global_state_get_resp_t resp = {0};
@@ -189,10 +222,9 @@ static void handle_reverse_call(void) {
             uint8_t zero32[32] = {0};
             w.writeRaw(zero32, 32); // balance = 0
             w.writeRaw(zero32, 32); // nonce = 0
-            w.writeBytes(g_contract_code, sizeof(g_contract_code));
+            w.writeBytes(code, code_len);
             resp_blob_len = w.off;
-            printf("[mvm_ca_test] GlobalStateGet: returning REAL code (%zu bytes) "
-                "for contract address\n", sizeof(g_contract_code));
+            printf("[mvm_ca_test] GlobalStateGet: returning REAL code (%zu bytes)\n", code_len);
             fflush(stdout);
         } else {
             // Every other address in this test is synthetic/never-before-seen
@@ -206,16 +238,38 @@ static void handle_reverse_call(void) {
         break;
     }
     case MVM_TZ_RCMD_GET_STORAGE_VALUE: {
-        // Genuinely fires now for the contract's own SLOAD/SSTORE traffic.
-        // Every slot in this test is fresh (first-ever write) -> NOT_FOUND=1
-        // is the correct answer for the pre-write read; the SSTORE itself
-        // updates mvm_ta's own in-process State/Xapian, no reverse call
-        // needed for the write side.
-        mvm_tz_get_storage_value_resp_t resp = {0};
-        resp.status = 1;
-        memcpy(resp_buf, &resp, sizeof(resp));
-        resp_hdr_len = sizeof(resp);
-        resp_blob_len = 0;
+        // mvm_tz_get_storage_value_req_t: [0] mvm_id(20) [1] address(20)
+        // [2] key(32) -- 72 bytes total.
+        const uint8_t *req_address = hdr_copy + 20;
+        const uint8_t *req_key = hdr_copy + 40;
+        static const uint8_t zero_key[32] = {0};
+        if (header_len >= 72 && memcmp(req_address, g_storage_test_addr, 20) == 0
+            && memcmp(req_key, zero_key, 32) == 0) {
+            // 2026-08-20 (plan §9.28 follow-up): the real-data case -- a
+            // slot this tx never wrote, answered with a genuine
+            // pre-existing value instead of NOT_FOUND. See
+            // g_storage_test_value's own comment for why 0x1337.
+            mvm_tz_get_storage_value_resp_t resp = {0};
+            resp.status = 0; // STORAGE_SUCCESS
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            memcpy(resp_buf + resp_hdr_len, g_storage_test_value, 32);
+            resp_blob_len = 32;
+            printf("[mvm_ca_test] GetStorageValue: returning REAL value 0x1337 "
+                "for storage-test address\n");
+            fflush(stdout);
+        } else {
+            // Every other (address, key) in this test is fresh (first-ever
+            // write, e.g. g_contract_addr's own SSTORE-then-SLOAD test) ->
+            // NOT_FOUND=1 is the correct answer; the SSTORE itself updates
+            // mvm_ta's own in-process State/Xapian, no reverse call needed
+            // for the write side.
+            mvm_tz_get_storage_value_resp_t resp = {0};
+            resp.status = 1;
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            resp_blob_len = 0;
+        }
         break;
     }
     // Added 2026-08-20 (plan §9.24 follow-up): all 4 remaining live reverse
@@ -407,12 +461,12 @@ static int run_execute_and_print(const char *label,
     auto skipBytes = [&](void) { uint32_t n = readU32(); off += n; return n; };
 
     uint32_t output_len = 0;
+    const uint8_t *output_p = nullptr;
     {
         skipBytes(); // exmsg
-        uint32_t save_off = off;
         output_len = readU32();
-        off = save_off;
-        skipBytes(); // output (re-consumed properly below)
+        output_p = blob + off;
+        off += output_len;
     }
     for (uint32_t i = 0; i < hdr.full_db_hash_count; i++) off += 52;
 
@@ -459,7 +513,12 @@ static int run_execute_and_print(const char *label,
             off += 64;
         }
     }
-    (void)output_len;
+    printf("-- output (RETURN data, %u bytes) --\n", output_len);
+    if (output_len > 0) {
+        printf("  ");
+        for (uint32_t j = 0; j < output_len; j++) printf("%02x", output_p[j]);
+        printf("\n");
+    }
     printf("(status=%u, exception=%u -- %s)\n", hdr.status, hdr.exception,
         hdr.exception ? "reverted/exception" : "success");
     return 0;
@@ -530,6 +589,21 @@ int main(void) {
     // this doesn't need MVM_TZ_CMD_DEPLOY. amount=0, empty calldata (the
     // bytecode itself takes no branch on input). ───
     if (run_execute_and_print("contract call (SSTORE/SLOAD)", sender, g_contract_addr, 0, nullptr, 0) != 0) {
+        return 1;
+    }
+
+    // ─── test 3 (2026-08-20, plan §9.28 follow-up): storage reverse-call
+    // with REAL pre-existing data. recipient = g_storage_test_addr, whose
+    // bytecode is a bare SLOAD (no prior SSTORE, this tx or any other) --
+    // exercises GET_STORAGE_VALUE's reverse-call round trip returning a
+    // genuine value (0x1337) instead of always NOT_FOUND, unlike test 2's
+    // SSTORE-then-SLOAD (which never leaves mvm_ta's own in-process cache).
+    // Expect the RETURNed output = 0x1337 -- confirmed on hardware
+    // 2026-08-20 (storage_read_count itself came back 0, not 1 as first
+    // guessed here; add_addresses_storage_read()'s tracking is Block-STM
+    // -specific bookkeeping, separate from whether the value round-tripped
+    // correctly, which the RETURN output is the real check for). ───
+    if (run_execute_and_print("storage read (real pre-existing value)", sender, g_storage_test_addr, 0, nullptr, 0) != 0) {
         return 1;
     }
 
