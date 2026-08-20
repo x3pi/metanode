@@ -1927,3 +1927,84 @@ sẵn `mvm.SetExecutionMode(app.config.ExecutionMode)` chờ hàm này tồn t�
 
 Đây là xác nhận đầu tiên GĐ2 (loopback transport) hoạt động đúng end-to-end trên x86 — trước đây
 chỉ tồn tại dưới dạng code+test chưa từng build/chạy được do thiếu file glue này.
+
+## §9.34 — Giai đoạn 3b hoàn tất (phạm vi x86): CA Go thật — cầu nối hardware, 2026-08-20
+
+Sau khi xác nhận GĐ0/1/2 đã sẵn sàng (§9.33), người dùng chọn "viết CA Go thật trước" làm ưu
+tiên hàng đầu trên đường tới production, thay vì nối 5 lệnh forward còn lại phía TA hay sửa lại
+toolchain Xapian/GCC. Trước hôm nay, mọi lần chạy `CALL`/`EXECUTE` thật trên board đều qua
+`ca_test/mvm_ca_test.cpp` — 1 tool C++ chẩn đoán trả dữ liệu giả lập cứng, **chưa từng đọc/ghi
+state Go thật**. Đây là lỗ hổng lớn nhất còn lại; hôm nay đóng nó lại (trong phạm vi build/test
+được trên x86, chưa đụng board — xem lý do trong kế hoạch phiên này).
+
+**Phát hiện quan trọng trước khi viết code mới** (bug thật, không phải giả thuyết): so khảo sát
+`tz_codec.go`'s `encode*Req` với `ta/mvm_ta_main.cpp` (`BlobReader::readBytes`) và
+`ca_test/mvm_ca_test.cpp` (`w.writeBytes(sender, 20)`) proven-trên-hardware, thấy Go ghi
+`bSender`/`bContractAddress`/`bTxHash`/mỗi related address dạng **raw fixed-width, không có
+length-prefix** — sai với chính lời văn của header (`mvm_tz_protocol.h:33-36`) và với TA thật.
+Loopback pass vì Go tự mã hoá sai rồi tự giải mã sai theo kiểu THỐNG NHẤT với chính nó, không có
+gì để đối chiếu tới nay. Nếu không bắt bug này trước, `CALL`/`EXECUTE` thật đầu tiên qua hardware
+sẽ hỏng ngay từ bước đọc header phía TA.
+
+**7 bước đã làm, theo đúng thứ tự phụ thuộc đã duyệt trong plan**:
+1. Sửa framing GĐ1 (`tz_codec.go`): 6 hàm `encode*Req`/`decode*Req` forward
+   (call/execute/deploy/send_native/process_native_mint_burn/nonce_plus_one) chuyển
+   `bSender`/`bContractAddress`/`bTxHash`/related-address sang length-prefixed
+   (`writeBytes`/`readBytes`), xoá `writeFixed20` (dead code sau sửa). 7 test loopback vẫn pass
+   100% (loopback tự đối xứng, không phát hiện được bug này, nhưng không được regress).
+2. Trích lõi Go thuần cho 6 reverse-call handler: `globalStateGetCore`/`getStorageValueCore`
+   (`mvm_api.go`), `extensionCallGetApiCore`/`extensionExtractJsonFieldCore`/`extensionBlstCore`/
+   `extensionGetOrCreateSimpleDbCore` (`extension.go`) — tách khỏi lớp marshal C, hành vi giữ
+   nguyên 100% (kể cả 1 quirk đã biết: `getStorageValueCore` giữ nguyên phân biệt nil-C-pointer
+   vs pointer-tới-0-byte của bản gốc qua return thêm `mvmApiFound bool`).
+3. `dispatchReverseCall` (`tz_hardware_reverse_dispatch.go`, file mới): switch theo cmd, decode
+   → core (bước 2) → encode, cho cả 6 lệnh reverse + `GET_LATEST_FULL_DB_LOGS` (trả
+   `entry_count=0` — hợp lệ theo doc comment của header, CHƯA nối `GetLatestFullDbLogsForAddress`
+   thật vì việc auto-trigger còn bị chặn bởi vấn đề Xapian/GCC-ABI ở §9.30/§9.32). Lỗi decode/cmd
+   lạ: log + trả response rỗng an toàn, KHÔNG panic (khác hẳn quy ước dev-only của
+   `tzLoopbackEngine`/`mvm_ca_test.cpp` — file này chạy trong tiến trình node thật). 8 test unit
+   mới, gồm cả 1 lượt BLS12-381 ký/xác minh thật qua `bls.GenerateKeyPair()`+`bls.Sign` và 1 lượt
+   JSON parse thật.
+4. `tzHardwareChannel` (`tz_hardware_channel.go`, file mới): `open("/dev/tc_ns_client")` (qua
+   `os.OpenFile`, né giới hạn cgo không bind được `open()`/`ioctl()` variadic) → ioctl
+   `SET_PAGES` (qua wrapper C non-variadic) → `mmap` → verify `protocol_version`, theo đúng
+   trình tự đã proven ở `ca_test/mvm_ca_test.cpp:1008-1055`. Goroutine relay bắt buộc
+   (`startReverseCallRelay`, `runtime.LockOSThread()`, backoff sau ngưỡng
+   `SMC_LOOP_EXIT_FINISH` liên tiếp) khởi động TRƯỚC `SET_PAGES`. `consumeRequestReadyForDirection`/
+   `consumeResponseReadyForDirection` peek `direction` trước CAS (né đúng bug đã biết
+   `mvm-ca-test-bidirectional-flag-race` của dự án `tz-llm-trustzone`).
+5+6. Vòng lặp round-trip hardware thật (`tzHardwareRoundTrip`, trong `tz_hardware_engine.go`):
+   gửi request `HOST_TO_TA` → poll `response_ready` (nếu `direction=HOST_TO_TA` là kết quả cuối)
+   xen kẽ `request_ready` (nếu `direction=TA_TO_HOST` là 1 reverse-call, phục vụ qua
+   `dispatchReverseCall` rồi ghi lại **y hệt** cmd/direction TA đã gửi — khớp đúng
+   `mvm_ca_test.cpp`'s `handle_reverse_call`, vốn không đổi `cmd`/`direction` khi trả lời), timeout
+   60s rõ ràng thay vì treo vô hạn không dấu hiệu (đúng tinh thần mục 7 của file này: TA treo do
+   lỗi logic trông giống hệt đang tính chậm). `tzHardwareEngine`: bọc 1 `*MVMApi` thật qua
+   `GetOrCreateMVMApi` — không phải để tính toán ở đây, mà vì `dispatchReverseCall`'s core tra cứu
+   `SmartContractDB`/`AccountStateDB` đúng theo `mvmId` qua CHÍNH registry này. Chỉ
+   `Call`/`Execute` thật (2 lệnh TA đã wire); `Deploy`/`SendNative`/`ProcessNativeMintBurn`/
+   `NoncePlusOne`/`ExecuteBatch` panic rõ ràng — không tự chế giả lập.
+7. `ModeTrustzoneHardware` (`execution_mode.go`, hằng mới, KHÔNG tái dùng `ModeTrustzone` vì đó
+   đang là loopback và 7 test hiện có phụ thuộc tính đồng bộ/deterministic của nó) — route
+   `NewExecutionEngine` sang `newTZHardwareEngine`.
+
+**Xác nhận sạch, không cần hardware** (đúng kỳ vọng của phạm vi phiên này — `tz_hardware_channel.go`/
+`tz_hardware_engine.go` build được nhưng KHÔNG chạy được thật trên x86, thiếu `/dev/tc_ns_client`):
+- `go build ./...` + `go vet ./...` + `gofmt -l`: sạch toàn module.
+- `go test -count=3 ./pkg/mvm/...`: sạch — 7 test loopback không regress, cộng 8 test dispatcher
+  mới.
+- `consensus/metanode/scripts/build_check.sh`: **ALL BUILDS PASSED (4/4)**.
+
+**Còn lại ngoài phạm vi phiên này** (đã chốt rõ trong kế hoạch, cần board + phiên riêng): chạy
+thật trên board; wire `DEPLOY`/`SEND_NATIVE`/`PROCESS_NATIVE_MINT_BURN`/`NONCE_PLUS_ONE`/
+`EXECUTE_BATCH` phía TA C++; cross-compile toàn bộ module Go cho `GOARCH=arm64` (0 tooling tồn tại
+hôm nay, xác nhận qua grep thật toàn repo — `-march=native` cứng trong `mvm_api.go`, gate
+`#cgo linux,amd64` sót arm64 trong `executor/ffi_bridge.go`).
+
+**Một khoảng trống chưa gắn cờ riêng với người dùng, đáng lưu ý cho phiên sau**: giao thức v1
+(`mvm_tz_protocol.h`) không mang `CHAINID`/blob context (`BLOBHASH`/`BLOBBASEFEE`)/cross-chain
+sender qua dây — phía TA truyền `nullptr`/`0` cho các trường này (`MVM_B1_CONTEXT_PARAMS`). Đây
+là khoảng lệch hành vi thật so với cgo mode cho bất kỳ tx nào dùng các opcode đó khi chạy qua
+`ModeTrustzoneHardware` — chưa phải bug (giao thức v1 chưa hứa hỗ trợ), nhưng cần quyết định rõ
+(mở rộng giao thức, hay chấp nhận giới hạn và tài liệu hoá) trước khi coi TZ-hardware mode "đúng"
+cho production theo đúng tinh thần mục 7 (Không tuyên bố hoàn thành khi...) của file này.
