@@ -58,7 +58,7 @@ jobs:
       - name: Build Rust libraries (libmtn_nomt.a and libmetanode.a)
         working-directory: .
         run: |
-          cargo build --release -p mtn-nomt-ffi -p metanode
+          cargo build --release --locked -p mtn-nomt-ffi -p metanode
           mkdir -p consensus/metanode/target/release
           cp target/release/libmetanode.a consensus/metanode/target/release/
 

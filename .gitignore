@@ -33,8 +33,6 @@ benchmark_results/
 **/*.bz2
 **/.cache/
 cache_debug.log
-Cargo.lock
-# Cargo.lock (only ignore in workspace root, keep in individual crates if needed)
 channel_debug.log
 /check_account
 /check_*.go

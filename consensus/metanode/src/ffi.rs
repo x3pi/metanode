@@ -62,6 +62,8 @@ pub struct GoCallbacks {
             details_ptr: *const c_char,
         ),
     >,
+    /// Log message to Go logger
+    pub log_message: Option<extern "C" fn(level: std::os::raw::c_int, msg_ptr: *const c_char, msg_len: usize)>,
 }
 
 /// Call into Go to update transaction trace
@@ -297,9 +299,56 @@ pub unsafe extern "C" fn metanode_start_consensus(
             );
         }));
 
-        // Initialize tracing for FFI thread (captured into execution.log via Go stdout/stderr redirection)
+
+/// Custom writer that forwards Rust tracing logs to Go logger via CGo callback with dynamic log levels
+struct GoLogWriter {
+    level: i32,
+}
+
+impl std::io::Write for GoLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let msg = String::from_utf8_lossy(buf);
+        let trimmed = msg.trim_end();
+        if !trimmed.is_empty() {
+            if let Some(callbacks) = GO_CALLBACKS.get() {
+                if let Some(log_func) = callbacks.log_message {
+                    if let Ok(c_msg) = std::ffi::CString::new(trimmed) {
+                        log_func(self.level, c_msg.as_ptr(), trimmed.len());
+                    }
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct GoLogMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
+    type Writer = GoLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        GoLogWriter { level: 1 } // Default to Info
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let level = match *meta.level() {
+            tracing::Level::ERROR => 3,
+            tracing::Level::WARN => 2,
+            tracing::Level::INFO => 1,
+            tracing::Level::DEBUG | tracing::Level::TRACE => 0,
+        };
+        GoLogWriter { level }
+    }
+}
+        // Initialize tracing for FFI thread (captured into execution.log via Go callback)
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_writer(GoLogMakeWriter)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| "info".into()),

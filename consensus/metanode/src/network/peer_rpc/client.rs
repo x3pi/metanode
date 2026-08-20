@@ -102,11 +102,6 @@ pub async fn query_peer_epochs_network(
     for peer_addr in peer_addresses {
         match query_peer_info(peer_addr).await {
             Ok(info) => {
-                info!(
-                    "🌐 [PEER RPC] Peer ({}): epoch={}, block={}, global_exec_index={}",
-                    peer_addr, info.epoch, info.last_block, info.last_global_exec_index
-                );
-
                 // Use this peer if it has higher epoch, or same epoch and higher global_exec_index
                 if best_address.is_empty()
                     || info.epoch > best_epoch
@@ -117,10 +112,6 @@ pub async fn query_peer_epochs_network(
                     best_block = info.last_block;
                     best_global_exec_index = info.last_global_exec_index;
                     best_address = peer_addr.clone();
-                    info!(
-                        "🌐 [PEER RPC] New best peer: epoch={} block={} global_exec_index={} from {}",
-                        best_epoch, best_block, best_global_exec_index, peer_addr
-                    );
                 }
             }
             Err(e) => {
@@ -133,11 +124,6 @@ pub async fn query_peer_epochs_network(
         return Err(anyhow::anyhow!("No reachable peers found"));
     }
 
-    info!(
-        "🌐 [PEER RPC] Best peer found: epoch={} block={} global_exec_index={} from {}",
-        best_epoch, best_block, best_global_exec_index, best_address
-    );
-
     Ok((best_epoch, best_block, best_address, best_global_exec_index))
 }
 
@@ -149,11 +135,6 @@ pub async fn query_peer_epoch_boundary_data(
     epoch: u64,
 ) -> Result<EpochBoundaryDataResponse> {
     use tokio::net::TcpStream;
-
-    info!(
-        "🌐 [PEER RPC] Querying epoch boundary data for epoch {} from {}",
-        epoch, peer_address
-    );
 
     // Connect with timeout
     let mut stream = tokio::time::timeout(
@@ -222,11 +203,6 @@ pub async fn query_peer_epoch_boundary_data(
     if let Some(error) = &response.error {
         return Err(anyhow::anyhow!("Peer returned error: {}", error));
     }
-
-    info!(
-        "🌐 [PEER RPC] Received epoch boundary data from {}: epoch={}, timestamp={}, boundary_block={}, validators={}",
-        peer_address, response.epoch, response.timestamp_ms, response.boundary_block, response.validators.len()
-    );
 
     Ok(response)
 }
