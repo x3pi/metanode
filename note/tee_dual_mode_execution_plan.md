@@ -2304,3 +2304,62 @@ thực tế đã được tháo gỡ hoàn toàn trong 1 phiên.
   TA/kernel, 1 tiến trình secure-world tại 1 thời điểm, bật lại hdcd sau mỗi reboot, v.v. — board
   vật lý này CHUNG với dự án đó, cần thận trọng, đặc biệt nếu sau này cần chạy `simple_chain` và
   `mvm_ta`/`llama-cli` đồng thời).
+
+## §9.40 — Chạy full node thật trên board: 2 phát hiện thật, 1 đã fix, 1 CHƯA GIẢI QUYẾT được (2026-08-21, cùng ngày)
+
+Tiếp nối §9.39 ngay trong phiên. Sinh config thật (`deploy/systemd/gen_single_chain.py`, giống hệt
+quy trình đã kiểm chứng ở GĐ4 §9.36 nhưng patch path cho board: `/data/ssd/metanode_test/...`),
+đẩy `config.json`+`genesis.json` lên board, chạy `simple_chain -config node-0/config.json` thật.
+
+**Phát hiện #1 — `io_uring_setup()` trả `EINVAL` trên kernel OpenHarmony tuỳ biến này, ĐÃ FIX**:
+lần chạy đầu (mặc định `state_backend=nomt`) crash ngay ở genesis:
+```
+thread 'io-worker' panicked at .../nomt/src/io/linux.rs:77:10:
+Error building io_uring: Os { code: 22, kind: InvalidInput, message: "Invalid argument" }
+thread 'beatree-sync' panicked ...: I/O Pool Down: "SendError(..)"
+```
+NOMT (backend mặc định, Rust + io_uring cho song song hoá I/O) không hoạt động được trên kernel
+5.10.110 tuỳ biến OpenHarmony của board — `io_uring_disabled` sysctl không tồn tại (option đó
+thêm ở kernel mới hơn), `dmesg` không có dòng SELinux "avc: denied" nào (nên khả năng cao KHÔNG
+phải bị chặn qua policy, mà do kernel Kconfig thật sự thiếu hỗ trợ 1 phần opcode/flag io_uring mà
+NOMT dùng — chưa xác định chính xác flag nào vì không có nguồn kernel OpenHarmony để đối chiếu).
+**Fix: đổi `state_backend` sang `"mpt"`** — CÙNG backend đã dùng ở GĐ4 §9.36 (lý do khác: ở đó là
+vì NOMT không hỗ trợ đọc theo root lịch sử, ở đây là vì io_uring không dùng được — nhưng cùng 1
+giải pháp). Sau khi đổi: genesis commit thành công, `INTEGRITY CHECK` 5/5 pass, RPC JSON thật
+phản hồi đúng qua network (`curl http://192.168.1.254:8545`: `eth_chainId`→`0x539`=1337 khớp
+config, `eth_blockNumber`→`0x0`).
+
+**Phát hiện #2 — Rust consensus engine (FFI thread) treo ngay sau khi khởi động, CHƯA GIẢI QUYẾT**:
+sau khi qua được genesis (fix #1), node "sống" (RPC trả lời đúng) nhưng **block không bao giờ
+tăng quá 0**, dù đợi hơn 4 phút và gửi tx thật qua `tx_sender` (kết nối TCP thành công, tx được
+gửi, nhưng `active_workers=0/64`, `queue=0/500000` mãi mãi — tx không hề vào hàng đợi xử lý).
+Log Rust (`metanode::ffi`) chỉ có ĐÚNG 1 DÒNG: `"Starting MetaNode Consensus Engine (FFI
+Thread)..."` rồi im lặng vĩnh viễn — không có log round/proposal/heartbeat nào tiếp theo (so với
+máy dev x86: cùng dòng log này xuất hiện rồi ngay sau đó có hàng loạt log tiến triển thật). `top`
+xác nhận **không phải deadlock bận rộn** (CPU tổng 800%, process chính chỉ dùng 3.5%, hệ thống
+idle 789%/800%) — đây là 1 thread bị BLOCK CHỜ mãi mãi trên 1 nguyên thuỷ đồng bộ nào đó (channel/
+mutex/I/O), không panic ra ngoài. **Nghi ngờ hàng đầu (chưa xác nhận)**: cùng gốc rễ io_uring như
+phát hiện #1, nhưng lần này ở phía RocksDB (`typed-store`/`librocksdb-sys`, dùng bởi
+`consensus-core`) hoặc runtime Tokio — có thể 1 trong 2 thứ đó CŨNG thử dùng io_uring nhưng xử lý
+lỗi khác NOMT (silent hang thay vì panic rõ ràng) — **chưa điều tra sâu, chỉ là giả thuyết hàng
+đầu dựa trên pattern giống hệt #1, không phải kết luận đã xác nhận**.
+
+Đã dừng node an toàn (`kill`, xác nhận qua `ps -ef` không còn process) — board không bị ảnh hưởng
+gì, không đụng tới TrustZone/OP-TEE/reboot.
+
+**Việc cần làm tiếp (phiên sau, chưa làm hôm nay)**:
+- Root-cause chính xác điểm treo của Rust consensus thread — cần công cụ debug Rust trên board
+  (gdb aarch64, hoặc thêm log/tracing chi tiết hơn vào `consensus/metanode`'s FFI init path rồi
+  build lại qua `scripts/build-aarch64.sh` và test lại) — vòng lặp này sẽ mất thời gian, không
+  làm vội trong 1 lượt.
+- Kiểm tra cụ thể `crates/typed-store`/`librocksdb-sys`/`tokio` có đường nào dùng io_uring
+  (feature flag `io-uring` của tokio, hoặc RocksDB's `use_direct_io_for_flush_and_compaction`/
+  async I/O options) — nếu có, thử tắt tương tự cách NOMT được né qua đổi backend.
+- Nếu xác nhận đúng là io_uring: cân nhắc tìm hiểu TẠI SAO kernel OpenHarmony 5.10.110 của board
+  trả EINVAL cụ thể (không phải ENOSYS/EPERM — gợi ý io_uring CÓ tồn tại nhưng 1 flag/opcode cụ
+  thể không được hỗ trợ) — có thể tham khảo `tz-llm-trustzone`'s kernel source
+  (`tz-llm/linux-5.10-opi`, CÙNG kernel base) nếu cần đối chiếu Kconfig thật.
+
+**Không tuyên bố "chạy node thật trên board thành công"** — chỉ tuyên bố đúng những gì đã xác
+nhận: binary chạy được, MPT/genesis/RPC hoạt động đúng; consensus/block-production CHƯA hoạt động
+trên board, nguyên nhân gốc chưa xác định chắc chắn.
