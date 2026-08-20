@@ -451,8 +451,6 @@ impl LeaderSwapTable {
             );
         });
 
-        tracing::info!("Scores used for new LeaderSwapTable: {reputation_scores:?}");
-
         Self {
             good_nodes,
             bad_nodes,

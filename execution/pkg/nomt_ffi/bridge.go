@@ -975,7 +975,7 @@ func (fs *FinishedSession) Abort() {
 		h.sessionsMu.Lock()
 		for i, pfs := range h.pendingSessions {
 			if pfs == fs {
-				h.pendingSessions = append(h.pendingSessions[:i], pfs.handle.pendingSessions[i+1:]...)
+				h.pendingSessions = append(h.pendingSessions[:i], h.pendingSessions[i+1:]...)
 				break
 			}
 		}

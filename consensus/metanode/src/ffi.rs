@@ -62,6 +62,8 @@ pub struct GoCallbacks {
             details_ptr: *const c_char,
         ),
     >,
+    /// Log message to Go logger
+    pub log_message: Option<extern "C" fn(level: std::os::raw::c_int, msg_ptr: *const c_char, msg_len: usize)>,
 }
 
 /// Call into Go to update transaction trace
@@ -297,9 +299,42 @@ pub unsafe extern "C" fn metanode_start_consensus(
             );
         }));
 
-        // Initialize tracing for FFI thread (captured into execution.log via Go stdout/stderr redirection)
+
+/// Custom writer that forwards Rust tracing logs to Go logger via CGo callback
+struct GoLogWriter;
+
+impl std::io::Write for GoLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let msg = String::from_utf8_lossy(buf);
+        let trimmed = msg.trim_end();
+        if !trimmed.is_empty() {
+            if let Some(callbacks) = GO_CALLBACKS.get() {
+                if let Some(log_func) = callbacks.log_message {
+                    if let Ok(c_msg) = std::ffi::CString::new(trimmed) {
+                        log_func(1, c_msg.as_ptr(), trimmed.len());
+                    }
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogWriter {
+    type Writer = GoLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        GoLogWriter
+    }
+}
+        // Initialize tracing for FFI thread (captured into execution.log via Go callback)
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_writer(GoLogWriter)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| "info".into()),

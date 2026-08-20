@@ -273,6 +273,30 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			IsFinished:      true,
 		}
 
+		// [FIX DEADLOCK / LEAK]: Check if block has already been committed to DB
+		// (e.g. by P2P Sync or Committer fast-forward while this goroutine was running).
+		lastCommittedGEI := storage.GetLastGlobalExecIndex()
+		if gei <= lastCommittedGEI {
+			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.", gei, blockNum, lastCommittedGEI)
+			if res.ClonedState != nil {
+				res.ClonedState.CloseSpeculative()
+			}
+			if res.AuthRespCh != nil {
+				select {
+				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true, // Block already committed in DB, safe to unblock Rust
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+				}:
+				default:
+				}
+			}
+			se.activeSessions.Delete(gei)
+			se.inFlight.Delete(gei)
+			return
+		}
+
 		// If CleanGEI already swept the placeholder away (e.g. P2P sync
 		// caught up past this GEI while we were executing), don't resurrect
 		// it — discard the speculative clone and never push to resultChan.
@@ -281,6 +305,18 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if res.ClonedState != nil {
 				res.ClonedState.CloseSpeculative()
 			}
+			if res.AuthRespCh != nil {
+				select {
+				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true, // Session swept by CleanGEI, unblock Rust
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+				}:
+				default:
+				}
+			}
+			se.inFlight.Delete(gei)
 			return
 		}
 
@@ -305,13 +341,6 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 		k := key.(uint64)
 		if k <= gei {
 			if res, ok := value.(*SpeculativeResult); ok && res != nil {
-				// ZERO-FORK FIX: Only clean sessions that have finished execution.
-				// If a session is still executing (!res.IsFinished), do NOT abort it!
-				// Let it finish and commit its transactions safely.
-				if !res.IsFinished {
-					logger.Debug("⏳ [CleanGEI] Skipping active in-flight session GEI=%d (still executing)", k)
-					return true
-				}
 				if res.ClonedState != nil {
 					res.ClonedState.CloseSpeculative()
 				}
