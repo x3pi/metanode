@@ -110,7 +110,7 @@ const (
 	PendingTimeout = 10 * time.Minute
 
 	// FutureTxTimeout is the timeout for future transactions waiting for their predecessors.
-	FutureTxTimeout = 2 * time.Minute
+	FutureTxTimeout = 5 * time.Minute
 
 	// CommitMaxRetries is the number of retries for commit operations.
 	CommitMaxRetries = 3

@@ -22,9 +22,9 @@ RestartSec=10s
 Environment=RUST_BACKTRACE=full
 LimitNOFILE=100000
 LimitCORE=infinity
-# Logging
-StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
-StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/consensus/consensus.log
+# Logging: Ghi chung vào execution.log với Go Execution
+StandardOutput=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
+StandardError=append:{{ metanode_install_dir }}/node-{{ item }}/logs/execution/execution.log
 SyslogIdentifier=metanode-consensus-{{ item }}
 
 [Install]

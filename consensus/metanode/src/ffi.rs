@@ -297,13 +297,14 @@ pub unsafe extern "C" fn metanode_start_consensus(
             );
         }));
 
-        // Initialize tracing
-        tracing_subscriber::fmt()
+        // Initialize tracing for FFI thread (captured into execution.log via Go stdout/stderr redirection)
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "metanode=info,consensus_core=info".into()),
+                    .unwrap_or_else(|_| "info".into()),
             )
-            .init();
+            .try_init();
 
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 

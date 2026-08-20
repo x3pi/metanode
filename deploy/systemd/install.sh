@@ -425,9 +425,9 @@ RestartSec=10s
 Environment=RUST_BACKTRACE=full
 LimitNOFILE=100000
 
-# Logging
-StandardOutput=append:${INSTALL_DIR}/logs/consensus/consensus.log
-StandardError=append:${INSTALL_DIR}/logs/consensus/consensus.log
+# Logging: Ghi chung vào execution.log với Go Execution
+StandardOutput=append:${INSTALL_DIR}/logs/execution/execution.log
+StandardError=append:${INSTALL_DIR}/logs/execution/execution.log
 SyslogIdentifier=${SVC_CONSENSUS}
 
 [Install]

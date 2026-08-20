@@ -84,8 +84,8 @@ func (pm *PruningManager) pruneTick() {
 	if pm.config.EpochsToKeep > 0 && currentEpoch > uint64(pm.config.EpochsToKeep) {
 		targetPruneEpoch := currentEpoch - uint64(pm.config.EpochsToKeep)
 		if targetPruneEpoch > pm.lastPrunedEpoch {
-			pm.pruneEpoch(targetPruneEpoch)
 			pm.lastPrunedEpoch = targetPruneEpoch
+			go pm.pruneEpoch(targetPruneEpoch)
 		}
 	}
 }
@@ -174,9 +174,9 @@ func (pm *PruningManager) pruneEpoch(epoch uint64) {
 		bc.DeleteBlockHashMapping(bNum)
 		prunedCount++
 
-		// Prevent CPU/IO hogging by sleeping briefly every 100 blocks
-		if prunedCount%100 == 0 {
-			time.Sleep(10 * time.Millisecond)
+		// Prevent CPU/IO hogging by sleeping briefly every 20 blocks
+		if prunedCount%20 == 0 {
+			time.Sleep(15 * time.Millisecond)
 		}
 	}
 

@@ -1,6 +1,8 @@
 package pruning
 
 import (
+	"time"
+
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
@@ -22,5 +24,7 @@ func PruneNomtEpoch(oldEpoch uint64) {
 		} else {
 			logger.Info("✅ [PRUNING-NOMT] Successfully pruned namespace %s for epoch <= %d", ns, oldEpoch)
 		}
+		// Gentle throttle to yield disk I/O to active block execution
+		time.Sleep(50 * time.Millisecond)
 	}
 }

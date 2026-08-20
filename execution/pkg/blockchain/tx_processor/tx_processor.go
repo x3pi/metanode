@@ -94,7 +94,14 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		mvm.CallClearAllStateInstances()
 	}
 
+	var mvmIdMap map[common.Hash]common.Address
 	defer func() {
+		if len(mvmIdMap) > 0 {
+			for _, mvmId := range mvmIdMap {
+				mvm.UnprotectMVMApi(mvmId)
+				mvm.ClearMVMApi(mvmId)
+			}
+		}
 		mvm.ClearAllMVMApi()
 		if isCache {
 			mvm.CallClearAllStateInstances()
@@ -125,7 +132,10 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 		return fmt.Sprintf("Block #%d (chứa %d groups) đang thực thi ProcessTransactionsOptimistic (Thực thi Smart Contract)!", blockNum, len(groupedGroups))
 	})
 
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	var allTransactions []types.Transaction
+	var allReceipts []types.Receipt
+	var allExecuteSCResults []types.ExecuteSCResult
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap = ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
 	stopWatchdogOpt()
 	execDuration := time.Since(startExec)
 	logger.Info("[PERF] Block Execution (Parallel): %v, txCount: %v, groups: %v", execDuration, len(allTransactions), len(groupedGroups))
@@ -249,7 +259,14 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		mvm.CallClearAllStateInstances()
 	}
 
+	var mvmIdMap map[common.Hash]common.Address
 	defer func() {
+		if len(mvmIdMap) > 0 {
+			for _, mvmId := range mvmIdMap {
+				mvm.UnprotectMVMApi(mvmId)
+				mvm.ClearMVMApi(mvmId)
+			}
+		}
 		mvm.ClearAllMVMApi()
 		if isCache {
 			mvm.CallClearAllStateInstances()
@@ -279,7 +296,10 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 		return fmt.Sprintf("Block #%d đang thực thi ProcessTransactionsOptimistic (Sync/RPC Node)!", blockNum)
 	})
 
-	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap := ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
+	var allTransactions []types.Transaction
+	var allReceipts []types.Receipt
+	var allExecuteSCResults []types.ExecuteSCResult
+	allTransactions, allReceipts, allExecuteSCResults, mvmIdMap = ProcessTransactionsOptimistic(funcCtx, chainState, groupedGroups, *lastBlockHeader, enableTrace, isCache, blockTime, leaderAddr, skipSignatureVerify)
 	stopWatchdogRemoteOpt()
 
 	// Get event logs (potentially modified by concurrent processing)
