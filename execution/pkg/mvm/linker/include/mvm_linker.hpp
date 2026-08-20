@@ -266,6 +266,23 @@ void CloseCppFileLog();
 
 extern void SetXapianBasePath(const char *path);
 
+// 2026-08-20 (plan §9.26/§9.27): the interpreter's saveDebugInfo() (called
+// from processor.cpp's dispatch() whenever a tx's is_debug flag is set)
+// does real filesystem I/O (std::filesystem::create_directories(),
+// std::ofstream) to write a per-opcode trace to ./tx_debug/ -- fine on the
+// normal cgo/Go path (real disk), but the secure-world TA build has no
+// POSIX filesystem at all (see CLAUDE.md's standing note on this). Calling
+// it there was a genuine, confirmed-on-hardware NULL ptr crash (root
+// -caused via bracketing prints across several rounds -- see memory
+// mvm-ta-evm-interpreter-nullptr-crash), not just a graceful ENOSYS, the
+// very first time ANY tx actually executed real contract bytecode with
+// is_debug=1 (never exercised by a pure native-transfer tx, since that
+// never enters the interpreter's dispatch loop at all). Defaults to
+// enabled (true) -- matches the cgo/Go path's existing behavior exactly,
+// zero change there. mvm_ta_main.cpp calls this once at startup with
+// false, before servicing any request.
+extern void MVM_SetDebugFileLoggingEnabled(bool enabled);
+
 extern void GoLogString(int, char *);
 extern void GoLogBytes(int, unsigned char *, int);
 

@@ -619,6 +619,15 @@ static void mvm_reverse_round_trip(
         abort();
     }
 
+    // 2026-08-20 (plan §9.26 follow-up): bracketing diagnostics for the
+    // NULL ptr crash investigation -- cheap, UART-only (no file I/O per
+    // CLAUDE.md), left in deliberately loud so a future run can grep for
+    // exactly which reverse-call round trip was in flight (or never even
+    // started) when the fault hit.
+    fprintf(stderr, "[mvm_ta][DIAG] round_trip ENTER cmd=%d req_header_len=%u req_blob_len=%u\n",
+        cmd, req_header_len, req_blob_len);
+    fflush(stderr);
+
     mvm_tz_spinlock_lock(&g_channel->lock);
     if (req_header_len) memcpy(g_channel->blob_region, req_header, req_header_len);
     if (req_blob_len) memcpy(g_channel->blob_region + req_header_len, req_blob, req_blob_len);
@@ -648,6 +657,10 @@ static void mvm_reverse_round_trip(
     *resp_blob_len_out = g_channel->blob_len;
     *resp_blob_out = g_channel->blob_region + hlen; // valid until the NEXT round trip reuses the region
     mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    fprintf(stderr, "[mvm_ta][DIAG] round_trip EXIT cmd=%d resp_header_len=%u resp_blob_len=%u\n",
+        cmd, hlen, *resp_blob_len_out);
+    fflush(stderr);
 }
 
 // ─────────────────── the 6 live reverse-callback shims ───────────────────
@@ -709,6 +722,9 @@ GlobalStateGet_return GlobalStateGet(unsigned char *mvmId, unsigned char *addres
             memcpy(ret.code_p, code, code_len);
         }
     }
+    fprintf(stderr, "[mvm_ta][DIAG] GlobalStateGet RETURN status=%d code_length=%d code_p=%p balance_p=%p nonce=%p\n",
+        ret.status, ret.code_length, (void *)ret.code_p, (void *)ret.balance_p, (void *)ret.nonce);
+    fflush(stderr);
     return ret;
 }
 
@@ -731,6 +747,9 @@ GetStorageValue_return GetStorageValue(unsigned char *mvmId, unsigned char *addr
         ret.value = (unsigned char *)malloc(32);
         memcpy(ret.value, resp_blob, 32);
     }
+    fprintf(stderr, "[mvm_ta][DIAG] GetStorageValue RETURN status=%d value=%p\n",
+        ret.status, (void *)ret.value);
+    fflush(stderr);
     return ret;
 }
 
@@ -1023,6 +1042,17 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
 
     // MVM_B1_CONTEXT_PARAMS: not yet threaded through this protocol
     // version — pass all-NULL, same as mvm_dispatch_call.
+    //
+    // 2026-08-20 (plan §9.26 follow-up): the single most valuable
+    // diagnostic bracket for the NULL ptr crash investigation -- if
+    // "execute() CALLING" prints but "execute() RETURNED" never does, the
+    // fault is genuinely inside the interpreter itself (execute()/c_mvm),
+    // not in any of this file's own reverse-callback plumbing (which is
+    // already independently bracketed above in mvm_reverse_round_trip/
+    // GlobalStateGet/GetStorageValue).
+    fprintf(stderr, "[mvm_ta][DIAG] execute() CALLING contract=%02x%02x...%02x input_len=%d\n",
+        b_contract[0], b_contract[1], b_contract[19], (int)input_len);
+    fflush(stderr);
     ExecuteResult *rs = execute(
         (unsigned char *)b_sender, (unsigned char *)b_contract,
         (unsigned char *)b_input, (int)input_len,
@@ -1036,6 +1066,9 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
         req.is_cache != 0,
         nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
     );
+    fprintf(stderr, "[mvm_ta][DIAG] execute() RETURNED rs=%p exitReason=%d exception=%d gas_used=%llu\n",
+        (void *)rs, rs ? rs->b_exitReason : -1, rs ? rs->b_exception : -1, rs ? rs->gas_used : 0ULL);
+    fflush(stderr);
 
     mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
     freeResult(rs);
@@ -1143,6 +1176,15 @@ int main(int argc, char **argv) {
     // core), fixed properly there with a retry loop. CPU affinity is
     // irrelevant to that fix, so removed rather than left in as dead
     // weight that implies a diagnosis we've since disproven.
+
+    // 2026-08-20 (plan §9.26/§9.27): root-caused the NULL ptr crash from a
+    // real contract-code EXECUTE -- the interpreter's saveDebugInfo() (only
+    // reached once dispatch() actually runs, i.e. never by a pure
+    // native-transfer tx) does real filesystem I/O for any tx with
+    // is_debug=1, which this TA build has none of. See
+    // MVM_SetDebugFileLoggingEnabled()'s doc comment (mvm_linker.hpp) and
+    // memory mvm-ta-evm-interpreter-nullptr-crash for the full story.
+    MVM_SetDebugFileLoggingEnabled(false);
 
     mvm_channel_init();
     mvm_ta_run();

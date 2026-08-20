@@ -1486,16 +1486,67 @@ transfer, không chạm contract code) vẫn chạy hoàn hảo trên CÙNG bả
 liên quan tới đường thực thi contract code, không phải hạ tầng channel/protocol.
 
 **Việc tiếp theo**:
-0. **ƯU TIÊN CAO NHẤT (§9.25, đã thu hẹp ở §9.26)**: điều tra crash NULL pointer — xem §9.26,
-   `addr2line`-qua-rebuild là ngõ cụt (rebuild không reproducible bit-for-bit), bug logic
-   interpreter/Xapian/stack-size đã bị loại; nghi vấn còn lại là codegen cross-build aarch64
-   hoặc chính wire-marshal code trong `mvm_ta_main.cpp`. Đây là blocker thật cho mọi việc liên
-   quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
+0. ~~Điều tra crash NULL pointer~~ **ĐÃ GIẢI QUYẾT — xem §9.27.**
 1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
 2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
-3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — phát hiện crash ở mục 0.
+3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — chạy đúng, xem §9.27.
 4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
-   binary thật) — xác minh RUNTIME cần đợi mục 0 (crash) được giải quyết trước.
+   binary thật) — xác minh RUNTIME giờ không còn bị chặn bởi crash, có thể làm tiếp.
+5. **MỚI**: exercise storage/extension reverse-calls với dữ liệu THẬT (hiện tất cả đang trả về
+   "empty nhưng hợp lệ" cho 4 lệnh extension) — giờ có thể bắt đầu vì contract execution đã chạy
+   được thật (bao gồm cả `GET_STORAGE_VALUE` cho SLOAD, xem §9.27).
+
+## §9.27 — Root cause thật của §9.25/§9.26: `saveDebugInfo()` ghi file khi TA không có filesystem
+
+Tiếp tục thu hẹp bằng bracketing `fprintf(stderr,...)` trực tiếp trên hardware (không phải qua
+rebuild-để-symbolicate, đã xác nhận là ngõ cụt ở §9.26) — 4 vòng build→flash→reboot liên tiếp,
+mỗi vòng thu hẹp phạm vi crash xuống một tầng:
+
+1. Bracket trong `mvm_ta_main.cpp` (`GlobalStateGet`/`round_trip`): crash xảy ra NGAY SAU khi
+   `GlobalStateGet` trả về thành công `status=1 code_length=16` với pointer hợp lệ — tức là toàn
+   bộ wire-marshal (`BlobWriter`/`BlobReader`) hoạt động đúng, loại được giả thuyết (b) của §9.26.
+2. Bracket trong `linker/src/my_global_state.cpp`'s `MyGlobalState::get()` (nhánh `status==1`):
+   TOÀN BỘ nhánh này chạy xong sạch (in tới tận `status==1 branch RETURN`) — bug KHÔNG nằm ở đây,
+   nằm ở bước SAU khi hàm này return, bên trong `run()` (`mvm_linker.cpp`) gọi vào
+   `_Processor::run()`.
+3. Bracket trong `c_mvm/src/processor.cpp`'s `_Processor::run()`: in "about to enter dispatch
+   loop, sm_size=16" thành công, nhưng KHÔNG bao giờ thấy "dispatch loop EXITED normally" —
+   crash nằm bên trong vòng lặp dispatch, ngay ở lần gọi `dispatch()` ĐẦU TIÊN (opcode PUSH1).
+   Vòng này bị nhiễu UART nặng do 1 print debug rác từ session khác (`[MVMDBG] sys_tee_switch_req
+   entry`, thêm 2026-08-18 cho 1 điều tra khác đã đóng từ lâu, in ra ở MỌI lần SMC world-switch) —
+   silence dòng này (comment, không xoá) trong `smc.c` mới đọc được log sạch ở vòng tiếp theo.
+   Xem thêm memory `uart-diagnostic-noise-garbles-capture`.
+4. Đọc `dispatch()` (`processor.cpp`): TRƯỚC switch-case xử lý opcode, có gọi
+   `saveDebugInfo(tx, op, ctxt)` khi `tx.is_debug == true` — **đây chính là lệnh EVM đầu tiên,
+   `mvm_ca_test.cpp` luôn set `req.is_debug = 1`**. Đọc `saveDebugInfo()`: làm I/O file THẬT —
+   `std::filesystem::exists()`/`create_directories()`, `std::ofstream outFile(...)` ghi trace mỗi
+   opcode vào `./tx_debug/*.log`. **Đây chính là bug**: TA không có filesystem POSIX (đã ghi rõ
+   trong CLAUDE.md từ trước) — và đường code này CHƯA TỪNG được thực thi ở bất kỳ test nào trước
+   đó, vì native-transfer-only `EXECUTE` không bao giờ vào tới vòng lặp `dispatch()` (exec_code
+   rỗng, điều kiện vòng lặp `false` ngay từ đầu).
+
+**Fix**: thêm `MVM_SetDebugFileLoggingEnabled(bool)` (khai báo `mvm_linker.hpp`, định nghĩa
+`processor.cpp` bằng `static std::atomic<bool>` module-level, mặc định `true` — không đổi hành vi
+đường cgo/Go hiện có). `saveDebugInfo()` early-return nếu bị tắt. `mvm_ta_main.cpp`'s `main()`
+gọi hàm này với `false` ngay đầu, trước `mvm_channel_init()`/`mvm_ta_run()`.
+
+**Xác nhận trên hardware, 2 lần liên tiếp** (build→flash→reboot riêng mỗi lần): lần 1 với các
+print chẩn đoán còn nguyên, lần 2 sau khi dọn sạch print (giữ lại các print nhẹ hơn trong
+`mvm_ta_main.cpp`, xoá hết print per-opcode/per-statement trong `processor.cpp`/
+`my_global_state.cpp`) — cả 2 lần cho kết quả GIỐNG HỆT nhau:
+```
+=== ExecuteResult (contract call (SSTORE/SLOAD)) ===
+status=0 exception=0 gas_used=20229
+nonce_change_count=1 storage_change_count=1
+storage_change: addr=3333...33 key=0x00 value=0x2a
+[mvm_ca_test] DONE
+```
+`value=0x2a` (=42 decimal) khớp chính xác với bytecode test (`PUSH1 0x2a ... SSTORE`) — semantics
+đúng, không chỉ "không crash". `cmd=102` (`GET_STORAGE_VALUE`, cho SLOAD) cũng lần đầu tiên xuất
+hiện và trả lời đúng trong round-trip này. Mốc GĐ3 cốt lõi — thực thi contract code EVM thật qua
+toàn bộ pipeline TrustZone TA — **đã đạt được và xác nhận**.
+
+Chi tiết đầy đủ: memory `mvm-ta-evm-interpreter-nullptr-crash` (đã cập nhật thành RESOLVED).
 
 ## §9.26 — Thu hẹp root cause của §9.25: dựng lại harness x86 in-process, loại 4 giả thuyết
 
