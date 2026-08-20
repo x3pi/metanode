@@ -25,6 +25,7 @@
 #include <sstream>
 #include <stdbool.h> // Thêm include này
 #include <stdlib.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -1447,44 +1448,37 @@ int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries) {
       std::cerr << "[C++ Replay FATAL] DatabaseLockError for db_name '"
                 << comp_log.db_name << "' addr=" << addr_hex
                 << " path=" << replay_db_path.string()
-                << ": " << e.get_msg() << std::endl;
-      overall_operation_success = false;
-      continue;
+                << ": " << e.get_msg() << " — Aborting batch immediately (Zero-Fork Invariant)." << std::endl;
+      return 0;
     } catch (const Xapian::Error &e) {
       std::cerr << "[C++ Replay FATAL] Xapian::Error for db_name '"
                 << comp_log.db_name << "' addr=" << addr_hex
                 << " path=" << replay_db_path.string()
                 << " type=" << e.get_type()
                 << " msg=" << e.get_msg()
-                << " context=" << e.get_context() << std::endl;
-      overall_operation_success = false;
-      continue;
+                << " context=" << e.get_context() << " — Aborting batch." << std::endl;
+      return 0;
     } catch (const std::exception &e) {
       std::cerr << "[C++ Replay FATAL] std::exception for db_name '"
                 << comp_log.db_name << "' addr=" << addr_hex
                 << " path=" << replay_db_path.string()
-                << ": " << e.what() << std::endl;
-      overall_operation_success = false;
-      continue;
+                << ": " << e.what() << " — Aborting batch." << std::endl;
+      return 0;
     } catch (...) {
       std::cerr << "[C++ Replay FATAL] Unknown exception for db_name '"
                 << comp_log.db_name << "' addr=" << addr_hex
-                << " path=" << replay_db_path.string() << std::endl;
-      overall_operation_success = false;
-      continue;
+                << " path=" << replay_db_path.string() << " — Aborting batch." << std::endl;
+      return 0;
     }
 
     if (!target_manager) {
-      std::cerr << "[C++ Replay Error] Failed to get/create XapianManager for "
+      std::cerr << "[C++ Replay FATAL] Failed to get/create XapianManager for "
                    "db_name '"
                 << comp_log.db_name << "' and address " << addr_hex
-                << " after reset. Skipping replay for this entry." << std::endl;
+                << " after reset. Aborting replay for entire batch." << std::endl;
       std::cerr << "  - Entry index: " << i << std::endl;
-      overall_operation_success = false;
-      continue;
+      return 0; // Abort ngay lập tức, không ghi dở dang
     }
-
-    bool replay_success_for_this_entry = true;
 
     if (!comp_log.xapian_doc_logs.empty()) {
       std::cerr << "[C++ Replay] Entry " << i << ": replaying "
@@ -1493,42 +1487,38 @@ int ReplayFullDbLogs(LogReplayEntryC *entries, int num_entries) {
         std::cerr << "[C++ Replay FATAL] replay_log FAILED for entry " << i
                   << " addr=" << addr_hex
                   << " db_name='" << comp_log.db_name << "'"
-                  << " ops=" << comp_log.xapian_doc_logs.size() << std::endl;
-        replay_success_for_this_entry = false;
+                  << " ops=" << comp_log.xapian_doc_logs.size() << " — Aborting batch." << std::endl;
+        return 0; // Abort ngay lập tức
       } else {
         std::cerr << "[C++ Replay] Entry " << i << ": replay_log OK" << std::endl;
       }
     }
 
-    if (replay_success_for_this_entry) {
-      try {
-        if (target_manager->saveAllAndCommit()) {
-          successful_replays_count++;
-          std::cerr << "[C++ Replay] Entry " << i << ": saveAllAndCommit OK" << std::endl;
-        } else {
-          std::cerr << "[C++ Replay FATAL] saveAllAndCommit returned false for addr="
-                    << addr_hex << " db_name='" << comp_log.db_name << "'" << std::endl;
-          overall_operation_success = false;
-        }
-      } catch (const Xapian::Error &e) {
-        std::cerr << "[C++ Replay FATAL] Xapian::Error during saveAllAndCommit for addr="
-                  << addr_hex << " type=" << e.get_type()
-                  << " msg=" << e.get_msg() << std::endl;
-        overall_operation_success = false;
-      } catch (const std::exception &e) {
-        std::cerr << "[C++ Replay FATAL] Exception during saveAllAndCommit for addr="
-                  << addr_hex << ": " << e.what() << std::endl;
-        overall_operation_success = false;
-      } catch (...) {
-        std::cerr << "[C++ Replay FATAL] Unknown exception during saveAllAndCommit for addr="
-                  << addr_hex << std::endl;
-        overall_operation_success = false;
+    try {
+      if (target_manager->saveAllAndCommit()) {
+        successful_replays_count++;
+        std::cerr << "[C++ Replay] Entry " << i << ": saveAllAndCommit OK" << std::endl;
+      } else {
+        std::cerr << "[C++ Replay FATAL] saveAllAndCommit returned false for addr="
+                  << addr_hex << " db_name='" << comp_log.db_name << "' — Aborting batch." << std::endl;
+        return 0;
       }
-    } else {
-      overall_operation_success = false;
+    } catch (const Xapian::Error &e) {
+      std::cerr << "[C++ Replay FATAL] Xapian::Error during saveAllAndCommit for addr="
+                << addr_hex << " type=" << e.get_type()
+                << " msg=" << e.get_msg() << " — Aborting batch." << std::endl;
+      return 0;
+    } catch (const std::exception &e) {
+      std::cerr << "[C++ Replay FATAL] Exception during saveAllAndCommit for addr="
+                << addr_hex << ": " << e.what() << " — Aborting batch." << std::endl;
+      return 0;
+    } catch (...) {
+      std::cerr << "[C++ Replay FATAL] Unknown exception during saveAllAndCommit for addr="
+                << addr_hex << " — Aborting batch." << std::endl;
+      return 0;
     }
   }
-  return overall_operation_success ? 1 : 0;
+  return 1;
 }
 
 void clearAllStateInstances() { State::clearAllInstances(); }

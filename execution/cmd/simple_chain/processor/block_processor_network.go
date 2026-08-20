@@ -65,6 +65,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 	// Inject ExecutionMutex Lock and Unlock callbacks to serialize sync operations with consensus execution
 	reqHandler.SetExecutionLockCallbacks(bp.ExecutionMutex.Lock, bp.ExecutionMutex.Unlock)
 
+	// Inject CancelSpeculativeCallback to abort active speculative workers on P2P block sync
+	reqHandler.SetCancelSpeculativeCallback(bp.CancelSpeculativeExecution)
+
 	// Inject SetBroadcastEventsAndReceiptsCallback for SyncOnly transaction receipt delivery
 	reqHandler.SetBroadcastEventsAndReceiptsCallback(func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) {
 		bp.broadcastEventsAndReceipts(blk, receipts, eventLogs)
