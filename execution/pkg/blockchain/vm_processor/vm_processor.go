@@ -127,7 +127,17 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if span != nil {
 			span.SetAttribute("readOnlyMvmId", mvmIdReadOnly.Hex())
 		}
-		mvmROnly := mvm.GetOrCreateMVMApi(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
+		// mvm.NewExecutionEngine (not GetOrCreateMVMApi directly) so this path
+		// honors execution_mode.go's global mode switch — see that file's
+		// doc comment and note/tee_dual_mode_execution_plan.md's "Giai đoạn
+		// 4" for why this matters: it's what lets a real block replay
+		// actually exercise trustzone/trustzone-hardware instead of silently
+		// running cgo under any mode. Registry bookkeeping below
+		// (ClearMVMApi/ProtectMVMApi by mvmId) still works unchanged: every
+		// ExecutionEngine implementation registers itself in the same
+		// GetOrCreateMVMApi-keyed registry internally (see tz_loopback_engine.go/
+		// tz_hardware_engine.go's own doc comments on why they wrap *MVMApi).
+		mvmROnly := mvm.NewExecutionEngine(mvmIdReadOnly, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		defer mvm.ClearMVMApi(mvmIdReadOnly)
 		mvmROnly.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmROnly.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
@@ -139,7 +149,16 @@ func (vmP *VmProcessor) ExecuteTransactionWithMvmId(
 		if isCache {
 			mvm.ProtectMVMApi(vmP.mvmId)
 		}
-		mvmE := mvm.GetOrCreateMVMApi(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
+		// Same mode-switch rationale as the read-only branch above.
+		// NOTE: under ModeTrustzone/ModeTrustzoneHardware, tzSessionMu
+		// (tz_channel.go) serializes the WHOLE call session across ALL
+		// goroutines -- true_block_stm.go's GOMAXPROCS parallel workers will
+		// queue up here instead of running concurrently. That is the
+		// deliberate serialization decision from
+		// note/tee_dual_mode_execution_plan.md's "Hệ quả thiết kế then chốt"
+		// #... (TZ mode runs one session at a time), not a bug or a
+		// performance regression to chase.
+		mvmE := mvm.NewExecutionEngine(vmP.mvmId, vmP.smartContractDB, vmP.accountStateDB, extendedMode)
 		mvmE.SetRelatedAddresses(tx.RelatedAddresses())
 		mvmE.SetBlobContext(tx.BlobVersionedHashes(), vmP.currentBlobBaseFee())
 		if isCache {
