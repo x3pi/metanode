@@ -1486,13 +1486,51 @@ transfer, không chạm contract code) vẫn chạy hoàn hảo trên CÙNG bả
 liên quan tới đường thực thi contract code, không phải hạ tầng channel/protocol.
 
 **Việc tiếp theo**:
-0. **ƯU TIÊN CAO NHẤT (mới, §9.25)**: điều tra crash NULL pointer thật trong EVM interpreter
-   khi xử lý contract code — cần debug core C++ (`libmvm_linker.a`/`c_mvm`), có thể cần thêm
-   log/breakpoint tại `faulting IP 0x3000005ed38c` tương ứng symbol nào trong `mvm_ta` (dùng
-   `addr2line`/`objdump` trên bản build **không strip** để tra ngược). Đây là blocker thật cho
-   mọi việc liên quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
+0. **ƯU TIÊN CAO NHẤT (§9.25, đã thu hẹp ở §9.26)**: điều tra crash NULL pointer — xem §9.26,
+   `addr2line`-qua-rebuild là ngõ cụt (rebuild không reproducible bit-for-bit), bug logic
+   interpreter/Xapian/stack-size đã bị loại; nghi vấn còn lại là codegen cross-build aarch64
+   hoặc chính wire-marshal code trong `mvm_ta_main.cpp`. Đây là blocker thật cho mọi việc liên
+   quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
 1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
 2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
 3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — phát hiện crash ở mục 0.
 4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
    binary thật) — xác minh RUNTIME cần đợi mục 0 (crash) được giải quyết trước.
+
+## §9.26 — Thu hẹp root cause của §9.25: dựng lại harness x86 in-process, loại 4 giả thuyết
+
+Thử symbolicate `faulting IP 0x3000005ed38c` bằng cách rebuild `mvm_ta` không strip trong cùng
+container — **ngõ cụt thật sự**: dù giữ nguyên `-DCMAKE_BUILD_TYPE=Release` (chỉ thêm `-g`),
+`.text` của bản rebuild lệch bản đã deploy ngay từ offset `0x24` (khác byte đầu tiên) — rebuild
+không reproducible bit-for-bit (nghi do thứ tự member trong static archive không determinist),
+nên không thể tra ngược địa chỉ crash qua rebuild. Bài học: muốn symbolicate thật, phải thêm
+`-g`/bỏ strip **ngay trong lần build gốc** (sửa `build_mvm_ta.sh`), không thể làm sau.
+
+**Hướng nhanh hơn nhiều**: dựng harness x86 in-process gọi thẳng `execute()` — không cần TA,
+không cần board, không cần cross-toolchain, vì bug nằm trong C++ thuần
+(`libmvm_linker.a`/`c_mvm`), không phải logic riêng cho chcore. Link thẳng vào
+`linker/build/lib/static/libmvm_linker.a` + `c_mvm/build/lib/static/libmvm.a` (bản x86 in-tree,
+build Release+`-g` mặc định của cgo path — không cần rebuild) + `libsecp256k1`/`libblst` x86 có
+sẵn trên máy. File: `metanode/execution/pkg/mvm/ta/host_repro/host_repro.cpp` (README riêng
+trong cùng thư mục).
+
+**Kết quả — KHÔNG tái hiện được crash**: gọi `execute()` với đúng bytecode + `GlobalStateGet`
+fabrication y hệt `mvm_ca_test.cpp`, kể cả đúng thứ tự 2 lần gọi (native transfer trước, contract
+call sau, cùng process/mvm_id) — chạy sạch dưới gdb, `exitReason=0 exception=0`. Loại được, là
+nguyên nhân DUY NHẤT:
+- Bug logic chung trong interpreter khi xử lý SSTORE/SLOAD.
+- Corruption state singleton giữa 2 lần gọi `execute()` liên tiếp cùng process.
+- Xapian (xác nhận thêm: `my_storage.cpp`'s đường SSTORE/SLOAD zero reference tới Xapian —
+  chưa từng là giả thuyết sống được sau khi kiểm tra).
+- Stack size nhỏ trên TA: `chcore/defs.h`'s `MAIN_THREAD_STACK_SIZE`/
+  `CHCORE_PTHREAD_DEFAULT_STACK_SIZE` đều resolve 8MB trên build 64-bit — cùng bậc với default
+  của glibc, không phải "TA có stack nhỏ hơn" như nghi ngờ ban đầu.
+
+**Còn lại, CHƯA test**: (a) codegen riêng của musl-gcc (GCC11 cross) tại đúng điểm crash — harness
+x86 không bắt được bug riêng của compiler cross; (b) chính code wire-marshal
+(`BlobWriter`/`BlobReader`) trong `mvm_ta_main.cpp` — harness dùng stub trả dữ liệu trực tiếp,
+bỏ qua hoàn toàn đường marshal thật đó (dù code này abort() rõ ràng khi lệch size, không phải
+kiểu lỗi im lặng NULL-deref, nên xác suất thấp hơn). Bước tiếp theo cần: hoặc thêm `printf` chẩn
+đoán quanh reverse-round-trip trong `mvm_ta_main.cpp` rồi build→flash→reboot 1 lần nữa trên board
+thật, hoặc disassemble trực tiếp object cross-build tại điểm crash — không việc nào làm tiếp
+được chỉ bằng x86.
