@@ -2179,3 +2179,63 @@ aarch64-unknown-linux-gnu` + `.cargo/config.toml` + cross-build `libmetanode.a` 
 RocksDB qua crate nội bộ `typed-store` — phần rủi ro/tốn thời gian nhất, RocksDB cross-compile
 luôn khét tiếng khó) + `libmtn_nomt.a` + thử link+chạy thật `cmd/simple_chain` cho aarch64. Sau đó
 mới tới: đóng gói/đẩy binary lên board, chạy `tz_replay_check -mode trustzone-hardware` thật.
+
+## §9.38 — Cross-compile aarch64 Giai đoạn 2 HOÀN TẤT NGAY TRONG PHIÊN NÀY: `cmd/simple_chain` link thật, gồm cả RocksDB (2026-08-21, cùng ngày với §9.37)
+
+Người dùng yêu cầu tiếp tục ngay sau §9.37 thay vì để phiên sau như dự kiến. **RocksDB
+cross-compile — phần được đánh giá rủi ro/tốn thời gian nhất trong toàn bộ kế hoạch — thực ra chỉ
+mất ~2 phút 20 giây, không lỗi gì**, thấp hơn nhiều so với lo ngại ban đầu.
+
+**Đã làm**:
+1. `rustup target add aarch64-unknown-linux-gnu`.
+2. `.cargo/config.toml` (repo root, mới): `[target.aarch64-unknown-linux-gnu] linker =
+   "aarch64-linux-gnu-gcc"` + `CC_aarch64_unknown_linux_gnu`/`CXX_.../AR_...` (env) cho
+   `librocksdb-sys`'s `cc` crate route đúng cross-compiler.
+3. `cargo build --release --target aarch64-unknown-linux-gnu -p mtn-nomt-ffi` — sạch, ~6s (thuần
+   Rust, không phụ thuộc C, đúng như Explore agent xác nhận trước đó). `readelf -h` trên `.o`
+   trích từ `.a` → `Machine: AArch64`.
+4. `cargo build --release --target aarch64-unknown-linux-gnu` cho `consensus/metanode` — sạch,
+   **2m20s**, bao gồm build `librocksdb-sys`/`rocksdb` (RocksDB C++ thật) + zstd/snappy/lz4 từ
+   nguồn. `libmetanode.a` (382MB) → `readelf -h` xác nhận `Machine: AArch64`.
+5. **Link thật toàn bộ `cmd/simple_chain`**: `mvm_api.go`/`ffi_bridge.go`/`nomt_ffi/bridge.go`
+   đều hardcode `-L` trỏ vào đường dẫn build x86 THẬT (không tham số hoá theo GOARCH/triple) —
+   không có cách nào link cho aarch64 mà không tráo tạm 4 artifact đó vào đúng đường dẫn. Tráo
+   tạm (backup trước bằng `cp`, md5 xác nhận) → build → **khôi phục ngay** qua `trap ... EXIT`
+   (chạy dù build lỗi/bị ngắt) — làm 2 lần thủ công trước khi viết thành script.
+   - Lần 1: lỗi source thật (không phải lỗi link) — `syscall.Dup2` không tồn tại trên
+     `linux/arm64` trong Go (`pkg/logger/logger.go`'s `RedirectStderrToFile`). ABI syscall Linux
+     aarch64 bỏ `dup2`, chỉ còn `dup3`; Go's `syscall` package theo đó không định nghĩa `Dup2`
+     cho arm64 (không phải bug của dự án, giới hạn thật của Go/kernel). Fix: `dup2Compat()` dùng
+     `syscall.Dup3(old, new, 0)` — có trên MỌI kiến trúc Linux (kernel 2.6.27+, kể cả amd64,
+     không phải nhánh riêng arm64), giữ đúng ngữ nghĩa dup2 cho case `oldfd==newfd` (dup3 từ
+     chối `EINVAL`, dup2 no-op) bằng 1 early-return.
+   - Lần 2: `cannot find -lxapian` — vì đã gỡ `libxapian-dev:arm64` khỏi hệ thống ở §9.37 (tránh
+     xung đột amd64). Thêm `CGO_LDFLAGS="-L<thư mục giải nén xapian arm64 riêng>"` cho lượt build
+     này — không cần cài lại qua apt.
+   - **Kết quả: `go build` cho `cmd/simple_chain` exit 0**. `file` xác nhận: `ELF 64-bit LSB
+     executable, ARM aarch64, ... dynamically linked, interpreter /lib/ld-linux-aarch64.so.1`.
+   - Khôi phục xác nhận **hoàn hảo bằng md5** (khớp tuyệt đối với backup trước khi tráo) —
+     `build_check.sh` chạy lại nhiều lần trong lúc thao tác, luôn ALL BUILDS PASSED (4/4).
+6. **Viết `scripts/build-aarch64.sh`** (mới): tự động hoá toàn bộ quy trình trên (build C++ →
+   build Rust → tráo/build/khôi phục `cmd/simple_chain`), có header comment ghi đầy đủ 7 bước
+   host-setup 1 lần (bao gồm cảnh báo `libxapian-dev` không Multi-Arch: same). **Đã tự chạy thử
+   chính script này end-to-end** (không phải các lệnh tay trước đó) → ra đúng binary aarch64
+   thật, x86 khôi phục nguyên vẹn.
+
+**Xác nhận sạch**: `go build/vet/gofmt ./pkg/logger/...` sạch; `build_check.sh` ALL BUILDS PASSED
+(4/4) — cả trước, giữa (nhiều lần, trong lúc tráo/khôi phục để test), và sau. `target/`/
+`consensus/metanode/target/` đã gitignore sẵn nên 0 artifact Rust lọt vào git.
+
+**Với commit này: toàn bộ cross-compile aarch64-linux-gnu cho `cmd/simple_chain` đã HOÀN TẤT và
+tái lập được qua 1 script** — điểm chặn cứng nhất trước khi Go CA (`ModeTrustzoneHardware`, GĐ3b)
+chạy thật trên board đã được tháo gỡ hoàn toàn.
+
+**Còn lại trước khi chạy thật trên board** (chưa làm, phiên sau):
+- Board cần có sẵn `.so` runtime cho 6 lib (xapian/tbb/leveldb/gmp/mpfr/uuid) — Orange Pi 5 Max
+  chạy hệ điều hành nào, có sẵn các gói này chưa, cần kiểm tra trực tiếp trên board (không đoán).
+- Đóng gói + đẩy `simple_chain-aarch64` lên board (qua SSD/`hdc`, tuỳ kênh nào board đang dùng),
+  chạy thử với `execution_mode=trustzone-hardware`.
+- Toàn bộ checklist vận hành board đã có sẵn từ `tz-llm-trustzone` (reboot mỗi lần đổi binary,
+  1 tiến trình secure-world tại 1 thời điểm, v.v. — board vật lý này CHUNG với dự án
+  `tz-llm-trustzone`, board hiện đang ở trạng thái ổn định "round 2" theo `DEPLOYED_STATE.md` của
+  dự án đó, cần thận trọng).
