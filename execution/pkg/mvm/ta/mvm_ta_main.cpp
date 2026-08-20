@@ -1238,26 +1238,34 @@ static void mvm_ta_run(void) {
     }
 }
 
-// 2026-08-20 (plan §9.29): a Xapian InMemory-backend hardware selftest
-// (mvm_ta_xapian_inmemory_selftest()) was added and run here -- it crashed
-// mvm_ta immediately at startup on real hardware (faulting address 0x82,
-// confirmed via UART on the very next boot). Removed rather than debugged
-// in place: getting the board back to a known-good boot was the priority
-// once the crash was confirmed NOT to be a flash/idbloader-level problem
-// (a full golden-image recovery + reflash of the exact same image still
-// crashed identically, and Linux/kernel/procmgr all boot fine up to the
-// point mvm_launcher launches mvm_ta -- the crash is inside this TA
-// binary specifically). Root cause NOT YET DETERMINED: could be the
-// selftest's own code (e.g. mvm::Address/mvm::from_big_endian usage) or a
-// genuine difference in the cross-compiled (musl/aarch64) libxapian.a's
-// InMemory backend support vs. the x86 system libxapian the equivalent
-// host-side test (scratchpad-only, not checked in) verified cleanly. See
-// memory mvm-ta-evm-interpreter-nullptr-crash's sibling notes / plan doc
-// §9.29 for the investigation to redo before re-attempting this selftest
-// on hardware -- next time, add printf bracketing INSIDE the selftest
-// body (before/after each Xapian call) rather than only around it, so a
-// crash pinpoints the exact call immediately instead of needing a second
-// round.
+// 2026-08-20 (plan §9.29 follow-up): the Xapian InMemory hardware
+// selftest (round 2, per-call bracketing) ROOT-CAUSED the crash --
+// removed after that, see memory xapian-inmemory-ta-backend-fix and plan
+// doc §9.29's final entry for the full story. Summary: getInstance()/
+// write/commit/read/revert's delete_document() ALL succeeded correctly
+// (confirmed via UART bracketing) -- the crash is specifically
+// `get_overlayed_document()` (xapian_manager.cpp) throwing
+// `Xapian::DocNotFoundError("Document not found")` when re-reading a
+// just-deleted doc, a THROW STATEMENT IN METANODE'S OWN SOURCE that is
+// immediately wrapped by a textually-matching `catch (const
+// Xapian::DocNotFoundError&)` one frame up in get_data() -- yet still
+// reaches std::terminate() uncaught. Root cause: libxapian.a (and
+// libtbb.a/libz.a) were cross-built with a DIFFERENT GCC generation
+// (13.3.0-era, per this project's own 2026-08-17 build notes) than
+// everything else linked into mvm_ta (GCC 11.5.0 via musl-gcc) -- a
+// cross-GCC-version C++ exception-handling ABI mismatch, not a logic bug.
+// Constructing a Xapian::DocNotFoundError calls into Xapian's own
+// (GCC13-compiled) Error base class; a GCC11-compiled catch clause's RTTI
+// comparison against that object's type_info can fail even when the
+// source-level types match exactly. Real fix needs rebuilding Xapian
+// (+ TBB/zlib) with the SAME GCC 11.5.0 toolchain as everything else --
+// flagged as an open risk back in 2026-08-17, never addressed until this
+// crash surfaced it for real. NOT attempted in this session (large,
+// separate task, needs its own dedicated pass) -- do not re-add this
+// selftest (or attempt the real GET_LATEST_FULL_DB_LOGS auto-trigger,
+// which would hit the exact same ABI issue the first time it needs to
+// distinguish "found" from "not found") until Xapian is rebuilt with a
+// matching GCC generation.
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;

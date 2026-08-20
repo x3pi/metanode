@@ -1701,3 +1701,34 @@ Chi tiết đầy đủ: memory `xapian-inmemory-ta-backend-fix`.
 musl/aarch64. Trước khi thử lại self-test: bracket TỪNG lệnh gọi Xapian riêng lẻ (không chỉ
 trước/sau cả hàm), và cân nhắc khả năng lỗi nằm ở chính `mvm::Address`/`mvm::from_big_endian`
 (chưa từng dùng đúng shape này trên TA trước đây) chứ không phải Xapian.
+
+## §9.30 — Root cause thật của crash §9.29: lệch phiên bản GCC giữa `libxapian.a` và phần còn lại của TA (2026-08-20)
+
+Thêm lại self-test (round 2) với bracket `fprintf`/`fflush` quanh TỪNG lệnh gọi Xapian riêng lẻ
+(không chỉ quanh cả hàm như round 1) — tái hiện đúng lớp crash cũ, nhưng lần này định vị chính
+xác được: `terminate called after throwing an instance of 'Xapian::DocNotFoundError'` rồi
+`Unsupported syscall 130, bye.` (chcore/musl chưa cài đặt đầy đủ đường `terminate`/`abort`, nên
+1 exception C++ không bắt được lộ ra ngoài trông y hệt crash NULL-deref). Định vị chính xác về
+`xapian_manager.cpp`'s `get_overlayed_document()` (~dòng 679): `throw
+Xapian::DocNotFoundError("Document not found");` — throw trong chính source của metanode, được
+bọc ngay 1 tầng trên bởi `catch (const Xapian::DocNotFoundError&)` GIỐNG HỆT về mặt chữ trong
+`get_data()` — vậy mà vẫn thoát ra không bắt được.
+
+**Root cause**: `libxapian.a` (+`libtbb.a`/`libz.a`) được cross-build bằng toolchain GCC
+13.3.0-era (đã cảnh báo là rủi ro mở, chưa xử lý, trong build note 2026-08-17 của chính project
+này), trong khi toàn bộ phần còn lại link vào `mvm_ta` (c_mvm, linker, `mvm_ta_main.cpp`) dùng
+GCC 11.5.0 qua `musl-gcc`. Dựng `Xapian::DocNotFoundError` gọi vào class cơ sở `Xapian::Error`
+được biên dịch bởi GCC13 của chính Xapian; so khớp RTTI/`type_info` của 1 `catch` biên dịch bởi
+GCC11 với object được throw đó có thể thất bại qua ranh giới ABI xử lý exception khác major
+version GCC như vậy, dù kiểu ở mức source giống hệt nhau cả 2 phía. Đây KHÔNG phải bug logic của
+fix 3-lớp — là lệch toolchain ảnh hưởng MỌI exception do Xapian ném ra, không riêng gì lệnh này.
+
+**Fix thật** (chưa làm, xác định là việc riêng, lớn, phạm vi tách biệt): rebuild
+`libxapian.a`/`libtbb.a`/`libz.a` bằng đúng thế hệ GCC 11.5.0 dùng cho phần còn lại của TA. Cho
+tới khi đó, không wire bất kỳ đường đi nào để Xapian tự throw và trông đợi catch hoạt động — điều
+này cũng chặn auto-trigger `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (§9.28 mục 6), vì phân biệt
+"found"/"not found" qua Xapian dựa đúng vào cơ chế này.
+
+Gỡ self-test lần 2 sau khi root-cause xong, rebuild+reflash board về lại trạng thái ổn định (fix
+3-lớp còn nguyên, không có self-test) — xem `DEPLOYED_STATE.md` cho checkpoint xác nhận sạch.
+Chi tiết đầy đủ + cách áp dụng: memory `xapian-inmemory-ta-backend-fix` (đã cập nhật).
