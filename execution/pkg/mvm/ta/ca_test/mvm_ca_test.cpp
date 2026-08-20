@@ -124,11 +124,40 @@ static void *ca_relay_thread(void *arg) {
     return nullptr;
 }
 
+// ─── blob writer (mirrors mvm_ta_main.cpp's BlobWriter) ───
+struct BlobWriter {
+    uint8_t *buf;
+    uint32_t off = 0;
+    void writeRaw(const void *p, uint32_t n) { memcpy(buf + off, p, n); off += n; }
+    void writeU32(uint32_t v) { writeRaw(&v, 4); }
+    void writeBytes(const void *p, uint32_t n) { writeU32(n); if (n) writeRaw(p, n); }
+};
+
 // ─── reverse-call handling (TA -> this CA) ───
 // Answers only what a single native-value-transfer EXECUTE between two
 // never-before-seen synthetic addresses can plausibly need. Anything else
 // aborts loudly (a clean, diagnosable failure) rather than silently
 // hanging or fabricating wrong data.
+// Contract-call test (2026-08-20, plan §9.24 follow-up): to exercise a
+// REAL contract's code path (SSTORE/SLOAD -> real GetStorageValue traffic,
+// not the "shouldn't fire" stub) without needing MVM_TZ_CMD_DEPLOY (not
+// wired in mvm_ta yet -- see that file's own comment), simulate "this
+// address already has code" entirely from the CA side: GlobalStateGet's
+// response for ONE specific address returns status=1 with real bytecode
+// in the code blob. mvm_ta's own EVM interpreter (unmodified, already
+// proven via cgo mode) does the rest -- this only fakes what a real
+// Host's state lookup would have returned for an already-deployed
+// contract, nothing about mvm_ta's own logic is being test-specific here.
+static const uint8_t g_contract_addr[20] = {
+    0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,
+    0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33,0x33};
+// PUSH1 0x2a PUSH1 0x00 SSTORE PUSH1 0x00 SLOAD PUSH1 0x00 MSTORE
+// PUSH1 0x20 PUSH1 0x00 RETURN -- store 42 at slot 0, read it back,
+// return it. Plain, well-known EVM bytecode, not metanode-specific.
+static const uint8_t g_contract_code[] = {
+    0x60,0x2a, 0x60,0x00, 0x55, 0x60,0x00, 0x54,
+    0x60,0x00, 0x52, 0x60,0x20, 0x60,0x00, 0xf3};
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -146,19 +175,42 @@ static void handle_reverse_call(void) {
 
     switch (cmd) {
     case MVM_TZ_RCMD_GLOBAL_STATE_GET: {
-        // Every address in this test is synthetic/never-before-seen ->
-        // status=0 ("not found, create fresh") is the only correct answer.
-        mvm_tz_global_state_get_resp_t resp = {0};
-        resp.status = 0;
-        memcpy(resp_buf, &resp, sizeof(resp));
-        resp_hdr_len = sizeof(resp);
-        resp_blob_len = 0; // status==0 -> no blob per protocol header
+        // mvm_tz_global_state_get_req_t: [0] mvm_id(20) [1] address(20).
+        const uint8_t *req_address = hdr_copy + 20;
+        if (header_len >= 40 && memcmp(req_address, g_contract_addr, 20) == 0) {
+            // The one address this test deliberately gives real code to.
+            // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
+            // [2] code (length-prefixed).
+            mvm_tz_global_state_get_resp_t resp = {0};
+            resp.status = 1;
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            BlobWriter w{resp_buf + resp_hdr_len};
+            uint8_t zero32[32] = {0};
+            w.writeRaw(zero32, 32); // balance = 0
+            w.writeRaw(zero32, 32); // nonce = 0
+            w.writeBytes(g_contract_code, sizeof(g_contract_code));
+            resp_blob_len = w.off;
+            printf("[mvm_ca_test] GlobalStateGet: returning REAL code (%zu bytes) "
+                "for contract address\n", sizeof(g_contract_code));
+            fflush(stdout);
+        } else {
+            // Every other address in this test is synthetic/never-before-seen
+            // -> status=0 ("not found, create fresh") is the correct answer.
+            mvm_tz_global_state_get_resp_t resp = {0};
+            resp.status = 0;
+            memcpy(resp_buf, &resp, sizeof(resp));
+            resp_hdr_len = sizeof(resp);
+            resp_blob_len = 0; // status==0 -> no blob per protocol header
+        }
         break;
     }
     case MVM_TZ_RCMD_GET_STORAGE_VALUE: {
-        // Shouldn't fire for a pure EOA->EOA native transfer (no code at
-        // either address) -- included so a wrong assumption fails loud
-        // (STORAGE_NOT_FOUND=1) rather than hanging.
+        // Genuinely fires now for the contract's own SLOAD/SSTORE traffic.
+        // Every slot in this test is fresh (first-ever write) -> NOT_FOUND=1
+        // is the correct answer for the pre-write read; the SSTORE itself
+        // updates mvm_ta's own in-process State/Xapian, no reverse call
+        // needed for the write side.
         mvm_tz_get_storage_value_resp_t resp = {0};
         resp.status = 1;
         memcpy(resp_buf, &resp, sizeof(resp));
@@ -219,14 +271,183 @@ static void handle_reverse_call(void) {
     mvm_tz_flag_set(&g_channel->response_ready, 1);
 }
 
-// ─── blob writer (mirrors mvm_ta_main.cpp's BlobWriter) ───
-struct BlobWriter {
-    uint8_t *buf;
+
+// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
+// the result. Factored out (2026-08-20) so main() can run it twice: once
+// for the original EOA->EOA native transfer, once for a real contract
+// call (see g_contract_addr/g_contract_code above) -- same protocol
+// mechanics either way, just a different recipient/amount/input. Returns
+// 0 on success, 1 on any failure (mirrors main()'s own prior return
+// convention exactly, just reusable now). ───
+static int run_execute_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20],
+    uint64_t amount, const uint8_t *input, uint32_t input_len) {
+    uint8_t tx_hash[32];
+    memset(tx_hash, 0xAB, 32);
+
+    mvm_tz_execute_req_t req = {0};
+    req.amount[24] = (uint8_t)(amount >> 56); req.amount[25] = (uint8_t)(amount >> 48);
+    req.amount[26] = (uint8_t)(amount >> 40); req.amount[27] = (uint8_t)(amount >> 32);
+    req.amount[28] = (uint8_t)(amount >> 24); req.amount[29] = (uint8_t)(amount >> 16);
+    req.amount[30] = (uint8_t)(amount >> 8);  req.amount[31] = (uint8_t)(amount);
+    req.gas_price = 1;
+    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
+    req.block_prevrandao = 0;
+    req.block_gas_limit = 30000000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    memset(req.block_coinbase, 0, 20);
+    memset(req.mvm_id, 0, 20);
+    req.is_debug = 1;
+    req.is_cache = 0;
+    req.related_addresses_count = 2;
+
+    static uint8_t blob_scratch[4096];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(recipient, 20);
+    w.writeBytes(input, input_len);
+    w.writeBytes(tx_hash, 32);
+    w.writeBytes(sender, 20);    // relatedAddresses[0]
+    w.writeBytes(recipient, 20); // relatedAddresses[1]
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+
+    const int TIMEOUT_S = 60;
+    for (int round = 0; ; round++) {
+        time_t start = time(nullptr);
+        uint64_t last_seq = (uint64_t)-1;
+        int which = -1;
+        while (which < 0) {
+            if (__atomic_load_n(&g_channel->response_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 0;
+                    break;
+                }
+            }
+            if (__atomic_load_n(&g_channel->request_ready, __ATOMIC_ACQUIRE) == 1
+                && g_channel->direction == MVM_TZ_DIR_TA_TO_HOST) {
+                uint8_t exp = 1;
+                if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    which = 1;
+                    break;
+                }
+            }
+            uint64_t seq = g_channel->seq;
+            if (seq != last_seq) {
+                printf("[mvm_ca_test] waiting (round=%d)... seq=%llu\n", round, (unsigned long long)seq);
+                fflush(stdout);
+                last_seq = seq;
+            }
+            if (time(nullptr) - start > TIMEOUT_S) {
+                printf("[mvm_ca_test] TIMEOUT after %ds (round=%d, last seq=%llu) -- "
+                       "genuinely stuck, not just slow (CLAUDE.md: don't assume otherwise)\n",
+                       TIMEOUT_S, round, (unsigned long long)last_seq);
+                return 1;
+            }
+            usleep(10000);
+        }
+        if (which == 0) {
+            if (g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
+                printf("[mvm_ca_test] got final response (round=%d)\n", round);
+                break;
+            } else {
+                printf("[mvm_ca_test] FATAL: response_ready set but direction=TA_TO_HOST "
+                       "-- protocol confusion, aborting\n");
+                return 1;
+            }
+        }
+        handle_reverse_call();
+    }
+
+    mvm_tz_execute_result_hdr_t hdr;
+    memcpy(&hdr, g_channel->blob_region, sizeof(hdr));
+    printf("\n=== ExecuteResult (%s) ===\n", label);
+    printf("status=%u exception=%u gas_used=%llu\n", hdr.status, hdr.exception, (unsigned long long)hdr.gas_used);
+    printf("add_balance_change_count=%u sub_balance_change_count=%u nonce_change_count=%u\n",
+        hdr.add_balance_change_count, hdr.sub_balance_change_count, hdr.nonce_change_count);
+    printf("code_change_count=%u storage_change_count=%u storage_read_count=%u full_db_hash_count=%u\n",
+        hdr.code_change_count, hdr.storage_change_count, hdr.storage_read_count, hdr.full_db_hash_count);
+
+    const uint8_t *blob = g_channel->blob_region + sizeof(hdr);
     uint32_t off = 0;
-    void writeRaw(const void *p, uint32_t n) { memcpy(buf + off, p, n); off += n; }
-    void writeU32(uint32_t v) { writeRaw(&v, 4); }
-    void writeBytes(const void *p, uint32_t n) { writeU32(n); if (n) writeRaw(p, n); }
-};
+    auto readU32 = [&](void) { uint32_t v; memcpy(&v, blob + off, 4); off += 4; return v; };
+    auto skipBytes = [&](void) { uint32_t n = readU32(); off += n; return n; };
+
+    uint32_t output_len = 0;
+    {
+        skipBytes(); // exmsg
+        uint32_t save_off = off;
+        output_len = readU32();
+        off = save_off;
+        skipBytes(); // output (re-consumed properly below)
+    }
+    for (uint32_t i = 0; i < hdr.full_db_hash_count; i++) off += 52;
+
+    printf("\n-- add_balance_change --\n");
+    for (uint32_t i = 0; i < hdr.add_balance_change_count; i++) {
+        printf("  addr=");
+        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
+        printf(" value=");
+        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
+        printf("\n");
+        off += 52;
+    }
+    printf("-- nonce_change --\n");
+    for (uint32_t i = 0; i < hdr.nonce_change_count; i++) {
+        printf("  addr=");
+        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
+        printf(" value=");
+        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
+        printf("\n");
+        off += 52;
+    }
+    printf("-- sub_balance_change --\n");
+    for (uint32_t i = 0; i < hdr.sub_balance_change_count; i++) {
+        printf("  addr=");
+        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
+        printf(" value=");
+        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
+        printf("\n");
+        off += 52;
+    }
+    printf("-- storage_change --\n");
+    for (uint32_t i = 0; i < hdr.storage_change_count; i++) {
+        printf("  addr=");
+        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
+        off += 20;
+        uint32_t pair_count = readU32();
+        printf(" pair_count=%u\n", pair_count);
+        for (uint32_t p = 0; p < pair_count; p++) {
+            printf("    key=");
+            for (int j = 0; j < 32; j++) printf("%02x", blob[off + j]);
+            printf(" value=");
+            for (int j = 0; j < 32; j++) printf("%02x", blob[off + 32 + j]);
+            printf("\n");
+            off += 64;
+        }
+    }
+    (void)output_len;
+    printf("(status=%u, exception=%u -- %s)\n", hdr.status, hdr.exception,
+        hdr.exception ? "reverted/exception" : "success");
+    return 0;
+}
 
 int main(void) {
     printf("[mvm_ca_test] opening %s\n", DEVICE_NAME);
@@ -277,190 +498,23 @@ int main(void) {
         return 1;
     }
 
-    // ─── build MVM_TZ_CMD_EXECUTE request: trivial native transfer ───
-    // sender=0x11*20, contract(recipient)=0x22*20, amount=100 wei,
-    // empty input (pure value transfer, no bytecode execution), tx_hash=
-    // arbitrary nonzero 32 bytes, relatedAddresses=[sender,recipient]
-    // (declares the expected read/write set -- avoids GlobalStateGet's
-    // status==2 "addressNotInRelated" path, see my_global_state.cpp).
-    uint8_t sender[20], recipient[20], tx_hash[32];
+    // ─── test 1: trivial EOA->EOA native transfer (already proven this
+    // session) ───
+    uint8_t sender[20], recipient[20];
     memset(sender, 0x11, 20);
     memset(recipient, 0x22, 20);
-    memset(tx_hash, 0xAB, 32);
-
-    mvm_tz_execute_req_t req = {0};
-    req.amount[31] = 100; // 100 wei, big-endian
-    req.gas_price = 1;
-    req.gas_limit = 21000;
-    req.block_prevrandao = 0;
-    req.block_gas_limit = 30000000;
-    req.block_time = (uint64_t)time(nullptr);
-    req.block_base_fee = 1;
-    req.block_number = 1;
-    memset(req.block_coinbase, 0, 20);
-    memset(req.mvm_id, 0, 20);
-    req.is_debug = 1;
-    req.is_cache = 0;
-    req.related_addresses_count = 2;
-
-    static uint8_t blob_scratch[4096];
-    BlobWriter w{blob_scratch};
-    w.writeBytes(sender, 20);
-    w.writeBytes(recipient, 20);
-    w.writeBytes(nullptr, 0); // empty input
-    w.writeBytes(tx_hash, 32);
-    w.writeBytes(sender, 20);    // relatedAddresses[0]
-    w.writeBytes(recipient, 20); // relatedAddresses[1]
-
-    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE: sender=0x11..11 recipient=0x22..22 amount=100wei\n");
-    fflush(stdout);
-
-    mvm_tz_spinlock_lock(&g_channel->lock);
-    memcpy(g_channel->blob_region, &req, sizeof(req));
-    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
-    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
-    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
-    g_channel->header_len = sizeof(req);
-    g_channel->blob_len = w.off;
-    g_channel->seq++;
-    mvm_tz_spinlock_unlock(&g_channel->lock);
-
-    mvm_tz_flag_set(&g_channel->request_ready, 1);
-
-    // ─── dispatch loop: consume nested reverse calls until the real
-    // response (direction==HOST_TO_TA, meaning "this is the answer to my
-    // own forward command") arrives. Watches BOTH flags in one loop --
-    // watching them sequentially (response_ready first, request_ready
-    // only after giving up) would spuriously time out whenever a nested
-    // reverse call happens well within the window, since that only ever
-    // flips request_ready, never response_ready. ───
-    const int TIMEOUT_S = 60;
-    for (int round = 0; ; round++) {
-        time_t start = time(nullptr);
-        uint64_t last_seq = (uint64_t)-1;
-        int which = -1; // 0 = response_ready fired, 1 = request_ready fired
-        while (which < 0) {
-            // Same fix, mirrored (2026-08-20): must PEEK direction before
-            // consuming response_ready too. handle_reverse_call() (below,
-            // from a PRIOR round) sets response_ready=1 itself when
-            // answering a TA-initiated reverse call, at which point
-            // direction is still TA_TO_HOST (mvm_ta's own
-            // mvm_reverse_round_trip() set it when it initiated that
-            // reverse call, and answering never flips it). Without this
-            // check, this exact loop -- one iteration after the one that
-            // called handle_reverse_call() -- raced ahead and consumed
-            // that self-set response_ready before mvm_ta's own
-            // mvm_reverse_round_trip() wait loop ever saw it, again
-            // permanently stealing our own signal. Confirmed live:
-            // produced "response_ready set but direction=TA_TO_HOST --
-            // protocol confusion, aborting" immediately after answering
-            // the first genuine reverse call. Only a response_ready seen
-            // WITH direction==HOST_TO_TA is genuinely the TA's final
-            // answer to our own forward command.
-            if (__atomic_load_n(&g_channel->response_ready, __ATOMIC_ACQUIRE) == 1
-                && g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
-                uint8_t exp = 1;
-                if (__atomic_compare_exchange_n(&g_channel->response_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                    which = 0;
-                    break;
-                }
-            }
-            // BUG FIX (2026-08-20, found live on hardware -- see plan doc
-            // §9.24): must PEEK direction BEFORE attempting to consume
-            // request_ready, not after. This same loop is what set
-            // request_ready=1 for our OWN outbound forward command a few
-            // lines above (direction==HOST_TO_TA at that point) -- without
-            // this check, our own next CAS attempt below would race ahead
-            // and consume that self-set flag before mvm_ta's own dispatch
-            // loop ever sees it, permanently stealing our own request and
-            // silently hanging mvm_ta forever (it never gets to see the
-            // forward command at all). Confirmed live: this exact race
-            // produced "[mvm_ca_test] reverse call cmd=2" -- cmd=2 is
-            // MVM_TZ_CMD_EXECUTE, i.e. literally reading back our own
-            // just-sent forward request's cmd field, not any real reverse
-            // call from the TA. Only attempt the consuming CAS once
-            // direction confirms this is genuinely TA-initiated.
-            if (__atomic_load_n(&g_channel->request_ready, __ATOMIC_ACQUIRE) == 1
-                && g_channel->direction == MVM_TZ_DIR_TA_TO_HOST) {
-                uint8_t exp = 1;
-                if (__atomic_compare_exchange_n(&g_channel->request_ready, &exp, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                    which = 1;
-                    break;
-                }
-            }
-            uint64_t seq = g_channel->seq;
-            if (seq != last_seq) {
-                printf("[mvm_ca_test] waiting (round=%d)... seq=%llu\n", round, (unsigned long long)seq);
-                fflush(stdout);
-                last_seq = seq;
-            }
-            if (time(nullptr) - start > TIMEOUT_S) {
-                printf("[mvm_ca_test] TIMEOUT after %ds (round=%d, last seq=%llu) -- "
-                       "genuinely stuck, not just slow (CLAUDE.md: don't assume otherwise)\n",
-                       TIMEOUT_S, round, (unsigned long long)last_seq);
-                return 1;
-            }
-            usleep(10000); // 10ms poll -- this is a probe tool, not the TA's own hot loop
-        }
-        if (which == 0) {
-            if (g_channel->direction == MVM_TZ_DIR_HOST_TO_TA) {
-                printf("[mvm_ca_test] got final response (round=%d)\n", round);
-                break;
-            } else {
-                printf("[mvm_ca_test] FATAL: response_ready set but direction=TA_TO_HOST "
-                       "-- protocol confusion, aborting\n");
-                return 1;
-            }
-        }
-        handle_reverse_call();
+    if (run_execute_and_print("native transfer", sender, recipient, 100, nullptr, 0) != 0) {
+        return 1;
     }
 
-    // ─── decode ExecuteResult ───
-    mvm_tz_execute_result_hdr_t hdr;
-    memcpy(&hdr, g_channel->blob_region, sizeof(hdr));
-    printf("\n=== ExecuteResult ===\n");
-    printf("status=%u exception=%u gas_used=%llu\n", hdr.status, hdr.exception, (unsigned long long)hdr.gas_used);
-    printf("add_balance_change_count=%u sub_balance_change_count=%u nonce_change_count=%u\n",
-        hdr.add_balance_change_count, hdr.sub_balance_change_count, hdr.nonce_change_count);
-    printf("code_change_count=%u storage_change_count=%u storage_read_count=%u full_db_hash_count=%u\n",
-        hdr.code_change_count, hdr.storage_change_count, hdr.storage_read_count, hdr.full_db_hash_count);
-
-    const uint8_t *blob = g_channel->blob_region + sizeof(hdr);
-    uint32_t off = 0;
-    auto readU32 = [&](void) { uint32_t v; memcpy(&v, blob + off, 4); off += 4; return v; };
-    auto skipBytes = [&](void) { uint32_t n = readU32(); off += n; return n; };
-
-    skipBytes(); // exmsg
-    skipBytes(); // output
-    for (uint32_t i = 0; i < hdr.full_db_hash_count; i++) off += 52;
-    for (uint32_t i = 0; i < hdr.full_db_logs_count; i++) { /* not wired yet, count should be 0 */ }
-
-    printf("\n-- add_balance_change --\n");
-    for (uint32_t i = 0; i < hdr.add_balance_change_count; i++) {
-        printf("  addr=");
-        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
-        printf(" value=");
-        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
-        printf("\n");
-        off += 52;
-    }
-    printf("-- nonce_change --\n");
-    for (uint32_t i = 0; i < hdr.nonce_change_count; i++) {
-        printf("  addr=");
-        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
-        printf(" value=");
-        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
-        printf("\n");
-        off += 52;
-    }
-    printf("-- sub_balance_change --\n");
-    for (uint32_t i = 0; i < hdr.sub_balance_change_count; i++) {
-        printf("  addr=");
-        for (int j = 0; j < 20; j++) printf("%02x", blob[off + j]);
-        printf(" value=");
-        for (int j = 0; j < 32; j++) printf("%02x", blob[off + 20 + j]);
-        printf("\n");
-        off += 52;
+    // ─── test 2 (2026-08-20, plan §9.24 follow-up): real contract call.
+    // recipient = g_contract_addr, whose GlobalStateGet response
+    // (handle_reverse_call() above) is special-cased to return real
+    // SSTORE/SLOAD/RETURN bytecode -- see that code's own comment for why
+    // this doesn't need MVM_TZ_CMD_DEPLOY. amount=0, empty calldata (the
+    // bytecode itself takes no branch on input). ───
+    if (run_execute_and_print("contract call (SSTORE/SLOAD)", sender, g_contract_addr, 0, nullptr, 0) != 0) {
+        return 1;
     }
 
     printf("\n[mvm_ca_test] DONE\n");

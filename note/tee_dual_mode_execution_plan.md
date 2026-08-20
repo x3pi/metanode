@@ -1457,11 +1457,42 @@ xác minh bằng build thật 2026-08-16, xem mục "Xapian: DB_BACKEND_INMEMORY
 - Rủi ro thật còn lại (chưa đo): 1 lỗ hổng hiệu năng Go-side (`GetStorageBackupDb()` tối ưu
   tra cứu theo block number, không tối ưu theo địa chỉ — cần thêm 1 index nhỏ).
 
-**Việc tiếp theo (đã điều chỉnh, nhỏ hơn nhiều so với đánh giá cũ)**:
+## §9.25 — Test contract code thật: NULL pointer crash thật trong EVM interpreter
+
+Viết test EXECUTE gọi contract thật (không cần `MVM_TZ_CMD_DEPLOY`, chưa wire trong `mvm_ta` —
+giả lập "địa chỉ đã có code" ngay từ phía CA: `GlobalStateGet`'s response cho MỘT địa chỉ cụ
+thể (`g_contract_addr`) trả `status=1` kèm bytecode thật trong blob, thay vì luôn trả
+`status=0`). Bytecode dùng: `PUSH1 0x2a PUSH1 0x00 SSTORE PUSH1 0x00 SLOAD PUSH1 0x00 MSTORE
+PUSH1 0x20 PUSH1 0x00 RETURN` (lưu 42 vào slot 0, đọc lại, trả về — chuẩn EVM đơn giản, không
+đặc thù metanode).
+
+**Kết quả**: `mvm_ca_test` gửi thành công code thật (`GlobalStateGet: returning REAL code (16
+bytes)`), nhưng `mvm_ta` **crash NULL pointer thật** ngay sau đó:
+```
+handle_trans_fault: no vmr found for va 0x0!
+do_page_fault: faulting ip is 0x3000005ed38c (real IP), faulting address is 0x0, fsc is trans_fault
+Thread ... CMD: /mvm_ta
+```
+`mvm_launcher.srv` **chưa in "metanode TA exited"** — `waitpid()` chưa trả về, chưa rõ toàn bộ
+process có bị kernel kill hẳn hay chỉ 1 luồng chết còn luồng khác vẫn "sống" ở mức OS (khớp
+CLAUDE.md's cảnh báo: lỗi bên trong TA không luôn abort sạch).
+
+**Chưa điều tra sâu** (cần session riêng, đụng core EVM interpreter C++ của metanode, không
+nên vá vội): có thể do (a) bytecode/test tự viết thiếu field nào đó interpreter cần (ví dụ:
+context/environment object chưa init đầy đủ khi không qua đường DEPLOY thật), (b) bug thật
+trong interpreter khi xử lý SSTORE/SLOAD lần đầu trên 1 địa chỉ "giả lập có code", hoặc (c) vấn
+đề trong cách `GlobalStateGet`'s response được `mvm_ta` parse (blob layout). Test 1 (native
+transfer, không chạm contract code) vẫn chạy hoàn hảo trên CÙNG bản build — xác nhận bug chỉ
+liên quan tới đường thực thi contract code, không phải hạ tầng channel/protocol.
+
+**Việc tiếp theo**:
+0. **ƯU TIÊN CAO NHẤT (mới, §9.25)**: điều tra crash NULL pointer thật trong EVM interpreter
+   khi xử lý contract code — cần debug core C++ (`libmvm_linker.a`/`c_mvm`), có thể cần thêm
+   log/breakpoint tại `faulting IP 0x3000005ed38c` tương ứng symbol nào trong `mvm_ta` (dùng
+   `addr2line`/`objdump` trên bản build **không strip** để tra ngược). Đây là blocker thật cho
+   mọi việc liên quan tới contract execution (bao gồm cả xác minh Xapian runtime — mục 3/4 cũ).
 1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
 2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
-3. Viết 1 test EXECUTE có gọi contract code thật (không chỉ native transfer) để exercise các
-   reverse-call còn lại (storage, extension) với dữ liệu thật, không chỉ "empty".
-4. Tích hợp `libxapian.a` thật (đã build sẵn) + `libmvm_linker.a` vào `mvm_ta`'s build thật
-   (hiện `mvm_ta` chưa link Xapian, chỉ mới link EVM core) — đo dung lượng heap+index có vừa
-   trần bộ nhớ secure hay không sau khi tích hợp thật.
+3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — phát hiện crash ở mục 0.
+4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
+   binary thật) — xác minh RUNTIME cần đợi mục 0 (crash) được giải quyết trước.
