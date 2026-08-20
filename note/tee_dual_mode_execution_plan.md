@@ -1487,14 +1487,20 @@ liên quan tới đường thực thi contract code, không phải hạ tầng c
 
 **Việc tiếp theo**:
 0. ~~Điều tra crash NULL pointer~~ **ĐÃ GIẢI QUYẾT — xem §9.27.**
-1. Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`.
+1. ~~Viết `encodeReplayFullDbLogsReq`/handler tương ứng cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS`~~
+   **ĐÃ LÀM (§9.28)** — cơ chế reverse-call viết xong đầy đủ; auto-trigger vào interpreter vẫn
+   là việc riêng, chưa làm (xem §9.28's ghi chú).
 2. Thêm index địa chỉ nhỏ cho `GetStorageBackupDb()` (lỗ hổng hiệu năng đã biết).
 3. ~~Viết test EXECUTE gọi contract code thật~~ **ĐÃ LÀM (§9.25)** — chạy đúng, xem §9.27.
 4. ~~Tích hợp `libxapian.a`~~ **ĐÃ XONG TỪ TRƯỚC** (xác nhận qua `strings`/symbol check trên
    binary thật) — xác minh RUNTIME giờ không còn bị chặn bởi crash, có thể làm tiếp.
-5. **MỚI**: exercise storage/extension reverse-calls với dữ liệu THẬT (hiện tất cả đang trả về
-   "empty nhưng hợp lệ" cho 4 lệnh extension) — giờ có thể bắt đầu vì contract execution đã chạy
-   được thật (bao gồm cả `GET_STORAGE_VALUE` cho SLOAD, xem §9.27).
+5. exercise storage/extension reverse-calls với dữ liệu THẬT (hiện tất cả đang trả về "empty
+   nhưng hợp lệ" cho 4 lệnh extension) — có thể bắt đầu vì contract execution đã chạy được thật
+   (bao gồm cả `GET_STORAGE_VALUE` cho SLOAD, xem §9.27).
+6. **MỚI (§9.28)**: thiết kế + wire auto-trigger thật cho `mvm_fetch_and_replay_full_db_logs()`
+   vào đúng điểm trong `xapian_handlers.cpp` (khi 1 địa chỉ được Xapian tra lần đầu trong phiên
+   TA, chưa có dữ liệu cục bộ) + dedupe per-session (tránh round-trip lặp lại mỗi lần chạm cùng
+   1 địa chỉ).
 
 ## §9.27 — Root cause thật của §9.25/§9.26: `saveDebugInfo()` ghi file khi TA không có filesystem
 
@@ -1585,3 +1591,39 @@ kiểu lỗi im lặng NULL-deref, nên xác suất thấp hơn). Bước tiếp
 đoán quanh reverse-round-trip trong `mvm_ta_main.cpp` rồi build→flash→reboot 1 lần nữa trên board
 thật, hoặc disassemble trực tiếp object cross-build tại điểm crash — không việc nào làm tiếp
 được chỉ bằng x86.
+
+## §9.28 — Viết cơ chế reverse-call cho `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (mục 1 cũ)
+
+Go-side codec cho cmd này (`encodeGetLatestFullDbLogsReq`/`decodeGetLatestFullDbLogsReq` +
+`encodeReplayFullDbLogsResp`/`decodeReplayFullDbLogsResp`, `tz_codec.go`) hoá ra **đã viết sẵn
+từ trước** (2026-08-16), kèm test round-trip (`tz_codec_full_db_logs_test.go`) — không cần làm
+lại. Phần thật sự thiếu: **TA-side handler** (`mvm_ta_main.cpp`) chưa hề gọi tới cmd này (0 kết
+quả grep) và `mvm_ca_test.cpp` cũng chưa xử lý (sẽ rơi vào nhánh FATAL nếu có ai gửi).
+
+**Đã viết**: `mvm_fetch_and_replay_full_db_logs(const unsigned char address[20])` trong
+`mvm_ta_main.cpp` — build request (`mvm_tz_get_latest_full_db_logs_req_t`, chỉ 20-byte address),
+gửi round trip, decode response (tái dùng shape `mvm_tz_replay_full_db_logs_req_t`: header
+`entry_count` + blob `entry_count` bản ghi `[20-byte address RAW, không length-prefix][log_len
+u32][log bytes]` — khớp chính xác `tz_codec.go`'s `writeAddrBytesMap`, KHÔNG dùng quy ước
+length-prefix-cho-mọi-field thông thường của `BlobReader::readBytes`), dựng mảng
+`LogReplayEntryC[]`, gọi `ReplayFullDbLogs()` — y hệt cách cgo mode dùng `mvm.CallReplayFullDbLogs`
+lúc node sync. Trả về giá trị `ReplayFullDbLogs` (khác 0 = thành công), hoặc `1` (thành công,
+không có gì để replay) nếu `entry_count==0` — KHÔNG phải lỗi.
+
+Thêm case tương ứng trong `mvm_ca_test.cpp`'s `handle_reverse_call()` cho cmd=107: trả về
+`entry_count=0` (hợp lệ, giống style 4 case extension stub trước đó).
+
+**Cố ý CHƯA làm** (khác các reverse-call khác): auto-trigger tự động vào interpreter. Comment
+protocol header mô tả điều kiện gọi là "lần đầu trong phiên TA mà 1 tra cứu Xapian cho địa chỉ
+này ra rỗng" — cần lần theo đúng chỗ trong `xapian_handlers.cpp` (2096 dòng, DB Xapian
+per-address được mở/tra ở đâu) + thêm dedupe theo phiên (tránh gọi lại mỗi lần chạm cùng địa
+chỉ) — đây là quyết định thiết kế thật, không nên đoán bừa. Hàm viết xong hoàn toàn ĐÚNG giao
+thức và sẵn sàng gọi, chỉ chưa có nơi gọi.
+
+**Xác nhận build**: compile sạch cả 2 phía (musl-gcc cross cho `mvm_ta_main.cpp`, thật trong
+container; `aarch64-linux-gnu-g++` cho `mvm_ca_test.cpp`, local). Link đầy đủ `mvm_ta` (dùng lại
+`libmvm_linker.a`/`libmvm.a` không đổi từ build trước) ra **md5 giống hệt bit-for-bit** bản đang
+chạy trên board (`d76124f4f8878c17bd21ea43dd5b9f47`) — vì hàm mới là `static`, chưa ai gọi, GCC
+`-O2` loại bỏ hoàn toàn (dead code elimination thật, không phải suy đoán). Do đó **không cần
+flash lại** — board hiện tại đã chạy code tương đương tuyệt đối. Không cần vòng build→flash→
+reboot nào cho thay đổi này.

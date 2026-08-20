@@ -72,6 +72,7 @@
 #include <cerrno>
 #include <pthread.h>
 #include <atomic>
+#include <vector>
 
 // PAGE_SIZE/ROUND_UP already come from chcore/defs.h (included via
 // chcore/syscall.h below) — don't redefine, just use them.
@@ -809,6 +810,80 @@ Extension_return ExtensionGetOrCreateSimpleDb(unsigned char *bytes, int size, un
 }
 
 } // extern "C"
+
+// ─── MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS (plan §5b, 2026-08-16; wired up
+// 2026-08-20, plan §9.28) ───
+//
+// TA-initiated, lazy, per-address pull of previously-saved full_db_logs —
+// the TZ-mode counterpart of what cgo mode already does via
+// mvm.CallReplayFullDbLogs during node sync (executor/
+// unix_socket_handler_sync.go:1039), just reached over the reverse-
+// callback channel instead of a direct Go call. Not one of the "6 live
+// reverse-callback shims" above because it has no direct 1:1 cgo-callback
+// equivalent — it's a plain internal helper (no extern "C"/no existing
+// libmvm_linker.a call site expects this exact name), callable whenever
+// TA-side code decides a given address's Xapian-backed full-database state
+// might be stale/missing for this (freshly-booted, in-memory-only) TA
+// session.
+//
+// NOT YET auto-triggered from any interpreter code path — deciding exactly
+// where ("the first time a Xapian lookup for `address` comes up empty",
+// per the protocol header's own doc comment) requires tracing
+// xapian_handlers.cpp's actual DB-open/lookup call sites plus a
+// per-session "already fetched for this address" dedupe (to avoid a
+// reverse round trip on every single touch), which is real, separate
+// design work — see plan doc §9.28's "Việc tiếp theo". This function is
+// the reverse-call mechanics half only: issue the round trip, decode the
+// response, feed it into ReplayFullDbLogs(). Returns ReplayFullDbLogs's
+// own return value (nonzero = success per mvm_linker.cpp:1367), or 1
+// (no-op success, nothing to do) if the Host had zero entries for this
+// address — not a failure, just "nothing new since last time".
+static int mvm_fetch_and_replay_full_db_logs(const unsigned char address[20]) {
+    mvm_tz_get_latest_full_db_logs_req_t req = {0};
+    memcpy(req.address, address, 20);
+
+    // Response reuses mvm_tz_replay_full_db_logs_req_t's shape (see that
+    // struct's own doc comment in mvm_tz_protocol.h for why one struct
+    // serves both the forward bulk-push command and this reverse pull).
+    mvm_tz_replay_full_db_logs_req_t resp_hdr = {0};
+    uint32_t resp_hdr_len = 0, resp_blob_len = 0;
+    const uint8_t *resp_blob = nullptr;
+    mvm_reverse_round_trip(MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS,
+        &req, sizeof(req), nullptr, 0,
+        &resp_hdr, sizeof(resp_hdr), &resp_hdr_len, &resp_blob, &resp_blob_len);
+
+    if (resp_hdr.entry_count == 0) {
+        return 1; // nothing to replay -- success, not a failure
+    }
+
+    // Blob layout: entry_count records of [20-byte address, RAW, no length
+    // prefix][log_len (u32)][log bytes] -- matches tz_codec.go's
+    // writeAddrBytesMap exactly (encodeReplayFullDbLogsResp reuses it), NOT
+    // BlobReader::readBytes' usual "everything is length-prefixed"
+    // convention, since the address field's length is already fixed/known.
+    BlobReader r{resp_blob, resp_blob_len};
+    std::vector<LogReplayEntryC> entries;
+    entries.reserve(resp_hdr.entry_count);
+    for (uint32_t i = 0; i < resp_hdr.entry_count; i++) {
+        if (r.off + 20 > r.len) {
+            fprintf(stderr, "[mvm_ta] FATAL: full_db_logs entry %u: BlobReader underflow (address)\n", i);
+            abort();
+        }
+        const uint8_t *addr_p = r.buf + r.off; // zero-copy: stable for the
+        r.off += 20;                            // round trip's duration
+        uint32_t log_len = 0;
+        const uint8_t *log_p = r.readBytes(&log_len);
+
+        LogReplayEntryC entry;
+        entry.address_ptr = const_cast<unsigned char *>(addr_p);
+        entry.address_len = 20;
+        entry.log_data_ptr = const_cast<unsigned char *>(log_p);
+        entry.log_data_len = (int)log_len;
+        entries.push_back(entry);
+    }
+
+    return ReplayFullDbLogs(entries.data(), (int)entries.size());
+}
 
 // ───────────────────────── ExecuteResult encoding ─────────────────────────
 // Mirrors tz_codec.go's encodeExecuteResult field-for-field (see that

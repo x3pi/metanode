@@ -253,6 +253,22 @@ static void handle_reverse_call(void) {
         resp_blob_len = sizeof(zero_len);
         break;
     }
+    case MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS: {
+        // Added 2026-08-20 (plan §9.28) alongside mvm_ta_main.cpp's
+        // mvm_fetch_and_replay_full_db_logs() -- not yet auto-triggered by
+        // any interpreter code path (see that function's own doc comment),
+        // so this test never actually sends this cmd today; handled here
+        // anyway so a future test that DOES trigger it fails loud with a
+        // real (if empty) response instead of hitting the FATAL default.
+        // Response reuses mvm_tz_replay_full_db_logs_req_t's shape: a real
+        // header (entry_count), unlike the blob-only extension cases above.
+        mvm_tz_replay_full_db_logs_req_t resp = {0};
+        resp.entry_count = 0; // "nothing to replay" -- valid, not a failure
+        memcpy(resp_buf, &resp, sizeof(resp));
+        resp_hdr_len = sizeof(resp);
+        resp_blob_len = 0;
+        break;
+    }
     default:
         printf("[mvm_ca_test] FATAL: unhandled reverse cmd=%d -- aborting cleanly "
                "instead of hanging mvm_ta forever\n", cmd);
