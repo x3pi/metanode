@@ -2119,3 +2119,63 @@ trên x86, không đụng board.
 **Còn lại của GĐ4**: phần TA thật (cần board + Go CA cross-compile aarch64 — chưa có tooling,
 xem §9.34) — `cmd/tool/tz_replay_check` đã có sẵn `-mode trustzone-hardware` để dùng khi phần đó
 sẵn sàng, không cần viết lại.
+
+## §9.37 — Cross-compile aarch64 Giai đoạn 1: `pkg/mvm` (C++ EVM/Xapian) thật, xác nhận bằng readelf (2026-08-21)
+
+Điểm chặn cứng nhất còn lại trước khi Go CA (`ModeTrustzoneHardware`, GĐ3b) chạy được thật trên
+board — trước hôm nay **0 tooling tồn tại** (xác nhận qua 2 Explore agent + grep toàn repo, không
+phải phỏng đoán). Chia 2 giai đoạn: GĐ1 (hôm nay) — cross-compile xong phần C++ thuần (`pkg/mvm`);
+GĐ2 (phiên sau) — Rust/RocksDB, rủi ro/tốn thời gian cao nhất, tách biệt hoàn toàn.
+
+**Phát hiện thật ngoài dự kiến — `libxapian-dev` không phải Multi-Arch: same**: sau khi bật
+`dpkg --add-architecture arm64` + cài `libgmp-dev/libmpfr-dev/libtbb-dev/libleveldb-dev/uuid-dev/
+libxapian-dev:arm64` (dry-run trước, không báo xung đột), `build_check.sh` gãy thật ngay sau đó —
+`cannot find -lxapian` khi link `cmd/simple_chain` (x86). Root cause: cài `libxapian-dev:arm64`
+đã **âm thầm GỠ MẤT** `libxapian-dev:amd64` (dpkg coi 2 kiến trúc của gói này là xung đột — không
+giống 5 gói kia, vốn `Multi-Arch: same` và coexist bình thường). Khôi phục ngay bằng
+`apt-get install --reinstall libxapian-dev:amd64` (xác nhận `build_check.sh` sạch lại 100%
+trước khi làm tiếp gì khác). Xapian cho aarch64 từ đó lấy bằng `apt-get download
+libxapian-dev:arm64 libxapian30:arm64` + `dpkg -x <file>.deb <thư mục riêng>` (giải nén thủ công,
+KHÔNG `dpkg -i`/cài qua apt database chung) — **không bao giờ `apt install libxapian-dev:arm64`
+lại nữa** trên máy này.
+
+**Đã làm**:
+1. Bật `arm64` cho apt (`dpkg --add-architecture arm64` + nguồn `ports.ubuntu.com` giới hạn
+   `[arch=arm64]`, restrict 2 stanza `ubuntu.sources` gốc về `amd64 i386` để tránh apt tự tìm
+   arm64 trên `archive.ubuntu.com` — mirror đó không có gói arm64).
+2. Cài 5/6 lib `-dev:arm64` qua apt bình thường; xapian xử lý riêng như trên.
+3. Viết `execution/pkg/mvm/cmake/aarch64-linux-gnu.cmake` (toolchain file chuẩn, dùng
+   `aarch64-linux-gnu-gcc`/`g++` 13.3.0 đã cài sẵn — chưa từng dùng cho metanode trước đây, chỉ
+   dùng cho `mvm_ca_test` bên `tz-llm-trustzone`, build tay không script).
+4. Build `c_mvm` cho aarch64 vào `build-aarch64/` (out-of-tree, `-DMVM_INSTALL_PREFIX` — cơ chế
+   đã có sẵn từ 2026-08-16). **Phát hiện thật khác**: `linker/CMakeLists.txt` — khác với những gì
+   tưởng ban đầu (và khác `c_mvm/CMakeLists.txt`) — **không có** cơ chế `MVM_INSTALL_PREFIX`,
+   `install()` hardcode thẳng `${CMAKE_CURRENT_SOURCE_DIR}/build` (build x86 thật). Né bằng cách
+   chỉ `make` (không `make install`) cho linker, lấy `.a` thẳng từ thư mục build — không sửa
+   `linker/CMakeLists.txt` (đã cân nhắc thêm `MVM_INSTALL_PREFIX` như `c_mvm` nhưng chọn cách né
+   an toàn hơn trong phạm vi GĐ1 này).
+5. **Xác nhận bằng chứng thật** (không tin "cmake chạy xong không lỗi"): `ar x` + `readelf -h`
+   trên `.o` trích từ cả `libmvm.a` và `libmvm_linker.a` (bản `build-aarch64/`) → `Machine:
+   AArch64`. Đối chiếu `build/` thật (x86, `build_check.sh` dùng): mtime không đổi, vẫn `Machine:
+   X86-64` — xác nhận không hề bị đè (đúng lo ngại đã ghi trong chính 2 `CMakeLists.txt` từ vụ
+   2026-08-16).
+6. Sửa `mvm_api.go` (`-march=native -mtune=native` → tách `#cgo linux,amd64`/`#cgo linux,arm64`,
+   mirror đúng nhánh `CMAKE_CROSSCOMPILING` đã có trong CMake) và `ffi_bridge.go` (bỏ giới hạn
+   `amd64` khỏi 1 dòng LDFLAGS — 5 lib glibc chuẩn, không đặc thù x86).
+7. **Verify thêm, ad-hoc** (không phải file trong repo, chỉ để có bằng chứng mạnh hơn): 1 binary
+   cgo test độc lập trong scratchpad, LDFLAGS trỏ thẳng `build-aarch64/` + 6 lib arm64 (xapian từ
+   bản giải nén riêng ở trên) — `aarch64-linux-gnu-ld` tìm thấy và liên kết đúng **toàn bộ** 6 lib
+   + nội dung 2 `.a` thật, "undefined reference" còn lại CHỈ là các hàm vốn dĩ nằm ở phía Go thật
+   (`GlobalStateGet`/`ExtensionCallGetApi`/... — `//export` trong `mvm_api.go`/`extension.go`) và
+   secp256k1/blst (vốn dĩ resolve qua go-ethereum's cgo — đúng theo comment có sẵn trong
+   `linker/CMakeLists.txt`) — đúng như dự đoán trước khi chạy, không phải lỗi thật.
+
+**Xác nhận sạch**: `go build/vet ./pkg/mvm/... ./executor/...` sạch; `go test -count=3
+./pkg/mvm/...` sạch; `build_check.sh` ALL BUILDS PASSED (4/4) — hành vi build x86 mặc định không
+đổi sau mọi thay đổi.
+
+**Còn lại (Giai đoạn 2, phiên sau, KHÔNG làm hôm nay)**: `rustup target add
+aarch64-unknown-linux-gnu` + `.cargo/config.toml` + cross-build `libmetanode.a` (gồm cả nhánh
+RocksDB qua crate nội bộ `typed-store` — phần rủi ro/tốn thời gian nhất, RocksDB cross-compile
+luôn khét tiếng khó) + `libmtn_nomt.a` + thử link+chạy thật `cmd/simple_chain` cho aarch64. Sau đó
+mới tới: đóng gói/đẩy binary lên board, chạy `tz_replay_check -mode trustzone-hardware` thật.
