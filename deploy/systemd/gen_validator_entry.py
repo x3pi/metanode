@@ -198,7 +198,10 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
     is_explorer = getattr(args, "is_explorer", False) or (args.node_type == "synconly")
     
     snapshot_enabled = getattr(args, "snapshot_enabled", False)
-    epochs_to_keep   = getattr(args, "epochs_to_keep", 5)
+    if getattr(args, "epochs_to_keep", None) is not None:
+        epochs_to_keep = args.epochs_to_keep
+    else:
+        epochs_to_keep = 0 if (is_rpc_node or is_explorer) else 5
     commit_batch_size= 500 if is_validator else 100
     commit_batches_ahead = 128 if is_validator else 64
 
@@ -393,7 +396,7 @@ def parse_args():
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
-    parser.add_argument("--epochs-to-keep", type=int, default=5, help="Number of epochs to keep (default: 5)")
+    parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 for RPC/Explorer, 5 for Validator)")
     parser.add_argument("--is-explorer",  action="store_true", help="Enable Explorer for this node")
     parser.add_argument("--node-id",      type=int, default=0, help="Node index in genesis (default: 0)")
     parser.add_argument("--total-nodes",  type=int, default=5, help="Total number of nodes for auto-generating peers")
@@ -426,8 +429,8 @@ def parse_args():
                         help="Enable snapshotting (requires Btrfs/XFS)")
     parser.add_argument("--snapshot-frequency-blocks", type=int, default=500,
                         help="Frequency of blocks between periodic snapshots (default: 500)")
-    parser.add_argument("--snapshot-max-snapshots", type=int, default=1,
-                        help="Maximum number of snapshots to keep (default: 1)")
+    parser.add_argument("--snapshot-max-snapshots", type=int, default=2,
+                        help="Maximum number of snapshots to keep (default: 2)")
     parser.add_argument("--max-part-size-mb", type=int, default=600,
                         help="Max part size in MB for snapshot archive (default: 600)")
     parser.add_argument("--epoch-duration-seconds", type=int, default=600,

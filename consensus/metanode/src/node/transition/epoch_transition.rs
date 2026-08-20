@@ -662,8 +662,8 @@ async fn poll_go_until_synced(
                             last_progress_time.elapsed(), go_last_gei, ffi_queue_depth
                         );
                     } else {
-                        warn!(
-                            "⏳ [SYNC POLL] Go executing heavy block for {:?} (current gei={}, expected={}, gap={}, ffi_queue_depth={}). \
+                        error!(
+                            "🚨 [SYNC POLL] Go executing heavy block for {:?} (current gei={}, expected={}, gap={}, ffi_queue_depth={}). \
                              Continuing to wait for Go to finish boundary block (thà pending chứ không fork)...",
                             last_progress_time.elapsed(), go_last_gei, expected_last_block, remaining, ffi_queue_depth
                         );
