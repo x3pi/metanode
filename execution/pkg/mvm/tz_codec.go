@@ -368,8 +368,22 @@ func decodeExecuteResult(header, blob []byte) (*MVMExecuteResult, error) {
 	hdr := (*C.mvm_tz_execute_result_hdr_t)(unsafe.Pointer(&header[0]))
 
 	r := &MVMExecuteResult{
-		Status:    pb.RECEIPT_STATUS(hdr.status),
-		Exception: pb.EXCEPTION(hdr.exception),
+		Status: pb.RECEIPT_STATUS(hdr.status),
+		// pb.EXCEPTION's whole defined range is -1 (EXCEPTION_NONE, the
+		// overwhelmingly common "success" value) through 15 -- comfortably
+		// inside int8. hdr.exception is C.uint8_t (unsigned) purely because
+		// that's the wire's byte layout (mvm_tz_protocol.h); converting it
+		// straight to pb.EXCEPTION (int32-based) would zero-extend instead
+		// of sign-extend, turning EXCEPTION_NONE=-1 into 255 on every single
+		// successful tx. Found 2026-08-20 via cmd/tool/tz_replay_check's
+		// real-block differential replay (note/tee_dual_mode_execution_plan.md
+		// §9's "Giai đoạn 4") -- every ModeCgo-vs-ModeTrustzone receipt
+		// otherwise matched byte-for-byte except this field. int8(...) first
+		// reinterprets the raw byte as signed before widening, which is the
+		// correct inverse of encodeExecuteResult's C.uint8_t(r.Exception)
+		// truncation below -- no wire layout change, so this does NOT need
+		// a TA rebuild/reflash to take effect on the Go side.
+		Exception: pb.EXCEPTION(int8(hdr.exception)),
 		GasUsed:   uint64(hdr.gas_used),
 	}
 
