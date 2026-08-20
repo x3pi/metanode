@@ -1238,6 +1238,27 @@ static void mvm_ta_run(void) {
     }
 }
 
+// 2026-08-20 (plan §9.29): a Xapian InMemory-backend hardware selftest
+// (mvm_ta_xapian_inmemory_selftest()) was added and run here -- it crashed
+// mvm_ta immediately at startup on real hardware (faulting address 0x82,
+// confirmed via UART on the very next boot). Removed rather than debugged
+// in place: getting the board back to a known-good boot was the priority
+// once the crash was confirmed NOT to be a flash/idbloader-level problem
+// (a full golden-image recovery + reflash of the exact same image still
+// crashed identically, and Linux/kernel/procmgr all boot fine up to the
+// point mvm_launcher launches mvm_ta -- the crash is inside this TA
+// binary specifically). Root cause NOT YET DETERMINED: could be the
+// selftest's own code (e.g. mvm::Address/mvm::from_big_endian usage) or a
+// genuine difference in the cross-compiled (musl/aarch64) libxapian.a's
+// InMemory backend support vs. the x86 system libxapian the equivalent
+// host-side test (scratchpad-only, not checked in) verified cleanly. See
+// memory mvm-ta-evm-interpreter-nullptr-crash's sibling notes / plan doc
+// §9.29 for the investigation to redo before re-attempting this selftest
+// on hardware -- next time, add printf bracketing INSIDE the selftest
+// body (before/after each Xapian call) rather than only around it, so a
+// crash pinpoints the exact call immediately instead of needing a second
+// round.
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[mvm_ta] starting\n");

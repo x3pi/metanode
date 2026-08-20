@@ -1648,3 +1648,56 @@ cache in-process của `mvm_ta`, không thật sự exercise round-trip). `GetSt
 không đổi — không regression. Chỉ cần build lại `mvm_ca_test` (aarch64-linux-gnu-g++, không đụng
 `mvm_ta`) + push qua `hdc` + chạy trên board đang chạy sẵn — **không cần flash/reboot** vì thay
 đổi hoàn toàn nằm ở phía test tool, không phải TA.
+
+## §9.29 — Fix Xapian InMemory backend cho TA (chuẩn bị cho auto-trigger §9.28 mục 6)
+
+Trước khi wire auto-trigger cho `mvm_fetch_and_replay_full_db_logs()`, phát hiện `XapianManager`
+chưa từng thực sự hỗ trợ chạy trong TA: constructor luôn mở DB qua path thật trên đĩa
+(`Xapian::WritableDatabase(path, DB_CREATE_OR_OPEN)`), không có nhánh InMemory nào trong code
+ứng dụng thật (`grep DB_BACKEND_INMEMORY` ra 0 kết quả trong `execution/`) — "InMemory đã proven"
+ghi nhận 2026-08-16 chỉ là smoke test độc lập, chưa nối vào `XapianManager` thật.
+
+**Fix 3 lớp** (`xapian_manager.cpp`/`.h`, `my_extension/utils.h`/`.cpp`):
+1. Constructor: `openXapianDb()` chọn `Xapian::WritableDatabase(std::string(),
+   DB_BACKEND_INMEMORY)` khi `IsXapianBasePathEmpty()` (TA không bao giờ gọi `SetXapianBasePath`),
+   giữ nguyên nhánh path-based khi có base path (cgo/Linux thường).
+2. `acquireSearchDb()`/`acquireSimpleReadDb()`: pool nhiều handle đọc đồng thời (mở lại cùng
+   path) không có ý nghĩa với InMemory (không có path) và cũng không cần (TA tuần tự hoá, không
+   bao giờ đọc đồng thời) — bypass thẳng `&db` trong chế độ InMemory.
+3. `revertUncommittedChanges()`: **phát hiện kiến trúc cứng, xác nhận qua đọc source Xapian thật**
+   — `InMemoryDatabase::commit()`/`::cancel()` đều là no-op tuyệt đối, `close()` xoá sạch dữ liệu
+   vĩnh viễn — cách revert cũ (đóng+mở lại từ đĩa) KHÔNG THỂ áp dụng cho InMemory bằng API Xapian.
+   Thêm `undo_snapshot_` (pre-image từng docid, capture lười lần đầu chạm trong `replay_log()`),
+   revert InMemory tự tay replay ngược lại thay vì đóng/mở.
+
+**Xác nhận trên x86 rất kỹ** (cả 2 chế độ trong 1 harness, `xapian_inmemory_test.cpp`,
+scratchpad-only): InMemory mode (open/ghi/đọc-trước-commit/revert-xoá-đúng/commit-rồi-revert-vẫn-
+còn — pass hết) VÀ disk mode (xác nhận, bằng cách so với code GỐC qua `git stash`, rằng 1 hành vi
+"get_data() trước commit không thấy gì qua reader pool" là đặc điểm CÓ SẴN từ trước của Glass
+backend, không phải regression).
+
+**Trên hardware thật: THẤT BẠI, chưa root-cause, đã gỡ bỏ**. Thêm self-test tạm
+(`mvm_ta_xapian_inmemory_selftest()`, cùng logic x86) chạy lúc TA khởi động — **crash `mvm_ta`
+NGAY LẬP TỨC mỗi lần boot** (`faulting address 0x82`, IP nằm ở vùng nhớ `0x400000062000-
+4000000d0000` — KHÁC hẳn mọi crash khác trong session này, vốn luôn `0x300...`). Ban đầu tưởng
+nghiêm trọng hơn nhiều (board im lặng hoàn toàn UART/HDMI đen sau lần flash đầu) — chạy
+`recover-golden-image.sh` + reflash lại ĐÚNG bản đó tái hiện crash y hệt, sạch sẽ (xác nhận đây
+là bug thật, xác định, không phải hỏng flash/idbloader; lần "im lặng hoàn toàn" trước đó hoá ra
+là sự cố rời rạc không liên quan — lần power-cycle NGAY SAU đó boot U-Boot/kernel/Linux bình
+thường, chỉ riêng `mvm_ta` crash). **Chưa xác định được root cause** — gỡ bỏ hẳn self-test (hàm +
+call site + include tạm) để đưa board về trạng thái ổn định đã biết thay vì tiếp tục điều tra
+trong cùng phiên; xác nhận 3 test cũ (native transfer, SSTORE/SLOAD, GET_STORAGE_VALUE thật) vẫn
+chạy đúng với fix 3-lớp còn nguyên, chỉ bỏ self-test.
+
+**Phát hiện phụ**: 6 tiến trình `cat /dev/ttyUSB0` cũ chồng chéo từ các lần capture trước (chưa
+bao giờ bị kill) từng làm 1 lần capture tưởng "board im lặng hoàn toàn" — thật ra chỉ là các
+process cũ tranh nhau đọc byte. `pkill -f "cat /dev/ttyUSB0"` trước MỌI lần bắt log mới. Xem
+memory `zombie-uart-readers-steal-bytes`.
+
+Chi tiết đầy đủ: memory `xapian-inmemory-ta-backend-fix`.
+
+**Việc tiếp theo cho fix Xapian**: KHÔNG coi fix này là "đã xác nhận trên hardware" — core fix
+(constructor/pool/revert) tin là đúng (khớp x86 tuyệt đối) nhưng CHƯA có bằng chứng thật trên
+musl/aarch64. Trước khi thử lại self-test: bracket TỪNG lệnh gọi Xapian riêng lẻ (không chỉ
+trước/sau cả hàm), và cân nhắc khả năng lỗi nằm ở chính `mvm::Address`/`mvm::from_big_endian`
+(chưa từng dùng đúng shape này trên TA trước đây) chứ không phải Xapian.
