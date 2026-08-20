@@ -2429,3 +2429,38 @@ thật (deploy + write) qua RPC/TCP thật qua mạng. Đây là mốc "chạy n
   SAU KHI node khởi động** — log thật (bao gồm cả log Rust) nằm ở đó, KHÔNG phải ở file mà lệnh
   `nohup ... > file` redirect lúc khởi động tiến trình (file đó chỉ chứa log từ TRƯỚC thời điểm
   redirect nội bộ này chạy).
+
+## §9.42 — Wire 4 lệnh forward TA còn thiếu (mã nguồn, chưa build/flash) (2026-08-21, cùng ngày)
+
+Tiếp nối yêu cầu người dùng. Wire `MVM_TZ_CMD_DEPLOY`/`SEND_NATIVE`/`PROCESS_NATIVE_MINT_BURN`/
+`NONCE_PLUS_ONE` trong `execution/pkg/mvm/ta/mvm_ta_main.cpp` — 4 hàm `mvm_dispatch_*` mới,
+mechanically identical với `mvm_dispatch_call`/`mvm_dispatch_execute` đã có (đọc header cố định
+qua `memcpy`, đọc phần biến-độ-dài qua `BlobReader`, gọi thẳng hàm C++ tương ứng trong
+`mvm_linker.hpp`, encode response qua `mvm_encode_execute_result` dùng chung). Blob order/field
+type đối chiếu trực tiếp với `tz_codec.go`'s 4 hàm `encode*Req` tương ứng (đã sửa đúng
+length-prefixed ở GĐ3b §9's step 1) và `mvm_tz_protocol.h`'s doc comment trên từng struct request
+— không đoán. `EXECUTE_BATCH` vẫn KHÔNG wire (dead code thật, không Go-side codec, không caller).
+
+**Không build/flash trong lượt này** — quyết định thận trọng, không phải giới hạn kỹ thuật đơn
+thuần: file này cần toolchain musl/chcore thật
+(`tz-llm-trustzone/scripts/kick-the-tires/cpp13-metanode-deps/build_mvm_ta.sh`, chạy trong Docker
+`vectorxj0553/tz-llm-llama-builder`, nhiều dependency đã "staged" theo cách riêng — khác hẳn
+`aarch64-linux-gnu` glibc toolchain vừa dùng cho GĐ1/GĐ2 cross-compile Go hôm nay). Sau khi build
+xong còn cần **flash lên board thật** (`rebuild.sh` → `repack.sh` → copy tay `boot.img` → MaskROM
+flash → power-cycle) — quy trình 8 bước có rủi ro thật đã ghi nhiều lần trong lịch sử dự án
+(`tz-llm-trustzone`'s CLAUDE.md), và board hiện đang ở trạng thái ổn định "round 2" — không nên
+động vào mà chưa xác nhận rõ với người dùng trước.
+
+**Xác nhận đã làm được (không cần toolchain thật)**: diagnostic từ IDE/clang trên file này chỉ
+báo lỗi ở các dòng **TRƯỚC** vị trí sửa (thiếu include path chcore SDK — pre-existing, do IDE
+không có toolchain thật, không liên quan code mới) — không có diagnostic nào trên chính 4 hàm mới
+thêm.
+
+**Còn lại cho `ModeTrustzoneHardware` "có ý nghĩa thực tế"** (chưa làm):
+- Build thật `mvm_ta` (musl/chcore) với code mới này, flash lên board — cần xác nhận với người
+  dùng trước khi động vào board đang ổn định.
+- Cross-compile Go CA cho board (đã xong, GĐ1/GĐ2) chạy qua `tzHardwareChannel` THẬT với TA thật
+  trên board — chưa từng thử; `tz_hardware_channel.go`/`tz_hardware_engine.go` mới chỉ build sạch
+  x86, chưa chạm `/dev/tc_ns_client` thật.
+- Giao thức v1 vẫn thiếu CHAINID/blob context/cross-chain sender (đã ghi từ §9.34) — chưa quyết
+  định.
