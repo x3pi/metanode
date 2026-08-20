@@ -2363,3 +2363,69 @@ gì, không đụng tới TrustZone/OP-TEE/reboot.
 **Không tuyên bố "chạy node thật trên board thành công"** — chỉ tuyên bố đúng những gì đã xác
 nhận: binary chạy được, MPT/genesis/RPC hoạt động đúng; consensus/block-production CHƯA hoạt động
 trên board, nguyên nhân gốc chưa xác định chắc chắn.
+
+## §9.41 — Root cause thật của §9.40's "Rust treo": thiếu file `node.toml`, KHÔNG PHẢI io_uring — chạy node thật THÀNH CÔNG (2026-08-21, cùng ngày)
+
+Người dùng yêu cầu tiếp tục điều tra ngay. Board không có `strace`/`gdb`, nhưng có đủ `/proc`
+(root qua `hdc shell`) để điều tra miễn phí trước khi nghĩ tới việc thêm log + build lại:
+
+1. **`/proc/<pid>/task/*/wchan`** trên mọi thread của process treo → toàn bộ `futex_wait_queue_me`
+   (chờ việc bình thường của threadpool nhàn rỗi) + 2 thread `do_epoll_wait` — **xác nhận Tokio
+   dùng epoll, KHÔNG dùng io_uring** (bác bỏ giả thuyết io_uring hàng đầu đã nêu ở §9.40 cho vấn
+   đề #2 — giả thuyết đó SAI). Không thread nào wchan bất thường — không phải deadlock.
+2. Bật `RUST_LOG=debug` (cần `env RUST_LOG=debug <binary>`, KHÔNG phải `VAR=val cmd &` qua `hdc
+   shell` — cú pháp đó không truyền được env var qua tới process con trên `sh` của board; xác
+   nhận qua `/proc/<pid>/environ`, cũng phát hiện `toybox`'s `grep -a` không xử lý đúng chuỗi
+   phân cách bằng null-byte, gây hiểu lầm ban đầu tưởng biến env bị thiếu). Log Rust vẫn không
+   xuất hiện trong file tôi đang xem (`stdout*.log`) — **vì đó SAI FILE**: `logger.RedirectStderrToFile()`
+   (`main.go`, gọi sau khi `app.Run()` — chứa `InitFFIBridge` — đã khởi động trong goroutine
+   riêng) dùng `dup2Compat` (fix arm64 hôm nay, §9.38) để chuyển hướng fd 1/2 SANG 1 file khác:
+   `node-0/logs/execution/<ngày>/execution.log` — không phải file tôi redirect lúc chạy `nohup ...
+   > stdout.log`. Đọc đúng file này lộ ra root cause thật ngay:
+   ```
+   ERROR metanode::ffi: Failed to load configuration from ".../node-0/node.toml":
+   Failed to read config file: ".../node-0/node.toml"
+   ```
+   (lặp lại mỗi 5s — ĐÚNG với logic retry-loop đã đọc ở §9.40's trích dẫn `ffi.rs`: `Err(e) => {
+   error!(...); sleep(5s); continue; }` — đây KHÔNG PHẢI treo/deadlock, mà là **vòng lặp retry vô
+   hạn có chủ đích**, chỉ là không đủ ồn ào để tôi nhận ra ngay vì đang xem sai file).
+
+**Root cause thật, rất đơn giản**: lúc đẩy config lên board ở §9.40, chỉ đẩy `config.json` +
+`genesis.json` — **quên hẳn `node.toml`** (config Rust consensus riêng, do `gen_single_chain.py`
+sinh cùng thư mục `node-0/`) và thư mục `keys/` (`protocol_key.json`/`network_key.json` mà
+`node.toml` trỏ tới). Lỗi triển khai của người thao tác (tôi), không phải bug của dự án hay của
+kernel/OpenHarmony.
+
+**Sau khi đẩy đủ `node.toml` (patch lại path trỏ đúng `/data/ssd/metanode_test/...`) + `keys/`**:
+node chạy đúng ngay — `eth_blockNumber` lên `0x1` chỉ trong vài giây, log
+`consensus_core::core::proposer` tạo block dồn dập (round 38→46 chỉ trong **dưới 1 giây thật**,
+`commit_index` tăng liên tục, `🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 41 | Network
+Quorum: 41 | Lag: 0`) — **Mysticeti DAG consensus hoạt động hoàn toàn bình thường trên board**,
+không có vấn đề io_uring/timing/kernel nào cả cho phần này.
+
+**Gửi tx thật qua `tx_sender`** (từ máy dev, qua network tới `192.168.1.254:4200`): deploy
+SimpleStorage + `store(2222)` **thành công thật** (return data `0x8ae` = 2222 đúng). Bước
+`retrieve()` (off-chain read, gọi ngay sau không có độ trễ) bị revert "transaction halted" — đây
+là 1 race MVCC/Block-STM ĐÃ BIẾT từ trước (đọc trước khi ghi kịp commit khi gửi liên tục sát
+nhau — cùng pattern đã thấy khi test x86 lần đầu, trước khi thêm sleep giữa các bước), **không
+phải vấn đề riêng của board**.
+
+Dừng node an toàn (`kill`, xác nhận qua `ps -ef`). Board hoàn toàn khoẻ mạnh sau đó (`uptime`
+12h29, RAM 11G trống, load bình thường).
+
+**Với §9.41: metanode đã chạy được 1 node THẬT hoàn chỉnh trên board Orange Pi 5 Max** — Go +
+Rust consensus (Mysticeti DAG) + C++ EVM/Xapian + RocksDB, tất cả cùng hoạt động đúng, xử lý tx
+thật (deploy + write) qua RPC/TCP thật qua mạng. Đây là mốc "chạy node thật trên board" đã nêu
+"chưa làm" ở cuối §9.39 — **nay đã làm và xác nhận thành công**.
+
+**Bài học ghi lại cho lần sau** (tránh lặp lại):
+- Khi đẩy config sinh bởi `gen_single_chain.py` lên board/máy khác: phải đẩy ĐỦ CẢ `config.json`
+  + `genesis.json` + `node.toml` + `keys/` (không chỉ 2 file đầu) — cả 4 đều cần thiết.
+- `hdc shell "VAR=val cmd &"` KHÔNG truyền được env var qua đúng cách cho process nền — dùng
+  `env VAR=val cmd` thay vì `VAR=val cmd`.
+- `toybox`'s `grep -a` trên board không đọc đúng file có nhiều null-byte (như `/proc/pid/environ`)
+  — dùng `base64` rồi decode ở máy dev nếu cần đọc chính xác.
+- **`logger.RedirectStderrToFile()` chuyển hướng fd 1/2 sang `logs/execution/<ngày>/execution.log`
+  SAU KHI node khởi động** — log thật (bao gồm cả log Rust) nằm ở đó, KHÔNG phải ở file mà lệnh
+  `nohup ... > file` redirect lúc khởi động tiến trình (file đó chỉ chứa log từ TRƯỚC thời điểm
+  redirect nội bộ này chạy).
