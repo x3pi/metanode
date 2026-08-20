@@ -430,13 +430,18 @@ static void handle_reverse_call(void) {
     case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
     case MVM_TZ_RCMD_EXTENSION_BLST: {
         // No fixed header for these 3 (mvm_tz_protocol.h line ~512) --
-        // response is just the blob stream: [0] output bytes. Empty output
-        // (a bare 4-byte zero length prefix) is the documented
-        // Extension_return{nullptr,0} failure case.
-        uint32_t zero_len = 0;
-        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        // response is just the raw output bytes verbatim, length via the
+        // channel's own blob_len field (NOT length-prefixed -- confirmed
+        // 2026-08-20, plan §9.31, by reading mvm_reverse_round_trip's
+        // actual response handling in mvm_ta_main.cpp, not the older doc
+        // comment here which wrongly implied a prefix). The true
+        // Extension_return{nullptr,0} failure case is resp_blob_len=0,
+        // full stop -- a previous version of this stub wrote a 4-byte
+        // all-zero blob instead (harmless only because nothing exercised
+        // these 3 cmds yet), fixed here alongside GET_OR_CREATE_SIMPLE_DB
+        // getting real data for the first time.
         resp_hdr_len = 0;
-        resp_blob_len = sizeof(zero_len);
+        resp_blob_len = 0;
         break;
     }
     case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
