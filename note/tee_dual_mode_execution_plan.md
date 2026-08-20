@@ -1892,3 +1892,38 @@ ABI string offset(0x20)+length(3)+`"123"` (hex `313233`).
 **Còn lại duy nhất**: CALL_GET_API — để sau theo đúng yêu cầu người dùng (chưa cần HTTP thật).
 Cả 3/4 lệnh extension còn lại (GET_OR_CREATE_SIMPLE_DB, BLST, EXTRACT_JSON_FIELD) đã có dữ liệu
 thật, xác nhận trên hardware.
+
+## §9.33 — Giai đoạn 0 hoàn tất: `execution_mode.go` nối GĐ0 với GĐ2 (đã có sẵn nhưng chưa nối dây)
+
+Kiểm tra lại kế hoạch dual-mode-execution lớn (không phải file này) phát hiện: **GĐ1 (wire
+protocol) và GĐ2 (loopback x86)** thực ra **đã làm xong** từ trước (không rõ phiên nào — không có
+trong lịch sử §9.x của file này, chỉ thấy qua code có sẵn): `tz_channel.go` (kênh spinlock-CAS
+thật), `tz_loopback_engine.go` (`tzLoopbackEngine`, implement đủ `ExecutionEngine`, gọi qua wire
+codec thật rồi loopback vào `*MVMApi` cùng tiến trình), và `ta_boundary_harness_test.go` (~600
+dòng test GĐ2, kỳ vọng sẵn `mvm.SetExecutionMode`/`mvm.GetExecutionMode`/`mvm.NewExecutionEngine`/
+hằng số `mvm.ModeCgo`/`mvm.ModeTrustzone`) — nhưng **chỉ thiếu đúng 1 file nối dây**:
+`execution_mode.go` (Giai đoạn 0 thật sự) chưa từng được viết, nên cả package không build được
+(`go vet` báo `undefined: mvm.ModeTrustzone`) dù mọi thứ khác đã sẵn sàng.
+
+**Việc làm hôm nay**: viết `execution/pkg/mvm/execution_mode.go` theo đúng khuôn
+`pkg/trie/trie_factory.go` (biến global + `SetXxx`/`GetXxx` + factory) — hằng `ModeCgo`/
+`ModeTrustzone` (tên hằng khớp đúng những gì test đã kỳ vọng, không tự đặt tên khác), factory
+`NewExecutionEngine(key, scDb, asDb, extendedMode) ExecutionEngine`: nhánh `ModeCgo` gọi thẳng
+`GetOrCreateMVMApi` hiện có (byte-for-byte object cũ, không đổi hành vi cgo), nhánh `ModeTrustzone`
+gọi `newTZLoopbackEngine(...)` (đã có sẵn, không phải viết mới). `cmd/simple_chain/app.go` đã có
+sẵn `mvm.SetExecutionMode(app.config.ExecutionMode)` chờ hàm này tồn tại (`config.go`'s
+`ExecutionMode` field cũng đã có sẵn) — chỉ cần file glue là đủ.
+
+**Xác nhận sạch, không cần hardware**:
+- `go build ./...` + `go vet ./...`: sạch toàn module.
+- `go test ./pkg/mvm/... -run TestTABoundary_TrustzoneLoopback -v`: **cả 7 test pass** —
+  `NativeTransfer`/`Deploy`/`Call`/`Execute`/`ProcessNativeMintBurn`/`NoncePlusOne`/
+  `DifferentialReplay` — mỗi test chạy cùng 1 giao dịch logic qua cả `ModeCgo` và `ModeTrustzone`
+  (2 lượt tách biệt, không chung 1 tx, đúng thiết kế), so kết quả khớp tuyệt đối (status/gas/
+  balance changes).
+- `go test -count=3 ./pkg/mvm/...`: sạch.
+- `consensus/metanode/scripts/build_check.sh`: **ALL BUILDS PASSED (4/4)** — EVM/NOMT FFI (C++),
+  consensus metanode (Rust), NOMT FFI (Rust), simple_chain (Go).
+
+Đây là xác nhận đầu tiên GĐ2 (loopback transport) hoạt động đúng end-to-end trên x86 — trước đây
+chỉ tồn tại dưới dạng code+test chưa từng build/chạy được do thiếu file glue này.
