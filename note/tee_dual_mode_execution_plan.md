@@ -1732,3 +1732,48 @@ này cũng chặn auto-trigger `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (§9.28 m�
 Gỡ self-test lần 2 sau khi root-cause xong, rebuild+reflash board về lại trạng thái ổn định (fix
 3-lớp còn nguyên, không có self-test) — xem `DEPLOYED_STATE.md` cho checkpoint xác nhận sạch.
 Chi tiết đầy đủ + cách áp dụng: memory `xapian-inmemory-ta-backend-fix` (đã cập nhật).
+
+## §9.31 — Extension reverse-call đầu tiên với dữ liệu THẬT: `GET_OR_CREATE_SIMPLE_DB` (2026-08-20)
+
+Trong 4 lệnh extension reverse-call còn lại (`CALL_GET_API`/`EXTRACT_JSON_FIELD`/`BLST`/
+`GET_OR_CREATE_SIMPLE_DB` — wire protocol + handler TA-side đã có sẵn từ round "6/6 reverse-call"
+trước đây, nhưng luôn trả stub rỗng vì chưa có test contract nào thực sự gọi tới), chọn
+`GET_OR_CREATE_SIMPLE_DB` làm cái đầu tiên: đơn giản nhất (chỉ ABI decode/encode + 1 map giả lập
+phía Host, không crypto/JSON, và — quan trọng — **không đụng HTTP thật** (theo yêu cầu người
+dùng: "chưa cần làm call http thật đâu nhé", để dành `CALL_GET_API` cho sau) lẫn không đụng
+Xapian của TA (đây là reverse-call thuần, Host tự lo lưu trữ; `SIMPLE_DATABASE_ADDRESS` khác hẳn
+`FULL_DATABASE_ADDRESS`/`xapian_handlers.cpp` — không bị chặn bởi bug ABI GCC ở §9.30).
+
+**Cách làm** (toàn bộ nằm ở `mvm_ca_test.cpp`, phía CA-test — KHÔNG đụng `mvm_ta`, nên không cần
+rebuild/flash):
+1. Contract address thứ 3 (`g_simpledb_test_addr`, 0x55×20) với bytecode "calldata forwarder"
+   generic (CALLDATACOPY → CALL tới precompile 261 = `SIMPLE_DATABASE_ADDRESS` với chính calldata
+   của tx → RETURNDATACOPY → RETURN) — không cần Solidity/`solc`, hand-assemble 22 opcode, tái
+   dùng được cho cả `set(...)` lẫn `get(...)` chỉ bằng cách đổi calldata mỗi lần EXECUTE (test
+   harness đã hỗ trợ input/input_len thật từ trước, chỉ 2 test cũ chưa dùng tới).
+2. Mini ABI codec tự viết (không dùng thư viện ngoài) cho `set(string,string,string) returns
+   (bool)` / `get(string,string) returns (string)` — đúng chuẩn go-ethereum ABI mà
+   `extension.go`'s `ExtensionGetOrCreateSimpleDb` (bản cgo thật) cũng decode/encode qua
+   `abi.MethodById`/`Inputs.Unpack`/`Outputs.Pack`. Selector lấy qua `cast sig` (foundry) thật,
+   không đoán: `set(string,string,string)` = `0xda465d74`, `get(string,string)` = `0x3e10510b`.
+   Giới hạn: chỉ string ≤32 byte (đủ cho test, không phải codec ABI tổng quát).
+3. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB`: decode selector
+   + args thật từ blob (raw ABI calldata, không có length-prefix riêng — khác với
+   `writeBytes`-style của các lệnh khác, xác nhận qua đọc `mvm_reverse_round_trip`'s code thật
+   thay vì đoán theo doc comment cũ của header, vốn mô tả sai là "length-prefixed"), lưu vào
+   `g_fake_simpledb` (map trong tiến trình, đứng vai Host thật), trả response ABI-encode thật.
+4. Phát hiện phụ: precompile 261 có write-protection check
+   (`ctxt->read_only || !gs.is_cache()`) áp dụng cho MỌI lời gọi (kể cả `get()`, không chỉ
+   `set()`) — `run_execute_and_print()` trước đó luôn hardcode `is_cache=0`; thêm tham số
+   `is_cache` (mặc định `false`, không đổi 3 test cũ) để test mới truyền `true`.
+
+**Xác nhận trên hardware, không cần reboot/flash** (chỉ build lại `mvm_ca_test` bằng
+`aarch64-linux-gnu-g++ -static`, push qua `hdc`, chạy trực tiếp trên board đang chạy sẵn):
+- SET: reverse call cmd=106 blob_len=292 (khớp đúng tính toán ABI head+tail), lưu
+  `db1/key1/hello_ta`, RETURN = 32 byte ABI `bool(true)`.
+- GET: reverse call cmd=106 blob_len=196 (khớp tính toán), tìm thấy, RETURN = 96 byte ABI
+  `string` đúng offset(0x20)+length(8)+`"hello_ta"` — decode hex xác nhận khớp chính xác giá trị
+  vừa SET.
+
+**Việc tiếp theo**: BLST (deterministic, có `libblst.a` sẵn) hoặc EXTRACT_JSON_FIELD tiếp theo;
+CALL_GET_API (cần gọi HTTP thật) để lại sau cùng theo đúng yêu cầu người dùng.

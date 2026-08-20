@@ -35,6 +35,9 @@
 #include <cstring>
 #include <cstdint>
 #include <ctime>
+#include <string>
+#include <vector>
+#include <map>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -183,6 +186,143 @@ static const uint8_t g_storage_test_value[32] = {
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x13,0x37};
 
+// ─── minimal Solidity ABI helpers for the SIMPLE_DATABASE_ADDRESS (261)
+// precompile's set(string,string,string)/get(string,string) dispatch --
+// 2026-08-20 (plan §9.31, first of the 4 extension reverse-calls to get
+// REAL data, per plan doc/mvm_tz_protocol.h's own scoping note). Just
+// enough encode/decode for this test's own fixed, short (<=32 bytes)
+// strings -- NOT a general ABI codec (no multi-chunk dynamic data,
+// nested types, etc.), matching this file's own stated scope (diagnostic
+// probe, not a production CA). Selectors are real go-ethereum-standard
+// `keccak256(signature)[0:4]` values (verified via `cast sig`), matching
+// exactly what extension.go's ExtensionGetOrCreateSimpleDb (the real cgo
+// implementation) parses from the same ABI (see that file's abiString).
+static const uint32_t SIMPLEDB_SET_SELECTOR = 0xda465d74; // set(string,string,string)
+static const uint32_t SIMPLEDB_GET_SELECTOR = 0x3e10510b; // get(string,string)
+
+static void abi_write_u256_be(uint8_t *out, uint32_t v) {
+    memset(out, 0, 32);
+    out[28] = (uint8_t)(v >> 24); out[29] = (uint8_t)(v >> 16);
+    out[30] = (uint8_t)(v >> 8);  out[31] = (uint8_t)v;
+}
+static uint32_t abi_read_u256_be(const uint8_t *in) {
+    return ((uint32_t)in[28] << 24) | ((uint32_t)in[29] << 16)
+         | ((uint32_t)in[30] << 8) | (uint32_t)in[31];
+}
+
+// Encodes calldata for a function taking N "string" args, each <=32
+// bytes (fits in a single 32-byte data chunk -- no multi-word strings in
+// this test). Writes selector + ABI head/tail into out, returns total
+// length.
+static uint32_t abi_encode_string_args(uint32_t selector,
+    const std::vector<std::string> &args, uint8_t *out) {
+    out[0] = (uint8_t)(selector >> 24); out[1] = (uint8_t)(selector >> 16);
+    out[2] = (uint8_t)(selector >> 8);  out[3] = (uint8_t)selector;
+    uint32_t n = (uint32_t)args.size();
+    uint32_t off = 4 + n * 32;      // absolute write cursor
+    uint32_t data_cursor = n * 32;  // offset relative to args-area start
+    for (uint32_t i = 0; i < n; i++) {
+        if (args[i].size() > 32) {
+            fprintf(stderr, "[mvm_ca_test] FATAL: abi_encode_string_args: "
+                "arg %u is %zu bytes, >32 unsupported by this minimal codec\n",
+                i, args[i].size());
+            exit(1);
+        }
+        abi_write_u256_be(out + 4 + i * 32, data_cursor);
+        abi_write_u256_be(out + off, (uint32_t)args[i].size());
+        memcpy(out + off + 32, args[i].data(), args[i].size());
+        memset(out + off + 32 + args[i].size(), 0, 32 - args[i].size());
+        off += 64;
+        data_cursor += 64;
+    }
+    return off;
+}
+
+// Decodes N "string" args (<=32 bytes each) from a calldata blob's args
+// area (i.e. blob+4, past the selector). Returns false on any bounds
+// violation -- never trusts a malformed/adversarial payload, matches this
+// file's stated "fail loud over guessing" policy.
+static bool abi_decode_string_args(const uint8_t *args, uint32_t args_len,
+    uint32_t n, std::vector<std::string> &out) {
+    out.clear();
+    for (uint32_t i = 0; i < n; i++) {
+        if ((uint64_t)(i + 1) * 32 > args_len) return false;
+        uint32_t rel_off = abi_read_u256_be(args + i * 32);
+        if ((uint64_t)rel_off + 32 > args_len) return false;
+        uint32_t len = abi_read_u256_be(args + rel_off);
+        if (len > 32 || (uint64_t)rel_off + 32 + len > args_len) return false;
+        out.emplace_back((const char *)(args + rel_off + 32), len);
+    }
+    return true;
+}
+
+// Encodes a single "bool" return value (32-byte word, 0 or 1) -- matches
+// set(...)'s real ABI ("outputs":[{"type":"bool"}]) in extension.go.
+static uint32_t abi_encode_bool(bool v, uint8_t *out) {
+    abi_write_u256_be(out, v ? 1 : 0);
+    return 32;
+}
+
+// Encodes a single "string" return value (<=32 bytes) -- matches
+// get(...)'s real ABI ("outputs":[{"type":"string"}]) in extension.go.
+static uint32_t abi_encode_string_ret(const std::string &s, uint8_t *out) {
+    if (s.size() > 32) {
+        fprintf(stderr, "[mvm_ca_test] FATAL: abi_encode_string_ret: "
+            "%zu bytes, >32 unsupported by this minimal codec\n", s.size());
+        exit(1);
+    }
+    abi_write_u256_be(out, 32);                    // offset
+    abi_write_u256_be(out + 32, (uint32_t)s.size()); // length
+    memcpy(out + 64, s.data(), s.size());
+    memset(out + 64 + s.size(), 0, 32 - s.size());
+    return 96;
+}
+
+// Fake Host-side "simple DB" -- a plain in-process map standing in for
+// what a real Host would persist via its own storage layer (this reverse
+// call's whole point per mvm_tz_protocol.h's doc comment: the TA never
+// touches storage directly here, the Host does). Keyed by "dbName\0key"
+// (NUL can't appear in this test's own fixed ASCII test strings).
+static std::map<std::string, std::string> g_fake_simpledb;
+
+// 2026-08-20 (plan §9.31): a THIRD synthetic contract address, whose code
+// is a generic "calldata forwarder to a fixed precompile address" --
+// copies the tx's own calldata into memory, CALLs SIMPLE_DATABASE_ADDRESS
+// (261 = 0x0105) with it verbatim, then RETURNs whatever that call
+// returns. A standard EVM proxy/forwarder pattern, not metanode-specific.
+// Lets ONE piece of bytecode exercise both set(...) and get(...) just by
+// varying the calldata each EXECUTE call passes in (mvm_tz_execute_req_t
+// already supports a real `input`/`input_len` -- see
+// run_execute_and_print's own signature -- unlike g_contract_code/
+// g_storage_read_code above, which never needed real calldata).
+static const uint8_t g_simpledb_test_addr[20] = {
+    0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,
+    0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55};
+static const uint8_t g_simpledb_forwarder_code[] = {
+    0x36,                   // CALLDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0x60,0x00,               // PUSH1 0x00 (destOffset)
+    0x37,                   // CALLDATACOPY -- mem[0:cds] = calldata
+    0x60,0x00,               // PUSH1 0x00 (retSize)
+    0x60,0x00,               // PUSH1 0x00 (retOffset)
+    0x36,                   // CALLDATASIZE (argsSize)
+    0x60,0x00,               // PUSH1 0x00 (argsOffset)
+    0x60,0x00,               // PUSH1 0x00 (value)
+    0x61,0x01,0x05,           // PUSH2 0x0105 (addr=261=SIMPLE_DATABASE_ADDRESS)
+    0x5a,                   // GAS
+    0xf1,                   // CALL
+    0x50,                   // POP -- discard success flag (diagnostic
+                             // test, a failure shows up as empty/wrong
+                             // RETURN output instead, visible either way)
+    0x3d,                   // RETURNDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0x60,0x00,               // PUSH1 0x00 (destOffset)
+    0x3e,                   // RETURNDATACOPY -- mem[0:rds] = returndata
+    0x3d,                   // RETURNDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0xf3                    // RETURN mem[0:rds]
+};
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -210,6 +350,9 @@ static void handle_reverse_call(void) {
         } else if (header_len >= 40 && memcmp(req_address, g_storage_test_addr, 20) == 0) {
             code = g_storage_read_code;
             code_len = sizeof(g_storage_read_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_simpledb_test_addr, 20) == 0) {
+            code = g_simpledb_forwarder_code;
+            code_len = sizeof(g_simpledb_forwarder_code);
         }
         if (code) {
             // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
@@ -297,14 +440,50 @@ static void handle_reverse_call(void) {
         break;
     }
     case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
-        // Same blob-only shape (mvm_tz_protocol.h line ~521): response
-        // blob is [0] output bytes. Empty output here means "no secondary
-        // DB result" -- correct for this test, which never calls a
-        // contract that touches a secondary Xapian-backed DB.
-        uint32_t zero_len = 0;
-        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        // 2026-08-20 (plan §9.31): real data, first of the 4 extension
+        // reverse-calls to get it (see g_fake_simpledb/g_simpledb_test_addr's
+        // own comments above). Request header =
+        // mvm_tz_get_or_create_simple_db_req_t{address,mvm_id} (unused --
+        // this test has only one caller/mvm_id); blob = raw ABI calldata
+        // (selector + args), the exact shape extension.go's
+        // ExtensionGetOrCreateSimpleDb (the real cgo implementation)
+        // decodes via go-ethereum's abi.MethodById/Inputs.Unpack. Response
+        // blob is the raw ABI-encoded return value verbatim (no extra
+        // length prefix -- resp_blob_len via the channel's own blob_len
+        // field IS the length, see mvm_reverse_round_trip's response
+        // handling) -- matches convertToCode()'s
+        // Extension_return{data_p,data_size} -> mvm::Code copy exactly.
         resp_hdr_len = 0;
-        resp_blob_len = sizeof(zero_len);
+        resp_blob_len = 0; // default: Extension_return{nullptr,0} ("no result")
+        if (blob_len >= 4) {
+            uint32_t selector = ((uint32_t)blob_copy[0] << 24) | ((uint32_t)blob_copy[1] << 16)
+                | ((uint32_t)blob_copy[2] << 8) | (uint32_t)blob_copy[3];
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::string> strs;
+            if (selector == SIMPLEDB_SET_SELECTOR && abi_decode_string_args(args, args_len, 3, strs)) {
+                const std::string &db = strs[0], &key = strs[1], &value = strs[2];
+                g_fake_simpledb[db + '\0' + key] = value;
+                resp_blob_len = abi_encode_bool(true, resp_buf);
+                printf("[mvm_ca_test] SimpleDb SET db=%s key=%s value=%s -> stored\n",
+                    db.c_str(), key.c_str(), value.c_str());
+                fflush(stdout);
+            } else if (selector == SIMPLEDB_GET_SELECTOR && abi_decode_string_args(args, args_len, 2, strs)) {
+                const std::string &db = strs[0], &key = strs[1];
+                auto it = g_fake_simpledb.find(db + '\0' + key);
+                std::string value = (it != g_fake_simpledb.end()) ? it->second : std::string();
+                resp_blob_len = abi_encode_string_ret(value, resp_buf);
+                printf("[mvm_ca_test] SimpleDb GET db=%s key=%s -> \"%s\" (%s)\n",
+                    db.c_str(), key.c_str(), value.c_str(),
+                    it != g_fake_simpledb.end() ? "found" : "NOT FOUND");
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] SimpleDb: unrecognized selector=0x%08x or malformed "
+                    "args (blob_len=%u) -- returning empty (Extension_return{nullptr,0})\n",
+                    selector, blob_len);
+                fflush(stdout);
+            }
+        }
         break;
     }
     case MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS: {
@@ -351,7 +530,8 @@ static void handle_reverse_call(void) {
 // convention exactly, just reusable now). ───
 static int run_execute_and_print(const char *label,
     const uint8_t sender[20], const uint8_t recipient[20],
-    uint64_t amount, const uint8_t *input, uint32_t input_len) {
+    uint64_t amount, const uint8_t *input, uint32_t input_len,
+    bool is_cache = false) {
     uint8_t tx_hash[32];
     memset(tx_hash, 0xAB, 32);
 
@@ -370,7 +550,12 @@ static int run_execute_and_print(const char *label,
     memset(req.block_coinbase, 0, 20);
     memset(req.mvm_id, 0, 20);
     req.is_debug = 1;
-    req.is_cache = 0;
+    // 2026-08-20 (plan §9.31): SIMPLE_DATABASE_ADDRESS's write-protection
+    // check (processor.cpp: `ctxt->read_only || !gs.is_cache()`) throws
+    // for ANY call to that precompile -- get() included, not just set() --
+    // unless is_cache. Existing tests 1-3 never touch that precompile, so
+    // this new default-false param changes nothing for them.
+    req.is_cache = is_cache ? 1 : 0;
     req.related_addresses_count = 2;
 
     static uint8_t blob_scratch[4096];
@@ -605,6 +790,35 @@ int main(void) {
     // correctly, which the RETURN output is the real check for). ───
     if (run_execute_and_print("storage read (real pre-existing value)", sender, g_storage_test_addr, 0, nullptr, 0) != 0) {
         return 1;
+    }
+
+    // ─── test 4/5 (2026-08-20, plan §9.31): first of the 4 extension
+    // reverse-calls exercised with REAL data --
+    // MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB via
+    // g_simpledb_test_addr's calldata-forwarder bytecode (see that
+    // constant's own comment) calling SIMPLE_DATABASE_ADDRESS (261)'s
+    // set(...) then get(...). Expect test 5's RETURN output to ABI-decode
+    // to "hello_ta" -- the exact value test 4 wrote via a REAL round trip
+    // through handle_reverse_call()'s new SimpleDb SET/GET branches (not
+    // mvm_ta's own in-process cache -- this precompile has no such cache,
+    // every call is a fresh reverse call to the Host). ───
+    {
+        static uint8_t calldata[512];
+        uint32_t len = abi_encode_string_args(SIMPLEDB_SET_SELECTOR,
+            {"db1", "key1", "hello_ta"}, calldata);
+        if (run_execute_and_print("simpledb set", sender, g_simpledb_test_addr,
+                0, calldata, len, /*is_cache=*/true) != 0) {
+            return 1;
+        }
+    }
+    {
+        static uint8_t calldata[512];
+        uint32_t len = abi_encode_string_args(SIMPLEDB_GET_SELECTOR,
+            {"db1", "key1"}, calldata);
+        if (run_execute_and_print("simpledb get", sender, g_simpledb_test_addr,
+                0, calldata, len, /*is_cache=*/true) != 0) {
+            return 1;
+        }
     }
 
     printf("\n[mvm_ca_test] DONE\n");
