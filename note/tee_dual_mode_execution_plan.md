@@ -772,9 +772,17 @@ sạch (2/2), `PROJECT_STRUCTURE.md` đã cập nhật.
     chỉ giữa 2 lượt, phải gọi `mvm.ClearAllStateInstances()` giữa 2 lượt để tránh rò rỉ
     State-singleton (xem mục 3.4) — xác nhận log `[State] Clearing all N cached State
     instances` xuất hiện đúng chỗ. Xác nhận sạch ở `-count=5`.
+  - [x] **Phần loopback, dải block THẬT (2026-08-20):** `cmd/tool/tz_replay_check` — dựng 1
+    private chain thật (single-validator, `deploy/systemd/gen_single_chain.py`), gửi tx thật
+    (deploy+store SimpleStorage qua `cmd/tool/tx_sender` có sẵn) để có 1 dải block ĐÃ COMMIT
+    thật, replay lại qua `pkg/block_validator.ProcessBlock` thật (trước đó 0 caller trong toàn
+    repo) 2 lần độc lập trên 2 bản sao dữ liệu tách biệt — khớp **100% byte-for-byte** trên 9
+    block/8 tx thật, kiểm chứng ngược xác nhận (dải thiếu block/root sửa tay đều bị báo
+    mismatch đúng). Xem §9.36 cho chi tiết + 2 bug thật phát hiện dọc đường.
   - [ ] **Phần TA thật:** replay cùng dải trên TA thật (cần GĐ3 xong trước) — chưa làm, cần
     board. Loại block gọi `ExtensionCallGetApi` khỏi so byte-for-byte (nguồn không-determinism
-    có từ trước, không phải lỗi riêng TZ mode).
+    có từ trước, không phải lỗi riêng TZ mode) — đã có cơ chế đếm
+    (`mvm.ExtensionCallGetApiCallCount`), `cmd/tool/tz_replay_check` đã tự động loại.
 - **GĐ5 — Bring-up 1 node thật:** chạy `execution_mode=trustzone` cạnh cluster `normal`,
   benchmark TPS thực tế, cập nhật `PROJECT_STRUCTURE.md`.
 
@@ -2038,3 +2046,76 @@ có dữ liệu thật trên `ModeCgo`/`ModeTrustzone`, luôn "không có dữ l
 
 Xác nhận sạch: `go build`/`go vet`/`gofmt -l` (không đụng 2 file vốn đã lệch format từ trước,
 `mvm_api.go`/`ta_boundary_harness_test.go`) sạch; `go test -count=3 ./pkg/mvm/...` sạch.
+
+## §9.36 — Giai đoạn 4, dải block THẬT: 2 bug thật phát hiện + sửa, khớp 100% byte-for-byte (2026-08-20)
+
+Người dùng chọn làm đúng nghĩa đen phần loopback của GĐ4 ("1 dải block **đã có**", không phải
+chuỗi tự dựng) sau khi được chỉ ra rằng `tz_differential_replay_test.go` (§9.33/kế hoạch gốc)
+tuy đã đánh dấu `[x]` nhưng chỉ dùng 1 chuỗi 6 tx tự dựng, đi vòng qua đường xử lý block thật.
+
+**Phát hiện chặn đường trước khi replay được (grep toàn repo, không phải phỏng đoán):**
+`mvm.NewExecutionEngine` không có call site nào ngoài test — mọi đường production
+(`vm_processor.go`, đường TrueBlockSTM chính) gọi thẳng `GetOrCreateMVMApi`, bỏ qua mode switch
+hoàn toàn. Đã sửa: đổi 2 chỗ lấy engine trong `vm_processor.go` sang `NewExecutionEngine` (mode
+mặc định vẫn cgo, hành vi production không đổi).
+
+**Hạ tầng replay tự dựng, không có sẵn**: không có dữ liệu block thật nào trong repo
+(`private_chain_3node/` chỉ là tên trong `.gitignore`). Dựng 1 private chain 1-validator thật
+bằng `deploy/systemd/gen_single_chain.py` (không dùng `scripts/init_private_chain.sh` — wrapper
+đó trỏ vào 1 file `gen_private_chain.py` không tồn tại, bug sẵn có, không sửa), gửi tx thật qua
+`cmd/tool/tx_sender` có sẵn (deploy SimpleStorage → `store(2222)` → `read_call retrieve()`, 4
+vòng, dùng đúng `config.json`/`data.json` mẫu đã có trong repo), dừng sạch, có 9 block/8 tx thật.
+
+**Bug thật #1 — `NOMT không hỗ trợ đọc theo root lịch sử` (chẩn đoán sai ban đầu, tự sửa)**:
+lần đầu chạy trên chain `state_backend=nomt` (mặc định của `gen_single_chain.py`), MỌI tx đều
+trả về 0 receipt, root đứng yên 1 giá trị cố định suốt 9 block. Tưởng NOMT (namespace-keyed,
+"current state" store, không root-addressable như MPT — xác nhận qua đọc `trie_factory.go`:
+`GetOrInitNomtHandle(namespace)` không dùng `root` để tái tạo state) là nguyên nhân — sinh lại
+chain với `state_backend=mpt` để kiểm tra. Root ĐÃ đổi theo từng block sau khi chuyển MPT, nhưng
+receipt vẫn 0 — hoá ra root đổi chỉ vì mỗi block đọc đúng root LỊCH SỬ THẬT của block cha (ghi
+sẵn trong header), không phải bằng chứng replay thành công → giả thuyết NOMT bị loại, bug thật
+nằm ở chỗ khác.
+
+**Bug thật #2 — `block_validator.go`'s `backupPath="skip_epoch_data"` (bug thật, đã sửa)**:
+`ModifiedAccounts=[]` mọi block dù log báo "Khởi chạy 1 TXs trên True MVCC Engine" → lần theo
+`runEvmPipeline` → `TrueBlockSTM.Process`'s nonce-check gate
+(`fromAccount.Nonce() != tx.GetNonce()` → "Clear results on failure", nil receipt, KHÔNG có lỗi
+nổi lên). Test trực tiếp: đổi `backupPath` từ `"skip_epoch_data"` sang `""` trong
+`block_validator.go:109` → tx deploy thật lập tức trả về `ExecuteResult` thật
+(`DEPLOY_DEBUG exit_reason=0 gas_used=1003`). Root cause: `useRegistry=false` (do
+`backupPath=="skip_epoch_data"`) làm đọc account thật từ chainState tạm bị sai âm thầm. Đã sửa
+trong `block_validator.go`, giữ nguyên hành vi bỏ qua changelog/epoch (check `!isRPC` của
+`initChangelog` đã tự short-circuit, không phụ thuộc `backupPath`). Giải thích tại sao hàm này
+chưa từng bắt được lỗi: **0 caller trong toàn repo trước `tz_replay_check`**.
+
+**Bug thật #3 — `tz_codec.go`'s `decodeExecuteResult` làm sai `EXCEPTION_NONE` (bug thật, đã sửa)**:
+sau khi sửa bug #2, replay khớp byte-for-byte ở MỌI trường TRỪ `Exception`: cgo trả `-1`,
+trustzone-loopback trả `255`, mọi tx thành công. `pb.EXCEPTION_NONE = -1` (giá trị "thành công"),
+`mvm_tz_protocol.h`'s `hdr.exception` là `uint8_t` — encode cắt `-1`→`0xFF` đúng, nhưng decode cũ
+(`pb.EXCEPTION(hdr.exception)`) zero-extend thay vì sign-extend, biến `0xFF` thành `255`. Nghĩa
+là **mọi tx thành công qua đường trustzone/trustzone-hardware đều có `Exception()` sai** kể từ
+khi codec này được viết — chưa từng bị bắt vì chưa từng có 1 bài so byte-for-byte đủ chặt (chuỗi
+tự dựng của §9.33 không phát hiện được, vì cả 2 lượt tự mã hoá/giải mã sai theo kiểu THỐNG NHẤT
+với nhau). Fix: `pb.EXCEPTION(int8(hdr.exception))` — reinterpret dấu trước khi widen. KHÔNG đổi
+layout trên dây (vẫn 1 byte) nên KHÔNG cần rebuild/reflash TA.
+
+**Kết quả cuối cùng, sau cả 3 fix**: replay 9 block/8 tx thật (`ModeCgo` vs `ModeTrustzone`) khớp
+**100% byte-for-byte** — status/gas/exception/return-hash từng tx + state root từng block.
+Kiểm chứng ngược (bắt buộc theo tinh thần "không tin 1 đường output là bằng chứng" của
+CLAUDE.md): tạo 2 tình huống lệch có chủ đích (dải thiếu block, root bị sửa tay) — cả 2 đều bị
+`tz_replay_check -compare-a/-compare-b` báo `MISMATCH` đúng, exit code 1 — xác nhận bộ so sánh
+thật sự phân biệt được khớp/lệch, không phải luôn báo khớp.
+
+**File đổi/thêm**: `pkg/blockchain/vm_processor/vm_processor.go` (nối dây mode switch),
+`pkg/block_validator/block_validator.go` (fix backupPath), `pkg/mvm/tz_codec.go` (fix sign-extend),
+`pkg/mvm/extension.go` (bộ đếm `ExtensionCallGetApiCallCount`),
+`cmd/tool/tz_replay_check/main.go` (mới).
+
+**Xác nhận sạch**: `go build`/`go vet`/`gofmt -l` sạch toàn module (các dòng lệch format báo
+trước edit này, đã xác nhận qua `gofmt -d`, không sửa); `go test -count=3 ./pkg/mvm/...` sạch (7
+loopback + 9 dispatcher không regress); `build_check.sh` ALL BUILDS PASSED (4/4). Toàn bộ chạy
+trên x86, không đụng board.
+
+**Còn lại của GĐ4**: phần TA thật (cần board + Go CA cross-compile aarch64 — chưa có tooling,
+xem §9.34) — `cmd/tool/tz_replay_check` đã có sẵn `-mode trustzone-hardware` để dùng khi phần đó
+sẵn sàng, không cần viết lại.
