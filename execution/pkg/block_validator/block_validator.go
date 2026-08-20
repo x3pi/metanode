@@ -106,7 +106,26 @@ func (bv *BlockValidator) ProcessBlock(ctx context.Context, blockData block.Bloc
 	}
 	blockDatabase := block.NewBlockDatabase(bv.storageManager.GetStorageBlock())
 
-	chainState, err := blockchain.NewChainState(bv.storageManager, blockDatabase, oldBlockData.Header(), bv.chainState.GetConfig(), bv.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
+	// backupPath="" (NOT "skip_epoch_data"), found and fixed 2026-08-20 while
+	// building cmd/tool/tz_replay_check (note/tee_dual_mode_execution_plan.md
+	// §9's "Giai đoạn 4" real-block replay -- this function had ZERO callers
+	// anywhere in the repo before that tool, so this bug was never exercised).
+	// blockchain.NewChainStateWithGenesis sets useRegistry=false (passed as
+	// trie.NewStateTrie's isHash arg) whenever backupPath=="skip_epoch_data" --
+	// with useRegistry=false, reading back a real historical account (e.g. a
+	// genesis-funded sender's nonce) from this temp chainState silently came
+	// back as "not found"/nonce mismatch, which true_block_stm.go's MVCC
+	// engine treats as an ordinary abort: every tx in the block got a nil
+	// receipt with NO error surfaced anywhere (ProcessBlock returned success,
+	// ProcessResult.Receipts was just empty). backupPath="" keeps
+	// useRegistry=true (matching how a real node's own chainState is built)
+	// while still skipping RPC-node-only changelog/epoch registration here
+	// (initChangelog's own early-return already short-circuits on
+	// `!isRPC`, independent of backupPath, for this non-RPC temp chainState).
+	// Confirmed via cmd/tool/tz_replay_check: a real deploy tx that produced
+	// zero receipts before this fix now round-trips with a real ExecuteResult
+	// (DEPLOY_DEBUG exit_reason=0, gas_used>0) after it.
+	chainState, err := blockchain.NewChainState(bv.storageManager, blockDatabase, oldBlockData.Header(), bv.chainState.GetConfig(), bv.chainState.GetFreeFeeAddress(), "")
 	if err != nil {
 		return tx_processor.ProcessResult{}, fmt.Errorf("ProcessBlock: failed to create chainState for block %d: %w", blockNumber, err)
 	}
