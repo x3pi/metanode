@@ -76,21 +76,27 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
     }
     return acc->second;
   }
-  // [TZLLM_TRACE] bracketed tracing (2026-08-21) -- see sendNative()'s own
-  // comment in mvm_linker.cpp for context. `to` in the hanging SEND_NATIVE
-  // repro is always a fresh/never-before-seen address, so it takes THIS
-  // reverse-call branch (not the isCache-hit branches above) -- bracket
-  // it specifically since that's the one path sendNative()'s 2nd gs.get()
-  // actually exercises in the repro.
-  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: before GlobalStateGet reverse call\n");
-  fflush(stderr);
   // Gọi callback để lấy data từ Go
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
-  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: after GlobalStateGet reverse call, status=%d\n",
-      (int)accountQueryData.status);
-  fflush(stderr);
 
+  // 2026-08-21: KNOWN REMAINING RISK, not yet fixed -- these 2 throw sites
+  // are reachable from EVERY forward command (CALL/EXECUTE/DEPLOY/
+  // SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE all call gs.get()),
+  // and C++ exceptions are confirmed broken in this TA build (see
+  // tz-llm-trustzone/DEPLOYED_STATE.md "DEFINITIVE answer" entry) -- if a
+  // reverse-call answer ever actually returns status==2 or status==3, this
+  // will hang the TA exactly like sendNative()'s insufficient-balance throw
+  // used to. NOT fixed here because this function returns AccountState BY
+  // VALUE with no error channel -- avoiding the throw would mean changing
+  // this function's signature (e.g. an out-parameter or variant return) and
+  // updating every caller (sendNative/processNativeMintBurn/noncePlusOne/
+  // deploy, and CALL/EXECUTE's own interpreter path) to check for it
+  // instead of relying on catch, which is a materially bigger, riskier
+  // change than the two throw sites already fixed in mvm_linker.cpp today.
+  // Never observed triggered in any test to date (every reverse-call
+  // answer in mvm_ca_test.cpp's handle_reverse_call() only ever returns
+  // status 0 or 1) -- but that's untested coverage, not a guarantee.
   if (accountQueryData.status == 3) {
     throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
   }
@@ -125,12 +131,7 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
     }
     return acc->second;
   }
-  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: status=0 branch, before create()\n");
-  fflush(stderr);
-  AccountState fresh = create(addr, 0, {}, 0);
-  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: status=0 branch, after create(), returning\n");
-  fflush(stderr);
-  return fresh;
+  return create(addr, 0, {}, 0);
 }
 
 AccountState MyGlobalState::getUpdate(const Address &addr) {

@@ -1539,21 +1539,29 @@ static void mvm_ta_xapian_inmemory_selftest3(void) {
     fprintf(stderr, "[xapian_selftest3] DONE -- all calls returned without crashing\n"); fflush(stderr);
 }
 
-// 2026-08-21 (plan-adjacent, tz-llm-trustzone DEPLOYED_STATE.md "root-caused
-// SEND_NATIVE hang" entry): isolated, minimal throw/catch self-test -- runs
-// automatically at every TA startup, independent of any command/dispatch
-// logic. Exists to answer ONE question definitively before a full rebuild
-// with a unified GCC-11.5.0 musleabi toolchain (matching libstdc++.so/
-// libgcc_s.so's own real version, replacing the mismatched musl-gcc-11.4.0
-// -Ubuntu-compiled object code that previously fed into that 11.5.0
-// runtime): does basic C++ exception unwinding work AT ALL in this build,
-// or only sendNative()'s specific scenario? A std::runtime_error thrown
-// and caught here, with zero Xapian/uint256_t/gs state involved, isolates
-// the toolchain-ABI question from everything else. Prints PASS or HANG (if
-// it prints PASS, the mismatch wasn't a blanket exception-ABI break, and
-// the earlier suspicion of a narrower sendNative()-specific bug should be
-// revisited instead). Cheap (microseconds), safe to leave running on every
-// boot -- remove once root-caused.
+// 2026-08-21 (tz-llm-trustzone DEPLOYED_STATE.md "DEFINITIVE answer" entry):
+// isolated, minimal throw/catch self-test. RESULT (confirmed on real
+// hardware via UART, root-caused, no longer an open question): C++
+// exception throw/catch is genuinely broken in this TA build -- the
+// `throw` below fires, but `catch (const std::exception &e)` right next to
+// it, same function, same compilation unit, never runs. libstdc++'s
+// default std::terminate() handler fires instead ("terminate called after
+// throwing an instance of 'std::runtime_error'"), and the TA hangs forever
+// afterward (abort()'s signal handling apparently doesn't work either in
+// this chcore/musl environment).
+//
+// !!! DO NOT call this from main()/at TA startup !!! It CRASHES THE TA
+// UNCONDITIONALLY, and because mvm_ta launches automatically very early in
+// every single boot (before the Linux kernel's own boot banner -- see
+// "[mvm_ta] starting" timing in plan doc history), calling this
+// unconditionally hangs the ENTIRE BOARD BOOT, 100% reproducible, not
+// flaky (confirmed the hard way -- see DEPLOYED_STATE.md for the
+// misdiagnosis-then-correction story). Kept here, unused, purely as a
+// regression/reference probe: if a future fix to the toolchain/build ever
+// claims to have fixed C++ exception handling in this environment, wire
+// this back in (behind a flag, NOT unconditionally in main()) to verify
+// before trusting it -- don't just assume.
+static void mvm_ta_exception_selftest(void) __attribute__((unused));
 static void mvm_ta_exception_selftest(void) {
     fprintf(stderr, "[TZLLM_TRACE] exception_selftest: before throw\n");
     fflush(stderr);
@@ -1580,7 +1588,11 @@ int main(int argc, char **argv) {
     printf("[mvm_ta] starting\n");
     fflush(stdout);
 
-    mvm_ta_exception_selftest();
+    // mvm_ta_exception_selftest() deliberately NOT called here -- see its
+    // own doc comment above: it unconditionally crashes the TA (confirmed
+    // C++ exceptions don't work in this build), which hangs the entire
+    // board boot since mvm_ta launches this early. Left defined+unused as
+    // a reference probe only.
 
     // NOTE (2026-08-18): this used to pin the thread to CPU 0 here,
     // guessing the g_tzasc_cma_meta_paddr==0 BUG_ON was a cross-core
