@@ -76,9 +76,20 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
     }
     return acc->second;
   }
+  // [TZLLM_TRACE] bracketed tracing (2026-08-21) -- see sendNative()'s own
+  // comment in mvm_linker.cpp for context. `to` in the hanging SEND_NATIVE
+  // repro is always a fresh/never-before-seen address, so it takes THIS
+  // reverse-call branch (not the isCache-hit branches above) -- bracket
+  // it specifically since that's the one path sendNative()'s 2nd gs.get()
+  // actually exercises in the repro.
+  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: before GlobalStateGet reverse call\n");
+  fflush(stderr);
   // Gọi callback để lấy data từ Go
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
+  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: after GlobalStateGet reverse call, status=%d\n",
+      (int)accountQueryData.status);
+  fflush(stderr);
 
   if (accountQueryData.status == 3) {
     throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
@@ -114,7 +125,12 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
     }
     return acc->second;
   }
-  return create(addr, 0, {}, 0);
+  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: status=0 branch, before create()\n");
+  fflush(stderr);
+  AccountState fresh = create(addr, 0, {}, 0);
+  fprintf(stderr, "[TZLLM_TRACE] MyGlobalState::get: status=0 branch, after create(), returning\n");
+  fflush(stderr);
+  return fresh;
 }
 
 AccountState MyGlobalState::getUpdate(const Address &addr) {

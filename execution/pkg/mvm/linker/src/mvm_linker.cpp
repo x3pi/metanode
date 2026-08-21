@@ -1122,6 +1122,20 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
            unsigned char *b_block_coinbase, unsigned char *mvmId,
            bool is_cache) {
 
+  // [TZLLM_TRACE] bracketed tracing (2026-08-21) -- SEND_NATIVE has been
+  // confirmed HANGING mvm_ta on real hardware, reproducibly (2/2 runs,
+  // see tz-llm-trustzone/DEPLOYED_STATE.md's "MỚI NHẤT" entry): both
+  // GLOBAL_STATE_GET reverse calls (for `from` then `to`) complete and
+  // are answered, then the TA never responds. Bracket every step between
+  // those 2 reverse calls and the final response to find exactly which
+  // one never returns -- fprintf(stderr,...) is confirmed to reach UART
+  // directly for this TA (unlike tz-llm's own LLM TA, which needs the
+  // shared-ring-buffer relay -- see "[mvm_ta] starting"/"[mvm_ta]
+  // channel ready" already visible on UART, plan doc §9.9-adjacent).
+  // Remove once root-caused.
+  fprintf(stderr, "[TZLLM_TRACE] sendNative: enter\n");
+  fflush(stderr);
+
   uint256_t from = mvm::from_big_endian((uint8_t *)b_from, 20u);
   uint256_t to = mvm::from_big_endian((uint8_t *)b_to, 20u);
   uint256_t amount = mvm::from_big_endian((uint8_t *)b_amount, 32u);
@@ -1129,34 +1143,58 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
   uint256_t block_coinbase =
       mvm::from_big_endian((uint8_t *)b_block_coinbase, 20u);
 
+  fprintf(stderr, "[TZLLM_TRACE] sendNative: before CreateBlockContext\n");
+  fflush(stderr);
   mvm::BlockContext blockContext =
       CreateBlockContext(mvmId, block_prevrandao, block_gas_limit, block_time,
                          block_base_fee, block_number, block_coinbase);
+  fprintf(stderr, "[TZLLM_TRACE] sendNative: after CreateBlockContext\n");
+  fflush(stderr);
 
   mvm::MyGlobalState gs(blockContext, is_cache);
   mvm::VectorLogHandler log_handler;
+  fprintf(stderr, "[TZLLM_TRACE] sendNative: gs+log_handler constructed\n");
+  fflush(stderr);
 
   try {
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: before gs.get(from)\n");
+    fflush(stderr);
     auto fromAc = gs.get(from, nullptr);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after gs.get(from), before gs.get(to)\n");
+    fflush(stderr);
     auto toAc = gs.get(to, nullptr);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after gs.get(to)\n");
+    fflush(stderr);
 
     if (fromAc.acc.get_balance() < amount) {
+      fprintf(stderr, "[TZLLM_TRACE] sendNative: insufficient balance, throwing\n");
+      fflush(stderr);
       throw std::runtime_error("insufficient balance for sendNative");
     }
 
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: before set_balance x2\n");
+    fflush(stderr);
     fromAc.acc.set_balance(fromAc.acc.get_balance() - amount);
     toAc.acc.set_balance(toAc.acc.get_balance() + amount);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after set_balance x2, before add_addresses_*_balance_change\n");
+    fflush(stderr);
     gs.add_addresses_sub_balance_change(from, amount);
     gs.add_addresses_add_balance_change(to, amount);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after add_addresses_*_balance_change, before incrementSenderNonce\n");
+    fflush(stderr);
 
     // 🔒 NONCE-FIX: Use State cache as authority for nonce increment
     incrementSenderNonce(gs, from, fromAc);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after incrementSenderNonce, before processResult\n");
+    fflush(stderr);
 
     mvm::ExecResult result;
     result.er = mvm::ExitReason::returned;
     result.gas_used = gas_limit;
 
     ExecuteResult *rs = processResult(result, gs, log_handler);
+    fprintf(stderr, "[TZLLM_TRACE] sendNative: after processResult, returning\n");
+    fflush(stderr);
     return rs;
   } catch (const std::exception &e) {
     try {

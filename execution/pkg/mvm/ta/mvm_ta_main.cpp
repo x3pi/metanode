@@ -79,6 +79,7 @@
 #include <pthread.h>
 #include <atomic>
 #include <vector>
+#include <stdexcept>
 
 // PAGE_SIZE/ROUND_UP already come from chcore/defs.h (included via
 // chcore/syscall.h below) — don't redefine, just use them.
@@ -1538,10 +1539,48 @@ static void mvm_ta_xapian_inmemory_selftest3(void) {
     fprintf(stderr, "[xapian_selftest3] DONE -- all calls returned without crashing\n"); fflush(stderr);
 }
 
+// 2026-08-21 (plan-adjacent, tz-llm-trustzone DEPLOYED_STATE.md "root-caused
+// SEND_NATIVE hang" entry): isolated, minimal throw/catch self-test -- runs
+// automatically at every TA startup, independent of any command/dispatch
+// logic. Exists to answer ONE question definitively before a full rebuild
+// with a unified GCC-11.5.0 musleabi toolchain (matching libstdc++.so/
+// libgcc_s.so's own real version, replacing the mismatched musl-gcc-11.4.0
+// -Ubuntu-compiled object code that previously fed into that 11.5.0
+// runtime): does basic C++ exception unwinding work AT ALL in this build,
+// or only sendNative()'s specific scenario? A std::runtime_error thrown
+// and caught here, with zero Xapian/uint256_t/gs state involved, isolates
+// the toolchain-ABI question from everything else. Prints PASS or HANG (if
+// it prints PASS, the mismatch wasn't a blanket exception-ABI break, and
+// the earlier suspicion of a narrower sendNative()-specific bug should be
+// revisited instead). Cheap (microseconds), safe to leave running on every
+// boot -- remove once root-caused.
+static void mvm_ta_exception_selftest(void) {
+    fprintf(stderr, "[TZLLM_TRACE] exception_selftest: before throw\n");
+    fflush(stderr);
+    try {
+        throw std::runtime_error("mvm_ta_exception_selftest probe");
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[TZLLM_TRACE] exception_selftest: PASS (caught: %s)\n", e.what());
+        fflush(stderr);
+        return;
+    } catch (...) {
+        fprintf(stderr, "[TZLLM_TRACE] exception_selftest: PASS (caught via ...)\n");
+        fflush(stderr);
+        return;
+    }
+    // Unreachable if either catch above fired -- if execution ever gets
+    // here, the throw statement itself returned instead of unwinding,
+    // which would be its own distinct (very strange) finding.
+    fprintf(stderr, "[TZLLM_TRACE] exception_selftest: FELL THROUGH (throw didn't unwind at all!)\n");
+    fflush(stderr);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[mvm_ta] starting\n");
     fflush(stdout);
+
+    mvm_ta_exception_selftest();
 
     // NOTE (2026-08-18): this used to pin the thread to CPU 0 here,
     // guessing the g_tzasc_cma_meta_paddr==0 BUG_ON was a cross-core
