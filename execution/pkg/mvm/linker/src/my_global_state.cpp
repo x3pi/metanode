@@ -1,6 +1,7 @@
 #include "my_global_state.h"
 #include "mvm/exception.h"
 #include "mvm/gas.h"
+#include "mvm/safe_throw.h"
 #include "mvm/util.h"
 #include "mvm_linker.hpp"
 #include "state.h"
@@ -61,7 +62,12 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
     std::cerr << error_msg << std::endl;
     // ✅ Exception message phải match với console log để client nhận được
     // message chi tiết
-    throw Exception(ET::addressNotInRelated, error_msg);
+    // 2026-08-21: this specific branch is provably unreachable today --
+    // isAddressAllowed() (my_global_state.h) hardcodes `return true`, so
+    // `!isAddressAllowed(addr)` can never be true regardless of isCache --
+    // but MVM_THROW anyway (cheap, harmless) rather than leaving a real
+    // throw in place as a landmine for if that ever changes.
+    MVM_THROW(Exception(ET::addressNotInRelated, error_msg));
   }
 
   if (isCache && State::instanceExists(addr)) {
@@ -80,30 +86,31 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
-  // 2026-08-21: KNOWN REMAINING RISK, not yet fixed -- these 2 throw sites
-  // are reachable from EVERY forward command (CALL/EXECUTE/DEPLOY/
-  // SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE all call gs.get()),
-  // and C++ exceptions are confirmed broken in this TA build (see
-  // tz-llm-trustzone/DEPLOYED_STATE.md "DEFINITIVE answer" entry) -- if a
-  // reverse-call answer ever actually returns status==2 or status==3, this
-  // will hang the TA exactly like sendNative()'s insufficient-balance throw
-  // used to. NOT fixed here because this function returns AccountState BY
-  // VALUE with no error channel -- avoiding the throw would mean changing
-  // this function's signature (e.g. an out-parameter or variant return) and
-  // updating every caller (sendNative/processNativeMintBurn/noncePlusOne/
-  // deploy, and CALL/EXECUTE's own interpreter path) to check for it
-  // instead of relying on catch, which is a materially bigger, riskier
-  // change than the two throw sites already fixed in mvm_linker.cpp today.
-  // Never observed triggered in any test to date (every reverse-call
-  // answer in mvm_ca_test.cpp's handle_reverse_call() only ever returns
-  // status 0 or 1) -- but that's untested coverage, not a guarantee.
+  // 2026-08-21 UPDATE: previously left as a known-risky real `throw` here
+  // (see git history for the original comment) because fixing it looked
+  // like it needed an AccountState-by-value signature change threaded
+  // through every caller. That's no longer necessary: mvm/safe_throw.h's
+  // MVM_THROW/MVM_TRY/MVM_CATCH (setjmp/longjmp-based in the TA build,
+  // real throw/catch unchanged on x86) now cover every gs.get() call site
+  // via processor.cpp's 3 try/catch choke points, so a real signature
+  // change was never required -- converting the throw itself was enough.
+  // status==3 (Block-STM Estimate Hit) is genuinely reachable in real
+  // parallel block production (globalStateGetCore() in mvm_api.go returns
+  // it on mvcc.ErrEstimateHit) -- this is a real fix, not just hygiene.
+  // status==2 (addressNotInRelated), by contrast, is provably unreachable
+  // today: globalStateGetCore() never returns status 2 (its own doc
+  // comment: "status: 0=not found, 1=found, 3=Block-STM suspend" -- 2 is
+  // simply not part of its contract), independently confirmed by
+  // isAddressAllowed() (my_global_state.h) hardcoding `return true`. Still
+  // converted below for the same reason as line ~64 above: cheap, and
+  // removes a landmine if either assumption ever changes.
   if (accountQueryData.status == 3) {
-    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+    MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
   }
   if (accountQueryData.status == 2) {
-    throw Exception(ET::addressNotInRelated,
-                    "Address not in related addresses: " +
-                        mvm::address_to_hex_string(addr));
+    MVM_THROW(Exception(ET::addressNotInRelated,
+                        "Address not in related addresses: " +
+                            mvm::address_to_hex_string(addr)));
   }
   if (accountQueryData.status == 1) {
     uint256_t balance = from_big_endian(accountQueryData.balance_p, 32u);
@@ -136,9 +143,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
 
 AccountState MyGlobalState::getUpdate(const Address &addr) {
   if (isCache && !isAddressAllowed(addr)) {
-    throw Exception(ET::addressNotInRelated,
-                    "Address not in related addresses: " +
-                        mvm::address_to_hex_string(addr));
+    MVM_THROW(Exception(ET::addressNotInRelated,
+                        "Address not in related addresses: " +
+                            mvm::address_to_hex_string(addr)));
   }
   uint8_t b_address[32];
   mvm::to_big_endian(addr, b_address);
@@ -148,12 +155,12 @@ AccountState MyGlobalState::getUpdate(const Address &addr) {
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
   if (accountQueryData.status == 3) {
-    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+    MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
   }
   if (accountQueryData.status == 2) {
-    throw Exception(ET::addressNotInRelated,
-                    "Address not in related addresses: " +
-                        mvm::address_to_hex_string(addr));
+    MVM_THROW(Exception(ET::addressNotInRelated,
+                        "Address not in related addresses: " +
+                            mvm::address_to_hex_string(addr)));
   }
   if (accountQueryData.status == 1) {
 
@@ -195,9 +202,9 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
     return acc->second;
   }
   if (isCache && !isAddressAllowed(addr)) {
-    throw Exception(ET::addressNotInRelated,
-                    "Address not in related addresses: " +
-                        mvm::address_to_hex_string(addr));
+    MVM_THROW(Exception(ET::addressNotInRelated,
+                        "Address not in related addresses: " +
+                            mvm::address_to_hex_string(addr)));
   }
   if (isCache && State::instanceExists(addr)) {
     auto gBalance = State::getInstance(addr)->getBalance();
@@ -217,12 +224,12 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker,
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
   if (accountQueryData.status == 3) {
-    throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+    MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
   }
   if (accountQueryData.status == 2) {
-    throw Exception(ET::addressNotInRelated,
-                    "Address not in related addresses: " +
-                        mvm::address_to_hex_string(addr));
+    MVM_THROW(Exception(ET::addressNotInRelated,
+                        "Address not in related addresses: " +
+                            mvm::address_to_hex_string(addr)));
   }
   if (accountQueryData.status == 1) {
     uint256_t balance = from_big_endian(accountQueryData.balance_p, 32u);
@@ -404,7 +411,7 @@ std::pair<bool, uint256_t> MyGlobalState::add_addresses_storage_read(const Addre
   
   auto ret = GetStorageValue(blockContext.mvmId, b_address + 12, b_key);
   if (ret.status == STORAGE_SUSPEND) {
-      throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+      MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
   }
   if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
       uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);

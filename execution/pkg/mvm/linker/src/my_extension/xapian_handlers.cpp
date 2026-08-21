@@ -4,6 +4,7 @@
 // Licensed under the MIT License.
 // Xapian database handlers - extracted from my_extension.cpp for
 // maintainability. Each XAPIAN_* opcode handler is implemented here.
+#include "mvm/safe_throw.h"
 #include "mvm/util.h"
 #include "mvm_linker.hpp"
 #include "my_extension/constants.h"
@@ -88,7 +89,7 @@ static uint256_t injectVirtualDependency(mvm::GlobalState* gs, const mvm::Addres
             
             auto ret = GetStorageValue(const_cast<unsigned char*>(gs->get_block_context().mvmId), b_address + 12, b_key);
             if (ret.status == STORAGE_SUSPEND) {
-                throw Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+                MVM_THROW(Exception(Exception::Type::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
             }
             if (ret.status == STORAGE_SUCCESS && ret.value != nullptr) {
                 uint256_t uncommitted_val = mvm::from_big_endian(ret.value, 32u);

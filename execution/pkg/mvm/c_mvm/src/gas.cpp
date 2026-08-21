@@ -1,4 +1,5 @@
 #include "mvm/gas.h"
+#include "mvm/safe_throw.h"
 
 namespace mvm
 {
@@ -351,9 +352,9 @@ namespace mvm
     uint64_t getMemExpansionGasCost(uint64_t &last_mem_fee, uint64_t old_mem_word_size, uint64_t new_mem_word_size)
     {   
         if (new_mem_word_size > 0x1FFFFFFFE0) {
-            throw Exception(
+            MVM_THROW(Exception(
                     Exception::Type::ErrGasUintOverflow,
-                    "Gas uint64 overflow");
+                    "Gas uint64 overflow"));
         }
         if(new_mem_word_size > old_mem_word_size) {
             uint64_t square = new_mem_word_size * new_mem_word_size;

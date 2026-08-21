@@ -8,6 +8,7 @@
 #include "mvm/exception.h"
 #include "mvm/gas.h"
 #include "mvm/opcode.h"
+#include "mvm/safe_throw.h"
 #include "mvm/stack.h"
 #include "mvm/util.h"
 
@@ -256,7 +257,12 @@ public:
       journal.revert_to(0);
       result.er = ExitReason::threw;
       result.ex = ex_.type;
-      try {
+      // MVM_TRY/MVM_CATCH (mvm/safe_throw.h): was try{...}catch(...){...}.
+      // Anything thrown while formatting the exception (e.g. stack pop64()
+      // underflow, copy_from_mem() out-of-bounds) is caught here rather
+      // than escaping -- see safe_throw.h's doc comment for why this
+      // can't be a real C++ catch in the TA build.
+      MVM_TRY
         if (result.ex == ET::ErrExecutionReverted) {
           if (ctxt && ctxt->s.size() >= 2) {
             const auto offset = ctxt->s.pop64();
@@ -277,9 +283,10 @@ public:
           result.output = mvm::encode_revert_string(ex_.what());
           result.exmsg = ex_.what();
         }
-      } catch (...) {
+      MVM_CATCH(inner_ex)
+        (void)inner_ex;
         result.exmsg = ex_.what();
-      }
+      MVM_END_TRY
     };
 
     vector<uint8_t> exec_code;
@@ -310,12 +317,13 @@ public:
     auto sm_size = ctxt->prog.code.size();
     // run
     while (ctxt && ctxt->get_pc() < ctxt->prog.code.size()) {
-      try {
+      // MVM_TRY/MVM_CATCH (mvm/safe_throw.h): was try{...}catch(Exception&){...}.
+      MVM_TRY
         dispatch(result);
-      } catch (Exception &ex) {
+      MVM_CATCH(ex)
         ctxt->eh(ex);
         pop_context();
-      }
+      MVM_END_TRY
 
       if (!ctxt)
         break;
@@ -385,9 +393,9 @@ private:
                     Context::HaltHandler &&hh, Context::ExceptionHandler &&eh,
                     bool read_only) {
     if (get_call_depth() >= Consts::MAX_CALL_DEPTH)
-      throw Exception(ET::ErrDepth, "Reached max call depth (" +
-                                        to_string(Consts::MAX_CALL_DEPTH) +
-                                        ")");
+      MVM_THROW(Exception(ET::ErrDepth, "Reached max call depth (" +
+                                            to_string(Consts::MAX_CALL_DEPTH) +
+                                            ")"));
 
     auto c =
         make_unique<Context>(caller, as, move(input), call_value, move(prog),
@@ -453,14 +461,14 @@ private:
 
     const auto lastDst = offDst + size;
     if (lastDst < offDst)
-      throw Exception(ET::outOfBounds, "Integer overflow in copy_mem (" +
-                                           to_string(lastDst) + " < " +
-                                           to_string(offDst) + ")");
+      MVM_THROW(Exception(ET::outOfBounds, "Integer overflow in copy_mem (" +
+                                               to_string(lastDst) + " < " +
+                                               to_string(offDst) + ")"));
 
     if (lastDst > Consts::MAX_MEM_SIZE)
-      throw Exception(ET::outOfBounds,
-                      "Memory limit exceeded (" + to_string(lastDst) + " > " +
-                          to_string(Consts::MAX_MEM_SIZE) + ")");
+      MVM_THROW(Exception(ET::outOfBounds,
+                          "Memory limit exceeded (" + to_string(lastDst) + " > " +
+                              to_string(Consts::MAX_MEM_SIZE) + ")"));
 
     if (lastDst > dst.size())
       dst.resize(lastDst);
@@ -497,14 +505,14 @@ private:
   void prepare_mem_access(const uint64_t offset, const uint64_t size) {
     const auto end = offset + size;
     if (end < offset)
-      throw Exception(ET::outOfBounds, "Integer overflow in memory access (" +
-                                           to_string(end) + " < " +
-                                           to_string(offset) + ")");
+      MVM_THROW(Exception(ET::outOfBounds, "Integer overflow in memory access (" +
+                                               to_string(end) + " < " +
+                                               to_string(offset) + ")"));
 
     if (end > Consts::MAX_MEM_SIZE)
-      throw Exception(ET::outOfBounds,
-                      "Memory limit exceeded (" + to_string(end) + " > " +
-                          to_string(Consts::MAX_MEM_SIZE) + ")");
+      MVM_THROW(Exception(ET::outOfBounds,
+                          "Memory limit exceeded (" + to_string(end) + " > " +
+                              to_string(Consts::MAX_MEM_SIZE) + ")"));
 
     if (end > ctxt->mem.size())
       ctxt->mem.resize(end);
@@ -528,8 +536,8 @@ private:
 
   void jump_to(const uint64_t newPc) {
     if (ctxt->prog.jump_dests.find(newPc) == ctxt->prog.jump_dests.end())
-      throw Exception(ET::ErrInvalidCode,
-                      to_string(newPc) + " is not a jump destination");
+      MVM_THROW(Exception(ET::ErrInvalidCode,
+                          to_string(newPc) + " is not a jump destination"));
     ctxt->set_pc(newPc);
   }
 
@@ -539,6 +547,13 @@ private:
   static auto safeAdd(const X x, const Y y) {
     const auto r = x + y;
     if (r < x)
+      // 2026-08-21: real C++ throw, deliberately NOT converted to
+      // MVM_THROW (mvm/safe_throw.h) -- it's std::overflow_error, not
+      // mvm::Exception, and this header's mechanism only covers the
+      // latter. Will still hang if hit in the TA build, same as before
+      // this file's other throws were fixed -- a known, narrower residual
+      // gap (astronomically large unsigned addition, far less likely to
+      // be hit by real contract execution than anything covered).
       throw overflow_error("integer overflow");
     return r;
   }
@@ -951,7 +966,7 @@ private:
       err << fmt::format(" at position {}, call-depth {}", ctxt->get_pc(),
                          get_call_depth())
           << endl;
-      throw Exception(Exception::Type::ErrInvalidCode, err.str());
+      MVM_THROW(Exception(Exception::Type::ErrInvalidCode, err.str()));
     };
   }
 
@@ -1390,8 +1405,8 @@ private:
 
   void sstore() {
     if (ctxt->read_only) {
-      throw Exception(ET::ErrWriteProtection,
-                      "Cant store stack from read only call");
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant store stack from read only call"));
     }
     const auto k = ctxt->s.pop();
     const auto v = ctxt->s.pop();
@@ -1502,15 +1517,15 @@ private:
     const uint8_t bytes = get_op() - PUSH1 + 1;
     const auto end = ctxt->get_pc() + bytes;
     if (end < ctxt->get_pc())
-      throw Exception(ET::outOfBounds, "Integer overflow in push (" +
-                                           to_string(end) + " < " +
-                                           to_string(ctxt->get_pc()) + ")");
+      MVM_THROW(Exception(ET::outOfBounds, "Integer overflow in push (" +
+                                               to_string(end) + " < " +
+                                               to_string(ctxt->get_pc()) + ")"));
 
     if (end >= ctxt->prog.code.size())
-      throw Exception(ET::outOfBounds,
-                      "Push immediate exceeds size of program (" +
-                          to_string(end) +
-                          " >= " + to_string(ctxt->prog.code.size()) + ")");
+      MVM_THROW(Exception(ET::outOfBounds,
+                          "Push immediate exceeds size of program (" +
+                              to_string(end) +
+                              " >= " + to_string(ctxt->prog.code.size()) + ")"));
 
     auto pc = ctxt->get_pc() + 1;
     uint256_t imm = 0;
@@ -1525,8 +1540,8 @@ private:
 
   void log() {
     if (ctxt->read_only) {
-      throw Exception(ET::ErrWriteProtection,
-                      "Cant create log from read only call");
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant create log from read only call"));
     }
     const uint8_t n = get_op() - LOG0;
     const auto offset = ctxt->s.pop64();
@@ -1604,8 +1619,8 @@ private:
 
   void selfdestruct(ExecResult &result) {
     if (ctxt->read_only) {
-      throw Exception(ET::ErrWriteProtection,
-                      "Cannot delete from read-only call");
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cannot delete from read-only call"));
     }
 
     const Address addr = ctxt->acc.get_address();
@@ -1654,8 +1669,8 @@ private:
 
   void create() {
     if (ctxt->read_only) {
-      throw Exception(ET::ErrWriteProtection,
-                      "Cant create from read only call");
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant create from read only call"));
     }
     const auto contractValue = ctxt->s.pop();
     const auto offset = ctxt->s.pop64();
@@ -1782,7 +1797,15 @@ private:
       vector<uint8_t> precompile_output;
       bool success = true;
 
-      try {
+      // MVM_TRY/MVM_CATCH (mvm/safe_throw.h): was
+      // try{...}catch(const std::exception&){...}catch(...){...}. Covers
+      // this block's own 2 throw sites (ErrWriteProtection/ErrInvalidCode
+      // below) plus my_storage.cpp/xapian_handlers.cpp's mvm::Exception
+      // throws reached via extension.SimpleDatabase/FullDatabase* below --
+      // see safe_throw.h's doc comment for the (smaller, separately
+      // tracked) set of non-Exception throw sites elsewhere in extension.*/
+      // crypto_handlers.cpp/xapian_manager|search|log.cpp NOT covered here.
+      MVM_TRY
         if (addr == mvm::getPaddedAddressSelector("wallet v1")) {
           precompile_output = extension.PublicKeyFromPrivateKey(input);
         } else if (addr == 1) {
@@ -1824,8 +1847,8 @@ private:
           precompile_output = extension.Math(input);
         } else if (addr == SIMPLE_DATABASE_ADDRESS) {
           if (ctxt->read_only || !gs.is_cache()) {
-            throw Exception(ET::ErrWriteProtection,
-                            "SimpleDatabase write protection");
+            MVM_THROW(Exception(ET::ErrWriteProtection,
+                                "SimpleDatabase write protection"));
           }
           precompile_output =
               extension.SimpleDatabase(input, ctxt->as.acc.get_address());
@@ -1842,15 +1865,13 @@ private:
               gs, input, precompile_output, ctxt->as, value, log_handler,
               gs.get_block_context().time, addr);
         } else {
-          throw Exception(ET::ErrInvalidCode,
-                          "Precompiled contract not implemented.");
+          MVM_THROW(Exception(ET::ErrInvalidCode,
+                              "Precompiled contract not implemented."));
         }
-      } catch (const std::exception &e) {
+      MVM_CATCH(e)
         success = false;
         precompile_output = mvm::encode_revert_string(e.what());
-      } catch (...) {
-        success = false;
-      }
+      MVM_END_TRY
 
       if (success) {
         ctxt->returnData = precompile_output;
@@ -1948,6 +1969,14 @@ private:
                    move(executableCode), value, rh, hh, he, true);
       break;
     default:
+      // 2026-08-21: real C++ throw, deliberately NOT converted -- it's
+      // UnexpectedState, not mvm::Exception (mvm/safe_throw.h's MVM_THROW
+      // only covers the latter). Per Exception.h's own doc comment,
+      // UnexpectedState "should never be thrown under normal conditions
+      // ... should be impossible to reach for smart contracts" -- `op`
+      // here is one of CALL/CALLCODE/DELEGATECALL/STATICCALL by
+      // construction (see the switch above), so this default case is
+      // genuinely dead code, not a real residual risk.
       throw UnexpectedState("Unknown call opcode.");
     }
   }
@@ -2025,8 +2054,8 @@ private:
 
   void opCreate2() {
     if (ctxt->read_only) {
-      throw Exception(ET::ErrWriteProtection,
-                      "Cant create from read only call");
+      MVM_THROW(Exception(ET::ErrWriteProtection,
+                          "Cant create from read only call"));
     }
     const auto endowment = ctxt->s.pop();
     const auto offset = ctxt->s.pop64();
@@ -2098,7 +2127,7 @@ private:
   }
 
   void opRevert() {
-    throw Exception(ET::ErrExecutionReverted, "Execution reverted");
+    MVM_THROW(Exception(ET::ErrExecutionReverted, "Execution reverted"));
   }
 };
 

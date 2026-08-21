@@ -6,6 +6,7 @@
 #include "mvm/gas.h"
 #include "mvm_linker.hpp"
 #include "mvm/exception.h"
+#include "mvm/safe_throw.h"
 #include "state.h"
 
 namespace mvm
@@ -66,7 +67,7 @@ namespace mvm
         auto get_rs = GetStorageValue(this->mvmId, b_address + 12, b_key);
         if (get_rs.status == STORAGE_SUSPEND)
         {
-            throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
+            MVM_THROW(Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)"));
         }
         if (get_rs.status == STORAGE_NOT_FOUND)
         {

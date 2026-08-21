@@ -4,6 +4,7 @@
 #include "mvm/stack.h"
 
 #include "mvm/exception.h" // Giả định file này định nghĩa Exception và ET
+#include "mvm/safe_throw.h"
 #include "mvm/util.h"      // Giả định file này định nghĩa to_hex_string
 
 #include <algorithm>
@@ -21,7 +22,7 @@ namespace mvm
   {
     // Kiểm tra stack rỗng trước khi pop
     if (st.empty())
-      throw Exception(ET::outOfBounds, "Stack underflow on pop");
+      MVM_THROW(Exception(ET::outOfBounds, "Stack underflow on pop"));
 
     uint256_t val = st.front();
     st.pop_front();
@@ -35,9 +36,9 @@ namespace mvm
 
     // Kiểm tra xem giá trị có nằm trong phạm vi uint64_t không
     if (val > std::numeric_limits<uint64_t>::max())
-      throw Exception(
+      MVM_THROW(Exception(
         ET::outOfBounds,
-        "Value on stack (" + to_hex_string(val) + ") exceeds uint64_t maximum");
+        "Value on stack (" + to_hex_string(val) + ") exceeds uint64_t maximum"));
 
     return static_cast<uint64_t>(val);
   }
@@ -47,10 +48,10 @@ namespace mvm
     // Kiểm tra giới hạn stack TRƯỚC KHI push
     // Sử dụng >= MAX_SIZE để an toàn hơn, mặc dù == MAX_SIZE là đủ logic
     if (size() >= MAX_SIZE)
-      throw Exception(
+      MVM_THROW(Exception(
         ET::outOfBounds,
         "Stack overflow on push (size: " + std::to_string(size()) +
-          ", limit: " + std::to_string(MAX_SIZE) + ")");
+          ", limit: " + std::to_string(MAX_SIZE) + ")"));
 
     try
     {
@@ -58,6 +59,12 @@ namespace mvm
     }
     catch (const std::bad_alloc&)
     {
+      // 2026-08-21: this whole catch(bad_alloc)/throw(runtime_error) pair
+      // is real C++ exception machinery, deliberately NOT converted to
+      // mvm/safe_throw.h's MVM_TRY/MVM_THROW -- both the catch and the
+      // throw would need it, and it's a genuine edge case (literal heap
+      // allocation failure, not an EVM-semantic error), out of scope for
+      // today's fix. Known, narrower residual gap: still hangs if hit.
       // Xử lý lỗi cấp phát bộ nhớ
       throw std::runtime_error("bad_alloc while pushing onto stack");
     }
@@ -74,10 +81,10 @@ namespace mvm
     // SWAPi hoán đổi st[0] và st[i]. Chỉ số i phải >= 1 và < size().
     // SWAP0 không tồn tại.
     if (i == 0 || i >= size())
-      throw Exception(
+      MVM_THROW(Exception(
         ET::outOfBounds,
         "Stack swap index out of range (index: " + std::to_string(i) + ", size: " + std::to_string(size()) +
-          ")");
+          ")"));
 
     // Thực hiện hoán đổi
     std::swap(st[0], st[i]);
@@ -89,17 +96,17 @@ namespace mvm
     // DUPa sao chép st[a] lên đỉnh. Chỉ số 'a' phải >= 0 và < size().
     // DUP1 -> a=0, DUP2 -> a=1, ...
     if (a >= size())
-      throw Exception(
+      MVM_THROW(Exception(
         ET::outOfBounds,
-        "Stack dup index out of range (index: " + std::to_string(a) + ", size: " + std::to_string(size()) + ")");
+        "Stack dup index out of range (index: " + std::to_string(a) + ", size: " + std::to_string(size()) + ")"));
 
     // <<< THAY ĐỔI CHÍNH: Kiểm tra giới hạn stack TRƯỚC KHI push bản sao >>>
     // Sử dụng >= MAX_SIZE để an toàn hơn
     if (size() >= MAX_SIZE)
-      throw Exception(
+      MVM_THROW(Exception(
         ET::outOfBounds,
         "Stack overflow on dup (size: " + std::to_string(size()) +
-          ", limit: " + std::to_string(MAX_SIZE) + ")");
+          ", limit: " + std::to_string(MAX_SIZE) + ")"));
     // <<< KẾT THÚC THAY ĐỔI CHÍNH >>>
 
     // Bây giờ mới thực hiện push bản sao
@@ -110,6 +117,8 @@ namespace mvm
     }
     catch (const std::bad_alloc&)
     {
+      // 2026-08-21: same as Stack::push()'s identical pattern above --
+      // deliberately NOT converted, see that comment.
       // Xử lý lỗi cấp phát bộ nhớ
       throw std::runtime_error("bad_alloc while duplicating onto stack");
     }

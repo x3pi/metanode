@@ -1400,6 +1400,34 @@ int main(void) {
         }
     }
 
+    // ─── test 12 (2026-08-21, added specifically to validate mvm/
+    // safe_throw.h's setjmp/longjmp fix): a contract whose CONSTRUCTOR
+    // itself executes the EVM REVERT opcode (opRevert() in
+    // c_mvm/src/processor.cpp -- PUSH1 0x00 PUSH1 0x00 REVERT, i.e.
+    // revert with 0 offset/0 size, no revert-reason data). This is
+    // deliberately NOT the same code path as test 11's SEND_NATIVE
+    // (whose no-throw fix lives entirely in mvm_linker.cpp's
+    // sendNative(), predates today's interpreter-wide fix, and never
+    // touches processor.cpp's dispatch loop at all) -- REVERT is the
+    // single most common way a real Solidity contract fails
+    // (require()/revert()), and until today's fix it threw a real C++
+    // exception from deep inside the interpreter's main dispatch loop,
+    // which -- per the same hardware-proven finding as SEND_NATIVE's
+    // original bug -- would have hung mvm_ta for the rest of this boot.
+    // Expect the same clean shape as test 11: ExitReason::threw +
+    // Exception::Type::ErrExecutionReverted, i.e. status=2 exception=5,
+    // NOT a hang. ───
+    {
+        // PUSH1 0x00(size) PUSH1 0x00(offset) REVERT
+        static const uint8_t revert_ctor[] = {
+            0x60,0x00, 0x60,0x00, 0xfd
+        };
+        if (run_deploy_and_print("deploy (constructor REVERTs)", sender,
+                revert_ctor, sizeof(revert_ctor)) != 0) {
+            return 1;
+        }
+    }
+
     printf("\n[mvm_ca_test] DONE\n");
     g_relay_stop = true;
     pthread_join(relay_tid, nullptr);
