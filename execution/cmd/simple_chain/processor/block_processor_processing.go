@@ -88,7 +88,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 		receipts, receiptsRoot = bp.calculateReceiptsRoot(processResults.Receipts)
 		receiptsRootDuration = time.Since(startReceipts)
-		logger.Debug("[PERF] Phase1.receiptsRoot: %v (%d receipts)", receiptsRootDuration, len(processResults.Receipts))
+		logger.Info("🧾 [RECEIPTS-ROOT] Block #%d | GEI: %d | ReceiptsRoot: %s | Count: %d | Duration: %v", currentBlockNumber, globalExecIndex, receiptsRoot.Hex(), len(processResults.Receipts), receiptsRootDuration)
 	}()
 
 	// Goroutine 2: txsRoot (must AddTransactions first)

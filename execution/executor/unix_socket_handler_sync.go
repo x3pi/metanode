@@ -125,6 +125,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
+	// FAST PREEMPTION (Aug 2026): Cancel any in-flight speculative execution
+	// workers immediately so they abort Block-STM and release Xapian/EVM locks.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if rh.cancelSpeculativeCallback != nil {
+		rh.cancelSpeculativeCallback()
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
 	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
 	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
 	// all prior consensus block executions have been fully committed to disk,
@@ -1039,6 +1047,7 @@ func (rh *RequestHandler) applyBackupDbBatches(backupDb *storage.BackUpDb) ([]tr
 			result := mvm.CallReplayFullDbLogs(logMap)
 			if result == 0 {
 				logger.Error("🚨 [FORK-RISK] ReplayFullDbLogs (epoch sync) FAILED for batch %d/%d (%d entries) block #%d — Xapian DB may be OUT OF SYNC!", idx+1, len(backupDb.FullDbLogs), len(logMap), backupDb.BockNumber)
+				return nil, fmt.Errorf("ReplayFullDbLogs failed for block #%d (batch %d/%d)", backupDb.BockNumber, idx+1, len(backupDb.FullDbLogs))
 			}
 		}
 		logger.Info("📥 [BLOCK SYNC] ✅ Replayed %d FullDbLogs entries for block %d", len(backupDb.FullDbLogs), backupDb.BockNumber)

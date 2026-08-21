@@ -62,6 +62,7 @@ type SpeculativeExecutor struct {
 type inFlightSession struct {
 	mu     sync.Mutex
 	respCh chan<- *pb.ExecuteBlockResponse
+	cancel context.CancelFunc
 }
 
 // NewSpeculativeExecutor creates a new SpeculativeExecutor
@@ -85,12 +86,14 @@ func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
 	gei := epochData.GetGlobalExecIndex()
 
-	session := &inFlightSession{respCh: authRespCh}
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &inFlightSession{respCh: authRespCh, cancel: cancel}
 	if existing, loaded := se.inFlight.LoadOrStore(gei, session); loaded {
 		existingSession := existing.(*inFlightSession)
 		existingSession.mu.Lock()
 		existingSession.respCh = authRespCh
 		existingSession.mu.Unlock()
+		cancel() // Cancel unused newly created context
 		logger.Warn("⏳ [SPECULATIVE] GEI=%d already executing — attaching retry's response channel instead of starting a duplicate execution", gei)
 		return
 	}
@@ -248,9 +251,19 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 
 		logger.Info("🔄 [SPECULATIVE] Executing GEI=%d speculatively with %d txs (block #%d)", gei, len(allTransactions), blockNum)
 		startTime := time.Now()
-		accumulatedResults, execErr := tx_processor.ProcessTransactions(context.Background(), csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
+		accumulatedResults, execErr := tx_processor.ProcessTransactions(ctx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
+
+		if ctx.Err() != nil {
+			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) execution was cancelled (aborted by Sync/Consensus). Discarding state.", gei, blockNum)
+			if csCopy != nil {
+				csCopy.CloseSpeculative()
+			}
+			se.activeSessions.Delete(gei)
+			se.inFlight.Delete(gei)
+			return
+		}
 
 		session.mu.Lock()
 		latestRespCh := session.respCh
@@ -330,6 +343,50 @@ func (se *SpeculativeExecutor) ResultChan() <-chan *SpeculativeResult {
 	return se.resultChan
 }
 
+// CancelInFlight cancels active speculative execution workers for the specified GEIs (or all if geis is empty).
+func (se *SpeculativeExecutor) CancelInFlight(geis ...uint64) {
+	if len(geis) == 0 {
+		se.inFlight.Range(func(key, value interface{}) bool {
+			if session, ok := value.(*inFlightSession); ok && session != nil {
+				session.mu.Lock()
+				if session.cancel != nil {
+					session.cancel()
+				}
+				session.mu.Unlock()
+			}
+			return true
+		})
+		return
+	}
+	for _, gei := range geis {
+		if val, ok := se.inFlight.Load(gei); ok {
+			if session, ok := val.(*inFlightSession); ok && session != nil {
+				session.mu.Lock()
+				if session.cancel != nil {
+					session.cancel()
+				}
+				session.mu.Unlock()
+			}
+		}
+	}
+}
+
+// WaitForInFlight waits for active in-flight speculative workers to drain/exit up to timeout.
+func (se *SpeculativeExecutor) WaitForInFlight(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		hasInFlight := false
+		se.inFlight.Range(func(_, _ interface{}) bool {
+			hasInFlight = true
+			return false // break early
+		})
+		if !hasInFlight || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // CleanGEI cleans speculative results older than or equal to a target GEI.
 //
 // ARCHITECTURAL NOTE: Why `if !res.IsFinished` was intentionally removed:
@@ -372,6 +429,15 @@ func (se *SpeculativeExecutor) CleanGEI(gei uint64) {
 				}
 			}
 			se.activeSessions.Delete(k)
+			if inf, ok := se.inFlight.Load(k); ok {
+				if infSession, ok := inf.(*inFlightSession); ok && infSession != nil {
+					infSession.mu.Lock()
+					if infSession.cancel != nil {
+						infSession.cancel()
+					}
+					infSession.mu.Unlock()
+				}
+			}
 			// inFlight[k] is deleted here rather than by the execution goroutine
 			// itself: this is the single authoritative point where the committer
 			// (or a P2P-sync fast-forward) has confirmed GEI=k no longer needs
@@ -453,6 +519,17 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
+	// Check if already committed by P2P Sync
+	lastGEI := storage.GetLastGlobalExecIndex()
+	if res.GEI <= lastGEI {
+		logger.Warn("⚠️ [COMMITTER] Committer received GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.",
+			res.GEI, res.BlockNum, lastGEI)
+		if res.ClonedState != nil {
+			res.ClonedState.CloseSpeculative()
+		}
+		return nil
+	}
+
 	logger.Info("📥 [COMMITTER] Processing speculative commit: GEI=%d, block=#%d, txs=%d", res.GEI, res.BlockNum, len(res.ProcessResult.Transactions))
 
 	lastBlock := bp.GetLastBlock()

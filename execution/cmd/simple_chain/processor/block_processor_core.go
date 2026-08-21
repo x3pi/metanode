@@ -284,6 +284,15 @@ func (bp *BlockProcessor) ResumeExecution() {
 	bp.openSnapshotGate()
 }
 
+// CancelSpeculativeExecution aborts any in-flight speculative execution workers for the given GEIs (or all if geis is empty)
+// and waits briefly for workers to release Xapian/EVM locks.
+func (bp *BlockProcessor) CancelSpeculativeExecution(geis ...uint64) {
+	if bp.speculativeExecutor != nil {
+		bp.speculativeExecutor.CancelInFlight(geis...)
+		bp.speculativeExecutor.WaitForInFlight(200 * time.Millisecond)
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SNAPSHOT GATE METHODS
 // ═══════════════════════════════════════════════════════════════════════════
