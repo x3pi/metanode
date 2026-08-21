@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"runtime"
+	runtime_debug "runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -172,6 +173,11 @@ func (stm *TrueBlockSTM) Process(
 		return stm.txs, nil, nil, nil
 	}
 
+	var startGC runtime_debug.GCStats
+	runtime_debug.ReadGCStats(&startGC)
+	var startMem runtime.MemStats
+	runtime.ReadMemStats(&startMem)
+
 	logger.Info("🚀 [BLOCK-STM] Khởi chạy %d TXs trên True MVCC Engine", numTxs)
 
 	isBarrierTx := make([]bool, numTxs)
@@ -205,7 +211,15 @@ func (stm *TrueBlockSTM) Process(
 		segStart = i + 1
 	}
 
-	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB | 📊 Đụng độ (Abort/Retry): %d lần", numTxs, atomic.LoadInt32(&stm.abortCount))
+	var endGC runtime_debug.GCStats
+	runtime_debug.ReadGCStats(&endGC)
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+	gcCount := endGC.NumGC - startGC.NumGC
+	gcPause := endGC.PauseTotal - startGC.PauseTotal
+
+	logger.Info("✅ [BLOCK-STM] Hoàn tất %d TXs, tiến hành Commit State DB | 📊 Đụng độ (Abort/Retry): %d lần | 🧹 GC Runs: %d, GC Pause: %v, HeapAlloc: %dMB -> %dMB, GCCPU: %.2f%%",
+		numTxs, atomic.LoadInt32(&stm.abortCount), gcCount, gcPause, startMem.HeapAlloc/(1024*1024), endMem.HeapAlloc/(1024*1024), endMem.GCCPUFraction*100)
 	stm.commitToBase(chainState)
 
 	// Collect receipts and results, calculate Total Gas Fee
