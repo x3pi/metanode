@@ -1347,22 +1347,17 @@ int main(void) {
         return 1;
     }
 
-    // ─── test 9: MVM_TZ_CMD_SEND_NATIVE -- a plain native transfer
-    // through its own dedicated command/dispatch (distinct code path from
-    // test 1's MVM_TZ_CMD_EXECUTE, even though the effect is similar).
-    // Use a fresh recipient (0x33...) so the balance/nonce changes in the
-    // printed result are unambiguously attributable to THIS command. ───
-    {
-        uint8_t send_native_recipient[20];
-        memset(send_native_recipient, 0x88, 20);
-        if (run_send_native_and_print("send native", sender, send_native_recipient, 50) != 0) {
-            return 1;
-        }
-    }
-
-    // ─── test 10: MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN, operation_type=0
-    // (mint) -- a fresh recipient (0x99...) receiving newly-minted native
-    // value, exercised through its own dedicated command/dispatch. ───
+    // ─── test 9 (2026-08-21, REORDERED ahead of SEND_NATIVE): confirmed
+    // 2026-08-21 that MVM_TZ_CMD_SEND_NATIVE hangs mvm_ta on real hardware
+    // (request sent, both GLOBAL_STATE_GET reverse calls answered, then
+    // stuck forever -- see tz-llm-trustzone/DEPLOYED_STATE.md's "MỚI NHẤT"
+    // entry for the full writeup; root cause not yet found). Moved
+    // PROCESS_NATIVE_MINT_BURN/DEPLOY ahead of it so they still get a
+    // real hardware run this session even though SEND_NATIVE (now last)
+    // is expected to wedge mvm_ta for the rest of this boot. ───
+    // MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN, operation_type=0 (mint) -- a
+    // fresh recipient (0x99...) receiving newly-minted native value,
+    // exercised through its own dedicated command/dispatch. ───
     {
         uint8_t mint_from[20], mint_to[20];
         memset(mint_from, 0x11, 20);
@@ -1372,7 +1367,7 @@ int main(void) {
         }
     }
 
-    // ─── test 11: MVM_TZ_CMD_DEPLOY -- a minimal real deploy (init code
+    // ─── test 10: MVM_TZ_CMD_DEPLOY -- a minimal real deploy (init code
     // that CODECOPYs+RETURNs a 1-byte STOP runtime body, standard EVM
     // deploy pattern, nothing metanode-specific). Expect
     // code_change_count>=1 in the printed result -- the concrete
@@ -1389,6 +1384,18 @@ int main(void) {
         };
         if (run_deploy_and_print("deploy (minimal STOP contract)", sender,
                 deploy_ctor, sizeof(deploy_ctor)) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 11 (LAST on purpose, see comment above test 9): MVM_TZ_CMD_
+    // SEND_NATIVE -- known to hang mvm_ta as of 2026-08-21. Placed last so
+    // tests 9/10 above already ran+printed before this one gets a chance
+    // to wedge the TA for the rest of the boot. ───
+    {
+        uint8_t send_native_recipient[20];
+        memset(send_native_recipient, 0x88, 20);
+        if (run_send_native_and_print("send native", sender, send_native_recipient, 50) != 0) {
             return 1;
         }
     }
