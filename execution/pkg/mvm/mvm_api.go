@@ -562,10 +562,12 @@ func HasBlockhashOpcode(code []byte) bool {
 	return false
 }
 
-var (
-	cachedRecentBlockNumber atomic.Uint64
-	cachedRecentHashes      atomic.Pointer[[][]byte]
-)
+type recentBlockHashesEntry struct {
+	blockNumber uint64
+	hashes      [][]byte
+}
+
+var cachedRecentBlockHashes atomic.Pointer[recentBlockHashesEntry]
 
 // fetchRecentBlockHashes returns up to maxBlockhashLookback preceding block
 // hashes for blockNumber, most-recent-first (index 0 = blockNumber-1),
@@ -577,10 +579,8 @@ var (
 // distance from the current block and has no way to represent "unknown" at
 // a specific index other than the array simply not extending that far.
 func fetchRecentBlockHashes(blockNumber uint64) [][]byte {
-	if cachedRecentBlockNumber.Load() == blockNumber {
-		if ptr := cachedRecentHashes.Load(); ptr != nil {
-			return *ptr
-		}
+	if entry := cachedRecentBlockHashes.Load(); entry != nil && entry.blockNumber == blockNumber {
+		return entry.hashes
 	}
 
 	bc := blockchain.GetBlockChainInstance()
@@ -599,8 +599,10 @@ func fetchRecentBlockHashes(blockNumber uint64) [][]byte {
 		}
 		hashes = append(hashes, h.Bytes())
 	}
-	cachedRecentHashes.Store(&hashes)
-	cachedRecentBlockNumber.Store(blockNumber)
+	cachedRecentBlockHashes.Store(&recentBlockHashesEntry{
+		blockNumber: blockNumber,
+		hashes:      hashes,
+	})
 	return hashes
 }
 

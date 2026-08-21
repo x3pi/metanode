@@ -16,7 +16,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
-	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -261,9 +260,6 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if csCopy != nil {
 				csCopy.CloseSpeculative()
 			}
-			mvm.ClearAllMVMApi()
-			mvm.ClearAllProtectedMVMApi()
-			mvm.CallClearAllStateInstances()
 			se.activeSessions.Delete(gei)
 			se.inFlight.Delete(gei)
 			return
@@ -298,9 +294,6 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if res.ClonedState != nil {
 				res.ClonedState.CloseSpeculative()
 			}
-			mvm.ClearAllMVMApi()
-			mvm.ClearAllProtectedMVMApi()
-			mvm.CallClearAllStateInstances()
 			if res.AuthRespCh != nil {
 				select {
 				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
@@ -325,9 +318,6 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 			if res.ClonedState != nil {
 				res.ClonedState.CloseSpeculative()
 			}
-			mvm.ClearAllMVMApi()
-			mvm.ClearAllProtectedMVMApi()
-			mvm.CallClearAllStateInstances()
 			if res.AuthRespCh != nil {
 				select {
 				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
@@ -537,9 +527,6 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		if res.ClonedState != nil {
 			res.ClonedState.CloseSpeculative()
 		}
-		mvm.ClearAllMVMApi()
-		mvm.ClearAllProtectedMVMApi()
-		mvm.CallClearAllStateInstances()
 		return nil
 	}
 

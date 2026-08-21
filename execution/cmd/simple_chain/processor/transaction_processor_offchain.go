@@ -148,8 +148,14 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	defer func() {
 		mvm.ClearMVMApi(mvmId)
-		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
-		mvm.CallClearAllStateInstances()
+		// NOTE (CONCURRENCY & THREAD-SAFETY):
+		// DO NOT call `mvm.CallClearAllStateInstances()` here.
+		// `CallClearAllStateInstances()` clears the process-wide static map `State::instances` in C++.
+		// Under high concurrency (e.g. 50+ parallel eth_call goroutines), clearing the global C++ map
+		// while other offchain goroutines are in the middle of executing C++ MVM code causes a race condition
+		// and SIGSEGV (Null Pointer Dereference / Dangling Pointer addr=0x0).
+		// Offchain transactions are read-only and ephemeral; individual cleanup is safely handled by
+		// `mvm.ClearMVMApi(mvmId)`. Process-wide state cache invalidation is managed solely by on-chain block processing.
 	}()
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
@@ -159,6 +165,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
+	
 	if executeTransaction.IsRegularTransaction() && !isSmartContract {
 		mvmResult = &mvm.MVMExecuteResult{
 			Status:  pb.RECEIPT_STATUS_RETURNED,
@@ -326,8 +333,14 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 	mvmOffChain := mvm.GetOrCreateMVMApi(mvmId, chainStateNew.GetSmartContractDB(), accountStateDB, true)
 	defer func() {
 		mvm.ClearMVMApi(mvmId)
-		// Clear C++ EVM cache after off-chain queries to prevent speculative state leaks
-		mvm.CallClearAllStateInstances()
+		// NOTE (CONCURRENCY & THREAD-SAFETY):
+		// DO NOT call `mvm.CallClearAllStateInstances()` here.
+		// `CallClearAllStateInstances()` clears the process-wide static map `State::instances` in C++.
+		// Under high concurrency (e.g. 50+ parallel eth_call goroutines), clearing the global C++ map
+		// while other offchain goroutines are in the middle of executing C++ MVM code causes a race condition
+		// and SIGSEGV (Null Pointer Dereference / Dangling Pointer addr=0x0).
+		// Offchain transactions are read-only and ephemeral; individual cleanup is safely handled by
+		// `mvm.ClearMVMApi(mvmId)`. Process-wide state cache invalidation is managed solely by on-chain block processing.
 	}()
 	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
