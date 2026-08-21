@@ -817,67 +817,31 @@ static void handle_reverse_call(void) {
 }
 
 
-// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
-// the result. Factored out (2026-08-20) so main() can run it twice: once
-// for the original EOA->EOA native transfer, once for a real contract
-// call (see g_contract_addr/g_contract_code above) -- same protocol
-// mechanics either way, just a different recipient/amount/input. Returns
-// 0 on success, 1 on any failure (mirrors main()'s own prior return
-// convention exactly, just reusable now). ───
-static int run_execute_and_print(const char *label,
-    const uint8_t sender[20], const uint8_t recipient[20],
-    uint64_t amount, const uint8_t *input, uint32_t input_len,
-    bool is_cache = false) {
-    uint8_t tx_hash[32];
-    memset(tx_hash, 0xAB, 32);
+// Writes a uint64 amount right-justified into a 32-byte big-endian field
+// (the wire format every *_req_t's `amount[32]` uses) -- factored out
+// 2026-08-21 to stop re-deriving this 8-line shift sequence in every new
+// run_*_and_print helper below (EXECUTE/SEND_NATIVE/
+// PROCESS_NATIVE_MINT_BURN all take a plain uint64 test amount).
+static void write_amount_be(uint8_t out32[32], uint64_t amount) {
+    memset(out32, 0, 32);
+    out32[24] = (uint8_t)(amount >> 56); out32[25] = (uint8_t)(amount >> 48);
+    out32[26] = (uint8_t)(amount >> 40); out32[27] = (uint8_t)(amount >> 32);
+    out32[28] = (uint8_t)(amount >> 24); out32[29] = (uint8_t)(amount >> 16);
+    out32[30] = (uint8_t)(amount >> 8);  out32[31] = (uint8_t)(amount);
+}
 
-    mvm_tz_execute_req_t req = {0};
-    req.amount[24] = (uint8_t)(amount >> 56); req.amount[25] = (uint8_t)(amount >> 48);
-    req.amount[26] = (uint8_t)(amount >> 40); req.amount[27] = (uint8_t)(amount >> 32);
-    req.amount[28] = (uint8_t)(amount >> 24); req.amount[29] = (uint8_t)(amount >> 16);
-    req.amount[30] = (uint8_t)(amount >> 8);  req.amount[31] = (uint8_t)(amount);
-    req.gas_price = 1;
-    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
-    req.block_prevrandao = 0;
-    req.block_gas_limit = 30000000;
-    req.block_time = (uint64_t)time(nullptr);
-    req.block_base_fee = 1;
-    req.block_number = 1;
-    memset(req.block_coinbase, 0, 20);
-    memset(req.mvm_id, 0, 20);
-    req.is_debug = 1;
-    // 2026-08-20 (plan §9.31): SIMPLE_DATABASE_ADDRESS's write-protection
-    // check (processor.cpp: `ctxt->read_only || !gs.is_cache()`) throws
-    // for ANY call to that precompile -- get() included, not just set() --
-    // unless is_cache. Existing tests 1-3 never touch that precompile, so
-    // this new default-false param changes nothing for them.
-    req.is_cache = is_cache ? 1 : 0;
-    req.related_addresses_count = 2;
-
-    static uint8_t blob_scratch[4096];
-    BlobWriter w{blob_scratch};
-    w.writeBytes(sender, 20);
-    w.writeBytes(recipient, 20);
-    w.writeBytes(input, input_len);
-    w.writeBytes(tx_hash, 32);
-    w.writeBytes(sender, 20);    // relatedAddresses[0]
-    w.writeBytes(recipient, 20); // relatedAddresses[1]
-
-    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
-    fflush(stdout);
-
-    mvm_tz_spinlock_lock(&g_channel->lock);
-    memcpy(g_channel->blob_region, &req, sizeof(req));
-    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
-    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
-    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
-    g_channel->header_len = sizeof(req);
-    g_channel->blob_len = w.off;
-    g_channel->seq++;
-    mvm_tz_spinlock_unlock(&g_channel->lock);
-
-    mvm_tz_flag_set(&g_channel->request_ready, 1);
-
+// Waits for mvm_ta's response to whatever request the caller just placed
+// in g_channel (servicing any reverse calls along the way), then decodes
+// +prints the shared ExecuteResult wire format. Factored out of
+// run_execute_and_print (2026-08-21) so the 4 newly-wired forward
+// commands (DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE --
+// mvm_ta_main.cpp's mvm_dispatch_*, added same day) can reuse this exact
+// wait+decode logic instead of re-deriving mvm_tz_protocol.h's
+// "IMPORTANT -- shared by CALL / EXECUTE / DEPLOY / SEND_NATIVE /
+// PROCESS_NATIVE_MINT_BURN / NONCE_PLUS_ONE" ExecuteResult shape by hand
+// for each. Returns 0 on success, 1 on any failure -- same convention
+// run_execute_and_print already had. ───
+static int wait_and_print_execute_result(const char *label) {
     const int TIMEOUT_S = 60;
     for (int round = 0; ; round++) {
         time_t start = time(nullptr);
@@ -1003,6 +967,223 @@ static int run_execute_and_print(const char *label,
     printf("(status=%u, exception=%u -- %s)\n", hdr.status, hdr.exception,
         hdr.exception ? "reverted/exception" : "success");
     return 0;
+}
+
+// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
+// the result. Factored out (2026-08-20) so main() can run it twice: once
+// for the original EOA->EOA native transfer, once for a real contract
+// call (see g_contract_addr/g_contract_code above) -- same protocol
+// mechanics either way, just a different recipient/amount/input. Returns
+// 0 on success, 1 on any failure (mirrors main()'s own prior return
+// convention exactly, just reusable now). ───
+static int run_execute_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20],
+    uint64_t amount, const uint8_t *input, uint32_t input_len,
+    bool is_cache = false) {
+    uint8_t tx_hash[32];
+    memset(tx_hash, 0xAB, 32);
+
+    mvm_tz_execute_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.gas_price = 1;
+    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
+    req.block_prevrandao = 0;
+    req.block_gas_limit = 30000000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    memset(req.block_coinbase, 0, 20);
+    memset(req.mvm_id, 0, 20);
+    req.is_debug = 1;
+    // 2026-08-20 (plan §9.31): SIMPLE_DATABASE_ADDRESS's write-protection
+    // check (processor.cpp: `ctxt->read_only || !gs.is_cache()`) throws
+    // for ANY call to that precompile -- get() included, not just set() --
+    // unless is_cache. Existing tests 1-3 never touch that precompile, so
+    // this new default-false param changes nothing for them.
+    req.is_cache = is_cache ? 1 : 0;
+    req.related_addresses_count = 2;
+
+    static uint8_t blob_scratch[4096];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(recipient, 20);
+    w.writeBytes(input, input_len);
+    w.writeBytes(tx_hash, 32);
+    w.writeBytes(sender, 20);    // relatedAddresses[0]
+    w.writeBytes(recipient, 20); // relatedAddresses[1]
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// ─── 4 newly-wired forward commands (2026-08-21, same day as
+// mvm_ta_main.cpp's mvm_dispatch_deploy/send_native/
+// process_native_mint_burn/nonce_plus_one -- see mvm_tz_protocol.h's own
+// doc comments on each *_req_t for the exact header/blob shape each
+// mirrors). None of these route through MVM_TZ_CMD_EXECUTE -- each is
+// its own top-level mvm_tz_cmd_t with its own fixed header struct, but
+// all 4 share ExecuteResult as the response (mvm_tz_protocol.h: "shared
+// by CALL / EXECUTE / DEPLOY / SEND_NATIVE / PROCESS_NATIVE_MINT_BURN /
+// NONCE_PLUS_ONE"), so each of these just builds its own request then
+// reuses wait_and_print_execute_result. ───
+
+// mirrors NoncePlusOne() (engine.go:146-158). Blob: [0] bSender (20).
+static int run_nonce_plus_one_and_print(const char *label, const uint8_t sender[20]) {
+    mvm_tz_nonce_plus_one_req_t req = {0};
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_NONCE_PLUS_ONE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_NONCE_PLUS_ONE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors SendNative() (engine.go:113-127). Blob: [0] bSender (20)
+// [1] bContractAddress (20). Mechanically the same shape as a plain
+// native transfer, just through MVM_TZ_CMD_SEND_NATIVE's own dedicated
+// header/dispatch instead of MVM_TZ_CMD_EXECUTE's.
+static int run_send_native_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20], uint64_t amount) {
+    mvm_tz_send_native_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(recipient, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_SEND_NATIVE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_SEND_NATIVE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors ProcessNativeMintBurn() (engine.go:129-144). Blob: [0] bFrom (20)
+// [1] bTo (20). operation_type: 0=mint, 1=burn (mvm_tz_protocol.h comment).
+static int run_process_native_mint_burn_and_print(const char *label,
+    const uint8_t from[20], const uint8_t to[20], uint64_t amount,
+    uint64_t operation_type) {
+    mvm_tz_process_native_mint_burn_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.operation_type = operation_type;
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(from, 20);
+    w.writeBytes(to, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors Deploy() (engine.go:94-111). Blob: [0] bSender (20)
+// [1] bContractConstructor (length-prefixed) [2] bTxHash (32).
+static int run_deploy_and_print(const char *label, const uint8_t sender[20],
+    const uint8_t *ctor, uint32_t ctor_len) {
+    uint8_t tx_hash[32];
+    memset(tx_hash, 0xCD, 32);
+
+    mvm_tz_deploy_req_t req = {0};
+    write_amount_be(req.amount, 0);
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_debug = 1;
+    req.is_cache = 0;
+    req.is_off_chain = 0;
+
+    static uint8_t blob_scratch[4096];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(ctor, ctor_len);
+    w.writeBytes(tx_hash, 32);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_DEPLOY (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_DEPLOY;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
 }
 
 int main(void) {
@@ -1152,6 +1333,62 @@ int main(void) {
         uint32_t len = abi_encode_bytes_args(EXTRACT_JSON_FIELD_SELECTOR, args, calldata);
         if (run_execute_and_print("extract json field", sender, g_json_test_addr,
                 0, calldata, len) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 8 (2026-08-21): MVM_TZ_CMD_NONCE_PLUS_ONE, first of the 4
+    // newly-wired forward commands to get a real hardware round trip
+    // (mvm_ta_main.cpp's mvm_dispatch_nonce_plus_one, added same day).
+    // sender already has nonce=1 from test 1's native transfer -- expect
+    // nonce_change to bump it to 2, a concrete state-advancing signal
+    // this is genuinely running the new dispatch, not a stub. ───
+    if (run_nonce_plus_one_and_print("nonce plus one", sender) != 0) {
+        return 1;
+    }
+
+    // ─── test 9: MVM_TZ_CMD_SEND_NATIVE -- a plain native transfer
+    // through its own dedicated command/dispatch (distinct code path from
+    // test 1's MVM_TZ_CMD_EXECUTE, even though the effect is similar).
+    // Use a fresh recipient (0x33...) so the balance/nonce changes in the
+    // printed result are unambiguously attributable to THIS command. ───
+    {
+        uint8_t send_native_recipient[20];
+        memset(send_native_recipient, 0x88, 20);
+        if (run_send_native_and_print("send native", sender, send_native_recipient, 50) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 10: MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN, operation_type=0
+    // (mint) -- a fresh recipient (0x99...) receiving newly-minted native
+    // value, exercised through its own dedicated command/dispatch. ───
+    {
+        uint8_t mint_from[20], mint_to[20];
+        memset(mint_from, 0x11, 20);
+        memset(mint_to, 0x99, 20);
+        if (run_process_native_mint_burn_and_print("native mint", mint_from, mint_to, 77, /*operation_type=*/0) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 11: MVM_TZ_CMD_DEPLOY -- a minimal real deploy (init code
+    // that CODECOPYs+RETURNs a 1-byte STOP runtime body, standard EVM
+    // deploy pattern, nothing metanode-specific). Expect
+    // code_change_count>=1 in the printed result -- the concrete
+    // state-advancing signal that mvm_ta's real linker deploy() path ran,
+    // not just that the dispatch didn't crash. ───
+    {
+        // PUSH1 0x01(len) PUSH1 0x0c(code offset) PUSH1 0x00(destOffset)
+        // CODECOPY PUSH1 0x01(retSize) PUSH1 0x00(retOffset) RETURN
+        // <runtime: STOP>
+        static const uint8_t deploy_ctor[] = {
+            0x60,0x01, 0x60,0x0c, 0x60,0x00, 0x39,
+            0x60,0x01, 0x60,0x00, 0xf3,
+            0x00
+        };
+        if (run_deploy_and_print("deploy (minimal STOP contract)", sender,
+                deploy_ctor, sizeof(deploy_ctor)) != 0) {
             return 1;
         }
     }
