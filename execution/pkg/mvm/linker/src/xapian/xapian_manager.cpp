@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cstdio>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
 #include "xapian/xapian_log.h" // Giả định chứa định nghĩa XapianLog::LogEntry
@@ -1169,26 +1170,70 @@ bool XapianManager::revertUncommittedChanges() {
       // this uncommitted batch, delete what didn't exist before it. See
       // undo_snapshot_'s own doc comment (xapian_manager.h) for the full
       // design and how/when it's populated.
+      // 2026-08-20 (plan §9.29 follow-up): granular per-call bracketing --
+      // a hardware run of this exact loop threw an uncaught
+      // Xapian::DocNotFoundError that escaped ALL THREE surrounding
+      // try/catch layers (this function's own, the caller's, main()'s) and
+      // crashed the whole TA (chcore/musl's std::terminate() path itself
+      // isn't fully implemented -- "Unsupported syscall 130" -- so an
+      // uncaught exception is unrecoverable here, not just noisy). Each
+      // individual Xapian call gets its own try/catch here so the NEXT
+      // hardware run pinpoints exactly which one throws, instead of
+      // needing a second round to add this.
       for (auto &entry : undo_snapshot_) {
         const std::string &nid = entry.first;
         std::optional<Xapian::Document> &pre_image = entry.second;
+        fprintf(stderr, "[xapian_manager][DIAG] revert: resolving nid=%s\n", nid.c_str());
+        fflush(stderr);
         Xapian::docid did = resolveVirtualDocId(nid);
-        if (pre_image.has_value()) {
-          if (did > 0) {
-            db.replace_document(did, *pre_image);
-          } else {
-            // Existed before this batch, but resolveVirtualDocId can't
-            // find it now -- shouldn't happen (nothing removes a doc's
-            // own "Q<id>" term without also deleting the doc itself), but
-            // re-add rather than silently drop real pre-existing data if
-            // it ever does.
-            db.add_document(*pre_image);
+        fprintf(stderr, "[xapian_manager][DIAG] revert: did=%u has_pre_image=%d\n",
+            (unsigned)did, (int)pre_image.has_value());
+        fflush(stderr);
+        try {
+          if (pre_image.has_value()) {
+            if (did > 0) {
+              fprintf(stderr, "[xapian_manager][DIAG] revert: about to replace_document(%u)\n", (unsigned)did);
+              fflush(stderr);
+              db.replace_document(did, *pre_image);
+              fprintf(stderr, "[xapian_manager][DIAG] revert: replace_document OK\n");
+              fflush(stderr);
+            } else {
+              // Existed before this batch, but resolveVirtualDocId can't
+              // find it now -- shouldn't happen (nothing removes a doc's
+              // own "Q<id>" term without also deleting the doc itself), but
+              // re-add rather than silently drop real pre-existing data if
+              // it ever does.
+              fprintf(stderr, "[xapian_manager][DIAG] revert: about to add_document (re-add)\n");
+              fflush(stderr);
+              db.add_document(*pre_image);
+              fprintf(stderr, "[xapian_manager][DIAG] revert: add_document OK\n");
+              fflush(stderr);
+            }
+          } else if (did > 0) {
+            fprintf(stderr, "[xapian_manager][DIAG] revert: about to delete_document(%u)\n", (unsigned)did);
+            fflush(stderr);
+            db.delete_document(did); // did not exist before this batch
+            fprintf(stderr, "[xapian_manager][DIAG] revert: delete_document OK\n");
+            fflush(stderr);
           }
-        } else if (did > 0) {
-          db.delete_document(did); // did not exist before this batch
+        } catch (const Xapian::Error &e) {
+          fprintf(stderr, "[xapian_manager][DIAG] revert: Xapian::Error on nid=%s: %s (type=%s)\n",
+              nid.c_str(), e.get_msg().c_str(), e.get_type());
+          fflush(stderr);
+          // Best-effort: this one entry's undo failed, but don't let it
+          // take down the whole revert (or the TA) -- continue with the
+          // rest of the snapshot.
+        } catch (const std::exception &e) {
+          fprintf(stderr, "[xapian_manager][DIAG] revert: std::exception on nid=%s: %s\n", nid.c_str(), e.what());
+          fflush(stderr);
+        } catch (...) {
+          fprintf(stderr, "[xapian_manager][DIAG] revert: unknown exception on nid=%s\n", nid.c_str());
+          fflush(stderr);
         }
       }
       undo_snapshot_.clear();
+      fprintf(stderr, "[xapian_manager][DIAG] revert: InMemory branch RETURN true\n");
+      fflush(stderr);
       return true;
     }
 

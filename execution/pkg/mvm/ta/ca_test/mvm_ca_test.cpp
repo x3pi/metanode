@@ -29,12 +29,16 @@
 // freshly booted TA with no prior state).
 
 #include "mvm_tz_protocol.h"
+#include "blst.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <ctime>
+#include <string>
+#include <vector>
+#include <map>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -183,6 +187,354 @@ static const uint8_t g_storage_test_value[32] = {
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
     0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x13,0x37};
 
+// ─── minimal Solidity ABI helpers for the SIMPLE_DATABASE_ADDRESS (261)
+// precompile's set(string,string,string)/get(string,string) dispatch --
+// 2026-08-20 (plan §9.31, first of the 4 extension reverse-calls to get
+// REAL data, per plan doc/mvm_tz_protocol.h's own scoping note). Just
+// enough encode/decode for this test's own fixed, short (<=32 bytes)
+// strings -- NOT a general ABI codec (no multi-chunk dynamic data,
+// nested types, etc.), matching this file's own stated scope (diagnostic
+// probe, not a production CA). Selectors are real go-ethereum-standard
+// `keccak256(signature)[0:4]` values (verified via `cast sig`), matching
+// exactly what extension.go's ExtensionGetOrCreateSimpleDb (the real cgo
+// implementation) parses from the same ABI (see that file's abiString).
+static const uint32_t SIMPLEDB_SET_SELECTOR = 0xda465d74; // set(string,string,string)
+static const uint32_t SIMPLEDB_GET_SELECTOR = 0x3e10510b; // get(string,string)
+
+static void abi_write_u256_be(uint8_t *out, uint32_t v) {
+    memset(out, 0, 32);
+    out[28] = (uint8_t)(v >> 24); out[29] = (uint8_t)(v >> 16);
+    out[30] = (uint8_t)(v >> 8);  out[31] = (uint8_t)v;
+}
+static uint32_t abi_read_u256_be(const uint8_t *in) {
+    return ((uint32_t)in[28] << 24) | ((uint32_t)in[29] << 16)
+         | ((uint32_t)in[30] << 8) | (uint32_t)in[31];
+}
+
+// Encodes calldata for a function taking N "string" args, each <=32
+// bytes (fits in a single 32-byte data chunk -- no multi-word strings in
+// this test). Writes selector + ABI head/tail into out, returns total
+// length.
+static uint32_t abi_encode_string_args(uint32_t selector,
+    const std::vector<std::string> &args, uint8_t *out) {
+    out[0] = (uint8_t)(selector >> 24); out[1] = (uint8_t)(selector >> 16);
+    out[2] = (uint8_t)(selector >> 8);  out[3] = (uint8_t)selector;
+    uint32_t n = (uint32_t)args.size();
+    uint32_t off = 4 + n * 32;      // absolute write cursor
+    uint32_t data_cursor = n * 32;  // offset relative to args-area start
+    for (uint32_t i = 0; i < n; i++) {
+        if (args[i].size() > 32) {
+            fprintf(stderr, "[mvm_ca_test] FATAL: abi_encode_string_args: "
+                "arg %u is %zu bytes, >32 unsupported by this minimal codec\n",
+                i, args[i].size());
+            exit(1);
+        }
+        abi_write_u256_be(out + 4 + i * 32, data_cursor);
+        abi_write_u256_be(out + off, (uint32_t)args[i].size());
+        memcpy(out + off + 32, args[i].data(), args[i].size());
+        memset(out + off + 32 + args[i].size(), 0, 32 - args[i].size());
+        off += 64;
+        data_cursor += 64;
+    }
+    return off;
+}
+
+// Decodes N "string" args (<=32 bytes each) from a calldata blob's args
+// area (i.e. blob+4, past the selector). Returns false on any bounds
+// violation -- never trusts a malformed/adversarial payload, matches this
+// file's stated "fail loud over guessing" policy.
+static bool abi_decode_string_args(const uint8_t *args, uint32_t args_len,
+    uint32_t n, std::vector<std::string> &out) {
+    out.clear();
+    for (uint32_t i = 0; i < n; i++) {
+        if ((uint64_t)(i + 1) * 32 > args_len) return false;
+        uint32_t rel_off = abi_read_u256_be(args + i * 32);
+        if ((uint64_t)rel_off + 32 > args_len) return false;
+        uint32_t len = abi_read_u256_be(args + rel_off);
+        if (len > 32 || (uint64_t)rel_off + 32 + len > args_len) return false;
+        out.emplace_back((const char *)(args + rel_off + 32), len);
+    }
+    return true;
+}
+
+// Encodes a single "bool" return value (32-byte word, 0 or 1) -- matches
+// set(...)'s real ABI ("outputs":[{"type":"bool"}]) in extension.go.
+static uint32_t abi_encode_bool(bool v, uint8_t *out) {
+    abi_write_u256_be(out, v ? 1 : 0);
+    return 32;
+}
+
+// Encodes a single "string" return value (<=32 bytes) -- matches
+// get(...)'s real ABI ("outputs":[{"type":"string"}]) in extension.go.
+static uint32_t abi_encode_string_ret(const std::string &s, uint8_t *out) {
+    if (s.size() > 32) {
+        fprintf(stderr, "[mvm_ca_test] FATAL: abi_encode_string_ret: "
+            "%zu bytes, >32 unsupported by this minimal codec\n", s.size());
+        exit(1);
+    }
+    abi_write_u256_be(out, 32);                    // offset
+    abi_write_u256_be(out + 32, (uint32_t)s.size()); // length
+    memcpy(out + 64, s.data(), s.size());
+    memset(out + 64 + s.size(), 0, 32 - s.size());
+    return 96;
+}
+
+// Fake Host-side "simple DB" -- a plain in-process map standing in for
+// what a real Host would persist via its own storage layer (this reverse
+// call's whole point per mvm_tz_protocol.h's doc comment: the TA never
+// touches storage directly here, the Host does). Keyed by "dbName\0key"
+// (NUL can't appear in this test's own fixed ASCII test strings).
+static std::map<std::string, std::string> g_fake_simpledb;
+
+// 2026-08-20 (plan §9.31): a THIRD synthetic contract address, whose code
+// is a generic "calldata forwarder to a fixed precompile address" --
+// copies the tx's own calldata into memory, CALLs SIMPLE_DATABASE_ADDRESS
+// (261 = 0x0105) with it verbatim, then RETURNs whatever that call
+// returns. A standard EVM proxy/forwarder pattern, not metanode-specific.
+// Lets ONE piece of bytecode exercise both set(...) and get(...) just by
+// varying the calldata each EXECUTE call passes in (mvm_tz_execute_req_t
+// already supports a real `input`/`input_len` -- see
+// run_execute_and_print's own signature -- unlike g_contract_code/
+// g_storage_read_code above, which never needed real calldata).
+static const uint8_t g_simpledb_test_addr[20] = {
+    0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,
+    0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55,0x55};
+static const uint8_t g_simpledb_forwarder_code[] = {
+    0x36,                   // CALLDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0x60,0x00,               // PUSH1 0x00 (destOffset)
+    0x37,                   // CALLDATACOPY -- mem[0:cds] = calldata
+    0x60,0x00,               // PUSH1 0x00 (retSize)
+    0x60,0x00,               // PUSH1 0x00 (retOffset)
+    0x36,                   // CALLDATASIZE (argsSize)
+    0x60,0x00,               // PUSH1 0x00 (argsOffset)
+    0x60,0x00,               // PUSH1 0x00 (value)
+    0x61,0x01,0x05,           // PUSH2 0x0105 (addr=261=SIMPLE_DATABASE_ADDRESS)
+    0x5a,                   // GAS
+    0xf1,                   // CALL
+    0x50,                   // POP -- discard success flag (diagnostic
+                             // test, a failure shows up as empty/wrong
+                             // RETURN output instead, visible either way)
+    0x3d,                   // RETURNDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0x60,0x00,               // PUSH1 0x00 (destOffset)
+    0x3e,                   // RETURNDATACOPY -- mem[0:rds] = returndata
+    0x3d,                   // RETURNDATASIZE
+    0x60,0x00,               // PUSH1 0x00 (offset)
+    0xf3                    // RETURN mem[0:rds]
+};
+
+// ─── BLST (2026-08-20, plan §9.31 follow-up: second of the 4 extension
+// reverse-calls with real data) ───
+//
+// Same calldata-forwarder pattern as g_simpledb_forwarder_code above, just
+// targeting precompile 259 (0x0103 = BLST) instead of 261. A FOURTH
+// synthetic contract address (0x66x20) -- kept separate from
+// g_simpledb_test_addr rather than reused, so each test's GlobalStateGet
+// case stays a simple 1:1 address->code lookup.
+static const uint8_t g_blst_test_addr[20] = {
+    0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+    0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66};
+static const uint8_t g_blst_forwarder_code[] = {
+    0x36, 0x60,0x00, 0x60,0x00, 0x37,           // CALLDATASIZE/PUSH1 0/PUSH1 0/CALLDATACOPY
+    0x60,0x00, 0x60,0x00,                       // PUSH1 0 (retSize) / PUSH1 0 (retOffset)
+    0x36, 0x60,0x00, 0x60,0x00,                 // CALLDATASIZE(argsSize)/PUSH1 0(argsOffset)/PUSH1 0(value)
+    0x61,0x01,0x03,                             // PUSH2 0x0103 (addr=259=BLST)
+    0x5a, 0xf1, 0x50,                           // GAS / CALL / POP
+    0x3d, 0x60,0x00, 0x60,0x00, 0x3e,           // RETURNDATASIZE/PUSH1 0/PUSH1 0/RETURNDATACOPY
+    0x3d, 0x60,0x00, 0xf3                       // RETURNDATASIZE/PUSH1 0/RETURN
+};
+
+// verifySign(bytes,bytes,bytes) returns (bool) -- real selector via
+// `cast sig` (foundry), matches extension.go's blstAbiStr exactly (the
+// real cgo implementation's ABI). Args are ABI "bytes" not "string", but
+// the wire encoding is identical (offset+length+right-padded-data) --
+// see abi_encode_bytes_args/abi_decode_bytes_args below, which (unlike
+// abi_encode_string_args/abi_decode_string_args above) support
+// >32-byte args since a compressed G2 signature is 96 bytes.
+static const uint32_t BLST_VERIFY_SIGN_SELECTOR = 0xee57fa59;
+
+static uint32_t abi_encode_bytes_args(uint32_t selector,
+    const std::vector<std::vector<uint8_t>> &args, uint8_t *out) {
+    out[0] = (uint8_t)(selector >> 24); out[1] = (uint8_t)(selector >> 16);
+    out[2] = (uint8_t)(selector >> 8);  out[3] = (uint8_t)selector;
+    uint32_t n = (uint32_t)args.size();
+    uint32_t off = 4 + n * 32;
+    uint32_t data_cursor = n * 32;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t len = (uint32_t)args[i].size();
+        uint32_t padded = ((len + 31) / 32) * 32;
+        abi_write_u256_be(out + 4 + i * 32, data_cursor);
+        abi_write_u256_be(out + off, len);
+        memcpy(out + off + 32, args[i].data(), len);
+        if (padded > len) memset(out + off + 32 + len, 0, padded - len);
+        off += 32 + padded;
+        data_cursor += 32 + padded;
+    }
+    return off;
+}
+
+static bool abi_decode_bytes_args(const uint8_t *args, uint32_t args_len,
+    uint32_t n, std::vector<std::vector<uint8_t>> &out) {
+    out.clear();
+    for (uint32_t i = 0; i < n; i++) {
+        if ((uint64_t)(i + 1) * 32 > args_len) return false;
+        uint32_t rel_off = abi_read_u256_be(args + i * 32);
+        if ((uint64_t)rel_off + 32 > args_len) return false;
+        uint32_t len = abi_read_u256_be(args + rel_off);
+        if ((uint64_t)rel_off + 32 + len > args_len) return false;
+        out.emplace_back(args + rel_off + 32, args + rel_off + 32 + len);
+    }
+    return true;
+}
+
+// Real (self-verified, see /tmp scratch gen_vector.cpp -- not checked in,
+// throwaway generator built against this repo's own vendored
+// pkg/bls/blst/{src,build,bindings} for an x86_64 host tool) BLS12-381
+// min-pubkey-size test vector: sk derived from a fixed IKM via
+// blst_keygen, pk = sk_to_pk_in_g1 compressed (48 bytes), sig =
+// sign_pk_in_g1 over g_blst_test_msg using the SAME DST metanode's own
+// pkg/bls/bls.go uses (dstMinPk), compressed (96 bytes). Not a randomly
+// invented blob -- confirmed valid via blst_core_verify_pk_in_g1 before
+// being embedded here.
+static const uint8_t g_blst_test_pubkey[48] = {
+    0xa9,0x4b,0xe7,0x25,0xaa,0x82,0x37,0x3c,0xeb,0xc0,0x22,0x08,
+    0x6b,0x9e,0xe2,0x14,0x32,0x02,0x6c,0x25,0x80,0xc1,0x7f,0x9d,
+    0xa0,0x26,0x5f,0xd3,0x8c,0xf9,0xe7,0x16,0xdb,0x04,0x1b,0x2d,
+    0x7e,0xd7,0x12,0x8e,0xaa,0x73,0x65,0xcc,0x88,0x86,0x96,0x3a,
+};
+static const uint8_t g_blst_test_sig[96] = {
+    0x93,0xd0,0xdc,0xc2,0x83,0x51,0xfb,0xd6,0xf7,0x2b,0xe6,0x95,
+    0x49,0xb3,0x50,0xa9,0xda,0x3f,0x80,0x8b,0x7b,0xcc,0x33,0x05,
+    0xc1,0x40,0x1a,0xcc,0x2a,0xf8,0x64,0x4a,0x1f,0xf8,0xda,0x1d,
+    0x90,0x1f,0xb7,0x67,0x96,0x91,0x9b,0xfe,0x60,0xf0,0xe3,0x27,
+    0x07,0x9b,0x83,0x4b,0x95,0x4e,0x78,0xd8,0xe0,0x82,0xf1,0x42,
+    0xbf,0x8d,0x35,0x6e,0x6d,0x04,0xb6,0x5d,0x27,0x34,0x4e,0xcb,
+    0x22,0x25,0xde,0xba,0x6b,0xb1,0x34,0x3c,0xcd,0x2d,0xdd,0xbb,
+    0xeb,0xb2,0xa5,0x04,0x24,0xa9,0xe9,0x79,0x32,0x51,0x69,0xad,
+};
+static const char g_blst_test_msg[] = "mvm_ca_test BLST real data (plan section 9.31)";
+static const uint32_t g_blst_test_msg_len = 46;
+
+// Same DST as metanode's own pkg/bls/bls.go (dstMinPk) -- the real
+// verifier MUST use the identical DST the signer used, or verification
+// fails even for a genuinely valid signature.
+static const uint8_t g_blst_dst[] = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+
+// Real BLS12-381 signature verification via libblst -- mirrors
+// pkg/bls/bls.go's VerifySign exactly (min-pubkey-size scheme: pk in G1,
+// sig in G2; sig group-checked, pk NOT group-checked, matching Go's
+// VerifyCompressed(sigGroupcheck=true, pkValidate=false) call).
+static bool blst_verify_sign(const std::vector<uint8_t> &pk,
+    const std::vector<uint8_t> &sig, const std::vector<uint8_t> &msg) {
+    if (pk.size() != 48 || sig.size() != 96) return false;
+    blst_p1_affine pk_aff;
+    if (blst_p1_uncompress(&pk_aff, pk.data()) != BLST_SUCCESS) return false;
+    blst_p2_affine sig_aff;
+    if (blst_p2_uncompress(&sig_aff, sig.data()) != BLST_SUCCESS) return false;
+    if (!blst_p2_affine_in_g2(&sig_aff)) return false; // sig group check
+    BLST_ERROR r = blst_core_verify_pk_in_g1(&pk_aff, &sig_aff, true,
+        msg.data(), msg.size(), g_blst_dst, sizeof(g_blst_dst) - 1, nullptr, 0);
+    return r == BLST_SUCCESS;
+}
+
+// ─── EXTRACT_JSON_FIELD (2026-08-20, plan §9.31 follow-up: third of the
+// 4 extension reverse-calls with real data) ───
+//
+// Same calldata-forwarder pattern as g_simpledb_forwarder_code/
+// g_blst_forwarder_code, targeting precompile 258 (0x0102 =
+// EXTRACT_JSON_FIELD_EXTENSION). A FIFTH synthetic contract address.
+static const uint8_t g_json_test_addr[20] = {
+    0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,
+    0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77,0x77};
+static const uint8_t g_json_forwarder_code[] = {
+    0x36, 0x60,0x00, 0x60,0x00, 0x37,
+    0x60,0x00, 0x60,0x00,
+    0x36, 0x60,0x00, 0x60,0x00,
+    0x61,0x01,0x02,                             // PUSH2 0x0102 (addr=258=EXTRACT_JSON_FIELD_EXTENSION)
+    0x5a, 0xf1, 0x50,
+    0x3d, 0x60,0x00, 0x60,0x00, 0x3e,
+    0x3d, 0x60,0x00, 0xf3
+};
+
+// extractJsonField(string,string) -- extension.go's real
+// ExtensionExtractJsonField doesn't verify this selector against an ABI
+// (it just does bCallData[4:], any 4-byte prefix works), so this is
+// picked for realism (real `cast sig` value) rather than something the
+// Host actually checks -- matches this test's own stated policy of using
+// real tooling over invented values wherever one exists.
+static const uint32_t EXTRACT_JSON_FIELD_SELECTOR = 0x8da776da;
+
+// Single-value ABI "bytes"/"string" return encoder (offset+length+
+// right-padded data, NO 32-byte cap unlike abi_encode_string_ret above --
+// a JSON blob or extracted field can exceed one word). Matches
+// argument_encode.EncodeSingleString's real byte layout exactly
+// (encoder.go: start=32, length, then the raw bytes).
+static uint32_t abi_encode_bytes_ret(const std::vector<uint8_t> &data, uint8_t *out) {
+    uint32_t len = (uint32_t)data.size();
+    uint32_t padded = ((len + 31) / 32) * 32;
+    abi_write_u256_be(out, 32);
+    abi_write_u256_be(out + 32, len);
+    memcpy(out + 64, data.data(), len);
+    if (padded > len) memset(out + 64 + len, 0, padded - len);
+    return 64 + padded;
+}
+
+// Minimal, scope-limited JSON field extractor -- parses a FLAT top-level
+// JSON object ({"key":"value","key2":123,"key3":true,...}, no nesting,
+// no unicode escapes) and returns the named field's value formatted the
+// same way extension.go's real ExtractJsonField does for a scalar value:
+// string -> raw (unquoted) text; bool -> "1"/"0" (that function's own
+// explicit true/false remap); number/null -> its literal JSON text
+// (matches Go's fmt.Sprintf("%v", ...) for a JSON-unmarshaled number,
+// which prints an integer-valued float64 without a decimal point). NOT a
+// general JSON parser -- this test only ever feeds it well-formed flat
+// JSON, so it doesn't replicate extension.go's array-JSON/nested-object
+// fallback branches.
+static bool json_extract_flat_field(const std::string &json,
+    const std::string &field, std::string &out) {
+    size_t i = json.find('{');
+    if (i == std::string::npos) return false;
+    i++;
+    size_t n = json.size();
+    while (i < n) {
+        while (i < n && (json[i] == ' ' || json[i] == '\n' || json[i] == '\t' || json[i] == ',')) i++;
+        if (i >= n || json[i] == '}') break;
+        if (json[i] != '"') return false;
+        i++;
+        size_t key_start = i;
+        while (i < n && json[i] != '"') i++;
+        if (i >= n) return false;
+        std::string key = json.substr(key_start, i - key_start);
+        i++; // closing quote
+        while (i < n && (json[i] == ' ' || json[i] == ':')) i++;
+        bool is_string_value = false;
+        std::string value_str;
+        if (i < n && json[i] == '"') {
+            is_string_value = true;
+            i++;
+            size_t val_start = i;
+            while (i < n && json[i] != '"') i++; // no escape handling
+            if (i >= n) return false;
+            value_str = json.substr(val_start, i - val_start);
+            i++; // closing quote
+        } else {
+            size_t val_start = i;
+            while (i < n && json[i] != ',' && json[i] != '}') i++;
+            value_str = json.substr(val_start, i - val_start);
+            while (!value_str.empty() && (value_str.back() == ' ' || value_str.back() == '\n')) value_str.pop_back();
+        }
+        if (key == field) {
+            if (is_string_value) out = value_str;
+            else if (value_str == "true") out = "1";
+            else if (value_str == "false") out = "0";
+            else out = value_str;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void handle_reverse_call(void) {
     uint32_t header_len = g_channel->header_len;
     uint32_t blob_len = g_channel->blob_len;
@@ -210,6 +562,15 @@ static void handle_reverse_call(void) {
         } else if (header_len >= 40 && memcmp(req_address, g_storage_test_addr, 20) == 0) {
             code = g_storage_read_code;
             code_len = sizeof(g_storage_read_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_simpledb_test_addr, 20) == 0) {
+            code = g_simpledb_forwarder_code;
+            code_len = sizeof(g_simpledb_forwarder_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_blst_test_addr, 20) == 0) {
+            code = g_blst_forwarder_code;
+            code_len = sizeof(g_blst_forwarder_code);
+        } else if (header_len >= 40 && memcmp(req_address, g_json_test_addr, 20) == 0) {
+            code = g_json_forwarder_code;
+            code_len = sizeof(g_json_forwarder_code);
         }
         if (code) {
             // Blob shape (status==1 only): [0] balance(32) [1] nonce(32)
@@ -276,35 +637,149 @@ static void handle_reverse_call(void) {
     // commands, so a future test exercising contract code (not just a pure
     // EOA->EOA native transfer) doesn't hit the FATAL default case. None of
     // these are exercised by THIS test's own transaction (no code at either
-    // synthetic address), so each returns the documented "no result"
-    // shape -- a real, correctly-formed response, just an empty one -- for
-    // now, rather than any speculative fabricated data (matches this
+    // synthetic address), so this returns the documented "no result"
+    // shape -- a real, correctly-formed response, just an empty one --
+    // for now, rather than any speculative fabricated data (matches this
     // function's own stated policy: fail loud/return "not found" over
-    // guessing). Filling in a REAL local HTTP client / JSON parser / BLST
-    // call / key-value store here is future work once an actual contract-
-    // calling test needs one of these to return real data.
-    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API:
-    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD:
-    case MVM_TZ_RCMD_EXTENSION_BLST: {
-        // No fixed header for these 3 (mvm_tz_protocol.h line ~512) --
-        // response is just the blob stream: [0] output bytes. Empty output
-        // (a bare 4-byte zero length prefix) is the documented
-        // Extension_return{nullptr,0} failure case.
-        uint32_t zero_len = 0;
-        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+    // guessing). Filling in a REAL HTTP client here is future work, left
+    // for last on purpose (BLST/EXTRACT_JSON_FIELD/GET_OR_CREATE_SIMPLE_DB
+    // all got real data first, 2026-08-20, plan §9.31 -- see their own
+    // cases below/above).
+    case MVM_TZ_RCMD_EXTENSION_CALL_GET_API: {
+        // No fixed header (mvm_tz_protocol.h line ~512) -- response is
+        // just the raw output bytes verbatim, length via the channel's
+        // own blob_len field (NOT length-prefixed -- confirmed 2026-08-20,
+        // plan §9.31, by reading mvm_reverse_round_trip's actual response
+        // handling in mvm_ta_main.cpp, not the older doc comment here
+        // which wrongly implied a prefix). The true
+        // Extension_return{nullptr,0} failure case is resp_blob_len=0,
+        // full stop -- a previous version of this stub wrote a 4-byte
+        // all-zero blob instead (harmless only because nothing exercised
+        // this cmd yet).
         resp_hdr_len = 0;
-        resp_blob_len = sizeof(zero_len);
+        resp_blob_len = 0;
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD: {
+        // 2026-08-20 (plan §9.31 follow-up): real data, third of the 4
+        // extension reverse-calls (see g_json_test_addr/
+        // json_extract_flat_field's own comments above). Blob = raw ABI
+        // calldata for extractJsonField(string,string) -- same shape
+        // extension.go's real ExtensionExtractJsonField decodes via
+        // argument_encode.DecodeStringInput(bCallData[4:], idx) (NOT
+        // go-ethereum's abi package for this one, but the wire encoding
+        // is identical standard ABI string encoding either way).
+        resp_hdr_len = 0;
+        resp_blob_len = 0; // default: Extension_return{nullptr,0}
+        if (blob_len >= 4) {
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::vector<uint8_t>> byte_args;
+            // extension.go's real handler never checks the selector
+            // (just skips 4 bytes) -- match that here rather than
+            // gatekeeping on EXTRACT_JSON_FIELD_SELECTOR, so this stays
+            // a faithful stand-in for the real Host.
+            if (abi_decode_bytes_args(args, args_len, 2, byte_args)) {
+                std::string json((const char*)byte_args[0].data(), byte_args[0].size());
+                std::string field((const char*)byte_args[1].data(), byte_args[1].size());
+                std::string value;
+                if (json_extract_flat_field(json, field, value)) {
+                    resp_blob_len = abi_encode_bytes_ret(
+                        std::vector<uint8_t>(value.begin(), value.end()), resp_buf);
+                    printf("[mvm_ca_test] ExtractJsonField: json=%s field=%s -> \"%s\"\n",
+                        json.c_str(), field.c_str(), value.c_str());
+                } else {
+                    printf("[mvm_ca_test] ExtractJsonField: field \"%s\" not found in json=%s "
+                        "-- returning empty (Extension_return{nullptr,0})\n",
+                        field.c_str(), json.c_str());
+                }
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] ExtractJsonField: malformed calldata (blob_len=%u) "
+                    "-- returning empty (Extension_return{nullptr,0})\n", blob_len);
+                fflush(stdout);
+            }
+        }
+        break;
+    }
+    case MVM_TZ_RCMD_EXTENSION_BLST: {
+        // 2026-08-20 (plan §9.31 follow-up): real data, second of the 4
+        // extension reverse-calls (see g_blst_test_addr/blst_verify_sign's
+        // own comments above). Same blob-only shape as CALL_GET_API/
+        // EXTRACT_JSON_FIELD (no fixed header) -- blob = raw ABI calldata
+        // for verifySign(bytes,bytes,bytes), the exact ABI extension.go's
+        // real ExtensionBlst decodes via blstAbi.MethodById/
+        // Inputs.UnpackIntoMap.
+        resp_hdr_len = 0;
+        resp_blob_len = 0; // default: Extension_return{nullptr,0}
+        if (blob_len >= 4) {
+            uint32_t selector = ((uint32_t)blob_copy[0] << 24) | ((uint32_t)blob_copy[1] << 16)
+                | ((uint32_t)blob_copy[2] << 8) | (uint32_t)blob_copy[3];
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::vector<uint8_t>> byte_args;
+            if (selector == BLST_VERIFY_SIGN_SELECTOR
+                    && abi_decode_bytes_args(args, args_len, 3, byte_args)) {
+                bool ok = blst_verify_sign(byte_args[0], byte_args[1], byte_args[2]);
+                resp_blob_len = abi_encode_bool(ok, resp_buf);
+                printf("[mvm_ca_test] BLST verifySign: pk=%zuB sig=%zuB msg=%zuB -> %s\n",
+                    byte_args[0].size(), byte_args[1].size(), byte_args[2].size(),
+                    ok ? "VALID" : "invalid");
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] BLST: unrecognized selector=0x%08x or malformed "
+                    "args (blob_len=%u) -- returning empty (Extension_return{nullptr,0})\n",
+                    selector, blob_len);
+                fflush(stdout);
+            }
+        }
         break;
     }
     case MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB: {
-        // Same blob-only shape (mvm_tz_protocol.h line ~521): response
-        // blob is [0] output bytes. Empty output here means "no secondary
-        // DB result" -- correct for this test, which never calls a
-        // contract that touches a secondary Xapian-backed DB.
-        uint32_t zero_len = 0;
-        memcpy(resp_buf, &zero_len, sizeof(zero_len));
+        // 2026-08-20 (plan §9.31): real data, first of the 4 extension
+        // reverse-calls to get it (see g_fake_simpledb/g_simpledb_test_addr's
+        // own comments above). Request header =
+        // mvm_tz_get_or_create_simple_db_req_t{address,mvm_id} (unused --
+        // this test has only one caller/mvm_id); blob = raw ABI calldata
+        // (selector + args), the exact shape extension.go's
+        // ExtensionGetOrCreateSimpleDb (the real cgo implementation)
+        // decodes via go-ethereum's abi.MethodById/Inputs.Unpack. Response
+        // blob is the raw ABI-encoded return value verbatim (no extra
+        // length prefix -- resp_blob_len via the channel's own blob_len
+        // field IS the length, see mvm_reverse_round_trip's response
+        // handling) -- matches convertToCode()'s
+        // Extension_return{data_p,data_size} -> mvm::Code copy exactly.
         resp_hdr_len = 0;
-        resp_blob_len = sizeof(zero_len);
+        resp_blob_len = 0; // default: Extension_return{nullptr,0} ("no result")
+        if (blob_len >= 4) {
+            uint32_t selector = ((uint32_t)blob_copy[0] << 24) | ((uint32_t)blob_copy[1] << 16)
+                | ((uint32_t)blob_copy[2] << 8) | (uint32_t)blob_copy[3];
+            const uint8_t *args = blob_copy + 4;
+            uint32_t args_len = blob_len - 4;
+            std::vector<std::string> strs;
+            if (selector == SIMPLEDB_SET_SELECTOR && abi_decode_string_args(args, args_len, 3, strs)) {
+                const std::string &db = strs[0], &key = strs[1], &value = strs[2];
+                g_fake_simpledb[db + '\0' + key] = value;
+                resp_blob_len = abi_encode_bool(true, resp_buf);
+                printf("[mvm_ca_test] SimpleDb SET db=%s key=%s value=%s -> stored\n",
+                    db.c_str(), key.c_str(), value.c_str());
+                fflush(stdout);
+            } else if (selector == SIMPLEDB_GET_SELECTOR && abi_decode_string_args(args, args_len, 2, strs)) {
+                const std::string &db = strs[0], &key = strs[1];
+                auto it = g_fake_simpledb.find(db + '\0' + key);
+                std::string value = (it != g_fake_simpledb.end()) ? it->second : std::string();
+                resp_blob_len = abi_encode_string_ret(value, resp_buf);
+                printf("[mvm_ca_test] SimpleDb GET db=%s key=%s -> \"%s\" (%s)\n",
+                    db.c_str(), key.c_str(), value.c_str(),
+                    it != g_fake_simpledb.end() ? "found" : "NOT FOUND");
+                fflush(stdout);
+            } else {
+                printf("[mvm_ca_test] SimpleDb: unrecognized selector=0x%08x or malformed "
+                    "args (blob_len=%u) -- returning empty (Extension_return{nullptr,0})\n",
+                    selector, blob_len);
+                fflush(stdout);
+            }
+        }
         break;
     }
     case MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS: {
@@ -342,61 +817,31 @@ static void handle_reverse_call(void) {
 }
 
 
-// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
-// the result. Factored out (2026-08-20) so main() can run it twice: once
-// for the original EOA->EOA native transfer, once for a real contract
-// call (see g_contract_addr/g_contract_code above) -- same protocol
-// mechanics either way, just a different recipient/amount/input. Returns
-// 0 on success, 1 on any failure (mirrors main()'s own prior return
-// convention exactly, just reusable now). ───
-static int run_execute_and_print(const char *label,
-    const uint8_t sender[20], const uint8_t recipient[20],
-    uint64_t amount, const uint8_t *input, uint32_t input_len) {
-    uint8_t tx_hash[32];
-    memset(tx_hash, 0xAB, 32);
+// Writes a uint64 amount right-justified into a 32-byte big-endian field
+// (the wire format every *_req_t's `amount[32]` uses) -- factored out
+// 2026-08-21 to stop re-deriving this 8-line shift sequence in every new
+// run_*_and_print helper below (EXECUTE/SEND_NATIVE/
+// PROCESS_NATIVE_MINT_BURN all take a plain uint64 test amount).
+static void write_amount_be(uint8_t out32[32], uint64_t amount) {
+    memset(out32, 0, 32);
+    out32[24] = (uint8_t)(amount >> 56); out32[25] = (uint8_t)(amount >> 48);
+    out32[26] = (uint8_t)(amount >> 40); out32[27] = (uint8_t)(amount >> 32);
+    out32[28] = (uint8_t)(amount >> 24); out32[29] = (uint8_t)(amount >> 16);
+    out32[30] = (uint8_t)(amount >> 8);  out32[31] = (uint8_t)(amount);
+}
 
-    mvm_tz_execute_req_t req = {0};
-    req.amount[24] = (uint8_t)(amount >> 56); req.amount[25] = (uint8_t)(amount >> 48);
-    req.amount[26] = (uint8_t)(amount >> 40); req.amount[27] = (uint8_t)(amount >> 32);
-    req.amount[28] = (uint8_t)(amount >> 24); req.amount[29] = (uint8_t)(amount >> 16);
-    req.amount[30] = (uint8_t)(amount >> 8);  req.amount[31] = (uint8_t)(amount);
-    req.gas_price = 1;
-    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
-    req.block_prevrandao = 0;
-    req.block_gas_limit = 30000000;
-    req.block_time = (uint64_t)time(nullptr);
-    req.block_base_fee = 1;
-    req.block_number = 1;
-    memset(req.block_coinbase, 0, 20);
-    memset(req.mvm_id, 0, 20);
-    req.is_debug = 1;
-    req.is_cache = 0;
-    req.related_addresses_count = 2;
-
-    static uint8_t blob_scratch[4096];
-    BlobWriter w{blob_scratch};
-    w.writeBytes(sender, 20);
-    w.writeBytes(recipient, 20);
-    w.writeBytes(input, input_len);
-    w.writeBytes(tx_hash, 32);
-    w.writeBytes(sender, 20);    // relatedAddresses[0]
-    w.writeBytes(recipient, 20); // relatedAddresses[1]
-
-    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
-    fflush(stdout);
-
-    mvm_tz_spinlock_lock(&g_channel->lock);
-    memcpy(g_channel->blob_region, &req, sizeof(req));
-    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
-    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
-    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
-    g_channel->header_len = sizeof(req);
-    g_channel->blob_len = w.off;
-    g_channel->seq++;
-    mvm_tz_spinlock_unlock(&g_channel->lock);
-
-    mvm_tz_flag_set(&g_channel->request_ready, 1);
-
+// Waits for mvm_ta's response to whatever request the caller just placed
+// in g_channel (servicing any reverse calls along the way), then decodes
+// +prints the shared ExecuteResult wire format. Factored out of
+// run_execute_and_print (2026-08-21) so the 4 newly-wired forward
+// commands (DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE --
+// mvm_ta_main.cpp's mvm_dispatch_*, added same day) can reuse this exact
+// wait+decode logic instead of re-deriving mvm_tz_protocol.h's
+// "IMPORTANT -- shared by CALL / EXECUTE / DEPLOY / SEND_NATIVE /
+// PROCESS_NATIVE_MINT_BURN / NONCE_PLUS_ONE" ExecuteResult shape by hand
+// for each. Returns 0 on success, 1 on any failure -- same convention
+// run_execute_and_print already had. ───
+static int wait_and_print_execute_result(const char *label) {
     const int TIMEOUT_S = 60;
     for (int round = 0; ; round++) {
         time_t start = time(nullptr);
@@ -524,6 +969,223 @@ static int run_execute_and_print(const char *label,
     return 0;
 }
 
+// ─── send one MVM_TZ_CMD_EXECUTE, service reverse calls, decode+print
+// the result. Factored out (2026-08-20) so main() can run it twice: once
+// for the original EOA->EOA native transfer, once for a real contract
+// call (see g_contract_addr/g_contract_code above) -- same protocol
+// mechanics either way, just a different recipient/amount/input. Returns
+// 0 on success, 1 on any failure (mirrors main()'s own prior return
+// convention exactly, just reusable now). ───
+static int run_execute_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20],
+    uint64_t amount, const uint8_t *input, uint32_t input_len,
+    bool is_cache = false) {
+    uint8_t tx_hash[32];
+    memset(tx_hash, 0xAB, 32);
+
+    mvm_tz_execute_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.gas_price = 1;
+    req.gas_limit = 200000; // headroom for the contract-call case's SSTORE/SLOAD (vs. 21000 for a plain transfer)
+    req.block_prevrandao = 0;
+    req.block_gas_limit = 30000000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    memset(req.block_coinbase, 0, 20);
+    memset(req.mvm_id, 0, 20);
+    req.is_debug = 1;
+    // 2026-08-20 (plan §9.31): SIMPLE_DATABASE_ADDRESS's write-protection
+    // check (processor.cpp: `ctxt->read_only || !gs.is_cache()`) throws
+    // for ANY call to that precompile -- get() included, not just set() --
+    // unless is_cache. Existing tests 1-3 never touch that precompile, so
+    // this new default-false param changes nothing for them.
+    req.is_cache = is_cache ? 1 : 0;
+    req.related_addresses_count = 2;
+
+    static uint8_t blob_scratch[4096];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(recipient, 20);
+    w.writeBytes(input, input_len);
+    w.writeBytes(tx_hash, 32);
+    w.writeBytes(sender, 20);    // relatedAddresses[0]
+    w.writeBytes(recipient, 20); // relatedAddresses[1]
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_EXECUTE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_EXECUTE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// ─── 4 newly-wired forward commands (2026-08-21, same day as
+// mvm_ta_main.cpp's mvm_dispatch_deploy/send_native/
+// process_native_mint_burn/nonce_plus_one -- see mvm_tz_protocol.h's own
+// doc comments on each *_req_t for the exact header/blob shape each
+// mirrors). None of these route through MVM_TZ_CMD_EXECUTE -- each is
+// its own top-level mvm_tz_cmd_t with its own fixed header struct, but
+// all 4 share ExecuteResult as the response (mvm_tz_protocol.h: "shared
+// by CALL / EXECUTE / DEPLOY / SEND_NATIVE / PROCESS_NATIVE_MINT_BURN /
+// NONCE_PLUS_ONE"), so each of these just builds its own request then
+// reuses wait_and_print_execute_result. ───
+
+// mirrors NoncePlusOne() (engine.go:146-158). Blob: [0] bSender (20).
+static int run_nonce_plus_one_and_print(const char *label, const uint8_t sender[20]) {
+    mvm_tz_nonce_plus_one_req_t req = {0};
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_NONCE_PLUS_ONE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_NONCE_PLUS_ONE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors SendNative() (engine.go:113-127). Blob: [0] bSender (20)
+// [1] bContractAddress (20). Mechanically the same shape as a plain
+// native transfer, just through MVM_TZ_CMD_SEND_NATIVE's own dedicated
+// header/dispatch instead of MVM_TZ_CMD_EXECUTE's.
+static int run_send_native_and_print(const char *label,
+    const uint8_t sender[20], const uint8_t recipient[20], uint64_t amount) {
+    mvm_tz_send_native_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(recipient, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_SEND_NATIVE (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_SEND_NATIVE;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors ProcessNativeMintBurn() (engine.go:129-144). Blob: [0] bFrom (20)
+// [1] bTo (20). operation_type: 0=mint, 1=burn (mvm_tz_protocol.h comment).
+static int run_process_native_mint_burn_and_print(const char *label,
+    const uint8_t from[20], const uint8_t to[20], uint64_t amount,
+    uint64_t operation_type) {
+    mvm_tz_process_native_mint_burn_req_t req = {0};
+    write_amount_be(req.amount, amount);
+    req.operation_type = operation_type;
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_cache = 0;
+
+    static uint8_t blob_scratch[256];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(from, 20);
+    w.writeBytes(to, 20);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
+// mirrors Deploy() (engine.go:94-111). Blob: [0] bSender (20)
+// [1] bContractConstructor (length-prefixed) [2] bTxHash (32).
+static int run_deploy_and_print(const char *label, const uint8_t sender[20],
+    const uint8_t *ctor, uint32_t ctor_len) {
+    uint8_t tx_hash[32];
+    memset(tx_hash, 0xCD, 32);
+
+    mvm_tz_deploy_req_t req = {0};
+    write_amount_be(req.amount, 0);
+    req.gas_price = 1;
+    req.gas_limit = 200000;
+    req.block_time = (uint64_t)time(nullptr);
+    req.block_base_fee = 1;
+    req.block_number = 1;
+    req.is_debug = 1;
+    req.is_cache = 0;
+    req.is_off_chain = 0;
+
+    static uint8_t blob_scratch[4096];
+    BlobWriter w{blob_scratch};
+    w.writeBytes(sender, 20);
+    w.writeBytes(ctor, ctor_len);
+    w.writeBytes(tx_hash, 32);
+
+    printf("[mvm_ca_test] sending MVM_TZ_CMD_DEPLOY (%s)\n", label);
+    fflush(stdout);
+
+    mvm_tz_spinlock_lock(&g_channel->lock);
+    memcpy(g_channel->blob_region, &req, sizeof(req));
+    memcpy(g_channel->blob_region + sizeof(req), blob_scratch, w.off);
+    g_channel->cmd = MVM_TZ_CMD_DEPLOY;
+    g_channel->direction = MVM_TZ_DIR_HOST_TO_TA;
+    g_channel->header_len = sizeof(req);
+    g_channel->blob_len = w.off;
+    g_channel->seq++;
+    mvm_tz_spinlock_unlock(&g_channel->lock);
+
+    mvm_tz_flag_set(&g_channel->request_ready, 1);
+    return wait_and_print_execute_result(label);
+}
+
 int main(void) {
     printf("[mvm_ca_test] opening %s\n", DEVICE_NAME);
     int fd = open(DEVICE_NAME, O_RDWR);
@@ -605,6 +1267,137 @@ int main(void) {
     // correctly, which the RETURN output is the real check for). ───
     if (run_execute_and_print("storage read (real pre-existing value)", sender, g_storage_test_addr, 0, nullptr, 0) != 0) {
         return 1;
+    }
+
+    // ─── test 4/5 (2026-08-20, plan §9.31): first of the 4 extension
+    // reverse-calls exercised with REAL data --
+    // MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB via
+    // g_simpledb_test_addr's calldata-forwarder bytecode (see that
+    // constant's own comment) calling SIMPLE_DATABASE_ADDRESS (261)'s
+    // set(...) then get(...). Expect test 5's RETURN output to ABI-decode
+    // to "hello_ta" -- the exact value test 4 wrote via a REAL round trip
+    // through handle_reverse_call()'s new SimpleDb SET/GET branches (not
+    // mvm_ta's own in-process cache -- this precompile has no such cache,
+    // every call is a fresh reverse call to the Host). ───
+    {
+        static uint8_t calldata[512];
+        uint32_t len = abi_encode_string_args(SIMPLEDB_SET_SELECTOR,
+            {"db1", "key1", "hello_ta"}, calldata);
+        if (run_execute_and_print("simpledb set", sender, g_simpledb_test_addr,
+                0, calldata, len, /*is_cache=*/true) != 0) {
+            return 1;
+        }
+    }
+    {
+        static uint8_t calldata[512];
+        uint32_t len = abi_encode_string_args(SIMPLEDB_GET_SELECTOR,
+            {"db1", "key1"}, calldata);
+        if (run_execute_and_print("simpledb get", sender, g_simpledb_test_addr,
+                0, calldata, len, /*is_cache=*/true) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 6 (2026-08-20, plan §9.31 follow-up): BLST extension
+    // reverse-call with REAL data -- g_blst_test_addr's forwarder calls
+    // verifySign(pk, sig, msg) with a genuine, self-verified BLS12-381
+    // signature (see g_blst_test_pubkey/g_blst_test_sig's own comment).
+    // Expect RETURN = ABI bool(true) (32 bytes, last byte 0x01). ───
+    {
+        static uint8_t calldata[512];
+        std::vector<std::vector<uint8_t>> args = {
+            std::vector<uint8_t>(g_blst_test_pubkey, g_blst_test_pubkey + 48),
+            std::vector<uint8_t>(g_blst_test_sig, g_blst_test_sig + 96),
+            std::vector<uint8_t>(g_blst_test_msg, g_blst_test_msg + g_blst_test_msg_len),
+        };
+        uint32_t len = abi_encode_bytes_args(BLST_VERIFY_SIGN_SELECTOR, args, calldata);
+        if (run_execute_and_print("blst verifySign", sender, g_blst_test_addr,
+                0, calldata, len) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 7 (2026-08-20, plan §9.31 follow-up): EXTRACT_JSON_FIELD
+    // extension reverse-call with REAL data -- g_json_test_addr's
+    // forwarder calls extractJsonField(json, "value") against a flat
+    // JSON object, expecting the numeric field's literal text back.
+    // Expect RETURN to ABI-decode to "123" (json_extract_flat_field's own
+    // number-formatting rule: literal JSON text, no quotes). ───
+    {
+        static uint8_t calldata[512];
+        const std::string json_str = "{\"status\":\"ok\",\"value\":123,\"flag\":true}";
+        std::vector<std::vector<uint8_t>> args = {
+            std::vector<uint8_t>(json_str.begin(), json_str.end()),
+            std::vector<uint8_t>({'v','a','l','u','e'}),
+        };
+        uint32_t len = abi_encode_bytes_args(EXTRACT_JSON_FIELD_SELECTOR, args, calldata);
+        if (run_execute_and_print("extract json field", sender, g_json_test_addr,
+                0, calldata, len) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 8 (2026-08-21): MVM_TZ_CMD_NONCE_PLUS_ONE, first of the 4
+    // newly-wired forward commands to get a real hardware round trip
+    // (mvm_ta_main.cpp's mvm_dispatch_nonce_plus_one, added same day).
+    // sender already has nonce=1 from test 1's native transfer -- expect
+    // nonce_change to bump it to 2, a concrete state-advancing signal
+    // this is genuinely running the new dispatch, not a stub. ───
+    if (run_nonce_plus_one_and_print("nonce plus one", sender) != 0) {
+        return 1;
+    }
+
+    // ─── test 9 (2026-08-21, REORDERED ahead of SEND_NATIVE): confirmed
+    // 2026-08-21 that MVM_TZ_CMD_SEND_NATIVE hangs mvm_ta on real hardware
+    // (request sent, both GLOBAL_STATE_GET reverse calls answered, then
+    // stuck forever -- see tz-llm-trustzone/DEPLOYED_STATE.md's "MỚI NHẤT"
+    // entry for the full writeup; root cause not yet found). Moved
+    // PROCESS_NATIVE_MINT_BURN/DEPLOY ahead of it so they still get a
+    // real hardware run this session even though SEND_NATIVE (now last)
+    // is expected to wedge mvm_ta for the rest of this boot. ───
+    // MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN, operation_type=0 (mint) -- a
+    // fresh recipient (0x99...) receiving newly-minted native value,
+    // exercised through its own dedicated command/dispatch. ───
+    {
+        uint8_t mint_from[20], mint_to[20];
+        memset(mint_from, 0x11, 20);
+        memset(mint_to, 0x99, 20);
+        if (run_process_native_mint_burn_and_print("native mint", mint_from, mint_to, 77, /*operation_type=*/0) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 10: MVM_TZ_CMD_DEPLOY -- a minimal real deploy (init code
+    // that CODECOPYs+RETURNs a 1-byte STOP runtime body, standard EVM
+    // deploy pattern, nothing metanode-specific). Expect
+    // code_change_count>=1 in the printed result -- the concrete
+    // state-advancing signal that mvm_ta's real linker deploy() path ran,
+    // not just that the dispatch didn't crash. ───
+    {
+        // PUSH1 0x01(len) PUSH1 0x0c(code offset) PUSH1 0x00(destOffset)
+        // CODECOPY PUSH1 0x01(retSize) PUSH1 0x00(retOffset) RETURN
+        // <runtime: STOP>
+        static const uint8_t deploy_ctor[] = {
+            0x60,0x01, 0x60,0x0c, 0x60,0x00, 0x39,
+            0x60,0x01, 0x60,0x00, 0xf3,
+            0x00
+        };
+        if (run_deploy_and_print("deploy (minimal STOP contract)", sender,
+                deploy_ctor, sizeof(deploy_ctor)) != 0) {
+            return 1;
+        }
+    }
+
+    // ─── test 11 (LAST on purpose, see comment above test 9): MVM_TZ_CMD_
+    // SEND_NATIVE -- known to hang mvm_ta as of 2026-08-21. Placed last so
+    // tests 9/10 above already ran+printed before this one gets a chance
+    // to wedge the TA for the rest of the boot. ───
+    {
+        uint8_t send_native_recipient[20];
+        memset(send_native_recipient, 0x88, 20);
+        if (run_send_native_and_print("send native", sender, send_native_recipient, 50) != 0) {
+            return 1;
+        }
     }
 
     printf("\n[mvm_ca_test] DONE\n");

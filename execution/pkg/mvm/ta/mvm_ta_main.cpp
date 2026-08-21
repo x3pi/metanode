@@ -44,9 +44,15 @@
 //     reading a real full_db_logs/event off this wire gets an empty
 //     result, not corrupted data.
 //   - MVM_TZ_CMD_DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
-//     NONCE_PLUS_ONE: NOT yet wired (mechanically identical to CALL/
-//     EXECUTE's pattern — deferred, not attempted this pass to avoid
-//     rushing unverifiable code).
+//     NONCE_PLUS_ONE: wired 2026-08-21 (mechanically identical to CALL/
+//     EXECUTE's pattern, same ExecuteResult encoding path) — build-clean
+//     on the aarch64-linux-gnu toolchain, NOT yet cross-built against the
+//     real musl/chcore TA toolchain or flashed/exercised on hardware (that
+//     needs tz-llm-trustzone's build_mvm_ta.sh pipeline + a real flash,
+//     out of scope for the x86-only pass that added this code).
+//   - MVM_TZ_CMD_EXECUTE_BATCH: still NOT wired — dead code with no real
+//     caller and no Go-side wire codec either (see mvm_tz_protocol.h's own
+//     comment on mvm_tz_execute_batch_req_t) — deliberately left alone.
 //
 // Built successfully (stripped, 5.1MB) and flashed to real hardware
 // 2026-08-17 (DEPLOYED_STATE.md, tz-llm-trustzone) — but chanmgr's
@@ -73,6 +79,7 @@
 #include <pthread.h>
 #include <atomic>
 #include <vector>
+#include <stdexcept>
 
 // PAGE_SIZE/ROUND_UP already come from chcore/defs.h (included via
 // chcore/syscall.h below) — don't redefine, just use them.
@@ -1150,6 +1157,174 @@ static void mvm_dispatch_execute(const uint8_t *req_header, uint32_t req_header_
     if (related_flat) free(related_flat);
 }
 
+// ───────────────────────── MVM_TZ_CMD_DEPLOY dispatch ─────────────────────────
+// Mechanically identical to mvm_dispatch_call/execute's pattern (2026-08-21,
+// wired alongside SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE — see
+// this file's top comment, previously deferred). Blob order/field types
+// cross-checked against tz_codec.go's encodeDeployReq (Go side) and
+// mvm_tz_protocol.h's own doc comment on mvm_tz_deploy_req_t, not guessed.
+static void mvm_dispatch_deploy(const uint8_t *req_header, uint32_t req_header_len,
+    const uint8_t *req_blob, uint32_t req_blob_len,
+    BlobWriter *resp_blob_writer, mvm_tz_execute_result_hdr_t *resp_hdr_out) {
+
+    if (req_header_len != sizeof(mvm_tz_deploy_req_t)) {
+        fprintf(stderr, "[mvm_ta] DEPLOY: bad header_len=%u want=%zu\n",
+            req_header_len, sizeof(mvm_tz_deploy_req_t));
+        abort();
+    }
+    mvm_tz_deploy_req_t req;
+    memcpy(&req, req_header, sizeof(req));
+
+    BlobReader r{req_blob, req_blob_len};
+    uint32_t n;
+    const uint8_t *b_sender = r.readBytes(&n);           // [0] bSender (20)
+    uint32_t ctor_len;
+    const uint8_t *b_ctor = r.readBytes(&ctor_len);       // [1] bContractConstructor
+    const uint8_t *b_tx_hash = r.readBytes(&n);            // [2] bTxHash (32)
+
+    uint8_t b_block_number[32] = {0};
+    {
+        uint64_t bn = req.block_number;
+        for (int i = 0; i < 8; i++) {
+            b_block_number[31 - i] = (uint8_t)(bn & 0xff);
+            bn >>= 8;
+        }
+    }
+
+    // MVM_B1_CONTEXT_PARAMS: not yet threaded through this protocol
+    // version — pass all-NULL, same as CALL/EXECUTE.
+    ExecuteResult *rs = deploy(
+        (unsigned char *)b_sender, (unsigned char *)b_ctor, (int)ctor_len,
+        (unsigned char *)req.amount,
+        req.gas_price, req.gas_limit,
+        req.block_prevrandao, req.block_gas_limit, req.block_time, req.block_base_fee,
+        b_block_number, (unsigned char *)req.block_coinbase,
+        (unsigned char *)req.mvm_id, (unsigned char *)b_tx_hash,
+        req.is_debug != 0, req.is_cache != 0, req.is_off_chain != 0,
+        nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0
+    );
+
+    mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
+    freeResult(rs);
+}
+
+// ───────────────────────── MVM_TZ_CMD_SEND_NATIVE dispatch ─────────────────────────
+static void mvm_dispatch_send_native(const uint8_t *req_header, uint32_t req_header_len,
+    const uint8_t *req_blob, uint32_t req_blob_len,
+    BlobWriter *resp_blob_writer, mvm_tz_execute_result_hdr_t *resp_hdr_out) {
+
+    if (req_header_len != sizeof(mvm_tz_send_native_req_t)) {
+        fprintf(stderr, "[mvm_ta] SEND_NATIVE: bad header_len=%u want=%zu\n",
+            req_header_len, sizeof(mvm_tz_send_native_req_t));
+        abort();
+    }
+    mvm_tz_send_native_req_t req;
+    memcpy(&req, req_header, sizeof(req));
+
+    BlobReader r{req_blob, req_blob_len};
+    uint32_t n;
+    const uint8_t *b_sender = r.readBytes(&n);  // [0] bSender (20)
+    const uint8_t *b_to = r.readBytes(&n);       // [1] bContractAddress (20)
+
+    uint8_t b_block_number[32] = {0};
+    {
+        uint64_t bn = req.block_number;
+        for (int i = 0; i < 8; i++) {
+            b_block_number[31 - i] = (uint8_t)(bn & 0xff);
+            bn >>= 8;
+        }
+    }
+
+    ExecuteResult *rs = sendNative(
+        (unsigned char *)b_sender, (unsigned char *)b_to, (unsigned char *)req.amount,
+        req.gas_price, req.gas_limit,
+        req.block_prevrandao, req.block_gas_limit, req.block_time, req.block_base_fee,
+        b_block_number, (unsigned char *)req.block_coinbase,
+        (unsigned char *)req.mvm_id, req.is_cache != 0
+    );
+
+    mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
+    freeResult(rs);
+}
+
+// ───────────────────────── MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN dispatch ─────────────────────────
+static void mvm_dispatch_process_native_mint_burn(const uint8_t *req_header, uint32_t req_header_len,
+    const uint8_t *req_blob, uint32_t req_blob_len,
+    BlobWriter *resp_blob_writer, mvm_tz_execute_result_hdr_t *resp_hdr_out) {
+
+    if (req_header_len != sizeof(mvm_tz_process_native_mint_burn_req_t)) {
+        fprintf(stderr, "[mvm_ta] PROCESS_NATIVE_MINT_BURN: bad header_len=%u want=%zu\n",
+            req_header_len, sizeof(mvm_tz_process_native_mint_burn_req_t));
+        abort();
+    }
+    mvm_tz_process_native_mint_burn_req_t req;
+    memcpy(&req, req_header, sizeof(req));
+
+    BlobReader r{req_blob, req_blob_len};
+    uint32_t n;
+    const uint8_t *b_from = r.readBytes(&n);  // [0] bFrom (20)
+    const uint8_t *b_to = r.readBytes(&n);     // [1] bTo (20)
+
+    uint8_t b_block_number[32] = {0};
+    {
+        uint64_t bn = req.block_number;
+        for (int i = 0; i < 8; i++) {
+            b_block_number[31 - i] = (uint8_t)(bn & 0xff);
+            bn >>= 8;
+        }
+    }
+
+    ExecuteResult *rs = processNativeMintBurn(
+        (unsigned char *)b_from, (unsigned char *)b_to, (unsigned char *)req.amount,
+        req.operation_type,
+        req.gas_price, req.gas_limit,
+        req.block_prevrandao, req.block_gas_limit, req.block_time, req.block_base_fee,
+        b_block_number, (unsigned char *)req.block_coinbase,
+        (unsigned char *)req.mvm_id, req.is_cache != 0
+    );
+
+    mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
+    freeResult(rs);
+}
+
+// ───────────────────────── MVM_TZ_CMD_NONCE_PLUS_ONE dispatch ─────────────────────────
+static void mvm_dispatch_nonce_plus_one(const uint8_t *req_header, uint32_t req_header_len,
+    const uint8_t *req_blob, uint32_t req_blob_len,
+    BlobWriter *resp_blob_writer, mvm_tz_execute_result_hdr_t *resp_hdr_out) {
+
+    if (req_header_len != sizeof(mvm_tz_nonce_plus_one_req_t)) {
+        fprintf(stderr, "[mvm_ta] NONCE_PLUS_ONE: bad header_len=%u want=%zu\n",
+            req_header_len, sizeof(mvm_tz_nonce_plus_one_req_t));
+        abort();
+    }
+    mvm_tz_nonce_plus_one_req_t req;
+    memcpy(&req, req_header, sizeof(req));
+
+    BlobReader r{req_blob, req_blob_len};
+    uint32_t n;
+    const uint8_t *b_sender = r.readBytes(&n);  // [0] bSender (20)
+
+    uint8_t b_block_number[32] = {0};
+    {
+        uint64_t bn = req.block_number;
+        for (int i = 0; i < 8; i++) {
+            b_block_number[31 - i] = (uint8_t)(bn & 0xff);
+            bn >>= 8;
+        }
+    }
+
+    ExecuteResult *rs = noncePlusOne(
+        (unsigned char *)b_sender,
+        req.gas_price, req.gas_limit,
+        req.block_prevrandao, req.block_gas_limit, req.block_time, req.block_base_fee,
+        b_block_number, (unsigned char *)req.block_coinbase,
+        (unsigned char *)req.mvm_id, req.is_cache != 0
+    );
+
+    mvm_encode_execute_result(rs, resp_hdr_out, resp_blob_writer);
+    freeResult(rs);
+}
+
 // ───────────────────────── main dispatch loop ─────────────────────────
 //
 // Design note (see mvm_reverse_round_trip's comment for the full
@@ -1210,9 +1385,22 @@ static void mvm_ta_run(void) {
         case MVM_TZ_CMD_EXECUTE:
             mvm_dispatch_execute(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
             break;
-        // MVM_TZ_CMD_DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/
-        // NONCE_PLUS_ONE: not yet wired (see this file's top comment) —
-        // fall through to the default error response below.
+        case MVM_TZ_CMD_DEPLOY:
+            mvm_dispatch_deploy(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
+            break;
+        case MVM_TZ_CMD_SEND_NATIVE:
+            mvm_dispatch_send_native(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
+            break;
+        case MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN:
+            mvm_dispatch_process_native_mint_burn(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
+            break;
+        case MVM_TZ_CMD_NONCE_PLUS_ONE:
+            mvm_dispatch_nonce_plus_one(req_header_copy, header_len, req_blob_copy, blob_len, &w, &resp_hdr);
+            break;
+        // MVM_TZ_CMD_EXECUTE_BATCH: dead code today (see cmd enum comment
+        // in mvm_tz_protocol.h — no real caller, no Go-side codec either)
+        // — falls through to the default error response below, unlike the
+        // 4 commands above.
         default:
             handled = false;
             fprintf(stderr, "[mvm_ta] cmd=%d not yet implemented\n", cmd);
@@ -1238,31 +1426,173 @@ static void mvm_ta_run(void) {
     }
 }
 
-// 2026-08-20 (plan §9.29): a Xapian InMemory-backend hardware selftest
-// (mvm_ta_xapian_inmemory_selftest()) was added and run here -- it crashed
-// mvm_ta immediately at startup on real hardware (faulting address 0x82,
-// confirmed via UART on the very next boot). Removed rather than debugged
-// in place: getting the board back to a known-good boot was the priority
-// once the crash was confirmed NOT to be a flash/idbloader-level problem
-// (a full golden-image recovery + reflash of the exact same image still
-// crashed identically, and Linux/kernel/procmgr all boot fine up to the
-// point mvm_launcher launches mvm_ta -- the crash is inside this TA
-// binary specifically). Root cause NOT YET DETERMINED: could be the
-// selftest's own code (e.g. mvm::Address/mvm::from_big_endian usage) or a
-// genuine difference in the cross-compiled (musl/aarch64) libxapian.a's
-// InMemory backend support vs. the x86 system libxapian the equivalent
-// host-side test (scratchpad-only, not checked in) verified cleanly. See
-// memory mvm-ta-evm-interpreter-nullptr-crash's sibling notes / plan doc
-// §9.29 for the investigation to redo before re-attempting this selftest
-// on hardware -- next time, add printf bracketing INSIDE the selftest
-// body (before/after each Xapian call) rather than only around it, so a
-// crash pinpoints the exact call immediately instead of needing a second
-// round.
+// 2026-08-20 (plan §9.29 follow-up): the Xapian InMemory hardware
+// selftest (round 2, per-call bracketing) ROOT-CAUSED the crash --
+// removed after that, see memory xapian-inmemory-ta-backend-fix and plan
+// doc §9.29's final entry for the full story. Summary: getInstance()/
+// write/commit/read/revert's delete_document() ALL succeeded correctly
+// (confirmed via UART bracketing) -- the crash is specifically
+// `get_overlayed_document()` (xapian_manager.cpp) throwing
+// `Xapian::DocNotFoundError("Document not found")` when re-reading a
+// just-deleted doc, a THROW STATEMENT IN METANODE'S OWN SOURCE that is
+// immediately wrapped by a textually-matching `catch (const
+// Xapian::DocNotFoundError&)` one frame up in get_data() -- yet still
+// reaches std::terminate() uncaught. Root cause: libxapian.a (and
+// libtbb.a/libz.a) were cross-built with a DIFFERENT GCC generation
+// (13.3.0-era, per this project's own 2026-08-17 build notes) than
+// everything else linked into mvm_ta (GCC 11.5.0 via musl-gcc) -- a
+// cross-GCC-version C++ exception-handling ABI mismatch, not a logic bug.
+// Constructing a Xapian::DocNotFoundError calls into Xapian's own
+// (GCC13-compiled) Error base class; a GCC11-compiled catch clause's RTTI
+// comparison against that object's type_info can fail even when the
+// source-level types match exactly. Real fix needs rebuilding Xapian
+// (+ TBB/zlib) with the SAME GCC 11.5.0 toolchain as everything else --
+// flagged as an open risk back in 2026-08-17, never addressed until this
+// crash surfaced it for real. NOT attempted in this session (large,
+// separate task, needs its own dedicated pass) -- do not re-add this
+// selftest (or attempt the real GET_LATEST_FULL_DB_LOGS auto-trigger,
+// which would hit the exact same ABI issue the first time it needs to
+// distinguish "found" from "not found") until Xapian is rebuilt with a
+// matching GCC generation.
+//
+// 2026-08-20 (round 3, same day): CORRECTION to the above -- re-checked
+// the actual .comment section (embedded compiler version string) of the
+// CURRENTLY-DEPLOYED libxapian.a/libz.a via readelf before rebuilding
+// anything, instead of trusting the 2026-08-17 build notes referenced
+// above. Both are ALREADY GCC 11.4.0 (matching musl-gcc, not 13.3.0 as
+// documented) -- xapian_zlib_pic_rebuild/build_pic.sh's 2026-08-17
+// TEXTREL fix used the real chcore musl-gcc and evidently rebuilt both
+// cleanly with it, but nobody re-checked the compiler version after that
+// fix landed, so the earlier (now-stale) documentation was never
+// corrected. The ACTUAL remaining mismatch was libtbb.a alone, still
+// GCC 13.3.0 (never touched by that TEXTREL fix, which only covered
+// zlib+xapian). This matters here specifically because
+// xapian_manager.h/xapian_registry.h/state.h all use
+// tbb::concurrent_hash_map directly -- a GCC13-built TBB linked
+// alongside GCC11-built code that constructs/throws C++ exceptions
+// (Xapian::DocNotFoundError included) is a plausible corruptor of
+// process-wide exception handling, not something scoped to Xapian's own
+// throw sites. Rebuilt libtbb.a from the same oneTBB 2021.11.0 source
+// (scripts/kick-the-tires/cpp13-metanode-deps still has cpp13/gcc13
+// backed up as libtbb.a.gcc13-backup) using the SAME GCC 11.5.0
+// musl-cross toolchain that stages this build's own libstdc++ headers
+// (/home/pi/musl-cross-build-scratch-gcc11 on the host) -- confirmed via
+// readelf the new libtbb.a is GCC 11.5.0, confirmed PIC/no-TEXTREL via a
+// -Wl,-z,text shared-object link, and the full mvm_ta relink against it
+// succeeded cleanly. Round-3 selftest below re-runs the EXACT x86-proven
+// scenario (getInstance/new_document/commitBufferForTxHash/get_data-
+// before-revert/revertUncommittedChanges/get_data-after-revert, the one
+// whose last call previously crashed) with the same per-call bracketing
+// as round 2, to confirm on real hardware whether the TBB rebuild alone
+// fixes it -- remove this selftest once confirmed either way, per the
+// same restore-board-stability discipline used after rounds 1 and 2.
+#include "xapian/xapian_manager.h"
+#include "xapian/xapian_registry.h"
+#include "mvm/address.h"
+#include "mvm/util.h"
+
+static void mvm_ta_xapian_inmemory_selftest3(void) {
+    fprintf(stderr, "[xapian_selftest3] START\n"); fflush(stderr);
+
+    uint8_t raw_addr[20];
+    memset(raw_addr, 0x55, sizeof(raw_addr));
+    mvm::Address real_addr = mvm::from_big_endian(raw_addr, 20u);
+
+    std::shared_ptr<XapianManager> manager;
+    fprintf(stderr, "[xapian_selftest3] about to getInstance\n"); fflush(stderr);
+    try {
+        manager = XapianManager::getInstance("test_db", real_addr, false);
+    } catch (const Xapian::Error &e) {
+        fprintf(stderr, "[xapian_selftest3] getInstance THREW Xapian::Error: %s\n", e.get_msg().c_str());
+        fflush(stderr);
+        return;
+    } catch (...) {
+        fprintf(stderr, "[xapian_selftest3] getInstance THREW (unknown)\n"); fflush(stderr);
+        return;
+    }
+    fprintf(stderr, "[xapian_selftest3] getInstance OK, manager=%p\n", (void*)manager.get()); fflush(stderr);
+    if (!manager) return;
+
+    uint256_t tx_hash = 0x1111;
+    fprintf(stderr, "[xapian_selftest3] about to new_document\n"); fflush(stderr);
+    std::string docid = manager->new_document("hello-inmemory", 1, nullptr, &tx_hash);
+    fprintf(stderr, "[xapian_selftest3] new_document OK docid=%s\n", docid.c_str()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to commitBufferForTxHash\n"); fflush(stderr);
+    registry.commitBufferForTxHash(&tx_hash);
+    fprintf(stderr, "[xapian_selftest3] commitBufferForTxHash OK\n"); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to get_data (before revert)\n"); fflush(stderr);
+    std::string data_before = manager->get_data(docid, 1, nullptr, nullptr);
+    fprintf(stderr, "[xapian_selftest3] get_data before revert OK = \"%s\"\n", data_before.c_str()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to revertUncommittedChanges\n"); fflush(stderr);
+    bool revert_ok = manager->revertUncommittedChanges();
+    fprintf(stderr, "[xapian_selftest3] revertUncommittedChanges OK = %d\n", (int)revert_ok); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] about to get_data (after revert) -- "
+        "THIS IS THE CALL THAT CRASHED IN ROUND 2\n"); fflush(stderr);
+    std::string data_after = manager->get_data(docid, 1, nullptr, nullptr);
+    fprintf(stderr, "[xapian_selftest3] get_data after revert OK = \"%s\" (empty=%d, expect empty=1)\n",
+        data_after.c_str(), (int)data_after.empty()); fflush(stderr);
+
+    fprintf(stderr, "[xapian_selftest3] DONE -- all calls returned without crashing\n"); fflush(stderr);
+}
+
+// 2026-08-21 (tz-llm-trustzone DEPLOYED_STATE.md "DEFINITIVE answer" entry):
+// isolated, minimal throw/catch self-test. RESULT (confirmed on real
+// hardware via UART, root-caused, no longer an open question): C++
+// exception throw/catch is genuinely broken in this TA build -- the
+// `throw` below fires, but `catch (const std::exception &e)` right next to
+// it, same function, same compilation unit, never runs. libstdc++'s
+// default std::terminate() handler fires instead ("terminate called after
+// throwing an instance of 'std::runtime_error'"), and the TA hangs forever
+// afterward (abort()'s signal handling apparently doesn't work either in
+// this chcore/musl environment).
+//
+// !!! DO NOT call this from main()/at TA startup !!! It CRASHES THE TA
+// UNCONDITIONALLY, and because mvm_ta launches automatically very early in
+// every single boot (before the Linux kernel's own boot banner -- see
+// "[mvm_ta] starting" timing in plan doc history), calling this
+// unconditionally hangs the ENTIRE BOARD BOOT, 100% reproducible, not
+// flaky (confirmed the hard way -- see DEPLOYED_STATE.md for the
+// misdiagnosis-then-correction story). Kept here, unused, purely as a
+// regression/reference probe: if a future fix to the toolchain/build ever
+// claims to have fixed C++ exception handling in this environment, wire
+// this back in (behind a flag, NOT unconditionally in main()) to verify
+// before trusting it -- don't just assume.
+static void mvm_ta_exception_selftest(void) __attribute__((unused));
+static void mvm_ta_exception_selftest(void) {
+    fprintf(stderr, "[TZLLM_TRACE] exception_selftest: before throw\n");
+    fflush(stderr);
+    try {
+        throw std::runtime_error("mvm_ta_exception_selftest probe");
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[TZLLM_TRACE] exception_selftest: PASS (caught: %s)\n", e.what());
+        fflush(stderr);
+        return;
+    } catch (...) {
+        fprintf(stderr, "[TZLLM_TRACE] exception_selftest: PASS (caught via ...)\n");
+        fflush(stderr);
+        return;
+    }
+    // Unreachable if either catch above fired -- if execution ever gets
+    // here, the throw statement itself returned instead of unwinding,
+    // which would be its own distinct (very strange) finding.
+    fprintf(stderr, "[TZLLM_TRACE] exception_selftest: FELL THROUGH (throw didn't unwind at all!)\n");
+    fflush(stderr);
+}
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[mvm_ta] starting\n");
     fflush(stdout);
+
+    // mvm_ta_exception_selftest() deliberately NOT called here -- see its
+    // own doc comment above: it unconditionally crashes the TA (confirmed
+    // C++ exceptions don't work in this build), which hangs the entire
+    // board boot since mvm_ta launches this early. Left defined+unused as
+    // a reference probe only.
 
     // NOTE (2026-08-18): this used to pin the thread to CPU 0 here,
     // guessing the g_tzasc_cma_meta_paddr==0 BUG_ON was a cross-core
@@ -1281,6 +1611,16 @@ int main(int argc, char **argv) {
     // MVM_SetDebugFileLoggingEnabled()'s doc comment (mvm_linker.hpp) and
     // memory mvm-ta-evm-interpreter-nullptr-crash for the full story.
     MVM_SetDebugFileLoggingEnabled(false);
+
+    // 2026-08-20 (round 3, plan §9.32): mvm_ta_xapian_inmemory_selftest3()
+    // was called here to verify the GCC-11.5.0-rebuilt libtbb.a fix -- NOT
+    // re-enabled after that flash attempt hit board-level instability
+    // (idbloader corruption, then a much-earlier ChCore-kernel hang) that
+    // never reached the point of actually running this selftest (chanmgr
+    // launches mvm_ta near the end of boot; the hangs were all well
+    // before that). Inconclusive, not root-caused to this change or
+    // ruled out -- see the function's own doc comment and plan §9.32 for
+    // the full story before re-enabling.
 
     mvm_channel_init();
     mvm_ta_run();

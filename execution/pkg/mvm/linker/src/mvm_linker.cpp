@@ -1077,7 +1077,16 @@ ExecuteResult *processNativeMintBurn(
 
       // Kiểm tra balance đủ để burn
       if (fromAc.acc.get_balance() < amount) {
-        throw std::runtime_error("insufficient balance for burn");
+        // 2026-08-21: same fix as sendNative() above -- do NOT throw, C++
+        // exceptions are confirmed broken in this TA build (see
+        // tz-llm-trustzone/DEPLOYED_STATE.md). Build the error result
+        // directly instead.
+        mvm::ExecResult error_result;
+        error_result.er = mvm::ExitReason::threw;
+        error_result.ex = mvm::Exception::Type::ErrExecutionReverted;
+        error_result.exmsg = "insufficient balance for burn";
+        ExecuteResult *rs = processResult(error_result, gs, log_handler);
+        return rs;
       }
 
       fromAc.acc.set_balance(fromAc.acc.get_balance() - amount);
@@ -1142,7 +1151,24 @@ sendNative(unsigned char *b_from, unsigned char *b_to, unsigned char *b_amount,
     auto toAc = gs.get(to, nullptr);
 
     if (fromAc.acc.get_balance() < amount) {
-      throw std::runtime_error("insufficient balance for sendNative");
+      // 2026-08-21: do NOT throw here -- confirmed on real hardware (see
+      // tz-llm-trustzone/DEPLOYED_STATE.md "DEFINITIVE answer" entry) that
+      // C++ exception throw/catch is genuinely broken in the mvm_ta build
+      // (a `throw` here used to hang the TA forever: it fired, but the
+      // `catch (const std::exception&)` right below never ran --
+      // libstdc++'s std::terminate() fired instead and the process hung).
+      // Build the same error ExecResult handleException() would have
+      // built, directly, with zero C++ exception machinery involved --
+      // this exact shape is what the TA needs to produce a real "reverted"
+      // response instead of silently hanging on an everyday, expected
+      // condition (insufficient balance is not a bug, it's normal EVM
+      // behavior that must produce a clean error result).
+      mvm::ExecResult error_result;
+      error_result.er = mvm::ExitReason::threw;
+      error_result.ex = mvm::Exception::Type::ErrExecutionReverted;
+      error_result.exmsg = "insufficient balance for sendNative";
+      ExecuteResult *rs = processResult(error_result, gs, log_handler);
+      return rs;
     }
 
     fromAc.acc.set_balance(fromAc.acc.get_balance() - amount);

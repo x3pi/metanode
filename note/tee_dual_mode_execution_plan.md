@@ -772,9 +772,17 @@ sạch (2/2), `PROJECT_STRUCTURE.md` đã cập nhật.
     chỉ giữa 2 lượt, phải gọi `mvm.ClearAllStateInstances()` giữa 2 lượt để tránh rò rỉ
     State-singleton (xem mục 3.4) — xác nhận log `[State] Clearing all N cached State
     instances` xuất hiện đúng chỗ. Xác nhận sạch ở `-count=5`.
+  - [x] **Phần loopback, dải block THẬT (2026-08-20):** `cmd/tool/tz_replay_check` — dựng 1
+    private chain thật (single-validator, `deploy/systemd/gen_single_chain.py`), gửi tx thật
+    (deploy+store SimpleStorage qua `cmd/tool/tx_sender` có sẵn) để có 1 dải block ĐÃ COMMIT
+    thật, replay lại qua `pkg/block_validator.ProcessBlock` thật (trước đó 0 caller trong toàn
+    repo) 2 lần độc lập trên 2 bản sao dữ liệu tách biệt — khớp **100% byte-for-byte** trên 9
+    block/8 tx thật, kiểm chứng ngược xác nhận (dải thiếu block/root sửa tay đều bị báo
+    mismatch đúng). Xem §9.36 cho chi tiết + 2 bug thật phát hiện dọc đường.
   - [ ] **Phần TA thật:** replay cùng dải trên TA thật (cần GĐ3 xong trước) — chưa làm, cần
     board. Loại block gọi `ExtensionCallGetApi` khỏi so byte-for-byte (nguồn không-determinism
-    có từ trước, không phải lỗi riêng TZ mode).
+    có từ trước, không phải lỗi riêng TZ mode) — đã có cơ chế đếm
+    (`mvm.ExtensionCallGetApiCallCount`), `cmd/tool/tz_replay_check` đã tự động loại.
 - **GĐ5 — Bring-up 1 node thật:** chạy `execution_mode=trustzone` cạnh cluster `normal`,
   benchmark TPS thực tế, cập nhật `PROJECT_STRUCTURE.md`.
 
@@ -1701,3 +1709,758 @@ Chi tiết đầy đủ: memory `xapian-inmemory-ta-backend-fix`.
 musl/aarch64. Trước khi thử lại self-test: bracket TỪNG lệnh gọi Xapian riêng lẻ (không chỉ
 trước/sau cả hàm), và cân nhắc khả năng lỗi nằm ở chính `mvm::Address`/`mvm::from_big_endian`
 (chưa từng dùng đúng shape này trên TA trước đây) chứ không phải Xapian.
+
+## §9.30 — Root cause thật của crash §9.29: lệch phiên bản GCC giữa `libxapian.a` và phần còn lại của TA (2026-08-20)
+
+Thêm lại self-test (round 2) với bracket `fprintf`/`fflush` quanh TỪNG lệnh gọi Xapian riêng lẻ
+(không chỉ quanh cả hàm như round 1) — tái hiện đúng lớp crash cũ, nhưng lần này định vị chính
+xác được: `terminate called after throwing an instance of 'Xapian::DocNotFoundError'` rồi
+`Unsupported syscall 130, bye.` (chcore/musl chưa cài đặt đầy đủ đường `terminate`/`abort`, nên
+1 exception C++ không bắt được lộ ra ngoài trông y hệt crash NULL-deref). Định vị chính xác về
+`xapian_manager.cpp`'s `get_overlayed_document()` (~dòng 679): `throw
+Xapian::DocNotFoundError("Document not found");` — throw trong chính source của metanode, được
+bọc ngay 1 tầng trên bởi `catch (const Xapian::DocNotFoundError&)` GIỐNG HỆT về mặt chữ trong
+`get_data()` — vậy mà vẫn thoát ra không bắt được.
+
+**Root cause**: `libxapian.a` (+`libtbb.a`/`libz.a`) được cross-build bằng toolchain GCC
+13.3.0-era (đã cảnh báo là rủi ro mở, chưa xử lý, trong build note 2026-08-17 của chính project
+này), trong khi toàn bộ phần còn lại link vào `mvm_ta` (c_mvm, linker, `mvm_ta_main.cpp`) dùng
+GCC 11.5.0 qua `musl-gcc`. Dựng `Xapian::DocNotFoundError` gọi vào class cơ sở `Xapian::Error`
+được biên dịch bởi GCC13 của chính Xapian; so khớp RTTI/`type_info` của 1 `catch` biên dịch bởi
+GCC11 với object được throw đó có thể thất bại qua ranh giới ABI xử lý exception khác major
+version GCC như vậy, dù kiểu ở mức source giống hệt nhau cả 2 phía. Đây KHÔNG phải bug logic của
+fix 3-lớp — là lệch toolchain ảnh hưởng MỌI exception do Xapian ném ra, không riêng gì lệnh này.
+
+**Fix thật** (chưa làm, xác định là việc riêng, lớn, phạm vi tách biệt): rebuild
+`libxapian.a`/`libtbb.a`/`libz.a` bằng đúng thế hệ GCC 11.5.0 dùng cho phần còn lại của TA. Cho
+tới khi đó, không wire bất kỳ đường đi nào để Xapian tự throw và trông đợi catch hoạt động — điều
+này cũng chặn auto-trigger `MVM_TZ_RCMD_GET_LATEST_FULL_DB_LOGS` (§9.28 mục 6), vì phân biệt
+"found"/"not found" qua Xapian dựa đúng vào cơ chế này.
+
+Gỡ self-test lần 2 sau khi root-cause xong, rebuild+reflash board về lại trạng thái ổn định (fix
+3-lớp còn nguyên, không có self-test) — xem `DEPLOYED_STATE.md` cho checkpoint xác nhận sạch.
+Chi tiết đầy đủ + cách áp dụng: memory `xapian-inmemory-ta-backend-fix` (đã cập nhật).
+
+## §9.32 — Round 3 (thử fix thật): rebuild `libtbb.a` bằng GCC 11.5.0 — BẤT ỔN trên hardware, REVERT, chưa kết luận
+
+Thử làm fix thật cho §9.30. Phát hiện quan trọng khi kiểm tra lại: đọc `.comment` section thật
+(`readelf -p .comment`) của `libxapian.a`/`libz.a` đang dùng cho thấy chúng **ĐÃ LÀ GCC 11.4.0**
+từ trước (round-1 TEXTREL fix 2026-08-17, `xapian_zlib_pic_rebuild/build_pic.sh`, dùng đúng
+musl-gcc thật) — đính chính lại §9.30's kết luận (dựa vào doc cũ, không tự kiểm tra) rằng cả 3 lib
+đều GCC13. **Chỉ `libtbb.a` còn lệch GCC 13.3.0.** Vì `xapian_manager.h`/`xapian_registry.h`/
+`state.h` đều dùng thẳng `tbb::concurrent_hash_map`, TBB lệch version là ứng viên hợp lý hơn cho
+crash exception-ABI đã thấy, không nhất thiết phải là Xapian tự nó.
+
+Rebuild `libtbb.a` (oneTBB 2021.11.0, source vẫn còn nguyên trong scratchpad phiên trước) bằng
+đúng toolchain GCC 11.5.0 (`/home/pi/musl-cross-build-scratch-gcc11`, cùng toolchain đã stage
+header libstdc++ cho build này) — build sạch, `.comment` xác nhận GCC 11.5.0, PIC/no-TEXTREL xác
+nhận qua `-Wl,-z,text` shared-object link, `mvm_ta` relink thành công. Thêm self-test round 3
+(bracket per-call như round 2) tái hiện đúng kịch bản x86-proven (getInstance/new_document/
+commitBufferForTxHash/get_data-trước-revert/revertUncommittedChanges/get_data-sau-revert — lệnh
+cuối chính là lệnh crash ở round 2) để kiểm chứng thật.
+
+**Kết quả: BẤT ỔN trên hardware, KHÔNG kết luận được, đã REVERT.** Flash round-3 lần đầu → board
+im lặng hoàn toàn → hoá ra idbloader/GPT hỏng (`[Vendor ERROR]: Boot device type is invalid!`) →
+`recover-golden-image.sh` sửa xong → power-cycle lần 1: boot thật sự tiến xa (DDR → U-Boot → ATF →
+OP-TEE → `[ChCore] create initial thread done`) rồi KẸT tại `SYS_rt_sigprocmask` → 2 lần cắm
+nguồn tiếp theo: im lặng hoàn toàn (tệ hơn, không cả tới DDR banner). So sánh FIT sub-image xác
+nhận U-Boot/ATF/fdt giống hệt bản trước, chỉ optee (chứa mvm_ta+libtbb.a mới) khác.
+
+**Đánh giá nguyên nhân**: điểm kẹt xảy ra RẤT SỚM trong ChCore kernel — trước cả khi `chanmgr`
+launch `mvm_ta`. Về cơ chế, `libtbb.a`/`mvm_ta`/self-test round 3 không thể là nguyên nhân trực
+tiếp ở giai đoạn này (chưa chạy tới). Khớp hơn với rủi ro kênh flash USB flaky đã biết từ trước
+(tz-llm-trustzone's CLAUDE.md: ~10-20% lỗi mỗi lần ghi; majority-vote-3 chỉ bảo vệ phần
+uboot/boot_linux, không bảo vệ idbloader/GPT). Revert checkpoints về bản round-2 ổn định trước đó,
+flash lại qua đúng kênh đó → boot sạch ngay lần đầu, uptime 7+ phút xác nhận qua `hdc` — củng cố
+(không chứng minh tuyệt đối, mới 1 lần thử) giả thuyết kênh-flash hơn lỗi nội dung.
+
+**Theo yêu cầu người dùng: dừng lại, không thử lại round-3 trong phiên này.** `libtbb.a` GCC11.5.0
+đã build sẵn, giữ làm artifact cho lần thử sau
+(`scripts/kick-the-tires/cpp13-metanode-deps/libtbb.a` hiện là bản GCC11.5.0, backup GCC13.3.0 ở
+`libtbb.a.gcc13-backup` cùng thư mục) — nhưng board hiện tại đang chạy bản round-2 (không có fix
+TBB, không có self-test). Xem `tz-llm-trustzone/DEPLOYED_STATE.md` cho trạng thái chính xác.
+
+**Việc tiếp theo nếu quay lại**: thử lại round-3 với biện pháp an toàn hơn — verify md5 ngay sau
+flash trước khi power-cycle (loại trừ ghi lỗi độc lập với hành vi boot), và/hoặc thử flash round-3
+nhiều lần để xem tỷ lệ thất bại có khớp với ~10-20% kênh-flash đã biết hay cao bất thường (nếu cao
+bất thường mới nên nghi ngờ lại nội dung).
+
+## §9.31 — Extension reverse-call đầu tiên với dữ liệu THẬT: `GET_OR_CREATE_SIMPLE_DB` (2026-08-20)
+
+Trong 4 lệnh extension reverse-call còn lại (`CALL_GET_API`/`EXTRACT_JSON_FIELD`/`BLST`/
+`GET_OR_CREATE_SIMPLE_DB` — wire protocol + handler TA-side đã có sẵn từ round "6/6 reverse-call"
+trước đây, nhưng luôn trả stub rỗng vì chưa có test contract nào thực sự gọi tới), chọn
+`GET_OR_CREATE_SIMPLE_DB` làm cái đầu tiên: đơn giản nhất (chỉ ABI decode/encode + 1 map giả lập
+phía Host, không crypto/JSON, và — quan trọng — **không đụng HTTP thật** (theo yêu cầu người
+dùng: "chưa cần làm call http thật đâu nhé", để dành `CALL_GET_API` cho sau) lẫn không đụng
+Xapian của TA (đây là reverse-call thuần, Host tự lo lưu trữ; `SIMPLE_DATABASE_ADDRESS` khác hẳn
+`FULL_DATABASE_ADDRESS`/`xapian_handlers.cpp` — không bị chặn bởi bug ABI GCC ở §9.30).
+
+**Cách làm** (toàn bộ nằm ở `mvm_ca_test.cpp`, phía CA-test — KHÔNG đụng `mvm_ta`, nên không cần
+rebuild/flash):
+1. Contract address thứ 3 (`g_simpledb_test_addr`, 0x55×20) với bytecode "calldata forwarder"
+   generic (CALLDATACOPY → CALL tới precompile 261 = `SIMPLE_DATABASE_ADDRESS` với chính calldata
+   của tx → RETURNDATACOPY → RETURN) — không cần Solidity/`solc`, hand-assemble 22 opcode, tái
+   dùng được cho cả `set(...)` lẫn `get(...)` chỉ bằng cách đổi calldata mỗi lần EXECUTE (test
+   harness đã hỗ trợ input/input_len thật từ trước, chỉ 2 test cũ chưa dùng tới).
+2. Mini ABI codec tự viết (không dùng thư viện ngoài) cho `set(string,string,string) returns
+   (bool)` / `get(string,string) returns (string)` — đúng chuẩn go-ethereum ABI mà
+   `extension.go`'s `ExtensionGetOrCreateSimpleDb` (bản cgo thật) cũng decode/encode qua
+   `abi.MethodById`/`Inputs.Unpack`/`Outputs.Pack`. Selector lấy qua `cast sig` (foundry) thật,
+   không đoán: `set(string,string,string)` = `0xda465d74`, `get(string,string)` = `0x3e10510b`.
+   Giới hạn: chỉ string ≤32 byte (đủ cho test, không phải codec ABI tổng quát).
+3. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_GET_OR_CREATE_SIMPLE_DB`: decode selector
+   + args thật từ blob (raw ABI calldata, không có length-prefix riêng — khác với
+   `writeBytes`-style của các lệnh khác, xác nhận qua đọc `mvm_reverse_round_trip`'s code thật
+   thay vì đoán theo doc comment cũ của header, vốn mô tả sai là "length-prefixed"), lưu vào
+   `g_fake_simpledb` (map trong tiến trình, đứng vai Host thật), trả response ABI-encode thật.
+4. Phát hiện phụ: precompile 261 có write-protection check
+   (`ctxt->read_only || !gs.is_cache()`) áp dụng cho MỌI lời gọi (kể cả `get()`, không chỉ
+   `set()`) — `run_execute_and_print()` trước đó luôn hardcode `is_cache=0`; thêm tham số
+   `is_cache` (mặc định `false`, không đổi 3 test cũ) để test mới truyền `true`.
+
+**Xác nhận trên hardware, không cần reboot/flash** (chỉ build lại `mvm_ca_test` bằng
+`aarch64-linux-gnu-g++ -static`, push qua `hdc`, chạy trực tiếp trên board đang chạy sẵn):
+- SET: reverse call cmd=106 blob_len=292 (khớp đúng tính toán ABI head+tail), lưu
+  `db1/key1/hello_ta`, RETURN = 32 byte ABI `bool(true)`.
+- GET: reverse call cmd=106 blob_len=196 (khớp tính toán), tìm thấy, RETURN = 96 byte ABI
+  `string` đúng offset(0x20)+length(8)+`"hello_ta"` — decode hex xác nhận khớp chính xác giá trị
+  vừa SET.
+
+**Việc tiếp theo**: BLST (deterministic, có `libblst.a` sẵn) hoặc EXTRACT_JSON_FIELD tiếp theo;
+CALL_GET_API (cần gọi HTTP thật) để lại sau cùng theo đúng yêu cầu người dùng.
+
+### §9.31 follow-up (cùng ngày) — BLST extension reverse-call với dữ liệu THẬT
+
+Lệnh thứ 2 trong 4 lệnh extension. Xác thực chữ ký BLS12-381 THẬT qua `libblst` (không phải giả
+lập/mock) — khớp chính xác scheme metanode dùng thật (`pkg/bls/bls.go`'s `VerifySign`:
+min-pubkey-size, pubkey G1 nén 48 byte, chữ ký G2 nén 96 byte, cùng DST
+`BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`).
+
+**Cách làm**:
+1. Địa chỉ contract thứ 4 (`g_blst_test_addr`, 0x66×20) — cùng mẫu "calldata forwarder" như
+   SimpleDb, chỉ đổi target sang precompile 259 (BLST).
+2. Test vector THẬT (không phải blob random): dùng chính source `pkg/bls/blst` đã vendor sẵn
+   trong repo metanode, build 1 tool offline trên x86_64 host (`gen_vector.cpp`, scratchpad-only,
+   không commit) để tạo sk/pk/sig/msg qua `blst_keygen`/`blst_sk_to_pk_in_g1`/`blst_hash_to_g2`/
+   `blst_sign_pk_in_g1`, tự verify lại bằng chính `blst_core_verify_pk_in_g1` trước khi in ra —
+   đảm bảo vector nhúng vào `mvm_ca_test.cpp` là chữ ký hợp lệ thật, không phải đoán.
+3. `abi_encode_bytes_args`/`abi_decode_bytes_args` mới (khác với
+   `abi_encode_string_args`/`abi_decode_string_args` của SimpleDb) — hỗ trợ arg nhiều chunk
+   (>32 byte, cần cho chữ ký 96 byte), cùng nguyên lý ABI offset+length+pad. Selector
+   `verifySign(bytes,bytes,bytes)` = `0xee57fa59` (qua `cast sig` thật, khớp `extension.go`'s
+   `blstAbiStr`).
+4. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_BLST`: decode ABI thật, gọi
+   `blst_verify_sign()` (wrap `blst_p1_uncompress`/`blst_p2_uncompress`/`blst_p2_affine_in_g2`
+   group-check/`blst_core_verify_pk_in_g1` — đúng thứ tự semantics của Go's
+   `VerifyCompressed(sigGroupcheck=true, pkValidate=false)`), trả ABI `bool` thật.
+5. **Phát hiện kỹ thuật đáng chú ý**: `libblst.a` cross-build cho aarch64/musl (dùng cho TA,
+   `cpp11-stage-extracted/aarch64/3rdparty/lib/libblst.a`) **link sạch vào binary aarch64/glibc**
+   (`aarch64-linux-gnu-g++ -static`) — xác nhận qua `nm -u` trước khi thử: blst hoàn toàn không
+   phụ thuộc libc (chỉ gọi symbol nội bộ của chính nó), nên không bị vấn đề lệch ABI như Xapian ở
+   §9.30 (Xapian ném C++ exception xuyên biên GCC-version; blst không dùng exception/RTTI C++ ở
+   tầng C API này).
+
+**Xác nhận trên hardware, không cần reboot/flash** (chỉ CA-test side): reverse call cmd=105
+blob_len=420 (khớp tính toán ABI: 4+96+64+128+64), `BLST verifySign: pk=48B sig=96B msg=46B ->
+VALID`, RETURN = 32 byte ABI `bool(true)`.
+
+**Còn lại**: EXTRACT_JSON_FIELD (cần JSON parser thật phía CA-test); CALL_GET_API (để sau, chưa
+cần HTTP thật theo yêu cầu người dùng).
+
+### §9.31 follow-up 2 (cùng ngày) — EXTRACT_JSON_FIELD extension reverse-call với dữ liệu THẬT
+
+Lệnh thứ 3 trong 4 lệnh extension. Khác 2 lệnh trước: `extension.go`'s `ExtensionExtractJsonField`
+thật KHÔNG dùng go-ethereum's `abi` package (không verify selector qua `MethodById`) — chỉ tự
+decode qua `argument_encode.DecodeStringInput(bCallData[4:], idx)`, nhưng encoding dây vẫn đúng
+chuẩn ABI string (offset+length+pad) hệt các lệnh khác — xác nhận qua đọc source Go thật, không
+đoán.
+
+**Cách làm**:
+1. Địa chỉ contract thứ 5 (`g_json_test_addr`, 0x77×20) — cùng mẫu forwarder, target precompile
+   258 (`EXTRACT_JSON_FIELD_EXTENSION`).
+2. `json_extract_flat_field()` — JSON extractor tối giản tự viết (không dùng thư viện ngoài,
+   khớp chủ trương KISS/YAGNI của dự án cho 1 test tool chẩn đoán): chỉ parse object JSON phẳng
+   1 tầng, format giá trị đúng quy tắc Go thật (`fmt.Sprintf("%v", ...)`: string trả nguyên văn
+   không dấu ngoặc kép, bool → `"1"`/`"0"` theo đúng remap tường minh trong `extension.go`, số →
+   literal text). Không phải parser JSON tổng quát (không hỗ trợ nested/array — đúng phạm vi test
+   này cần).
+3. `abi_encode_bytes_ret()` mới — giống `abi_encode_string_ret` của SimpleDb nhưng KHÔNG giới hạn
+   32 byte (JSON blob có thể dài hơn 1 word) — khớp chính xác `argument_encode.EncodeSingleString`
+   thật (`encoder.go`: offset=32, length, data).
+4. `handle_reverse_call()`'s case `MVM_TZ_RCMD_EXTENSION_EXTRACT_JSON_FIELD`: decode 2 arg qua
+   `abi_decode_bytes_args` (không phải `abi_decode_string_args` — JSON test string 40 byte, vượt
+   giới hạn 32 byte của bản dành cho SimpleDb), KHÔNG gatekeep theo selector (khớp hành vi Go thật
+   — hàm thật cũng không check).
+
+**Xác nhận trên hardware, không cần reboot/flash**: reverse call cmd=104 blob_len=228, input
+`json={"status":"ok","value":123,"flag":true} field=value`, trích đúng `"123"`, RETURN = 96 byte
+ABI string offset(0x20)+length(3)+`"123"` (hex `313233`).
+
+**Còn lại duy nhất**: CALL_GET_API — để sau theo đúng yêu cầu người dùng (chưa cần HTTP thật).
+Cả 3/4 lệnh extension còn lại (GET_OR_CREATE_SIMPLE_DB, BLST, EXTRACT_JSON_FIELD) đã có dữ liệu
+thật, xác nhận trên hardware.
+
+## §9.33 — Giai đoạn 0 hoàn tất: `execution_mode.go` nối GĐ0 với GĐ2 (đã có sẵn nhưng chưa nối dây)
+
+Kiểm tra lại kế hoạch dual-mode-execution lớn (không phải file này) phát hiện: **GĐ1 (wire
+protocol) và GĐ2 (loopback x86)** thực ra **đã làm xong** từ trước (không rõ phiên nào — không có
+trong lịch sử §9.x của file này, chỉ thấy qua code có sẵn): `tz_channel.go` (kênh spinlock-CAS
+thật), `tz_loopback_engine.go` (`tzLoopbackEngine`, implement đủ `ExecutionEngine`, gọi qua wire
+codec thật rồi loopback vào `*MVMApi` cùng tiến trình), và `ta_boundary_harness_test.go` (~600
+dòng test GĐ2, kỳ vọng sẵn `mvm.SetExecutionMode`/`mvm.GetExecutionMode`/`mvm.NewExecutionEngine`/
+hằng số `mvm.ModeCgo`/`mvm.ModeTrustzone`) — nhưng **chỉ thiếu đúng 1 file nối dây**:
+`execution_mode.go` (Giai đoạn 0 thật sự) chưa từng được viết, nên cả package không build được
+(`go vet` báo `undefined: mvm.ModeTrustzone`) dù mọi thứ khác đã sẵn sàng.
+
+**Việc làm hôm nay**: viết `execution/pkg/mvm/execution_mode.go` theo đúng khuôn
+`pkg/trie/trie_factory.go` (biến global + `SetXxx`/`GetXxx` + factory) — hằng `ModeCgo`/
+`ModeTrustzone` (tên hằng khớp đúng những gì test đã kỳ vọng, không tự đặt tên khác), factory
+`NewExecutionEngine(key, scDb, asDb, extendedMode) ExecutionEngine`: nhánh `ModeCgo` gọi thẳng
+`GetOrCreateMVMApi` hiện có (byte-for-byte object cũ, không đổi hành vi cgo), nhánh `ModeTrustzone`
+gọi `newTZLoopbackEngine(...)` (đã có sẵn, không phải viết mới). `cmd/simple_chain/app.go` đã có
+sẵn `mvm.SetExecutionMode(app.config.ExecutionMode)` chờ hàm này tồn tại (`config.go`'s
+`ExecutionMode` field cũng đã có sẵn) — chỉ cần file glue là đủ.
+
+**Xác nhận sạch, không cần hardware**:
+- `go build ./...` + `go vet ./...`: sạch toàn module.
+- `go test ./pkg/mvm/... -run TestTABoundary_TrustzoneLoopback -v`: **cả 7 test pass** —
+  `NativeTransfer`/`Deploy`/`Call`/`Execute`/`ProcessNativeMintBurn`/`NoncePlusOne`/
+  `DifferentialReplay` — mỗi test chạy cùng 1 giao dịch logic qua cả `ModeCgo` và `ModeTrustzone`
+  (2 lượt tách biệt, không chung 1 tx, đúng thiết kế), so kết quả khớp tuyệt đối (status/gas/
+  balance changes).
+- `go test -count=3 ./pkg/mvm/...`: sạch.
+- `consensus/metanode/scripts/build_check.sh`: **ALL BUILDS PASSED (4/4)** — EVM/NOMT FFI (C++),
+  consensus metanode (Rust), NOMT FFI (Rust), simple_chain (Go).
+
+Đây là xác nhận đầu tiên GĐ2 (loopback transport) hoạt động đúng end-to-end trên x86 — trước đây
+chỉ tồn tại dưới dạng code+test chưa từng build/chạy được do thiếu file glue này.
+
+## §9.34 — Giai đoạn 3b hoàn tất (phạm vi x86): CA Go thật — cầu nối hardware, 2026-08-20
+
+Sau khi xác nhận GĐ0/1/2 đã sẵn sàng (§9.33), người dùng chọn "viết CA Go thật trước" làm ưu
+tiên hàng đầu trên đường tới production, thay vì nối 5 lệnh forward còn lại phía TA hay sửa lại
+toolchain Xapian/GCC. Trước hôm nay, mọi lần chạy `CALL`/`EXECUTE` thật trên board đều qua
+`ca_test/mvm_ca_test.cpp` — 1 tool C++ chẩn đoán trả dữ liệu giả lập cứng, **chưa từng đọc/ghi
+state Go thật**. Đây là lỗ hổng lớn nhất còn lại; hôm nay đóng nó lại (trong phạm vi build/test
+được trên x86, chưa đụng board — xem lý do trong kế hoạch phiên này).
+
+**Phát hiện quan trọng trước khi viết code mới** (bug thật, không phải giả thuyết): so khảo sát
+`tz_codec.go`'s `encode*Req` với `ta/mvm_ta_main.cpp` (`BlobReader::readBytes`) và
+`ca_test/mvm_ca_test.cpp` (`w.writeBytes(sender, 20)`) proven-trên-hardware, thấy Go ghi
+`bSender`/`bContractAddress`/`bTxHash`/mỗi related address dạng **raw fixed-width, không có
+length-prefix** — sai với chính lời văn của header (`mvm_tz_protocol.h:33-36`) và với TA thật.
+Loopback pass vì Go tự mã hoá sai rồi tự giải mã sai theo kiểu THỐNG NHẤT với chính nó, không có
+gì để đối chiếu tới nay. Nếu không bắt bug này trước, `CALL`/`EXECUTE` thật đầu tiên qua hardware
+sẽ hỏng ngay từ bước đọc header phía TA.
+
+**7 bước đã làm, theo đúng thứ tự phụ thuộc đã duyệt trong plan**:
+1. Sửa framing GĐ1 (`tz_codec.go`): 6 hàm `encode*Req`/`decode*Req` forward
+   (call/execute/deploy/send_native/process_native_mint_burn/nonce_plus_one) chuyển
+   `bSender`/`bContractAddress`/`bTxHash`/related-address sang length-prefixed
+   (`writeBytes`/`readBytes`), xoá `writeFixed20` (dead code sau sửa). 7 test loopback vẫn pass
+   100% (loopback tự đối xứng, không phát hiện được bug này, nhưng không được regress).
+2. Trích lõi Go thuần cho 6 reverse-call handler: `globalStateGetCore`/`getStorageValueCore`
+   (`mvm_api.go`), `extensionCallGetApiCore`/`extensionExtractJsonFieldCore`/`extensionBlstCore`/
+   `extensionGetOrCreateSimpleDbCore` (`extension.go`) — tách khỏi lớp marshal C, hành vi giữ
+   nguyên 100% (kể cả 1 quirk đã biết: `getStorageValueCore` giữ nguyên phân biệt nil-C-pointer
+   vs pointer-tới-0-byte của bản gốc qua return thêm `mvmApiFound bool`).
+3. `dispatchReverseCall` (`tz_hardware_reverse_dispatch.go`, file mới): switch theo cmd, decode
+   → core (bước 2) → encode, cho cả 6 lệnh reverse + `GET_LATEST_FULL_DB_LOGS` (trả
+   `entry_count=0` — hợp lệ theo doc comment của header, CHƯA nối `GetLatestFullDbLogsForAddress`
+   thật vì việc auto-trigger còn bị chặn bởi vấn đề Xapian/GCC-ABI ở §9.30/§9.32). Lỗi decode/cmd
+   lạ: log + trả response rỗng an toàn, KHÔNG panic (khác hẳn quy ước dev-only của
+   `tzLoopbackEngine`/`mvm_ca_test.cpp` — file này chạy trong tiến trình node thật). 8 test unit
+   mới, gồm cả 1 lượt BLS12-381 ký/xác minh thật qua `bls.GenerateKeyPair()`+`bls.Sign` và 1 lượt
+   JSON parse thật.
+4. `tzHardwareChannel` (`tz_hardware_channel.go`, file mới): `open("/dev/tc_ns_client")` (qua
+   `os.OpenFile`, né giới hạn cgo không bind được `open()`/`ioctl()` variadic) → ioctl
+   `SET_PAGES` (qua wrapper C non-variadic) → `mmap` → verify `protocol_version`, theo đúng
+   trình tự đã proven ở `ca_test/mvm_ca_test.cpp:1008-1055`. Goroutine relay bắt buộc
+   (`startReverseCallRelay`, `runtime.LockOSThread()`, backoff sau ngưỡng
+   `SMC_LOOP_EXIT_FINISH` liên tiếp) khởi động TRƯỚC `SET_PAGES`. `consumeRequestReadyForDirection`/
+   `consumeResponseReadyForDirection` peek `direction` trước CAS (né đúng bug đã biết
+   `mvm-ca-test-bidirectional-flag-race` của dự án `tz-llm-trustzone`).
+5+6. Vòng lặp round-trip hardware thật (`tzHardwareRoundTrip`, trong `tz_hardware_engine.go`):
+   gửi request `HOST_TO_TA` → poll `response_ready` (nếu `direction=HOST_TO_TA` là kết quả cuối)
+   xen kẽ `request_ready` (nếu `direction=TA_TO_HOST` là 1 reverse-call, phục vụ qua
+   `dispatchReverseCall` rồi ghi lại **y hệt** cmd/direction TA đã gửi — khớp đúng
+   `mvm_ca_test.cpp`'s `handle_reverse_call`, vốn không đổi `cmd`/`direction` khi trả lời), timeout
+   60s rõ ràng thay vì treo vô hạn không dấu hiệu (đúng tinh thần mục 7 của file này: TA treo do
+   lỗi logic trông giống hệt đang tính chậm). `tzHardwareEngine`: bọc 1 `*MVMApi` thật qua
+   `GetOrCreateMVMApi` — không phải để tính toán ở đây, mà vì `dispatchReverseCall`'s core tra cứu
+   `SmartContractDB`/`AccountStateDB` đúng theo `mvmId` qua CHÍNH registry này. Chỉ
+   `Call`/`Execute` thật (2 lệnh TA đã wire); `Deploy`/`SendNative`/`ProcessNativeMintBurn`/
+   `NoncePlusOne`/`ExecuteBatch` panic rõ ràng — không tự chế giả lập.
+7. `ModeTrustzoneHardware` (`execution_mode.go`, hằng mới, KHÔNG tái dùng `ModeTrustzone` vì đó
+   đang là loopback và 7 test hiện có phụ thuộc tính đồng bộ/deterministic của nó) — route
+   `NewExecutionEngine` sang `newTZHardwareEngine`.
+
+**Xác nhận sạch, không cần hardware** (đúng kỳ vọng của phạm vi phiên này — `tz_hardware_channel.go`/
+`tz_hardware_engine.go` build được nhưng KHÔNG chạy được thật trên x86, thiếu `/dev/tc_ns_client`):
+- `go build ./...` + `go vet ./...` + `gofmt -l`: sạch toàn module.
+- `go test -count=3 ./pkg/mvm/...`: sạch — 7 test loopback không regress, cộng 8 test dispatcher
+  mới.
+- `consensus/metanode/scripts/build_check.sh`: **ALL BUILDS PASSED (4/4)**.
+
+**Còn lại ngoài phạm vi phiên này** (đã chốt rõ trong kế hoạch, cần board + phiên riêng): chạy
+thật trên board; wire `DEPLOY`/`SEND_NATIVE`/`PROCESS_NATIVE_MINT_BURN`/`NONCE_PLUS_ONE`/
+`EXECUTE_BATCH` phía TA C++; cross-compile toàn bộ module Go cho `GOARCH=arm64` (0 tooling tồn tại
+hôm nay, xác nhận qua grep thật toàn repo — `-march=native` cứng trong `mvm_api.go`, gate
+`#cgo linux,amd64` sót arm64 trong `executor/ffi_bridge.go`).
+
+**Một khoảng trống chưa gắn cờ riêng với người dùng, đáng lưu ý cho phiên sau**: giao thức v1
+(`mvm_tz_protocol.h`) không mang `CHAINID`/blob context (`BLOBHASH`/`BLOBBASEFEE`)/cross-chain
+sender qua dây — phía TA truyền `nullptr`/`0` cho các trường này (`MVM_B1_CONTEXT_PARAMS`). Đây
+là khoảng lệch hành vi thật so với cgo mode cho bất kỳ tx nào dùng các opcode đó khi chạy qua
+`ModeTrustzoneHardware` — chưa phải bug (giao thức v1 chưa hứa hỗ trợ), nhưng cần quyết định rõ
+(mở rộng giao thức, hay chấp nhận giới hạn và tài liệu hoá) trước khi coi TZ-hardware mode "đúng"
+cho production theo đúng tinh thần mục 7 (Không tuyên bố hoàn thành khi...) của file này.
+
+## §9.35 — Chốt: `CALL_GET_API` KHÔNG hỗ trợ qua hardware bridge (quyết định vĩnh viễn, 2026-08-20)
+
+Từ §9.31 (2026-08-20), `CALL_GET_API` (trong 4 lệnh extension reverse-call) đã bị để lại sau
+cùng theo yêu cầu người dùng ("chưa cần làm call http thật đâu nhé") — nhưng khi rà lại
+`dispatchReverseCall` (`tz_hardware_reverse_dispatch.go`, viết trong §9.34) để chuẩn bị tổng kết
+production-readiness, phát hiện code thực tế **đã gọi thẳng** `extensionCallGetApiCore` (HTTP GET
+thật) cho case này — lệch với comment cũ của chính nó ("dispatcher does not call it yet"). Người
+dùng chốt dứt khoát hôm nay: **bỏ, không hỗ trợ `CALL_GET_API`** — không phải "để sau" nữa mà là
+quyết định phạm vi vĩnh viễn cho `ModeTrustzoneHardware`.
+
+**Lý do kỹ thuật** (không chỉ theo yêu cầu suông): 1 EVM call block chờ HTTP thật bên trong 1
+round-trip hardware — dưới `tzSessionMu` (tuần tự hoá toàn bộ phiên), với TA timeout 60s đua với
+HTTP timeout 5s — là rủi ro không đáng giữ cho 1 tính năng vốn đã không-determinism (2 lần gọi
+HTTP có thể trả nội dung khác nhau, xem mục "Hệ quả thiết kế then chốt" #3 — đúng lý do
+`CALL_GET_API` bị loại khỏi tập so byte-for-byte ở Giai đoạn 4 ngay từ đầu).
+
+**Đã sửa**: `dispatchReverseCall`'s case `EXTENSION_CALL_GET_API` không còn gọi core nữa — trả
+response rỗng + log rõ "not supported ... by design", cùng dạng với các đường "not-found/failure"
+khác trên kênh này (không phải crash). `extensionCallGetApiCore` (`extension.go`) vẫn giữ nguyên
+100%, vẫn phục vụ `ModeCgo`/`ModeTrustzone` qua `//export ExtensionCallGetApi` — chỉ đường hardware
+bridge mất tính năng này. Thêm 1 test chốt hành vi (`..._UnsupportedByDesign`, dùng cả 1 URL SSRF
+độc hại để chứng minh không hề chạm mạng).
+
+**Hệ quả cho production**: 1 hợp đồng dùng precompile `CALL_GET_API` sẽ chạy khác nhau tuỳ mode —
+có dữ liệu thật trên `ModeCgo`/`ModeTrustzone`, luôn "không có dữ liệu" trên `ModeTrustzoneHardware`.
+Đây là giới hạn đã biết và chấp nhận, không phải lỗ hổng cần vá thêm.
+
+Xác nhận sạch: `go build`/`go vet`/`gofmt -l` (không đụng 2 file vốn đã lệch format từ trước,
+`mvm_api.go`/`ta_boundary_harness_test.go`) sạch; `go test -count=3 ./pkg/mvm/...` sạch.
+
+## §9.36 — Giai đoạn 4, dải block THẬT: 2 bug thật phát hiện + sửa, khớp 100% byte-for-byte (2026-08-20)
+
+Người dùng chọn làm đúng nghĩa đen phần loopback của GĐ4 ("1 dải block **đã có**", không phải
+chuỗi tự dựng) sau khi được chỉ ra rằng `tz_differential_replay_test.go` (§9.33/kế hoạch gốc)
+tuy đã đánh dấu `[x]` nhưng chỉ dùng 1 chuỗi 6 tx tự dựng, đi vòng qua đường xử lý block thật.
+
+**Phát hiện chặn đường trước khi replay được (grep toàn repo, không phải phỏng đoán):**
+`mvm.NewExecutionEngine` không có call site nào ngoài test — mọi đường production
+(`vm_processor.go`, đường TrueBlockSTM chính) gọi thẳng `GetOrCreateMVMApi`, bỏ qua mode switch
+hoàn toàn. Đã sửa: đổi 2 chỗ lấy engine trong `vm_processor.go` sang `NewExecutionEngine` (mode
+mặc định vẫn cgo, hành vi production không đổi).
+
+**Hạ tầng replay tự dựng, không có sẵn**: không có dữ liệu block thật nào trong repo
+(`private_chain_3node/` chỉ là tên trong `.gitignore`). Dựng 1 private chain 1-validator thật
+bằng `deploy/systemd/gen_single_chain.py` (không dùng `scripts/init_private_chain.sh` — wrapper
+đó trỏ vào 1 file `gen_private_chain.py` không tồn tại, bug sẵn có, không sửa), gửi tx thật qua
+`cmd/tool/tx_sender` có sẵn (deploy SimpleStorage → `store(2222)` → `read_call retrieve()`, 4
+vòng, dùng đúng `config.json`/`data.json` mẫu đã có trong repo), dừng sạch, có 9 block/8 tx thật.
+
+**Bug thật #1 — `NOMT không hỗ trợ đọc theo root lịch sử` (chẩn đoán sai ban đầu, tự sửa)**:
+lần đầu chạy trên chain `state_backend=nomt` (mặc định của `gen_single_chain.py`), MỌI tx đều
+trả về 0 receipt, root đứng yên 1 giá trị cố định suốt 9 block. Tưởng NOMT (namespace-keyed,
+"current state" store, không root-addressable như MPT — xác nhận qua đọc `trie_factory.go`:
+`GetOrInitNomtHandle(namespace)` không dùng `root` để tái tạo state) là nguyên nhân — sinh lại
+chain với `state_backend=mpt` để kiểm tra. Root ĐÃ đổi theo từng block sau khi chuyển MPT, nhưng
+receipt vẫn 0 — hoá ra root đổi chỉ vì mỗi block đọc đúng root LỊCH SỬ THẬT của block cha (ghi
+sẵn trong header), không phải bằng chứng replay thành công → giả thuyết NOMT bị loại, bug thật
+nằm ở chỗ khác.
+
+**Bug thật #2 — `block_validator.go`'s `backupPath="skip_epoch_data"` (bug thật, đã sửa)**:
+`ModifiedAccounts=[]` mọi block dù log báo "Khởi chạy 1 TXs trên True MVCC Engine" → lần theo
+`runEvmPipeline` → `TrueBlockSTM.Process`'s nonce-check gate
+(`fromAccount.Nonce() != tx.GetNonce()` → "Clear results on failure", nil receipt, KHÔNG có lỗi
+nổi lên). Test trực tiếp: đổi `backupPath` từ `"skip_epoch_data"` sang `""` trong
+`block_validator.go:109` → tx deploy thật lập tức trả về `ExecuteResult` thật
+(`DEPLOY_DEBUG exit_reason=0 gas_used=1003`). Root cause: `useRegistry=false` (do
+`backupPath=="skip_epoch_data"`) làm đọc account thật từ chainState tạm bị sai âm thầm. Đã sửa
+trong `block_validator.go`, giữ nguyên hành vi bỏ qua changelog/epoch (check `!isRPC` của
+`initChangelog` đã tự short-circuit, không phụ thuộc `backupPath`). Giải thích tại sao hàm này
+chưa từng bắt được lỗi: **0 caller trong toàn repo trước `tz_replay_check`**.
+
+**Bug thật #3 — `tz_codec.go`'s `decodeExecuteResult` làm sai `EXCEPTION_NONE` (bug thật, đã sửa)**:
+sau khi sửa bug #2, replay khớp byte-for-byte ở MỌI trường TRỪ `Exception`: cgo trả `-1`,
+trustzone-loopback trả `255`, mọi tx thành công. `pb.EXCEPTION_NONE = -1` (giá trị "thành công"),
+`mvm_tz_protocol.h`'s `hdr.exception` là `uint8_t` — encode cắt `-1`→`0xFF` đúng, nhưng decode cũ
+(`pb.EXCEPTION(hdr.exception)`) zero-extend thay vì sign-extend, biến `0xFF` thành `255`. Nghĩa
+là **mọi tx thành công qua đường trustzone/trustzone-hardware đều có `Exception()` sai** kể từ
+khi codec này được viết — chưa từng bị bắt vì chưa từng có 1 bài so byte-for-byte đủ chặt (chuỗi
+tự dựng của §9.33 không phát hiện được, vì cả 2 lượt tự mã hoá/giải mã sai theo kiểu THỐNG NHẤT
+với nhau). Fix: `pb.EXCEPTION(int8(hdr.exception))` — reinterpret dấu trước khi widen. KHÔNG đổi
+layout trên dây (vẫn 1 byte) nên KHÔNG cần rebuild/reflash TA.
+
+**Kết quả cuối cùng, sau cả 3 fix**: replay 9 block/8 tx thật (`ModeCgo` vs `ModeTrustzone`) khớp
+**100% byte-for-byte** — status/gas/exception/return-hash từng tx + state root từng block.
+Kiểm chứng ngược (bắt buộc theo tinh thần "không tin 1 đường output là bằng chứng" của
+CLAUDE.md): tạo 2 tình huống lệch có chủ đích (dải thiếu block, root bị sửa tay) — cả 2 đều bị
+`tz_replay_check -compare-a/-compare-b` báo `MISMATCH` đúng, exit code 1 — xác nhận bộ so sánh
+thật sự phân biệt được khớp/lệch, không phải luôn báo khớp.
+
+**File đổi/thêm**: `pkg/blockchain/vm_processor/vm_processor.go` (nối dây mode switch),
+`pkg/block_validator/block_validator.go` (fix backupPath), `pkg/mvm/tz_codec.go` (fix sign-extend),
+`pkg/mvm/extension.go` (bộ đếm `ExtensionCallGetApiCallCount`),
+`cmd/tool/tz_replay_check/main.go` (mới).
+
+**Xác nhận sạch**: `go build`/`go vet`/`gofmt -l` sạch toàn module (các dòng lệch format báo
+trước edit này, đã xác nhận qua `gofmt -d`, không sửa); `go test -count=3 ./pkg/mvm/...` sạch (7
+loopback + 9 dispatcher không regress); `build_check.sh` ALL BUILDS PASSED (4/4). Toàn bộ chạy
+trên x86, không đụng board.
+
+**Còn lại của GĐ4**: phần TA thật (cần board + Go CA cross-compile aarch64 — chưa có tooling,
+xem §9.34) — `cmd/tool/tz_replay_check` đã có sẵn `-mode trustzone-hardware` để dùng khi phần đó
+sẵn sàng, không cần viết lại.
+
+## §9.37 — Cross-compile aarch64 Giai đoạn 1: `pkg/mvm` (C++ EVM/Xapian) thật, xác nhận bằng readelf (2026-08-21)
+
+Điểm chặn cứng nhất còn lại trước khi Go CA (`ModeTrustzoneHardware`, GĐ3b) chạy được thật trên
+board — trước hôm nay **0 tooling tồn tại** (xác nhận qua 2 Explore agent + grep toàn repo, không
+phải phỏng đoán). Chia 2 giai đoạn: GĐ1 (hôm nay) — cross-compile xong phần C++ thuần (`pkg/mvm`);
+GĐ2 (phiên sau) — Rust/RocksDB, rủi ro/tốn thời gian cao nhất, tách biệt hoàn toàn.
+
+**Phát hiện thật ngoài dự kiến — `libxapian-dev` không phải Multi-Arch: same**: sau khi bật
+`dpkg --add-architecture arm64` + cài `libgmp-dev/libmpfr-dev/libtbb-dev/libleveldb-dev/uuid-dev/
+libxapian-dev:arm64` (dry-run trước, không báo xung đột), `build_check.sh` gãy thật ngay sau đó —
+`cannot find -lxapian` khi link `cmd/simple_chain` (x86). Root cause: cài `libxapian-dev:arm64`
+đã **âm thầm GỠ MẤT** `libxapian-dev:amd64` (dpkg coi 2 kiến trúc của gói này là xung đột — không
+giống 5 gói kia, vốn `Multi-Arch: same` và coexist bình thường). Khôi phục ngay bằng
+`apt-get install --reinstall libxapian-dev:amd64` (xác nhận `build_check.sh` sạch lại 100%
+trước khi làm tiếp gì khác). Xapian cho aarch64 từ đó lấy bằng `apt-get download
+libxapian-dev:arm64 libxapian30:arm64` + `dpkg -x <file>.deb <thư mục riêng>` (giải nén thủ công,
+KHÔNG `dpkg -i`/cài qua apt database chung) — **không bao giờ `apt install libxapian-dev:arm64`
+lại nữa** trên máy này.
+
+**Đã làm**:
+1. Bật `arm64` cho apt (`dpkg --add-architecture arm64` + nguồn `ports.ubuntu.com` giới hạn
+   `[arch=arm64]`, restrict 2 stanza `ubuntu.sources` gốc về `amd64 i386` để tránh apt tự tìm
+   arm64 trên `archive.ubuntu.com` — mirror đó không có gói arm64).
+2. Cài 5/6 lib `-dev:arm64` qua apt bình thường; xapian xử lý riêng như trên.
+3. Viết `execution/pkg/mvm/cmake/aarch64-linux-gnu.cmake` (toolchain file chuẩn, dùng
+   `aarch64-linux-gnu-gcc`/`g++` 13.3.0 đã cài sẵn — chưa từng dùng cho metanode trước đây, chỉ
+   dùng cho `mvm_ca_test` bên `tz-llm-trustzone`, build tay không script).
+4. Build `c_mvm` cho aarch64 vào `build-aarch64/` (out-of-tree, `-DMVM_INSTALL_PREFIX` — cơ chế
+   đã có sẵn từ 2026-08-16). **Phát hiện thật khác**: `linker/CMakeLists.txt` — khác với những gì
+   tưởng ban đầu (và khác `c_mvm/CMakeLists.txt`) — **không có** cơ chế `MVM_INSTALL_PREFIX`,
+   `install()` hardcode thẳng `${CMAKE_CURRENT_SOURCE_DIR}/build` (build x86 thật). Né bằng cách
+   chỉ `make` (không `make install`) cho linker, lấy `.a` thẳng từ thư mục build — không sửa
+   `linker/CMakeLists.txt` (đã cân nhắc thêm `MVM_INSTALL_PREFIX` như `c_mvm` nhưng chọn cách né
+   an toàn hơn trong phạm vi GĐ1 này).
+5. **Xác nhận bằng chứng thật** (không tin "cmake chạy xong không lỗi"): `ar x` + `readelf -h`
+   trên `.o` trích từ cả `libmvm.a` và `libmvm_linker.a` (bản `build-aarch64/`) → `Machine:
+   AArch64`. Đối chiếu `build/` thật (x86, `build_check.sh` dùng): mtime không đổi, vẫn `Machine:
+   X86-64` — xác nhận không hề bị đè (đúng lo ngại đã ghi trong chính 2 `CMakeLists.txt` từ vụ
+   2026-08-16).
+6. Sửa `mvm_api.go` (`-march=native -mtune=native` → tách `#cgo linux,amd64`/`#cgo linux,arm64`,
+   mirror đúng nhánh `CMAKE_CROSSCOMPILING` đã có trong CMake) và `ffi_bridge.go` (bỏ giới hạn
+   `amd64` khỏi 1 dòng LDFLAGS — 5 lib glibc chuẩn, không đặc thù x86).
+7. **Verify thêm, ad-hoc** (không phải file trong repo, chỉ để có bằng chứng mạnh hơn): 1 binary
+   cgo test độc lập trong scratchpad, LDFLAGS trỏ thẳng `build-aarch64/` + 6 lib arm64 (xapian từ
+   bản giải nén riêng ở trên) — `aarch64-linux-gnu-ld` tìm thấy và liên kết đúng **toàn bộ** 6 lib
+   + nội dung 2 `.a` thật, "undefined reference" còn lại CHỈ là các hàm vốn dĩ nằm ở phía Go thật
+   (`GlobalStateGet`/`ExtensionCallGetApi`/... — `//export` trong `mvm_api.go`/`extension.go`) và
+   secp256k1/blst (vốn dĩ resolve qua go-ethereum's cgo — đúng theo comment có sẵn trong
+   `linker/CMakeLists.txt`) — đúng như dự đoán trước khi chạy, không phải lỗi thật.
+
+**Xác nhận sạch**: `go build/vet ./pkg/mvm/... ./executor/...` sạch; `go test -count=3
+./pkg/mvm/...` sạch; `build_check.sh` ALL BUILDS PASSED (4/4) — hành vi build x86 mặc định không
+đổi sau mọi thay đổi.
+
+**Còn lại (Giai đoạn 2, phiên sau, KHÔNG làm hôm nay)**: `rustup target add
+aarch64-unknown-linux-gnu` + `.cargo/config.toml` + cross-build `libmetanode.a` (gồm cả nhánh
+RocksDB qua crate nội bộ `typed-store` — phần rủi ro/tốn thời gian nhất, RocksDB cross-compile
+luôn khét tiếng khó) + `libmtn_nomt.a` + thử link+chạy thật `cmd/simple_chain` cho aarch64. Sau đó
+mới tới: đóng gói/đẩy binary lên board, chạy `tz_replay_check -mode trustzone-hardware` thật.
+
+## §9.38 — Cross-compile aarch64 Giai đoạn 2 HOÀN TẤT NGAY TRONG PHIÊN NÀY: `cmd/simple_chain` link thật, gồm cả RocksDB (2026-08-21, cùng ngày với §9.37)
+
+Người dùng yêu cầu tiếp tục ngay sau §9.37 thay vì để phiên sau như dự kiến. **RocksDB
+cross-compile — phần được đánh giá rủi ro/tốn thời gian nhất trong toàn bộ kế hoạch — thực ra chỉ
+mất ~2 phút 20 giây, không lỗi gì**, thấp hơn nhiều so với lo ngại ban đầu.
+
+**Đã làm**:
+1. `rustup target add aarch64-unknown-linux-gnu`.
+2. `.cargo/config.toml` (repo root, mới): `[target.aarch64-unknown-linux-gnu] linker =
+   "aarch64-linux-gnu-gcc"` + `CC_aarch64_unknown_linux_gnu`/`CXX_.../AR_...` (env) cho
+   `librocksdb-sys`'s `cc` crate route đúng cross-compiler.
+3. `cargo build --release --target aarch64-unknown-linux-gnu -p mtn-nomt-ffi` — sạch, ~6s (thuần
+   Rust, không phụ thuộc C, đúng như Explore agent xác nhận trước đó). `readelf -h` trên `.o`
+   trích từ `.a` → `Machine: AArch64`.
+4. `cargo build --release --target aarch64-unknown-linux-gnu` cho `consensus/metanode` — sạch,
+   **2m20s**, bao gồm build `librocksdb-sys`/`rocksdb` (RocksDB C++ thật) + zstd/snappy/lz4 từ
+   nguồn. `libmetanode.a` (382MB) → `readelf -h` xác nhận `Machine: AArch64`.
+5. **Link thật toàn bộ `cmd/simple_chain`**: `mvm_api.go`/`ffi_bridge.go`/`nomt_ffi/bridge.go`
+   đều hardcode `-L` trỏ vào đường dẫn build x86 THẬT (không tham số hoá theo GOARCH/triple) —
+   không có cách nào link cho aarch64 mà không tráo tạm 4 artifact đó vào đúng đường dẫn. Tráo
+   tạm (backup trước bằng `cp`, md5 xác nhận) → build → **khôi phục ngay** qua `trap ... EXIT`
+   (chạy dù build lỗi/bị ngắt) — làm 2 lần thủ công trước khi viết thành script.
+   - Lần 1: lỗi source thật (không phải lỗi link) — `syscall.Dup2` không tồn tại trên
+     `linux/arm64` trong Go (`pkg/logger/logger.go`'s `RedirectStderrToFile`). ABI syscall Linux
+     aarch64 bỏ `dup2`, chỉ còn `dup3`; Go's `syscall` package theo đó không định nghĩa `Dup2`
+     cho arm64 (không phải bug của dự án, giới hạn thật của Go/kernel). Fix: `dup2Compat()` dùng
+     `syscall.Dup3(old, new, 0)` — có trên MỌI kiến trúc Linux (kernel 2.6.27+, kể cả amd64,
+     không phải nhánh riêng arm64), giữ đúng ngữ nghĩa dup2 cho case `oldfd==newfd` (dup3 từ
+     chối `EINVAL`, dup2 no-op) bằng 1 early-return.
+   - Lần 2: `cannot find -lxapian` — vì đã gỡ `libxapian-dev:arm64` khỏi hệ thống ở §9.37 (tránh
+     xung đột amd64). Thêm `CGO_LDFLAGS="-L<thư mục giải nén xapian arm64 riêng>"` cho lượt build
+     này — không cần cài lại qua apt.
+   - **Kết quả: `go build` cho `cmd/simple_chain` exit 0**. `file` xác nhận: `ELF 64-bit LSB
+     executable, ARM aarch64, ... dynamically linked, interpreter /lib/ld-linux-aarch64.so.1`.
+   - Khôi phục xác nhận **hoàn hảo bằng md5** (khớp tuyệt đối với backup trước khi tráo) —
+     `build_check.sh` chạy lại nhiều lần trong lúc thao tác, luôn ALL BUILDS PASSED (4/4).
+6. **Viết `scripts/build-aarch64.sh`** (mới): tự động hoá toàn bộ quy trình trên (build C++ →
+   build Rust → tráo/build/khôi phục `cmd/simple_chain`), có header comment ghi đầy đủ 7 bước
+   host-setup 1 lần (bao gồm cảnh báo `libxapian-dev` không Multi-Arch: same). **Đã tự chạy thử
+   chính script này end-to-end** (không phải các lệnh tay trước đó) → ra đúng binary aarch64
+   thật, x86 khôi phục nguyên vẹn.
+
+**Xác nhận sạch**: `go build/vet/gofmt ./pkg/logger/...` sạch; `build_check.sh` ALL BUILDS PASSED
+(4/4) — cả trước, giữa (nhiều lần, trong lúc tráo/khôi phục để test), và sau. `target/`/
+`consensus/metanode/target/` đã gitignore sẵn nên 0 artifact Rust lọt vào git.
+
+**Với commit này: toàn bộ cross-compile aarch64-linux-gnu cho `cmd/simple_chain` đã HOÀN TẤT và
+tái lập được qua 1 script** — điểm chặn cứng nhất trước khi Go CA (`ModeTrustzoneHardware`, GĐ3b)
+chạy thật trên board đã được tháo gỡ hoàn toàn.
+
+## §9.39 — Chạy THẬT lần đầu tiên metanode Go binary trên board (2026-08-21, cùng ngày với §9.37/§9.38)
+
+Người dùng yêu cầu tiếp tục ngay. Trước khi đẩy lên board, xác minh trực tiếp qua `hdc shell`
+(board đang kết nối sẵn ở `192.168.1.254:8710` — hdcd đã bật từ phiên `tz-llm-trustzone` trước
+đó, không persist qua reboot nhưng board chưa reboot) — **không đoán, không giả định "chắc là
+Ubuntu ARM" như kế hoạch GĐ1/GĐ2 âm thầm giả định**:
+
+**Phát hiện quan trọng, thay đổi hướng đi**: `uname -a` → `Linux localhost 5.10.110 ... aarch64`
+(đúng kernel Normal World của `tz-llm-trustzone`'s `linux-5.10-opi`) nhưng **userspace là
+OpenHarmony tuỳ biến, KHÔNG PHẢI glibc Linux chuẩn**: không có `/lib/aarch64-linux-gnu/`, không
+có `/lib64/ld-linux-aarch64.so.1` — libc thật của hệ này là `/system/lib64/libc.so` (OpenHarmony-
+specific). Binary `aarch64-linux-gnu` (glibc, dynamically linked) từ `scripts/build-aarch64.sh`
+**không chạy được nguyên trạng** trên hệ này — thiếu cả dynamic linker lẫn glibc runtime, chưa
+nói tới 6 lib C++ (xapian/tbb/leveldb/gmp/mpfr/uuid). Đây chính là lý do dự án `tz-llm-trustzone`
+phải dùng `-static` cho `mvm_ca_test` — cùng một vấn đề, chỉ khác cách giải quyết ở đây.
+
+**Giải pháp đã chọn — đóng gói "portable" thay vì build static hoàn toàn**: `tbb`/`xapian`
+không có bản `.a` (static) từ apt (đã xác nhận ở §9.37), nên build static hoàn toàn cần build lại
+2 lib đó từ nguồn — việc lớn hơn nhiều. Thay vào đó, đóng gói binary cùng TOÀN BỘ thư viện runtime
+nó cần (kể cả glibc/libstdc++ của chính nó) và tự chỉ định dynamic linker tường minh lúc chạy —
+kỹ thuật "self-contained portable Linux binary" chuẩn (như AppImage/Nix): kernel Linux của board
+tương thích ABI syscall với BẤT KỲ ELF aarch64 nào, chỉ có userspace (libc) là khác — đóng gói
+đúng phần đó là đủ, không cần đụng gì tới kernel/OS thật của board.
+
+```
+<lib64/ld-linux-aarch64.so.1> --library-path <lib64/> <simple_chain> [args]
+```
+
+**Danh sách lib cần** — 9 lib từ `aarch64-linux-gnu-readelf -d <binary> | grep NEEDED` + 1 lib
+phát hiện thêm qua thử-lỗi thật trên board (`libz.so.1` — phụ thuộc bắc cầu của `libxapian`,
+không nằm trong NEEDED trực tiếp của binary chính, chỉ lộ ra khi chạy thật): `libxapian.so.30`,
+`libstdc++.so.6`, `libgmp.so.10`, `libmpfr.so.6`, `libtbb.so.12`, `libuuid.so.1`, `libm.so.6`,
+`libgcc_s.so.1`, `libc.so.6`, `libz.so.1` — cộng `ld-linux-aarch64.so.1` (dynamic linker) — tất cả
+lấy thẳng từ `/usr/lib/aarch64-linux-gnu/`/`/lib/aarch64-linux-gnu/` trên máy dev (cùng nguồn
+`apt install ...:arm64` đã dùng để cross-compile ở §9.37).
+
+**Xác nhận THẬT trên phần cứng, không phải suy đoán**: mount `/data/ssd` (`mount -t ext4
+/dev/block/nvme0n1p1 /data/ssd` — không persist qua reboot, đúng quy trình đã biết), đẩy bundle
+136MB qua `hdc file send`, chạy:
+```
+./lib64/ld-linux-aarch64.so.1 --library-path ./lib64 ./simple_chain \
+  -tool-get-address 2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b
+```
+→ in đúng `0x97126B71376F7e55fBA904FdaA9dF0dBd396612f` — **1 phép tính secp256k1+keccak thật**
+(không phải "không crash" suông, dùng đúng cờ `-tool-get-address` có sẵn trong `main.go` để test
+mà không cần config/genesis đầy đủ). Chạy lại lần 2 → kết quả giống hệt (deterministic). Board
+hoàn toàn ổn định sau đó (`uptime`: 11h40, RAM 11G trống, load bình thường) — không có tác dụng
+phụ nào lên phần TrustZone/TA của `tz-llm-trustzone` (chỉ chạy 1 ELF Normal World userspace bình
+thường qua `hdc shell`, không đụng flash/OP-TEE/reboot).
+
+**Thêm MỚI `scripts/package-for-board.sh`**: tự động hoá đóng gói bundle (binary + 10 lib +
+linker) + tuỳ chọn đẩy/smoke-test qua `hdc` (`--push [remote dir]`). Đã tự chạy thử CHÍNH script
+này (không phải các lệnh tay trước đó) → kết quả khớp đúng địa chỉ mong đợi, xác nhận script tự
+nó (không chỉ quy trình thủ công) hoạt động đúng.
+
+**Dọn dẹp**: xoá thư mục test trùng lặp trên board (`/data/ssd/metanode_scripttest`), giữ lại
+`/data/ssd/metanode_test` (bundle đầu tiên) làm nơi test tiếp theo. `.board_bundle/`/
+`simple_chain-aarch64` đã gitignore, không lọt vào git.
+
+**Với §9.37+§9.38+§9.39: toàn bộ hành trình "Go CA chạy thật trên board" đã có bằng chứng đầu-
+cuối thật trên phần cứng** — điểm chặn cứng nhất trước khi `ModeTrustzoneHardware` có ý nghĩa
+thực tế đã được tháo gỡ hoàn toàn trong 1 phiên.
+
+**Còn lại** (chưa làm, phiên sau):
+- Chạy **full node thật** trên board (cần `config.json`/`genesis.json` thật đẩy lên board, đúng
+  quy trình private-chain đã dùng ở GĐ4 §9.36 nhưng chạy trên board thay vì máy dev) — hôm nay
+  mới xác nhận binary tự nó chạy được (`-tool-get-address`), chưa chạy 1 node thật với I/O mạng
+  thật trên board.
+- Test thật `ModeTrustzoneHardware` (cần TA C++ wire nốt 5 lệnh forward còn thiếu — xem tổng kết
+  "còn thiếu cho production" đã trao đổi với người dùng trước đó trong phiên).
+- Toàn bộ checklist vận hành board đã có sẵn từ `tz-llm-trustzone` (reboot mỗi lần đổi binary
+  TA/kernel, 1 tiến trình secure-world tại 1 thời điểm, bật lại hdcd sau mỗi reboot, v.v. — board
+  vật lý này CHUNG với dự án đó, cần thận trọng, đặc biệt nếu sau này cần chạy `simple_chain` và
+  `mvm_ta`/`llama-cli` đồng thời).
+
+## §9.40 — Chạy full node thật trên board: 2 phát hiện thật, 1 đã fix, 1 CHƯA GIẢI QUYẾT được (2026-08-21, cùng ngày)
+
+Tiếp nối §9.39 ngay trong phiên. Sinh config thật (`deploy/systemd/gen_single_chain.py`, giống hệt
+quy trình đã kiểm chứng ở GĐ4 §9.36 nhưng patch path cho board: `/data/ssd/metanode_test/...`),
+đẩy `config.json`+`genesis.json` lên board, chạy `simple_chain -config node-0/config.json` thật.
+
+**Phát hiện #1 — `io_uring_setup()` trả `EINVAL` trên kernel OpenHarmony tuỳ biến này, ĐÃ FIX**:
+lần chạy đầu (mặc định `state_backend=nomt`) crash ngay ở genesis:
+```
+thread 'io-worker' panicked at .../nomt/src/io/linux.rs:77:10:
+Error building io_uring: Os { code: 22, kind: InvalidInput, message: "Invalid argument" }
+thread 'beatree-sync' panicked ...: I/O Pool Down: "SendError(..)"
+```
+NOMT (backend mặc định, Rust + io_uring cho song song hoá I/O) không hoạt động được trên kernel
+5.10.110 tuỳ biến OpenHarmony của board — `io_uring_disabled` sysctl không tồn tại (option đó
+thêm ở kernel mới hơn), `dmesg` không có dòng SELinux "avc: denied" nào (nên khả năng cao KHÔNG
+phải bị chặn qua policy, mà do kernel Kconfig thật sự thiếu hỗ trợ 1 phần opcode/flag io_uring mà
+NOMT dùng — chưa xác định chính xác flag nào vì không có nguồn kernel OpenHarmony để đối chiếu).
+**Fix: đổi `state_backend` sang `"mpt"`** — CÙNG backend đã dùng ở GĐ4 §9.36 (lý do khác: ở đó là
+vì NOMT không hỗ trợ đọc theo root lịch sử, ở đây là vì io_uring không dùng được — nhưng cùng 1
+giải pháp). Sau khi đổi: genesis commit thành công, `INTEGRITY CHECK` 5/5 pass, RPC JSON thật
+phản hồi đúng qua network (`curl http://192.168.1.254:8545`: `eth_chainId`→`0x539`=1337 khớp
+config, `eth_blockNumber`→`0x0`).
+
+**Phát hiện #2 — Rust consensus engine (FFI thread) treo ngay sau khi khởi động, CHƯA GIẢI QUYẾT**:
+sau khi qua được genesis (fix #1), node "sống" (RPC trả lời đúng) nhưng **block không bao giờ
+tăng quá 0**, dù đợi hơn 4 phút và gửi tx thật qua `tx_sender` (kết nối TCP thành công, tx được
+gửi, nhưng `active_workers=0/64`, `queue=0/500000` mãi mãi — tx không hề vào hàng đợi xử lý).
+Log Rust (`metanode::ffi`) chỉ có ĐÚNG 1 DÒNG: `"Starting MetaNode Consensus Engine (FFI
+Thread)..."` rồi im lặng vĩnh viễn — không có log round/proposal/heartbeat nào tiếp theo (so với
+máy dev x86: cùng dòng log này xuất hiện rồi ngay sau đó có hàng loạt log tiến triển thật). `top`
+xác nhận **không phải deadlock bận rộn** (CPU tổng 800%, process chính chỉ dùng 3.5%, hệ thống
+idle 789%/800%) — đây là 1 thread bị BLOCK CHỜ mãi mãi trên 1 nguyên thuỷ đồng bộ nào đó (channel/
+mutex/I/O), không panic ra ngoài. **Nghi ngờ hàng đầu (chưa xác nhận)**: cùng gốc rễ io_uring như
+phát hiện #1, nhưng lần này ở phía RocksDB (`typed-store`/`librocksdb-sys`, dùng bởi
+`consensus-core`) hoặc runtime Tokio — có thể 1 trong 2 thứ đó CŨNG thử dùng io_uring nhưng xử lý
+lỗi khác NOMT (silent hang thay vì panic rõ ràng) — **chưa điều tra sâu, chỉ là giả thuyết hàng
+đầu dựa trên pattern giống hệt #1, không phải kết luận đã xác nhận**.
+
+Đã dừng node an toàn (`kill`, xác nhận qua `ps -ef` không còn process) — board không bị ảnh hưởng
+gì, không đụng tới TrustZone/OP-TEE/reboot.
+
+**Việc cần làm tiếp (phiên sau, chưa làm hôm nay)**:
+- Root-cause chính xác điểm treo của Rust consensus thread — cần công cụ debug Rust trên board
+  (gdb aarch64, hoặc thêm log/tracing chi tiết hơn vào `consensus/metanode`'s FFI init path rồi
+  build lại qua `scripts/build-aarch64.sh` và test lại) — vòng lặp này sẽ mất thời gian, không
+  làm vội trong 1 lượt.
+- Kiểm tra cụ thể `crates/typed-store`/`librocksdb-sys`/`tokio` có đường nào dùng io_uring
+  (feature flag `io-uring` của tokio, hoặc RocksDB's `use_direct_io_for_flush_and_compaction`/
+  async I/O options) — nếu có, thử tắt tương tự cách NOMT được né qua đổi backend.
+- Nếu xác nhận đúng là io_uring: cân nhắc tìm hiểu TẠI SAO kernel OpenHarmony 5.10.110 của board
+  trả EINVAL cụ thể (không phải ENOSYS/EPERM — gợi ý io_uring CÓ tồn tại nhưng 1 flag/opcode cụ
+  thể không được hỗ trợ) — có thể tham khảo `tz-llm-trustzone`'s kernel source
+  (`tz-llm/linux-5.10-opi`, CÙNG kernel base) nếu cần đối chiếu Kconfig thật.
+
+**Không tuyên bố "chạy node thật trên board thành công"** — chỉ tuyên bố đúng những gì đã xác
+nhận: binary chạy được, MPT/genesis/RPC hoạt động đúng; consensus/block-production CHƯA hoạt động
+trên board, nguyên nhân gốc chưa xác định chắc chắn.
+
+## §9.41 — Root cause thật của §9.40's "Rust treo": thiếu file `node.toml`, KHÔNG PHẢI io_uring — chạy node thật THÀNH CÔNG (2026-08-21, cùng ngày)
+
+Người dùng yêu cầu tiếp tục điều tra ngay. Board không có `strace`/`gdb`, nhưng có đủ `/proc`
+(root qua `hdc shell`) để điều tra miễn phí trước khi nghĩ tới việc thêm log + build lại:
+
+1. **`/proc/<pid>/task/*/wchan`** trên mọi thread của process treo → toàn bộ `futex_wait_queue_me`
+   (chờ việc bình thường của threadpool nhàn rỗi) + 2 thread `do_epoll_wait` — **xác nhận Tokio
+   dùng epoll, KHÔNG dùng io_uring** (bác bỏ giả thuyết io_uring hàng đầu đã nêu ở §9.40 cho vấn
+   đề #2 — giả thuyết đó SAI). Không thread nào wchan bất thường — không phải deadlock.
+2. Bật `RUST_LOG=debug` (cần `env RUST_LOG=debug <binary>`, KHÔNG phải `VAR=val cmd &` qua `hdc
+   shell` — cú pháp đó không truyền được env var qua tới process con trên `sh` của board; xác
+   nhận qua `/proc/<pid>/environ`, cũng phát hiện `toybox`'s `grep -a` không xử lý đúng chuỗi
+   phân cách bằng null-byte, gây hiểu lầm ban đầu tưởng biến env bị thiếu). Log Rust vẫn không
+   xuất hiện trong file tôi đang xem (`stdout*.log`) — **vì đó SAI FILE**: `logger.RedirectStderrToFile()`
+   (`main.go`, gọi sau khi `app.Run()` — chứa `InitFFIBridge` — đã khởi động trong goroutine
+   riêng) dùng `dup2Compat` (fix arm64 hôm nay, §9.38) để chuyển hướng fd 1/2 SANG 1 file khác:
+   `node-0/logs/execution/<ngày>/execution.log` — không phải file tôi redirect lúc chạy `nohup ...
+   > stdout.log`. Đọc đúng file này lộ ra root cause thật ngay:
+   ```
+   ERROR metanode::ffi: Failed to load configuration from ".../node-0/node.toml":
+   Failed to read config file: ".../node-0/node.toml"
+   ```
+   (lặp lại mỗi 5s — ĐÚNG với logic retry-loop đã đọc ở §9.40's trích dẫn `ffi.rs`: `Err(e) => {
+   error!(...); sleep(5s); continue; }` — đây KHÔNG PHẢI treo/deadlock, mà là **vòng lặp retry vô
+   hạn có chủ đích**, chỉ là không đủ ồn ào để tôi nhận ra ngay vì đang xem sai file).
+
+**Root cause thật, rất đơn giản**: lúc đẩy config lên board ở §9.40, chỉ đẩy `config.json` +
+`genesis.json` — **quên hẳn `node.toml`** (config Rust consensus riêng, do `gen_single_chain.py`
+sinh cùng thư mục `node-0/`) và thư mục `keys/` (`protocol_key.json`/`network_key.json` mà
+`node.toml` trỏ tới). Lỗi triển khai của người thao tác (tôi), không phải bug của dự án hay của
+kernel/OpenHarmony.
+
+**Sau khi đẩy đủ `node.toml` (patch lại path trỏ đúng `/data/ssd/metanode_test/...`) + `keys/`**:
+node chạy đúng ngay — `eth_blockNumber` lên `0x1` chỉ trong vài giây, log
+`consensus_core::core::proposer` tạo block dồn dập (round 38→46 chỉ trong **dưới 1 giây thật**,
+`commit_index` tăng liên tục, `🛡️ [UNIFIED STATE] Phase: Healthy | Local DAG Commit: 41 | Network
+Quorum: 41 | Lag: 0`) — **Mysticeti DAG consensus hoạt động hoàn toàn bình thường trên board**,
+không có vấn đề io_uring/timing/kernel nào cả cho phần này.
+
+**Gửi tx thật qua `tx_sender`** (từ máy dev, qua network tới `192.168.1.254:4200`): deploy
+SimpleStorage + `store(2222)` **thành công thật** (return data `0x8ae` = 2222 đúng). Bước
+`retrieve()` (off-chain read, gọi ngay sau không có độ trễ) bị revert "transaction halted" — đây
+là 1 race MVCC/Block-STM ĐÃ BIẾT từ trước (đọc trước khi ghi kịp commit khi gửi liên tục sát
+nhau — cùng pattern đã thấy khi test x86 lần đầu, trước khi thêm sleep giữa các bước), **không
+phải vấn đề riêng của board**.
+
+Dừng node an toàn (`kill`, xác nhận qua `ps -ef`). Board hoàn toàn khoẻ mạnh sau đó (`uptime`
+12h29, RAM 11G trống, load bình thường).
+
+**Với §9.41: metanode đã chạy được 1 node THẬT hoàn chỉnh trên board Orange Pi 5 Max** — Go +
+Rust consensus (Mysticeti DAG) + C++ EVM/Xapian + RocksDB, tất cả cùng hoạt động đúng, xử lý tx
+thật (deploy + write) qua RPC/TCP thật qua mạng. Đây là mốc "chạy node thật trên board" đã nêu
+"chưa làm" ở cuối §9.39 — **nay đã làm và xác nhận thành công**.
+
+**Bài học ghi lại cho lần sau** (tránh lặp lại):
+- Khi đẩy config sinh bởi `gen_single_chain.py` lên board/máy khác: phải đẩy ĐỦ CẢ `config.json`
+  + `genesis.json` + `node.toml` + `keys/` (không chỉ 2 file đầu) — cả 4 đều cần thiết.
+- `hdc shell "VAR=val cmd &"` KHÔNG truyền được env var qua đúng cách cho process nền — dùng
+  `env VAR=val cmd` thay vì `VAR=val cmd`.
+- `toybox`'s `grep -a` trên board không đọc đúng file có nhiều null-byte (như `/proc/pid/environ`)
+  — dùng `base64` rồi decode ở máy dev nếu cần đọc chính xác.
+- **`logger.RedirectStderrToFile()` chuyển hướng fd 1/2 sang `logs/execution/<ngày>/execution.log`
+  SAU KHI node khởi động** — log thật (bao gồm cả log Rust) nằm ở đó, KHÔNG phải ở file mà lệnh
+  `nohup ... > file` redirect lúc khởi động tiến trình (file đó chỉ chứa log từ TRƯỚC thời điểm
+  redirect nội bộ này chạy).
+
+## §9.42 — Wire 4 lệnh forward TA còn thiếu (mã nguồn, chưa build/flash) (2026-08-21, cùng ngày)
+
+Tiếp nối yêu cầu người dùng. Wire `MVM_TZ_CMD_DEPLOY`/`SEND_NATIVE`/`PROCESS_NATIVE_MINT_BURN`/
+`NONCE_PLUS_ONE` trong `execution/pkg/mvm/ta/mvm_ta_main.cpp` — 4 hàm `mvm_dispatch_*` mới,
+mechanically identical với `mvm_dispatch_call`/`mvm_dispatch_execute` đã có (đọc header cố định
+qua `memcpy`, đọc phần biến-độ-dài qua `BlobReader`, gọi thẳng hàm C++ tương ứng trong
+`mvm_linker.hpp`, encode response qua `mvm_encode_execute_result` dùng chung). Blob order/field
+type đối chiếu trực tiếp với `tz_codec.go`'s 4 hàm `encode*Req` tương ứng (đã sửa đúng
+length-prefixed ở GĐ3b §9's step 1) và `mvm_tz_protocol.h`'s doc comment trên từng struct request
+— không đoán. `EXECUTE_BATCH` vẫn KHÔNG wire (dead code thật, không Go-side codec, không caller).
+
+**Không build/flash trong lượt này** — quyết định thận trọng, không phải giới hạn kỹ thuật đơn
+thuần: file này cần toolchain musl/chcore thật
+(`tz-llm-trustzone/scripts/kick-the-tires/cpp13-metanode-deps/build_mvm_ta.sh`, chạy trong Docker
+`vectorxj0553/tz-llm-llama-builder`, nhiều dependency đã "staged" theo cách riêng — khác hẳn
+`aarch64-linux-gnu` glibc toolchain vừa dùng cho GĐ1/GĐ2 cross-compile Go hôm nay). Sau khi build
+xong còn cần **flash lên board thật** (`rebuild.sh` → `repack.sh` → copy tay `boot.img` → MaskROM
+flash → power-cycle) — quy trình 8 bước có rủi ro thật đã ghi nhiều lần trong lịch sử dự án
+(`tz-llm-trustzone`'s CLAUDE.md), và board hiện đang ở trạng thái ổn định "round 2" — không nên
+động vào mà chưa xác nhận rõ với người dùng trước.
+
+**Xác nhận đã làm được (không cần toolchain thật)**: diagnostic từ IDE/clang trên file này chỉ
+báo lỗi ở các dòng **TRƯỚC** vị trí sửa (thiếu include path chcore SDK — pre-existing, do IDE
+không có toolchain thật, không liên quan code mới) — không có diagnostic nào trên chính 4 hàm mới
+thêm.
+
+**Còn lại cho `ModeTrustzoneHardware` "có ý nghĩa thực tế"** (chưa làm):
+- Build thật `mvm_ta` (musl/chcore) với code mới này, flash lên board — cần xác nhận với người
+  dùng trước khi động vào board đang ổn định.
+- Cross-compile Go CA cho board (đã xong, GĐ1/GĐ2) chạy qua `tzHardwareChannel` THẬT với TA thật
+  trên board — chưa từng thử; `tz_hardware_channel.go`/`tz_hardware_engine.go` mới chỉ build sạch
+  x86, chưa chạm `/dev/tc_ns_client` thật.
+- Giao thức v1 vẫn thiếu CHAINID/blob context/cross-chain sender (đã ghi từ §9.34) — chưa quyết
+  định.

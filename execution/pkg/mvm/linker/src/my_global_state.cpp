@@ -80,6 +80,23 @@ AccountState MyGlobalState::get(const Address &addr, GasTracker *gas_tracker) {
   GlobalStateGet_return accountQueryData =
       GlobalStateGet(blockContext.mvmId, b_address + 12);
 
+  // 2026-08-21: KNOWN REMAINING RISK, not yet fixed -- these 2 throw sites
+  // are reachable from EVERY forward command (CALL/EXECUTE/DEPLOY/
+  // SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE all call gs.get()),
+  // and C++ exceptions are confirmed broken in this TA build (see
+  // tz-llm-trustzone/DEPLOYED_STATE.md "DEFINITIVE answer" entry) -- if a
+  // reverse-call answer ever actually returns status==2 or status==3, this
+  // will hang the TA exactly like sendNative()'s insufficient-balance throw
+  // used to. NOT fixed here because this function returns AccountState BY
+  // VALUE with no error channel -- avoiding the throw would mean changing
+  // this function's signature (e.g. an out-parameter or variant return) and
+  // updating every caller (sendNative/processNativeMintBurn/noncePlusOne/
+  // deploy, and CALL/EXECUTE's own interpreter path) to check for it
+  // instead of relying on catch, which is a materially bigger, riskier
+  // change than the two throw sites already fixed in mvm_linker.cpp today.
+  // Never observed triggered in any test to date (every reverse-call
+  // answer in mvm_ca_test.cpp's handle_reverse_call() only ever returns
+  // status 0 or 1) -- but that's untested coverage, not a guarantee.
   if (accountQueryData.status == 3) {
     throw Exception(ET::ErrExecutionReverted, "Block-STM: Estimate Hit (Suspend)");
   }

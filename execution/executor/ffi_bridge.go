@@ -3,7 +3,11 @@ package executor
 /*
 #cgo CFLAGS: -I../../consensus/metanode/src/ffi
 #cgo LDFLAGS: -L${SRCDIR}/../../consensus/metanode/target/release -lmetanode -Wl,--allow-multiple-definition
-#cgo linux,amd64 LDFLAGS: -lpthread -ldl -lm -lutil -lrt
+// pthread/dl/m/util/rt are standard glibc-provided libs on any Linux/glibc
+// arch (confirmed 2026-08-21 while cross-compiling for aarch64-linux-gnu,
+// the real board's arch -- nothing x86-specific about them), so this was
+// just an under-scoped constraint, not an intentional amd64-only gate.
+#cgo linux LDFLAGS: -lpthread -ldl -lm -lutil -lrt
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>

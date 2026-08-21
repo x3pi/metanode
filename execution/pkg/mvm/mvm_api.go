@@ -1,8 +1,22 @@
 package mvm
 
 /*
-#cgo CFLAGS: -w -O3 -march=native -mtune=native
-#cgo CXXFLAGS: -std=c++17 -w -O3 -march=native -mtune=native
+#cgo CFLAGS: -w -O3
+#cgo CXXFLAGS: -std=c++17 -w -O3
+// -march=native/-mtune=native only make sense when the compiler runs on the
+// same machine it targets -- meaningless (and rejected outright by gcc/g++)
+// under a cross toolchain like aarch64-linux-gnu-gcc. Mirrors the same
+// CMAKE_CROSSCOMPILING guard already in c_mvm/CMakeLists.txt and
+// linker/CMakeLists.txt (added 2026-08-16 for the chcore/musl TA target) --
+// this is the Go-side cgo equivalent, added 2026-08-21 while cross-compiling
+// pkg/mvm for the real board (aarch64-linux-gnu, NOT the musl/chcore TA
+// target -- see note/tee_dual_mode_execution_plan.md's cross-compile
+// section). Default (no explicit GOARCH, i.e. the host's own arch) still
+// gets the amd64 line on this development machine, unchanged from before.
+#cgo linux,amd64 CFLAGS: -march=native -mtune=native
+#cgo linux,arm64 CFLAGS: -march=armv8-a -mtune=generic
+#cgo linux,amd64 CXXFLAGS: -march=native -mtune=native
+#cgo linux,arm64 CXXFLAGS: -march=armv8-a -mtune=generic
 #cgo LDFLAGS: -lgmp -lmpfr -lm -ltbb -lxapian -L./linker/build/lib/static -lleveldb -lmvm_linker -L./c_mvm/build/lib/static -lmvm -lstdc++ -luuid
 #cgo CPPFLAGS: -I./linker/build/include
 #include "mvm_linker.hpp"
@@ -1359,6 +1373,87 @@ func (a *MVMApi) GetExecuteResult() *MVMExecuteResult {
 }
 
 
+// globalStateGetCore is the pure-Go core of GlobalStateGet, extracted
+// 2026-08-20 (plan §9's "Giai đoạn 3b") so the real-hardware reverse-call
+// dispatcher can call it directly and encode the result over the wire
+// codec, instead of only being reachable via the //export C signature
+// (which the in-process cgo path still uses unchanged below). Mechanical
+// extraction — zero behavior change, every branch/log line/precompile
+// check identical to before. status: 0=not found (create fresh),
+// 1=found, 3=Block-STM suspend (ErrEstimateHit) — matches
+// mvm_tz_protocol.h's mvm_tz_global_state_get_resp_t exactly, no
+// translation needed by callers.
+func globalStateGetCore(fmvmId, fAddress common.Address) (status int32, balance, nonce, code []byte) {
+	mvmApi := GetMVMApi(fmvmId)
+	if mvmApi == nil {
+		logger.Error("[GLOBAL_STATE_GET] ERROR: mvmApi is nil for mvmId=%v", fmvmId.Hex())
+		log.Printf("mvmApi nil: %v", fmvmId)
+		return 0, nil, nil, nil
+	}
+
+	isPrecompile := false
+	if fAddress[0] == 0 && fAddress[1] == 0 && fAddress[2] == 0 && fAddress[3] == 0 &&
+		fAddress[4] == 0 && fAddress[5] == 0 && fAddress[6] == 0 && fAddress[7] == 0 &&
+		fAddress[8] == 0 && fAddress[9] == 0 && fAddress[10] == 0 && fAddress[11] == 0 &&
+		fAddress[12] == 0 && fAddress[13] == 0 && fAddress[14] == 0 && fAddress[15] == 0 &&
+		fAddress[16] == 0 && fAddress[17] == 0 {
+		val := (uint16(fAddress[18]) << 8) | uint16(fAddress[19])
+		if val >= 1 && val <= 409 {
+			isPrecompile = true
+		}
+	}
+	if !isPrecompile && fAddress == common.HexToAddress("0x00000000000000000000000000000000b429c0b2") {
+		isPrecompile = true
+	}
+
+	if isPrecompile {
+		logger.Debug("[GLOBAL_STATE_GET] Precompiled contract detected: %v", fAddress.Hex())
+		b32 := uint256.NewInt(0).Bytes32()
+		bNonce := [32]byte{}
+		big.NewInt(0).FillBytes(bNonce[:])
+		code = []byte{0x01}
+		return 1, b32[:], bNonce[:], code
+	}
+	if mvmApi.extendedMode {
+		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
+			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
+		}
+	}
+
+	accountState, err := mvmApi.accountStateDb.AccountState(fAddress)
+	if err != nil {
+		if errors.Is(err, mvcc.ErrEstimateHit) {
+			logger.Debug("[GLOBAL_STATE_GET] Suspend: ErrEstimateHit for %s", fAddress.Hex())
+			return 3, nil, nil, nil
+		}
+		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState err for %s, err=%v", fAddress.Hex(), err)
+		return 0, nil, nil, nil
+	}
+	if accountState == nil {
+		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState nil for %s", fAddress.Hex())
+		return 0, nil, nil, nil
+	}
+
+	bigBalance := big.NewInt(0).Add(
+		accountState.Balance(),
+		accountState.PendingBalance(),
+	)
+
+	b32Balance := [32]byte{}
+	bigBalance.FillBytes(b32Balance[:])
+	bigIntNonce := big.NewInt(0)
+	bigIntNonce.SetUint64(accountState.Nonce())
+	bNonce := [32]byte{}
+	bigIntNonce.FillBytes(bNonce[:])
+	var bCode []byte
+	if smartContractState := accountState.SmartContractState(); smartContractState != nil {
+		bCode = mvmApi.smartContractDb.Code(fAddress)
+		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded for %s, codeLen=%d, codeHash=%s, code=%s", fAddress.Hex(), len(bCode), smartContractState.CodeHash().Hex(), hex.EncodeToString(bCode))
+	}
+
+	return 1, b32Balance[:], bNonce[:], bCode
+}
+
 //export GlobalStateGet
 func GlobalStateGet(
 	mvmId *C.uchar,
@@ -1384,82 +1479,15 @@ func GlobalStateGet(
 	bAddress := C.GoBytes(unsafe.Pointer(address), 20)
 	fAddress := common.BytesToAddress(bAddress)
 
-	mvmApi := GetMVMApi(fmvmId)
-	if mvmApi == nil {
-		logger.Error("[GLOBAL_STATE_GET] ERROR: mvmApi is nil for mvmId=%v", fmvmId.Hex())
-		log.Printf("mvmApi nil: %v", fmvmId)
-		return C.int(0), nil, nil, nil, 0
+	st, balance, gNonce, code := globalStateGetCore(fmvmId, fAddress)
+	if st == 0 || st == 3 {
+		return C.int(st), nil, nil, nil, 0
 	}
-
-	isPrecompile := false
-	if fAddress[0] == 0 && fAddress[1] == 0 && fAddress[2] == 0 && fAddress[3] == 0 &&
-		fAddress[4] == 0 && fAddress[5] == 0 && fAddress[6] == 0 && fAddress[7] == 0 &&
-		fAddress[8] == 0 && fAddress[9] == 0 && fAddress[10] == 0 && fAddress[11] == 0 &&
-		fAddress[12] == 0 && fAddress[13] == 0 && fAddress[14] == 0 && fAddress[15] == 0 &&
-		fAddress[16] == 0 && fAddress[17] == 0 {
-		val := (uint16(fAddress[18]) << 8) | uint16(fAddress[19])
-		if val >= 1 && val <= 409 {
-			isPrecompile = true
-		}
-	}
-	if !isPrecompile && fAddress == common.HexToAddress("0x00000000000000000000000000000000b429c0b2") {
-		isPrecompile = true
-	}
-
-	if isPrecompile {
-		logger.Debug("[GLOBAL_STATE_GET] Precompiled contract detected: %v", fAddress.Hex())
-		balance := uint256.NewInt(0).Bytes32()
-		cBBalance := C.CBytes(balance[:])
-		bNonce := [32]byte{}
-		big.NewInt(0).FillBytes(bNonce[:])
-		cBNonce := C.CBytes(bNonce[:])
-		code := []byte{0x01}
-		cBCode := C.CBytes(code)
-		// Không gửi con trỏ đi đâu cả, C++ sẽ tự quản lý.
-		return C.int(1), (*C.uchar)(cBBalance), (*C.uchar)(cBNonce), (*C.uchar)(cBCode), C.int(len(code))
-	}
-	if mvmApi.extendedMode {
-		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
-			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
-		}
-	}
-
-	accountState, err := mvmApi.accountStateDb.AccountState(fAddress)
-	if err != nil {
-		if errors.Is(err, mvcc.ErrEstimateHit) {
-			logger.Debug("[GLOBAL_STATE_GET] Suspend: ErrEstimateHit for %s", fAddress.Hex())
-			return C.int(3), nil, nil, nil, 0
-		}
-		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState err for %s, err=%v", fAddress.Hex(), err)
-		return C.int(0), nil, nil, nil, 0
-	}
-	if accountState == nil {
-		logger.Error("[GLOBAL_STATE_GET] ❌ AccountState nil for %s", fAddress.Hex())
-		return C.int(0), nil, nil, nil, 0
-	}
-
-	bigBalance := big.NewInt(0).Add(
-		accountState.Balance(),
-		accountState.PendingBalance(),
-	)
-
-	b32Balance := [32]byte{}
-	bigBalance.FillBytes(b32Balance[:])
-	cBBalance := C.CBytes(b32Balance[:])
-	bigIntNonce := big.NewInt(0)
-	bigIntNonce.SetUint64(accountState.Nonce())
-	bNonce := [32]byte{}
-	bigIntNonce.FillBytes(bNonce[:])
-	cBNonce := C.CBytes(bNonce[:])
-	var bCode []byte
-	if smartContractState := accountState.SmartContractState(); smartContractState != nil {
-		bCode = mvmApi.smartContractDb.Code(fAddress)
-		logger.Debug("[GLOBAL_STATE_GET] Smart contract code loaded for %s, codeLen=%d, codeHash=%s, code=%s", fAddress.Hex(), len(bCode), smartContractState.CodeHash().Hex(), hex.EncodeToString(bCode))
-	}
-
-	cBCode := C.CBytes(bCode)
 	// Không gửi con trỏ đi đâu cả, C++ sẽ tự quản lý.
-	return C.int(1), (*C.uchar)(cBBalance), (*C.uchar)(cBNonce), (*C.uchar)(cBCode), C.int(len(bCode))
+	cBBalance := C.CBytes(balance)
+	cBNonce := C.CBytes(gNonce)
+	cBCode := C.CBytes(code)
+	return C.int(st), (*C.uchar)(cBBalance), (*C.uchar)(cBNonce), (*C.uchar)(cBCode), C.int(len(code))
 }
 
 //export ClearProcessingPointers
@@ -1491,6 +1519,46 @@ const (
 	StorageStatusSuspend  C.int = 2
 )
 
+// getStorageValueCore is the pure-Go core of GetStorageValue, extracted
+// 2026-08-20 (plan §9's "Giai đoạn 3b") for the same reason as
+// globalStateGetCore above — mechanical, zero behavior change, including
+// a pre-existing quirk worth flagging rather than silently fixing here:
+// a nil mvmApi returns status=0, which is StorageStatusSuccess, not a
+// distinguishable "not found"/error status. Left as-is (out of scope for
+// an extraction step); a real fix would need its own deliberate decision
+// about what status a nil mvmApi should actually report on the wire.
+// status matches mvm_tz_protocol.h's mvm_tz_get_storage_value_resp_t
+// exactly (0=success, 1=not found, 2=suspend) — no translation needed.
+func getStorageValueCore(fmvmId, fAddress common.Address, bKey []byte) (value []byte, status int32, mvmApiFound bool) {
+	mvmApi := GetMVMApi(fmvmId)
+	if mvmApi == nil {
+		return nil, int32(StorageStatusSuccess), false
+	}
+
+	// STRICT ACCESS LIST CHECK FOR SLOAD
+	if mvmApi.extendedMode {
+		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
+			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
+		}
+	}
+
+	logger.Debug("GetStorageValue address: ", fAddress, hex.EncodeToString(bKey))
+	bValue, success := mvmApi.smartContractDb.StorageValue(fAddress, bKey)
+
+	retStatus := StorageStatusSuccess
+	if !success {
+		retStatus = StorageStatusNotFound
+	}
+
+	if mvccDB, ok := mvmApi.smartContractDb.(*mvcc.MVCCSmartContractDB); ok {
+		if mvccDB.BlockingVersion != mvcc.BaseVersion {
+			retStatus = StorageStatusSuspend
+		}
+	}
+
+	return bValue, int32(retStatus), true
+}
+
 //export GetStorageValue
 func GetStorageValue(
 	mvmId *C.uchar,
@@ -1507,35 +1575,17 @@ func GetStorageValue(
 	}()
 	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
 	fmvmId := common.BytesToAddress(bmvmId)
-	mvmApi := GetMVMApi(fmvmId)
-	if mvmApi == nil {
-		return nil, 0
-	}
 	bAddress := C.GoBytes(unsafe.Pointer(address), 20)
 	bKey := C.GoBytes(unsafe.Pointer(key), 32)
 	fAddress := common.BytesToAddress(bAddress)
 
-	// STRICT ACCESS LIST CHECK FOR SLOAD
-	if mvmApi.extendedMode {
-		if _, loaded := mvmApi.currentRelatedAddresses.LoadOrStore(fAddress, struct{}{}); !loaded {
-			logger.Debug("add RelatedAddresses", fmvmId, fAddress)
-		}
+	bValue, retStatus, found := getStorageValueCore(fmvmId, fAddress, bKey)
+	if !found {
+		// Preserves the original nil-mvmApi short-circuit exactly: no
+		// C.CBytes call at all, a true nil pointer (not a CBytes(nil)
+		// pointer-to-zero-bytes, which is a different C-level value).
+		return nil, C.int(retStatus)
 	}
-
-	logger.Debug("GetStorageValue address: ", fAddress, hex.EncodeToString(bKey))
-	bValue, success := mvmApi.smartContractDb.StorageValue(fAddress, bKey)
-	
-	retStatus := StorageStatusSuccess
-	if !success {
-		retStatus = StorageStatusNotFound
-	}
-
-	if mvccDB, ok := mvmApi.smartContractDb.(*mvcc.MVCCSmartContractDB); ok {
-		if mvccDB.BlockingVersion != mvcc.BaseVersion {
-			retStatus = StorageStatusSuspend
-		}
-	}
-
 	cValue := C.CBytes(bValue)
 	// Không gửi con trỏ đi đâu cả, C++ sẽ tự quản lý.
 	return (*C.uchar)(cValue), C.int(retStatus)

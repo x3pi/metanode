@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -40,12 +41,43 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie_database"
 )
 
-//export ExtensionCallGetApi
-func ExtensionCallGetApi(
-	bytes *C.uchar,
-	size C.int,
-) C.struct_Extension_return {
-	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+// extensionCallGetApiCallCount counts every real invocation of
+// extensionCallGetApiCore (ModeCgo/ModeTrustzone only — see that core's own
+// doc comment; ModeTrustzoneHardware never reaches it). Added 2026-08-20 for
+// note/tee_dual_mode_execution_plan.md's "Giai đoạn 4" real-block replay
+// tool (cmd/tool/tz_replay_check): CALL_GET_API's real HTTP response is a
+// known, pre-existing non-determinism source (see plan doc mục "Hệ quả
+// thiết kế then chốt" #3) that must be excluded from any byte-for-byte
+// comparison between two independent replay runs — this counter is how the
+// tool detects, per block, whether that exclusion applies. Not used by any
+// other production code path.
+var extensionCallGetApiCallCount atomic.Uint64
+
+// ExtensionCallGetApiCallCount returns the running total of real
+// extensionCallGetApiCore invocations since process start. See
+// extensionCallGetApiCallCount's doc comment for why this exists.
+func ExtensionCallGetApiCallCount() uint64 {
+	return extensionCallGetApiCallCount.Load()
+}
+
+// extensionCallGetApiCore is the pure-Go core of ExtensionCallGetApi,
+// extracted 2026-08-20 (plan §9's "Giai đoạn 3b") for the same reason as
+// mvm_api.go's globalStateGetCore — mechanical, zero behavior change. It
+// still backs the cgo path (//export ExtensionCallGetApi below, used by
+// ModeCgo/ModeTrustzone) unchanged. nil return means the
+// Extension_return{nullptr,0} failure case (matches the //export
+// wrapper's own convention below). NOTE: this makes a real HTTP GET out
+// to the network (SSRF-blocked to non-loopback/private targets, 5s
+// timeout) — as of 2026-08-20 this is a PERMANENT scope decision, not a
+// "not yet": tz_hardware_reverse_dispatch.go's dispatchReverseCall
+// deliberately does NOT call this core for the real hardware bridge
+// (ModeTrustzoneHardware) — see that file's own comment on the
+// EXTENSION_CALL_GET_API case for why. Any contract relying on this
+// precompile behaves differently under ModeTrustzoneHardware (always
+// "no data") than under ModeCgo/ModeTrustzone (real HTTP) — a known,
+// accepted gap, not a bug to fix.
+func extensionCallGetApiCore(bCallData []byte) []byte {
+	extensionCallGetApiCallCount.Add(1)
 	logger.Debug("Calling get api data ", hex.EncodeToString(bCallData))
 	url := argument_encode.DecodeStringInput(bCallData[4:], 0)
 	// Add safe HTTP client with SSRF protection and timeout
@@ -74,31 +106,40 @@ func ExtensionCallGetApi(
 	response, err := safeHTTPClient.Get(url)
 	if err != nil {
 		logger.Warn("Error when call get api to ", url, err)
-
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 	defer response.Body.Close()
 	responseData, err := io.ReadAll(io.LimitReader(response.Body, 10*1024*1024)) // 10MB limit limit
 	if err != nil {
 		logger.Warn("Error when call get api to ", url, err)
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 	encodedRespone := argument_encode.EncodeSingleString(string(responseData))
 	logger.Debug("Extension call get api result ", encodedRespone)
-	data_size := C.int(len(encodedRespone))
-	data_p := (*C.uchar)(C.CBytes(encodedRespone))
-	return C.struct_Extension_return{
-		data_p:    data_p,
-		data_size: data_size,
-	}
+	return encodedRespone
 }
 
-//export ExtensionExtractJsonField
-func ExtensionExtractJsonField(
+//export ExtensionCallGetApi
+func ExtensionCallGetApi(
 	bytes *C.uchar,
 	size C.int,
 ) C.struct_Extension_return {
 	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+	out := extensionCallGetApiCore(bCallData)
+	if out == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
+	return C.struct_Extension_return{
+		data_p:    (*C.uchar)(C.CBytes(out)),
+		data_size: C.int(len(out)),
+	}
+}
+
+// extensionExtractJsonFieldCore is the pure-Go core of
+// ExtensionExtractJsonField, extracted 2026-08-20 (plan §9's "Giai đoạn
+// 3b") — mechanical, zero behavior change. nil return means the
+// Extension_return{nullptr,0} failure case.
+func extensionExtractJsonFieldCore(bCallData []byte) []byte {
 	logger.Debug("Extension extract json field ", hex.EncodeToString(bCallData))
 	jsonMap := make(map[string]interface{})
 	jsonStr := argument_encode.DecodeStringInput(bCallData[4:], 0)
@@ -115,12 +156,12 @@ func ExtensionExtractJsonField(
 		err = json.Unmarshal([]byte(jsonStr), &jsonArr)
 		if err != nil {
 			logger.Warn("Error when extract json field ", jsonStr, field, err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		intField, err := strconv.Atoi(field)
 		if err != nil {
 			logger.Warn("Error when extract json field ", jsonStr, field, err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		fieldData = jsonArr[intField]
 	}
@@ -139,20 +180,29 @@ func ExtensionExtractJsonField(
 		}
 	}
 
-	encodedData := argument_encode.EncodeSingleString(data)
-	data_size := C.int(len(encodedData))
-	data_p := (*C.uchar)(C.CBytes(encodedData))
-	return C.struct_Extension_return{
-		data_p:    data_p,
-		data_size: data_size,
-	}
+	return argument_encode.EncodeSingleString(data)
 }
 
-//export ExtensionBlst
-func ExtensionBlst(
+//export ExtensionExtractJsonField
+func ExtensionExtractJsonField(
 	bytes *C.uchar,
 	size C.int,
 ) C.struct_Extension_return {
+	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+	out := extensionExtractJsonFieldCore(bCallData)
+	if out == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
+	return C.struct_Extension_return{
+		data_p:    (*C.uchar)(C.CBytes(out)),
+		data_size: C.int(len(out)),
+	}
+}
+
+// extensionBlstCore is the pure-Go core of ExtensionBlst, extracted
+// 2026-08-20 (plan §9's "Giai đoạn 3b") — mechanical, zero behavior
+// change. nil return means the Extension_return{nullptr,0} failure case.
+func extensionBlstCore(bCallData []byte) []byte {
 	blstAbiStr := strings.NewReader(`
 [
 	{
@@ -218,15 +268,14 @@ func ExtensionBlst(
 	blstAbi, err := abi.JSON(blstAbiStr)
 	if err != nil {
 		logger.Error("Error ", err)
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 
-	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
 	logger.Debug("Calling extention blst", hex.EncodeToString(bCallData))
 	method, err := blstAbi.MethodById(bCallData[0:4])
 	if err != nil {
 		logger.Warn("Error when get method by id", err)
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 
 	if method.RawName == "verifySign" {
@@ -242,12 +291,7 @@ func ExtensionBlst(
 		if err != nil {
 			logger.Warn("Error when pack output", err)
 		}
-		data_size := C.int(len(outputs))
-		data_p := (*C.uchar)(C.CBytes(outputs))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return outputs
 	}
 
 	if method.RawName == "verifyAggregateSign" {
@@ -264,16 +308,26 @@ func ExtensionBlst(
 		if err != nil {
 			logger.Warn("Error when pack output", err)
 		}
-		data_size := C.int(len(outputs))
-		data_p := (*C.uchar)(C.CBytes(outputs))
 		logger.Debug("Extension blst result ", hex.EncodeToString(outputs))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return outputs
 	}
-	return C.struct_Extension_return{data_p: nil, data_size: 0}
+	return nil
+}
 
+//export ExtensionBlst
+func ExtensionBlst(
+	bytes *C.uchar,
+	size C.int,
+) C.struct_Extension_return {
+	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+	out := extensionBlstCore(bCallData)
+	if out == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
+	return C.struct_Extension_return{
+		data_p:    (*C.uchar)(C.CBytes(out)),
+		data_size: C.int(len(out)),
+	}
 }
 
 func WrapExtensionBlst(
@@ -284,14 +338,14 @@ func WrapExtensionBlst(
 	return C.GoBytes(unsafe.Pointer(cReturn.data_p), cReturn.data_size)
 }
 
-//export ExtensionGetOrCreateSimpleDb
-func ExtensionGetOrCreateSimpleDb(
-	bytes *C.uchar,
-	size C.int,
-	address *C.uchar,
-	mvmId *C.uchar,
-) C.struct_Extension_return {
-	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+// extensionGetOrCreateSimpleDbCore is the pure-Go core of
+// ExtensionGetOrCreateSimpleDb, extracted 2026-08-20 (plan §9's "Giai
+// đoạn 3b") — mechanical, zero behavior change. The ABI-parse-and-
+// dispatch layer here was the one part of the 4 extension functions NOT
+// already plain Go (unlike getOrCreateSimpleDb/getSimpledb/setSimpledb/
+// getNextKeys/getAllSimpledb/searchByValue below, which always were).
+// nil return means the Extension_return{nullptr,0} failure case.
+func extensionGetOrCreateSimpleDbCore(bCallData []byte, addressId, addressMvmId e_common.Address) []byte {
 	logger.Error("Calling ExtensionGetOrCreateSimpleDb with data: ", hex.EncodeToString(bCallData))
 
 	// ABI của hàm getOrCreateSimpleDb (bạn cần lấy từ hợp đồng Solidity)
@@ -465,219 +519,199 @@ func ExtensionGetOrCreateSimpleDb(
 
 	if err != nil {
 		logger.Error("Error parsing ABI: ", err) // Sử dụng logger thay vì log.Fatal
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 
 	// Tìm method getOrCreateSimpleDb trong ABI
 	method, err := parsedABI.MethodById(bCallData[0:4])
 	if err != nil {
 		logger.Error("Error finding method: ", err) // Sử dụng logger thay vì log.Fatal
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 	logger.Error("method: ", method.Name)
-	logger.Error("address", address)
-	// Giải mã dữ liệu
-
-	baddressId := C.GoBytes(unsafe.Pointer(address), 20)
-	addressId := e_common.BytesToAddress(baddressId)
 	logger.Error("address", addressId)
-
-	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
-	addressMvmId := e_common.BytesToAddress(bmvmId)
 	logger.Error("address", addressMvmId)
 
 	decoded, err := method.Inputs.Unpack(bCallData[4:]) // Bỏ qua 4 bytes đầu tiên
 	if err != nil {
 		logger.Error("Error unpacking data: ", err) // Sử dụng logger thay vì log.Fatal
-		return C.struct_Extension_return{data_p: nil, data_size: 0}
+		return nil
 	}
 
 	if method.Name == "deleteDb" {
 		logger.Info("deleteDb")
 		if len(decoded) < 1 {
 			logger.Error("Missing arguments for deleteDb")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Gọi hàm getOrCreateSimpleDb (bạn cần triển khai logic này)
 		result, err := deleteDb(decoded[0].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling getOrCreateSimpleDb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "getNextKeys" {
 		logger.Info("set")
 		if len(decoded) < 3 {
 			logger.Error("Missing arguments for set")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 
 		limit, ok := decoded[2].(uint8)
 		if !ok {
 			logger.Error("decoded[2] is not of type uint8")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		result, err := getNextKeys(decoded[0].(string), decoded[1].(string), int(limit), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling setSimpledb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "getOrCreateSimpleDb" {
 		logger.Info("getOrCreateSimpleDb")
 		if len(decoded) < 1 {
 			logger.Error("Missing arguments for getOrCreateSimpleDb")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Gọi hàm getOrCreateSimpleDb (bạn cần triển khai logic này)
 		result, err := getOrCreateSimpleDb(decoded[0].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling getOrCreateSimpleDb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "get" {
 		if len(decoded) < 2 {
 			logger.Error("Missing arguments for get")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		result, err := getSimpledb(decoded[0].(string), decoded[1].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling getSimpledb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "searchByValue" {
 		logger.Info("searchByValue")
 		if len(decoded) < 2 {
 			logger.Error("Missing arguments for searchByValue")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		result, err := searchByValue(decoded[0].(string), decoded[1].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling getSimpledb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "set" {
 		logger.Info("set")
 		if len(decoded) < 3 {
 			logger.Error("Missing arguments for set")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		result, err := setSimpledb(decoded[0].(string), decoded[1].(string), decoded[2].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling setSimpledb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
 	if method.Name == "getAll" {
 		logger.Info("getAll")
 		if len(decoded) < 1 {
 			logger.Error("Missing arguments for getAll")
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Gọi hàm getOrCreateSimpleDb (bạn cần triển khai logic này)
 		result, err := getAllSimpledb(decoded[0].(string), addressMvmId, addressId) // Giả sử decoded[0] là string
 		if err != nil {
 			logger.Error("Error calling getSimpledb: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
 		// Mã hóa kết quả
 		encodedResult, err := method.Outputs.Pack(result)
 		if err != nil {
 			logger.Error("Error packing result: ", err)
-			return C.struct_Extension_return{data_p: nil, data_size: 0}
+			return nil
 		}
-		data_size := C.int(len(encodedResult))
-		data_p := (*C.uchar)(C.CBytes(encodedResult))
-		return C.struct_Extension_return{
-			data_p:    data_p,
-			data_size: data_size,
-		}
+		return encodedResult
 	}
 
-	return C.struct_Extension_return{data_p: nil, data_size: 0}
-
+	return nil
 }
+
+//export ExtensionGetOrCreateSimpleDb
+func ExtensionGetOrCreateSimpleDb(
+	bytes *C.uchar,
+	size C.int,
+	address *C.uchar,
+	mvmId *C.uchar,
+) C.struct_Extension_return {
+	bCallData := C.GoBytes(unsafe.Pointer(bytes), size)
+	baddressId := C.GoBytes(unsafe.Pointer(address), 20)
+	addressId := e_common.BytesToAddress(baddressId)
+	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+	addressMvmId := e_common.BytesToAddress(bmvmId)
+
+	out := extensionGetOrCreateSimpleDbCore(bCallData, addressId, addressMvmId)
+	if out == nil {
+		return C.struct_Extension_return{data_p: nil, data_size: 0}
+	}
+	return C.struct_Extension_return{
+		data_p:    (*C.uchar)(C.CBytes(out)),
+		data_size: C.int(len(out)),
+	}
+}
+
 func getOrCreateSimpleDb(dbName string, addressMvmId e_common.Address, addressId e_common.Address) (bool, error) {
 	logger.Info("getOrCreateSimpleDb", dbName, addressId)
 	mvmApi := GetMVMApi(addressMvmId)

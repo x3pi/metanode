@@ -417,6 +417,23 @@ func SyncFileLog() {
 	syncFileOutputs()
 }
 
+// dup2Compat is syscall.Dup2, but portable across CPU architectures: Go's
+// syscall package does not define Dup2 for linux/arm64 (the real board's
+// arch, cross-compile added 2026-08-21 — see
+// note/tee_dual_mode_execution_plan.md's cross-compile section) because the
+// arm64 Linux syscall ABI itself dropped dup2 in favor of dup3 (dup3 has
+// existed on every Linux syscall ABI, including amd64, since kernel
+// 2.6.27/2008, so this is safe everywhere, not an arm64-only code path).
+// The one behavioral difference from dup2: dup3 rejects oldfd==newfd with
+// EINVAL instead of silently no-op'ing, so that case is special-cased here
+// to preserve dup2's exact semantics.
+func dup2Compat(oldfd, newfd int) error {
+	if oldfd == newfd {
+		return nil
+	}
+	return syscall.Dup3(oldfd, newfd, 0)
+}
+
 // RedirectStderrToFile redirect cả stdout và stderr của tiến trình (kể cả C/C++ runtime) vào log file
 // Đảm bảo unrecovered panic, runtime fatal error, và toàn bộ C++ cout/cerr được ghi vào execution.log
 // Gọi SAU EnableFileLog()
@@ -436,12 +453,12 @@ func RedirectStderrToFile() error {
 	fd := int(logFile.Fd())
 
 	// Redirect stdout (fd 1) đến file log
-	if err := syscall.Dup2(fd, int(os.Stdout.Fd())); err != nil {
+	if err := dup2Compat(fd, int(os.Stdout.Fd())); err != nil {
 		return fmt.Errorf("failed to redirect stdout: %w", err)
 	}
 
 	// Redirect stderr (fd 2) đến file log
-	if err := syscall.Dup2(fd, int(os.Stderr.Fd())); err != nil {
+	if err := dup2Compat(fd, int(os.Stderr.Fd())); err != nil {
 		return fmt.Errorf("failed to redirect stderr: %w", err)
 	}
 

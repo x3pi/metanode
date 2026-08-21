@@ -1,0 +1,19 @@
+# Cross-compile config for aarch64-linux-gnu (glibc), the real board's arch
+# (Orange Pi 5 Max, RK3588) — added 2026-08-21 as part of cross-compiling
+# metanode's Go binary (cmd/simple_chain) for the board. See
+# note/tee_dual_mode_execution_plan.md's cross-compile section, Giai đoạn 2.
+#
+# Only affects `cargo build --target aarch64-unknown-linux-gnu`; the default
+# (no --target, or --target x86_64-unknown-linux-gnu) build is untouched.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+# librocksdb-sys (pulled in transitively via crates/typed-store, used by
+# consensus/metanode) compiles RocksDB (C++) and its bundled compression
+# libs from source at cargo-build time via the `cc` crate, which reads
+# these CC/CXX/AR env vars for the target triple to pick the right
+# cross-compiler instead of the host's gcc/g++.
+[env]
+CC_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-gcc"
+CXX_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-g++"
+AR_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-ar"
