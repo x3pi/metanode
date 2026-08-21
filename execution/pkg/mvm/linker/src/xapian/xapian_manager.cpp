@@ -285,6 +285,7 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
         return &db;
     }
 
+    auto start_wait = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(simple_read_pool.pool_mutex);
     bool acquired = simple_read_pool.pool_cv.wait_for(lock, std::chrono::seconds(5), [this]() {
         for (size_t i = 0; i < simple_read_pool.in_use.size(); ++i)
@@ -292,6 +293,10 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                 return true;
         return false;
     });
+    auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_wait).count();
+    if (wait_ms > 10) {
+        std::cerr << "⏱️ [XAPIAN-PERF-WARN] acquireSimpleReadDb pool wait took " << wait_ms << "ms" << std::endl;
+    }
 
     if (!acquired) {
         std::cerr << "[ERROR] acquireSimpleReadDb: Timeout (5s) waiting for available DB." << std::endl;
@@ -702,11 +707,16 @@ struct ScopedSimpleReadDb {
 };
 
 std::string XapianManager::get_data(const std::string& virtualDocId, uint256_t blockNumber, const uint256_t *txHash, const uint256_t *writerHash) {
+  auto start = std::chrono::steady_clock::now();
   ScopedSimpleReadDb scopedDb(this);
   if (!scopedDb.get()) throw std::runtime_error("Failed to acquire DB slot for get_data");
   std::shared_lock<std::shared_mutex> read_lock(changes_mutex);
   try {
     Xapian::Document doc = get_overlayed_document(virtualDocId, txHash, writerHash, scopedDb.get());
+    auto dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    if (dur_ms > 20) {
+        std::cerr << "⏱️ [XAPIAN-PERF-WARN] get_data took " << dur_ms << "ms (doc=" << virtualDocId << ")" << std::endl;
+    }
     return doc.get_data();
   } catch (const Xapian::DocNotFoundError&) {
     // Normal, ignore

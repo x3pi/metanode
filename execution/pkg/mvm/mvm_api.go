@@ -806,8 +806,12 @@ func (a *MVMApi) Call(
 	} else {
 		cBRelatedAddresses = nil
 	}
+	b1ctxStart := time.Now()
 	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
+	b1ctxDur := time.Since(b1ctxStart)
 	defer b1ctx.free()
+
+	callStart := time.Now()
 	cRs := C.call(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -838,6 +842,11 @@ func (a *MVMApi) Call(
 		(*C.uchar)(b1ctx.blockHashes),
 		b1ctx.blockHashCount,
 	)
+	callDur := time.Since(callStart)
+	totalDur := time.Since(b1ctxStart)
+	if totalDur > 50*time.Millisecond && len(bTxHash) >= 4 {
+		logger.Warn("⏱️ [MVM-CALL-SLOW] Call tx=%x took %v (buildB1Context: %v, C.call: %v, codeLen: %d)", bTxHash[:4], totalDur, b1ctxDur, callDur, len(a.smartContractDb.Code(common.BytesToAddress(bContractAddress))))
+	}
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
@@ -899,8 +908,12 @@ func (a *MVMApi) Execute(
 	defer C.free(unsafe.Pointer(cBTxHash))
 	defer C.free(unsafe.Pointer(cBBmvmId))
 
+	b1ctxStart := time.Now()
 	b1ctx := a.buildB1Context(a.smartContractDb.Code(common.BytesToAddress(bContractAddress)), blockNumber)
+	b1ctxDur := time.Since(b1ctxStart)
 	defer b1ctx.free()
+
+	execStart := time.Now()
 	cRs := C.execute(
 		(*C.uchar)(cBSender),
 		(*C.uchar)(cBContractAddress),
@@ -930,6 +943,11 @@ func (a *MVMApi) Execute(
 		(*C.uchar)(b1ctx.blockHashes),
 		b1ctx.blockHashCount,
 	)
+	execDur := time.Since(execStart)
+	totalDur := time.Since(b1ctxStart)
+	if totalDur > 50*time.Millisecond && len(bTxHash) >= 4 {
+		logger.Warn("⏱️ [MVM-EXEC-SLOW] Execute tx=%x took %v (buildB1Context: %v, C.execute: %v, codeLen: %d)", bTxHash[:4], totalDur, b1ctxDur, execDur, len(a.smartContractDb.Code(common.BytesToAddress(bContractAddress))))
+	}
 	a.rs = extractExecuteResult(cRs)
 	FlushNativeLogs(a.rs.NativeLogs) // TEE-packaging B2
 	C.freeResult(cRs)
@@ -1339,6 +1357,14 @@ func GlobalStateGet(
 	code_p *C.uchar,
 	code_length C.int,
 ) {
+	gsStart := time.Now()
+	defer func() {
+		if dur := time.Since(gsStart); dur > 10*time.Millisecond {
+			bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
+			bAddress := C.GoBytes(unsafe.Pointer(address), 20)
+			logger.Warn("⏱️ [MVM-CALLBACK-SLOW] GlobalStateGet took %v (mvmId=%s, addr=%s)", dur, common.BytesToAddress(bmvmId).Hex()[:10], common.BytesToAddress(bAddress).Hex())
+		}
+	}()
 	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
 	fmvmId := common.BytesToAddress(bmvmId)
 
@@ -1435,18 +1461,14 @@ func TestMemLeak() {
 	logger.Debug("TestMemLeak: ", rs)
 }
 
-func TestMemLeakGs(addresses []common.Address) {
-	totalAddress := len(addresses)
-	var bAddress []byte
-	for i := range totalAddress {
-		bAddress = append(bAddress, addresses[i].Bytes()...)
-	}
-	cAddress := C.CBytes(bAddress)
-	logger.Debug("TotalAddress", totalAddress)
-	logger.Debug("bAddress", hex.EncodeToString(bAddress))
+//export TestMemLeakGS
+func TestMemLeakGS(
+	totalAddress C.int,
+	cAddress *C.uchar,
+) {
 	C.testMemLeakGS(
-		C.int(totalAddress),
-		(*C.uchar)(cAddress),
+		totalAddress,
+		cAddress,
 	)
 }
 
@@ -1462,6 +1484,14 @@ func GetStorageValue(
 	address *C.uchar,
 	key *C.uchar,
 ) (value *C.uchar, status C.int) {
+	svStart := time.Now()
+	defer func() {
+		if dur := time.Since(svStart); dur > 10*time.Millisecond {
+			bAddress := C.GoBytes(unsafe.Pointer(address), 20)
+			bKey := C.GoBytes(unsafe.Pointer(key), 32)
+			logger.Warn("⏱️ [MVM-CALLBACK-SLOW] GetStorageValue took %v (addr=%s, key=%s)", dur, common.BytesToAddress(bAddress).Hex(), hex.EncodeToString(bKey))
+		}
+	}()
 	bmvmId := C.GoBytes(unsafe.Pointer(mvmId), 20)
 	fmvmId := common.BytesToAddress(bmvmId)
 	mvmApi := GetMVMApi(fmvmId)

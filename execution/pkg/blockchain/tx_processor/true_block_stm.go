@@ -316,6 +316,7 @@ func (stm *TrueBlockSTM) runParallelSegment(
 		}()
 	}
 
+	segStart := time.Now()
 	var completed bool
 	select {
 	case <-doneCh:
@@ -326,6 +327,11 @@ func (stm *TrueBlockSTM) runParallelSegment(
 
 	workerCancel()
 	wg.Wait()
+	segDur := time.Since(segStart)
+	if segDur > 500*time.Millisecond {
+		logger.Warn("⏱️ [SEGMENT-PERF] Segment [%d..%d] (txCount=%d) completed in %v | Aborts: %d | ExecWorkers: %d, ValWorkers: %d",
+			lo, hi, segSize, segDur, atomic.LoadInt32(&stm.abortCount), execWorkers, validateWorkers)
+	}
 	return completed
 }
 
@@ -720,7 +726,7 @@ func (stm *TrueBlockSTM) execOne(
 			exRs, err = vmP.ExecuteTransactionWithMvmId(ctx, tx, false, false)
 			txExecDuration := time.Since(txExecStart)
 			if txExecDuration > 100*time.Millisecond {
-				logger.Warn("⏱️ [SLOW-TX] Tx [%d/%d] %s took %v in MVM execution", txIndex, len(stm.txs), tx.Hash().Hex()[:10], txExecDuration)
+				logger.Warn("⏱️ [SLOW-TX] Tx [%d/%d] %s took %v in MVM execution (inc=%d)", txIndex, len(stm.txs), tx.Hash().Hex()[:10], txExecDuration, inc)
 			}
 
 			blockingVer := mvccDB.BlockingVersion
