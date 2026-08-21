@@ -18,6 +18,7 @@ typedef struct {
     void (*free_go_buffer)(uint8_t* ptr);
     char* (*get_state_root)();
     void (*update_tx_trace)(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
+    void (*log_message)(int level, char* msg_ptr, size_t msg_len);
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
@@ -33,6 +34,7 @@ extern bool cgo_process_rpc_request(uint8_t* req_payload, size_t req_len, uint8_
 extern void cgo_free_go_buffer(uint8_t* ptr);
 extern char* cgo_get_state_root();
 extern void cgo_update_tx_trace(uint8_t* hash_ptr, char* step_ptr, char* details_ptr);
+extern void cgo_log_message(int level, char* msg_ptr, size_t msg_len);
 
 static inline void register_callbacks_to_rust() {
     GoCallbacks cbs = {
@@ -41,6 +43,7 @@ static inline void register_callbacks_to_rust() {
         .free_go_buffer = cgo_free_go_buffer,
         .get_state_root = cgo_get_state_root,
         .update_tx_trace = cgo_update_tx_trace,
+        .log_message = cgo_log_message,
     };
     metanode_register_callbacks(cbs);
 }
@@ -68,6 +71,26 @@ var traceCallback func(hash common.Hash, step string, details string)
 // unbounded — a stuck response here previously froze the entire Rust->Go
 // delivery pipeline permanently, with no self-recovery.
 const executeBlockResponseTimeout = 10 * time.Second
+
+//export cgo_log_message
+func cgo_log_message(level C.int, msgPtr *C.char, msgLen C.size_t) {
+	if msgPtr == nil || msgLen == 0 {
+		return
+	}
+	msg := C.GoStringN(msgPtr, C.int(msgLen))
+	switch level {
+	case 0: // Trace / Debug
+		logger.Debug("[RUST] %s", msg)
+	case 1: // Info
+		logger.Info("[RUST] %s", msg)
+	case 2: // Warn
+		logger.Warn("[RUST] %s", msg)
+	case 3: // Error
+		logger.Error("[RUST] %s", msg)
+	default:
+		logger.Info("[RUST] %s", msg)
+	}
+}
 
 // RegisterTraceCallback sets the callback function to update transaction traces in Go's memory
 func RegisterTraceCallback(cb func(hash common.Hash, step string, details string)) {

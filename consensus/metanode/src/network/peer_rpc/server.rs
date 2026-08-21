@@ -627,7 +627,6 @@ impl PeerRpcServer {
                 }
 
                 let count = blocks.len();
-                info!("🌐 [PEER RPC] Returning {} blocks from Go Master", count);
 
                 let response = GetBlocksResponse {
                     node_id,
