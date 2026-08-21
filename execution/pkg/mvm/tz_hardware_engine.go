@@ -90,7 +90,10 @@ func (e *tzHardwareEngine) GetExecuteResult() *MVMExecuteResult {
 // short enough that a genuinely stuck TA (see CLAUDE.md: a GGML_ASSERT-
 // style internal abort spins forever instead of crashing cleanly) is
 // eventually reported instead of hanging the caller silently forever.
-const tzHardwareRoundTripTimeout = 60 * time.Second
+// A var, not a const: tz_hardware_watchdog_test.go overrides it to a much
+// shorter duration so the watchdog-trigger test doesn't need to actually
+// wait 60s.
+var tzHardwareRoundTripTimeout = 60 * time.Second
 
 // tzHardwareRoundTrip drives one full request/response cycle against
 // REAL hardware: write the request as HOST_TO_TA, flip request_ready,
@@ -136,6 +139,12 @@ func tzHardwareRoundTrip(cmd C.mvm_tz_cmd_t, reqHeader, reqBlob []byte) (respHea
 			continue
 		}
 		if time.Now().After(deadline) {
+			// 2026-08-22 (watchdog/auto-recovery): this is THE single choke
+			// point every one of the 6 forward commands' round trips funnels
+			// through on timeout -- see tz_hardware_watchdog.go's own doc
+			// comment for why a full board reboot, not a live TA
+			// kill+relaunch, is what actually happens here.
+			tzHardwareOnRoundTripTimeout(int(cmd), tzHardwareRoundTripTimeout)
 			return nil, nil, fmt.Errorf(
 				"mvm: tzHardware: TIMEOUT after %s waiting for cmd=%d response -- "+
 					"genuinely stuck, not just slow (CLAUDE.md: a stuck TA spins forever "+
