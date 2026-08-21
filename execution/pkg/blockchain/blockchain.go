@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"errors"
@@ -108,8 +109,7 @@ type BlockChain struct {
 	wg          sync.WaitGroup
 
 	// Pruning tracking
-	lastPrunedBlockNumber uint64
-	pruneLock             sync.RWMutex
+	lastPrunedBlockNumber atomic.Uint64
 }
 
 // Structs lưu trong cache kèm thời gian để dọn dẹp
@@ -211,6 +211,14 @@ func InitBlockChain(size int, blockDatabase *block.BlockDatabase, storageManager
 			blockDatabase:  blockDatabase,
 			storageManager: storageManager,
 			stopCleanup:    make(chan struct{}),
+		}
+
+		if storageManager != nil && storageManager.GetStorageMapping() != nil {
+			key := []byte("last_pruned_block_number")
+			data, err := storageManager.GetStorageMapping().Get(key)
+			if err == nil && len(data) == 8 {
+				blockChainInstance.lastPrunedBlockNumber.Store(binary.BigEndian.Uint64(data))
+			}
 		}
 
 		// Kích hoạt Worker chạy ngầm để dọn cache
@@ -480,6 +488,10 @@ func (bc *BlockChain) SetBlockNumberToHash(blockNumber uint64, blockHash common.
 }
 
 func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, bool) {
+	if lastPruned := bc.GetLastPrunedBlockNumber(); lastPruned > 0 && blockNumber <= lastPruned {
+		return common.Hash{}, false
+	}
+
 	if value, ok := bc.blockNumberToHashCache.Load(blockNumber); ok {
 		if cached, ok := value.(cachedHash); ok {
 			if time.Since(cached.addedAt) <= mappingCacheTTL {
@@ -521,6 +533,11 @@ func (bc *BlockChain) GetBlockHashByNumber(blockNumber uint64) (common.Hash, boo
 // chain to find the block at blockNumber and rebuild all missing mappings.
 // Returns the hash of the target block if found.
 func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common.Hash, bool) {
+	lastPruned := bc.GetLastPrunedBlockNumber()
+	if lastPruned > 0 && targetBlockNumber <= lastPruned {
+		return common.Hash{}, false
+	}
+
 	lastBlock, err := bc.blockDatabase.GetLastBlock()
 	if err != nil || lastBlock == nil {
 		return common.Hash{}, false
@@ -536,9 +553,14 @@ func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common
 	var rebuiltCount int
 	var targetHash common.Hash
 	found := false
+	const maxDepth = 2000
+	var depth int
 
-	for blk != nil {
+	for blk != nil && depth < maxDepth {
 		bNum := blk.Header().BlockNumber()
+		if lastPruned > 0 && bNum <= lastPruned {
+			break
+		}
 
 		// Check if mapping already exists for this block
 		if _, exists := bc.blockNumberToHashCache.Load(bNum); !exists {
@@ -601,6 +623,7 @@ func (bc *BlockChain) rebuildMappingByWalkback(targetBlockNumber uint64) (common
 			break
 		}
 		blk = parentBlk
+		depth++
 	}
 
 	// Commit rebuilt mappings to DB so they survive restart
@@ -768,6 +791,8 @@ func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint
 		return 0, false
 	}
 
+	lastPruned := bc.GetLastPrunedBlockNumber()
+
 	// Walk backwards from lastBlock
 	blk := lastBlock
 	const maxDepth = 2000 // Safely scan up to 2000 blocks to prevent RPC hang
@@ -775,6 +800,9 @@ func (bc *BlockChain) rebuildTxMappingByWalkback(targetTxHash common.Hash) (uint
 
 	for blk != nil && depth < maxDepth {
 		bNum := blk.Header().BlockNumber()
+		if lastPruned > 0 && bNum <= lastPruned {
+			break
+		}
 
 		txHashes := blk.Transactions()
 		if len(txHashes) > 0 {
@@ -941,30 +969,20 @@ func (bc *BlockChain) DeleteBlockHashMapping(blockNumber uint64) error {
 }
 
 func (bc *BlockChain) SetLastPrunedBlockNumber(blockNumber uint64) error {
-	bc.pruneLock.Lock()
-	defer bc.pruneLock.Unlock()
-	bc.lastPrunedBlockNumber = blockNumber
+	bc.lastPrunedBlockNumber.Store(blockNumber)
 
 	// Persist to DB so it survives restarts
-	key := []byte("last_pruned_block_number")
-	blockNumberBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
-	return bc.storageManager.GetStorageMapping().Put(key, blockNumberBytes)
+	if bc.storageManager != nil && bc.storageManager.GetStorageMapping() != nil {
+		key := []byte("last_pruned_block_number")
+		blockNumberBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(blockNumberBytes, blockNumber)
+		return bc.storageManager.GetStorageMapping().Put(key, blockNumberBytes)
+	}
+	return nil
 }
 
 func (bc *BlockChain) GetLastPrunedBlockNumber() uint64 {
-	bc.pruneLock.RLock()
-	defer bc.pruneLock.RUnlock()
-
-	// Lazy load from DB on first access if it's 0 (assuming node restart)
-	if bc.lastPrunedBlockNumber == 0 {
-		key := []byte("last_pruned_block_number")
-		data, err := bc.storageManager.GetStorageMapping().Get(key)
-		if err == nil && len(data) == 8 {
-			bc.lastPrunedBlockNumber = binary.BigEndian.Uint64(data)
-		}
-	}
-	return bc.lastPrunedBlockNumber
+	return bc.lastPrunedBlockNumber.Load()
 }
 
 // ============================================================================
