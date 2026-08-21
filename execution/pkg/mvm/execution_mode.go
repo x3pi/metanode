@@ -56,7 +56,7 @@ func SetExecutionMode(mode string) {
 		logger.Warn("⚠️ [MVM] Execution mode set to: TRUSTZONE (GĐ2 x86 loopback -- see note/tee_dual_mode_execution_plan.md; NOT a real TA yet, that's GĐ3)")
 	case ModeTrustzoneHardware:
 		globalExecutionMode = ModeTrustzoneHardware
-		logger.Warn("⚠️ [MVM] Execution mode set to: TRUSTZONE-HARDWARE (GĐ3b real TA bridge over /dev/tc_ns_client -- only Call/Execute are wired on the TA side today, everything else panics)")
+		logger.Warn("⚠️ [MVM] Execution mode set to: TRUSTZONE-HARDWARE (GĐ3b real TA bridge over /dev/tc_ns_client -- Call/Execute/Deploy/SendNative/ProcessNativeMintBurn/NoncePlusOne all wired as of 2026-08-21/22; only ExecuteBatch still panics, dead code with no wire codec)")
 	case ModeCgo, "":
 		// Empty config: keep the global default (cgo) -- matches
 		// trie_factory.go's own empty-string handling.

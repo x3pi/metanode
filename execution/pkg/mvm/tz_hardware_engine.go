@@ -146,13 +146,14 @@ func tzHardwareRoundTrip(cmd C.mvm_tz_cmd_t, reqHeader, reqBlob []byte) (respHea
 	}
 }
 
-// ────────────────────── the 2 TA-supported forward commands ────────────────
+// ─────────────────── the first 2 TA-supported forward commands ─────────────
 //
-// Only CALL and EXECUTE are wired on the real mvm_ta side today (see
-// ta/mvm_ta_main.cpp's dispatch switch, and this file's own doc comment
-// on the 5 NOT-yet-supported ones below). Guarded by tzSessionMu
-// (declared in tz_channel.go, shared with tzLoopbackEngine) for the
-// whole call, per the plan's serialization decision.
+// CALL and EXECUTE were the first 2 wired on the real mvm_ta side (see
+// ta/mvm_ta_main.cpp's dispatch switch) -- DEPLOY/SEND_NATIVE/
+// PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE followed below, same pattern.
+// Guarded by tzSessionMu (declared in tz_channel.go, shared with
+// tzLoopbackEngine) for the whole call, per the plan's serialization
+// decision.
 
 func (e *tzHardwareEngine) Call(
 	bSender []byte, bContractAddress []byte, bInput []byte, amount *big.Int,
@@ -215,16 +216,18 @@ func (e *tzHardwareEngine) Execute(
 	return result
 }
 
-// ────────────── forward commands the real TA does not implement yet ─────────
+// ───────────────── the 4 forward commands added 2026-08-21/2026-08-22 ──────
 //
-// ta/mvm_ta_main.cpp's dispatch switch only has cases for CALL/EXECUTE —
-// DEPLOY/SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE all fall
-// through to its own "not yet implemented" default branch, and
-// EXECUTE_BATCH has no wire codec at all yet (tz_codec.go). Panicking
-// here, loudly and immediately, rather than silently returning a
-// zero-value/fabricated *MVMExecuteResult -- a caller that reaches one
-// of these on a real hardware-mode node needs to know THAT, not receive
-// a result that looks like a legitimate (if odd) on-chain outcome.
+// ta/mvm_ta_main.cpp's dispatch switch gained real cases for DEPLOY/
+// SEND_NATIVE/PROCESS_NATIVE_MINT_BURN/NONCE_PLUS_ONE this session (and
+// SEND_NATIVE's/the interpreter's throw/catch hang was root-caused and
+// fixed the same session -- see DEPLOYED_STATE.md's "setjmp/longjmp"
+// entries) -- these 4 are no longer stubs. Same pattern as Call/Execute
+// above: encode -> tzHardwareRoundTrip (which itself services any
+// reverse calls the TA issues while processing) -> decode. Unlike
+// tzLoopbackEngine's own versions of these methods, there is no
+// in-process "process" callback to pass -- the real work happens on the
+// actual mvm_ta process, not here.
 
 func (e *tzHardwareEngine) Deploy(
 	bSender []byte, bContractConstructor []byte, amount *big.Int,
@@ -232,7 +235,24 @@ func (e *tzHardwareEngine) Deploy(
 	blockTime uint64, blockBaseFee uint64, blockNumber uint64, blockCoinbase common.Address,
 	mvmId common.Address, bTxHash []byte, isDebug bool, isCache bool, isOffChain bool,
 ) *MVMExecuteResult {
-	panic("mvm: tzHardwareEngine.Deploy: MVM_TZ_CMD_DEPLOY is not implemented on the real TA yet (ta/mvm_ta_main.cpp)")
+	tzSessionMu.Lock()
+	defer tzSessionMu.Unlock()
+
+	reqHeader, reqBlob := encodeDeployReq(
+		bSender, bContractConstructor, amount,
+		gasPrice, gasLimit, blockPrevrandao, blockGasLimit, blockTime, blockBaseFee, blockNumber,
+		blockCoinbase, mvmId, bTxHash, isDebug, isCache, isOffChain,
+	)
+
+	respHeader, respBlob, err := tzHardwareRoundTrip(C.MVM_TZ_CMD_DEPLOY, reqHeader, reqBlob)
+	if err != nil {
+		panic(fmt.Errorf("mvm: tzHardware: Deploy round trip: %w", err))
+	}
+	result, derr := decodeExecuteResult(respHeader, respBlob)
+	if derr != nil {
+		panic(fmt.Errorf("mvm: tzHardware: decodeExecuteResult (Deploy): %w", derr))
+	}
+	return result
 }
 
 func (e *tzHardwareEngine) SendNative(
@@ -241,7 +261,24 @@ func (e *tzHardwareEngine) SendNative(
 	blockTime uint64, blockBaseFee uint64, blockNumber uint64, blockCoinbase common.Address,
 	mvmId common.Address, isCache bool,
 ) *MVMExecuteResult {
-	panic("mvm: tzHardwareEngine.SendNative: MVM_TZ_CMD_SEND_NATIVE is not implemented on the real TA yet (ta/mvm_ta_main.cpp)")
+	tzSessionMu.Lock()
+	defer tzSessionMu.Unlock()
+
+	reqHeader, reqBlob := encodeSendNativeReq(
+		bSender, bContractAddress, amount,
+		gasPrice, gasLimit, blockPrevrandao, blockGasLimit, blockTime, blockBaseFee, blockNumber,
+		blockCoinbase, mvmId, isCache,
+	)
+
+	respHeader, respBlob, err := tzHardwareRoundTrip(C.MVM_TZ_CMD_SEND_NATIVE, reqHeader, reqBlob)
+	if err != nil {
+		panic(fmt.Errorf("mvm: tzHardware: SendNative round trip: %w", err))
+	}
+	result, derr := decodeExecuteResult(respHeader, respBlob)
+	if derr != nil {
+		panic(fmt.Errorf("mvm: tzHardware: decodeExecuteResult (SendNative): %w", derr))
+	}
+	return result
 }
 
 func (e *tzHardwareEngine) ProcessNativeMintBurn(
@@ -250,7 +287,24 @@ func (e *tzHardwareEngine) ProcessNativeMintBurn(
 	blockTime uint64, blockBaseFee uint64, blockNumber uint64, blockCoinbase common.Address,
 	mvmId common.Address, isCache bool,
 ) *MVMExecuteResult {
-	panic("mvm: tzHardwareEngine.ProcessNativeMintBurn: MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN is not implemented on the real TA yet (ta/mvm_ta_main.cpp)")
+	tzSessionMu.Lock()
+	defer tzSessionMu.Unlock()
+
+	reqHeader, reqBlob := encodeProcessNativeMintBurnReq(
+		bFrom, bTo, amount, operationType,
+		gasPrice, gasLimit, blockPrevrandao, blockGasLimit, blockTime, blockBaseFee, blockNumber,
+		blockCoinbase, mvmId, isCache,
+	)
+
+	respHeader, respBlob, err := tzHardwareRoundTrip(C.MVM_TZ_CMD_PROCESS_NATIVE_MINT_BURN, reqHeader, reqBlob)
+	if err != nil {
+		panic(fmt.Errorf("mvm: tzHardware: ProcessNativeMintBurn round trip: %w", err))
+	}
+	result, derr := decodeExecuteResult(respHeader, respBlob)
+	if derr != nil {
+		panic(fmt.Errorf("mvm: tzHardware: decodeExecuteResult (ProcessNativeMintBurn): %w", derr))
+	}
+	return result
 }
 
 func (e *tzHardwareEngine) NoncePlusOne(
@@ -259,7 +313,24 @@ func (e *tzHardwareEngine) NoncePlusOne(
 	blockTime uint64, blockBaseFee uint64, blockNumber uint64, blockCoinbase common.Address,
 	mvmId common.Address, isCache bool,
 ) *MVMExecuteResult {
-	panic("mvm: tzHardwareEngine.NoncePlusOne: MVM_TZ_CMD_NONCE_PLUS_ONE is not implemented on the real TA yet (ta/mvm_ta_main.cpp)")
+	tzSessionMu.Lock()
+	defer tzSessionMu.Unlock()
+
+	reqHeader, reqBlob := encodeNoncePlusOneReq(
+		bSender,
+		gasPrice, gasLimit, blockPrevrandao, blockGasLimit, blockTime, blockBaseFee, blockNumber,
+		blockCoinbase, mvmId, isCache,
+	)
+
+	respHeader, respBlob, err := tzHardwareRoundTrip(C.MVM_TZ_CMD_NONCE_PLUS_ONE, reqHeader, reqBlob)
+	if err != nil {
+		panic(fmt.Errorf("mvm: tzHardware: NoncePlusOne round trip: %w", err))
+	}
+	result, derr := decodeExecuteResult(respHeader, respBlob)
+	if derr != nil {
+		panic(fmt.Errorf("mvm: tzHardware: decodeExecuteResult (NoncePlusOne): %w", derr))
+	}
+	return result
 }
 
 func (e *tzHardwareEngine) ExecuteBatch(
