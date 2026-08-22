@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-05-17
+> **Last updated:** 2026-08-22
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -220,6 +220,7 @@ metanode/
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
 | `proto/` | gRPC proto definitions | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, envelope definitions | 🟢 LOW |
 
 ---
 
@@ -368,6 +369,10 @@ metanode/
 |------|------|
 | `transaction.rs` | Core Tx type |
 | `tx_hash.rs` | Tx hash utilities |
+| `cross_chain.rs` | Root Anchor & Cross-Chain schema types |
+| `governance.rs` | On-chain governance lifecycle & 72h timelock |
+| `pop.rs` | BLS12-381 Proof-of-Possession & rogue key guard |
+| `root_anchor.rs` | Root Anchor founding committee & BFT stake quorum |
 
 ---
 
