@@ -373,6 +373,9 @@ metanode/
 | `governance.rs` | On-chain governance lifecycle & 72h timelock |
 | `pop.rs` | BLS12-381 Proof-of-Possession & rogue key guard |
 | `root_anchor.rs` | Root Anchor founding committee & BFT stake quorum |
+| `gateway.rs` | GatewayPrecompile & cross-chain execution state machine |
+| `epoch_sync.rs` | Epoch transition committee sync & account-level state root checkpoints |
+
 
 ---
 
