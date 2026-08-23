@@ -187,6 +187,18 @@ type SimpleChainConfig struct {
 	GoMemLimitGB int `json:"go_mem_limit_gb,omitempty"` // Go soft memory limit in GB (default: 8). Set per-node to prevent OOM when running multiple nodes on same server.
 	GoGCPercent  int `json:"go_gc_percent,omitempty"`   // GC target percentage (default: 800). Lower = more frequent GC = less memory but more CPU.
 
+	// XapianPruneRetentionBlocks: nếu > 0, XapianManager sẽ dọn (xoá vĩnh viễn)
+	// các document Xapian đã bị supersede — đánh dấu ở slot value 254 — quá N
+	// block. Cơ chế ghi slot 254 này bị loại bỏ khỏi write-path ở commit
+	// 4108fe70 ("replace physical docid with virtual ID system", 2026-07-02):
+	// mọi document TẠO MỚI sau đó không còn phát sinh loại "bản cũ mồ côi" này
+	// nữa, NHƯNG bất kỳ node nào có dữ liệu Xapian từ TRƯỚC commit đó và chưa
+	// từng bị reset sẽ vẫn còn tồn đọng các document loại này vĩnh viễn (không
+	// gì dọn chúng nếu field này = 0). Mặc định 0 = TẮT HOÀN TOÀN, không xoá
+	// gì — tương thích ngược 100% với mọi config hiện có. Chỉ bật khi đã xác
+	// nhận cần dọn dữ liệu tồn đọng (xem XapianManager::pruneOldVersions()).
+	XapianPruneRetentionBlocks uint64 `json:"xapian_prune_retention_blocks,omitempty"`
+
 	TxVerificationChunkSize int                `json:"tx_verification_chunk_size,omitempty"`
 	Pruning                 PruningConfig      `json:"pruning,omitempty"`
 	RpcRateLimit   RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`

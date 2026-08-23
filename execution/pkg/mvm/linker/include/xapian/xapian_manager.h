@@ -162,6 +162,31 @@ public:
   bool compactInPlace(size_t minSizeBytes = 1024 * 1024,
                        std::chrono::minutes minInterval = std::chrono::minutes(60));
 
+  // --- Legacy "superseded document" cleanup (write-path that created these
+  // was removed at commit 4108fe70, 2026-07-02, "replace physical docid with
+  // virtual ID system" -- any document created BEFORE that commit and never
+  // reset still carries permanently-orphaned entries this is the only thing
+  // that ever cleans up) ---
+  // Deletes every document with a value at slot 254 (the old "superseded at
+  // block N" marker -- see xapian_search.cpp's read-side use of the same
+  // slot for why active documents never have one) whose marked block is
+  // older than (currentBlockHeight - retentionBlocks). Deterministic in
+  // currentBlockHeight alone, so independent nodes running this at slightly
+  // different wall-clock moments still agree on exactly which documents
+  // qualify at a given block height (no consensus impact regardless, since
+  // this only touches the physical db, never comprehensive_log -- see
+  // getComprehensiveStateHash()'s own doc comment -- but determinism still
+  // matters for nodes to converge on the same disk usage over time).
+  // No-ops (returns 0, deletes nothing) when: retentionBlocks == 0 (default,
+  // the OFF switch), InMemory mode, a transaction is in flight, or
+  // currentBlockHeight <= retentionBlocks (nothing old enough yet). Caps
+  // deletions to maxDeletePerCall per invocation so a first run against a
+  // large backlog doesn't block the caller for a long time -- call
+  // repeatedly (e.g. once/minute from cleaner_thread) until it returns 0.
+  // Returns the number of documents actually deleted.
+  size_t pruneOldVersions(uint64_t currentBlockHeight, uint64_t retentionBlocks,
+                          size_t maxDeletePerCall = 500);
+
   // (Optional) Cung cấp getter/setter an toàn luồng nếu cần
 
   // Chỉ nên được gọi bởi registry
