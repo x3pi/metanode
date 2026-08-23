@@ -139,6 +139,29 @@ public:
   void mvmCancelTransaction();
   void dump_all_documents(uint256_t blockNumber);
 
+  // --- On-disk compaction (fixes unbounded Xapian B-tree growth from
+  // frequent small commits; see note/XAPIAN_COMPACT_IN_PLACE.md) ---
+  // Compacts the on-disk database into a fresh copy (same docids, same
+  // logical content -- Xapian::DBCOMPACT_NO_RENUMBER), then atomically
+  // swaps it in for `db`, all under changes_mutex so no writer/reader can
+  // observe a half-swapped state. Safe to call from a background thread
+  // while the node is running; no consensus impact (getComprehensiveStateHash()
+  // only ever hashes comprehensive_log, never the physical db -- see that
+  // function's own comment). No-ops (returns false, changes nothing) when:
+  //  - running InMemory (no on-disk path to compact),
+  //  - there are staged-but-uncommitted writes (has_uncommitted_writes or a
+  //    non-empty comprehensive_log) -- compacting mid-transaction would race
+  //    the eventual commit(),
+  //  - the on-disk database is smaller than minSizeBytes (not worth the I/O),
+  //  - called again before minInterval has elapsed since the last attempt
+  //    (self-throttled via last_compact_attempt_ -- callers don't need their
+  //    own cooldown bookkeeping).
+  // On any failure (compact(), rename, or reopen), rolls back to the
+  // original on-disk database and leaves `db` open and valid -- never
+  // leaves the instance in a state where subsequent operations would fail.
+  bool compactInPlace(size_t minSizeBytes = 1024 * 1024,
+                       std::chrono::minutes minInterval = std::chrono::minutes(60));
+
   // (Optional) Cung cấp getter/setter an toàn luồng nếu cần
 
   // Chỉ nên được gọi bởi registry
@@ -192,6 +215,10 @@ private:
   // never consulted) in cgo/disk mode -- zero behavior/overhead change
   // there.
   std::map<std::string, std::optional<Xapian::Document>> undo_snapshot_;
+
+  // --- compactInPlace() self-throttling (see that method's doc comment) ---
+  std::chrono::steady_clock::time_point last_compact_attempt_{}; // epoch value -> first call is never throttled
+  std::mutex compact_time_mutex_;
 };
 
 #endif // XAPIAN_MANAGER_H
