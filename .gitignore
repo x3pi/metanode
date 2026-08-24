@@ -480,6 +480,8 @@ deploy/ansible/monitors/parse_inventory.py
 deploy/systemd/genesis.json
 note/commit_review_fc17b2d2_xapian_manager.md
 deploy/systemd/single_chain_data/
+deploy/systemd/private_chains_data/
+private_chains_data/
 private_chain_3node/
 
 # aarch64 cross-compile (scripts/build-aarch64.sh, scripts/package-for-board.sh)

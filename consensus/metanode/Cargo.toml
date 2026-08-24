@@ -59,6 +59,7 @@ rand = { workspace = true }
 toml = { version = "0.7.4", features = ["preserve_order"] }
 base64 = { workspace = true }
 hex = "0.4.3"
+uint = "0.10.0"
 hostname = "0.3.1"
 async-trait = { workspace = true }
 prost = { workspace = true }

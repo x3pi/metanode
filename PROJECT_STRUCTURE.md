@@ -220,6 +220,7 @@ metanode/
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
 | `proto/` | gRPC proto definitions | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayPrecompile, Governance, Relayer reference implementation (P0-P4) | 🟢 LOW |
 
 ---
 
@@ -368,6 +369,13 @@ metanode/
 |------|------|
 | `transaction.rs` | Core Tx type |
 | `tx_hash.rs` | Tx hash utilities |
+| `cross_chain.rs` | Root Anchor & Cross-Chain schema types |
+| `governance.rs` | On-chain governance lifecycle & 72h timelock |
+| `pop.rs` | BLS12-381 Proof-of-Possession & rogue key guard |
+| `root_anchor.rs` | Root Anchor founding committee & BFT stake quorum |
+| `gateway.rs` | GatewayPrecompile & cross-chain execution state machine |
+| `epoch_sync.rs` | Epoch transition committee sync & account-level state root checkpoints |
+
 
 ---
 

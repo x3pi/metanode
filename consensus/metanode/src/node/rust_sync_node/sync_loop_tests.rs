@@ -42,8 +42,8 @@ fn test_rust_sync_config_defaults() {
 
     assert_eq!(config.fetch_interval_secs, 2);
     assert_eq!(config.turbo_fetch_interval_ms, 50);
-    assert_eq!(config.fetch_batch_size, 500);
-    assert_eq!(config.turbo_batch_size, 200);
+    assert_eq!(config.fetch_batch_size, 20);
+    assert_eq!(config.turbo_batch_size, 20);
     assert_eq!(config.fetch_timeout_secs, 30);
     assert!(config.peer_rpc_addresses.is_empty());
 }

@@ -1,38 +1,47 @@
-# Metanode Single Chain
+# 🚀 Metanode Private Chains & Dashboard Quickstart
 
-Dùng `setup_and_run.sh` để khởi tạo và chạy 1 node cục bộ.
-
-## 🚀 Các lệnh chạy
-
-> **Lưu ý:** Mặc định các lệnh `setup_and_run.sh` **LUÔN THỰC HIỆN BUILD** lại code (Go & Rust). Sử dụng thêm cờ `--no-build` nếu bạn không sửa code và muốn chạy nhanh hơn.
-
-
-- **Chạy tiếp (Giữ nguyên data cũ và build):**
-  ```bash
-  bash setup_and_run.sh
-  ```
-
-- **Chạy mới hoàn toàn (Xóa sạch data cũ):**
-  ```bash
-  bash setup_and_run.sh --clean
-  ```
-
-- **Chạy nhanh (Bỏ qua quá trình biên dịch code):**
-  ```bash
-  bash setup_and_run.sh --no-build
-  ```
-
-- **Dừng hệ thống:**
-  ```bash
-  bash single_chain_data/stop_single_chain.sh
-  ```
-
-*(Có thể kết hợp các cờ: `bash setup_and_run.sh --clean --no-build`)*
+Hướng dẫn nhanh khởi động, dừng 2 Private Chains và Web Dashboard giám sát.
 
 ---
 
-## 🛠️ Dữ liệu sinh ra (`single_chain_data/`)
+## 1. Vận hành 2 Private Chains (Chain 101 & 102)
 
-- `dev_accounts.json`: Chứa private key của 5 ví test (đã có sẵn tiền).
-- `node-0/logs/node-0.log`: Log hoạt động của node (dùng để debug).
-- `start_single_chain.sh` / `stop_single_chain.sh`: Script start/stop trực tiếp của node.
+Vào thư mục:
+```bash
+cd /home/abc/nhat/consensus-chain/metanode/deploy/systemd
+```
+
+| Thao tác | Lệnh thực hiện |
+| :--- | :--- |
+| **Khởi động** | `bash setup_2_private_chains.sh` |
+| **Reset mới hoàn toàn** | `bash setup_2_private_chains.sh --clean` |
+| **Chạy nhanh (không build)** | `bash setup_2_private_chains.sh --no-build` |
+| **Dừng cả 2 chains** | `bash private_chains_data/stop_all.sh` |
+| **Dừng khẩn cấp** | `pkill -f simple_chain` |
+
+---
+
+## 2. Giao diện Web Dashboard Giám Sát (P7)
+
+| Thao tác | Lệnh thực hiện |
+| :--- | :--- |
+| **Bật Dashboard** | `cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible/monitors/cross_chain_dashboard && go run main.go --port 8088` |
+| **Tắt Dashboard** | `pkill -f "cross_chain_dashboard"` |
+
+🌐 **Mở xem trên trình duyệt Laptop:**  
+👉 **[http://192.168.1.233:8088](http://192.168.1.233:8088)** *(hoặc `http://localhost:8088`)*
+
+---
+
+## 3. Danh sách Cổng Kết Nối (RPC & Ports)
+
+* **Private Chain A (101):** `http://127.0.0.1:8546`
+* **Private Chain B (102):** `http://127.0.0.1:8547`
+* **Public Chain (991):** `http://192.168.1.233:10746`
+
+---
+
+## 4. Xem Log Thời Gian Thực
+
+* **Chain A:** `tail -f private_chains_data/chain_101/node-0/logs/node-0.log`
+* **Chain B:** `tail -f private_chains_data/chain_102/node-0/logs/node-0.log`
