@@ -255,13 +255,41 @@ func (g *GatewayEngine) Outbound(
 	return msg, nil
 }
 
-// AttestCommit executes Phase 1 of Attest-then-Claim (P2.2).
-// Verifies BLS aggregate signature against registered committee via SignerBitmap, ensures strict epoch alignment, and checks per_chain_allocation ceiling.
+// AttestCommit executes Phase 1 of Attest-then-Claim (P2.2) for a commit originating from a
+// registered PRIVATE CHAIN. It enforces and debits per_chain_allocation[sourceChainID] — this is
+// the ONLY leg of a transfer where a ceiling is meaningful (Section 2.3 step 2). The matching
+// credit to the final destination chain happens in ClaimMessage (Section 2.3.1 fix), not here,
+// because a single commit can route to multiple distinct destinations.
 func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
 	cert QuorumCert,
+) (*AttestedCommit, error) {
+	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, cert, true)
+}
+
+// AttestReserveIssuedCommit executes Phase 1 of Attest-then-Claim for a commit issued by RESERVE
+// itself (the Reserve->destination leg, Section 2.3 step 3). Reserve is the unconditional issuer:
+// there is no per_chain_allocation ceiling to enforce against Reserve's own entry, and this call
+// MUST NOT debit it — doing so was the root cause of the "double debit, zero credit" supply
+// invariant violation found during review (100 transferred -> 200 destroyed from the ledger).
+// Full BLS quorum verification still applies; only the ceiling/debit step is skipped.
+func (g *GatewayEngine) AttestReserveIssuedCommit(
+	reserveChainID uint64,
+	commitRoot common.Hash,
+	aggregateAmount *big.Int,
+	cert QuorumCert,
+) (*AttestedCommit, error) {
+	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, cert, false)
+}
+
+func (g *GatewayEngine) attestCommitInternal(
+	sourceChainID uint64,
+	commitRoot common.Hash,
+	aggregateAmount *big.Int,
+	cert QuorumCert,
+	enforceCeiling bool,
 ) (*AttestedCommit, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -345,17 +373,21 @@ func (g *GatewayEngine) AttestCommit(
 		aggregateAmount = big.NewInt(0)
 	}
 
-	// Check per_chain_allocation ceiling
-	currentAlloc := g.SupplyLedger.GetAllocation(sourceChainID)
-	if aggregateAmount.Cmp(currentAlloc) > 0 {
-		if g.allocationRejectedListener != nil {
-			g.allocationRejectedListener(sourceChainID, aggregateAmount, currentAlloc)
+	if enforceCeiling {
+		// Check per_chain_allocation ceiling (Scenario 10.7) — only meaningful for a private
+		// chain's own commit (the X -> Reserve leg). Reserve-issued commits skip this entirely.
+		currentAlloc := g.SupplyLedger.GetAllocation(sourceChainID)
+		if aggregateAmount.Cmp(currentAlloc) > 0 {
+			if g.allocationRejectedListener != nil {
+				g.allocationRejectedListener(sourceChainID, aggregateAmount, currentAlloc)
+			}
+			return nil, fmt.Errorf("%w: requested %s exceeds available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
 		}
-		return nil, fmt.Errorf("%w: requested %s exceeds available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
-	}
 
-	// Debit source chain allocation upon successful BFT attestation
-	g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
+		// Debit source chain allocation upon successful BFT attestation. The matching credit to
+		// the destination happens per-message in ClaimMessage (Section 2.3.1).
+		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
+	}
 
 	key := fmt.Sprintf("%d:%s", sourceChainID, commitRoot.Hex())
 	attested := AttestedCommit{
@@ -419,6 +451,20 @@ func (g *GatewayEngine) ClaimMessage(
 
 	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
 		return MessageStatusPending, ErrInvalidMerkleProof
+	}
+
+	// Credit this chain's allocation ceiling with the value being finalized here (Section 2.3.1
+	// fix). This is the missing counterpart to AttestCommit's debit — without it, value silently
+	// evaporates from Σ per_chain_allocation on every successful transfer (proven via reproduction:
+	// 100 transferred -> 200 destroyed). ClaimMessage is the correct place because it is the only
+	// point that knows the message's real, individual DestChainID (a single attested commit can
+	// route to several distinct destinations).
+	if message.Value != nil && message.Value.Sign() > 0 && g.SupplyLedger != nil {
+		if message.DestChainID != g.LocalChainID {
+			return MessageStatusPending, fmt.Errorf("%w: message destChainId %d does not match claiming engine's chain %d", ErrInvalidMerkleProof, message.DestChainID, g.LocalChainID)
+		}
+		currentAlloc := g.SupplyLedger.GetAllocation(g.LocalChainID)
+		g.SupplyLedger.PerChainAllocation[g.LocalChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}
 
 	// Set execution context for destination target contracts

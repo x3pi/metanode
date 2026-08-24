@@ -193,8 +193,72 @@ func TestRelayer_Scenario10_1_NativeTransferViaReserve(t *testing.T) {
 	reserveEngine := chains[1000]
 	assert.Equal(t, big.NewInt(4900), reserveEngine.SupplyLedger.PerChainAllocation[101])
 
+	// Section 2.3.1 regression guard: Chain 102 (destination) MUST be credited by the same 100,
+	// and Reserve's OWN allocation entry (chain 1000) must be untouched — without this, value
+	// silently evaporates from the ledger on every successful transfer (was: 100 transferred ->
+	// 200 destroyed, invariant broken) even though no attacker or failure was involved.
+	assert.Equal(t, big.NewInt(5100), reserveEngine.SupplyLedger.PerChainAllocation[102])
+	assert.Equal(t, big.NewInt(100_000), reserveEngine.SupplyLedger.PerChainAllocation[1000])
+	assert.True(t, reserveEngine.SupplyLedger.VerifyInvariant(), "Σ per_chain_allocation must still equal genesis_total_supply after a successful transfer")
+
 	// Relayer collected tip
 	assert.Equal(t, tipAmount, chains[102].RelayerBalances[relayerEngine.Config.RelayerAddress])
+}
+
+// TestRelayer_InvariantHoldsAcrossMultipleReserveRoutedTransfers is a regression guard for the
+// "double debit, zero credit" supply invariant bug found during review: AttestCommit used to
+// unconditionally debit whatever sourceChainID it was called with — including the Reserve->dest
+// leg, where it was wrongly called with Reserve as the "source", debiting Reserve's own bucket a
+// second time while never crediting the true destination. Runs several successful, non-adversarial
+// transfers end-to-end through RelayCommit (the real relay path, not just the isolated ledger
+// unit) and asserts Σ per_chain_allocation == genesis_total_supply after every single one.
+func TestRelayer_InvariantHoldsAcrossMultipleReserveRoutedTransfers(t *testing.T) {
+	relayerEngine, chains := setupTestRelayerNetwork()
+	ledger := chains[1000].SupplyLedger
+	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	transfers := []struct {
+		fromChain uint64
+		toChain   uint64
+		value     int64
+	}{
+		{101, 102, 100},
+		{102, 101, 50},
+		{101, 102, 1},
+		{102, 101, 25},
+	}
+
+	for i, tr := range transfers {
+		sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+		txHash := common.BigToHash(big.NewInt(int64(9000 + i)))
+
+		before := new(big.Int).Set(ledger.GetAllocation(tr.toChain))
+
+		params := OutboundParams{
+			DestChainID: tr.toChain,
+			Target:      recipient,
+			AssetID:     big.NewInt(0),
+			Value:       big.NewInt(tr.value),
+			Tip:         big.NewInt(0),
+			HopCount:    1,
+			Ordered:     false,
+		}
+
+		msg, err := relayerEngine.SubmitOutbound(tr.fromChain, sender, params, txHash)
+		require.NoError(t, err)
+
+		commitData, err := relayerEngine.CertifyCommit(tr.fromChain, 1, []CrossChainMessage{*msg}, nil)
+		require.NoError(t, err)
+
+		_, err = relayerEngine.RelayCommit(tr.fromChain, commitData.CommitRoot, relayerEngine.Config.RelayerAddress)
+		require.NoError(t, err)
+
+		after := ledger.GetAllocation(tr.toChain)
+		assert.Equal(t, new(big.Int).Add(before, big.NewInt(tr.value)), after,
+			"transfer #%d: destination chain %d must be credited exactly by the transferred value", i, tr.toChain)
+		assert.True(t, ledger.VerifyInvariant(),
+			"transfer #%d (%d -> %d, value %d): Σ per_chain_allocation must equal genesis_total_supply", i, tr.fromChain, tr.toChain, tr.value)
+	}
 }
 
 func TestRelayer_Scenario10_2_ContractCallWithValueAndOriginalSender(t *testing.T) {

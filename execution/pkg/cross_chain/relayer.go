@@ -388,8 +388,10 @@ func (r *RelayerEngine) RelayMessage(
 			SignerBitmap:       []byte{0xFF},
 		}
 
-		// Destination Chain verifies Reserve's commit and claims message
-		_, err = destEngine.AttestCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert)
+		// Destination Chain verifies Reserve's commit (authentication only — Reserve is the
+		// unconditional issuer, no ceiling to debit here) and claims message. ClaimMessage below
+		// is what actually credits destChainID's allocation (Section 2.3.1 fix).
+		_, err = destEngine.AttestReserveIssuedCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest attest from reserve failed: %w", err)

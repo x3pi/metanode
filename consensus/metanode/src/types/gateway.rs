@@ -229,7 +229,11 @@ impl GatewayEngine {
         Ok(msg)
     }
 
-    /// P2.2: attestCommit() — Phase 1 of Attest-then-Claim.
+    /// P2.2: attestCommit() — Phase 1 of Attest-then-Claim, for a commit originating from a
+    /// registered PRIVATE CHAIN. Enforces and debits per_chain_allocation[source_chain_id] — this
+    /// is the ONLY leg of a transfer where a ceiling is meaningful (Section 2.3 step 2). The
+    /// matching credit to the final destination happens in claim_message (Section 2.3.1 fix), not
+    /// here, because a single commit can route to multiple distinct destinations.
     /// Verifies BLS QuorumCert, checks epoch match, and strictly enforces per_chain_allocation (Scenario 10.7).
     pub fn attest_commit(
         &mut self,
@@ -237,6 +241,33 @@ impl GatewayEngine {
         commit_root: Hash,
         aggregate_amount: U256,
         cert: QuorumCert,
+    ) -> Result<AttestedCommit, GatewayError> {
+        self.attest_commit_internal(source_chain_id, commit_root, aggregate_amount, cert, true)
+    }
+
+    /// Phase 1 of Attest-then-Claim for a commit issued by RESERVE itself (the Reserve->destination
+    /// leg, Section 2.3 step 3). Reserve is the unconditional issuer: there is no
+    /// per_chain_allocation ceiling to enforce against Reserve's own entry, and this call MUST NOT
+    /// debit it — doing so was the root cause of the "double debit, zero credit" supply invariant
+    /// violation found during review (100 transferred -> 200 destroyed from the ledger). Full BLS
+    /// quorum verification still applies; only the ceiling/debit step is skipped.
+    pub fn attest_reserve_issued_commit(
+        &mut self,
+        reserve_chain_id: u64,
+        commit_root: Hash,
+        aggregate_amount: U256,
+        cert: QuorumCert,
+    ) -> Result<AttestedCommit, GatewayError> {
+        self.attest_commit_internal(reserve_chain_id, commit_root, aggregate_amount, cert, false)
+    }
+
+    fn attest_commit_internal(
+        &mut self,
+        source_chain_id: u64,
+        commit_root: Hash,
+        aggregate_amount: U256,
+        cert: QuorumCert,
+        enforce_ceiling: bool,
     ) -> Result<AttestedCommit, GatewayError> {
         let registry = self
             .chain_registry
@@ -326,27 +357,31 @@ impl GatewayEngine {
                 .map_err(|_| GatewayError::InvalidBLSSignature)?;
         }
 
-        // Enforce per_chain_allocation ceiling check (Scenario 10.7)
-        let current_alloc = self
-            .supply_ledger
-            .per_chain_allocation
-            .get(&source_chain_id)
-            .copied()
-            .unwrap_or(U256::zero());
+        if enforce_ceiling {
+            // Enforce per_chain_allocation ceiling check (Scenario 10.7) — only meaningful for a
+            // private chain's own commit (the X -> Reserve leg). Reserve-issued commits skip this.
+            let current_alloc = self
+                .supply_ledger
+                .per_chain_allocation
+                .get(&source_chain_id)
+                .copied()
+                .unwrap_or(U256::zero());
 
-        if aggregate_amount > current_alloc {
-            return Err(GatewayError::AllocationExceeded {
-                chain_id: source_chain_id,
-                requested: aggregate_amount,
-                available: current_alloc,
-            });
+            if aggregate_amount > current_alloc {
+                return Err(GatewayError::AllocationExceeded {
+                    chain_id: source_chain_id,
+                    requested: aggregate_amount,
+                    available: current_alloc,
+                });
+            }
+
+            // Deduct from allocation atomically. The matching credit to the destination happens
+            // per-message in claim_message (Section 2.3.1).
+            let new_alloc = current_alloc - aggregate_amount;
+            self.supply_ledger
+                .per_chain_allocation
+                .insert(source_chain_id, new_alloc);
         }
-
-        // Deduct from allocation atomically
-        let new_alloc = current_alloc - aggregate_amount;
-        self.supply_ledger
-            .per_chain_allocation
-            .insert(source_chain_id, new_alloc);
 
         let attested = AttestedCommit {
             source_chain_id,
@@ -419,6 +454,24 @@ impl GatewayEngine {
             return Err(GatewayError::InvalidMerkleProof);
         }
 
+        // Credit this chain's allocation ceiling with the value being finalized here
+        // (Section 2.3.1 fix). This is the missing counterpart to attest_commit's debit —
+        // without it, value silently evaporates from Σ per_chain_allocation on every successful
+        // transfer (proven via reproduction: 100 transferred -> 200 destroyed). claim_message is
+        // the correct place because it is the only point that knows the message's real,
+        // individual dest_chain_id (a single attested commit can route to several destinations).
+        if message.value > U256::zero() {
+            if message.dest_chain_id != self.local_chain_id {
+                return Err(GatewayError::InvalidMerkleProof);
+            }
+            let current_alloc = self
+                .supply_ledger
+                .per_chain_allocation
+                .entry(self.local_chain_id)
+                .or_insert(U256::zero());
+            *current_alloc += message.value;
+        }
+
         self.message_status.insert(msg_id, MessageStatus::Success);
 
         // Context injection for target precompiles / contracts
@@ -433,6 +486,11 @@ impl GatewayEngine {
             let current_bal = self.relayer_balances.get(&relayer).copied().unwrap_or(U256::zero());
             self.relayer_balances.insert(relayer, current_bal + message.tip);
         }
+
+        // Clear execution context — it must not outlive this single claim (Section 2.6.4); a
+        // stale context left set would leak the previous message's original_sender to any later,
+        // unrelated call that checks is_called_by_gateway()/get_original_sender().
+        self.active_context = None;
 
         Ok(MessageStatus::Success)
     }
@@ -474,15 +532,12 @@ impl GatewayEngine {
             *current_alloc += value;
         }
 
-        // Refund locked tips if any
-        if let Some(tip) = self.locked_tips.remove(&message_id) {
-            let current_alloc = self
-                .supply_ledger
-                .per_chain_allocation
-                .entry(source_chain_id)
-                .or_insert(U256::zero());
-            *current_alloc += tip;
-        }
+        // Release the locked tip back to the sender bookkeeping. NOTE (Section 2.3.1 fix): this
+        // must NOT be added to per_chain_allocation — the tip is a separate escrow bucket that was
+        // never debited from per_chain_allocation in the first place (attest_commit only ever
+        // ceiling-checks/debits message.value, not value+tip). Crediting it here would create
+        // value that was never removed, breaking Σ per_chain_allocation == genesis_total_supply.
+        self.locked_tips.remove(&message_id);
 
         Ok(())
     }
@@ -574,6 +629,8 @@ impl GatewayEngine {
 mod tests {
     use super::*;
     use crate::types::cross_chain::ValidatorEntry;
+    use fastcrypto::bls12381::min_sig::BLS12381KeyPair;
+    use fastcrypto::traits::{KeyPair, Signer};
 
     fn dummy_address(byte: u8) -> Address {
         Address([byte; 20])

@@ -278,7 +278,10 @@ impl RelayerEngine {
                 .get_mut(&msg.dest_chain_id)
                 .ok_or(GatewayError::UnknownSourceChain(msg.dest_chain_id))?;
 
-            dest_engine.attest_commit(
+            // Authentication only (Reserve is the unconditional issuer, no ceiling to debit here
+            // — Section 2.3.1 fix). claim_message below is what actually credits
+            // dest_chain_id's allocation.
+            dest_engine.attest_reserve_issued_commit(
                 reserve_chain_id,
                 commit_root,
                 msg.value,
@@ -290,6 +293,30 @@ impl RelayerEngine {
                 "{} -> {} (Mint & Execute)",
                 reserve_chain_id, msg.dest_chain_id
             ));
+
+            // Section 2.3.1 fix, Rust-specific note: each simulated chain in `self.chains` owns
+            // an independently CLONED GlobalSupplyLedger (see setup_test_network / any real
+            // caller constructing GatewayEngine per chain) rather than a single shared instance —
+            // so the credit claim_message() just applied only landed on dest_engine's own clone,
+            // invisible to Reserve's. Reserve is the sole authoritative ledger (Section 2.1: "CHỈ
+            // Root Anchor mới được ghi"), so mirror the credit onto Reserve's own copy here too —
+            // this is what every other caller (dashboards, ProcessRefund-equivalent, tests) reads.
+            if msg.value > U256::zero() {
+                let reserve_engine = self
+                    .chains
+                    .get_mut(&reserve_chain_id)
+                    .ok_or(GatewayError::UnknownSourceChain(reserve_chain_id))?;
+                let current = reserve_engine
+                    .supply_ledger
+                    .per_chain_allocation
+                    .get(&msg.dest_chain_id)
+                    .copied()
+                    .unwrap_or(U256::zero());
+                reserve_engine
+                    .supply_ledger
+                    .per_chain_allocation
+                    .insert(msg.dest_chain_id, current + msg.value);
+            }
 
             self.stats.total_relayed += 1;
             self.stats.reserve_routed_count += 1;
@@ -512,6 +539,7 @@ mod tests {
     use crate::types::cross_chain::{AccountLeaf, ChainRegistry, GlobalSupplyLedger, GovernanceProposalKind, ValidatorEntry};
     use crate::types::gateway::keccak256;
     use crate::types::governance::GovernanceEngine;
+    use fastcrypto::traits::KeyPair;
 
     fn setup_test_network() -> (RelayerEngine, BTreeMap<u64, GatewayEngine>) {
         let mut rng = rand::thread_rng();
@@ -701,6 +729,89 @@ mod tests {
             reserve.supply_ledger.per_chain_allocation.get(&101).copied().unwrap(),
             U256::from(4900u64)
         );
+
+        // Section 2.3.1 regression guard: chain 102 (destination) MUST be credited by the same
+        // 100, and Reserve's OWN allocation entry (chain 1000) must be untouched — without this,
+        // value silently evaporates from the ledger on every successful transfer (was: 100
+        // transferred -> 200 destroyed, invariant broken) even with no attacker or failure
+        // involved.
+        assert_eq!(
+            reserve.supply_ledger.per_chain_allocation.get(&102).copied().unwrap(),
+            U256::from(5100u64)
+        );
+        assert_eq!(
+            reserve.supply_ledger.per_chain_allocation.get(&1000).copied().unwrap(),
+            U256::from(100_000u64)
+        );
+        assert!(
+            reserve.supply_ledger.verify_invariant(),
+            "Σ per_chain_allocation must still equal genesis_total_supply after a successful transfer"
+        );
+    }
+
+    /// Regression guard for the "double debit, zero credit" supply invariant bug found during
+    /// review: attest_commit used to unconditionally debit whatever source_chain_id it was called
+    /// with — including the Reserve->dest leg, where it was wrongly called with Reserve as the
+    /// "source", debiting Reserve's own bucket a second time while never crediting the true
+    /// destination. Runs several successful, non-adversarial transfers end-to-end through
+    /// relay_commit (the real relay path, not just the isolated ledger unit) and asserts
+    /// Σ per_chain_allocation == genesis_total_supply after every single one.
+    #[test]
+    fn test_invariant_holds_across_multiple_reserve_routed_transfers() {
+        let (mut relayer_engine, _) = setup_test_network();
+        let recipient = Address([0x22; 20]);
+
+        let transfers: [(u64, u64, u64); 4] = [(101, 102, 100), (102, 101, 50), (101, 102, 1), (102, 101, 25)];
+
+        for (i, (from_chain, to_chain, value)) in transfers.iter().enumerate() {
+            let sender = Address([0x11; 20]);
+            let mut tx_hash_bytes = [0x99u8; 32];
+            tx_hash_bytes[31] = i as u8;
+            let tx_hash = Hash(tx_hash_bytes);
+
+            let before = relayer_engine
+                .chains
+                .get(&1000)
+                .unwrap()
+                .supply_ledger
+                .per_chain_allocation
+                .get(to_chain)
+                .copied()
+                .unwrap_or(U256::zero());
+
+            let params = OutboundParams {
+                dest_chain_id: *to_chain,
+                target: recipient,
+                payload: vec![],
+                asset_id: U256::zero(),
+                value: U256::from(*value),
+                tip: U256::zero(),
+                hop_count: 1,
+                ordered: false,
+            };
+
+            let msg = relayer_engine
+                .submit_outbound(*from_chain, sender, params, tx_hash)
+                .unwrap();
+            let commit = relayer_engine
+                .certify_commit(*from_chain, 1, vec![msg], vec![])
+                .unwrap();
+            relayer_engine
+                .relay_commit(*from_chain, commit.commit_root, Address([0x77; 20]))
+                .unwrap();
+
+            let ledger = &relayer_engine.chains.get(&1000).unwrap().supply_ledger;
+            let after = ledger.per_chain_allocation.get(to_chain).copied().unwrap_or(U256::zero());
+            assert_eq!(
+                after,
+                before + U256::from(*value),
+                "transfer #{i}: destination chain {to_chain} must be credited exactly by the transferred value"
+            );
+            assert!(
+                ledger.verify_invariant(),
+                "transfer #{i} ({from_chain} -> {to_chain}, value {value}): Σ per_chain_allocation must equal genesis_total_supply"
+            );
+        }
     }
 
     #[test]
