@@ -383,6 +383,12 @@ func (g *GatewayEngine) ClaimDeadChainBalance(
 		return ErrInvalidMerkleProof
 	}
 
+	if amount != nil && amount.Sign() > 0 && g.SupplyLedger != nil {
+		if err := g.SupplyLedger.TransferAllocation(deadChainID, g.LocalChainID, amount); err != nil {
+			return err
+		}
+	}
+
 	g.DeadChainClaimed[claimKey] = true
 	return nil
 }

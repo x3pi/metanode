@@ -9,17 +9,27 @@ echo "🏢 SETUP & RUN 2 PRIVATE CHAINS (CHAIN 101 & 102)"
 echo "═══════════════════════════════════════════════════════════════"
 
 CLEAN=0
+NO_BUILD=0
 for arg in "$@"; do
     case $arg in
         --clean|-c)
             CLEAN=1
             ;;
+        --no-build)
+            NO_BUILD=1
+            ;;
         --help|-h)
-            echo "Usage: bash setup_2_private_chains.sh [--clean]"
+            echo "Usage: bash setup_2_private_chains.sh [--clean] [--no-build]"
             exit 0
             ;;
     esac
 done
+
+if [ "$NO_BUILD" -eq 0 ]; then
+    echo "🔨 [BUILD] Đảm bảo biên dịch mã nguồn mới nhất (Go, Rust, FFI)..."
+    bash "$SCRIPT_DIR/../../consensus/metanode/scripts/build_check.sh"
+    echo ""
+fi
 
 if [ "$CLEAN" -eq 1 ] && [ -d "$DATA_DIR" ]; then
     echo "🛑 Đang dừng các Private Chains cũ nếu đang chạy..."
