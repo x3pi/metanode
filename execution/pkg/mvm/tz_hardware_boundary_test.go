@@ -37,6 +37,7 @@ package mvm_test
 
 import (
 	"math/big"
+	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -44,7 +45,15 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
+func skipIfNoHardware(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/dev/tc_ns_client"); os.IsNotExist(err) {
+		t.Skip("skipping real-hardware test: /dev/tc_ns_client not found")
+	}
+}
+
 func TestTABoundary_TrustzoneHardware_MatchesCgo_SendNative(t *testing.T) {
+	skipIfNoHardware(t)
 	from := nextTestAddr()
 	to := nextTestAddr()
 	amount := big.NewInt(1_234)
@@ -79,6 +88,7 @@ func TestTABoundary_TrustzoneHardware_MatchesCgo_SendNative(t *testing.T) {
 }
 
 func TestTABoundary_TrustzoneHardware_MatchesCgo_ProcessNativeMintBurn(t *testing.T) {
+	skipIfNoHardware(t)
 	systemAddr := common.HexToAddress("0x000000000000000000000000000000000000MINT")
 	to := nextTestAddr()
 	amount := big.NewInt(777_777)
@@ -113,6 +123,7 @@ func TestTABoundary_TrustzoneHardware_MatchesCgo_ProcessNativeMintBurn(t *testin
 }
 
 func TestTABoundary_TrustzoneHardware_MatchesCgo_NoncePlusOne(t *testing.T) {
+	skipIfNoHardware(t)
 	sender := nextTestAddr()
 	const startNonce = 41
 

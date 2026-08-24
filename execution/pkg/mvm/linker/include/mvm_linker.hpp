@@ -259,6 +259,13 @@ extern struct Value_return GetCrossChainSourceId(unsigned char *mvmId);
 extern struct Value_return GetBlobHash(unsigned char *mvmId, unsigned long long index);
 extern struct Value_return GetBlobBaseFee(unsigned char *mvmId);
 
+// XapianManager::pruneOldVersions() support (background cleaner_thread, no
+// mvmId/BlockContext available — same pre-B1-style mid-flight callback as
+// GetChainId() above). Both return an 8-byte big-endian uint64 in data_p;
+// success=false means "treat as unavailable" (caller must no-op, not assume 0).
+extern struct Value_return GetXapianPruneRetentionBlocks();
+extern struct Value_return GetCurrentBlockNumberForXapianPrune();
+
 // Redirect C++ cout/cerr sang file log riêng
 // name: tên process (ví dụ "master", "sub-write") → tạo file mvm_cpp_{name}.log
 void InitCppFileLog(const char *log_dir, const char *name);

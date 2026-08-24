@@ -139,6 +139,54 @@ public:
   void mvmCancelTransaction();
   void dump_all_documents(uint256_t blockNumber);
 
+  // --- On-disk compaction (fixes unbounded Xapian B-tree growth from
+  // frequent small commits; see note/XAPIAN_COMPACT_IN_PLACE.md) ---
+  // Compacts the on-disk database into a fresh copy (same docids, same
+  // logical content -- Xapian::DBCOMPACT_NO_RENUMBER), then atomically
+  // swaps it in for `db`, all under changes_mutex so no writer/reader can
+  // observe a half-swapped state. Safe to call from a background thread
+  // while the node is running; no consensus impact (getComprehensiveStateHash()
+  // only ever hashes comprehensive_log, never the physical db -- see that
+  // function's own comment). No-ops (returns false, changes nothing) when:
+  //  - running InMemory (no on-disk path to compact),
+  //  - there are staged-but-uncommitted writes (has_uncommitted_writes or a
+  //    non-empty comprehensive_log) -- compacting mid-transaction would race
+  //    the eventual commit(),
+  //  - the on-disk database is smaller than minSizeBytes (not worth the I/O),
+  //  - called again before minInterval has elapsed since the last attempt
+  //    (self-throttled via last_compact_attempt_ -- callers don't need their
+  //    own cooldown bookkeeping).
+  // On any failure (compact(), rename, or reopen), rolls back to the
+  // original on-disk database and leaves `db` open and valid -- never
+  // leaves the instance in a state where subsequent operations would fail.
+  bool compactInPlace(size_t minSizeBytes = 1024 * 1024,
+                       std::chrono::minutes minInterval = std::chrono::minutes(60));
+
+  // --- Legacy "superseded document" cleanup (write-path that created these
+  // was removed at commit 4108fe70, 2026-07-02, "replace physical docid with
+  // virtual ID system" -- any document created BEFORE that commit and never
+  // reset still carries permanently-orphaned entries this is the only thing
+  // that ever cleans up) ---
+  // Deletes every document with a value at slot 254 (the old "superseded at
+  // block N" marker -- see xapian_search.cpp's read-side use of the same
+  // slot for why active documents never have one) whose marked block is
+  // older than (currentBlockHeight - retentionBlocks). Deterministic in
+  // currentBlockHeight alone, so independent nodes running this at slightly
+  // different wall-clock moments still agree on exactly which documents
+  // qualify at a given block height (no consensus impact regardless, since
+  // this only touches the physical db, never comprehensive_log -- see
+  // getComprehensiveStateHash()'s own doc comment -- but determinism still
+  // matters for nodes to converge on the same disk usage over time).
+  // No-ops (returns 0, deletes nothing) when: retentionBlocks == 0 (default,
+  // the OFF switch), InMemory mode, a transaction is in flight, or
+  // currentBlockHeight <= retentionBlocks (nothing old enough yet). Caps
+  // deletions to maxDeletePerCall per invocation so a first run against a
+  // large backlog doesn't block the caller for a long time -- call
+  // repeatedly (e.g. once/minute from cleaner_thread) until it returns 0.
+  // Returns the number of documents actually deleted.
+  size_t pruneOldVersions(uint64_t currentBlockHeight, uint64_t retentionBlocks,
+                          size_t maxDeletePerCall = 500);
+
   // (Optional) Cung cấp getter/setter an toàn luồng nếu cần
 
   // Chỉ nên được gọi bởi registry
@@ -192,6 +240,10 @@ private:
   // never consulted) in cgo/disk mode -- zero behavior/overhead change
   // there.
   std::map<std::string, std::optional<Xapian::Document>> undo_snapshot_;
+
+  // --- compactInPlace() self-throttling (see that method's doc comment) ---
+  std::chrono::steady_clock::time_point last_compact_attempt_{}; // epoch value -> first call is never throttled
+  std::mutex compact_time_mutex_;
 };
 
 #endif // XAPIAN_MANAGER_H

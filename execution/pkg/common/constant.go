@@ -39,13 +39,6 @@ const (
 	// === HẰNG SỐ MỚI ===
 	RequestDirectory = "REQUEST_DIRECTORY"
 
-	// === CROSS-CHAIN TX TYPES ===
-	// Dùng trong proto.Type (field 16) để phân biệt giai đoạn xử lý batchSubmit.
-	// 0 = TX bình thường (standard)
-	// 100 = CC_SIG_ACK: chưa đủ 2/3 embassy vote, master chỉ tăng nonce
-	// 101 = CC_EXECUTE: đủ 2/3 vote, master sẽ execute CrossChainHandler
-	TX_TYPE_CC_SIG_ACK uint64 = 100
-	TX_TYPE_CC_EXECUTE uint64 = 101
 
 	// === EIP-4844 BLOB GAS MARKET ===
 	// Matches go-ethereum's params.BlobTxBlobGasPerBlob / Cancun BlobConfig.

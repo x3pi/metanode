@@ -16,14 +16,12 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
-	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
 	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -212,9 +210,6 @@ func NewTransactionProcessor(
 	// MEMORY LEAK FIX: Start background cleanup for verifiedSignaturesCache
 	// Prevents unbounded growth of signature verification cache (~2.3GB/hour at 10K TPS)
 	tx_processor.StartSignatureCacheCleanup(make(chan struct{}))
-
-	// Set global OffChainProcessor cho cross-chain handler
-	cross_chain_handler.SetOffChainProcessor(tp)
 
 	return tp
 }
@@ -494,27 +489,7 @@ func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Re
 	}
 
 	t1 := time.Now()
-	var processedTxs []types.Transaction
-	var droppedVirtualCount int
-
-	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
-
-	for _, tx := range transactions {
-		// Check cross-chain batchSubmit
-		if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
-			inputData := tx.CallData().Input()
-			if ccHandler.IsBatchSubmitTx(inputData) {
-				updatedTx, err, _ := tp.processBatchSubmitVirtual(tx, inputData)
-				if err != nil {
-					logger.Warn("Dropped transaction from batch during virtual execution: hash=%s, err=%v", tx.Hash().Hex(), err)
-					droppedVirtualCount++
-					continue
-				}
-				tx = updatedTx
-			}
-		}
-		processedTxs = append(processedTxs, tx)
-	}
+	processedTxs := transactions
 	virtualExecDuration := time.Since(t1)
 
 	queueFullErrs := 0
@@ -603,20 +578,7 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
 
-	// Check cross-chain batchSubmit
-	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
-	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
-		inputData := tx.CallData().Input()
-		if ccHandler.IsBatchSubmitTx(inputData) {
-			updatedTx, err, output := tp.processBatchSubmitVirtual(tx, inputData)
-			if err != nil {
-				logger.Error("processBatchSubmitVirtual failed: ", err)
-				tp.sendTransactionError(conn, tx.Hash(), -1, err.Error(), output, msgID)
-				return err
-			}
-			tx = updatedTx
-		}
-	}
+
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
 	code, err := tp.AddTransactionToPool(tx)
@@ -635,21 +597,6 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 
 func (tp *TransactionProcessor) ProcessTransactionFromRpc(tx types.Transaction) ([]byte, error) {
 	var output []byte
-
-	// Check cross-chain batchSubmit
-	ccHandler, _ := cross_chain_handler.GetCrossChainHandler()
-	if tx.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS && ccHandler != nil {
-		inputData := tx.CallData().Input()
-		if ccHandler.IsBatchSubmitTx(inputData) {
-			updatedTx, err, out := tp.processBatchSubmitVirtual(tx, inputData)
-			if err != nil {
-				logger.Error("processBatchSubmitVirtual failed: ", err)
-				return out, err
-			}
-			tx = updatedTx
-			output = out
-		}
-	}
 
 	_, err := tp.AddTransactionToPool(tx)
 	if err != nil {
