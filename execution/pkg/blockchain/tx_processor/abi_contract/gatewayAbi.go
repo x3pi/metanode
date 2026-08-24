@@ -10,10 +10,15 @@ package abi_contract
 // no existing precedent for decoding tuple/struct ABI parameters — ValidatorHandler, the closest
 // template, only ever decodes scalar parameters) for this first, wiring-focused milestone.
 //
-// Scope for this milestone (Milestone A of the Root Anchor wiring plan): outbound(), attestCommit(),
+// Scope for Milestone A of the Root Anchor wiring plan: outbound(), attestCommit(),
 // claimMessage(), refund(), and the 3 view methods. verifyAndExecute() and claimDeadChainBalance()
 // are deferred — they follow the exact same pattern and can be added once this foundation is
 // proven, without touching what's already wired.
+//
+// getChainRegistry() was added in Milestone B: it lets a remote chain read this chain's
+// ChainRegistry entry for a given chainId over eth_call, the read half of the Go↔Root Anchor RPC
+// channel (see execution/pkg/cross_chain/rootanchor). Same flattened-array convention as above —
+// parallel arrays instead of a Solidity tuple/struct array for the committee.
 const GatewayABI = `[
 	{
 		"inputs": [
@@ -102,6 +107,24 @@ const GatewayABI = `[
 		"inputs": [],
 		"name": "isCalledByGateway",
 		"outputs": [{"internalType": "bool", "name": "result", "type": "bool"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getChainRegistry",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "bytes[]", "name": "committeePubkeys", "type": "bytes[]"},
+			{"internalType": "uint64[]", "name": "committeeStakes", "type": "uint64[]"},
+			{"internalType": "bytes[]", "name": "committeePopSignatures", "type": "bytes[]"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "uint64", "name": "quorumThreshold", "type": "uint64"},
+			{"internalType": "address", "name": "gatewayContract", "type": "address"},
+			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "string", "name": "archivalEndpoint", "type": "string"},
+			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"}
+		],
 		"stateMutability": "view",
 		"type": "function"
 	},
