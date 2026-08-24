@@ -349,6 +349,149 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	_ = rcpDup
 }
 
+// TestGatewayHandler_GetChainRegistry covers Milestone B's read side of the Go↔Root Anchor RPC
+// channel: a remote chain reads this chain's ChainRegistry entry over eth_call. Exercises real
+// ABI pack/unpack, not just the Go struct, since execution/pkg/cross_chain/rootanchor's client
+// will decode this exact wire format.
+func TestGatewayHandler_GetChainRegistry(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+	engine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
+	}
+	wantStateRoot := common.HexToHash("0xAAAABBBBCCCCDDDDAAAABBBBCCCCDDDDAAAABBBBCCCCDDDDAAAABBBBCCCCDDDD")
+	wantGatewayContract := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	engine.ChainRegistry[101] = cross_chain.ChainRegistry{
+		ChainID: 101,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: kp1.PublicKey().Bytes(), Stake: 1000, PopSignature: []byte{0xAA, 0xBB}},
+			{PubkeyBLS: kp2.PublicKey().Bytes(), Stake: 2000, PopSignature: []byte{0xCC, 0xDD}},
+		},
+		Epoch:            7,
+		QuorumThreshold:  6667,
+		GatewayContract:  wantGatewayContract,
+		StateRoot:        wantStateRoot,
+		ArchivalEndpoint: "https://archive.example.com/chain-101",
+		RegisteredAt:     1234567890,
+	}
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
+	}
+
+	sender := common.HexToAddress("0x8888888888888888888888888888888888888888")
+
+	calldata, err := h.abi.Pack("getChainRegistry", big.NewInt(101))
+	if err != nil {
+		t.Fatalf("pack getChainRegistry() calldata: %v", err)
+	}
+	viewTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+
+	// Via HandleOffChainQuery directly (raw bytes)...
+	data, err := h.HandleOffChainQuery(cs, viewTx)
+	if err != nil {
+		t.Fatalf("getChainRegistry (HandleOffChainQuery) failed: %v", err)
+	}
+
+	// ...and via HandleOffChainQueryResult (the ExecuteSCResult wrapper the eth_call dispatch
+	// sites in transaction_processor_offchain.go actually call) — both must agree.
+	result, err := h.HandleOffChainQueryResult(viewTx, cs)
+	if err != nil {
+		t.Fatalf("getChainRegistry (HandleOffChainQueryResult) failed: %v", err)
+	}
+	if result == nil || string(result.Return()) != string(data) {
+		t.Fatalf("HandleOffChainQueryResult.Return() != HandleOffChainQuery output")
+	}
+
+	outValues, err := h.abi.Unpack("getChainRegistry", data)
+	if err != nil {
+		t.Fatalf("unpack getChainRegistry() output: %v", err)
+	}
+	if len(outValues) != 10 {
+		t.Fatalf("expected 10 output values, got %d", len(outValues))
+	}
+	exists, _ := outValues[0].(bool)
+	pubkeys, _ := outValues[1].([][]byte)
+	stakes, _ := outValues[2].([]uint64)
+	popSignatures, _ := outValues[3].([][]byte)
+	epoch, _ := outValues[4].(uint64)
+	quorumThreshold, _ := outValues[5].(uint64)
+	gatewayContract, _ := outValues[6].(common.Address)
+	stateRootRaw, _ := outValues[7].([32]byte)
+	archivalEndpoint, _ := outValues[8].(string)
+	registeredAt, _ := outValues[9].(uint64)
+
+	if !exists {
+		t.Fatal("expected exists=true for a registered chain")
+	}
+	if len(pubkeys) != 2 || len(stakes) != 2 || len(popSignatures) != 2 {
+		t.Fatalf("expected 2 committee members, got pubkeys=%d stakes=%d popSignatures=%d", len(pubkeys), len(stakes), len(popSignatures))
+	}
+	if stakes[0] != 1000 || stakes[1] != 2000 {
+		t.Fatalf("stakes mismatch: got %v", stakes)
+	}
+	if string(pubkeys[0]) != string(kp1.PublicKey().Bytes()) || string(pubkeys[1]) != string(kp2.PublicKey().Bytes()) {
+		t.Fatal("pubkeys mismatch")
+	}
+	if epoch != 7 {
+		t.Fatalf("epoch = %d, want 7", epoch)
+	}
+	if quorumThreshold != 6667 {
+		t.Fatalf("quorumThreshold = %d, want 6667", quorumThreshold)
+	}
+	if gatewayContract != wantGatewayContract {
+		t.Fatalf("gatewayContract = %s, want %s", gatewayContract.Hex(), wantGatewayContract.Hex())
+	}
+	if common.Hash(stateRootRaw) != wantStateRoot {
+		t.Fatalf("stateRoot = %s, want %s", common.Hash(stateRootRaw).Hex(), wantStateRoot.Hex())
+	}
+	if archivalEndpoint != "https://archive.example.com/chain-101" {
+		t.Fatalf("archivalEndpoint = %q", archivalEndpoint)
+	}
+	if registeredAt != 1234567890 {
+		t.Fatalf("registeredAt = %d, want 1234567890", registeredAt)
+	}
+}
+
+// TestGatewayHandler_GetChainRegistry_NotRegistered covers the fail-closed "not registered" case
+// — a caller must be able to distinguish "chain not in registry" from "chain registered but
+// happens to have zero-value fields" (a bug in a naive implementation would conflate the two).
+func TestGatewayHandler_GetChainRegistry_NotRegistered(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	calldata, err := h.abi.Pack("getChainRegistry", big.NewInt(999999))
+	if err != nil {
+		t.Fatalf("pack getChainRegistry() calldata: %v", err)
+	}
+	viewTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+
+	data, err := h.HandleOffChainQuery(cs, viewTx)
+	if err != nil {
+		t.Fatalf("getChainRegistry failed: %v", err)
+	}
+	outValues, err := h.abi.Unpack("getChainRegistry", data)
+	if err != nil {
+		t.Fatalf("unpack getChainRegistry() output: %v", err)
+	}
+	exists, _ := outValues[0].(bool)
+	if exists {
+		t.Fatal("expected exists=false for an unregistered chain")
+	}
+}
+
 func marshalCallData(t *testing.T, calldata []byte) []byte {
 	t.Helper()
 	dataBytes, err := transaction.NewCallData(calldata).Marshal()

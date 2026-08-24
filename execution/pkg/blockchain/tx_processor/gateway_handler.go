@@ -18,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -202,6 +203,34 @@ func (h *GatewayHandler) HandleOffChainQuery(chainState *blockchain.ChainState, 
 	return h.handleView(chainState, method, inputData[4:])
 }
 
+// HandleOffChainQueryResult wraps HandleOffChainQuery's raw ABI-packed output into a
+// types.ExecuteSCResult, matching the (tx, chainState) types.ExecuteSCResult signature
+// transaction_processor_offchain.go's eth_call dispatch sites expect — see
+// ValidatorHandler.HandleOffChainQuery (validation_query.go) for the exact precedent this
+// mirrors (Milestone B: wiring GATEWAY_CONTRACT_ADDRESS into the same eth_call dispatch that
+// VALIDATOR_CONTRACT_ADDRESS already uses).
+func (h *GatewayHandler) HandleOffChainQueryResult(tx types.Transaction, chainState *blockchain.ChainState) (types.ExecuteSCResult, error) {
+	returnData, err := h.HandleOffChainQuery(chainState, tx)
+	return smart_contract.NewExecuteSCResult(
+		tx.Hash(),
+		pb.RECEIPT_STATUS_TRANSACTION_ERROR,
+		pb.EXCEPTION_NONE,
+		returnData,
+		0, // GasUsed is 0 — view function
+		common.Hash{},
+		make(map[string][]byte),
+		make(map[string][]byte),
+		make(map[string][]byte),
+		make(map[string][]byte),
+		make(map[string][]byte),
+		make(map[string]common.Address),
+		make(map[string][]byte),
+		make(map[common.Address][]common.Address),
+		make(map[common.Address][][2][]byte),
+		[]types.EventLog{},
+	), err
+}
+
 func (h *GatewayHandler) handleWrite(
 	chainState *blockchain.ChainState, tx types.Transaction, method *abi.Method, argData []byte,
 ) ([]types.EventLog, []byte, error) {
@@ -326,6 +355,42 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 
 	case "isCalledByGateway":
 		return method.Outputs.Pack(engine.IsCalledByGateway())
+
+	case "getChainRegistry":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getChainRegistry input: %w", err)
+		}
+		chainID := mustUint64(args[0])
+
+		// engine is a fresh, single-goroutine local deserialization from loadGatewayEngine()
+		// above (see its doc comment) — not a value shared across concurrent callers, so no
+		// locking is needed to read its ChainRegistry map here.
+		registry, exists := engine.ChainRegistry[chainID]
+
+		if !exists {
+			return method.Outputs.Pack(
+				false,
+				[][]byte{}, []uint64{}, [][]byte{},
+				uint64(0), uint64(0), common.Address{}, [32]byte{}, "", uint64(0),
+			)
+		}
+
+		pubkeys := make([][]byte, len(registry.Committee))
+		stakes := make([]uint64, len(registry.Committee))
+		popSignatures := make([][]byte, len(registry.Committee))
+		for i, v := range registry.Committee {
+			pubkeys[i] = v.PubkeyBLS
+			stakes[i] = v.Stake
+			popSignatures[i] = v.PopSignature
+		}
+
+		return method.Outputs.Pack(
+			true,
+			pubkeys, stakes, popSignatures,
+			registry.Epoch, registry.QuorumThreshold, registry.GatewayContract,
+			[32]byte(registry.StateRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
+		)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

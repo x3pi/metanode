@@ -67,6 +67,21 @@ type NodesConfig struct {
 // CrossChainConfig chứa cấu hình cross-chain
 type CrossChainConfig struct {
 	GatewayContract string `json:"gateway_contract,omitempty"` // Contract/Precompile xử lý giao dịch cross-chain
+
+	// RootAnchorRpcUrls — JSON-RPC endpoint(s) of the Root Anchor network this chain talks to
+	// (Milestone B of the wiring plan; see execution/pkg/cross_chain/rootanchor). Tried in order,
+	// first success wins. Empty/omitted disables the ChainRegistry refresh worker entirely — a
+	// private chain not yet participating in cross-chain has no Root Anchor to reach.
+	RootAnchorRpcUrls []string `json:"root_anchor_rpc_urls,omitempty"`
+	// RootAnchorPollIntervalSeconds — how often the background worker refreshes each already-
+	// registered ChainRegistry entry from Root Anchor. Default 60 if zero. Deliberately NOT
+	// per-transaction (mục 5.4 of the design doc requires this).
+	RootAnchorPollIntervalSeconds int `json:"root_anchor_poll_interval_seconds,omitempty"`
+	// RootAnchorCircuitBreakerMaxFailures / RootAnchorCircuitBreakerTimeoutSeconds configure the
+	// pkg/network.CircuitBreaker wrapping every Root Anchor RPC call. Defaults (10 failures / 60s)
+	// from network.DefaultCircuitBreakerConfig() are used when zero.
+	RootAnchorCircuitBreakerMaxFailures    int `json:"root_anchor_circuit_breaker_max_failures,omitempty"`
+	RootAnchorCircuitBreakerTimeoutSeconds int `json:"root_anchor_circuit_breaker_timeout_seconds,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
@@ -129,7 +144,7 @@ type SimpleChainConfig struct {
 	GenesisFilePath                    string         `json:"genesis_file_path"`
 	Securepassword                     string         `json:"securepassword"`
 	//
-	PkAdminFileStorage string `json:"pk_admin_file_storage"`
+	PkAdminFileStorage        string   `json:"pk_admin_file_storage"`
 	RustConfigPath            string   `json:"rust_config_path,omitempty"`  // FFI: Path to Rust node-X.toml
 	ValidatorForwardAddresses []string `json:"validator_forward_addresses"` // TCP addresses of validator Go Subs for sync-only nodes (e.g., ["192.168.1.1:4200"])
 	MetaNodeRPCAddress        string   `json:"meta_node_rpc_address"`       // Address of Rust MetaNode RPC (fallback for TX)
@@ -200,15 +215,15 @@ type SimpleChainConfig struct {
 
 	TxVerificationChunkSize int                `json:"tx_verification_chunk_size,omitempty"`
 	Pruning                 PruningConfig      `json:"pruning,omitempty"`
-	RpcRateLimit   RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
-	TraceEnabled   bool               `json:"trace_enabled,omitempty"`
-	TraceEndpoint  string             `json:"trace_endpoint,omitempty"`
-	TxTraceEnabled bool               `json:"tx_trace_enabled,omitempty"`
-	TlsCert        string             `json:"tls_cert,omitempty"`
-	TlsKey         string             `json:"tls_key,omitempty"`
-	Databases      DatabasesConfig    `json:"Databases"`
-	Nodes          NodesConfig        `json:"nodes"`
-	Log            LogConfig          `json:"log"`
+	RpcRateLimit            RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
+	TraceEnabled            bool               `json:"trace_enabled,omitempty"`
+	TraceEndpoint           string             `json:"trace_endpoint,omitempty"`
+	TxTraceEnabled          bool               `json:"tx_trace_enabled,omitempty"`
+	TlsCert                 string             `json:"tls_cert,omitempty"`
+	TlsKey                  string             `json:"tls_key,omitempty"`
+	Databases               DatabasesConfig    `json:"Databases"`
+	Nodes                   NodesConfig        `json:"nodes"`
+	Log                     LogConfig          `json:"log"`
 
 	// C++ MVM State cache control
 	MVMCacheEnabled *bool `json:"mvm_cache_enabled,omitempty"`

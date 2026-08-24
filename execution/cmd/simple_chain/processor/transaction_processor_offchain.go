@@ -107,7 +107,20 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		return validatorHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
 	}
 
+	if executeTransaction.ToAddress() == mt_common.GATEWAY_CONTRACT_ADDRESS {
+		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
+		if err != nil {
+			return nil, err
+		}
+		defer chainStateNew.Close()
 
+		gatewayHandler, err := tx_processor.GetGatewayHandler()
+		if err != nil {
+			return nil, err
+		}
+		return gatewayHandler.HandleOffChainQueryResult(executeTransaction, chainStateNew)
+	}
 
 	ctx := context.Background()
 	transactionHash := executeTransaction.Hash()
@@ -152,7 +165,6 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 	v.blockProcessingLock.RLock()
 	defer v.blockProcessingLock.RUnlock()
 
-	
 	if executeTransaction.IsRegularTransaction() && !isSmartContract {
 		mvmResult = &mvm.MVMExecuteResult{
 			Status:  pb.RECEIPT_STATUS_RETURNED,
@@ -248,7 +260,26 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		return validatorHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
 	}
 
+	if executeTransaction.ToAddress() == mt_common.GATEWAY_CONTRACT_ADDRESS {
+		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
+		headerPtr := v.chainState.GetcurrentBlockHeader()
+		if headerPtr == nil {
+			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in ExecuteTransactionOffChain")
+			return nil, fmt.Errorf("current block header is nil")
+		}
+		lastBlockHeader := *headerPtr
 
+		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data") // Empty backupPath for temporary chain state
+		if err != nil {
+			return nil, err
+		}
+		defer chainStateNew.Close()
+		gatewayHandler, err := tx_processor.GetGatewayHandler()
+		if err != nil {
+			return nil, err
+		}
+		return gatewayHandler.HandleOffChainQueryResult(executeTransaction, chainStateNew)
+	}
 
 	// cần code thêm
 	if executeTransaction.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {
