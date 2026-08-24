@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"encoding/json"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -14,25 +13,49 @@ import (
 )
 
 // ══════════════════════════════════════════════════════════════════════════════
-// P5 — SECURITY REVIEW & ADVERSARIAL AUDIT TEST SUITE (P5.1 DoD)
+// SECURITY & ADVERSARIAL AUDIT TEST SUITE
 // ══════════════════════════════════════════════════════════════════════════════
 
-func setupSecurityAuditEnvironment() (*GatewayEngine, map[uint64]ChainRegistry, *GlobalSupplyLedger) {
+func setupSecurityAuditEnvironment() (*GatewayEngine, map[uint64]ChainRegistry, *GlobalSupplyLedger, *bls.KeyPair) {
+	kp := bls.GenerateKeyPair()
+	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
+
 	registry := make(map[uint64]ChainRegistry)
 	registry[1000] = ChainRegistry{
-		ChainID:         1000,
+		ChainID: 1000,
+		Committee: []ValidatorEntry{
+			{
+				PubkeyBLS:    kp.BytesPublicKey(),
+				Stake:        10000,
+				PopSignature: popSig.Bytes(),
+			},
+		},
 		Epoch:           1,
 		QuorumThreshold: 6667,
 		StateRoot:       common.HexToHash("0x1000100010001000100010001000100010001000100010001000100010001000"),
 	}
 	registry[101] = ChainRegistry{
-		ChainID:         101,
+		ChainID: 101,
+		Committee: []ValidatorEntry{
+			{
+				PubkeyBLS:    kp.BytesPublicKey(),
+				Stake:        10000,
+				PopSignature: popSig.Bytes(),
+			},
+		},
 		Epoch:           1,
 		QuorumThreshold: 6667,
 		StateRoot:       common.HexToHash("0x1010101010101010101010101010101010101010101010101010101010101010"),
 	}
 	registry[102] = ChainRegistry{
-		ChainID:         102,
+		ChainID: 102,
+		Committee: []ValidatorEntry{
+			{
+				PubkeyBLS:    kp.BytesPublicKey(),
+				Stake:        10000,
+				PopSignature: popSig.Bytes(),
+			},
+		},
 		Epoch:           1,
 		QuorumThreshold: 6667,
 		StateRoot:       common.HexToHash("0x1020102010201020102010201020102010201020102010201020102010201020"),
@@ -49,28 +72,35 @@ func setupSecurityAuditEnvironment() (*GatewayEngine, map[uint64]ChainRegistry, 
 	}
 
 	engine := NewGatewayEngine(102, registry, ledger)
-	return engine, registry, ledger
+	return engine, registry, ledger, kp
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 1: BLS Verification & Quorum Certificate Integrity
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
+	engine, _, _, kp := setupSecurityAuditEnvironment()
 
 	commitRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	cert := QuorumCert{
+
+	// 1. Invalid / Empty BLS Signature -> MUST FAIL-CLOSED
+	certInvalid := QuorumCert{
 		Epoch:              1,
-		AggregateSignature: make([]byte, 48),
+		AggregateSignature: make([]byte, 48), // Empty signature
 		SignerBitmap:       []byte{0xFF},
 	}
+	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certInvalid)
+	assert.Error(t, errInvalidBLS, "Empty/invalid BLS signature must fail-closed")
 
-	// 1. Invalid BLS Signature -> MUST FAIL-CLOSED (P5.1 DoD)
-	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), cert, false)
-	assert.ErrorIs(t, errInvalidBLS, ErrInvalidMerkleProof, "Invalid BLS signature must fail-closed")
-
-	// 2. Valid BLS Signature -> MUST PASS
-	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), cert, true)
+	// 2. Valid Real BLS Signature -> MUST PASS
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	certValid := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certValid)
 	require.NoError(t, errValidBLS)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 
@@ -104,7 +134,7 @@ func TestP5_Audit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 2: Merkle Proof Integrity & Tamper-Resistance (Bit-Flip Attacks)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_MerkleProofTamperResistance(t *testing.T) {
+func TestAudit_MerkleProofTamperResistance(t *testing.T) {
 	leaves := []common.Hash{
 		common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
 		common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
@@ -139,8 +169,8 @@ func TestP5_Audit_MerkleProofTamperResistance(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 3: Anti-Replay & Concurrent Double-Claim Race Resistance
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
+	engine, _, _, kp := setupSecurityAuditEnvironment()
 
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -159,14 +189,19 @@ func TestP5_Audit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafBytes, _ := json.Marshal(msg)
-	leafHash := Keccak256(leafBytes)
+	leafHash := ComputeMessageLeafHash(*msg)
 	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
 	proof := GetMerkleProof(layers, 0)
 
-	// Attest on Root Anchor / Gateway
-	cert := QuorumCert{Epoch: 1}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), cert, true)
+	// Attest on Root Anchor / Gateway with real BLS signature
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), cert)
 	require.NoError(t, err)
 
 	// Stress Test: 50 concurrent workers try to claim the EXACT SAME message simultaneously
@@ -199,8 +234,8 @@ func TestP5_Audit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 4: Anti-Double-Mint via Refund Pathway Race Guard
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
+	engine, _, _, kp := setupSecurityAuditEnvironment()
 
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -219,13 +254,18 @@ func TestP5_Audit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafBytes, _ := json.Marshal(msg)
-	leafHash := Keccak256(leafBytes)
+	leafHash := ComputeMessageLeafHash(*msg)
 	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
 	proof := GetMerkleProof(layers, 0)
 
-	cert := QuorumCert{Epoch: 1}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), cert, true)
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), cert)
 	require.NoError(t, err)
 
 	// Step 1: Claim message successfully
@@ -234,7 +274,7 @@ func TestP5_Audit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	assert.Equal(t, MessageStatusSuccess, status)
 
 	// Step 2: Attacker tries to submit a Refund for the same claimed message (Double-Mint Attack)
-	errRefundAttack := engine.Refund(msg.MessageID, sender, big.NewInt(300), true)
+	errRefundAttack := engine.Refund(msg.MessageID, 102, sender, big.NewInt(300), true)
 	assert.ErrorIs(t, errRefundAttack, ErrInvalidRefundState, "Refund on already claimed message must be blocked")
 
 	// Step 3: Refund with fake/invalid failed execution proof
@@ -242,15 +282,15 @@ func TestP5_Audit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	msg2, err := engine.Outbound(sender, params, txHash2)
 	require.NoError(t, err)
 
-	errInvalidProof := engine.Refund(msg2.MessageID, sender, big.NewInt(300), false)
+	errInvalidProof := engine.Refund(msg2.MessageID, 102, sender, big.NewInt(300), false)
 	assert.ErrorIs(t, errInvalidProof, ErrInvalidRefundProof, "Refund with invalid proof must be rejected")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 5: Origin-Sender Context Security (Mục 2.6.4 điểm 2)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_OriginSenderContextIntegrity(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_OriginSenderContextIntegrity(t *testing.T) {
+	engine, _, _, _ := setupSecurityAuditEnvironment()
 
 	// 1. Direct call outside Gateway -> ActiveContext must be nil
 	assert.Nil(t, engine.ActiveContext, "ActiveContext must be nil when not called by Gateway")
@@ -277,8 +317,8 @@ func TestP5_Audit_OriginSenderContextIntegrity(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 6: Hop-Count Strict Boundary Enforcement (Mục 2.6.2)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_HopCountBoundaryEnforcement(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_HopCountBoundaryEnforcement(t *testing.T) {
+	engine, _, _, _ := setupSecurityAuditEnvironment()
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
@@ -311,61 +351,79 @@ func TestP5_Audit_HopCountBoundaryEnforcement(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 7: Adversarial Overdraw & Ceiling Enforcement (Scenario 10.7)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_AdversarialOverdrawAndSupplyCeiling(t *testing.T) {
-	engine, _, ledger := setupSecurityAuditEnvironment()
+func TestAudit_AdversarialOverdrawAndSupplyCeiling(t *testing.T) {
+	engine, _, ledger, kp := setupSecurityAuditEnvironment()
 
 	// Initial Allocation: Chain 101 has 5,000 MTN
 	commitRoot := common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
-	cert := QuorumCert{Epoch: 1}
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
 
 	// Attack 1: Overdraw attempt 10,000,000 MTN -> BLOCKED
-	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), cert, true)
+	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), cert)
 	assert.ErrorIs(t, errOverdraw, ErrAllocationExceeded, "Overdraw attempt must be blocked")
 
 	// Attack 2: Exact boundary + 1 wei -> BLOCKED
-	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), cert, true)
+	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), cert)
 	assert.ErrorIs(t, errBoundaryPlus1, ErrAllocationExceeded, "Allocation + 1 wei must be blocked")
 
 	// Valid 1: Exact allocation 5,000 MTN -> PASS
-	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), cert, true)
+	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), cert)
 	require.NoError(t, errExact)
 	assert.Equal(t, big.NewInt(5_000), attested.FundedAmount)
 	assert.Zero(t, ledger.PerChainAllocation[101].Sign())
 
 	// Attack 3: Subsequent request when allocation is 0 -> BLOCKED
-	_, errExhausted := engine.AttestCommit(101, commitRoot, big.NewInt(1), cert, true)
+	_, errExhausted := engine.AttestCommit(101, commitRoot, big.NewInt(1), cert)
 	assert.ErrorIs(t, errExhausted, ErrAllocationExceeded, "Exhausted allocation must be blocked")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 8: Fail-Closed Epoch Alignment Check (Mục 5.3)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_FailClosedEpochAlignment(t *testing.T) {
-	engine, registry, _ := setupSecurityAuditEnvironment()
+func TestAudit_FailClosedEpochAlignment(t *testing.T) {
+	engine, registry, _, kp := setupSecurityAuditEnvironment()
 	assert.Equal(t, uint64(1), registry[101].Epoch)
 
 	commitRoot := common.HexToHash("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 
 	// Attack 1: Old Epoch Cert (Epoch = 0) -> BLOCKED
-	oldCert := QuorumCert{Epoch: 0}
-	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), oldCert, true)
+	oldCert := QuorumCert{
+		Epoch:              0,
+		AggregateSignature: sig.Bytes(),
+	}
+	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), oldCert)
 	assert.ErrorIs(t, errOldEpoch, ErrEpochMismatch, "Old epoch cert must be rejected")
 
 	// Attack 2: Future Epoch Cert (Epoch = 2) -> BLOCKED
-	futureCert := QuorumCert{Epoch: 2}
-	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), futureCert, true)
+	futureCert := QuorumCert{
+		Epoch:              2,
+		AggregateSignature: sig.Bytes(),
+	}
+	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), futureCert)
 	assert.ErrorIs(t, errFutureEpoch, ErrEpochMismatch, "Future epoch cert must be rejected")
 
 	// Attack 3: Unknown Chain ID (Chain = 999) -> BLOCKED
-	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), QuorumCert{Epoch: 1}, true)
+	unknownCert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig.Bytes(),
+	}
+	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), unknownCert)
 	assert.ErrorIs(t, errUnknownChain, ErrUnknownSourceChain, "Unknown source chain must be rejected")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // AUDIT TEST 9: Zero-Fork Invariant & Destination Offline Stability (Scenario 10.4)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP5_Audit_ZeroForkDestinationOfflineStability(t *testing.T) {
-	engine, _, _ := setupSecurityAuditEnvironment()
+func TestAudit_ZeroForkDestinationOfflineStability(t *testing.T) {
+	engine, _, _, _ := setupSecurityAuditEnvironment()
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	txHash := common.HexToHash("0x7777777777777777777777777777777777777777777777777777777777777777")

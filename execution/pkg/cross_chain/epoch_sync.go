@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -47,17 +46,7 @@ func HashAccountLeaf(leaf AccountLeaf) common.Hash {
 }
 
 func hashNodePair(left, right common.Hash) common.Hash {
-	hasher := sha3.NewLegacyKeccak256()
-	if bytes.Compare(left.Bytes(), right.Bytes()) <= 0 {
-		hasher.Write(left.Bytes())
-		hasher.Write(right.Bytes())
-	} else {
-		hasher.Write(right.Bytes())
-		hasher.Write(left.Bytes())
-	}
-	var out common.Hash
-	hasher.Sum(out[:0])
-	return out
+	return hashPair(left, right)
 }
 
 // BuildAccountMerkleTree constructs a binary Merkle tree from account leaves and generates individual inclusion proofs (Section 14 P3.2).

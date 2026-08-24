@@ -101,21 +101,40 @@ pub fn keccak256(data: &[u8]) -> Hash {
     Hash(out)
 }
 
-pub fn verify_merkle_proof(leaf: Hash, proof: &MerkleProof, expected_root: Hash) -> bool {
-    let mut current = leaf.0;
-    for sibling in &proof.siblings {
-        let mut combined = Vec::with_capacity(64);
-        if current <= sibling.0 {
-            combined.extend_from_slice(&current);
-            combined.extend_from_slice(&sibling.0);
-        } else {
-            combined.extend_from_slice(&sibling.0);
-            combined.extend_from_slice(&current);
-        }
-        let digest = Keccak256::digest(&combined);
-        current.copy_from_slice(digest.as_ref());
+pub fn hash_pair(a: Hash, b: Hash) -> Hash {
+    let mut combined = Vec::with_capacity(65);
+    combined.push(0x01); // Domain separation: 0x01 for internal node
+    if a.0 <= b.0 {
+        combined.extend_from_slice(&a.0);
+        combined.extend_from_slice(&b.0);
+    } else {
+        combined.extend_from_slice(&b.0);
+        combined.extend_from_slice(&a.0);
     }
-    current == expected_root.0
+    keccak256(&combined)
+}
+
+pub fn verify_merkle_proof(leaf: Hash, proof: &MerkleProof, expected_root: Hash) -> bool {
+    let mut current = leaf;
+    for sibling in &proof.siblings {
+        current = hash_pair(current, *sibling);
+    }
+    current == expected_root
+}
+
+pub fn compute_message_leaf_hash(message: &CrossChainMessage) -> Hash {
+    let mut buf = Vec::new();
+    buf.push(0x00); // Domain separation: 0x00 for leaf node
+    buf.extend_from_slice(&message.message_id.0);
+    buf.extend_from_slice(&message.source_chain_id.to_be_bytes());
+    buf.extend_from_slice(&message.dest_chain_id.to_be_bytes());
+    buf.extend_from_slice(&message.sequence.to_be_bytes());
+    buf.extend_from_slice(&message.sender.0);
+    buf.extend_from_slice(&message.target.0);
+    let val_bytes = message.value.to_big_endian();
+    buf.extend_from_slice(&val_bytes);
+    buf.extend_from_slice(&message.payload);
+    keccak256(&buf)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,29 +297,39 @@ impl GatewayEngine {
         }
 
         // Verify that the commitRoot was attested
-        let mut attested = self
-            .attested_commits
-            .contains_key(&(message.source_chain_id, commit_root));
-
-        if !attested {
+        let mut attested_key = None;
+        if self.attested_commits.contains_key(&(message.source_chain_id, commit_root)) {
+            attested_key = Some((message.source_chain_id, commit_root));
+        } else {
             for (&chain_id, _) in &self.chain_registry {
                 if self.attested_commits.contains_key(&(chain_id, commit_root)) {
-                    attested = true;
+                    attested_key = Some((chain_id, commit_root));
                     break;
                 }
             }
         }
 
-        if !attested {
-            return Err(GatewayError::CommitNotAttested(
-                commit_root,
-                message.source_chain_id,
-            ));
+        let key = match attested_key {
+            Some(k) => k,
+            None => return Err(GatewayError::CommitNotAttested(commit_root, message.source_chain_id)),
+        };
+
+        // Hard-cap check: ClaimedAmount + message.value <= FundedAmount (Section 2.3.1)
+        if message.value > U256::zero() {
+            let attested = self.attested_commits.get_mut(&key).unwrap();
+            let new_claimed = attested.claimed_amount + message.value;
+            if new_claimed > attested.funded_amount {
+                return Err(GatewayError::AllocationExceeded {
+                    chain_id: message.source_chain_id,
+                    requested: new_claimed,
+                    available: attested.funded_amount,
+                });
+            }
+            attested.claimed_amount = new_claimed;
         }
 
-        // Compute message hash leaf
-        let leaf_bytes = serde_json::to_vec(&message).unwrap_or_default();
-        let leaf_hash = keccak256(&leaf_bytes);
+        // Compute message hash leaf using canonical encoding & domain separation
+        let leaf_hash = compute_message_leaf_hash(&message);
 
         // Verify Merkle proof
         if !verify_merkle_proof(leaf_hash, &proof, commit_root) {
@@ -334,12 +363,13 @@ impl GatewayEngine {
     }
 
     /// P2.4: Refund pathway — When message FAILED at destination, sender claims refund on source chain.
-    /// Prevents double-refund (must be in Pending state).
+    /// Prevents double-refund (must be in Pending state) and restores per_chain_allocation in GlobalSupplyLedger.
     pub fn refund(
         &mut self,
         message_id: Hash,
+        source_chain_id: u64,
         _sender: Address,
-        _amount: U256,
+        amount: U256,
         is_failed_proof_valid: bool,
     ) -> Result<(), GatewayError> {
         let status = self
@@ -357,6 +387,16 @@ impl GatewayEngine {
         }
 
         self.message_status.insert(message_id, MessageStatus::Refunded);
+
+        if amount > U256::zero() {
+            let current_alloc = self
+                .supply_ledger
+                .per_chain_allocation
+                .entry(source_chain_id)
+                .or_insert(U256::zero());
+            *current_alloc += amount;
+        }
+
         Ok(())
     }
 
@@ -572,8 +612,7 @@ mod tests {
             ordered: false,
         };
 
-        let leaf_bytes = serde_json::to_vec(&msg).unwrap();
-        let leaf_hash = keccak256(&leaf_bytes);
+        let leaf_hash = compute_message_leaf_hash(&msg);
         let proof = MerkleProof {
             leaf_index: 0,
             siblings: vec![],
@@ -610,14 +649,18 @@ mod tests {
 
         engine.message_status.insert(msg_id, MessageStatus::Pending);
 
-        // First Refund -> Success
+        // First Refund -> Success and Restores Allocation (+100)
         engine
-            .refund(msg_id, sender, U256::from(100u64), true)
+            .refund(msg_id, 101, sender, U256::from(100u64), true)
             .expect("refund ok");
         assert_eq!(engine.get_message_status(msg_id), MessageStatus::Refunded);
+        assert_eq!(
+            engine.supply_ledger.per_chain_allocation.get(&101).copied().unwrap(),
+            U256::from(5100u64)
+        );
 
         // Second Refund -> MUST REJECT (status is now Refunded)
-        let res_dup = engine.refund(msg_id, sender, U256::from(100u64), true);
+        let res_dup = engine.refund(msg_id, 101, sender, U256::from(100u64), true);
         assert_eq!(
             res_dup,
             Err(GatewayError::InvalidRefundState(msg_id, MessageStatus::Refunded))

@@ -65,18 +65,7 @@ pub fn hash_account_leaf(leaf: &AccountLeaf) -> Hash {
 
 
 fn hash_nodes(left: Hash, right: Hash) -> Hash {
-    let mut combined = Vec::with_capacity(64);
-    if left.0 <= right.0 {
-        combined.extend_from_slice(&left.0);
-        combined.extend_from_slice(&right.0);
-    } else {
-        combined.extend_from_slice(&right.0);
-        combined.extend_from_slice(&left.0);
-    }
-    let digest = Keccak256::digest(&combined);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(digest.as_ref());
-    Hash(out)
+    crate::types::gateway::hash_pair(left, right)
 }
 
 /// Builds a binary Merkle Tree from a list of AccountLeaves and returns (root, proofs).

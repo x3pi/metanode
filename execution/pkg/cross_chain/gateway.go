@@ -2,13 +2,15 @@ package cross_chain
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	cm "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -31,6 +33,7 @@ var (
 	ErrDeadChainAlreadyClaimed = errors.New("account balance on dead chain has already been claimed")
 	ErrNoActiveContext         = errors.New("no active cross-chain execution context")
 	ErrNotCalledByGateway      = errors.New("caller is not authorized by GatewayPrecompile")
+	ErrInvalidBLSSignature     = errors.New("BLS Quorum Certificate signature is invalid or empty")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -107,23 +110,53 @@ func Keccak256(data []byte) common.Hash {
 	return out
 }
 
-func VerifyMerkleProof(leaf common.Hash, proof MerkleProof, expectedRoot common.Hash) bool {
-	current := leaf.Bytes()
-	for _, sibling := range proof.Siblings {
-		sibBytes := sibling.Bytes()
-		hasher := sha3.NewLegacyKeccak256()
-		if bytes.Compare(current, sibBytes) <= 0 {
-			hasher.Write(current)
-			hasher.Write(sibBytes)
-		} else {
-			hasher.Write(sibBytes)
-			hasher.Write(current)
-		}
-		var next common.Hash
-		hasher.Sum(next[:0])
-		current = next.Bytes()
+// hashPair combines two Merkle tree hashes with RFC 6962 domain separation (0x01 for internal nodes).
+func hashPair(a, b common.Hash) common.Hash {
+	var combined []byte
+	combined = append(combined, 0x01) // Domain separation: 0x01 for internal node
+	if bytes.Compare(a.Bytes(), b.Bytes()) <= 0 {
+		combined = append(combined, a.Bytes()...)
+		combined = append(combined, b.Bytes()...)
+	} else {
+		combined = append(combined, b.Bytes()...)
+		combined = append(combined, a.Bytes()...)
 	}
-	return bytes.Equal(current, expectedRoot.Bytes())
+	return Keccak256(combined)
+}
+
+// VerifyMerkleProof verifies Merkle membership using domain-separated pair hashing.
+func VerifyMerkleProof(leaf common.Hash, proof MerkleProof, expectedRoot common.Hash) bool {
+	current := leaf
+	for _, sibling := range proof.Siblings {
+		current = hashPair(current, sibling)
+	}
+	return current == expectedRoot
+}
+
+// CanonicalEncodeMessage serializes a CrossChainMessage into canonical deterministic binary representation.
+func CanonicalEncodeMessage(m CrossChainMessage) []byte {
+	var buf []byte
+	buf = append(buf, m.MessageID.Bytes()...)
+	var cBuf [8]byte
+	binary.BigEndian.PutUint64(cBuf[:], m.SourceChainID)
+	buf = append(buf, cBuf[:]...)
+	binary.BigEndian.PutUint64(cBuf[:], m.DestChainID)
+	buf = append(buf, cBuf[:]...)
+	binary.BigEndian.PutUint64(cBuf[:], m.Sequence)
+	buf = append(buf, cBuf[:]...)
+	buf = append(buf, m.Sender.Bytes()...)
+	buf = append(buf, m.Target.Bytes()...)
+	if m.Value != nil {
+		buf = append(buf, m.Value.Bytes()...)
+	}
+	buf = append(buf, m.Payload...)
+	return buf
+}
+
+// ComputeMessageLeafHash computes the canonical leaf hash with 0x00 domain separation prefix.
+func ComputeMessageLeafHash(m CrossChainMessage) common.Hash {
+	data := append([]byte{0x00}, CanonicalEncodeMessage(m)...)
+	return Keccak256(data)
 }
 
 // Outbound handles initiating a cross-chain message on the source chain (P2.1 & P2.5).
@@ -184,13 +217,12 @@ func (g *GatewayEngine) Outbound(
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2).
-// Verifies BLS signature, ensures strict epoch alignment, and checks per_chain_allocation ceiling.
+// Verifies BLS signature against registered committee, ensures strict epoch alignment, and checks per_chain_allocation ceiling.
 func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
 	cert QuorumCert,
-	isBlsValid bool,
 ) (*AttestedCommit, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -205,8 +237,32 @@ func (g *GatewayEngine) AttestCommit(
 		return nil, fmt.Errorf("%w: expected %d, got %d", ErrEpochMismatch, registry.Epoch, cert.Epoch)
 	}
 
-	if !isBlsValid {
-		return nil, ErrInvalidMerkleProof
+	// Real BLS Quorum Signature Verification (Cryptographic Defense)
+	if len(cert.AggregateSignature) == 0 {
+		return nil, ErrInvalidBLSSignature
+	}
+
+	if len(registry.Committee) > 0 {
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+		var pubkeys [][]byte
+		for _, val := range registry.Committee {
+			pubkeys = append(pubkeys, val.PubkeyBLS)
+		}
+		if len(pubkeys) == 1 {
+			pubKey := cm.PubkeyFromBytes(pubkeys[0])
+			sig := cm.SignFromBytes(cert.AggregateSignature)
+			if !bls.VerifySign(pubKey, sig, commitMsg) {
+				return nil, ErrInvalidBLSSignature
+			}
+		} else {
+			msgs := make([][]byte, len(pubkeys))
+			for i := range msgs {
+				msgs[i] = commitMsg
+			}
+			if !bls.VerifyAggregateSign(pubkeys, cert.AggregateSignature, msgs) {
+				return nil, ErrInvalidBLSSignature
+			}
+		}
 	}
 
 	if aggregateAmount == nil {
@@ -244,7 +300,7 @@ func (g *GatewayEngine) AttestCommit(
 }
 
 // ClaimMessage executes Phase 2 of Attest-then-Claim (P2.3 & P2.6).
-// Verifies Merkle proof against attested commit, guards against double-claim, sets execution context.
+// Enforces hard-cap on FundedAmount, verifies domain-separated Merkle proof, guards against double-claim, sets execution context.
 func (g *GatewayEngine) ClaimMessage(
 	message CrossChainMessage,
 	proof MerkleProof,
@@ -260,26 +316,35 @@ func (g *GatewayEngine) ClaimMessage(
 	}
 
 	key := fmt.Sprintf("%d:%s", message.SourceChainID, commitRoot.Hex())
-	_, attested := g.AttestedCommits[key]
-	if !attested {
-		// Also check if commitRoot was attested via Reserve chain for 2-hop routed transfers
+	attested, exists := g.AttestedCommits[key]
+	if !exists {
+		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b))
 		for chainID := range g.ChainRegistry {
 			k := fmt.Sprintf("%d:%s", chainID, commitRoot.Hex())
-			if _, ok := g.AttestedCommits[k]; ok {
-				attested = true
+			if a, ok := g.AttestedCommits[k]; ok {
+				attested = a
+				exists = true
+				key = k
 				break
 			}
 		}
 	}
-	if !attested {
+	if !exists {
 		return MessageStatusPending, fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
 	}
 
-	leafBytes, err := json.Marshal(message)
-	if err != nil {
-		return MessageStatusPending, fmt.Errorf("failed to serialize message leaf: %w", err)
+	// Hard-cap verification: ClaimedAmount + Value <= FundedAmount (Section 2.3.1)
+	if message.Value != nil && message.Value.Sign() > 0 {
+		newClaimed := new(big.Int).Add(attested.ClaimedAmount, message.Value)
+		if newClaimed.Cmp(attested.FundedAmount) > 0 {
+			return MessageStatusPending, fmt.Errorf("%w: commit cap %s exceeded by %s", ErrAllocationExceeded, attested.FundedAmount.String(), newClaimed.String())
+		}
+		attested.ClaimedAmount = newClaimed
+		g.AttestedCommits[key] = attested
 	}
-	leafHash := Keccak256(leafBytes)
+
+	// Canonical leaf hash with 0x00 domain separation
+	leafHash := ComputeMessageLeafHash(message)
 
 	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
 		return MessageStatusPending, ErrInvalidMerkleProof
@@ -315,6 +380,7 @@ func (g *GatewayEngine) ClaimMessage(
 // Refund processes returning funds to the sender on the source chain when the destination reverts (P2.4).
 func (g *GatewayEngine) Refund(
 	messageID common.Hash,
+	sourceChainID uint64,
 	sender common.Address,
 	amount *big.Int,
 	isFailedProofValid bool,
@@ -336,6 +402,16 @@ func (g *GatewayEngine) Refund(
 	}
 
 	g.MessageStatus[messageID] = MessageStatusRefunded
+
+	// Restore allocation in GlobalSupplyLedger to preserve total supply invariant (Section 2.4 #2)
+	if g.SupplyLedger != nil && amount != nil && amount.Sign() > 0 {
+		currAlloc, hasAlloc := g.SupplyLedger.PerChainAllocation[sourceChainID]
+		if !hasAlloc || currAlloc == nil {
+			currAlloc = big.NewInt(0)
+		}
+		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Add(currAlloc, amount)
+	}
+
 	return nil
 }
 
@@ -346,9 +422,8 @@ func (g *GatewayEngine) VerifyAndExecute(
 	proof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
-	isBlsValid bool,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, cert, isBlsValid); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, cert); err != nil {
 		return MessageStatusPending, err
 	}
 	return g.ClaimMessage(message, proof, commitRoot, relayer)

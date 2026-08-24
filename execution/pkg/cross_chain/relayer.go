@@ -1,8 +1,6 @@
 package cross_chain
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -10,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"golang.org/x/crypto/sha3"
 )
 
 var (
@@ -150,22 +147,6 @@ func BuildMerkleTree(leaves []common.Hash) (common.Hash, [][]common.Hash) {
 	return current[0], layers
 }
 
-func hashPair(a, b common.Hash) common.Hash {
-	hasher := sha3.NewLegacyKeccak256()
-	aBytes := a.Bytes()
-	bBytes := b.Bytes()
-	if bytes.Compare(aBytes, bBytes) <= 0 {
-		hasher.Write(aBytes)
-		hasher.Write(bBytes)
-	} else {
-		hasher.Write(bBytes)
-		hasher.Write(aBytes)
-	}
-	var out common.Hash
-	hasher.Sum(out[:0])
-	return out
-}
-
 // GetMerkleProof generates an inclusion proof for a leaf at the given index.
 func GetMerkleProof(layers [][]common.Hash, leafIndex int) MerkleProof {
 	var siblings []common.Hash
@@ -196,11 +177,7 @@ func BuildMerkleTreeFromMessages(msgs []CrossChainMessage) (common.Hash, [][]com
 	}
 	var leaves []common.Hash
 	for _, msg := range msgs {
-		leafBytes, err := json.Marshal(msg)
-		if err != nil {
-			return common.Hash{}, nil, fmt.Errorf("failed to serialize message: %w", err)
-		}
-		leaves = append(leaves, Keccak256(leafBytes))
+		leaves = append(leaves, ComputeMessageLeafHash(msg))
 	}
 	root, layers := BuildMerkleTree(leaves)
 	return root, layers, nil
@@ -308,7 +285,7 @@ func (r *RelayerEngine) RelayMessage(
 		}
 
 		// Step 1: Attest commit on Reserve (checks per_chain_allocation ceiling)
-		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, msg.Value, cert, true)
+		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, msg.Value, cert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("reserve attest failed: %w", err)
@@ -324,7 +301,7 @@ func (r *RelayerEngine) RelayMessage(
 		}
 
 		// Destination Chain verifies Reserve's commit and claims message
-		_, err = destEngine.AttestCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert, true)
+		_, err = destEngine.AttestCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest attest from reserve failed: %w", err)
@@ -353,7 +330,7 @@ func (r *RelayerEngine) RelayMessage(
 	}
 
 	// ROUTE B: Value == 0 (Pure Message / Contract Call) -> Direct 1-Hop Routing (Section 2.2(a))
-	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, big.NewInt(0), cert, true)
+	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, big.NewInt(0), cert)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct attest failed: %w", err)
@@ -454,7 +431,7 @@ func (r *RelayerEngine) ProcessRefund(
 	}
 
 	// Refund on source chain
-	err := sourceEngine.Refund(messageID, sender, amount, isFailedProofValid)
+	err := sourceEngine.Refund(messageID, sourceChainID, sender, amount, isFailedProofValid)
 	if err != nil {
 		return fmt.Errorf("source refund failed: %w", err)
 	}

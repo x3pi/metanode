@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 )
 
 const (
@@ -163,4 +165,31 @@ func (c *RootAnchorCommittee) VerifyQuorumVotes(votingPubkeys [][]byte) (bool, u
 	}
 
 	return accumulatedStake >= threshold, accumulatedStake, threshold
+}
+
+// VerifyQuorumCert validates both cryptographic BLS aggregate signature and BFT stake quorum (Section 1.3 #2).
+func (c *RootAnchorCommittee) VerifyQuorumCert(
+	votingPubkeys [][]byte,
+	cert QuorumCert,
+	digest []byte,
+) (bool, uint64, uint64, error) {
+	if len(cert.AggregateSignature) == 0 {
+		return false, 0, c.BftQuorumThreshold(), ErrInvalidBLSSignature
+	}
+
+	quorumMet, accumStake, threshold := c.VerifyQuorumVotes(votingPubkeys)
+	if !quorumMet {
+		return false, accumStake, threshold, fmt.Errorf("quorum not reached: stake %d < threshold %d", accumStake, threshold)
+	}
+
+	msgs := make([][]byte, len(votingPubkeys))
+	for i := range msgs {
+		msgs[i] = digest
+	}
+
+	if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
+		return false, accumStake, threshold, ErrInvalidBLSSignature
+	}
+
+	return true, accumStake, threshold, nil
 }

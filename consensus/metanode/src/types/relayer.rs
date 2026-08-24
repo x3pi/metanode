@@ -15,7 +15,7 @@ use crate::types::cross_chain::{
     Address, CrossChainMessage, Hash, MerkleProof, MessageStatus, QuorumCert, U256,
 };
 use crate::types::gateway::{
-    keccak256, GatewayEngine, GatewayError, OutboundParams,
+    GatewayEngine, GatewayError, OutboundParams,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -368,7 +368,7 @@ impl RelayerEngine {
             .get_mut(&source_chain_id)
             .ok_or(GatewayError::UnknownSourceChain(source_chain_id))?;
 
-        source_engine.refund(message_id, sender, amount, is_failed_proof_valid)?;
+        source_engine.refund(message_id, source_chain_id, sender, amount, is_failed_proof_valid)?;
 
         // Restore Reserve allocation if value was transferred
         if amount > U256::zero() {
@@ -416,15 +416,7 @@ pub fn build_merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<Hash>>) {
 }
 
 fn hash_pair(a: Hash, b: Hash) -> Hash {
-    let mut combined = Vec::with_capacity(64);
-    if a.as_bytes() <= b.as_bytes() {
-        combined.extend_from_slice(a.as_bytes());
-        combined.extend_from_slice(b.as_bytes());
-    } else {
-        combined.extend_from_slice(b.as_bytes());
-        combined.extend_from_slice(a.as_bytes());
-    }
-    keccak256(&combined)
+    crate::types::gateway::hash_pair(a, b)
 }
 
 pub fn get_merkle_proof(layers: &[Vec<Hash>], leaf_index: usize) -> MerkleProof {
@@ -454,8 +446,7 @@ pub fn build_merkle_tree_from_messages(
 
     let mut leaves = Vec::new();
     for m in msgs {
-        let bytes = serde_json::to_vec(m).map_err(|e| e.to_string())?;
-        leaves.push(keccak256(&bytes));
+        leaves.push(crate::types::gateway::compute_message_leaf_hash(m));
     }
 
     Ok(build_merkle_tree(&leaves))

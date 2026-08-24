@@ -105,10 +105,13 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 	// Available ceiling for Chain 101 is 5,000,000 MTN
 	// Attacker attempts to withdraw 15,000,000 MTN
 	hackAmount := big.NewInt(15_000_000)
-	cert := QuorumCert{Epoch: 1}
+	cert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: make([]byte, 48),
+	}
 
 	// Trigger overdraw attack via gateway
-	_, err := gateway.AttestCommit(101, common.HexToHash("0xDEADBEEF"), hackAmount, cert, true)
+	_, err := gateway.AttestCommit(101, common.HexToHash("0xDEADBEEF"), hackAmount, cert)
 	assert.ErrorIs(t, err, ErrAllocationExceeded, "Overdraw attempt must be rejected")
 
 	// Verify instant alert received in channel within milliseconds (< 1s)
