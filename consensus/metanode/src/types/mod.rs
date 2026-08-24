@@ -3,6 +3,7 @@ pub mod epoch_sync;
 pub mod gateway;
 pub mod governance;
 pub mod pop;
+pub mod relayer;
 pub mod root_anchor;
 pub mod transaction;
 pub mod tx_hash;

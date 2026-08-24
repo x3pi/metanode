@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-22
+> **Last updated:** 2026-08-24
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -220,7 +220,7 @@ metanode/
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
 | `proto/` | gRPC proto definitions | 🟢 LOW |
-| `cross_chain/` | Cross-chain types, Root Anchor ledger, envelope definitions | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayPrecompile, Governance, Relayer reference implementation (P0-P4) | 🟢 LOW |
 
 ---
 

@@ -137,6 +137,7 @@ def main():
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
     parser.add_argument("--rpc-port", type=int, default=8545, help="Base RPC Port (default: 8545)")
+    parser.add_argument("--port-offset", type=int, default=0, help="Port offset for primary, worker, p2p, dns ports (default: 0)")
     parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
     args = parser.parse_args()
@@ -173,9 +174,9 @@ def main():
         validator_keys_list.append((bls, eth))
 
         eth_addr = eth["address"].lower()
-        p2p_port = 10000 + node_id
-        primary_port = 4200 + node_id
-        worker_port = 5012 + node_id
+        p2p_port = 10200 + args.port_offset + node_id
+        primary_port = 4200 + args.port_offset + node_id
+        worker_port = 5012 + args.port_offset + node_id
 
         val_entry = {
             "address": eth_addr,
@@ -271,15 +272,16 @@ def main():
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
         rpc_port = args.rpc_port + node_id
-        primary_port = 4200 + node_id
-        dns_port = 10080 + node_id
-        peer_rpc_port = 20200 + node_id
-        consensus_port = 10000 + node_id
-        meta_rpc_port = 11100 + node_id
+        primary_port = 4200 + args.port_offset + node_id
+        dns_port = 13000 + args.port_offset + node_id
+        peer_rpc_port = 20200 + args.port_offset + node_id
+        consensus_port = 10200 + args.port_offset + node_id
+        meta_rpc_port = 11100 + args.port_offset + node_id
+        metrics_port = 12100 + args.port_offset + node_id
 
         # Node peers
-        go_peers = [f"{args.ip}:{7200 + j}" for j in range(args.validators) if j != node_id]
-        rust_peers = [f"{args.ip}:{20200 + j}" for j in range(args.validators) if j != node_id]
+        go_peers = [f"{args.ip}:{7200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
+        rust_peers = [f"{args.ip}:{20200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
 
         exec_config = {
             "debug": False,
@@ -350,7 +352,7 @@ network_key_path = "{node_dir}/keys/network_key.json"
 storage_path = "{node_dir}/data/consensus/db"
 
 enable_metrics = true
-metrics_port = {10100 + node_id}
+metrics_port = {metrics_port}
 peer_rpc_port = {peer_rpc_port}
 peer_rpc_addresses = [{peers_toml}]
 executor_read_enabled = true
@@ -369,7 +371,7 @@ time_based_epoch_change = true
     start_script_content = f"""#!/usr/bin/env bash
 set -e
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🚀 Starting Metanode Single Chain..."
+echo "🚀 Starting Metanode Single Chain (Chain ID {args.chain_id})..."
 
 METANODE_BIN="{metanode_bin}"
 SIMPLE_CHAIN_BIN="{simple_chain_bin}"
@@ -387,7 +389,7 @@ echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node
 """
 
     start_script_content += f"""
-echo "✅ Single Chain started successfully!"
+echo "✅ Single Chain {args.chain_id} started successfully!"
 echo "   Node-0 RPC URL: http://{args.ip}:{args.rpc_port}"
 echo "   Chain ID: {args.chain_id}"
 echo "   Check logs in $DIR/node-0/logs/node-0.log"
@@ -395,20 +397,22 @@ echo "   Check logs in $DIR/node-0/logs/node-0.log"
 
     stop_script_content = f"""#!/usr/bin/env bash
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🛑 Stopping Metanode Single Chain..."
+echo "🛑 Stopping Metanode Single Chain (Chain ID {args.chain_id})..."
 
 for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
     if [ -f "$pid_file" ]; then
         PID=$(cat "$pid_file")
-        echo "  → Stopping node process PID $PID..."
-        kill -15 "$PID" 2>/dev/null || true
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "  → Stopping node process PID $PID..."
+            kill -15 "$PID" 2>/dev/null || true
+            sleep 0.5
+            kill -9 "$PID" 2>/dev/null || true
+        fi
         rm -f "$pid_file"
     fi
 done
 
-pkill -f "simple_chain --config" 2>/dev/null || true
-pkill -f "metanode start --config" 2>/dev/null || true
-echo "✅ Single Chain stopped."
+echo "✅ Single Chain {args.chain_id} stopped."
 """
 
     with open(start_sh, "w") as f:

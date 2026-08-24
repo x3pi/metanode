@@ -130,6 +130,7 @@ pub struct GatewayEngine {
     pub active_context: Option<CrossChainContext>,
     pub locked_tips: BTreeMap<Hash, U256>,
     pub channel_sequence: BTreeMap<(u64, u64), u64>,
+    pub relayer_balances: BTreeMap<Address, U256>,
 }
 
 impl GatewayEngine {
@@ -149,6 +150,7 @@ impl GatewayEngine {
             active_context: None,
             locked_tips: BTreeMap::new(),
             channel_sequence: BTreeMap::new(),
+            relayer_balances: BTreeMap::new(),
         }
     }
 
@@ -265,7 +267,7 @@ impl GatewayEngine {
         message: CrossChainMessage,
         proof: MerkleProof,
         commit_root: Hash,
-        _relayer: Address,
+        relayer: Address,
     ) -> Result<MessageStatus, GatewayError> {
         // Double-claim prevention: only process if status is None or Pending
         let current_status = self.message_status.get(&message.message_id).copied();
@@ -276,10 +278,20 @@ impl GatewayEngine {
         }
 
         // Verify that the commitRoot was attested
-        if !self
+        let mut attested = self
             .attested_commits
-            .contains_key(&(message.source_chain_id, commit_root))
-        {
+            .contains_key(&(message.source_chain_id, commit_root));
+
+        if !attested {
+            for (&chain_id, _) in &self.chain_registry {
+                if self.attested_commits.contains_key(&(chain_id, commit_root)) {
+                    attested = true;
+                    break;
+                }
+            }
+        }
+
+        if !attested {
             return Err(GatewayError::CommitNotAttested(
                 commit_root,
                 message.source_chain_id,
@@ -311,6 +323,12 @@ impl GatewayEngine {
         // Mark status
         self.message_status
             .insert(message.message_id, exec_status);
+
+        // Disburse tip to relayer (P2.3 & P4.2)
+        if message.tip > U256::zero() {
+            let current_bal = self.relayer_balances.get(&relayer).copied().unwrap_or(U256::zero());
+            self.relayer_balances.insert(relayer, current_bal + message.tip);
+        }
 
         Ok(exec_status)
     }
