@@ -534,10 +534,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 				sessions, applyErr := rh.applyBackupDbBatches(&backupDb)
 				if applyErr != nil {
-					logger.Error("🚀 [SNAPSHOT-RESUME] [EXECUTE SYNC] Failed to apply backup batches for block #%d: %v", blockNum, applyErr)
-				} else {
-					allNomtSessions = append(allNomtSessions, sessions...)
+					logger.Error("🚨 [SYNC-FATAL] Failed to apply backup batches for block #%d: %v — ABORTING to prevent State Drift!", blockNum, applyErr)
+					return &pb.SyncBlocksResponse{
+						SyncedCount:     executedCount,
+						LastSyncedBlock: lastExecutedBlock,
+						Error:           fmt.Sprintf("apply backup batches failed for block %d: %v", blockNum, applyErr),
+					}, nil
 				}
+				allNomtSessions = append(allNomtSessions, sessions...)
 
 				// ═══════════════════════════════════════════════════════════════
 				// FORK-DIAG (May 2026): Log NOMT handle root after EACH block's
