@@ -1,6 +1,6 @@
 # Kiến Trúc Mở Rộng Metanode Đa-Chain: Root Anchor Chain & Native Light-Client Bridge
 
-> **Ngày viết:** 2026-08-22 (v14 — bổ sung ước tính thời gian hoàn thành có hỗ trợ agent; xem mục 0, mục 15)
+> **Ngày viết:** 2026-08-22, cập nhật 2026-08-24 (v15 — vá lỗ hổng thật phát hiện khi rà soát độc lập lần 2: `aggregateAmount` trong `attestCommit()` trước đây là số relayer tự khai, không ràng buộc mật mã — nay bắt buộc chứng minh bằng `AggregateValueLeaf` + Merkle proof trong cùng cây đã BLS-sign; xem mục 0 điểm 28-32, mục 1.3 #11, mục 2.3.1, mục 11.3, mục 11.6, mục 13.3.1)
 > **Phạm vi:** Thiết kế kiến trúc cho phép nhiều Metanode private chain trao đổi giao dịch, chuyển tài nguyên ví liên chuỗi, và thống nhất 1 đồng coin native — lấy cảm hứng mô hình Masterchain/Workchain của TON nhưng thiết kế lại phù hợp quy mô private-chain doanh nghiệp.
 > **Lưu ý quan trọng:** Tài liệu này **thay thế hoàn toàn** hướng tiếp cận cross-chain cũ (`execution/contracts/cross_chain/CrossChainGateWay_v3.sol`, `CrossChainConfigRegistry.sol`, mô hình "Embassy"). Các file đó có lỗ hổng thiết kế nghiêm trọng (mục 5.1) và **không nên dùng làm nền tảng** — chỉ giữ lại làm tham chiếu lịch sử.
 
@@ -14,7 +14,8 @@
 3. Mục 5.2 — lý do kiến trúc phải như vậy (rủi ro weakest-link), để không "tối ưu nhầm" làm mất tính năng an toàn khi code.
 4. Mục 11 — API/ABI cụ thể (bắt đầu code từ đây), đọc mục 11.1 trước để hiểu đây là pattern Go-native precompile, không phải Solidity contract thật.
 5. Mục 13 — bắt buộc đọc nếu implement `attestCommit()`/`claimMessage()` (mục 2.2 điểm 5 và mục 11.3), vì thứ tự tách giao dịch sai sẽ làm mất hết lợi ích song song hoá.
-6. **Mục 14 — nhận task cụ thể để làm và bài test bắt buộc phải PASS để coi là Done.** Đây là điểm bắt đầu thực tế nhất nếu bạn được giao 1 task cụ thể, không cần đọc lại toàn bộ mục 1-13 trước — mỗi dòng task ở mục 14 đã dẫn ngược lại đúng mục cần đọc.
+6. **Mục 2.3.1 (mới, v15) — bắt buộc đọc nếu implement `attestCommit()`.** Đây là phần vá 1 lỗ hổng thật (không phải rủi ro lý thuyết): nếu thiếu cơ chế `AggregateValueLeaf` mô tả ở đây, `attestCommit()` sẽ tin 1 con số relayer tự khai — phá thẳng bất biến `Σ per_chain_allocation == genesis_total_supply` mà mục 2.3/5.2 tưởng đã khoá chặt.
+7. **Mục 14 — nhận task cụ thể để làm và bài test bắt buộc phải PASS để coi là Done.** Đây là điểm bắt đầu thực tế nhất nếu bạn được giao 1 task cụ thể, không cần đọc lại toàn bộ mục 1-13 trước — mỗi dòng task ở mục 14 đã dẫn ngược lại đúng mục cần đọc.
 
 Mục 0 (ngay dưới đây) là nhật ký rà soát qua từng phiên bản — hữu ích để hiểu **tại sao** thiết kế đi đến hình dạng hiện tại (đặc biệt nếu có ai hỏi "sao không làm đơn giản hơn"), nhưng không bắt buộc đọc để bắt đầu code. Mục 10 (kịch bản thực tế) và mục 12 (test/rollout) nên đọc trước khi viết integration test.
 
@@ -88,6 +89,14 @@ Sau khi hoàn thành bản v1, đã chủ động rà soát lại toàn diện �
 
 27. **Mục 15 (mới):** ước tính thời gian hoàn thành khi có hỗ trợ agent, giả định nhóm 2-4 dev mỗi người làm cùng 1 agent. Tách rõ 2 loại thời gian: **phần agent rút ngắn được** (viết code+test theo spec mục 11/14 — ~6-9 tuần cho toàn bộ P0-P4/P6-P7) và **phần KHÔNG agent nào rút ngắn được** vì bị giới hạn bởi bên ngoài đội dev (đàm phán chain sáng lập P1.2, security audit ngoài P5 ~4-8 tuần, thời gian quan sát production có chủ đích ở T4 ~2-4+ tháng). Tổng: ~2-3 tháng tới lúc sẵn sàng audit, ~5-8 tháng tới lúc mainnet chạy đầy đủ — nêu rõ đây là ước tính lập kế hoạch kèm 3 biến số cần xác nhận, không phải cam kết.
 
+**Bổ sung v15 (rà soát độc lập lần 2 — phát hiện 1 lỗ hổng thật trong chính cơ chế tối ưu throughput v10, cộng 3 khoảng trống nhỏ hơn):**
+
+28. **Phát hiện nghiêm trọng nhất kể từ risk #1 gốc (mục 5.2):** mô hình "Attest-then-Claim" thêm ở v10 (mục 13.2-13.3) để tối ưu song song hoá đã **vô tình mở lại đúng loại lỗ hổng mà v6 tự hào đã vá** — `attestCommit()` (mục 11.3 bản v10-v14) trừ `per_chain_allocation[sourceChainId]` theo `aggregateAmount`, một **con số relayer tự khai khi gọi hàm, không được `QuorumCert` hay Merkle proof nào ràng buộc**; mục 11.6 (bản cũ) còn tự nhận `claimedAmount` chỉ là "phòng vệ bổ sung, không phải cơ chế an toàn chính". Hệ quả nếu không vá: 1 relayer (không cần chiếm chain nào) khai `aggregateAmount` thấp hơn thật cho 1 commit thật → Reserve trừ ceiling quá ít trong khi `claimMessage()` vẫn mint đủ giá trị thật cho từng message (mỗi cái có Merkle proof hợp lệ riêng) → vi phạm thẳng bất biến `Σ per_chain_allocation == genesis_total_supply` (mục 2.1) mà không cần chiếm BFT của bất kỳ chain nào. **Đã vá bằng cơ chế `AggregateValueLeaf`** (mục 2.3.1 mới, mục 11.2/11.3/11.6 đã sửa) — buộc `aggregateAmount` phải có Merkle proof vào chính `commitRoot` đã BLS-sign, cùng mức tin cậy như 1 message thường, không còn là số tự khai. `claimedAmount <= fundedAmount` cũng được nâng từ "phòng vệ bổ sung" thành **cap cứng bắt buộc**. Xem ma trận rủi ro mục 7, risk #20 (mới).
+29. **Làm rõ (mục 1.3 #11 mới, mục 11.1):** ceiling-check bên trong `attestCommit()` **chỉ có tác dụng khi lời gọi xảy ra trên Reserve với `sourceChainId` là 1 private chain** — bản v1-v14 để ngỏ điểm này dù `GatewayPrecompile` được mô tả triển khai giống hệt trên mọi chain (mục 11.1), dễ gây hiểu nhầm `per_chain_allocation` bị đụng ở nhiều nơi trái với mục 2.1 ("CHỈ Root Anchor mới được ghi"). Đồng thời chốt luôn ngữ nghĩa idempotent: `attestCommit()` cho cùng `(sourceChainId, commitRoot, assetId)` chỉ thành công **đúng 1 lần** (ghi-1-lần), lần gọi sau bị revert thay vì cho phép ghi đè bằng số khác.
+30. **Vá khoảng trống nhỏ (mục 2.3 bước 3):** đúng loại lỗi mà v11 (điểm 21) đã tìm và sửa ở mục 2.2/2.2.1/2.4/bảng mục 4, nhưng **bỏ sót ở chính mục 2.3** — bước 3 vẫn mô tả "B verify quorum cert rồi mint" như 1 bước atomic đơn lẻ (đúng mô hình pre-v10), không dẫn ngược về `attestCommit()`/`claimMessage()` như các mục khác đã làm. Đây là mục đứng thứ 2 trong danh sách 6 mục bắt buộc đọc trước ở đầu tài liệu — dev đọc mục 2.3 trước mục 13 sẽ có mô hình tư duy sai. Đã thêm câu dẫn ngược, khớp đúng convention các mục lân cận.
+31. **Bổ sung khoảng trống chưa xử lý (mục 2.3.2 mới):** chưa có mô tả điều gì xảy ra khi Reserve từ chối **ngay ở bước ceiling-check của chính burn tại A** (khác với thất bại thực thi ở B, đã có refund ở mục 2.4) — v1-v14 chỉ nói "Reserve từ chối, không giảm ledger" mà chưa nói rõ số coin đã burn cục bộ ở A có được hoàn không, và vì sao. Đã bổ sung lập luận + kết luận thiết kế: **không có đường hoàn tiền cho trường hợp này** (khác biệt có chủ đích với refund ở mục 2.4), kèm lý do và yêu cầu UX/cảnh báo tương ứng.
+32. **Làm rõ nhỏ (mục 1.3 #3, mục 5.4):** cơ chế biểu quyết theo SỐ CHAIN (không theo stake) tuy chặn được 1 chain lớn chi phối, nhưng chưa định nghĩa cách đếm chain không tham gia bỏ phiếu (tính là phiếu chống hay bị loại khỏi mẫu số) — ảnh hưởng trực tiếp ngưỡng ≥2/3 thực tế và khả năng chống Sybil-chain (nhiều chain nhỏ cấu kết thắng phiếu). Đã bổ sung quy tắc đếm rõ ràng.
+
 ---
 
 ## 1. Mục tiêu & Nguyên tắc thiết kế
@@ -117,7 +126,7 @@ Sau khi hoàn thành bản v1, đã chủ động rà soát lại toàn diện �
 |---|---|---|---|
 | 1 | Mô hình chống weakest-link (mục 5.2.1: A hay B?) | **Phương án A — Custodial/Reserve**, và được **thực thi (enforce) chủ động**, không chỉ là khuyến nghị thụ động (xem mục 2.3 đã viết lại) | 2.3, 5.2 |
 | 2 | Chain nào phải anchor state-root account-level? | **Bắt buộc với TẤT CẢ private chain đăng ký**, không có ngoại lệ — vì mọi chain đều giữ IOU của người dùng cần khôi phục được | 5.2.2 |
-| 3 | Quản trị `ChainRegistry`/`AssetRegistry` | Biểu quyết on-chain bởi các chain đã đăng ký trên Root Anchor, ngưỡng **≥2/3 số chain đang active**, kèm **delay window 72 giờ** trước khi hiệu lực | 5.4 |
+| 3 | Quản trị `ChainRegistry`/`AssetRegistry` | Biểu quyết on-chain bởi các chain đã đăng ký trên Root Anchor, ngưỡng **≥2/3 số chain đang active**, kèm **delay window 72 giờ** trước khi hiệu lực. **Cách đếm (v15):** mẫu số là TOÀN BỘ chain đang `active` trong `ChainRegistry` (không loại chain không bỏ phiếu ra khỏi mẫu số) — 1 chain không vote trong cửa sổ biểu quyết bị tính như phiếu chống, KHÔNG bị loại khỏi mẫu số. Mục đích: chặn kịch bản 1 nhóm chain nhỏ thắng phiếu chỉ vì đa số còn lại im lặng/không để ý (Sybil-chain qua vote thấp) | 5.4 |
 | 4 | Proof-of-possession cho BLS key | **Bắt buộc thêm bước `PopVerify` tường minh khi đăng ký committee lên `ChainRegistry`** (không phụ thuộc việc thư viện nền có sẵn PoP hay không — làm thêm 1 lớp phòng thủ độc lập, chi phí thấp) | 5.4 |
 | 5 | Thành phần committee Root Anchor/Reserve lúc khởi động | **Tối thiểu 4 private chain sáng lập** cùng góp validator đại diện (stake-weighted, có trần tối đa % đóng góp mỗi chain để tránh 1 chain chi phối) — dưới 4 chain thì Reserve tự nó là 1 uỷ ban nhỏ, lặp lại đúng vấn đề weakest-link ở tầng cao nhất | 5.2.1, 5.2.4 |
 | 6 | Ordered vs Unordered channel mặc định | **Unordered** cho toàn hệ thống theo mặc định; ordered chỉ bật per-channel khi ứng dụng khai báo rõ | 2.6.3 |
@@ -125,6 +134,8 @@ Sau khi hoàn thành bản v1, đã chủ động rà soát lại toàn diện �
 | 8 | Có nên chuyển sang "shared validator pool" kiểu TON không? | **Không** — giữ chủ quyền private chain, xử lý weakest-link bằng quyết định #1/#2 thay vì bỏ chủ quyền | 5.2.4 |
 | 9 | Địa chỉ ví có cần đổi khác nhau giữa các chain không? | **Không cần** — đã xác nhận trong code (`execution/pkg/common/common.go:AddressFromPubkey`, dùng `crypto.PubkeyToAddress` chuẩn kiểu Ethereum) địa chỉ chỉ phụ thuộc public key, không có "muối" chain_id. Cùng 1 ví/private key cho địa chỉ **giống hệt nhau** trên mọi private chain và Reserve — không cần thiết kế gì thêm | 10 |
 | 10 | Ai trả phí cho relayer, vì sao họ chịu relay miễn phí? | **Chưa có** ở các bản trước — đây là khoảng trống thật, đã bổ sung mô hình "relay tip" ở mục 2.2.1 | 2.2.1 |
+| 11 | **(v15, mới)** Làm sao ràng buộc `aggregateAmount` trong `attestCommit()` với dữ liệu thật đã BFT-sign, thay vì tin số relayer tự khai? | **Thêm `AggregateValueLeaf(assetId, totalValue)` vào CHÍNH cây Merkle chứa các message đã dùng để proof (không phải cây mới)** — mỗi asset có giá trị trong commit là 1 leaf riêng ở vị trí quy ước, mọi validator trung thực bắt buộc tính lại và đối chiếu leaf này khi validate block (như đã làm với `AccountStatesRoot`) trước khi ký; relayer phải nộp kèm Merkle proof cho leaf này khi gọi `attestCommit()`. `claimedAmount` chuyển từ "phòng vệ bổ sung" thành **cap cứng, revert nếu vượt** | 2.3.1, 11.2, 11.3, 11.6, 13.3.1 |
+| 12 | **(v15, mới)** Reserve từ chối ceiling-check ngay ở bước burn tại A (không phải lúc B thực thi) thì có hoàn tiền không? | **Không** — về thiết kế, trường hợp này chỉ xảy ra khi sổ sách A không trung thực (số cục bộ vượt phần A từng được cấp phép hợp pháp); khác về bản chất với refund ở mục 2.4 (dành cho thất bại thực thi ở B với bằng chứng hợp lệ). Nếu xảy ra ở 1 chain trung thực (bug/race) → coi là sự cố khẩn cấp cần alert riêng, không phải luồng UX refund bình thường | 2.3.2 |
 
 ---
 
@@ -235,11 +246,40 @@ Luồng cụ thể A→B (cả 2 đều là private chain thường, không ph�
 2. **Relay tới Reserve (không phải thẳng tới B)**: Relayer mang quorum cert của A tới Root Anchor/Reserve. Reserve verify quorum cert của A (đúng cơ chế mục 2.2), sau đó **kiểm tra trần**: `per_chain_allocation[A] >= X`? 
    - Nếu **KHÔNG đủ** (dấu hiệu A đã bị chiếm và tự "burn" nhiều hơn mức từng được cấp) → Reserve **từ chối, không giảm ledger, không phát hành tiếp** — đây chính là điểm chặn kỹ thuật khiến kịch bản tấn công ở mục 5.2 (bước 3-4) **không thể xảy ra được nữa**: kẻ tấn công chiếm A chỉ có thể rút tối đa đúng bằng `per_chain_allocation[A]` hiện có, không thể tạo giá trị mới từ hư không.
    - Nếu **đủ** → Reserve cập nhật `per_chain_allocation[A] -= X`, `per_chain_allocation[B] += X`, rồi Reserve tự phát sinh 1 outbound message MỚI (ký bởi quorum cert của chính Reserve, không phải của A) gửi tới B: "mint X cho user".
-3. **Mint ở B**: B verify quorum cert của **Reserve** (không phải của A — B không cần và không nên tin trực tiếp quorum cert của A cho việc mint) rồi chạy `ProcessNativeMintBurn(0)` để credit cho user.
+3. **Mint ở B**: B verify quorum cert của **Reserve** (không phải của A — B không cần và không nên tin trực tiếp quorum cert của A cho việc mint). **Với khối lượng thấp**: đường đơn giản `verifyAndExecute()` verify + `ProcessNativeMintBurn(0)` atomically trong 1 giao dịch. **Với khối lượng lớn (đường mặc định cho production)**: tách `attestCommit()` (verify quorum cert của Reserve + `AggregateValueLeaf`, 1 lần/commit) + N giao dịch `claimMessage()` riêng biệt (1 lần/message) — xem mục 11.3/13.3, giống hệt cơ chế đã dùng cho chặng A→Reserve.
 
 Genesis: `genesis_total_supply` được mint **đúng 1 lần** tại Reserve, `per_chain_allocation` ban đầu của mỗi chain được cấp phát theo thoả thuận lúc onboarding (0 nếu chain mới tham gia chưa nhận allocation nào).
 
 **Vì sao đây là điểm khác biệt quyết định so với v1-v2 (đã có lỗ hổng tích hợp cần sửa):** bản v1-v2 mô tả `local_supply` là **con số các chain tự báo cáo lên Root Anchor để đối chiếu sau** (passive audit) — nghĩa là 1 chain bị chiếm vẫn tự do mint/burn nội bộ trước, chỉ bị "phát hiện" ở lần đối chiếu tiếp theo (đã muộn, giá trị đã rút ra ngoài). Bản v6 này sửa lại: `per_chain_allocation` là **trần được Reserve chủ động thực thi TRƯỚC khi cho phép bất kỳ đợt phát hành mới nào**, không phải audit sau. Đây là khác biệt giữa "khuyến nghị dùng custodial model" và "thực sự implement custodial model" — thiếu bước enforce chủ động này thì phương án A ở mục 5.2.1 chỉ là khẩu hiệu, không có tác dụng chặn tấn công thật.
+
+#### 2.3.1 Ràng buộc mật mã cho `aggregateAmount` (vá lỗ hổng phát hiện ở rà soát độc lập v15 — bắt buộc đọc trước khi implement `attestCommit()`)
+
+**Đây là 1 lỗ hổng thật, không phải rủi ro lý thuyết, do chính tối ưu throughput ở v10 (mục 13.2-13.3) vô tình mở lại.** Bước "kiểm tra trần" ở bước 2 phía trên, khi implement theo đường mặc định `attestCommit()`+`claimMessage()` (mục 13.3), trừ `per_chain_allocation[sourceChainId]` theo tham số `aggregateAmount` truyền vào `attestCommit()`. Nếu tham số này chỉ là 1 con số relayer tự khai (như mô tả ở bản v10-v14) — không có `QuorumCert` hay Merkle proof nào ràng buộc nó với nội dung commit thật — thì:
+
+- 1 relayer (permissionless, **không cần chiếm BFT của bất kỳ chain nào**) có thể gọi `attestCommit()` cho 1 commit **thật, hợp lệ** từ chain A (chứa nhiều message value>0 thật, tổng thật VD 100.000 coin) nhưng khai `aggregateAmount = 1`.
+- Reserve chỉ trừ `per_chain_allocation[A]` đúng 1, dù mỗi message trong 10 message đó vẫn có Merkle proof **hợp lệ thật** vào đúng `commitRoot` đã attest — nếu `claimMessage()` không có cap cứng đối chiếu ngược `aggregateAmount`, toàn bộ 100.000 coin vẫn được mint ở B.
+- Kết quả: `per_chain_allocation[A]` giảm 1 nhưng giá trị thật rời khỏi A tới B là 100.000 → **vi phạm thẳng bất biến `Σ per_chain_allocation == genesis_total_supply`** (mục 2.1) — đúng loại lỗi mà mục 2.3/5.2 (v6) tuyên bố đã vá dứt điểm so với v1-v2, nay bị tái tạo ở 1 tầng khác (relayer tự khai số, thay vì chain tự báo cáo — cùng bản chất "passive trust").
+
+**Cơ chế vá — `AggregateValueLeaf`:** thay vì để `aggregateAmount` là tham số tự do, chain nguồn khi xây commit **thêm 1 leaf đặc biệt vào CHÍNH cây Merkle đã dùng để tạo Merkle proof cho từng message** (không phải cây mới, không cần đổi cấu trúc `CertifiedCommit`/consensus lõi) — leaf này mã hoá `(assetId, totalValue)` = tổng `value` của mọi message thuộc `assetId` đó trong commit. Leaf được đặt ở vị trí quy ước cố định (VD: `keccak256("AGGREGATE", assetId)` làm khoá trong cây thay vì chỉ số tuần tự, để không đụng độ với leaf message).
+
+**Điểm mấu chốt về độ tin cậy:** giá trị `(assetId, totalValue)` chỉ trở thành đáng tin nếu **mọi validator trung thực của chain nguồn độc lập tính lại tổng này khi validate block/commit** (hoàn toàn tương tự cách họ đã tính lại `AccountStatesRoot` trước khi ký, mục 2.1) — validator nào thấy leaf không khớp tổng thật sẽ từ chối ký commit đó. Vì leaf nằm trong cùng cây mà `commitRoot` là gốc, và `commitRoot` là thứ `QuorumCert.aggregateSignature` ký lên (mục 2.2 điểm 2-4), nên khi `attestCommit()` verify được `QuorumCert` khớp `commitRoot` VÀ Merkle proof của leaf khớp `commitRoot`, nó có đúng mức tin cậy như verify 1 message thường — **không còn là số tự khai**.
+
+**Chi phí thêm không đáng kể:** đây chỉ là 1 thay đổi ở tầng xây dựng block/commit của chain nguồn (execution layer, giống cách `AccountStatesRoot` đã được thêm vào header) — **không đổi gì ở Mysticeti DAG-BFT lõi** (khớp đúng đánh giá tương thích mục 3). Ở phía verify, `attestCommit()` chỉ verify thêm 1 Merkle proof (thuần hash, rẻ) bên cạnh phép verify BLS đã có — không ảnh hưởng phân tích thông lượng mục 13 (BLS pairing vẫn là chi phí áp đảo ở Pha 1, mục 13.1) và hoàn toàn không đụng tới Pha 2 (`claimMessage()`, vẫn song song hoá được như mục 13.3 đã thiết kế).
+
+`claimedAmount` (mục 11.6) đổi từ "phòng vệ bổ sung" thành **cap cứng bắt buộc**: `claimMessage()` phải revert nếu `claimedAmount[assetId] + message.value > fundedAmount[assetId]` — đây mới là điều kiện đóng vòng bảo vệ hoàn chỉnh (Merkle proof của `AggregateValueLeaf` đảm bảo `fundedAmount` đúng bằng tổng thật; cap cứng ở Pha 2 đảm bảo tổng đã claim không bao giờ vượt số đã được chứng minh đúng đó).
+
+**Ngữ nghĩa nơi áp dụng (làm rõ mục 1.3 #11):** ceiling-check này trong `attestCommit()` chỉ có ý nghĩa/được kích hoạt khi lời gọi xảy ra **trên Reserve, với `sourceChainId` là 1 private chain** (chặng A→Reserve, mục 2.3 bước 2) — đây là nơi duy nhất `per_chain_allocation` thật sự bị ghi. Khi B gọi `attestCommit()` cho commit của chính **Reserve** (chặng Reserve→B, bước 3 phía trên), hàm chỉ verify `QuorumCert` + `AggregateValueLeaf` để xác nhận Reserve đã thật sự phát hành đúng số đó — **không có ceiling nào bị kiểm tra ở B** (Reserve không có trần đối với chính nó, nó là người phát hành). Mỗi private chain chạy `GatewayPrecompile` giống hệt nhau về code (mục 11.1), nhưng nhánh ghi `per_chain_allocation` chỉ thực thi có ý nghĩa khi state đó tồn tại — tức trên Reserve.
+
+`attestCommit()` cho cùng `(sourceChainId, commitRoot, assetId)` **chỉ thành công đúng 1 lần** (ghi-1-lần, khoá bằng `attestedCommits` mapping mục 11.6) — lần gọi thứ 2 (kể cả với `aggregateAmount`/proof khác) phải revert, không cho phép ghi đè.
+
+#### 2.3.2 Reserve từ chối ngay ở bước burn tại A — có hoàn tiền không?
+
+Khác với mục 2.4 (refund khi **B thực thi thất bại** dù bằng chứng hợp lệ), trường hợp Reserve từ chối ở chính bước 2 (ceiling-check, `per_chain_allocation[A] < X`) **không có đường hoàn tiền**. Lý do: theo đúng lập luận bất biến ở mục 2.3.1 — nếu sổ sách cục bộ của A trung thực, `per_chain_allocation[A]` luôn `>= Σ` số dư cục bộ thật đang có trên A (vì mọi coin từng xuất hiện trên A đều đã cộng vào `per_chain_allocation[A]` khi được mint tới A), nên 1 yêu cầu burn hợp pháp (`X <= số dư thật của user`) về nguyên tắc **không bao giờ** bị từ chối ở bước này. Việc Reserve từ chối do đó chỉ có thể xảy ra khi:
+
+- **A đã bị chiếm/gian lận sổ sách** (đúng kịch bản 10.7) — số "burn" không có allocation hợp pháp tương ứng. Trường hợp này **không có gì để hoàn** — giá trị bị "burn" chưa từng thực sự tồn tại trong hệ thống thống nhất.
+- Hoặc **bug/race hiếm gặp** ở 1 chain hoàn toàn trung thực — nếu xảy ra, đây là **mất mát giá trị thật** cho người dùng hợp pháp trên A, cần được coi là sự cố khẩn cấp (alert ngay, dừng luồng liên chuỗi của A để điều tra), **không phải** 1 nhánh UX "đang chờ hoàn tiền" thông thường như mục 2.4/10.3 — vì hệ thống không có cơ chế chứng minh lại giá trị đã mất theo đường refund tiêu chuẩn (refund cần quorum cert "FAILED" từ B, nhưng ở đây B chưa từng nhận được gì để phát sinh cert đó).
+
+**Yêu cầu UX/vận hành:** ví trên A khi gặp trường hợp này phải hiển thị rõ "Giao dịch bị từ chối bởi Reserve — liên hệ hỗ trợ" (khác hẳn trạng thái "Đang chờ xử lý" ở 10.4 hay "Đang hoàn tiền" ở 10.3), và sự kiện `AllocationRejected` (mục 11.5) phải kích hoạt cảnh báo vận hành ngay lập tức — đây chính là tín hiệu sớm nhất cho biết A có thể đã bị chiếm (mục 5.3/7 risk #1).
 
 ### 2.4 Xử lý thất bại, timeout và hoàn tiền (bổ sung v2 — v1 còn thiếu)
 
@@ -300,7 +340,7 @@ Payload `CONTRACT_CALL` có thể chứa lệnh gọi tuỳ ý, chi phí thực 
 
 | Thành phần Metanode hiện có | Dùng lại được không? | Ghi chú |
 |---|---|---|
-| Mysticeti DAG-BFT (`meta-consensus/core`) | ✅ Toàn bộ, không sửa | Quorum cert (`StakeAggregator<QuorumThreshold>`, `CertifiedCommit`) chính là nền tảng của bridge mới |
+| Mysticeti DAG-BFT (`meta-consensus/core`) | ✅ Toàn bộ, không sửa | Quorum cert (`StakeAggregator<QuorumThreshold>`, `CertifiedCommit`) chính là nền tảng của bridge mới. **Lưu ý (v15, mục 2.3.1):** `AggregateValueLeaf` là 1 thay đổi ở tầng EXECUTION khi xây commit (giống cách `AccountStatesRoot` đã được thêm vào header) — không đụng thuật toán Mysticeti lõi, nhưng validator phải tự tính lại leaf này trước khi ký, cần cập nhật đúng chỗ block/commit được lắp ráp phía execution |
 | BLS aggregate signature (`pkg/bls`, `execution/pkg/mvm` BLST binding) | ✅ Tái dùng | Đã có `VerifyAggregateSign` (`extension.go:302`) — dùng đúng hàm này để verify quorum cert ở chain đích |
 | `ProcessNativeMintBurn` / `tz_hardware_engine.go` | ✅ Tái dùng nguyên vẹn | Đây là phần cơ chế mint/burn **duy nhất** cần giữ từ thiết kế cũ — nó độc lập với lỗi Embassy |
 | Epoch transition (`epoch_transition.rs`, `epoch_checkpoint.rs`) | ✅ Mở rộng nhẹ | Thêm 1 bước gửi `CommitteeUpdate` lên Root Anchor sau mỗi epoch — không đổi luồng epoch nội bộ |
@@ -443,7 +483,7 @@ Câu hỏi trực tiếp cần trả lời dứt khoát: **có nên bỏ chủ q
 
 | Trường hợp | Rủi ro | Đánh giá / cần làm |
 |---|---|---|
-| Quản trị `ChainRegistry`/`AssetRegistry` — ai được thêm/xoá 1 chain hoặc 1 asset? | Nếu chỉ là 1 khoá `onlyOwner` (như contract cũ) thì **tái tạo đúng điểm tập trung** mà toàn bộ thiết kế này đang cố loại bỏ | Bắt buộc: việc thêm/xoá chain phải là 1 giao dịch được chính BFT committee của Root Anchor finalize (biểu quyết đa số/siêu đa số qua giao dịch thường), không phải 1 EOA đơn lẻ ký. Cần đặc tả rõ ngưỡng biểu quyết ở P0 |
+| Quản trị `ChainRegistry`/`AssetRegistry` — ai được thêm/xoá 1 chain hoặc 1 asset? | Nếu chỉ là 1 khoá `onlyOwner` (như contract cũ) thì **tái tạo đúng điểm tập trung** mà toàn bộ thiết kế này đang cố loại bỏ. **Bổ sung v15:** biểu quyết theo SỐ CHAIN (không theo stake, mục 1.3 #3) tuy chặn được 1 chain lớn chi phối, nhưng nếu đếm sai (VD loại chain không vote khỏi mẫu số) sẽ mở đường Sybil-chain — nhiều chain nhỏ cấu kết/lần lượt gia nhập rồi thắng phiếu nhờ đa số còn lại im lặng | Bắt buộc: việc thêm/xoá chain phải là 1 giao dịch được chính BFT committee của Root Anchor finalize (biểu quyết đa số/siêu đa số qua giao dịch thường), không phải 1 EOA đơn lẻ ký. **Quy tắc đếm (v15, mục 1.3 #3):** mẫu số = toàn bộ chain `active`, chain không vote tính như phiếu chống — không loại khỏi mẫu số |
 | Rogue public-key attack trên chữ ký BLS tổng hợp | Nếu không có proof-of-possession (PoP) khi đăng ký public key validator, 1 bên có thể chọn public key của mình phụ thuộc vào public key người khác để giả mạo chữ ký tổng hợp | Đã thấy `pkg/bls/bls.go` dùng ciphersuite DST `..._POP_` (chuẩn IETF BLS có hỗ trợ PoP) — **nhưng chưa xác nhận được có bước `PopVerify` khi đăng ký validator key hay không** trong phạm vi đã đọc. Cần xác minh cụ thể ở P0/P1 trước khi dùng cùng cơ chế cho `ChainRegistry`; nếu thiếu, phải thêm PoP-check khi 1 chain đăng ký committee lên Root Anchor |
 | Data availability: pruning xoá block cũ trước khi relayer kịp tạo Merkle proof | `execution/pkg/pruning/` (`nomt_pruner.go`, `pruning_manager.go`) đã tồn tại cơ chế prune state/block — nếu cửa sổ giữ lại quá ngắn, message cross-chain "chậm" (relayer offline lâu) sẽ không thể relay được nữa vì thiếu dữ liệu tạo proof | Cần đảm bảo cửa sổ pruning giữ đủ lâu cho mọi message cross-chain CHƯA resolve (liên kết với trạng thái `PENDING` ở mục 2.4) — hoặc archive riêng dữ liệu cần cho proof, tách khỏi state pruning thông thường |
 | MEV/front-run ở nhánh `CONTRACT_CALL` tại chain đích | Message cross-chain gọi contract kèm `payload` có thể bị người xem thấy trước (message đã public từ lúc certify ở nguồn) và bị front-run ở đích trước khi relayer nộp | Chấp nhận được cho hầu hết use-case doanh nghiệp (không phải trading); nếu cần chống MEV, thêm tuỳ chọn "commit-reveal" cho payload nhạy cảm — không cần giải quyết ở bản đầu, ghi nhận là rủi ro đã biết |
@@ -489,6 +529,7 @@ Câu hỏi trực tiếp cần trả lời dứt khoát: **có nên bỏ chủ q
 | 17 | Giả mạo `AssetRegistry` (asset ngoài native coin) | Bảo mật | 🟢 Thấp-Trung bình | Dùng chung cơ chế quản trị đa số với #4 |
 | 18 | MEV/front-run ở nhánh `CONTRACT_CALL` | Bảo mật | 🟢 Thấp | Ghi nhận là rủi ro đã biết, không chặn bản đầu |
 | 19 | Free-gas mint bị lợi dụng spam CPU verify | Bảo mật | 🟢 Thấp | Relay TX tính phí thật, chỉ miễn phí bước mint sau verify |
+| 20 | **(v15, mới) `aggregateAmount` trong `attestCommit()` không ràng buộc mật mã → relayer tự khai số để né trần `per_chain_allocation` dù message thật vẫn claim đủ giá trị** (mục 2.3.1) — vi phạm thẳng bất biến `Σ per_chain_allocation == genesis_total_supply`, tái tạo đúng bản chất lỗ hổng risk #1 nhưng ở tầng relayer thay vì tầng chain | Bảo mật — cấp mô hình (do tối ưu throughput v10 gây ra) | 🔴 Đã có thiết kế vá, cần implement đúng | **ĐÃ CHỐT**: bắt buộc `AggregateValueLeaf` + Merkle proof trong `attestCommit()` (mục 2.3.1/11.2/11.3), `claimedAmount <= fundedAmount` là cap cứng (mục 11.6) — test bắt buộc riêng ở P2.2 (mục 14) |
 
 ---
 
@@ -651,6 +692,18 @@ struct MerkleProof {
     uint256 leafIndex;
     bytes32[] siblings;
 }
+
+// Mới ở v15 (mục 2.3.1) — leaf đặc biệt trong CHÍNH cây Merkle chứa các CrossChainMessage
+// của 1 commit, ràng buộc aggregateAmount dùng ở attestCommit() với dữ liệu đã BFT-sign,
+// thay vì để relayer tự khai 1 con số tự do. Mọi validator trung thực của chain nguồn PHẢI
+// tự tính lại totalValue và đối chiếu leaf này trước khi ký commit (như đã làm với
+// AccountStatesRoot) — nếu không khớp, commit bị từ chối ký, không lọt được vào QuorumCert.
+struct AggregateValueLeaf {
+    uint256 assetId;      // 0 = native coin; khác 0 = AssetRegistry (mục 2.5)
+    uint256 totalValue;   // = Σ value của mọi CrossChainMessage cùng assetId trong commit này
+}
+// Vị trí leaf trong cây: khoá = keccak256("AGGREGATE", assetId) thay vì chỉ số tuần tự,
+// để không đụng độ với leaf message và cho phép nhiều assetId cùng có mặt trong 1 commit.
 ```
 
 ### 11.3 Hàm ghi (state-changing)
@@ -690,19 +743,30 @@ function verifyAndExecute(
 // Tách chi phí BLS (đắt, theo số CHAIN, làm 1 lần/commit) khỏi phần thực thi (rẻ, theo số
 // MESSAGE, chạy song song thật qua Union-Find/Block-STM) — lý do chi tiết ở mục 13.2/13.3.
 
-// PHA 1 — gọi 1 lần/commit. Nên định tuyến vào threadpool "Native Go-Only (BLS)" riêng đã có
-// sẵn trong Block-STM (`block_stm_architecture_review.md` mục 4.3), không dùng chung worker
+// PHA 1 — gọi 1 lần/commit (có thể gọi lại thêm cho assetId KHÁC của cùng commitRoot — mỗi
+// assetId ghi 1 lần, xem mục 1.3 #11). Nên định tuyến vào threadpool "Native Go-Only (BLS)" riêng
+// đã có sẵn trong Block-STM (`block_stm_architecture_review.md` mục 4.3), không dùng chung worker
 // pool EVM/MVM với claimMessage() bên dưới.
+//
+// SỬA Ở v15 (mục 2.3.1 — vá lỗ hổng thật): aggregateAmount KHÔNG còn là số relayer tự khai.
+// Contract PHẢI verify aggregateProof chứng minh AggregateValueLeaf{assetId, aggregateAmount}
+// thực sự là 1 leaf của commitRoot mà QuorumCert đã ký — cùng mức tin cậy như verify 1 message
+// thường (mục 2.2 điểm 4), KHÔNG chấp nhận số không có proof này trong bất kỳ trường hợp nào.
+// Ghi-1-lần: revert nếu attestedCommits[keccak256(sourceChainId, commitRoot, assetId)] đã tồn tại.
 function attestCommit(
     uint256 sourceChainId,
     bytes32 commitRoot,
-    uint256 aggregateAmount,   // tổng value mọi message value>0 trong commit — trừ per_chain_allocation 1 LẦN (mục 13.3.1)
+    uint256 assetId,
+    uint256 aggregateAmount,        // = tổng value thật của mọi message cùng assetId trong commit
+    MerkleProof calldata aggregateProof,  // proof(AggregateValueLeaf{assetId, aggregateAmount}) vào commitRoot — BẮT BUỘC (mục 2.3.1)
     QuorumCert calldata cert
 ) external;
 
 // PHA 2 — gọi N lần, MỖI LẦN LÀ 1 GIAO DỊCH RIÊNG (không gộp lại thành vòng lặp — mất hết lợi
 // ích song song nếu gộp, xem mục 13.2). Khai báo AccessList = {recipient, target nếu có},
 // KHÔNG đụng per_chain_allocation (mục 13.3.3).
+// SỬA Ở v15: claimedAmount[assetId] + message.value > fundedAmount[assetId] PHẢI revert —
+// đây là CAP CỨNG, không còn là "phòng vệ bổ sung" (mục 2.3.1/11.6).
 function claimMessage(
     CrossChainMessage calldata message,
     MerkleProof calldata proof   // proof vào commitRoot đã attest ở Pha 1
@@ -742,7 +806,7 @@ event MessageSent(bytes32 indexed messageId, uint256 indexed destChainId, uint25
 event MessageExecuted(bytes32 indexed messageId, bool success);
 event MessageRefunded(bytes32 indexed messageId, uint256 amount);
 event AllocationRejected(uint256 indexed chainId, uint256 requested, uint256 available); // log khi mục 2.3 chặn 1 chain rút vượt mức — dùng làm cảnh báo an ninh tức thời (mục 6)
-event CommitAttested(uint256 indexed sourceChainId, bytes32 indexed commitRoot, uint256 fundedAmount); // Pha 1 xong (mục 13.3) — relayer dùng để biết khi nào có thể bắt đầu gửi hàng loạt claimMessage() cho commit này
+event CommitAttested(uint256 indexed sourceChainId, bytes32 indexed commitRoot, uint256 indexed assetId, uint256 fundedAmount); // Pha 1 xong (mục 13.3) — relayer dùng để biết khi nào có thể bắt đầu gửi hàng loạt claimMessage() cho commit này. assetId thêm ở v15 (mục 2.3.1) vì attestCommit() nay ghi theo (sourceChainId, commitRoot, assetId)
 ```
 
 `AllocationRejected` nên được đấu nối trực tiếp vào dashboard giám sát (mục 6) — đây chính là tín hiệu sớm nhất cho biết 1 chain có thể đang bị chiếm (kịch bản 10.7), cần cảnh báo ngay chứ không chờ đến đối chiếu định kỳ.
@@ -785,14 +849,22 @@ struct Channel {
 
 // Mới ở v10 (mục 13.3) — trạng thái 1 commit đã được attestCommit() xác nhận,
 // dùng để claimMessage() đọc (không ghi) khi verify từng message riêng lẻ.
+// SỬA Ở v15 (mục 2.3.1): key theo (sourceChainId, commitRoot, assetId) — mỗi assetId ghi độc
+// lập, ghi-1-lần (mục 1.3 #11). fundedAmount giờ ĐÃ được chứng minh bằng AggregateValueLeaf +
+// Merkle proof (không còn là số relayer tự khai) nên claimedAmount không còn là "phòng vệ bổ
+// sung" — nó là CAP CỨNG: claimMessage() BẮT BUỘC revert nếu claimedAmount + message.value >
+// fundedAmount. Thiếu cap cứng này thì proof đúng của aggregateAmount ở Pha 1 vô nghĩa, vì
+// Pha 2 vẫn có thể mint vượt số đã chứng minh.
 struct AttestedCommit {
     uint256 sourceChainId;
     bytes32 commitRoot;
+    uint256 assetId;
     uint64  epoch;
-    uint256 fundedAmount;      // = aggregateAmount đã trừ ceiling ở attestCommit() (mục 13.3.1)
-    uint256 claimedAmount;     // cộng dồn qua từng claimMessage() — dùng để phát hiện lệch nếu Merkle proof sai/giả (phòng vệ bổ sung, không phải cơ chế an toàn chính)
+    uint256 fundedAmount;      // = aggregateAmount đã verify bằng AggregateValueLeaf (mục 2.3.1), sau khi trừ ceiling ở attestCommit() (mục 13.3.1)
+    uint256 claimedAmount;     // CAP CỨNG — cộng dồn qua từng claimMessage(), claimMessage() revert nếu vượt fundedAmount (mục 2.3.1)
 }
-// mapping(bytes32 => AttestedCommit) attestedCommits — key = keccak256(sourceChainId, commitRoot)
+// mapping(bytes32 => AttestedCommit) attestedCommits — key = keccak256(sourceChainId, commitRoot, assetId)
+// Ghi-1-lần: attestCommit() revert nếu key đã tồn tại (mục 1.3 #11) — không cho phép ghi đè bằng aggregateAmount khác
 
 // Thiếu ở v8 — mục 2.1 dùng tuple (validator_pubkey_bls, stake), cần thêm popSignature tường minh
 struct ValidatorEntry {
@@ -869,6 +941,8 @@ Mục 4 đã phân tích **độ trễ** (latency — 1 giao dịch mất bao l�
 
 Nếu để mỗi `claimMessage()` tự trừ/cộng `per_chain_allocation[chainId]`, MỌI message cùng nguồn/đích sẽ cùng ghi vào 1 ô nhớ (storage slot) — Union-Find sẽ gộp **toàn bộ N giao dịch claim** thành 1 siêu nhóm (Meta-group) vì tất cả đều xung đột ghi trên cùng 1 slot, suy biến thành chạy tuần tự **y hệt hiện tượng "Hot-Contract" đã được `block_stm_architecture_review.md` mục 2.A cảnh báo trước** (VD IDO/Airdrop cùng chạm 1 contract). Cách khắc phục: **dồn phần chạm vào ô nhớ dùng chung (`per_chain_allocation`) về đúng Pha 1 (Attest, 1 lần/commit)** — Pha 2 (Claim) chỉ còn chạm vào tài khoản riêng của từng người nhận, vốn dĩ độc lập giữa các message (đúng category "Regular Transfer" — rẻ, Union-Find xử lý tốt, theo đúng bảng so sánh mục 2.C của tài liệu Block-STM).
 
+**Lưu ý bắt buộc (v15, mục 2.3.1):** "tổng giá trị cả lô" trừ 1 lần ở đây (`aggregateAmount`) **không được là số relayer tự khai** — phải đi kèm `aggregateProof` chứng minh nó là `AggregateValueLeaf` thật trong `commitRoot` đã BLS-sign, nếu không toàn bộ lợi ích của việc "trừ 1 lần" này sụp đổ thành lỗ hổng (relayer khai số nhỏ hơn thật để né ceiling — xem phân tích đầy đủ ở 2.3.1). Việc thêm 1 Merkle proof (hash-only) vào Pha 1 **không** làm mất tối ưu song song — nó chỉ cộng thêm chi phí không đáng kể vào đúng nơi đã phải trả chi phí BLS pairing (Pha 1, theo số chain, hiếm), không đụng tới Pha 2 (theo số message, nhiều, vẫn song song hoá đầy đủ như thiết kế gốc).
+
 #### 13.3.2 Điểm nghẽn thứ 2 đã phát hiện: bộ đếm `sequence` phía gửi cũng là 1 "ô nhớ nóng"
 
 Rà soát lại `Channel.nextSequence` (mục 11.6): nếu MỌI người dùng gửi từ A sang B đều phải đọc-tăng chung 1 biến đếm này khi gọi `outbound()`, đây cũng là 1 ô nhớ dùng chung sẽ gây xung đột/gộp nhóm y hệt 13.3.1, nhưng ở **phía gửi** thay vì phía nhận.
@@ -930,8 +1004,8 @@ Chia nhỏ lộ trình P0-P8 (mục 8) thành các task cụ thể, giao đượ
 | Task | Hàm/nội dung | Bài test bắt buộc (DoD) |
 |---|---|---|
 | P2.1 | `outbound()` | Burn đúng số dư qua `ProcessNativeMintBurn(1)`; `messageId` = đúng tx hash; `tip` bị khoá đúng số; định tuyến đúng nhánh theo `assetId` (0 = native, khác 0 = `AssetRegistry`) |
-| P2.2 | `attestCommit()` | Verify BLS đúng/sai (test vector cố định, mục 12 T0); **test kịch bản 10.7** (chặn tấn công): `aggregateAmount` vượt `per_chain_allocation[sourceChainId]` phải bị từ chối, KHÔNG cập nhật ledger, event `AllocationRejected` bắn đúng; test `epoch` không khớp `ChainRegistry` hiện tại → fail-closed (không dùng epoch cũ/tương lai) |
-| P2.3 | `claimMessage()` | Merkle proof đúng/sai; **double-claim cùng `messageId` bị chặn** (idempotent); `getOriginalSender()` trả đúng theo context Gateway set, KHÔNG phải `msg.sender`; **test bắt buộc riêng cho mục 2.6.4 điểm 2**: gọi trực tiếp hàm nội bộ (giả lập, không qua Gateway thật) để set context giả — PHẢI bị chặn bởi `isCalledByGateway()` |
+| P2.2 | `attestCommit()` | Verify BLS đúng/sai (test vector cố định, mục 12 T0); **test kịch bản 10.7** (chặn tấn công): `aggregateAmount` vượt `per_chain_allocation[sourceChainId]` phải bị từ chối, KHÔNG cập nhật ledger, event `AllocationRejected` bắn đúng; test `epoch` không khớp `ChainRegistry` hiện tại → fail-closed (không dùng epoch cũ/tương lai); **test bắt buộc riêng cho mục 2.3.1 (risk #20, mục 7) — lỗ hổng `aggregateAmount` tự khai**: (a) `aggregateProof` sai/thiếu/không khớp `AggregateValueLeaf` thật → PHẢI revert, dù `QuorumCert` hợp lệ; (b) tái hiện đúng kịch bản khai thấp hơn thật (VD relayer khai `aggregateAmount=1` cho commit có tổng thật 100.000) → `claimMessage()` cho các message còn lại trong commit đó PHẢI bị chặn bởi cap cứng `claimedAmount <= fundedAmount` khi tổng vượt `fundedAmount=1`, không được mint vượt; (c) gọi `attestCommit()` lần 2 cho cùng `(sourceChainId, commitRoot, assetId)` với `aggregateAmount` khác → PHẢI revert (ghi-1-lần, mục 1.3 #11) |
+| P2.3 | `claimMessage()` | Merkle proof đúng/sai; **double-claim cùng `messageId` bị chặn** (idempotent); `getOriginalSender()` trả đúng theo context Gateway set, KHÔNG phải `msg.sender`; **test bắt buộc riêng cho mục 2.6.4 điểm 2**: gọi trực tiếp hàm nội bộ (giả lập, không qua Gateway thật) để set context giả — PHẢI bị chặn bởi `isCalledByGateway()`; **test cap cứng `claimedAmount`** (mục 2.3.1/11.6): claim tuần tự nhiều message tới khi chạm `fundedAmount` — message tiếp theo PHẢI revert dù Merkle proof của chính nó hợp lệ |
 | P2.4 | Đường hoàn tiền (mục 2.4) | **Test kịch bản 10.3 end-to-end** (revert ở đích → hoàn tiền ở nguồn); **test double-mint qua refund bị chặn** (mục 2.4 điểm 3): gửi cả message gốc "SUCCESS" lẫn "FAILED" giả cho cùng 1 `messageId` — chỉ 1 trong 2 được xử lý, lần thứ 2 phải revert vì trạng thái không còn `PENDING` |
 | P2.5 | `hop_count` enforcement (mục 2.6.2) | **Test kịch bản 10.5**: `hop_count = 6` được chấp nhận, `hop_count = 7` bị từ chối cứng |
 | P2.6 | Gas cap cho `CONTRACT_CALL` inbound (mục 2.6.5) | Payload tốn gas vượt mức bị cap đúng (không chạy "free"); phần gas dư được hoàn lại đúng qua cơ chế refund (P2.4) |
