@@ -14,7 +14,11 @@
 //! - P2.8: claimDeadChainBalance() — Account-level Merkle proof recovery for dead chains
 
 use std::collections::{BTreeMap, BTreeSet};
+use fastcrypto::bls12381::min_sig::{
+    BLS12381AggregateSignature, BLS12381PublicKey, BLS12381Signature,
+};
 use fastcrypto::hash::{HashFunction, Keccak256};
+use fastcrypto::traits::{AggregateAuthenticator, ToFromBytes, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,6 +56,12 @@ pub enum GatewayError {
 
     #[error("Invalid Merkle proof for message")]
     InvalidMerkleProof,
+
+    #[error("Invalid BLS signature for commit certificate")]
+    InvalidBLSSignature,
+
+    #[error("Quorum not reached: accumulated stake below threshold")]
+    QuorumNotReached,
 
     #[error("Message {0:?} has already been claimed or processed")]
     AlreadyClaimed(Hash),
@@ -227,7 +237,6 @@ impl GatewayEngine {
         commit_root: Hash,
         aggregate_amount: U256,
         cert: QuorumCert,
-        is_bls_valid: bool,
     ) -> Result<AttestedCommit, GatewayError> {
         let registry = self
             .chain_registry
@@ -248,14 +257,14 @@ impl GatewayEngine {
             return Err(GatewayError::UnknownSourceChain(source_chain_id));
         }
 
-        if !is_bls_valid || cert.aggregate_signature.is_empty() {
-            return Err(GatewayError::InvalidMerkleProof);
+        if cert.aggregate_signature.is_empty() {
+            return Err(GatewayError::InvalidBLSSignature);
         }
 
-        // Calculate quorum from signer_bitmap
+        // Calculate quorum from signer_bitmap and collect voting public keys
         let mut accumulated_stake = 0u64;
         let mut total_stake = 0u64;
-        let mut signer_count = 0usize;
+        let mut voting_pubkeys: Vec<&[u8]> = Vec::new();
 
         for (i, val) in registry.committee.iter().enumerate() {
             total_stake += val.stake;
@@ -272,22 +281,49 @@ impl GatewayEngine {
 
             if is_signer {
                 accumulated_stake += val.stake;
-                signer_count += 1;
+                voting_pubkeys.push(&val.pubkey_bls);
             }
         }
 
         if total_stake == 0 {
-            return Err(GatewayError::InvalidMerkleProof);
+            return Err(GatewayError::UnknownSourceChain(source_chain_id));
         }
 
-        let threshold = if registry.quorum_threshold > 0 {
-            (total_stake * registry.quorum_threshold + 9999) / 10000
+        // Overflow-safe threshold calculation via u128
+        let total_stake_128 = total_stake as u128;
+        let threshold_128 = if registry.quorum_threshold > 0 {
+            (total_stake_128 * registry.quorum_threshold as u128 + 9999) / 10000
         } else {
-            (total_stake * 2 + 2) / 3
+            (total_stake_128 * 2 + 2) / 3
         };
 
-        if accumulated_stake < threshold || signer_count == 0 {
-            return Err(GatewayError::InvalidMerkleProof);
+        if (accumulated_stake as u128) < threshold_128 || voting_pubkeys.is_empty() {
+            return Err(GatewayError::QuorumNotReached);
+        }
+
+        // Real Cryptographic BLS verification
+        let mut commit_msg = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg.extend_from_slice(&commit_root.0);
+
+        if voting_pubkeys.len() == 1 {
+            let pk = BLS12381PublicKey::from_bytes(voting_pubkeys[0])
+                .map_err(|_| GatewayError::InvalidBLSSignature)?;
+            let sig = BLS12381Signature::from_bytes(&cert.aggregate_signature)
+                .map_err(|_| GatewayError::InvalidBLSSignature)?;
+            pk.verify(&commit_msg, &sig)
+                .map_err(|_| GatewayError::InvalidBLSSignature)?;
+        } else {
+            let pks: Result<Vec<BLS12381PublicKey>, _> = voting_pubkeys
+                .iter()
+                .map(|b| BLS12381PublicKey::from_bytes(b))
+                .collect();
+            let pks = pks.map_err(|_| GatewayError::InvalidBLSSignature)?;
+
+            let agg_sig = BLS12381AggregateSignature::from_bytes(&cert.aggregate_signature)
+                .map_err(|_| GatewayError::InvalidBLSSignature)?;
+            agg_sig
+                .verify(&pks, &commit_msg)
+                .map_err(|_| GatewayError::InvalidBLSSignature)?;
         }
 
         // Enforce per_chain_allocation ceiling check (Scenario 10.7)
@@ -327,8 +363,7 @@ impl GatewayEngine {
     }
 
     /// P2.3: claimMessage() — Phase 2 of Attest-then-Claim.
-    /// Verifies Merkle proof against attested commitRoot, guards against double-claims,
-    /// sets context for getOriginalSender() & isCalledByGateway(), and disburses relayer tip.
+    /// Verifies Merkle branch against previously attested CommitRoot and prevents double-claiming (P5).
     pub fn claim_message(
         &mut self,
         message: CrossChainMessage,
@@ -336,18 +371,20 @@ impl GatewayEngine {
         commit_root: Hash,
         relayer: Address,
     ) -> Result<MessageStatus, GatewayError> {
-        // Double-claim prevention: only process if status is None or Pending
-        let current_status = self.message_status.get(&message.message_id).copied();
+        let (source_id, msg_id) = (message.source_chain_id, message.message_id);
+
+        // Idempotency: Protect against double-claiming & replay attacks
+        let current_status = self.message_status.get(&msg_id).copied();
         if let Some(status) = current_status {
             if status != MessageStatus::Pending {
-                return Err(GatewayError::AlreadyClaimed(message.message_id));
+                return Err(GatewayError::AlreadyClaimed(msg_id));
             }
         }
 
-        // Verify that the commitRoot was attested
+        // Find attested commit (direct or 2-hop routed via Reserve)
         let mut attested_key = None;
-        if self.attested_commits.contains_key(&(message.source_chain_id, commit_root)) {
-            attested_key = Some((message.source_chain_id, commit_root));
+        if self.attested_commits.contains_key(&(source_id, commit_root)) {
+            attested_key = Some((source_id, commit_root));
         } else {
             for (&chain_id, _) in &self.chain_registry {
                 if self.attested_commits.contains_key(&(chain_id, commit_root)) {
@@ -359,7 +396,7 @@ impl GatewayEngine {
 
         let key = match attested_key {
             Some(k) => k,
-            None => return Err(GatewayError::CommitNotAttested(commit_root, message.source_chain_id)),
+            None => return Err(GatewayError::CommitNotAttested(commit_root, source_id)),
         };
 
         // Hard-cap check: ClaimedAmount + message.value <= FundedAmount (Section 2.3.1)
@@ -368,7 +405,7 @@ impl GatewayEngine {
             let new_claimed = attested.claimed_amount + message.value;
             if new_claimed > attested.funded_amount {
                 return Err(GatewayError::AllocationExceeded {
-                    chain_id: message.source_chain_id,
+                    chain_id: key.0,
                     requested: new_claimed,
                     available: attested.funded_amount,
                 });
@@ -376,50 +413,44 @@ impl GatewayEngine {
             attested.claimed_amount = new_claimed;
         }
 
-        // Compute message hash leaf using canonical encoding & domain separation
+        // Verify Merkle branch
         let leaf_hash = compute_message_leaf_hash(&message);
-
-        // Verify Merkle proof
         if !verify_merkle_proof(leaf_hash, &proof, commit_root) {
             return Err(GatewayError::InvalidMerkleProof);
         }
 
-        // Set execution context for destination contract
+        self.message_status.insert(msg_id, MessageStatus::Success);
+
+        // Context injection for target precompiles / contracts
         self.active_context = Some(CrossChainContext {
             original_sender: message.sender,
-            source_chain_id: message.source_chain_id,
+            source_chain_id: source_id,
             is_gateway: true,
         });
 
-        // Simulate execution
-        let exec_status = MessageStatus::Success;
-
-        // Clear execution context
-        self.active_context = None;
-
-        // Mark status
-        self.message_status
-            .insert(message.message_id, exec_status);
-
-        // Disburse tip to relayer (P2.3 & P4.2)
+        // Pay tip to the claiming relayer
         if message.tip > U256::zero() {
             let current_bal = self.relayer_balances.get(&relayer).copied().unwrap_or(U256::zero());
             self.relayer_balances.insert(relayer, current_bal + message.tip);
         }
 
-        Ok(exec_status)
+        Ok(MessageStatus::Success)
     }
 
-    /// P2.4: Refund pathway — When message FAILED at destination, sender claims refund on source chain.
-    /// Prevents double-refund (must be in Pending state) and restores per_chain_allocation in GlobalSupplyLedger.
+    /// P2.4: refund() — Revert & Refund Protocol.
+    /// Triggered when target chain reverts execution; unlocks funds back on source chain.
     pub fn refund(
         &mut self,
         message_id: Hash,
         source_chain_id: u64,
         _sender: Address,
-        amount: U256,
+        value: U256,
         is_failed_proof_valid: bool,
     ) -> Result<(), GatewayError> {
+        if !is_failed_proof_valid {
+            return Err(GatewayError::InvalidRefundProof);
+        }
+
         let status = self
             .message_status
             .get(&message_id)
@@ -430,19 +461,27 @@ impl GatewayEngine {
             return Err(GatewayError::InvalidRefundState(message_id, status));
         }
 
-        if !is_failed_proof_valid {
-            return Err(GatewayError::InvalidRefundProof);
-        }
+        self.message_status
+            .insert(message_id, MessageStatus::Refunded);
 
-        self.message_status.insert(message_id, MessageStatus::Refunded);
-
-        if amount > U256::zero() {
+        // Restore allocation on supply ledger
+        if value > U256::zero() {
             let current_alloc = self
                 .supply_ledger
                 .per_chain_allocation
                 .entry(source_chain_id)
                 .or_insert(U256::zero());
-            *current_alloc += amount;
+            *current_alloc += value;
+        }
+
+        // Refund locked tips if any
+        if let Some(tip) = self.locked_tips.remove(&message_id) {
+            let current_alloc = self
+                .supply_ledger
+                .per_chain_allocation
+                .entry(source_chain_id)
+                .or_insert(U256::zero());
+            *current_alloc += tip;
         }
 
         Ok(())
@@ -456,14 +495,12 @@ impl GatewayEngine {
         proof: MerkleProof,
         commit_root: Hash,
         relayer: Address,
-        is_bls_valid: bool,
     ) -> Result<MessageStatus, GatewayError> {
         self.attest_commit(
             message.source_chain_id,
             commit_root,
             message.value,
             cert,
-            is_bls_valid,
         )?;
 
         self.claim_message(message, proof, commit_root, relayer)
@@ -546,12 +583,16 @@ mod tests {
         Hash([byte; 32])
     }
 
-    fn setup_test_gateway() -> GatewayEngine {
+    fn setup_test_gateway() -> (GatewayEngine, BLS12381KeyPair) {
+        let mut rng = rand::thread_rng();
+        let kp = BLS12381KeyPair::generate(&mut rng);
+        let pubkey_bytes = kp.public().as_bytes().to_vec();
+
         let mut registry = BTreeMap::new();
         let chain_1 = ChainRegistry {
             chain_id: 101,
             committee: vec![ValidatorEntry {
-                pubkey_bls: vec![1; 48],
+                pubkey_bls: pubkey_bytes,
                 stake: 100,
                 pop_signature: vec![],
             }],
@@ -569,12 +610,18 @@ mod tests {
         allocs.insert(102, U256::from(5000u64));
 
         let ledger = GlobalSupplyLedger::new(U256::from(10000u64), allocs).unwrap();
-        GatewayEngine::new(102, registry, ledger)
+        (GatewayEngine::new(102, registry, ledger), kp)
+    }
+
+    fn sign_commit_for_test(kp: &BLS12381KeyPair, commit_root: Hash) -> Vec<u8> {
+        let mut commit_msg = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg.extend_from_slice(&commit_root.0);
+        kp.sign(&commit_msg).as_bytes().to_vec()
     }
 
     #[test]
     fn test_p2_1_and_p2_5_outbound_and_hop_count_guard() {
-        let mut engine = setup_test_gateway();
+        let (mut engine, _) = setup_test_gateway();
         let sender = dummy_address(0x01);
         let target = dummy_address(0x02);
         let tx_hash = dummy_hash(0x11);
@@ -613,16 +660,17 @@ mod tests {
 
     #[test]
     fn test_p2_2_attest_commit_and_scenario_10_7_allocation_guard() {
-        let mut engine = setup_test_gateway();
+        let (mut engine, kp) = setup_test_gateway();
         let commit_root = dummy_hash(0x33);
+        let sig = sign_commit_for_test(&kp, commit_root);
         let cert = QuorumCert {
             epoch: 5,
-            aggregate_signature: vec![0xFF; 48],
-            signer_bitmap: vec![0b1111],
+            aggregate_signature: sig,
+            signer_bitmap: vec![0b1],
         };
 
         // Attack Case: aggregateAmount = 6000 > available allocation = 5000 -> MUST REJECT (Scenario 10.7)
-        let res_attack = engine.attest_commit(101, commit_root, U256::from(6000u64), cert.clone(), true);
+        let res_attack = engine.attest_commit(101, commit_root, U256::from(6000u64), cert.clone());
         assert_eq!(
             res_attack,
             Err(GatewayError::AllocationExceeded {
@@ -634,7 +682,7 @@ mod tests {
 
         // Valid Case: aggregateAmount = 2000 <= 5000 -> SUCCEEDS & Deducts allocation to 3000
         let attested = engine
-            .attest_commit(101, commit_root, U256::from(2000u64), cert, true)
+            .attest_commit(101, commit_root, U256::from(2000u64), cert)
             .expect("attest ok");
         assert_eq!(attested.funded_amount, U256::from(2000u64));
         assert_eq!(
@@ -645,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_p2_3_claim_message_and_double_claim_prevention() {
-        let mut engine = setup_test_gateway();
+        let (mut engine, kp) = setup_test_gateway();
         let sender = dummy_address(0x01);
         let target = dummy_address(0x02);
         let relayer = dummy_address(0x99);
@@ -673,13 +721,14 @@ mod tests {
         let commit_root = leaf_hash; // Root equals leaf when 0 siblings
 
         // Attest the commit root first
+        let sig = sign_commit_for_test(&kp, commit_root);
         let cert = QuorumCert {
             epoch: 5,
-            aggregate_signature: vec![0xEE; 48],
-            signer_bitmap: vec![0b1111],
+            aggregate_signature: sig,
+            signer_bitmap: vec![0b1],
         };
         engine
-            .attest_commit(101, commit_root, U256::from(500u64), cert, true)
+            .attest_commit(101, commit_root, U256::from(500u64), cert)
             .unwrap();
 
         // First Claim -> Success
@@ -696,7 +745,7 @@ mod tests {
 
     #[test]
     fn test_p2_4_refund_pathway_and_double_refund_guard() {
-        let mut engine = setup_test_gateway();
+        let (mut engine, _) = setup_test_gateway();
         let msg_id = dummy_hash(0x77);
         let sender = dummy_address(0x01);
 
@@ -722,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_p2_8_claim_dead_chain_balance_and_duplicate_guard() {
-        let mut engine = setup_test_gateway();
+        let (mut engine, _) = setup_test_gateway();
         let dead_chain_id = 101;
         let account = dummy_address(0x33);
         let account_leaf_hash = dummy_hash(0xEE); // matches state_root of chain 101 in setup
@@ -770,5 +819,126 @@ mod tests {
                 account
             })
         );
+    }
+
+    #[test]
+    fn test_gateway_p2_2_multi_validator_quorum_bitmap() {
+        let mut rng = rand::thread_rng();
+        let kp1 = BLS12381KeyPair::generate(&mut rng);
+        let kp2 = BLS12381KeyPair::generate(&mut rng);
+        let kp3 = BLS12381KeyPair::generate(&mut rng);
+        let kp4 = BLS12381KeyPair::generate(&mut rng);
+
+        // 4 Validators with stakes: 30, 25, 25, 20 (Total = 100). Threshold 66.67% = 67
+        let committee = vec![
+            ValidatorEntry {
+                pubkey_bls: kp1.public().as_bytes().to_vec(),
+                stake: 30,
+                pop_signature: vec![],
+            },
+            ValidatorEntry {
+                pubkey_bls: kp2.public().as_bytes().to_vec(),
+                stake: 25,
+                pop_signature: vec![],
+            },
+            ValidatorEntry {
+                pubkey_bls: kp3.public().as_bytes().to_vec(),
+                stake: 25,
+                pop_signature: vec![],
+            },
+            ValidatorEntry {
+                pubkey_bls: kp4.public().as_bytes().to_vec(),
+                stake: 20,
+                pop_signature: vec![],
+            },
+        ];
+
+        let mut registry = BTreeMap::new();
+        registry.insert(
+            201,
+            ChainRegistry {
+                chain_id: 201,
+                committee,
+                epoch: 1,
+                quorum_threshold: 6667,
+                gateway_contract: dummy_address(0xBB),
+                state_root: dummy_hash(0xCC),
+                archival_endpoint: "http://archive.chain201.test".to_string(),
+                registered_at: 1000,
+            },
+        );
+
+        let mut allocs = BTreeMap::new();
+        allocs.insert(201, U256::from(10000u64));
+        allocs.insert(102, U256::from(10000u64));
+        let ledger = GlobalSupplyLedger::new(U256::from(20000u64), allocs).unwrap();
+        let mut gateway = GatewayEngine::new(102, registry, ledger);
+
+        let commit_root = dummy_hash(0xAA);
+        let mut commit_msg = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg.extend_from_slice(&commit_root.0);
+
+        // Case 1: 3 of 4 sign (v1, v2, v3) -> Stake = 30 + 25 + 25 = 80 >= 67 -> SUCCESS
+        let sig1 = kp1.sign(&commit_msg);
+        let sig2 = kp2.sign(&commit_msg);
+        let sig3 = kp3.sign(&commit_msg);
+        let agg_sig1 = BLS12381AggregateSignature::aggregate(&[&sig1, &sig2, &sig3]).unwrap();
+
+        let cert1 = QuorumCert {
+            epoch: 1,
+            aggregate_signature: agg_sig1.as_bytes().to_vec(),
+            signer_bitmap: vec![0x07], // bits 0, 1, 2 set: 1 + 2 + 4 = 7
+        };
+        let attested1 = gateway
+            .attest_commit(201, commit_root, U256::from(1000u64), cert1)
+            .expect("quorum 3/4 ok");
+        assert_eq!(attested1.commit_root, commit_root);
+
+        // Case 2: Only 2 of 4 sign (v1, v2) -> Stake = 30 + 25 = 55 < 67 -> MUST FAIL (QuorumNotReached)
+        let commit_root2 = dummy_hash(0xBB);
+        let mut commit_msg2 = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg2.extend_from_slice(&commit_root2.0);
+
+        let sig1_2 = kp1.sign(&commit_msg2);
+        let sig2_2 = kp2.sign(&commit_msg2);
+        let agg_sig2 = BLS12381AggregateSignature::aggregate(&[&sig1_2, &sig2_2]).unwrap();
+
+        let cert2 = QuorumCert {
+            epoch: 1,
+            aggregate_signature: agg_sig2.as_bytes().to_vec(),
+            signer_bitmap: vec![0x03], // bits 0, 1 set: 1 + 2 = 3
+        };
+        let err_quorum = gateway.attest_commit(201, commit_root2, U256::from(1000u64), cert2);
+        assert_eq!(err_quorum, Err(GatewayError::QuorumNotReached));
+
+        // Case 3: Bitmap claims 3 signers (0, 1, 2) but aggregate signature only contains 2 signers -> BLS Verify Fails
+        let cert_forged = QuorumCert {
+            epoch: 1,
+            aggregate_signature: agg_sig2.as_bytes().to_vec(), // only 2 signatures
+            signer_bitmap: vec![0x07],                         // claims 3 signers
+        };
+        let err_bls = gateway.attest_commit(201, commit_root2, U256::from(1000u64), cert_forged);
+        assert_eq!(err_bls, Err(GatewayError::InvalidBLSSignature));
+
+        // Case 4: All 4 validators sign -> Stake = 100 >= 67 -> SUCCESS
+        let commit_root4 = dummy_hash(0xCC);
+        let mut commit_msg4 = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg4.extend_from_slice(&commit_root4.0);
+
+        let sig1_4 = kp1.sign(&commit_msg4);
+        let sig2_4 = kp2.sign(&commit_msg4);
+        let sig3_4 = kp3.sign(&commit_msg4);
+        let sig4_4 = kp4.sign(&commit_msg4);
+        let agg_sig4 = BLS12381AggregateSignature::aggregate(&[&sig1_4, &sig2_4, &sig3_4, &sig4_4]).unwrap();
+
+        let cert4 = QuorumCert {
+            epoch: 1,
+            aggregate_signature: agg_sig4.as_bytes().to_vec(),
+            signer_bitmap: vec![0x0F], // bits 0, 1, 2, 3 set = 15
+        };
+        let attested4 = gateway
+            .attest_commit(201, commit_root4, U256::from(2000u64), cert4)
+            .expect("quorum 4/4 ok");
+        assert_eq!(attested4.commit_root, commit_root4);
     }
 }

@@ -9,6 +9,10 @@
 //! - 8 User Scenarios (10.1 - 10.8) as official Definition of Done (DoD)
 
 use std::collections::{BTreeMap, BTreeSet};
+use fastcrypto::bls12381::min_sig::{
+    BLS12381AggregateSignature, BLS12381KeyPair, BLS12381Signature,
+};
+use fastcrypto::traits::{AggregateAuthenticator, Signer, ToFromBytes};
 use serde::{Deserialize, Serialize};
 
 use crate::types::cross_chain::{
@@ -59,6 +63,7 @@ pub struct RelayerStats {
 pub struct RelayerEngine {
     pub config: RelayerConfig,
     pub chains: BTreeMap<u64, GatewayEngine>,
+    pub signers: BTreeMap<u64, Vec<BLS12381KeyPair>>,
     pub pending_outbounds: BTreeMap<u64, Vec<CrossChainMessage>>,
     pub certified_commits: BTreeMap<(u64, Hash), CertifiedCommitData>,
     pub offline_chains: BTreeSet<u64>,
@@ -70,10 +75,57 @@ impl RelayerEngine {
         Self {
             config,
             chains,
+            signers: BTreeMap::new(),
             pending_outbounds: BTreeMap::new(),
             certified_commits: BTreeMap::new(),
             offline_chains: BTreeSet::new(),
             stats: RelayerStats::default(),
+        }
+    }
+
+    pub fn set_signers(&mut self, chain_id: u64, signers: Vec<BLS12381KeyPair>) {
+        self.signers.insert(chain_id, signers);
+    }
+
+    pub fn sign_commit(&self, chain_id: u64, commit_root: Hash, signer_bitmap: &[u8]) -> Vec<u8> {
+        let keypairs = match self.signers.get(&chain_id) {
+            Some(kps) if !kps.is_empty() => kps,
+            _ => return vec![0u8; 48],
+        };
+
+        let mut commit_msg = b"COMMIT_ROOT_ATTEST_V1:".to_vec();
+        commit_msg.extend_from_slice(&commit_root.0);
+
+        let mut sigs: Vec<BLS12381Signature> = Vec::new();
+        for (i, kp) in keypairs.iter().enumerate() {
+            let mut is_signer = false;
+            if !signer_bitmap.is_empty() {
+                let byte_idx = i / 8;
+                let bit_idx = i % 8;
+                if byte_idx < signer_bitmap.len() && (signer_bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+                    is_signer = true;
+                }
+            } else if keypairs.len() == 1 {
+                is_signer = true;
+            }
+
+            if is_signer {
+                sigs.push(kp.sign(&commit_msg));
+            }
+        }
+
+        if sigs.is_empty() {
+            return vec![0u8; 48];
+        }
+
+        if sigs.len() == 1 {
+            sigs[0].as_bytes().to_vec()
+        } else {
+            let sig_refs: Vec<&BLS12381Signature> = sigs.iter().collect();
+            match BLS12381AggregateSignature::aggregate(&sig_refs) {
+                Ok(agg) => agg.as_bytes().to_vec(),
+                Err(_) => vec![0u8; 48],
+            }
         }
     }
 
@@ -128,9 +180,11 @@ impl RelayerEngine {
             signer_bitmap
         };
 
+        let aggregate_signature = self.sign_commit(source_chain_id, root, &bitmap);
+
         let cert = QuorumCert {
             epoch,
-            aggregate_signature: vec![0u8; 48],
+            aggregate_signature,
             signer_bitmap: bitmap,
         };
 
@@ -197,7 +251,6 @@ impl RelayerEngine {
                     commit_root,
                     msg.value,
                     cert,
-                    true,
                 )?;
                 routes.push(format!(
                     "{} -> {} (Reserve Attest)",
@@ -206,29 +259,30 @@ impl RelayerEngine {
             }
 
             // Step 2: Forward to Destination Chain (verified via Reserve's attestation)
+            let reserve_epoch = self
+                .chains
+                .get(&msg.dest_chain_id)
+                .and_then(|d| d.chain_registry.get(&reserve_chain_id))
+                .map(|r| r.epoch)
+                .unwrap_or(1);
+
+            let reserve_sig = self.sign_commit(reserve_chain_id, commit_root, &[0xFF]);
+            let reserve_cert = QuorumCert {
+                epoch: reserve_epoch,
+                aggregate_signature: reserve_sig,
+                signer_bitmap: vec![0xFF],
+            };
+
             let dest_engine = self
                 .chains
                 .get_mut(&msg.dest_chain_id)
                 .ok_or(GatewayError::UnknownSourceChain(msg.dest_chain_id))?;
-
-            let reserve_epoch = dest_engine
-                .chain_registry
-                .get(&reserve_chain_id)
-                .map(|r| r.epoch)
-                .unwrap_or(1);
-
-            let reserve_cert = QuorumCert {
-                epoch: reserve_epoch,
-                aggregate_signature: vec![0u8; 48],
-                signer_bitmap: vec![0xFF],
-            };
 
             dest_engine.attest_commit(
                 reserve_chain_id,
                 commit_root,
                 msg.value,
                 reserve_cert,
-                true,
             )?;
 
             let status = dest_engine.claim_message(msg.clone(), proof, commit_root, relayer)?;
@@ -258,7 +312,7 @@ impl RelayerEngine {
             .get_mut(&msg.dest_chain_id)
             .ok_or(GatewayError::UnknownSourceChain(msg.dest_chain_id))?;
 
-        dest_engine.attest_commit(msg.source_chain_id, commit_root, U256::zero(), cert, true)?;
+        dest_engine.attest_commit(msg.source_chain_id, commit_root, U256::zero(), cert)?;
         let status = dest_engine.claim_message(msg.clone(), proof, commit_root, relayer)?;
         routes.push(format!(
             "{} -> {} (Direct Call)",
@@ -460,8 +514,29 @@ mod tests {
     use crate::types::governance::GovernanceEngine;
 
     fn setup_test_network() -> (RelayerEngine, BTreeMap<u64, GatewayEngine>) {
-        let val = ValidatorEntry {
-            pubkey_bls: vec![1; 48],
+        let mut rng = rand::thread_rng();
+        let kp1000 = BLS12381KeyPair::generate(&mut rng);
+        let kp101 = BLS12381KeyPair::generate(&mut rng);
+        let kp102 = BLS12381KeyPair::generate(&mut rng);
+        let kp103 = BLS12381KeyPair::generate(&mut rng);
+
+        let val1000 = ValidatorEntry {
+            pubkey_bls: kp1000.public().as_bytes().to_vec(),
+            stake: 100,
+            pop_signature: vec![],
+        };
+        let val101 = ValidatorEntry {
+            pubkey_bls: kp101.public().as_bytes().to_vec(),
+            stake: 100,
+            pop_signature: vec![],
+        };
+        let val102 = ValidatorEntry {
+            pubkey_bls: kp102.public().as_bytes().to_vec(),
+            stake: 100,
+            pop_signature: vec![],
+        };
+        let val103 = ValidatorEntry {
+            pubkey_bls: kp103.public().as_bytes().to_vec(),
             stake: 100,
             pop_signature: vec![],
         };
@@ -471,7 +546,7 @@ mod tests {
             1000,
             ChainRegistry {
                 chain_id: 1000,
-                committee: vec![val.clone()],
+                committee: vec![val1000],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -484,7 +559,7 @@ mod tests {
             101,
             ChainRegistry {
                 chain_id: 101,
-                committee: vec![val.clone()],
+                committee: vec![val101],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -497,7 +572,7 @@ mod tests {
             102,
             ChainRegistry {
                 chain_id: 102,
-                committee: vec![val.clone()],
+                committee: vec![val102],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -510,7 +585,7 @@ mod tests {
             103,
             ChainRegistry {
                 chain_id: 103,
-                committee: vec![val],
+                committee: vec![val103],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -541,7 +616,12 @@ mod tests {
             max_retries: 3,
         };
 
-        let engine = RelayerEngine::new(cfg, chains.clone());
+        let mut engine = RelayerEngine::new(cfg, chains.clone());
+        engine.set_signers(1000, vec![kp1000]);
+        engine.set_signers(101, vec![kp101]);
+        engine.set_signers(102, vec![kp102]);
+        engine.set_signers(103, vec![kp103]);
+
         (engine, chains)
     }
 
