@@ -44,6 +44,7 @@ while strictly avoiding over-engineering.
 | **No Blocking Async** | NEVER use synchronous blocking I/O inside async loops or event engines. |
 | **Deterministic Merging** | NEVER trust local unverified state over network consensus hashes. |
 | **Output Language** | Code comments in English. Post-process summary in Vietnamese (see Part 5). |
+| **Math & Formatting** | NEVER use raw LaTeX syntax (`$$`, `$`, `\sum`, `\text{}`) in chat responses because IDE chat markdown renderer does not support LaTeX/KaTeX. Always use readable plain text, Markdown code blocks, or standard Unicode math symbols (∑, Δ, ≥, ≤, ≡, ➔). |
 | **Build Verification** | ALWAYS run or ask the user to run `build_check.sh` inside `consensus/metanode/scripts/` after editing code to verify that both Go, Rust, and FFI build correctly without any compile errors or warnings. The agent is responsible for fixing all errors, warnings, and compilation issues to guarantee a completely clean, warning-free build check; complex runtime testing and pipeline validation are left for the user. |
 
 ---

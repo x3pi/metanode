@@ -52,20 +52,24 @@ type CrossChainContext struct {
 	IsGateway      bool           `json:"is_gateway"`
 }
 
+// AllocationRejectedListener defines a hook triggered when a chain overdraws its allocation ceiling.
+type AllocationRejectedListener func(chainID uint64, requested, available *big.Int)
+
 // GatewayEngine implements the GatewayPrecompile state machine and execution logic.
 type GatewayEngine struct {
-	mu               sync.RWMutex
-	LocalChainID     uint64
-	ChainRegistry    map[uint64]ChainRegistry
-	SupplyLedger     *GlobalSupplyLedger
-	AttestedCommits  map[string]AttestedCommit // key: "sourceChainId:commitRootHex"
-	MessageStatus    map[common.Hash]MessageStatus
-	DeadChains       map[uint64]bool
-	DeadChainClaimed map[string]bool // key: "deadChainId:accountHex"
-	ActiveContext    *CrossChainContext
-	LockedTips       map[common.Hash]*big.Int
-	ChannelSequence  map[string]uint64
-	RelayerBalances  map[common.Address]*big.Int
+	mu                         sync.RWMutex
+	LocalChainID               uint64
+	ChainRegistry              map[uint64]ChainRegistry
+	SupplyLedger               *GlobalSupplyLedger
+	AttestedCommits            map[string]AttestedCommit // key: "sourceChainId:commitRootHex"
+	MessageStatus              map[common.Hash]MessageStatus
+	DeadChains                 map[uint64]bool
+	DeadChainClaimed           map[string]bool // key: "deadChainId:accountHex"
+	ActiveContext              *CrossChainContext
+	LockedTips                 map[common.Hash]*big.Int
+	ChannelSequence            map[string]uint64
+	RelayerBalances            map[common.Address]*big.Int
+	allocationRejectedListener AllocationRejectedListener
 }
 
 // NewGatewayEngine initializes the GatewayPrecompile execution engine.
@@ -86,6 +90,13 @@ func NewGatewayEngine(
 		ChannelSequence:  make(map[string]uint64),
 		RelayerBalances:  make(map[common.Address]*big.Int),
 	}
+}
+
+// SetAllocationRejectedListener registers an instant alert listener for overdraw events.
+func (g *GatewayEngine) SetAllocationRejectedListener(l AllocationRejectedListener) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.allocationRejectedListener = l
 }
 
 func Keccak256(data []byte) common.Hash {
@@ -209,6 +220,9 @@ func (g *GatewayEngine) AttestCommit(
 	}
 
 	if aggregateAmount.Cmp(currentAlloc) > 0 {
+		if g.allocationRejectedListener != nil {
+			g.allocationRejectedListener(sourceChainID, aggregateAmount, currentAlloc)
+		}
 		return nil, fmt.Errorf("%w: requested %s > available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
 	}
 
