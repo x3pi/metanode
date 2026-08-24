@@ -64,10 +64,9 @@ type NodesConfig struct {
 	NetworkSyncEnabled bool     `json:"network_sync_enabled"`
 }
 
-// CrossChainConfig chứa cấu hình cross-chain contracts
+// CrossChainConfig chứa cấu hình cross-chain
 type CrossChainConfig struct {
-	GatewayContract string `json:"gateway_contract"` // Contract xử lý giao dịch cross-chain (gateway)
-	ConfigContract  string `json:"config_contract"`  // Contract chứa cấu hình (embassy pubkeys, chainId)
+	GatewayContract string `json:"gateway_contract,omitempty"` // Contract/Precompile xử lý giao dịch cross-chain
 }
 
 // PruningConfig configures the historical state pruning strategy

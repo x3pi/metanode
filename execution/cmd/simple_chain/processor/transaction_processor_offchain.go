@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -108,19 +107,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		return validatorHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
 	}
 
-	if executeTransaction.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, header, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
-		if err != nil {
-			return nil, err
-		}
-		defer chainStateNew.Close()
-		ccHandler, err := cross_chain_handler.GetCrossChainHandler()
-		if err != nil {
-			return nil, err
-		}
-		return ccHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
-	}
+
 
 	ctx := context.Background()
 	transactionHash := executeTransaction.Hash()
@@ -261,26 +248,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		return validatorHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
 	}
 
-	if executeTransaction.ToAddress() == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-		blockDatabase := block.NewBlockDatabase(v.storageManager.GetStorageBlock())
-		headerPtr := v.chainState.GetcurrentBlockHeader()
-		if headerPtr == nil {
-			logger.Error("CRITICAL: v.chainState.GetcurrentBlockHeader() is nil in ExecuteTransactionOffChain for cross-chain")
-			return nil, fmt.Errorf("current block header is nil")
-		}
-		lastBlockHeader := *headerPtr
 
-		chainStateNew, err := blockchain.NewChainState(v.storageManager, blockDatabase, lastBlockHeader, v.chainState.GetConfig(), v.chainState.GetFreeFeeAddress(), "skip_epoch_data")
-		if err != nil {
-			return nil, err
-		}
-		defer chainStateNew.Close()
-		ccHandler, err := cross_chain_handler.GetCrossChainHandler()
-		if err != nil {
-			return nil, err
-		}
-		return ccHandler.HandleOffChainQuery(executeTransaction, chainStateNew)
-	}
 
 	// cần code thêm
 	if executeTransaction.ToAddress() == utils.GetAddressSelector(mt_common.IDENTIFIER_STAKE) {

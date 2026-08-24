@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	pb_cross "github.com/meta-node-blockchain/meta-node/pkg/proto/cross_chain_proto"
 	t_network "github.com/meta-node-blockchain/meta-node/types/network"
 	"google.golang.org/protobuf/proto"
 )
@@ -260,64 +258,7 @@ func (c *ConnectionClient) GetErrorNotifyChan() <-chan error {
 	return c.errorNotifyChan
 }
 
-// VerifyContractTransaction sends a contract transaction verification request to observer and waits for ACK
-func (c *ConnectionClient) VerifyTransaction(
-	clusterId uint64,
-	blockNumber uint64,
-	fromAddress common.Address,
-	toAddress common.Address,
-	txHash common.Hash,
-	amount *big.Int,
-) (*pb_cross.CrossClusterTransferAck, error) {
-	if atomic.LoadInt32(&c.connected) != 1 {
-		return nil, fmt.Errorf("not connected to observer")
-	}
 
-	reqKey := txHash.Hex()
-	responseChan := make(chan interface{}, 1)
-	c.pendingRequests.Store(reqKey, responseChan)
-	defer c.pendingRequests.Delete(reqKey)
-	// Convert amount to bytes
-	var amountBytes []byte
-	if amount != nil {
-		amountBytes = amount.Bytes()
-	}
-	// Create VerifyTransactionRequest proto message (reuse existing message)
-	request := &pb_cross.VerifyTransactionRequest{
-		NationId:    clusterId,
-		BlockNumber: blockNumber,
-		FromAddress: fromAddress.Bytes(),
-		ToAddress:   toAddress.Bytes(),
-		TxHash:      txHash.Bytes(),
-		Amount:      amountBytes,
-	}
-	// Marshal the request
-	requestBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal VerifyTransactionRequest: %w", err)
-	}
-
-	// Send request using VerifyTransaction command
-	if err := c.messageSender.SendBytes(c.connection, pkg_com.VerifyTransaction, requestBytes); err != nil {
-		return nil, fmt.Errorf("failed to send VerifyTransactionRequest: %w", err)
-	}
-	// Wait for CrossClusterTransferAck response with timeout
-	for {
-		select {
-		case res := <-responseChan:
-			if ack, ok := res.(*pb_cross.CrossClusterTransferAck); ok {
-				return ack, nil
-			}
-			return nil, fmt.Errorf("invalid response type")
-		case err := <-c.errorNotifyChan:
-			return nil, fmt.Errorf("connection error: %w", err)
-		case <-time.After(30 * time.Second):
-			return nil, fmt.Errorf("timeout waiting for CrossClusterTransferAck")
-		case <-c.ctx.Done():
-			return nil, fmt.Errorf("context cancelled")
-		}
-	}
-}
 func (c *ConnectionClient) GetTransactionsByBlockNumber(blockNumber uint64) (*pb.TransactionsWithBlockNumber, error) {
 	if atomic.LoadInt32(&c.connected) != 1 || c.connection == nil {
 		return nil, fmt.Errorf("not connected to cluster %s", c.key)

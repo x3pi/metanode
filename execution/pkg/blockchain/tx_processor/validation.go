@@ -14,7 +14,6 @@ import (
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
@@ -153,13 +152,6 @@ func VerifyTransaction(
 	if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
 		return nil
 	}
-	isCrossChainBatchSubmit := false
-	if tx.ToAddress() == common.CROSS_CHAIN_CONTRACT_ADDRESS {
-		ccHandler, errHandler := cross_chain_handler.GetCrossChainHandler()
-		if errHandler == nil && ccHandler != nil {
-			isCrossChainBatchSubmit = ccHandler.IsBatchSubmitTx(tx.CallData().Input())
-		}
-	}
 
 	var as types.AccountState
 	if preloadedState != nil {
@@ -222,33 +214,31 @@ func VerifyTransaction(
 			// )
 			// Let it pass local verification; assume Master will reject if invalid.
 		} else {
-			if !isCrossChainBatchSubmit {
-				if !LoadVerifiedSignature(txHash) {
-					request := transaction.NewVerifyTransactionRequest(
-						tx.Hash(),
-						common.PubkeyFromBytes(as.PublicKeyBls()),
-						tx.Sign(),
-					)
-					if !request.Valid() {
-						logger.Error("BLS Verification Failed!")
-						logger.Error("  txHashHex: %s", txHash.Hex())
-						logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
-						logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
-						logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
-						logger.Error("  SenderSign: %x", tx.Sign().Bytes())
-						logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
-						if !tx.ValidEthSign() {
-							logger.Error("  ETH Verification also failed!")
-							return transaction.InvalidSign
-						}
+			if !LoadVerifiedSignature(txHash) {
+				request := transaction.NewVerifyTransactionRequest(
+					tx.Hash(),
+					common.PubkeyFromBytes(as.PublicKeyBls()),
+					tx.Sign(),
+				)
+				if !request.Valid() {
+					logger.Error("BLS Verification Failed!")
+					logger.Error("  txHashHex: %s", txHash.Hex())
+					logger.Error("  FromAddress: %s", tx.FromAddress().Hex())
+					logger.Error("  ToAddress: %s", tx.ToAddress().Hex())
+					logger.Error("  SenderPubKey: %x", as.PublicKeyBls())
+					logger.Error("  SenderSign: %x", tx.Sign().Bytes())
+					logger.Error("  Hash() of TX according to SubNode: %x", tx.Hash().Bytes())
+					if !tx.ValidEthSign() {
+						logger.Error("  ETH Verification also failed!")
+						return transaction.InvalidSign
 					}
-					// Only cache on successful validation
-					StoreVerifiedSignature(txHash)
-					count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
-					if count == maxVerifiedSignaturesCacheSize {
-						rotateVerifiedSignatures()
-						atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
-					}
+				}
+				// Only cache on successful validation
+				StoreVerifiedSignature(txHash)
+				count := atomic.AddInt64(&verifiedSignaturesCacheCount, 1)
+				if count == maxVerifiedSignaturesCacheSize {
+					rotateVerifiedSignatures()
+					atomic.StoreInt64(&verifiedSignaturesCacheCount, 0)
 				}
 			}
 		}
@@ -301,7 +291,7 @@ func VerifyTransaction(
 			return transaction.InvalidData
 		}
 	} else {
-		if as.Nonce() == 0 && !isCrossChainBatchSubmit && !isSubNodeLagging {
+		if as.Nonce() == 0 && !isSubNodeLagging {
 			return transaction.InvalidAddressMatchForTx0
 		}
 		if !tx.ValidDeployData() {
@@ -363,7 +353,7 @@ func VerifyTransaction(
 		if !isFree {
 			_, isFree = chainState.GetFreeFeeAddress()[tx.FromAddress()]
 		}
-		if tx.GetNonce() == 0 || isCrossChainBatchSubmit {
+		if tx.GetNonce() == 0 {
 			isFree = true
 		}
 

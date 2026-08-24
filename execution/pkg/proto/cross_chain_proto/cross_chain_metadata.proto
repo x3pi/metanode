@@ -1,9 +1,0 @@
-syntax = "proto3";
-package cross_chain;
-option go_package = "/proto";
-option java_package = "com.meta_node.protos.compiled.cross_chain";
-
-message CrossChainTransferMetadata {
-    // Required: Target nation ID
-    uint64 target_nation_id = 1;
-}
