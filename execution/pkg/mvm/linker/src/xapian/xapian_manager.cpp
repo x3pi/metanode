@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include "xapian/xapian_manager.h"
 #include "my_extension/utils.h"
 #include "xapian/xapian_log.h" // Giả định chứa định nghĩa XapianLog::LogEntry
 #include "xapian/xapian_registry.h"
+#include "mvm_linker.hpp" // GetXapianPruneRetentionBlocks / GetCurrentBlockNumberForXapianPrune
 
 #include <chrono>
 #include <filesystem> // Cần cho std::filesystem::path
@@ -841,6 +843,295 @@ bool XapianManager::commit_changes() {
 }
 
 
+// Tổng dung lượng (bytes) của mọi file bên trong 1 thư mục database Xapian
+// (glass backend lưu nhiều file trong 1 thư mục, không phải 1 file đơn).
+// Best-effort: bỏ qua entry nào gây lỗi (race với 1 thao tác I/O khác) thay vì
+// làm hỏng toàn bộ phép đo.
+static uint64_t directorySizeBytes(const std::filesystem::path &dir) {
+  std::error_code ec;
+  if (!std::filesystem::exists(dir, ec) || ec) return 0;
+  uint64_t total = 0;
+  for (auto it = std::filesystem::recursive_directory_iterator(
+           dir, std::filesystem::directory_options::skip_permission_denied, ec);
+       !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+    std::error_code entry_ec;
+    if (it->is_regular_file(entry_ec) && !entry_ec) {
+      auto sz = it->file_size(entry_ec);
+      if (!entry_ec) total += sz;
+    }
+  }
+  return total;
+}
+
+bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes minInterval) {
+  // InMemory mode (TA / no base path) has no on-disk directory to compact.
+  if (mvm::IsXapianBasePathEmpty()) {
+    return false;
+  }
+
+  // Self-throttle: never run more than once per minInterval for this
+  // instance, regardless of how often the caller (cleaner_thread) invokes
+  // us. Checked before taking changes_mutex so a busy instance being
+  // compacted too often doesn't even contend for that lock.
+  {
+    std::lock_guard<std::mutex> t_lock(compact_time_mutex_);
+    auto now = std::chrono::steady_clock::now();
+    if (last_compact_attempt_.time_since_epoch().count() != 0 &&
+        now - last_compact_attempt_ < minInterval) {
+      return false;
+    }
+    last_compact_attempt_ = now;
+  }
+
+  touch();
+  std::unique_lock<std::shared_mutex> lock(changes_mutex);
+
+  // Never compact mid-transaction: replay_log()/commit_changes() must be
+  // able to find the db exactly where they left it. has_started mirrors the
+  // guard the rest of this class uses for "a transaction is in flight";
+  // has_uncommitted_writes / a non-empty comprehensive_log cover the
+  // buffered-but-not-yet-replayed-and-committed case.
+  if (has_started || has_uncommitted_writes.load(std::memory_order_acquire) ||
+      !comprehensive_log.xapian_doc_logs.empty()) {
+    return false;
+  }
+
+  std::filesystem::path full_path = mvm::createFullPath(address, db_name);
+  uint64_t current_size = directorySizeBytes(full_path);
+  if (current_size < minSizeBytes) {
+    return false; // Not worth the I/O yet.
+  }
+
+  std::filesystem::path tmp_path = full_path;
+  tmp_path += ".compact_tmp";
+  std::filesystem::path backup_path = full_path;
+  backup_path += ".pre_compact_backup";
+
+  std::error_code ec;
+  std::filesystem::remove_all(tmp_path, ec);   // Clean up any crashed previous attempt.
+  std::filesystem::remove_all(backup_path, ec); // Same.
+
+  try {
+    // Reads from `db` (currently open), writes a fresh compacted copy to
+    // tmp_path. DBCOMPACT_NO_RENUMBER: this is a single source database, not
+    // a merge, and callers (resolveVirtualDocId's cache, external Merkle-style
+    // references) depend on docids staying exactly what they were.
+    db.compact(tmp_path.string(), Xapian::DBCOMPACT_NO_RENUMBER);
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[XapianCompact ERROR] compact() failed for " << db_name
+               << ": " << e.get_msg() << " -- original database untouched." << std::endl;
+    std::filesystem::remove_all(tmp_path, ec);
+    return false;
+  } catch (const std::exception &e) {
+    std::cerr << "[XapianCompact ERROR] compact() failed for " << db_name
+               << ": " << e.what() << " -- original database untouched." << std::endl;
+    std::filesystem::remove_all(tmp_path, ec);
+    return false;
+  }
+
+  // Everything from here on mutates `db`/the on-disk layout. `db` itself is
+  // fully safe to close here: every OTHER method that touches it
+  // (replay_log via commit_changes, revertUncommittedChanges, ...) also
+  // requires this same exclusive changes_mutex, so nothing else can be
+  // calling a method on `db` right now.
+  //
+  // The read pools are a DIFFERENT story and need care: acquireSearchDb()/
+  // acquireSimpleReadDb() mark a slot in_use BEFORE the caller takes its own
+  // changes_mutex shared_lock (see get_data() etc.) -- so a slot can be
+  // legitimately in_use here even though we're holding changes_mutex
+  // exclusively. Force-closing+deleting an in_use slot would hand that
+  // caller a dangling pointer the instant it resumes (use-after-free).
+  // commit_changes()'s own pool-reopen loop already only ever touches
+  // `!in_use` slots for exactly this reason -- follow the same rule here:
+  // only close+delete IDLE slots now; leave in_use slots' Xapian::Database
+  // objects alone. This is safe to leave for later because on Linux,
+  // rename()/remove_all() on files with open fds elsewhere never invalidates
+  // those fds (delete-on-last-close semantics) -- an in-use slot keeps
+  // reading a fully self-consistent pre-compaction snapshot until its
+  // current caller releases it, and then self-heals via the existing
+  // db_generation/last_gen reopen() check on its *next* acquire (same
+  // mechanism commit_changes() already relies on for busy slots).
+  try { db.close(); } catch (...) {}
+  {
+    std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
+    for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+      if (search_pool.pool[i] && !search_pool.in_use[i]) {
+        try { search_pool.pool[i]->close(); } catch (...) {}
+        delete search_pool.pool[i];
+        search_pool.pool[i] = nullptr;
+        search_pool.last_gen[i] = 0;
+      }
+    }
+  }
+  {
+    std::lock_guard<std::mutex> pool_lock(simple_read_pool.pool_mutex);
+    for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+      if (simple_read_pool.pool[i] && !simple_read_pool.in_use[i]) {
+        try { simple_read_pool.pool[i]->close(); } catch (...) {}
+        delete simple_read_pool.pool[i];
+        simple_read_pool.pool[i] = nullptr;
+        simple_read_pool.last_gen[i] = 0;
+      }
+    }
+  }
+
+  // Swap: original -> backup, tmp -> original. Keep backup_path around until
+  // we've confirmed the reopen below actually works.
+  std::filesystem::rename(full_path, backup_path, ec);
+  if (ec) {
+    std::cerr << "[XapianCompact ERROR] rename(original->backup) failed for " << db_name
+               << ": " << ec.message() << " -- reopening original in place." << std::endl;
+    std::filesystem::remove_all(tmp_path, ec);
+    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    return false;
+  }
+  std::filesystem::rename(tmp_path, full_path, ec);
+  if (ec) {
+    std::cerr << "[XapianCompact ERROR] rename(tmp->original) failed for " << db_name
+               << ": " << ec.message() << " -- restoring original from backup." << std::endl;
+    std::filesystem::rename(backup_path, full_path, ec); // best-effort restore
+    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    return false;
+  }
+
+  // Reopen the compacted copy as the live `db`. If this somehow throws,
+  // restore the pre-compact backup so the instance never ends up unusable.
+  try {
+    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+  } catch (const std::exception &e) {
+    std::cerr << "[XapianCompact ERROR] reopen of compacted db failed for " << db_name
+               << ": " << e.what() << " -- restoring pre-compact backup." << std::endl;
+    std::filesystem::remove_all(full_path, ec);
+    std::filesystem::rename(backup_path, full_path, ec);
+    db = Xapian::WritableDatabase(full_path.string(), Xapian::DB_CREATE_OR_OPEN);
+    return false;
+  }
+
+  std::filesystem::remove_all(backup_path, ec); // best-effort; a leftover backup is harmless clutter, not a correctness issue
+  uint64_t new_size = directorySizeBytes(full_path);
+
+  // Bump the generation counter -- this alone is enough. DO NOT also stamp
+  // last_gen[i] = current_gen for every slot here: a slot we deliberately
+  // left alone above (in_use, still pointing at the pre-compaction files)
+  // has NOT been reopened, so its last_gen must stay at its old value --
+  // otherwise the "last_gen[i] < current_gen" check in acquire*Db() would
+  // wrongly conclude it's already fresh and skip the reopen() it genuinely
+  // still needs on its next acquire. Slots we did close (now nullptr) don't
+  // need last_gen touched either: acquire*Db()'s lazy-init branch (pool[i]
+  // == nullptr) always creates a fresh Xapian::Database and sets last_gen
+  // itself at that point.
+  db_generation.fetch_add(1, std::memory_order_acq_rel);
+
+  std::cerr << "[XapianCompact] " << db_name << ": " << current_size << " -> " << new_size
+             << " bytes (" << (current_size > 0 ? 100 - (new_size * 100 / current_size) : 0)
+             << "% reduction)" << std::endl;
+  return true;
+}
+
+size_t XapianManager::pruneOldVersions(uint64_t currentBlockHeight, uint64_t retentionBlocks,
+                                       size_t maxDeletePerCall) {
+  if (retentionBlocks == 0) {
+    return 0; // OFF switch -- absolute no-op, never even takes changes_mutex.
+  }
+  if (mvm::IsXapianBasePathEmpty()) {
+    return 0; // InMemory: nothing on disk to prune, and this legacy pattern
+              // only ever existed in the on-disk (glass) backend anyway.
+  }
+  if (currentBlockHeight <= retentionBlocks) {
+    return 0; // Nothing could be older than the retention window yet.
+  }
+  uint64_t cutoff = currentBlockHeight - retentionBlocks;
+
+  touch();
+  std::unique_lock<std::shared_mutex> lock(changes_mutex);
+
+  // Never prune mid-transaction -- same guard as compactInPlace(): a
+  // transaction in flight means replay_log()/commit_changes() still expect
+  // the db in exactly the state they left it.
+  if (has_started || has_uncommitted_writes.load(std::memory_order_acquire) ||
+      !comprehensive_log.xapian_doc_logs.empty()) {
+    return 0;
+  }
+
+  std::vector<Xapian::docid> to_delete;
+  try {
+    // valuestream_begin(254): by construction, ONLY documents that have a
+    // value set at slot 254 are visited here -- the write-path that used to
+    // set it (removed at commit 4108fe70) marked exactly and only the
+    // documents it was superseding via clone_document(). An active document
+    // (post-4108fe70 or never superseded) never has a slot 254 value, so it
+    // can never appear in this loop -- this is a property of the data
+    // itself, not something this function additionally checks for.
+    for (Xapian::ValueIterator it = db.valuestream_begin(254);
+        it != db.valuestream_end(254); ++it) {
+      double deleted_at;
+      try {
+        deleted_at = Xapian::sortable_unserialise(*it);
+      } catch (const std::exception &) {
+        continue; // Malformed value -- skip rather than risk mis-deleting.
+      }
+      if (deleted_at < 0) continue;
+      if (static_cast<uint64_t>(deleted_at) < cutoff) {
+        to_delete.push_back(it.get_docid());
+        if (to_delete.size() >= maxDeletePerCall) break;
+      }
+    }
+  } catch (const Xapian::Error &e) {
+    std::cerr << "[XapianPrune ERROR] scanning slot 254 failed for " << db_name
+               << ": " << e.get_msg() << std::endl;
+    return 0;
+  }
+
+  size_t deleted_count = 0;
+  for (Xapian::docid did : to_delete) {
+    try {
+      db.delete_document(did);
+      ++deleted_count;
+    } catch (const Xapian::DocNotFoundError &) {
+      // Already gone (e.g. a previous call's commit raced with this scan) --
+      // harmless, not an error.
+    } catch (const Xapian::Error &e) {
+      std::cerr << "[XapianPrune ERROR] delete_document(" << did << ") failed for "
+                 << db_name << ": " << e.get_msg() << std::endl;
+    }
+  }
+
+  if (deleted_count > 0) {
+    try {
+      db.commit();
+    } catch (const Xapian::Error &e) {
+      std::cerr << "[XapianPrune ERROR] commit() after prune failed for " << db_name
+                 << ": " << e.get_msg() << std::endl;
+      return deleted_count; // Deletes are already applied in-memory to `db`;
+                            // report what was queued even if the flush to
+                            // disk failed -- next commit_changes()/prune call
+                            // will retry the flush.
+    }
+    // Same "new generation" protocol as commit_changes()/compactInPlace().
+    db_generation.fetch_add(1, std::memory_order_acq_rel);
+    uint64_t current_gen = db_generation.load(std::memory_order_acquire);
+    {
+      std::lock_guard<std::mutex> pool_lock(search_pool.pool_mutex);
+      for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+        if (search_pool.pool[i] && !search_pool.in_use[i]) {
+          try { search_pool.pool[i]->reopen(); search_pool.last_gen[i] = current_gen; } catch (...) {}
+        }
+      }
+    }
+    {
+      std::lock_guard<std::mutex> pool_lock(simple_read_pool.pool_mutex);
+      for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+        if (simple_read_pool.pool[i] && !simple_read_pool.in_use[i]) {
+          try { simple_read_pool.pool[i]->reopen(); simple_read_pool.last_gen[i] = current_gen; } catch (...) {}
+        }
+      }
+    }
+    std::cerr << "[XapianPrune] " << db_name << ": deleted " << deleted_count
+               << " legacy superseded document(s) (cutoff block " << cutoff << ")" << std::endl;
+  }
+  return deleted_count;
+}
+
 void XapianManager::commitAllInstances() {
   std::unique_lock<std::shared_mutex> lock(instances_mutex);
   for (auto &pair : instances) {
@@ -970,6 +1261,65 @@ std::thread cleaner_thread([] {
     for (const std::string &key : keys_to_erase) {
       // Gọi hàm destroyInstance để xử lý việc đóng DB, dọn dẹp và xóa khỏi map
       XapianManager::destroyInstance(key, /*onlyIfIdle=*/true);
+    }
+
+    // Giai đoạn 3: compact các instance vẫn đang "sống" (không nằm trong
+    // keys_to_erase) -- đây chính là các DB bị ghi liên tục, không bao giờ
+    // idle đủ lâu để lọt vào Giai đoạn 1, nên phải có đường riêng để nén
+    // định kỳ thay vì chỉ trông chờ vào lúc bị huỷ (xem doc comment của
+    // compactInPlace()). Lấy shared_ptr rồi thả instances_mutex TRƯỚC khi
+    // gọi compactInPlace() -- compact có thể mất vài trăm ms tới vài giây
+    // trên DB lớn, không được giữ lock của toàn bộ map trong lúc đó.
+    std::vector<std::shared_ptr<XapianManager>> live_instances;
+    {
+      std::shared_lock<std::shared_mutex> read_lock(XapianManager::instances_mutex);
+      for (auto &pair : XapianManager::instances) {
+        if (pair.second &&
+            std::find(keys_to_erase.begin(), keys_to_erase.end(), pair.first) ==
+                keys_to_erase.end()) {
+          live_instances.push_back(pair.second);
+        }
+      }
+    }
+    for (auto &manager : live_instances) {
+      // Tự throttle bên trong (mặc định tối đa 1 lần/giờ/instance) -- gọi
+      // mỗi phút ở đây là vô hại, compactInPlace() tự no-op khi chưa tới hạn.
+      manager->compactInPlace();
+    }
+
+    // Giai đoạn 4: dọn document Xapian "mồ côi" (đánh dấu slot 254 bởi
+    // write-path cũ trước commit 4108fe70) -- xem doc comment của
+    // pruneOldVersions(). retentionBlocks/currentBlockHeight giống nhau cho
+    // mọi instance trong 1 vòng lặp, nên chỉ cần lấy 1 lần, không phải mỗi
+    // instance 1 lần callback sang Go.
+    {
+      Value_return retentionRet = GetXapianPruneRetentionBlocks();
+      if (retentionRet.success && retentionRet.data_p && retentionRet.data_size == 8) {
+        uint64_t retentionBlocks = 0;
+        for (int i = 0; i < 8; ++i) {
+          retentionBlocks = (retentionBlocks << 8) | static_cast<uint64_t>(retentionRet.data_p[i]);
+        }
+        free(retentionRet.data_p); // Go's C.CBytes() -> caller (đây) phải free, xem GetChainId's own comment
+
+        if (retentionBlocks > 0) { // Bỏ hẳn callback lấy block height nếu tắt (retentionBlocks==0) -- không tốn gì thêm khi feature đang OFF.
+          Value_return heightRet = GetCurrentBlockNumberForXapianPrune();
+          if (heightRet.success && heightRet.data_p && heightRet.data_size == 8) {
+            uint64_t currentHeight = 0;
+            for (int i = 0; i < 8; ++i) {
+              currentHeight = (currentHeight << 8) | static_cast<uint64_t>(heightRet.data_p[i]);
+            }
+            free(heightRet.data_p);
+
+            for (auto &manager : live_instances) {
+              manager->pruneOldVersions(currentHeight, retentionBlocks);
+            }
+          } else if (heightRet.data_p) {
+            free(heightRet.data_p);
+          }
+        }
+      } else if (retentionRet.data_p) {
+        free(retentionRet.data_p);
+      }
     }
   }
 });

@@ -45,15 +45,15 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 )
 
-func skipIfNoTZHardware(t *testing.T) {
+func skipIfNoHardware(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat("/dev/tc_ns_client"); os.IsNotExist(err) {
-		t.Skip("skipping real-hardware TrustZone test: /dev/tc_ns_client not found (only runnable on physical board)")
+	if _, err := os.Stat("/dev/tc_ns_client"); err != nil {
+		t.Skipf("skipping real-hardware test: /dev/tc_ns_client not accessible: %v", err)
 	}
 }
 
 func TestTABoundary_TrustzoneHardware_MatchesCgo_SendNative(t *testing.T) {
-	skipIfNoTZHardware(t)
+	skipIfNoHardware(t)
 	from := nextTestAddr()
 	to := nextTestAddr()
 	amount := big.NewInt(1_234)
@@ -88,7 +88,7 @@ func TestTABoundary_TrustzoneHardware_MatchesCgo_SendNative(t *testing.T) {
 }
 
 func TestTABoundary_TrustzoneHardware_MatchesCgo_ProcessNativeMintBurn(t *testing.T) {
-	skipIfNoTZHardware(t)
+	skipIfNoHardware(t)
 	systemAddr := common.HexToAddress("0x000000000000000000000000000000000000MINT")
 	to := nextTestAddr()
 	amount := big.NewInt(777_777)
@@ -123,7 +123,7 @@ func TestTABoundary_TrustzoneHardware_MatchesCgo_ProcessNativeMintBurn(t *testin
 }
 
 func TestTABoundary_TrustzoneHardware_MatchesCgo_NoncePlusOne(t *testing.T) {
-	skipIfNoTZHardware(t)
+	skipIfNoHardware(t)
 	sender := nextTestAddr()
 	const startNonce = 41
 

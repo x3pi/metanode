@@ -1609,6 +1609,43 @@ func GetBlockHash(blockNumber C.int) C.struct_Value_return {
 	}
 }
 
+// GetXapianPruneRetentionBlocks / GetCurrentBlockNumberForXapianPrune: cấp
+// thông tin cho XapianManager::pruneOldVersions() (chạy trong background
+// cleaner_thread, không có transaction/BlockContext đang active để đọc, nên
+// không thể tái dùng cơ chế BlockContext của deploy/call/execute — cần
+// callback mid-flight kiểu tiền-B1, giống GetChainId ngay dưới đây).
+//export GetXapianPruneRetentionBlocks
+func GetXapianPruneRetentionBlocks() C.struct_Value_return {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, config.ConfigApp.XapianPruneRetentionBlocks)
+	data_p := (*C.uchar)(C.CBytes(buf))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(len(buf)),
+		success:   true,
+	}
+}
+
+//export GetCurrentBlockNumberForXapianPrune
+func GetCurrentBlockNumberForXapianPrune() C.struct_Value_return {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil {
+		return C.struct_Value_return{success: false}
+	}
+	lastBlock := bc.GetLastBlock()
+	if lastBlock == nil || lastBlock.Header() == nil {
+		return C.struct_Value_return{success: false}
+	}
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, lastBlock.Header().BlockNumber())
+	data_p := (*C.uchar)(C.CBytes(buf))
+	return C.struct_Value_return{
+		data_p:    data_p,
+		data_size: C.int(len(buf)),
+		success:   true,
+	}
+}
+
 //export GetChainId
 func GetChainId() C.struct_Value_return {
 	chainId := config.ConfigApp.ChainId

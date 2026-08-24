@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	e_common "github.com/ethereum/go-ethereum/common"
@@ -383,6 +386,16 @@ func (app *App) Run() error {
 			logger.Info("Heap Alloc: %dMB | Sys: %dMB | NumGC: %d | Goroutines: %d",
 				m.Alloc/1024/1024, m.Sys/1024/1024, m.NumGC, numGoroutines)
 
+			// runtime.MemStats chỉ thấy Go heap — không thấy bộ nhớ cấp phát bởi
+			// cgo/C++ (Xapian, MVM interpreter, ...) chạy trong cùng tiến trình.
+			// RSS(OS) thật (đọc trực tiếp từ kernel qua /proc/self/status) là cách
+			// duy nhất phát hiện được leak/phình ở phía cgo/C++ mà Go heap không
+			// thấy — dùng để đối chiếu khi Heap Alloc/Sys ổn định nhưng process
+			// vẫn bị OOM-kill (dấu hiệu leak nằm ngoài Go heap).
+			if rssKB, err := readProcessRSSKB(); err == nil {
+				logger.Info("Process RSS(OS): %dMB (bao gồm cả cgo/C++ heap, VD Xapian)", rssKB/1024)
+			}
+
 			// Log top goroutines
 			if numGoroutines > 1000 {
 				logger.Info("⚠️  ALERT: Goroutine count > 1000! (current: %d)", numGoroutines)
@@ -702,4 +715,39 @@ func (app *App) WasCleanShutdown() bool {
 	os.Remove(sentinelPath)
 	logger.Info("✅ [STARTUP] Clean shutdown detected — skipping expensive integrity checks")
 	return true
+}
+
+// readProcessRSSKB đọc dung lượng RSS (Resident Set Size) thật của tiến trình
+// hiện tại từ /proc/self/status — không phải runtime.MemStats (chỉ thấy Go
+// heap, bỏ sót mọi phân bổ bộ nhớ phía cgo/C++ như Xapian/MVM interpreter
+// đang chạy chung tiến trình qua cgo). Đây là chỉ số duy nhất phản ánh đúng
+// mức bộ nhớ mà kernel/OOM-killer thực sự nhìn thấy.
+// Trả về KB; lỗi nếu không phải Linux hoặc không đọc được /proc/self/status.
+func readProcessRSSKB() (uint64, error) {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line) // ["VmRSS:", "<kb>", "kB"]
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("readProcessRSSKB: unexpected VmRSS line format: %q", line)
+		}
+		kb, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("readProcessRSSKB: parse VmRSS value: %w", err)
+		}
+		return kb, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("readProcessRSSKB: VmRSS not found in /proc/self/status")
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/mvcc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain_handler"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
@@ -183,7 +182,7 @@ func (stm *TrueBlockSTM) Process(
 	isBarrierTx := make([]bool, numTxs)
 	for i, tx := range stm.txs {
 		to := tx.ToAddress()
-		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS || to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
+		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS {
 			isBarrierTx[i] = true
 		}
 	}
@@ -1228,13 +1227,6 @@ func (stm *TrueBlockSTM) runBarrierTx(
 			logger.Error("Lỗi khi lấy ValidatorHandler: %v", herr)
 		} else {
 			rcp, exRs, _ = validatorHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
-		}
-	} else if toAddress == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS {
-		ccHandler, herr := cross_chain_handler.GetCrossChainHandler()
-		if herr != nil {
-			logger.Error("Lỗi khi lấy CrossChainHandler: %v", herr)
-		} else {
-			rcp, exRs, _ = ccHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
 		}
 	}
 
