@@ -182,7 +182,7 @@ func (stm *TrueBlockSTM) Process(
 	isBarrierTx := make([]bool, numTxs)
 	for i, tx := range stm.txs {
 		to := tx.ToAddress()
-		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS {
+		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS || to == mt_common.GATEWAY_CONTRACT_ADDRESS {
 			isBarrierTx[i] = true
 		}
 	}
@@ -1227,6 +1227,13 @@ func (stm *TrueBlockSTM) runBarrierTx(
 			logger.Error("Lỗi khi lấy ValidatorHandler: %v", herr)
 		} else {
 			rcp, exRs, _ = validatorHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
+		}
+	} else if toAddress == mt_common.GATEWAY_CONTRACT_ADDRESS {
+		gatewayHandler, herr := GetGatewayHandler()
+		if herr != nil {
+			logger.Error("Lỗi khi lấy GatewayHandler: %v", herr)
+		} else {
+			rcp, exRs, _ = gatewayHandler.HandleTransaction(ctx, chainState, tx, toAddress, false, blockTime)
 		}
 	}
 

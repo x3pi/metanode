@@ -33,6 +33,9 @@ func IsNativeParallelAddress(addr common.Address) bool {
 	if addr == mt_common.VALIDATOR_CONTRACT_ADDRESS {
 		return true
 	}
+	if addr == mt_common.GATEWAY_CONTRACT_ADDRESS {
+		return true
+	}
 	if addr == common.HexToAddress("0x0000000000000000000000000000000000000106") {
 		return true
 	}
@@ -378,6 +381,7 @@ func classifyGroup(items []Item, hasCode HasCodeFunc) GroupKind {
 
 		to := tx.ToAddress()
 		if to == mt_common.VALIDATOR_CONTRACT_ADDRESS ||
+			to == mt_common.GATEWAY_CONTRACT_ADDRESS ||
 			to == mt_common.CROSS_CHAIN_CONTRACT_ADDRESS ||
 			to == utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 			isEvm = true
