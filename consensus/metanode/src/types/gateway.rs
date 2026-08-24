@@ -131,8 +131,13 @@ pub fn compute_message_leaf_hash(message: &CrossChainMessage) -> Hash {
     buf.extend_from_slice(&message.sequence.to_be_bytes());
     buf.extend_from_slice(&message.sender.0);
     buf.extend_from_slice(&message.target.0);
-    let val_bytes = message.value.to_big_endian();
-    buf.extend_from_slice(&val_bytes);
+    buf.extend_from_slice(&message.asset_id.to_big_endian());
+    buf.push(message.hop_count);
+    buf.push(if message.ordered { 0x01 } else { 0x00 });
+    buf.extend_from_slice(&message.value.to_big_endian());
+    buf.extend_from_slice(&message.tip.to_big_endian());
+    let payload_len = message.payload.len() as u32;
+    buf.extend_from_slice(&payload_len.to_be_bytes());
     buf.extend_from_slice(&message.payload);
     keccak256(&buf)
 }
@@ -238,7 +243,50 @@ impl GatewayEngine {
             });
         }
 
-        if !is_bls_valid {
+        // Fail-closed: Committee cannot be empty
+        if registry.committee.is_empty() {
+            return Err(GatewayError::UnknownSourceChain(source_chain_id));
+        }
+
+        if !is_bls_valid || cert.aggregate_signature.is_empty() {
+            return Err(GatewayError::InvalidMerkleProof);
+        }
+
+        // Calculate quorum from signer_bitmap
+        let mut accumulated_stake = 0u64;
+        let mut total_stake = 0u64;
+        let mut signer_count = 0usize;
+
+        for (i, val) in registry.committee.iter().enumerate() {
+            total_stake += val.stake;
+            let mut is_signer = false;
+            if !cert.signer_bitmap.is_empty() {
+                let byte_idx = i / 8;
+                let bit_idx = i % 8;
+                if byte_idx < cert.signer_bitmap.len() && (cert.signer_bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+                    is_signer = true;
+                }
+            } else if registry.committee.len() == 1 {
+                is_signer = true;
+            }
+
+            if is_signer {
+                accumulated_stake += val.stake;
+                signer_count += 1;
+            }
+        }
+
+        if total_stake == 0 {
+            return Err(GatewayError::InvalidMerkleProof);
+        }
+
+        let threshold = if registry.quorum_threshold > 0 {
+            (total_stake * registry.quorum_threshold + 9999) / 10000
+        } else {
+            (total_stake * 2 + 2) / 3
+        };
+
+        if accumulated_stake < threshold || signer_count == 0 {
             return Err(GatewayError::InvalidMerkleProof);
         }
 
@@ -488,6 +536,7 @@ impl GatewayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::cross_chain::ValidatorEntry;
 
     fn dummy_address(byte: u8) -> Address {
         Address([byte; 20])
@@ -501,7 +550,11 @@ mod tests {
         let mut registry = BTreeMap::new();
         let chain_1 = ChainRegistry {
             chain_id: 101,
-            committee: vec![],
+            committee: vec![ValidatorEntry {
+                pubkey_bls: vec![1; 48],
+                stake: 100,
+                pop_signature: vec![],
+            }],
             epoch: 5,
             quorum_threshold: 6667,
             gateway_contract: dummy_address(0xAA),

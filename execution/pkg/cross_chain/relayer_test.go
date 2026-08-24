@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,29 +18,38 @@ func setupTestRelayerNetwork() (*RelayerEngine, map[uint64]*GatewayEngine) {
 	// Chain 102  = Private Chain B
 	// Chain 103  = Private Chain C (Adversarial)
 
+	kp1000 := bls.GenerateKeyPair()
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+	kp103 := bls.GenerateKeyPair()
+
 	registry := make(map[uint64]ChainRegistry)
 	registry[1000] = ChainRegistry{
 		ChainID:         1000,
 		Epoch:           1,
 		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp1000.PublicKey().Bytes(), Stake: 100}},
 		StateRoot:       common.HexToHash("0x1000100010001000100010001000100010001000100010001000100010001000"),
 	}
 	registry[101] = ChainRegistry{
 		ChainID:         101,
 		Epoch:           1,
 		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}},
 		StateRoot:       common.HexToHash("0x1010101010101010101010101010101010101010101010101010101010101010"),
 	}
 	registry[102] = ChainRegistry{
 		ChainID:         102,
 		Epoch:           1,
 		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}},
 		StateRoot:       common.HexToHash("0x1020102010201020102010201020102010201020102010201020102010201020"),
 	}
 	registry[103] = ChainRegistry{
 		ChainID:         103,
 		Epoch:           1,
 		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp103.PublicKey().Bytes(), Stake: 100}},
 		StateRoot:       common.HexToHash("0x1030103010301030103010301030103010301030103010301030103010301030"),
 	}
 
@@ -69,6 +79,10 @@ func setupTestRelayerNetwork() (*RelayerEngine, map[uint64]*GatewayEngine) {
 	}
 
 	engine := NewRelayerEngine(cfg, chains)
+	engine.SetSigners(1000, []*bls.KeyPair{kp1000})
+	engine.SetSigners(101, []*bls.KeyPair{kp101})
+	engine.SetSigners(102, []*bls.KeyPair{kp102})
+	engine.SetSigners(103, []*bls.KeyPair{kp103})
 	return engine, chains
 }
 
@@ -356,10 +370,12 @@ func TestRelayer_Scenario10_6_OnboardNewChainViaGovernance(t *testing.T) {
 	require.NoError(t, errExec)
 
 	// Register Chain 104 in Reserve registry with 0 initial allocation
+	kp104 := bls.GenerateKeyPair()
 	chains[1000].ChainRegistry[104] = ChainRegistry{
 		ChainID:         104,
 		Epoch:           1,
 		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp104.PublicKey().Bytes(), Stake: 100}},
 	}
 	chains[1000].SupplyLedger.PerChainAllocation[104] = big.NewInt(0)
 

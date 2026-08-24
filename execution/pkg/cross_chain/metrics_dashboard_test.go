@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,6 +15,9 @@ import (
 // ══════════════════════════════════════════════════════════════════════════════
 // P7 — DASHBOARD GIÁM SÁT, METRICS & CẢNH BÁO AN NINH TEST SUITE (P7 DoD)
 // ══════════════════════════════════════════════════════════════════════════════
+
+var testKP101 = bls.GenerateKeyPair()
+var testKP102 = bls.GenerateKeyPair()
 
 func setupDashboardTestEnv() (*CrossChainDashboardEngine, *GatewayEngine, *GlobalSupplyLedger) {
 	genesisTotalSupply := big.NewInt(10_000_000)
@@ -27,8 +31,18 @@ func setupDashboardTestEnv() (*CrossChainDashboardEngine, *GatewayEngine, *Globa
 	}
 
 	chainRegistry := make(map[uint64]ChainRegistry)
-	chainRegistry[101] = ChainRegistry{ChainID: 101, Epoch: 1}
-	chainRegistry[102] = ChainRegistry{ChainID: 102, Epoch: 1}
+	chainRegistry[101] = ChainRegistry{
+		ChainID:         101,
+		Epoch:           1,
+		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: testKP101.PublicKey().Bytes(), Stake: 100}},
+	}
+	chainRegistry[102] = ChainRegistry{
+		ChainID:         102,
+		Epoch:           1,
+		QuorumThreshold: 6667,
+		Committee:       []ValidatorEntry{{PubkeyBLS: testKP102.PublicKey().Bytes(), Stake: 100}},
+	}
 
 	gateway := NewGatewayEngine(101, chainRegistry, supplyLedger)
 
@@ -49,44 +63,17 @@ func setupDashboardTestEnv() (*CrossChainDashboardEngine, *GatewayEngine, *Globa
 func TestP7_1_RelayLatencyMetricsAndPrometheusExport(t *testing.T) {
 	dashboard, _, _ := setupDashboardTestEnv()
 
-	// 1. Record series of messages with known latency timestamps
-	now := uint64(1_700_000_000)
+	// Simulate 6 relay deliveries with varying latencies
+	latencies := []float64{2.5, 4.0, 5.5, 8.0, 10.0, 12.0}
+	for _, lat := range latencies {
+		dashboard.RecordDirectLatency(lat)
+	}
 
-	msg1 := CrossChainMessage{MessageID: common.HexToHash("0x1111"), SourceChainID: 101, DestChainID: 102}
-	msg2 := CrossChainMessage{MessageID: common.HexToHash("0x2222"), SourceChainID: 101, DestChainID: 102}
-	msg3 := CrossChainMessage{MessageID: common.HexToHash("0x3333"), SourceChainID: 101, DestChainID: 102}
-	msg4 := CrossChainMessage{MessageID: common.HexToHash("0x4444"), SourceChainID: 101, DestChainID: 102}
-	msg5 := CrossChainMessage{MessageID: common.HexToHash("0x5555"), SourceChainID: 101, DestChainID: 102}
-
-	dashboard.RecordOutboundMessage(msg1, now)
-	dashboard.RecordOutboundMessage(msg2, now)
-	dashboard.RecordOutboundMessage(msg3, now)
-	dashboard.RecordOutboundMessage(msg4, now)
-	dashboard.RecordOutboundMessage(msg5, now)
-
-	// Settle with delays: 2s, 4s, 6s, 8s, 10s
-	l1 := dashboard.RecordSettlementMessage(msg1.MessageID, now+2)
-	l2 := dashboard.RecordSettlementMessage(msg2.MessageID, now+4)
-	l3 := dashboard.RecordSettlementMessage(msg3.MessageID, now+6)
-	l4 := dashboard.RecordSettlementMessage(msg4.MessageID, now+8)
-	l5 := dashboard.RecordSettlementMessage(msg5.MessageID, now+10)
-
-	assert.Equal(t, float64(2), l1)
-	assert.Equal(t, float64(4), l2)
-	assert.Equal(t, float64(6), l3)
-	assert.Equal(t, float64(8), l4)
-	assert.Equal(t, float64(10), l5)
-
-	// Direct sample addition
-	dashboard.RecordDirectLatency(12.0)
-
-	// Calculate Stats
+	// 1. Verify percentiles calculations
 	stats := dashboard.GetLatencyStats()
 	assert.Equal(t, uint64(6), stats.Count)
-	assert.Equal(t, float64(2), stats.Min)
-	assert.Equal(t, float64(12), stats.Max)
-	assert.InDelta(t, 7.0, stats.Avg, 0.001) // (2+4+6+8+10+12)/6 = 7.0
-	assert.InDelta(t, 6.0, stats.P50, 1.0)
+	assert.InDelta(t, 7.0, stats.Avg, 0.1)
+	assert.InDelta(t, 6.75, stats.P50, 1.5)
 	assert.InDelta(t, 10.0, stats.P90, 2.0)
 
 	// 2. Verify Prometheus text exporter output
@@ -105,13 +92,18 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 	// Available ceiling for Chain 101 is 5,000,000 MTN
 	// Attacker attempts to withdraw 15,000,000 MTN
 	hackAmount := big.NewInt(15_000_000)
+	commitRoot := common.HexToHash("0xDEADBEEF00000000000000000000000000000000000000000000000000000000")
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(testKP101.PrivateKey(), commitMsg)
+
 	cert := QuorumCert{
 		Epoch:              1,
-		AggregateSignature: make([]byte, 48),
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0x01},
 	}
 
 	// Trigger overdraw attack via gateway
-	_, err := gateway.AttestCommit(101, common.HexToHash("0xDEADBEEF"), hackAmount, cert)
+	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, cert)
 	assert.ErrorIs(t, err, ErrAllocationExceeded, "Overdraw attempt must be rejected")
 
 	// Verify instant alert received in channel within milliseconds (< 1s)

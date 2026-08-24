@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 )
 
 var (
@@ -61,6 +62,7 @@ type RelayerEngine struct {
 	mu               sync.RWMutex
 	Config           RelayerConfig
 	Chains           map[uint64]*GatewayEngine
+	Signers          map[uint64][]*bls.KeyPair
 	PendingOutbounds map[uint64][]CrossChainMessage
 	CertifiedCommits map[string]CertifiedCommitData // key: "sourceChainId:commitRootHex"
 	OfflineChains    map[uint64]bool
@@ -78,6 +80,7 @@ func NewRelayerEngine(config RelayerConfig, chains map[uint64]*GatewayEngine) *R
 	return &RelayerEngine{
 		Config:           config,
 		Chains:           chains,
+		Signers:          make(map[uint64][]*bls.KeyPair),
 		PendingOutbounds: make(map[uint64][]CrossChainMessage),
 		CertifiedCommits: make(map[string]CertifiedCommitData),
 		OfflineChains:    make(map[uint64]bool),
@@ -85,6 +88,47 @@ func NewRelayerEngine(config RelayerConfig, chains map[uint64]*GatewayEngine) *R
 			TotalTipsCollected: big.NewInt(0),
 		},
 	}
+}
+
+// SetSigners registers BLS validator keypairs for generating real QuorumCert signatures.
+func (r *RelayerEngine) SetSigners(chainID uint64, keys []*bls.KeyPair) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Signers == nil {
+		r.Signers = make(map[uint64][]*bls.KeyPair)
+	}
+	r.Signers[chainID] = keys
+}
+
+func (r *RelayerEngine) signCommit(chainID uint64, commitRoot common.Hash, signerBitmap []byte) []byte {
+	keys := r.Signers[chainID]
+	if len(keys) == 0 {
+		return make([]byte, 48)
+	}
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	var activeSigs [][]byte
+	for i, kp := range keys {
+		isSigner := false
+		if len(signerBitmap) > 0 {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			if byteIdx < len(signerBitmap) && (signerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
+				isSigner = true
+			}
+		} else {
+			isSigner = true
+		}
+		if isSigner {
+			sig := bls.Sign(kp.PrivateKey(), commitMsg)
+			activeSigs = append(activeSigs, sig.Bytes())
+		}
+	}
+	if len(activeSigs) == 1 {
+		return activeSigs[0]
+	} else if len(activeSigs) > 1 {
+		return bls.CreateAggregateSign(activeSigs)
+	}
+	return make([]byte, 48)
 }
 
 // SetChainOffline simulates network disconnectivity / maintenance for Scenario 10.4.
@@ -133,57 +177,99 @@ func BuildMerkleTree(leaves []common.Hash) (common.Hash, [][]common.Hash) {
 	layers := [][]common.Hash{leaves}
 	current := leaves
 	for len(current) > 1 {
-		var nextLayer []common.Hash
+		var next []common.Hash
 		for i := 0; i < len(current); i += 2 {
 			if i+1 < len(current) {
-				nextLayer = append(nextLayer, hashPair(current[i], current[i+1]))
+				next = append(next, hashPair(current[i], current[i+1]))
 			} else {
-				nextLayer = append(nextLayer, current[i])
+				next = append(next, current[i])
 			}
 		}
-		layers = append(layers, nextLayer)
-		current = nextLayer
+		layers = append(layers, next)
+		current = next
 	}
 	return current[0], layers
 }
 
-// GetMerkleProof generates an inclusion proof for a leaf at the given index.
-func GetMerkleProof(layers [][]common.Hash, leafIndex int) MerkleProof {
+// IngestOutbounds scans and batches outbound messages from the specified source chain.
+func (r *RelayerEngine) IngestOutbounds(sourceChainID uint64, msgs []CrossChainMessage) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.PendingOutbounds[sourceChainID] = append(r.PendingOutbounds[sourceChainID], msgs...)
+	return len(r.PendingOutbounds[sourceChainID])
+}
+
+// BuildMerkleTreeFromMessages computes the Merkle tree with RFC 6962 domain separation (Section 2.1).
+func BuildMerkleTreeFromMessages(msgs []CrossChainMessage) (common.Hash, [][]common.Hash, error) {
+	if len(msgs) == 0 {
+		return common.Hash{}, nil, errors.New("cannot build Merkle tree from empty messages")
+	}
+
+	leaves := make([]common.Hash, len(msgs))
+	for i, m := range msgs {
+		leaves[i] = ComputeMessageLeafHash(m)
+	}
+
+	layers := [][]common.Hash{leaves}
+	current := leaves
+
+	for len(current) > 1 {
+		var next []common.Hash
+		for i := 0; i < len(current); i += 2 {
+			if i+1 < len(current) {
+				next = append(next, hashPair(current[i], current[i+1]))
+			} else {
+				next = append(next, current[i])
+			}
+		}
+		layers = append(layers, next)
+		current = next
+	}
+
+	return current[0], layers, nil
+}
+
+// GenerateMerkleProof generates an inclusion proof for a message index.
+func GenerateMerkleProof(layers [][]common.Hash, leafIndex int) (*MerkleProof, error) {
+	if len(layers) == 0 || leafIndex < 0 || leafIndex >= len(layers[0]) {
+		return nil, errors.New("invalid leaf index or empty layers")
+	}
+
 	var siblings []common.Hash
 	idx := leafIndex
-	for i := 0; i < len(layers)-1; i++ {
-		layer := layers[i]
-		var siblingIndex int
+
+	for layerIdx := 0; layerIdx < len(layers)-1; layerIdx++ {
+		layer := layers[layerIdx]
+		var siblingIdx int
 		if idx%2 == 0 {
-			siblingIndex = idx + 1
+			siblingIdx = idx + 1
 		} else {
-			siblingIndex = idx - 1
+			siblingIdx = idx - 1
 		}
-		if siblingIndex < len(layer) {
-			siblings = append(siblings, layer[siblingIndex])
+
+		if siblingIdx < len(layer) {
+			siblings = append(siblings, layer[siblingIdx])
 		}
 		idx /= 2
 	}
-	return MerkleProof{
+
+	return &MerkleProof{
 		LeafIndex: uint64(leafIndex),
 		Siblings:  siblings,
-	}
+	}, nil
 }
 
-// BuildMerkleTreeFromMessages converts messages into leaves and builds the full Merkle tree.
-func BuildMerkleTreeFromMessages(msgs []CrossChainMessage) (common.Hash, [][]common.Hash, error) {
-	if len(msgs) == 0 {
-		return common.Hash{}, nil, errors.New("empty messages list")
+// GetMerkleProof is a convenience helper for generating MerkleProof directly.
+func GetMerkleProof(layers [][]common.Hash, leafIndex int) MerkleProof {
+	proof, err := GenerateMerkleProof(layers, leafIndex)
+	if err != nil {
+		return MerkleProof{LeafIndex: uint64(leafIndex)}
 	}
-	var leaves []common.Hash
-	for _, msg := range msgs {
-		leaves = append(leaves, ComputeMessageLeafHash(msg))
-	}
-	root, layers := BuildMerkleTree(leaves)
-	return root, layers, nil
+	return *proof
 }
 
-// CertifyCommit groups pending messages into a certified commit with QuorumCert and Merkle tree.
+// CertifyCommit creates an authenticated batch commit from pending outbound messages (Section 2.1 & 2.2).
 func (r *RelayerEngine) CertifyCommit(
 	sourceChainID uint64,
 	epoch uint64,
@@ -206,9 +292,10 @@ func (r *RelayerEngine) CertifyCommit(
 		signerBitmap = []byte{0xFF}
 	}
 
+	sig := r.signCommit(sourceChainID, root, signerBitmap)
 	cert := QuorumCert{
 		Epoch:              epoch,
-		AggregateSignature: make([]byte, 48), // BLS aggregate signature
+		AggregateSignature: sig,
 		SignerBitmap:       signerBitmap,
 	}
 
@@ -294,9 +381,10 @@ func (r *RelayerEngine) RelayMessage(
 
 		// Step 2: Reserve mints/authorizes and issues certified commit for Destination
 		reserveEpoch := reserveEngine.ChainRegistry[r.Config.ReserveChainID].Epoch
+		reserveSig := r.signCommit(r.Config.ReserveChainID, commitRoot, []byte{0xFF})
 		reserveCert := QuorumCert{
 			Epoch:              reserveEpoch,
-			AggregateSignature: make([]byte, 48),
+			AggregateSignature: reserveSig,
 			SignerBitmap:       []byte{0xFF},
 		}
 

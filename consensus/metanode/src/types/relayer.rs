@@ -455,16 +455,23 @@ pub fn build_merkle_tree_from_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::cross_chain::{AccountLeaf, ChainRegistry, GlobalSupplyLedger, GovernanceProposalKind};
+    use crate::types::cross_chain::{AccountLeaf, ChainRegistry, GlobalSupplyLedger, GovernanceProposalKind, ValidatorEntry};
+    use crate::types::gateway::keccak256;
     use crate::types::governance::GovernanceEngine;
 
     fn setup_test_network() -> (RelayerEngine, BTreeMap<u64, GatewayEngine>) {
+        let val = ValidatorEntry {
+            pubkey_bls: vec![1; 48],
+            stake: 100,
+            pop_signature: vec![],
+        };
+
         let mut registry = BTreeMap::new();
         registry.insert(
             1000,
             ChainRegistry {
                 chain_id: 1000,
-                committee: vec![],
+                committee: vec![val.clone()],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -477,7 +484,7 @@ mod tests {
             101,
             ChainRegistry {
                 chain_id: 101,
-                committee: vec![],
+                committee: vec![val.clone()],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -490,7 +497,7 @@ mod tests {
             102,
             ChainRegistry {
                 chain_id: 102,
-                committee: vec![],
+                committee: vec![val.clone()],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,
@@ -503,7 +510,7 @@ mod tests {
             103,
             ChainRegistry {
                 chain_id: 103,
-                committee: vec![],
+                committee: vec![val],
                 epoch: 1,
                 quorum_threshold: 6667,
                 gateway_contract: Address::ZERO,

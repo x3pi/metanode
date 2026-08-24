@@ -242,3 +242,89 @@ func TestGateway_P2_8_ClaimDeadChainBalanceAndDuplicateGuard(t *testing.T) {
 	errDup := engine.ClaimDeadChainBalance(deadChainID, account, big.NewInt(1000), proof, accountLeafHash)
 	assert.ErrorIs(t, errDup, ErrDeadChainAlreadyClaimed)
 }
+
+func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
+	// Setup 4 validators with 25 stake each (Total 100 stake, 2/3 threshold = 67)
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+	kp3 := bls.GenerateKeyPair()
+	kp4 := bls.GenerateKeyPair()
+
+	committee := []ValidatorEntry{
+		{PubkeyBLS: kp1.PublicKey().Bytes(), Stake: 25},
+		{PubkeyBLS: kp2.PublicKey().Bytes(), Stake: 25},
+		{PubkeyBLS: kp3.PublicKey().Bytes(), Stake: 25},
+		{PubkeyBLS: kp4.PublicKey().Bytes(), Stake: 25},
+	}
+
+	registry := map[uint64]ChainRegistry{
+		201: {
+			ChainID:         201,
+			Epoch:           1,
+			QuorumThreshold: 6667, // 66.67%
+			Committee:       committee,
+		},
+	}
+
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(500_000), map[uint64]*big.Int{201: big.NewInt(500_000)})
+	require.NoError(t, err)
+
+	gateway := NewGatewayEngine(1000, registry, ledger)
+	commitRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+
+	sig1 := bls.Sign(kp1.PrivateKey(), commitMsg)
+	sig2 := bls.Sign(kp2.PrivateKey(), commitMsg)
+	sig3 := bls.Sign(kp3.PrivateKey(), commitMsg)
+
+	// Case 1: 3 out of 4 validators sign (Val 0, 1, 2) -> Stake = 75 >= 67 -> SUCCESS
+	aggSig3 := bls.CreateAggregateSign([][]byte{sig1.Bytes(), sig2.Bytes(), sig3.Bytes()})
+	cert3 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: aggSig3,
+		SignerBitmap:       []byte{0x07}, // bits 0, 1, 2 set: 1 + 2 + 4 = 7
+	}
+	attested, err := gateway.AttestCommit(201, commitRoot, big.NewInt(1000), cert3)
+	require.NoError(t, err)
+	assert.Equal(t, commitRoot, attested.CommitRoot)
+
+	// Case 2: Only 2 validators sign (Val 0, 1) -> Stake = 50 < 67 -> Quorum NOT reached
+	commitRoot2 := common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	commitMsg2 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot2.Bytes()...)
+	sig1_2 := bls.Sign(kp1.PrivateKey(), commitMsg2)
+	sig2_2 := bls.Sign(kp2.PrivateKey(), commitMsg2)
+	aggSig2 := bls.CreateAggregateSign([][]byte{sig1_2.Bytes(), sig2_2.Bytes()})
+	cert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: aggSig2,
+		SignerBitmap:       []byte{0x03}, // bits 0, 1 set: 1 + 2 = 3
+	}
+	_, errQuorum := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), cert2)
+	assert.ErrorIs(t, errQuorum, ErrQuorumNotReached)
+
+	// Case 3: Bitmap claims 3 signers (0, 1, 2) but aggregate signature only contains 2 signers -> BLS Verify Fails
+	certForged := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: aggSig2,      // only 2 signatures aggregated
+		SignerBitmap:       []byte{0x07}, // claims 3 signers
+	}
+	_, errBLS := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), certForged)
+	assert.ErrorIs(t, errBLS, ErrInvalidBLSSignature)
+
+	// Case 4: All 4 validators sign -> Stake = 100 >= 67 -> SUCCESS
+	commitRoot4 := common.HexToHash("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+	commitMsg4 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot4.Bytes()...)
+	sig1_4 := bls.Sign(kp1.PrivateKey(), commitMsg4)
+	sig2_4 := bls.Sign(kp2.PrivateKey(), commitMsg4)
+	sig3_4 := bls.Sign(kp3.PrivateKey(), commitMsg4)
+	sig4_4 := bls.Sign(kp4.PrivateKey(), commitMsg4)
+	aggSig4 := bls.CreateAggregateSign([][]byte{sig1_4.Bytes(), sig2_4.Bytes(), sig3_4.Bytes(), sig4_4.Bytes()})
+	cert4 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: aggSig4,
+		SignerBitmap:       []byte{0x0F}, // bits 0, 1, 2, 3 set = 15
+	}
+	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), cert4)
+	require.NoError(t, err4)
+	assert.Equal(t, commitRoot4, attested4.CommitRoot)
+}

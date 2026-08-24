@@ -24,6 +24,7 @@ var (
 	ErrUnknownSourceChain      = errors.New("unknown source chain ID")
 	ErrEpochMismatch           = errors.New("epoch mismatch for source chain")
 	ErrAllocationExceeded      = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrQuorumNotReached        = errors.New("BFT quorum stake threshold not reached")
 	ErrCommitNotAttested       = errors.New("commit root has not been attested by source chain")
 	ErrInvalidMerkleProof      = errors.New("invalid Merkle proof")
 	ErrAlreadyClaimed          = errors.New("message has already been claimed or processed (idempotent guard)")
@@ -58,16 +59,16 @@ type CrossChainContext struct {
 // AllocationRejectedListener defines a hook triggered when a chain overdraws its allocation ceiling.
 type AllocationRejectedListener func(chainID uint64, requested, available *big.Int)
 
-// GatewayEngine implements the GatewayPrecompile state machine and execution logic.
+// GatewayEngine implements the native light-client bridge state machine (Section 2.1 & 2.2).
 type GatewayEngine struct {
 	mu                         sync.RWMutex
 	LocalChainID               uint64
 	ChainRegistry              map[uint64]ChainRegistry
 	SupplyLedger               *GlobalSupplyLedger
-	AttestedCommits            map[string]AttestedCommit // key: "sourceChainId:commitRootHex"
+	AttestedCommits            map[string]AttestedCommit
 	MessageStatus              map[common.Hash]MessageStatus
 	DeadChains                 map[uint64]bool
-	DeadChainClaimed           map[string]bool // key: "deadChainId:accountHex"
+	DeadChainClaimed           map[string]bool
 	ActiveContext              *CrossChainContext
 	LockedTips                 map[common.Hash]*big.Int
 	ChannelSequence            map[string]uint64
@@ -75,16 +76,16 @@ type GatewayEngine struct {
 	allocationRejectedListener AllocationRejectedListener
 }
 
-// NewGatewayEngine initializes the GatewayPrecompile execution engine.
+// NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
 func NewGatewayEngine(
 	localChainID uint64,
 	registry map[uint64]ChainRegistry,
-	supplyLedger *GlobalSupplyLedger,
+	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
 	return &GatewayEngine{
 		LocalChainID:     localChainID,
 		ChainRegistry:    registry,
-		SupplyLedger:     supplyLedger,
+		SupplyLedger:     ledger,
 		AttestedCommits:  make(map[string]AttestedCommit),
 		MessageStatus:    make(map[common.Hash]MessageStatus),
 		DeadChains:       make(map[uint64]bool),
@@ -133,7 +134,8 @@ func VerifyMerkleProof(leaf common.Hash, proof MerkleProof, expectedRoot common.
 	return current == expectedRoot
 }
 
-// CanonicalEncodeMessage serializes a CrossChainMessage into canonical deterministic binary representation.
+// CanonicalEncodeMessage serializes a CrossChainMessage into canonical deterministic binary representation (Section 11.2).
+// Fixed-width formatting for all numeric and hash fields with length prefix for variable payload ensures zero boundary ambiguity.
 func CanonicalEncodeMessage(m CrossChainMessage) []byte {
 	var buf []byte
 	buf = append(buf, m.MessageID.Bytes()...)
@@ -146,9 +148,48 @@ func CanonicalEncodeMessage(m CrossChainMessage) []byte {
 	buf = append(buf, cBuf[:]...)
 	buf = append(buf, m.Sender.Bytes()...)
 	buf = append(buf, m.Target.Bytes()...)
-	if m.Value != nil {
-		buf = append(buf, m.Value.Bytes()...)
+
+	// Fixed 32 bytes for AssetID (uint256 big-endian)
+	assetBytes := make([]byte, 32)
+	if m.AssetID != nil {
+		raw := m.AssetID.Bytes()
+		if len(raw) <= 32 {
+			copy(assetBytes[32-len(raw):], raw)
+		}
 	}
+	buf = append(buf, assetBytes...)
+
+	buf = append(buf, byte(m.HopCount))
+	if m.Ordered {
+		buf = append(buf, 0x01)
+	} else {
+		buf = append(buf, 0x00)
+	}
+
+	// Fixed 32 bytes for Value (uint256 big-endian)
+	valBytes := make([]byte, 32)
+	if m.Value != nil {
+		raw := m.Value.Bytes()
+		if len(raw) <= 32 {
+			copy(valBytes[32-len(raw):], raw)
+		}
+	}
+	buf = append(buf, valBytes...)
+
+	// Fixed 32 bytes for Tip (uint256 big-endian)
+	tipBytes := make([]byte, 32)
+	if m.Tip != nil {
+		raw := m.Tip.Bytes()
+		if len(raw) <= 32 {
+			copy(tipBytes[32-len(raw):], raw)
+		}
+	}
+	buf = append(buf, tipBytes...)
+
+	// 4-byte length prefix for Payload followed by payload bytes
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(m.Payload)))
+	buf = append(buf, lenBuf[:]...)
 	buf = append(buf, m.Payload...)
 	return buf
 }
@@ -180,22 +221,20 @@ func (g *GatewayEngine) Outbound(
 	}
 
 	seqKey := fmt.Sprintf("%d:%d", g.LocalChainID, params.DestChainID)
-	g.ChannelSequence[seqKey]++
-	seq := g.ChannelSequence[seqKey]
+	seq := g.ChannelSequence[seqKey] + 1
+	g.ChannelSequence[seqKey] = seq
 
 	val := big.NewInt(0)
 	if params.Value != nil {
-		val.Set(params.Value)
+		val = new(big.Int).Set(params.Value)
 	}
-
 	tip := big.NewInt(0)
 	if params.Tip != nil {
-		tip.Set(params.Tip)
+		tip = new(big.Int).Set(params.Tip)
 	}
-
 	assetID := big.NewInt(0)
 	if params.AssetID != nil {
-		assetID.Set(params.AssetID)
+		assetID = new(big.Int).Set(params.AssetID)
 	}
 
 	msg := &CrossChainMessage{
@@ -217,7 +256,7 @@ func (g *GatewayEngine) Outbound(
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2).
-// Verifies BLS signature against registered committee, ensures strict epoch alignment, and checks per_chain_allocation ceiling.
+// Verifies BLS aggregate signature against registered committee via SignerBitmap, ensures strict epoch alignment, and checks per_chain_allocation ceiling.
 func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
@@ -237,31 +276,68 @@ func (g *GatewayEngine) AttestCommit(
 		return nil, fmt.Errorf("%w: expected %d, got %d", ErrEpochMismatch, registry.Epoch, cert.Epoch)
 	}
 
+	// Fail-closed: Committee cannot be empty
+	if len(registry.Committee) == 0 {
+		return nil, fmt.Errorf("%w: chain %d", ErrEmptyCommittee, sourceChainID)
+	}
+
 	// Real BLS Quorum Signature Verification (Cryptographic Defense)
 	if len(cert.AggregateSignature) == 0 {
 		return nil, ErrInvalidBLSSignature
 	}
 
-	if len(registry.Committee) > 0 {
-		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
-		var pubkeys [][]byte
-		for _, val := range registry.Committee {
-			pubkeys = append(pubkeys, val.PubkeyBLS)
+	var accumulatedStake uint64
+	var totalStake uint64
+	var votingPubkeys [][]byte
+
+	for i, val := range registry.Committee {
+		totalStake += val.Stake
+		isSigner := false
+		if len(cert.SignerBitmap) > 0 {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			if byteIdx < len(cert.SignerBitmap) && (cert.SignerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
+				isSigner = true
+			}
+		} else if len(registry.Committee) == 1 {
+			// Single validator backward compatibility when bitmap is omitted
+			isSigner = true
 		}
-		if len(pubkeys) == 1 {
-			pubKey := cm.PubkeyFromBytes(pubkeys[0])
-			sig := cm.SignFromBytes(cert.AggregateSignature)
-			if !bls.VerifySign(pubKey, sig, commitMsg) {
-				return nil, ErrInvalidBLSSignature
-			}
-		} else {
-			msgs := make([][]byte, len(pubkeys))
-			for i := range msgs {
-				msgs[i] = commitMsg
-			}
-			if !bls.VerifyAggregateSign(pubkeys, cert.AggregateSignature, msgs) {
-				return nil, ErrInvalidBLSSignature
-			}
+
+		if isSigner {
+			accumulatedStake += val.Stake
+			votingPubkeys = append(votingPubkeys, val.PubkeyBLS)
+		}
+	}
+
+	if totalStake == 0 {
+		return nil, ErrZeroTotalStake
+	}
+
+	// Calculate quorum threshold: default 66.67% (BFT 2/3) or basis points from registry.QuorumThreshold
+	threshold := (totalStake*2 + 2) / 3
+	if registry.QuorumThreshold > 0 {
+		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
+	}
+
+	if accumulatedStake < threshold || len(votingPubkeys) == 0 {
+		return nil, fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
+	}
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	if len(votingPubkeys) == 1 {
+		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
+		sig := cm.SignFromBytes(cert.AggregateSignature)
+		if !bls.VerifySign(pubKey, sig, commitMsg) {
+			return nil, ErrInvalidBLSSignature
+		}
+	} else {
+		msgs := make([][]byte, len(votingPubkeys))
+		for i := range msgs {
+			msgs[i] = commitMsg
+		}
+		if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
+			return nil, ErrInvalidBLSSignature
 		}
 	}
 
@@ -269,22 +345,17 @@ func (g *GatewayEngine) AttestCommit(
 		aggregateAmount = big.NewInt(0)
 	}
 
-	// Ceiling check on source chain allocation (Scenario 10.7)
-	currentAlloc, hasAlloc := g.SupplyLedger.PerChainAllocation[sourceChainID]
-	if !hasAlloc {
-		currentAlloc = big.NewInt(0)
-	}
-
+	// Check per_chain_allocation ceiling
+	currentAlloc := g.SupplyLedger.GetAllocation(sourceChainID)
 	if aggregateAmount.Cmp(currentAlloc) > 0 {
 		if g.allocationRejectedListener != nil {
 			g.allocationRejectedListener(sourceChainID, aggregateAmount, currentAlloc)
 		}
-		return nil, fmt.Errorf("%w: requested %s > available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
+		return nil, fmt.Errorf("%w: requested %s exceeds available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
 	}
 
-	// Deduct allocation atomically
-	newAlloc := new(big.Int).Sub(currentAlloc, aggregateAmount)
-	g.SupplyLedger.PerChainAllocation[sourceChainID] = newAlloc
+	// Debit source chain allocation upon successful BFT attestation
+	g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
 
 	key := fmt.Sprintf("%d:%s", sourceChainID, commitRoot.Hex())
 	attested := AttestedCommit{
