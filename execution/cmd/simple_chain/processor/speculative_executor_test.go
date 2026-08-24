@@ -91,9 +91,11 @@ func TestSpeculativeExecutor_WaitForInFlight(t *testing.T) {
 
 	_, cancel := context.WithCancel(context.Background())
 	se.inFlight.Store(uint64(20), &inFlightSession{cancel: cancel})
+	se.activeWorkers.Add(1)
 
 	go func() {
 		defer wg.Done()
+		defer se.activeWorkers.Add(-1)
 		time.Sleep(30 * time.Millisecond)
 		se.inFlight.Delete(uint64(20))
 	}()

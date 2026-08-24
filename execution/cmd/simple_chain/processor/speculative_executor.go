@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -51,6 +52,7 @@ type SpeculativeExecutor struct {
 	activeSessions sync.Map      // Completed speculative results by GEI
 	concurrencySem chan struct{} // Bounded concurrency (max 2 sessions)
 	inFlight       sync.Map      // GEI (uint64) -> *inFlightSession, executions currently running
+	activeWorkers  atomic.Int32  // Number of EVM speculative worker goroutines currently executing
 }
 
 // inFlightSession tracks the caller currently waiting on a GEI's speculative
@@ -175,10 +177,51 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 	})
 
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
+	se.activeWorkers.Add(1)
 	go func() {
 		defer func() {
+			se.activeWorkers.Add(-1)
 			<-se.concurrencySem // Release concurrency slot
 		}()
+
+		// 🔒 CONCURRENCY & FORK-SAFETY GATE:
+		// Acquire ExecutionMutex.RLock() so that when P2P Block Sync holds ExecutionMutex.Lock(),
+		// this speculative EVM goroutine waits and cannot run concurrently with Block Sync.
+		if se.bp != nil {
+			se.bp.ExecutionMutex.RLock()
+			defer se.bp.ExecutionMutex.RUnlock()
+		}
+
+		// If block was committed to DB while waiting for the lock (e.g. by P2P Sync),
+		// bypass speculative execution immediately and unblock Rust.
+		lastCommittedGEI := storage.GetLastGlobalExecIndex()
+		if gei <= lastCommittedGEI {
+			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) was already committed to DB while waiting for execution lock (lastGEI=%d). Bypassing.", gei, blockNum, lastCommittedGEI)
+			se.inFlight.Delete(gei)
+			se.activeSessions.Delete(gei)
+			session.mu.Lock()
+			latestRespCh := session.respCh
+			session.mu.Unlock()
+			if latestRespCh != nil {
+				select {
+				case latestRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true,
+					ActualGei:    gei,
+					BlockNumber:  blockNum,
+					GeisConsumed: 0,
+				}:
+				default:
+				}
+			}
+			return
+		}
+
+		if ctx.Err() != nil {
+			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) execution was cancelled (aborted by Sync/Consensus). Discarding state.", gei, blockNum)
+			se.activeSessions.Delete(gei)
+			se.inFlight.Delete(gei)
+			return
+		}
 
 		// NOTE: inFlight[gei] is intentionally NOT deleted here. Deleting it as
 		// soon as this goroutine returns raced against the asynchronous
@@ -288,7 +331,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 
 		// [FIX DEADLOCK / LEAK]: Check if block has already been committed to DB
 		// (e.g. by P2P Sync or Committer fast-forward while this goroutine was running).
-		lastCommittedGEI := storage.GetLastGlobalExecIndex()
+		lastCommittedGEI = storage.GetLastGlobalExecIndex()
 		if gei <= lastCommittedGEI {
 			logger.Warn("⚠️ [SPECULATIVE] Execution finished for GEI=%d (block #%d) but block is already committed to DB (lastGEI=%d). Discarding obsolete speculative state immediately.", gei, blockNum, lastCommittedGEI)
 			if res.ClonedState != nil {
@@ -375,15 +418,10 @@ func (se *SpeculativeExecutor) CancelInFlight(geis ...uint64) {
 func (se *SpeculativeExecutor) WaitForInFlight(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for {
-		hasInFlight := false
-		se.inFlight.Range(func(_, _ interface{}) bool {
-			hasInFlight = true
-			return false // break early
-		})
-		if !hasInFlight || time.Now().After(deadline) {
+		if se.activeWorkers.Load() <= 0 || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

@@ -47,8 +47,8 @@ import (
 
 func skipIfNoHardware(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat("/dev/tc_ns_client"); os.IsNotExist(err) {
-		t.Skip("skipping real-hardware test: /dev/tc_ns_client not found")
+	if _, err := os.Stat("/dev/tc_ns_client"); err != nil {
+		t.Skipf("skipping real-hardware test: /dev/tc_ns_client not accessible: %v", err)
 	}
 }
 
