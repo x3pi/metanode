@@ -112,7 +112,7 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     }
     return bls, eth
 
-def generate_eth_dev_account():
+def generate_eth_dev_account(metanode_bin=None):
     """Generates a random secp256k1 Ethereum private key and derives its 0x address without external dependencies."""
     try:
         from eth_keys import keys
@@ -123,8 +123,19 @@ def generate_eth_dev_account():
             "address": pk.public_key.to_checksum_address()
         }
     except ImportError:
-        print(red("ERROR: 'eth_keys' python module is required to generate dev accounts."))
-        print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
+        if metanode_bin:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                subprocess.run([metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir], capture_output=True)
+                eth_file = os.path.join(tmpdir, "eth_key.json")
+                if os.path.exists(eth_file):
+                    with open(eth_file) as f:
+                        data = json.load(f)
+                    return {
+                        "private_key": data["ETH_PRIVATE_KEY"],
+                        "address": data["ETH_ADDRESS"]
+                    }
+        print(red("ERROR: 'eth_keys' python module or 'metanode' binary is required to generate dev accounts."))
         sys.exit(1)
 
 def main():
@@ -215,7 +226,7 @@ def main():
     print(f"\n💰 Generating {args.dev_accounts} pre-funded developer accounts ...")
     dev_accounts = []
     for i in range(args.dev_accounts):
-        dev_acc = generate_eth_dev_account()
+        dev_acc = generate_eth_dev_account(metanode_bin)
         dev_accounts.append(dev_acc)
         alloc_list.append({
             "address": dev_acc["address"].lower(),
