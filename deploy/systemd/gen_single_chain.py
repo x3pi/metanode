@@ -127,6 +127,56 @@ def generate_eth_dev_account():
         print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
         sys.exit(1)
 
+def load_or_generate_private_dev_keys(keys_file: Path, chain_id: int, count: int = 6) -> tuple:
+    """
+    Loads fixed/persistent developer keys from a local (git-ignored) JSON file.
+    If the file or the chain_id entry does not exist, generates fresh accounts and persists them locally.
+    Returns:
+      (current_chain_dev_accounts, all_system_dev_accounts)
+    """
+    data = {}
+    if keys_file.exists():
+        try:
+            with open(keys_file, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(yellow(f"  ⚠️ Warning reading {keys_file}: {e}. Creating new storage."))
+            data = {}
+
+    chain_key_str = str(chain_id)
+    if chain_key_str not in data or not isinstance(data[chain_key_str], list) or len(data[chain_key_str]) == 0:
+        roles = [
+            f"Sender ({'A' if chain_id % 2 != 0 else 'B'}0)",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}1",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}2",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}3",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}4",
+            f"Relayer {'A' if chain_id % 2 != 0 else 'B'} ({'A' if chain_id % 2 != 0 else 'B'}5)",
+        ]
+        new_chain_accounts = []
+        for i in range(max(count, len(roles))):
+            acc = generate_eth_dev_account()
+            role_name = roles[i] if i < len(roles) else f"Dev {i}"
+            acc["role"] = role_name
+            new_chain_accounts.append(acc)
+
+        data[chain_key_str] = new_chain_accounts
+        try:
+            with open(keys_file, "w") as fw:
+                json.dump(data, fw, indent=2)
+            os.chmod(keys_file, 0o600)
+            print(green(f"  🔑 Generated & saved {len(new_chain_accounts)} dev keys to local ignored file: {keys_file.name}"))
+        except Exception as e:
+            print(yellow(f"  ⚠️ Could not persist dev keys to {keys_file}: {e}"))
+
+    current_chain_accounts = data.get(chain_key_str, [])
+    all_system_accounts = []
+    for cid_str, accs in data.items():
+        if isinstance(accs, list):
+            all_system_accounts.extend(accs)
+
+    return current_chain_accounts, all_system_accounts
+
 def main():
     parser = argparse.ArgumentParser(description="Generate single chain configs for Metanode")
     parser.add_argument("--chain-id", type=int, default=1337, help="EVM Chain ID (default: 1337)")
@@ -135,11 +185,15 @@ def main():
     parser.add_argument("--output-dir", default="./single_chain_data", help="Output directory (default: ./single_chain_data)")
     parser.add_argument("--alloc-balance", type=int, default=1000000, help="Initial MTN balance per account (default: 1000000)")
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
+    parser.add_argument("--dev-keys-file", default=None, help="Path to local dev keys JSON file (default: deploy/systemd/private_dev_keys.json)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
     parser.add_argument("--rpc-port", type=int, default=8545, help="Base RPC Port (default: 8545)")
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset for primary, worker, p2p, dns ports (default: 0)")
     parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
+    parser.add_argument("--genesis-template", default=None, help="Path to genesis template file (default: deploy/systemd/genesis.json.example)")
+    parser.add_argument("--no-example-alloc", action="store_true", help="Do not inject accounts from genesis.json.example")
+    parser.add_argument("--inject-example-alloc", action="store_true", default=True, help="Inject accounts from genesis.json.example (default: True)")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -211,22 +265,23 @@ def main():
             "publicKeyBls": bls["authority_key"]
         })
 
-    # 2. Generate pre-funded dev accounts
-    print(f"\n💰 Generating {args.dev_accounts} pre-funded developer accounts ...")
-    dev_accounts = []
-    for i in range(args.dev_accounts):
-        dev_acc = generate_eth_dev_account()
-        dev_accounts.append(dev_acc)
+    # 2. Load or generate developer accounts from local ignored file (no secrets in git)
+    dev_keys_path = Path(args.dev_keys_file) if args.dev_keys_file else (SCRIPT_DIR / "private_dev_keys.json")
+    print(f"\n💰 Loading pre-funded developer accounts for Chain {args.chain_id} from {dev_keys_path.name} ...")
+    dev_accounts, all_system_dev_accounts = load_or_generate_private_dev_keys(dev_keys_path, args.chain_id, args.dev_accounts)
+
+    seen_addrs = set(a["address"].lower() for a in alloc_list)
+    for acc in all_system_dev_accounts:
+        addr_str = acc["address"].lower()
+        if addr_str in seen_addrs:
+            continue
+        seen_addrs.add(addr_str)
         alloc_list.append({
-            "address": dev_acc["address"].lower(),
+            "address": addr_str,
             "balance": alloc_wei,
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            # Must match the gateway BLS keypair (gateway_bls_key below) so that
-            # standard eth_sendRawTransaction from these dev accounts passes the
-            # on-chain BLS registration check in eth_tx_converter.go — otherwise
-            # every tx is rejected with "no BLS public key registered on-chain".
             "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
         })
 
@@ -234,6 +289,30 @@ def main():
         json.dump(dev_accounts, f, indent=2)
 
     # 3. Create genesis.json
+    total_stake = args.validators * 1000
+    fault_tolerance = (total_stake - 1) // 3 if total_stake > 1 else 0
+    quorum_threshold = total_stake - fault_tolerance
+    validity_threshold = fault_tolerance + 1
+
+    # Inject all accounts from genesis template (default: genesis.json.example) with deduplication
+    template_path = Path(args.genesis_template) if args.genesis_template else (REPO_ROOT / "deploy" / "systemd" / "genesis.json.example")
+    if not args.no_example_alloc and template_path.exists():
+        try:
+            with open(template_path, "r") as ef:
+                example_data = json.load(ef)
+                if "alloc" in example_data:
+                    injected_count = 0
+                    for ex_acc in example_data["alloc"]:
+                        addr = ex_acc.get("address", "").lower()
+                        if not addr or addr in seen_addrs:
+                            continue
+                        seen_addrs.add(addr)
+                        alloc_list.append(ex_acc)
+                        injected_count += 1
+                    print(f"  💉 Injected {injected_count} accounts from {template_path.name} (Total unique alloc accounts: {len(alloc_list)})")
+        except Exception as e:
+            print(yellow(f"  ⚠️ Warning: could not merge {template_path} allocs: {e}"))
+
     genesis_data = {
         "config": {
             "chainId": args.chain_id,
@@ -243,25 +322,25 @@ def main():
             "epoch_duration_seconds": 345600
         },
         "validators": validators_entries,
-        "alloc": alloc_list
+        "alloc": alloc_list,
+        "total_stake": total_stake,
+        "quorum_threshold": quorum_threshold,
+        "validity_threshold": validity_threshold
     }
-    
-    # BƠM CÁC VÍ CỐ ĐỊNH TỪ genesis.json.example VÀO ĐÂY
-    example_path = REPO_ROOT / "deploy" / "systemd" / "genesis.json.example"
-    if example_path.exists():
-        try:
-            with open(example_path, "r") as ef:
-                example_data = json.load(ef)
-                if "alloc" in example_data:
-                    genesis_data["alloc"].extend(example_data["alloc"])
-                    print(f"  💉 Injected {len(example_data['alloc'])} accounts from genesis.json.example")
-        except Exception as e:
-            print(yellow(f"  ⚠️ Warning: could not merge genesis.json.example allocs: {e}"))
 
     genesis_path = out_dir / "genesis.json"
     with open(genesis_path, "w") as f:
         json.dump(genesis_data, f, indent=2)
     print(f"  ✅ Written genesis.json to {green(str(genesis_path))}")
+
+    # Xuất thêm file genesis-<chain_id>.json tại deploy/systemd/ để quản lý tập trung và phân biệt rõ từng chain
+    systemd_genesis_path = REPO_ROOT / "deploy" / "systemd" / f"genesis-{args.chain_id}.json"
+    try:
+        with open(systemd_genesis_path, "w") as f:
+            json.dump(genesis_data, f, indent=2)
+        print(f"  📑 Exported chain-specific genesis template to {green(str(systemd_genesis_path))}")
+    except Exception as e:
+        print(yellow(f"  ⚠️ Warning: could not export {systemd_genesis_path}: {e}"))
 
     # 4. Generate per-node runtime configs (config.json & node.toml)
     for node_id in range(args.validators):

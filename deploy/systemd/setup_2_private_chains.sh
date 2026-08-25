@@ -31,11 +31,13 @@ if [ "$NO_BUILD" -eq 0 ]; then
     echo ""
 fi
 
-if [ "$CLEAN" -eq 1 ] && [ -d "$DATA_DIR" ]; then
+if [ "$CLEAN" -eq 1 ]; then
     echo "🛑 Đang dừng các Private Chains cũ nếu đang chạy..."
-    if [ -f "$DATA_DIR/stop_all.sh" ]; then
+    if [ -d "$DATA_DIR" ] && [ -f "$DATA_DIR/stop_all.sh" ]; then
         bash "$DATA_DIR/stop_all.sh" || true
     fi
+    fuser -k 8546/tcp 8547/tcp 4210/tcp 4220/tcp 20210/tcp 20220/tcp 10210/tcp 10220/tcp 11110/tcp 11120/tcp >/dev/null 2>&1 || true
+    sleep 1
     echo "🧹 Dọn dẹp thư mục dữ liệu cũ..."
     rm -rf "$DATA_DIR"
 fi

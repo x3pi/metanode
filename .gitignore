@@ -478,6 +478,11 @@ deploy/ansible/monitors/parse_inventory.py
 
 # Genesis dynamically generated files
 deploy/systemd/genesis.json
+deploy/systemd/genesis-*.json
+deploy/systemd/genesis-101.json
+deploy/systemd/genesis-102.json
+deploy/systemd/private_dev_keys.json
+*dev_keys.json
 note/commit_review_fc17b2d2_xapian_manager.md
 deploy/systemd/single_chain_data/
 deploy/systemd/private_chains_data/
