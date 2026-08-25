@@ -317,11 +317,17 @@ def main():
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
-                "RootAnchorRpcUrls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
-                "RootAnchorSubmitterPrivateKeyHex": args.root_anchor_submitter_key,
-                "RootAnchorPollIntervalSeconds": 5,
-                "RootAnchorCircuitBreakerMaxFailures": 5,
-                "RootAnchorCircuitBreakerTimeoutSeconds": 10
+                # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
+                # exactly (snake_case) — encoding/json silently leaves a field at its zero value
+                # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't
+                # fail loudly: it just silently disables the ChainRegistry refresh worker /
+                # CommitteeAttestationWorker on every node this script generates. Verified against
+                # config.go directly, not assumed.
+                "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
+                "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
+                "root_anchor_poll_interval_seconds": 5,
+                "root_anchor_circuit_breaker_max_failures": 5,
+                "root_anchor_circuit_breaker_timeout_seconds": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

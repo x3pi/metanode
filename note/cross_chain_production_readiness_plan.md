@@ -206,14 +206,26 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    Whichever you choose, write it down in this file's successor or the design doc, not
    just in a commit message — this is exactly the kind of "accepted limitation" that
    needs to stay visible to whoever runs T2/T3 next.
-2. **Deployment tooling smoke-test.** `deploy/systemd/gen_root_anchor_chain.py` and
-   `setup_root_anchor.sh` (Milestone I) have never been run end-to-end — only confirmed
-   that `metanode keytool generate validator` exists as a CLI subcommand, not that the
-   scripts' exact invocation/output format matches what they assume (flag names, output
-   file paths/structure, etc.). Build `metanode` for real (see
-   `note/metanode-build-environment.md` if using this session's memory, or the repo's own
-   build docs) and run both scripts for real before Phase 2 needs them. Fix whatever
-   breaks; this is expected to surface small mismatches, not a design problem.
+2. **Deployment tooling smoke-test — DONE 2026-08-25, found+fixed one real bug this way.**
+   Ran `gen_root_anchor_chain.py` (4-validator Root Anchor, real `simple_chain`+Rust-FFI
+   binary, real BFT block production confirmed via `eth_blockNumber` increasing) and
+   `gen_single_chain.py --root-anchor-rpc ... --root-anchor-submitter-key ...` (a private
+   chain pointed at it) for real, locally. Exactly the kind of small-mismatch bug this item
+   predicted: `gen_single_chain.py` emitted the `cross_chain` config block with **PascalCase**
+   keys (`"RootAnchorRpcUrls"`, `"RootAnchorSubmitterPrivateKeyHex"`, ...) but
+   `config.go`'s `CrossChainConfig` struct tags are **snake_case**
+   (`root_anchor_rpc_urls`, ...) — `encoding/json` doesn't error on an unmatched key, it
+   just silently leaves the field at its zero value, so every node this script generated
+   would have booted with `GatewayRegistryMonitor`/`CommitteeAttestationWorker` **silently
+   disabled** (confirmed empirically with a throwaway `config.LoadConfig()` test before
+   fixing, and again by tailing a real node's log for the "✅ Gateway ChainRegistry Drift
+   Monitor started" / "✅ Committee Attestation Worker started" lines before vs. after the
+   fix). Fixed by correcting the keys to snake_case; re-verified live against the running
+   Root Anchor devnet that both workers now actually start. `setup_root_anchor.sh` doesn't
+   exist under that name (the working script is `gen_root_anchor_chain.py` alone, plus the
+   generated `start_all.sh`/`stop_all.sh` in its output dir) — update this doc/any other
+   reference accordingly if that's intentional, or add the missing wrapper if one was meant
+   to exist.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make
