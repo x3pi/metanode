@@ -143,6 +143,72 @@ func (g *GatewayEngine) EnsureGovernance() {
 	}
 }
 
+// ErrAlreadyBootstrapped guards BootstrapFoundingChains — see its doc comment.
+var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has active chains — bootstrap is only for genesis, use governance propose/vote/executeProposal instead")
+
+// BootstrapFoundingChains seeds ChainRegistry/Governance.ActiveChains directly, once, from a
+// genesis-time batch of founding chains — the one gap the normal governance flow cannot cover on
+// its own: GovernanceEngine.Vote requires the voting chain to already be a member of
+// engine.ChainRegistry (gateway_handler.go's "vote" case looks up the signer's committee there),
+// and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have already
+// passed a vote — so a Root Anchor with zero active chains has no path to ever register its
+// first chain through governance alone. This mirrors the real founding_entry.json/
+// assemble_root_anchor ceremony's own >= MinFoundingChains requirement (mục 1.3 #5) for the
+// SAME reason that requirement exists there: a bootstrap path open to only 1 chain would let
+// whoever calls it first become the sole active chain and unilaterally control all governance
+// thereafter, defeating the "1 chain = 1 vote, no chain dominates" design (mục 1.2).
+//
+// Self-closing: succeeds at most once per Root Anchor — the moment it succeeds,
+// Governance.ActiveChains is non-empty, so every subsequent call (by anyone) fails closed with
+// ErrAlreadyBootstrapped. Every founding chain's committee must independently pass the same
+// PopVerify check attestCommit()/committeeUpdate() already require, so bootstrapping cannot be
+// used to seed a fake/unverifiable committee either.
+func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.EnsureGovernance()
+
+	if len(g.Governance.ActiveChains) > 0 {
+		return ErrAlreadyBootstrapped
+	}
+	if len(payloads) < MinFoundingChains {
+		return fmt.Errorf("%w: got %d, need >= %d", ErrInsufficientFoundingChains, len(payloads), MinFoundingChains)
+	}
+
+	registries := make(map[uint64]ChainRegistry, len(payloads))
+	for _, p := range payloads {
+		var reg ChainRegistry
+		if err := json.Unmarshal(p, &reg); err != nil {
+			return fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		if reg.ChainID == 0 {
+			return fmt.Errorf("invalid chain ID: 0")
+		}
+		if _, dup := registries[reg.ChainID]; dup {
+			return fmt.Errorf("%w: chain %d", ErrDuplicateChainID, reg.ChainID)
+		}
+		if len(reg.Committee) == 0 {
+			return fmt.Errorf("chain %d: empty committee", reg.ChainID)
+		}
+		for _, v := range reg.Committee {
+			ok, err := PopVerify(v.PubkeyBLS, v.PopSignature)
+			if err != nil || !ok {
+				return fmt.Errorf("chain %d: proof-of-possession verification failed for a committee member: %w", reg.ChainID, err)
+			}
+		}
+		registries[reg.ChainID] = reg
+	}
+
+	if g.ChainRegistry == nil {
+		g.ChainRegistry = make(map[uint64]ChainRegistry)
+	}
+	for chainID, reg := range registries {
+		g.ChainRegistry[chainID] = reg
+		g.Governance.RegisterActiveChain(chainID)
+	}
+	return nil
+}
+
 // ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
 // mutates GatewayEngine state (ChainRegistry onboarding/offboarding, dead chains, asset registration).
 func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, currentTimestamp uint64) (*GovernanceProposal, error) {

@@ -261,6 +261,50 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    first (a 5-line throwaway `go run` is enough, as done here) — this is the same
    "what would make this pass without the real thing being true" discipline this doc
    already asks for in code, just applied to generated config/payloads too.
+
+   **New sub-item found continuing this work — genesis governance deadlock, fixed:**
+   `GovernanceEngine.Vote` requires the voter to already be a member of `engine.ChainRegistry`
+   (`gateway_handler.go`'s "vote" case looks up the signer's committee there), and
+   `ExecuteGovernanceProposal`'s `ProposalRegisterChain` case requires a proposal to have
+   already passed a vote — so a fresh Root Anchor (`ChainRegistry` always starts empty, see
+   `NewGatewayEngine`'s call site) has **no path to register its first chain through
+   governance at all**, confirmed by tracing the code and by hitting it live (submitted real
+   `propose()` transactions for chains 101-104 against a running Root Anchor — see PR
+   `fix/cross-chain-refund-authorization` — they landed on-chain but can never be voted on).
+   Added `GatewayEngine.BootstrapFoundingChains([]byte payloads)` /
+   `bootstrapFoundingChains(bytes[])`: seeds `ChainRegistry`/`ActiveChains` directly, once,
+   requires `>= MinFoundingChains` (4, matching mục 1.3 #5) and real PoP for every committee
+   member, and is self-closing — the moment it succeeds `ActiveChains` is non-empty, so it can
+   never be called again by anyone. 5 new tests in `root_anchor_bootstrap_test.go` cover
+   success, <4 chains, duplicate chain ID, forged PoP, and the self-close guarantee — all real
+   BLS, no shortcuts.
+
+   **Investigated live, root cause found — environmental, not a code bug:** restarting the
+   local 4-validator Root Anchor devnet from persisted state appeared to hang (no new blocks,
+   silent Go-side log, one validator's RSS climbing unbounded). Ruled out with real evidence
+   before concluding anything: Go goroutine dump (`/debug/pprof/goroutine`) showed only the
+   normal idle worker pools (300/200 chan-receive goroutines matching
+   `NumInjectionWorkers`/`NumReadTxWorkers` exactly, nothing duplicated); Go heap profile
+   showed a tiny, stable ~67MB heap — the multi-GB RSS growth is entirely native/CGo-side, not
+   a Go leak; disk write throughput measured at 662MB/s (not I/O-bound); `ulimit -u` has huge
+   headroom (only ~1000 of 771041 threads in use). `gdb`/`ptrace` were unavailable in the
+   sandbox (`yama/ptrace_scope=1`, no passwordless sudo) so a Rust-side stack trace couldn't be
+   taken directly. What DID explain it: this machine (104 cores, 188GB RAM) has an unrelated,
+   pre-existing systemd service, `metanode-execution-3.service` (owned by system user
+   `metanode`, not this session's user) — running for 1+ day, consuming **653% CPU
+   (6.5+ cores) and 110GB RSS (peak 116.6GB)** continuously. This matches this project's own
+   prior session notes describing leftover crash-loop test artifacts on this shared machine,
+   unrelated to any cross-chain work. Left running at the user's explicit instruction (not this
+   session's to touch — needs sudo the assistant doesn't have anyway). **Net effect: the
+   bootstrap fix above is verified by its 5 real unit tests; a live multi-validator run is
+   still not done, but the blocker is this shared machine's resource contention, not a defect
+   in `BootstrapFoundingChains` or the Rust startup-sync path** (`startup_sync.rs` was read in
+   full during this investigation looking for an infinite-retry bug — its retry loops are all
+   properly bounded, e.g. `MAX_VERIFY_RETRIES=10`/`MAX_ISOLATION_ROUNDS=60`, not the culprit).
+   Whoever revisits this: get the noisy neighbor process stopped or run T2 on dedicated
+   hardware/VMs (this doc's own Phase 2 T2 row already calls for "separate machines/VMs" —
+   this finding is a concrete reason why, not just a nice-to-have) before spending more time
+   chasing this as a code issue.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make

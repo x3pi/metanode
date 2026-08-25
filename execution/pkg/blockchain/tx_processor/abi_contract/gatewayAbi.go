@@ -26,6 +26,16 @@ package abi_contract
 // signature shares (no new P2P, no Rust changes — see
 // execution/pkg/blockchain/tx_processor/committee_attestation_worker.go and
 // execution/pkg/cross_chain/epoch_sync.go's ComputeCommitteeUpdateDigest).
+//
+// bootstrapFoundingChains() was added while running a real T2 devnet smoke-test: a Root Anchor
+// starts with zero ChainRegistry entries (NewGatewayEngine is always called with an empty
+// registry — see gateway_handler.go's loadGatewayEngine), but GovernanceEngine.Vote requires the
+// voter to already be a ChainRegistry member and ExecuteGovernanceProposal's
+// ProposalRegisterChain case requires a proposal to have already passed a vote — a genuine
+// circular dependency with no path to register the very first chains through governance alone.
+// See GatewayEngine.BootstrapFoundingChains's doc comment (pkg/cross_chain/gateway.go) for the
+// full design rationale (mirrors the >= MinFoundingChains requirement of the real
+// founding_entry.json/assemble_root_anchor ceremony, and is self-closing after first use).
 const GatewayABI = `[
 	{
 		"inputs": [
@@ -238,6 +248,15 @@ const GatewayABI = `[
 			{"internalType": "bytes", "name": "aggSignature", "type": "bytes"}
 		],
 		"name": "committeeUpdate",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes[]", "name": "payloads", "type": "bytes[]"}
+		],
+		"name": "bootstrapFoundingChains",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
