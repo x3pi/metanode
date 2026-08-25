@@ -19,6 +19,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/utils"
 	"github.com/meta-node-blockchain/meta-node/types"
+	"math/big"
 )
 
 // VmProcessor struct now includes a flag to control tracing internally.
@@ -464,17 +465,20 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 	tx types.Transaction,
 	mvmE mvm.ExecutionEngine,
 	operationType uint64, // 0: mint, 1: burn
+	amount *big.Int,
+	from common.Address,
+	to common.Address,
 ) (*mvm.MVMExecuteResult, error) {
-	var span *trace.Span = nil        // Khởi tạo nil
+	var span *trace.Span = nil // Khởi tạo nil
 	lastBlockHeader := *vmP.chainState.GetcurrentBlockHeader()
 
 	if vmP.tracingEnabled { // Chỉ tạo span nếu flag processor bật
 		var actualSpan *trace.Span
 		_, actualSpan = trace.StartSpan(ctx, "VmProcessor.processNativeMintBurn", map[string]interface{}{
 			"mvmId":         mvmE.GetKey().Hex(),
-			"from":          tx.FromAddress().Hex(),
-			"to":            tx.ToAddress().Hex(),
-			"value":         tx.Amount().String(),
+			"from":          from.Hex(),
+			"to":            to.Hex(),
+			"value":         amount.String(),
 			"gasLimit":      tx.MaxGas(),
 			"gasPrice":      tx.MaxGasPrice(),
 			"operationType": operationType, // 0: mint, 1: burn
@@ -505,17 +509,17 @@ func (vmP *VmProcessor) ProcessNativeMintBurn(
 	// Determine from and to addresses based on operation type
 	var bFrom, bTo []byte
 	if operationType == 1 { // burn operation: burn from 'from' address
-		bFrom = tx.FromAddress().Bytes()
-		bTo = tx.ToAddress().Bytes()
+		bFrom = from.Bytes()
+		bTo = to.Bytes()
 	} else { // mint operation: mint to 'to' address (from system)
 		// For mint, we use a system address as 'from'
 		systemAddr := common.HexToAddress("0x000000000000000000000000000000000000MINT")
 		bFrom = systemAddr.Bytes()
-		bTo = tx.ToAddress().Bytes()
+		bTo = to.Bytes()
 	}
 
 	mvmResult := mvmE.ProcessNativeMintBurn( // Call MVM ProcessNativeMintBurn
-		bFrom, bTo, tx.Amount(), operationType, tx.MaxGasPrice(), maxGas,
+		bFrom, bTo, amount, operationType, tx.MaxGasPrice(), maxGas,
 		lastBlockHeader.TimeStamp(), mt_common.BLOCK_GAS_LIMIT, vmP.blockTime, mt_common.MINIMUM_BASE_FEE,
 		lastBlockHeader.BlockNumber()+1, vmP.getLeaderAddress(lastBlockHeader), mvmE.GetKey(),
 		false,

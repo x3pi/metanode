@@ -22,8 +22,18 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 
 **Cổng bắt buộc trước khi cho giá trị thật chạy qua Root Anchor** (không phải gợi ý, là điều
 kiện chặn — xem `note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
+0. **🔴 QUAN TRỌNG NHẤT, phát hiện 2026-08-25:** lớp xác minh mật mã (BLS/Merkle/anti-fraud)
+   đã xong và test kỹ, nhưng **chưa một dòng code nào thực sự di chuyển giá trị thật** —
+   `outbound()`/`claimMessage()`/`verifyAndExecute()`/`refund()`/`claimDeadChainBalance()`
+   chỉ sửa 1 ledger nội bộ trong bộ nhớ, chưa bao giờ gọi
+   `AccountStateDB.AddBalance`/`SubBalance` hay `VmProcessor.ProcessNativeMintBurn` (hàm đã
+   có sẵn, đúng như kiến trúc mô tả, nhưng 0 nơi gọi nó). Nghĩa là: mọi lần "chuyển tiền liên
+   chuỗi thành công" trong test/devnet từ trước tới nay chưa bao giờ thực sự đổi số dư của
+   ai. Kế hoạch vá đầy đủ: `note/cross_chain_full_implementation_plan.md` Task 1 — đây là
+   việc lớn nhất, phải xong **trước** mọi mục 1-4 dưới đây, vì các mục đó đều giả định tính
+   năng di chuyển giá trị đã tồn tại.
 1. P5 — security review độc lập cho toàn bộ luồng verify (BLS + Merkle + replay + double-mint
-   qua refund + xác thực origin sender 2 chiều) — **chưa làm**.
+   qua refund + xác thực origin sender 2 chiều **+ toàn bộ code mới ở mục 0**) — **chưa làm**.
 2. Đã chạy thật trên **nhiều máy vật lý/VM độc lập** (không phải devnet 1 máy) đủ lâu để quan
    sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**, xem mục 6 bên
    dưới về lý do lần chạy gần nhất bị chặn bởi tài nguyên máy chia sẻ.
@@ -34,6 +44,9 @@ kiện chặn — xem `note/cross_chain_root_anchor_architecture.md` mục 8, l�
    `register_private_chains_t2.py` (`RELAYER_KEY` / `dev_priv_key`) — đây là khoá devnet công
    khai trong repo public, **không bao giờ được dùng cho relayer/submitter thật** — xem mục
    5.4 và mục 7.
+
+**Việc cần làm tiếp theo, đầy đủ, theo thứ tự:** `note/cross_chain_full_implementation_plan.md`
+— viết cho 1 agent/dev mới hoàn toàn để triển khai hết các mục trên.
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
 dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — dừng ở đây,
@@ -315,6 +328,7 @@ thế trở nên bất khả thi về mặt cấu trúc thay vì chỉ có thể
 | :--- | :--- |
 | Kiến trúc thiết kế đầy đủ cross-chain | `note/cross_chain_root_anchor_architecture.md` |
 | Tiến độ, bug đã sửa, lộ trình P0-P8 | `note/cross_chain_production_readiness_plan.md` |
+| Kế hoạch triển khai đầy đủ (code còn thiếu, cho agent khác thực hiện) | `note/cross_chain_full_implementation_plan.md` |
 | Lễ khai sinh Root Anchor nhiều tổ chức | `note/runbook_root_anchor_genesis_ceremony.md` |
 | Vận hành 1 private chain đơn (Ansible) | `deploy/ansible/README.md` |
 | Cụm nhiều node 1 máy (systemd) | `deploy/systemd/docs/systemd-cluster.md` |
