@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-24
+> **Last updated:** 2026-08-25
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -219,8 +219,8 @@ metanode/
 | `snapshot/` | State snapshot/restore | 🟡 MED — large I/O |
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
-| `proto/` | gRPC proto definitions | 🟢 LOW |
-| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayPrecompile, Governance, Relayer reference implementation (P0-P4) | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine, GovernanceEngine, AssetRegistryEngine, Ceremony, Root Anchor RPC client, and Relayer implementation (Milestones A-H) | 🟢 LOW |
+| `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 
 ---
 
