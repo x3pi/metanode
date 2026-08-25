@@ -54,7 +54,8 @@ func TestGatewayHandler_Vote_RejectsUnauthenticatedImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalDeclareChainDead), payload, uint64(100))
 	require.NoError(t, err)
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
+	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
 	require.False(t, failed)
 	out, err := h.abi.Unpack("propose", rcp.Return())
 	require.NoError(t, err)
@@ -129,7 +130,8 @@ func TestGatewayHandler_Governance_OnboardNewChainLifecycle(t *testing.T) {
 	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalRegisterChain), payload, proposedAt)
 	require.NoError(t, err)
 
-	proposeTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, proposeCalldata))
+	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
+	proposeTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata))
 	rcp, _, failed := h.HandleTransaction(context.Background(), cs, proposeTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, proposedAt)
 	require.False(t, failed)
 	require.NotNil(t, rcp)
@@ -234,7 +236,8 @@ func TestGatewayHandler_Governance_AssetRegistrationLifecycle(t *testing.T) {
 	// Propose asset
 	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalRegisterAsset), payload, uint64(100))
 	require.NoError(t, err)
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
+	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
 	require.False(t, failed)
 	out, err := h.abi.Unpack("propose", rcp.Return())
 	require.NoError(t, err)

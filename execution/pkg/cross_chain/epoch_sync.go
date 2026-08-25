@@ -51,6 +51,22 @@ func ComputeCommitRootAttestMessage(commitRoot common.Hash) []byte {
 	return buf
 }
 
+// MessageFailureAttestDomainTag domain-separates the payload a destination chain committee signs
+// to attest that a specific cross-chain message failed execution on the destination chain (P2.4).
+var MessageFailureAttestDomainTag = []byte("MESSAGE_FAILURE_ATTEST_V1:")
+
+// ComputeMessageFailureAttestMessage computes the domain-separated message payload a destination chain
+// committee signs to attest execution failure for messageID on destChainID.
+func ComputeMessageFailureAttestMessage(messageID common.Hash, destChainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, MessageFailureAttestDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], destChainID)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, messageID.Bytes()...)
+	return buf
+}
+
 // GovernanceVoteDomainTag domain-separates the payload a committee member signs to cast their
 // chain's single governance vote (Milestone G security fix), distinct from every other signed
 // payload in this package so a signature over one can never be replayed as another.

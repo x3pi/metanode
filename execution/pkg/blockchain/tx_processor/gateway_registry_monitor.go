@@ -2,6 +2,7 @@ package tx_processor
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 )
 
 // GatewayRegistryMonitor periodically compares this chain's locally-committed (consensus-agreed)
@@ -113,6 +115,9 @@ func (m *GatewayRegistryMonitor) poll(ctx context.Context) {
 			lag := remote.Epoch - localEntry.Epoch
 			logger.Warn("⚠️ [ROOT ANCHOR MONITOR] chain %d: local ChainRegistry epoch=%d is %d epochs behind Root Anchor epoch=%d — needs CommitteeUpdate catch-up transactions (Milestone C)",
 				chainID, localEntry.Epoch, lag, remote.Epoch)
+			metrics.GatewayRegistryDriftEpochs.WithLabelValues(fmt.Sprintf("%d", chainID)).Set(float64(lag))
+		} else {
+			metrics.GatewayRegistryDriftEpochs.WithLabelValues(fmt.Sprintf("%d", chainID)).Set(0)
 		}
 	}
 }

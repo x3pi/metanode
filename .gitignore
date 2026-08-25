@@ -490,3 +490,13 @@ private_chain_3node/
 .aarch64-xapian-extract/
 simple_chain-aarch64
 .board_bundle/
+
+# Root Anchor / cross-chain T2 testnet local artifacts — generated validator/dev
+# private keys (single_chain_data/*/keys/*.json, eth_key.json) must never be
+# committed to this public repo, and the compiled tool binaries don't belong
+# in source control either.
+single_chain_data/
+eth_key.json
+deploy/systemd/root_anchor_data/
+deploy/systemd/register_chains
+deploy/systemd/cross_chain_relayer

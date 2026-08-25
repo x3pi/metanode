@@ -97,6 +97,12 @@ var (
 		Name: "master_peers_connected",
 		Help: "Number of connected peers",
 	})
+
+	// GatewayRegistryDriftEpochs tracks how many epochs the local ChainRegistry is behind Root Anchor.
+	GatewayRegistryDriftEpochs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "master_gateway_registry_drift_epochs",
+		Help: "Number of epochs the local ChainRegistry is behind Root Anchor (by chain_id)",
+	}, []string{"chain_id"})
 )
 
 // ─── Histograms ──────────────────────────────────────────────────────────────

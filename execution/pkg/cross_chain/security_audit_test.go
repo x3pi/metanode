@@ -278,17 +278,69 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, MessageStatusSuccess, status)
 
+	// Create valid destination failure cert
+	failMsg := ComputeMessageFailureAttestMessage(msg.MessageID, 102)
+	failSig := bls.Sign(kp.PrivateKey(), failMsg)
+	destFailureCert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+
 	// Step 2: Attacker tries to submit a Refund for the same claimed message (Double-Mint Attack)
-	errRefundAttack := engine.Refund(msg.MessageID, 102, sender, big.NewInt(300), true)
+	errRefundAttack := engine.Refund(*msg, proof, commitRoot, destFailureCert)
 	assert.ErrorIs(t, errRefundAttack, ErrInvalidRefundState, "Refund on already claimed message must be blocked")
 
-	// Step 3: Refund with fake/invalid failed execution proof
+	// Step 3: Attacker tries to mint free allocation via forged unused messageID
+	forgedMsg := *msg
+	forgedMsg.MessageID = common.HexToHash("0xDEADC001DEADC001DEADC001DEADC001DEADC001DEADC001DEADC001DEADC001")
+	errForgedMsg := engine.Refund(forgedMsg, proof, commitRoot, destFailureCert)
+	assert.Error(t, errForgedMsg, "Refund on forged/uncommitted message must fail closed")
+
+	// Create a second, un-claimed message to test Merkle proof and BLS verification specifically
 	txHash2 := common.HexToHash("0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
-	msg2, err := engine.Outbound(sender, params, txHash2)
+	msgPending, err := engine.Outbound(sender, params, txHash2)
 	require.NoError(t, err)
 
-	errInvalidProof := engine.Refund(msg2.MessageID, 102, sender, big.NewInt(300), false)
-	assert.ErrorIs(t, errInvalidProof, ErrInvalidRefundProof, "Refund with invalid proof must be rejected")
+	commitRoot2, layers2, aggAmounts2, aggIndex2, errTree2 := BuildCommitTree([]CrossChainMessage{*msgPending})
+	require.NoError(t, errTree2)
+	proof2 := GetMerkleProof(layers2, 0)
+	aggregateProof2 := GetMerkleProof(layers2, aggIndex2["0"])
+
+	commitMsg2 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot2.Bytes()...)
+	sig2 := bls.Sign(kp.PrivateKey(), commitMsg2)
+	cert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig2.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	_, err = engine.AttestCommit(102, commitRoot2, aggAmounts2["0"], big.NewInt(0), aggregateProof2, cert2)
+	require.NoError(t, err)
+
+	failMsg2 := ComputeMessageFailureAttestMessage(msgPending.MessageID, 102)
+	failSig2 := bls.Sign(kp.PrivateKey(), failMsg2)
+	destFailureCert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig2.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+
+	// Step 4: Attacker tries to inflate refund amount -> Merkle proof fails
+	forgedAmountMsg := *msgPending
+	forgedAmountMsg.Value = big.NewInt(999999999)
+	errForgedAmount := engine.Refund(forgedAmountMsg, proof2, commitRoot2, destFailureCert2)
+	assert.ErrorIs(t, errForgedAmount, ErrInvalidMerkleProof, "Refund with forged amount must fail Merkle check")
+
+	// Step 5: Attacker provides fake failure cert -> BLS verification fails
+	fakeCert := destFailureCert2
+	fakeCert.AggregateSignature = bls.Sign(bls.GenerateKeyPair().PrivateKey(), failMsg2).Bytes()
+	errInvalidProof := engine.Refund(*msgPending, proof2, commitRoot2, fakeCert)
+	assert.ErrorIs(t, errInvalidProof, ErrInvalidRefundProof, "Refund with invalid failure cert must be rejected")
+
+	// Step 6: Valid refund on pending message -> SUCCESS
+	errValidRefund := engine.Refund(*msgPending, proof2, commitRoot2, destFailureCert2)
+	require.NoError(t, errValidRefund)
+	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msgPending.MessageID))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

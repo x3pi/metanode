@@ -23,6 +23,132 @@ security review has happened. **3 critical bugs found across 2 internal review p
 freshly-written code is a base rate, not bad luck** — do not skip the gates below to save
 time, and stay suspicious of any new cryptographic/authorization code the same way.
 
+---
+
+## Phase 0.5 — critical finding + in-progress work, found and FIXED same day (2026-08-25, 3rd review pass)
+
+> ✅ **RESOLVED 2026-08-25, same day as found.** Item 1's fix (real `MerkleProof` +
+> destination `QuorumCert` binding, `VerifyQuorumCertAgainstRegistry` extracted and reused,
+> `ProcessRefund`'s redundant unchecked Reserve credit removed) is committed in the **same
+> commit/PR** as this writeup — satisfies the responsible-disclosure rule below, which is
+> kept as the record of why this section was held back from `git commit`/push until the fix
+> landed. Verified before commit: `go build ./...`, `go vet ./...`, `gofmt -l` clean, full
+> `go test ./...` (whole `execution/` module) 100% pass including the new exploit-reproduction
+> regression tests in `security_audit_test.go`'s `TestAudit_AntiDoubleMintViaRefundRaceGuard`;
+> `cargo build --release` clean for the `consensus/metanode/src/config.rs` change. Items 2
+> and 3 below are also fixed (register_chains tool rewritten and compiles; propose() fee
+> tests updated, all pass).
+>
+> **Original responsible-disclosure note (kept for context):** `x3pi/metanode` is a
+> **public** GitHub repo — item 1 documented a live, unpatched, exact-reproduction-steps
+> exploit against code already on `dev`. The rule that applied while unfixed: never
+> `git commit`/`push`/open a PR containing this section unless the fix is included in that
+> same commit/PR; keep it local/uncommitted otherwise. That gate is why this file sat
+> uncommitted from when the bug was found until the fix above landed.
+
+Found while reviewing the current state ahead of a T2 testnet push. Item 1 is the same bug
+shape as PR #56/#58 (see `git log`/PR history for the exact fix commit once pushed).
+
+### 1. CRITICAL (FIXED) — `GatewayEngine.Refund()` minted allocation from nothing
+
+`execution/pkg/cross_chain/gateway.go:638-673`. This is the **4th instance of the exact
+same bug class** as PR #56 (Milestone E `attestCommit`) and PR #58 (Phase 0
+`claimDeadChainBalance`): a value that must be cryptographically bound to committee-attested
+state is instead trusted directly from the caller.
+
+```go
+func (g *GatewayEngine) Refund(
+    messageID common.Hash, sourceChainID uint64, sender common.Address,
+    amount *big.Int, isFailedProofValid bool,
+) error {
+    ...
+    if !isFailedProofValid {                 // ← caller-supplied bool, zero crypto/state checks
+        return ErrInvalidRefundProof
+    }
+    g.MessageStatus[messageID] = MessageStatusRefunded
+    ...
+    g.SupplyLedger.PerChainAllocation[sourceChainID] =        // ← raw add, no matching debit anywhere,
+        new(big.Int).Add(currAlloc, amount)                   //   no VerifyInvariant() call (contrast
+                                                                //   with TransferAllocation, types.go:131,
+                                                                //   used correctly by ClaimDeadChainBalance)
+```
+
+**Exploit:** call `refund` (`gateway_handler.go:338`, reachable as a normal write tx, no
+extra auth) with any never-before-seen `messageID`, any `sourceChainID`, any `amount`, and
+`isFailedProofValid=true`. `MessageStatus[messageID]` defaults to `Pending` for an unknown
+ID, so the status check passes trivially; the bool check passes trivially; `amount` is
+credited to that chain's `per_chain_allocation` with nothing debited anywhere. That
+inflated allocation then passes `AttestCommit`'s ceiling check
+(`gateway.go:516`), letting far more value be bridged out of that chain than it was ever
+entitled to. `RelayerEngine.ProcessRefund` (`relayer.go:587,600`) makes it worse: it
+forwards the same unverified bool into `Refund()` *and* separately applies a second,
+independent unchecked credit to Reserve's own ledger from one call.
+
+`security_audit_test.go:290`'s existing `Refund` test ("Anti-Double-Mint via Refund
+Pathway Race Guard") only covers the double-claim race and the trivial
+`isFailedProofValid=false` rejection — it never exercises the real attack (unused
+messageID + `true`), so CI is currently green despite this being live.
+
+**Why this needs a design decision, not a quick patch (stop and confirm before
+implementing, per this doc's own "how to work" section):** unlike `AttestCommit`/
+`ClaimMessage`, there is currently **no per-message ledger entry** recording how much was
+reserved for a specific `messageID` — `attestCommitInternal` (gateway.go:516-521) debits
+`sourceChainID` for the whole commit's `aggregateAmount` in one shot; `ClaimMessage`
+(gateway.go:602-607) credits `LocalChainID` per message, capped in total by
+`AttestedCommit.FundedAmount`. So a correct fix needs `Refund()` to take a real
+`CrossChainMessage` + `MerkleProof` (bound to an already-`AttestedCommit`'s `commitRoot`,
+the same way `ClaimMessage` does) so `amount` can't be fabricated, **plus** a real
+`QuorumCert` from the *destination* chain's committee attesting that this specific message
+genuinely failed execution there — this is exactly what
+`note/cross_chain_root_anchor_architecture.md` mục 2.4 originally specified ("relayer lấy
+quorum cert của B xác nhận message X FAILED, mang về A") and what got short-circuited with
+a trust-the-caller bool. The destination-attests-failure digest/QuorumCert wire format
+isn't designed yet — that's the actual open question, same category as Phase 0's
+`AccountTreeRoot` decision. Also decide: does `ProcessRefund`'s second, independent Reserve
+credit make sense at all once `Refund()` itself is fixed, or was it compensating for the
+same gap and should be removed?
+
+**Definition of done:** `Refund()` fails closed on a forged/unused messageID or a message
+that was never part of any attested commit; a new regression test proves the exact
+exploit above (unused messageID, arbitrary amount, `isFailedProofValid=true`) is rejected,
+following the "what would make this test pass without the real thing being true"
+philosophy from this doc's own testing section. PR title should follow the existing
+`fix(cross-chain): ...` convention; this is Phase 0's sibling, not a Phase 1 item.
+
+### 2. (FIXED) `execution/cmd/tool/register_chains/main.go` was corrupted, doesn't compile
+
+New/untracked, does not compile: `go build ./...` fails with `package base64 is not in
+std` and `package io/outintil is not in std`, and the `gatewayAbiJSON` string literal in
+this file is corrupted (binary garbage from roughly line 33 onward, not valid JSON) —
+this isn't a typo, the file needs to be rewritten. Recommend reusing the existing, already
+machine-verified ABI in `execution/pkg/blockchain/tx_processor/abi_contract/gatewayAbi.go`
+instead of hand-duplicating the ABI JSON a second time (avoids this exact class of
+corruption happening again). Confirm what this tool is for (name suggests: register the
+private chains created by `deploy/systemd/register_private_chains_t2.py/sh` — also new,
+uncommitted — with Root Anchor) and finish it as part of the Phase 1 item 2 deployment
+tooling smoke-test, since it looks like part of the same T2 prep work.
+
+### 3. (FIXED) `propose()` anti-spam fee had broken 4 existing tests
+
+`execution/pkg/blockchain/tx_processor/gateway_handler.go` now requires `tx.Amount() >=
+0.1 native token` for `propose` (addresses Phase 1 item 4's open question — good, but
+needs finishing). Currently breaks, because they call `propose` with zero value:
+`TestGatewayHandler_ClaimDeadChainBalance_Lifecycle`,
+`TestGatewayHandler_Vote_RejectsUnauthenticatedImpersonation`,
+`TestGatewayHandler_Governance_OnboardNewChainLifecycle`,
+`TestGatewayHandler_Governance_AssetRegistrationLifecycle` (all in
+`pkg/blockchain/tx_processor/`, confirmed via `go test ./pkg/blockchain/tx_processor/...`).
+Update these tests to attach the fee, and double check the hardcoded
+`100_000_000_000_000_000` constant matches this project's actual native-coin decimals
+convention (confirm against `mt_common`'s existing amount constants rather than assuming
+18 decimals). Per this doc's own verification bar, this must not land with red tests.
+
+### Verification bar for all three items above
+
+Same as the rest of this document: `go build ./... && go vet ./... && go test ./...` from
+`execution/` zero regressions, each fix has a regression test proving the specific issue,
+PR via `gh` off a branch from `dev`, no self-merge.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to

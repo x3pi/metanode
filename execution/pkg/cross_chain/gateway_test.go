@@ -203,20 +203,110 @@ func TestGateway_P2_3_1_HardCapCommitCapacityDefense(t *testing.T) {
 }
 
 func TestGateway_P2_4_RefundPathwayAndSupplyRestoration(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	msgID := common.HexToHash("0x7777777777777777777777777777777777777777777777777777777777777777")
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+	pop101 := PopSign(kp101.PrivateKey(), kp101.PublicKey())
+	pop102 := PopSign(kp102.PrivateKey(), kp102.PublicKey())
+
+	registry := map[uint64]ChainRegistry{
+		101: {
+			ChainID: 101,
+			Committee: []ValidatorEntry{
+				{PubkeyBLS: kp101.BytesPublicKey(), Stake: 10000, PopSignature: pop101.Bytes()},
+			},
+			Epoch:           5,
+			QuorumThreshold: 6667,
+		},
+		102: {
+			ChainID: 102,
+			Committee: []ValidatorEntry{
+				{PubkeyBLS: kp102.BytesPublicKey(), Stake: 10000, PopSignature: pop102.Bytes()},
+			},
+			Epoch:           5,
+			QuorumThreshold: 6667,
+		},
+	}
+
+	allocs := map[uint64]*big.Int{
+		101: big.NewInt(5000),
+		102: big.NewInt(5000),
+	}
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(10000), allocs)
+	require.NoError(t, err)
+
+	engine := NewGatewayEngine(101, registry, ledger)
+
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	txHash := common.HexToHash("0x7777777777777777777777777777777777777777777777777777777777777777")
+
+	msg, err := engine.Outbound(sender, OutboundParams{
+		DestChainID: 102,
+		Target:      target,
+		Payload:     []byte{1, 2, 3},
+		AssetID:     big.NewInt(0),
+		Value:       big.NewInt(100),
+		Tip:         big.NewInt(5),
+		HopCount:    1,
+		Ordered:     false,
+	}, txHash)
+	require.NoError(t, err)
+
+	// Build commit tree with the message
+	messages := []CrossChainMessage{*msg}
+	commitRoot, layers, aggAmounts, aggIndex, err := BuildCommitTree(messages)
+	require.NoError(t, err)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	// Attest commit on chain 101
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
+	sig101 := bls.Sign(kp101.PrivateKey(), commitMsg)
+	cert101 := QuorumCert{
+		Epoch:              5,
+		AggregateSignature: sig101.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
+	_, err = engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101)
+	require.NoError(t, err)
+
+	// Destination (102) fails and signs failure cert
+	failMsg := ComputeMessageFailureAttestMessage(msg.MessageID, 102)
+	failSig := bls.Sign(kp102.PrivateKey(), failMsg)
+	destFailureCert := QuorumCert{
+		Epoch:              5,
+		AggregateSignature: failSig.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
 
 	allocBefore := new(big.Int).Set(engine.SupplyLedger.PerChainAllocation[101])
 
-	// First Refund -> Success and Restores Allocation (+100)
-	err := engine.Refund(msgID, 101, sender, big.NewInt(100), true)
+	// Attack 1: Forged/unused messageID -> MUST REJECT
+	forgedMsg := *msg
+	forgedMsg.MessageID = common.HexToHash("0xFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	errForged := engine.Refund(forgedMsg, proof, commitRoot, destFailureCert)
+	assert.Error(t, errForged, "Refund with forged messageID must be rejected")
+
+	// Attack 2: Forged amount in message -> Merkle proof MUST REJECT
+	forgedAmountMsg := *msg
+	forgedAmountMsg.Value = big.NewInt(999999)
+	errForgedAmount := engine.Refund(forgedAmountMsg, proof, commitRoot, destFailureCert)
+	assert.ErrorIs(t, errForgedAmount, ErrInvalidMerkleProof, "Refund with forged amount must fail Merkle check")
+
+	// Attack 3: Forged destination failure cert -> BLS verification MUST REJECT
+	forgedCert := destFailureCert
+	forgedCert.AggregateSignature = bls.Sign(bls.GenerateKeyPair().PrivateKey(), failMsg).Bytes()
+	errForgedCert := engine.Refund(*msg, proof, commitRoot, forgedCert)
+	assert.ErrorIs(t, errForgedCert, ErrInvalidRefundProof, "Refund with forged failure cert must be rejected")
+
+	// Valid Refund -> Success and Restores Allocation (+100)
+	err = engine.Refund(*msg, proof, commitRoot, destFailureCert)
 	require.NoError(t, err)
-	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msgID))
+	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msg.MessageID))
 	assert.Equal(t, new(big.Int).Add(allocBefore, big.NewInt(100)), engine.SupplyLedger.PerChainAllocation[101])
 
 	// Second Refund -> MUST REJECT (Already refunded)
-	errDup := engine.Refund(msgID, 101, sender, big.NewInt(100), true)
+	errDup := engine.Refund(*msg, proof, commitRoot, destFailureCert)
 	assert.ErrorIs(t, errDup, ErrInvalidRefundState)
 }
 

@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/state"
 )
 
 // ──────────────────────────────────────────────
@@ -59,6 +61,27 @@ func TestLoadGenesisData_ValidFile(t *testing.T) {
 	assert.Equal(t, 5, genesis.Config.Epoch)
 	assert.Empty(t, genesis.Validators)
 	assert.Empty(t, genesis.Alloc)
+}
+
+func TestLoadGenesisData_RootAnchor(t *testing.T) {
+	filePath := "/home/abc/chain-n/metanode/deploy/systemd/root_anchor_data/genesis.json"
+	genesis, err := LoadGenesisData(filePath)
+	require.NoError(t, err)
+	require.NotNil(t, genesis)
+
+	var targetAlloc *state.JsonAccountState
+	for _, a := range genesis.Alloc {
+		if a.Address == "0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366" {
+			targetAlloc = &a
+			break
+		}
+	}
+	require.NotNil(t, targetAlloc, "account 0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366 must exist in genesis alloc")
+	assert.Equal(t, "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184", targetAlloc.PublicKeyBls)
+
+	as := targetAlloc.ToAccountState()
+	assert.NotEmpty(t, as.PublicKeyBls(), "ToAccountState must parse PublicKeyBls")
+	assert.Len(t, as.PublicKeyBls(), 48)
 }
 
 func TestLoadGenesisData_WithValidators(t *testing.T) {

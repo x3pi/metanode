@@ -110,7 +110,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if err := json.Unmarshal(data, &engine); err != nil {
 		return nil, fmt.Errorf("unmarshal GatewayEngine state: %w", err)
 	}
-	engine.LocalChainID = localChainID
+	if localChainID != 0 {
+		engine.LocalChainID = localChainID
+	}
 	if engine.SupplyLedger == nil {
 		emptyLedger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
 		if err != nil {
@@ -336,8 +338,41 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "refund":
-		if err := engine.Refund(mustHash(args[0]), mustUint64(args[1]), mustAddress(args[2]), mustBigInt(args[3]), mustBool(args[4])); err != nil {
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustBigInt(args[3]).Uint64(),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			Ordered:       mustBool(args[11]),
+		}
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[12]).Uint64(),
+			Siblings:  mustHashSlice(args[13]),
+		}
+		commitRoot := mustHash(args[14])
+		failCert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[15]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[16])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[17])),
+		}
+		if err := engine.Refund(msg, proof, commitRoot, failCert); err != nil {
 			return nil, nil, err
+		}
+		if event, ok := h.abi.Events["MessageRefunded"]; ok {
+			eventData, packErr := event.Inputs.NonIndexed().Pack(msg.Value)
+			if packErr == nil {
+				eventLogs = append(eventLogs, smart_contract.NewEventLog(
+					tx.Hash(), tx.ToAddress(), eventData,
+					[][]byte{event.ID.Bytes(), msg.MessageID.Bytes()},
+				))
+			}
 		}
 
 	case "registerCommitteePop":
@@ -567,6 +602,13 @@ func (h *GatewayHandler) handleWrite(
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
 	case "propose":
+		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose
+		fee := tx.Amount()
+		requiredFee := big.NewInt(100_000_000_000_000_000) // 0.1 native token
+		if fee == nil || fee.Cmp(requiredFee) < 0 {
+			return nil, nil, fmt.Errorf("propose requires a fee of at least 0.1 native tokens to prevent spam (got %v)", fee)
+		}
+
 		engine.EnsureGovernance()
 		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
 		payload := mustBytes(args[1])

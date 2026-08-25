@@ -568,37 +568,23 @@ func (r *RelayerEngine) CompeteRelayers(
 
 // ProcessRefund executes the automated refund pipeline when destination execution fails (P2.4 & Scenario 10.3).
 func (r *RelayerEngine) ProcessRefund(
-	sourceChainID uint64,
-	destChainID uint64,
-	messageID common.Hash,
-	sender common.Address,
-	amount *big.Int,
-	isFailedProofValid bool,
+	message CrossChainMessage,
+	messageProof MerkleProof,
+	commitRoot common.Hash,
+	destFailureCert QuorumCert,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	sourceEngine, exists := r.Chains[sourceChainID]
+	sourceEngine, exists := r.Chains[message.SourceChainID]
 	if !exists {
-		return fmt.Errorf("source chain %d not found", sourceChainID)
+		return fmt.Errorf("source chain %d not found", message.SourceChainID)
 	}
 
-	// Refund on source chain
-	err := sourceEngine.Refund(messageID, sourceChainID, sender, amount, isFailedProofValid)
+	// Refund on source chain with full cryptographic proof
+	err := sourceEngine.Refund(message, messageProof, commitRoot, destFailureCert)
 	if err != nil {
 		return fmt.Errorf("source refund failed: %w", err)
-	}
-
-	// Restore allocation on Reserve if value was routed through Reserve
-	if amount != nil && amount.Sign() > 0 {
-		reserveEngine, reserveExists := r.Chains[r.Config.ReserveChainID]
-		if reserveExists {
-			currAlloc, has := reserveEngine.SupplyLedger.PerChainAllocation[sourceChainID]
-			if !has {
-				currAlloc = big.NewInt(0)
-			}
-			reserveEngine.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Add(currAlloc, amount)
-		}
 	}
 
 	return nil
