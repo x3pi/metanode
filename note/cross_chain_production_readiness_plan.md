@@ -342,6 +342,70 @@ blocker below is resolved to close this out fully.
    start (start node_0, wait for it to be ready, then node_1, etc.) to test the race-condition
    theory before diving into Rust source.
 
+   **Update, same day — root-caused finding #2 down to 2 more precise layers, NOT resolved,
+   3 experimental patches left uncommitted for review.** Rust-side tracing (as this doc's own
+   previous entry asked for) was done. Chain of causes, most-proximate first:
+   - **Layer A (root-caused + fixed, validated live):** `commit_syncer/cold_start.rs`'s
+     `determine_startup_sync_exit()` Gate 1 (`has_parity`) required `lag == 0` exactly — on a
+     cluster whose round timer never idles (empty blocks forever, no real tx load), the
+     network's quorum_commit is a perpetually moving target; live logs showed
+     `synced=326, local=326, quorum=327, lag=1` and the equivalent pair 10s later at
+     `synced=262→326`, i.e. this node processes commits in real time but `lag` locks at
+     exactly 1, never 0, so Gate 1 never passes and the node never leaves CatchingUp.
+     **Experimental fix (uncommitted):** loosened Gate 1 to `lag <= 1`. Gate 5
+     (`block_hash_verified`, the actual fork-safety check via peer-verified block hash) is
+     completely untouched and still independently gates the same transition, so this widens
+     only a liveness check, not the fork-safety one. **Verified live:** after this fix, node
+     logs changed from "CatchingUp — lag > 0" to *"All gates (1-4) passed but block hash NOT
+     yet verified against peers (Gate 5)"* — Gate 1 confirmed fixed, Gate 5 is next.
+   - **Layer B (root-caused, NOT fixed):** Gate 5's `perform_post_gate_verification()`
+     (`node/setup_consensus/verification.rs`) needs to query peers' `/peer_info` over a raw
+     TCP+manual-HTTP server (`network/peer_rpc/server.rs`, `PeerRpcServer`) on
+     `peer_rpc_port` (19200+node_id for this devnet) — but every query failed with "No
+     reachable peers found" (`network/peer_rpc/client.rs`), so Gate 5 never passes, node
+     stays in CatchingUp forever, `eth_blockNumber` never advances past 1. Direct `curl` to
+     the port confirmed it: connects fine, but answers `content-type: application/grpc,
+     grpc-status: 12 (UNIMPLEMENTED)` — something is listening, but it isn't the intended
+     `/peer_info` HTTP handler.
+   - **Layer C (partially root-caused, NOT resolved):** log tracing found the real proximate
+     error: `startup.rs` starts a "full" `PeerRpcServer` on the same port right after
+     `startup_sync.rs` aborts a temporary "early" `PeerRpcServer` instance (started to serve
+     `/peer_info` before the rest of the node is ready, an intentional design — see its own
+     "prevent STARTUP-SYNC deadlock" comment) — and the full server's `bind()` failed with
+     "Address already in use" (os error 98), logged but **silently swallowed by the spawning
+     task**, so no `/peer_info` server ever runs again for the life of the node. **Two
+     experimental fixes tried, in order, neither resolved it:**
+     1. Retry `bind()` up to 20× with 250ms backoff instead of failing once
+        (`peer_rpc/server.rs`) — **still failed all 20/20 retries** (5s straight), proving
+        this isn't a short release-timing race.
+     2. Replaced the early server's `handle.abort(); sleep(100ms)` with the textbook-correct
+        `handle.abort(); let _ = handle.await;` (`setup_consensus/startup_sync.rs`) — awaiting
+        an aborted `JoinHandle` should block until the task, and the `TcpListener` it owns,
+        is actually torn down. **Still failed all 20/20 retries.** Live logs show the early
+        server started and was stopped again within **1.9ms** of each other, then the full
+        server's bind still couldn't get the port for the next 5+ seconds — meaning
+        something holds it well past what either fix addresses.
+     Ruled out as the culprit (checked directly, not assumed): Go does NOT bind this port
+     itself (`execution/cmd/simple_chain/processor/block_processor_core.go`'s own comment —
+     the call is literally commented out); no second Rust call site constructs a
+     `PeerRpcServer` anywhere in the tree (`grep -rn "PeerRpcServer::new"` — exactly one call
+     site, in `startup_sync.rs`); the early-server spawn+cleanup in `startup_sync.rs` happens
+     exactly once per node lifetime (outside any loop that could re-spawn without cleaning up
+     the previous instance). **What's actually holding the port for 5+ full seconds is still
+     unknown** — needs real process-level tracing (`strace -f -e trace=bind,close`, or
+     `lsof`/`ss` sampled at high frequency during the exact failure window with fd/thread
+     detail) rather than more source-reading-and-guessing; the "guess a fix, rebuild, retest
+     live" cycle used for Layers A/B stopped being productive at this layer.
+   - **Net effect:** Layer A's fix is real progress (validated), but Root Anchor still cannot
+     leave CatchingUp on a fresh multi-validator start because of Layer C, so the
+     destination-side `claimMessage()` acceptance-test proof is still blocked. All 3
+     experimental patches (Gate 1, bind-retry, abort+await) are left **uncommitted** in the
+     working tree — each is independently a reasonable robustness improvement and none
+     reduces fork-safety (Gate 5 itself is never touched), but none is proven sufficient and
+     none has been reviewed. Do not commit/merge without dedicated review, ideally alongside
+     whoever wrote the original Gate 1/5 fork-safety gates and the early/full PeerRpcServer
+     handoff design.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to
