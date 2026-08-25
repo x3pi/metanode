@@ -1,12 +1,19 @@
-# Kế hoạch xử lý các mục còn mở — Phase 1 Root Anchor Cross-Chain (giao cho agent/dev khác)
+# Kế hoạch xử lý toàn bộ việc còn thiếu (giao cho agent/dev khác)
 
 Viết 2026-08-25 (đêm), sau khi Phase 0.6–0.9 (`cross_chain_production_readiness_plan.md`)
 đóng xong toàn bộ các lỗ hổng CRITICAL đã tìm được (di chuyển giá trị thật, front-run genesis,
 timestamp bypass timelock, Root Anchor Layer C livelock). **Không còn lỗi CRITICAL/fund-loss
-nào đang mở** — tài liệu này chỉ liệt kê các mục Phase 1 còn lại: một số cần quyết định thiết
-kế trước khi code, một số cần review sâu chưa làm, một số cần đo đạc thật trước khi tối ưu.
-Không mục nào khẩn cấp bằng các lỗi đã vá đêm nay, nhưng đều cần làm trước khi coi Phase 1 là
-xong (theo `cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0–P8).
+nào đang mở.** Tài liệu này liệt kê **mọi việc sửa code còn biết là thiếu**, chia 2 phần:
+
+- **Phần A — Cross-chain Root Anchor (Phase 1):** đã xác minh lại trực tiếp trong phiên làm
+  việc tối nay (25/8/2026), thông tin chính xác tại thời điểm viết.
+- **Phần B — Ngoài phạm vi cross-chain:** ghi lại từ các phiên làm việc TRƯỚC (không phải tối
+  nay), **chưa được xác minh lại lần này** — mỗi mục đều ghi rõ nguồn và yêu cầu xác nhận lại
+  hiện trạng trước khi bắt tay sửa, vì code có thể đã đổi kể từ lúc ghi nhận.
+
+Không mục nào ở Phần A khẩn cấp bằng các lỗi đã vá đêm nay, nhưng đều cần làm trước khi coi
+Phase 1 cross-chain là xong (theo `cross_chain_root_anchor_architecture.md` mục 8, lộ trình
+P0–P8).
 
 **Đọc trước khi bắt đầu bất cứ mục nào:**
 - `note/cross_chain_production_readiness_plan.md` — toàn bộ lịch sử bug tìm+vá, đọc để hiểu
@@ -187,6 +194,50 @@ sạch, `lag` đạt đúng 0 ngay).
 
 ---
 
+## Mục 7 — 🔴 MỚI PHÁT HIỆN (xác minh trực tiếp tối nay): `ProposalUpdateCommittee` chưa từng được thực thi
+
+**Files:** `execution/pkg/cross_chain/types.go:311` (`ProposalUpdateCommittee
+GovernanceProposalKind = 3`); `execution/pkg/cross_chain/gateway.go`, hàm
+`ExecuteGovernanceProposal` (switch theo `proposal.Kind`).
+
+**Bằng chứng — cùng dạng bug đã tìm thấy 2 lần đêm nay** (`SupplyLedger` không có đường cấp
+allocation, `GenesisCoordinator` không bao giờ được set): `ExecuteGovernanceProposal`'s switch
+chỉ xử lý `ProposalRegisterChain`/`ProposalUnregisterChain`/`ProposalDeclareChainDead`/
+`ProposalAllocateSupply` (mục vừa thêm đêm nay). **`ProposalUpdateCommittee` (kind=3) không
+có case nào** — `grep -rn "ProposalUpdateCommittee"` toàn bộ `execution/` chỉ ra đúng 2 chỗ:
+định nghĩa hằng số, và 1 test (`governance_test.go:132`) chỉ test
+`GovernanceEngine.Propose/Vote/Execute` mức thấp (không đụng tới `GatewayEngine`/
+`ChainRegistry` thật). Nghĩa là: 1 proposal `UpdateCommittee` có thể propose → vote → qua
+timelock → execute thành công (status chuyển `Executed`) **nhưng không có tác dụng gì lên
+`ChainRegistry` thật** — một cách "thành công giả" y hệt các bug đã tìm đêm nay.
+
+**Đối chiếu tài liệu thiết kế:** `cross_chain_root_anchor_architecture.md` mục 8 (bảng P3),
+dòng P3.1: *"Gửi `CommitteeUpdate` lên Root Anchor sau mỗi epoch transition (tái dùng
+`epoch_transition.rs`/`epoch_checkpoint.rs`)"* — đây là roadmap item P3 (không phải P0/P1
+khẩn cấp), có 2 nửa còn thiếu:
+1. **Phía gửi (Rust, chưa làm):** `consensus/metanode/src/consensus/epoch_transition.rs`
+   (hoặc `node/transition/epoch_transition.rs`) chưa gửi transaction `propose(kind=3,
+   ...)`/`CommitteeUpdate` lên Root Anchor sau mỗi lần epoch transition thật — ghi nhận từ
+   phiên làm việc trước (`project_root_anchor_p1_p3_devnet` — **chưa xác minh lại trong phiên
+   này**, kiểm tra lại hiện trạng trước khi tin).
+2. **Phía nhận (Go, đã xác minh trực tiếp tối nay):** ngay cả khi phía gửi hoàn thiện,
+   `ExecuteGovernanceProposal` vẫn sẽ không làm gì với proposal đó — cần thêm 1 case xử lý,
+   theo đúng mẫu `ProposalAllocateSupply` vừa thêm (`gateway.go`): unmarshal payload (cần xác
+   định rõ payload chứa gì — chain ID + committee mới + PoP mỗi thành viên, tương tự
+   `ApplyCommitteeUpdate` ở mục 1 tài liệu này), verify PoP thật cho mọi thành viên mới (như
+   `BootstrapFoundingChains` đã làm), rồi cập nhật `g.ChainRegistry[chainID].Committee`.
+
+**⚠️ Liên quan trực tiếp Mục 1 (epoch catch-up):** cả 2 mục đều xoay quanh cùng 1 cơ chế
+`CommitteeUpdate`/epoch rotation — nên làm chung 1 đợt thiết kế, không tách rời, để tránh xây
+2 cơ chế cập nhật committee khác nhau cho cùng 1 khái niệm.
+
+**Test bắt buộc:** case mới trong `ExecuteGovernanceProposal` cần 1 test hồi quy y hệt kiểu
+`TestGateway_ProposalAllocateSupply_UnblocksAttestCommit` (đêm nay) — propose→vote→timelock→
+execute thật, xác nhận `ChainRegistry` thật đổi đúng, và 1 test đối kháng: PoP giả cho thành
+viên mới phải bị từ chối.
+
+---
+
 ## Việc dọn dẹp tài liệu (không phải code, nhưng cần làm cùng đợt)
 
 - `note/cross_chain_full_implementation_plan.md` **đang lỗi thời** — vẫn ghi Task 1.2/Task 2
@@ -198,21 +249,79 @@ sạch, `lag` đạt đúng 0 ngay).
 
 ---
 
-## Thứ tự khuyến nghị
+## Thứ tự khuyến nghị (Phần A)
 
 Không mục nào chặn mục khác (khác với Task 1→6 trong `cross_chain_full_implementation_plan.md`
 cũ, vốn có phụ thuộc tuần tự) — có thể làm song song hoặc theo độ ưu tiên rủi ro:
 
 ```
-Mục 6 (review Gate 1)         — làm trước nếu định chạy T2 nhiều máy sớm, vì ảnh hưởng liveness thật
-Mục 4 (re-review F/I)         — cùng nhóm rủi ro với các bug đã tìm thấy, ưu tiên kế tiếp
-Mục 1 (epoch catch-up)        — cần quyết định thiết kế trước, bắt đầu bằng việc hỏi
-Mục 2 (propose gating)        — cần xác nhận trước, việc nhỏ sau khi có câu trả lời
-Mục 5 (đo account-tree-root)  — làm cùng lúc/sau Phase 2 T2 (cần hạ tầng đo)
-Mục 3 (relayer key custody)   — quyết định vận hành, không chặn kỹ thuật, làm bất cứ lúc nào
+Mục 7 (ProposalUpdateCommittee chưa thực thi) — cùng dạng bug đã gây critical đêm nay, ưu tiên cao nhất còn lại
+Mục 1 (epoch catch-up)         — LÀM CHUNG với mục 7 (cùng cơ chế CommitteeUpdate) — cần quyết định thiết kế trước, bắt đầu bằng việc hỏi
+Mục 6 (review Gate 1)          — làm trước nếu định chạy T2 nhiều máy sớm, vì ảnh hưởng liveness thật
+Mục 4 (re-review F/I)          — cùng nhóm rủi ro với các bug đã tìm thấy, ưu tiên kế tiếp
+Mục 2 (propose gating)         — cần xác nhận trước, việc nhỏ sau khi có câu trả lời
+Mục 5 (đo account-tree-root)   — làm cùng lúc/sau Phase 2 T2 (cần hạ tầng đo)
+Mục 3 (relayer key custody)    — quyết định vận hành, không chặn kỹ thuật, làm bất cứ lúc nào
 ```
 
 **Verification bar giống hệt mọi phase trước:** `go build ./... && go vet ./... && go test
 ./...` sạch từ `execution/`; với mục 6 (Rust) thêm `cargo build --release && cargo test` sạch
 từ `consensus/metanode/`. Mỗi finding/thay đổi phải có test hồi quy thật. Branch từ `dev`, PR
 qua `gh`, không tự merge.
+
+---
+
+# Phần B — Ngoài phạm vi cross-chain (từ các phiên làm việc TRƯỚC, chưa xác minh lại tối nay)
+
+**Đọc kỹ trước khi dùng phần này:** mỗi mục dưới đây được ghi lại từ trạng thái dự án ở các
+phiên làm việc trước — **không phải kết quả kiểm tra trực tiếp trong phiên tối nay** (khác
+với Phần A, đã xác minh trực tiếp bằng code/test/log thật). Code có thể đã đổi kể từ lúc ghi
+nhận. **Việc đầu tiên cho mỗi mục: xác nhận lại hiện trạng bằng cách đọc code/chạy thử thật
+trước khi tin bất kỳ chi tiết nào dưới đây**, rồi mới quyết định có cần sửa không.
+
+## B1 — 3-node cluster: submit transaction thật bị chặn bởi lỗi "no BLS public key registered"
+
+Ghi nhận trước đây: cụm 3-node local (`private_chain_3node/`) chạy ổn định (build B1/B2/B5/B6
+xác nhận qua nhiều lần chạy thật, không crash), nhưng gửi transaction thật bị chặn bởi lỗi
+"no BLS public key registered" **dù genesis đã set đúng khoá đó** — đã điều tra sâu, **không
+tìm ra root cause**, kể cả debug log kỳ vọng cũng không xuất hiện đúng chỗ trong log của đúng
+node. Người dùng lúc đó yêu cầu dừng điều tra thay vì tiếp tục đoán.
+
+**Việc cần làm:** xác nhận lỗi này còn tái hiện được không (code/genesis-gen script có thể đã
+đổi từ đó, đặc biệt sau các lần sửa `gen_single_chain.py`/`gen_validator_entry.py` gần đây).
+Nếu còn, cần công cụ điều tra khác với lần trước (lần trước đã thử debug log mà không ra) —
+cân nhắc `strace`/kiểm tra trực tiếp nơi BLS pubkey được load lúc khởi động vs. nơi nó được
+tra cứu lúc submit tx, so sánh 2 đường đọc có cùng nguồn dữ liệu không (đây chính là dạng bug
+"2 đường đọc lệch nhau" đã gặp nhiều lần trong dự án này).
+
+## B2 — State history pruning: self-heal qua peer + Checkpoint() còn treo (on hold)
+
+Ghi nhận trước đây: giai đoạn 1 (fix stub `prune()` của NOMT) đã xong. Giai đoạn 2 (self-heal
+dữ liệu lịch sử bị thiếu bằng cách hỏi peer + gọi `Checkpoint()`) đang **tạm dừng** vì
+`Checkpoint()` của Pebble/NOMT gây treo/đứng hệ thống thật khi test (không phải giả định — đã
+quan sát được, xem ghi chú "Checkpoint() causes system stall" từ phiên trước).
+
+**Việc cần làm:** trước khi tiếp tục giai đoạn 2, phải hiểu **vì sao** `Checkpoint()` gây treo
+(I/O đồng bộ chặn hết worker? khoá toàn cục? kích thước dữ liệu?) — đây là việc cần làm trước,
+không phải đoán rồi né bằng cách khác. Nếu không hiểu được nguyên nhân treo, cân nhắc thiết kế
+self-heal không cần `Checkpoint()` (ví dụ snapshot tăng dần thay vì full checkpoint).
+
+## B3 — TEE core packaging (OHtee/tzdriver): B4 storage-abstraction — BỊ CHẶN, cần info từ người phụ trách trước
+
+**File:** `note/tee_core_packaging_plan.md` (đã có trong repo, đọc trước).
+
+B1/B2/B5/B6 đã xong. B3 (SimpleDb) đã được xác nhận là việc lớn riêng, hoãn lại có chủ đích
+(quyết định của người phụ trách, không phải bug). **B4 (bọc storage-abstraction quanh Xapian)
+bị chặn cứng**: cần biết API lưu trữ thật của OHtee (tmpfs trong TA hay storage API riêng?) —
+**không thể code trước khi có câu trả lời này**, xem `tee_core_packaging_plan.md` mục cuối
+("API lưu trữ thật của OHtee cho Xapian (B4): tmpfs trong TA, hay storage API riêng của
+SDK?"). Không giao mục này cho agent khác tự làm — chỉ giao SAU KHI có câu trả lời đó.
+
+## B4 — Số validator tối thiểu cho BFT thật (không phải bug, là yêu cầu hạ tầng)
+
+Ghi nhận trước đây: công thức BFT `f = ⌊(n-1)/3⌋` (xem `note/bft_fault_tolerance_node_count.md`
+đã có trong repo) — cụm 3-node có `f=0`, **KHÔNG chịu được bất kỳ node lỗi nào**, cần `n≥4` để
+có `f≥1`. Đây không phải lỗi code cần sửa — là yêu cầu vận hành: bất kỳ cụm nào định chạy thật
+với kỳ vọng chịu lỗi phải có tối thiểu 4 validator, không phải 3. Ghi vào đây để agent/dev kế
+tiếp không vô tình đề xuất/triển khai cụm 3-node cho production rồi ngạc nhiên khi 1 node chết
+làm treo cả cụm.
