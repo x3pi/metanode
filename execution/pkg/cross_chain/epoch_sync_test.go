@@ -198,3 +198,53 @@ func TestBuildAccountSnapshot_DeterministicAndVerifiable(t *testing.T) {
 	assert.True(t, VerifyAccountMerkleProof(bob, proofMap1[bob.Account], root1))
 	assert.True(t, VerifyAccountMerkleProof(charlie, proofMap1[charlie.Account], root1))
 }
+
+func TestBuildAccountSnapshot_LargeScale(t *testing.T) {
+	const count = 5000
+	accounts := make([]AccountLeaf, count)
+	for i := 0; i < count; i++ {
+		var addrBytes [20]byte
+		addrBytes[0] = byte(i >> 24)
+		addrBytes[1] = byte(i >> 16)
+		addrBytes[2] = byte(i >> 8)
+		addrBytes[3] = byte(i)
+		accounts[i] = AccountLeaf{
+			Account: common.BytesToAddress(addrBytes[:]),
+			Balance: big.NewInt(int64(i * 100)),
+		}
+	}
+
+	root, proofMap, err := BuildAccountSnapshot(accounts)
+	assert.NoError(t, err)
+	assert.NotEqual(t, common.Hash{}, root)
+	assert.Equal(t, count, len(proofMap))
+
+	// Verify sample proofs across the tree
+	for _, idx := range []int{0, 1, count / 2, count - 2, count - 1} {
+		leaf := accounts[idx]
+		proof, ok := proofMap[leaf.Account]
+		assert.True(t, ok)
+		assert.True(t, VerifyAccountMerkleProof(leaf, proof, root))
+	}
+}
+
+func BenchmarkBuildAccountSnapshot_10kAccounts(b *testing.B) {
+	const count = 10000
+	accounts := make([]AccountLeaf, count)
+	for i := 0; i < count; i++ {
+		var addrBytes [20]byte
+		addrBytes[0] = byte(i >> 24)
+		addrBytes[1] = byte(i >> 16)
+		addrBytes[2] = byte(i >> 8)
+		addrBytes[3] = byte(i)
+		accounts[i] = AccountLeaf{
+			Account: common.BytesToAddress(addrBytes[:]),
+			Balance: big.NewInt(int64(i * 100)),
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = BuildAccountSnapshot(accounts)
+	}
+}
