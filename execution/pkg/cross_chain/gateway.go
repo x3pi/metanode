@@ -717,7 +717,7 @@ func (g *GatewayEngine) ClaimDeadChainBalance(
 		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, deadChainID)
 	}
 
-	if !VerifyMerkleProof(accountLeafHash, proof, registry.StateRoot) {
+	if !VerifyMerkleProof(accountLeafHash, proof, registry.AccountTreeRoot) {
 		return ErrInvalidMerkleProof
 	}
 

@@ -38,10 +38,10 @@ var (
 // propose -> vote -> >=2/3 active chains -> 72h timelock -> executed.
 // 1 chain = 1 vote (counted by number of active registered chains, not stake).
 type GovernanceEngine struct {
-	ActiveChains          map[uint64]bool                      `json:"active_chains"`
-	Proposals             map[common.Hash]*GovernanceProposal  `json:"proposals"`
-	ProposalStatus        map[common.Hash]GovernanceProposalStatus `json:"proposal_status"`
-	TimelockDelaySeconds  uint64                               `json:"timelock_delay_seconds"`
+	ActiveChains         map[uint64]bool                          `json:"active_chains"`
+	Proposals            map[common.Hash]*GovernanceProposal      `json:"proposals"`
+	ProposalStatus       map[common.Hash]GovernanceProposalStatus `json:"proposal_status"`
+	TimelockDelaySeconds uint64                                   `json:"timelock_delay_seconds"`
 }
 
 // NewGovernanceEngine creates a new governance engine with default 72h timelock.
@@ -92,6 +92,9 @@ func (g *GovernanceEngine) Propose(kind GovernanceProposalKind, payload []byte, 
 	buf = append(buf, payload...)
 
 	proposalID := crypto.Keccak256Hash(buf)
+	if _, exists := g.Proposals[proposalID]; exists {
+		return proposalID, nil
+	}
 
 	proposal := &GovernanceProposal{
 		ProposalID:  proposalID,

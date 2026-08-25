@@ -28,6 +28,7 @@ type CommitteeUpdate struct {
 	NewCommittee    []ValidatorEntry `json:"new_committee"`
 	QuorumThreshold uint64           `json:"quorum_threshold"`
 	StateRoot       common.Hash      `json:"state_root"`
+	AccountTreeRoot common.Hash      `json:"account_tree_root"`
 	Cert            QuorumCert       `json:"cert"`
 }
 
@@ -94,9 +95,9 @@ func BuildSignerBitmap(committee []ValidatorEntry, votingPubkeys [][]byte) []byt
 // ComputeCommitteeUpdateDigest computes the domain-separated digest every validator of the OLD
 // committee signs to attest to a new one. newCommittee is sorted by PubkeyBLS bytes before
 // hashing so the digest is independent of slice order — every validator must derive the exact
-// same digest from the exact same (sourceChainID, newEpoch, newCommittee, stateRoot) tuple for
+// same digest from the exact same (sourceChainID, newEpoch, newCommittee, stateRoot, accountTreeRoot) tuple for
 // their individual signatures to aggregate into a single valid QuorumCert (Section 11.2).
-func ComputeCommitteeUpdateDigest(sourceChainID, newEpoch uint64, newCommittee []ValidatorEntry, stateRoot common.Hash) common.Hash {
+func ComputeCommitteeUpdateDigest(sourceChainID, newEpoch uint64, newCommittee []ValidatorEntry, stateRoot common.Hash, accountTreeRoot common.Hash) common.Hash {
 	sorted := make([]ValidatorEntry, len(newCommittee))
 	copy(sorted, newCommittee)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -122,6 +123,7 @@ func ComputeCommitteeUpdateDigest(sourceChainID, newEpoch uint64, newCommittee [
 	buf = append(buf, epochBuf[:]...)
 	buf = append(buf, committeeHash.Bytes()...)
 	buf = append(buf, stateRoot.Bytes()...)
+	buf = append(buf, accountTreeRoot.Bytes()...)
 
 	return Keccak256(buf)
 }
@@ -238,7 +240,32 @@ func BuildAccountMerkleTree(accounts []AccountLeaf) (common.Hash, []MerkleProof,
 	return root, proofs, nil
 }
 
-// VerifyAccountMerkleProof checks whether an AccountLeaf belongs to a committed state_root.
+// BuildAccountSnapshot constructs a deterministic binary Merkle tree over a slice of AccountLeaf entries
+// (sorting them by account address bytes for canonical ordering) and returns the root hash and a map
+// of address -> MerkleProof for easy client-side recovery.
+func BuildAccountSnapshot(accounts []AccountLeaf) (common.Hash, map[common.Address]MerkleProof, error) {
+	if len(accounts) == 0 {
+		return common.Hash{}, nil, ErrEmptyAccounts
+	}
+	sorted := make([]AccountLeaf, len(accounts))
+	copy(sorted, accounts)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i].Account.Bytes(), sorted[j].Account.Bytes()) < 0
+	})
+
+	root, proofs, err := BuildAccountMerkleTree(sorted)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+
+	proofMap := make(map[common.Address]MerkleProof, len(sorted))
+	for i, acc := range sorted {
+		proofMap[acc.Account] = proofs[i]
+	}
+	return root, proofMap, nil
+}
+
+// VerifyAccountMerkleProof checks whether an AccountLeaf belongs to a committed account_tree_root.
 func VerifyAccountMerkleProof(leaf AccountLeaf, proof MerkleProof, expectedRoot common.Hash) bool {
 	current := HashAccountLeaf(leaf)
 	for _, sibling := range proof.Siblings {
@@ -275,6 +302,7 @@ func ApplyCommitteeUpdate(
 	reg.Committee = update.NewCommittee
 	reg.QuorumThreshold = update.QuorumThreshold
 	reg.StateRoot = update.StateRoot
+	reg.AccountTreeRoot = update.AccountTreeRoot
 
 	return nil
 }

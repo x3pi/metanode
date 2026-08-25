@@ -1,4 +1,3 @@
-
 package tx_processor
 
 import (
@@ -841,52 +840,52 @@ func (stm *TrueBlockSTM) execOne(
 					if canPayGas {
 						if exRs.ReceiptStatus() == pb.RECEIPT_STATUS_RETURNED {
 							if exRs.MapAddBalance() != nil {
-							for addrHex, addAmtBytes := range exRs.MapAddBalance() {
-								addr := common.HexToAddress(addrHex)
-								addAmt := big.NewInt(0).SetBytes(addAmtBytes)
-								mvccDB.AddBalance(addr, addAmt)
-							}
-						}
-						if exRs.MapSubBalance() != nil {
-							for addrHex, subAmtBytes := range exRs.MapSubBalance() {
-								addr := common.HexToAddress(addrHex)
-								subAmt := big.NewInt(0).SetBytes(subAmtBytes)
-								mvccDB.SubTotalBalance(addr, subAmt)
-							}
-						}
-						if exRs.MapStorageChange() != nil {
-							for addrHex, changes := range exRs.MapStorageChange() {
-								addr := common.HexToAddress(addrHex)
-								var keys [][]byte
-								var values [][]byte
-								for keyHex, valueBytes := range changes {
-									keys = append(keys, common.HexToHash(keyHex).Bytes())
-									values = append(values, valueBytes)
+								for addrHex, addAmtBytes := range exRs.MapAddBalance() {
+									addr := common.HexToAddress(addrHex)
+									addAmt := big.NewInt(0).SetBytes(addAmtBytes)
+									mvccDB.AddBalance(addr, addAmt)
 								}
-								scDB.BatchSetStorageValues(addr, keys, values)
 							}
-						}
-						if exRs.MapCodeHash() != nil {
-							mapCreator := exRs.MapCreatorPubkey()
-							mapStorage := exRs.MapStorageAddress()
-							for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
-								addr := common.HexToAddress(addrHex)
-								newCodeHash := common.BytesToHash(newCodeHashBytes)
-								mvccDB.SetCodeHash(addr, newCodeHash)
-								if mapCreator != nil {
-									if creatorBytes, ok := mapCreator[addrHex]; ok {
-										mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
+							if exRs.MapSubBalance() != nil {
+								for addrHex, subAmtBytes := range exRs.MapSubBalance() {
+									addr := common.HexToAddress(addrHex)
+									subAmt := big.NewInt(0).SetBytes(subAmtBytes)
+									mvccDB.SubTotalBalance(addr, subAmt)
+								}
+							}
+							if exRs.MapStorageChange() != nil {
+								for addrHex, changes := range exRs.MapStorageChange() {
+									addr := common.HexToAddress(addrHex)
+									var keys [][]byte
+									var values [][]byte
+									for keyHex, valueBytes := range changes {
+										keys = append(keys, common.HexToHash(keyHex).Bytes())
+										values = append(values, valueBytes)
+									}
+									scDB.BatchSetStorageValues(addr, keys, values)
+								}
+							}
+							if exRs.MapCodeHash() != nil {
+								mapCreator := exRs.MapCreatorPubkey()
+								mapStorage := exRs.MapStorageAddress()
+								for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
+									addr := common.HexToAddress(addrHex)
+									newCodeHash := common.BytesToHash(newCodeHashBytes)
+									mvccDB.SetCodeHash(addr, newCodeHash)
+									if mapCreator != nil {
+										if creatorBytes, ok := mapCreator[addrHex]; ok {
+											mvccDB.SetCreatorPublicKey(addr, mt_common.PubkeyFromBytes(creatorBytes))
+										}
+									}
+									if mapStorage != nil {
+										if storageAddr, ok := mapStorage[addrHex]; ok {
+											mvccDB.SetStorageAddress(addr, storageAddr)
+										}
 									}
 								}
-								if mapStorage != nil {
-									if storageAddr, ok := mapStorage[addrHex]; ok {
-										mvccDB.SetStorageAddress(addr, storageAddr)
-									}
-								}
 							}
 						}
-					}
-				} // end of canPayGas
+					} // end of canPayGas
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())

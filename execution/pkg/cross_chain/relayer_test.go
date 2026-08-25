@@ -499,9 +499,9 @@ func TestRelayer_Scenario10_8_DeadChainRecovery(t *testing.T) {
 	}
 	leafHash := HashAccountLeaf(leaf)
 
-	// Set state root on Reserve registry to leafHash for test
+	// Set account tree root on Reserve registry to leafHash for test
 	reg := reserveEngine.ChainRegistry[deadChainID]
-	reg.StateRoot = leafHash
+	reg.AccountTreeRoot = leafHash
 	reserveEngine.ChainRegistry[deadChainID] = reg
 
 	proof := MerkleProof{

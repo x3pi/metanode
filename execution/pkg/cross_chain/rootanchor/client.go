@@ -89,8 +89,8 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	if err != nil {
 		return nil, false, fmt.Errorf("unpack getChainRegistry output: %w", err)
 	}
-	if len(outValues) != 10 {
-		return nil, false, fmt.Errorf("getChainRegistry: expected 10 output values, got %d", len(outValues))
+	if len(outValues) != 11 {
+		return nil, false, fmt.Errorf("getChainRegistry: expected 11 output values, got %d", len(outValues))
 	}
 
 	exists, _ := outValues[0].(bool)
@@ -105,8 +105,9 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	quorumThreshold, _ := outValues[5].(uint64)
 	gatewayContract, _ := outValues[6].(common.Address)
 	stateRootRaw, _ := outValues[7].([32]byte)
-	archivalEndpoint, _ := outValues[8].(string)
-	registeredAt, _ := outValues[9].(uint64)
+	accountTreeRootRaw, _ := outValues[8].([32]byte)
+	archivalEndpoint, _ := outValues[9].(string)
+	registeredAt, _ := outValues[10].(uint64)
 
 	if len(pubkeys) != len(stakes) || len(pubkeys) != len(popSignatures) {
 		return nil, false, fmt.Errorf("getChainRegistry: mismatched committee array lengths (pubkeys=%d stakes=%d popSignatures=%d)",
@@ -128,6 +129,7 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 		QuorumThreshold:  quorumThreshold,
 		GatewayContract:  gatewayContract,
 		StateRoot:        common.Hash(stateRootRaw),
+		AccountTreeRoot:  common.Hash(accountTreeRootRaw),
 		ArchivalEndpoint: archivalEndpoint,
 		RegisteredAt:     registeredAt,
 	}

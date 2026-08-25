@@ -4,7 +4,7 @@ import (
 	"math"
 	"sort"
 	"sync"
-        "sync/atomic"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/types"
@@ -229,8 +229,8 @@ type VersionedStorage struct {
 
 func NewVersionedStorage() *VersionedStorage {
 	return &VersionedStorage{
-		versions: make(map[Version][]byte),
-		writeIDs: make(map[Version]WriteID),
+		versions:  make(map[Version][]byte),
+		writeIDs:  make(map[Version]WriteID),
 		estimates: make([]Version, 0, 2),
 	}
 }
@@ -304,8 +304,8 @@ func (v *VersionedStorage) Read(requestVersion Version) ([]byte, Version, WriteI
 
 // MVCCStorageMap stores all versioned storage values for the block.
 type MVCCStorageMap struct {
-	mu       sync.RWMutex
-	storage  map[string]*VersionedStorage
+	mu      sync.RWMutex
+	storage map[string]*VersionedStorage
 }
 
 func NewMVCCStorageMap() *MVCCStorageMap {
@@ -366,7 +366,6 @@ func (m *MVCCStorageMap) Delete(addr common.Address, key string, version Version
 		v.Delete(version)
 	}
 }
-
 
 func (m *MVCCStorageMap) AddEstimate(addr common.Address, key string, version Version) {
 	v := m.getOrCreate(addr, key)

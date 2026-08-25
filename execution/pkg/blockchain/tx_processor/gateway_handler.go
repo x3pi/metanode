@@ -447,9 +447,10 @@ func (h *GatewayHandler) handleWrite(
 		newCommitteePopSignatures := mustBytesSlice(args[4])
 		quorumThreshold := mustUint64(args[5])
 		stateRoot := mustHash(args[6])
-		payloadHash := mustHash(args[7])
-		aggPubkeys := mustBytesSlice(args[8])
-		aggSignature := mustBytes(args[9])
+		accountTreeRoot := mustHash(args[7])
+		payloadHash := mustHash(args[8])
+		aggPubkeys := mustBytesSlice(args[9])
+		aggSignature := mustBytes(args[10])
 
 		if len(newCommitteePubkeys) != len(newCommitteeStakes) || len(newCommitteePubkeys) != len(newCommitteePopSignatures) {
 			return nil, nil, fmt.Errorf("committeeUpdate: mismatched new-committee array lengths (pubkeys=%d stakes=%d popSignatures=%d)",
@@ -474,9 +475,9 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 		// Recompute the digest from the claimed inputs — must match exactly, or a submitter
-		// could change newCommittee/stateRoot/newEpoch after signatures were already collected
+		// could change newCommittee/stateRoot/accountTreeRoot/newEpoch after signatures were already collected
 		// over a different payloadHash.
-		expectedDigest := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, newCommittee, stateRoot)
+		expectedDigest := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, newCommittee, stateRoot, accountTreeRoot)
 		if expectedDigest != payloadHash {
 			return nil, nil, fmt.Errorf("committeeUpdate: payloadHash %s does not match recomputed digest %s", payloadHash.Hex(), expectedDigest.Hex())
 		}
@@ -546,6 +547,7 @@ func (h *GatewayHandler) handleWrite(
 			NewCommittee:    newCommittee,
 			QuorumThreshold: quorumThreshold,
 			StateRoot:       stateRoot,
+			AccountTreeRoot: accountTreeRoot,
 			Cert: cross_chain.QuorumCert{
 				Epoch:              registry.Epoch,
 				AggregateSignature: aggSignature,
@@ -756,7 +758,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return method.Outputs.Pack(
 				false,
 				[][]byte{}, []uint64{}, [][]byte{},
-				uint64(0), uint64(0), common.Address{}, [32]byte{}, "", uint64(0),
+				uint64(0), uint64(0), common.Address{}, [32]byte{}, [32]byte{}, "", uint64(0),
 			)
 		}
 
@@ -773,7 +775,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			true,
 			pubkeys, stakes, popSignatures,
 			registry.Epoch, registry.QuorumThreshold, registry.GatewayContract,
-			[32]byte(registry.StateRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
+			[32]byte(registry.StateRoot), [32]byte(registry.AccountTreeRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
 		)
 
 	case "getRegisteredPop":

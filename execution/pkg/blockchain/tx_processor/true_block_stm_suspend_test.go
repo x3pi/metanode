@@ -24,7 +24,7 @@ func TestTrueBlockSTM_SuspendWakeupLogic(t *testing.T) {
 	cs := newTestChainState(t)
 	addrA := common.HexToAddress("0xA1")
 	addrB := common.HexToAddress("0xB2")
-	
+
 	// Khởi tạo số dư cho B để đọc không bị nil
 	seedAccount(t, cs, addrB, big.NewInt(100), 0)
 
@@ -84,7 +84,7 @@ func TestTrueBlockSTM_SuspendWakeupLogic(t *testing.T) {
 	wg.Wait()
 
 	// --- BƯỚC 4: KIỂM TRA KẾT QUẢ ĐÁNH THỨC ---
-	
+
 	select {
 	case wokenTx := <-execCh:
 		if wokenTx != 1 {
@@ -115,7 +115,7 @@ func TestTrueBlockSTM_SuspendWakeupRace_DoubleCheck(t *testing.T) {
 	stm := newDummySTM(2)
 
 	execCh := make(chan uint32, 10)
-	
+
 	// Ép TX 0 ở trạng thái ĐÃ XONG (st = 1)
 	atomic.StoreUint64(&stm.txState[0], packState(1, 1))
 
@@ -136,7 +136,7 @@ func TestTrueBlockSTM_SuspendWakeupRace_DoubleCheck(t *testing.T) {
 	stm.waitersMu[0].Lock()
 	w := stm.waiters[0]
 	stm.waitersMu[0].Unlock()
-	
+
 	if len(w) > 0 {
 		t.Fatalf("LỖI Race Condition: TX 1 tự đưa mình vào hàng chờ trong khi TX 0 ĐÃ XONG (Lost wake-up)!")
 	}

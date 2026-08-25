@@ -110,8 +110,9 @@ func (m *GatewayRegistryMonitor) poll(ctx context.Context) {
 		m.mu.Unlock()
 
 		if isDrifting {
-			logger.Warn("⚠️ [ROOT ANCHOR MONITOR] chain %d: local ChainRegistry epoch=%d is behind Root Anchor epoch=%d — needs a CommitteeUpdate transaction (Milestone C) to catch up",
-				chainID, localEntry.Epoch, remote.Epoch)
+			lag := remote.Epoch - localEntry.Epoch
+			logger.Warn("⚠️ [ROOT ANCHOR MONITOR] chain %d: local ChainRegistry epoch=%d is %d epochs behind Root Anchor epoch=%d — needs CommitteeUpdate catch-up transactions (Milestone C)",
+				chainID, localEntry.Epoch, lag, remote.Epoch)
 		}
 	}
 }
@@ -132,4 +133,24 @@ func (m *GatewayRegistryMonitor) IsDrifting(chainID uint64) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.drift[chainID]
+}
+
+// DriftEpochs returns how many epochs chainID's locally-committed ChainRegistry is behind
+// Root Anchor's copy. Returns 0 if not drifting or if no snapshot has been fetched yet.
+func (m *GatewayRegistryMonitor) DriftEpochs(chainID uint64) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	remote, ok := m.lastSeen[chainID]
+	if !ok {
+		return 0
+	}
+	engine, err := loadGatewayEngine(m.chainState)
+	if err != nil {
+		return 0
+	}
+	local, ok := engine.ChainRegistry[chainID]
+	if !ok || remote.Epoch <= local.Epoch {
+		return 0
+	}
+	return remote.Epoch - local.Epoch
 }

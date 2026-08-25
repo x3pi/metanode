@@ -389,6 +389,7 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
 	}
 	wantStateRoot := common.HexToHash("0xAAAABBBBCCCCDDDDAAAABBBBCCCCDDDDAAAABBBBCCCCDDDDAAAABBBBCCCCDDDD")
+	wantAccountTreeRoot := common.HexToHash("0x1111222233334444111122223333444411112222333344441111222233334444")
 	wantGatewayContract := common.HexToAddress("0x1234567890123456789012345678901234567890")
 	engine.ChainRegistry[101] = cross_chain.ChainRegistry{
 		ChainID: 101,
@@ -400,6 +401,7 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 		QuorumThreshold:  6667,
 		GatewayContract:  wantGatewayContract,
 		StateRoot:        wantStateRoot,
+		AccountTreeRoot:  wantAccountTreeRoot,
 		ArchivalEndpoint: "https://archive.example.com/chain-101",
 		RegisteredAt:     1234567890,
 	}
@@ -435,8 +437,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unpack getChainRegistry() output: %v", err)
 	}
-	if len(outValues) != 10 {
-		t.Fatalf("expected 10 output values, got %d", len(outValues))
+	if len(outValues) != 11 {
+		t.Fatalf("expected 11 output values, got %d", len(outValues))
 	}
 	exists, _ := outValues[0].(bool)
 	pubkeys, _ := outValues[1].([][]byte)
@@ -446,8 +448,9 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	quorumThreshold, _ := outValues[5].(uint64)
 	gatewayContract, _ := outValues[6].(common.Address)
 	stateRootRaw, _ := outValues[7].([32]byte)
-	archivalEndpoint, _ := outValues[8].(string)
-	registeredAt, _ := outValues[9].(uint64)
+	accountTreeRootRaw, _ := outValues[8].([32]byte)
+	archivalEndpoint, _ := outValues[9].(string)
+	registeredAt, _ := outValues[10].(uint64)
 
 	if !exists {
 		t.Fatal("expected exists=true for a registered chain")
@@ -472,6 +475,9 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	}
 	if common.Hash(stateRootRaw) != wantStateRoot {
 		t.Fatalf("stateRoot = %s, want %s", common.Hash(stateRootRaw).Hex(), wantStateRoot.Hex())
+	}
+	if common.Hash(accountTreeRootRaw) != wantAccountTreeRoot {
+		t.Fatalf("accountTreeRoot = %s, want %s", common.Hash(accountTreeRootRaw).Hex(), wantAccountTreeRoot.Hex())
 	}
 	if archivalEndpoint != "https://archive.example.com/chain-101" {
 		t.Fatalf("archivalEndpoint = %q", archivalEndpoint)
