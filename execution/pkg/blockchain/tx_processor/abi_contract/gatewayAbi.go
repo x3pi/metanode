@@ -185,6 +185,33 @@ const GatewayABI = `[
 	{
 		"inputs": [
 			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "submitCommitAttestation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}
+		],
+		"name": "getCommitAttestationShares",
+		"outputs": [
+			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
+			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
 			{"internalType": "uint64", "name": "newEpoch", "type": "uint64"},
 			{"internalType": "bytes[]", "name": "newCommitteePubkeys", "type": "bytes[]"},
 			{"internalType": "uint64[]", "name": "newCommitteeStakes", "type": "uint64[]"},

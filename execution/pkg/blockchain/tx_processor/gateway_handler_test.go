@@ -226,9 +226,22 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 
-	// --- attestCommit(sourceChainId=101, commitRoot, aggregateAmount=0, epoch=1, sig, bitmap) ---
+	// Set StateRoot on registry so Merkle proof verification succeeds
+	leaf := cross_chain.AggregateValueLeaf{
+		SourceChainID:   101,
+		CommitRoot:      commitRoot,
+		AssetID:         big.NewInt(0),
+		AggregateAmount: big.NewInt(0),
+	}
+	engine, _ = loadGatewayEngine(cs)
+	reg := engine.ChainRegistry[101]
+	reg.StateRoot = cross_chain.HashAggregateValueLeaf(leaf)
+	engine.ChainRegistry[101] = reg
+	_ = saveGatewayEngine(cs, engine)
+
+	// --- attestCommit(sourceChainId=101, commitRoot, aggregateAmount=0, assetId=0, proofLeafIndex=0, proofSiblings=[], epoch=1, sig, bitmap) ---
 	attestCalldata, err := h.abi.Pack("attestCommit",
-		big.NewInt(101), commitRoot, big.NewInt(0), uint64(1), sig.Bytes(), []byte{0x01},
+		big.NewInt(101), commitRoot, big.NewInt(0), big.NewInt(0), big.NewInt(0), [][32]byte{}, uint64(1), sig.Bytes(), []byte{0x01},
 	)
 	if err != nil {
 		t.Fatalf("pack attestCommit() calldata: %v", err)

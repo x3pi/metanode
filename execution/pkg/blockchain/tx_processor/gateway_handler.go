@@ -182,7 +182,7 @@ func (h *GatewayHandler) HandleTransaction(
 
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
-		"registerCommitteePop", "submitCommitteeAttestation", "committeeUpdate":
+		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -390,6 +390,48 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 		engine.PendingCommitteeAttestations[key] = append(engine.PendingCommitteeAttestations[key], cross_chain.CommitteeAttestationShare{
+			SignerPubkeyBLS: signerPubkeyBls,
+			Signature:       signature,
+		})
+
+	case "submitCommitAttestation":
+		sourceChainID := mustUint64(args[0])
+		epoch := mustUint64(args[1])
+		commitRoot := mustHash(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		registry, exists := engine.ChainRegistry[sourceChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
+		}
+		if epoch != registry.Epoch {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: expected %d, got %d", cross_chain.ErrEpochMismatch, registry.Epoch, epoch)
+		}
+		isMember := false
+		for _, v := range registry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: signer is not a member of chain %d's current committee", sourceChainID)
+		}
+		commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, commitMsg) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		key := commitAttestationKey(sourceChainID, epoch, commitRoot)
+		for _, s := range engine.PendingCommitAttestations[key] {
+			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
+				return nil, nil, fmt.Errorf("submitCommitAttestation: pubkey already submitted a share for this commit root")
+			}
+		}
+		engine.PendingCommitAttestations[key] = append(engine.PendingCommitAttestations[key], cross_chain.CommitAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
@@ -620,6 +662,24 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
+	case "getCommitAttestationShares":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getCommitAttestationShares input: %w", err)
+		}
+		sourceChainID := mustUint64(args[0])
+		epoch := mustUint64(args[1])
+		commitRoot := mustHash(args[2])
+
+		shares := engine.PendingCommitAttestations[commitAttestationKey(sourceChainID, epoch, commitRoot)]
+		pubkeys := make([][]byte, len(shares))
+		signatures := make([][]byte, len(shares))
+		for i, s := range shares {
+			pubkeys[i] = s.SignerPubkeyBLS
+			signatures[i] = s.Signature
+		}
+		return method.Outputs.Pack(pubkeys, signatures)
+
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)
 	}
@@ -629,6 +689,12 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 // GatewayEngine.PendingCommitteeAttestations is keyed by this string (Milestone C).
 func committeeAttestationKey(sourceChainID, epoch uint64, payloadHash common.Hash) string {
 	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, payloadHash.Hex())
+}
+
+// commitAttestationKey identifies one in-progress commit root's share collection —
+// GatewayEngine.PendingCommitAttestations is keyed by this string (Milestone F).
+func commitAttestationKey(sourceChainID, epoch uint64, commitRoot common.Hash) string {
+	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, commitRoot.Hex())
 }
 
 // --- ABI arg conversion helpers ---

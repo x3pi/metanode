@@ -38,6 +38,16 @@ type CommitteeAttestationShare struct {
 	Signature       []byte `json:"signature"`
 }
 
+// CommitAttestationShare is one validator's individual BLS signature over a pending
+// commit root (Milestone F of the wiring plan — see
+// execution/pkg/cross_chain/epoch_sync.go's ComputeCommitRootAttestMessage). Collected on Root
+// Anchor via GatewayEngine.PendingCommitAttestations until enough stake is reached to
+// aggregate into a real QuorumCert for attestCommit().
+type CommitAttestationShare struct {
+	SignerPubkeyBLS []byte `json:"signer_pubkey_bls"`
+	Signature       []byte `json:"signature"`
+}
+
 // ChainRegistry holds registered chain metadata and committee state on Root Anchor (Section 2.1).
 type ChainRegistry struct {
 	ChainID          uint64           `json:"chain_id"`

@@ -79,6 +79,9 @@ type GatewayEngine struct {
 	// CommitteeUpdate, keyed by "sourceChainId:oldEpoch:payloadHashHex" (Milestone C). Cleared
 	// once the corresponding committeeUpdate() succeeds.
 	PendingCommitteeAttestations map[string][]CommitteeAttestationShare
+	// PendingCommitAttestations collects individual BLS signature shares for a pending
+	// commit root attestation, keyed by "sourceChainId:epoch:commitRootHex" (Milestone F).
+	PendingCommitAttestations map[string][]CommitAttestationShare
 	// RegisteredPops is a durable, permissionless Proof-of-Possession registry keyed by
 	// hex(pubkeyBls) (Milestone C) — see registerCommitteePop()/getRegisteredPop() in
 	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
@@ -104,6 +107,7 @@ func NewGatewayEngine(
 		ChannelSequence:              make(map[string]uint64),
 		RelayerBalances:              make(map[common.Address]*big.Int),
 		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
+		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
 		RegisteredPops:               make(map[string][]byte),
 	}
 }
@@ -370,7 +374,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		return nil, fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
 	}
 
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
 	if len(votingPubkeys) == 1 {
 		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
 		sig := cm.SignFromBytes(cert.AggregateSignature)

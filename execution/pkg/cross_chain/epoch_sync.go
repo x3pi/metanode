@@ -33,9 +33,43 @@ type CommitteeUpdate struct {
 
 // CommitteeUpdateDomainTag domain-separates the payload every validator signs when attesting to
 // a CommitteeUpdate (Milestone C of the wiring plan), distinct from attestCommit's
-// "COMMIT_ROOT_ATTEST_V1:" tag (gateway.go) so a signature over one can never be replayed as the
-// other.
+// "COMMIT_ROOT_ATTEST_V1:" tag so a signature over one can never be replayed as the other.
 var CommitteeUpdateDomainTag = []byte("COMMITTEE_UPDATE_V1:")
+
+// CommitRootAttestDomainTag domain-separates the payload every validator signs when attesting to
+// a commit root (Milestone F of the wiring plan), matching attestCommit's verification convention
+// in gateway.go.
+var CommitRootAttestDomainTag = []byte("COMMIT_ROOT_ATTEST_V1:")
+
+// ComputeCommitRootAttestMessage computes the domain-separated message payload every validator of
+// the committee signs to attest to a commit root.
+func ComputeCommitRootAttestMessage(commitRoot common.Hash) []byte {
+	var buf []byte
+	buf = append(buf, CommitRootAttestDomainTag...)
+	buf = append(buf, commitRoot.Bytes()...)
+	return buf
+}
+
+// BuildSignerBitmap constructs a deterministic bit vector for a committee indicating which
+// members have signed, where bit i represents committee[i].
+func BuildSignerBitmap(committee []ValidatorEntry, votingPubkeys [][]byte) []byte {
+	if len(committee) == 0 || len(votingPubkeys) == 0 {
+		return []byte{}
+	}
+	numBytes := (len(committee) + 7) / 8
+	bitmap := make([]byte, numBytes)
+	for _, pk := range votingPubkeys {
+		for i, member := range committee {
+			if bytes.Equal(member.PubkeyBLS, pk) {
+				byteIdx := i / 8
+				bitIdx := uint(i % 8)
+				bitmap[byteIdx] |= (1 << bitIdx)
+				break
+			}
+		}
+	}
+	return bitmap
+}
 
 // ComputeCommitteeUpdateDigest computes the domain-separated digest every validator of the OLD
 // committee signs to attest to a new one. newCommittee is sorted by PubkeyBLS bytes before
