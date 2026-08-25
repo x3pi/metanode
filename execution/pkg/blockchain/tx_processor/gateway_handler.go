@@ -185,6 +185,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
+		"bootstrapFoundingChains",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
@@ -600,6 +601,16 @@ func (h *GatewayHandler) handleWrite(
 		}
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
+
+	case "bootstrapFoundingChains":
+		// See GatewayEngine.BootstrapFoundingChains's doc comment (pkg/cross_chain/gateway.go)
+		// and this file's ABI doc comment for why this exists and why it's safe: self-closing
+		// after the first successful call, requires >= MinFoundingChains, requires real PoP for
+		// every committee member.
+		payloads := mustBytesSlice(args[0])
+		if err := engine.BootstrapFoundingChains(payloads); err != nil {
+			return nil, nil, err
+		}
 
 	case "propose":
 		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose

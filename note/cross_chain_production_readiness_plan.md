@@ -261,6 +261,39 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    first (a 5-line throwaway `go run` is enough, as done here) — this is the same
    "what would make this pass without the real thing being true" discipline this doc
    already asks for in code, just applied to generated config/payloads too.
+
+   **New sub-item found continuing this work — genesis governance deadlock, fixed:**
+   `GovernanceEngine.Vote` requires the voter to already be a member of `engine.ChainRegistry`
+   (`gateway_handler.go`'s "vote" case looks up the signer's committee there), and
+   `ExecuteGovernanceProposal`'s `ProposalRegisterChain` case requires a proposal to have
+   already passed a vote — so a fresh Root Anchor (`ChainRegistry` always starts empty, see
+   `NewGatewayEngine`'s call site) has **no path to register its first chain through
+   governance at all**, confirmed by tracing the code and by hitting it live (submitted real
+   `propose()` transactions for chains 101-104 against a running Root Anchor — see PR
+   `fix/cross-chain-refund-authorization` — they landed on-chain but can never be voted on).
+   Added `GatewayEngine.BootstrapFoundingChains([]byte payloads)` /
+   `bootstrapFoundingChains(bytes[])`: seeds `ChainRegistry`/`ActiveChains` directly, once,
+   requires `>= MinFoundingChains` (4, matching mục 1.3 #5) and real PoP for every committee
+   member, and is self-closing — the moment it succeeds `ActiveChains` is non-empty, so it can
+   never be called again by anyone. 5 new tests in `root_anchor_bootstrap_test.go` cover
+   success, <4 chains, duplicate chain ID, forged PoP, and the self-close guarantee — all real
+   BLS, no shortcuts.
+
+   **Still open — a separate, real infra bug found while testing this live:** restarting the
+   local 4-validator Root Anchor devnet from persisted state (any restart — reproduced both
+   simultaneous and staggered process start, **before** ever submitting the bootstrap tx, so
+   this is NOT caused by the change above) leaves block production fully stalled — no new
+   blocks, no log output at all past the startup sequence — while at least one validator
+   process's CPU/memory keeps climbing unbounded (observed one process reach 2+GB RSS at
+   ~38% CPU with zero corresponding log activity). Looks like a livelock/retry-storm in the
+   Rust consensus engine's restart-recovery path, not a fork (no divergent state was
+   produced — the safe failure mode per this doc's Zero-Fork principle), but it means the
+   bootstrap fix above is verified by unit test only, not yet by a live end-to-end run
+   against a real multi-validator network. Whoever picks this up next: reproduce with just
+   `deploy/systemd/root_anchor_data/{start,stop}_all.sh` (no cross-chain transaction
+   involved) and get real Rust-side consensus logs/a profile of the ballooning process before
+   guessing at a fix — the Go-side log is completely silent, so the useful signal is
+   elsewhere.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make
