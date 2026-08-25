@@ -103,6 +103,20 @@ type CrossChainConfig struct {
 	// added and the live verification it unblocked. Never set this on anything but a disposable
 	// local devnet.
 	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
+
+	// GenesisCoordinatorAddress — hex address pre-committed out of band (matching
+	// runbook_root_anchor_genesis_ceremony.md's genesis_digest.txt convention) as the ONLY
+	// caller allowed to submit bootstrapFoundingChains(). Real fix for the front-run gap
+	// documented in cross_chain_production_readiness_plan.md's Phase 1 hardening item:
+	// GatewayEngine.GenesisCoordinator/BootstrapFoundingChainsWithCaller already enforce this
+	// check in code, but nothing in production ever set the field, so the check was always a
+	// no-op (zero address = any caller accepted) — anyone racing a founding_entry.json leak
+	// could front-run the real ceremony and permanently occupy a founding committee seat.
+	// Empty/omitted preserves that exact pre-existing behavior (any caller may bootstrap) —
+	// this is opt-in, not a breaking default change, so existing devnet/test flows that never
+	// set a coordinator are unaffected. Any real genesis ceremony MUST set this to the
+	// coordinator's real address before the bootstrap transaction is ever submitted.
+	GenesisCoordinatorAddress string `json:"genesis_coordinator_address,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy

@@ -15,6 +15,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -914,6 +915,96 @@ func TestGatewayHandler_BootstrapFoundingChains_CoordinatorGuards(t *testing.T) 
 	if failedSuccess {
 		t.Fatalf("expected coordinator bootstrap to succeed")
 	}
+}
+
+// TestLoadGatewayEngine_GenesisCoordinatorConfig is the regression test for the
+// bootstrapFoundingChains front-run gap tracked in
+// note/cross_chain_production_readiness_plan.md (Phase 1 hardening item): GenesisCoordinator/
+// BootstrapFoundingChainsWithCaller already enforced this check in code, but nothing in
+// production ever populated the field, so it was always the zero address — a no-op that let
+// any caller bootstrap. CrossChain.GenesisCoordinatorAddress (config.go) plus
+// applyGenesisCoordinatorConfig (gateway_handler.go) close that gap.
+func TestLoadGatewayEngine_GenesisCoordinatorConfig(t *testing.T) {
+	prevConfig := config.ConfigApp
+	t.Cleanup(func() { config.ConfigApp = prevConfig })
+
+	coordinatorAddr := "0xC0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0"
+
+	t.Run("fresh engine picks up configured coordinator", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if engine.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
+			t.Fatalf("GenesisCoordinator = %s, want %s", engine.GenesisCoordinator.Hex(), coordinatorAddr)
+		}
+	})
+
+	t.Run("unconfigured leaves existing any-caller behavior unchanged", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if engine.GenesisCoordinator != (common.Address{}) {
+			t.Fatalf("expected zero-address GenesisCoordinator when unconfigured, got %s", engine.GenesisCoordinator.Hex())
+		}
+	})
+
+	t.Run("once set, persisted value is locked in against a later config change", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if err := saveGatewayEngine(cs, engine); err != nil {
+			t.Fatalf("saveGatewayEngine: %v", err)
+		}
+
+		attackerAddr := "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: attackerAddr}}
+		reloaded, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine (reload): %v", err)
+		}
+		if reloaded.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
+			t.Fatalf("GenesisCoordinator changed on reload despite already being locked in: got %s, want original %s", reloaded.GenesisCoordinator.Hex(), coordinatorAddr)
+		}
+	})
+
+	t.Run("end-to-end: front-running caller rejected, configured coordinator accepted", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+
+		h, err := GetGatewayHandler()
+		if err != nil {
+			t.Fatalf("GetGatewayHandler: %v", err)
+		}
+
+		var payloads [][]byte
+		for _, id := range []uint64{201, 202, 203, 204} {
+			payloads = append(payloads, makeFoundingChainPayload(t, id))
+		}
+		calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
+		if err != nil {
+			t.Fatalf("pack bootstrapFoundingChains: %v", err)
+		}
+
+		frontRunner := common.HexToAddress("0xF00DF00DF00DF00DF00DF00DF00DF00DF00DF00D")
+		attackTx := newTx(frontRunner, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, attackTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
+			t.Fatalf("expected front-running caller to be rejected once a coordinator is configured")
+		}
+
+		coordinatorTx := newTx(common.HexToAddress(coordinatorAddr), mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, coordinatorTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+			t.Fatalf("expected the configured coordinator's bootstrap to succeed")
+		}
+	})
 }
 
 // computeProposalIDForTest mirrors GovernanceEngine.Propose's exact proposalID derivation

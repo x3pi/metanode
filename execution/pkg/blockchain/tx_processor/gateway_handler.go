@@ -108,6 +108,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		}
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
 		applyDevnetGovernanceTimelockOverride(freshEngine)
+		applyGenesisCoordinatorConfig(freshEngine)
 		return freshEngine, nil
 	}
 
@@ -133,7 +134,24 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		engine.RegisteredPops = make(map[string][]byte)
 	}
 	applyDevnetGovernanceTimelockOverride(&engine)
+	applyGenesisCoordinatorConfig(&engine)
 	return &engine, nil
+}
+
+// applyGenesisCoordinatorConfig is a no-op unless config.ConfigApp explicitly sets
+// CrossChain.GenesisCoordinatorAddress AND the engine's GenesisCoordinator is still unset (the
+// zero address) — see that field's own doc comment (pkg/config/config.go). Only ever sets the
+// coordinator once, from the pristine/never-configured state: once a coordinator is recorded
+// (whether from an earlier config application or restored from persisted state), it is locked in
+// for the life of this GatewayEngine and a later config change cannot silently swap it out.
+func applyGenesisCoordinatorConfig(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil || config.ConfigApp.CrossChain.GenesisCoordinatorAddress == "" {
+		return
+	}
+	if engine.GenesisCoordinator != (common.Address{}) {
+		return
+	}
+	engine.GenesisCoordinator = common.HexToAddress(config.ConfigApp.CrossChain.GenesisCoordinatorAddress)
 }
 
 // applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
