@@ -38,6 +38,16 @@ type CommitteeAttestationShare struct {
 	Signature       []byte `json:"signature"`
 }
 
+// CommitAttestationShare is one validator's individual BLS signature over a pending
+// commit root (Milestone F of the wiring plan — see
+// execution/pkg/cross_chain/epoch_sync.go's ComputeCommitRootAttestMessage). Collected on Root
+// Anchor via GatewayEngine.PendingCommitAttestations until enough stake is reached to
+// aggregate into a real QuorumCert for attestCommit().
+type CommitAttestationShare struct {
+	SignerPubkeyBLS []byte `json:"signer_pubkey_bls"`
+	Signature       []byte `json:"signature"`
+}
+
 // ChainRegistry holds registered chain metadata and committee state on Root Anchor (Section 2.1).
 type ChainRegistry struct {
 	ChainID          uint64           `json:"chain_id"`
@@ -260,6 +270,7 @@ type Channel struct {
 type AttestedCommit struct {
 	SourceChainID uint64      `json:"source_chain_id"`
 	CommitRoot    common.Hash `json:"commit_root"`
+	AssetID       *big.Int    `json:"asset_id"`
 	Epoch         uint64      `json:"epoch"`
 	FundedAmount  *big.Int    `json:"funded_amount"`
 	ClaimedAmount *big.Int    `json:"claimed_amount"`
@@ -292,4 +303,18 @@ type GovernanceProposal struct {
 type AccountLeaf struct {
 	Account common.Address `json:"account"`
 	Balance *big.Int       `json:"balance"`
+}
+
+// AggregateValueLeaf represents the real total value moved for a given asset in a commit
+// (Section 11.2/2.3.1). It is a leaf of the SAME Merkle tree that already contains the commit's
+// per-message leaves (BuildCommitTree in relayer.go) — not a separate tree, and it carries no
+// sourceChainId/commitRoot fields of its own (matching the design doc's minimal
+// AggregateValueLeaf{assetId, totalValue} exactly): scoping to one specific commit comes entirely
+// from verifying its Merkle proof against that commit's own commitRoot, so the identical leaf is
+// valid both for the originating chain's own attestCommit() and for Reserve's re-attestation of
+// the same commit on the second hop (AttestReserveIssuedCommit) — both verify against the same
+// commitRoot.
+type AggregateValueLeaf struct {
+	AssetID         *big.Int
+	AggregateAmount *big.Int
 }

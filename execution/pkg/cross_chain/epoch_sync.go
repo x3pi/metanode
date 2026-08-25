@@ -33,9 +33,63 @@ type CommitteeUpdate struct {
 
 // CommitteeUpdateDomainTag domain-separates the payload every validator signs when attesting to
 // a CommitteeUpdate (Milestone C of the wiring plan), distinct from attestCommit's
-// "COMMIT_ROOT_ATTEST_V1:" tag (gateway.go) so a signature over one can never be replayed as the
-// other.
+// "COMMIT_ROOT_ATTEST_V1:" tag so a signature over one can never be replayed as the other.
 var CommitteeUpdateDomainTag = []byte("COMMITTEE_UPDATE_V1:")
+
+// CommitRootAttestDomainTag domain-separates the payload every validator signs when attesting to
+// a commit root (Milestone F of the wiring plan), matching attestCommit's verification convention
+// in gateway.go.
+var CommitRootAttestDomainTag = []byte("COMMIT_ROOT_ATTEST_V1:")
+
+// ComputeCommitRootAttestMessage computes the domain-separated message payload every validator of
+// the committee signs to attest to a commit root.
+func ComputeCommitRootAttestMessage(commitRoot common.Hash) []byte {
+	var buf []byte
+	buf = append(buf, CommitRootAttestDomainTag...)
+	buf = append(buf, commitRoot.Bytes()...)
+	return buf
+}
+
+// GovernanceVoteDomainTag domain-separates the payload a committee member signs to cast their
+// chain's single governance vote (Milestone G security fix), distinct from every other signed
+// payload in this package so a signature over one can never be replayed as another.
+var GovernanceVoteDomainTag = []byte("GOVERNANCE_VOTE_V1:")
+
+// ComputeGovernanceVoteMessage computes the domain-separated payload a member of voterChainID's
+// CURRENT committee (per Root Anchor's own ChainRegistry) must sign to cast that chain's one vote
+// for a proposal. This is what gateway_handler.go's "vote" case verifies before ever calling
+// GovernanceEngine.Vote — without it, any unauthenticated caller could cast a vote "as" any
+// registered chain merely by naming its ID, since GovernanceEngine.Vote itself trusts its caller.
+func ComputeGovernanceVoteMessage(proposalID common.Hash, voterChainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, GovernanceVoteDomainTag...)
+	buf = append(buf, proposalID.Bytes()...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], voterChainID)
+	buf = append(buf, idBuf[:]...)
+	return buf
+}
+
+// BuildSignerBitmap constructs a deterministic bit vector for a committee indicating which
+// members have signed, where bit i represents committee[i].
+func BuildSignerBitmap(committee []ValidatorEntry, votingPubkeys [][]byte) []byte {
+	if len(committee) == 0 || len(votingPubkeys) == 0 {
+		return []byte{}
+	}
+	numBytes := (len(committee) + 7) / 8
+	bitmap := make([]byte, numBytes)
+	for _, pk := range votingPubkeys {
+		for i, member := range committee {
+			if bytes.Equal(member.PubkeyBLS, pk) {
+				byteIdx := i / 8
+				bitIdx := uint(i % 8)
+				bitmap[byteIdx] |= (1 << bitIdx)
+				break
+			}
+		}
+	}
+	return bitmap
+}
 
 // ComputeCommitteeUpdateDigest computes the domain-separated digest every validator of the OLD
 // committee signs to attest to a new one. newCommittee is sorted by PubkeyBLS bytes before
@@ -81,6 +135,43 @@ func HashAccountLeaf(leaf AccountLeaf) common.Hash {
 	padded := make([]byte, 32)
 	copy(padded[32-len(balBytes):], balBytes)
 	data = append(data, padded...)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(data)
+	var out common.Hash
+	hasher.Sum(out[:0])
+	return out
+}
+
+// HashAggregateValueLeaf computes the 32-byte Keccak-256 leaf hash for an AggregateValueLeaf,
+// domain-separated with 0x02 (distinct from 0x00 message leaves and 0x01 internal nodes —
+// gateway.go's ComputeMessageLeafHash / hashPair) so it can never collide with a real message
+// leaf inside the same commit tree (Section 2.3.1/11.2). Deliberately excludes sourceChainId and
+// commitRoot: this leaf is scoped to one specific commit purely by being verified with a Merkle
+// proof against that commit's own commitRoot (see BuildCommitTree in relayer.go and
+// attestCommitInternal in gateway.go), matching the design doc's minimal
+// AggregateValueLeaf{assetId, totalValue} exactly.
+func HashAggregateValueLeaf(leaf AggregateValueLeaf) common.Hash {
+	var data []byte
+	data = append(data, 0x02) // Domain separation: 0x02 for AggregateValueLeaf
+
+	assetBytes := make([]byte, 32)
+	if leaf.AssetID != nil {
+		raw := leaf.AssetID.Bytes()
+		if len(raw) <= 32 {
+			copy(assetBytes[32-len(raw):], raw)
+		}
+	}
+	data = append(data, assetBytes...)
+
+	amountBytes := make([]byte, 32)
+	if leaf.AggregateAmount != nil {
+		raw := leaf.AggregateAmount.Bytes()
+		if len(raw) <= 32 {
+			copy(amountBytes[32-len(raw):], raw)
+		}
+	}
+	data = append(data, amountBytes...)
 
 	hasher := sha3.NewLegacyKeccak256()
 	hasher.Write(data)

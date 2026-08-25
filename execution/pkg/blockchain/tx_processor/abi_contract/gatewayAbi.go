@@ -48,6 +48,9 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
 			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
 			{"internalType": "uint256", "name": "aggregateAmount", "type": "uint256"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
 			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
 			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
 			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
@@ -182,6 +185,33 @@ const GatewayABI = `[
 	{
 		"inputs": [
 			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "submitCommitAttestation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}
+		],
+		"name": "getCommitAttestationShares",
+		"outputs": [
+			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
+			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
 			{"internalType": "uint64", "name": "newEpoch", "type": "uint64"},
 			{"internalType": "bytes[]", "name": "newCommitteePubkeys", "type": "bytes[]"},
 			{"internalType": "uint64[]", "name": "newCommitteeStakes", "type": "uint64[]"},
@@ -193,6 +223,120 @@ const GatewayABI = `[
 			{"internalType": "bytes", "name": "aggSignature", "type": "bytes"}
 		],
 		"name": "committeeUpdate",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint8", "name": "kind", "type": "uint8"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"}
+		],
+		"name": "propose",
+		"outputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "voterChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "vote",
+		"outputs": [{"internalType": "uint8", "name": "status", "type": "uint8"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"}
+		],
+		"name": "executeProposal",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "totalSupply", "type": "uint256"}
+		],
+		"name": "registerAsset",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
+		"name": "getProposal",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint8", "name": "kind", "type": "uint8"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint64", "name": "votesFor", "type": "uint64"},
+			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"},
+			{"internalType": "uint64", "name": "effectiveAt", "type": "uint64"},
+			{"internalType": "bool", "name": "executed", "type": "bool"},
+			{"internalType": "uint8", "name": "status", "type": "uint8"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "assetId", "type": "uint256"}],
+		"name": "getAsset",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint256", "name": "homeChainId", "type": "uint256"},
+			{"internalType": "address", "name": "canonicalContract", "type": "address"},
+			{"internalType": "bool", "name": "active", "type": "bool"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "sequence", "type": "uint256"},
+			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
+			{"internalType": "address", "name": "sender", "type": "address"},
+			{"internalType": "address", "name": "target", "type": "address"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "value", "type": "uint256"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint256", "name": "aggregateProofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "aggregateProofSiblings", "type": "bytes32[]"},
+			{"internalType": "uint256", "name": "messageProofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "messageProofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "verifyAndExecute",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "deadChainId", "type": "uint256"},
+			{"internalType": "address", "name": "account", "type": "address"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "accountLeafHash", "type": "bytes32"}
+		],
+		"name": "claimDeadChainBalance",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"

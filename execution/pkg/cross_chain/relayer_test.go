@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
@@ -115,13 +114,13 @@ func TestRelayer_P4_2_TipClaimingAndConcurrencyCompetition(t *testing.T) {
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
 	proof := GetMerkleProof(commitData.MerkleLayers, 0)
+	aggregateProof := GetMerkleProof(commitData.MerkleLayers, commitData.AggregateLeafIndex["0"])
 
 	relayer1 := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
 	relayer2 := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
 
-	// Simulate both relayers racing to claim the same message
 	winner, receipt, losers, dupErrors := relayerEngine.CompeteRelayers(
-		*msg, proof, commitData.CommitRoot, commitData.Cert,
+		*msg, commitData.AggregateAmounts["0"], aggregateProof, proof, commitData.CommitRoot, commitData.Cert,
 		[]common.Address{relayer1, relayer2},
 	)
 
@@ -498,8 +497,7 @@ func TestRelayer_Scenario10_8_DeadChainRecovery(t *testing.T) {
 		Account: victimAccount,
 		Balance: victimBalance,
 	}
-	leafBytes, _ := json.Marshal(leaf)
-	leafHash := Keccak256(leafBytes)
+	leafHash := HashAccountLeaf(leaf)
 
 	// Set state root on Reserve registry to leafHash for test
 	reg := reserveEngine.ChainRegistry[deadChainID]

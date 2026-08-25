@@ -181,6 +181,30 @@ func (c *Client) GetCommitteeAttestationShares(ctx context.Context, sourceChainI
 	return pubkeys, signatures, nil
 }
 
+// GetCommitAttestationShares reads the currently-collected BLS attestation shares for a
+// pending commit root from Root Anchor via eth_call to getCommitAttestationShares()
+// (Milestone F).
+func (c *Client) GetCommitAttestationShares(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash) (pubkeys [][]byte, signatures [][]byte, err error) {
+	calldata, err := c.abi.Pack("getCommitAttestationShares", new(big.Int).SetUint64(sourceChainID), epoch, commitRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack getCommitAttestationShares: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, nil, err
+	}
+	outValues, err := c.abi.Unpack("getCommitAttestationShares", result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack getCommitAttestationShares output: %w", err)
+	}
+	if len(outValues) != 2 {
+		return nil, nil, fmt.Errorf("getCommitAttestationShares: expected 2 output values, got %d", len(outValues))
+	}
+	pubkeys, _ = outValues[0].([][]byte)
+	signatures, _ = outValues[1].([][]byte)
+	return pubkeys, signatures, nil
+}
+
 // SubmitTransaction sends a pre-signed raw transaction to Root Anchor via eth_sendRawTransaction.
 // Deliberately generic — it does not know or care what the transaction does. This is the
 // transport Milestone C's CommitteeUpdate submission will use; building that payload and deciding
@@ -253,6 +277,26 @@ func (c *Client) ethCall(ctx context.Context, calldata []byte) ([]byte, error) {
 	}
 	c.breaker.RecordSuccess()
 	return resultHex, nil
+}
+
+// EthCallGateway executes a raw read-only call against Root Anchor's Gateway contract.
+func (c *Client) EthCallGateway(ctx context.Context, calldata []byte) ([]byte, error) {
+	return c.ethCall(ctx, calldata)
+}
+
+// SendRawTransaction broadcasts a signed raw transaction to the network.
+func (c *Client) SendRawTransaction(ctx context.Context, rawTxHex string) (common.Hash, error) {
+	if !c.breaker.CanExecute() {
+		return common.Hash{}, ErrCircuitOpen
+	}
+	var txHashStr string
+	err := c.callRPC(ctx, "eth_sendRawTransaction", &txHashStr, rawTxHex)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return common.Hash{}, err
+	}
+	c.breaker.RecordSuccess()
+	return common.HexToHash(txHashStr), nil
 }
 
 // callRPC tries each configured URL in order, returning the first success. It does NOT itself

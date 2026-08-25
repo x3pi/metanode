@@ -3,6 +3,7 @@ package cross_chain
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -79,11 +80,18 @@ type GatewayEngine struct {
 	// CommitteeUpdate, keyed by "sourceChainId:oldEpoch:payloadHashHex" (Milestone C). Cleared
 	// once the corresponding committeeUpdate() succeeds.
 	PendingCommitteeAttestations map[string][]CommitteeAttestationShare
+	// PendingCommitAttestations collects individual BLS signature shares for a pending
+	// commit root attestation, keyed by "sourceChainId:epoch:commitRootHex" (Milestone F).
+	PendingCommitAttestations map[string][]CommitAttestationShare
 	// RegisteredPops is a durable, permissionless Proof-of-Possession registry keyed by
 	// hex(pubkeyBls) (Milestone C) — see registerCommitteePop()/getRegisteredPop() in
 	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
 	// their own key at any time.
 	RegisteredPops map[string][]byte
+	// Governance manages on-chain multi-chain voting and 72h timelocks (Milestone G).
+	Governance *GovernanceEngine `json:"governance,omitempty"`
+	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
+	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -92,6 +100,13 @@ func NewGatewayEngine(
 	registry map[uint64]ChainRegistry,
 	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
+	activeChains := make([]uint64, 0, len(registry))
+	for c := range registry {
+		activeChains = append(activeChains, c)
+	}
+	gov := NewGovernanceEngine(activeChains)
+	assetReg := NewAssetRegistryEngine(registry, gov)
+
 	return &GatewayEngine{
 		LocalChainID:                 localChainID,
 		ChainRegistry:                registry,
@@ -104,8 +119,82 @@ func NewGatewayEngine(
 		ChannelSequence:              make(map[string]uint64),
 		RelayerBalances:              make(map[common.Address]*big.Int),
 		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
+		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
 		RegisteredPops:               make(map[string][]byte),
+		Governance:                   gov,
+		AssetRegistry:                assetReg,
 	}
+}
+
+// EnsureGovernance ensures Governance and AssetRegistry engines are initialized after JSON deserialization.
+func (g *GatewayEngine) EnsureGovernance() {
+	if g.Governance == nil {
+		activeChains := make([]uint64, 0, len(g.ChainRegistry))
+		for c := range g.ChainRegistry {
+			activeChains = append(activeChains, c)
+		}
+		g.Governance = NewGovernanceEngine(activeChains)
+	}
+	if g.AssetRegistry == nil {
+		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
+	} else {
+		g.AssetRegistry.ChainRegistry = g.ChainRegistry
+		g.AssetRegistry.Governance = g.Governance
+	}
+}
+
+// ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
+// mutates GatewayEngine state (ChainRegistry onboarding/offboarding, dead chains, asset registration).
+func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, currentTimestamp uint64) (*GovernanceProposal, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.EnsureGovernance()
+
+	proposal, err := g.Governance.Execute(proposalID, currentTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	switch proposal.Kind {
+	case ProposalRegisterChain:
+		var reg ChainRegistry
+		if err := json.Unmarshal(proposal.Payload, &reg); err != nil {
+			return nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		if reg.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		g.Governance.RegisterActiveChain(reg.ChainID)
+		if g.ChainRegistry == nil {
+			g.ChainRegistry = make(map[uint64]ChainRegistry)
+		}
+		g.ChainRegistry[reg.ChainID] = reg
+
+	case ProposalUnregisterChain:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid unregister chain ID payload: %w", err)
+		}
+		g.Governance.UnregisterActiveChain(chainID)
+		delete(g.ChainRegistry, chainID)
+
+	case ProposalDeclareChainDead:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid declare dead chain ID payload: %w", err)
+		}
+		if g.DeadChains == nil {
+			g.DeadChains = make(map[uint64]bool)
+		}
+		g.DeadChains[chainID] = true
+	}
+
+	return proposal, nil
 }
 
 // SetAllocationRejectedListener registers an instant alert listener for overdraw events.
@@ -276,9 +365,11 @@ func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, cert, true)
+	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, true)
 }
 
 // AttestReserveIssuedCommit executes Phase 1 of Attest-then-Claim for a commit issued by RESERVE
@@ -291,15 +382,19 @@ func (g *GatewayEngine) AttestReserveIssuedCommit(
 	reserveChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, cert, false)
+	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false)
 }
 
 func (g *GatewayEngine) attestCommitInternal(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 	enforceCeiling bool,
 ) (*AttestedCommit, error) {
@@ -364,7 +459,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		return nil, fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
 	}
 
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
 	if len(votingPubkeys) == 1 {
 		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
 		sig := cm.SignFromBytes(cert.AggregateSignature)
@@ -384,6 +479,35 @@ func (g *GatewayEngine) attestCommitInternal(
 	if aggregateAmount == nil {
 		aggregateAmount = big.NewInt(0)
 	}
+	if assetId == nil {
+		assetId = big.NewInt(0)
+	}
+
+	// Verify cryptographic binding of the declared aggregateAmount to the commit itself (Section
+	// 2.3.1/11.2, risk #20): aggregateAmount must be provably a leaf of the SAME Merkle tree whose
+	// root is commitRoot — the very thing cert (verified above) already BLS-attests to — not a
+	// number the caller simply asserts. Verifying against commitRoot (not registry.StateRoot) is
+	// deliberate: it's what BuildCommitTree actually embeds the leaf into (relayer.go), and it's
+	// what makes AttestReserveIssuedCommit's re-attestation of the same underlying commit on the
+	// Reserve->destination leg check out identically, since both legs share the same commitRoot.
+	leaf := AggregateValueLeaf{
+		AssetID:         assetId,
+		AggregateAmount: aggregateAmount,
+	}
+	leafHash := HashAggregateValueLeaf(leaf)
+	if !VerifyMerkleProof(leafHash, aggregateProof, commitRoot) {
+		return nil, ErrInvalidMerkleProof
+	}
+
+	key := fmt.Sprintf("%d:%s:%s", sourceChainID, commitRoot.Hex(), assetId.String())
+
+	// Enforce write-once semantics
+	if existing, exists := g.AttestedCommits[key]; exists {
+		if existing.FundedAmount.Cmp(aggregateAmount) != 0 {
+			return nil, fmt.Errorf("attestCommit: aggregateAmount mismatch for already-attested asset")
+		}
+		return &existing, nil
+	}
 
 	if enforceCeiling {
 		// Check per_chain_allocation ceiling (Scenario 10.7) — only meaningful for a private
@@ -401,10 +525,10 @@ func (g *GatewayEngine) attestCommitInternal(
 		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
 	}
 
-	key := fmt.Sprintf("%d:%s", sourceChainID, commitRoot.Hex())
 	attested := AttestedCommit{
 		SourceChainID: sourceChainID,
 		CommitRoot:    commitRoot,
+		AssetID:       new(big.Int).Set(assetId),
 		Epoch:         cert.Epoch,
 		FundedAmount:  new(big.Int).Set(aggregateAmount),
 		ClaimedAmount: big.NewInt(0),
@@ -430,12 +554,16 @@ func (g *GatewayEngine) ClaimMessage(
 		return currentStatus, fmt.Errorf("%w: message %s has status %d", ErrAlreadyClaimed, message.MessageID.Hex(), currentStatus)
 	}
 
-	key := fmt.Sprintf("%d:%s", message.SourceChainID, commitRoot.Hex())
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	attested, exists := g.AttestedCommits[key]
 	if !exists {
 		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b))
 		for chainID := range g.ChainRegistry {
-			k := fmt.Sprintf("%d:%s", chainID, commitRoot.Hex())
+			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
 			if a, ok := g.AttestedCommits[k]; ok {
 				attested = a
 				exists = true
@@ -547,15 +675,16 @@ func (g *GatewayEngine) Refund(
 // VerifyAndExecute handles atomic verification & execution for low-volume messages (P2.7).
 func (g *GatewayEngine) VerifyAndExecute(
 	message CrossChainMessage,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
-	proof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, cert); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert); err != nil {
 		return MessageStatusPending, err
 	}
-	return g.ClaimMessage(message, proof, commitRoot, relayer)
+	return g.ClaimMessage(message, messageProof, commitRoot, relayer)
 }
 
 // ClaimDeadChainBalance allows user to recover funds on Reserve using account-tree Merkle proof (P2.8).
@@ -576,6 +705,11 @@ func (g *GatewayEngine) ClaimDeadChainBalance(
 	claimKey := fmt.Sprintf("%d:%s", deadChainID, account.Hex())
 	if g.DeadChainClaimed[claimKey] {
 		return fmt.Errorf("%w: chain %d, account %s", ErrDeadChainAlreadyClaimed, deadChainID, account.Hex())
+	}
+
+	expectedLeafHash := HashAccountLeaf(AccountLeaf{Account: account, Balance: amount})
+	if accountLeafHash != expectedLeafHash {
+		return fmt.Errorf("accountLeafHash %s does not match computed %s", accountLeafHash.Hex(), expectedLeafHash.Hex())
 	}
 
 	registry, exists := g.ChainRegistry[deadChainID]

@@ -182,7 +182,9 @@ func (h *GatewayHandler) HandleTransaction(
 
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
-		"registerCommitteePop", "submitCommitteeAttestation", "committeeUpdate":
+		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
+		"propose", "vote", "executeProposal", "registerAsset",
+		"verifyAndExecute", "claimDeadChainBalance":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -256,6 +258,7 @@ func (h *GatewayHandler) handleWrite(
 	}
 
 	var eventLogs []types.EventLog
+	var returnData []byte
 
 	switch method.Name {
 	case "outbound":
@@ -284,12 +287,17 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "attestCommit":
-		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[3]),
-			AggregateSignature: hexutil.Bytes(mustBytes(args[4])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[5])),
+		assetId := mustBigInt(args[3])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[4]).Uint64(),
+			Siblings:  mustHashSlice(args[5]),
 		}
-		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), cert); err != nil {
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[6]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
+		}
+		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
 			return nil, nil, err
 		}
 
@@ -385,6 +393,48 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 		engine.PendingCommitteeAttestations[key] = append(engine.PendingCommitteeAttestations[key], cross_chain.CommitteeAttestationShare{
+			SignerPubkeyBLS: signerPubkeyBls,
+			Signature:       signature,
+		})
+
+	case "submitCommitAttestation":
+		sourceChainID := mustUint64(args[0])
+		epoch := mustUint64(args[1])
+		commitRoot := mustHash(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		registry, exists := engine.ChainRegistry[sourceChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
+		}
+		if epoch != registry.Epoch {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: expected %d, got %d", cross_chain.ErrEpochMismatch, registry.Epoch, epoch)
+		}
+		isMember := false
+		for _, v := range registry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: signer is not a member of chain %d's current committee", sourceChainID)
+		}
+		commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, commitMsg) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		key := commitAttestationKey(sourceChainID, epoch, commitRoot)
+		for _, s := range engine.PendingCommitAttestations[key] {
+			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
+				return nil, nil, fmt.Errorf("submitCommitAttestation: pubkey already submitted a share for this commit root")
+			}
+		}
+		engine.PendingCommitAttestations[key] = append(engine.PendingCommitAttestations[key], cross_chain.CommitAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
@@ -514,6 +564,147 @@ func (h *GatewayHandler) handleWrite(
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
+	case "propose":
+		engine.EnsureGovernance()
+		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
+		payload := mustBytes(args[1])
+		proposedAt := mustUint64(args[2])
+		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
+		if err != nil {
+			return nil, nil, err
+		}
+		packed, packErr := method.Outputs.Pack(proposalID)
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		returnData = packed
+
+	case "vote":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		voterChainID := mustUint64(args[1])
+		currentTimestamp := mustUint64(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		// Security fix: GovernanceEngine.Vote itself trusts whatever voterChainID its caller
+		// passes — it was never meant to be called from an unauthenticated public entry point.
+		// Require proof that the caller actually speaks for voterChainID: a valid BLS signature
+		// from a member of that chain's CURRENT committee (per Root Anchor's own ChainRegistry)
+		// over this specific (proposalId, voterChainId) pair. Without this, any caller could cast
+		// any registered chain's single governance vote just by naming its ID.
+		voterRegistry, exists := engine.ChainRegistry[voterChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("vote: %w: chain %d", cross_chain.ErrUnknownSourceChain, voterChainID)
+		}
+		isMember := false
+		for _, v := range voterRegistry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("vote: signer is not a member of chain %d's current committee", voterChainID)
+		}
+		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, voterChainID)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, voteMsg) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		status, err := engine.Governance.Vote(proposalID, voterChainID, currentTimestamp)
+		if err != nil {
+			return nil, nil, err
+		}
+		packed, packErr := method.Outputs.Pack(uint8(status))
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		returnData = packed
+
+	case "executeProposal":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		currentTimestamp := mustUint64(args[1])
+		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
+			return nil, nil, err
+		}
+
+	case "registerAsset":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		totalSupply := mustBigInt(args[1])
+		proposal := engine.Governance.GetProposal(proposalID)
+		if proposal == nil {
+			return nil, nil, cross_chain.ErrProposalNotFound
+		}
+		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(proposal, totalSupply); err != nil {
+			return nil, nil, err
+		}
+
+	case "verifyAndExecute":
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustUint64(args[3]),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			Ordered:       mustBool(args[11]),
+		}
+		aggregateProof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[12]),
+			Siblings:  mustHashSlice(args[13]),
+		}
+		messageProof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[14]),
+			Siblings:  mustHashSlice(args[15]),
+		}
+		commitRoot := mustHash(args[16])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[17]),
+			AggregateSignature: mustBytes(args[18]),
+			SignerBitmap:       mustBytes(args[19]),
+		}
+
+		status, err := engine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, tx.FromAddress())
+		if err != nil {
+			return nil, nil, err
+		}
+
+		statusEvent := h.abi.Events["MessageStatusChanged"]
+		topic0 := statusEvent.ID
+		topic1 := msg.MessageID
+		eventData, packErr := statusEvent.Inputs.NonIndexed().Pack(uint8(status))
+		if packErr != nil {
+			return nil, nil, fmt.Errorf("pack MessageStatusChanged event: %w", packErr)
+		}
+		eventLogs = append(eventLogs, smart_contract.NewEventLog(
+			tx.Hash(), tx.ToAddress(), eventData,
+			[][]byte{topic0.Bytes(), topic1.Bytes()},
+		))
+
+	case "claimDeadChainBalance":
+		deadChainID := mustUint64(args[0])
+		account := mustAddress(args[1])
+		amount := mustBigInt(args[2])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[3]),
+			Siblings:  mustHashSlice(args[4]),
+		}
+		accountLeafHash := mustHash(args[5])
+
+		if err := engine.ClaimDeadChainBalance(deadChainID, account, amount, proof, accountLeafHash); err != nil {
+			return nil, nil, err
+		}
+
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)
 	}
@@ -521,7 +712,7 @@ func (h *GatewayHandler) handleWrite(
 	if err := saveGatewayEngine(chainState, engine); err != nil {
 		return nil, nil, err
 	}
-	return eventLogs, nil, nil
+	return eventLogs, returnData, nil
 }
 
 func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *abi.Method, argData []byte) ([]byte, error) {
@@ -615,6 +806,51 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
+	case "getCommitAttestationShares":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getCommitAttestationShares input: %w", err)
+		}
+		sourceChainID := mustUint64(args[0])
+		epoch := mustUint64(args[1])
+		commitRoot := mustHash(args[2])
+
+		shares := engine.PendingCommitAttestations[commitAttestationKey(sourceChainID, epoch, commitRoot)]
+		pubkeys := make([][]byte, len(shares))
+		signatures := make([][]byte, len(shares))
+		for i, s := range shares {
+			pubkeys[i] = s.SignerPubkeyBLS
+			signatures[i] = s.Signature
+		}
+		return method.Outputs.Pack(pubkeys, signatures)
+
+	case "getProposal":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getProposal input: %w", err)
+		}
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		proposal := engine.Governance.GetProposal(proposalID)
+		status, exists := engine.Governance.GetStatus(proposalID)
+		if !exists || proposal == nil {
+			return method.Outputs.Pack(false, uint8(0), []byte{}, uint64(0), uint64(0), uint64(0), false, uint8(0))
+		}
+		return method.Outputs.Pack(true, uint8(proposal.Kind), proposal.Payload, proposal.VotesFor, proposal.ProposedAt, proposal.EffectiveAt, proposal.Executed, uint8(status))
+
+	case "getAsset":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getAsset input: %w", err)
+		}
+		engine.EnsureGovernance()
+		assetID := mustBigInt(args[0])
+		entry, err := engine.AssetRegistry.GetAsset(assetID)
+		if err != nil || entry == nil {
+			return method.Outputs.Pack(false, new(big.Int), common.Address{}, false)
+		}
+		return method.Outputs.Pack(true, new(big.Int).SetUint64(entry.HomeChainID), entry.CanonicalContract, entry.Active)
+
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)
 	}
@@ -624,6 +860,12 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 // GatewayEngine.PendingCommitteeAttestations is keyed by this string (Milestone C).
 func committeeAttestationKey(sourceChainID, epoch uint64, payloadHash common.Hash) string {
 	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, payloadHash.Hex())
+}
+
+// commitAttestationKey identifies one in-progress commit root's share collection —
+// GatewayEngine.PendingCommitAttestations is keyed by this string (Milestone F).
+func commitAttestationKey(sourceChainID, epoch uint64, commitRoot common.Hash) string {
+	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, commitRoot.Hex())
 }
 
 // --- ABI arg conversion helpers ---
