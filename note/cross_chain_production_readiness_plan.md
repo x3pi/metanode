@@ -279,21 +279,32 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    success, <4 chains, duplicate chain ID, forged PoP, and the self-close guarantee — all real
    BLS, no shortcuts.
 
-   **Still open — a separate, real infra bug found while testing this live:** restarting the
-   local 4-validator Root Anchor devnet from persisted state (any restart — reproduced both
-   simultaneous and staggered process start, **before** ever submitting the bootstrap tx, so
-   this is NOT caused by the change above) leaves block production fully stalled — no new
-   blocks, no log output at all past the startup sequence — while at least one validator
-   process's CPU/memory keeps climbing unbounded (observed one process reach 2+GB RSS at
-   ~38% CPU with zero corresponding log activity). Looks like a livelock/retry-storm in the
-   Rust consensus engine's restart-recovery path, not a fork (no divergent state was
-   produced — the safe failure mode per this doc's Zero-Fork principle), but it means the
-   bootstrap fix above is verified by unit test only, not yet by a live end-to-end run
-   against a real multi-validator network. Whoever picks this up next: reproduce with just
-   `deploy/systemd/root_anchor_data/{start,stop}_all.sh` (no cross-chain transaction
-   involved) and get real Rust-side consensus logs/a profile of the ballooning process before
-   guessing at a fix — the Go-side log is completely silent, so the useful signal is
-   elsewhere.
+   **Investigated live, root cause found — environmental, not a code bug:** restarting the
+   local 4-validator Root Anchor devnet from persisted state appeared to hang (no new blocks,
+   silent Go-side log, one validator's RSS climbing unbounded). Ruled out with real evidence
+   before concluding anything: Go goroutine dump (`/debug/pprof/goroutine`) showed only the
+   normal idle worker pools (300/200 chan-receive goroutines matching
+   `NumInjectionWorkers`/`NumReadTxWorkers` exactly, nothing duplicated); Go heap profile
+   showed a tiny, stable ~67MB heap — the multi-GB RSS growth is entirely native/CGo-side, not
+   a Go leak; disk write throughput measured at 662MB/s (not I/O-bound); `ulimit -u` has huge
+   headroom (only ~1000 of 771041 threads in use). `gdb`/`ptrace` were unavailable in the
+   sandbox (`yama/ptrace_scope=1`, no passwordless sudo) so a Rust-side stack trace couldn't be
+   taken directly. What DID explain it: this machine (104 cores, 188GB RAM) has an unrelated,
+   pre-existing systemd service, `metanode-execution-3.service` (owned by system user
+   `metanode`, not this session's user) — running for 1+ day, consuming **653% CPU
+   (6.5+ cores) and 110GB RSS (peak 116.6GB)** continuously. This matches this project's own
+   prior session notes describing leftover crash-loop test artifacts on this shared machine,
+   unrelated to any cross-chain work. Left running at the user's explicit instruction (not this
+   session's to touch — needs sudo the assistant doesn't have anyway). **Net effect: the
+   bootstrap fix above is verified by its 5 real unit tests; a live multi-validator run is
+   still not done, but the blocker is this shared machine's resource contention, not a defect
+   in `BootstrapFoundingChains` or the Rust startup-sync path** (`startup_sync.rs` was read in
+   full during this investigation looking for an infinite-retry bug — its retry loops are all
+   properly bounded, e.g. `MAX_VERIFY_RETRIES=10`/`MAX_ISOLATION_ROUNDS=60`, not the culprit).
+   Whoever revisits this: get the noisy neighbor process stopped or run T2 on dedicated
+   hardware/VMs (this doc's own Phase 2 T2 row already calls for "separate machines/VMs" —
+   this finding is a concrete reason why, not just a nice-to-have) before spending more time
+   chasing this as a code issue.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make
