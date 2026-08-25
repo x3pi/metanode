@@ -132,6 +132,7 @@ const GatewayABI = `[
 			{"internalType": "uint64", "name": "quorumThreshold", "type": "uint64"},
 			{"internalType": "address", "name": "gatewayContract", "type": "address"},
 			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "accountTreeRoot", "type": "bytes32"},
 			{"internalType": "string", "name": "archivalEndpoint", "type": "string"},
 			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"}
 		],
@@ -218,6 +219,7 @@ const GatewayABI = `[
 			{"internalType": "bytes[]", "name": "newCommitteePopSignatures", "type": "bytes[]"},
 			{"internalType": "uint64", "name": "quorumThreshold", "type": "uint64"},
 			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "accountTreeRoot", "type": "bytes32"},
 			{"internalType": "bytes32", "name": "payloadHash", "type": "bytes32"},
 			{"internalType": "bytes[]", "name": "aggPubkeys", "type": "bytes[]"},
 			{"internalType": "bytes", "name": "aggSignature", "type": "bytes"}

@@ -56,6 +56,7 @@ type ChainRegistry struct {
 	QuorumThreshold  uint64           `json:"quorum_threshold"`
 	GatewayContract  common.Address   `json:"gateway_contract"`
 	StateRoot        common.Hash      `json:"state_root"`
+	AccountTreeRoot  common.Hash      `json:"account_tree_root"`
 	ArchivalEndpoint string           `json:"archival_endpoint"`
 	RegisteredAt     uint64           `json:"registered_at"`
 }

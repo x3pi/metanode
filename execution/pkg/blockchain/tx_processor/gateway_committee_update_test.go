@@ -152,7 +152,8 @@ func TestGatewayHandler_CommitteeUpdate_FullQuorumLifecycle(t *testing.T) {
 	newCommittee := append(append([]cross_chain.ValidatorEntry{}, oldCommittee...), newMember.entry)
 	newEpoch := uint64(oldEpoch + 1)
 	stateRoot := common.HexToHash("0xFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACE")
-	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, newCommittee, stateRoot)
+	accountTreeRoot := common.HexToHash("0xCAFEBABEDEADBEAFCAFEBABEDEADBEAFCAFEBABEDEADBEAFCAFEBABEDEADBEAF")
+	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, newCommittee, stateRoot, accountTreeRoot)
 
 	// --- 3 of 4 OLD members (3000/4000 = 75% >= 2/3) submit real BLS attestation shares. ---
 	signers := old[:3]
@@ -209,7 +210,7 @@ func TestGatewayHandler_CommitteeUpdate_FullQuorumLifecycle(t *testing.T) {
 	calldata, err := h.abi.Pack("committeeUpdate",
 		new(big.Int).SetUint64(sourceChainID), newEpoch,
 		newPubkeys, newStakes, newPops,
-		uint64(6667), stateRoot, payloadHash,
+		uint64(6667), stateRoot, accountTreeRoot, payloadHash,
 		gotPubkeys, aggSignature,
 	)
 	if err != nil {
@@ -243,6 +244,9 @@ func TestGatewayHandler_CommitteeUpdate_FullQuorumLifecycle(t *testing.T) {
 	}
 	if updated.StateRoot != stateRoot {
 		t.Fatalf("registry stateRoot = %s, want %s", updated.StateRoot.Hex(), stateRoot.Hex())
+	}
+	if updated.AccountTreeRoot != accountTreeRoot {
+		t.Fatalf("registry accountTreeRoot = %s, want %s", updated.AccountTreeRoot.Hex(), accountTreeRoot.Hex())
 	}
 
 	// --- Pending shares for this now-applied update must be cleared. ---
@@ -299,7 +303,8 @@ func TestGatewayHandler_CommitteeUpdate_InsufficientQuorumRejected(t *testing.T)
 	sender := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	newEpoch := uint64(oldEpoch + 1)
 	stateRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, oldCommittee, stateRoot)
+	accountTreeRoot := common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, oldCommittee, stateRoot, accountTreeRoot)
 
 	// Only 1 of 4 signs — 25% stake, below the 2/3 threshold.
 	sig := bls.Sign(old[0].kp.PrivateKey(), payloadHash.Bytes())
@@ -318,7 +323,7 @@ func TestGatewayHandler_CommitteeUpdate_InsufficientQuorumRejected(t *testing.T)
 	calldata, err := h.abi.Pack("committeeUpdate",
 		new(big.Int).SetUint64(sourceChainID), newEpoch,
 		newPubkeys, newStakes, newPops,
-		uint64(6667), stateRoot, payloadHash,
+		uint64(6667), stateRoot, accountTreeRoot, payloadHash,
 		[][]byte{old[0].entry.PubkeyBLS}, sig.Bytes(),
 	)
 	if err != nil {

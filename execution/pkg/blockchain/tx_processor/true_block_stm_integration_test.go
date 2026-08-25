@@ -111,10 +111,10 @@ func TestTrueBlockSTM_BarrierTxObservesRealCommitNotSharedMVCCMap(t *testing.T) 
 	seedAccount(t, cs, addrA, big.NewInt(1_000_000), 0)
 	seedAccount(t, cs, addrC, big.NewInt(1_000_000), 0)
 
-	tx0 := newTx(addrA, addrB, 0, big.NewInt(500_000), nil) // A -> B, segment 1
-	txBump := newTx(addrC, addrX, 0, big.NewInt(1000), nil) // C -> X, segment 1, bumps C's nonce 0 -> 1 (MVCC only)
+	tx0 := newTx(addrA, addrB, 0, big.NewInt(500_000), nil)                          // A -> B, segment 1
+	txBump := newTx(addrC, addrX, 0, big.NewInt(1000), nil)                          // C -> X, segment 1, bumps C's nonce 0 -> 1 (MVCC only)
 	tx1 := newTx(addrC, mt_common.VALIDATOR_CONTRACT_ADDRESS, 0, big.NewInt(0), nil) // barrier: STALE nonce
-	tx2 := newTx(addrB, addrD, 0, big.NewInt(100_000), nil)                         // B -> D, segment 2
+	tx2 := newTx(addrB, addrD, 0, big.NewInt(100_000), nil)                          // B -> D, segment 2
 
 	txs := []types.Transaction{tx0, txBump, tx1, tx2}
 	leaderAddr := common.HexToAddress("0xE5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5")
@@ -253,7 +253,7 @@ func TestTrueBlockSTM_SmartContractGasDeduction(t *testing.T) {
 
 	// senderGood has 1,000,000 wei. Gas cost is ~20000.
 	seedAccount(t, cs, senderGood, big.NewInt(1_000_000), 0)
-	
+
 	// senderPoor has only 100 wei. Gas cost is ~20000, so it will fail to pay gas.
 	seedAccount(t, cs, senderPoor, big.NewInt(100), 0)
 
@@ -265,7 +265,7 @@ func TestTrueBlockSTM_SmartContractGasDeduction(t *testing.T) {
 	callData := transaction.NewCallData(packedInput)
 	dataBytes, _ := callData.Marshal()
 	dummyContractAddr := common.HexToAddress("0x9999999999999999999999999999999999999999")
-	
+
 	// MaxGasPrice is 1
 	txGood := newTx(senderGood, dummyContractAddr, 0, big.NewInt(0), dataBytes)
 	txPoor := newTx(senderPoor, dummyContractAddr, 0, big.NewInt(0), dataBytes)

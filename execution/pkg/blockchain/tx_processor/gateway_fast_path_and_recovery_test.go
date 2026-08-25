@@ -137,7 +137,7 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	engine.LocalChainID = localChainID
 	engine.SupplyLedger = ledger
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
-		deadChainID: {ChainID: deadChainID, StateRoot: stateRoot, Epoch: 1},
+		deadChainID: {ChainID: deadChainID, StateRoot: common.HexToHash("0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"), AccountTreeRoot: stateRoot, Epoch: 1},
 		101:         {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
 		102:         {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
 	}

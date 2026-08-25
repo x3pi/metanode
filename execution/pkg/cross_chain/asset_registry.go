@@ -11,27 +11,27 @@ import (
 )
 
 var (
-	ErrAssetNotFound           = errors.New("asset not found in AssetRegistry")
-	ErrAssetInactive           = errors.New("asset is currently inactive or paused")
-	ErrAssetAlreadyExists      = errors.New("asset ID already registered")
-	ErrInvalidCanonicalContract= errors.New("canonical contract address cannot be zero")
-	ErrInvalidHomeChain        = errors.New("home chain ID is invalid or not registered")
-	ErrInvalidWrappedContract  = errors.New("wrapped contract address cannot be zero")
-	ErrUnauthorizedRegistration= errors.New("unauthorized asset registration attempt (must pass governance >= 2/3)")
-	ErrInsufficientVaultBalance= errors.New("insufficient vault balance on home chain for unlock")
-	ErrInsufficientCirculation = errors.New("insufficient wrapped token circulation on source chain for burn")
-	ErrAssetSupplyMismatch     = errors.New("asset total supply does not match sum of vault and circulation balances")
-	ErrZeroAssetAmount         = errors.New("asset amount must be greater than zero")
+	ErrAssetNotFound            = errors.New("asset not found in AssetRegistry")
+	ErrAssetInactive            = errors.New("asset is currently inactive or paused")
+	ErrAssetAlreadyExists       = errors.New("asset ID already registered")
+	ErrInvalidCanonicalContract = errors.New("canonical contract address cannot be zero")
+	ErrInvalidHomeChain         = errors.New("home chain ID is invalid or not registered")
+	ErrInvalidWrappedContract   = errors.New("wrapped contract address cannot be zero")
+	ErrUnauthorizedRegistration = errors.New("unauthorized asset registration attempt (must pass governance >= 2/3)")
+	ErrInsufficientVaultBalance = errors.New("insufficient vault balance on home chain for unlock")
+	ErrInsufficientCirculation  = errors.New("insufficient wrapped token circulation on source chain for burn")
+	ErrAssetSupplyMismatch      = errors.New("asset total supply does not match sum of vault and circulation balances")
+	ErrZeroAssetAmount          = errors.New("asset amount must be greater than zero")
 )
 
 // AssetRegistryEngine manages cross-chain custom tokens (ERC-20 / Wrapped assets) (P6.1 & P6.2).
 // Governed on Root Anchor via ProposalRegisterAsset (>= 2/3 active chains + 72h timelock).
 type AssetRegistryEngine struct {
 	mu                  sync.RWMutex
-	Assets              map[string]*AssetEntry             // key: assetID.String()
-	VaultBalances       map[string]*big.Int                // key: "assetID:chainID" -> locked tokens in home chain vault
-	CirculationBalances map[string]*big.Int                // key: "assetID:chainID" -> wrapped tokens circulating on dest chains
-	TotalSupplies       map[string]*big.Int                // key: assetID.String() -> canonical total supply
+	Assets              map[string]*AssetEntry // key: assetID.String()
+	VaultBalances       map[string]*big.Int    // key: "assetID:chainID" -> locked tokens in home chain vault
+	CirculationBalances map[string]*big.Int    // key: "assetID:chainID" -> wrapped tokens circulating on dest chains
+	TotalSupplies       map[string]*big.Int    // key: assetID.String() -> canonical total supply
 	ChainRegistry       map[uint64]ChainRegistry
 	Governance          *GovernanceEngine
 }

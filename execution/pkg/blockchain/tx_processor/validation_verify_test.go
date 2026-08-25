@@ -8,8 +8,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -21,7 +21,7 @@ import (
 // Helper to create a ChainState for testing
 func setupTestChainState(t *testing.T) *blockchain.ChainState {
 	t.Helper()
-	
+
 	// Ensure SKIP_MEMPOOL_SIG_VERIFY is disabled for tests so validation actually runs
 	os.Setenv("SKIP_MEMPOOL_SIG_VERIFY", "false")
 
@@ -85,7 +85,7 @@ func TestVerifyTransaction_Success(t *testing.T) {
 
 	// Bypass skip mempool verification
 	err := VerifyTransaction(tx, cs, as)
-	
+
 	// Since we now generate a real BLS signature, it should completely pass and return nil
 	if err != nil {
 		t.Errorf("Expected nil, got %v", err)
@@ -146,7 +146,7 @@ func TestVerifyTransaction_FreeFeeBypass(t *testing.T) {
 	cs := setupTestChainState(t)
 	from := common.HexToAddress("0x123")
 	to := common.HexToAddress("0x456")
-	
+
 	// Add 'to' address to free fee addresses
 	cs.GetFreeFeeAddress()[to] = struct{}{}
 
@@ -173,12 +173,12 @@ func TestVerifyTransaction_LaggingSubnode(t *testing.T) {
 	tx, _ := createTestTx(from, common.HexToAddress("0x456"), big.NewInt(100), p_common.TRANSFER_GAS_COST, p_common.MINIMUM_BASE_FEE, 1)
 
 	as := state.NewAccountState(from)
-	
+
 	// Simulate lagging subnode: has nonce > 0, but no PublicKeyBls
 	as.SetNonce(1)
-	
+
 	err := VerifyTransaction(tx, cs, as)
-	
+
 	// If it is lagging, it doesn't fail on BLS verify, and it skips fee checks
 	// So it should return nil
 	if err != nil {

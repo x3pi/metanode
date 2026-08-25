@@ -152,7 +152,13 @@ func (w *CommitteeAttestationWorker) handleEpochTransition(ctx context.Context, 
 		return
 	}
 
-	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(localChainID, sig.newEpoch, newCommittee, stateRoot)
+	accountTreeRoot, err := w.accountTreeRootAtBlock(sig.boundaryBlock)
+	if err != nil {
+		logger.Warn("⚠️ [COMMITTEE ATTESTATION] could not compute account tree root at boundary block %d, skipping epoch %d: %v", sig.boundaryBlock, sig.newEpoch, err)
+		return
+	}
+
+	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(localChainID, sig.newEpoch, newCommittee, stateRoot, accountTreeRoot)
 
 	if err := w.submitMyShare(ctx, localChainID, oldRegistry.Epoch, payloadHash); err != nil {
 		logger.Warn("⚠️ [COMMITTEE ATTESTATION] could not submit attestation share for epoch %d: %v", sig.newEpoch, err)
@@ -160,7 +166,7 @@ func (w *CommitteeAttestationWorker) handleEpochTransition(ctx context.Context, 
 		// try to observe+submit the final committeeUpdate below.
 	}
 
-	w.pollAndFinalize(ctx, localChainID, oldRegistry, newCommittee, sig.newEpoch, stateRoot, payloadHash)
+	w.pollAndFinalize(ctx, localChainID, oldRegistry, newCommittee, sig.newEpoch, stateRoot, accountTreeRoot, payloadHash)
 }
 
 // myPublicKeyBls reads this validator's own durable min-pk BLS public key — set at genesis via
@@ -251,6 +257,39 @@ func (w *CommitteeAttestationWorker) stateRootAtBlock(blockNumber uint64) (commo
 	return header.AccountStatesRoot(), nil
 }
 
+// accountTreeRootAtBlock walks the chain's full committed account set via AccountStateDB.GetAll(),
+// constructs deterministic AccountLeaf entries sorted by address bytes, and derives the binary
+// Merkle tree root using cross_chain.BuildAccountSnapshot.
+func (w *CommitteeAttestationWorker) accountTreeRootAtBlock(blockNumber uint64) (common.Hash, error) {
+	asDB := w.chainState.GetAccountStateDB()
+	if asDB == nil {
+		return common.Hash{}, fmt.Errorf("chainState has no AccountStateDB")
+	}
+	allAccounts, err := asDB.GetAll()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("GetAll accounts: %w", err)
+	}
+	if len(allAccounts) == 0 {
+		return common.Hash{}, nil
+	}
+	leaves := make([]cross_chain.AccountLeaf, 0, len(allAccounts))
+	for addr, as := range allAccounts {
+		bal := big.NewInt(0)
+		if as != nil && as.Balance() != nil {
+			bal = as.Balance()
+		}
+		leaves = append(leaves, cross_chain.AccountLeaf{
+			Account: addr,
+			Balance: bal,
+		})
+	}
+	root, _, err := cross_chain.BuildAccountSnapshot(leaves)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("BuildAccountSnapshot: %w", err)
+	}
+	return root, nil
+}
+
 func (w *CommitteeAttestationWorker) ensureOwnPopRegistered(ctx context.Context, myPubkeyBls []byte) error {
 	existing, err := w.client.GetRegisteredPop(ctx, myPubkeyBls)
 	if err == nil && len(existing) > 0 {
@@ -307,6 +346,7 @@ func (w *CommitteeAttestationWorker) pollAndFinalize(
 	newCommittee []cross_chain.ValidatorEntry,
 	newEpoch uint64,
 	stateRoot common.Hash,
+	accountTreeRoot common.Hash,
 	payloadHash common.Hash,
 ) {
 	var totalStake uint64
@@ -364,7 +404,7 @@ func (w *CommitteeAttestationWorker) pollAndFinalize(
 		calldata, err := h.abi.Pack("committeeUpdate",
 			new(big.Int).SetUint64(sourceChainID), newEpoch,
 			newPubkeys, newStakes, newPops,
-			oldRegistry.QuorumThreshold, stateRoot, payloadHash,
+			oldRegistry.QuorumThreshold, stateRoot, accountTreeRoot, payloadHash,
 			pubkeys, aggSignature,
 		)
 		if err != nil {

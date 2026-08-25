@@ -105,7 +105,8 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 						uint64(epoch),
 						uint64(6667),
 						common.Address{},
-						common.Hash{}, // StateRoot is no longer consulted by attestCommit()'s Merkle-proof check (Section 2.3.1 verifies against commitRoot instead)
+						common.Hash{}, // StateRoot
+						common.Hash{}, // AccountTreeRoot
 						"",
 						uint64(0),
 					)

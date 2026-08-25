@@ -17,8 +17,8 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
@@ -37,17 +37,17 @@ type DaemonConfig struct {
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
 // aggregates BLS QuorumCerts from Root Anchor, and executes claims on destination chains.
 type RelayerDaemon struct {
-	mu                 sync.RWMutex
-	config             DaemonConfig
-	relayerKey         *ecdsa.PrivateKey
-	relayerAddr        common.Address
-	rootAnchorClient   *rootanchor.Client
-	chainClients       map[uint64]*rootanchor.Client
-	abi                abi.ABI
-	processedMessages  map[common.Hash]bool
-	attestedCommits    map[string]bool // key: "destChainId:commitRootHex"
-	stopCh             chan struct{}
-	wg                 sync.WaitGroup
+	mu                sync.RWMutex
+	config            DaemonConfig
+	relayerKey        *ecdsa.PrivateKey
+	relayerAddr       common.Address
+	rootAnchorClient  *rootanchor.Client
+	chainClients      map[uint64]*rootanchor.Client
+	abi               abi.ABI
+	processedMessages map[common.Hash]bool
+	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
+	stopCh            chan struct{}
+	wg                sync.WaitGroup
 }
 
 // NewRelayerDaemon instantiates a new live RelayerDaemon.
