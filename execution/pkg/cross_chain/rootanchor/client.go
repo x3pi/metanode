@@ -279,6 +279,26 @@ func (c *Client) ethCall(ctx context.Context, calldata []byte) ([]byte, error) {
 	return resultHex, nil
 }
 
+// EthCallGateway executes a raw read-only call against Root Anchor's Gateway contract.
+func (c *Client) EthCallGateway(ctx context.Context, calldata []byte) ([]byte, error) {
+	return c.ethCall(ctx, calldata)
+}
+
+// SendRawTransaction broadcasts a signed raw transaction to the network.
+func (c *Client) SendRawTransaction(ctx context.Context, rawTxHex string) (common.Hash, error) {
+	if !c.breaker.CanExecute() {
+		return common.Hash{}, ErrCircuitOpen
+	}
+	var txHashStr string
+	err := c.callRPC(ctx, "eth_sendRawTransaction", &txHashStr, rawTxHex)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return common.Hash{}, err
+	}
+	c.breaker.RecordSuccess()
+	return common.HexToHash(txHashStr), nil
+}
+
 // callRPC tries each configured URL in order, returning the first success. It does NOT itself
 // touch the circuit breaker — callers record success/failure once for the whole attempt (trying
 // multiple URLs for one logical call is not itself a failure signal).

@@ -219,7 +219,7 @@ metanode/
 | `snapshot/` | State snapshot/restore | 🟡 MED — large I/O |
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
-| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine, GovernanceEngine, AssetRegistryEngine, Ceremony, Root Anchor RPC client, and Relayer implementation (Milestones A-H) | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine, GovernanceEngine, AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
 | `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 
 ---
