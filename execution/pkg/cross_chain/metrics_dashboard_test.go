@@ -92,7 +92,9 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 	// Available ceiling for Chain 101 is 5,000,000 MTN
 	// Attacker attempts to withdraw 15,000,000 MTN
 	hackAmount := big.NewInt(15_000_000)
-	commitRoot := common.HexToHash("0xDEADBEEF00000000000000000000000000000000000000000000000000000000")
+	// commitRoot is the malicious claim's own AggregateValueLeaf hash (proof = no siblings) — a
+	// real Merkle-proof binding now (Section 2.3.1), not a StateRoot the test just declares.
+	commitRoot := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: hackAmount})
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(testKP101.PrivateKey(), commitMsg)
 
@@ -101,11 +103,6 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0x01},
 	}
-
-	// Set StateRoot to match the malicious claim
-	reg101 := gateway.ChainRegistry[101]
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: hackAmount})
-	gateway.ChainRegistry[101] = reg101
 
 	// Trigger overdraw attack via gateway
 	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, big.NewInt(0), MerkleProof{}, cert)

@@ -483,15 +483,19 @@ func (g *GatewayEngine) attestCommitInternal(
 		assetId = big.NewInt(0)
 	}
 
-	// Verify cryptographic binding of the declared aggregateAmount to the source chain's state root
+	// Verify cryptographic binding of the declared aggregateAmount to the commit itself (Section
+	// 2.3.1/11.2, risk #20): aggregateAmount must be provably a leaf of the SAME Merkle tree whose
+	// root is commitRoot — the very thing cert (verified above) already BLS-attests to — not a
+	// number the caller simply asserts. Verifying against commitRoot (not registry.StateRoot) is
+	// deliberate: it's what BuildCommitTree actually embeds the leaf into (relayer.go), and it's
+	// what makes AttestReserveIssuedCommit's re-attestation of the same underlying commit on the
+	// Reserve->destination leg check out identically, since both legs share the same commitRoot.
 	leaf := AggregateValueLeaf{
-		SourceChainID:   sourceChainID,
-		CommitRoot:      commitRoot,
 		AssetID:         assetId,
 		AggregateAmount: aggregateAmount,
 	}
 	leafHash := HashAggregateValueLeaf(leaf)
-	if !VerifyMerkleProof(leafHash, aggregateProof, registry.StateRoot) {
+	if !VerifyMerkleProof(leafHash, aggregateProof, commitRoot) {
 		return nil, ErrInvalidMerkleProof
 	}
 

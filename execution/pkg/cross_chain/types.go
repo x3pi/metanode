@@ -305,10 +305,16 @@ type AccountLeaf struct {
 	Balance *big.Int       `json:"balance"`
 }
 
-// AggregateValueLeaf represents the real total value moved for a given asset in a commit root (Milestone E, Section 11.2).
+// AggregateValueLeaf represents the real total value moved for a given asset in a commit
+// (Section 11.2/2.3.1). It is a leaf of the SAME Merkle tree that already contains the commit's
+// per-message leaves (BuildCommitTree in relayer.go) — not a separate tree, and it carries no
+// sourceChainId/commitRoot fields of its own (matching the design doc's minimal
+// AggregateValueLeaf{assetId, totalValue} exactly): scoping to one specific commit comes entirely
+// from verifying its Merkle proof against that commit's own commitRoot, so the identical leaf is
+// valid both for the originating chain's own attestCommit() and for Reserve's re-attestation of
+// the same commit on the second hop (AttestReserveIssuedCommit) — both verify against the same
+// commitRoot.
 type AggregateValueLeaf struct {
-	SourceChainID   uint64
-	CommitRoot      common.Hash
 	AssetID         *big.Int
 	AggregateAmount *big.Int
 }

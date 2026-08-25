@@ -26,7 +26,10 @@ func TestCommitAttestationWorker_SingleValidatorLifecycle(t *testing.T) {
 	kp := bls.GenerateKeyPair()
 	entry := cross_chain.ValidatorEntry{PubkeyBLS: kp.PublicKey().Bytes(), Stake: 1000}
 
-	commitRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	// commitRoot is the eventual AttestCommit call's own AggregateValueLeaf hash (proof = no
+	// siblings, Section 2.3.1) — the worker/bulletin-board flow below only needs it to be a stable
+	// identifier throughout, not any particular bit pattern.
+	commitRoot := cross_chain.HashAggregateValueLeaf(cross_chain.AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)})
 
 	raEngine, err := loadGatewayEngine(rootAnchorCS)
 	require.NoError(t, err)
@@ -79,17 +82,6 @@ func TestCommitAttestationWorker_SingleValidatorLifecycle(t *testing.T) {
 		},
 	}, ledger)
 
-	// Bind StateRoot to AggregateValueLeaf so Merkle verify passes
-	leaf := cross_chain.AggregateValueLeaf{
-		SourceChainID:   localChainID,
-		CommitRoot:      commitRoot,
-		AssetID:         big.NewInt(0),
-		AggregateAmount: big.NewInt(100),
-	}
-	reg := destEngine.ChainRegistry[localChainID]
-	reg.StateRoot = cross_chain.HashAggregateValueLeaf(leaf)
-	destEngine.ChainRegistry[localChainID] = reg
-
 	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(100), big.NewInt(0), cross_chain.MerkleProof{}, *cert)
 	require.NoError(t, err)
 	require.NotNil(t, attested)
@@ -111,7 +103,7 @@ func TestCommitAttestationWorker_MultiValidatorQuorum(t *testing.T) {
 	v2 := cross_chain.ValidatorEntry{PubkeyBLS: kp2.PublicKey().Bytes(), Stake: 40}
 	v3 := cross_chain.ValidatorEntry{PubkeyBLS: kp3.PublicKey().Bytes(), Stake: 20}
 
-	commitRoot := common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	commitRoot := cross_chain.HashAggregateValueLeaf(cross_chain.AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: big.NewInt(500)})
 
 	raEngine, err := loadGatewayEngine(rootAnchorCS)
 	require.NoError(t, err)
@@ -177,16 +169,6 @@ func TestCommitAttestationWorker_MultiValidatorQuorum(t *testing.T) {
 			Epoch:     epoch,
 		},
 	}, ledger2)
-
-	leaf := cross_chain.AggregateValueLeaf{
-		SourceChainID:   localChainID,
-		CommitRoot:      commitRoot,
-		AssetID:         big.NewInt(0),
-		AggregateAmount: big.NewInt(500),
-	}
-	reg := destEngine.ChainRegistry[localChainID]
-	reg.StateRoot = cross_chain.HashAggregateValueLeaf(leaf)
-	destEngine.ChainRegistry[localChainID] = reg
 
 	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(500), big.NewInt(0), cross_chain.MerkleProof{}, *cert)
 	require.NoError(t, err)

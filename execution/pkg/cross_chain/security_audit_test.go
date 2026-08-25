@@ -83,7 +83,8 @@ func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 
 	commitRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 
-	// 1. Invalid / Empty BLS Signature -> MUST FAIL-CLOSED
+	// 1. Invalid / Empty BLS Signature -> MUST FAIL-CLOSED (fails before the Merkle proof check is
+	// ever reached, so commitRoot's value doesn't matter here).
 	certInvalid := QuorumCert{
 		Epoch:              1,
 		AggregateSignature: make([]byte, 48), // Empty signature
@@ -92,18 +93,17 @@ func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, certInvalid)
 	assert.Error(t, errInvalidBLS, "Empty/invalid BLS signature must fail-closed")
 
-	// 2. Valid Real BLS Signature -> MUST PASS
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	// 2. Valid Real BLS Signature -> MUST PASS. commitRoot is now the declared amount's own
+	// AggregateValueLeaf hash (proof = no siblings) — a real Merkle-proof binding (Section 2.3.1).
+	commitRootValid := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)})
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRootValid.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 	certValid := QuorumCert{
 		Epoch:              1,
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	reg101 := engine.ChainRegistry[101]
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)})
-	engine.ChainRegistry[101] = reg101
-	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, certValid)
+	attested, errValidBLS := engine.AttestCommit(101, commitRootValid, big.NewInt(100), big.NewInt(0), MerkleProof{}, certValid)
 	require.NoError(t, errValidBLS)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 
@@ -192,9 +192,10 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafHash := ComputeMessageLeafHash(*msg)
-	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{*msg})
+	require.NoError(t, errTree)
 	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
 
 	// Attest on Root Anchor / Gateway with real BLS signature
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
@@ -204,10 +205,7 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	reg102 := engine.ChainRegistry[102]
-	reg102.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 102, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(500)})
-	engine.ChainRegistry[102] = reg102
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), big.NewInt(0), MerkleProof{}, cert)
+	_, err = engine.AttestCommit(102, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
 	require.NoError(t, err)
 
 	// Stress Test: 50 concurrent workers try to claim the EXACT SAME message simultaneously
@@ -260,9 +258,10 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafHash := ComputeMessageLeafHash(*msg)
-	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{*msg})
+	require.NoError(t, errTree)
 	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
 
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
@@ -271,10 +270,7 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	reg102 := engine.ChainRegistry[102]
-	reg102.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 102, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(300)})
-	engine.ChainRegistry[102] = reg102
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), big.NewInt(0), MerkleProof{}, cert)
+	_, err = engine.AttestCommit(102, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
 	require.NoError(t, err)
 
 	// Step 1: Claim message successfully
@@ -363,50 +359,37 @@ func TestAudit_HopCountBoundaryEnforcement(t *testing.T) {
 func TestAudit_AdversarialOverdrawAndSupplyCeiling(t *testing.T) {
 	engine, _, ledger, kp := setupSecurityAuditEnvironment()
 
-	// Initial Allocation: Chain 101 has 5,000 MTN
-	commitRoot := common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
-	sig := bls.Sign(kp.PrivateKey(), commitMsg)
-	cert := QuorumCert{
-		Epoch:              1,
-		AggregateSignature: sig.Bytes(),
-		SignerBitmap:       []byte{0xFF},
+	// Initial Allocation: Chain 101 has 5,000 MTN. Each declared amount now needs its own
+	// commitRoot (its own AggregateValueLeaf hash, Section 2.3.1) and its own matching signature —
+	// a different amount is cryptographically a different commit, it can't reuse one fixed root.
+	signFor := func(amount *big.Int) (common.Hash, QuorumCert) {
+		leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: amount}
+		root := HashAggregateValueLeaf(leaf)
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+		sig := bls.Sign(kp.PrivateKey(), commitMsg)
+		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0xFF}}
 	}
 
 	// Attack 1: Overdraw attempt 10,000,000 MTN -> BLOCKED
-	reg101 := engine.ChainRegistry[101]
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(10_000_000)})
-	engine.ChainRegistry[101] = reg101
-	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), big.NewInt(0), MerkleProof{}, cert)
+	rootOverdraw, certOverdraw := signFor(big.NewInt(10_000_000))
+	_, errOverdraw := engine.AttestCommit(101, rootOverdraw, big.NewInt(10_000_000), big.NewInt(0), MerkleProof{}, certOverdraw)
 	assert.ErrorIs(t, errOverdraw, ErrAllocationExceeded, "Overdraw attempt must be blocked")
 
 	// Attack 2: Exact boundary + 1 wei -> BLOCKED
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(5_001)})
-	engine.ChainRegistry[101] = reg101
-	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), big.NewInt(0), MerkleProof{}, cert)
+	rootPlus1, certPlus1 := signFor(big.NewInt(5_001))
+	_, errBoundaryPlus1 := engine.AttestCommit(101, rootPlus1, big.NewInt(5_001), big.NewInt(0), MerkleProof{}, certPlus1)
 	assert.ErrorIs(t, errBoundaryPlus1, ErrAllocationExceeded, "Allocation + 1 wei must be blocked")
 
 	// Valid 1: Exact allocation 5,000 MTN -> PASS
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(5_000)})
-	engine.ChainRegistry[101] = reg101
-	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), big.NewInt(0), MerkleProof{}, cert)
+	rootExact, certExactCert := signFor(big.NewInt(5_000))
+	attested, errExact := engine.AttestCommit(101, rootExact, big.NewInt(5_000), big.NewInt(0), MerkleProof{}, certExactCert)
 	require.NoError(t, errExact)
 	assert.Equal(t, big.NewInt(5_000), attested.FundedAmount)
 	assert.Zero(t, ledger.PerChainAllocation[101].Sign())
 
 	// Attack 3: Subsequent request when allocation is 0 -> BLOCKED
-	// Use a new commitRoot so it's not blocked by "already-attested" check
-	commitRoot2 := common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-	commitMsg2 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot2.Bytes()...)
-	sig2 := bls.Sign(kp.PrivateKey(), commitMsg2)
-	cert2 := QuorumCert{
-		Epoch:              1,
-		AggregateSignature: sig2.Bytes(),
-		SignerBitmap:       []byte{0xFF},
-	}
-	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot2, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(1)})
-	engine.ChainRegistry[101] = reg101
-	_, errExhausted := engine.AttestCommit(101, commitRoot2, big.NewInt(1), big.NewInt(0), MerkleProof{}, cert2)
+	rootExhausted, certExhausted := signFor(big.NewInt(1))
+	_, errExhausted := engine.AttestCommit(101, rootExhausted, big.NewInt(1), big.NewInt(0), MerkleProof{}, certExhausted)
 	assert.ErrorIs(t, errExhausted, ErrAllocationExceeded, "Exhausted allocation must be blocked")
 }
 

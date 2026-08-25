@@ -44,15 +44,12 @@ func TestGatewayHandler_VerifyAndExecute_Lifecycle(t *testing.T) {
 		Tip:           big.NewInt(0),
 		Ordered:       false,
 	}
-	commitRoot := cross_chain.ComputeMessageLeafHash(msg)
-
-	leaf := cross_chain.AggregateValueLeaf{
-		SourceChainID:   sourceChainID,
-		CommitRoot:      commitRoot,
-		AssetID:         big.NewInt(0),
-		AggregateAmount: big.NewInt(0),
-	}
-	stateRoot := cross_chain.HashAggregateValueLeaf(leaf)
+	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
+	// verifies aggregateProof against commitRoot itself, not a separately-declared StateRoot.
+	commitRoot, commitLayers, _, aggIndex, errTree := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	messageProof := cross_chain.GetMerkleProof(commitLayers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(commitLayers, aggIndex["0"])
 
 	// Seed engine
 	engine, err := loadGatewayEngine(cs)
@@ -62,7 +59,6 @@ func TestGatewayHandler_VerifyAndExecute_Lifecycle(t *testing.T) {
 		Committee:       []cross_chain.ValidatorEntry{entry},
 		Epoch:           epoch,
 		QuorumThreshold: 6667,
-		StateRoot:       stateRoot,
 	}
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
@@ -84,8 +80,8 @@ func TestGatewayHandler_VerifyAndExecute_Lifecycle(t *testing.T) {
 		msg.Payload,
 		msg.Tip,
 		msg.Ordered,
-		big.NewInt(0), [][32]byte{}, // aggregateProof
-		big.NewInt(0), [][32]byte{}, // messageProof
+		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings),
 		commitRoot,
 		uint64(epoch),
 		sig.Bytes(),
@@ -131,14 +127,19 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Chains 101/102 each need a real committee member to cast a BLS-authenticated governance
+	// vote (Milestone G security fix).
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+
 	engine, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
 	engine.LocalChainID = localChainID
 	engine.SupplyLedger = ledger
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
 		deadChainID: {ChainID: deadChainID, StateRoot: stateRoot, Epoch: 1},
-		101:         {ChainID: 101, Epoch: 1},
-		102:         {ChainID: 102, Epoch: 1},
+		101:         {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
+		102:         {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
 	}
 	engine.Governance = cross_chain.NewGovernanceEngineWithTimelock([]uint64{101, 102}, 10)
 	require.NoError(t, saveGatewayEngine(cs, engine))
@@ -170,10 +171,14 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	propID := common.Hash(out[0].([32]byte))
 
 	// Vote from 101 and 102
-	vote1, _ := h.abi.Pack("vote", propID, big.NewInt(101), uint64(101))
-	_, _, _ = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	vote2, _ := h.abi.Pack("vote", propID, big.NewInt(102), uint64(102))
-	_, _, _ = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
+	pub101, sig101 := signGovernanceVote(kp101, propID, 101)
+	vote1, _ := h.abi.Pack("vote", propID, big.NewInt(101), uint64(101), pub101, sig101)
+	_, _, failVote1 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
+	require.False(t, failVote1)
+	pub102, sig102 := signGovernanceVote(kp102, propID, 102)
+	vote2, _ := h.abi.Pack("vote", propID, big.NewInt(102), uint64(102), pub102, sig102)
+	_, _, failVote2 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
+	require.False(t, failVote2)
 
 	// Execute proposal at t=120
 	execDead, _ := h.abi.Pack("executeProposal", propID, uint64(120))

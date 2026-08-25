@@ -17,6 +17,16 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 )
 
+// hashesToBytes32 converts a MerkleProof's []common.Hash siblings into the [][32]byte shape the
+// GatewayABI's bytes32[] proofSiblings parameter expects.
+func hashesToBytes32(hashes []common.Hash) [][32]byte {
+	out := make([][32]byte, len(hashes))
+	for i, h := range hashes {
+		out[i] = h
+	}
+	return out
+}
+
 // newPersistentTestChainState is like newTestChainState (true_block_stm_integration_test.go)
 // but backed by storage.NewMemoryDb() instead of storage.NewDummyStorage — DummyStorage's
 // Get/Put/BatchPut are all no-ops (see storage/dummy_db.go), so it is unsuitable for a test that
@@ -221,27 +231,25 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 		Tip:           big.NewInt(0),
 		Ordered:       false,
 	}
-	commitRoot := cross_chain.ComputeMessageLeafHash(msg) // single-message tree: root == leaf
+	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
+	// verifies aggregateProof against commitRoot itself, not a separately-declared StateRoot.
+	commitRoot, commitLayers, _, aggIndex, errTree := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	if errTree != nil {
+		t.Fatalf("BuildCommitTree: %v", errTree)
+	}
+	messageProof := cross_chain.GetMerkleProof(commitLayers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(commitLayers, aggIndex["0"])
+	messageProofSiblings := hashesToBytes32(messageProof.Siblings)
+	aggregateProofSiblings := hashesToBytes32(aggregateProof.Siblings)
 
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 
-	// Set StateRoot on registry so Merkle proof verification succeeds
-	leaf := cross_chain.AggregateValueLeaf{
-		SourceChainID:   101,
-		CommitRoot:      commitRoot,
-		AssetID:         big.NewInt(0),
-		AggregateAmount: big.NewInt(0),
-	}
-	engine, _ = loadGatewayEngine(cs)
-	reg := engine.ChainRegistry[101]
-	reg.StateRoot = cross_chain.HashAggregateValueLeaf(leaf)
-	engine.ChainRegistry[101] = reg
-	_ = saveGatewayEngine(cs, engine)
-
-	// --- attestCommit(sourceChainId=101, commitRoot, aggregateAmount=0, assetId=0, proofLeafIndex=0, proofSiblings=[], epoch=1, sig, bitmap) ---
+	// --- attestCommit(sourceChainId=101, commitRoot, aggregateAmount=0, assetId=0, proofLeafIndex, proofSiblings, epoch=1, sig, bitmap) ---
 	attestCalldata, err := h.abi.Pack("attestCommit",
-		big.NewInt(101), commitRoot, big.NewInt(0), big.NewInt(0), big.NewInt(0), [][32]byte{}, uint64(1), sig.Bytes(), []byte{0x01},
+		big.NewInt(101), commitRoot, big.NewInt(0), big.NewInt(0),
+		new(big.Int).SetUint64(aggregateProof.LeafIndex), aggregateProofSiblings,
+		uint64(1), sig.Bytes(), []byte{0x01},
 	)
 	if err != nil {
 		t.Fatalf("pack attestCommit() calldata: %v", err)
@@ -256,12 +264,12 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 		t.Fatalf("attestCommit() transaction failed: %q", reason)
 	}
 
-	// --- claimMessage(msg..., proof{leafIndex:0, siblings:[]}, commitRoot) ---
+	// --- claimMessage(msg..., proof{leafIndex, siblings}, commitRoot) ---
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
-		big.NewInt(0), [][32]byte{}, commitRoot,
+		new(big.Int).SetUint64(messageProof.LeafIndex), messageProofSiblings, commitRoot,
 	)
 	if err != nil {
 		t.Fatalf("pack claimMessage() calldata: %v", err)

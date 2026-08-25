@@ -50,6 +50,26 @@ func ComputeCommitRootAttestMessage(commitRoot common.Hash) []byte {
 	return buf
 }
 
+// GovernanceVoteDomainTag domain-separates the payload a committee member signs to cast their
+// chain's single governance vote (Milestone G security fix), distinct from every other signed
+// payload in this package so a signature over one can never be replayed as another.
+var GovernanceVoteDomainTag = []byte("GOVERNANCE_VOTE_V1:")
+
+// ComputeGovernanceVoteMessage computes the domain-separated payload a member of voterChainID's
+// CURRENT committee (per Root Anchor's own ChainRegistry) must sign to cast that chain's one vote
+// for a proposal. This is what gateway_handler.go's "vote" case verifies before ever calling
+// GovernanceEngine.Vote — without it, any unauthenticated caller could cast a vote "as" any
+// registered chain merely by naming its ID, since GovernanceEngine.Vote itself trusts its caller.
+func ComputeGovernanceVoteMessage(proposalID common.Hash, voterChainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, GovernanceVoteDomainTag...)
+	buf = append(buf, proposalID.Bytes()...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], voterChainID)
+	buf = append(buf, idBuf[:]...)
+	return buf
+}
+
 // BuildSignerBitmap constructs a deterministic bit vector for a committee indicating which
 // members have signed, where bit i represents committee[i].
 func BuildSignerBitmap(committee []ValidatorEntry, votingPubkeys [][]byte) []byte {
@@ -123,16 +143,17 @@ func HashAccountLeaf(leaf AccountLeaf) common.Hash {
 	return out
 }
 
-// HashAggregateValueLeaf computes the 32-byte Keccak-256 leaf hash for an AggregateValueLeaf with 0x02 domain separation.
+// HashAggregateValueLeaf computes the 32-byte Keccak-256 leaf hash for an AggregateValueLeaf,
+// domain-separated with 0x02 (distinct from 0x00 message leaves and 0x01 internal nodes —
+// gateway.go's ComputeMessageLeafHash / hashPair) so it can never collide with a real message
+// leaf inside the same commit tree (Section 2.3.1/11.2). Deliberately excludes sourceChainId and
+// commitRoot: this leaf is scoped to one specific commit purely by being verified with a Merkle
+// proof against that commit's own commitRoot (see BuildCommitTree in relayer.go and
+// attestCommitInternal in gateway.go), matching the design doc's minimal
+// AggregateValueLeaf{assetId, totalValue} exactly.
 func HashAggregateValueLeaf(leaf AggregateValueLeaf) common.Hash {
 	var data []byte
 	data = append(data, 0x02) // Domain separation: 0x02 for AggregateValueLeaf
-
-	var cBuf [8]byte
-	binary.BigEndian.PutUint64(cBuf[:], leaf.SourceChainID)
-	data = append(data, cBuf[:]...)
-
-	data = append(data, leaf.CommitRoot.Bytes()...)
 
 	assetBytes := make([]byte, 32)
 	if leaf.AssetID != nil {

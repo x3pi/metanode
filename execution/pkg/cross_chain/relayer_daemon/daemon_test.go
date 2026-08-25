@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 )
 
@@ -57,15 +57,12 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 		Tip:           big.NewInt(0),
 		Ordered:       false,
 	}
-	commitRoot := cross_chain.ComputeMessageLeafHash(msg)
-
-	leaf := cross_chain.AggregateValueLeaf{
-		SourceChainID:   sourceChainID,
-		CommitRoot:      commitRoot,
-		AssetID:         big.NewInt(0),
-		AggregateAmount: big.NewInt(0),
-	}
-	stateRoot := cross_chain.HashAggregateValueLeaf(leaf)
+	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
+	// verifies aggregateProof against commitRoot itself now, not a separately-declared StateRoot.
+	commitRoot, commitLayers, _, aggIndex, errTree := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	messageProof := cross_chain.GetMerkleProof(commitLayers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(commitLayers, aggIndex["0"])
 
 	// Step 1: Mock Root Anchor Server
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
@@ -108,7 +105,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 						uint64(epoch),
 						uint64(6667),
 						common.Address{},
-						stateRoot,
+						common.Hash{}, // StateRoot is no longer consulted by attestCommit()'s Merkle-proof check (Section 2.3.1 verifies against commitRoot instead)
 						"",
 						uint64(0),
 					)
@@ -156,7 +153,6 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 			ChainID:   sourceChainID,
 			Committee: []cross_chain.ValidatorEntry{validatorEntry},
 			Epoch:     epoch,
-			StateRoot: stateRoot,
 		},
 	}, ledger)
 
@@ -200,7 +196,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 				AggregateSignature: sig.Bytes(),
 				SignerBitmap:       []byte{0x01},
 			}
-			st, err := destEngine.VerifyAndExecute(msg, cross_chain.MerkleProof{}, cert, cross_chain.MerkleProof{}, commitRoot, from)
+			st, err := destEngine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, from)
 			assert.NoError(t, err)
 			assert.Equal(t, cross_chain.MessageStatusSuccess, st)
 
@@ -237,7 +233,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 	assert.Equal(t, relayerAddr, daemon.Address())
 
 	// Step 4: Relay single message
-	txHash, err := daemon.RelayMessage(context.Background(), msg, commitRoot, epoch, cross_chain.MerkleProof{}, cross_chain.MerkleProof{})
+	txHash, err := daemon.RelayMessage(context.Background(), msg, commitRoot, epoch, aggregateProof, messageProof)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txHash.Hex())
 
