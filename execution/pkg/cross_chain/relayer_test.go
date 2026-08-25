@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
@@ -566,8 +565,7 @@ func TestRelayer_Scenario10_8_DeadChainRecovery(t *testing.T) {
 		Account: victimAccount,
 		Balance: victimBalance,
 	}
-	leafBytes, _ := json.Marshal(leaf)
-	leafHash := Keccak256(leafBytes)
+	leafHash := HashAccountLeaf(leaf)
 
 	// Set state root on Reserve registry to leafHash for test
 	reg := reserveEngine.ChainRegistry[deadChainID]

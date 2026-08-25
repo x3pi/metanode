@@ -298,6 +298,48 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "sequence", "type": "uint256"},
+			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
+			{"internalType": "address", "name": "sender", "type": "address"},
+			{"internalType": "address", "name": "target", "type": "address"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "value", "type": "uint256"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint256", "name": "aggregateProofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "aggregateProofSiblings", "type": "bytes32[]"},
+			{"internalType": "uint256", "name": "messageProofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "messageProofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "verifyAndExecute",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "deadChainId", "type": "uint256"},
+			{"internalType": "address", "name": "account", "type": "address"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "accountLeafHash", "type": "bytes32"}
+		],
+		"name": "claimDeadChainBalance",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true, "internalType": "bytes32", "name": "messageId", "type": "bytes32"},

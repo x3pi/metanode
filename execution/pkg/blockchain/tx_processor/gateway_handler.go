@@ -183,7 +183,8 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"propose", "vote", "executeProposal", "registerAsset":
+		"propose", "vote", "executeProposal", "registerAsset",
+		"verifyAndExecute", "claimDeadChainBalance":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -610,6 +611,67 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, cross_chain.ErrProposalNotFound
 		}
 		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(proposal, totalSupply); err != nil {
+			return nil, nil, err
+		}
+
+	case "verifyAndExecute":
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustUint64(args[3]),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			Ordered:       mustBool(args[11]),
+		}
+		aggregateProof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[12]),
+			Siblings:  mustHashSlice(args[13]),
+		}
+		messageProof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[14]),
+			Siblings:  mustHashSlice(args[15]),
+		}
+		commitRoot := mustHash(args[16])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[17]),
+			AggregateSignature: mustBytes(args[18]),
+			SignerBitmap:       mustBytes(args[19]),
+		}
+
+		status, err := engine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, tx.FromAddress())
+		if err != nil {
+			return nil, nil, err
+		}
+
+		statusEvent := h.abi.Events["MessageStatusChanged"]
+		topic0 := statusEvent.ID
+		topic1 := msg.MessageID
+		eventData, packErr := statusEvent.Inputs.NonIndexed().Pack(uint8(status))
+		if packErr != nil {
+			return nil, nil, fmt.Errorf("pack MessageStatusChanged event: %w", packErr)
+		}
+		eventLogs = append(eventLogs, smart_contract.NewEventLog(
+			tx.Hash(), tx.ToAddress(), eventData,
+			[][]byte{topic0.Bytes(), topic1.Bytes()},
+		))
+
+	case "claimDeadChainBalance":
+		deadChainID := mustUint64(args[0])
+		account := mustAddress(args[1])
+		amount := mustBigInt(args[2])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustUint64(args[3]),
+			Siblings:  mustHashSlice(args[4]),
+		}
+		accountLeafHash := mustHash(args[5])
+
+		if err := engine.ClaimDeadChainBalance(deadChainID, account, amount, proof, accountLeafHash); err != nil {
 			return nil, nil, err
 		}
 

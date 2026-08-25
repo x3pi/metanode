@@ -671,15 +671,16 @@ func (g *GatewayEngine) Refund(
 // VerifyAndExecute handles atomic verification & execution for low-volume messages (P2.7).
 func (g *GatewayEngine) VerifyAndExecute(
 	message CrossChainMessage,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
-	proof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, proof, cert); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert); err != nil {
 		return MessageStatusPending, err
 	}
-	return g.ClaimMessage(message, proof, commitRoot, relayer)
+	return g.ClaimMessage(message, messageProof, commitRoot, relayer)
 }
 
 // ClaimDeadChainBalance allows user to recover funds on Reserve using account-tree Merkle proof (P2.8).
@@ -700,6 +701,11 @@ func (g *GatewayEngine) ClaimDeadChainBalance(
 	claimKey := fmt.Sprintf("%d:%s", deadChainID, account.Hex())
 	if g.DeadChainClaimed[claimKey] {
 		return fmt.Errorf("%w: chain %d, account %s", ErrDeadChainAlreadyClaimed, deadChainID, account.Hex())
+	}
+
+	expectedLeafHash := HashAccountLeaf(AccountLeaf{Account: account, Balance: amount})
+	if accountLeafHash != expectedLeafHash {
+		return fmt.Errorf("accountLeafHash %s does not match computed %s", accountLeafHash.Hex(), expectedLeafHash.Hex())
 	}
 
 	registry, exists := g.ChainRegistry[deadChainID]

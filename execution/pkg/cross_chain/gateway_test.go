@@ -232,7 +232,11 @@ func TestGateway_P2_8_ClaimDeadChainBalanceAndDuplicateGuard(t *testing.T) {
 	engine, _ := setupTestGatewayEngine()
 	deadChainID := uint64(101)
 	account := common.HexToAddress("0x3333333333333333333333333333333333333333")
-	accountLeafHash := common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE") // matches stateRoot
+	accountLeafHash := HashAccountLeaf(AccountLeaf{Account: account, Balance: big.NewInt(1000)})
+	reg := engine.ChainRegistry[deadChainID]
+	reg.StateRoot = accountLeafHash
+	engine.ChainRegistry[deadChainID] = reg
+
 	proof := MerkleProof{
 		LeafIndex: 0,
 		Siblings:  []common.Hash{},
