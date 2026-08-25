@@ -406,6 +406,70 @@ blocker below is resolved to close this out fully.
      whoever wrote the original Gate 1/5 fork-safety gates and the early/full PeerRpcServer
      handoff design.
 
+## Phase 0.8 — PR #64: Task 1.2 real-contract acceptance test found + fixed 2 more real bugs
+## (2026-08-25, same day), plus live 2-node RPC verification
+
+**Code:** `test/custom-asset-real-token-coverage` → PR #64 (open at time of writing). Closes
+the Task 1.2 test-coverage gap this doc and `cross_chain_task1_native_value_fix_plan.md`
+both flagged: the existing `TestGatewayHandler_CustomAsset_Outbound_ClaimMessage` only ever
+proved the custom-asset code fails gracefully against a non-contract address, never that a
+real `transferFrom`/`transfer`/`mint` succeeds against a real deployed token. Writing that
+real test (a solc-0.8.35-compiled ERC-20-shaped fixture, deployed via the real
+`mvm.ExecutionEngine.Deploy` path) found **2 more real production bugs**, both fixed:
+
+1. **`msg.sender` bug, 4 call sites** (`outbound`'s `transferFrom`, `claimMessage`'s
+   `transfer`/`mint`, `refund`'s `transfer`/`mint`, `verifyAndExecute`'s `transfer`/`mint`) —
+   `executeContractCallForGateway` was called with `sender=tx.FromAddress()` (the bridging
+   user/relayer) instead of the Gateway contract. `transferFrom(from,to,value)` checks
+   `allowance[from][msg.sender]`; with `sender==from==tx.FromAddress()` this checked
+   `allowance[user][user]` — never set by any real approval flow, since a user can only
+   sanely `approve()` a fixed known spender (the Gateway). **This meant the entire
+   custom-asset outbound path was unconditionally broken against any real
+   standards-compliant ERC-20** — confirmed live, `ERR_EXECUTION_REVERTED`. Same root cause
+   breaks the vault-unlock `transfer()` (moves the wrong account's balance) and would break
+   `mint()` against any real access-controlled wrapped token. Fixed all 4 sites to pass
+   `mt_common.GATEWAY_CONTRACT_ADDRESS`.
+2. **`applyFullMvmResultToStateDB` never applied `MapCodeChange`** (only the hash, not the
+   bytecode) — `SmartContractDB.SetCode` was never called, so code written via this path was
+   never actually retrievable (`"Error getting code from storage"` on the next call in). Only
+   affects the Gateway's own internal contract-call/deploy paths, not normal top-level EVM
+   deployment (which goes through `vm_processor_state.go`'s already-correct application
+   logic). Fixed by adding the missing `SetCode` step.
+
+`go build ./... && go vet ./... && go test ./...` clean across all 43 packages in
+`execution/`, `gofmt -l` clean.
+
+**Live 2-node RPC verification (same day, at the user's explicit request before signing
+off):** rebuilt the Go binary with PR #64's fixes, ran 2 real single-validator private
+chains (101, 102) as separate OS processes (clean single-shot regenerate — see finding #1
+above for why that matters), and ran a throwaway tool (`deploy_and_approve_quick`, not
+committed) against each over **real JSON-RPC**, not an in-process shortcut:
+- A real top-level `CREATE` transaction (`to: nil`, standard EVM deployment path, not the Go
+  test's `mvm.Deploy` shortcut) — real receipt, real deployed address, on both chains.
+- A real `balanceOf()` `eth_call` immediately after — proves the deployed code is really
+  retrievable (this is the code path the tests above cover with bug #2's fix; a normal `CREATE`
+  doesn't actually exercise that fix, since it uses the separately-correct
+  `vm_processor_state.go` path — this call mainly confirms deployment itself is healthy).
+  Chain 101: `1000000` (exact initial supply). Chain 102: `500000` (exact initial supply).
+- A real `approve(GATEWAY_CONTRACT_ADDRESS, 500)` transaction — real receipt on both chains.
+- A real `allowance()` `eth_call` afterward — exactly `500` on both chains, confirming the
+  approve really landed.
+
+**What this does and doesn't prove:** confirms the rebuilt binary carrying both fixes runs
+correctly end-to-end (real consensus block inclusion, real EVM execution, real state
+persisted and readable back) on 2 independent real node processes talking only over RPC —
+not a Go-process-internal test. It does **not** cover the full `outbound()`/`claimMessage()`
+round trip for a custom asset over real RPC, because that requires the asset to already be
+registered via `registerAsset`, which requires an executed governance proposal, which
+requires a real committee (`ChainRegistry`) on each chain — the same Root Anchor dependency
+chain Phase 0.7's Layers A/B/C are about, and Layer C is still unresolved. The in-process Go
+acceptance tests in PR #64 (`TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds` /
+`...RealTokenMintSucceeds`) remain the authoritative proof of the `msg.sender` and `SetCode`
+fixes themselves — they exercise the exact same `executeContractCallForGateway` /
+`applyFullMvmResultToStateDB` code the live nodes run, just without needing the full
+governance ceremony to seed `AssetRegistry`. Closing that last gap needs Layer C fixed first
+(or a deliberate governance/bootstrap shortcut designed for it, not guessed at here).
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to
