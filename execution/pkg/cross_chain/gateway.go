@@ -92,6 +92,8 @@ type GatewayEngine struct {
 	Governance *GovernanceEngine `json:"governance,omitempty"`
 	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
+
+	GenesisCoordinator common.Address `json:"genesisCoordinator,omitempty"`
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -163,6 +165,27 @@ var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has a
 // ErrAlreadyBootstrapped. Every founding chain's committee must independently pass the same
 // PopVerify check attestCommit()/committeeUpdate() already require, so bootstrapping cannot be
 // used to seed a fake/unverifiable committee either.
+func (g *GatewayEngine) BootstrapFoundingChainsWithCaller(caller common.Address, payloads [][]byte) error {
+	if g.GenesisCoordinator != (common.Address{}) && g.GenesisCoordinator != caller {
+		return fmt.Errorf("unauthorized bootstrap coordinator %s (expected %s)", caller.Hex(), g.GenesisCoordinator.Hex())
+	}
+	return g.BootstrapFoundingChains(payloads)
+}
+
+func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.RelayerBalances == nil {
+		g.RelayerBalances = make(map[common.Address]*big.Int)
+	}
+	amount, exists := g.RelayerBalances[caller]
+	if !exists || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("no accumulated relayer tip balance to withdraw")
+	}
+	g.RelayerBalances[caller] = big.NewInt(0)
+	return amount, nil
+}
+
 func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -376,6 +376,13 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [],
+		"name": "withdrawRelayerTip",
+		"outputs": [{"internalType": "uint256", "name": "amount", "type": "uint256"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true, "internalType": "bytes32", "name": "messageId", "type": "bytes32"},

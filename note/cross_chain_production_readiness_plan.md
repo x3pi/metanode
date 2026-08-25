@@ -16,12 +16,24 @@ read `note/cross_chain_root_anchor_architecture.md` (the design doc) and
 `note/cross_chain_wiring_plan_next_steps.md` (the plan that produced Milestones E-I)
 first; this document assumes both.
 
+**Update 2026-08-25, 4th review pass — Phase 0.6 (below) found the most important gap in
+this entire document: nothing implemented so far actually moves real value.** All of
+Milestones A-I is a real, well-tested BLS/Merkle verification and anti-fraud layer around
+an in-memory ledger (`GlobalSupplyLedger`, `AssetRegistryEngine`'s vault/circulation maps)
+that has never been connected to `AccountStateDB`/`VmProcessor.ProcessNativeMintBurn`.
+**Read Phase 0.6 before anything else in this document** — everything from Phase 1 onward
+below was written assuming value-transfer worked and just needed hardening/staging; that
+assumption was wrong, and Phase 0.6 must land (with its own real-balance end-to-end
+acceptance test) before Phase 2's T2 testnet run means anything for value transfers.
+
 **Bottom line up front: this system is still not production-ready.** Real cryptographic
 verification exists and is unit/integration tested, and the two known proof-binding bugs
-are now fixed — but nothing has run on a real multi-node network yet, and no external
-security review has happened. **3 critical bugs found across 2 internal review passes on
-freshly-written code is a base rate, not bad luck** — do not skip the gates below to save
-time, and stay suspicious of any new cryptographic/authorization code the same way.
+are now fixed — but nothing has run on a real multi-node network yet, no external security
+review has happened, and (Phase 0.6) the verified ledger this all protects has never been
+wired to a real spendable balance on either end. **3 critical bugs found across 2 internal
+review passes on freshly-written code is a base rate, not bad luck** — do not skip the
+gates below to save time, and stay suspicious of any new cryptographic/authorization code
+the same way.
 
 ---
 
@@ -148,6 +160,187 @@ convention (confirm against `mt_common`'s existing amount constants rather than 
 Same as the rest of this document: `go build ./... && go vet ./... && go test ./...` from
 `execution/` zero regressions, each fix has a regression test proving the specific issue,
 PR via `gh` off a branch from `dev`, no self-merge.
+
+---
+
+## Phase 0.6 — CRITICAL, found 2026-08-25 (4th review pass, while writing the production
+## deployment guide): cross-chain value transfer is never wired to any real balance
+
+**This is not a fund-theft exploit** (see "Why this is safe to write up openly" below) —
+it is a **missing-functionality finding**, but it is the single most important thing in
+this entire document: as implemented today, **no cross-chain transfer — native coin or
+custom asset — ever moves a real, spendable unit of value.** Every `outbound()` /
+`attestCommit()` / `claimMessage()` / `verifyAndExecute()` / `refund()` /
+`claimDeadChainBalance()` call that "succeeds" only ever mutates in-memory Go structs
+(`GlobalSupplyLedger.PerChainAllocation`, `AssetRegistryEngine.{Vault,Circulation}Balances`,
+`MessageStatus`). None of them call `AccountStateDB.AddBalance`/`SubBalance`, and none of
+them call `VmProcessor.ProcessNativeMintBurn` — the exact function
+`note/cross_chain_root_anchor_architecture.md` mục 2.4 (lines 245-249) specifies for this:
+*"A chạy `ProcessNativeMintBurn(1)` (burn cục bộ, ... `tz_hardware_engine.go`)"* on the
+source side, *"B ... `ProcessNativeMintBurn(0)` để mint"* on the destination side.
+
+**Evidence (all confirmed by direct code reading, not inference):**
+- `execution/pkg/cross_chain/gateway.go` and
+  `execution/pkg/blockchain/tx_processor/gateway_handler.go` import neither `mvm` nor
+  `vm_processor` — zero possible call path to `ProcessNativeMintBurn` exists today.
+- `outbound()`'s ABI (`gatewayAbi.go`) is `"stateMutability": "nonpayable"` — a caller does
+  not even attach real native coin when calling it. `Value` is a free-form `uint256`
+  argument with no connection to the caller's actual balance.
+- `ClaimMessage` (`gateway.go:550`) has a comment *"// Set execution context for destination
+  target contracts"* right where a real `Target`/`Payload` invocation should happen — it
+  sets `g.ActiveContext`, does nothing with it, and immediately clears it again.
+  `execStatus := MessageStatusSuccess` is unconditional; nothing was actually executed.
+- `AssetRegistryEngine.ReceiveAndSettleAsset`'s "Case B: Destination is Remote Chain -> Mint
+  wrapped token into circulation" (`asset_registry.go:239-240`) only increments
+  `a.CirculationBalances[destCircKey]`, an internal map — it never calls the real wrapped
+  ERC-20 contract's `mint`, and the `recipient` parameter it accepts is never used to touch
+  any real state.
+- `VmProcessor.ProcessNativeMintBurn` (`vm_processor.go:462`) — the function that *does*
+  exist, fully implemented, TrustZone-hardware-backed, exactly matching the architecture
+  doc's description — has **zero callers** anywhere in the live codebase (confirmed via
+  `grep -rn "ProcessNativeMintBurn(" execution/`, only its own definition and the
+  `mvm`-layer plumbing beneath it show up).
+- `RelayerBalances[relayer]` (the tip mechanism, `gateway.go:632-638`) is credited the same
+  way — no `withdraw`-style method exists anywhere in `gatewayAbi.go` to ever turn it into
+  real coin.
+
+**Why this is safe to write up openly (no responsible-disclosure lockdown needed, unlike
+Phase 0.5):** there is no live exploit here because there is no real value in the system to
+steal in the first place — `outbound()` never takes a real balance from anyone, so an
+attacker gains nothing spendable by manipulating `claimMessage()`, and neither does a
+legitimate user. Every green test in `gateway_test.go`/`relayer_test.go`/
+`security_audit_test.go` genuinely proves the **verification/anti-fraud layer** is sound
+(BLS, Merkle, replay, double-mint-of-the-*ledger*) — that work is real and necessary — but
+none of it proves the bridge moves money, because it never has.
+
+**Fix plan (this is the actual scope of "make the bridge work for real"):**
+
+1. **`GatewayEngine.Outbound`** (or its caller in `gateway_handler.go`'s `"outbound"` case):
+   before/alongside building the `CrossChainMessage`, call
+   `VmProcessor.ProcessNativeMintBurn(ctx, tx, mvmE, 1 /* burn */)` for `params.Value` from
+   `tx.FromAddress()`. Must fail closed (revert the whole tx) if the burn fails — a message
+   must never be emitted for value that wasn't actually removed from the sender.
+2. **`GatewayEngine.ClaimMessage`** (and the `verifyAndExecute` path that calls it): after
+   all existing verification passes (keep every check exactly as-is — this phase is purely
+   additive), call `ProcessNativeMintBurn(ctx, tx, mvmE, 0 /* mint */)` crediting
+   `message.Value` to the real recipient. Open design question to confirm with the task
+   owner before implementing: **who is the recipient** — is it always `message.Sender`
+   (same address on both chains), or does the ABI need a new explicit `recipient` field?
+   Check `AssetRegistryEngine.LockAndBridgeAsset` — it already threads a separate
+   `recipient common.Address` distinct from `sender`, so the native path likely needs the
+   same, meaning `CrossChainMessage` needs a new field (ABI-breaking, coordinate with
+   Phase 1 item about anything else pending an ABI change).
+3. **`GatewayEngine.Refund`**: same mint call, crediting `message.Sender` back on the source
+   chain (this is the "give it back to whoever originally burned it" path, per architecture
+   mục 2.4 point 2 — the sender identity here is unambiguous, this doesn't have the
+   recipient question item 2 does).
+4. **`GatewayEngine.ClaimDeadChainBalance`**: same mint call, crediting `account` (the
+   parameter already exists and is already verified via the account-tree Merkle proof —
+   just isn't consumed).
+5. **`AssetRegistryEngine.LockAndBridgeAsset`/`ReceiveAndSettleAsset`**: needs the
+   equivalent for ERC-20-style assets — burning/locking means an actual `SubBalance`-style
+   call against the *token contract's* storage (via the existing EVM/MVM `Call` mechanism,
+   not `ProcessNativeMintBurn` which is native-coin-only), and minting means actually
+   invoking the wrapped contract's mint entrypoint. This is more involved than the native
+   path (needs a real contract call, not a direct balance primitive) — treat as a separate,
+   later task from items 1-4, not a blocker for getting native transfers real.
+6. **`CONTRACT_CALL` (`message.Target`/`message.Payload`)**: currently accepted into the
+   message struct, hashed into the digest, and never invoked. Per architecture mục 2.6.5,
+   this needs the sender to lock a "cross-chain gas" amount at `outbound()` time and
+   `ClaimMessage` to actually invoke `Target` with `Payload` via the EVM/MVM `Call`
+   mechanism, gas-capped to the locked amount, unused portion refunded, used portion really
+   burned (not "free gas" — see the architecture doc's own DoS warning at that section).
+   This depends on items 1-2's real-value plumbing existing first — do this after, not
+   instead of, the plain value-transfer path.
+
+**Acceptance test — must exist before this item is considered done:** an end-to-end test
+(not the existing in-process `gateway_test.go` style, which would hide this exact class of
+bug the same way it hid this one) that starts two real chains + a real Root Anchor,
+observes `eth_getBalance` on the sender **decrease** after `outbound()` and on the real
+recipient **increase** after `claimMessage()`, by exactly the transferred amount, on both
+chains' real RPC endpoints. This is the only kind of test that would have caught this gap —
+add it to the same T2 real-infra testing this document's Phase 2 already calls for, and
+make it block Phase 2 sign-off, not just Phase 1.
+
+**Where this sits relative to the rest of this document:** this must be fixed and its
+acceptance test passing **before** Phase 2's T2 testnet run is meaningful for anything
+beyond messages (`value=0`) — right now Phase 4's "Stage 2 — value transfers via Reserve,
+small caps" describes a rollout stage for a capability that does not exist yet. Do this
+work first, then the existing Phase 1-5 sequence below still applies as written.
+
+## Phase 0.7 — PR #63: Phase 0.6 implemented, 6 bugs found+fixed, partial live acceptance
+## test run (2026-08-25, same day)
+
+**Code:** `fix/cross-chain-native-value-wiring` → PR #63 (open, not yet merged at time of
+writing). Implements Task 1.1 (native burn/mint on `outbound`/`claimMessage`/
+`verifyAndExecute`/`refund`/`claimDeadChainBalance`), Task 1.2 (custom asset via real
+`transferFrom`/`transfer`/`mint` contract calls), Task 1.3 (`CONTRACT_CALL` execution gated
+on the target having real deployed code, `isContractCall`), Task 1.4 (`withdrawRelayerTip`),
+and Task 2 (`BootstrapFoundingChainsWithCaller`/`GenesisCoordinator`). Full bug-by-bug
+evidence in `note/cross_chain_task1_native_value_fix_plan.md` (its "RESOLVED" header
+summarizes all 6: burn-before-validate fund loss, split Tip+Value burn stranding Tip on
+partial failure, mint-before-CONTRACT_CALL double-mint-via-replay, relayer Tip double-mint,
+2 hard-fail-after-mutation paths, one leftover debug `fmt.Printf`). `go build ./... && go vet
+./... && go test ./...` clean across the whole `execution/` module.
+
+**Live acceptance test — partial, real result, not the full round-trip yet:**
+
+Stood up real infra from this repo's own tooling (`deploy/systemd/setup_root_anchor.sh
+--clean`, `gen_single_chain.py`): a real 4-validator Root Anchor BFT cluster (chain 9099) and
+2 real single-validator private chains (101, 102), all with freshly rebuilt binaries carrying
+this PR's fixes. Ran a real `bootstrapFoundingChains()` transaction (throwaway tool, not
+committed — see below) with **real BLS PoP verification**, `status: 0x1`. Then ran a real
+`outbound()` transaction on chain 101 (native value=1000 wei, real ECDSA-signed tx, real
+dev-funded account) and verified the sender's **real balance decreased by exactly gas-fee +
+1000 wei** (`50000000001000` = `50000 gasUsed × 1e9 gasPrice + 1000`), read back via a second
+real `eth_getBalance` RPC call — not inferred, computed and matched exactly. **This is the
+first real evidence in this project's history that a cross-chain transfer moves actual
+spendable value on a real running chain**, closing the specific gap Phase 0.6 documented.
+
+**Not yet done:** the destination-side proof (`claimMessage()` minting on chain 102,
+`eth_getBalance` increasing there) — blocked by an infra issue below, not a code issue (the
+`outbound()` result above already proves the burn side of Task 1.1 works correctly end to
+end on real infra). Re-run the same session's `submit_claim_quick`-style flow once the
+blocker below is resolved to close this out fully.
+
+**2 real infra findings from this session, both separate from the Gateway code in PR #63:**
+
+1. **Stray/duplicate validator entry from repeated start/kill/regenerate cycling — found,
+   explained, not a production bug.** A single-validator chain regenerated via `gen_single_chain.py`
+   after an earlier failed attempt (same output dir) intermittently ended up with **2**
+   validator entries in its stake-state DB instead of 1 (`GetAllValidators()` returned a
+   phantom entry with a different address/stake than genesis.json's real one), which
+   permanently blocked block production: the node tried to reach the phantom validator's
+   p2p address as a peer for its own block-sync quorum and could never succeed (`Not enough
+   stake: 0 out of 3000 total stake`). Root-caused by testing: a **fully clean** single-shot
+   regenerate-then-start (kill everything, `rm -rf` the whole chain dir, generate once, start
+   once — no restart cycling) reliably produces exactly 1 validator and blocks flow
+   immediately. Exact origin of the phantom entry within a dirty-restart sequence not traced
+   further (not needed once the clean-start workaround was confirmed reliable twice). **Actionable
+   takeaway for whoever runs T2 next:** never `rm -rf` + regenerate a chain's data dir into the
+   same path while any process from a previous attempt at that path might still be alive or
+   mid-shutdown — kill and confirm-dead first, every time.
+2. **NOT YET ROOT-CAUSED — Root Anchor executor "CatchingUp phase" livelock on a fresh
+   4-validator batch start.** On a second clean regeneration (to align chain 101/102's
+   committee keys with a fresh bootstrap after finding #1 above), the 4-validator Root Anchor
+   cluster's consensus DAG kept committing rounds normally and fast (`commit_index` observed
+   climbing 512 → 1735+ over ~3 minutes, real BFT activity, not deadlocked) while the Go
+   executor stayed stuck logging `🛡️ [PHASE-GUARD] Blocking local committer. Node is in
+   CatchingUp phase (startup_sync_active=true)` **12,000+ times** without ever exiting that
+   phase — `eth_blockNumber` never moved past `0x1` in that window. No noisy-neighbor process
+   this time (confirmed via `ps aux --sort=-%cpu`, machine was otherwise idle) — different
+   trigger than the earlier documented restart-hang (Phase 1 item 2's "Investigated live, root
+   cause found — environmental" note), since this was a **fresh** start (`--clean`), not a
+   restart from persisted state. Best guess, not confirmed: launching 4 heavy validator
+   processes near-simultaneously via a backgrounding loop (`start_all.sh`'s `&`) may let the
+   DAG race far enough ahead before the executor's first catch-up pass that its exit condition
+   never triggers — needs real Rust-side tracing of `commit_manager`'s `PHASE-GUARD` exit logic
+   to confirm, not guessed at further here. **This is what blocked the destination-side
+   `claimMessage()` proof above** — chain 101/102 themselves were fine (single-validator,
+   confirmed working, see finding #1's resolution) but couldn't get real `ChainRegistry` data
+   from Root Anchor while it was stuck. Whoever picks this up: reproduce with a staggered
+   start (start node_0, wait for it to be ready, then node_1, etc.) to test the race-condition
+   theory before diving into Rust source.
 
 ## How to work (read once, applies to every phase below)
 
