@@ -992,7 +992,18 @@ func (h *GatewayHandler) handleWrite(
 		engine.EnsureGovernance()
 		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
 		payload := mustBytes(args[1])
-		proposedAt := mustUint64(args[2])
+		// Security fix: args[2] (the ABI's declared "proposedAt") is a raw caller-supplied
+		// value with nothing to cross-check it against — GovernanceEngine.Propose/Vote/Execute
+		// were written as pure functions that trust whatever timestamp they're given, never
+		// meant to be fed directly from unauthenticated calldata. A caller naming a future
+		// timestamp here (and an equally fake future one at vote/executeProposal time) can walk
+		// EffectiveAt arbitrarily far ahead and immediately satisfy it, bypassing the mandatory
+		// 72h timelock outright — the same trust class of bug already fixed for voterChainID
+		// above. Fail-closed like every other consensus-relevant value in this file: ignore the
+		// caller's claim and always use the real, consensus-agreed block time instead. The ABI
+		// parameter itself is left in place (removing it would be an ABI-breaking change with no
+		// safety benefit); its value is simply never trusted.
+		proposedAt := blockTime
 		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
 		if err != nil {
 			return nil, nil, err
@@ -1007,7 +1018,9 @@ func (h *GatewayHandler) handleWrite(
 		engine.EnsureGovernance()
 		proposalID := mustHash(args[0])
 		voterChainID := mustUint64(args[1])
-		currentTimestamp := mustUint64(args[2])
+		// Security fix: see the matching comment on "propose" above — args[2] is untrusted
+		// caller-supplied input; always use the real block time instead.
+		currentTimestamp := blockTime
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
@@ -1051,7 +1064,9 @@ func (h *GatewayHandler) handleWrite(
 	case "executeProposal":
 		engine.EnsureGovernance()
 		proposalID := mustHash(args[0])
-		currentTimestamp := mustUint64(args[1])
+		// Security fix: see the matching comment on "propose" above — args[1] is untrusted
+		// caller-supplied input; always use the real block time instead.
+		currentTimestamp := blockTime
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
