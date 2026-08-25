@@ -228,6 +228,76 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{"internalType": "uint8", "name": "kind", "type": "uint8"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"}
+		],
+		"name": "propose",
+		"outputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "voterChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"}
+		],
+		"name": "vote",
+		"outputs": [{"internalType": "uint8", "name": "status", "type": "uint8"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"}
+		],
+		"name": "executeProposal",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "totalSupply", "type": "uint256"}
+		],
+		"name": "registerAsset",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
+		"name": "getProposal",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint8", "name": "kind", "type": "uint8"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint64", "name": "votesFor", "type": "uint64"},
+			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"},
+			{"internalType": "uint64", "name": "effectiveAt", "type": "uint64"},
+			{"internalType": "bool", "name": "executed", "type": "bool"},
+			{"internalType": "uint8", "name": "status", "type": "uint8"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "assetId", "type": "uint256"}],
+		"name": "getAsset",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint256", "name": "homeChainId", "type": "uint256"},
+			{"internalType": "address", "name": "canonicalContract", "type": "address"},
+			{"internalType": "bool", "name": "active", "type": "bool"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true, "internalType": "bytes32", "name": "messageId", "type": "bytes32"},

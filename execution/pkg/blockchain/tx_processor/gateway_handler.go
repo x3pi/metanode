@@ -182,7 +182,8 @@ func (h *GatewayHandler) HandleTransaction(
 
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
-		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate":
+		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
+		"propose", "vote", "executeProposal", "registerAsset":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -256,6 +257,7 @@ func (h *GatewayHandler) handleWrite(
 	}
 
 	var eventLogs []types.EventLog
+	var returnData []byte
 
 	switch method.Name {
 	case "outbound":
@@ -561,6 +563,56 @@ func (h *GatewayHandler) handleWrite(
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
+	case "propose":
+		engine.EnsureGovernance()
+		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
+		payload := mustBytes(args[1])
+		proposedAt := mustUint64(args[2])
+		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
+		if err != nil {
+			return nil, nil, err
+		}
+		packed, packErr := method.Outputs.Pack(proposalID)
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		returnData = packed
+
+	case "vote":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		voterChainID := mustUint64(args[1])
+		currentTimestamp := mustUint64(args[2])
+		status, err := engine.Governance.Vote(proposalID, voterChainID, currentTimestamp)
+		if err != nil {
+			return nil, nil, err
+		}
+		packed, packErr := method.Outputs.Pack(uint8(status))
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		returnData = packed
+
+	case "executeProposal":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		currentTimestamp := mustUint64(args[1])
+		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
+			return nil, nil, err
+		}
+
+	case "registerAsset":
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		totalSupply := mustBigInt(args[1])
+		proposal := engine.Governance.GetProposal(proposalID)
+		if proposal == nil {
+			return nil, nil, cross_chain.ErrProposalNotFound
+		}
+		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(proposal, totalSupply); err != nil {
+			return nil, nil, err
+		}
+
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)
 	}
@@ -568,7 +620,7 @@ func (h *GatewayHandler) handleWrite(
 	if err := saveGatewayEngine(chainState, engine); err != nil {
 		return nil, nil, err
 	}
-	return eventLogs, nil, nil
+	return eventLogs, returnData, nil
 }
 
 func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *abi.Method, argData []byte) ([]byte, error) {
@@ -679,6 +731,33 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			signatures[i] = s.Signature
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
+
+	case "getProposal":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getProposal input: %w", err)
+		}
+		engine.EnsureGovernance()
+		proposalID := mustHash(args[0])
+		proposal := engine.Governance.GetProposal(proposalID)
+		status, exists := engine.Governance.GetStatus(proposalID)
+		if !exists || proposal == nil {
+			return method.Outputs.Pack(false, uint8(0), []byte{}, uint64(0), uint64(0), uint64(0), false, uint8(0))
+		}
+		return method.Outputs.Pack(true, uint8(proposal.Kind), proposal.Payload, proposal.VotesFor, proposal.ProposedAt, proposal.EffectiveAt, proposal.Executed, uint8(status))
+
+	case "getAsset":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getAsset input: %w", err)
+		}
+		engine.EnsureGovernance()
+		assetID := mustBigInt(args[0])
+		entry, err := engine.AssetRegistry.GetAsset(assetID)
+		if err != nil || entry == nil {
+			return method.Outputs.Pack(false, new(big.Int), common.Address{}, false)
+		}
+		return method.Outputs.Pack(true, new(big.Int).SetUint64(entry.HomeChainID), entry.CanonicalContract, entry.Active)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

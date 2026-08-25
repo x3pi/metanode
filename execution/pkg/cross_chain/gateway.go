@@ -3,6 +3,7 @@ package cross_chain
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -87,6 +88,10 @@ type GatewayEngine struct {
 	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
 	// their own key at any time.
 	RegisteredPops map[string][]byte
+	// Governance manages on-chain multi-chain voting and 72h timelocks (Milestone G).
+	Governance *GovernanceEngine `json:"governance,omitempty"`
+	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
+	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -95,6 +100,13 @@ func NewGatewayEngine(
 	registry map[uint64]ChainRegistry,
 	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
+	activeChains := make([]uint64, 0, len(registry))
+	for c := range registry {
+		activeChains = append(activeChains, c)
+	}
+	gov := NewGovernanceEngine(activeChains)
+	assetReg := NewAssetRegistryEngine(registry, gov)
+
 	return &GatewayEngine{
 		LocalChainID:                 localChainID,
 		ChainRegistry:                registry,
@@ -109,7 +121,80 @@ func NewGatewayEngine(
 		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
 		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
 		RegisteredPops:               make(map[string][]byte),
+		Governance:                   gov,
+		AssetRegistry:                assetReg,
 	}
+}
+
+// EnsureGovernance ensures Governance and AssetRegistry engines are initialized after JSON deserialization.
+func (g *GatewayEngine) EnsureGovernance() {
+	if g.Governance == nil {
+		activeChains := make([]uint64, 0, len(g.ChainRegistry))
+		for c := range g.ChainRegistry {
+			activeChains = append(activeChains, c)
+		}
+		g.Governance = NewGovernanceEngine(activeChains)
+	}
+	if g.AssetRegistry == nil {
+		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
+	} else {
+		g.AssetRegistry.ChainRegistry = g.ChainRegistry
+		g.AssetRegistry.Governance = g.Governance
+	}
+}
+
+// ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
+// mutates GatewayEngine state (ChainRegistry onboarding/offboarding, dead chains, asset registration).
+func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, currentTimestamp uint64) (*GovernanceProposal, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.EnsureGovernance()
+
+	proposal, err := g.Governance.Execute(proposalID, currentTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	switch proposal.Kind {
+	case ProposalRegisterChain:
+		var reg ChainRegistry
+		if err := json.Unmarshal(proposal.Payload, &reg); err != nil {
+			return nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		if reg.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		g.Governance.RegisterActiveChain(reg.ChainID)
+		if g.ChainRegistry == nil {
+			g.ChainRegistry = make(map[uint64]ChainRegistry)
+		}
+		g.ChainRegistry[reg.ChainID] = reg
+
+	case ProposalUnregisterChain:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid unregister chain ID payload: %w", err)
+		}
+		g.Governance.UnregisterActiveChain(chainID)
+		delete(g.ChainRegistry, chainID)
+
+	case ProposalDeclareChainDead:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid declare dead chain ID payload: %w", err)
+		}
+		if g.DeadChains == nil {
+			g.DeadChains = make(map[uint64]bool)
+		}
+		g.DeadChains[chainID] = true
+	}
+
+	return proposal, nil
 }
 
 // SetAllocationRejectedListener registers an instant alert listener for overdraw events.
