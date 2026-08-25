@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
@@ -115,13 +114,13 @@ func TestRelayer_P4_2_TipClaimingAndConcurrencyCompetition(t *testing.T) {
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
 	proof := GetMerkleProof(commitData.MerkleLayers, 0)
+	aggregateProof := GetMerkleProof(commitData.MerkleLayers, commitData.AggregateLeafIndex["0"])
 
 	relayer1 := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
 	relayer2 := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
 
-	// Simulate both relayers racing to claim the same message
 	winner, receipt, losers, dupErrors := relayerEngine.CompeteRelayers(
-		*msg, proof, commitData.CommitRoot, commitData.Cert,
+		*msg, commitData.AggregateAmounts["0"], aggregateProof, proof, commitData.CommitRoot, commitData.Cert,
 		[]common.Address{relayer1, relayer2},
 	)
 
@@ -315,15 +314,42 @@ func TestRelayer_Scenario10_3_ContractCallFailedAndAutomatedRefund(t *testing.T)
 	msg, err := relayerEngine.SubmitOutbound(101, sender, params, txHash)
 	require.NoError(t, err)
 
+	// Build commit tree with the message
+	messages := []CrossChainMessage{*msg}
+	commitRoot, layers, aggAmounts, aggIndex, err := BuildCommitTree(messages)
+	require.NoError(t, err)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	// Attest commit on Chain 101
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
+	sig101 := bls.Sign(relayerEngine.Signers[101][0].PrivateKey(), commitMsg)
+	cert101 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig101.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
+	_, err = chains[101].AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101)
+	require.NoError(t, err)
+
+	// Destination chain (102) reverts and committee signs failure cert
+	failMsg := ComputeMessageFailureAttestMessage(msg.MessageID, 102)
+	failSig := bls.Sign(relayerEngine.Signers[102][0].PrivateKey(), failMsg)
+	destFailureCert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
+
 	// Simulate contract failure at destination: Relayer executes automated refund pipeline
-	err = relayerEngine.ProcessRefund(101, 102, msg.MessageID, sender, refundAmount, true)
+	err = relayerEngine.ProcessRefund(*msg, proof, commitRoot, destFailureCert)
 	require.NoError(t, err)
 
 	// Chain A reflects refunded status
 	assert.Equal(t, MessageStatusRefunded, chains[101].GetMessageStatus(msg.MessageID))
 
 	// Double refund protection: attempting a 2nd refund MUST fail
-	errDup := relayerEngine.ProcessRefund(101, 102, msg.MessageID, sender, refundAmount, true)
+	errDup := relayerEngine.ProcessRefund(*msg, proof, commitRoot, destFailureCert)
 	assert.ErrorIs(t, errDup, ErrInvalidRefundState)
 }
 
@@ -498,12 +524,11 @@ func TestRelayer_Scenario10_8_DeadChainRecovery(t *testing.T) {
 		Account: victimAccount,
 		Balance: victimBalance,
 	}
-	leafBytes, _ := json.Marshal(leaf)
-	leafHash := Keccak256(leafBytes)
+	leafHash := HashAccountLeaf(leaf)
 
-	// Set state root on Reserve registry to leafHash for test
+	// Set account tree root on Reserve registry to leafHash for test
 	reg := reserveEngine.ChainRegistry[deadChainID]
-	reg.StateRoot = leafHash
+	reg.AccountTreeRoot = leafHash
 	reserveEngine.ChainRegistry[deadChainID] = reg
 
 	proof := MerkleProof{

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# start_relayer_daemon.sh — Starts the cross-chain RelayerDaemon for private chains (101-104) and Root Anchor (9099)
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_PATH="$SCRIPT_DIR/cross_chain_relayer"
+
+if [ ! -f "$BIN_PATH" ]; then
+    echo "🔨 Building cross_chain_relayer binary..."
+    (cd "$SCRIPT_DIR/../../execution" && go build -o "$BIN_PATH" ./cmd/tool/cross_chain_relayer)
+fi
+
+RELAYER_KEY="0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8"
+ROOT_ANCHOR="http://127.0.0.1:9099"
+CHAINS="101=http://127.0.0.1:8546,102=http://127.0.0.1:8547,103=http://127.0.0.1:8548,104=http://127.0.0.1:8549"
+POLL_MS=500
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "🌐 STARTING CROSS-CHAIN RELAYER DAEMON"
+echo "   - Root Anchor: $ROOT_ANCHOR"
+echo "   - Private Chains: $CHAINS"
+echo "   - Poll Interval: ${POLL_MS}ms"
+echo "═══════════════════════════════════════════════════════════════"
+
+exec "$BIN_PATH" \
+    -key "$RELAYER_KEY" \
+    -root-anchor "$ROOT_ANCHOR" \
+    -chains "$CHAINS" \
+    -poll-interval-ms "$POLL_MS"

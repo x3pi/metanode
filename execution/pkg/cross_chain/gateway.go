@@ -3,6 +3,7 @@ package cross_chain
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -74,6 +75,23 @@ type GatewayEngine struct {
 	ChannelSequence            map[string]uint64
 	RelayerBalances            map[common.Address]*big.Int
 	allocationRejectedListener AllocationRejectedListener
+
+	// PendingCommitteeAttestations collects individual BLS signature shares for a pending
+	// CommitteeUpdate, keyed by "sourceChainId:oldEpoch:payloadHashHex" (Milestone C). Cleared
+	// once the corresponding committeeUpdate() succeeds.
+	PendingCommitteeAttestations map[string][]CommitteeAttestationShare
+	// PendingCommitAttestations collects individual BLS signature shares for a pending
+	// commit root attestation, keyed by "sourceChainId:epoch:commitRootHex" (Milestone F).
+	PendingCommitAttestations map[string][]CommitAttestationShare
+	// RegisteredPops is a durable, permissionless Proof-of-Possession registry keyed by
+	// hex(pubkeyBls) (Milestone C) — see registerCommitteePop()/getRegisteredPop() in
+	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
+	// their own key at any time.
+	RegisteredPops map[string][]byte
+	// Governance manages on-chain multi-chain voting and 72h timelocks (Milestone G).
+	Governance *GovernanceEngine `json:"governance,omitempty"`
+	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
+	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -82,18 +100,101 @@ func NewGatewayEngine(
 	registry map[uint64]ChainRegistry,
 	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
-	return &GatewayEngine{
-		LocalChainID:     localChainID,
-		ChainRegistry:    registry,
-		SupplyLedger:     ledger,
-		AttestedCommits:  make(map[string]AttestedCommit),
-		MessageStatus:    make(map[common.Hash]MessageStatus),
-		DeadChains:       make(map[uint64]bool),
-		DeadChainClaimed: make(map[string]bool),
-		LockedTips:       make(map[common.Hash]*big.Int),
-		ChannelSequence:  make(map[string]uint64),
-		RelayerBalances:  make(map[common.Address]*big.Int),
+	activeChains := make([]uint64, 0, len(registry))
+	for c := range registry {
+		activeChains = append(activeChains, c)
 	}
+	gov := NewGovernanceEngine(activeChains)
+	assetReg := NewAssetRegistryEngine(registry, gov)
+
+	return &GatewayEngine{
+		LocalChainID:                 localChainID,
+		ChainRegistry:                registry,
+		SupplyLedger:                 ledger,
+		AttestedCommits:              make(map[string]AttestedCommit),
+		MessageStatus:                make(map[common.Hash]MessageStatus),
+		DeadChains:                   make(map[uint64]bool),
+		DeadChainClaimed:             make(map[string]bool),
+		LockedTips:                   make(map[common.Hash]*big.Int),
+		ChannelSequence:              make(map[string]uint64),
+		RelayerBalances:              make(map[common.Address]*big.Int),
+		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
+		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
+		RegisteredPops:               make(map[string][]byte),
+		Governance:                   gov,
+		AssetRegistry:                assetReg,
+	}
+}
+
+// EnsureGovernance ensures Governance and AssetRegistry engines are initialized after JSON deserialization.
+func (g *GatewayEngine) EnsureGovernance() {
+	if g.Governance == nil {
+		activeChains := make([]uint64, 0, len(g.ChainRegistry))
+		for c := range g.ChainRegistry {
+			activeChains = append(activeChains, c)
+		}
+		g.Governance = NewGovernanceEngine(activeChains)
+	}
+	if g.AssetRegistry == nil {
+		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
+	} else {
+		g.AssetRegistry.ChainRegistry = g.ChainRegistry
+		g.AssetRegistry.Governance = g.Governance
+	}
+}
+
+// ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
+// mutates GatewayEngine state (ChainRegistry onboarding/offboarding, dead chains, asset registration).
+func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, currentTimestamp uint64) (*GovernanceProposal, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.EnsureGovernance()
+
+	proposal, err := g.Governance.Execute(proposalID, currentTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	switch proposal.Kind {
+	case ProposalRegisterChain:
+		var reg ChainRegistry
+		if err := json.Unmarshal(proposal.Payload, &reg); err != nil {
+			return nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		if reg.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		g.Governance.RegisterActiveChain(reg.ChainID)
+		if g.ChainRegistry == nil {
+			g.ChainRegistry = make(map[uint64]ChainRegistry)
+		}
+		g.ChainRegistry[reg.ChainID] = reg
+
+	case ProposalUnregisterChain:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid unregister chain ID payload: %w", err)
+		}
+		g.Governance.UnregisterActiveChain(chainID)
+		delete(g.ChainRegistry, chainID)
+
+	case ProposalDeclareChainDead:
+		var chainID uint64
+		if len(proposal.Payload) == 8 {
+			chainID = binary.BigEndian.Uint64(proposal.Payload)
+		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
+			return nil, fmt.Errorf("invalid declare dead chain ID payload: %w", err)
+		}
+		if g.DeadChains == nil {
+			g.DeadChains = make(map[uint64]bool)
+		}
+		g.DeadChains[chainID] = true
+	}
+
+	return proposal, nil
 }
 
 // SetAllocationRejectedListener registers an instant alert listener for overdraw events.
@@ -264,9 +365,11 @@ func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, cert, true)
+	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, true)
 }
 
 // AttestReserveIssuedCommit executes Phase 1 of Attest-then-Claim for a commit issued by RESERVE
@@ -279,15 +382,19 @@ func (g *GatewayEngine) AttestReserveIssuedCommit(
 	reserveChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, cert, false)
+	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false)
 }
 
 func (g *GatewayEngine) attestCommitInternal(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 	enforceCeiling bool,
 ) (*AttestedCommit, error) {
@@ -305,72 +412,42 @@ func (g *GatewayEngine) attestCommitInternal(
 	}
 
 	// Fail-closed: Committee cannot be empty
-	if len(registry.Committee) == 0 {
-		return nil, fmt.Errorf("%w: chain %d", ErrEmptyCommittee, sourceChainID)
-	}
-
-	// Real BLS Quorum Signature Verification (Cryptographic Defense)
-	if len(cert.AggregateSignature) == 0 {
-		return nil, ErrInvalidBLSSignature
-	}
-
-	var accumulatedStake uint64
-	var totalStake uint64
-	var votingPubkeys [][]byte
-
-	for i, val := range registry.Committee {
-		totalStake += val.Stake
-		isSigner := false
-		if len(cert.SignerBitmap) > 0 {
-			byteIdx := i / 8
-			bitIdx := uint(i % 8)
-			if byteIdx < len(cert.SignerBitmap) && (cert.SignerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
-				isSigner = true
-			}
-		} else if len(registry.Committee) == 1 {
-			// Single validator backward compatibility when bitmap is omitted
-			isSigner = true
-		}
-
-		if isSigner {
-			accumulatedStake += val.Stake
-			votingPubkeys = append(votingPubkeys, val.PubkeyBLS)
-		}
-	}
-
-	if totalStake == 0 {
-		return nil, ErrZeroTotalStake
-	}
-
-	// Calculate quorum threshold: default 66.67% (BFT 2/3) or basis points from registry.QuorumThreshold
-	threshold := (totalStake*2 + 2) / 3
-	if registry.QuorumThreshold > 0 {
-		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
-	}
-
-	if accumulatedStake < threshold || len(votingPubkeys) == 0 {
-		return nil, fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
-	}
-
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
-	if len(votingPubkeys) == 1 {
-		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
-		sig := cm.SignFromBytes(cert.AggregateSignature)
-		if !bls.VerifySign(pubKey, sig, commitMsg) {
-			return nil, ErrInvalidBLSSignature
-		}
-	} else {
-		msgs := make([][]byte, len(votingPubkeys))
-		for i := range msgs {
-			msgs[i] = commitMsg
-		}
-		if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
-			return nil, ErrInvalidBLSSignature
-		}
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
+	if err := VerifyQuorumCertAgainstRegistry(registry, cert, commitMsg); err != nil {
+		return nil, err
 	}
 
 	if aggregateAmount == nil {
 		aggregateAmount = big.NewInt(0)
+	}
+	if assetId == nil {
+		assetId = big.NewInt(0)
+	}
+
+	// Verify cryptographic binding of the declared aggregateAmount to the commit itself (Section
+	// 2.3.1/11.2, risk #20): aggregateAmount must be provably a leaf of the SAME Merkle tree whose
+	// root is commitRoot — the very thing cert (verified above) already BLS-attests to — not a
+	// number the caller simply asserts. Verifying against commitRoot (not registry.StateRoot) is
+	// deliberate: it's what BuildCommitTree actually embeds the leaf into (relayer.go), and it's
+	// what makes AttestReserveIssuedCommit's re-attestation of the same underlying commit on the
+	// Reserve->destination leg check out identically, since both legs share the same commitRoot.
+	leaf := AggregateValueLeaf{
+		AssetID:         assetId,
+		AggregateAmount: aggregateAmount,
+	}
+	leafHash := HashAggregateValueLeaf(leaf)
+	if !VerifyMerkleProof(leafHash, aggregateProof, commitRoot) {
+		return nil, ErrInvalidMerkleProof
+	}
+
+	key := fmt.Sprintf("%d:%s:%s", sourceChainID, commitRoot.Hex(), assetId.String())
+
+	// Enforce write-once semantics
+	if existing, exists := g.AttestedCommits[key]; exists {
+		if existing.FundedAmount.Cmp(aggregateAmount) != 0 {
+			return nil, fmt.Errorf("attestCommit: aggregateAmount mismatch for already-attested asset")
+		}
+		return &existing, nil
 	}
 
 	if enforceCeiling {
@@ -389,10 +466,10 @@ func (g *GatewayEngine) attestCommitInternal(
 		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
 	}
 
-	key := fmt.Sprintf("%d:%s", sourceChainID, commitRoot.Hex())
 	attested := AttestedCommit{
 		SourceChainID: sourceChainID,
 		CommitRoot:    commitRoot,
+		AssetID:       new(big.Int).Set(assetId),
 		Epoch:         cert.Epoch,
 		FundedAmount:  new(big.Int).Set(aggregateAmount),
 		ClaimedAmount: big.NewInt(0),
@@ -418,12 +495,16 @@ func (g *GatewayEngine) ClaimMessage(
 		return currentStatus, fmt.Errorf("%w: message %s has status %d", ErrAlreadyClaimed, message.MessageID.Hex(), currentStatus)
 	}
 
-	key := fmt.Sprintf("%d:%s", message.SourceChainID, commitRoot.Hex())
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	attested, exists := g.AttestedCommits[key]
 	if !exists {
 		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b))
 		for chainID := range g.ChainRegistry {
-			k := fmt.Sprintf("%d:%s", chainID, commitRoot.Hex())
+			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
 			if a, ok := g.AttestedCommits[k]; ok {
 				attested = a
 				exists = true
@@ -494,39 +575,136 @@ func (g *GatewayEngine) ClaimMessage(
 	return execStatus, nil
 }
 
+// VerifyQuorumCertAgainstRegistry validates the BLS signature and threshold stake against a chain's committee.
+func VerifyQuorumCertAgainstRegistry(registry ChainRegistry, cert QuorumCert, digest []byte) error {
+	if len(registry.Committee) == 0 {
+		return fmt.Errorf("%w: chain %d", ErrEmptyCommittee, registry.ChainID)
+	}
+	if len(cert.AggregateSignature) == 0 {
+		return ErrInvalidBLSSignature
+	}
+
+	var accumulatedStake uint64
+	var totalStake uint64
+	var votingPubkeys [][]byte
+
+	for i, val := range registry.Committee {
+		totalStake += val.Stake
+		isSigner := false
+		if len(cert.SignerBitmap) > 0 {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			if byteIdx < len(cert.SignerBitmap) && (cert.SignerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
+				isSigner = true
+			}
+		} else if len(registry.Committee) == 1 {
+			// Single validator backward compatibility when bitmap is omitted
+			isSigner = true
+		}
+
+		if isSigner {
+			accumulatedStake += val.Stake
+			votingPubkeys = append(votingPubkeys, val.PubkeyBLS)
+		}
+	}
+
+	if totalStake == 0 {
+		return ErrZeroTotalStake
+	}
+
+	threshold := (totalStake*2 + 2) / 3
+	if registry.QuorumThreshold > 0 {
+		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
+	}
+
+	if accumulatedStake < threshold || len(votingPubkeys) == 0 {
+		return fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
+	}
+
+	if len(votingPubkeys) == 1 {
+		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
+		sig := cm.SignFromBytes(cert.AggregateSignature)
+		if !bls.VerifySign(pubKey, sig, digest) {
+			return ErrInvalidBLSSignature
+		}
+	} else {
+		msgs := make([][]byte, len(votingPubkeys))
+		for i := range msgs {
+			msgs[i] = digest
+		}
+		if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
+			return ErrInvalidBLSSignature
+		}
+	}
+	return nil
+}
+
 // Refund processes returning funds to the sender on the source chain when the destination reverts (P2.4).
 func (g *GatewayEngine) Refund(
-	messageID common.Hash,
-	sourceChainID uint64,
-	sender common.Address,
-	amount *big.Int,
-	isFailedProofValid bool,
+	message CrossChainMessage,
+	messageProof MerkleProof,
+	commitRoot common.Hash,
+	destFailureCert QuorumCert,
 ) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	status, exists := g.MessageStatus[messageID]
+	// 1. Refund must be processed on the message's source chain (where value was burned)
+	if message.SourceChainID != g.LocalChainID {
+		return fmt.Errorf("refund must be processed on source chain %d, got local chain %d", message.SourceChainID, g.LocalChainID)
+	}
+
+	// 2. Message status must be Pending (never resolved before)
+	status, exists := g.MessageStatus[message.MessageID]
 	if !exists {
 		status = MessageStatusPending
 	}
-
 	if status != MessageStatusPending {
-		return fmt.Errorf("%w: message %s current status is %d", ErrInvalidRefundState, messageID.Hex(), status)
+		return fmt.Errorf("%w: message %s current status is %d", ErrInvalidRefundState, message.MessageID.Hex(), status)
 	}
 
-	if !isFailedProofValid {
-		return ErrInvalidRefundProof
-	}
-
-	g.MessageStatus[messageID] = MessageStatusRefunded
-
-	// Restore allocation in GlobalSupplyLedger to preserve total supply invariant (Section 2.4 #2)
-	if g.SupplyLedger != nil && amount != nil && amount.Sign() > 0 {
-		currAlloc, hasAlloc := g.SupplyLedger.PerChainAllocation[sourceChainID]
-		if !hasAlloc || currAlloc == nil {
-			currAlloc = big.NewInt(0)
+	// 3. Verify message was part of an attested commit on this source chain
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), message.AssetID.String())
+	_, exists = g.AttestedCommits[key]
+	if !exists {
+		for _, v := range g.AttestedCommits {
+			if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
+				exists = true
+				break
+			}
 		}
-		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Add(currAlloc, amount)
+	}
+	if !exists {
+		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+	}
+
+	// 4. Verify message Merkle proof against commitRoot
+	leafHash := ComputeMessageLeafHash(message)
+	if !VerifyMerkleProof(leafHash, messageProof, commitRoot) {
+		return ErrInvalidMerkleProof
+	}
+
+	// 5. Verify destination failure QuorumCert
+	destRegistry, hasDest := g.ChainRegistry[message.DestChainID]
+	if !hasDest {
+		return fmt.Errorf("%w: destination chain %d", ErrUnknownSourceChain, message.DestChainID)
+	}
+	if destFailureCert.Epoch != destRegistry.Epoch {
+		return fmt.Errorf("%w: expected epoch %d, got %d", ErrEpochMismatch, destRegistry.Epoch, destFailureCert.Epoch)
+	}
+
+	failureDigest := ComputeMessageFailureAttestMessage(message.MessageID, message.DestChainID)
+	if err := VerifyQuorumCertAgainstRegistry(destRegistry, destFailureCert, failureDigest); err != nil {
+		return fmt.Errorf("%w: destination failure cert verification failed: %v", ErrInvalidRefundProof, err)
+	}
+
+	// 6. Atomically set status to Refunded
+	g.MessageStatus[message.MessageID] = MessageStatusRefunded
+
+	// 7. Restore allocation in GlobalSupplyLedger
+	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 {
+		currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
+		g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}
 
 	return nil
@@ -535,15 +713,16 @@ func (g *GatewayEngine) Refund(
 // VerifyAndExecute handles atomic verification & execution for low-volume messages (P2.7).
 func (g *GatewayEngine) VerifyAndExecute(
 	message CrossChainMessage,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
-	proof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, cert); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert); err != nil {
 		return MessageStatusPending, err
 	}
-	return g.ClaimMessage(message, proof, commitRoot, relayer)
+	return g.ClaimMessage(message, messageProof, commitRoot, relayer)
 }
 
 // ClaimDeadChainBalance allows user to recover funds on Reserve using account-tree Merkle proof (P2.8).
@@ -566,12 +745,17 @@ func (g *GatewayEngine) ClaimDeadChainBalance(
 		return fmt.Errorf("%w: chain %d, account %s", ErrDeadChainAlreadyClaimed, deadChainID, account.Hex())
 	}
 
+	expectedLeafHash := HashAccountLeaf(AccountLeaf{Account: account, Balance: amount})
+	if accountLeafHash != expectedLeafHash {
+		return fmt.Errorf("accountLeafHash %s does not match computed %s", accountLeafHash.Hex(), expectedLeafHash.Hex())
+	}
+
 	registry, exists := g.ChainRegistry[deadChainID]
 	if !exists {
 		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, deadChainID)
 	}
 
-	if !VerifyMerkleProof(accountLeafHash, proof, registry.StateRoot) {
+	if !VerifyMerkleProof(accountLeafHash, proof, registry.AccountTreeRoot) {
 		return ErrInvalidMerkleProof
 	}
 

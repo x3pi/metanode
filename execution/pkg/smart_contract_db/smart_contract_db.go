@@ -16,6 +16,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
@@ -486,11 +487,45 @@ func (db *SmartContractDB) LateBindRoots() error {
 			// Non-NOMT: safe to use Copy→Commit→Close (no shared mutable handle)
 			commitTrie := t.Copy()
 			var err error
-			root, _, _, err = commitTrie.Commit(true)
+			var nodeSet *node.NodeSet
+			root, nodeSet, _, err = commitTrie.Commit(true)
 			if err != nil {
 				logger.Error("LateBindRoots: Error committing storage trie for address:", address)
 				finalErr = err
 				continue
+			}
+			// PERSIST BUG FIX: commitTrie.Commit(true) marks the nodes shared with the
+			// ORIGINAL cached trie `t` as clean (MerklePatriciaTrie.Commit clears node
+			// dirty-flags in place, shared between a trie and its .Copy() — Copy() does not
+			// deep-clone node dirty state). A later CommitAllStorage() call re-committing
+			// the SAME address hits that already-clean state and finds nothing to write
+			// (empty node set / GetCommitBatch()), so the nodes computed HERE were the only
+			// ones ever produced and MUST be persisted now — relying on a second, later
+			// commit to do it (as production's LateBindRoots -> ...(later)... ->
+			// SmartContractDB.Commit() -> CommitAllStorage() sequence effectively assumed)
+			// silently drops every non-NOMT contract storage write. NOMT does not have this
+			// problem: its branch above persists immediately via CommitPayload() for exactly
+			// this reason; this mirrors that for MPT specifically (the only non-NOMT backend
+			// exercised by this codebase's tests today — see backend keying note below).
+			if trie.GetStateBackend() == trie.BackendMPT && nodeSet != nil && len(nodeSet.Nodes) > 0 {
+				batch := make([][2][]byte, 0, len(nodeSet.Nodes))
+				for _, n := range nodeSet.Nodes {
+					if n.IsDeleted() || n.Hash == (common.Hash{}) {
+						continue
+					}
+					batch = append(batch, [2][]byte{n.Hash.Bytes(), n.Blob})
+				}
+				if len(batch) > 0 {
+					// MPT nodes are globally content-addressed (Keccak256(RLP)) and stored
+					// unprefixed in db.dbSmartContract — same target CommitAllStorage's MPT
+					// branch already writes to (see loadStorageTrie's "MUST NOT wrap MPT with
+					// PrefixedStorage" note above).
+					if batchErr := db.dbSmartContract.BatchPut(batch); batchErr != nil {
+						logger.Error("LateBindRoots: BatchPut error for address:", address, "error:", batchErr)
+						finalErr = batchErr
+						continue
+					}
+				}
 			}
 			if closer, ok := commitTrie.(interface{ Close() }); ok {
 				closer.Close()
@@ -779,4 +814,3 @@ func (db *SmartContractDB) SetAccountStateDB(asdb types.AccountStateDB) {
 
 func (db *SmartContractDB) SetBlockNumber(blockNumber uint64) {
 }
-

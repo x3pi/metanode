@@ -83,24 +83,27 @@ func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 
 	commitRoot := common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 
-	// 1. Invalid / Empty BLS Signature -> MUST FAIL-CLOSED
+	// 1. Invalid / Empty BLS Signature -> MUST FAIL-CLOSED (fails before the Merkle proof check is
+	// ever reached, so commitRoot's value doesn't matter here).
 	certInvalid := QuorumCert{
 		Epoch:              1,
 		AggregateSignature: make([]byte, 48), // Empty signature
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certInvalid)
+	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, certInvalid)
 	assert.Error(t, errInvalidBLS, "Empty/invalid BLS signature must fail-closed")
 
-	// 2. Valid Real BLS Signature -> MUST PASS
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	// 2. Valid Real BLS Signature -> MUST PASS. commitRoot is now the declared amount's own
+	// AggregateValueLeaf hash (proof = no siblings) — a real Merkle-proof binding (Section 2.3.1).
+	commitRootValid := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)})
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRootValid.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 	certValid := QuorumCert{
 		Epoch:              1,
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certValid)
+	attested, errValidBLS := engine.AttestCommit(101, commitRootValid, big.NewInt(100), big.NewInt(0), MerkleProof{}, certValid)
 	require.NoError(t, errValidBLS)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 
@@ -189,9 +192,10 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafHash := ComputeMessageLeafHash(*msg)
-	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{*msg})
+	require.NoError(t, errTree)
 	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
 
 	// Attest on Root Anchor / Gateway with real BLS signature
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
@@ -201,7 +205,7 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), cert)
+	_, err = engine.AttestCommit(102, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
 	require.NoError(t, err)
 
 	// Stress Test: 50 concurrent workers try to claim the EXACT SAME message simultaneously
@@ -254,9 +258,10 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	msg, err := engine.Outbound(sender, params, txHash)
 	require.NoError(t, err)
 
-	leafHash := ComputeMessageLeafHash(*msg)
-	commitRoot, layers := BuildMerkleTree([]common.Hash{leafHash})
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{*msg})
+	require.NoError(t, errTree)
 	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
 
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
@@ -265,7 +270,7 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), cert)
+	_, err = engine.AttestCommit(102, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
 	require.NoError(t, err)
 
 	// Step 1: Claim message successfully
@@ -273,17 +278,69 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, MessageStatusSuccess, status)
 
+	// Create valid destination failure cert
+	failMsg := ComputeMessageFailureAttestMessage(msg.MessageID, 102)
+	failSig := bls.Sign(kp.PrivateKey(), failMsg)
+	destFailureCert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+
 	// Step 2: Attacker tries to submit a Refund for the same claimed message (Double-Mint Attack)
-	errRefundAttack := engine.Refund(msg.MessageID, 102, sender, big.NewInt(300), true)
+	errRefundAttack := engine.Refund(*msg, proof, commitRoot, destFailureCert)
 	assert.ErrorIs(t, errRefundAttack, ErrInvalidRefundState, "Refund on already claimed message must be blocked")
 
-	// Step 3: Refund with fake/invalid failed execution proof
+	// Step 3: Attacker tries to mint free allocation via forged unused messageID
+	forgedMsg := *msg
+	forgedMsg.MessageID = common.HexToHash("0xDEADC001DEADC001DEADC001DEADC001DEADC001DEADC001DEADC001DEADC001")
+	errForgedMsg := engine.Refund(forgedMsg, proof, commitRoot, destFailureCert)
+	assert.Error(t, errForgedMsg, "Refund on forged/uncommitted message must fail closed")
+
+	// Create a second, un-claimed message to test Merkle proof and BLS verification specifically
 	txHash2 := common.HexToHash("0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
-	msg2, err := engine.Outbound(sender, params, txHash2)
+	msgPending, err := engine.Outbound(sender, params, txHash2)
 	require.NoError(t, err)
 
-	errInvalidProof := engine.Refund(msg2.MessageID, 102, sender, big.NewInt(300), false)
-	assert.ErrorIs(t, errInvalidProof, ErrInvalidRefundProof, "Refund with invalid proof must be rejected")
+	commitRoot2, layers2, aggAmounts2, aggIndex2, errTree2 := BuildCommitTree([]CrossChainMessage{*msgPending})
+	require.NoError(t, errTree2)
+	proof2 := GetMerkleProof(layers2, 0)
+	aggregateProof2 := GetMerkleProof(layers2, aggIndex2["0"])
+
+	commitMsg2 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot2.Bytes()...)
+	sig2 := bls.Sign(kp.PrivateKey(), commitMsg2)
+	cert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig2.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	_, err = engine.AttestCommit(102, commitRoot2, aggAmounts2["0"], big.NewInt(0), aggregateProof2, cert2)
+	require.NoError(t, err)
+
+	failMsg2 := ComputeMessageFailureAttestMessage(msgPending.MessageID, 102)
+	failSig2 := bls.Sign(kp.PrivateKey(), failMsg2)
+	destFailureCert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig2.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+
+	// Step 4: Attacker tries to inflate refund amount -> Merkle proof fails
+	forgedAmountMsg := *msgPending
+	forgedAmountMsg.Value = big.NewInt(999999999)
+	errForgedAmount := engine.Refund(forgedAmountMsg, proof2, commitRoot2, destFailureCert2)
+	assert.ErrorIs(t, errForgedAmount, ErrInvalidMerkleProof, "Refund with forged amount must fail Merkle check")
+
+	// Step 5: Attacker provides fake failure cert -> BLS verification fails
+	fakeCert := destFailureCert2
+	fakeCert.AggregateSignature = bls.Sign(bls.GenerateKeyPair().PrivateKey(), failMsg2).Bytes()
+	errInvalidProof := engine.Refund(*msgPending, proof2, commitRoot2, fakeCert)
+	assert.ErrorIs(t, errInvalidProof, ErrInvalidRefundProof, "Refund with invalid failure cert must be rejected")
+
+	// Step 6: Valid refund on pending message -> SUCCESS
+	errValidRefund := engine.Refund(*msgPending, proof2, commitRoot2, destFailureCert2)
+	require.NoError(t, errValidRefund)
+	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msgPending.MessageID))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -354,32 +411,37 @@ func TestAudit_HopCountBoundaryEnforcement(t *testing.T) {
 func TestAudit_AdversarialOverdrawAndSupplyCeiling(t *testing.T) {
 	engine, _, ledger, kp := setupSecurityAuditEnvironment()
 
-	// Initial Allocation: Chain 101 has 5,000 MTN
-	commitRoot := common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
-	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
-	sig := bls.Sign(kp.PrivateKey(), commitMsg)
-	cert := QuorumCert{
-		Epoch:              1,
-		AggregateSignature: sig.Bytes(),
-		SignerBitmap:       []byte{0xFF},
+	// Initial Allocation: Chain 101 has 5,000 MTN. Each declared amount now needs its own
+	// commitRoot (its own AggregateValueLeaf hash, Section 2.3.1) and its own matching signature —
+	// a different amount is cryptographically a different commit, it can't reuse one fixed root.
+	signFor := func(amount *big.Int) (common.Hash, QuorumCert) {
+		leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: amount}
+		root := HashAggregateValueLeaf(leaf)
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+		sig := bls.Sign(kp.PrivateKey(), commitMsg)
+		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0xFF}}
 	}
 
 	// Attack 1: Overdraw attempt 10,000,000 MTN -> BLOCKED
-	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), cert)
+	rootOverdraw, certOverdraw := signFor(big.NewInt(10_000_000))
+	_, errOverdraw := engine.AttestCommit(101, rootOverdraw, big.NewInt(10_000_000), big.NewInt(0), MerkleProof{}, certOverdraw)
 	assert.ErrorIs(t, errOverdraw, ErrAllocationExceeded, "Overdraw attempt must be blocked")
 
 	// Attack 2: Exact boundary + 1 wei -> BLOCKED
-	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), cert)
+	rootPlus1, certPlus1 := signFor(big.NewInt(5_001))
+	_, errBoundaryPlus1 := engine.AttestCommit(101, rootPlus1, big.NewInt(5_001), big.NewInt(0), MerkleProof{}, certPlus1)
 	assert.ErrorIs(t, errBoundaryPlus1, ErrAllocationExceeded, "Allocation + 1 wei must be blocked")
 
 	// Valid 1: Exact allocation 5,000 MTN -> PASS
-	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), cert)
+	rootExact, certExactCert := signFor(big.NewInt(5_000))
+	attested, errExact := engine.AttestCommit(101, rootExact, big.NewInt(5_000), big.NewInt(0), MerkleProof{}, certExactCert)
 	require.NoError(t, errExact)
 	assert.Equal(t, big.NewInt(5_000), attested.FundedAmount)
 	assert.Zero(t, ledger.PerChainAllocation[101].Sign())
 
 	// Attack 3: Subsequent request when allocation is 0 -> BLOCKED
-	_, errExhausted := engine.AttestCommit(101, commitRoot, big.NewInt(1), cert)
+	rootExhausted, certExhausted := signFor(big.NewInt(1))
+	_, errExhausted := engine.AttestCommit(101, rootExhausted, big.NewInt(1), big.NewInt(0), MerkleProof{}, certExhausted)
 	assert.ErrorIs(t, errExhausted, ErrAllocationExceeded, "Exhausted allocation must be blocked")
 }
 
@@ -399,7 +461,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              0,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), oldCert)
+	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, oldCert)
 	assert.ErrorIs(t, errOldEpoch, ErrEpochMismatch, "Old epoch cert must be rejected")
 
 	// Attack 2: Future Epoch Cert (Epoch = 2) -> BLOCKED
@@ -407,7 +469,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              2,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), futureCert)
+	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, futureCert)
 	assert.ErrorIs(t, errFutureEpoch, ErrEpochMismatch, "Future epoch cert must be rejected")
 
 	// Attack 3: Unknown Chain ID (Chain = 999) -> BLOCKED
@@ -415,7 +477,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              1,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), unknownCert)
+	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, unknownCert)
 	assert.ErrorIs(t, errUnknownChain, ErrUnknownSourceChain, "Unknown source chain must be rejected")
 }
 

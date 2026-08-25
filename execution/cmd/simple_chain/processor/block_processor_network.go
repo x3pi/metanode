@@ -62,6 +62,12 @@ func (bp *BlockProcessor) runUnixSocket() {
 		GetGEIAuthority().ResetCommitIndexForEpoch(newEpoch)
 	})
 
+	// Inject EpochAdvanced callback (Milestone C) — nil-safe, since the worker is only built
+	// when RootAnchorSubmitterPrivateKeyHex is configured (see block_processor_core.go).
+	if bp.committeeAttestationWorker != nil {
+		reqHandler.SetEpochAdvancedCallback(bp.committeeAttestationWorker.OnEpochAdvanced)
+	}
+
 	// Inject ExecutionMutex Lock and Unlock callbacks to serialize sync operations with consensus execution
 	reqHandler.SetExecutionLockCallbacks(bp.ExecutionMutex.Lock, bp.ExecutionMutex.Unlock)
 

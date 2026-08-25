@@ -53,11 +53,13 @@ func TestP8_1_CompleteChainDeathRecoveryLifecycle(t *testing.T) {
 	anchoredStateRoot, proofs, err := BuildAccountMerkleTree(accounts)
 	require.NoError(t, err)
 
-	// Root Anchor records the last verified state root
+	// Root Anchor records the last verified state root and account tree snapshot
+	realTrieStateRoot := common.HexToHash("0x9999888877776666555544443333222211110000aabbccddeeff001122334455")
 	gateway.ChainRegistry[deadChainID] = ChainRegistry{
-		ChainID:   deadChainID,
-		Epoch:     15,
-		StateRoot: anchoredStateRoot,
+		ChainID:         deadChainID,
+		Epoch:           15,
+		StateRoot:       realTrieStateRoot,
+		AccountTreeRoot: anchoredStateRoot,
 	}
 
 	// 2. Simulate Chain 101 Permanent Death (Liveness Failure)
@@ -124,9 +126,10 @@ func TestP8_2_AdversarialSecurityAndDoubleClaimDefenses(t *testing.T) {
 	require.NoError(t, err)
 
 	gateway.ChainRegistry[deadChainID] = ChainRegistry{
-		ChainID:   deadChainID,
-		Epoch:     10,
-		StateRoot: anchoredStateRoot,
+		ChainID:         deadChainID,
+		Epoch:           10,
+		StateRoot:       common.HexToHash("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+		AccountTreeRoot: anchoredStateRoot,
 	}
 
 	proofAlice := proofs[0]
@@ -188,8 +191,9 @@ func TestP8_3_FuzzMultiAccountDeadChainRescue(t *testing.T) {
 	require.NoError(t, err)
 
 	gateway.ChainRegistry[deadChainID] = ChainRegistry{
-		ChainID:   deadChainID,
-		StateRoot: stateRoot,
+		ChainID:         deadChainID,
+		StateRoot:       common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+		AccountTreeRoot: stateRoot,
 	}
 
 	initialAlloc := new(big.Int).Set(supplyLedger.GetAllocation(deadChainID))

@@ -58,6 +58,10 @@ var (
 
 	// Validator/Staking contract address - 0x1001
 	VALIDATOR_CONTRACT_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000001001")
+	// GatewayPrecompile contract address - 0x1002 (note/cross_chain_root_anchor_architecture.md mục 11.1).
+	// Handled as a Go-native barrier transaction (same dispatch pattern as VALIDATOR_CONTRACT_ADDRESS),
+	// not a C++ MVM precompile — see execution/pkg/blockchain/tx_processor/gateway_handler.go.
+	GATEWAY_CONTRACT_ADDRESS = common.HexToAddress("0x0000000000000000000000000000000000001002")
 	// use global
 	CROSS_CHAIN_CONTRACT_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000B429C0B2")
 )

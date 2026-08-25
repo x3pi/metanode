@@ -112,7 +112,7 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     }
     return bls, eth
 
-def generate_eth_dev_account():
+def generate_eth_dev_account(metanode_bin=None):
     """Generates a random secp256k1 Ethereum private key and derives its 0x address without external dependencies."""
     try:
         from eth_keys import keys
@@ -123,11 +123,22 @@ def generate_eth_dev_account():
             "address": pk.public_key.to_checksum_address()
         }
     except ImportError:
-        print(red("ERROR: 'eth_keys' python module is required to generate dev accounts."))
-        print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
+        if metanode_bin:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                subprocess.run([metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir], capture_output=True)
+                eth_file = os.path.join(tmpdir, "eth_key.json")
+                if os.path.exists(eth_file):
+                    with open(eth_file) as f:
+                        data = json.load(f)
+                    return {
+                        "private_key": data["ETH_PRIVATE_KEY"],
+                        "address": data["ETH_ADDRESS"]
+                    }
+        print(red("ERROR: 'eth_keys' python module or 'metanode' binary is required to generate dev accounts."))
         sys.exit(1)
 
-def load_or_generate_private_dev_keys(keys_file: Path, chain_id: int, count: int = 6) -> tuple:
+def load_or_generate_private_dev_keys(keys_file: Path, chain_id: int, count: int = 6, metanode_bin: str = None) -> tuple:
     """
     Loads fixed/persistent developer keys from a local (git-ignored) JSON file.
     If the file or the chain_id entry does not exist, generates fresh accounts and persists them locally.
@@ -155,7 +166,7 @@ def load_or_generate_private_dev_keys(keys_file: Path, chain_id: int, count: int
         ]
         new_chain_accounts = []
         for i in range(max(count, len(roles))):
-            acc = generate_eth_dev_account()
+            acc = generate_eth_dev_account(metanode_bin)
             role_name = roles[i] if i < len(roles) else f"Dev {i}"
             acc["role"] = role_name
             new_chain_accounts.append(acc)
@@ -194,6 +205,8 @@ def main():
     parser.add_argument("--genesis-template", default=None, help="Path to genesis template file (default: deploy/systemd/genesis.json.example)")
     parser.add_argument("--no-example-alloc", action="store_true", help="Do not inject accounts from genesis.json.example")
     parser.add_argument("--inject-example-alloc", action="store_true", default=True, help="Inject accounts from genesis.json.example (default: True)")
+    parser.add_argument("--root-anchor-rpc", type=str, default="", help="Comma-separated list of Root Anchor RPC URLs (e.g. http://127.0.0.1:9099)")
+    parser.add_argument("--root-anchor-submitter-key", type=str, default="", help="ECDSA private key for the committee attestation worker")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -268,7 +281,7 @@ def main():
     # 2. Load or generate developer accounts from local ignored file (no secrets in git)
     dev_keys_path = Path(args.dev_keys_file) if args.dev_keys_file else (SCRIPT_DIR / "private_dev_keys.json")
     print(f"\n💰 Loading pre-funded developer accounts for Chain {args.chain_id} from {dev_keys_path.name} ...")
-    dev_accounts, all_system_dev_accounts = load_or_generate_private_dev_keys(dev_keys_path, args.chain_id, args.dev_accounts)
+    dev_accounts, all_system_dev_accounts = load_or_generate_private_dev_keys(dev_keys_path, args.chain_id, args.dev_accounts, metanode_bin)
 
     seen_addrs = set(a["address"].lower() for a in alloc_list)
     for acc in all_system_dev_accounts:
@@ -382,7 +395,18 @@ def main():
                 "55798165960a62cED34a0d86e36B1758D1303907"
             ],
             "cross_chain": {
-                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
+                # exactly (snake_case) — encoding/json silently leaves a field at its zero value
+                # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't
+                # fail loudly: it just silently disables the ChainRegistry refresh worker /
+                # CommitteeAttestationWorker on every node this script generates. Verified against
+                # config.go directly, not assumed.
+                "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
+                "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
+                "root_anchor_poll_interval_seconds": 5,
+                "root_anchor_circuit_breaker_max_failures": 5,
+                "root_anchor_circuit_breaker_timeout_seconds": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

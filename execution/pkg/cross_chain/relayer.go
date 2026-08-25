@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 var (
 	ErrDestinationOffline = errors.New("destination chain is currently offline or unreachable (Zero-Fork pending state)")
 	ErrNoCommitFound      = errors.New("no certified commit found for message")
-	ErrMessageNotFound   = errors.New("message not found in commit")
+	ErrMessageNotFound    = errors.New("message not found in commit")
 	ErrNoRelayers         = errors.New("no relayers provided for competition")
 )
 
@@ -35,26 +36,33 @@ type CertifiedCommitData struct {
 	Cert          QuorumCert          `json:"cert"`
 	Messages      []CrossChainMessage `json:"messages"`
 	MerkleLayers  [][]common.Hash     `json:"merkle_layers"`
+	// AggregateAmounts holds, per assetId (canonical big.Int.String() key), the total value of
+	// all messages sharing that assetId in this commit — the same value embedded as an
+	// AggregateValueLeaf inside MerkleLayers (Section 2.3.1/11.2).
+	AggregateAmounts map[string]*big.Int `json:"aggregate_amounts"`
+	// AggregateLeafIndex holds, per assetId key, that asset's AggregateValueLeaf's index in
+	// MerkleLayers[0] — use with GetMerkleProof to produce attestCommit()'s aggregateProof.
+	AggregateLeafIndex map[string]int `json:"aggregate_leaf_index"`
 }
 
 // RelayReceipt records the outcome of a relayed cross-chain message.
 type RelayReceipt struct {
-	MessageID    common.Hash    `json:"message_id"`
+	MessageID     common.Hash    `json:"message_id"`
 	SourceChainID uint64         `json:"source_chain_id"`
 	DestChainID   uint64         `json:"dest_chain_id"`
-	Status       MessageStatus  `json:"status"`
-	Relayer      common.Address `json:"relayer"`
-	TipCollected *big.Int       `json:"tip_collected"`
-	Routes       []string       `json:"routes"`
+	Status        MessageStatus  `json:"status"`
+	Relayer       common.Address `json:"relayer"`
+	TipCollected  *big.Int       `json:"tip_collected"`
+	Routes        []string       `json:"routes"`
 }
 
 // RelayerStats tracks overall relayer runtime metrics.
 type RelayerStats struct {
-	TotalRelayed        uint64   `json:"total_relayed"`
-	TotalTipsCollected  *big.Int `json:"total_tips_collected"`
-	FailedRelays        uint64   `json:"failed_relays"`
-	DirectMessageCount  uint64   `json:"direct_message_count"`
-	ReserveRoutedCount  uint64   `json:"reserve_routed_count"`
+	TotalRelayed       uint64   `json:"total_relayed"`
+	TotalTipsCollected *big.Int `json:"total_tips_collected"`
+	FailedRelays       uint64   `json:"failed_relays"`
+	DirectMessageCount uint64   `json:"direct_message_count"`
+	ReserveRoutedCount uint64   `json:"reserve_routed_count"`
 }
 
 // RelayerEngine implements the reference Relayer service for Metanode (Phase P4).
@@ -211,23 +219,66 @@ func BuildMerkleTreeFromMessages(msgs []CrossChainMessage) (common.Hash, [][]com
 		leaves[i] = ComputeMessageLeafHash(m)
 	}
 
-	layers := [][]common.Hash{leaves}
-	current := leaves
+	root, layers := BuildMerkleTree(leaves)
+	return root, layers, nil
+}
 
-	for len(current) > 1 {
-		var next []common.Hash
-		for i := 0; i < len(current); i += 2 {
-			if i+1 < len(current) {
-				next = append(next, hashPair(current[i], current[i+1]))
-			} else {
-				next = append(next, current[i])
-			}
-		}
-		layers = append(layers, next)
-		current = next
+// BuildCommitTree computes a commit's Merkle tree: the per-message leaves (same order/indices as
+// BuildMerkleTreeFromMessages, domain 0x00 — ComputeMessageLeafHash) followed by one
+// AggregateValueLeaf (domain 0x02) per distinct assetId present in msgs, in ascending assetId
+// order so every honest validator recomputes the identical tree before signing (Section
+// 2.3.1/11.2). This is what lets attestCommit() verify aggregateAmount with a Merkle proof
+// against commitRoot instead of trusting a relayer-declared number (risk #20).
+//
+// Returns the tree root/layers plus, per assetId (canonical big.Int.String() key), its total
+// value and its leaf index in layers[0] — use the index with GetMerkleProof to build the
+// AggregateValueLeaf proof attestCommit() requires.
+func BuildCommitTree(msgs []CrossChainMessage) (root common.Hash, layers [][]common.Hash, aggregateAmounts map[string]*big.Int, aggregateLeafIndex map[string]int, err error) {
+	if len(msgs) == 0 {
+		return common.Hash{}, nil, nil, nil, errors.New("cannot build Merkle tree from empty messages")
 	}
 
-	return current[0], layers, nil
+	leaves := make([]common.Hash, len(msgs))
+	for i, m := range msgs {
+		leaves[i] = ComputeMessageLeafHash(m)
+	}
+
+	aggregateAmounts = make(map[string]*big.Int)
+	for _, m := range msgs {
+		assetStr := "0"
+		if m.AssetID != nil {
+			assetStr = m.AssetID.String()
+		}
+		if _, ok := aggregateAmounts[assetStr]; !ok {
+			aggregateAmounts[assetStr] = big.NewInt(0)
+		}
+		if m.Value != nil {
+			aggregateAmounts[assetStr].Add(aggregateAmounts[assetStr], m.Value)
+		}
+	}
+
+	assetKeys := make([]string, 0, len(aggregateAmounts))
+	for k := range aggregateAmounts {
+		assetKeys = append(assetKeys, k)
+	}
+	sort.Slice(assetKeys, func(i, j int) bool {
+		bi, _ := new(big.Int).SetString(assetKeys[i], 10)
+		bj, _ := new(big.Int).SetString(assetKeys[j], 10)
+		return bi.Cmp(bj) < 0
+	})
+
+	aggregateLeafIndex = make(map[string]int, len(assetKeys))
+	for _, assetStr := range assetKeys {
+		assetID, _ := new(big.Int).SetString(assetStr, 10)
+		aggregateLeafIndex[assetStr] = len(leaves)
+		leaves = append(leaves, HashAggregateValueLeaf(AggregateValueLeaf{
+			AssetID:         assetID,
+			AggregateAmount: aggregateAmounts[assetStr],
+		}))
+	}
+
+	root, layers = BuildMerkleTree(leaves)
+	return root, layers, aggregateAmounts, aggregateLeafIndex, nil
 }
 
 // GenerateMerkleProof generates an inclusion proof for a message index.
@@ -283,7 +334,7 @@ func (r *RelayerEngine) CertifyCommit(
 		return nil, errors.New("cannot certify empty commit")
 	}
 
-	root, layers, err := BuildMerkleTreeFromMessages(msgs)
+	root, layers, aggregateAmounts, aggregateLeafIndex, err := BuildCommitTree(msgs)
 	if err != nil {
 		return nil, err
 	}
@@ -300,12 +351,14 @@ func (r *RelayerEngine) CertifyCommit(
 	}
 
 	data := CertifiedCommitData{
-		SourceChainID: sourceChainID,
-		CommitRoot:    root,
-		Epoch:         epoch,
-		Cert:          cert,
-		Messages:      msgs,
-		MerkleLayers:  layers,
+		SourceChainID:      sourceChainID,
+		CommitRoot:         root,
+		Epoch:              epoch,
+		Cert:               cert,
+		Messages:           msgs,
+		MerkleLayers:       layers,
+		AggregateAmounts:   aggregateAmounts,
+		AggregateLeafIndex: aggregateLeafIndex,
 	}
 
 	key := fmt.Sprintf("%d:%s", sourceChainID, root.Hex())
@@ -332,7 +385,9 @@ func (r *RelayerEngine) CertifyCommit(
 // - Value == 0 and AssetID == 0: 1-Hop direct routing (Source -> Dest)
 func (r *RelayerEngine) RelayMessage(
 	msg CrossChainMessage,
-	proof MerkleProof,
+	aggregateAmount *big.Int,
+	aggregateProof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	cert QuorumCert,
 	relayerAddr common.Address,
@@ -372,7 +427,7 @@ func (r *RelayerEngine) RelayMessage(
 		}
 
 		// Step 1: Attest commit on Reserve (checks per_chain_allocation ceiling)
-		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, msg.Value, cert)
+		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("reserve attest failed: %w", err)
@@ -391,13 +446,13 @@ func (r *RelayerEngine) RelayMessage(
 		// Destination Chain verifies Reserve's commit (authentication only — Reserve is the
 		// unconditional issuer, no ceiling to debit here) and claims message. ClaimMessage below
 		// is what actually credits destChainID's allocation (Section 2.3.1 fix).
-		_, err = destEngine.AttestReserveIssuedCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert)
+		_, err = destEngine.AttestReserveIssuedCommit(r.Config.ReserveChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, reserveCert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest attest from reserve failed: %w", err)
 		}
 
-		status, err := destEngine.ClaimMessage(msg, proof, commitRoot, relayerAddr)
+		status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest claim message failed: %w", err)
@@ -420,13 +475,13 @@ func (r *RelayerEngine) RelayMessage(
 	}
 
 	// ROUTE B: Value == 0 (Pure Message / Contract Call) -> Direct 1-Hop Routing (Section 2.2(a))
-	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, big.NewInt(0), cert)
+	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct attest failed: %w", err)
 	}
 
-	status, err := destEngine.ClaimMessage(msg, proof, commitRoot, relayerAddr)
+	status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct claim failed: %w", err)
@@ -461,8 +516,14 @@ func (r *RelayerEngine) RelayCommit(sourceChainID uint64, commitRoot common.Hash
 
 	var receipts []*RelayReceipt
 	for i, msg := range commitData.Messages {
-		proof := GetMerkleProof(commitData.MerkleLayers, i)
-		receipt, err := r.RelayMessage(msg, proof, commitData.CommitRoot, commitData.Cert, relayerAddr)
+		messageProof := GetMerkleProof(commitData.MerkleLayers, i)
+		assetStr := "0"
+		if msg.AssetID != nil {
+			assetStr = msg.AssetID.String()
+		}
+		aggAmount := commitData.AggregateAmounts[assetStr]
+		aggregateProof := GetMerkleProof(commitData.MerkleLayers, commitData.AggregateLeafIndex[assetStr])
+		receipt, err := r.RelayMessage(msg, aggAmount, aggregateProof, messageProof, commitData.CommitRoot, commitData.Cert, relayerAddr)
 		if err != nil {
 			return receipts, err
 		}
@@ -475,7 +536,9 @@ func (r *RelayerEngine) RelayCommit(sourceChainID uint64, commitRoot common.Hash
 // Verifies "First Come, First Served" tip claiming and ensures zero double-spending.
 func (r *RelayerEngine) CompeteRelayers(
 	msg CrossChainMessage,
-	proof MerkleProof,
+	aggregateAmount *big.Int,
+	aggregateProof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	cert QuorumCert,
 	relayers []common.Address,
@@ -486,7 +549,7 @@ func (r *RelayerEngine) CompeteRelayers(
 
 	// First relayer attempts submission
 	winner = relayers[0]
-	rcpt, err := r.RelayMessage(msg, proof, commitRoot, cert, winner)
+	rcpt, err := r.RelayMessage(msg, aggregateAmount, aggregateProof, messageProof, commitRoot, cert, winner)
 	if err != nil {
 		return common.Address{}, nil, nil, []error{err}
 	}
@@ -495,7 +558,7 @@ func (r *RelayerEngine) CompeteRelayers(
 	// Subsequent relayers attempt submission of the same already-claimed message
 	for i := 1; i < len(relayers); i++ {
 		competingRelayer := relayers[i]
-		_, errDup := r.RelayMessage(msg, proof, commitRoot, cert, competingRelayer)
+		_, errDup := r.RelayMessage(msg, aggregateAmount, aggregateProof, messageProof, commitRoot, cert, competingRelayer)
 		losers = append(losers, competingRelayer)
 		duplicateErrors = append(duplicateErrors, errDup)
 	}
@@ -505,37 +568,23 @@ func (r *RelayerEngine) CompeteRelayers(
 
 // ProcessRefund executes the automated refund pipeline when destination execution fails (P2.4 & Scenario 10.3).
 func (r *RelayerEngine) ProcessRefund(
-	sourceChainID uint64,
-	destChainID uint64,
-	messageID common.Hash,
-	sender common.Address,
-	amount *big.Int,
-	isFailedProofValid bool,
+	message CrossChainMessage,
+	messageProof MerkleProof,
+	commitRoot common.Hash,
+	destFailureCert QuorumCert,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	sourceEngine, exists := r.Chains[sourceChainID]
+	sourceEngine, exists := r.Chains[message.SourceChainID]
 	if !exists {
-		return fmt.Errorf("source chain %d not found", sourceChainID)
+		return fmt.Errorf("source chain %d not found", message.SourceChainID)
 	}
 
-	// Refund on source chain
-	err := sourceEngine.Refund(messageID, sourceChainID, sender, amount, isFailedProofValid)
+	// Refund on source chain with full cryptographic proof
+	err := sourceEngine.Refund(message, messageProof, commitRoot, destFailureCert)
 	if err != nil {
 		return fmt.Errorf("source refund failed: %w", err)
-	}
-
-	// Restore allocation on Reserve if value was routed through Reserve
-	if amount != nil && amount.Sign() > 0 {
-		reserveEngine, reserveExists := r.Chains[r.Config.ReserveChainID]
-		if reserveExists {
-			currAlloc, has := reserveEngine.SupplyLedger.PerChainAllocation[sourceChainID]
-			if !has {
-				currAlloc = big.NewInt(0)
-			}
-			reserveEngine.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Add(currAlloc, amount)
-		}
 	}
 
 	return nil

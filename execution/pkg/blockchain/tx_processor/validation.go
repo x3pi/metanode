@@ -311,10 +311,13 @@ func VerifyTransaction(
 		// execution time; if they turn out invalid the call simply hits a
 		// no-code address and no-ops, same as calling any other empty EOA.
 		if tx.IsCallContract() && tx.GetType() != uint64(e_types.SetCodeTxType) {
-			toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(tx.ToAddress())
-			if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
-				logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())
-				return transaction.InvalidCallSmartContractToAccount
+			toAddress := tx.ToAddress()
+			if toAddress != common.VALIDATOR_CONTRACT_ADDRESS && toAddress != common.GATEWAY_CONTRACT_ADDRESS {
+				toAccount, err := chainState.GetAccountStateDB().AccountStateReadOnly(toAddress)
+				if err != nil || toAccount == nil || toAccount.SmartContractState() == nil {
+					logger.Warn("❌ [VERIFY] Invalid call to non-existent smart contract: %s (txHash=%s)", tx.ToAddress().Hex(), tx.Hash().Hex())
+					return transaction.InvalidCallSmartContractToAccount
+				}
 			}
 		}
 	}

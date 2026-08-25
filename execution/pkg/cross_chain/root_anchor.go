@@ -34,10 +34,10 @@ type FoundingChainConfig struct {
 
 // RootAnchorGenesisConfig specifies the genesis parameters for the Root Anchor chain.
 type RootAnchorGenesisConfig struct {
-	ChainID            uint64                 `json:"chain_id"`
-	GenesisTotalSupply *big.Int               `json:"genesis_total_supply"`
-	FoundingChains     []FoundingChainConfig  `json:"founding_chains"`
-	InitialAllocations map[uint64]*big.Int    `json:"initial_allocations"`
+	ChainID            uint64                `json:"chain_id"`
+	GenesisTotalSupply *big.Int              `json:"genesis_total_supply"`
+	FoundingChains     []FoundingChainConfig `json:"founding_chains"`
+	InitialAllocations map[uint64]*big.Int   `json:"initial_allocations"`
 }
 
 // RootAnchorCommittee manages the aggregated validator committee on the Root Anchor chain.

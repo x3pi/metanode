@@ -286,7 +286,9 @@ func (db *MVCCAccountStateDB) SetState(s types.AccountState) {
 		db.accountMap.Write(addr, db.txIndex, safeCopy(s))
 	}
 }
-func (db *MVCCAccountStateDB) InjectLoadedAccount(s types.AccountState) {}
+func (db *MVCCAccountStateDB) InjectLoadedAccount(s types.AccountState)        {}
 func (db *MVCCAccountStateDB) PublicSetDirtyAccountState(s types.AccountState) {}
-func (db *MVCCAccountStateDB) DirtyAccountCount() int { return 0 }
-func (db *MVCCAccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, error) { return common.Hash{}, nil }
+func (db *MVCCAccountStateDB) DirtyAccountCount() int                          { return 0 }
+func (db *MVCCAccountStateDB) IntermediateRoot(isLockProcess ...bool) (common.Hash, error) {
+	return common.Hash{}, nil
+}

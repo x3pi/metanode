@@ -253,3 +253,7 @@ patch_http_handler.sh
 
 # ===== Prometheus configuration =====
 deploy/prometheus/prometheus.yml
+
+# ===== T2 testnet tooling binaries (deploy/systemd/register_private_chains_t2.sh
+# builds this in-place at the execution/ module root) =====
+/register_chains

@@ -72,7 +72,11 @@ func HandleSuccessTransaction(
 		logger.Error("ExecuteNonceOnly thất bại cho tx %s: %v", tx.Hash().Hex(), err)
 		return rcp, exRs, true
 	}
-	rcp.UpdateExecuteResult(exRs.ReceiptStatus(), exRs.Return(), exRs.Exception(), exRs.GasUsed(), eventLogs)
+	ret := exRs.Return()
+	if len(ret) == 0 && len(returnData) > 0 {
+		ret = returnData
+	}
+	rcp.UpdateExecuteResult(exRs.ReceiptStatus(), ret, exRs.Exception(), exRs.GasUsed(), eventLogs)
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
 	return rcp, exRs, false // hasFailed = false
