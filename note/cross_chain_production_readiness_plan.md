@@ -470,6 +470,110 @@ fixes themselves — they exercise the exact same `executeContractCallForGateway
 governance ceremony to seed `AssetRegistry`. Closing that last gap needs Layer C fixed first
 (or a deliberate governance/bootstrap shortcut designed for it, not guessed at here).
 
+## Phase 0.9 — full live custom-asset round trip completed for real (2026-08-25, same day),
+## found + fixed the SupplyLedger allocation dead end, plus 2 tooling bugs and 1 unfixed finding
+
+**Closes Phase 0.8's last open gap.** Ran the complete `outbound()` → `attestCommit()` →
+`claimMessage()` custom-asset round trip over real JSON-RPC against the same 2 live
+single-validator private chains (101 on `:8551`, 102 on `:8547`) as Phase 0.8, through real
+on-chain governance end to end — not a bootstrap/test shortcut. Sequence, all real
+transactions with real receipts:
+
+1. Real `bootstrapFoundingChains()` on both chains (4-chain fake founding committee, satisfies
+   `MinFoundingChains`).
+2. Real `propose()`/`vote()`/`executeProposal()` — chain 101 registers chain 102 and itself;
+   chain 102 registers chain 101 and itself. Each a real proposal, real quorum votes from the
+   founding committee, a real (devnet-shortened) timelock wait, real execution.
+3. Real `propose()`/`vote()`/`executeProposal()` + `registerAsset()` — assetID 42 registered
+   on both chains, linking the real deployed canonical token (chain 101) and wrapped token
+   (chain 102) from Phase 0.8.
+4. Real `outbound()` on chain 101 — moved 100 units from sender to Gateway. Verified via real
+   `eth_call` to `balanceOf`: sender `1,000,000 → 999,900`, Gateway `0 → 100`.
+5. Real `attestCommit()` on chain 102 for that commit — **found bug #3 below, fixed, then
+   this succeeded for real.**
+6. Real `claimMessage()` on chain 102 — verified via real `eth_call` to `balanceOf`:
+   recipient `500,000 → 500,100`, exactly the bridged amount.
+
+**Devnet-only timelock override (separate small piece of this work, safe by construction):**
+added `CrossChainConfig.DevnetGovernanceTimelockSecondsOverride` (`config.go`) and
+`GatewayEngine.ApplyGovernanceTimelockOverride` (`gateway.go`), wired from
+`loadGatewayEngine` (`gateway_handler.go`). Zero by default — `EnsureGovernance()` only takes
+the override path when it's explicitly nonzero, so production behavior (mandatory 72h
+timelock) is unchanged unless an operator deliberately opts in. This is what made steps
+2/3/5 above practical to run live (real ~12s waits instead of real 72h waits) without
+touching the mandatory-timelock invariant itself, and without exploiting the separately-found
+`vote()`/`executeProposal()` caller-supplied-timestamp gap noted below.
+
+**Bug #3 (the interesting one) — `GlobalSupplyLedger.PerChainAllocation` had no
+governance-reachable way to ever be funded, at all:** step 5 above reverted with
+`ErrAllocationExceeded` ("requested 100 exceeds available 0"). Traced to: production always
+constructs the ledger via `NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})` —
+genesis-zero, empty allocations (`gateway_handler.go`'s `loadGatewayEngine`, both branches).
+Neither `BootstrapFoundingChains` nor `ExecuteGovernanceProposal`'s `ProposalRegisterChain`
+case ever touches `SupplyLedger` (confirmed by direct code reading). The only mutator that
+existed, `GlobalSupplyLedger.TransferAllocation`/`SetInitialAllocation`, was never called
+from anywhere ABI-reachable — `grep -rn "SetInitialAllocation\|TransferAllocation"` outside
+`types.go` itself turned up nothing. `TestRelayer_Scenario10_6_OnboardNewChainViaGovernance`
+(pre-existing) had quietly worked around exactly this by poking
+`chains[1000].SupplyLedger.PerChainAllocation[104] = big.NewInt(0)` directly in white-box
+test code instead of exercising a real path — a real symptom of the same gap this phase
+found live. **Net effect: as shipped, `attestCommit()`'s Scenario 10.7 ceiling rejects every
+chain forever, native coin or custom asset alike, with no legitimate way to ever unblock it**
+— a second, independent dead end on top of Phase 0.6's finding (that one was "verified
+ledger never wired to real balances"; this one is "the ledger's own ceiling can never be
+funded even in principle").
+
+**Fix:** new `GovernanceProposalKind = 5` (`ProposalAllocateSupply`) and
+`GlobalSupplyLedger.GrantAllocation(chainID, amount)` (`types.go`) — increases the target
+chain's allocation **and** `GenesisTotalSupply` together, keeping
+`sum(per_chain_allocation) == genesis_total_supply` intact (deliberately different from
+`TransferAllocation`, which redistributes *existing* allocation and would need a pre-funded
+reserve chain nothing in production ever seeds). Wired into `ExecuteGovernanceProposal`'s
+switch in `gateway.go`. No ABI change needed — `propose()`'s `kind` is a raw caller-supplied
+`uint8`, so the existing `propose`/`vote`/`executeProposal` methods immediately accept it.
+Same quorum + timelock protection as every other governance action, so a captured single
+chain still cannot self-grant. Regression tests:
+`TestGateway_ProposalAllocateSupply_UnblocksAttestCommit` (full propose→vote→timelock→execute
+cycle, before/after ceiling behavior) and `TestGlobalSupplyLedger_GrantAllocation` (ledger
+primitive: accumulation, invariant, nil/zero/negative rejection) in `pkg/cross_chain/`.
+Verified live: re-ran step 5 after a real `ProposalAllocateSupply` grant on chain 102 for
+chain 101 — succeeded, then step 6 (`claimMessage`) succeeded, exact balance delta confirmed.
+
+**2 throwaway-tool bugs found and fixed along the way (own tooling, not production code, not
+committed — `execution/cmd/tool/live_asset_bridge/main.go`):** (a) a single
+`RemoteCommitteePriv string` field silently overwritten across 2 `register-chain` calls on
+the same state file (once for the real peer chain, once for self-registration), causing
+`attestCommit` to fail with an invalid quorum cert because the saved private key no longer
+matched what was actually registered on-chain — diagnosed by adding a `query-registry` debug
+step comparing the on-chain pubkey against the locally-derived one, fixed by keying it
+`map[chainID]string` instead; (b) a hardcoded quorum vote count that went stale as
+`ActiveChains` grew with each executed `ProposalRegisterChain` — fixed by making all votes
+tolerate an expected post-quorum revert rather than trying to predict the exact threshold.
+
+**Finding noted but deliberately not exploited, not yet fixed — needs a decision, not a
+guess:** `vote()`/`executeProposal()` accept a caller-supplied `currentTimestamp` argument
+with no cross-check against real block time. This is what made the devnet timelock override
+above unnecessary to lean on for correctness (the override is a real, honest config value,
+not this gap) — but the gap itself means anyone can currently claim any timestamp they like
+when voting/executing, including one far in the future, bypassing the 72h timelock outright
+in production today. Not exercised here (out of scope for "prove the bridge moves real
+value," and doing so live would require deliberately faking a governance execution, which
+needs a call before doing it) — flagging for Phase 1 or a dedicated fix: should this validate
+against `blockTime` the same way `AttestCommit`'s epoch check is fail-closed, and if so is
+there a legitimate reason it currently isn't (e.g. some caller needs to backdate/forward-date
+for a reason not yet identified)?
+
+**What this proves and what's still open:** a real custom-asset bridge transfer now
+genuinely moves a real, spendable ERC-20-shaped balance from a real sender on one live chain
+to a real recipient on another live chain, through real BLS-verified governance and real
+BLS/Merkle-verified attestation — the first time in this project's history any cross-chain
+transfer has done that (Phase 0.6 documented that none ever had). Phase 0.6's native-coin
+`ProcessNativeMintBurn` wiring (item 1/2 in its fix plan) is still separately open — this
+phase only closes the custom-asset path plus the allocation-ceiling dead end that blocked
+both. Root Anchor Layer C (Phase 0.7, `peer_rpc_port` bind collision) remains unresolved and
+was worked around here the same way Phase 0.7 already does (single-validator chains, no real
+multi-node Root Anchor consensus needed for this test).
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to

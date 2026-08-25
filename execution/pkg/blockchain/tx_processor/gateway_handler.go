@@ -106,7 +106,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap empty GlobalSupplyLedger: %w", err)
 		}
-		return cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger), nil
+		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
+		applyDevnetGovernanceTimelockOverride(freshEngine)
+		return freshEngine, nil
 	}
 
 	var engine cross_chain.GatewayEngine
@@ -130,7 +132,19 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
 	}
+	applyDevnetGovernanceTimelockOverride(&engine)
 	return &engine, nil
+}
+
+// applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
+// CrossChain.DevnetGovernanceTimelockSecondsOverride — see that field's own doc comment
+// (pkg/config/config.go) for why this exists and why it never affects a real production
+// config.
+func applyDevnetGovernanceTimelockOverride(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil {
+		return
+	}
+	engine.ApplyGovernanceTimelockOverride(config.ConfigApp.CrossChain.DevnetGovernanceTimelockSecondsOverride)
 }
 
 // allZero reports whether data is exactly common.Hash{}.Bytes() — SmartContractDB.StorageValue

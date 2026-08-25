@@ -127,6 +127,30 @@ func (g *GlobalSupplyLedger) SetInitialAllocation(reserveChainID, newChainID uin
 	return g.TransferAllocation(reserveChainID, newChainID, amount)
 }
 
+// GrantAllocation increases chainID's custodial ceiling (per_chain_allocation) and the tracked
+// genesis total supply together, keeping sum(per_chain_allocation) == genesis_total_supply intact.
+// Unlike TransferAllocation (redistributes EXISTING allocation between two already-funded chains),
+// this is the only way new headroom enters the ledger at all: neither BootstrapFoundingChains nor
+// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger (confirmed by
+// direct code reading), and production always constructs the ledger with genesis_total_supply=0
+// and an empty allocation map (gateway_handler.go's loadGatewayEngine) — so without this method,
+// EVERY attestCommit() ceiling check (Scenario 10.7) rejects with "available 0" forever, for every
+// chain, native coin or custom asset alike. Gated by full governance (ProposalAllocateSupply, >=
+// 2/3 active-chain quorum + timelock, mục 11.6) so a captured single chain can never self-grant —
+// same protection level as ProposalRegisterChain/ProposalRegisterAsset.
+func (g *GlobalSupplyLedger) GrantAllocation(chainID uint64, amount *big.Int) error {
+	if amount == nil || amount.Sign() <= 0 {
+		return ErrNilAmount
+	}
+	current := g.GetAllocation(chainID)
+	g.PerChainAllocation[chainID] = new(big.Int).Add(current, amount)
+	g.GenesisTotalSupply = new(big.Int).Add(g.GenesisTotalSupply, amount)
+	if !g.VerifyInvariant() {
+		panic("CRITICAL: Invariant violation during GrantAllocation")
+	}
+	return nil
+}
+
 // TransferAllocation moves allocation between chains, enforcing the custodial ceiling.
 func (g *GlobalSupplyLedger) TransferAllocation(fromChain, toChain uint64, amount *big.Int) error {
 	if fromChain == toChain {
@@ -286,7 +310,14 @@ const (
 	ProposalRegisterAsset    GovernanceProposalKind = 2
 	ProposalUpdateCommittee  GovernanceProposalKind = 3
 	ProposalDeclareChainDead GovernanceProposalKind = 4
+	ProposalAllocateSupply   GovernanceProposalKind = 5
 )
+
+// AllocationGrantPayload is the JSON payload for ProposalAllocateSupply proposals.
+type AllocationGrantPayload struct {
+	ChainID uint64   `json:"chain_id"`
+	Amount  *big.Int `json:"amount"`
+}
 
 // GovernanceProposal tracks on-chain voting across active chains (Section 11.6 & 1.3 #3).
 type GovernanceProposal struct {

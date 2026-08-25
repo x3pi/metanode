@@ -91,6 +91,18 @@ type CrossChainConfig struct {
 	// needs this; mục 2.2 of the design doc: "Relayer bất kỳ ai, không cần đăng ký"). Empty
 	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
 	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
+
+	// DevnetGovernanceTimelockSecondsOverride — EXPLICIT OPT-IN devnet/testing accommodation
+	// only: shortens GovernanceEngine's mandatory 72h (DefaultGovernanceTimelockSeconds)
+	// proposal timelock to this many seconds instead. Zero/omitted (the only value any real
+	// production config should ever use) leaves the real 72h timelock completely unchanged —
+	// this field does not exist in any production config and defaults to inert. Exists because
+	// exercising the full propose->vote->timelock->execute->registerAsset governance path on a
+	// real running devnet is otherwise a literal 72-hour wait, which makes it untestable in
+	// practice; see note/cross_chain_production_readiness_plan.md Phase 0.8 for why this was
+	// added and the live verification it unblocked. Never set this on anything but a disposable
+	// local devnet.
+	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
