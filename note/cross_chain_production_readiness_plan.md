@@ -226,6 +226,41 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    generated `start_all.sh`/`stop_all.sh` in its output dir) — update this doc/any other
    reference accordingly if that's intentional, or add the missing wrapper if one was meant
    to exist.
+
+   Continued smoke-testing the rest of the T2 tooling chain found (and fixed) **2 more real
+   bugs of the exact same "silent mismatch" shape**, each verified with a throwaway Go
+   program against the real target type before fixing, not assumed:
+   - `deploy/systemd/register_private_chains_t2.sh` called `./register_chains --rpc ...`,
+     but the tool's actual flag (`execution/cmd/tool/register_chains/main.go`) is
+     `-root-anchor` — there is no `-rpc` flag, so Go's `flag` package would reject the
+     invocation outright (`flag provided but not defined: -rpc`), confirmed by running the
+     built binary. Fixed the flag name; also had the script auto-build the tool if the
+     binary isn't already present (it's gitignored, not meant to be committed — added
+     `/register_chains` to `execution/.gitignore`, it was missing).
+   - `deploy/systemd/register_private_chains_t2.py` built each chain's registration payload
+     with `"state_root"`/`"account_tree_root"` as bare 64-hex-char strings (no `0x` prefix)
+     — `common.Hash.UnmarshalJSON` (the target type, `ChainRegistry` in
+     `pkg/cross_chain/types.go`) explicitly errors ("cannot unmarshal hex string without 0x
+     prefix") without it, confirmed directly. **Worse, silently-wrong rather than
+     error-loud:** `"pubkey_bls"` was sent as `bls_bytes.hex()` (a hex string), but the
+     target field is `[]byte` (`ValidatorEntry.PubkeyBLS`), and Go's `encoding/json`
+     base64-DECODES a JSON string into a `[]byte` field, not hex-decodes it — hex digits
+     happen to also be valid base64 characters, so this produced **no error and a
+     completely wrong pubkey** (confirmed empirically: decoding a real 48-byte BLS pubkey's
+     hex string as base64 silently yields 72 garbage bytes). Any chain registered this way
+     would have an unverifiable committee with no error anywhere pointing at why. Fixed by
+     adding the `0x` prefix to both root fields, and by sending `pubkey_bls` as the
+     already-base64 `authority_key` value straight from genesis.json instead of
+     re-encoding it as hex.
+
+   **Takeaway for whoever runs T2 next:** every one of these 3 tooling bugs (this item's
+   original PascalCase one plus these 2) shares the same shape — a script-generated JSON
+   payload silently mismatching what the real Go struct/`encoding/json` actually expects,
+   with **no error at the point of failure** in 2 of the 3 cases. Don't trust any new
+   deploy-tooling JSON payload without unmarshaling it through the real target Go type
+   first (a 5-line throwaway `go run` is enough, as done here) — this is the same
+   "what would make this pass without the real thing being true" discipline this doc
+   already asks for in code, just applied to generated config/payloads too.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make

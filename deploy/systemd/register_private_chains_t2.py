@@ -57,17 +57,22 @@ def main():
         committee = []
         total_stake = 0
         for v in gen.get("validators", []):
+            # authority_key in genesis.json is already base64 — that's also exactly what Go's
+            # encoding/json expects for a []byte field (ValidatorEntry.PubkeyBLS in
+            # execution/pkg/cross_chain/types.go): it base64-DECODES a JSON string target, not
+            # hex-decodes it. Sending bls_bytes.hex() here was a real bug — it round-tripped
+            # through hex first, then Go's unmarshal silently base64-decoded that hex STRING as
+            # if it were base64 (no error, since hex digits are valid base64 characters),
+            # producing a completely wrong pubkey with no error anywhere. Verified directly
+            # against ValidatorEntry before fixing, not assumed. Just forward auth_key as-is.
             auth_key = v.get("authority_key", "")
-            import base64
-            bls_bytes = base64.b64decode(auth_key)
-            bls_hex = "0x" + bls_bytes.hex()
-            
+
             stake = 0
             if v.get("delegator_stakes"):
                 stake = int(v["delegator_stakes"][0]["amount"])
-                
+
             committee.append({
-                "pubkey_bls": bls_bytes.hex(),
+                "pubkey_bls": auth_key,
                 "stake": stake
             })
             total_stake += stake
@@ -80,8 +85,12 @@ def main():
             "committee": committee,
             "quorum_threshold": quorum,
             "gateway_contract": "0x0000000000000000000000000000000000000000",
-            "state_root": "0000000000000000000000000000000000000000000000000000000000000000",
-            "account_tree_root": "0000000000000000000000000000000000000000000000000000000000000000",
+            # common.Hash.UnmarshalJSON (execution/pkg/cross_chain/types.go's ChainRegistry)
+            # errors with "cannot unmarshal hex string without 0x prefix" on a bare hex string
+            # — verified directly against that exact type before fixing, not assumed. Missing
+            # the prefix here would fail every single registration transaction's payload decode.
+            "state_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "account_tree_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "archival_endpoint": "",
             "registered_at": 0
         }
