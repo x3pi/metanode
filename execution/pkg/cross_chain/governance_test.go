@@ -7,6 +7,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestGovernance_ProposeIsIdempotent_DoesNotResetVotes is a regression test: proposalID is
+// deterministic (keccak256 of kind+proposedAt+payload), so re-submitting an identical propose()
+// call — e.g. a relayer retry, or a malicious replay timed right before quorum is reached — used
+// to silently overwrite the existing *GovernanceProposal with a fresh zero-vote one, wiping out
+// every vote already cast. Propose() must now return the existing proposal unchanged instead.
+func TestGovernance_ProposeIsIdempotent_DoesNotResetVotes(t *testing.T) {
+	engine := NewGovernanceEngine([]uint64{101, 102, 103})
+
+	kind := ProposalRegisterChain
+	payload := []byte("same-payload")
+	const proposedAt = uint64(1000)
+
+	propID1, err := engine.Propose(kind, payload, proposedAt)
+	require.NoError(t, err)
+
+	// Cast 1 vote (below the 2/3-of-3 threshold of 2, so status stays Active).
+	status, err := engine.Vote(propID1, 101, proposedAt+1)
+	require.NoError(t, err)
+	assert.Equal(t, ProposalStatusActive, status)
+	assert.Equal(t, uint64(1), engine.GetProposal(propID1).VotesFor)
+
+	// Re-submit the IDENTICAL propose() call (same kind/proposedAt/payload -> same proposalID).
+	propID2, err := engine.Propose(kind, payload, proposedAt)
+	require.NoError(t, err)
+	assert.Equal(t, propID1, propID2, "identical inputs must produce the identical deterministic proposalID")
+
+	// The vote already cast must still be there — NOT reset to 0.
+	assert.Equal(t, uint64(1), engine.GetProposal(propID1).VotesFor, "re-proposing an identical proposal must not wipe out votes already cast")
+	assert.True(t, engine.GetProposal(propID1).VotedChains[101])
+}
+
 func TestGovernance_QuorumThreshold(t *testing.T) {
 	engine := NewGovernanceEngine(nil)
 	_, err := engine.QuorumThreshold()
