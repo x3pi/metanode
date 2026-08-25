@@ -242,7 +242,9 @@ const GatewayABI = `[
 		"inputs": [
 			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
 			{"internalType": "uint256", "name": "voterChainId", "type": "uint256"},
-			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"}
+			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
 		],
 		"name": "vote",
 		"outputs": [{"internalType": "uint8", "name": "status", "type": "uint8"}],

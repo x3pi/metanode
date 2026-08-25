@@ -584,6 +584,36 @@ func (h *GatewayHandler) handleWrite(
 		proposalID := mustHash(args[0])
 		voterChainID := mustUint64(args[1])
 		currentTimestamp := mustUint64(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		// Security fix: GovernanceEngine.Vote itself trusts whatever voterChainID its caller
+		// passes — it was never meant to be called from an unauthenticated public entry point.
+		// Require proof that the caller actually speaks for voterChainID: a valid BLS signature
+		// from a member of that chain's CURRENT committee (per Root Anchor's own ChainRegistry)
+		// over this specific (proposalId, voterChainId) pair. Without this, any caller could cast
+		// any registered chain's single governance vote just by naming its ID.
+		voterRegistry, exists := engine.ChainRegistry[voterChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("vote: %w: chain %d", cross_chain.ErrUnknownSourceChain, voterChainID)
+		}
+		isMember := false
+		for _, v := range voterRegistry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("vote: signer is not a member of chain %d's current committee", voterChainID)
+		}
+		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, voterChainID)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, voteMsg) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
 		status, err := engine.Governance.Vote(proposalID, voterChainID, currentTimestamp)
 		if err != nil {
 			return nil, nil, err
