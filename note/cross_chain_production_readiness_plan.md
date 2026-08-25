@@ -406,6 +406,49 @@ blocker below is resolved to close this out fully.
      whoever wrote the original Gate 1/5 fork-safety gates and the early/full PeerRpcServer
      handoff design.
 
+   **Update, same day, later — Layer C ROOT-CAUSED FOR REAL AND FIXED, verified live.** Took
+   the doc's own advice above (real process-level tracing instead of more source-reading):
+   `curl -sv http://127.0.0.1:19200/peer_info` mid-failure returned
+   `content-type: application/grpc, grpc-status: 12 (UNIMPLEMENTED)` — a clue this doc's
+   earlier pass recorded but didn't chase down. That response can only come from the
+   validator's real gRPC consensus network server (`meta-consensus/core/src/network/
+   tonic_network.rs`, built on `tonic`), never from `PeerRpcServer`'s raw-HTTP handler. Cross-
+   checked against genesis config: `deploy/systemd/gen_root_anchor_chain.py` computes
+   `p2p_port = 19200 + args.port_offset + node_id` for the validator's `p2p_address` (fed
+   into `tonic_network.rs`'s real, permanent listener) **and separately** `network_port =
+   19200 + i`, which gets written straight into `peer_rpc_port` — the exact same port number,
+   assigned to two completely different, independently-implemented servers. This is not a
+   Tokio task-cancellation race at all: the "early" `PeerRpcServer` briefly holds the port
+   first (starting earlier in boot), gets stopped correctly, and then loses the port
+   *permanently* to the real gRPC P2P listener the moment that starts — which is why bind()
+   failed 20/20 times over 5+ real seconds in both earlier attempts: the true occupant never
+   releases the port for the rest of the process's life, so no amount of retrying or awaiting
+   task teardown could ever have worked. **Fix:** `gen_root_anchor_chain.py`'s
+   `peer_rpc_port` now gets its own disjoint range (`29200 + i`, matching the convention
+   already used correctly by `_rehearsal_gen_node_configs.py` elsewhere in the same
+   directory) instead of reusing `network_port`; `peer_rpc_addresses` (each node's list of
+   peers to query) fixed to match. Added a generation-time self-check
+   (`gen_root_anchor_chain.py`) that fails loudly if any two of the ports directly confirmed
+   to be real independent listeners (`rpc_port`, `network_port`/`p2p_address`,
+   `peer_rpc_port`, `metrics_port`) ever collide again, instead of trusting the arithmetic by
+   inspection. **Verified live, clean single-shot regeneration, fresh 4-validator devnet:**
+   zero "Address already in use" across all 4 nodes; every node logs `[POST-GATE-VERIFY]
+   ... Gate 5 cleared — node state is bit-perfect` and `Phase transition: Bootstrapping ->
+   Healthy`; all 4 RPC endpoints report matching block heights and keep advancing. This is
+   the first time a real multi-validator Root Anchor cluster has ever reached Healthy in this
+   project's history — closes the T2 blocker Phase 0.8/0.9's custom-asset round trip had to
+   route around via single-validator-per-chain.
+
+   The 2 "experimental" Rust patches (bind-retry-with-backoff in `peer_rpc/server.rs`,
+   `abort()+await` in `startup_sync.rs`) turned out to be solving the wrong theory — kept
+   anyway as real, independently-correct, zero-cost defensive hardening (their code comments
+   updated to say so plainly rather than still claiming credit for the actual fix), committed
+   alongside the real fix. **Gate 1's `lag <= 1` loosening (Layer A, `cold_start.rs`) is
+   UNCHANGED and still not committed** — that was a genuinely separate finding (a
+   continuously-live cluster's `lag` never landing on exactly 0) unrelated to Layer C's port
+   collision, not retested this session, and still needs the dedicated review this doc has
+   asked for since it was written.
+
 ## Phase 0.8 — PR #64: Task 1.2 real-contract acceptance test found + fixed 2 more real bugs
 ## (2026-08-25, same day), plus live 2-node RPC verification
 
@@ -469,6 +512,8 @@ fixes themselves — they exercise the exact same `executeContractCallForGateway
 `applyFullMvmResultToStateDB` code the live nodes run, just without needing the full
 governance ceremony to seed `AssetRegistry`. Closing that last gap needs Layer C fixed first
 (or a deliberate governance/bootstrap shortcut designed for it, not guessed at here).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update above. This paragraph is left as-written for the historical record.)**
 
 ## Phase 0.9 — full live custom-asset round trip completed for real (2026-08-25, same day),
 ## found + fixed the SupplyLedger allocation dead end, plus 2 tooling bugs and 1 unfixed finding
@@ -573,6 +618,10 @@ phase only closes the custom-asset path plus the allocation-ceiling dead end tha
 both. Root Anchor Layer C (Phase 0.7, `peer_rpc_port` bind collision) remains unresolved and
 was worked around here the same way Phase 0.7 already does (single-validator chains, no real
 multi-node Root Anchor consensus needed for this test).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update. A real multi-validator Root Anchor devnet now reaches Healthy; nothing in this phase
+needed to route around it any more, but this phase's own live run predates that fix and this
+paragraph is left as-written for the historical record.)**
 
 ## How to work (read once, applies to every phase below)
 

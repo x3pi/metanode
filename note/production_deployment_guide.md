@@ -39,10 +39,14 @@ kiện chặn — xem `note/cross_chain_root_anchor_architecture.md` mục 8, l�
    là điều kiện chặn cuối cùng còn lại cho mainnet giá trị thật**. Phạm vi + tài liệu chuẩn bị
    cho đợt audit này: `note/external_security_audit_scope_p5.md` (mới).
 2. Đã chạy thật trên **nhiều máy vật lý/VM độc lập** (không phải devnet 1 máy) đủ lâu để quan
-   sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**. Root Anchor
-   Layer C (`peer_rpc_port` bind collision khi node "full" khởi động sau node "early") vẫn
-   chặn một cụm multi-validator thật chạy hết chu trình CatchingUp→Healthy — xem readiness-plan
-   Phase 0.7 và mục 6 bên dưới.
+   sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**. **✅ Root
+   Anchor Layer C đã tìm ra nguyên nhân thật + vá xong 2026-08-25 tối** (không phải race
+   Tokio như 2 lần đoán trước — `gen_root_anchor_chain.py` gán `peer_rpc_port` trùng số cổng
+   với cổng gRPC P2P thật, chiếm vĩnh viễn chứ không phải tạm thời): xác nhận thật cụm 4
+   validator sạch (regenerate + start một lần, không tái sử dụng thư mục cũ) đạt `Healthy` cả
+   4 node, 0 lỗi bind, block height khớp nhau và tiếp tục tăng. Việc còn thiếu cho mục 2 giờ
+   chỉ còn là chạy thật trên nhiều máy vật lý riêng biệt (không phải 1 máy chia sẻ) đủ lâu —
+   xem readiness-plan Phase 0.7's "ROOT-CAUSED FOR REAL AND FIXED" update.
 3. **✅ ĐÃ VÁ 2026-08-25 tối:** nguy cơ front-run `bootstrapFoundingChains` khi làm lễ genesis —
    `CrossChainConfig.GenesisCoordinatorAddress` (config.go) giờ khoá người gọi hợp lệ duy nhất,
    xem readiness-plan (commit "bootstrapFoundingChains front-run gap"). **Bắt buộc phải set**
@@ -65,8 +69,9 @@ lại tương ứng, chưa làm trong đợt này).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
 dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — mục chặn duy
-nhất còn lại là **mục 1 (audit độc lập P5)** và **mục 2 (chạy thật đa máy, cần Layer C xong
-trước)** — việc cần làm tiếp theo là lên kế hoạch cho 2 mục đó, không phải chạy thêm script.
+nhất còn lại là **mục 1 (audit độc lập P5)** và **mục 2 (chạy thật đa máy — Layer C đã xong,
+giờ chỉ còn thiếu hạ tầng nhiều máy vật lý thật)** — việc cần làm tiếp theo là lên kế hoạch
+cho 2 mục đó, không phải chạy thêm script.
 
 ---
 
