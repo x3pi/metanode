@@ -645,8 +645,25 @@ impl ConsensusNode {
         
                     if let Some(handle) = early_peer_server_handle {
                         tracing::info!("📡 [PEER RPC] Stopping early server. Handing over to full server in startup.rs...");
+                        // Defensive hardening, not the fix for Layer C (see
+                        // note/cross_chain_production_readiness_plan.md Phase 0.7 for the full
+                        // writeup, and the matching comment in peer_rpc/server.rs::start()):
+                        // abort() only requests cancellation, it does not wait for the task (and
+                        // the TcpListener it owns) to actually finish unwinding, so a fixed
+                        // sleep afterward is a guess, not a guarantee — awaiting the handle is
+                        // strictly more correct regardless of what else is going on. This was
+                        // originally written on the theory that a slow-to-release early-server
+                        // socket was why the "full" PeerRpcServer's bind() failed 20/20 times
+                        // live — root-caused later the same day to be unrelated: a config
+                        // generator bug assigned this exact port to both peer_rpc_port and the
+                        // real gRPC consensus P2P listener (tonic_network.rs), a permanent
+                        // collision no amount of waiting for this task to unwind could ever
+                        // have fixed. That generator bug is the actual, verified fix. Kept
+                        // anyway as a real (if narrower) correctness improvement over a fixed
+                        // delay, and it's free: the await resolves immediately once the
+                        // already-fast early-server task tears down.
                         handle.abort();
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        let _ = handle.await;
                     }
                 }
 

@@ -1,6 +1,7 @@
 package cross_chain
 
 import (
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -106,6 +107,93 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 	require.NoError(t, errValid)
 	assert.Equal(t, big.NewInt(2000), attested.FundedAmount)
 	assert.Equal(t, big.NewInt(3000), engine.SupplyLedger.PerChainAllocation[101])
+}
+
+// TestGateway_ProposalAllocateSupply_UnblocksAttestCommit proves the fix for a real dead end
+// found via live 2-node RPC testing: neither BootstrapFoundingChains nor
+// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger, and
+// production always constructs it with genesis_total_supply=0 and an empty allocation map
+// (gateway_handler.go's loadGatewayEngine) — so a freshly onboarded chain's attestCommit
+// rejects with "available 0" forever, with no prior governance-reachable way to fund it.
+// ProposalAllocateSupply (GrantAllocation) closes that gap through the same propose/vote/
+// timelock/execute path as every other governance action.
+func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	// Chain 103: registered but never allocated — the exact state a real ProposalRegisterChain
+	// leaves a brand-new chain in today.
+	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
+	engine.ChainRegistry[103] = ChainRegistry{
+		ChainID:         103,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: popSig.Bytes()}},
+		Epoch:           1,
+		QuorumThreshold: 6667,
+	}
+	require.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103))
+
+	signFor := func(amount *big.Int) (common.Hash, QuorumCert) {
+		leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: amount}
+		root := HashAggregateValueLeaf(leaf)
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+		sig := bls.Sign(kp.PrivateKey(), commitMsg)
+		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	}
+
+	// Before the grant: even a modest amount is rejected, ceiling is 0.
+	root, cert := signFor(big.NewInt(100))
+	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	assert.ErrorIs(t, errBefore, ErrAllocationExceeded)
+
+	// Grant allocation via real governance: propose -> vote (>=2/3 of active chains) -> 72h
+	// timelock -> execute. Active chains here is just {101} (setupTestGatewayEngine's registry
+	// plus 103 just added, but 103 isn't RegisterActiveChain'd), so quorum = 1.
+	grant := AllocationGrantPayload{ChainID: 103, Amount: big.NewInt(1000)}
+	payload, err := json.Marshal(grant)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalAllocateSupply, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
+
+	// The exact same commit now succeeds, and debits normally afterward.
+	attested, errAfter := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	require.NoError(t, errAfter)
+	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
+	assert.Equal(t, big.NewInt(900), engine.SupplyLedger.GetAllocation(103))
+}
+
+// TestGlobalSupplyLedger_GrantAllocation is the focused unit test for the ledger primitive
+// itself: increases both the target's allocation and genesis_total_supply together (unlike
+// TransferAllocation, which redistributes existing allocation and would need a pre-funded
+// reserve chain that nothing in production ever seeds), and keeps VerifyInvariant() true.
+func TestGlobalSupplyLedger_GrantAllocation(t *testing.T) {
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(1000), map[uint64]*big.Int{1: big.NewInt(1000)})
+	require.NoError(t, err)
+
+	require.NoError(t, ledger.GrantAllocation(2, big.NewInt(500)))
+	assert.Equal(t, big.NewInt(500), ledger.GetAllocation(2))
+	assert.Equal(t, big.NewInt(1500), ledger.GenesisTotalSupply)
+	assert.True(t, ledger.VerifyInvariant())
+
+	// Granting again to the same chain accumulates rather than overwriting.
+	require.NoError(t, ledger.GrantAllocation(2, big.NewInt(250)))
+	assert.Equal(t, big.NewInt(750), ledger.GetAllocation(2))
+	assert.Equal(t, big.NewInt(1750), ledger.GenesisTotalSupply)
+	assert.True(t, ledger.VerifyInvariant())
+
+	// Nil/zero/negative amounts are rejected.
+	assert.ErrorIs(t, ledger.GrantAllocation(3, nil), ErrNilAmount)
+	assert.ErrorIs(t, ledger.GrantAllocation(3, big.NewInt(0)), ErrNilAmount)
+	assert.ErrorIs(t, ledger.GrantAllocation(3, big.NewInt(-1)), ErrNilAmount)
 }
 
 func TestGateway_P2_3_ClaimMessageAndDoubleClaimPrevention(t *testing.T) {

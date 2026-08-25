@@ -342,6 +342,287 @@ blocker below is resolved to close this out fully.
    start (start node_0, wait for it to be ready, then node_1, etc.) to test the race-condition
    theory before diving into Rust source.
 
+   **Update, same day — root-caused finding #2 down to 2 more precise layers, NOT resolved,
+   3 experimental patches left uncommitted for review.** Rust-side tracing (as this doc's own
+   previous entry asked for) was done. Chain of causes, most-proximate first:
+   - **Layer A (root-caused + fixed, validated live):** `commit_syncer/cold_start.rs`'s
+     `determine_startup_sync_exit()` Gate 1 (`has_parity`) required `lag == 0` exactly — on a
+     cluster whose round timer never idles (empty blocks forever, no real tx load), the
+     network's quorum_commit is a perpetually moving target; live logs showed
+     `synced=326, local=326, quorum=327, lag=1` and the equivalent pair 10s later at
+     `synced=262→326`, i.e. this node processes commits in real time but `lag` locks at
+     exactly 1, never 0, so Gate 1 never passes and the node never leaves CatchingUp.
+     **Experimental fix (uncommitted):** loosened Gate 1 to `lag <= 1`. Gate 5
+     (`block_hash_verified`, the actual fork-safety check via peer-verified block hash) is
+     completely untouched and still independently gates the same transition, so this widens
+     only a liveness check, not the fork-safety one. **Verified live:** after this fix, node
+     logs changed from "CatchingUp — lag > 0" to *"All gates (1-4) passed but block hash NOT
+     yet verified against peers (Gate 5)"* — Gate 1 confirmed fixed, Gate 5 is next.
+   - **Layer B (root-caused, NOT fixed):** Gate 5's `perform_post_gate_verification()`
+     (`node/setup_consensus/verification.rs`) needs to query peers' `/peer_info` over a raw
+     TCP+manual-HTTP server (`network/peer_rpc/server.rs`, `PeerRpcServer`) on
+     `peer_rpc_port` (19200+node_id for this devnet) — but every query failed with "No
+     reachable peers found" (`network/peer_rpc/client.rs`), so Gate 5 never passes, node
+     stays in CatchingUp forever, `eth_blockNumber` never advances past 1. Direct `curl` to
+     the port confirmed it: connects fine, but answers `content-type: application/grpc,
+     grpc-status: 12 (UNIMPLEMENTED)` — something is listening, but it isn't the intended
+     `/peer_info` HTTP handler.
+   - **Layer C (partially root-caused, NOT resolved):** log tracing found the real proximate
+     error: `startup.rs` starts a "full" `PeerRpcServer` on the same port right after
+     `startup_sync.rs` aborts a temporary "early" `PeerRpcServer` instance (started to serve
+     `/peer_info` before the rest of the node is ready, an intentional design — see its own
+     "prevent STARTUP-SYNC deadlock" comment) — and the full server's `bind()` failed with
+     "Address already in use" (os error 98), logged but **silently swallowed by the spawning
+     task**, so no `/peer_info` server ever runs again for the life of the node. **Two
+     experimental fixes tried, in order, neither resolved it:**
+     1. Retry `bind()` up to 20× with 250ms backoff instead of failing once
+        (`peer_rpc/server.rs`) — **still failed all 20/20 retries** (5s straight), proving
+        this isn't a short release-timing race.
+     2. Replaced the early server's `handle.abort(); sleep(100ms)` with the textbook-correct
+        `handle.abort(); let _ = handle.await;` (`setup_consensus/startup_sync.rs`) — awaiting
+        an aborted `JoinHandle` should block until the task, and the `TcpListener` it owns,
+        is actually torn down. **Still failed all 20/20 retries.** Live logs show the early
+        server started and was stopped again within **1.9ms** of each other, then the full
+        server's bind still couldn't get the port for the next 5+ seconds — meaning
+        something holds it well past what either fix addresses.
+     Ruled out as the culprit (checked directly, not assumed): Go does NOT bind this port
+     itself (`execution/cmd/simple_chain/processor/block_processor_core.go`'s own comment —
+     the call is literally commented out); no second Rust call site constructs a
+     `PeerRpcServer` anywhere in the tree (`grep -rn "PeerRpcServer::new"` — exactly one call
+     site, in `startup_sync.rs`); the early-server spawn+cleanup in `startup_sync.rs` happens
+     exactly once per node lifetime (outside any loop that could re-spawn without cleaning up
+     the previous instance). **What's actually holding the port for 5+ full seconds is still
+     unknown** — needs real process-level tracing (`strace -f -e trace=bind,close`, or
+     `lsof`/`ss` sampled at high frequency during the exact failure window with fd/thread
+     detail) rather than more source-reading-and-guessing; the "guess a fix, rebuild, retest
+     live" cycle used for Layers A/B stopped being productive at this layer.
+   - **Net effect:** Layer A's fix is real progress (validated), but Root Anchor still cannot
+     leave CatchingUp on a fresh multi-validator start because of Layer C, so the
+     destination-side `claimMessage()` acceptance-test proof is still blocked. All 3
+     experimental patches (Gate 1, bind-retry, abort+await) are left **uncommitted** in the
+     working tree — each is independently a reasonable robustness improvement and none
+     reduces fork-safety (Gate 5 itself is never touched), but none is proven sufficient and
+     none has been reviewed. Do not commit/merge without dedicated review, ideally alongside
+     whoever wrote the original Gate 1/5 fork-safety gates and the early/full PeerRpcServer
+     handoff design.
+
+   **Update, same day, later — Layer C ROOT-CAUSED FOR REAL AND FIXED, verified live.** Took
+   the doc's own advice above (real process-level tracing instead of more source-reading):
+   `curl -sv http://127.0.0.1:19200/peer_info` mid-failure returned
+   `content-type: application/grpc, grpc-status: 12 (UNIMPLEMENTED)` — a clue this doc's
+   earlier pass recorded but didn't chase down. That response can only come from the
+   validator's real gRPC consensus network server (`meta-consensus/core/src/network/
+   tonic_network.rs`, built on `tonic`), never from `PeerRpcServer`'s raw-HTTP handler. Cross-
+   checked against genesis config: `deploy/systemd/gen_root_anchor_chain.py` computes
+   `p2p_port = 19200 + args.port_offset + node_id` for the validator's `p2p_address` (fed
+   into `tonic_network.rs`'s real, permanent listener) **and separately** `network_port =
+   19200 + i`, which gets written straight into `peer_rpc_port` — the exact same port number,
+   assigned to two completely different, independently-implemented servers. This is not a
+   Tokio task-cancellation race at all: the "early" `PeerRpcServer` briefly holds the port
+   first (starting earlier in boot), gets stopped correctly, and then loses the port
+   *permanently* to the real gRPC P2P listener the moment that starts — which is why bind()
+   failed 20/20 times over 5+ real seconds in both earlier attempts: the true occupant never
+   releases the port for the rest of the process's life, so no amount of retrying or awaiting
+   task teardown could ever have worked. **Fix:** `gen_root_anchor_chain.py`'s
+   `peer_rpc_port` now gets its own disjoint range (`29200 + i`, matching the convention
+   already used correctly by `_rehearsal_gen_node_configs.py` elsewhere in the same
+   directory) instead of reusing `network_port`; `peer_rpc_addresses` (each node's list of
+   peers to query) fixed to match. Added a generation-time self-check
+   (`gen_root_anchor_chain.py`) that fails loudly if any two of the ports directly confirmed
+   to be real independent listeners (`rpc_port`, `network_port`/`p2p_address`,
+   `peer_rpc_port`, `metrics_port`) ever collide again, instead of trusting the arithmetic by
+   inspection. **Verified live, clean single-shot regeneration, fresh 4-validator devnet:**
+   zero "Address already in use" across all 4 nodes; every node logs `[POST-GATE-VERIFY]
+   ... Gate 5 cleared — node state is bit-perfect` and `Phase transition: Bootstrapping ->
+   Healthy`; all 4 RPC endpoints report matching block heights and keep advancing. This is
+   the first time a real multi-validator Root Anchor cluster has ever reached Healthy in this
+   project's history — closes the T2 blocker Phase 0.8/0.9's custom-asset round trip had to
+   route around via single-validator-per-chain.
+
+   The 2 "experimental" Rust patches (bind-retry-with-backoff in `peer_rpc/server.rs`,
+   `abort()+await` in `startup_sync.rs`) turned out to be solving the wrong theory — kept
+   anyway as real, independently-correct, zero-cost defensive hardening (their code comments
+   updated to say so plainly rather than still claiming credit for the actual fix), committed
+   alongside the real fix. **Gate 1's `lag <= 1` loosening (Layer A, `cold_start.rs`) is
+   UNCHANGED and still not committed** — that was a genuinely separate finding (a
+   continuously-live cluster's `lag` never landing on exactly 0) unrelated to Layer C's port
+   collision, not retested this session, and still needs the dedicated review this doc has
+   asked for since it was written.
+
+## Phase 0.8 — PR #64: Task 1.2 real-contract acceptance test found + fixed 2 more real bugs
+## (2026-08-25, same day), plus live 2-node RPC verification
+
+**Code:** `test/custom-asset-real-token-coverage` → PR #64 (open at time of writing). Closes
+the Task 1.2 test-coverage gap this doc and `cross_chain_task1_native_value_fix_plan.md`
+both flagged: the existing `TestGatewayHandler_CustomAsset_Outbound_ClaimMessage` only ever
+proved the custom-asset code fails gracefully against a non-contract address, never that a
+real `transferFrom`/`transfer`/`mint` succeeds against a real deployed token. Writing that
+real test (a solc-0.8.35-compiled ERC-20-shaped fixture, deployed via the real
+`mvm.ExecutionEngine.Deploy` path) found **2 more real production bugs**, both fixed:
+
+1. **`msg.sender` bug, 4 call sites** (`outbound`'s `transferFrom`, `claimMessage`'s
+   `transfer`/`mint`, `refund`'s `transfer`/`mint`, `verifyAndExecute`'s `transfer`/`mint`) —
+   `executeContractCallForGateway` was called with `sender=tx.FromAddress()` (the bridging
+   user/relayer) instead of the Gateway contract. `transferFrom(from,to,value)` checks
+   `allowance[from][msg.sender]`; with `sender==from==tx.FromAddress()` this checked
+   `allowance[user][user]` — never set by any real approval flow, since a user can only
+   sanely `approve()` a fixed known spender (the Gateway). **This meant the entire
+   custom-asset outbound path was unconditionally broken against any real
+   standards-compliant ERC-20** — confirmed live, `ERR_EXECUTION_REVERTED`. Same root cause
+   breaks the vault-unlock `transfer()` (moves the wrong account's balance) and would break
+   `mint()` against any real access-controlled wrapped token. Fixed all 4 sites to pass
+   `mt_common.GATEWAY_CONTRACT_ADDRESS`.
+2. **`applyFullMvmResultToStateDB` never applied `MapCodeChange`** (only the hash, not the
+   bytecode) — `SmartContractDB.SetCode` was never called, so code written via this path was
+   never actually retrievable (`"Error getting code from storage"` on the next call in). Only
+   affects the Gateway's own internal contract-call/deploy paths, not normal top-level EVM
+   deployment (which goes through `vm_processor_state.go`'s already-correct application
+   logic). Fixed by adding the missing `SetCode` step.
+
+`go build ./... && go vet ./... && go test ./...` clean across all 43 packages in
+`execution/`, `gofmt -l` clean.
+
+**Live 2-node RPC verification (same day, at the user's explicit request before signing
+off):** rebuilt the Go binary with PR #64's fixes, ran 2 real single-validator private
+chains (101, 102) as separate OS processes (clean single-shot regenerate — see finding #1
+above for why that matters), and ran a throwaway tool (`deploy_and_approve_quick`, not
+committed) against each over **real JSON-RPC**, not an in-process shortcut:
+- A real top-level `CREATE` transaction (`to: nil`, standard EVM deployment path, not the Go
+  test's `mvm.Deploy` shortcut) — real receipt, real deployed address, on both chains.
+- A real `balanceOf()` `eth_call` immediately after — proves the deployed code is really
+  retrievable (this is the code path the tests above cover with bug #2's fix; a normal `CREATE`
+  doesn't actually exercise that fix, since it uses the separately-correct
+  `vm_processor_state.go` path — this call mainly confirms deployment itself is healthy).
+  Chain 101: `1000000` (exact initial supply). Chain 102: `500000` (exact initial supply).
+- A real `approve(GATEWAY_CONTRACT_ADDRESS, 500)` transaction — real receipt on both chains.
+- A real `allowance()` `eth_call` afterward — exactly `500` on both chains, confirming the
+  approve really landed.
+
+**What this does and doesn't prove:** confirms the rebuilt binary carrying both fixes runs
+correctly end-to-end (real consensus block inclusion, real EVM execution, real state
+persisted and readable back) on 2 independent real node processes talking only over RPC —
+not a Go-process-internal test. It does **not** cover the full `outbound()`/`claimMessage()`
+round trip for a custom asset over real RPC, because that requires the asset to already be
+registered via `registerAsset`, which requires an executed governance proposal, which
+requires a real committee (`ChainRegistry`) on each chain — the same Root Anchor dependency
+chain Phase 0.7's Layers A/B/C are about, and Layer C is still unresolved. The in-process Go
+acceptance tests in PR #64 (`TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds` /
+`...RealTokenMintSucceeds`) remain the authoritative proof of the `msg.sender` and `SetCode`
+fixes themselves — they exercise the exact same `executeContractCallForGateway` /
+`applyFullMvmResultToStateDB` code the live nodes run, just without needing the full
+governance ceremony to seed `AssetRegistry`. Closing that last gap needs Layer C fixed first
+(or a deliberate governance/bootstrap shortcut designed for it, not guessed at here).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update above. This paragraph is left as-written for the historical record.)**
+
+## Phase 0.9 — full live custom-asset round trip completed for real (2026-08-25, same day),
+## found + fixed the SupplyLedger allocation dead end, plus 2 tooling bugs and 1 unfixed finding
+
+**Closes Phase 0.8's last open gap.** Ran the complete `outbound()` → `attestCommit()` →
+`claimMessage()` custom-asset round trip over real JSON-RPC against the same 2 live
+single-validator private chains (101 on `:8551`, 102 on `:8547`) as Phase 0.8, through real
+on-chain governance end to end — not a bootstrap/test shortcut. Sequence, all real
+transactions with real receipts:
+
+1. Real `bootstrapFoundingChains()` on both chains (4-chain fake founding committee, satisfies
+   `MinFoundingChains`).
+2. Real `propose()`/`vote()`/`executeProposal()` — chain 101 registers chain 102 and itself;
+   chain 102 registers chain 101 and itself. Each a real proposal, real quorum votes from the
+   founding committee, a real (devnet-shortened) timelock wait, real execution.
+3. Real `propose()`/`vote()`/`executeProposal()` + `registerAsset()` — assetID 42 registered
+   on both chains, linking the real deployed canonical token (chain 101) and wrapped token
+   (chain 102) from Phase 0.8.
+4. Real `outbound()` on chain 101 — moved 100 units from sender to Gateway. Verified via real
+   `eth_call` to `balanceOf`: sender `1,000,000 → 999,900`, Gateway `0 → 100`.
+5. Real `attestCommit()` on chain 102 for that commit — **found bug #3 below, fixed, then
+   this succeeded for real.**
+6. Real `claimMessage()` on chain 102 — verified via real `eth_call` to `balanceOf`:
+   recipient `500,000 → 500,100`, exactly the bridged amount.
+
+**Devnet-only timelock override (separate small piece of this work, safe by construction):**
+added `CrossChainConfig.DevnetGovernanceTimelockSecondsOverride` (`config.go`) and
+`GatewayEngine.ApplyGovernanceTimelockOverride` (`gateway.go`), wired from
+`loadGatewayEngine` (`gateway_handler.go`). Zero by default — `EnsureGovernance()` only takes
+the override path when it's explicitly nonzero, so production behavior (mandatory 72h
+timelock) is unchanged unless an operator deliberately opts in. This is what made steps
+2/3/5 above practical to run live (real ~12s waits instead of real 72h waits) without
+touching the mandatory-timelock invariant itself, and without exploiting the separately-found
+`vote()`/`executeProposal()` caller-supplied-timestamp gap noted below.
+
+**Bug #3 (the interesting one) — `GlobalSupplyLedger.PerChainAllocation` had no
+governance-reachable way to ever be funded, at all:** step 5 above reverted with
+`ErrAllocationExceeded` ("requested 100 exceeds available 0"). Traced to: production always
+constructs the ledger via `NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})` —
+genesis-zero, empty allocations (`gateway_handler.go`'s `loadGatewayEngine`, both branches).
+Neither `BootstrapFoundingChains` nor `ExecuteGovernanceProposal`'s `ProposalRegisterChain`
+case ever touches `SupplyLedger` (confirmed by direct code reading). The only mutator that
+existed, `GlobalSupplyLedger.TransferAllocation`/`SetInitialAllocation`, was never called
+from anywhere ABI-reachable — `grep -rn "SetInitialAllocation\|TransferAllocation"` outside
+`types.go` itself turned up nothing. `TestRelayer_Scenario10_6_OnboardNewChainViaGovernance`
+(pre-existing) had quietly worked around exactly this by poking
+`chains[1000].SupplyLedger.PerChainAllocation[104] = big.NewInt(0)` directly in white-box
+test code instead of exercising a real path — a real symptom of the same gap this phase
+found live. **Net effect: as shipped, `attestCommit()`'s Scenario 10.7 ceiling rejects every
+chain forever, native coin or custom asset alike, with no legitimate way to ever unblock it**
+— a second, independent dead end on top of Phase 0.6's finding (that one was "verified
+ledger never wired to real balances"; this one is "the ledger's own ceiling can never be
+funded even in principle").
+
+**Fix:** new `GovernanceProposalKind = 5` (`ProposalAllocateSupply`) and
+`GlobalSupplyLedger.GrantAllocation(chainID, amount)` (`types.go`) — increases the target
+chain's allocation **and** `GenesisTotalSupply` together, keeping
+`sum(per_chain_allocation) == genesis_total_supply` intact (deliberately different from
+`TransferAllocation`, which redistributes *existing* allocation and would need a pre-funded
+reserve chain nothing in production ever seeds). Wired into `ExecuteGovernanceProposal`'s
+switch in `gateway.go`. No ABI change needed — `propose()`'s `kind` is a raw caller-supplied
+`uint8`, so the existing `propose`/`vote`/`executeProposal` methods immediately accept it.
+Same quorum + timelock protection as every other governance action, so a captured single
+chain still cannot self-grant. Regression tests:
+`TestGateway_ProposalAllocateSupply_UnblocksAttestCommit` (full propose→vote→timelock→execute
+cycle, before/after ceiling behavior) and `TestGlobalSupplyLedger_GrantAllocation` (ledger
+primitive: accumulation, invariant, nil/zero/negative rejection) in `pkg/cross_chain/`.
+Verified live: re-ran step 5 after a real `ProposalAllocateSupply` grant on chain 102 for
+chain 101 — succeeded, then step 6 (`claimMessage`) succeeded, exact balance delta confirmed.
+
+**2 throwaway-tool bugs found and fixed along the way (own tooling, not production code, not
+committed — `execution/cmd/tool/live_asset_bridge/main.go`):** (a) a single
+`RemoteCommitteePriv string` field silently overwritten across 2 `register-chain` calls on
+the same state file (once for the real peer chain, once for self-registration), causing
+`attestCommit` to fail with an invalid quorum cert because the saved private key no longer
+matched what was actually registered on-chain — diagnosed by adding a `query-registry` debug
+step comparing the on-chain pubkey against the locally-derived one, fixed by keying it
+`map[chainID]string` instead; (b) a hardcoded quorum vote count that went stale as
+`ActiveChains` grew with each executed `ProposalRegisterChain` — fixed by making all votes
+tolerate an expected post-quorum revert rather than trying to predict the exact threshold.
+
+**Finding noted but deliberately not exploited, not yet fixed — needs a decision, not a
+guess:** `vote()`/`executeProposal()` accept a caller-supplied `currentTimestamp` argument
+with no cross-check against real block time. This is what made the devnet timelock override
+above unnecessary to lean on for correctness (the override is a real, honest config value,
+not this gap) — but the gap itself means anyone can currently claim any timestamp they like
+when voting/executing, including one far in the future, bypassing the 72h timelock outright
+in production today. Not exercised here (out of scope for "prove the bridge moves real
+value," and doing so live would require deliberately faking a governance execution, which
+needs a call before doing it) — flagging for Phase 1 or a dedicated fix: should this validate
+against `blockTime` the same way `AttestCommit`'s epoch check is fail-closed, and if so is
+there a legitimate reason it currently isn't (e.g. some caller needs to backdate/forward-date
+for a reason not yet identified)?
+
+**What this proves and what's still open:** a real custom-asset bridge transfer now
+genuinely moves a real, spendable ERC-20-shaped balance from a real sender on one live chain
+to a real recipient on another live chain, through real BLS-verified governance and real
+BLS/Merkle-verified attestation — the first time in this project's history any cross-chain
+transfer has done that (Phase 0.6 documented that none ever had). Phase 0.6's native-coin
+`ProcessNativeMintBurn` wiring (item 1/2 in its fix plan) is still separately open — this
+phase only closes the custom-asset path plus the allocation-ceiling dead end that blocked
+both. Root Anchor Layer C (Phase 0.7, `peer_rpc_port` bind collision) remains unresolved and
+was worked around here the same way Phase 0.7 already does (single-validator chains, no real
+multi-node Root Anchor consensus needed for this test).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update. A real multi-validator Root Anchor devnet now reaches Healthy; nothing in this phase
+needed to route around it any more, but this phase's own live run predates that fix and this
+paragraph is left as-written for the historical record.)**
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to

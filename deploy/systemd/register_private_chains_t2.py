@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import time
@@ -34,9 +35,18 @@ ABI = """
 def main():
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     
-    # Use the known dev account we just injected into the root anchor
-    dev_priv_key = "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8"
-        
+    # DEV_PRIV_KEY must come from the environment for any real deployment — the fallback below
+    # is a PUBLIC devnet-only key committed to this repo. Never let it sign a real registration:
+    # whoever controls it can propose/vote as this account. Set DEV_PRIV_KEY yourself before
+    # running this against anything but a local throwaway devnet.
+    dev_priv_key = os.environ.get("DEV_PRIV_KEY")
+    if not dev_priv_key:
+        print("⚠️  WARNING: DEV_PRIV_KEY not set in environment — falling back to the PUBLIC")
+        print("⚠️  devnet key committed in this script. This is safe ONLY for a local")
+        print("⚠️  throwaway devnet. Set DEV_PRIV_KEY yourself before running this against")
+        print("⚠️  any real network.")
+        dev_priv_key = "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8"
+
     chain_id = w3.eth.chain_id
     print(f"Connected to Root Anchor (ChainID: {chain_id})")
     

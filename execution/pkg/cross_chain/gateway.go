@@ -94,6 +94,29 @@ type GatewayEngine struct {
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 
 	GenesisCoordinator common.Address `json:"genesisCoordinator,omitempty"`
+
+	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
+	// an explicit devnet-only config field (config.CrossChainConfig
+	// .DevnetGovernanceTimelockSecondsOverride). Zero (the value on every real chain's
+	// persisted state) means "use the real 72h DefaultGovernanceTimelockSeconds" — see that
+	// field's own doc comment for why this exists.
+	GovernanceTimelockSecondsOverride uint64 `json:"governance_timelock_seconds_override,omitempty"`
+}
+
+// ApplyGovernanceTimelockOverride is a no-op when seconds==0 (every real production config).
+// When explicitly set (devnet/testing only — see GovernanceTimelockSecondsOverride's own doc
+// comment), it both records the override for future EnsureGovernance() calls and, if a
+// Governance engine already exists (either freshly constructed by NewGatewayEngine or just
+// deserialized), updates its TimelockDelaySeconds directly so the change takes effect
+// immediately rather than only on the next from-scratch construction.
+func (g *GatewayEngine) ApplyGovernanceTimelockOverride(seconds uint64) {
+	if seconds == 0 {
+		return
+	}
+	g.GovernanceTimelockSecondsOverride = seconds
+	if g.Governance != nil {
+		g.Governance.TimelockDelaySeconds = seconds
+	}
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -135,7 +158,11 @@ func (g *GatewayEngine) EnsureGovernance() {
 		for c := range g.ChainRegistry {
 			activeChains = append(activeChains, c)
 		}
-		g.Governance = NewGovernanceEngine(activeChains)
+		if g.GovernanceTimelockSecondsOverride > 0 {
+			g.Governance = NewGovernanceEngineWithTimelock(activeChains, g.GovernanceTimelockSecondsOverride)
+		} else {
+			g.Governance = NewGovernanceEngine(activeChains)
+		}
 	}
 	if g.AssetRegistry == nil {
 		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
@@ -281,6 +308,23 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 			g.DeadChains = make(map[uint64]bool)
 		}
 		g.DeadChains[chainID] = true
+
+	case ProposalAllocateSupply:
+		// See GlobalSupplyLedger.GrantAllocation's doc comment (types.go) for why this exists:
+		// without it, no chain can ever pass attestCommit's per_chain_allocation ceiling check.
+		var grant AllocationGrantPayload
+		if err := json.Unmarshal(proposal.Payload, &grant); err != nil {
+			return nil, fmt.Errorf("invalid AllocationGrantPayload: %w", err)
+		}
+		if grant.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		if g.SupplyLedger == nil {
+			return nil, fmt.Errorf("ProposalAllocateSupply: SupplyLedger not initialized")
+		}
+		if err := g.SupplyLedger.GrantAllocation(grant.ChainID, grant.Amount); err != nil {
+			return nil, fmt.Errorf("ProposalAllocateSupply: %w", err)
+		}
 	}
 
 	return proposal, nil
