@@ -86,6 +86,69 @@ func setupTestRelayerNetwork() (*RelayerEngine, map[uint64]*GatewayEngine) {
 	return engine, chains
 }
 
+func injectMockStateRoot(relayerEngine *RelayerEngine, commitData *CertifiedCommitData) {
+	aggregateAmounts := make(map[string]*big.Int)
+	for _, m := range commitData.Messages {
+		assetStr := "0"
+		if m.AssetID != nil {
+			assetStr = m.AssetID.String()
+		}
+		if _, exists := aggregateAmounts[assetStr]; !exists {
+			aggregateAmounts[assetStr] = big.NewInt(0)
+		}
+		if m.Value != nil {
+			aggregateAmounts[assetStr].Add(aggregateAmounts[assetStr], m.Value)
+		}
+	}
+
+	sourceChainID := commitData.SourceChainID
+	reserveChainID := relayerEngine.Config.ReserveChainID
+
+	for _, m := range commitData.Messages {
+		assetStr := "0"
+		if m.AssetID != nil {
+			assetStr = m.AssetID.String()
+		}
+		aggAmount := aggregateAmounts[assetStr]
+		var assetId *big.Int
+		if m.AssetID != nil {
+			assetId = m.AssetID
+		} else {
+			assetId = big.NewInt(0)
+		}
+
+		leafSrc := AggregateValueLeaf{
+			SourceChainID:   sourceChainID,
+			CommitRoot:      commitData.CommitRoot,
+			AssetID:         assetId,
+			AggregateAmount: aggAmount,
+		}
+		hashSrc := HashAggregateValueLeaf(leafSrc)
+
+		leafRes := AggregateValueLeaf{
+			SourceChainID:   reserveChainID,
+			CommitRoot:      commitData.CommitRoot,
+			AssetID:         assetId,
+			AggregateAmount: aggAmount,
+		}
+		hashRes := HashAggregateValueLeaf(leafRes)
+
+		reserveEngine := relayerEngine.Chains[reserveChainID]
+		regReserve := reserveEngine.ChainRegistry[sourceChainID]
+		regReserve.StateRoot = hashSrc
+		reserveEngine.ChainRegistry[sourceChainID] = regReserve
+
+		destEngine := relayerEngine.Chains[m.DestChainID]
+		regDestSrc := destEngine.ChainRegistry[sourceChainID]
+		regDestSrc.StateRoot = hashSrc
+		destEngine.ChainRegistry[sourceChainID] = regDestSrc
+
+		regDestRes := destEngine.ChainRegistry[reserveChainID]
+		regDestRes.StateRoot = hashRes
+		destEngine.ChainRegistry[reserveChainID] = regDestRes
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // P4.2: Relay Tip Claiming & Competition Tests ("First Come, First Served")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,14 +177,14 @@ func TestRelayer_P4_2_TipClaimingAndConcurrencyCompetition(t *testing.T) {
 
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
+	injectMockStateRoot(relayerEngine, commitData)
 	proof := GetMerkleProof(commitData.MerkleLayers, 0)
 
 	relayer1 := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
 	relayer2 := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
 
-	// Simulate both relayers racing to claim the same message
 	winner, receipt, losers, dupErrors := relayerEngine.CompeteRelayers(
-		*msg, proof, commitData.CommitRoot, commitData.Cert,
+		*msg, big.NewInt(0), MerkleProof{}, proof, commitData.CommitRoot, commitData.Cert,
 		[]common.Address{relayer1, relayer2},
 	)
 
@@ -178,6 +241,7 @@ func TestRelayer_Scenario10_1_NativeTransferViaReserve(t *testing.T) {
 	// Step 2: Certified commit generated on Chain A
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
+	injectMockStateRoot(relayerEngine, commitData)
 
 	// Step 3 & 4 & 5: Relayer carries cert to Reserve (1000), checks ceiling, forwards to Chain B (102)
 	receipts, err := relayerEngine.RelayCommit(101, commitData.CommitRoot, relayerEngine.Config.RelayerAddress)
@@ -249,6 +313,7 @@ func TestRelayer_InvariantHoldsAcrossMultipleReserveRoutedTransfers(t *testing.T
 
 		commitData, err := relayerEngine.CertifyCommit(tr.fromChain, 1, []CrossChainMessage{*msg}, nil)
 		require.NoError(t, err)
+		injectMockStateRoot(relayerEngine, commitData)
 
 		_, err = relayerEngine.RelayCommit(tr.fromChain, commitData.CommitRoot, relayerEngine.Config.RelayerAddress)
 		require.NoError(t, err)
@@ -284,6 +349,7 @@ func TestRelayer_Scenario10_2_ContractCallWithValueAndOriginalSender(t *testing.
 
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
+	injectMockStateRoot(relayerEngine, commitData)
 
 	receipts, err := relayerEngine.RelayCommit(101, commitData.CommitRoot, relayerEngine.Config.RelayerAddress)
 	require.NoError(t, err)
@@ -350,6 +416,7 @@ func TestRelayer_Scenario10_4_DestinationOfflinePendingZeroFork(t *testing.T) {
 
 	commitData, err := relayerEngine.CertifyCommit(101, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
+	injectMockStateRoot(relayerEngine, commitData)
 
 	// Simulate Chain B is temporarily OFFLINE (maintenance / network partition)
 	relayerEngine.SetChainOffline(102, true)
@@ -471,6 +538,7 @@ func TestRelayer_Scenario10_7_AdversarialOverdrawAttackBlocked(t *testing.T) {
 
 	commitData, err := relayerEngine.CertifyCommit(103, 1, []CrossChainMessage{*msg}, nil)
 	require.NoError(t, err)
+	injectMockStateRoot(relayerEngine, commitData)
 
 	// Reserve MUST reject the overdrawn commit because requested (1,000,000) > available (500)
 	_, errOverdraw := relayerEngine.RelayCommit(103, commitData.CommitRoot, relayerEngine.Config.RelayerAddress)

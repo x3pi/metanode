@@ -276,9 +276,11 @@ func (g *GatewayEngine) AttestCommit(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, cert, true)
+	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, true)
 }
 
 // AttestReserveIssuedCommit executes Phase 1 of Attest-then-Claim for a commit issued by RESERVE
@@ -291,15 +293,19 @@ func (g *GatewayEngine) AttestReserveIssuedCommit(
 	reserveChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, cert, false)
+	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false)
 }
 
 func (g *GatewayEngine) attestCommitInternal(
 	sourceChainID uint64,
 	commitRoot common.Hash,
 	aggregateAmount *big.Int,
+	assetId *big.Int,
+	aggregateProof MerkleProof,
 	cert QuorumCert,
 	enforceCeiling bool,
 ) (*AttestedCommit, error) {
@@ -384,6 +390,31 @@ func (g *GatewayEngine) attestCommitInternal(
 	if aggregateAmount == nil {
 		aggregateAmount = big.NewInt(0)
 	}
+	if assetId == nil {
+		assetId = big.NewInt(0)
+	}
+
+	// Verify cryptographic binding of the declared aggregateAmount to the source chain's state root
+	leaf := AggregateValueLeaf{
+		SourceChainID:   sourceChainID,
+		CommitRoot:      commitRoot,
+		AssetID:         assetId,
+		AggregateAmount: aggregateAmount,
+	}
+	leafHash := HashAggregateValueLeaf(leaf)
+	if !VerifyMerkleProof(leafHash, aggregateProof, registry.StateRoot) {
+		return nil, ErrInvalidMerkleProof
+	}
+
+	key := fmt.Sprintf("%d:%s:%s", sourceChainID, commitRoot.Hex(), assetId.String())
+
+	// Enforce write-once semantics
+	if existing, exists := g.AttestedCommits[key]; exists {
+		if existing.FundedAmount.Cmp(aggregateAmount) != 0 {
+			return nil, fmt.Errorf("attestCommit: aggregateAmount mismatch for already-attested asset")
+		}
+		return &existing, nil
+	}
 
 	if enforceCeiling {
 		// Check per_chain_allocation ceiling (Scenario 10.7) — only meaningful for a private
@@ -401,10 +432,10 @@ func (g *GatewayEngine) attestCommitInternal(
 		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
 	}
 
-	key := fmt.Sprintf("%d:%s", sourceChainID, commitRoot.Hex())
 	attested := AttestedCommit{
 		SourceChainID: sourceChainID,
 		CommitRoot:    commitRoot,
+		AssetID:       new(big.Int).Set(assetId),
 		Epoch:         cert.Epoch,
 		FundedAmount:  new(big.Int).Set(aggregateAmount),
 		ClaimedAmount: big.NewInt(0),
@@ -430,12 +461,16 @@ func (g *GatewayEngine) ClaimMessage(
 		return currentStatus, fmt.Errorf("%w: message %s has status %d", ErrAlreadyClaimed, message.MessageID.Hex(), currentStatus)
 	}
 
-	key := fmt.Sprintf("%d:%s", message.SourceChainID, commitRoot.Hex())
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	attested, exists := g.AttestedCommits[key]
 	if !exists {
 		// 2-hop routed transfers via Reserve / Hub Chain (Section 2.2(b))
 		for chainID := range g.ChainRegistry {
-			k := fmt.Sprintf("%d:%s", chainID, commitRoot.Hex())
+			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
 			if a, ok := g.AttestedCommits[k]; ok {
 				attested = a
 				exists = true
@@ -552,7 +587,7 @@ func (g *GatewayEngine) VerifyAndExecute(
 	commitRoot common.Hash,
 	relayer common.Address,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, cert); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, proof, cert); err != nil {
 		return MessageStatusPending, err
 	}
 	return g.ClaimMessage(message, proof, commitRoot, relayer)

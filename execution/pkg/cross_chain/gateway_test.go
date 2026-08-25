@@ -95,11 +95,16 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 	}
 
 	// Attack Case (Scenario 10.7): aggregateAmount = 6000 > available allocation = 5000 -> REJECT
-	_, errAttack := engine.AttestCommit(101, commitRoot, big.NewInt(6000), cert)
+	reg101 := engine.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(6000)})
+	engine.ChainRegistry[101] = reg101
+	_, errAttack := engine.AttestCommit(101, commitRoot, big.NewInt(6000), big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, errAttack, ErrAllocationExceeded)
 
 	// Valid Case: aggregateAmount = 2000 <= 5000 -> Succeeded & Deducts allocation to 3000
-	attested, errValid := engine.AttestCommit(101, commitRoot, big.NewInt(2000), cert)
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(2000)})
+	engine.ChainRegistry[101] = reg101
+	attested, errValid := engine.AttestCommit(101, commitRoot, big.NewInt(2000), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, errValid)
 	assert.Equal(t, big.NewInt(2000), attested.FundedAmount)
 	assert.Equal(t, big.NewInt(3000), engine.SupplyLedger.PerChainAllocation[101])
@@ -141,7 +146,10 @@ func TestGateway_P2_3_ClaimMessageAndDoubleClaimPrevention(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0x0F},
 	}
-	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), cert)
+	reg101 := engine.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(500)})
+	engine.ChainRegistry[101] = reg101
+	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, errAttest)
 
 	// First Claim -> SUCCESS (P2.3)
@@ -191,7 +199,10 @@ func TestGateway_P2_3_1_HardCapCommitCapacityDefense(t *testing.T) {
 		SignerBitmap:       []byte{0x0F},
 	}
 	// Commit is only funded with 500
-	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), cert)
+	reg101 := engine.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(500)})
+	engine.ChainRegistry[101] = reg101
+	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, errAttest)
 
 	// Attacker tries to claim 600 -> MUST REJECT (Hard-cap capacity exceeded)
@@ -284,7 +295,10 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig3,
 		SignerBitmap:       []byte{0x07}, // bits 0, 1, 2 set: 1 + 2 + 4 = 7
 	}
-	attested, err := gateway.AttestCommit(201, commitRoot, big.NewInt(1000), cert3)
+	reg201 := gateway.ChainRegistry[201]
+	reg201.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 201, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(1000)})
+	gateway.ChainRegistry[201] = reg201
+	attested, err := gateway.AttestCommit(201, commitRoot, big.NewInt(1000), big.NewInt(0), MerkleProof{}, cert3)
 	require.NoError(t, err)
 	assert.Equal(t, commitRoot, attested.CommitRoot)
 
@@ -299,7 +313,9 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig2,
 		SignerBitmap:       []byte{0x03}, // bits 0, 1 set: 1 + 2 = 3
 	}
-	_, errQuorum := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), cert2)
+	reg201.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 201, CommitRoot: commitRoot2, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(1000)})
+	gateway.ChainRegistry[201] = reg201
+	_, errQuorum := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), big.NewInt(0), MerkleProof{}, cert2)
 	assert.ErrorIs(t, errQuorum, ErrQuorumNotReached)
 
 	// Case 3: Bitmap claims 3 signers (0, 1, 2) but aggregate signature only contains 2 signers -> BLS Verify Fails
@@ -308,7 +324,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig2,      // only 2 signatures aggregated
 		SignerBitmap:       []byte{0x07}, // claims 3 signers
 	}
-	_, errBLS := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), certForged)
+	_, errBLS := gateway.AttestCommit(201, commitRoot2, big.NewInt(1000), big.NewInt(0), MerkleProof{}, certForged)
 	assert.ErrorIs(t, errBLS, ErrInvalidBLSSignature)
 
 	// Case 4: All 4 validators sign -> Stake = 100 >= 67 -> SUCCESS
@@ -324,7 +340,9 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig4,
 		SignerBitmap:       []byte{0x0F}, // bits 0, 1, 2, 3 set = 15
 	}
-	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), cert4)
+	reg201.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 201, CommitRoot: commitRoot4, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(2000)})
+	gateway.ChainRegistry[201] = reg201
+	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), big.NewInt(0), MerkleProof{}, cert4)
 	require.NoError(t, err4)
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }

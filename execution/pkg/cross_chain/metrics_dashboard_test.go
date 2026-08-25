@@ -102,8 +102,13 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 		SignerBitmap:       []byte{0x01},
 	}
 
+	// Set StateRoot to match the malicious claim
+	reg101 := gateway.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: hackAmount})
+	gateway.ChainRegistry[101] = reg101
+
 	// Trigger overdraw attack via gateway
-	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, cert)
+	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, err, ErrAllocationExceeded, "Overdraw attempt must be rejected")
 
 	// Verify instant alert received in channel within milliseconds (< 1s)

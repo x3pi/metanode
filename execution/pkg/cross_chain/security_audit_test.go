@@ -89,7 +89,7 @@ func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 		AggregateSignature: make([]byte, 48), // Empty signature
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certInvalid)
+	_, errInvalidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, certInvalid)
 	assert.Error(t, errInvalidBLS, "Empty/invalid BLS signature must fail-closed")
 
 	// 2. Valid Real BLS Signature -> MUST PASS
@@ -100,7 +100,10 @@ func TestAudit_BLSQuorumCertAndRogueKeyDefense(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), certValid)
+	reg101 := engine.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)})
+	engine.ChainRegistry[101] = reg101
+	attested, errValidBLS := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, certValid)
 	require.NoError(t, errValidBLS)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 
@@ -201,7 +204,10 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), cert)
+	reg102 := engine.ChainRegistry[102]
+	reg102.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 102, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(500)})
+	engine.ChainRegistry[102] = reg102
+	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(500), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, err)
 
 	// Stress Test: 50 concurrent workers try to claim the EXACT SAME message simultaneously
@@ -265,7 +271,10 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0xFF},
 	}
-	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), cert)
+	reg102 := engine.ChainRegistry[102]
+	reg102.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 102, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(300)})
+	engine.ChainRegistry[102] = reg102
+	_, err = engine.AttestCommit(102, commitRoot, big.NewInt(300), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, err)
 
 	// Step 1: Claim message successfully
@@ -365,21 +374,39 @@ func TestAudit_AdversarialOverdrawAndSupplyCeiling(t *testing.T) {
 	}
 
 	// Attack 1: Overdraw attempt 10,000,000 MTN -> BLOCKED
-	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), cert)
+	reg101 := engine.ChainRegistry[101]
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(10_000_000)})
+	engine.ChainRegistry[101] = reg101
+	_, errOverdraw := engine.AttestCommit(101, commitRoot, big.NewInt(10_000_000), big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, errOverdraw, ErrAllocationExceeded, "Overdraw attempt must be blocked")
 
 	// Attack 2: Exact boundary + 1 wei -> BLOCKED
-	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), cert)
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(5_001)})
+	engine.ChainRegistry[101] = reg101
+	_, errBoundaryPlus1 := engine.AttestCommit(101, commitRoot, big.NewInt(5_001), big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, errBoundaryPlus1, ErrAllocationExceeded, "Allocation + 1 wei must be blocked")
 
 	// Valid 1: Exact allocation 5,000 MTN -> PASS
-	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), cert)
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(5_000)})
+	engine.ChainRegistry[101] = reg101
+	attested, errExact := engine.AttestCommit(101, commitRoot, big.NewInt(5_000), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, errExact)
 	assert.Equal(t, big.NewInt(5_000), attested.FundedAmount)
 	assert.Zero(t, ledger.PerChainAllocation[101].Sign())
 
 	// Attack 3: Subsequent request when allocation is 0 -> BLOCKED
-	_, errExhausted := engine.AttestCommit(101, commitRoot, big.NewInt(1), cert)
+	// Use a new commitRoot so it's not blocked by "already-attested" check
+	commitRoot2 := common.HexToHash("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	commitMsg2 := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot2.Bytes()...)
+	sig2 := bls.Sign(kp.PrivateKey(), commitMsg2)
+	cert2 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig2.Bytes(),
+		SignerBitmap:       []byte{0xFF},
+	}
+	reg101.StateRoot = HashAggregateValueLeaf(AggregateValueLeaf{SourceChainID: 101, CommitRoot: commitRoot2, AssetID: big.NewInt(0), AggregateAmount: big.NewInt(1)})
+	engine.ChainRegistry[101] = reg101
+	_, errExhausted := engine.AttestCommit(101, commitRoot2, big.NewInt(1), big.NewInt(0), MerkleProof{}, cert2)
 	assert.ErrorIs(t, errExhausted, ErrAllocationExceeded, "Exhausted allocation must be blocked")
 }
 
@@ -399,7 +426,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              0,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), oldCert)
+	_, errOldEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, oldCert)
 	assert.ErrorIs(t, errOldEpoch, ErrEpochMismatch, "Old epoch cert must be rejected")
 
 	// Attack 2: Future Epoch Cert (Epoch = 2) -> BLOCKED
@@ -407,7 +434,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              2,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), futureCert)
+	_, errFutureEpoch := engine.AttestCommit(101, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, futureCert)
 	assert.ErrorIs(t, errFutureEpoch, ErrEpochMismatch, "Future epoch cert must be rejected")
 
 	// Attack 3: Unknown Chain ID (Chain = 999) -> BLOCKED
@@ -415,7 +442,7 @@ func TestAudit_FailClosedEpochAlignment(t *testing.T) {
 		Epoch:              1,
 		AggregateSignature: sig.Bytes(),
 	}
-	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), unknownCert)
+	_, errUnknownChain := engine.AttestCommit(999, commitRoot, big.NewInt(100), big.NewInt(0), MerkleProof{}, unknownCert)
 	assert.ErrorIs(t, errUnknownChain, ErrUnknownSourceChain, "Unknown source chain must be rejected")
 }
 

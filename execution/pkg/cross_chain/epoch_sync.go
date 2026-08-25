@@ -89,6 +89,42 @@ func HashAccountLeaf(leaf AccountLeaf) common.Hash {
 	return out
 }
 
+// HashAggregateValueLeaf computes the 32-byte Keccak-256 leaf hash for an AggregateValueLeaf with 0x02 domain separation.
+func HashAggregateValueLeaf(leaf AggregateValueLeaf) common.Hash {
+	var data []byte
+	data = append(data, 0x02) // Domain separation: 0x02 for AggregateValueLeaf
+
+	var cBuf [8]byte
+	binary.BigEndian.PutUint64(cBuf[:], leaf.SourceChainID)
+	data = append(data, cBuf[:]...)
+
+	data = append(data, leaf.CommitRoot.Bytes()...)
+
+	assetBytes := make([]byte, 32)
+	if leaf.AssetID != nil {
+		raw := leaf.AssetID.Bytes()
+		if len(raw) <= 32 {
+			copy(assetBytes[32-len(raw):], raw)
+		}
+	}
+	data = append(data, assetBytes...)
+
+	amountBytes := make([]byte, 32)
+	if leaf.AggregateAmount != nil {
+		raw := leaf.AggregateAmount.Bytes()
+		if len(raw) <= 32 {
+			copy(amountBytes[32-len(raw):], raw)
+		}
+	}
+	data = append(data, amountBytes...)
+
+	hasher := sha3.NewLegacyKeccak256()
+	hasher.Write(data)
+	var out common.Hash
+	hasher.Sum(out[:0])
+	return out
+}
+
 func hashNodePair(left, right common.Hash) common.Hash {
 	return hashPair(left, right)
 }

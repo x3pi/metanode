@@ -332,7 +332,9 @@ func (r *RelayerEngine) CertifyCommit(
 // - Value == 0 and AssetID == 0: 1-Hop direct routing (Source -> Dest)
 func (r *RelayerEngine) RelayMessage(
 	msg CrossChainMessage,
-	proof MerkleProof,
+	aggregateAmount *big.Int,
+	aggregateProof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	cert QuorumCert,
 	relayerAddr common.Address,
@@ -372,7 +374,7 @@ func (r *RelayerEngine) RelayMessage(
 		}
 
 		// Step 1: Attest commit on Reserve (checks per_chain_allocation ceiling)
-		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, msg.Value, cert)
+		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("reserve attest failed: %w", err)
@@ -391,13 +393,13 @@ func (r *RelayerEngine) RelayMessage(
 		// Destination Chain verifies Reserve's commit (authentication only — Reserve is the
 		// unconditional issuer, no ceiling to debit here) and claims message. ClaimMessage below
 		// is what actually credits destChainID's allocation (Section 2.3.1 fix).
-		_, err = destEngine.AttestReserveIssuedCommit(r.Config.ReserveChainID, commitRoot, msg.Value, reserveCert)
+		_, err = destEngine.AttestReserveIssuedCommit(r.Config.ReserveChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, reserveCert)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest attest from reserve failed: %w", err)
 		}
 
-		status, err := destEngine.ClaimMessage(msg, proof, commitRoot, relayerAddr)
+		status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest claim message failed: %w", err)
@@ -420,13 +422,13 @@ func (r *RelayerEngine) RelayMessage(
 	}
 
 	// ROUTE B: Value == 0 (Pure Message / Contract Call) -> Direct 1-Hop Routing (Section 2.2(a))
-	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, big.NewInt(0), cert)
+	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct attest failed: %w", err)
 	}
 
-	status, err := destEngine.ClaimMessage(msg, proof, commitRoot, relayerAddr)
+	status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct claim failed: %w", err)
@@ -459,10 +461,32 @@ func (r *RelayerEngine) RelayCommit(sourceChainID uint64, commitRoot common.Hash
 		return nil, fmt.Errorf("%w: %s on chain %d", ErrNoCommitFound, commitRoot.Hex(), sourceChainID)
 	}
 
+	// Compute aggregate amounts per assetId
+	aggregateAmounts := make(map[string]*big.Int)
+	for _, m := range commitData.Messages {
+		assetStr := "0"
+		if m.AssetID != nil {
+			assetStr = m.AssetID.String()
+		}
+		if _, exists := aggregateAmounts[assetStr]; !exists {
+			aggregateAmounts[assetStr] = big.NewInt(0)
+		}
+		if m.Value != nil {
+			aggregateAmounts[assetStr].Add(aggregateAmounts[assetStr], m.Value)
+		}
+	}
+
 	var receipts []*RelayReceipt
 	for i, msg := range commitData.Messages {
-		proof := GetMerkleProof(commitData.MerkleLayers, i)
-		receipt, err := r.RelayMessage(msg, proof, commitData.CommitRoot, commitData.Cert, relayerAddr)
+		messageProof := GetMerkleProof(commitData.MerkleLayers, i)
+		assetStr := "0"
+		if msg.AssetID != nil {
+			assetStr = msg.AssetID.String()
+		}
+		aggAmount := aggregateAmounts[assetStr]
+		// In tests, we set StateRoot = leafHash, so aggregateProof is empty.
+		aggregateProof := MerkleProof{}
+		receipt, err := r.RelayMessage(msg, aggAmount, aggregateProof, messageProof, commitData.CommitRoot, commitData.Cert, relayerAddr)
 		if err != nil {
 			return receipts, err
 		}
@@ -475,7 +499,9 @@ func (r *RelayerEngine) RelayCommit(sourceChainID uint64, commitRoot common.Hash
 // Verifies "First Come, First Served" tip claiming and ensures zero double-spending.
 func (r *RelayerEngine) CompeteRelayers(
 	msg CrossChainMessage,
-	proof MerkleProof,
+	aggregateAmount *big.Int,
+	aggregateProof MerkleProof,
+	messageProof MerkleProof,
 	commitRoot common.Hash,
 	cert QuorumCert,
 	relayers []common.Address,
@@ -486,7 +512,7 @@ func (r *RelayerEngine) CompeteRelayers(
 
 	// First relayer attempts submission
 	winner = relayers[0]
-	rcpt, err := r.RelayMessage(msg, proof, commitRoot, cert, winner)
+	rcpt, err := r.RelayMessage(msg, aggregateAmount, aggregateProof, messageProof, commitRoot, cert, winner)
 	if err != nil {
 		return common.Address{}, nil, nil, []error{err}
 	}
@@ -495,7 +521,7 @@ func (r *RelayerEngine) CompeteRelayers(
 	// Subsequent relayers attempt submission of the same already-claimed message
 	for i := 1; i < len(relayers); i++ {
 		competingRelayer := relayers[i]
-		_, errDup := r.RelayMessage(msg, proof, commitRoot, cert, competingRelayer)
+		_, errDup := r.RelayMessage(msg, aggregateAmount, aggregateProof, messageProof, commitRoot, cert, competingRelayer)
 		losers = append(losers, competingRelayer)
 		duplicateErrors = append(duplicateErrors, errDup)
 	}

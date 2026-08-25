@@ -284,12 +284,17 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "attestCommit":
-		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[3]),
-			AggregateSignature: hexutil.Bytes(mustBytes(args[4])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[5])),
+		assetId := mustBigInt(args[3])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[4]).Uint64(),
+			Siblings:  mustHashSlice(args[5]),
 		}
-		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), cert); err != nil {
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[6]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
+		}
+		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
 			return nil, nil, err
 		}
 

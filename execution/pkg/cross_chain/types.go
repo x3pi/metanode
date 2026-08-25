@@ -260,6 +260,7 @@ type Channel struct {
 type AttestedCommit struct {
 	SourceChainID uint64      `json:"source_chain_id"`
 	CommitRoot    common.Hash `json:"commit_root"`
+	AssetID       *big.Int    `json:"asset_id"`
 	Epoch         uint64      `json:"epoch"`
 	FundedAmount  *big.Int    `json:"funded_amount"`
 	ClaimedAmount *big.Int    `json:"claimed_amount"`
@@ -292,4 +293,12 @@ type GovernanceProposal struct {
 type AccountLeaf struct {
 	Account common.Address `json:"account"`
 	Balance *big.Int       `json:"balance"`
+}
+
+// AggregateValueLeaf represents the real total value moved for a given asset in a commit root (Milestone E, Section 11.2).
+type AggregateValueLeaf struct {
+	SourceChainID   uint64
+	CommitRoot      common.Hash
+	AssetID         *big.Int
+	AggregateAmount *big.Int
 }
