@@ -306,12 +306,35 @@ func TestGatewayHandler_Refund(t *testing.T) {
 		t.Fatalf("GetGatewayHandler() error: %v", err)
 	}
 
-	// Seed chain 101 with 5000 allocation so Refund has something to restore into.
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+	pop101 := cross_chain.PopSign(kp101.PrivateKey(), kp101.PublicKey())
+	pop102 := cross_chain.PopSign(kp102.PrivateKey(), kp102.PublicKey())
+
 	engine, err := loadGatewayEngine(cs)
 	if err != nil {
 		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
 	}
-	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(5000), map[uint64]*big.Int{101: big.NewInt(5000)})
+	engine.LocalChainID = 101
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		101: {
+			ChainID: 101,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kp101.BytesPublicKey(), Stake: 1000, PopSignature: pop101.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+		102: {
+			ChainID: 102,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kp102.BytesPublicKey(), Stake: 1000, PopSignature: pop102.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
 	if err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
@@ -339,11 +362,79 @@ func TestGatewayHandler_Refund(t *testing.T) {
 		t.Fatalf("outbound() transaction failed: %q", reason)
 	}
 
-	refundCalldata, err := h.abi.Pack("refund", messageID, big.NewInt(101), sender, big.NewInt(100), true)
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     messageID,
+		SourceChainID: 101,
+		DestChainID:   102,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(100),
+		Payload:       []byte{},
+		Tip:           big.NewInt(0),
+		Ordered:       false,
+	}
+
+	// Build commit tree
+	commitRoot, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	if err != nil {
+		t.Fatalf("BuildCommitTree failed: %v", err)
+	}
+	proof := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	// Attest commit on chain 101
+	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+	sig101 := bls.Sign(kp101.PrivateKey(), commitMsg)
+	attestCalldata, err := h.abi.Pack("attestCommit",
+		big.NewInt(101),
+		commitRoot,
+		aggAmounts["0"],
+		big.NewInt(0),
+		big.NewInt(int64(aggregateProof.LeafIndex)),
+		aggregateProof.Siblings,
+		uint64(1),
+		sig101.Bytes(),
+		[]byte{0x01},
+	)
+	if err != nil {
+		t.Fatalf("pack attestCommit failed: %v", err)
+	}
+	attestTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, attestCalldata))
+	if _, _, failAttest := h.HandleTransaction(context.Background(), cs, attestTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failAttest {
+		t.Fatalf("attestCommit transaction failed")
+	}
+
+	// Chain 102 committee signs failure cert
+	failMsg := cross_chain.ComputeMessageFailureAttestMessage(messageID, 102)
+	failSig := bls.Sign(kp102.PrivateKey(), failMsg)
+
+	refundCalldata, err := h.abi.Pack("refund",
+		messageID,
+		big.NewInt(101),
+		big.NewInt(102),
+		big.NewInt(1),
+		uint8(1),
+		sender,
+		target,
+		big.NewInt(0),
+		big.NewInt(100),
+		[]byte{},
+		big.NewInt(0),
+		false,
+		big.NewInt(int64(proof.LeafIndex)),
+		proof.Siblings,
+		commitRoot,
+		uint64(1),
+		failSig.Bytes(),
+		[]byte{0x01},
+	)
 	if err != nil {
 		t.Fatalf("pack refund() calldata: %v", err)
 	}
-	refundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, refundCalldata))
+	refundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
 	if rcp, _, failed := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
 		reason := ""
 		if rcp != nil {
@@ -362,7 +453,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	}
 
 	// Double refund must be rejected (idempotent guard, Section 2.4 point 3).
-	refundTx2 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
+	refundTx2 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 3, big.NewInt(0), marshalCallData(t, refundCalldata))
 	rcpDup, _, failedDup := h.HandleTransaction(context.Background(), cs, refundTx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
 	if !failedDup {
 		t.Fatalf("expected second refund() to fail (already refunded), but it succeeded")

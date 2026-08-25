@@ -314,15 +314,42 @@ func TestRelayer_Scenario10_3_ContractCallFailedAndAutomatedRefund(t *testing.T)
 	msg, err := relayerEngine.SubmitOutbound(101, sender, params, txHash)
 	require.NoError(t, err)
 
+	// Build commit tree with the message
+	messages := []CrossChainMessage{*msg}
+	commitRoot, layers, aggAmounts, aggIndex, err := BuildCommitTree(messages)
+	require.NoError(t, err)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	// Attest commit on Chain 101
+	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
+	sig101 := bls.Sign(relayerEngine.Signers[101][0].PrivateKey(), commitMsg)
+	cert101 := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: sig101.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
+	_, err = chains[101].AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101)
+	require.NoError(t, err)
+
+	// Destination chain (102) reverts and committee signs failure cert
+	failMsg := ComputeMessageFailureAttestMessage(msg.MessageID, 102)
+	failSig := bls.Sign(relayerEngine.Signers[102][0].PrivateKey(), failMsg)
+	destFailureCert := QuorumCert{
+		Epoch:              1,
+		AggregateSignature: failSig.Bytes(),
+		SignerBitmap:       []byte{0x01},
+	}
+
 	// Simulate contract failure at destination: Relayer executes automated refund pipeline
-	err = relayerEngine.ProcessRefund(101, 102, msg.MessageID, sender, refundAmount, true)
+	err = relayerEngine.ProcessRefund(*msg, proof, commitRoot, destFailureCert)
 	require.NoError(t, err)
 
 	// Chain A reflects refunded status
 	assert.Equal(t, MessageStatusRefunded, chains[101].GetMessageStatus(msg.MessageID))
 
 	// Double refund protection: attempting a 2nd refund MUST fail
-	errDup := relayerEngine.ProcessRefund(101, 102, msg.MessageID, sender, refundAmount, true)
+	errDup := relayerEngine.ProcessRefund(*msg, proof, commitRoot, destFailureCert)
 	assert.ErrorIs(t, errDup, ErrInvalidRefundState)
 }
 

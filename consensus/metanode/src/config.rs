@@ -446,6 +446,24 @@ impl NodeConfig {
     pub fn load_protocol_keypair(&self) -> Result<ProtocolKeyPair> {
         if let Some(path) = &self.protocol_key_path {
             let content = fs::read_to_string(path)?;
+            
+            // First try to parse as JSON from metanode-keytool
+            #[derive(serde::Deserialize)]
+            struct KeyFile {
+                private_key_hex: String,
+            }
+            if let Ok(json_key) = serde_json::from_str::<KeyFile>(&content) {
+                let private_bytes = hex::decode(json_key.private_key_hex.trim())
+                    .context("Failed to decode hex private key")?;
+                let private_bytes: [u8; 32] = private_bytes.try_into()
+                    .unwrap_or_else(|v: Vec<u8>| panic!("Expected 32 bytes, got {}", v.len()));
+                use fastcrypto::ed25519::Ed25519PrivateKey;
+                let private_key = Ed25519PrivateKey::from_bytes(&private_bytes)
+                    .context("Failed to create private key from bytes")?;
+                let keypair = fastcrypto::ed25519::Ed25519KeyPair::from(private_key);
+                return Ok(ProtocolKeyPair::new(keypair));
+            }
+
             use base64::{engine::general_purpose, Engine as _};
             let bytes = general_purpose::STANDARD
                 .decode(content.trim())
@@ -473,6 +491,24 @@ impl NodeConfig {
     pub fn load_network_keypair(&self) -> Result<NetworkKeyPair> {
         if let Some(path) = &self.network_key_path {
             let content = fs::read_to_string(path)?;
+
+            // First try to parse as JSON from metanode-keytool
+            #[derive(serde::Deserialize)]
+            struct KeyFile {
+                private_key_hex: String,
+            }
+            if let Ok(json_key) = serde_json::from_str::<KeyFile>(&content) {
+                let private_bytes = hex::decode(json_key.private_key_hex.trim())
+                    .context("Failed to decode hex private key")?;
+                let private_bytes: [u8; 32] = private_bytes.try_into()
+                    .unwrap_or_else(|v: Vec<u8>| panic!("Expected 32 bytes, got {}", v.len()));
+                use fastcrypto::ed25519::Ed25519PrivateKey;
+                let private_key = Ed25519PrivateKey::from_bytes(&private_bytes)
+                    .context("Failed to create private key from bytes")?;
+                let keypair = fastcrypto::ed25519::Ed25519KeyPair::from(private_key);
+                return Ok(NetworkKeyPair::new(keypair));
+            }
+
             use base64::{engine::general_purpose, Engine as _};
             let bytes = general_purpose::STANDARD
                 .decode(content.trim())

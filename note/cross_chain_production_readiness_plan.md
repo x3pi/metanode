@@ -23,6 +23,132 @@ security review has happened. **3 critical bugs found across 2 internal review p
 freshly-written code is a base rate, not bad luck** — do not skip the gates below to save
 time, and stay suspicious of any new cryptographic/authorization code the same way.
 
+---
+
+## Phase 0.5 — critical finding + in-progress work, found and FIXED same day (2026-08-25, 3rd review pass)
+
+> ✅ **RESOLVED 2026-08-25, same day as found.** Item 1's fix (real `MerkleProof` +
+> destination `QuorumCert` binding, `VerifyQuorumCertAgainstRegistry` extracted and reused,
+> `ProcessRefund`'s redundant unchecked Reserve credit removed) is committed in the **same
+> commit/PR** as this writeup — satisfies the responsible-disclosure rule below, which is
+> kept as the record of why this section was held back from `git commit`/push until the fix
+> landed. Verified before commit: `go build ./...`, `go vet ./...`, `gofmt -l` clean, full
+> `go test ./...` (whole `execution/` module) 100% pass including the new exploit-reproduction
+> regression tests in `security_audit_test.go`'s `TestAudit_AntiDoubleMintViaRefundRaceGuard`;
+> `cargo build --release` clean for the `consensus/metanode/src/config.rs` change. Items 2
+> and 3 below are also fixed (register_chains tool rewritten and compiles; propose() fee
+> tests updated, all pass).
+>
+> **Original responsible-disclosure note (kept for context):** `x3pi/metanode` is a
+> **public** GitHub repo — item 1 documented a live, unpatched, exact-reproduction-steps
+> exploit against code already on `dev`. The rule that applied while unfixed: never
+> `git commit`/`push`/open a PR containing this section unless the fix is included in that
+> same commit/PR; keep it local/uncommitted otherwise. That gate is why this file sat
+> uncommitted from when the bug was found until the fix above landed.
+
+Found while reviewing the current state ahead of a T2 testnet push. Item 1 is the same bug
+shape as PR #56/#58 (see `git log`/PR history for the exact fix commit once pushed).
+
+### 1. CRITICAL (FIXED) — `GatewayEngine.Refund()` minted allocation from nothing
+
+`execution/pkg/cross_chain/gateway.go:638-673`. This is the **4th instance of the exact
+same bug class** as PR #56 (Milestone E `attestCommit`) and PR #58 (Phase 0
+`claimDeadChainBalance`): a value that must be cryptographically bound to committee-attested
+state is instead trusted directly from the caller.
+
+```go
+func (g *GatewayEngine) Refund(
+    messageID common.Hash, sourceChainID uint64, sender common.Address,
+    amount *big.Int, isFailedProofValid bool,
+) error {
+    ...
+    if !isFailedProofValid {                 // ← caller-supplied bool, zero crypto/state checks
+        return ErrInvalidRefundProof
+    }
+    g.MessageStatus[messageID] = MessageStatusRefunded
+    ...
+    g.SupplyLedger.PerChainAllocation[sourceChainID] =        // ← raw add, no matching debit anywhere,
+        new(big.Int).Add(currAlloc, amount)                   //   no VerifyInvariant() call (contrast
+                                                                //   with TransferAllocation, types.go:131,
+                                                                //   used correctly by ClaimDeadChainBalance)
+```
+
+**Exploit:** call `refund` (`gateway_handler.go:338`, reachable as a normal write tx, no
+extra auth) with any never-before-seen `messageID`, any `sourceChainID`, any `amount`, and
+`isFailedProofValid=true`. `MessageStatus[messageID]` defaults to `Pending` for an unknown
+ID, so the status check passes trivially; the bool check passes trivially; `amount` is
+credited to that chain's `per_chain_allocation` with nothing debited anywhere. That
+inflated allocation then passes `AttestCommit`'s ceiling check
+(`gateway.go:516`), letting far more value be bridged out of that chain than it was ever
+entitled to. `RelayerEngine.ProcessRefund` (`relayer.go:587,600`) makes it worse: it
+forwards the same unverified bool into `Refund()` *and* separately applies a second,
+independent unchecked credit to Reserve's own ledger from one call.
+
+`security_audit_test.go:290`'s existing `Refund` test ("Anti-Double-Mint via Refund
+Pathway Race Guard") only covers the double-claim race and the trivial
+`isFailedProofValid=false` rejection — it never exercises the real attack (unused
+messageID + `true`), so CI is currently green despite this being live.
+
+**Why this needs a design decision, not a quick patch (stop and confirm before
+implementing, per this doc's own "how to work" section):** unlike `AttestCommit`/
+`ClaimMessage`, there is currently **no per-message ledger entry** recording how much was
+reserved for a specific `messageID` — `attestCommitInternal` (gateway.go:516-521) debits
+`sourceChainID` for the whole commit's `aggregateAmount` in one shot; `ClaimMessage`
+(gateway.go:602-607) credits `LocalChainID` per message, capped in total by
+`AttestedCommit.FundedAmount`. So a correct fix needs `Refund()` to take a real
+`CrossChainMessage` + `MerkleProof` (bound to an already-`AttestedCommit`'s `commitRoot`,
+the same way `ClaimMessage` does) so `amount` can't be fabricated, **plus** a real
+`QuorumCert` from the *destination* chain's committee attesting that this specific message
+genuinely failed execution there — this is exactly what
+`note/cross_chain_root_anchor_architecture.md` mục 2.4 originally specified ("relayer lấy
+quorum cert của B xác nhận message X FAILED, mang về A") and what got short-circuited with
+a trust-the-caller bool. The destination-attests-failure digest/QuorumCert wire format
+isn't designed yet — that's the actual open question, same category as Phase 0's
+`AccountTreeRoot` decision. Also decide: does `ProcessRefund`'s second, independent Reserve
+credit make sense at all once `Refund()` itself is fixed, or was it compensating for the
+same gap and should be removed?
+
+**Definition of done:** `Refund()` fails closed on a forged/unused messageID or a message
+that was never part of any attested commit; a new regression test proves the exact
+exploit above (unused messageID, arbitrary amount, `isFailedProofValid=true`) is rejected,
+following the "what would make this test pass without the real thing being true"
+philosophy from this doc's own testing section. PR title should follow the existing
+`fix(cross-chain): ...` convention; this is Phase 0's sibling, not a Phase 1 item.
+
+### 2. (FIXED) `execution/cmd/tool/register_chains/main.go` was corrupted, doesn't compile
+
+New/untracked, does not compile: `go build ./...` fails with `package base64 is not in
+std` and `package io/outintil is not in std`, and the `gatewayAbiJSON` string literal in
+this file is corrupted (binary garbage from roughly line 33 onward, not valid JSON) —
+this isn't a typo, the file needs to be rewritten. Recommend reusing the existing, already
+machine-verified ABI in `execution/pkg/blockchain/tx_processor/abi_contract/gatewayAbi.go`
+instead of hand-duplicating the ABI JSON a second time (avoids this exact class of
+corruption happening again). Confirm what this tool is for (name suggests: register the
+private chains created by `deploy/systemd/register_private_chains_t2.py/sh` — also new,
+uncommitted — with Root Anchor) and finish it as part of the Phase 1 item 2 deployment
+tooling smoke-test, since it looks like part of the same T2 prep work.
+
+### 3. (FIXED) `propose()` anti-spam fee had broken 4 existing tests
+
+`execution/pkg/blockchain/tx_processor/gateway_handler.go` now requires `tx.Amount() >=
+0.1 native token` for `propose` (addresses Phase 1 item 4's open question — good, but
+needs finishing). Currently breaks, because they call `propose` with zero value:
+`TestGatewayHandler_ClaimDeadChainBalance_Lifecycle`,
+`TestGatewayHandler_Vote_RejectsUnauthenticatedImpersonation`,
+`TestGatewayHandler_Governance_OnboardNewChainLifecycle`,
+`TestGatewayHandler_Governance_AssetRegistrationLifecycle` (all in
+`pkg/blockchain/tx_processor/`, confirmed via `go test ./pkg/blockchain/tx_processor/...`).
+Update these tests to attach the fee, and double check the hardcoded
+`100_000_000_000_000_000` constant matches this project's actual native-coin decimals
+convention (confirm against `mt_common`'s existing amount constants rather than assuming
+18 decimals). Per this doc's own verification bar, this must not land with red tests.
+
+### Verification bar for all three items above
+
+Same as the rest of this document: `go build ./... && go vet ./... && go test ./...` from
+`execution/` zero regressions, each fix has a regression test proving the specific issue,
+PR via `gh` off a branch from `dev`, no self-merge.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to
@@ -80,14 +206,61 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    Whichever you choose, write it down in this file's successor or the design doc, not
    just in a commit message — this is exactly the kind of "accepted limitation" that
    needs to stay visible to whoever runs T2/T3 next.
-2. **Deployment tooling smoke-test.** `deploy/systemd/gen_root_anchor_chain.py` and
-   `setup_root_anchor.sh` (Milestone I) have never been run end-to-end — only confirmed
-   that `metanode keytool generate validator` exists as a CLI subcommand, not that the
-   scripts' exact invocation/output format matches what they assume (flag names, output
-   file paths/structure, etc.). Build `metanode` for real (see
-   `note/metanode-build-environment.md` if using this session's memory, or the repo's own
-   build docs) and run both scripts for real before Phase 2 needs them. Fix whatever
-   breaks; this is expected to surface small mismatches, not a design problem.
+2. **Deployment tooling smoke-test — DONE 2026-08-25, found+fixed one real bug this way.**
+   Ran `gen_root_anchor_chain.py` (4-validator Root Anchor, real `simple_chain`+Rust-FFI
+   binary, real BFT block production confirmed via `eth_blockNumber` increasing) and
+   `gen_single_chain.py --root-anchor-rpc ... --root-anchor-submitter-key ...` (a private
+   chain pointed at it) for real, locally. Exactly the kind of small-mismatch bug this item
+   predicted: `gen_single_chain.py` emitted the `cross_chain` config block with **PascalCase**
+   keys (`"RootAnchorRpcUrls"`, `"RootAnchorSubmitterPrivateKeyHex"`, ...) but
+   `config.go`'s `CrossChainConfig` struct tags are **snake_case**
+   (`root_anchor_rpc_urls`, ...) — `encoding/json` doesn't error on an unmatched key, it
+   just silently leaves the field at its zero value, so every node this script generated
+   would have booted with `GatewayRegistryMonitor`/`CommitteeAttestationWorker` **silently
+   disabled** (confirmed empirically with a throwaway `config.LoadConfig()` test before
+   fixing, and again by tailing a real node's log for the "✅ Gateway ChainRegistry Drift
+   Monitor started" / "✅ Committee Attestation Worker started" lines before vs. after the
+   fix). Fixed by correcting the keys to snake_case; re-verified live against the running
+   Root Anchor devnet that both workers now actually start. `setup_root_anchor.sh` doesn't
+   exist under that name (the working script is `gen_root_anchor_chain.py` alone, plus the
+   generated `start_all.sh`/`stop_all.sh` in its output dir) — update this doc/any other
+   reference accordingly if that's intentional, or add the missing wrapper if one was meant
+   to exist.
+
+   Continued smoke-testing the rest of the T2 tooling chain found (and fixed) **2 more real
+   bugs of the exact same "silent mismatch" shape**, each verified with a throwaway Go
+   program against the real target type before fixing, not assumed:
+   - `deploy/systemd/register_private_chains_t2.sh` called `./register_chains --rpc ...`,
+     but the tool's actual flag (`execution/cmd/tool/register_chains/main.go`) is
+     `-root-anchor` — there is no `-rpc` flag, so Go's `flag` package would reject the
+     invocation outright (`flag provided but not defined: -rpc`), confirmed by running the
+     built binary. Fixed the flag name; also had the script auto-build the tool if the
+     binary isn't already present (it's gitignored, not meant to be committed — added
+     `/register_chains` to `execution/.gitignore`, it was missing).
+   - `deploy/systemd/register_private_chains_t2.py` built each chain's registration payload
+     with `"state_root"`/`"account_tree_root"` as bare 64-hex-char strings (no `0x` prefix)
+     — `common.Hash.UnmarshalJSON` (the target type, `ChainRegistry` in
+     `pkg/cross_chain/types.go`) explicitly errors ("cannot unmarshal hex string without 0x
+     prefix") without it, confirmed directly. **Worse, silently-wrong rather than
+     error-loud:** `"pubkey_bls"` was sent as `bls_bytes.hex()` (a hex string), but the
+     target field is `[]byte` (`ValidatorEntry.PubkeyBLS`), and Go's `encoding/json`
+     base64-DECODES a JSON string into a `[]byte` field, not hex-decodes it — hex digits
+     happen to also be valid base64 characters, so this produced **no error and a
+     completely wrong pubkey** (confirmed empirically: decoding a real 48-byte BLS pubkey's
+     hex string as base64 silently yields 72 garbage bytes). Any chain registered this way
+     would have an unverifiable committee with no error anywhere pointing at why. Fixed by
+     adding the `0x` prefix to both root fields, and by sending `pubkey_bls` as the
+     already-base64 `authority_key` value straight from genesis.json instead of
+     re-encoding it as hex.
+
+   **Takeaway for whoever runs T2 next:** every one of these 3 tooling bugs (this item's
+   original PascalCase one plus these 2) shares the same shape — a script-generated JSON
+   payload silently mismatching what the real Go struct/`encoding/json` actually expects,
+   with **no error at the point of failure** in 2 of the 3 cases. Don't trust any new
+   deploy-tooling JSON payload without unmarshaling it through the real target Go type
+   first (a 5-line throwaway `go run` is enough, as done here) — this is the same
+   "what would make this pass without the real thing being true" discipline this doc
+   already asks for in code, just applied to generated config/payloads too.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make

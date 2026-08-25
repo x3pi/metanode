@@ -164,7 +164,8 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	// Governance: Declare Chain 404 Dead
 	deadPayload, _ := json.Marshal(uint64(deadChainID))
 	proposeDead, _ := h.abi.Pack("propose", uint8(cross_chain.ProposalDeclareChainDead), deadPayload, uint64(100))
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, proposeDead)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
+	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeDead)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
 	require.False(t, failed)
 	out, err := h.abi.Unpack("propose", rcp.Return())
 	require.NoError(t, err)

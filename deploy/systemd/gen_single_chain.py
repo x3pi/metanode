@@ -151,6 +151,8 @@ def main():
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset for primary, worker, p2p, dns ports (default: 0)")
     parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
+    parser.add_argument("--root-anchor-rpc", type=str, default="", help="Comma-separated list of Root Anchor RPC URLs (e.g. http://127.0.0.1:9099)")
+    parser.add_argument("--root-anchor-submitter-key", type=str, default="", help="ECDSA private key for the committee attestation worker")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -314,7 +316,18 @@ def main():
                 "55798165960a62cED34a0d86e36B1758D1303907"
             ],
             "cross_chain": {
-                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
+                # exactly (snake_case) — encoding/json silently leaves a field at its zero value
+                # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't
+                # fail loudly: it just silently disables the ChainRegistry refresh worker /
+                # CommitteeAttestationWorker on every node this script generates. Verified against
+                # config.go directly, not assumed.
+                "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
+                "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
+                "root_anchor_poll_interval_seconds": 5,
+                "root_anchor_circuit_breaker_max_failures": 5,
+                "root_anchor_circuit_breaker_timeout_seconds": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

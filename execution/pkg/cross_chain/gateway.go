@@ -412,68 +412,9 @@ func (g *GatewayEngine) attestCommitInternal(
 	}
 
 	// Fail-closed: Committee cannot be empty
-	if len(registry.Committee) == 0 {
-		return nil, fmt.Errorf("%w: chain %d", ErrEmptyCommittee, sourceChainID)
-	}
-
-	// Real BLS Quorum Signature Verification (Cryptographic Defense)
-	if len(cert.AggregateSignature) == 0 {
-		return nil, ErrInvalidBLSSignature
-	}
-
-	var accumulatedStake uint64
-	var totalStake uint64
-	var votingPubkeys [][]byte
-
-	for i, val := range registry.Committee {
-		totalStake += val.Stake
-		isSigner := false
-		if len(cert.SignerBitmap) > 0 {
-			byteIdx := i / 8
-			bitIdx := uint(i % 8)
-			if byteIdx < len(cert.SignerBitmap) && (cert.SignerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
-				isSigner = true
-			}
-		} else if len(registry.Committee) == 1 {
-			// Single validator backward compatibility when bitmap is omitted
-			isSigner = true
-		}
-
-		if isSigner {
-			accumulatedStake += val.Stake
-			votingPubkeys = append(votingPubkeys, val.PubkeyBLS)
-		}
-	}
-
-	if totalStake == 0 {
-		return nil, ErrZeroTotalStake
-	}
-
-	// Calculate quorum threshold: default 66.67% (BFT 2/3) or basis points from registry.QuorumThreshold
-	threshold := (totalStake*2 + 2) / 3
-	if registry.QuorumThreshold > 0 {
-		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
-	}
-
-	if accumulatedStake < threshold || len(votingPubkeys) == 0 {
-		return nil, fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
-	}
-
 	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
-	if len(votingPubkeys) == 1 {
-		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
-		sig := cm.SignFromBytes(cert.AggregateSignature)
-		if !bls.VerifySign(pubKey, sig, commitMsg) {
-			return nil, ErrInvalidBLSSignature
-		}
-	} else {
-		msgs := make([][]byte, len(votingPubkeys))
-		for i := range msgs {
-			msgs[i] = commitMsg
-		}
-		if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
-			return nil, ErrInvalidBLSSignature
-		}
+	if err := VerifyQuorumCertAgainstRegistry(registry, cert, commitMsg); err != nil {
+		return nil, err
 	}
 
 	if aggregateAmount == nil {
@@ -634,39 +575,136 @@ func (g *GatewayEngine) ClaimMessage(
 	return execStatus, nil
 }
 
+// VerifyQuorumCertAgainstRegistry validates the BLS signature and threshold stake against a chain's committee.
+func VerifyQuorumCertAgainstRegistry(registry ChainRegistry, cert QuorumCert, digest []byte) error {
+	if len(registry.Committee) == 0 {
+		return fmt.Errorf("%w: chain %d", ErrEmptyCommittee, registry.ChainID)
+	}
+	if len(cert.AggregateSignature) == 0 {
+		return ErrInvalidBLSSignature
+	}
+
+	var accumulatedStake uint64
+	var totalStake uint64
+	var votingPubkeys [][]byte
+
+	for i, val := range registry.Committee {
+		totalStake += val.Stake
+		isSigner := false
+		if len(cert.SignerBitmap) > 0 {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			if byteIdx < len(cert.SignerBitmap) && (cert.SignerBitmap[byteIdx]&(1<<bitIdx)) != 0 {
+				isSigner = true
+			}
+		} else if len(registry.Committee) == 1 {
+			// Single validator backward compatibility when bitmap is omitted
+			isSigner = true
+		}
+
+		if isSigner {
+			accumulatedStake += val.Stake
+			votingPubkeys = append(votingPubkeys, val.PubkeyBLS)
+		}
+	}
+
+	if totalStake == 0 {
+		return ErrZeroTotalStake
+	}
+
+	threshold := (totalStake*2 + 2) / 3
+	if registry.QuorumThreshold > 0 {
+		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
+	}
+
+	if accumulatedStake < threshold || len(votingPubkeys) == 0 {
+		return fmt.Errorf("%w: accumulated stake %d < threshold %d", ErrQuorumNotReached, accumulatedStake, threshold)
+	}
+
+	if len(votingPubkeys) == 1 {
+		pubKey := cm.PubkeyFromBytes(votingPubkeys[0])
+		sig := cm.SignFromBytes(cert.AggregateSignature)
+		if !bls.VerifySign(pubKey, sig, digest) {
+			return ErrInvalidBLSSignature
+		}
+	} else {
+		msgs := make([][]byte, len(votingPubkeys))
+		for i := range msgs {
+			msgs[i] = digest
+		}
+		if !bls.VerifyAggregateSign(votingPubkeys, cert.AggregateSignature, msgs) {
+			return ErrInvalidBLSSignature
+		}
+	}
+	return nil
+}
+
 // Refund processes returning funds to the sender on the source chain when the destination reverts (P2.4).
 func (g *GatewayEngine) Refund(
-	messageID common.Hash,
-	sourceChainID uint64,
-	sender common.Address,
-	amount *big.Int,
-	isFailedProofValid bool,
+	message CrossChainMessage,
+	messageProof MerkleProof,
+	commitRoot common.Hash,
+	destFailureCert QuorumCert,
 ) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	status, exists := g.MessageStatus[messageID]
+	// 1. Refund must be processed on the message's source chain (where value was burned)
+	if message.SourceChainID != g.LocalChainID {
+		return fmt.Errorf("refund must be processed on source chain %d, got local chain %d", message.SourceChainID, g.LocalChainID)
+	}
+
+	// 2. Message status must be Pending (never resolved before)
+	status, exists := g.MessageStatus[message.MessageID]
 	if !exists {
 		status = MessageStatusPending
 	}
-
 	if status != MessageStatusPending {
-		return fmt.Errorf("%w: message %s current status is %d", ErrInvalidRefundState, messageID.Hex(), status)
+		return fmt.Errorf("%w: message %s current status is %d", ErrInvalidRefundState, message.MessageID.Hex(), status)
 	}
 
-	if !isFailedProofValid {
-		return ErrInvalidRefundProof
-	}
-
-	g.MessageStatus[messageID] = MessageStatusRefunded
-
-	// Restore allocation in GlobalSupplyLedger to preserve total supply invariant (Section 2.4 #2)
-	if g.SupplyLedger != nil && amount != nil && amount.Sign() > 0 {
-		currAlloc, hasAlloc := g.SupplyLedger.PerChainAllocation[sourceChainID]
-		if !hasAlloc || currAlloc == nil {
-			currAlloc = big.NewInt(0)
+	// 3. Verify message was part of an attested commit on this source chain
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), message.AssetID.String())
+	_, exists = g.AttestedCommits[key]
+	if !exists {
+		for _, v := range g.AttestedCommits {
+			if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
+				exists = true
+				break
+			}
 		}
-		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Add(currAlloc, amount)
+	}
+	if !exists {
+		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+	}
+
+	// 4. Verify message Merkle proof against commitRoot
+	leafHash := ComputeMessageLeafHash(message)
+	if !VerifyMerkleProof(leafHash, messageProof, commitRoot) {
+		return ErrInvalidMerkleProof
+	}
+
+	// 5. Verify destination failure QuorumCert
+	destRegistry, hasDest := g.ChainRegistry[message.DestChainID]
+	if !hasDest {
+		return fmt.Errorf("%w: destination chain %d", ErrUnknownSourceChain, message.DestChainID)
+	}
+	if destFailureCert.Epoch != destRegistry.Epoch {
+		return fmt.Errorf("%w: expected epoch %d, got %d", ErrEpochMismatch, destRegistry.Epoch, destFailureCert.Epoch)
+	}
+
+	failureDigest := ComputeMessageFailureAttestMessage(message.MessageID, message.DestChainID)
+	if err := VerifyQuorumCertAgainstRegistry(destRegistry, destFailureCert, failureDigest); err != nil {
+		return fmt.Errorf("%w: destination failure cert verification failed: %v", ErrInvalidRefundProof, err)
+	}
+
+	// 6. Atomically set status to Refunded
+	g.MessageStatus[message.MessageID] = MessageStatusRefunded
+
+	// 7. Restore allocation in GlobalSupplyLedger
+	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 {
+		currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
+		g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}
 
 	return nil
