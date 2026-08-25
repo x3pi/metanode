@@ -247,7 +247,22 @@ func applyFullMvmResultToStateDB(chainState *blockchain.ChainState, res *mvm.MVM
 		accountStateDB.SetNonce(addr, nonce)
 	}
 
-	// 3. CodeHash
+	// 3. Code — new/changed bytecode (a CONTRACT_CALL payload that internally executes
+	// CREATE/CREATE2, or the empty-Payload case, both leave state via MapCodeChange). Must be
+	// applied via SetCode (address+codeHash+code together, so the code is actually retrievable
+	// later by that hash) BEFORE the bare SetCodeHash fallback below — an address with a
+	// genuinely new codeHash but no matching MapCodeChange entry (shouldn't happen, but keep
+	// the two loops independent rather than assuming MapCodeChange is a superset) still gets
+	// its hash recorded, just without code content, matching the previous behavior for that
+	// case.
+	for addrHex, code := range res.MapCodeChange {
+		addr := common.HexToAddress(addrHex)
+		codeHashBytes, ok := res.MapCodeHash[addrHex]
+		if !ok {
+			continue
+		}
+		scDB.SetCode(addr, common.BytesToHash(codeHashBytes), code)
+	}
 	for addrHex, hash := range res.MapCodeHash {
 		addr := common.HexToAddress(addrHex)
 		accountStateDB.SetCodeHash(addr, common.BytesToHash(hash))
@@ -480,8 +495,20 @@ func (h *GatewayHandler) handleWrite(
 				copy(callData[36:68], common.LeftPadBytes(tx.ToAddress().Bytes(), 32))
 				copy(callData[68:100], common.LeftPadBytes(params.Value.Bytes(), 32))
 
+				// EXPERIMENTAL FIX (2026-08-25, found + fixed while writing the real-token
+				// Task 1.2 acceptance test — see note/cross_chain_production_readiness_plan.md
+				// Phase 0.7): msg.sender for this internal transferFrom() call MUST be the
+				// Gateway contract itself, not tx.FromAddress() (the bridging user). A real
+				// ERC-20's transferFrom checks allowance[from][msg.sender] — a user can only
+				// ever sanely approve() the Gateway (a fixed, known address) as spender, never
+				// their own tx sender address. With sender=tx.FromAddress() (== `from` too,
+				// since outbound() always locks the caller's own tokens), this checked
+				// allowance[user][user], which is never set by any real approval flow — the
+				// custom-asset outbound path was unconditionally broken against any real
+				// standards-compliant ERC-20, confirmed by a real deployed-contract test
+				// reverting with ERR_EXECUTION_REVERTED before this fix.
 				if err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, tx.FromAddress(), sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("outbound custom asset transferFrom failed: %w", err)
 				}
@@ -591,8 +618,15 @@ func (h *GatewayHandler) handleWrite(
 					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 				}
 
+				// EXPERIMENTAL FIX (2026-08-25, same finding as outbound's transferFrom fix
+				// above): msg.sender for this internal transfer()/mint() call must be the
+				// Gateway itself. transfer(recipient, value) moves balanceOf[msg.sender] — if
+				// msg.sender were tx.FromAddress() (the relayer submitting claimMessage), the
+				// vault-unlock branch would try to move the RELAYER's own token balance
+				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
+				// and any real access-controlled mint() would reject a non-Gateway caller.
 				if err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, tx.FromAddress(), targetContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("claim custom asset execution failed: %w", err)
 				}
@@ -675,8 +709,12 @@ func (h *GatewayHandler) handleWrite(
 					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 				}
 
+				// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
+				// sites in this file): msg.sender must be the Gateway itself, not
+				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
+				// full reasoning.
 				if err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, tx.FromAddress(), sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
 				}
@@ -1099,8 +1137,12 @@ func (h *GatewayHandler) handleWrite(
 					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 				}
 
+				// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
+				// sites in this file): msg.sender must be the Gateway itself, not
+				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
+				// full reasoning.
 				if err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, tx.FromAddress(), targetContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("verifyAndExecute custom asset execution failed: %w", err)
 				}
