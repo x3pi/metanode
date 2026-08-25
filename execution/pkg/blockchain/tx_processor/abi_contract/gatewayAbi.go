@@ -19,6 +19,13 @@ package abi_contract
 // ChainRegistry entry for a given chainId over eth_call, the read half of the Go↔Root Anchor RPC
 // channel (see execution/pkg/cross_chain/rootanchor). Same flattened-array convention as above —
 // parallel arrays instead of a Solidity tuple/struct array for the committee.
+//
+// registerCommitteePop/getRegisteredPop/submitCommitteeAttestation/getCommitteeAttestationShares/
+// committeeUpdate were added in Milestone C: a real multi-validator BLS quorum-cert production
+// pipeline for CommitteeUpdate, using Root Anchor itself as the rendezvous point for individual
+// signature shares (no new P2P, no Rust changes — see
+// execution/pkg/blockchain/tx_processor/committee_attestation_worker.go and
+// execution/pkg/cross_chain/epoch_sync.go's ComputeCommitteeUpdateDigest).
 const GatewayABI = `[
 	{
 		"inputs": [
@@ -126,6 +133,68 @@ const GatewayABI = `[
 			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"}
 		],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes", "name": "pubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "popSignature", "type": "bytes"}
+		],
+		"name": "registerCommitteePop",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "bytes", "name": "pubkeyBls", "type": "bytes"}],
+		"name": "getRegisteredPop",
+		"outputs": [{"internalType": "bytes", "name": "popSignature", "type": "bytes"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "oldEpoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "payloadHash", "type": "bytes32"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "submitCommitteeAttestation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "oldEpoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "payloadHash", "type": "bytes32"}
+		],
+		"name": "getCommitteeAttestationShares",
+		"outputs": [
+			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
+			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "newEpoch", "type": "uint64"},
+			{"internalType": "bytes[]", "name": "newCommitteePubkeys", "type": "bytes[]"},
+			{"internalType": "uint64[]", "name": "newCommitteeStakes", "type": "uint64[]"},
+			{"internalType": "bytes[]", "name": "newCommitteePopSignatures", "type": "bytes[]"},
+			{"internalType": "uint64", "name": "quorumThreshold", "type": "uint64"},
+			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "payloadHash", "type": "bytes32"},
+			{"internalType": "bytes[]", "name": "aggPubkeys", "type": "bytes[]"},
+			{"internalType": "bytes", "name": "aggSignature", "type": "bytes"}
+		],
+		"name": "committeeUpdate",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{

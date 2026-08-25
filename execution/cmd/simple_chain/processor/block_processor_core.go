@@ -118,6 +118,11 @@ type BlockProcessor struct {
 	isSyncCompleted                  atomic.Bool
 	ProcessedVirtualTransactionChain chan []byte
 
+	// committeeAttestationWorker (Milestone C, nil unless RootAnchorRpcUrls +
+	// RootAnchorSubmitterPrivateKeyHex are both configured) — its OnEpochAdvanced is wired into
+	// executor.RequestHandler in runUnixSocket (block_processor_network.go).
+	committeeAttestationWorker *tx_processor.CommitteeAttestationWorker
+
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
 
@@ -637,14 +642,17 @@ func NewBlockProcessor(
 	// go bp.commitWorker()
 	go bp.backupDbWorker() // Coalesced BackupDb builder
 	go bp.geiWorker()      // Coalesced GEI updates
-	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
-	go bp.inputTPSWorker()
 
 	// ROOT ANCHOR CHAIN REGISTRY MONITOR (Milestone B of the Root Anchor wiring plan): read-only
 	// drift detection against Root Anchor's ChainRegistry — see
 	// tx_processor.GatewayRegistryMonitor's doc comment for why this never writes to consensus
 	// state. Disabled unless RootAnchorRpcUrls is configured (a chain not yet participating in
 	// cross-chain has nothing to poll).
+	//
+	// MUST run before `go bp.runUnixSocket()` below: that goroutine reads
+	// bp.committeeAttestationWorker (to wire its epoch-advanced callback) concurrently with this
+	// goroutine, so the field must be fully assigned before runUnixSocket is launched — not just
+	// "usually happens first" by scheduling luck.
 	if cfg := config; cfg != nil && len(cfg.CrossChain.RootAnchorRpcUrls) > 0 {
 		defBreaker := p_network.DefaultCircuitBreakerConfig()
 		breakerCfg := &p_network.CircuitBreakerConfig{
@@ -666,8 +674,34 @@ func NewBlockProcessor(
 			pollInterval := time.Duration(cfg.CrossChain.RootAnchorPollIntervalSeconds) * time.Second
 			monitor := tx_processor.NewGatewayRegistryMonitor(rootAnchorClient, bp.chainState, pollInterval)
 			go monitor.Run(context.Background())
+
+			// COMMITTEE ATTESTATION WORKER (Milestone C): real multi-validator BLS quorum-cert
+			// production for CommitteeUpdate, triggered from local epoch transitions (wired via
+			// SetEpochAdvancedCallback in runUnixSocket below). Needs its OWN submitter key
+			// (distinct from the BLS key) to sign transactions TO Root Anchor — disabled if
+			// that isn't configured, same as the monitor above is disabled without RPC URLs.
+			if cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex != "" {
+				var localChainID uint64
+				if cfg.ChainId != nil {
+					localChainID = cfg.ChainId.Uint64()
+				}
+				bp.committeeAttestationWorker = tx_processor.NewCommitteeAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					localChainID,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.committeeAttestationWorker.Run(context.Background())
+			} else {
+				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
+			}
 		}
 	}
+
+	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
+	go bp.inputTPSWorker()
 
 	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer
 	// which now listens on config.PeerRPCPort (e.g. 1920x) for HTTP JSON-RPC.

@@ -1,9 +1,12 @@
 package cross_chain
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/crypto/sha3"
@@ -26,6 +29,47 @@ type CommitteeUpdate struct {
 	QuorumThreshold uint64           `json:"quorum_threshold"`
 	StateRoot       common.Hash      `json:"state_root"`
 	Cert            QuorumCert       `json:"cert"`
+}
+
+// CommitteeUpdateDomainTag domain-separates the payload every validator signs when attesting to
+// a CommitteeUpdate (Milestone C of the wiring plan), distinct from attestCommit's
+// "COMMIT_ROOT_ATTEST_V1:" tag (gateway.go) so a signature over one can never be replayed as the
+// other.
+var CommitteeUpdateDomainTag = []byte("COMMITTEE_UPDATE_V1:")
+
+// ComputeCommitteeUpdateDigest computes the domain-separated digest every validator of the OLD
+// committee signs to attest to a new one. newCommittee is sorted by PubkeyBLS bytes before
+// hashing so the digest is independent of slice order — every validator must derive the exact
+// same digest from the exact same (sourceChainID, newEpoch, newCommittee, stateRoot) tuple for
+// their individual signatures to aggregate into a single valid QuorumCert (Section 11.2).
+func ComputeCommitteeUpdateDigest(sourceChainID, newEpoch uint64, newCommittee []ValidatorEntry, stateRoot common.Hash) common.Hash {
+	sorted := make([]ValidatorEntry, len(newCommittee))
+	copy(sorted, newCommittee)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i].PubkeyBLS, sorted[j].PubkeyBLS) < 0
+	})
+
+	var committeeBuf []byte
+	for _, v := range sorted {
+		committeeBuf = append(committeeBuf, v.PubkeyBLS...)
+		var stakeBuf [8]byte
+		binary.BigEndian.PutUint64(stakeBuf[:], v.Stake)
+		committeeBuf = append(committeeBuf, stakeBuf[:]...)
+		committeeBuf = append(committeeBuf, v.PopSignature...)
+	}
+	committeeHash := Keccak256(committeeBuf)
+
+	var buf []byte
+	buf = append(buf, CommitteeUpdateDomainTag...)
+	var chainIDBuf, epochBuf [8]byte
+	binary.BigEndian.PutUint64(chainIDBuf[:], sourceChainID)
+	binary.BigEndian.PutUint64(epochBuf[:], newEpoch)
+	buf = append(buf, chainIDBuf[:]...)
+	buf = append(buf, epochBuf[:]...)
+	buf = append(buf, committeeHash.Bytes()...)
+	buf = append(buf, stateRoot.Bytes()...)
+
+	return Keccak256(buf)
 }
 
 // HashAccountLeaf computes the 32-byte Keccak-256 leaf hash for an AccountLeaf (Section 11.6 & 5.2.2).

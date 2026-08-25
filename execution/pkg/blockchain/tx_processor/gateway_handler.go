@@ -1,7 +1,9 @@
 package tx_processor
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -14,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
@@ -115,6 +118,13 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		}
 		engine.SupplyLedger = emptyLedger
 	}
+	// Milestone C fields: nil after unmarshaling a blob written before they existed.
+	if engine.PendingCommitteeAttestations == nil {
+		engine.PendingCommitteeAttestations = make(map[string][]cross_chain.CommitteeAttestationShare)
+	}
+	if engine.RegisteredPops == nil {
+		engine.RegisteredPops = make(map[string][]byte)
+	}
 	return &engine, nil
 }
 
@@ -171,7 +181,8 @@ func (h *GatewayHandler) HandleTransaction(
 	}
 
 	switch method.Name {
-	case "outbound", "attestCommit", "claimMessage", "refund":
+	case "outbound", "attestCommit", "claimMessage", "refund",
+		"registerCommitteePop", "submitCommitteeAttestation", "committeeUpdate":
 		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -321,6 +332,188 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+	case "registerCommitteePop":
+		// Milestone C: permissionless PoP registry — anyone may register a PoP for their OWN
+		// key at any time (self-authenticating via PopVerify itself, no committee membership
+		// check needed). See committeeUpdate below for why this durable registry exists: a
+		// worker assembling a new committee only holds its own private key and cannot produce
+		// PoP on behalf of other members.
+		pubkeyBls := mustBytes(args[0])
+		popSig := mustBytes(args[1])
+		if valid, popErr := cross_chain.PopVerify(pubkeyBls, popSig); popErr != nil || !valid {
+			return nil, nil, fmt.Errorf("registerCommitteePop: %w", cross_chain.ErrPopVerifyFailed)
+		}
+		engine.RegisteredPops[hex.EncodeToString(pubkeyBls)] = popSig
+
+	case "submitCommitteeAttestation":
+		sourceChainID := mustUint64(args[0])
+		oldEpoch := mustUint64(args[1])
+		payloadHash := mustHash(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		registry, exists := engine.ChainRegistry[sourceChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
+		}
+		// Fail-closed: the share must attest FROM the committee currently on file (the one
+		// about to be replaced) — matches attestCommitInternal's epoch-mismatch convention
+		// (gateway.go).
+		if oldEpoch != registry.Epoch {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w: expected %d, got %d", cross_chain.ErrEpochMismatch, registry.Epoch, oldEpoch)
+		}
+		isMember := false
+		for _, v := range registry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: signer is not a member of chain %d's current committee", sourceChainID)
+		}
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, payloadHash.Bytes()) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		key := committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)
+		for _, s := range engine.PendingCommitteeAttestations[key] {
+			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
+				return nil, nil, fmt.Errorf("submitCommitteeAttestation: pubkey already submitted a share for this update")
+			}
+		}
+		engine.PendingCommitteeAttestations[key] = append(engine.PendingCommitteeAttestations[key], cross_chain.CommitteeAttestationShare{
+			SignerPubkeyBLS: signerPubkeyBls,
+			Signature:       signature,
+		})
+
+	case "committeeUpdate":
+		sourceChainID := mustUint64(args[0])
+		newEpoch := mustUint64(args[1])
+		newCommitteePubkeys := mustBytesSlice(args[2])
+		newCommitteeStakes := mustUint64Slice(args[3])
+		newCommitteePopSignatures := mustBytesSlice(args[4])
+		quorumThreshold := mustUint64(args[5])
+		stateRoot := mustHash(args[6])
+		payloadHash := mustHash(args[7])
+		aggPubkeys := mustBytesSlice(args[8])
+		aggSignature := mustBytes(args[9])
+
+		if len(newCommitteePubkeys) != len(newCommitteeStakes) || len(newCommitteePubkeys) != len(newCommitteePopSignatures) {
+			return nil, nil, fmt.Errorf("committeeUpdate: mismatched new-committee array lengths (pubkeys=%d stakes=%d popSignatures=%d)",
+				len(newCommitteePubkeys), len(newCommitteeStakes), len(newCommitteePopSignatures))
+		}
+		newCommittee := make([]cross_chain.ValidatorEntry, len(newCommitteePubkeys))
+		for i := range newCommitteePubkeys {
+			// Never trust a PoP embedded directly in this tx — require it to already match a
+			// PoP independently registered via registerCommitteePop. Otherwise an attacker
+			// submitting the final tx could fabricate a "valid-looking" PoP for a rogue key
+			// they don't actually hold the matching secret for is exactly what PoP exists to
+			// prevent, so it must come from the durable, separately-verified registry.
+			registered := engine.RegisteredPops[hex.EncodeToString(newCommitteePubkeys[i])]
+			if len(registered) == 0 || !bytes.Equal(registered, newCommitteePopSignatures[i]) {
+				return nil, nil, fmt.Errorf("committeeUpdate: pubkey %x has no matching registered PoP (call registerCommitteePop first)", newCommitteePubkeys[i])
+			}
+			newCommittee[i] = cross_chain.ValidatorEntry{
+				PubkeyBLS:    newCommitteePubkeys[i],
+				Stake:        newCommitteeStakes[i],
+				PopSignature: newCommitteePopSignatures[i],
+			}
+		}
+
+		// Recompute the digest from the claimed inputs — must match exactly, or a submitter
+		// could change newCommittee/stateRoot/newEpoch after signatures were already collected
+		// over a different payloadHash.
+		expectedDigest := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, newCommittee, stateRoot)
+		if expectedDigest != payloadHash {
+			return nil, nil, fmt.Errorf("committeeUpdate: payloadHash %s does not match recomputed digest %s", payloadHash.Hex(), expectedDigest.Hex())
+		}
+
+		registry, exists := engine.ChainRegistry[sourceChainID]
+		if !exists {
+			return nil, nil, fmt.Errorf("committeeUpdate: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
+		}
+
+		// Real BLS quorum-cert verification against the OLD (currently on-file) committee —
+		// same structure as attestCommitInternal's verification (gateway.go), generalized to a
+		// caller-supplied signer list instead of a bitmap (aggPubkeys plays the same role).
+		var totalStake uint64
+		for _, v := range registry.Committee {
+			totalStake += v.Stake
+		}
+		if totalStake == 0 {
+			return nil, nil, cross_chain.ErrZeroTotalStake
+		}
+		seen := make(map[string]bool, len(aggPubkeys))
+		var accumulatedStake uint64
+		for _, pk := range aggPubkeys {
+			key := hex.EncodeToString(pk)
+			if seen[key] {
+				return nil, nil, fmt.Errorf("committeeUpdate: duplicate signer in aggPubkeys")
+			}
+			seen[key] = true
+			found := false
+			for _, v := range registry.Committee {
+				if bytes.Equal(v.PubkeyBLS, pk) {
+					accumulatedStake += v.Stake
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, nil, fmt.Errorf("committeeUpdate: aggPubkeys contains a key that is not a member of chain %d's current committee", sourceChainID)
+			}
+		}
+		threshold := (totalStake*2 + 2) / 3
+		if registry.QuorumThreshold > 0 {
+			threshold = (totalStake*registry.QuorumThreshold + 9999) / 10000
+		}
+		if accumulatedStake < threshold || len(aggPubkeys) == 0 {
+			return nil, nil, fmt.Errorf("committeeUpdate: %w: accumulated stake %d < threshold %d", cross_chain.ErrQuorumNotReached, accumulatedStake, threshold)
+		}
+
+		var sigValid bool
+		if len(aggPubkeys) == 1 {
+			pubKey := mt_common.PubkeyFromBytes(aggPubkeys[0])
+			sig := mt_common.SignFromBytes(aggSignature)
+			sigValid = bls.VerifySign(pubKey, sig, payloadHash.Bytes())
+		} else {
+			msgs := make([][]byte, len(aggPubkeys))
+			for i := range msgs {
+				msgs[i] = payloadHash.Bytes()
+			}
+			sigValid = bls.VerifyAggregateSign(aggPubkeys, aggSignature, msgs)
+		}
+		if !sigValid {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		update := cross_chain.CommitteeUpdate{
+			SourceChainID:   sourceChainID,
+			NewEpoch:        newEpoch,
+			NewCommittee:    newCommittee,
+			QuorumThreshold: quorumThreshold,
+			StateRoot:       stateRoot,
+			Cert: cross_chain.QuorumCert{
+				Epoch:              registry.Epoch,
+				AggregateSignature: aggSignature,
+			},
+		}
+		// ApplyCommitteeUpdate takes map[uint64]*ChainRegistry; GatewayEngine.ChainRegistry is
+		// map[uint64]ChainRegistry (value) — adapt at this call site rather than changing
+		// ApplyCommitteeUpdate's signature (kept identical to its Rust mirror).
+		regCopy := registry
+		adapter := map[uint64]*cross_chain.ChainRegistry{sourceChainID: &regCopy}
+		// isOldCertValid=true: the real verification above (membership+stake+signature) IS the
+		// check this bool used to be a caller-supplied placeholder for.
+		if err := cross_chain.ApplyCommitteeUpdate(adapter, update, true); err != nil {
+			return nil, nil, err
+		}
+		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
+		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
+
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)
 	}
@@ -392,9 +585,45 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			[32]byte(registry.StateRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
 		)
 
+	case "getRegisteredPop":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getRegisteredPop input: %w", err)
+		}
+		pubkeyBls := mustBytes(args[0])
+		pop := engine.RegisteredPops[hex.EncodeToString(pubkeyBls)]
+		if pop == nil {
+			pop = []byte{}
+		}
+		return method.Outputs.Pack(pop)
+
+	case "getCommitteeAttestationShares":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getCommitteeAttestationShares input: %w", err)
+		}
+		sourceChainID := mustUint64(args[0])
+		oldEpoch := mustUint64(args[1])
+		payloadHash := mustHash(args[2])
+
+		shares := engine.PendingCommitteeAttestations[committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)]
+		pubkeys := make([][]byte, len(shares))
+		signatures := make([][]byte, len(shares))
+		for i, s := range shares {
+			pubkeys[i] = s.SignerPubkeyBLS
+			signatures[i] = s.Signature
+		}
+		return method.Outputs.Pack(pubkeys, signatures)
+
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)
 	}
+}
+
+// committeeAttestationKey identifies one in-progress CommitteeUpdate's share collection —
+// GatewayEngine.PendingCommitteeAttestations is keyed by this string (Milestone C).
+func committeeAttestationKey(sourceChainID, epoch uint64, payloadHash common.Hash) string {
+	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, payloadHash.Hex())
 }
 
 // --- ABI arg conversion helpers ---
@@ -437,6 +666,16 @@ func mustAddress(v interface{}) common.Address {
 func mustBytes(v interface{}) []byte {
 	b, _ := v.([]byte)
 	return b
+}
+
+func mustBytesSlice(v interface{}) [][]byte {
+	b, _ := v.([][]byte)
+	return b
+}
+
+func mustUint64Slice(v interface{}) []uint64 {
+	u, _ := v.([]uint64)
+	return u
 }
 
 func mustHash(v interface{}) common.Hash {

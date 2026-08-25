@@ -343,6 +343,13 @@ func (rh *RequestHandler) HandleAdvanceEpochRequest(request *pb.AdvanceEpochRequ
 			request.NewEpoch, request.BoundaryBlock, vErr)
 	}
 
+	// Milestone C: notify CommitteeAttestationWorker a local epoch transition just completed.
+	// Non-blocking by contract (SetEpochAdvancedCallback's doc comment) — this call site is the
+	// Rust-FFI-blocking path.
+	if rh.epochAdvancedCallback != nil {
+		rh.epochAdvancedCallback(request.NewEpoch, request.BoundaryBlock)
+	}
+
 	response := &pb.AdvanceEpochResponse{
 		NewEpoch:              request.NewEpoch,
 		EpochStartTimestampMs: timestampMs,
@@ -594,4 +601,3 @@ func (rh *RequestHandler) HandleSetLastExecutedCommitHashRequest(request *pb.Set
 	}
 	return &pb.SetLastExecutedCommitHashResponse{Success: false}, fmt.Errorf("invalid hash length: %d", len(hash))
 }
-
