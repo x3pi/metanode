@@ -20,37 +20,53 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 | 1 private chain đơn (Go execution + Rust consensus, Ansible/systemd) | Production nội bộ, testnet, mainnet doanh nghiệp riêng lẻ | — |
 | Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer) | Testnet nội bộ, diễn tập ceremony, demo | **Giá trị thật** cho tới khi qua P5 (security review độc lập) — xem `note/cross_chain_production_readiness_plan.md` |
 
+**Cập nhật 2026-08-25 (cuối ngày):** mục 0 bên dưới **đã lỗi thời** so với bản gốc viết đầu
+ngày hôm nay — 4 trong 5 mục đã được vá thật kể từ đó (PR #63, #64 + 2 commit theo sau trên
+cùng branch). Giữ mục 0 nguyên trạng lịch sử (đánh dấu ✅ ngay dưới mỗi mục đã xong) thay vì
+xoá, vì `note/cross_chain_production_readiness_plan.md` Phase 0.6-0.9 là nơi có đầy đủ bằng
+chứng/chi tiết cho từng mục — đọc ở đó trước khi tin bất kỳ dòng nào dưới đây là "chưa làm".
+
 **Cổng bắt buộc trước khi cho giá trị thật chạy qua Root Anchor** (không phải gợi ý, là điều
 kiện chặn — xem `note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
-0. **🔴 QUAN TRỌNG NHẤT, phát hiện 2026-08-25:** lớp xác minh mật mã (BLS/Merkle/anti-fraud)
-   đã xong và test kỹ, nhưng **chưa một dòng code nào thực sự di chuyển giá trị thật** —
-   `outbound()`/`claimMessage()`/`verifyAndExecute()`/`refund()`/`claimDeadChainBalance()`
-   chỉ sửa 1 ledger nội bộ trong bộ nhớ, chưa bao giờ gọi
-   `AccountStateDB.AddBalance`/`SubBalance` hay `VmProcessor.ProcessNativeMintBurn` (hàm đã
-   có sẵn, đúng như kiến trúc mô tả, nhưng 0 nơi gọi nó). Nghĩa là: mọi lần "chuyển tiền liên
-   chuỗi thành công" trong test/devnet từ trước tới nay chưa bao giờ thực sự đổi số dư của
-   ai. Kế hoạch vá đầy đủ: `note/cross_chain_full_implementation_plan.md` Task 1 — đây là
-   việc lớn nhất, phải xong **trước** mọi mục 1-4 dưới đây, vì các mục đó đều giả định tính
-   năng di chuyển giá trị đã tồn tại.
+0. **🔴 phát hiện 2026-08-25 sáng, ✅ ĐÃ VÁ 2026-08-25 tối (PR #63 + #64):** lớp xác minh mật mã
+   (BLS/Merkle/anti-fraud) giờ đã nối thật vào giá trị thật cho cả 2 nhánh: coin gốc (PR #63,
+   `ProcessNativeMintBurn` được gọi thật từ `outbound`/`claimMessage`) và tài sản tuỳ biến (PR
+   #64 + theo sau, `msg.sender`/`SetCode` sửa xong, custom-asset round trip chạy thật đầu-cuối
+   trên 2 node thật — xem readiness-plan Phase 0.9). **Vẫn chưa qua audit độc lập (mục 1)** —
+   "đã vá + test kỹ" không thay thế cho "đã được bên thứ 3 xác minh độc lập".
 1. P5 — security review độc lập cho toàn bộ luồng verify (BLS + Merkle + replay + double-mint
-   qua refund + xác thực origin sender 2 chiều **+ toàn bộ code mới ở mục 0**) — **chưa làm**.
+   qua refund + xác thực origin sender 2 chiều + toàn bộ code mới ở mục 0) — **vẫn chưa làm,
+   là điều kiện chặn cuối cùng còn lại cho mainnet giá trị thật**. Phạm vi + tài liệu chuẩn bị
+   cho đợt audit này: `note/external_security_audit_scope_p5.md` (mới).
 2. Đã chạy thật trên **nhiều máy vật lý/VM độc lập** (không phải devnet 1 máy) đủ lâu để quan
-   sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**, xem mục 6 bên
-   dưới về lý do lần chạy gần nhất bị chặn bởi tài nguyên máy chia sẻ.
-3. Xử lý (ít nhất mitigat quy trình, lý tưởng là vá code) mục "hardening item" mới nhất trong
-   `cross_chain_production_readiness_plan.md` (nguy cơ front-run `bootstrapFoundingChains` khi
-   làm lễ genesis) — xem mục 5.3 bên dưới.
-4. Thay khoá đóng cứng trong `deploy/systemd/start_relayer_daemon.sh` /
-   `register_private_chains_t2.py` (`RELAYER_KEY` / `dev_priv_key`) — đây là khoá devnet công
-   khai trong repo public, **không bao giờ được dùng cho relayer/submitter thật** — xem mục
-   5.4 và mục 7.
+   sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**. Root Anchor
+   Layer C (`peer_rpc_port` bind collision khi node "full" khởi động sau node "early") vẫn
+   chặn một cụm multi-validator thật chạy hết chu trình CatchingUp→Healthy — xem readiness-plan
+   Phase 0.7 và mục 6 bên dưới.
+3. **✅ ĐÃ VÁ 2026-08-25 tối:** nguy cơ front-run `bootstrapFoundingChains` khi làm lễ genesis —
+   `CrossChainConfig.GenesisCoordinatorAddress` (config.go) giờ khoá người gọi hợp lệ duy nhất,
+   xem readiness-plan (commit "bootstrapFoundingChains front-run gap"). **Bắt buộc phải set**
+   giá trị này trong config thật trước khi gửi transaction bootstrap — bỏ trống vẫn giữ hành vi
+   cũ (ai gọi cũng được) để không phá vỡ devnet/test hiện có.
+4. **✅ ĐÃ VÁ 2026-08-25 tối:** khoá đóng cứng trong `deploy/systemd/start_relayer_daemon.sh` /
+   `register_private_chains_t2.py` giờ đọc từ biến môi trường `RELAYER_KEY` / `DEV_PRIV_KEY`,
+   chỉ rơi về khoá devnet công khai (kèm cảnh báo to) nếu không set — **bắt buộc phải set 2
+   biến này thật** trước khi chạy relayer/submitter cho mạng thật.
+
+**Cũng đã vá cùng đợt, không nằm trong danh sách gốc:**
+`vote()`/`executeProposal()` từng tin timestamp do caller tự khai (không đối chiếu block time
+thật) — đủ để bypass timelock 72h bắt buộc. Đã vá: 2 hàm này giờ luôn dùng block time thật,
+bỏ qua giá trị caller khai — xem readiness-plan Phase 0.9 và commit "governance
+propose/vote/executeProposal never trust caller-supplied timestamps".
 
 **Việc cần làm tiếp theo, đầy đủ, theo thứ tự:** `note/cross_chain_full_implementation_plan.md`
-— viết cho 1 agent/dev mới hoàn toàn để triển khai hết các mục trên.
+— viết cho 1 agent/dev mới hoàn toàn để triển khai hết các mục trên (bản này cũng cần cập nhật
+lại tương ứng, chưa làm trong đợt này).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
-dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — dừng ở đây,
-việc cần làm tiếp theo là lên kế hoạch P5, không phải chạy thêm script.
+dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — mục chặn duy
+nhất còn lại là **mục 1 (audit độc lập P5)** và **mục 2 (chạy thật đa máy, cần Layer C xong
+trước)** — việc cần làm tiếp theo là lên kế hoạch cho 2 mục đó, không phải chạy thêm script.
 
 ---
 
@@ -240,10 +256,9 @@ vote đã có trong `ChainRegistry`) → vòng gà-trứng. `bootstrapFoundingCh
 payloads)` phá vòng lặp này: nạp thẳng ≥4 `ChainRegistry` (yêu cầu PoP thật cho mọi thành
 viên committee), tự khoá vĩnh viễn ngay sau lần gọi thành công đầu tiên.
 
-**Phát hiện khi viết tài liệu này (2026-08-25, đã ghi vào
-`note/cross_chain_production_readiness_plan.md`, chưa vá code):** lệnh này **không kiểm tra
-người gửi giao dịch** — bất kỳ địa chỉ nào cũng gọi được, miễn payload hợp lệ cấu trúc + PoP
-thật. Vì `founding_entry.json` được thiết kế "an toàn để công khai" (không có private key),
+**Phát hiện khi viết tài liệu này (2026-08-25 sáng, ✅ đã vá code cùng ngày tối, xem cuối mục
+này):** lệnh này (mặc định, nếu không cấu hình mục dưới) **không kiểm tra người gửi giao
+dịch** — bất kỳ địa chỉ nào cũng gọi được, miễn payload hợp lệ cấu trúc + PoP thật. Vì `founding_entry.json` được thiết kế "an toàn để công khai" (không có private key),
 ai lấy được ≥3 trong 4 file thật của các nhà sáng lập **trước khi** giao dịch bootstrap của
 coordinator được xác nhận trên chain, có thể ghép chúng với 1 entry tự tạo (khoá + PoP của
 chính họ, không cần chiếm đoạt gì) rồi đua gửi giao dịch `bootstrapFoundingChains` của riêng
@@ -263,18 +278,23 @@ coordinator gửi giao dịch bootstrap **ngay** sau khi nhận đủ 4 file, v�
 có giao dịch nào khác gọi cùng địa chỉ Gateway đang chờ xử lý trước khi giao dịch của mình
 xác nhận không.
 
-**Việc cần vá trong code (chưa làm, ghi lại để giao việc)：** giới hạn người gọi
-`bootstrapFoundingChains` vào 1 địa chỉ coordinator đã cam kết từ trước (out-of-band, cùng
-kiểu với `genesis_digest.txt`), hoặc yêu cầu khai báo trước tập chain ID kỳ vọng để việc thay
-thế trở nên bất khả thi về mặt cấu trúc thay vì chỉ có thể khắc phục sau khi xảy ra.
+**✅ Đã vá (2026-08-25 tối):** `CrossChainConfig.GenesisCoordinatorAddress` (khối `cross_chain`
+trong `config.json`, key `genesis_coordinator_address`) — set địa chỉ coordinator đã cam kết
+từ trước (out-of-band, cùng kiểu với `genesis_digest.txt`) và `bootstrapFoundingChains` sẽ từ
+chối mọi người gọi khác. **Bắt buộc phải set giá trị này trước khi gửi giao dịch bootstrap
+thật** — bỏ trống vẫn giữ hành vi cũ (ai gọi cũng được, chỉ an toàn cho devnet/rehearsal). Chi
+tiết: `note/cross_chain_production_readiness_plan.md`, commit "bootstrapFoundingChains
+front-run gap".
 
 ### 5.4 Sau khi Root Anchor sống: bật attestation + relayer
 
 - `CommitteeAttestationWorker`/`GatewayRegistryMonitor` tự chạy kèm node nếu config đúng
   (xem CẢNH BÁO mục 5.1).
 - Chạy `RelayerDaemon` (`cmd/tool/cross_chain_relayer`) — **permissionless, ai cũng chạy
-  được**, nhưng cần khoá của **chính người vận hành relayer đó**, không dùng lại
-  `start_relayer_daemon.sh`'s khoá devnet đóng cứng (xem CẢNH BÁO mục 3). Ví dụ chạy với
+  được**, nhưng cần khoá của **chính người vận hành relayer đó**. `start_relayer_daemon.sh`
+  giờ đọc khoá từ biến môi trường `RELAYER_KEY` — **bắt buộc phải set** trước khi chạy cho vai
+  trò thật; không set thì script vẫn chạy được nhưng rơi về khoá devnet công khai (kèm cảnh
+  báo to, xem CẢNH BÁO mục 3), không bao giờ được dùng cho relayer thật. Ví dụ chạy với
   khoá riêng:
   ```bash
   ./cross_chain_relayer \
@@ -306,8 +326,12 @@ thế trở nên bất khả thi về mặt cấu trúc thay vì chỉ có thể
 
 - [ ] P5 — security review độc lập đã hoàn tất (mục 0).
 - [ ] Đã chạy thật trên nhiều máy độc lập, không chỉ devnet 1 máy (mục 0, mục 6).
-- [ ] Không còn khoá devnet đóng cứng nào từ `deploy/systemd/` được dùng cho vai trò thật
-      (relayer, submitter) — mỗi vai trò có khoá riêng, tự sinh, không commit git (mục 3, 5.4).
+- [ ] Đã set biến môi trường `RELAYER_KEY` (`start_relayer_daemon.sh`) và `DEV_PRIV_KEY`
+      (`register_private_chains_t2.py`) thành khoá thật của vai trò đó — không còn script nào
+      rơi về khoá devnet công khai đóng cứng trong repo (mục 3, 5.4).
+- [ ] Đã set `CrossChainConfig.GenesisCoordinatorAddress` (config thật, không phải devnet)
+      thành địa chỉ coordinator đã cam kết out-of-band, TRƯỚC KHI gửi giao dịch
+      `bootstrapFoundingChains` (mục 5.3).
 - [ ] Ceremony genesis (nếu dùng) đã áp dụng giảm thiểu mục 5.3: không công khai
       `founding_entry.json`, coordinator gửi bootstrap tx ngay lập tức.
 - [ ] Mọi `config.json` khối `cross_chain` đã xác nhận field đúng snake_case bằng cách xem
@@ -329,6 +353,7 @@ thế trở nên bất khả thi về mặt cấu trúc thay vì chỉ có thể
 | Kiến trúc thiết kế đầy đủ cross-chain | `note/cross_chain_root_anchor_architecture.md` |
 | Tiến độ, bug đã sửa, lộ trình P0-P8 | `note/cross_chain_production_readiness_plan.md` |
 | Kế hoạch triển khai đầy đủ (code còn thiếu, cho agent khác thực hiện) | `note/cross_chain_full_implementation_plan.md` |
+| Phạm vi + chuẩn bị cho audit bảo mật độc lập (P5) | `note/external_security_audit_scope_p5.md` |
 | Lễ khai sinh Root Anchor nhiều tổ chức | `note/runbook_root_anchor_genesis_ceremony.md` |
 | Vận hành 1 private chain đơn (Ansible) | `deploy/ansible/README.md` |
 | Cụm nhiều node 1 máy (systemd) | `deploy/systemd/docs/systemd-cluster.md` |
