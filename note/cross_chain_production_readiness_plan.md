@@ -279,6 +279,40 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    success, <4 chains, duplicate chain ID, forged PoP, and the self-close guarantee — all real
    BLS, no shortcuts.
 
+   **New hardening item found while writing the production deployment guide
+   (2026-08-25, not yet fixed, 🟡 medium — bounded/recoverable, not a fund-loss bug):**
+   `BootstrapFoundingChains` (`gateway_handler.go`'s `bootstrapFoundingChains` case) has no
+   sender-authorization check — any address can submit the call, the only gate is that the
+   payload structurally validates and every committee member's PoP verifies against their own
+   claimed key. Combined with `runbook_root_anchor_genesis_ceremony.md`'s own guidance that
+   `founding_entry.json` files are "safe to publish" (no private key material) and get sent to
+   the coordinator "over any channel (email, chat, a shared drive)", this creates a front-run
+   window: anyone who obtains ≥3 of the real founders' published `founding_entry.json` files
+   before the coordinator's bootstrap transaction confirms can pair them with a 4th
+   self-generated (real PoP, attacker's own key — no compromise needed) chain entry and race
+   their own `bootstrapFoundingChains` call ahead of the legitimate one. Since the call is
+   self-closing on first success, the attacker's fabricated chain would permanently occupy one
+   of the founding committee/governance seats instead of the real 4th founder.
+   **Why this is 🟡 not 🔴:** `ChainRegistry` carries no `per_chain_allocation`/balance field —
+   at genesis there is nothing to steal — and `ProposalUnregisterChain` already exists, so the
+   legitimate 3-of-4 founders can immediately vote the attacker's chain back out (quorum is
+   `ceil(2*4/3) = 3`) and then register the real 4th founder normally through governance
+   (which now works, since `ActiveChains` is no longer empty). Net effect is a recoverable
+   griefing/delay attack on the ceremony, not a value-loss exploit — tracked here per this
+   doc's own severity convention (compare risk-table items #8/#9/#10 in
+   `cross_chain_root_anchor_architecture.md`, same 🟡 tier, same "mitigate procedurally +
+   track" treatment) rather than triggering the responsible-disclosure commit-lockdown reserved
+   for uncapped fund-fabrication bugs (Phase 0.5 item 1, above). **Interim operational
+   mitigation, added to the new deployment guide's ceremony section:** never broadcast
+   `founding_entry.json` files widely (send directly/privately to the coordinator, not a group
+   channel); the coordinator should submit the assembled bootstrap transaction promptly after
+   collecting the last entry and watch for competing pending transactions to the Gateway
+   address before it confirms. **Real fix, still open:** restrict `bootstrapFoundingChains` to
+   a coordinator address pre-committed out of band (e.g. hash-committed in the same
+   out-of-band channel `genesis_digest.txt` already uses), or require the call to name the
+   expected set of founding chain IDs up front so a late substitution is structurally
+   impossible rather than merely recoverable after the fact.
+
    **Investigated live, root cause found — environmental, not a code bug:** restarting the
    local 4-validator Root Anchor devnet from persisted state appeared to hang (no new blocks,
    silent Go-side log, one validator's RSS climbing unbounded). Ruled out with real evidence
