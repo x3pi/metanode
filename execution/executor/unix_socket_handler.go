@@ -31,6 +31,7 @@ type RequestHandler struct {
 	broadcastEventsAndReceiptsCallback func(blk types.Block, receipts []types.Receipt, eventLogs []types.EventLog) // Callback to broadcast transaction receipts on synced blocks
 	clearNoncesCacheCallback           func()                                                                      // Callback to clear expected nonces cache on block sync
 	cancelSpeculativeCallback          func(geis ...uint64)                                                        // Callback to abort active speculative workers on P2P block sync
+	epochAdvancedCallback              func(newEpoch, boundaryBlock uint64)                                        // Milestone C: notifies CommitteeAttestationWorker of a local epoch transition
 }
 
 func NewRequestHandler(storageManager *storage.StorageManager, chainState *blockchain.ChainState, genesisPath string) *RequestHandler {
@@ -82,6 +83,13 @@ func (rh *RequestHandler) SetPushAsyncGEIUpdateCallback(cb func(gei uint64, hash
 // SetResetCommitIndexCallback allows RequestHandler to synchronously reset Go's commit index on epoch advancement
 func (rh *RequestHandler) SetResetCommitIndexCallback(cb func(newEpoch uint64)) {
 	rh.resetCommitIndexCallback = cb
+}
+
+// SetEpochAdvancedCallback (Milestone C) wires CommitteeAttestationWorker.OnEpochAdvanced — called
+// at the end of HandleAdvanceEpochRequest. The callback itself MUST NOT block: this fires
+// synchronously on the Rust-FFI-blocking path (see AGENTS.md's Zero-Fork invariant).
+func (rh *RequestHandler) SetEpochAdvancedCallback(cb func(newEpoch, boundaryBlock uint64)) {
+	rh.epochAdvancedCallback = cb
 }
 
 // SetExecutionLockCallbacks sets the execution lock/unlock callbacks for sync gating

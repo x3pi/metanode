@@ -124,6 +124,12 @@ func (m *mockRootAnchorServer) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	case "eth_sendRawTransaction":
 		writeJSONRPC(w, req.ID, "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", nil)
 
+	case "eth_getTransactionCount":
+		writeJSONRPC(w, req.ID, "0x2a", nil) // 42
+
+	case "eth_chainId":
+		writeJSONRPC(w, req.ID, "0x238b", nil) // 9099
+
 	default:
 		writeJSONRPC(w, req.ID, nil, &jsonRPCError{Code: -32601, Message: "method not found"})
 	}
@@ -178,6 +184,42 @@ func TestClient_GetChainRegistry_NotFound(t *testing.T) {
 	}
 	if exists || registry != nil {
 		t.Fatalf("expected exists=false, nil registry; got exists=%v registry=%+v", exists, registry)
+	}
+}
+
+func TestClient_GetTransactionCount(t *testing.T) {
+	mock := newMockRootAnchorServer(t)
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	c, err := NewClient([]string{srv.URL}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	nonce, err := c.GetTransactionCount(context.Background(), common.HexToAddress("0x1111111111111111111111111111111111111111"))
+	if err != nil {
+		t.Fatalf("GetTransactionCount: %v", err)
+	}
+	if nonce != 42 {
+		t.Fatalf("nonce = %d, want 42", nonce)
+	}
+}
+
+func TestClient_ChainID(t *testing.T) {
+	mock := newMockRootAnchorServer(t)
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	c, err := NewClient([]string{srv.URL}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	chainID, err := c.ChainID(context.Background())
+	if err != nil {
+		t.Fatalf("ChainID: %v", err)
+	}
+	if chainID.Uint64() != 9099 {
+		t.Fatalf("chainID = %s, want 9099", chainID)
 	}
 }
 

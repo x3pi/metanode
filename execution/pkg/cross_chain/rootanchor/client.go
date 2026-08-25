@@ -134,6 +134,53 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	return registry, true, nil
 }
 
+// GetRegisteredPop reads a pubkey's registered Proof-of-Possession from Root Anchor via eth_call
+// to getRegisteredPop() (Milestone C). Returns an empty slice, not an error, if nothing has been
+// registered for that pubkey yet.
+func (c *Client) GetRegisteredPop(ctx context.Context, pubkeyBls []byte) ([]byte, error) {
+	calldata, err := c.abi.Pack("getRegisteredPop", pubkeyBls)
+	if err != nil {
+		return nil, fmt.Errorf("pack getRegisteredPop: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, err
+	}
+	outValues, err := c.abi.Unpack("getRegisteredPop", result)
+	if err != nil {
+		return nil, fmt.Errorf("unpack getRegisteredPop output: %w", err)
+	}
+	if len(outValues) != 1 {
+		return nil, fmt.Errorf("getRegisteredPop: expected 1 output value, got %d", len(outValues))
+	}
+	pop, _ := outValues[0].([]byte)
+	return pop, nil
+}
+
+// GetCommitteeAttestationShares reads the currently-collected BLS attestation shares for a
+// pending CommitteeUpdate from Root Anchor via eth_call to getCommitteeAttestationShares()
+// (Milestone C).
+func (c *Client) GetCommitteeAttestationShares(ctx context.Context, sourceChainID, oldEpoch uint64, payloadHash common.Hash) (pubkeys [][]byte, signatures [][]byte, err error) {
+	calldata, err := c.abi.Pack("getCommitteeAttestationShares", new(big.Int).SetUint64(sourceChainID), oldEpoch, payloadHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack getCommitteeAttestationShares: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, nil, err
+	}
+	outValues, err := c.abi.Unpack("getCommitteeAttestationShares", result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack getCommitteeAttestationShares output: %w", err)
+	}
+	if len(outValues) != 2 {
+		return nil, nil, fmt.Errorf("getCommitteeAttestationShares: expected 2 output values, got %d", len(outValues))
+	}
+	pubkeys, _ = outValues[0].([][]byte)
+	signatures, _ = outValues[1].([][]byte)
+	return pubkeys, signatures, nil
+}
+
 // SubmitTransaction sends a pre-signed raw transaction to Root Anchor via eth_sendRawTransaction.
 // Deliberately generic — it does not know or care what the transaction does. This is the
 // transport Milestone C's CommitteeUpdate submission will use; building that payload and deciding
@@ -151,6 +198,39 @@ func (c *Client) SubmitTransaction(ctx context.Context, signedRawTx []byte) (com
 	}
 	c.breaker.RecordSuccess()
 	return common.HexToHash(txHashHex), nil
+}
+
+// GetTransactionCount returns address's current nonce on Root Anchor (eth_getTransactionCount,
+// "latest") — needed to build a new transaction to submit via SubmitTransaction. Added in
+// Milestone C, the first consumer that needs to construct (not just relay) a signed transaction.
+func (c *Client) GetTransactionCount(ctx context.Context, address common.Address) (uint64, error) {
+	if !c.breaker.CanExecute() {
+		return 0, ErrCircuitOpen
+	}
+	var result hexutil.Uint64
+	err := c.callRPC(ctx, "eth_getTransactionCount", &result, address.Hex(), "latest")
+	if err != nil {
+		c.breaker.RecordFailure()
+		return 0, err
+	}
+	c.breaker.RecordSuccess()
+	return uint64(result), nil
+}
+
+// ChainID returns Root Anchor's own chain ID (eth_chainId) — needed to build an EIP-155-signed
+// transaction addressed to it (Milestone C).
+func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var result hexutil.Big
+	err := c.callRPC(ctx, "eth_chainId", &result)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return (*big.Int)(&result), nil
 }
 
 // ethCall performs a read-only eth_call against GATEWAY_CONTRACT_ADDRESS with the given calldata,

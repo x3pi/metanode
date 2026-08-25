@@ -74,6 +74,16 @@ type GatewayEngine struct {
 	ChannelSequence            map[string]uint64
 	RelayerBalances            map[common.Address]*big.Int
 	allocationRejectedListener AllocationRejectedListener
+
+	// PendingCommitteeAttestations collects individual BLS signature shares for a pending
+	// CommitteeUpdate, keyed by "sourceChainId:oldEpoch:payloadHashHex" (Milestone C). Cleared
+	// once the corresponding committeeUpdate() succeeds.
+	PendingCommitteeAttestations map[string][]CommitteeAttestationShare
+	// RegisteredPops is a durable, permissionless Proof-of-Possession registry keyed by
+	// hex(pubkeyBls) (Milestone C) — see registerCommitteePop()/getRegisteredPop() in
+	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
+	// their own key at any time.
+	RegisteredPops map[string][]byte
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -83,16 +93,18 @@ func NewGatewayEngine(
 	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
 	return &GatewayEngine{
-		LocalChainID:     localChainID,
-		ChainRegistry:    registry,
-		SupplyLedger:     ledger,
-		AttestedCommits:  make(map[string]AttestedCommit),
-		MessageStatus:    make(map[common.Hash]MessageStatus),
-		DeadChains:       make(map[uint64]bool),
-		DeadChainClaimed: make(map[string]bool),
-		LockedTips:       make(map[common.Hash]*big.Int),
-		ChannelSequence:  make(map[string]uint64),
-		RelayerBalances:  make(map[common.Address]*big.Int),
+		LocalChainID:                 localChainID,
+		ChainRegistry:                registry,
+		SupplyLedger:                 ledger,
+		AttestedCommits:              make(map[string]AttestedCommit),
+		MessageStatus:                make(map[common.Hash]MessageStatus),
+		DeadChains:                   make(map[uint64]bool),
+		DeadChainClaimed:             make(map[string]bool),
+		LockedTips:                   make(map[common.Hash]*big.Int),
+		ChannelSequence:              make(map[string]uint64),
+		RelayerBalances:              make(map[common.Address]*big.Int),
+		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
+		RegisteredPops:               make(map[string][]byte),
 	}
 }
 

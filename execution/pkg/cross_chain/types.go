@@ -28,6 +28,16 @@ type ValidatorEntry struct {
 	PopSignature []byte `json:"pop_signature"`
 }
 
+// CommitteeAttestationShare is one validator's individual BLS signature over a pending
+// CommitteeUpdate's payload hash (Milestone C of the wiring plan — see
+// execution/pkg/cross_chain/epoch_sync.go's ComputeCommitteeUpdateDigest). Collected on Root
+// Anchor via GatewayEngine.PendingCommitteeAttestations until enough stake is reached to
+// aggregate into a real QuorumCert for committeeUpdate().
+type CommitteeAttestationShare struct {
+	SignerPubkeyBLS []byte `json:"signer_pubkey_bls"`
+	Signature       []byte `json:"signature"`
+}
+
 // ChainRegistry holds registered chain metadata and committee state on Root Anchor (Section 2.1).
 type ChainRegistry struct {
 	ChainID          uint64           `json:"chain_id"`
@@ -238,11 +248,11 @@ const (
 
 // Channel tracks message progress between source and destination chains (Section 11.6).
 type Channel struct {
-	SourceChainID         uint64                       `json:"source_chain_id"`
-	DestChainID           uint64                       `json:"dest_chain_id"`
-	Ordered               bool                         `json:"ordered"`
-	NextSequence          uint64                       `json:"next_sequence"`
-	LastProcessedSequence uint64                       `json:"last_processed_sequence"`
+	SourceChainID         uint64                        `json:"source_chain_id"`
+	DestChainID           uint64                        `json:"dest_chain_id"`
+	Ordered               bool                          `json:"ordered"`
+	NextSequence          uint64                        `json:"next_sequence"`
+	LastProcessedSequence uint64                        `json:"last_processed_sequence"`
 	StatusByMessageID     map[common.Hash]MessageStatus `json:"status_by_message_id"`
 }
 
@@ -259,10 +269,10 @@ type AttestedCommit struct {
 type GovernanceProposalKind uint8
 
 const (
-	ProposalRegisterChain   GovernanceProposalKind = 0
-	ProposalUnregisterChain GovernanceProposalKind = 1
-	ProposalRegisterAsset   GovernanceProposalKind = 2
-	ProposalUpdateCommittee GovernanceProposalKind = 3
+	ProposalRegisterChain    GovernanceProposalKind = 0
+	ProposalUnregisterChain  GovernanceProposalKind = 1
+	ProposalRegisterAsset    GovernanceProposalKind = 2
+	ProposalUpdateCommittee  GovernanceProposalKind = 3
 	ProposalDeclareChainDead GovernanceProposalKind = 4
 )
 

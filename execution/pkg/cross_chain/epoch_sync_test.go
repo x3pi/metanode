@@ -139,3 +139,36 @@ func TestEpochSync_P3_2_AccountMerkleTreeProofAndTamperGuard(t *testing.T) {
 	}
 	assert.False(t, VerifyAccountMerkleProof(tamperedAddr, proofs[0], root), "tampered address must fail")
 }
+
+// TestComputeCommitteeUpdateDigest_OrderIndependent is Milestone C's core determinism guarantee:
+// every validator must derive the exact same digest from the exact same logical committee, no
+// matter what order they happened to enumerate its members in (e.g. GetAllValidators' own sort
+// order could differ subtly from another node's), or their individual signatures could never
+// aggregate into one valid QuorumCert.
+func TestComputeCommitteeUpdateDigest_OrderIndependent(t *testing.T) {
+	v1 := makeTestValidator(1000)
+	v2 := makeTestValidator(2000)
+	v3 := makeTestValidator(3000)
+	stateRoot := common.HexToHash("0xABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD")
+
+	orderA := []ValidatorEntry{v1, v2, v3}
+	orderB := []ValidatorEntry{v3, v1, v2}
+	orderC := []ValidatorEntry{v2, v3, v1}
+
+	digestA := ComputeCommitteeUpdateDigest(101, 5, orderA, stateRoot)
+	digestB := ComputeCommitteeUpdateDigest(101, 5, orderB, stateRoot)
+	digestC := ComputeCommitteeUpdateDigest(101, 5, orderC, stateRoot)
+
+	assert.Equal(t, digestA, digestB, "digest must not depend on input slice order")
+	assert.Equal(t, digestA, digestC, "digest must not depend on input slice order")
+
+	// Sanity: changing any input actually changes the digest (the function isn't just returning
+	// a constant).
+	assert.NotEqual(t, digestA, ComputeCommitteeUpdateDigest(102, 5, orderA, stateRoot), "sourceChainID must affect the digest")
+	assert.NotEqual(t, digestA, ComputeCommitteeUpdateDigest(101, 6, orderA, stateRoot), "newEpoch must affect the digest")
+	assert.NotEqual(t, digestA, ComputeCommitteeUpdateDigest(101, 5, orderA, common.Hash{}), "stateRoot must affect the digest")
+	assert.NotEqual(t, digestA, ComputeCommitteeUpdateDigest(101, 5, []ValidatorEntry{v1, v2}, stateRoot), "committee membership must affect the digest")
+
+	// The original slice must not be mutated by sorting internally (callers may reuse it).
+	assert.Equal(t, []ValidatorEntry{v1, v2, v3}, orderA, "ComputeCommitteeUpdateDigest must not mutate its input slice")
+}

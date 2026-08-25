@@ -82,6 +82,15 @@ type CrossChainConfig struct {
 	// from network.DefaultCircuitBreakerConfig() are used when zero.
 	RootAnchorCircuitBreakerMaxFailures    int `json:"root_anchor_circuit_breaker_max_failures,omitempty"`
 	RootAnchorCircuitBreakerTimeoutSeconds int `json:"root_anchor_circuit_breaker_timeout_seconds,omitempty"`
+
+	// RootAnchorSubmitterPrivateKeyHex (Milestone C) — a secp256k1 private key, distinct from
+	// this node's BLS key (Databases.BLSPrivateKey), used to sign+submit transactions TO Root
+	// Anchor (registerCommitteePop/submitCommitteeAttestation/committeeUpdate) via
+	// eth_sendRawTransaction. The corresponding address must hold enough native coin on Root
+	// Anchor to pay gas — an operational requirement, not a new design (every relayer already
+	// needs this; mục 2.2 of the design doc: "Relayer bất kỳ ai, không cần đăng ký"). Empty
+	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
+	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
