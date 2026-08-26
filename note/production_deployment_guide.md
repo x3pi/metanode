@@ -459,6 +459,7 @@ front-run gap".
 
 | Việc cần làm | Tài liệu/script |
 | :--- | :--- |
+| **Sổ tay thao tác: lệnh cụ thể + cách xác thực từng bước** | **`note/deployment_runbook_step_by_step.md`** |
 | Kiến trúc thiết kế đầy đủ cross-chain | `note/cross_chain_root_anchor_architecture.md` |
 | Tiến độ, bug đã sửa, lộ trình P0-P8 | `note/cross_chain_production_readiness_plan.md` |
 | Việc còn lại (code + quyết định thiết kế), cho agent khác thực hiện | `note/all_remaining_fixes_plan.md` |
