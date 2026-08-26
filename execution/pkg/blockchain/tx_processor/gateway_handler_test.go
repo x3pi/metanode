@@ -2,14 +2,20 @@ package tx_processor
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -76,6 +82,11 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
+	// Task 1.1: Seed initial real balance for sender (1000)
+	if err := cs1.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
 	calldata, err := h.abi.Pack("outbound",
 		big.NewInt(102),    // destChainId
 		target,             // target
@@ -108,6 +119,12 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 	}
 	if rcp == nil || rcp.Status() != pb.RECEIPT_STATUS_RETURNED {
 		t.Fatalf("expected successful receipt, got %+v", rcp)
+	}
+
+	// Verify real balance deduction (1000 - (100 value + 5 tip) = 895)
+	as, err := cs1.GetAccountStateDB().AccountState(sender)
+	if err != nil || as == nil || as.Balance().Cmp(big.NewInt(895)) != 0 {
+		t.Fatalf("expected sender balance 895, got %v (err=%v)", as.Balance(), err)
 	}
 
 	// --- Commit through the REAL production sequence: tx_processor.go calls LateBindRoots()
@@ -293,6 +310,12 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 	if len(statusData) == 0 || statusData[len(statusData)-1] != uint8(cross_chain.MessageStatusSuccess) {
 		t.Fatalf("expected MessageStatusSuccess (%d), got %x", cross_chain.MessageStatusSuccess, statusData)
 	}
+
+	// --- Double claim must fail ---
+	rcp3, _, hasFailed3 := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !hasFailed3 {
+		t.Fatalf("expected second claimMessage() to fail, but it succeeded: %+v", rcp3)
+	}
 }
 
 // TestGatewayHandler_Refund covers the 4th and last write method (outbound, attestCommit,
@@ -346,6 +369,11 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
 	target := common.HexToAddress("0x7777777777777777777777777777777777777777")
 
+	// Task 1.1: Seed initial real balance for sender (500)
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(500)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
 	outboundCalldata, err := h.abi.Pack("outbound",
 		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(0), uint8(1), false,
 	)
@@ -360,6 +388,12 @@ func TestGatewayHandler_Refund(t *testing.T) {
 			reason = string(rcp.Return())
 		}
 		t.Fatalf("outbound() transaction failed: %q", reason)
+	}
+
+	// Verify balance after burn (500 - 100 = 400)
+	asBeforeRefund, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || asBeforeRefund == nil || asBeforeRefund.Balance().Cmp(big.NewInt(400)) != 0 {
+		t.Fatalf("expected sender balance 400 after outbound, got %v (err=%v)", asBeforeRefund.Balance(), err)
 	}
 
 	msg := cross_chain.CrossChainMessage{
@@ -441,6 +475,12 @@ func TestGatewayHandler_Refund(t *testing.T) {
 			reason = string(rcp.Return())
 		}
 		t.Fatalf("refund() transaction failed: %q", reason)
+	}
+
+	// Verify real balance restored back to sender (400 + 100 = 500)
+	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || asAfterRefund == nil || asAfterRefund.Balance().Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("expected sender balance restored to 500, got %v (err=%v)", asAfterRefund.Balance(), err)
 	}
 
 	viewTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), mustPackGetMessageStatus(t, h, messageID))
@@ -632,4 +672,637 @@ func reopenChainState(t *testing.T, accountStorage, codeStorage, scStorage stora
 		t.Fatalf("failed to reopen chain state: %v", err)
 	}
 	return cs2
+}
+
+func TestGatewayHandler_OutboundFailsOnInsufficientBalance(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
+	target := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
+
+	// Sender balance is 50 (insufficient for 100 value + 10 tip = 110)
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(50)); err != nil {
+		t.Fatalf("AddBalance failed: %v", err)
+	}
+
+	calldata, err := h.abi.Pack("outbound",
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), uint8(1), false,
+	)
+	if err != nil {
+		t.Fatalf("pack outbound() calldata: %v", err)
+	}
+	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed {
+		t.Fatalf("expected outbound() with insufficient balance to fail, but got success receipt: %+v", rcp)
+	}
+}
+
+func TestGatewayHandler_OutboundFailsHopCountExceededDoesNotBurn(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
+	target := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
+
+	// Seed balance
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
+		t.Fatalf("AddBalance failed: %v", err)
+	}
+
+	// MaxHopCount is 255. Set to 255 + something, but HopCount is uint8, so max is 255.
+	// Wait, engine.Outbound fails if HopCount > cross_chain.MaxHopCount (which is 10).
+	// Let's pass HopCount = 100.
+	calldata, err := h.abi.Pack("outbound",
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), uint8(100), false,
+	)
+	if err != nil {
+		t.Fatalf("pack outbound() calldata: %v", err)
+	}
+	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed {
+		t.Fatalf("expected outbound() with HopCount=100 to fail, but got success receipt: %+v", rcp)
+	}
+
+	// Balance must remain unchanged at 1000
+	as, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || as == nil || as.Balance().Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected balance to remain 1000 after revert, got %v", as.Balance())
+	}
+}
+
+func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	kp := bls.GenerateKeyPair()
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
+	if err != nil {
+		t.Fatalf("NewGlobalSupplyLedger failed: %v", err)
+	}
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{
+		101: {
+			ChainID: 101,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}, ledger)
+
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine failed: %v", err)
+	}
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	relayer := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0x9999999999999999999999999999999999999999999999999999999999999999"),
+		SourceChainID: 101,
+		DestChainID:   102,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(777),
+		Payload:       []byte{0xDE, 0xAD},
+		Tip:           big.NewInt(33),
+		Ordered:       false,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	if err != nil {
+		t.Fatalf("BuildCommitTree failed: %v", err)
+	}
+	messageProof := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+
+	// Attest commit
+	attestCalldata, err := h.abi.Pack("attestCommit",
+		big.NewInt(101), commitRoot, aggAmounts["0"], big.NewInt(0),
+		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
+		uint64(1), sig.Bytes(), []byte{0x01},
+	)
+	if err != nil {
+		t.Fatalf("pack attestCommit failed: %v", err)
+	}
+	attestTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, attestCalldata))
+	if _, _, failed := h.HandleTransaction(context.Background(), cs, attestTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+		t.Fatalf("attestCommit failed")
+	}
+
+	// Claim message
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
+	)
+	if err != nil {
+		t.Fatalf("pack claimMessage failed: %v", err)
+	}
+	claimTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	if rcp, _, failed := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+		t.Fatalf("claimMessage failed: status=%+v", rcp)
+	}
+
+	// Verify target received minted value (777)
+	asTarget, err := cs.GetAccountStateDB().AccountState(target)
+	if err != nil || asTarget == nil || asTarget.Balance().Cmp(big.NewInt(777)) != 0 {
+		t.Fatalf("expected target balance 777, got %v (err=%v)", asTarget.Balance(), err)
+	}
+
+	// Verify relayer did NOT receive tip immediately (it accumulates in ledger)
+	asRelayer, err := cs.GetAccountStateDB().AccountState(relayer)
+	if err != nil || asRelayer == nil {
+		// Valid, account might not exist
+	} else if asRelayer.Balance().Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("expected relayer balance 0 (accumulates only), got %v (err=%v)", asRelayer.Balance(), err)
+	}
+}
+
+func TestGatewayHandler_WithdrawRelayerTip(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	relayer := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	engine := cross_chain.NewGatewayEngine(101, map[uint64]cross_chain.ChainRegistry{}, nil)
+	engine.RelayerBalances[relayer] = big.NewInt(500)
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine failed: %v", err)
+	}
+
+	withdrawCalldata, err := h.abi.Pack("withdrawRelayerTip")
+	if err != nil {
+		t.Fatalf("pack withdrawRelayerTip: %v", err)
+	}
+	withdrawTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, withdrawCalldata))
+	if _, _, failed := h.HandleTransaction(context.Background(), cs, withdrawTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+		t.Fatalf("withdrawRelayerTip failed")
+	}
+
+	// Verify relayer received 500 in real balance
+	asRelayer, err := cs.GetAccountStateDB().AccountState(relayer)
+	if err != nil || asRelayer == nil || asRelayer.Balance().Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("expected relayer balance 500, got %v (err=%v)", asRelayer.Balance(), err)
+	}
+
+	// Second withdraw must fail because balance is empty
+	withdrawTx2 := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, withdrawCalldata))
+	_, _, failed2 := h.HandleTransaction(context.Background(), cs, withdrawTx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed2 {
+		t.Fatalf("expected second withdrawRelayerTip to fail, but it succeeded")
+	}
+}
+
+func TestGatewayHandler_BootstrapFoundingChains_CoordinatorGuards(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	coordinator := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
+	attacker := common.HexToAddress("0xAA00AA00AA00AA00AA00AA00AA00AA00AA00AA00")
+
+	engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+	engine.GenesisCoordinator = coordinator
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine failed: %v", err)
+	}
+
+	var payloads [][]byte
+	for _, id := range []uint64{101, 102, 103, 104} {
+		payloads = append(payloads, makeFoundingChainPayload(t, id))
+	}
+
+	calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
+	if err != nil {
+		t.Fatalf("pack bootstrapFoundingChains: %v", err)
+	}
+
+	// Attacker tries to bootstrap -> must fail
+	attackTx := newTx(attacker, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	_, _, failedAttack := h.HandleTransaction(context.Background(), cs, attackTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failedAttack {
+		t.Fatalf("expected attacker bootstrap to fail due to GenesisCoordinator check")
+	}
+
+	// Coordinator submits -> must succeed
+	successTx := newTx(coordinator, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	_, _, failedSuccess := h.HandleTransaction(context.Background(), cs, successTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedSuccess {
+		t.Fatalf("expected coordinator bootstrap to succeed")
+	}
+}
+
+// TestLoadGatewayEngine_GenesisCoordinatorConfig is the regression test for the
+// bootstrapFoundingChains front-run gap tracked in
+// note/cross_chain_production_readiness_plan.md (Phase 1 hardening item): GenesisCoordinator/
+// BootstrapFoundingChainsWithCaller already enforced this check in code, but nothing in
+// production ever populated the field, so it was always the zero address — a no-op that let
+// any caller bootstrap. CrossChain.GenesisCoordinatorAddress (config.go) plus
+// applyGenesisCoordinatorConfig (gateway_handler.go) close that gap.
+func TestLoadGatewayEngine_GenesisCoordinatorConfig(t *testing.T) {
+	prevConfig := config.ConfigApp
+	t.Cleanup(func() { config.ConfigApp = prevConfig })
+
+	coordinatorAddr := "0xC0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0"
+
+	t.Run("fresh engine picks up configured coordinator", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if engine.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
+			t.Fatalf("GenesisCoordinator = %s, want %s", engine.GenesisCoordinator.Hex(), coordinatorAddr)
+		}
+	})
+
+	t.Run("unconfigured leaves existing any-caller behavior unchanged", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if engine.GenesisCoordinator != (common.Address{}) {
+			t.Fatalf("expected zero-address GenesisCoordinator when unconfigured, got %s", engine.GenesisCoordinator.Hex())
+		}
+	})
+
+	t.Run("once set, persisted value is locked in against a later config change", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+		engine, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if err := saveGatewayEngine(cs, engine); err != nil {
+			t.Fatalf("saveGatewayEngine: %v", err)
+		}
+
+		attackerAddr := "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: attackerAddr}}
+		reloaded, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine (reload): %v", err)
+		}
+		if reloaded.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
+			t.Fatalf("GenesisCoordinator changed on reload despite already being locked in: got %s, want original %s", reloaded.GenesisCoordinator.Hex(), coordinatorAddr)
+		}
+	})
+
+	t.Run("end-to-end: front-running caller rejected, configured coordinator accepted", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+
+		h, err := GetGatewayHandler()
+		if err != nil {
+			t.Fatalf("GetGatewayHandler: %v", err)
+		}
+
+		var payloads [][]byte
+		for _, id := range []uint64{201, 202, 203, 204} {
+			payloads = append(payloads, makeFoundingChainPayload(t, id))
+		}
+		calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
+		if err != nil {
+			t.Fatalf("pack bootstrapFoundingChains: %v", err)
+		}
+
+		frontRunner := common.HexToAddress("0xF00DF00DF00DF00DF00DF00DF00DF00DF00DF00D")
+		attackTx := newTx(frontRunner, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, attackTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
+			t.Fatalf("expected front-running caller to be rejected once a coordinator is configured")
+		}
+
+		coordinatorTx := newTx(common.HexToAddress(coordinatorAddr), mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, coordinatorTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+			t.Fatalf("expected the configured coordinator's bootstrap to succeed")
+		}
+	})
+}
+
+// computeProposalIDForTest mirrors GovernanceEngine.Propose's exact proposalID derivation
+// (governance.go: keccak256(kind_byte || proposedAt_be64 || payload)) so the test can predict
+// which proposalID a given claimed timestamp WOULD produce, without relying on the handler to
+// tell it — the whole point is to prove the handler no longer echoes back whatever timestamp
+// the caller claims.
+func computeProposalIDForTest(kind uint8, proposedAt uint64, payload []byte) common.Hash {
+	buf := []byte{kind}
+	var tsBytes [8]byte
+	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
+	buf = append(buf, tsBytes[:]...)
+	buf = append(buf, payload...)
+	return crypto.Keccak256Hash(buf)
+}
+
+// TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue is the regression test for
+// the timestamp-trust gap found during live 2-node testing (note/
+// cross_chain_production_readiness_plan.md Phase 0.9): propose()/vote()/executeProposal() used
+// to trust a raw caller-supplied "currentTimestamp"/"proposedAt" ABI argument with nothing to
+// cross-check it against, letting a caller claim an arbitrary future timestamp to make the
+// mandatory 72h timelock appear satisfied immediately. The fix ignores that argument entirely
+// and always uses the real, consensus-agreed block time instead.
+func TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	kp := bls.GenerateKeyPair()
+	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
+	registry := map[uint64]cross_chain.ChainRegistry{
+		101: {
+			ChainID:         101,
+			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: popSig.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
+	if err != nil {
+		t.Fatalf("NewGlobalSupplyLedger: %v", err)
+	}
+	engine := cross_chain.NewGatewayEngine(101, registry, ledger)
+	engine.EnsureGovernance() // ActiveChains = {101} -> quorum threshold = 1
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine: %v", err)
+	}
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	realProposeBlockTime := uint64(1_000_000)
+	fakeFarFutureTimestamp := uint64(9_999_999_999) // an attacker's claimed timestamp, decades ahead
+
+	kind := uint8(cross_chain.ProposalAllocateSupply)
+	payload := []byte(`{"chain_id":999,"amount":1}`)
+
+	proposeCalldata, err := h.abi.Pack("propose", kind, payload, fakeFarFutureTimestamp)
+	if err != nil {
+		t.Fatalf("pack propose: %v", err)
+	}
+	fee := big.NewInt(100_000_000_000_000_000)
+	proposeTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, fee, marshalCallData(t, proposeCalldata))
+	if _, _, failed := h.HandleTransaction(context.Background(), cs, proposeTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realProposeBlockTime); failed {
+		t.Fatalf("expected propose to succeed")
+	}
+
+	// The proposalID a real caller would derive using the ATTACKER's claimed timestamp must
+	// NOT exist — proving the handler never fed that value into Propose().
+	fakeProposalID := computeProposalIDForTest(kind, fakeFarFutureTimestamp, payload)
+	fakeCalldata, err := h.abi.Pack("getProposal", fakeProposalID)
+	if err != nil {
+		t.Fatalf("pack getProposal (fake): %v", err)
+	}
+	fakeOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, fakeCalldata)))
+	if err != nil {
+		t.Fatalf("getProposal (fake) query: %v", err)
+	}
+	fakeValues, err := h.abi.Unpack("getProposal", fakeOut)
+	if err != nil {
+		t.Fatalf("unpack getProposal (fake): %v", err)
+	}
+	if exists, _ := fakeValues[0].(bool); exists {
+		t.Fatalf("proposal keyed on the attacker's claimed timestamp must not exist")
+	}
+
+	// The proposal actually keyed on the REAL block time must exist, and report proposedAt ==
+	// the real block time, not the attacker's claim.
+	realProposalID := computeProposalIDForTest(kind, realProposeBlockTime, payload)
+	realCalldata, err := h.abi.Pack("getProposal", realProposalID)
+	if err != nil {
+		t.Fatalf("pack getProposal (real): %v", err)
+	}
+	realOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
+	if err != nil {
+		t.Fatalf("getProposal (real) query: %v", err)
+	}
+	realValues, err := h.abi.Unpack("getProposal", realOut)
+	if err != nil {
+		t.Fatalf("unpack getProposal (real): %v", err)
+	}
+	if exists, _ := realValues[0].(bool); !exists {
+		t.Fatalf("proposal keyed on the real block time must exist")
+	}
+	if proposedAt, _ := realValues[4].(uint64); proposedAt != realProposeBlockTime {
+		t.Fatalf("proposedAt = %d, want real block time %d (not the attacker's claim %d)", proposedAt, realProposeBlockTime, fakeFarFutureTimestamp)
+	}
+
+	// Vote, again claiming the fake far-future timestamp. A single vote reaches quorum
+	// (threshold=1), transitioning straight to Timelocked.
+	voteMsg := cross_chain.ComputeGovernanceVoteMessage(realProposalID, uint64(101))
+	voteSig := bls.Sign(kp.PrivateKey(), voteMsg)
+	voteCalldata, err := h.abi.Pack("vote", realProposalID, new(big.Int).SetUint64(101), fakeFarFutureTimestamp, kp.BytesPublicKey(), voteSig.Bytes())
+	if err != nil {
+		t.Fatalf("pack vote: %v", err)
+	}
+	realVoteBlockTime := realProposeBlockTime + 10
+	voteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, voteCalldata))
+	if _, _, failed := h.HandleTransaction(context.Background(), cs, voteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime); failed {
+		t.Fatalf("expected vote to succeed")
+	}
+
+	// effectiveAt must be derived from the REAL vote block time, not the attacker's claim.
+	postVoteOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
+	if err != nil {
+		t.Fatalf("getProposal (post-vote) query: %v", err)
+	}
+	postVoteValues, err := h.abi.Unpack("getProposal", postVoteOut)
+	if err != nil {
+		t.Fatalf("unpack getProposal (post-vote): %v", err)
+	}
+	wantEffectiveAt := realVoteBlockTime + cross_chain.DefaultGovernanceTimelockSeconds
+	if effectiveAt, _ := postVoteValues[5].(uint64); effectiveAt != wantEffectiveAt {
+		t.Fatalf("effectiveAt = %d, want %d (real vote time + 72h) — NOT derived from the attacker's claimed timestamp %d", effectiveAt, wantEffectiveAt, fakeFarFutureTimestamp)
+	}
+
+	// Attacker attempts executeProposal claiming the far-future timestamp — the REAL block
+	// time attached to this transaction is still nowhere near the 72h timelock, so this MUST
+	// still fail even though the calldata claims otherwise.
+	executeCalldata, err := h.abi.Pack("executeProposal", realProposalID, fakeFarFutureTimestamp)
+	if err != nil {
+		t.Fatalf("pack executeProposal: %v", err)
+	}
+	earlyExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, executeCalldata))
+	_, _, earlyFailed := h.HandleTransaction(context.Background(), cs, earlyExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime+100)
+	if !earlyFailed {
+		t.Fatalf("expected executeProposal to fail — the attacker's claimed timestamp must not bypass the real 72h timelock")
+	}
+
+	// Once the REAL block time genuinely passes the timelock, execution succeeds.
+	lateExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 3, big.NewInt(0), marshalCallData(t, executeCalldata))
+	realExecuteBlockTime := wantEffectiveAt + 1
+	if _, _, failed := h.HandleTransaction(context.Background(), cs, lateExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realExecuteBlockTime); failed {
+		t.Fatalf("expected executeProposal to succeed once the real block time genuinely passes the timelock")
+	}
+}
+
+func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler: %v", err)
+	}
+
+	sender := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
+	target := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
+
+	assetID := big.NewInt(999)
+	homeChainID := uint64(101)
+	destChainID := uint64(102)
+
+	// Register a mock custom asset
+	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
+	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
+	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry, nil)
+
+	entry := &cross_chain.AssetEntry{
+		AssetID:           assetID,
+		Active:            true,
+		HomeChainID:       homeChainID,
+		CanonicalContract: common.BytesToAddress([]byte{2}), // SHA256 precompile
+		WrappedContracts: map[uint64]common.Address{
+			destChainID: common.BytesToAddress([]byte{2}), // SHA256 precompile
+		},
+	}
+	engine.AssetRegistry.Assets[assetID.String()] = entry
+	engine.AssetRegistry.CirculationBalances[fmt.Sprintf("%s:%d", assetID.String(), homeChainID)] = big.NewInt(1000)
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine failed: %v", err)
+	}
+
+	// 1. Outbound on Home Chain (101)
+	outboundCalldata, err := h.abi.Pack("outbound",
+		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), uint8(1), false,
+	)
+	if err != nil {
+		t.Fatalf("pack outbound: %v", err)
+	}
+	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
+
+	// Execute outbound (transferFrom will fail because the mock contract doesn't exist)
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed {
+		t.Fatalf("expected outbound custom asset to fail due to missing contract, but it succeeded")
+	}
+	if !strings.Contains(string(rcp.Return()), "outbound custom asset transferFrom failed") {
+		t.Fatalf("expected transferFrom EVM call to fail, got: %s", string(rcp.Return()))
+	}
+
+	// 2. ClaimMessage on Dest Chain (102)
+	// We simulate receiving the message on chain 102
+	engine3 := cross_chain.NewGatewayEngine(destChainID, map[uint64]cross_chain.ChainRegistry{
+		homeChainID: {
+			ChainID: homeChainID,
+			Epoch:   1,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+			},
+		},
+	}, nil)
+	engine3.AssetRegistry = engine.AssetRegistry // use the same registry config
+	if err := saveGatewayEngine(cs, engine3); err != nil {
+		t.Fatalf("saveGatewayEngine for claim failed: %v", err)
+	}
+
+	// Create fake proof just to bypass the verification (or use dummy zeroes since we only test the handler layer)
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0x123"),
+		SourceChainID: homeChainID,
+		DestChainID:   destChainID,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        entry.WrappedContracts[destChainID],
+		AssetID:       assetID,
+		Value:         big.NewInt(100),
+		Payload:       target.Bytes(), // recipient is in Payload
+		Tip:           big.NewInt(0),
+	}
+
+	// Compute leaf hash to mock the root
+	leafHash := cross_chain.ComputeMessageLeafHash(msg)
+
+	// Manually inject the message into pending state to bypass AttestCommit
+	engine3.MessageStatus[msg.MessageID] = cross_chain.MessageStatusPending
+	engine3.AttestedCommits[fmt.Sprintf("%d:%s:%s", homeChainID, leafHash.Hex(), assetID.String())] = cross_chain.AttestedCommit{
+		SourceChainID: homeChainID,
+		CommitRoot:    leafHash,
+		AssetID:       assetID,
+		Epoch:         1,
+		FundedAmount:  big.NewInt(100),
+		ClaimedAmount: big.NewInt(0),
+	}
+	if err := saveGatewayEngine(cs, engine3); err != nil {
+		t.Fatalf("saveGatewayEngine for pending message failed: %v", err)
+	}
+
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash,
+	)
+	if err != nil {
+		t.Fatalf("pack claimMessage: %v", err)
+	}
+
+	claimTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	rcpClaim, _, failedClaim := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+
+	if !failedClaim {
+		t.Fatalf("expected claimMessage custom asset to fail due to missing contract, but it succeeded")
+	}
+	if !strings.Contains(string(rcpClaim.Return()), "claim custom asset execution failed") {
+		t.Fatalf("expected EVM mint call to fail, got: %s", string(rcpClaim.Return()))
+	}
+}
+
+func makeFoundingChainPayload(t *testing.T, chainID uint64) []byte {
+	t.Helper()
+	kp := bls.GenerateKeyPair()
+	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
+	reg := cross_chain.ChainRegistry{
+		ChainID: chainID,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()},
+		},
+		Epoch:            0,
+		QuorumThreshold:  6667,
+		GatewayContract:  common.Address{},
+		StateRoot:        common.Hash{},
+		AccountTreeRoot:  common.Hash{},
+		ArchivalEndpoint: "",
+		RegisteredAt:     0,
+	}
+	b, err := json.Marshal(reg)
+	if err != nil {
+		t.Fatalf("marshal ChainRegistry failed: %v", err)
+	}
+	return b
 }

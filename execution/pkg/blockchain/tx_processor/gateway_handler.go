@@ -21,10 +21,14 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/types"
+
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
+	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
 )
 
 // GatewayHandler dispatches transactions sent to GATEWAY_CONTRACT_ADDRESS to the
@@ -103,7 +107,10 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap empty GlobalSupplyLedger: %w", err)
 		}
-		return cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger), nil
+		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
+		applyDevnetGovernanceTimelockOverride(freshEngine)
+		applyGenesisCoordinatorConfig(freshEngine)
+		return freshEngine, nil
 	}
 
 	var engine cross_chain.GatewayEngine
@@ -127,7 +134,36 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
 	}
+	applyDevnetGovernanceTimelockOverride(&engine)
+	applyGenesisCoordinatorConfig(&engine)
 	return &engine, nil
+}
+
+// applyGenesisCoordinatorConfig is a no-op unless config.ConfigApp explicitly sets
+// CrossChain.GenesisCoordinatorAddress AND the engine's GenesisCoordinator is still unset (the
+// zero address) — see that field's own doc comment (pkg/config/config.go). Only ever sets the
+// coordinator once, from the pristine/never-configured state: once a coordinator is recorded
+// (whether from an earlier config application or restored from persisted state), it is locked in
+// for the life of this GatewayEngine and a later config change cannot silently swap it out.
+func applyGenesisCoordinatorConfig(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil || config.ConfigApp.CrossChain.GenesisCoordinatorAddress == "" {
+		return
+	}
+	if engine.GenesisCoordinator != (common.Address{}) {
+		return
+	}
+	engine.GenesisCoordinator = common.HexToAddress(config.ConfigApp.CrossChain.GenesisCoordinatorAddress)
+}
+
+// applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
+// CrossChain.DevnetGovernanceTimelockSecondsOverride — see that field's own doc comment
+// (pkg/config/config.go) for why this exists and why it never affects a real production
+// config.
+func applyDevnetGovernanceTimelockOverride(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil {
+		return
+	}
+	engine.ApplyGovernanceTimelockOverride(config.ConfigApp.CrossChain.DevnetGovernanceTimelockSecondsOverride)
 }
 
 // allZero reports whether data is exactly common.Hash{}.Bytes() — SmartContractDB.StorageValue
@@ -168,6 +204,172 @@ func saveGatewayEngine(chainState *blockchain.ChainState, engine *cross_chain.Ga
 	return nil
 }
 
+func createVmProcessorForGateway(ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, blockTime uint64) (*vm_processor.VmProcessor, mvm.ExecutionEngine) {
+	mvmId := tx.ToAddress()
+	leaderAddr := common.Address{}
+	if currentHeader := chainState.GetcurrentBlockHeader(); currentHeader != nil {
+		leaderAddr = (*currentHeader).LeaderAddress()
+	}
+
+	// Clear any residual MVM API state to ensure a clean execution context for the barrier tx
+	mvm.ClearMVMApi(mvmId)
+
+	vmP := vm_processor.NewVmProcessor(chainState, mvmId, false, blockTime, leaderAddr)
+	vmP.SetAccountStateDB(chainState.GetAccountStateDB())
+	vmP.SetSmartContractDB(chainState.GetSmartContractDB())
+
+	mvmE := mvm.NewExecutionEngine(mvmId, chainState.GetSmartContractDB(), chainState.GetAccountStateDB(), false)
+	return vmP, mvmE
+}
+
+func processNativeMintBurnForGateway(
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
+	blockTime uint64, operationType uint64, amount *big.Int, from common.Address, to common.Address,
+) error {
+	vmP, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
+	res, err := vmP.ProcessNativeMintBurn(ctx, tx, mvmE, operationType, amount, from, to)
+	if err != nil {
+		return err
+	}
+	if res.Status != pb.RECEIPT_STATUS_RETURNED {
+		return fmt.Errorf("mvm execution failed with status %v", res.Status)
+	}
+
+	accountStateDB := chainState.GetAccountStateDB()
+	for addrHex, addAmtBytes := range res.MapAddBalance {
+		addr := common.HexToAddress(addrHex)
+		amt := new(big.Int).SetBytes(addAmtBytes)
+		if err := accountStateDB.AddBalance(addr, amt); err != nil {
+			return err
+		}
+	}
+	for addrHex, subAmtBytes := range res.MapSubBalance {
+		addr := common.HexToAddress(addrHex)
+		amt := new(big.Int).SetBytes(subAmtBytes)
+		if err := accountStateDB.SubBalance(addr, amt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyFullMvmResultToStateDB(chainState *blockchain.ChainState, res *mvm.MVMExecuteResult) error {
+	accountStateDB := chainState.GetAccountStateDB()
+	scDB := chainState.GetSmartContractDB()
+
+	// 1. Balances
+	for addrHex, addAmtBytes := range res.MapAddBalance {
+		addr := common.HexToAddress(addrHex)
+		amt := new(big.Int).SetBytes(addAmtBytes)
+		if err := accountStateDB.AddBalance(addr, amt); err != nil {
+			return err
+		}
+	}
+	for addrHex, subAmtBytes := range res.MapSubBalance {
+		addr := common.HexToAddress(addrHex)
+		amt := new(big.Int).SetBytes(subAmtBytes)
+		if err := accountStateDB.SubBalance(addr, amt); err != nil {
+			return err
+		}
+	}
+
+	// 2. Nonce
+	for addrHex, nonceBytes := range res.MapNonce {
+		addr := common.HexToAddress(addrHex)
+		nonce := new(big.Int).SetBytes(nonceBytes).Uint64()
+		accountStateDB.SetNonce(addr, nonce)
+	}
+
+	// 3. Code — new/changed bytecode (a CONTRACT_CALL payload that internally executes
+	// CREATE/CREATE2, or the empty-Payload case, both leave state via MapCodeChange). Must be
+	// applied via SetCode (address+codeHash+code together, so the code is actually retrievable
+	// later by that hash) BEFORE the bare SetCodeHash fallback below — an address with a
+	// genuinely new codeHash but no matching MapCodeChange entry (shouldn't happen, but keep
+	// the two loops independent rather than assuming MapCodeChange is a superset) still gets
+	// its hash recorded, just without code content, matching the previous behavior for that
+	// case.
+	for addrHex, code := range res.MapCodeChange {
+		addr := common.HexToAddress(addrHex)
+		codeHashBytes, ok := res.MapCodeHash[addrHex]
+		if !ok {
+			continue
+		}
+		scDB.SetCode(addr, common.BytesToHash(codeHashBytes), code)
+	}
+	for addrHex, hash := range res.MapCodeHash {
+		addr := common.HexToAddress(addrHex)
+		accountStateDB.SetCodeHash(addr, common.BytesToHash(hash))
+	}
+
+	// 4. Storage
+	for addrHex, changes := range res.MapStorageChange {
+		addr := common.HexToAddress(addrHex)
+		var keys [][]byte
+		var values [][]byte
+		for keyHex, valueBytes := range changes {
+			keys = append(keys, common.HexToHash(keyHex).Bytes())
+			values = append(values, valueBytes)
+		}
+		if err := scDB.BatchSetStorageValues(addr, keys, values); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// isContractCall checks if the target address has code deployed in the state.
+func isContractCall(chainState *blockchain.ChainState, target common.Address) bool {
+	as, err := chainState.GetAccountStateDB().AccountState(target)
+	if err != nil || as == nil {
+		return false
+	}
+	scState := as.SmartContractState()
+	if scState == nil {
+		return false
+	}
+	return scState.CodeHash() != (common.Hash{})
+}
+
+func executeContractCallForGateway(
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
+	blockTime uint64, sender common.Address, target common.Address, payload []byte, amount *big.Int, gasLimit uint64,
+) error {
+	_, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
+
+	lastBlockHeader := *chainState.GetcurrentBlockHeader()
+	leaderAddr := lastBlockHeader.LeaderAddress()
+	if leaderAddr == (common.Address{}) {
+		leaderAddr = tx.ToAddress()
+	}
+
+	mvmResult := mvmE.Execute(
+		sender.Bytes(),
+		target.Bytes(),
+		payload,
+		amount,
+		tx.MaxGasPrice(),
+		gasLimit,
+		lastBlockHeader.TimeStamp(),
+		mt_common.BLOCK_GAS_LIMIT,
+		blockTime,
+		mt_common.MINIMUM_BASE_FEE,
+		lastBlockHeader.BlockNumber()+1,
+		leaderAddr,
+		mvmE.GetKey(),
+		tx.Hash().Bytes(),
+		[]common.Address{}, // relatedAddresses
+		false,              // isDebug
+		false,              // isCache
+	)
+
+	if mvmResult.Status != pb.RECEIPT_STATUS_RETURNED {
+		return fmt.Errorf("contract execution failed with status %v: %s", mvmResult.Status, mvmResult.Exception.String())
+	}
+
+	return applyFullMvmResultToStateDB(chainState, mvmResult)
+}
+
 func (h *GatewayHandler) HandleTransaction(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
 	toAddress common.Address, enableTrace bool, blockTime uint64,
@@ -185,9 +387,10 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
+		"bootstrapFoundingChains",
 		"propose", "vote", "executeProposal", "registerAsset",
-		"verifyAndExecute", "claimDeadChainBalance":
-		eventLogs, returnData, logicErr := h.handleWrite(chainState, tx, method, inputData[4:])
+		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
+		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
 			return HandleRevertedTransaction(ctx, chainState, tx, toAddress, toAddress, blockTime, enableTrace, logicErr.Error())
@@ -247,7 +450,7 @@ func (h *GatewayHandler) HandleOffChainQueryResult(tx types.Transaction, chainSt
 }
 
 func (h *GatewayHandler) handleWrite(
-	chainState *blockchain.ChainState, tx types.Transaction, method *abi.Method, argData []byte,
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, method *abi.Method, argData []byte, blockTime uint64,
 ) ([]types.EventLog, []byte, error) {
 	engine, err := loadGatewayEngine(chainState)
 	if err != nil {
@@ -274,9 +477,80 @@ func (h *GatewayHandler) handleWrite(
 			HopCount:    mustUint8(args[6]),
 			Ordered:     mustBool(args[7]),
 		}
+
 		msg, err := engine.Outbound(tx.FromAddress(), params, tx.Hash())
 		if err != nil {
 			return nil, nil, err
+		}
+
+		// Balance mutations come last, after every check that can still fail — barrier TXs
+		// write straight to AccountStateDB with no rollback-on-later-error (true_block_stm.go's
+		// runBarrierTx: "no MVCC tracking, no retry-on-abort"), so any operation performed
+		// AFTER a real burn/transferFrom that can itself fail would strand that burn/lock
+		// permanently even though the whole TX reports as reverted. See
+		// note/cross_chain_task1_native_value_fix_plan.md for the exploit shape this avoids.
+		if params.AssetID == nil || params.AssetID.Sign() == 0 {
+			// Task 1.1: native path — burn Value + Tip together in ONE call so a failure
+			// (e.g. balance covers Tip but not Tip+Value) can never leave Tip stuck-burned
+			// with Value never taken.
+			totalDeduct := big.NewInt(0)
+			if params.Value != nil && params.Value.Sign() > 0 {
+				totalDeduct.Add(totalDeduct, params.Value)
+			}
+			if params.Tip != nil && params.Tip.Sign() > 0 {
+				totalDeduct.Add(totalDeduct, params.Tip)
+			}
+			if totalDeduct.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, totalDeduct, tx.FromAddress(), tx.ToAddress()); err != nil {
+					return nil, nil, fmt.Errorf("outbound native burn failed: %w", err)
+				}
+			}
+		} else {
+			// Task 1.2: custom asset path — lock the asset (transferFrom, can fail on
+			// insufficient allowance/balance in the token contract) FIRST, then burn the
+			// native Tip LAST, so Tip can never be stuck-burned by a subsequent asset-lock
+			// failure.
+			if params.Value != nil && params.Value.Sign() > 0 {
+				asset, err := engine.AssetRegistry.GetAsset(params.AssetID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
+				}
+				sourceContract := asset.CanonicalContract
+				if engine.LocalChainID != asset.HomeChainID {
+					sourceContract = asset.WrappedContracts[engine.LocalChainID]
+				}
+
+				// Construct transferFrom(address,address,uint256)
+				transferFromID := crypto.Keccak256Hash([]byte("transferFrom(address,address,uint256)")).Bytes()[:4]
+				callData := make([]byte, 4+32+32+32)
+				copy(callData[0:4], transferFromID)
+				copy(callData[4:36], common.LeftPadBytes(tx.FromAddress().Bytes(), 32))
+				copy(callData[36:68], common.LeftPadBytes(tx.ToAddress().Bytes(), 32))
+				copy(callData[68:100], common.LeftPadBytes(params.Value.Bytes(), 32))
+
+				// EXPERIMENTAL FIX (2026-08-25, found + fixed while writing the real-token
+				// Task 1.2 acceptance test — see note/cross_chain_production_readiness_plan.md
+				// Phase 0.7): msg.sender for this internal transferFrom() call MUST be the
+				// Gateway contract itself, not tx.FromAddress() (the bridging user). A real
+				// ERC-20's transferFrom checks allowance[from][msg.sender] — a user can only
+				// ever sanely approve() the Gateway (a fixed, known address) as spender, never
+				// their own tx sender address. With sender=tx.FromAddress() (== `from` too,
+				// since outbound() always locks the caller's own tokens), this checked
+				// allowance[user][user], which is never set by any real approval flow — the
+				// custom-asset outbound path was unconditionally broken against any real
+				// standards-compliant ERC-20, confirmed by a real deployed-contract test
+				// reverting with ERR_EXECUTION_REVERTED before this fix.
+				if err := executeContractCallForGateway(
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+				); err != nil {
+					return nil, nil, fmt.Errorf("outbound custom asset transferFrom failed: %w", err)
+				}
+			}
+			if params.Tip != nil && params.Tip.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, params.Tip, tx.FromAddress(), tx.ToAddress()); err != nil {
+					return nil, nil, fmt.Errorf("outbound native tip burn failed: %w", err)
+				}
+			}
 		}
 		if event, ok := h.abi.Events["MessageSent"]; ok {
 			eventData, packErr := event.Inputs.NonIndexed().Pack(msg.Sequence)
@@ -327,6 +601,71 @@ func (h *GatewayHandler) handleWrite(
 		if err != nil {
 			return nil, nil, err
 		}
+
+		// Task 1.3: Contract Call (only for Native or Pure messages)
+		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
+			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
+			if err := executeContractCallForGateway(
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, big.NewInt(0), tx.MaxGas(),
+			); err != nil {
+				return nil, nil, fmt.Errorf("claimMessage payload execution failed: %v", err)
+			}
+		}
+
+		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Target); err != nil {
+					return nil, nil, fmt.Errorf("claimMessage native mint failed: %v", err)
+				}
+			}
+		} else {
+			// Task 1.2: Custom Asset Mint/Unlock
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				if len(msg.Payload) != 20 {
+					return nil, nil, fmt.Errorf("invalid payload for custom asset claim (expected 20 bytes recipient address, got %d)", len(msg.Payload))
+				}
+				recipient := common.BytesToAddress(msg.Payload)
+
+				asset, err := engine.AssetRegistry.GetAsset(msg.AssetID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
+				}
+
+				targetContract := msg.Target
+				var callData []byte
+
+				if engine.LocalChainID == asset.HomeChainID {
+					// Unlock from vault: transfer(recipient, value)
+					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], transferID)
+					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				} else {
+					// Mint wrapped token: mint(recipient, value)
+					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], mintID)
+					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				}
+
+				// EXPERIMENTAL FIX (2026-08-25, same finding as outbound's transferFrom fix
+				// above): msg.sender for this internal transfer()/mint() call must be the
+				// Gateway itself. transfer(recipient, value) moves balanceOf[msg.sender] — if
+				// msg.sender were tx.FromAddress() (the relayer submitting claimMessage), the
+				// vault-unlock branch would try to move the RELAYER's own token balance
+				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
+				// and any real access-controlled mint() would reject a non-Gateway caller.
+				if err := executeContractCallForGateway(
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
+				); err != nil {
+					return nil, nil, fmt.Errorf("claim custom asset execution failed: %w", err)
+				}
+			}
+		}
+
 		if event, ok := h.abi.Events["MessageStatusChanged"]; ok {
 			eventData, packErr := event.Inputs.NonIndexed().Pack(uint8(status))
 			if packErr == nil {
@@ -365,6 +704,56 @@ func (h *GatewayHandler) handleWrite(
 		if err := engine.Refund(msg, proof, commitRoot, failCert); err != nil {
 			return nil, nil, err
 		}
+
+		// Task 1.1: Real Native Refund Credit back to original sender (msg.Sender) on source chain
+		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Sender); err != nil {
+					return nil, nil, fmt.Errorf("refund native balance restoration failed: %v", err)
+				}
+			}
+		} else {
+			// Task 1.2: Custom Asset Refund
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				asset, err := engine.AssetRegistry.GetAsset(msg.AssetID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
+				}
+
+				sourceContract := asset.CanonicalContract
+				if engine.LocalChainID != asset.HomeChainID {
+					sourceContract = asset.WrappedContracts[engine.LocalChainID]
+				}
+
+				var callData []byte
+				if engine.LocalChainID == asset.HomeChainID {
+					// Unlock from vault back to sender: transfer(sender, value)
+					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], transferID)
+					copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				} else {
+					// Mint wrapped token back to sender (if failed outbound): mint(sender, value)
+					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], mintID)
+					copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				}
+
+				// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
+				// sites in this file): msg.sender must be the Gateway itself, not
+				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
+				// full reasoning.
+				if err := executeContractCallForGateway(
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+				); err != nil {
+					return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
+				}
+			}
+		}
+
 		if event, ok := h.abi.Events["MessageRefunded"]; ok {
 			eventData, packErr := event.Inputs.NonIndexed().Pack(msg.Value)
 			if packErr == nil {
@@ -601,6 +990,16 @@ func (h *GatewayHandler) handleWrite(
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
+	case "bootstrapFoundingChains":
+		// See GatewayEngine.BootstrapFoundingChains's doc comment (pkg/cross_chain/gateway.go)
+		// and this file's ABI doc comment for why this exists and why it's safe: self-closing
+		// after the first successful call, requires >= MinFoundingChains, requires real PoP for
+		// every committee member. Task 2: Pass tx.FromAddress() to restrict to GenesisCoordinator if set.
+		payloads := mustBytesSlice(args[0])
+		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
+			return nil, nil, err
+		}
+
 	case "propose":
 		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose
 		fee := tx.Amount()
@@ -612,11 +1011,28 @@ func (h *GatewayHandler) handleWrite(
 		engine.EnsureGovernance()
 		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
 		payload := mustBytes(args[1])
-		proposedAt := mustUint64(args[2])
+		// Security fix: args[2] (the ABI's declared "proposedAt") is a raw caller-supplied
+		// value with nothing to cross-check it against — GovernanceEngine.Propose/Vote/Execute
+		// were written as pure functions that trust whatever timestamp they're given, never
+		// meant to be fed directly from unauthenticated calldata. A caller naming a future
+		// timestamp here (and an equally fake future one at vote/executeProposal time) can walk
+		// EffectiveAt arbitrarily far ahead and immediately satisfy it, bypassing the mandatory
+		// 72h timelock outright — the same trust class of bug already fixed for voterChainID
+		// above. Fail-closed like every other consensus-relevant value in this file: ignore the
+		// caller's claim and always use the real, consensus-agreed block time instead. The ABI
+		// parameter itself is left in place (removing it would be an ABI-breaking change with no
+		// safety benefit); its value is simply never trusted.
+		proposedAt := blockTime
 		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
 		if err != nil {
 			return nil, nil, err
 		}
+		// propose() is deliberately permissionless (all_remaining_fixes_plan.md Mục 2: gated
+		// only at vote()/quorum, matching common bond-then-vote governance patterns and needed
+		// for a new chain to self-nominate via ProposalRegisterChain without an existing chain
+		// sponsoring it). Proposals has no TTL/cleanup, so surface its real size as a metric
+		// instead of guessing at a rate-limit design with no production data behind it.
+		metrics.GovernanceProposalCount.Set(float64(len(engine.Governance.Proposals)))
 		packed, packErr := method.Outputs.Pack(proposalID)
 		if packErr != nil {
 			return nil, nil, packErr
@@ -627,7 +1043,9 @@ func (h *GatewayHandler) handleWrite(
 		engine.EnsureGovernance()
 		proposalID := mustHash(args[0])
 		voterChainID := mustUint64(args[1])
-		currentTimestamp := mustUint64(args[2])
+		// Security fix: see the matching comment on "propose" above — args[2] is untrusted
+		// caller-supplied input; always use the real block time instead.
+		currentTimestamp := blockTime
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
@@ -671,7 +1089,9 @@ func (h *GatewayHandler) handleWrite(
 	case "executeProposal":
 		engine.EnsureGovernance()
 		proposalID := mustHash(args[0])
-		currentTimestamp := mustUint64(args[1])
+		// Security fix: see the matching comment on "propose" above — args[1] is untrusted
+		// caller-supplied input; always use the real block time instead.
+		currentTimestamp := blockTime
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
@@ -723,17 +1143,85 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
-		statusEvent := h.abi.Events["MessageStatusChanged"]
-		topic0 := statusEvent.ID
-		topic1 := msg.MessageID
-		eventData, packErr := statusEvent.Inputs.NonIndexed().Pack(uint8(status))
-		if packErr != nil {
-			return nil, nil, fmt.Errorf("pack MessageStatusChanged event: %w", packErr)
+		// Task 1.3: Contract Call (only for Native or Pure messages)
+		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
+			if err := executeContractCallForGateway(
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, big.NewInt(0), tx.MaxGas(),
+			); err != nil {
+				return nil, nil, fmt.Errorf("verifyAndExecute payload execution failed: %v", err)
+			}
 		}
-		eventLogs = append(eventLogs, smart_contract.NewEventLog(
-			tx.Hash(), tx.ToAddress(), eventData,
-			[][]byte{topic0.Bytes(), topic1.Bytes()},
-		))
+
+		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Target); err != nil {
+					return nil, nil, fmt.Errorf("verifyAndExecute native mint failed: %v", err)
+				}
+			}
+		} else {
+			// Task 1.2: Custom Asset Mint/Unlock
+			if msg.Value != nil && msg.Value.Sign() > 0 {
+				if len(msg.Payload) != 20 {
+					return nil, nil, fmt.Errorf("invalid payload for custom asset claim (expected 20 bytes recipient address, got %d)", len(msg.Payload))
+				}
+				recipient := common.BytesToAddress(msg.Payload)
+
+				asset, err := engine.AssetRegistry.GetAsset(msg.AssetID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
+				}
+
+				targetContract := msg.Target
+				var callData []byte
+
+				if engine.LocalChainID == asset.HomeChainID {
+					// Unlock from vault: transfer(recipient, value)
+					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], transferID)
+					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				} else {
+					// Mint wrapped token: mint(recipient, value)
+					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+					callData = make([]byte, 4+32+32)
+					copy(callData[0:4], mintID)
+					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
+					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+				}
+
+				// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
+				// sites in this file): msg.sender must be the Gateway itself, not
+				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
+				// full reasoning.
+				if err := executeContractCallForGateway(
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
+				); err != nil {
+					return nil, nil, fmt.Errorf("verifyAndExecute custom asset execution failed: %w", err)
+				}
+			}
+		}
+
+		// Pack failure is intentionally non-fatal here (unlike an ordinary early-return
+		// error): the native mint / asset execution above has already mutated real balance
+		// via a direct, non-rollback-able AccountStateDB/contract-storage write (barrier TXs
+		// have no MVCC/no retry-on-abort — see the comment on the burn ordering in the
+		// "outbound" case above). Returning an error at this point would revert the TX's
+		// receipt/logs while the value transfer it's supposed to report already happened for
+		// real — same failure shape as the bugs fixed elsewhere in this file, just for an
+		// event log instead of the transfer itself. Emitting no event on a Pack failure (which
+		// requires a corrupt/mismatched ABI, not a normal runtime condition) is safe; silently
+		// reverting a delivered transfer is not.
+		statusEvent := h.abi.Events["MessageStatusChanged"]
+		if eventData, packErr := statusEvent.Inputs.NonIndexed().Pack(uint8(status)); packErr == nil {
+			eventLogs = append(eventLogs, smart_contract.NewEventLog(
+				tx.Hash(), tx.ToAddress(), eventData,
+				[][]byte{statusEvent.ID.Bytes(), msg.MessageID.Bytes()},
+			))
+		} else {
+			logger.Error("verifyAndExecute: pack MessageStatusChanged event failed (transfer already applied, not reverting): %v", packErr)
+		}
 
 	case "claimDeadChainBalance":
 		deadChainID := mustUint64(args[0])
@@ -748,6 +1236,34 @@ func (h *GatewayHandler) handleWrite(
 		if err := engine.ClaimDeadChainBalance(deadChainID, account, amount, proof, accountLeafHash); err != nil {
 			return nil, nil, err
 		}
+
+		// Task 1.1: Real Native Balance Credit for dead chain recovery
+		if amount != nil && amount.Sign() > 0 {
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, amount, tx.FromAddress(), account); err != nil {
+				return nil, nil, fmt.Errorf("claimDeadChainBalance native balance credit failed: %v", err)
+			}
+		}
+
+	case "withdrawRelayerTip":
+		amount, err := engine.WithdrawRelayerTip(tx.FromAddress())
+		if err != nil {
+			return nil, nil, err
+		}
+		// Pack the return value BEFORE the real mint below — Pack is a pure function of
+		// `amount` (no chain-state dependency), so doing it first means a Pack failure is
+		// caught while nothing has been mutated yet, instead of after a real, non-reversible
+		// balance credit (barrier TXs have no MVCC/no retry-on-abort; see the "outbound"
+		// case's comment above for why an error path is never allowed after a real mutation).
+		packed, packErr := method.Outputs.Pack(amount)
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		if amount != nil && amount.Sign() > 0 {
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, amount, tx.FromAddress(), tx.FromAddress()); err != nil {
+				return nil, nil, fmt.Errorf("withdrawRelayerTip credit failed: %v", err)
+			}
+		}
+		returnData = packed
 
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)

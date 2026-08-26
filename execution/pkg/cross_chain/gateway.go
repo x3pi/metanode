@@ -92,6 +92,31 @@ type GatewayEngine struct {
 	Governance *GovernanceEngine `json:"governance,omitempty"`
 	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
+
+	GenesisCoordinator common.Address `json:"genesisCoordinator,omitempty"`
+
+	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
+	// an explicit devnet-only config field (config.CrossChainConfig
+	// .DevnetGovernanceTimelockSecondsOverride). Zero (the value on every real chain's
+	// persisted state) means "use the real 72h DefaultGovernanceTimelockSeconds" — see that
+	// field's own doc comment for why this exists.
+	GovernanceTimelockSecondsOverride uint64 `json:"governance_timelock_seconds_override,omitempty"`
+}
+
+// ApplyGovernanceTimelockOverride is a no-op when seconds==0 (every real production config).
+// When explicitly set (devnet/testing only — see GovernanceTimelockSecondsOverride's own doc
+// comment), it both records the override for future EnsureGovernance() calls and, if a
+// Governance engine already exists (either freshly constructed by NewGatewayEngine or just
+// deserialized), updates its TimelockDelaySeconds directly so the change takes effect
+// immediately rather than only on the next from-scratch construction.
+func (g *GatewayEngine) ApplyGovernanceTimelockOverride(seconds uint64) {
+	if seconds == 0 {
+		return
+	}
+	g.GovernanceTimelockSecondsOverride = seconds
+	if g.Governance != nil {
+		g.Governance.TimelockDelaySeconds = seconds
+	}
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -133,7 +158,11 @@ func (g *GatewayEngine) EnsureGovernance() {
 		for c := range g.ChainRegistry {
 			activeChains = append(activeChains, c)
 		}
-		g.Governance = NewGovernanceEngine(activeChains)
+		if g.GovernanceTimelockSecondsOverride > 0 {
+			g.Governance = NewGovernanceEngineWithTimelock(activeChains, g.GovernanceTimelockSecondsOverride)
+		} else {
+			g.Governance = NewGovernanceEngine(activeChains)
+		}
 	}
 	if g.AssetRegistry == nil {
 		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
@@ -141,6 +170,96 @@ func (g *GatewayEngine) EnsureGovernance() {
 		g.AssetRegistry.ChainRegistry = g.ChainRegistry
 		g.AssetRegistry.Governance = g.Governance
 	}
+}
+
+// ErrAlreadyBootstrapped guards BootstrapFoundingChains — see its doc comment.
+var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has active chains — bootstrap is only for genesis, use governance propose/vote/executeProposal instead")
+
+// BootstrapFoundingChains seeds ChainRegistry/Governance.ActiveChains directly, once, from a
+// genesis-time batch of founding chains — the one gap the normal governance flow cannot cover on
+// its own: GovernanceEngine.Vote requires the voting chain to already be a member of
+// engine.ChainRegistry (gateway_handler.go's "vote" case looks up the signer's committee there),
+// and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have already
+// passed a vote — so a Root Anchor with zero active chains has no path to ever register its
+// first chain through governance alone. This mirrors the real founding_entry.json/
+// assemble_root_anchor ceremony's own >= MinFoundingChains requirement (mục 1.3 #5) for the
+// SAME reason that requirement exists there: a bootstrap path open to only 1 chain would let
+// whoever calls it first become the sole active chain and unilaterally control all governance
+// thereafter, defeating the "1 chain = 1 vote, no chain dominates" design (mục 1.2).
+//
+// Self-closing: succeeds at most once per Root Anchor — the moment it succeeds,
+// Governance.ActiveChains is non-empty, so every subsequent call (by anyone) fails closed with
+// ErrAlreadyBootstrapped. Every founding chain's committee must independently pass the same
+// PopVerify check attestCommit()/committeeUpdate() already require, so bootstrapping cannot be
+// used to seed a fake/unverifiable committee either.
+func (g *GatewayEngine) BootstrapFoundingChainsWithCaller(caller common.Address, payloads [][]byte) error {
+	if g.GenesisCoordinator != (common.Address{}) && g.GenesisCoordinator != caller {
+		return fmt.Errorf("unauthorized bootstrap coordinator %s (expected %s)", caller.Hex(), g.GenesisCoordinator.Hex())
+	}
+	return g.BootstrapFoundingChains(payloads)
+}
+
+func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.RelayerBalances == nil {
+		g.RelayerBalances = make(map[common.Address]*big.Int)
+	}
+	amount, exists := g.RelayerBalances[caller]
+	if !exists || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("no accumulated relayer tip balance to withdraw")
+	}
+	g.RelayerBalances[caller] = big.NewInt(0)
+	return amount, nil
+}
+
+func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.EnsureGovernance()
+
+	if len(g.Governance.ActiveChains) > 0 {
+		return ErrAlreadyBootstrapped
+	}
+	if len(payloads) < MinFoundingChains {
+		return fmt.Errorf("%w: got %d, need >= %d", ErrInsufficientFoundingChains, len(payloads), MinFoundingChains)
+	}
+
+	registries := make(map[uint64]ChainRegistry, len(payloads))
+	for _, p := range payloads {
+		var reg ChainRegistry
+		if err := json.Unmarshal(p, &reg); err != nil {
+			return fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		if reg.ChainID == 0 {
+			return fmt.Errorf("invalid chain ID: 0")
+		}
+		if _, dup := registries[reg.ChainID]; dup {
+			return fmt.Errorf("%w: chain %d", ErrDuplicateChainID, reg.ChainID)
+		}
+		if len(reg.Committee) == 0 {
+			return fmt.Errorf("chain %d: empty committee", reg.ChainID)
+		}
+		for _, v := range reg.Committee {
+			ok, err := PopVerify(v.PubkeyBLS, v.PopSignature)
+			if err != nil || !ok {
+				return fmt.Errorf("chain %d: proof-of-possession verification failed for a committee member: %w", reg.ChainID, err)
+			}
+		}
+		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
+			return fmt.Errorf("chain %d: %w", reg.ChainID, err)
+		}
+		registries[reg.ChainID] = reg
+	}
+
+	if g.ChainRegistry == nil {
+		g.ChainRegistry = make(map[uint64]ChainRegistry)
+	}
+	for chainID, reg := range registries {
+		g.ChainRegistry[chainID] = reg
+		g.Governance.RegisterActiveChain(chainID)
+	}
+	return nil
 }
 
 // ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
@@ -164,6 +283,23 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		}
 		if reg.ChainID == 0 {
 			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		// Security fix: a NON-EMPTY committee here was previously accepted with no PoP
+		// verification at all — unlike BootstrapFoundingChains and ProposalUpdateCommittee,
+		// which both require it — letting a proposal register a chain whose "committee" is
+		// unverifiable rogue keys. An EMPTY committee is still allowed (registers routing
+		// metadata only; VerifyQuorumCertAgainstRegistry fails closed with ErrEmptyCommittee
+		// for any quorum cert against it until a real committee is set via
+		// ProposalUpdateCommittee) — this matches an existing real usage pattern
+		// (gateway_governance_test.go's asset-registration test onboards a chain this way)
+		// that a blanket non-empty requirement would have broken.
+		if len(reg.Committee) > 0 {
+			if err := ValidateCommittee(reg.Committee); err != nil {
+				return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
+			}
+		}
+		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
+			return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
 		}
 		g.Governance.RegisterActiveChain(reg.ChainID)
 		if g.ChainRegistry == nil {
@@ -192,6 +328,63 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 			g.DeadChains = make(map[uint64]bool)
 		}
 		g.DeadChains[chainID] = true
+
+	case ProposalAllocateSupply:
+		// See GlobalSupplyLedger.GrantAllocation's doc comment (types.go) for why this exists:
+		// without it, no chain can ever pass attestCommit's per_chain_allocation ceiling check.
+		var grant AllocationGrantPayload
+		if err := json.Unmarshal(proposal.Payload, &grant); err != nil {
+			return nil, fmt.Errorf("invalid AllocationGrantPayload: %w", err)
+		}
+		if grant.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		if g.SupplyLedger == nil {
+			return nil, fmt.Errorf("ProposalAllocateSupply: SupplyLedger not initialized")
+		}
+		if err := g.SupplyLedger.GrantAllocation(grant.ChainID, grant.Amount); err != nil {
+			return nil, fmt.Errorf("ProposalAllocateSupply: %w", err)
+		}
+
+	case ProposalUpdateCommittee:
+		var update UpdateCommitteePayload
+		if err := json.Unmarshal(proposal.Payload, &update); err != nil {
+			return nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
+		}
+		if update.ChainID == 0 && update.SourceChainID != 0 {
+			update.ChainID = update.SourceChainID
+		}
+		if update.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		reg, exists := g.ChainRegistry[update.ChainID]
+		if !exists {
+			return nil, fmt.Errorf("%w: chain %d", ErrUnknownChain, update.ChainID)
+		}
+		if err := ValidateCommittee(update.NewCommittee); err != nil {
+			return nil, fmt.Errorf("ProposalUpdateCommittee: %w", err)
+		}
+		// Security fix: QuorumThreshold was applied with no bounds check — a governance
+		// proposal (even an honestly-intended one with a typo) could set it below the 2/3 BFT
+		// floor, letting a minority of this chain's new committee forge a "valid" QuorumCert
+		// for every future attestCommit()/vote() against it.
+		if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
+			return nil, fmt.Errorf("ProposalUpdateCommittee: chain %d: %w", update.ChainID, err)
+		}
+		reg.Committee = update.NewCommittee
+		if update.NewEpoch > 0 {
+			reg.Epoch = update.NewEpoch
+		}
+		if update.QuorumThreshold > 0 {
+			reg.QuorumThreshold = update.QuorumThreshold
+		}
+		if update.StateRoot != (common.Hash{}) {
+			reg.StateRoot = update.StateRoot
+		}
+		if update.AccountTreeRoot != (common.Hash{}) {
+			reg.AccountTreeRoot = update.AccountTreeRoot
+		}
+		g.ChainRegistry[update.ChainID] = reg
 	}
 
 	return proposal, nil

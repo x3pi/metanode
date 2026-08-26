@@ -16,12 +16,24 @@ read `note/cross_chain_root_anchor_architecture.md` (the design doc) and
 `note/cross_chain_wiring_plan_next_steps.md` (the plan that produced Milestones E-I)
 first; this document assumes both.
 
+**Update 2026-08-25, 4th review pass — Phase 0.6 (below) found the most important gap in
+this entire document: nothing implemented so far actually moves real value.** All of
+Milestones A-I is a real, well-tested BLS/Merkle verification and anti-fraud layer around
+an in-memory ledger (`GlobalSupplyLedger`, `AssetRegistryEngine`'s vault/circulation maps)
+that has never been connected to `AccountStateDB`/`VmProcessor.ProcessNativeMintBurn`.
+**Read Phase 0.6 before anything else in this document** — everything from Phase 1 onward
+below was written assuming value-transfer worked and just needed hardening/staging; that
+assumption was wrong, and Phase 0.6 must land (with its own real-balance end-to-end
+acceptance test) before Phase 2's T2 testnet run means anything for value transfers.
+
 **Bottom line up front: this system is still not production-ready.** Real cryptographic
 verification exists and is unit/integration tested, and the two known proof-binding bugs
-are now fixed — but nothing has run on a real multi-node network yet, and no external
-security review has happened. **3 critical bugs found across 2 internal review passes on
-freshly-written code is a base rate, not bad luck** — do not skip the gates below to save
-time, and stay suspicious of any new cryptographic/authorization code the same way.
+are now fixed — but nothing has run on a real multi-node network yet, no external security
+review has happened, and (Phase 0.6) the verified ledger this all protects has never been
+wired to a real spendable balance on either end. **3 critical bugs found across 2 internal
+review passes on freshly-written code is a base rate, not bad luck** — do not skip the
+gates below to save time, and stay suspicious of any new cryptographic/authorization code
+the same way.
 
 ---
 
@@ -149,6 +161,578 @@ Same as the rest of this document: `go build ./... && go vet ./... && go test ./
 `execution/` zero regressions, each fix has a regression test proving the specific issue,
 PR via `gh` off a branch from `dev`, no self-merge.
 
+---
+
+## Phase 0.6 — CRITICAL, found 2026-08-25 (4th review pass, while writing the production
+## deployment guide): cross-chain value transfer is never wired to any real balance
+
+**This is not a fund-theft exploit** (see "Why this is safe to write up openly" below) —
+it is a **missing-functionality finding**, but it is the single most important thing in
+this entire document: as implemented today, **no cross-chain transfer — native coin or
+custom asset — ever moves a real, spendable unit of value.** Every `outbound()` /
+`attestCommit()` / `claimMessage()` / `verifyAndExecute()` / `refund()` /
+`claimDeadChainBalance()` call that "succeeds" only ever mutates in-memory Go structs
+(`GlobalSupplyLedger.PerChainAllocation`, `AssetRegistryEngine.{Vault,Circulation}Balances`,
+`MessageStatus`). None of them call `AccountStateDB.AddBalance`/`SubBalance`, and none of
+them call `VmProcessor.ProcessNativeMintBurn` — the exact function
+`note/cross_chain_root_anchor_architecture.md` mục 2.4 (lines 245-249) specifies for this:
+*"A chạy `ProcessNativeMintBurn(1)` (burn cục bộ, ... `tz_hardware_engine.go`)"* on the
+source side, *"B ... `ProcessNativeMintBurn(0)` để mint"* on the destination side.
+
+**Evidence (all confirmed by direct code reading, not inference):**
+- `execution/pkg/cross_chain/gateway.go` and
+  `execution/pkg/blockchain/tx_processor/gateway_handler.go` import neither `mvm` nor
+  `vm_processor` — zero possible call path to `ProcessNativeMintBurn` exists today.
+- `outbound()`'s ABI (`gatewayAbi.go`) is `"stateMutability": "nonpayable"` — a caller does
+  not even attach real native coin when calling it. `Value` is a free-form `uint256`
+  argument with no connection to the caller's actual balance.
+- `ClaimMessage` (`gateway.go:550`) has a comment *"// Set execution context for destination
+  target contracts"* right where a real `Target`/`Payload` invocation should happen — it
+  sets `g.ActiveContext`, does nothing with it, and immediately clears it again.
+  `execStatus := MessageStatusSuccess` is unconditional; nothing was actually executed.
+- `AssetRegistryEngine.ReceiveAndSettleAsset`'s "Case B: Destination is Remote Chain -> Mint
+  wrapped token into circulation" (`asset_registry.go:239-240`) only increments
+  `a.CirculationBalances[destCircKey]`, an internal map — it never calls the real wrapped
+  ERC-20 contract's `mint`, and the `recipient` parameter it accepts is never used to touch
+  any real state.
+- `VmProcessor.ProcessNativeMintBurn` (`vm_processor.go:462`) — the function that *does*
+  exist, fully implemented, TrustZone-hardware-backed, exactly matching the architecture
+  doc's description — has **zero callers** anywhere in the live codebase (confirmed via
+  `grep -rn "ProcessNativeMintBurn(" execution/`, only its own definition and the
+  `mvm`-layer plumbing beneath it show up).
+- `RelayerBalances[relayer]` (the tip mechanism, `gateway.go:632-638`) is credited the same
+  way — no `withdraw`-style method exists anywhere in `gatewayAbi.go` to ever turn it into
+  real coin.
+
+**Why this is safe to write up openly (no responsible-disclosure lockdown needed, unlike
+Phase 0.5):** there is no live exploit here because there is no real value in the system to
+steal in the first place — `outbound()` never takes a real balance from anyone, so an
+attacker gains nothing spendable by manipulating `claimMessage()`, and neither does a
+legitimate user. Every green test in `gateway_test.go`/`relayer_test.go`/
+`security_audit_test.go` genuinely proves the **verification/anti-fraud layer** is sound
+(BLS, Merkle, replay, double-mint-of-the-*ledger*) — that work is real and necessary — but
+none of it proves the bridge moves money, because it never has.
+
+**Fix plan (this is the actual scope of "make the bridge work for real"):**
+
+1. **`GatewayEngine.Outbound`** (or its caller in `gateway_handler.go`'s `"outbound"` case):
+   before/alongside building the `CrossChainMessage`, call
+   `VmProcessor.ProcessNativeMintBurn(ctx, tx, mvmE, 1 /* burn */)` for `params.Value` from
+   `tx.FromAddress()`. Must fail closed (revert the whole tx) if the burn fails — a message
+   must never be emitted for value that wasn't actually removed from the sender.
+2. **`GatewayEngine.ClaimMessage`** (and the `verifyAndExecute` path that calls it): after
+   all existing verification passes (keep every check exactly as-is — this phase is purely
+   additive), call `ProcessNativeMintBurn(ctx, tx, mvmE, 0 /* mint */)` crediting
+   `message.Value` to the real recipient. Open design question to confirm with the task
+   owner before implementing: **who is the recipient** — is it always `message.Sender`
+   (same address on both chains), or does the ABI need a new explicit `recipient` field?
+   Check `AssetRegistryEngine.LockAndBridgeAsset` — it already threads a separate
+   `recipient common.Address` distinct from `sender`, so the native path likely needs the
+   same, meaning `CrossChainMessage` needs a new field (ABI-breaking, coordinate with
+   Phase 1 item about anything else pending an ABI change).
+3. **`GatewayEngine.Refund`**: same mint call, crediting `message.Sender` back on the source
+   chain (this is the "give it back to whoever originally burned it" path, per architecture
+   mục 2.4 point 2 — the sender identity here is unambiguous, this doesn't have the
+   recipient question item 2 does).
+4. **`GatewayEngine.ClaimDeadChainBalance`**: same mint call, crediting `account` (the
+   parameter already exists and is already verified via the account-tree Merkle proof —
+   just isn't consumed).
+5. **`AssetRegistryEngine.LockAndBridgeAsset`/`ReceiveAndSettleAsset`**: needs the
+   equivalent for ERC-20-style assets — burning/locking means an actual `SubBalance`-style
+   call against the *token contract's* storage (via the existing EVM/MVM `Call` mechanism,
+   not `ProcessNativeMintBurn` which is native-coin-only), and minting means actually
+   invoking the wrapped contract's mint entrypoint. This is more involved than the native
+   path (needs a real contract call, not a direct balance primitive) — treat as a separate,
+   later task from items 1-4, not a blocker for getting native transfers real.
+6. **`CONTRACT_CALL` (`message.Target`/`message.Payload`)**: currently accepted into the
+   message struct, hashed into the digest, and never invoked. Per architecture mục 2.6.5,
+   this needs the sender to lock a "cross-chain gas" amount at `outbound()` time and
+   `ClaimMessage` to actually invoke `Target` with `Payload` via the EVM/MVM `Call`
+   mechanism, gas-capped to the locked amount, unused portion refunded, used portion really
+   burned (not "free gas" — see the architecture doc's own DoS warning at that section).
+   This depends on items 1-2's real-value plumbing existing first — do this after, not
+   instead of, the plain value-transfer path.
+
+**Acceptance test — must exist before this item is considered done:** an end-to-end test
+(not the existing in-process `gateway_test.go` style, which would hide this exact class of
+bug the same way it hid this one) that starts two real chains + a real Root Anchor,
+observes `eth_getBalance` on the sender **decrease** after `outbound()` and on the real
+recipient **increase** after `claimMessage()`, by exactly the transferred amount, on both
+chains' real RPC endpoints. This is the only kind of test that would have caught this gap —
+add it to the same T2 real-infra testing this document's Phase 2 already calls for, and
+make it block Phase 2 sign-off, not just Phase 1.
+
+**Where this sits relative to the rest of this document:** this must be fixed and its
+acceptance test passing **before** Phase 2's T2 testnet run is meaningful for anything
+beyond messages (`value=0`) — right now Phase 4's "Stage 2 — value transfers via Reserve,
+small caps" describes a rollout stage for a capability that does not exist yet. Do this
+work first, then the existing Phase 1-5 sequence below still applies as written.
+
+## Phase 0.7 — PR #63: Phase 0.6 implemented, 6 bugs found+fixed, partial live acceptance
+## test run (2026-08-25, same day)
+
+**Code:** `fix/cross-chain-native-value-wiring` → PR #63 (open, not yet merged at time of
+writing). Implements Task 1.1 (native burn/mint on `outbound`/`claimMessage`/
+`verifyAndExecute`/`refund`/`claimDeadChainBalance`), Task 1.2 (custom asset via real
+`transferFrom`/`transfer`/`mint` contract calls), Task 1.3 (`CONTRACT_CALL` execution gated
+on the target having real deployed code, `isContractCall`), Task 1.4 (`withdrawRelayerTip`),
+and Task 2 (`BootstrapFoundingChainsWithCaller`/`GenesisCoordinator`). Full bug-by-bug
+evidence in `note/cross_chain_task1_native_value_fix_plan.md` (its "RESOLVED" header
+summarizes all 6: burn-before-validate fund loss, split Tip+Value burn stranding Tip on
+partial failure, mint-before-CONTRACT_CALL double-mint-via-replay, relayer Tip double-mint,
+2 hard-fail-after-mutation paths, one leftover debug `fmt.Printf`). `go build ./... && go vet
+./... && go test ./...` clean across the whole `execution/` module.
+
+**Live acceptance test — partial, real result, not the full round-trip yet:**
+
+Stood up real infra from this repo's own tooling (`deploy/systemd/setup_root_anchor.sh
+--clean`, `gen_single_chain.py`): a real 4-validator Root Anchor BFT cluster (chain 9099) and
+2 real single-validator private chains (101, 102), all with freshly rebuilt binaries carrying
+this PR's fixes. Ran a real `bootstrapFoundingChains()` transaction (throwaway tool, not
+committed — see below) with **real BLS PoP verification**, `status: 0x1`. Then ran a real
+`outbound()` transaction on chain 101 (native value=1000 wei, real ECDSA-signed tx, real
+dev-funded account) and verified the sender's **real balance decreased by exactly gas-fee +
+1000 wei** (`50000000001000` = `50000 gasUsed × 1e9 gasPrice + 1000`), read back via a second
+real `eth_getBalance` RPC call — not inferred, computed and matched exactly. **This is the
+first real evidence in this project's history that a cross-chain transfer moves actual
+spendable value on a real running chain**, closing the specific gap Phase 0.6 documented.
+
+**Not yet done:** the destination-side proof (`claimMessage()` minting on chain 102,
+`eth_getBalance` increasing there) — blocked by an infra issue below, not a code issue (the
+`outbound()` result above already proves the burn side of Task 1.1 works correctly end to
+end on real infra). Re-run the same session's `submit_claim_quick`-style flow once the
+blocker below is resolved to close this out fully.
+
+**2 real infra findings from this session, both separate from the Gateway code in PR #63:**
+
+1. **Stray/duplicate validator entry from repeated start/kill/regenerate cycling — found,
+   explained, not a production bug.** A single-validator chain regenerated via `gen_single_chain.py`
+   after an earlier failed attempt (same output dir) intermittently ended up with **2**
+   validator entries in its stake-state DB instead of 1 (`GetAllValidators()` returned a
+   phantom entry with a different address/stake than genesis.json's real one), which
+   permanently blocked block production: the node tried to reach the phantom validator's
+   p2p address as a peer for its own block-sync quorum and could never succeed (`Not enough
+   stake: 0 out of 3000 total stake`). Root-caused by testing: a **fully clean** single-shot
+   regenerate-then-start (kill everything, `rm -rf` the whole chain dir, generate once, start
+   once — no restart cycling) reliably produces exactly 1 validator and blocks flow
+   immediately. Exact origin of the phantom entry within a dirty-restart sequence not traced
+   further (not needed once the clean-start workaround was confirmed reliable twice). **Actionable
+   takeaway for whoever runs T2 next:** never `rm -rf` + regenerate a chain's data dir into the
+   same path while any process from a previous attempt at that path might still be alive or
+   mid-shutdown — kill and confirm-dead first, every time.
+2. **NOT YET ROOT-CAUSED — Root Anchor executor "CatchingUp phase" livelock on a fresh
+   4-validator batch start.** On a second clean regeneration (to align chain 101/102's
+   committee keys with a fresh bootstrap after finding #1 above), the 4-validator Root Anchor
+   cluster's consensus DAG kept committing rounds normally and fast (`commit_index` observed
+   climbing 512 → 1735+ over ~3 minutes, real BFT activity, not deadlocked) while the Go
+   executor stayed stuck logging `🛡️ [PHASE-GUARD] Blocking local committer. Node is in
+   CatchingUp phase (startup_sync_active=true)` **12,000+ times** without ever exiting that
+   phase — `eth_blockNumber` never moved past `0x1` in that window. No noisy-neighbor process
+   this time (confirmed via `ps aux --sort=-%cpu`, machine was otherwise idle) — different
+   trigger than the earlier documented restart-hang (Phase 1 item 2's "Investigated live, root
+   cause found — environmental" note), since this was a **fresh** start (`--clean`), not a
+   restart from persisted state. Best guess, not confirmed: launching 4 heavy validator
+   processes near-simultaneously via a backgrounding loop (`start_all.sh`'s `&`) may let the
+   DAG race far enough ahead before the executor's first catch-up pass that its exit condition
+   never triggers — needs real Rust-side tracing of `commit_manager`'s `PHASE-GUARD` exit logic
+   to confirm, not guessed at further here. **This is what blocked the destination-side
+   `claimMessage()` proof above** — chain 101/102 themselves were fine (single-validator,
+   confirmed working, see finding #1's resolution) but couldn't get real `ChainRegistry` data
+   from Root Anchor while it was stuck. Whoever picks this up: reproduce with a staggered
+   start (start node_0, wait for it to be ready, then node_1, etc.) to test the race-condition
+   theory before diving into Rust source.
+
+   **Update, same day — root-caused finding #2 down to 2 more precise layers, NOT resolved,
+   3 experimental patches left uncommitted for review.** Rust-side tracing (as this doc's own
+   previous entry asked for) was done. Chain of causes, most-proximate first:
+   - **Layer A (root-caused + fixed, validated live):** `commit_syncer/cold_start.rs`'s
+     `determine_startup_sync_exit()` Gate 1 (`has_parity`) required `lag == 0` exactly — on a
+     cluster whose round timer never idles (empty blocks forever, no real tx load), the
+     network's quorum_commit is a perpetually moving target; live logs showed
+     `synced=326, local=326, quorum=327, lag=1` and the equivalent pair 10s later at
+     `synced=262→326`, i.e. this node processes commits in real time but `lag` locks at
+     exactly 1, never 0, so Gate 1 never passes and the node never leaves CatchingUp.
+     **Experimental fix (uncommitted):** loosened Gate 1 to `lag <= 1`. Gate 5
+     (`block_hash_verified`, the actual fork-safety check via peer-verified block hash) is
+     completely untouched and still independently gates the same transition, so this widens
+     only a liveness check, not the fork-safety one. **Verified live:** after this fix, node
+     logs changed from "CatchingUp — lag > 0" to *"All gates (1-4) passed but block hash NOT
+     yet verified against peers (Gate 5)"* — Gate 1 confirmed fixed, Gate 5 is next.
+   - **Layer B (root-caused, NOT fixed):** Gate 5's `perform_post_gate_verification()`
+     (`node/setup_consensus/verification.rs`) needs to query peers' `/peer_info` over a raw
+     TCP+manual-HTTP server (`network/peer_rpc/server.rs`, `PeerRpcServer`) on
+     `peer_rpc_port` (19200+node_id for this devnet) — but every query failed with "No
+     reachable peers found" (`network/peer_rpc/client.rs`), so Gate 5 never passes, node
+     stays in CatchingUp forever, `eth_blockNumber` never advances past 1. Direct `curl` to
+     the port confirmed it: connects fine, but answers `content-type: application/grpc,
+     grpc-status: 12 (UNIMPLEMENTED)` — something is listening, but it isn't the intended
+     `/peer_info` HTTP handler.
+   - **Layer C (partially root-caused, NOT resolved):** log tracing found the real proximate
+     error: `startup.rs` starts a "full" `PeerRpcServer` on the same port right after
+     `startup_sync.rs` aborts a temporary "early" `PeerRpcServer` instance (started to serve
+     `/peer_info` before the rest of the node is ready, an intentional design — see its own
+     "prevent STARTUP-SYNC deadlock" comment) — and the full server's `bind()` failed with
+     "Address already in use" (os error 98), logged but **silently swallowed by the spawning
+     task**, so no `/peer_info` server ever runs again for the life of the node. **Two
+     experimental fixes tried, in order, neither resolved it:**
+     1. Retry `bind()` up to 20× with 250ms backoff instead of failing once
+        (`peer_rpc/server.rs`) — **still failed all 20/20 retries** (5s straight), proving
+        this isn't a short release-timing race.
+     2. Replaced the early server's `handle.abort(); sleep(100ms)` with the textbook-correct
+        `handle.abort(); let _ = handle.await;` (`setup_consensus/startup_sync.rs`) — awaiting
+        an aborted `JoinHandle` should block until the task, and the `TcpListener` it owns,
+        is actually torn down. **Still failed all 20/20 retries.** Live logs show the early
+        server started and was stopped again within **1.9ms** of each other, then the full
+        server's bind still couldn't get the port for the next 5+ seconds — meaning
+        something holds it well past what either fix addresses.
+     Ruled out as the culprit (checked directly, not assumed): Go does NOT bind this port
+     itself (`execution/cmd/simple_chain/processor/block_processor_core.go`'s own comment —
+     the call is literally commented out); no second Rust call site constructs a
+     `PeerRpcServer` anywhere in the tree (`grep -rn "PeerRpcServer::new"` — exactly one call
+     site, in `startup_sync.rs`); the early-server spawn+cleanup in `startup_sync.rs` happens
+     exactly once per node lifetime (outside any loop that could re-spawn without cleaning up
+     the previous instance). **What's actually holding the port for 5+ full seconds is still
+     unknown** — needs real process-level tracing (`strace -f -e trace=bind,close`, or
+     `lsof`/`ss` sampled at high frequency during the exact failure window with fd/thread
+     detail) rather than more source-reading-and-guessing; the "guess a fix, rebuild, retest
+     live" cycle used for Layers A/B stopped being productive at this layer.
+   - **Net effect:** Layer A's fix is real progress (validated), but Root Anchor still cannot
+     leave CatchingUp on a fresh multi-validator start because of Layer C, so the
+     destination-side `claimMessage()` acceptance-test proof is still blocked. All 3
+     experimental patches (Gate 1, bind-retry, abort+await) are left **uncommitted** in the
+     working tree — each is independently a reasonable robustness improvement and none
+     reduces fork-safety (Gate 5 itself is never touched), but none is proven sufficient and
+     none has been reviewed. Do not commit/merge without dedicated review, ideally alongside
+     whoever wrote the original Gate 1/5 fork-safety gates and the early/full PeerRpcServer
+     handoff design.
+
+   **Update, same day, later — Layer C ROOT-CAUSED FOR REAL AND FIXED, verified live.** Took
+   the doc's own advice above (real process-level tracing instead of more source-reading):
+   `curl -sv http://127.0.0.1:19200/peer_info` mid-failure returned
+   `content-type: application/grpc, grpc-status: 12 (UNIMPLEMENTED)` — a clue this doc's
+   earlier pass recorded but didn't chase down. That response can only come from the
+   validator's real gRPC consensus network server (`meta-consensus/core/src/network/
+   tonic_network.rs`, built on `tonic`), never from `PeerRpcServer`'s raw-HTTP handler. Cross-
+   checked against genesis config: `deploy/systemd/gen_root_anchor_chain.py` computes
+   `p2p_port = 19200 + args.port_offset + node_id` for the validator's `p2p_address` (fed
+   into `tonic_network.rs`'s real, permanent listener) **and separately** `network_port =
+   19200 + i`, which gets written straight into `peer_rpc_port` — the exact same port number,
+   assigned to two completely different, independently-implemented servers. This is not a
+   Tokio task-cancellation race at all: the "early" `PeerRpcServer` briefly holds the port
+   first (starting earlier in boot), gets stopped correctly, and then loses the port
+   *permanently* to the real gRPC P2P listener the moment that starts — which is why bind()
+   failed 20/20 times over 5+ real seconds in both earlier attempts: the true occupant never
+   releases the port for the rest of the process's life, so no amount of retrying or awaiting
+   task teardown could ever have worked. **Fix:** `gen_root_anchor_chain.py`'s
+   `peer_rpc_port` now gets its own disjoint range (`29200 + i`, matching the convention
+   already used correctly by `_rehearsal_gen_node_configs.py` elsewhere in the same
+   directory) instead of reusing `network_port`; `peer_rpc_addresses` (each node's list of
+   peers to query) fixed to match. Added a generation-time self-check
+   (`gen_root_anchor_chain.py`) that fails loudly if any two of the ports directly confirmed
+   to be real independent listeners (`rpc_port`, `network_port`/`p2p_address`,
+   `peer_rpc_port`, `metrics_port`) ever collide again, instead of trusting the arithmetic by
+   inspection. **Verified live, clean single-shot regeneration, fresh 4-validator devnet:**
+   zero "Address already in use" across all 4 nodes; every node logs `[POST-GATE-VERIFY]
+   ... Gate 5 cleared — node state is bit-perfect` and `Phase transition: Bootstrapping ->
+   Healthy`; all 4 RPC endpoints report matching block heights and keep advancing. This is
+   the first time a real multi-validator Root Anchor cluster has ever reached Healthy in this
+   project's history — closes the T2 blocker Phase 0.8/0.9's custom-asset round trip had to
+   route around via single-validator-per-chain.
+
+   The 2 "experimental" Rust patches (bind-retry-with-backoff in `peer_rpc/server.rs`,
+   `abort()+await` in `startup_sync.rs`) turned out to be solving the wrong theory — kept
+   anyway as real, independently-correct, zero-cost defensive hardening (their code comments
+   updated to say so plainly rather than still claiming credit for the actual fix), committed
+   alongside the real fix. **Gate 1's `lag <= 1` loosening (Layer A, `cold_start.rs`) is
+   UNCHANGED and still not committed** — that was a genuinely separate finding (a
+   continuously-live cluster's `lag` never landing on exactly 0) unrelated to Layer C's port
+   collision, not retested this session, and still needs the dedicated review this doc has
+   asked for since it was written.
+
+## Phase 0.8 — PR #64: Task 1.2 real-contract acceptance test found + fixed 2 more real bugs
+## (2026-08-25, same day), plus live 2-node RPC verification
+
+**Code:** `test/custom-asset-real-token-coverage` → PR #64 (open at time of writing). Closes
+the Task 1.2 test-coverage gap this doc and `cross_chain_task1_native_value_fix_plan.md`
+both flagged: the existing `TestGatewayHandler_CustomAsset_Outbound_ClaimMessage` only ever
+proved the custom-asset code fails gracefully against a non-contract address, never that a
+real `transferFrom`/`transfer`/`mint` succeeds against a real deployed token. Writing that
+real test (a solc-0.8.35-compiled ERC-20-shaped fixture, deployed via the real
+`mvm.ExecutionEngine.Deploy` path) found **2 more real production bugs**, both fixed:
+
+1. **`msg.sender` bug, 4 call sites** (`outbound`'s `transferFrom`, `claimMessage`'s
+   `transfer`/`mint`, `refund`'s `transfer`/`mint`, `verifyAndExecute`'s `transfer`/`mint`) —
+   `executeContractCallForGateway` was called with `sender=tx.FromAddress()` (the bridging
+   user/relayer) instead of the Gateway contract. `transferFrom(from,to,value)` checks
+   `allowance[from][msg.sender]`; with `sender==from==tx.FromAddress()` this checked
+   `allowance[user][user]` — never set by any real approval flow, since a user can only
+   sanely `approve()` a fixed known spender (the Gateway). **This meant the entire
+   custom-asset outbound path was unconditionally broken against any real
+   standards-compliant ERC-20** — confirmed live, `ERR_EXECUTION_REVERTED`. Same root cause
+   breaks the vault-unlock `transfer()` (moves the wrong account's balance) and would break
+   `mint()` against any real access-controlled wrapped token. Fixed all 4 sites to pass
+   `mt_common.GATEWAY_CONTRACT_ADDRESS`.
+2. **`applyFullMvmResultToStateDB` never applied `MapCodeChange`** (only the hash, not the
+   bytecode) — `SmartContractDB.SetCode` was never called, so code written via this path was
+   never actually retrievable (`"Error getting code from storage"` on the next call in). Only
+   affects the Gateway's own internal contract-call/deploy paths, not normal top-level EVM
+   deployment (which goes through `vm_processor_state.go`'s already-correct application
+   logic). Fixed by adding the missing `SetCode` step.
+
+`go build ./... && go vet ./... && go test ./...` clean across all 43 packages in
+`execution/`, `gofmt -l` clean.
+
+**Live 2-node RPC verification (same day, at the user's explicit request before signing
+off):** rebuilt the Go binary with PR #64's fixes, ran 2 real single-validator private
+chains (101, 102) as separate OS processes (clean single-shot regenerate — see finding #1
+above for why that matters), and ran a throwaway tool (`deploy_and_approve_quick`, not
+committed) against each over **real JSON-RPC**, not an in-process shortcut:
+- A real top-level `CREATE` transaction (`to: nil`, standard EVM deployment path, not the Go
+  test's `mvm.Deploy` shortcut) — real receipt, real deployed address, on both chains.
+- A real `balanceOf()` `eth_call` immediately after — proves the deployed code is really
+  retrievable (this is the code path the tests above cover with bug #2's fix; a normal `CREATE`
+  doesn't actually exercise that fix, since it uses the separately-correct
+  `vm_processor_state.go` path — this call mainly confirms deployment itself is healthy).
+  Chain 101: `1000000` (exact initial supply). Chain 102: `500000` (exact initial supply).
+- A real `approve(GATEWAY_CONTRACT_ADDRESS, 500)` transaction — real receipt on both chains.
+- A real `allowance()` `eth_call` afterward — exactly `500` on both chains, confirming the
+  approve really landed.
+
+**What this does and doesn't prove:** confirms the rebuilt binary carrying both fixes runs
+correctly end-to-end (real consensus block inclusion, real EVM execution, real state
+persisted and readable back) on 2 independent real node processes talking only over RPC —
+not a Go-process-internal test. It does **not** cover the full `outbound()`/`claimMessage()`
+round trip for a custom asset over real RPC, because that requires the asset to already be
+registered via `registerAsset`, which requires an executed governance proposal, which
+requires a real committee (`ChainRegistry`) on each chain — the same Root Anchor dependency
+chain Phase 0.7's Layers A/B/C are about, and Layer C is still unresolved. The in-process Go
+acceptance tests in PR #64 (`TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds` /
+`...RealTokenMintSucceeds`) remain the authoritative proof of the `msg.sender` and `SetCode`
+fixes themselves — they exercise the exact same `executeContractCallForGateway` /
+`applyFullMvmResultToStateDB` code the live nodes run, just without needing the full
+governance ceremony to seed `AssetRegistry`. Closing that last gap needs Layer C fixed first
+(or a deliberate governance/bootstrap shortcut designed for it, not guessed at here).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update above. This paragraph is left as-written for the historical record.)**
+
+## Phase 0.9 — full live custom-asset round trip completed for real (2026-08-25, same day),
+## found + fixed the SupplyLedger allocation dead end, plus 2 tooling bugs and 1 unfixed finding
+
+**Closes Phase 0.8's last open gap.** Ran the complete `outbound()` → `attestCommit()` →
+`claimMessage()` custom-asset round trip over real JSON-RPC against the same 2 live
+single-validator private chains (101 on `:8551`, 102 on `:8547`) as Phase 0.8, through real
+on-chain governance end to end — not a bootstrap/test shortcut. Sequence, all real
+transactions with real receipts:
+
+1. Real `bootstrapFoundingChains()` on both chains (4-chain fake founding committee, satisfies
+   `MinFoundingChains`).
+2. Real `propose()`/`vote()`/`executeProposal()` — chain 101 registers chain 102 and itself;
+   chain 102 registers chain 101 and itself. Each a real proposal, real quorum votes from the
+   founding committee, a real (devnet-shortened) timelock wait, real execution.
+3. Real `propose()`/`vote()`/`executeProposal()` + `registerAsset()` — assetID 42 registered
+   on both chains, linking the real deployed canonical token (chain 101) and wrapped token
+   (chain 102) from Phase 0.8.
+4. Real `outbound()` on chain 101 — moved 100 units from sender to Gateway. Verified via real
+   `eth_call` to `balanceOf`: sender `1,000,000 → 999,900`, Gateway `0 → 100`.
+5. Real `attestCommit()` on chain 102 for that commit — **found bug #3 below, fixed, then
+   this succeeded for real.**
+6. Real `claimMessage()` on chain 102 — verified via real `eth_call` to `balanceOf`:
+   recipient `500,000 → 500,100`, exactly the bridged amount.
+
+**Devnet-only timelock override (separate small piece of this work, safe by construction):**
+added `CrossChainConfig.DevnetGovernanceTimelockSecondsOverride` (`config.go`) and
+`GatewayEngine.ApplyGovernanceTimelockOverride` (`gateway.go`), wired from
+`loadGatewayEngine` (`gateway_handler.go`). Zero by default — `EnsureGovernance()` only takes
+the override path when it's explicitly nonzero, so production behavior (mandatory 72h
+timelock) is unchanged unless an operator deliberately opts in. This is what made steps
+2/3/5 above practical to run live (real ~12s waits instead of real 72h waits) without
+touching the mandatory-timelock invariant itself, and without exploiting the separately-found
+`vote()`/`executeProposal()` caller-supplied-timestamp gap noted below.
+
+**Bug #3 (the interesting one) — `GlobalSupplyLedger.PerChainAllocation` had no
+governance-reachable way to ever be funded, at all:** step 5 above reverted with
+`ErrAllocationExceeded` ("requested 100 exceeds available 0"). Traced to: production always
+constructs the ledger via `NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})` —
+genesis-zero, empty allocations (`gateway_handler.go`'s `loadGatewayEngine`, both branches).
+Neither `BootstrapFoundingChains` nor `ExecuteGovernanceProposal`'s `ProposalRegisterChain`
+case ever touches `SupplyLedger` (confirmed by direct code reading). The only mutator that
+existed, `GlobalSupplyLedger.TransferAllocation`/`SetInitialAllocation`, was never called
+from anywhere ABI-reachable — `grep -rn "SetInitialAllocation\|TransferAllocation"` outside
+`types.go` itself turned up nothing. `TestRelayer_Scenario10_6_OnboardNewChainViaGovernance`
+(pre-existing) had quietly worked around exactly this by poking
+`chains[1000].SupplyLedger.PerChainAllocation[104] = big.NewInt(0)` directly in white-box
+test code instead of exercising a real path — a real symptom of the same gap this phase
+found live. **Net effect: as shipped, `attestCommit()`'s Scenario 10.7 ceiling rejects every
+chain forever, native coin or custom asset alike, with no legitimate way to ever unblock it**
+— a second, independent dead end on top of Phase 0.6's finding (that one was "verified
+ledger never wired to real balances"; this one is "the ledger's own ceiling can never be
+funded even in principle").
+
+**Fix:** new `GovernanceProposalKind = 5` (`ProposalAllocateSupply`) and
+`GlobalSupplyLedger.GrantAllocation(chainID, amount)` (`types.go`) — increases the target
+chain's allocation **and** `GenesisTotalSupply` together, keeping
+`sum(per_chain_allocation) == genesis_total_supply` intact (deliberately different from
+`TransferAllocation`, which redistributes *existing* allocation and would need a pre-funded
+reserve chain nothing in production ever seeds). Wired into `ExecuteGovernanceProposal`'s
+switch in `gateway.go`. No ABI change needed — `propose()`'s `kind` is a raw caller-supplied
+`uint8`, so the existing `propose`/`vote`/`executeProposal` methods immediately accept it.
+Same quorum + timelock protection as every other governance action, so a captured single
+chain still cannot self-grant. Regression tests:
+`TestGateway_ProposalAllocateSupply_UnblocksAttestCommit` (full propose→vote→timelock→execute
+cycle, before/after ceiling behavior) and `TestGlobalSupplyLedger_GrantAllocation` (ledger
+primitive: accumulation, invariant, nil/zero/negative rejection) in `pkg/cross_chain/`.
+Verified live: re-ran step 5 after a real `ProposalAllocateSupply` grant on chain 102 for
+chain 101 — succeeded, then step 6 (`claimMessage`) succeeded, exact balance delta confirmed.
+
+**2 throwaway-tool bugs found and fixed along the way (own tooling, not production code, not
+committed — `execution/cmd/tool/live_asset_bridge/main.go`):** (a) a single
+`RemoteCommitteePriv string` field silently overwritten across 2 `register-chain` calls on
+the same state file (once for the real peer chain, once for self-registration), causing
+`attestCommit` to fail with an invalid quorum cert because the saved private key no longer
+matched what was actually registered on-chain — diagnosed by adding a `query-registry` debug
+step comparing the on-chain pubkey against the locally-derived one, fixed by keying it
+`map[chainID]string` instead; (b) a hardcoded quorum vote count that went stale as
+`ActiveChains` grew with each executed `ProposalRegisterChain` — fixed by making all votes
+tolerate an expected post-quorum revert rather than trying to predict the exact threshold.
+
+**Finding noted but deliberately not exploited, not yet fixed — needs a decision, not a
+guess:** `vote()`/`executeProposal()` accept a caller-supplied `currentTimestamp` argument
+with no cross-check against real block time. This is what made the devnet timelock override
+above unnecessary to lean on for correctness (the override is a real, honest config value,
+not this gap) — but the gap itself means anyone can currently claim any timestamp they like
+when voting/executing, including one far in the future, bypassing the 72h timelock outright
+in production today. Not exercised here (out of scope for "prove the bridge moves real
+value," and doing so live would require deliberately faking a governance execution, which
+needs a call before doing it) — flagging for Phase 1 or a dedicated fix: should this validate
+against `blockTime` the same way `AttestCommit`'s epoch check is fail-closed, and if so is
+there a legitimate reason it currently isn't (e.g. some caller needs to backdate/forward-date
+for a reason not yet identified)?
+
+**What this proves and what's still open:** a real custom-asset bridge transfer now
+genuinely moves a real, spendable ERC-20-shaped balance from a real sender on one live chain
+to a real recipient on another live chain, through real BLS-verified governance and real
+BLS/Merkle-verified attestation — the first time in this project's history any cross-chain
+transfer has done that (Phase 0.6 documented that none ever had). Phase 0.6's native-coin
+`ProcessNativeMintBurn` wiring (item 1/2 in its fix plan) is still separately open — this
+phase only closes the custom-asset path plus the allocation-ceiling dead end that blocked
+both. Root Anchor Layer C (Phase 0.7, `peer_rpc_port` bind collision) remains unresolved and
+was worked around here the same way Phase 0.7 already does (single-validator chains, no real
+multi-node Root Anchor consensus needed for this test).
+**(Layer C fixed later the same day — see Phase 0.7's own "ROOT-CAUSED FOR REAL AND FIXED"
+update. A real multi-validator Root Anchor devnet now reaches Healthy; nothing in this phase
+needed to route around it any more, but this phase's own live run predates that fix and this
+paragraph is left as-written for the historical record.)**
+
+## Phase 0.10 — 2 real security gaps found on request ("kiểm tra lại kỹ luồng và bảo mật",
+## 2026-08-26), by re-applying this doc's own review method to Mục 7's new
+## `ProposalUpdateCommittee` code
+
+Asked to specifically re-check flow/security after the batch of Phase 1 fixes landed. Applied
+the same method that found every other bug in this document: for every safety mechanism, ask
+"is this actually wired to every real call path that needs it, or just the ones already
+reviewed?" Found 2 real, previously-undetected gaps, both fixed same day:
+
+1. **`QuorumThreshold` had no bounds validation anywhere it's set** — 4 write sites
+   (`BootstrapFoundingChains`, `ExecuteGovernanceProposal`'s `ProposalRegisterChain` and
+   `ProposalUpdateCommittee` cases, `epoch_sync.go`'s `ApplyCommitteeUpdate`).
+   `VerifyQuorumCertAgainstRegistry` treats it as the fraction of a committee's *total stake*
+   required to sign before a `QuorumCert` verifies — a nonzero value below 2/3 lets a cert
+   verify without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could
+   forge a "valid" quorum for that chain's `attestCommit()`/`vote()` from then on. **Found a
+   real pre-existing test with unsafe values already in it**
+   (`TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD` used 667/3334 basis points — ~6.7%/~33%
+   — nobody had noticed the security implication) — exactly the "test proves mechanical
+   correctness but not safety" pattern this whole document is full of. Fixed the test's values
+   (6667/6700) rather than weakening the new floor. Fix: `ValidateQuorumThreshold` (`pop.go`)
+   enforcing the same 2/3 floor already used everywhere else in this project
+   (`root_anchor.go`'s `BftQuorumThreshold`, `GovernanceEngine.QuorumThreshold`'s
+   `ceil(2N/3)`) — zero still means "unset, use the real stake-weighted 2/3 fallback."
+2. **`ProposalRegisterChain` accepted a non-empty committee with zero PoP verification** —
+   unlike `BootstrapFoundingChains` and `ProposalUpdateCommittee`, both of which correctly
+   require it via `ValidateCommittee`. A rogue-key attack surface on BLS aggregate signature
+   verification, identical to the one PoP exists to close everywhere else in this codebase.
+   Fixed: non-empty committees now go through `ValidateCommittee`. An **empty** committee is
+   still allowed unconditionally — a real, pre-existing, legitimate pattern (register routing
+   metadata, defer the real committee to a later `ProposalUpdateCommittee`) that
+   `VerifyQuorumCertAgainstRegistry` already makes safe on its own
+   (`ErrEmptyCommittee` fails closed until a committee exists), and an existing test
+   (`TestGatewayHandler_Governance_AssetRegistrationLifecycle`) legitimately depends on it —
+   confirmed via the full test suite before deciding not to make committees unconditionally
+   mandatory here.
+
+6 new regression tests in `pkg/cross_chain/gateway_test.go` (sub-BFT threshold rejected at all
+3 remaining write sites with registry-untouched assertions; unverified non-empty committee
+rejected; empty-committee-deferred-to-update still works end to end). `go build/vet/test`
+clean, zero regressions beyond the 1 pre-existing test whose own unsafe values needed fixing.
+
+**Both gaps require real Root Anchor governance quorum (≥2/3 of active chains + 72h timelock)
+to exploit** — same trust-model caveat already noted for `ProposalUpdateCommittee` in Mục 7 of
+`all_remaining_fixes_plan.md` — so this isn't a single-actor exploit, but it removed 2 real
+defense-in-depth gaps that a captured or colluding governance majority could otherwise have
+used to fully undermine a target chain's BFT security going forward. Both belong in P5 audit
+scope alongside the trust-model note already flagged there.
+
+## Phase 0.11 — Both remaining open design questions decided (asked to decide directly,
+## 2026-08-26), plus a real CI-breaking test found during final handover verification
+
+Asked to check the codebase/architecture once more for handover readiness, then explicitly
+told to decide the 2 design questions this document's own "ask, don't guess" rule had left
+open (`all_remaining_fixes_plan.md` Mục 1/2) rather than continue leaving them for a future
+architecture owner.
+
+**Decision 1 — epoch catch-up (Mục 1): `ProposalUpdateCommittee` (Phase 0.10) is the official
+answer.** No new cryptographic "skip-ahead" construction is needed: there is no way to prove
+continuity from signing keys that no longer exist (validators rotated away) — this is a
+fundamental limit of self-attestation, not a design gap. When self-continuity is impossible,
+external attestation is the only remaining path, and Root Anchor governance quorum (>=2/3 of
+active chains + 72h timelock) already IS that external attestation mechanism, same trust
+model as `BootstrapFoundingChains`/`ProposalRegisterChain`. Proved with a new test,
+`TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind`
+(`pkg/cross_chain/gateway_test.go`): chain 101 stuck at Epoch 5 with no QuorumCert available
+from the Epoch-5 committee (simulating lost keys) recovers to Epoch 500 via governance vote
+alone — `ApplyCommitteeUpdate`'s strict sequential-epoch path correctly still rejects this
+exact scenario (`ErrNonSequentialEpoch`), confirming the two mechanisms are complementary, not
+duplicative: automated self-continuity for the normal case, governance recovery for when that
+breaks. Operational alerting on `GatewayRegistryMonitor.DriftEpochs` (the original "option b")
+remains a real, valuable early-warning signal worth building later, but is no longer a
+condition for closing this item.
+
+**Decision 2 — propose() gating (Mục 2): permissionless, gated only at vote(), is intentional
+and stays unchanged.** Confirmed via 2 real reasons rather than just re-stating the status
+quo: (a) the 0.1-token non-refundable fee already makes pure spam economically pointless
+(burns the spammer's own money for zero effect without real quorum); (b) it's structurally
+required for a candidate chain to self-nominate via its own `ProposalRegisterChain` before it
+is an active chain at all — gating propose() to active-chains-only would make that impossible
+without an existing chain sponsoring every newcomer, an unnecessary intermediary this design
+correctly avoids. The one real residual concern -- `Proposals` has no TTL/cleanup and grows
+unbounded -- is a storage-hygiene question, not a fund-safety one, and per this document's own
+"measure before optimizing" precedent (`accountTreeRootAtBlock`, Phase 1 item 5) was not
+guessed at with a speculative rate-limit design. Instead, added a new metric,
+`master_gateway_governance_proposal_count` (`pkg/metrics/metrics.go`, updated in
+`gateway_handler.go`'s `"propose"` case), making the real growth observable in production.
+New test `TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric`
+(`gateway_governance_test.go`) proves both halves: a wallet address with zero relationship to
+any registered chain proposes successfully, and the metric reflects the real count.
+
+**Real finding along the way — CI has been silently failing on `dev`.** Full verification
+pass (checked out `dev` directly, not just the feature branch, and ran the exact CI command)
+found `pkg/config`'s `TestLoadGenesisData_RootAnchor` reading a hardcoded absolute path,
+`/home/abc/chain-n/metanode/deploy/systemd/root_anchor_data/genesis.json` — a gitignored,
+machine-local devnet artifact, not part of the repo. It only ever passed by accident on a
+machine that happened to have generated that exact file, including most of this session
+(until an earlier devnet cleanup removed it, which is what surfaced this). Confirmed via the
+GitHub API that `go-build-test` (`.github/workflows/go-ci.yml`, the actual gate for PRs into
+`dev`) genuinely reported `conclusion: failure` on the commit that merged PR #65 into `dev` —
+this was not hypothetical, it has been red on every fresh checkout (including CI's) for as
+long as this test existed, and PR #65 was merged despite it. Rebuilt as a real, hermetic,
+`t.TempDir()`-based fixture using the exact same real BLS pubkey value the original file had,
+preserving the actual regression coverage (`PublicKeyBls` hex parsing through
+`ToAccountState()` producing a real 48-byte BLS12-381 G1 pubkey) without depending on
+anything outside the test itself. Swept the rest of the test suite for the same
+hardcoded-absolute-path pattern (`grep -rln '"/home/abc'`) — no other instances found.
+`go test -count=1 ./...` (the exact CI command) now passes clean, run twice to rule out
+order-dependent flakiness.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to
@@ -261,6 +845,84 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    first (a 5-line throwaway `go run` is enough, as done here) — this is the same
    "what would make this pass without the real thing being true" discipline this doc
    already asks for in code, just applied to generated config/payloads too.
+
+   **New sub-item found continuing this work — genesis governance deadlock, fixed:**
+   `GovernanceEngine.Vote` requires the voter to already be a member of `engine.ChainRegistry`
+   (`gateway_handler.go`'s "vote" case looks up the signer's committee there), and
+   `ExecuteGovernanceProposal`'s `ProposalRegisterChain` case requires a proposal to have
+   already passed a vote — so a fresh Root Anchor (`ChainRegistry` always starts empty, see
+   `NewGatewayEngine`'s call site) has **no path to register its first chain through
+   governance at all**, confirmed by tracing the code and by hitting it live (submitted real
+   `propose()` transactions for chains 101-104 against a running Root Anchor — see PR
+   `fix/cross-chain-refund-authorization` — they landed on-chain but can never be voted on).
+   Added `GatewayEngine.BootstrapFoundingChains([]byte payloads)` /
+   `bootstrapFoundingChains(bytes[])`: seeds `ChainRegistry`/`ActiveChains` directly, once,
+   requires `>= MinFoundingChains` (4, matching mục 1.3 #5) and real PoP for every committee
+   member, and is self-closing — the moment it succeeds `ActiveChains` is non-empty, so it can
+   never be called again by anyone. 5 new tests in `root_anchor_bootstrap_test.go` cover
+   success, <4 chains, duplicate chain ID, forged PoP, and the self-close guarantee — all real
+   BLS, no shortcuts.
+
+   **New hardening item found while writing the production deployment guide
+   (2026-08-25, not yet fixed, 🟡 medium — bounded/recoverable, not a fund-loss bug):**
+   `BootstrapFoundingChains` (`gateway_handler.go`'s `bootstrapFoundingChains` case) has no
+   sender-authorization check — any address can submit the call, the only gate is that the
+   payload structurally validates and every committee member's PoP verifies against their own
+   claimed key. Combined with `runbook_root_anchor_genesis_ceremony.md`'s own guidance that
+   `founding_entry.json` files are "safe to publish" (no private key material) and get sent to
+   the coordinator "over any channel (email, chat, a shared drive)", this creates a front-run
+   window: anyone who obtains ≥3 of the real founders' published `founding_entry.json` files
+   before the coordinator's bootstrap transaction confirms can pair them with a 4th
+   self-generated (real PoP, attacker's own key — no compromise needed) chain entry and race
+   their own `bootstrapFoundingChains` call ahead of the legitimate one. Since the call is
+   self-closing on first success, the attacker's fabricated chain would permanently occupy one
+   of the founding committee/governance seats instead of the real 4th founder.
+   **Why this is 🟡 not 🔴:** `ChainRegistry` carries no `per_chain_allocation`/balance field —
+   at genesis there is nothing to steal — and `ProposalUnregisterChain` already exists, so the
+   legitimate 3-of-4 founders can immediately vote the attacker's chain back out (quorum is
+   `ceil(2*4/3) = 3`) and then register the real 4th founder normally through governance
+   (which now works, since `ActiveChains` is no longer empty). Net effect is a recoverable
+   griefing/delay attack on the ceremony, not a value-loss exploit — tracked here per this
+   doc's own severity convention (compare risk-table items #8/#9/#10 in
+   `cross_chain_root_anchor_architecture.md`, same 🟡 tier, same "mitigate procedurally +
+   track" treatment) rather than triggering the responsible-disclosure commit-lockdown reserved
+   for uncapped fund-fabrication bugs (Phase 0.5 item 1, above). **Interim operational
+   mitigation, added to the new deployment guide's ceremony section:** never broadcast
+   `founding_entry.json` files widely (send directly/privately to the coordinator, not a group
+   channel); the coordinator should submit the assembled bootstrap transaction promptly after
+   collecting the last entry and watch for competing pending transactions to the Gateway
+   address before it confirms. **Real fix, still open:** restrict `bootstrapFoundingChains` to
+   a coordinator address pre-committed out of band (e.g. hash-committed in the same
+   out-of-band channel `genesis_digest.txt` already uses), or require the call to name the
+   expected set of founding chain IDs up front so a late substitution is structurally
+   impossible rather than merely recoverable after the fact.
+
+   **Investigated live, root cause found — environmental, not a code bug:** restarting the
+   local 4-validator Root Anchor devnet from persisted state appeared to hang (no new blocks,
+   silent Go-side log, one validator's RSS climbing unbounded). Ruled out with real evidence
+   before concluding anything: Go goroutine dump (`/debug/pprof/goroutine`) showed only the
+   normal idle worker pools (300/200 chan-receive goroutines matching
+   `NumInjectionWorkers`/`NumReadTxWorkers` exactly, nothing duplicated); Go heap profile
+   showed a tiny, stable ~67MB heap — the multi-GB RSS growth is entirely native/CGo-side, not
+   a Go leak; disk write throughput measured at 662MB/s (not I/O-bound); `ulimit -u` has huge
+   headroom (only ~1000 of 771041 threads in use). `gdb`/`ptrace` were unavailable in the
+   sandbox (`yama/ptrace_scope=1`, no passwordless sudo) so a Rust-side stack trace couldn't be
+   taken directly. What DID explain it: this machine (104 cores, 188GB RAM) has an unrelated,
+   pre-existing systemd service, `metanode-execution-3.service` (owned by system user
+   `metanode`, not this session's user) — running for 1+ day, consuming **653% CPU
+   (6.5+ cores) and 110GB RSS (peak 116.6GB)** continuously. This matches this project's own
+   prior session notes describing leftover crash-loop test artifacts on this shared machine,
+   unrelated to any cross-chain work. Left running at the user's explicit instruction (not this
+   session's to touch — needs sudo the assistant doesn't have anyway). **Net effect: the
+   bootstrap fix above is verified by its 5 real unit tests; a live multi-validator run is
+   still not done, but the blocker is this shared machine's resource contention, not a defect
+   in `BootstrapFoundingChains` or the Rust startup-sync path** (`startup_sync.rs` was read in
+   full during this investigation looking for an infinite-retry bug — its retry loops are all
+   properly bounded, e.g. `MAX_VERIFY_RETRIES=10`/`MAX_ISOLATION_ROUNDS=60`, not the culprit).
+   Whoever revisits this: get the noisy neighbor process stopped or run T2 on dedicated
+   hardware/VMs (this doc's own Phase 2 T2 row already calls for "separate machines/VMs" —
+   this finding is a concrete reason why, not just a nice-to-have) before spending more time
+   chasing this as a code issue.
 3. **Adversarial re-review of Milestones F and I at Phase-0 depth.**
    `CommitAttestationWorker` (F) and `RelayerDaemon` (I) were reviewed structurally when
    E/G/Phase-0 were found and looked sound, but never got the specific "what would make
@@ -280,13 +942,31 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    spam/storage-growth mitigation before mainnet — this is a griefing/cost concern, not a
    fund-safety one, so it's fine to explicitly defer with a written rationale rather than
    fix, but make the decision on purpose.
-5. **Account-tree-root scalability.** Phase 0's `CommitteeAttestationWorker.accountTreeRootAtBlock`
-   walks a chain's *entire* committed account set via `AccountStateDB.GetAll()` on every
-   epoch transition. This is correct and necessary for the security property, but nobody
-   has measured its cost on a chain with a large number of accounts. Get a real number for
-   this during Phase 2's T2 measurements (see the table below) — if it's a bottleneck at
-   realistic account counts, that's a Phase-2-driven follow-up item, not something to
-   pre-optimize now without data.
+5. **Account-tree-root scalability — measured 2026-08-26, no optimization needed yet.**
+   Phase 0's `CommitteeAttestationWorker.accountTreeRootAtBlock` walks a chain's *entire*
+   committed account set via `AccountStateDB.GetAll()` on every epoch transition. Real
+   benchmark added (`account_tree_root_bench_test.go`, real `AccountStateDB`/MPT backend, no
+   mock), run on this machine (Xeon Platinum 8272CL):
+
+   | Accounts | Time/call | Alloc/call |
+   | :--- | :--- | :--- |
+   | 1,000 | 15.6ms | 5.0MB / 49,991 allocs |
+   | 10,000 | 137.3ms | 53.2MB / 532,822 allocs |
+   | 50,000 | 578.3ms | 254.2MB / 2,539,365 allocs |
+
+   Scaling is roughly linear (consistent with a full O(n) scan, no pathological blowup).
+   Extrapolating linearly, ~1M accounts would be on the order of ~11-12s per epoch
+   transition — this runs once per epoch (not per block), so likely acceptable at that scale,
+   but worth a real T2 measurement on real multi-machine hardware once account counts there
+   approach this range, since real disk I/O (this benchmark uses `storage.NewMemoryDb()`, not
+   real Pebble/NOMT) could change the picture. **Also found alongside this benchmark, fixed:**
+   `AccountStateDB.GetAll()` derived each account's map key via
+   `common.HexToAddress(rawTrieKey)` instead of the unmarshaled `AccountState.Address()` field
+   — harmless when the raw trie key happens to already be a clean hex address, but a latent
+   correctness risk for any trie backend/key encoding where it isn't (would have silently
+   keyed accounts wrong in `GetAll()`'s result map, corrupting `accountTreeRootAtBlock`'s real
+   BLS-attested output). Fixed to read `AccountState.Address()` first, falling back to the old
+   behavior only if that field is zero (backward compatible with any pre-existing data).
 
 ---
 

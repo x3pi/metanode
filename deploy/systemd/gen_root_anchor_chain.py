@@ -127,9 +127,54 @@ def main():
             "consensus_port": 19000 + i,
             "mempool_port": 19100 + i,
             "network_port": 19200 + i,
+            # peer_rpc_port MUST be a distinct port from network_port/p2p_port (both 19200+i
+            # below): network_port feeds the validator's real gRPC consensus P2P listener
+            # (tonic_network.rs, permanent for the process's life), while peer_rpc_port is a
+            # SEPARATE diagnostic HTTP server (PeerRpcServer) with its own early/full startup
+            # handoff. Reusing the same port number for both (the bug this comment replaces)
+            # meant the diagnostic server's "full" instance could never bind after handoff --
+            # not a transient race, but a permanent collision with the real P2P listener, which
+            # starts later and keeps the port for good. Root-caused live 2026-08-25 (see
+            # note/cross_chain_production_readiness_plan.md Phase 0.7's "Layer C") after 2
+            # earlier attempts wrongly assumed a Tokio task-cancellation race and treated it as
+            # such (bind-retry-with-backoff, abort()+await in the Rust code) -- both real,
+            # harmless hardening in their own right, but neither could have fixed this, since
+            # the true occupant of the port never releases it at all. 29200 matches the
+            # disjoint-range convention already used by _rehearsal_gen_node_configs.py.
+            "peer_rpc_port": 29200 + i,
         }
         validators_info.append(val_info)
         print(green(f"  ✅ Node {i} generated: {val_info['keys']['eth']['address']} (RPC :{val_info['rpc_port']})"))
+
+    # Fail loudly, at generation time, if any two of the CONFIRMED-real distinct OS listeners
+    # ever collide across the whole cluster -- this is exactly the class of bug that caused
+    # Layer C (see peer_rpc_port's own comment above): two DIFFERENT real listeners silently
+    # assigned the same port number, which only surfaces at runtime as a mystifying "Address
+    # already in use" days later. Deliberately scoped to only the ports directly confirmed live
+    # (2026-08-25) to be real, independent binds -- rpc_port (Go client JSON-RPC), network_port
+    # (Rust gRPC consensus P2P / p2p_address), peer_rpc_port (Rust diagnostic PeerRpcServer), and
+    # metrics_port (Rust Prometheus exporter). consensus_port/mempool_port/primary_port/
+    # worker_port are NOT included: their actual runtime binding behavior wasn't verified this
+    # session (some may be informational-only metadata, e.g. consensus_port only ever appears as
+    # the self-reported "network_address" string, never bound), and asserting uniqueness on
+    # fields whose collision might be intentional risks a false-positive crash worse than the bug
+    # this check exists to catch. Extend this set only after confirming a field really is bound.
+    port_assignments = {}
+    for i, v in enumerate(validators_info):
+        candidates = {
+            f"node{i}.rpc_port": v["rpc_port"],
+            f"node{i}.network_port (p2p_address)": v["network_port"],
+            f"node{i}.peer_rpc_port": v["peer_rpc_port"],
+            f"node{i}.metrics_port": 12100 + args.port_offset + i,
+        }
+        for label, port in candidates.items():
+            if port in port_assignments:
+                print(red(
+                    f"ERROR: port {port} assigned to both '{port_assignments[port]}' and '{label}' "
+                    f"-- refusing to generate a cluster with a self-inflicted port collision."
+                ))
+                sys.exit(1)
+            port_assignments[port] = label
 
     # Construct genesis.json in the new format for simple_chain
     validators_entries = []
@@ -224,7 +269,10 @@ def main():
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
         go_peers = [f"{ip_address}:{17200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
-        rust_peers = [f"{ip_address}:{19200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
+        # Must point at each peer's peer_rpc_port (the diagnostic PeerRpcServer), NOT p2p_port
+        # (19200+j, the real gRPC consensus network layer) -- see the peer_rpc_port field's own
+        # comment above for why conflating the two was the actual root cause of Layer C.
+        rust_peers = [f"{ip_address}:{29200 + j}" for j in range(args.validators) if j != node_id]
 
         exec_config = {
             "debug": False,
@@ -253,7 +301,7 @@ def main():
             "dns_server_address": f"{ip_address}:{13000 + args.port_offset + node_id}",
             "version": "0.0.1.0",
             "rpc_port": f":{v['rpc_port']}",
-            "peer_rpc_port": v['network_port'],
+            "peer_rpc_port": v['peer_rpc_port'],
             "db_type": 2,
             "genesis_file_path": str(genesis_path),
             "rust_config_path": str(node_dir / "node.toml"),
@@ -295,7 +343,7 @@ storage_path = "{node_dir}/data/consensus/db"
 
 enable_metrics = true
 metrics_port = {12100 + args.port_offset + node_id}
-peer_rpc_port = {v['network_port']}
+peer_rpc_port = {v['peer_rpc_port']}
 peer_rpc_addresses = [{peers_toml}]
 executor_read_enabled = true
 executor_commit_enabled = true

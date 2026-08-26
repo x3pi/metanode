@@ -1,6 +1,7 @@
 package cross_chain
 
 import (
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -106,6 +107,93 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 	require.NoError(t, errValid)
 	assert.Equal(t, big.NewInt(2000), attested.FundedAmount)
 	assert.Equal(t, big.NewInt(3000), engine.SupplyLedger.PerChainAllocation[101])
+}
+
+// TestGateway_ProposalAllocateSupply_UnblocksAttestCommit proves the fix for a real dead end
+// found via live 2-node RPC testing: neither BootstrapFoundingChains nor
+// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger, and
+// production always constructs it with genesis_total_supply=0 and an empty allocation map
+// (gateway_handler.go's loadGatewayEngine) — so a freshly onboarded chain's attestCommit
+// rejects with "available 0" forever, with no prior governance-reachable way to fund it.
+// ProposalAllocateSupply (GrantAllocation) closes that gap through the same propose/vote/
+// timelock/execute path as every other governance action.
+func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	// Chain 103: registered but never allocated — the exact state a real ProposalRegisterChain
+	// leaves a brand-new chain in today.
+	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
+	engine.ChainRegistry[103] = ChainRegistry{
+		ChainID:         103,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: popSig.Bytes()}},
+		Epoch:           1,
+		QuorumThreshold: 6667,
+	}
+	require.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103))
+
+	signFor := func(amount *big.Int) (common.Hash, QuorumCert) {
+		leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: amount}
+		root := HashAggregateValueLeaf(leaf)
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+		sig := bls.Sign(kp.PrivateKey(), commitMsg)
+		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	}
+
+	// Before the grant: even a modest amount is rejected, ceiling is 0.
+	root, cert := signFor(big.NewInt(100))
+	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	assert.ErrorIs(t, errBefore, ErrAllocationExceeded)
+
+	// Grant allocation via real governance: propose -> vote (>=2/3 of active chains) -> 72h
+	// timelock -> execute. Active chains here is just {101} (setupTestGatewayEngine's registry
+	// plus 103 just added, but 103 isn't RegisterActiveChain'd), so quorum = 1.
+	grant := AllocationGrantPayload{ChainID: 103, Amount: big.NewInt(1000)}
+	payload, err := json.Marshal(grant)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalAllocateSupply, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
+
+	// The exact same commit now succeeds, and debits normally afterward.
+	attested, errAfter := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	require.NoError(t, errAfter)
+	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
+	assert.Equal(t, big.NewInt(900), engine.SupplyLedger.GetAllocation(103))
+}
+
+// TestGlobalSupplyLedger_GrantAllocation is the focused unit test for the ledger primitive
+// itself: increases both the target's allocation and genesis_total_supply together (unlike
+// TransferAllocation, which redistributes existing allocation and would need a pre-funded
+// reserve chain that nothing in production ever seeds), and keeps VerifyInvariant() true.
+func TestGlobalSupplyLedger_GrantAllocation(t *testing.T) {
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(1000), map[uint64]*big.Int{1: big.NewInt(1000)})
+	require.NoError(t, err)
+
+	require.NoError(t, ledger.GrantAllocation(2, big.NewInt(500)))
+	assert.Equal(t, big.NewInt(500), ledger.GetAllocation(2))
+	assert.Equal(t, big.NewInt(1500), ledger.GenesisTotalSupply)
+	assert.True(t, ledger.VerifyInvariant())
+
+	// Granting again to the same chain accumulates rather than overwriting.
+	require.NoError(t, ledger.GrantAllocation(2, big.NewInt(250)))
+	assert.Equal(t, big.NewInt(750), ledger.GetAllocation(2))
+	assert.Equal(t, big.NewInt(1750), ledger.GenesisTotalSupply)
+	assert.True(t, ledger.VerifyInvariant())
+
+	// Nil/zero/negative amounts are rejected.
+	assert.ErrorIs(t, ledger.GrantAllocation(3, nil), ErrNilAmount)
+	assert.ErrorIs(t, ledger.GrantAllocation(3, big.NewInt(0)), ErrNilAmount)
+	assert.ErrorIs(t, ledger.GrantAllocation(3, big.NewInt(-1)), ErrNilAmount)
 }
 
 func TestGateway_P2_3_ClaimMessageAndDoubleClaimPrevention(t *testing.T) {
@@ -427,4 +515,334 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), big.NewInt(0), MerkleProof{}, cert4)
 	require.NoError(t, err4)
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
+}
+
+func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	popSig2 := PopSign(kp2.PrivateKey(), kp2.PublicKey())
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: popSig2.Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 6700,
+		StateRoot:       common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+		AccountTreeRoot: common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Timelock guard check
+	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+
+	// Execute after timelock
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	// Verify updated ChainRegistry state
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(2), reg.Epoch)
+	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
+	assert.Equal(t, payloadObj.StateRoot, reg.StateRoot)
+	assert.Equal(t, payloadObj.AccountTreeRoot, reg.AccountTreeRoot)
+	assert.Equal(t, 2, len(reg.Committee))
+	assert.Equal(t, kp1.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
+	assert.Equal(t, kp2.BytesPublicKey(), reg.Committee[1].PubkeyBLS)
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	badPopSig := make([]byte, 96) // Zeroed / invalid PoP signature
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: badPopSig},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to invalid PoP
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ProposalUpdateCommittee")
+
+	// Ensure registry was NOT modified
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(5), reg.Epoch)
+	assert.Equal(t, 1, len(reg.Committee))
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsUnknownChain(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      999, // Unknown chain
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to unknown chain
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrUnknownChain)
+}
+
+// TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold is the regression test for a
+// real gap found reviewing this same feature: QuorumThreshold was applied with no bounds check
+// at all. VerifyQuorumCertAgainstRegistry treats it as the fraction of a committee's TOTAL STAKE
+// required to sign before a QuorumCert verifies — a nonzero value below 2/3 lets a cert verify
+// without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could forge a
+// "valid" quorum for that chain's attestCommit()/vote() from then on.
+func TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+	}
+
+	// 3334 basis points = 33.34% -- well under the 2/3 BFT floor (6667).
+	payloadObj := UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 3334,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+
+	// Registry must be untouched -- still the original committee/threshold from setupTestGatewayEngine.
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(5), reg.Epoch)
+	assert.Equal(t, uint64(6667), reg.QuorumThreshold)
+}
+
+// TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee is the regression test
+// for a real gap found reviewing ProposalUpdateCommittee: unlike BootstrapFoundingChains and
+// ProposalUpdateCommittee (both of which verify PoP for every committee member), the older
+// ProposalRegisterChain case accepted a NON-EMPTY committee wholesale with no PoP check at all
+// -- a rogue-key attack surface identical to the one PoP exists to close everywhere else in this
+// codebase. An EMPTY committee (registering routing metadata only, deferred committee via a
+// later ProposalUpdateCommittee) is a real, pre-existing usage pattern and must still work.
+func TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kpRogue := bls.GenerateKeyPair()
+	forgedCommittee := []ValidatorEntry{
+		{PubkeyBLS: kpRogue.BytesPublicKey(), Stake: 10000, PopSignature: make([]byte, 96)}, // zeroed/forged PoP
+	}
+
+	newChainReg := ChainRegistry{
+		ChainID:   999,
+		Epoch:     1,
+		Committee: forgedCommittee,
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrPopVerifyFailed)
+
+	_, exists := engine.ChainRegistry[999]
+	assert.False(t, exists, "chain with an unverified committee must not be registered")
+}
+
+// TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate proves the legitimate
+// pattern the fix above must not break: registering routing metadata with no committee yet,
+// verified safe because VerifyQuorumCertAgainstRegistry fails closed (ErrEmptyCommittee) for
+// that chain until a real committee is set via ProposalUpdateCommittee.
+func TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newChainReg := ChainRegistry{
+		ChainID:          104,
+		Epoch:            1,
+		QuorumThreshold:  6667,
+		ArchivalEndpoint: "https://rpc.chain104.test",
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	reg, exists := engine.ChainRegistry[104]
+	require.True(t, exists)
+	assert.Empty(t, reg.Committee)
+}
+
+// TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold mirrors the UpdateCommittee
+// version above for the registration path.
+func TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newChainReg := ChainRegistry{
+		ChainID:         104,
+		Epoch:           1,
+		QuorumThreshold: 100, // 1% -- far under the 2/3 BFT floor
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+
+	_, exists := engine.ChainRegistry[104]
+	assert.False(t, exists)
+}
+
+// TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold covers the same gap at genesis time.
+func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
+
+	makeEntry := func(chainID uint64, threshold uint64) []byte {
+		reg := ChainRegistry{
+			ChainID:         chainID,
+			Committee:       []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: threshold,
+		}
+		b, _ := json.Marshal(reg)
+		return b
+	}
+
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
+	require.NoError(t, err)
+	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, ledger)
+
+	payloads := [][]byte{
+		makeEntry(101, 6667),
+		makeEntry(102, 6667),
+		makeEntry(103, 6667),
+		makeEntry(104, 1000), // 10% -- far under the 2/3 BFT floor
+	}
+	err = engine.BootstrapFoundingChains(payloads)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+	assert.Empty(t, engine.ChainRegistry, "no chain should be registered if any entry fails validation")
+}
+
+// TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind is the decision test
+// for all_remaining_fixes_plan.md's Mục 1 ("epoch catch-up: chain mất kết nối nhiều epoch
+// không có đường bắt kịp"). ApplyCommitteeUpdate (epoch_sync.go) requires strict sequential
+// epoch progression AND a valid quorum cert from the chain's CURRENT committee -- if a chain
+// loses connectivity for many epochs and its old committee's signing keys are gone (validators
+// rotated in the meantime), self-attested continuity is permanently impossible; no amount of
+// clever cryptography can prove continuity from keys that no longer exist. This test proves
+// ProposalUpdateCommittee is a real, working answer: recovery via Root Anchor governance
+// quorum (>=2/3 of OTHER active chains vouching for the stuck chain's claimed new committee,
+// e.g. based on real-world proof the stuck chain's operators published out of band) rather
+// than cryptographic self-continuity -- the same trust model BootstrapFoundingChains and
+// ProposalRegisterChain already use elsewhere in this codebase, not a new risk class.
+func TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	// Chain 101 (from setupTestGatewayEngine) is stuck at Epoch 5. Simulate the real-world
+	// failure this mechanism exists for: its old committee's keys are gone -- nobody in this
+	// test ever produces a QuorumCert signed by the Epoch-5 committee, proving the recovery
+	// path genuinely does not need one.
+	require.Equal(t, uint64(5), engine.ChainRegistry[101].Epoch)
+
+	kpNew := bls.GenerateKeyPair()
+	popSigNew := PopSign(kpNew.PrivateKey(), kpNew.PublicKey())
+	recoveredCommittee := []ValidatorEntry{
+		{PubkeyBLS: kpNew.BytesPublicKey(), Stake: 10000, PopSignature: popSigNew.Bytes()},
+	}
+
+	// A big, non-sequential jump (5 -> 500) -- ApplyCommitteeUpdate would reject this outright
+	// (ErrNonSequentialEpoch expects exactly 6). ProposalUpdateCommittee has no such
+	// restriction: real Root Anchor governance quorum is the safety property here, not epoch
+	// sequencing.
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     500,
+		NewCommittee: recoveredCommittee,
+	}
+	payload, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payload, 1000)
+	require.NoError(t, err)
+	// Active chains here is just {101} (setupTestGatewayEngine's registry), so quorum = 1 --
+	// in a real multi-chain Root Anchor this would be >=2/3 of OTHER active chains vouching
+	// for chain 101, since chain 101 itself is the one that's stuck/unreachable.
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(500), reg.Epoch, "chain recovered to the current epoch despite the 495-epoch gap")
+	assert.Equal(t, 1, len(reg.Committee))
+	assert.Equal(t, kpNew.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
 }
