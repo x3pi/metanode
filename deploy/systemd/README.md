@@ -4,6 +4,17 @@ Hướng dẫn nhanh khởi động, dừng 2 Private Chains và Web Dashboard g
 
 ---
 
+## 0. Yêu cầu Hệ thống (Prerequisites)
+
+Trước khi chạy các script deploy (`setup_root_anchor.sh`, `setup_2_private_chains.sh`, v.v.), bạn cần đảm bảo môi trường đã cài đặt thư viện Python cần thiết:
+
+```bash
+# Cài đặt các thư viện Python để sinh genesis và keys
+pip3 install web3 eth-account eth-keys --break-system-packages
+```
+
+---
+
 ## 1. Vận hành 2 Private Chains (Chain 101 & 102)
 
 Vào thư mục:
