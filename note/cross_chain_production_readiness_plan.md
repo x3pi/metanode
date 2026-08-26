@@ -986,6 +986,64 @@ Do not proceed to Phase 3 (audit) without real T2 numbers — the audit firm wil
 and per the design doc's own stated principle, no stage should be skipped by "trusting"
 instead of measuring.
 
+### T2 — first real live smoke test (2026-08-26), local multi-process (not yet multi-machine)
+
+Stood up, on m0 only (single machine, separate OS processes per node — not the multi-machine
+step T2 ultimately calls for, but a real step up from T1's in-process tests): a real 4-validator
+Root Anchor BFT cluster (chain 9099, via `setup_root_anchor.sh --clean`) and 2 real
+single-validator private chains (101 @ :8546, 102 @ :8547, via `setup_4_private_chains.sh
+--clean`, which also brought up 103/104), all built fresh from current `dev` (includes the
+same-day gas-lock/refund PR #71 fix). Registered all 4 chains for real via `bootstrapFoundingChains()`
+(both on Root Anchor AND on each of the 4 private chains — a destination chain needs the source
+chain's committee in its OWN local ChainRegistry to verify a QuorumCert locally). Deployed the
+real test ERC-20-shaped contract used by the Go test suite on chain 102, then ran a full
+`outbound()` (chain 101, real CONTRACT_CALL payload = `mint(recipient, 12345)`, real `gasFee`
+locked) -> `attestCommit()` + `claimMessage()` (chain 102) round trip entirely over real
+JSON-RPC between separate processes, no in-process shortcuts.
+
+**Result: fully real success**, verified by reading real RPC responses, not inferred:
+`balanceOf(recipient) == 12345` (the CONTRACT_CALL genuinely executed on a separate real
+process over real RPC), `getMessageStatus == 1` (Success), and the gas-lock/refund mechanism
+correctly refunded `47,870,600,000` of the `50,000,000,000` wei locked (~21,294 real gas units
+consumed by the `mint()` call — neither 0 (would mean "never executed") nor the full amount
+(would mean "no gas metering happened"), the actual proof this mechanism works for real).
+
+**3 real tooling gaps found along the way (not Gateway/gas-lock bugs — deploy/devnet tooling
+bugs), left as-is, not fixed this session:**
+1. `register_private_chains_t2.sh`/`cmd/tool/register_chains` calls `propose(ProposalRegisterChain, ...)`
+   — the normal governance path — to register the founding chains. This can **never** succeed:
+   `propose()`/`vote()` require the voter to already be an `ActiveChains` member, and
+   `ChainRegistry` starts empty, so there is no committee to ever vote these proposals through.
+   The tool needs to call `bootstrapFoundingChains()` instead (self-closing genesis path, added
+   in PR #61) — worked around this session with a one-off script, not committed. Also has a
+   `-chains-dir` path bug: the wrapper script `cd`s into `execution/` before running the binary,
+   but the binary's default `-chains-dir` is relative to the repo root, so genesis files are
+   never found unless `-chains-dir` is passed explicitly as an absolute path.
+2. `cmd/tool/cross_chain_relayer` (the only "P4 relayer" binary in the repo) is an **incomplete
+   stub**: it constructs a `RelayerDaemon` and then just blocks on a shutdown signal — it never
+   watches any chain for new `outbound()`/`MessageSent` events and never calls
+   `RelayerDaemon.RelayMessage()` on its own. No automated relaying happens by running this
+   binary; every step above had to be driven manually via direct RPC calls (real, but not
+   automated). A real P4 relayer needs an actual watch-loop (poll `MessageSent` logs or track
+   `ChannelSequence` on each source chain, batch, then drive the same `RelayMessage` calls this
+   session did by hand) — doesn't exist yet.
+3. `gen_single_chain.py`'s hardcoded devnet fallback submitter key
+   (`0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8`, also used as
+   `setup_root_anchor.sh`'s default) has **no BLS public key registered on-chain on a private
+   chain's own genesis** (`gen_single_chain.py`), even though the identical account works fine
+   as a transaction sender on Root Anchor's genesis (`gen_root_anchor_chain.py`) — a genesis-
+   generation inconsistency between the two generator scripts. Worked around by using each
+   chain's own `dev_accounts.json` entries instead. Also noted: `--root-anchor-submitter-key`
+   generates a fresh ECDSA key per chain correctly, but the separate `gateway_bls_key` config
+   field `gen_single_chain.py` writes is the **same hardcoded value on every chain** — fine for
+   this smoke test (not exercising cross-chain-identity separation) but not a realistic stand-in
+   for 4 independently-operated chains' committees.
+
+None of these block the actual Gateway/gas-lock code from working — confirmed the opposite,
+everything worked once these were worked around. They're real gaps in the T2 *bring-up*
+tooling, useful for whoever runs the next real T2 pass (especially the eventual multi-machine
+one) to not have to re-discover them.
+
 ---
 
 ## Phase 3 — External security audit (design doc P5 / section 8)
