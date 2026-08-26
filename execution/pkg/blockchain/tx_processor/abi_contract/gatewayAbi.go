@@ -27,6 +27,18 @@ package abi_contract
 // execution/pkg/blockchain/tx_processor/committee_attestation_worker.go and
 // execution/pkg/cross_chain/epoch_sync.go's ComputeCommitteeUpdateDigest).
 //
+// gasFee (outbound/claimMessage/refund/verifyAndExecute) was added per mục 2.6.5: a native-coin
+// amount locked at outbound() time to pay for CONTRACT_CALL execution at the destination chain —
+// closes the "unbounded/free gas for inbound CONTRACT_CALL -> DoS" risk (mục 5.3 risk #9).
+// isContractCall()==true with gasFee==0 fails closed rather than running for free. Unused gas
+// (gasFee minus real EVM gas actually consumed, priced at mt_common.MINIMUM_BASE_FEE) is minted
+// back to msg.Sender on the destination chain in the same claim transaction — a deliberate
+// simplification of the doc's literal "hoàn qua message refund" wording (which would require a
+// brand-new B->A reverse-attestation message type); this keeps the supply invariant identical
+// (nothing is minted beyond what was burned at outbound()) at the cost of the leftover landing on
+// the destination chain rather than back on the source chain. See gateway_handler.go's
+// executeContractCallForGateway call sites for the settlement logic.
+//
 // bootstrapFoundingChains() was added while running a real T2 devnet smoke-test: a Root Anchor
 // starts with zero ChainRegistry entries (NewGatewayEngine is always called with an empty
 // registry — see gateway_handler.go's loadGatewayEngine), but GovernanceEngine.Vote requires the
@@ -45,6 +57,7 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
 			{"internalType": "uint256", "name": "value", "type": "uint256"},
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
 			{"internalType": "bool", "name": "ordered", "type": "bool"}
 		],
@@ -83,6 +96,7 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "value", "type": "uint256"},
 			{"internalType": "bytes", "name": "payload", "type": "bytes"},
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
 			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
@@ -106,6 +120,7 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "value", "type": "uint256"},
 			{"internalType": "bytes", "name": "payload", "type": "bytes"},
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
 			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
@@ -346,6 +361,7 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "value", "type": "uint256"},
 			{"internalType": "bytes", "name": "payload", "type": "bytes"},
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
 			{"internalType": "uint256", "name": "aggregateProofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "aggregateProofSiblings", "type": "bytes32[]"},

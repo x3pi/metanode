@@ -287,10 +287,26 @@ nhận được **đúng bằng đúng 1 lần tip**, không phải 2 lần.
    vá sau đó, xem `cross_chain_production_readiness_plan.md` Phase 0.7–0.9 để biết chi tiết):
    - Task 1.2: `AssetRegistryEngine.LockAndBridgeAsset`/`ReceiveAndSettleAsset` vẫn chưa nối
      balance thật — `asset_registry.go` không đổi trong lần thực hiện này.
-   - Task 1.3: `executeContractCallForGateway` hiện dùng thẳng `tx.MaxGas()` của relayer, chưa có
-     cơ chế khoá "cross-chain gas" tại `outbound()` + hoàn phần dư theo đúng kiến trúc mục 2.6.5 —
-     việc chọn flag CONTRACT_CALL ở Lỗi 2 phía trên là bước đầu cho việc này, nhưng gas-lock thật
-     sự vẫn chưa làm.
+   - Task 1.3: ✅ ĐÃ XONG 2026-08-26 (branch `test/gateway-contract-call-real-coverage`) —
+     `outbound()`/`claimMessage()`/`refund()`/`verifyAndExecute()` ABI thêm tham số `gasFee`
+     (uint256, native coin khoá tại `outbound()` cùng lúc với Value/Tip). CONTRACT_CALL
+     (`isContractCall()==true`) giờ fail closed nếu `gasFee<=0` thay vì chạy free bằng
+     `tx.MaxGas()` như trước — đóng đúng lỗ hổng DoS mục 5.3 risk #9. Gas cap = `gasFee /
+     mt_common.MINIMUM_BASE_FEE` (base fee cố định toàn mạng, không cần oracle giá gas liên
+     chuỗi). Phần gas dư (`gasFee` trừ gas thật đã tiêu, theo `MVMExecuteResult.GasUsed`) được
+     mint thẳng lại cho `msg.Sender` **trên chính chain đích** trong cùng transaction claim —
+     đây là 1 đơn giản hoá có chủ đích so với chữ "hoàn qua message hoàn tiền, dùng chung cơ chế
+     mục 2.4" trong tài liệu gốc (cách đó cần 1 loại thông điệp đính kèm chứng thực ngược B->A
+     hoàn toàn mới); bất biến tổng cung vẫn giữ nguyên (không mint vượt quá số đã khoá/đốt ở
+     `outbound()`), chỉ khác chỗ phần dư "về" trên chain nào — là đánh đổi UX/kinh tế, không phải
+     bảo mật. Khi `refund()` chạy (toàn bộ message chưa từng thực thi), `gasFee` cũng được hoàn
+     đủ 100% cùng Value. 3 test thật mới (`gateway_handler_contract_call_real_test.go`, deploy
+     contract thật + `mvm.ExecutionEngine` thật, không mock): `..._ExecutesRealContractCall` (x2,
+     claimMessage + verifyAndExecute — assert real mint() chạy đúng VÀ phần gas dư thật được hoàn
+     đúng: >0 và <gasFee) và `..._FailsClosedWithoutGasFee` (gasFee=0 + payload CONTRACT_CALL
+     thật → phải fail closed, contract KHÔNG được gọi). `go build/vet/test -count=1 ./...` toàn
+     bộ `execution/` sạch, 0 regression (đã cập nhật toàn bộ ~17 call site ABI-pack cũ trong test
+     + `relayer_daemon/daemon.go` + `cmd/tool/live_asset_bridge/main.go` sang chữ ký mới).
 4. **Acceptance test cuối cùng** của toàn bộ Task 1 (không chỉ 3 lỗi trên) vẫn là test thật đã mô
    tả ở Phase 0.6 của `cross_chain_production_readiness_plan.md`: khởi động 2 chain thật + Root
    Anchor thật, quan sát `eth_getBalance` thật đổi trên RPC thật — chưa có test này thì Task 1

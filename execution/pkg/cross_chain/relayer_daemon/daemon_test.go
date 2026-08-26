@@ -55,6 +55,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 		Value:         big.NewInt(0),
 		Payload:       []byte{0x01, 0x02, 0x03},
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
@@ -374,4 +375,386 @@ func TestRelayerDaemon_QuorumCertPollingTimeout(t *testing.T) {
 	_, err = daemon.RelayMessage(context.Background(), msg, common.HexToHash("0x8888"), 1, cross_chain.MerkleProof{}, cross_chain.MerkleProof{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "QuorumCert")
+}
+
+// newRootAnchorAttestationMock builds a real Root Anchor mock server that answers
+// getChainRegistry/getCommitAttestationShares for a single committee member (kpVal) attesting
+// commitRoot at the given epoch -- the minimum real BLS apparatus pollAndAggregateCommitCert
+// needs to produce a valid QuorumCert. Shared by the nonce-management tests below so each can
+// focus on destination-chain nonce behavior instead of re-deriving BLS/commit-tree plumbing.
+func newRootAnchorAttestationMock(t *testing.T, sourceChainID, epoch uint64, kpVal *bls.KeyPair, validatorEntry cross_chain.ValidatorEntry, commitRoot common.Hash) *httptest.Server {
+	t.Helper()
+	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	require.NoError(t, err)
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kpVal.PrivateKey(), commitMsg)
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		switch req.Method {
+		case "eth_chainId":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeBig(big.NewInt(9099)),
+			})
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			dataHex, _ := callObj["data"].(string)
+			calldata, _ := hexutil.Decode(dataHex)
+
+			var packed []byte
+			var packErr error
+			if len(calldata) >= 4 && (calldata[0] == 0x9f || len(calldata) == 36) {
+				packed, packErr = parsedABI.Methods["getChainRegistry"].Outputs.Pack(
+					true,
+					[][]byte{validatorEntry.PubkeyBLS},
+					[]uint64{validatorEntry.Stake},
+					[][]byte{validatorEntry.PopSignature},
+					epoch,
+					uint64(6667),
+					common.Address{},
+					common.Hash{},
+					common.Hash{},
+					"",
+					uint64(0),
+				)
+			} else {
+				packed, packErr = parsedABI.Methods["getCommitAttestationShares"].Outputs.Pack(
+					[][]byte{validatorEntry.PubkeyBLS}, [][]byte{sig.Bytes()},
+				)
+			}
+			require.NoError(t, packErr)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": req.ID, "result": hexutil.Encode(packed),
+			})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0", "id": req.ID, "result": "0x0",
+			})
+		}
+	}))
+}
+
+// TestRelayerDaemon_CachesNonceAcrossSends is the regression test for the nonce-caching half of
+// the RelayerDaemon nonce fix: relaying 2 messages back to back through the SAME daemon must
+// reuse the in-memory nonce counter (sequential nonces, exactly one eth_getTransactionCount
+// call) rather than re-querying the destination chain's nonce before every single send.
+func TestRelayerDaemon_CachesNonceAcrossSends(t *testing.T) {
+	const sourceChainID, destChainID, epoch = uint64(101), uint64(202), uint64(1)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpVal.PublicKey().Bytes(), Stake: 1000}
+
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+	relayerAddr := crypto.PubkeyToAddress(relayerKey.PublicKey)
+
+	sender := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	target := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	msgA := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xA001"), SourceChainID: sourceChainID, DestChainID: destChainID,
+		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
+		Payload: []byte{0x01}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
+	}
+	msgB := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xA002"), SourceChainID: sourceChainID, DestChainID: destChainID,
+		Sequence: 2, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
+		Payload: []byte{0x02}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
+	}
+	// Both messages batched into ONE real commit tree (a real relayer commonly batches several
+	// messages per commit) -- one commitRoot, two independent message proofs.
+	commitRoot, layers, _, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msgA, msgB})
+	require.NoError(t, err)
+	proofA := cross_chain.GetMerkleProof(layers, 0)
+	proofB := cross_chain.GetMerkleProof(layers, 1)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	rootAnchorSrv := newRootAnchorAttestationMock(t, sourceChainID, epoch, kpVal, validatorEntry, commitRoot)
+	defer rootAnchorSrv.Close()
+
+	const startingNonce = uint64(7)
+	var getTxCountCalls int
+	var sentNonces []uint64
+	destSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Method {
+		case "eth_chainId":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeBig(big.NewInt(int64(destChainID)))})
+		case "eth_getTransactionCount":
+			getTxCountCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeUint64(startingNonce)})
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawHex, _ := params[0].(string)
+			rawBytes, _ := hexutil.Decode(rawHex)
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			signer := ethtypes.NewEIP155Signer(big.NewInt(int64(destChainID)))
+			from, _ := ethtypes.Sender(signer, &ethTx)
+			assert.Equal(t, relayerAddr, from)
+			sentNonces = append(sentNonces, ethTx.Nonce())
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": ethTx.Hash().Hex()})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": "0x0"})
+		}
+	}))
+	defer destSrv.Close()
+
+	cfg := DaemonConfig{
+		RelayerKeyHex:  relayerKeyHex,
+		RootAnchorURLs: []string{rootAnchorSrv.URL},
+		ChainRPCURLs:   map[uint64]string{destChainID: destSrv.URL},
+		PollInterval:   5 * time.Millisecond, MaxPollIterations: 10,
+	}
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	_, err = daemon.RelayMessage(context.Background(), msgA, commitRoot, epoch, aggregateProof, proofA)
+	require.NoError(t, err)
+	_, err = daemon.RelayMessage(context.Background(), msgB, commitRoot, epoch, aggregateProof, proofB)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, getTxCountCalls, "second RelayMessage must reuse the cached nonce, not re-query the destination chain")
+	assert.Equal(t, []uint64{startingNonce, startingNonce + 1}, sentNonces, "nonces must be sequential across the two sends")
+}
+
+// TestRelayerDaemon_RecoversPendingNonceOnFreshDaemon is the regression test for the actual bug
+// this fix closes: RelayerDaemon used to query eth_getTransactionCount with "latest" (confirmed-
+// only) before every send. If the daemon process crashes right after broadcasting a transaction
+// but before it's mined, a fresh daemon restarting afterward would see the stale "latest" nonce
+// and reuse the exact nonce of the still-pending transaction -- a real double-submit/nonce
+// collision. A brand-new daemon instance here (no in-memory cache, simulating a fresh process
+// after restart) must query the PENDING count instead, correctly stepping past the transaction
+// that's already sitting unconfirmed in the mempool from "before the crash".
+func TestRelayerDaemon_RecoversPendingNonceOnFreshDaemon(t *testing.T) {
+	const sourceChainID, destChainID, epoch = uint64(101), uint64(202), uint64(1)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpVal.PublicKey().Bytes(), Stake: 1000}
+
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+	relayerAddr := crypto.PubkeyToAddress(relayerKey.PublicKey)
+
+	sender := common.HexToAddress("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+	target := common.HexToAddress("0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
+	msg := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xB001"), SourceChainID: sourceChainID, DestChainID: destChainID,
+		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
+		Payload: []byte{0x03}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
+	}
+	commitRoot, layers, _, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	messageProof := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	rootAnchorSrv := newRootAnchorAttestationMock(t, sourceChainID, epoch, kpVal, validatorEntry, commitRoot)
+	defer rootAnchorSrv.Close()
+
+	// A prior (now-crashed) instance of this same relayer already broadcast one transaction at
+	// nonce 5 that hasn't been mined yet: "latest" (confirmed-only) is still 5, but "pending"
+	// (mempool-aware) is 6. Reusing 5 here would collide with that in-flight transaction.
+	const confirmedNonce = uint64(5)
+	const pendingNonce = uint64(6)
+	var sentNonce uint64
+	var sawPendingQuery bool
+	destSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Method {
+		case "eth_chainId":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeBig(big.NewInt(int64(destChainID)))})
+		case "eth_getTransactionCount":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			blockTag, _ := params[1].(string)
+			result := confirmedNonce
+			if blockTag == "pending" {
+				sawPendingQuery = true
+				result = pendingNonce
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeUint64(result)})
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawHex, _ := params[0].(string)
+			rawBytes, _ := hexutil.Decode(rawHex)
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			signer := ethtypes.NewEIP155Signer(big.NewInt(int64(destChainID)))
+			from, _ := ethtypes.Sender(signer, &ethTx)
+			assert.Equal(t, relayerAddr, from)
+			sentNonce = ethTx.Nonce()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": ethTx.Hash().Hex()})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": "0x0"})
+		}
+	}))
+	defer destSrv.Close()
+
+	// A fresh daemon instance -- its nonces map starts empty, exactly like a real process
+	// restart -- must be the one used here, not one that already has this dest chain cached.
+	cfg := DaemonConfig{
+		RelayerKeyHex:  relayerKeyHex,
+		RootAnchorURLs: []string{rootAnchorSrv.URL},
+		ChainRPCURLs:   map[uint64]string{destChainID: destSrv.URL},
+		PollInterval:   5 * time.Millisecond, MaxPollIterations: 10,
+	}
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	_, err = daemon.RelayMessage(context.Background(), msg, commitRoot, epoch, aggregateProof, messageProof)
+	require.NoError(t, err)
+
+	assert.True(t, sawPendingQuery, "RelayerDaemon must query the PENDING nonce, not just latest/confirmed")
+	assert.Equal(t, pendingNonce, sentNonce, "must send at the pending nonce (6), not the stale confirmed one (5) which would collide with the already-in-flight transaction from before the restart")
+}
+
+// TestRelayerDaemon_DropsCachedNonceOnNonceError is the regression test for the third piece of
+// the nonce fix: if the destination chain itself rejects a broadcast with a nonce-related error
+// (e.g. because the cached counter drifted out of sync with real chain state for any reason),
+// the daemon must drop its cached nonce for that chain instead of continuing to hand out a
+// counter it no longer trusts -- the next send re-establishes a fresh baseline from the real
+// pending count rather than compounding the drift.
+func TestRelayerDaemon_DropsCachedNonceOnNonceError(t *testing.T) {
+	const sourceChainID, destChainID, epoch = uint64(101), uint64(202), uint64(1)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpVal.PublicKey().Bytes(), Stake: 1000}
+
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+
+	sender := common.HexToAddress("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+	target := common.HexToAddress("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+	msgA := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xC001"), SourceChainID: sourceChainID, DestChainID: destChainID,
+		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
+		Payload: []byte{0x04}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
+	}
+	msgB := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xC002"), SourceChainID: sourceChainID, DestChainID: destChainID,
+		Sequence: 2, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
+		Payload: []byte{0x05}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
+	}
+	commitRoot, layers, _, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msgA, msgB})
+	require.NoError(t, err)
+	proofA := cross_chain.GetMerkleProof(layers, 0)
+	proofB := cross_chain.GetMerkleProof(layers, 1)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	rootAnchorSrv := newRootAnchorAttestationMock(t, sourceChainID, epoch, kpVal, validatorEntry, commitRoot)
+	defer rootAnchorSrv.Close()
+
+	const startingNonce = uint64(3)
+	const refreshedPendingNonce = uint64(9) // real chain state after the drift is discovered
+	sendAttempt := 0
+	var getTxCountCalls int
+	var sentNonces []uint64
+	destSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Method {
+		case "eth_chainId":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeBig(big.NewInt(int64(destChainID)))})
+		case "eth_getTransactionCount":
+			getTxCountCalls++
+			result := startingNonce
+			if getTxCountCalls > 1 {
+				result = refreshedPendingNonce
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": hexutil.EncodeUint64(result)})
+		case "eth_sendRawTransaction":
+			sendAttempt++
+			if sendAttempt == 1 {
+				// Simulate the destination chain rejecting the first send as stale/out of sync.
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "error": map[string]interface{}{"code": -32000, "message": "nonce too low"}})
+				return
+			}
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawHex, _ := params[0].(string)
+			rawBytes, _ := hexutil.Decode(rawHex)
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			sentNonces = append(sentNonces, ethTx.Nonce())
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": ethTx.Hash().Hex()})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": "0x0"})
+		}
+	}))
+	defer destSrv.Close()
+
+	cfg := DaemonConfig{
+		RelayerKeyHex:  relayerKeyHex,
+		RootAnchorURLs: []string{rootAnchorSrv.URL},
+		ChainRPCURLs:   map[uint64]string{destChainID: destSrv.URL},
+		PollInterval:   5 * time.Millisecond, MaxPollIterations: 10,
+	}
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	// First send fails with a nonce error -- must drop the cached nonce rather than keep
+	// handing out counters relative to a baseline the chain just told us is wrong.
+	_, err = daemon.RelayMessage(context.Background(), msgA, commitRoot, epoch, aggregateProof, proofA)
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "nonce")
+
+	// Second send (different message, same daemon) must re-query the destination chain for a
+	// fresh pending nonce instead of reusing/incrementing the now-untrusted cached value.
+	_, err = daemon.RelayMessage(context.Background(), msgB, commitRoot, epoch, aggregateProof, proofB)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, getTxCountCalls, "must re-query the destination chain's nonce after a nonce-related send failure")
+	require.Len(t, sentNonces, 1)
+	assert.Equal(t, refreshedPendingNonce, sentNonces[0], "must use the freshly re-queried pending nonce, not the stale cached counter")
 }

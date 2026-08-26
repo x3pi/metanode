@@ -159,7 +159,7 @@ key nguyên bản trong bộ nhớ tiến trình). Không có code mới (đúng
 
 ---
 
-## Mục 4 — ✅ PHẦN LỚN ĐÃ XONG 2026-08-26 — Re-review đối kháng `CommitteeAttestationWorker` + `RelayerDaemon` ở độ sâu Phase 0
+## Mục 4 — ✅ ĐÃ XONG 2026-08-26 — Re-review đối kháng `CommitteeAttestationWorker` + `RelayerDaemon` ở độ sâu Phase 0
 
 **Files:** `execution/pkg/blockchain/tx_processor/committee_attestation_worker.go` +
 `committee_attestation_worker_test.go` (hiện chỉ có 1 test:
@@ -197,9 +197,20 @@ phải bỏ qua im lặng, không mutate state),
 `TestCommitteeAttestationWorker_HandlesRootAnchorOfflineGracefully` (Root Anchor offline không
 được panic), `TestCommitteeAttestationWorker_SignalChannelBufferDrop` (buffer đầy phải drop
 không block), `TestRelayerDaemon_MissingDestinationClient_ReturnsError`,
-`TestRelayerDaemon_QuorumCertPollingTimeout`. **Chưa xong hoàn toàn:** mục "kiểm tra riêng"
-(bước 3 ở trên — nonce/double-submit khi `RelayerDaemon` restart giữa chừng) chưa có test
-nào nhắm trực tiếp — vẫn còn mở, agent tiếp theo nên làm tiếp phần này.
+`TestRelayerDaemon_QuorumCertPollingTimeout`.
+
+**✅ Đóng hoàn toàn 2026-08-26 (PR #69):** bước 3 (nonce/double-submit khi `RelayerDaemon`
+restart giữa chừng) giờ đã có fix + test thật. Root cause: daemon cũ query nonce qua
+`eth_getTransactionCount(addr, "latest")` (chỉ tính tx đã confirm) — nếu daemon crash rồi
+restart trong lúc 1 tx relay vẫn còn pending trên mempool đích, instance mới sẽ suy ra lại
+đúng cái nonce đó và double-submit/nonce-collide với chính tx cũ của mình. Fix: thêm
+`GetPendingTransactionCount()` (`rootanchor/client.go`, dùng tag `"pending"`) +
+`RelayerDaemon` giữ 1 cache nonce theo từng dest-chain (`nonces map[uint64]uint64`), seed từ
+pending nonce lần đầu, tăng lạc quan cho các lần gửi sau (tránh 1 RPC/message), và **xoá cache
+khi gặp lỗi liên quan đến nonce** để lần gửi kế tiếp buộc phải truy vấn lại nonce thật thay vì
+tiếp tục tăng dựa trên 1 baseline chain vừa từ chối. 3 test mới (real BLS/Merkle, không mock):
+`TestRelayerDaemon_CachesNonceAcrossSends`, `TestRelayerDaemon_RecoversPendingNonceOnFreshDaemon`,
+`TestRelayerDaemon_DropsCachedNonceOnNonceError`. Không còn việc gì mở trong Mục 4.
 
 ---
 
@@ -365,13 +376,12 @@ làm tiếp P3.1 đầy đủ (gửi tự động, không chỉ có khả năng 
 
 ## Thứ tự khuyến nghị (Phần A)
 
-**Cập nhật 2026-08-26 — TẤT CẢ 7 mục ở Phần A giờ đã có quyết định/đã xong** (Mục 1, 2, 3, 5,
-7 đóng hoàn toàn; Mục 4, 6 phần lớn xong, còn 2 việc nhỏ cụ thể liệt kê dưới). Không còn mục
+**Cập nhật 2026-08-26 — TẤT CẢ 7 mục ở Phần A giờ đã có quyết định/đã xong** (Mục 1, 2, 3, 4, 5,
+7 đóng hoàn toàn; Mục 6 phần lớn xong, còn 1 việc nhỏ cụ thể liệt kê dưới). Không còn mục
 nào cần hỏi người phụ trách kiến trúc nữa — 2 câu hỏi thiết kế gốc (Mục 1, 2) đã được quyết
 định trực tiếp theo yêu cầu, có test hồi quy chứng minh, xem chi tiết ở từng mục.
 
-**2 việc nhỏ còn thật sự mở** (không chặn, không cần hỏi ai, chỉ là chưa có thời gian làm):
-- Mục 4: test nonce/double-submit khi `RelayerDaemon` restart giữa chừng.
+**1 việc nhỏ còn thật sự mở** (không chặn, không cần hỏi ai, chỉ là chưa có thời gian làm):
 - Mục 6: test hành vi Gate 1 trên 1 cụm sống dưới tải thật (hiện chỉ có unit test quyết định
   logic, đã đủ để commit patch nhưng chưa đủ để coi là kiểm chứng tải thật).
 
@@ -379,11 +389,16 @@ nào cần hỏi người phụ trách kiến trúc nữa — 2 câu hỏi thi�
 Mục 7 (ProposalUpdateCommittee chưa thực thi) — ✅ ĐÃ XONG
 Mục 1 (epoch catch-up)         — ✅ ĐÃ XONG — ProposalUpdateCommittee là câu trả lời chính thức, có test
 Mục 6 (review Gate 1)          — ✅ PHẦN LỚN XONG — còn thiếu test tải thật trên cụm sống
-Mục 4 (re-review F/I)          — ✅ PHẦN LỚN XONG — còn thiếu test nonce/double-submit RelayerDaemon
+Mục 4 (re-review F/I)          — ✅ ĐÃ XONG — nonce/double-submit RelayerDaemon vá + test (PR #69)
 Mục 2 (propose gating)         — ✅ ĐÃ XONG — permissionless xác nhận là chủ ý, thêm metric quan sát tăng trưởng
 Mục 5 (đo account-tree-root)   — ✅ ĐÃ XONG — có số liệu thật, xem readiness-plan Phase 1 mục 5
 Mục 3 (relayer key custody)    — ✅ ĐÃ XONG — xem production_deployment_guide.md mục 5.5
 ```
+
+**Ngoài phạm vi 7 mục gốc, cũng đã vá 2026-08-26 (cùng PR #69):** FFI panic-safety —
+`consensus/metanode/src/ffi.rs` bọc `catch_unwind` quanh 4 hàm `extern "C"` (trước đó 1 panic
+Rust ở đây là UB qua ranh giới C-ABI, có thể crash cả tiến trình Go), có test hồi quy ép panic
+thật và xác nhận trả về fallback an toàn thay vì abort tiến trình.
 
 **Verification bar giống hệt mọi phase trước:** `go build ./... && go vet ./... && go test
 ./...` sạch từ `execution/`; với mục 6 (Rust) thêm `cargo build --release && cargo test` sạch

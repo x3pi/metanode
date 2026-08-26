@@ -243,6 +243,23 @@ func (c *Client) GetTransactionCount(ctx context.Context, address common.Address
 	return uint64(result), nil
 }
 
+// GetPendingTransactionCount returns address's pending nonce on Root Anchor (eth_getTransactionCount,
+// "pending"). This is crucial for RelayerDaemon to avoid double-submits or nonce-too-low errors
+// when submitting multiple transactions quickly or recovering from a crash while txs are pending.
+func (c *Client) GetPendingTransactionCount(ctx context.Context, address common.Address) (uint64, error) {
+	if !c.breaker.CanExecute() {
+		return 0, ErrCircuitOpen
+	}
+	var result hexutil.Uint64
+	err := c.callRPC(ctx, "eth_getTransactionCount", &result, address.Hex(), "pending")
+	if err != nil {
+		c.breaker.RecordFailure()
+		return 0, err
+	}
+	c.breaker.RecordSuccess()
+	return uint64(result), nil
+}
+
 // ChainID returns Root Anchor's own chain ID (eth_chainId) — needed to build an EIP-155-signed
 // transaction addressed to it (Milestone C).
 func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {

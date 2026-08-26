@@ -46,6 +46,8 @@ type RelayerDaemon struct {
 	abi               abi.ABI
 	processedMessages map[common.Hash]bool
 	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
+	nonces            map[uint64]uint64
+	nonceMu           sync.Mutex
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
 }
@@ -98,6 +100,7 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		abi:               parsedABI,
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
+		nonces:            make(map[uint64]uint64),
 		stopCh:            make(chan struct{}),
 	}, nil
 }
@@ -140,10 +143,18 @@ func (d *RelayerDaemon) RelayMessage(
 		return common.Hash{}, fmt.Errorf("query destination chain ID: %w", err)
 	}
 
-	nonce, err := destClient.GetTransactionCount(ctx, d.relayerAddr)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("query relayer nonce on dest chain: %w", err)
+	d.nonceMu.Lock()
+	nonce, exists := d.nonces[msg.DestChainID]
+	if !exists {
+		pendingNonce, err := destClient.GetPendingTransactionCount(ctx, d.relayerAddr)
+		if err != nil {
+			d.nonceMu.Unlock()
+			return common.Hash{}, fmt.Errorf("query relayer pending nonce on dest chain: %w", err)
+		}
+		nonce = pendingNonce
 	}
+	d.nonces[msg.DestChainID] = nonce + 1
+	d.nonceMu.Unlock()
 
 	aggSiblings := make([][32]byte, len(aggregateProof.Siblings))
 	for i, s := range aggregateProof.Siblings {
@@ -166,6 +177,7 @@ func (d *RelayerDaemon) RelayMessage(
 		msg.Value,
 		msg.Payload,
 		msg.Tip,
+		msg.GasFee,
 		msg.Ordered,
 		new(big.Int).SetUint64(aggregateProof.LeafIndex),
 		aggSiblings,
@@ -203,6 +215,13 @@ func (d *RelayerDaemon) RelayMessage(
 
 	txHash, err := destClient.SendRawTransaction(ctx, hexutil.Encode(rawBytes))
 	if err != nil {
+		d.nonceMu.Lock()
+		if strings.Contains(strings.ToLower(err.Error()), "nonce") {
+			delete(d.nonces, msg.DestChainID)
+		} else if d.nonces[msg.DestChainID] == nonce+1 {
+			d.nonces[msg.DestChainID] = nonce
+		}
+		d.nonceMu.Unlock()
 		return common.Hash{}, fmt.Errorf("broadcast verifyAndExecute tx: %w", err)
 	}
 

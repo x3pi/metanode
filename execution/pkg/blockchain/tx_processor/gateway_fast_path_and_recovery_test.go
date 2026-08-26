@@ -42,6 +42,7 @@ func TestGatewayHandler_VerifyAndExecute_Lifecycle(t *testing.T) {
 		Value:         big.NewInt(0),
 		Payload:       []byte{0xDE, 0xAD, 0xBE, 0xEF},
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
@@ -79,6 +80,7 @@ func TestGatewayHandler_VerifyAndExecute_Lifecycle(t *testing.T) {
 		msg.Value,
 		msg.Payload,
 		msg.Tip,
+		msg.GasFee,
 		msg.Ordered,
 		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings),
