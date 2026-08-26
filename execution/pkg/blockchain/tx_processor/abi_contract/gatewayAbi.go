@@ -27,6 +27,24 @@ package abi_contract
 // execution/pkg/blockchain/tx_processor/committee_attestation_worker.go and
 // execution/pkg/cross_chain/epoch_sync.go's ComputeCommitteeUpdateDigest).
 //
+// batchOutboundCommit/getPendingOutboundCount/getCommitBatch/CommitBatched (2026-08-26, P4
+// relayer automation) close a real gap found while building an automated RelayerDaemon watch
+// loop: CommitAttestationWorker (Milestone F, committee_attestation_worker.go's sibling
+// commit_attestation_worker.go) has always existed to BLS-sign a commit root and collect shares
+// on Root Anchor, but its OnCommitFinalized() trigger was never called from anywhere in
+// production -- there was no real mechanism that ever decided "these N pending outbound()
+// messages now form a committed batch" in the first place. batchOutboundCommit(destChainId)
+// (permissionless, like committeeUpdate()) takes every message currently queued for that one
+// destination (scoped per-destination deliberately -- see GatewayEngine.PendingOutboundMessages'
+// doc comment for why: batching multiple destinations under one AggregateValueLeaf would let
+// each destination's own independent attestCommit() call debit the same source allocation
+// against its own local ledger copy), builds a real commit tree, and both returns and durably
+// records (getCommitBatch) the exact message list + signing epoch behind the resulting
+// commitRoot -- letting the local CommitAttestationWorker sign it (wired in
+// block_processor_core.go) and any relayer (including after a restart) deterministically
+// rebuild the same Merkle proofs via BuildCommitTree(messages) without needing to also invent a
+// separate proof-storage format.
+//
 // gasFee (outbound/claimMessage/refund/verifyAndExecute) was added per mục 2.6.5: a native-coin
 // amount locked at outbound() time to pay for CONTRACT_CALL execution at the destination chain —
 // closes the "unbounded/free gas for inbound CONTRACT_CALL -> DoS" risk (mục 5.3 risk #9).
@@ -266,6 +284,53 @@ const GatewayABI = `[
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"}
+		],
+		"name": "batchOutboundCommit",
+		"outputs": [
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint256", "name": "messageCount", "type": "uint256"}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"}
+		],
+		"name": "getPendingOutboundCount",
+		"outputs": [
+			{"internalType": "uint256", "name": "count", "type": "uint256"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}
+		],
+		"name": "getCommitBatch",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "messagesJson", "type": "bytes"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"indexed": true, "internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"indexed": false, "internalType": "uint256", "name": "messageCount", "type": "uint256"},
+			{"indexed": false, "internalType": "uint64", "name": "epoch", "type": "uint64"}
+		],
+		"name": "CommitBatched",
+		"type": "event"
 	},
 	{
 		"inputs": [

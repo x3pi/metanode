@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -757,4 +758,353 @@ func TestRelayerDaemon_DropsCachedNonceOnNonceError(t *testing.T) {
 	assert.Equal(t, 2, getTxCountCalls, "must re-query the destination chain's nonce after a nonce-related send failure")
 	require.Len(t, sentNonces, 1)
 	assert.Equal(t, refreshedPendingNonce, sentNonces[0], "must use the freshly re-queried pending nonce, not the stale cached counter")
+}
+
+// TestRelayerDaemon_WatchChainPair_RealBatchAndRelay closes the real automation gap found while
+// building P4: CommitAttestationWorker (Milestone F) has always existed to BLS-sign a commit
+// root, but nothing ever decided "these pending outbound() messages now form a committed batch"
+// -- and cross_chain_relayer's own binary never watched anything, it just blocked on a shutdown
+// signal. This test proves the full new automation chain end-to-end against real GatewayEngine
+// instances (mock RPC servers execute real engine methods, not canned responses -- the same
+// established pattern TestRelayerDaemon_Lifecycle already uses for its single-message case):
+// 2 real outbound() messages get queued, BatchAndRelay discovers them via a real
+// getPendingOutboundCount() call, submits a real batchOutboundCommit(), retrieves the batch via
+// getCommitBatch(), independently rebuilds real Merkle proofs, real-attests via attestCommit()
+// (using the real aggregate amount) and claims both messages via claimMessage() -- ending with
+// both messages Success on the (mocked) destination engine.
+func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
+	const sourceChainID = 501
+	const destChainID = 502
+	const epoch = uint64(0)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpVal.PublicKey().Bytes(), Stake: 1000}
+
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+
+	sender := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
+	target := common.HexToAddress("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222")
+
+	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	require.NoError(t, err)
+
+	sourceEngine := cross_chain.NewGatewayEngine(sourceChainID, map[uint64]cross_chain.ChainRegistry{}, nil)
+	_, err = sourceEngine.Outbound(sender, cross_chain.OutboundParams{
+		DestChainID: destChainID, Target: target, Payload: []byte{0x01},
+		AssetID: big.NewInt(0), Value: big.NewInt(0), Tip: big.NewInt(0), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xB001"))
+	require.NoError(t, err)
+	_, err = sourceEngine.Outbound(sender, cross_chain.OutboundParams{
+		DestChainID: destChainID, Target: target, Payload: []byte{0x02},
+		AssetID: big.NewInt(0), Value: big.NewInt(0), Tip: big.NewInt(0), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xB002"))
+	require.NoError(t, err)
+
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10_000), map[uint64]*big.Int{sourceChainID: big.NewInt(10_000)})
+	require.NoError(t, err)
+	destEngine := cross_chain.NewGatewayEngine(destChainID, map[uint64]cross_chain.ChainRegistry{
+		sourceChainID: {ChainID: sourceChainID, Committee: []cross_chain.ValidatorEntry{validatorEntry}, Epoch: epoch, QuorumThreshold: 6667},
+	}, ledger)
+
+	type storedReceipt struct {
+		status uint64
+		ret    []byte
+	}
+	var receiptsMu sync.Mutex
+	receipts := make(map[common.Hash]storedReceipt)
+
+	var sourceNonce, destNonce uint64
+
+	// --- Root Anchor mock: same real-BLS pattern TestRelayerDaemon_Lifecycle already uses ---
+	var commitRootForSig common.Hash
+	var commitRootMu sync.Mutex
+	rootAnchorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(9099)))
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			calldata, _ := hexutil.Decode(callObj["data"].(string))
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			switch method.Name {
+			case "getChainRegistry":
+				packed, _ := method.Outputs.Pack(
+					true, [][]byte{validatorEntry.PubkeyBLS}, []uint64{validatorEntry.Stake},
+					[][]byte{validatorEntry.PopSignature}, uint64(epoch), uint64(6667),
+					common.Address{}, common.Hash{}, common.Hash{}, "", uint64(0),
+				)
+				reply(hexutil.Encode(packed))
+			case "getCommitAttestationShares":
+				commitRootMu.Lock()
+				root := commitRootForSig
+				commitRootMu.Unlock()
+				commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+				sig := bls.Sign(kpVal.PrivateKey(), commitMsg)
+				packed, _ := method.Outputs.Pack([][]byte{validatorEntry.PubkeyBLS}, [][]byte{sig.Bytes()})
+				reply(hexutil.Encode(packed))
+			default:
+				t.Fatalf("unexpected eth_call to root anchor: %s", method.Name)
+			}
+		default:
+			reply("0x0")
+		}
+	}))
+	defer rootAnchorSrv.Close()
+
+	// --- Source chain mock: drives sourceEngine for real ---
+	sourceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(sourceChainID)))
+		case "eth_getTransactionCount":
+			reply(hexutil.EncodeUint64(sourceNonce))
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			calldata, _ := hexutil.Decode(callObj["data"].(string))
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+			switch method.Name {
+			case "getPendingOutboundCount":
+				dcid := args[0].(*big.Int).Uint64()
+				count := len(sourceEngine.PendingOutboundMessages[dcid])
+				packed, _ := method.Outputs.Pack(big.NewInt(int64(count)))
+				reply(hexutil.Encode(packed))
+			case "getCommitBatch":
+				cr := common.Hash(args[0].([32]byte))
+				batch, exists := sourceEngine.CommittedBatches[cr]
+				if !exists {
+					packed, _ := method.Outputs.Pack(false, uint64(0), []byte{})
+					reply(hexutil.Encode(packed))
+					return
+				}
+				msgsJSON, _ := json.Marshal(batch.Messages)
+				packed, _ := method.Outputs.Pack(true, batch.Epoch, msgsJSON)
+				reply(hexutil.Encode(packed))
+			default:
+				t.Fatalf("unexpected eth_call to source chain: %s", method.Name)
+			}
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawBytes, _ := hexutil.Decode(params[0].(string))
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			calldata := ethTx.Data()
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			require.Equal(t, "batchOutboundCommit", method.Name)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+			dcid := args[0].(*big.Int).Uint64()
+
+			commitRoot, messages, batchErr := sourceEngine.BatchOutboundCommit(dcid, epoch)
+			var status uint64 = 1
+			var ret []byte
+			if batchErr != nil {
+				status = 0
+			} else {
+				ret, _ = method.Outputs.Pack(commitRoot, big.NewInt(int64(len(messages))))
+				commitRootMu.Lock()
+				commitRootForSig = commitRoot
+				commitRootMu.Unlock()
+			}
+			receiptsMu.Lock()
+			receipts[ethTx.Hash()] = storedReceipt{status: status, ret: ret}
+			receiptsMu.Unlock()
+			sourceNonce++
+			reply(ethTx.Hash().Hex())
+		case "eth_getTransactionReceipt":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			txHash := common.HexToHash(params[0].(string))
+			receiptsMu.Lock()
+			rcp, exists := receipts[txHash]
+			receiptsMu.Unlock()
+			if !exists {
+				reply(nil)
+				return
+			}
+			reply(map[string]interface{}{"status": hexutil.EncodeUint64(rcp.status), "return": hexutil.Encode(rcp.ret)})
+		default:
+			reply("0x0")
+		}
+	}))
+	defer sourceSrv.Close()
+
+	// --- Destination chain mock: drives destEngine for real ---
+	destSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(destChainID)))
+		case "eth_getTransactionCount":
+			reply(hexutil.EncodeUint64(destNonce))
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			calldata, _ := hexutil.Decode(callObj["data"].(string))
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			require.Equal(t, "getMessageStatus", method.Name)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+			status := destEngine.GetMessageStatus(common.Hash(args[0].([32]byte)))
+			packed, _ := method.Outputs.Pack(uint8(status))
+			reply(hexutil.Encode(packed))
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawBytes, _ := hexutil.Decode(params[0].(string))
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			calldata := ethTx.Data()
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+
+			signer := ethtypes.NewEIP155Signer(big.NewInt(destChainID))
+			from, sErr := ethtypes.Sender(signer, &ethTx)
+			require.NoError(t, sErr)
+
+			var status uint64 = 1
+			switch method.Name {
+			case "attestCommit":
+				proof := cross_chain.MerkleProof{
+					LeafIndex: args[4].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[5].([][32]byte)),
+				}
+				cert := cross_chain.QuorumCert{
+					Epoch:              args[6].(uint64),
+					AggregateSignature: args[7].([]byte),
+					SignerBitmap:       args[8].([]byte),
+				}
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				if attestErr != nil {
+					status = 0
+				}
+			case "claimMessage":
+				msg := cross_chain.CrossChainMessage{
+					MessageID:     common.Hash(args[0].([32]byte)),
+					SourceChainID: args[1].(*big.Int).Uint64(),
+					DestChainID:   args[2].(*big.Int).Uint64(),
+					Sequence:      args[3].(*big.Int).Uint64(),
+					HopCount:      args[4].(uint8),
+					Sender:        args[5].(common.Address),
+					Target:        args[6].(common.Address),
+					AssetID:       args[7].(*big.Int),
+					Value:         args[8].(*big.Int),
+					Payload:       args[9].([]byte),
+					Tip:           args[10].(*big.Int),
+					GasFee:        args[11].(*big.Int),
+					Ordered:       args[12].(bool),
+				}
+				proof := cross_chain.MerkleProof{
+					LeafIndex: args[13].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+				}
+				commitRoot := common.Hash(args[15].([32]byte))
+				_, claimErr := destEngine.ClaimMessage(msg, proof, commitRoot, from)
+				if claimErr != nil {
+					status = 0
+				}
+			default:
+				t.Fatalf("unexpected write to destination chain: %s", method.Name)
+			}
+
+			receiptsMu.Lock()
+			receipts[ethTx.Hash()] = storedReceipt{status: status}
+			receiptsMu.Unlock()
+			destNonce++
+			reply(ethTx.Hash().Hex())
+		case "eth_getTransactionReceipt":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			txHash := common.HexToHash(params[0].(string))
+			receiptsMu.Lock()
+			rcp, exists := receipts[txHash]
+			receiptsMu.Unlock()
+			if !exists {
+				reply(nil)
+				return
+			}
+			reply(map[string]interface{}{"status": hexutil.EncodeUint64(rcp.status), "return": hexutil.Encode(rcp.ret)})
+		default:
+			reply("0x0")
+		}
+	}))
+	defer destSrv.Close()
+
+	cfg := DaemonConfig{
+		RelayerKeyHex:  relayerKeyHex,
+		RootAnchorURLs: []string{rootAnchorSrv.URL},
+		ChainRPCURLs: map[uint64]string{
+			sourceChainID: sourceSrv.URL,
+			destChainID:   destSrv.URL,
+		},
+		PollInterval:      5 * time.Millisecond,
+		MaxPollIterations: 20,
+	}
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	n, err := daemon.BatchAndRelay(context.Background(), sourceChainID, destChainID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "expected both real pending outbound messages to be batched and relayed")
+
+	assert.Equal(t, cross_chain.MessageStatusSuccess, destEngine.GetMessageStatus(common.HexToHash("0xB001")))
+	assert.Equal(t, cross_chain.MessageStatusSuccess, destEngine.GetMessageStatus(common.HexToHash("0xB002")))
+
+	// A second call with nothing pending must be a real no-op, not an error.
+	n2, err := daemon.BatchAndRelay(context.Background(), sourceChainID, destChainID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n2)
+}
+
+func bytes32SliceToHashes(in [][32]byte) []common.Hash {
+	out := make([]common.Hash, len(in))
+	for i, b := range in {
+		out[i] = b
+	}
+	return out
 }

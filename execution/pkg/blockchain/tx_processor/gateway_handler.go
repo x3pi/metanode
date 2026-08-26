@@ -57,6 +57,15 @@ var (
 	onceGateway            sync.Once
 )
 
+// CommitFinalizedCallback, if set, is invoked synchronously by the batchOutboundCommit() case
+// whenever THIS node processes that transaction for real -- wires into
+// CommitAttestationWorker.OnCommitFinalized (Milestone F), set from block_processor_core.go the
+// same way SetEpochAdvancedCallback wires CommitteeAttestationWorker.OnEpochAdvanced
+// (Milestone C). nil (the default) means this node isn't running a CommitAttestationWorker
+// (RootAnchorRpcUrls/RootAnchorSubmitterPrivateKeyHex not configured) -- batchOutboundCommit()
+// still works and still records the batch, it just has no local validator to auto-sign it.
+var CommitFinalizedCallback func(sourceChainID, epoch uint64, commitRoot common.Hash)
+
 // GetGatewayHandler returns the singleton GatewayHandler, parsing the ABI on first use.
 func GetGatewayHandler() (*GatewayHandler, error) {
 	var err error
@@ -429,7 +438,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"bootstrapFoundingChains",
+		"bootstrapFoundingChains", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -1078,6 +1087,37 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+	case "batchOutboundCommit":
+		destChainID := mustUint64(args[0])
+		epoch := chainState.GetCurrentEpoch()
+		commitRoot, messages, err := engine.BatchOutboundCommit(destChainID, epoch)
+		if err != nil {
+			return nil, nil, err
+		}
+		packed, packErr := method.Outputs.Pack(commitRoot, big.NewInt(int64(len(messages))))
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		returnData = packed
+		if event, ok := h.abi.Events["CommitBatched"]; ok {
+			eventData, packErr := event.Inputs.NonIndexed().Pack(big.NewInt(int64(len(messages))), epoch)
+			if packErr == nil {
+				eventLogs = append(eventLogs, smart_contract.NewEventLog(
+					tx.Hash(), tx.ToAddress(), eventData,
+					[][]byte{event.ID.Bytes(), commitRoot.Bytes(), leftPadUint64(destChainID)},
+				))
+			}
+		}
+		// Wire into CommitAttestationWorker (Milestone F) so THIS node's own validator (if a
+		// committee member) signs and submits a real BLS attestation share for the commit root
+		// it just deterministically computed -- mirrors epochAdvancedCallback's synchronous,
+		// in-process trigger pattern for CommitteeAttestationWorker (Milestone C). Every
+		// validator node processes this same transaction identically, so every one of them
+		// invokes its own local worker with the exact same (chainID, epoch, commitRoot).
+		if CommitFinalizedCallback != nil {
+			CommitFinalizedCallback(engine.LocalChainID, epoch, commitRoot)
+		}
+
 	case "propose":
 		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose
 		fee := tx.Amount()
@@ -1373,6 +1413,31 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		status := engine.GetMessageStatus(mustHash(args[0]))
 		return method.Outputs.Pack(uint8(status))
+
+	case "getPendingOutboundCount":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getPendingOutboundCount input: %w", err)
+		}
+		destChainID := mustUint64(args[0])
+		count := len(engine.PendingOutboundMessages[destChainID])
+		return method.Outputs.Pack(big.NewInt(int64(count)))
+
+	case "getCommitBatch":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getCommitBatch input: %w", err)
+		}
+		commitRoot := mustHash(args[0])
+		batch, exists := engine.CommittedBatches[commitRoot]
+		if !exists {
+			return method.Outputs.Pack(false, uint64(0), []byte{})
+		}
+		messagesJSON, err := json.Marshal(batch.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("marshal committed batch messages: %w", err)
+		}
+		return method.Outputs.Pack(true, batch.Epoch, messagesJSON)
 
 	case "getOriginalSender":
 		sender, sourceChainID, err := engine.GetOriginalSender()

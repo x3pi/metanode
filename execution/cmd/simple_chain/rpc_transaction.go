@@ -834,8 +834,15 @@ func (api *MetaAPI) GetTransactionReceipt(ctx context.Context, hashEth common.Ha
 		receiptMap["blobGasUsed"] = hexutil.EncodeUint64(blobGasUsed)
 		receiptMap["blobGasPrice"] = hexutil.EncodeBig(block.BlobBaseFeeForHeader(blockData.Header()))
 	}
-	// Thêm revertReason nếu tx bị lỗi (status != RETURNED)
-	if rcp.Return() != nil && len(rcp.Return()) > 0 && rcp.Status().Number() != 0 {
+	// "return" used to be populated only for a revert (revertReason). Extended 2026-08-26 to
+	// also surface a SUCCESSFUL write method's real ABI-packed return value (e.g.
+	// batchOutboundCommit's (commitRoot, messageCount)) -- found needed while building the P4
+	// RelayerDaemon watch loop: without this, there is no way for an external caller to learn a
+	// write transaction's return value at all (eth_call simulates but never actually commits,
+	// so it can't be used to learn what a REAL submitted transaction produced). Backward
+	// compatible: still absent whenever there's no return data, and still present for reverts
+	// exactly as before.
+	if rcp.Return() != nil && len(rcp.Return()) > 0 {
 		receiptMap["return"] = fmt.Sprintf("0x%s", common.Bytes2Hex(rcp.Return()))
 	}
 	if (rcp.ToAddress() == common.Address{}) {

@@ -21,6 +21,8 @@ import subprocess
 import argparse
 import shutil
 import secrets
+import base64
+import hashlib
 from pathlib import Path
 
 def green(s):  return f"\033[32m{s}\033[0m"
@@ -82,6 +84,69 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> dict:
         }
     }
 
+_BLS_PUBKEY_BIN_CACHE = None
+
+def derive_min_pk_pubkey(secret_hex: str) -> str:
+    """Derives the real pkg/bls (min-pk, 48-byte G1) public key from a BLS secret scalar, as
+    base64 -- same real fix as gen_single_chain.py's derive_min_pk_pubkey (see its doc comment
+    for the full story). This script had the identical bug: writing
+    v["keys"]["authority"]["public_key_base64"] (min_sig/G2, AND missing the "0x" hex prefix
+    AccountState's genesis loader requires -- common.FromHex() on a bare base64 string silently
+    decodes to 0 bytes, confirmed empirically) straight into alloc[].publicKeyBls."""
+    global _BLS_PUBKEY_BIN_CACHE
+    if _BLS_PUBKEY_BIN_CACHE is None:
+        bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+        if not bin_path.exists():
+            print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+            result = subprocess.run(
+                ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                sys.exit(1)
+        _BLS_PUBKEY_BIN_CACHE = str(bin_path)
+    result = subprocess.run(
+        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
+        sys.exit(1)
+    return result.stdout.strip()
+
+def derive_devnet_submitter_account(chain_id: int):
+    """Deterministically derive a devnet-only secp256k1 keypair for the
+    CommitAttestationWorker "submitter" account of a given private chain ID.
+
+    Root Anchor's genesis is generated BEFORE the private chains it will later
+    register (gen_root_anchor_chain.py runs first in setup_root_anchor.sh, then
+    setup_4_private_chains.sh generates the private chains and their submitter
+    keys) -- so there is no way for a *randomly*-generated submitter key to ever
+    be present in Root Anchor's genesis alloc. Every submitCommitAttestation()
+    tx from such a key was rejected by Root Anchor's tx-validation gate with
+    "no BLS public key registered on-chain" (the same generic "every tx sender
+    needs a registered BLS pubkey" gate documented next to gateway_bls_key
+    below), permanently blocking Milestone F's real BLS-share submission.
+
+    Fix: derive the key deterministically from the chain ID alone (sha256 of a
+    fixed seed string), so BOTH this script (at Root Anchor genesis time) and
+    setup_4_private_chains.sh (at private-chain genesis time) can independently
+    compute the *same* keypair for a given chain ID with zero data-passing
+    between the two scripts, and pre-register its address here with the same
+    shared devnet BLS pubkey already used for the "known dev account" below.
+
+    DEVNET ONLY. This key is derivable by anyone who reads this source file --
+    never use it to hold real value. Production deployments must generate a
+    real, secret, per-chain submitter key and register it on Root Anchor
+    (a real registration transaction/process, not a hardcoded genesis alloc).
+    """
+    from eth_account import Account
+    seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    priv_hex = hashlib.sha256(seed).hexdigest()
+    address = Account.from_key(priv_hex).address
+    return priv_hex, address
+
 def main():
     parser = argparse.ArgumentParser(description="Generate Root Anchor cluster configurations")
     parser.add_argument("--chain-id", type=int, default=9099, help="Root Anchor Chain ID (default: 9099)")
@@ -116,6 +181,12 @@ def main():
         keys_dir = node_dir / "keys"
         os.makedirs(keys_dir, exist_ok=True)
         keys = generate_validator_keys(metanode_bin, str(keys_dir))
+        # Real min-pk (48-byte G1) pubkey derived from the same secret authority["private_key_hex"]
+        # uses -- see derive_min_pk_pubkey's doc comment. keys["authority"]["public_key_base64"]
+        # stays min_sig/G2, used only for consensus identity.
+        keys["min_pk_pubkey_hex"] = "0x" + base64.b64decode(
+            derive_min_pk_pubkey(keys["authority"]["private_key_hex"])
+        ).hex()
 
         val_info = {
             "index": i,
@@ -218,7 +289,10 @@ def main():
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "publicKeyBls": v["keys"]["authority"]["public_key_base64"]
+            # Real min-pk pubkey (see derive_min_pk_pubkey's doc comment) -- NOT
+            # public_key_base64 (min_sig/G2, consensus-only, and not even hex-encoded so the
+            # genesis loader's common.FromHex() silently decoded it to 0 bytes).
+            "publicKeyBls": v["keys"]["min_pk_pubkey_hex"]
         })
 
     # Inject a known dev account so we can send transactions via web3
@@ -230,6 +304,23 @@ def main():
         "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
     })
+
+    # Pre-register each founding chain's deterministic devnet submitter account
+    # (see derive_devnet_submitter_account() docstring for why this is needed:
+    # CommitAttestationWorker.submitMyShare() sends submitCommitAttestation()
+    # txs to Root Anchor from this account, and Root Anchor rejects txs from
+    # any account with no BLS pubkey registered on its own chain).
+    for founding_chain_id in founding_chains:
+        _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id)
+        alloc_list.append({
+            "address": submitter_address,
+            "balance": "1000000000000000000000000",
+            "pending_balance": "0",
+            "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+        })
+        print(f"  🔑 Pre-registered devnet submitter account for chain {founding_chain_id}: {submitter_address}")
 
     genesis_data = {
         "config": {
@@ -294,7 +385,10 @@ def main():
                 "55798165960a62cED34a0d86e36B1758D1303907"
             ],
             "cross_chain": {
-                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
+                # full rationale. NEVER set this on a real deployment.
+                "devnet_governance_timelock_seconds_override": 10
             },
             "meta_node_rpc_address": f"{ip_address}:{11100 + args.port_offset + node_id}",
             "connection_address": f"0.0.0.0:{14200 + args.port_offset + node_id}",

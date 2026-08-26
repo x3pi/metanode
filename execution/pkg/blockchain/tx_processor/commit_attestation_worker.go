@@ -116,7 +116,6 @@ func (w *CommitAttestationWorker) handleCommit(ctx context.Context, sig commitSi
 		return
 	}
 	if !committeeContains(registry.Committee, myPubkeyBls) {
-		// Not a member of the current committee — nothing for this node to sign
 		return
 	}
 
