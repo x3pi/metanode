@@ -46,6 +46,7 @@ type OutboundParams struct {
 	AssetID     *big.Int       `json:"asset_id"`
 	Value       *big.Int       `json:"value"`
 	Tip         *big.Int       `json:"tip"`
+	GasFee      *big.Int       `json:"gas_fee"`
 	HopCount    uint8          `json:"hop_count"`
 	Ordered     bool           `json:"ordered"`
 }
@@ -480,6 +481,18 @@ func CanonicalEncodeMessage(m CrossChainMessage) []byte {
 	}
 	buf = append(buf, tipBytes...)
 
+	// Fixed 32 bytes for GasFee (uint256 big-endian) -- included in the hash so a relayer can't
+	// alter the locked cross-chain gas budget in transit (same integrity requirement as every
+	// other economic field here).
+	gasFeeBytes := make([]byte, 32)
+	if m.GasFee != nil {
+		raw := m.GasFee.Bytes()
+		if len(raw) <= 32 {
+			copy(gasFeeBytes[32-len(raw):], raw)
+		}
+	}
+	buf = append(buf, gasFeeBytes...)
+
 	// 4-byte length prefix for Payload followed by payload bytes
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(m.Payload)))
@@ -526,6 +539,10 @@ func (g *GatewayEngine) Outbound(
 	if params.Tip != nil {
 		tip = new(big.Int).Set(params.Tip)
 	}
+	gasFee := big.NewInt(0)
+	if params.GasFee != nil {
+		gasFee = new(big.Int).Set(params.GasFee)
+	}
 	assetID := big.NewInt(0)
 	if params.AssetID != nil {
 		assetID = new(big.Int).Set(params.AssetID)
@@ -542,6 +559,7 @@ func (g *GatewayEngine) Outbound(
 		Value:         val,
 		Sequence:      seq,
 		Tip:           tip,
+		GasFee:        gasFee,
 		HopCount:      params.HopCount,
 		Ordered:       params.Ordered,
 	}

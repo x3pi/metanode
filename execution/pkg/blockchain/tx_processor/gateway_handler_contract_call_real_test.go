@@ -63,6 +63,12 @@ func TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall(t *testing.
 	}, ledger)
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
+	// GasFee (mục 2.6.5): locked cross-chain gas budget for the CONTRACT_CALL payload below --
+	// converted at claim time via mt_common.MINIMUM_BASE_FEE (500,000 gas worth), comfortably
+	// more than a plain mint() call needs, so the leftover-refund assertion below has something
+	// real to prove.
+	gasFee := big.NewInt(500_000 * mt_common.MINIMUM_BASE_FEE)
+
 	msg := cross_chain.CrossChainMessage{
 		MessageID:     common.HexToHash("0xC0FFEE00000000000000000000000000000000000000000000000000000001"),
 		SourceChainID: 101,
@@ -75,6 +81,7 @@ func TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall(t *testing.
 		Value:         big.NewInt(0), // pure message: no native value, payload-only
 		Payload:       mintPayload,
 		Tip:           big.NewInt(0),
+		GasFee:        gasFee,
 		Ordered:       false,
 	}
 
@@ -102,7 +109,7 @@ func TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall(t *testing.
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -116,6 +123,18 @@ func TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall(t *testing.
 	recipientBalAfter := realTokenBalanceOf(t, cs, targetContract, recipient)
 	require.Equal(t, 0, recipientBalAfter.Cmp(big.NewInt(42)),
 		"expected real mint(recipient, 42) call from the message Payload to have executed, got balance %s", recipientBalAfter)
+
+	// Second real assertion (mục 2.6.5's gas-lock/refund mechanism): msg.Sender must have
+	// received back the unused portion of the locked GasFee, as real native balance on this
+	// chain -- more than 0 (a real mint() call is cheap, most of the generous 500k-gas budget
+	// goes unused) but strictly less than the full gasFee (real gas was genuinely consumed, not
+	// "free").
+	senderState, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.NotNil(t, senderState)
+	senderRefund := senderState.Balance()
+	require.True(t, senderRefund.Sign() > 0, "expected some unused gasFee refunded to msg.Sender, got %s", senderRefund)
+	require.True(t, senderRefund.Cmp(gasFee) < 0, "refund must be strictly less than the full locked gasFee (real gas was consumed), got %s of %s", senderRefund, gasFee)
 }
 
 func TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall(t *testing.T) {
@@ -140,6 +159,8 @@ func TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall(t *test
 	kp := bls.GenerateKeyPair()
 	entry := cross_chain.ValidatorEntry{PubkeyBLS: kp.PublicKey().Bytes(), Stake: 1000}
 
+	gasFee := big.NewInt(500_000 * mt_common.MINIMUM_BASE_FEE)
+
 	msg := cross_chain.CrossChainMessage{
 		MessageID:     common.HexToHash("0xFEED000000000000000000000000000000000000000000000000000000002"),
 		SourceChainID: sourceChainID,
@@ -152,6 +173,7 @@ func TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall(t *test
 		Value:         big.NewInt(0),
 		Payload:       mintPayload,
 		Tip:           big.NewInt(0),
+		GasFee:        gasFee,
 		Ordered:       false,
 	}
 	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf) -- same real BLS/Merkle
@@ -178,7 +200,7 @@ func TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall(t *test
 	calldata, err := h.abi.Pack("verifyAndExecute",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings),
 		commitRoot, uint64(epoch), sig.Bytes(), []byte{0x01},
@@ -197,4 +219,97 @@ func TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall(t *test
 	recipientBalAfter := realTokenBalanceOf(t, cs, targetContract, recipient)
 	require.Equal(t, 0, recipientBalAfter.Cmp(big.NewInt(77)),
 		"expected real mint(recipient, 77) call from the message Payload to have executed, got balance %s", recipientBalAfter)
+
+	// Gas-lock/refund assertion (mục 2.6.5), mirroring the claimMessage test above.
+	senderState, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.NotNil(t, senderState)
+	senderRefund := senderState.Balance()
+	require.True(t, senderRefund.Sign() > 0, "expected some unused gasFee refunded to msg.Sender, got %s", senderRefund)
+	require.True(t, senderRefund.Cmp(gasFee) < 0, "refund must be strictly less than the full locked gasFee (real gas was consumed), got %s of %s", senderRefund, gasFee)
+}
+
+// TestGatewayHandler_ClaimMessagePayload_FailsClosedWithoutGasFee proves the actual security
+// property mục 2.6.5 exists for: a CONTRACT_CALL payload against a real contract with GasFee==0
+// must NOT execute for free (the DoS vector mục 5.3 risk #9 describes) -- it must fail closed
+// with a clear error, and the target contract's state must be provably untouched.
+func TestGatewayHandler_ClaimMessagePayload_FailsClosedWithoutGasFee(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	deployer := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	sender := common.HexToAddress("0xAAAA111111111111111111111111111111AAAA1")
+	recipient := common.HexToAddress("0xBBBB222222222222222222222222222222BBBB2")
+	relayer := common.HexToAddress("0xCCCC333333333333333333333333333333CCCC3")
+
+	targetContract := deployTestWrappedAsset(t, cs, deployer, big.NewInt(0))
+	parsedABI := testWrappedAssetABI(t)
+	mintPayload, err := parsedABI.Pack("mint", recipient, big.NewInt(999))
+	require.NoError(t, err)
+
+	kp := bls.GenerateKeyPair()
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{201: big.NewInt(5000), 202: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine := cross_chain.NewGatewayEngine(202, map[uint64]cross_chain.ChainRegistry{
+		201: {
+			ChainID:         201,
+			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}, ledger)
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0xBAD00000000000000000000000000000000000000000000000000000000003"),
+		SourceChainID: 201,
+		DestChainID:   202,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        targetContract,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(0),
+		Payload:       mintPayload,
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0), // the point of this test: no gas locked
+		Ordered:       false,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	messageProof := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+
+	attestCalldata, err := h.abi.Pack("attestCommit",
+		big.NewInt(201), commitRoot, aggAmounts["0"], big.NewInt(0),
+		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
+		uint64(1), sig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	attestTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, attestCalldata))
+	_, _, attestFailed := h.HandleTransaction(context.Background(), cs, attestTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, attestFailed, "attestCommit should succeed")
+
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
+	)
+	require.NoError(t, err)
+	claimTx := newHighGasTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.True(t, failed, "claimMessage with a CONTRACT_CALL payload and gasFee==0 must fail closed, not execute for free")
+	if rcp != nil {
+		require.Contains(t, string(rcp.Return()), "gasFee", "revert reason should point at the missing gasFee, got: %q", string(rcp.Return()))
+	}
+
+	// The real, defining assertion: the contract must NOT have executed the free mint at all.
+	recipientBal := realTokenBalanceOf(t, cs, targetContract, recipient)
+	require.Zero(t, recipientBal.Sign(), "expected mint(recipient, 999) to NOT have executed without a locked gasFee, got balance %s", recipientBal)
 }
