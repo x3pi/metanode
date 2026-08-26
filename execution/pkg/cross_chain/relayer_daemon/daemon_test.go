@@ -467,11 +467,13 @@ func TestRelayerDaemon_CachesNonceAcrossSends(t *testing.T) {
 		MessageID: common.HexToHash("0xA001"), SourceChainID: sourceChainID, DestChainID: destChainID,
 		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
 		Payload: []byte{0x01}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
 	}
 	msgB := cross_chain.CrossChainMessage{
 		MessageID: common.HexToHash("0xA002"), SourceChainID: sourceChainID, DestChainID: destChainID,
 		Sequence: 2, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
 		Payload: []byte{0x02}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
 	}
 	// Both messages batched into ONE real commit tree (a real relayer commonly batches several
 	// messages per commit) -- one commitRoot, two independent message proofs.
@@ -566,6 +568,7 @@ func TestRelayerDaemon_RecoversPendingNonceOnFreshDaemon(t *testing.T) {
 		MessageID: common.HexToHash("0xB001"), SourceChainID: sourceChainID, DestChainID: destChainID,
 		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
 		Payload: []byte{0x03}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
 	}
 	commitRoot, layers, _, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
 	require.NoError(t, err)
@@ -665,11 +668,13 @@ func TestRelayerDaemon_DropsCachedNonceOnNonceError(t *testing.T) {
 		MessageID: common.HexToHash("0xC001"), SourceChainID: sourceChainID, DestChainID: destChainID,
 		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
 		Payload: []byte{0x04}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
 	}
 	msgB := cross_chain.CrossChainMessage{
 		MessageID: common.HexToHash("0xC002"), SourceChainID: sourceChainID, DestChainID: destChainID,
 		Sequence: 2, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(0),
 		Payload: []byte{0x05}, Tip: big.NewInt(0),
+		GasFee: big.NewInt(0),
 	}
 	commitRoot, layers, _, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msgA, msgB})
 	require.NoError(t, err)
