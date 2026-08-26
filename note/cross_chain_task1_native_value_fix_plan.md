@@ -54,8 +54,9 @@
    check lại chính giá trị đó").
 2. Cùng file đó, mục **Phase 0.6** — bối cảnh đầy đủ: vì sao value-transfer chưa từng được nối
    vào balance thật, và kế hoạch sửa gốc (6 bước) mà đoạn code dưới đây đang cố hiện thực.
-3. `note/cross_chain_full_implementation_plan.md` Task 1 — vị trí việc này nằm trong lộ trình
-   tổng.
+3. `note/cross_chain_production_readiness_plan.md` Phase 0.6 — vị trí việc này nằm trong lộ
+   trình tổng (file `cross_chain_full_implementation_plan.md` từng trỏ tới ở đây đã bị xoá vì
+   trùng lặp với `note/all_remaining_fixes_plan.md`, xem ghi chú dọn dẹp trong file đó).
 
 ## Bối cảnh: code đã tồn tại, chưa commit, có bug
 
@@ -282,8 +283,8 @@ nhận được **đúng bằng đúng 1 lần tip**, không phải 2 lần.
    và 3 test mới bắt buộc thêm ở trên phải pass, đúng thứ tự: viết test trước khi sửa code (test
    phải fail đúng vì lý do mô tả, không phải vì lý do khác), sửa code, test pass.
 2. `gofmt -l` sạch trên các file đã sửa.
-3. Việc còn lại của Task 1 (chưa làm trong lần này, không phải phạm vi sửa lỗi ở trên, xem
-   `cross_chain_full_implementation_plan.md` Task 1.2/1.3 để biết chi tiết):
+3. Việc còn lại của Task 1 (chưa làm trong lần này, không phải phạm vi sửa lỗi ở trên — đã
+   vá sau đó, xem `cross_chain_production_readiness_plan.md` Phase 0.7–0.9 để biết chi tiết):
    - Task 1.2: `AssetRegistryEngine.LockAndBridgeAsset`/`ReceiveAndSettleAsset` vẫn chưa nối
      balance thật — `asset_registry.go` không đổi trong lần thực hiện này.
    - Task 1.3: `executeContractCallForGateway` hiện dùng thẳng `tx.MaxGas()` của relayer, chưa có

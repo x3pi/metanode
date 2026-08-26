@@ -321,15 +321,15 @@ làm tiếp P3.1 đầy đủ (gửi tự động, không chỉ có khả năng 
 
 ## Việc dọn dẹp tài liệu (không phải code, nhưng cần làm cùng đợt)
 
-- `note/cross_chain_full_implementation_plan.md` **đang lỗi thời** — vẫn ghi Task 1.2/Task 2
-  (custom-asset value wiring, front-run bootstrap) là "chưa xong", nhưng cả 2 đã vá xong đêm
-  25/8/2026 (xem `cross_chain_production_readiness_plan.md` Phase 0.7–0.9). Cập nhật lại toàn
-  bộ bảng trạng thái + thứ tự Task cho khớp, và thêm 6 mục ở tài liệu này vào đúng vị trí
-  trong lộ trình Task 1→6 hiện có (các mục 1–5 ở đây thuộc "Task 3 — Phase 1 còn mở"; mục 6
-  là 1 mục mới, không có trong file đó).
-  **✅ Đã cập nhật bảng trạng thái tổng quan 2026-08-26** (di chuyển giá trị thật, genesis
-  ceremony, Phase 1 open items đều đánh dấu xong) — chi tiết Task 1→6 bên dưới bảng chưa được
-  viết lại đầy đủ tương ứng, vẫn còn việc dọn dẹp nếu muốn thật sự khớp 100%.
+- `note/cross_chain_full_implementation_plan.md` từng lỗi thời (vẫn ghi các việc đã vá xong
+  là "chưa xong"), được cập nhật một phần 2026-08-26 rồi phát hiện nó **trùng lặp hoàn toàn**
+  với chính tài liệu này (cả hai đều là "danh sách việc cần làm để chạy thực tế, cho agent
+  mới") — thay vì duy trì 2 bản dễ lệch nhau, **đã xoá file đó 2026-08-26**, 2 chỗ trỏ tới nó
+  (`production_deployment_guide.md`) đã cập nhật trỏ sang tài liệu này. Không xoá
+  `cross_chain_task1_native_value_fix_plan.md` hay `cross_chain_wiring_plan_next_steps.md` dù
+  cả 2 cũng đã lịch sử/RESOLVED — cả 2 vẫn được code (comment) và
+  `cross_chain_production_readiness_plan.md` trỏ tới như bằng chứng/bối cảnh gốc, xoá sẽ tạo
+  link chết thật sự mất thông tin, khác với file kia (chỉ là danh sách việc trùng lặp).
 
 ---
 
