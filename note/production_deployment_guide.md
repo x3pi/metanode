@@ -15,63 +15,70 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 
 ## 0. Tóm tắt điều hành (đọc trước)
 
+*Cập nhật lần cuối: 2026-08-26. Đây là bản trạng thái hiện tại — không phải nhật ký theo
+thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi nào, PR nào) nằm ở
+`note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết "vì sao", còn tài liệu
+này chỉ trả lời "hiện đang ở đâu".*
+
 | Thành phần | Sẵn sàng cho | Chưa sẵn sàng cho |
 | :--- | :--- | :--- |
 | 1 private chain đơn (Go execution + Rust consensus, Ansible/systemd) | Production nội bộ, testnet, mainnet doanh nghiệp riêng lẻ | — |
-| Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer) | Testnet nội bộ, diễn tập ceremony, demo | **Giá trị thật** cho tới khi qua P5 (security review độc lập) — xem `note/cross_chain_production_readiness_plan.md` |
+| Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer) | Testnet nội bộ, diễn tập ceremony, demo, chạy thật nhiều tiến trình 1 máy (đã kiểm chứng sống) | **Giá trị thật trên mainnet** cho tới khi qua P5 (audit độc lập) + T2 (chạy thật nhiều máy vật lý) |
 
-**Cập nhật 2026-08-25 (cuối ngày):** mục 0 bên dưới **đã lỗi thời** so với bản gốc viết đầu
-ngày hôm nay — 4 trong 5 mục đã được vá thật kể từ đó (PR #63, #64 + 2 commit theo sau trên
-cùng branch). Giữ mục 0 nguyên trạng lịch sử (đánh dấu ✅ ngay dưới mỗi mục đã xong) thay vì
-xoá, vì `note/cross_chain_production_readiness_plan.md` Phase 0.6-0.9 là nơi có đầy đủ bằng
-chứng/chi tiết cho từng mục — đọc ở đó trước khi tin bất kỳ dòng nào dưới đây là "chưa làm".
+**Trạng thái code (quan trọng cho bất kỳ ai tiếp quản việc deploy):** toàn bộ các lỗ hổng
+CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống — nhưng code này
+**hiện nằm trên PR #65** (`test/custom-asset-real-token-coverage` → `dev`), **chưa merge**.
+Trước khi triển khai bất cứ thứ gì thật, xác nhận PR #65 (hoặc PR kế tiếp nếu #65 đã đóng) đã
+merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây chỉ vì tài liệu này nói đã vá.
 
-**Cổng bắt buộc trước khi cho giá trị thật chạy qua Root Anchor** (không phải gợi ý, là điều
-kiện chặn — xem `note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
-0. **🔴 phát hiện 2026-08-25 sáng, ✅ ĐÃ VÁ 2026-08-25 tối (PR #63 + #64):** lớp xác minh mật mã
-   (BLS/Merkle/anti-fraud) giờ đã nối thật vào giá trị thật cho cả 2 nhánh: coin gốc (PR #63,
-   `ProcessNativeMintBurn` được gọi thật từ `outbound`/`claimMessage`) và tài sản tuỳ biến (PR
-   #64 + theo sau, `msg.sender`/`SetCode` sửa xong, custom-asset round trip chạy thật đầu-cuối
-   trên 2 node thật — xem readiness-plan Phase 0.9). **Vẫn chưa qua audit độc lập (mục 1)** —
-   "đã vá + test kỹ" không thay thế cho "đã được bên thứ 3 xác minh độc lập".
-1. P5 — security review độc lập cho toàn bộ luồng verify (BLS + Merkle + replay + double-mint
-   qua refund + xác thực origin sender 2 chiều + toàn bộ code mới ở mục 0) — **vẫn chưa làm,
-   là điều kiện chặn cuối cùng còn lại cho mainnet giá trị thật**. Phạm vi + tài liệu chuẩn bị
-   cho đợt audit này: `note/external_security_audit_scope_p5.md` (mới).
-2. Đã chạy thật trên **nhiều máy vật lý/VM độc lập** (không phải devnet 1 máy) đủ lâu để quan
-   sát hành vi production thật (T4, mục 12 tài liệu kiến trúc) — **chưa làm**. **✅ Root
-   Anchor Layer C đã tìm ra nguyên nhân thật + vá xong 2026-08-25 tối** (không phải race
-   Tokio như 2 lần đoán trước — `gen_root_anchor_chain.py` gán `peer_rpc_port` trùng số cổng
-   với cổng gRPC P2P thật, chiếm vĩnh viễn chứ không phải tạm thời): xác nhận thật cụm 4
-   validator sạch (regenerate + start một lần, không tái sử dụng thư mục cũ) đạt `Healthy` cả
-   4 node, 0 lỗi bind, block height khớp nhau và tiếp tục tăng. Việc còn thiếu cho mục 2 giờ
-   chỉ còn là chạy thật trên nhiều máy vật lý riêng biệt (không phải 1 máy chia sẻ) đủ lâu —
-   xem readiness-plan Phase 0.7's "ROOT-CAUSED FOR REAL AND FIXED" update.
-3. **✅ ĐÃ VÁ 2026-08-25 tối:** nguy cơ front-run `bootstrapFoundingChains` khi làm lễ genesis —
-   `CrossChainConfig.GenesisCoordinatorAddress` (config.go) giờ khoá người gọi hợp lệ duy nhất,
-   xem readiness-plan (commit "bootstrapFoundingChains front-run gap"). **Bắt buộc phải set**
-   giá trị này trong config thật trước khi gửi transaction bootstrap — bỏ trống vẫn giữ hành vi
-   cũ (ai gọi cũng được) để không phá vỡ devnet/test hiện có.
-4. **✅ ĐÃ VÁ 2026-08-25 tối:** khoá đóng cứng trong `deploy/systemd/start_relayer_daemon.sh` /
-   `register_private_chains_t2.py` giờ đọc từ biến môi trường `RELAYER_KEY` / `DEV_PRIV_KEY`,
-   chỉ rơi về khoá devnet công khai (kèm cảnh báo to) nếu không set — **bắt buộc phải set 2
-   biến này thật** trước khi chạy relayer/submitter cho mạng thật.
+**Đã vá + xác nhận sống (không còn là rủi ro mở):**
+- Lớp xác minh mật mã (BLS/Merkle/anti-fraud) đã nối thật vào số dư thật cho cả native coin
+  (`ProcessNativeMintBurn` gọi thật từ `outbound`/`claimMessage`) và tài sản tuỳ biến
+  (`msg.sender`/`SetCode` đúng, custom-asset round trip chạy thật đầu-cuối trên 2 node thật).
+- `GlobalSupplyLedger.PerChainAllocation` từng không có đường nào cấp phát được (trần luôn =
+  0 vĩnh viễn) — đã vá bằng `ProposalAllocateSupply`/`GrantAllocation` qua governance thật.
+- `vote()`/`executeProposal()` từng tin timestamp do caller tự khai (đủ để bypass timelock
+  72h bắt buộc) — giờ luôn dùng block time thật.
+- `bootstrapFoundingChains` từng không kiểm tra người gửi (front-run ceremony) —
+  `CrossChainConfig.GenesisCoordinatorAddress` giờ khoá người gọi hợp lệ duy nhất (**bắt buộc
+  phải set giá trị này trong config thật trước khi gửi giao dịch bootstrap** — bỏ trống vẫn
+  giữ hành vi cũ để không phá vỡ devnet/test).
+- Khoá đóng cứng trong `start_relayer_daemon.sh`/`register_private_chains_t2.py` — giờ đọc từ
+  biến môi trường `RELAYER_KEY`/`DEV_PRIV_KEY` (**bắt buộc phải set thật** trước khi chạy cho
+  vai trò thật, không set thì rơi về khoá devnet công khai kèm cảnh báo to).
+- Root Anchor "Layer C": 1 cụm multi-validator thật không bao giờ đạt được trạng thái
+  `Healthy` do lỗi trong script sinh cấu hình (`gen_root_anchor_chain.py` gán trùng cổng giữa
+  server chẩn đoán và cổng gRPC P2P thật) — đã tìm ra nguyên nhân thật (không phải race Tokio
+  như 2 lần đoán trước) và vá; xác nhận sống: cụm 4 validator sạch đạt `Healthy` cả 4 node, 0
+  lỗi bind, block height tiếp tục tăng — lần đầu tiên trong lịch sử dự án.
+- `QuorumThreshold` (ngưỡng % stake cần để 1 quorum cert hợp lệ) từng không có sàn an toàn ở
+  bất kỳ đâu — có thể set dưới 2/3 BFT, cho 1 thiểu số giả mạo quorum. Đã vá: sàn 2/3 bắt buộc
+  ở cả 4 nơi gán giá trị.
+- `ProposalRegisterChain` từng nhận 1 uỷ ban (committee) không rỗng mà không verify PoP (lỗ
+  hổng rogue-key) — khác với `BootstrapFoundingChains`/`ProposalUpdateCommittee`, cả 2 đều đã
+  verify đúng. Đã vá: bắt buộc verify khi uỷ ban không rỗng.
 
-**Cũng đã vá cùng đợt, không nằm trong danh sách gốc:**
-`vote()`/`executeProposal()` từng tin timestamp do caller tự khai (không đối chiếu block time
-thật) — đủ để bypass timelock 72h bắt buộc. Đã vá: 2 hàm này giờ luôn dùng block time thật,
-bỏ qua giá trị caller khai — xem readiness-plan Phase 0.9 và commit "governance
-propose/vote/executeProposal never trust caller-supplied timestamps".
+**2 điều kiện chặn cứng còn lại trước mainnet giá trị thật, không có đường tắt** (xem
+`note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
+1. **P5 — Audit bảo mật độc lập.** Chưa làm, cần bên thứ ba, không tự làm được. Phạm vi +
+   tài liệu chuẩn bị: `note/external_security_audit_scope_p5.md`.
+2. **T2 — Chạy thật trên nhiều máy vật lý/VM độc lập** đủ lâu để quan sát hành vi production
+   thật (độ trễ mạng thật, tải thật). Mọi bằng chứng "chạy thật" tới nay đều trên **1 máy chia
+   sẻ** (nhiều tiến trình riêng biệt, không phải hạ tầng nhiều máy) — Layer C đã hết là lý do
+   chặn kỹ thuật cho việc này, giờ chỉ còn thiếu hạ tầng nhiều máy thật.
 
-**Việc cần làm tiếp theo, đầy đủ, theo thứ tự:** `note/cross_chain_full_implementation_plan.md`
-— viết cho 1 agent/dev mới hoàn toàn để triển khai hết các mục trên (bản này cũng cần cập nhật
-lại tương ứng, chưa làm trong đợt này).
+**Việc còn mở, không chặn nhưng chưa xong** (chi tiết đầy đủ, cho agent/dev tiếp theo:
+`note/all_remaining_fixes_plan.md`):
+- 2 quyết định thiết kế cần người phụ trách kiến trúc xác nhận (cơ chế epoch catch-up khi 1
+  chain kẹt nhiều epoch; `propose()` có nên giới hạn người gọi hay permissionless là chủ ý).
+- Chưa có công cụ production thật để coordinator gửi `bootstrapFoundingChains()` với dữ liệu
+  registry thật của ≥4 chain sáng lập (chỉ có công cụ devnet/test).
+- Vài khoảng trống test nhỏ (nonce/double-submit khi `RelayerDaemon` restart giữa chừng; test
+  tải thật cho Gate 1 trên cụm sống thay vì chỉ unit test).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
-dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — mục chặn duy
-nhất còn lại là **mục 1 (audit độc lập P5)** và **mục 2 (chạy thật đa máy — Layer C đã xong,
-giờ chỉ còn thiếu hạ tầng nhiều máy vật lý thật)** — việc cần làm tiếp theo là lên kế hoạch
-cho 2 mục đó, không phải chạy thêm script.
+dùng (sau khi PR #65 merge), cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị
+thật** — việc cần làm tiếp theo là lên kế hoạch cho P5 + T2, không phải chạy thêm script.
 
 ---
 
@@ -367,7 +374,7 @@ front-run gap".
 | :--- | :--- |
 | Kiến trúc thiết kế đầy đủ cross-chain | `note/cross_chain_root_anchor_architecture.md` |
 | Tiến độ, bug đã sửa, lộ trình P0-P8 | `note/cross_chain_production_readiness_plan.md` |
-| Kế hoạch triển khai đầy đủ (code còn thiếu, cho agent khác thực hiện) | `note/cross_chain_full_implementation_plan.md` |
+| Việc còn lại (code + quyết định thiết kế), cho agent khác thực hiện | `note/all_remaining_fixes_plan.md` |
 | Phạm vi + chuẩn bị cho audit bảo mật độc lập (P5) | `note/external_security_audit_scope_p5.md` |
 | Lễ khai sinh Root Anchor nhiều tổ chức | `note/runbook_root_anchor_genesis_ceremony.md` |
 | Vận hành 1 private chain đơn (Ansible) | `deploy/ansible/README.md` |
@@ -376,3 +383,43 @@ front-run gap".
 | Khôi phục từ snapshot | `deploy/systemd/docs/restore_snapshot_systemd.md` |
 | Chết node, phục hồi | `note/runbook_chain_death_recovery.md` |
 | Số node tối thiểu cho BFT | `note/bft_fault_tolerance_node_count.md` |
+
+---
+
+## 9. Bàn giao triển khai (đọc nếu bạn mới tiếp quản việc này)
+
+**Trạng thái code tại thời điểm bàn giao (2026-08-26):**
+- Toàn bộ fix mô tả ở mục 0 nằm trên PR #65 (`test/custom-asset-real-token-coverage` →
+  `dev`), **chưa merge**. `dev` hiện chỉ có phần vá đầu tiên (PR #64, `msg.sender`/`SetCode`)
+  — mọi thứ sau đó (SupplyLedger, bypass-timelock, front-run genesis, Layer C,
+  `ProposalUpdateCommittee`, sàn `QuorumThreshold`, PoP cho `ProposalRegisterChain`) **chưa ở
+  trong `dev`** cho tới khi PR đó (hoặc PR kế tiếp nếu nó đã đóng) được merge.
+- **Việc đầu tiên phải làm:** kiểm tra trạng thái PR đó trên GitHub, đảm bảo CI xanh, merge
+  vào `dev` trước khi tin bất kỳ dòng nào ở mục 0 phía trên là đã áp dụng cho môi trường thật.
+- Không có gì đang chạy dở/hỏng — `go build/vet/test` và `cargo build/test` đều sạch tại thời
+  điểm bàn giao, không có regression nào chưa xử lý.
+
+**Việc tiếp theo, theo đúng thứ tự ưu tiên:**
+1. Merge PR (xem trên).
+2. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
+   giá trị thật (dừng lại lên kế hoạch cho 2 điều kiện chặn ở mục 0 — P5 và T2 — trước khi
+   chạy thêm bất kỳ script nào).
+3. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
+   `note/external_security_audit_scope_p5.md` làm tài liệu bàn giao cho họ), song song chuẩn
+   bị hạ tầng nhiều máy vật lý/VM độc lập cho T2 (không phải devnet 1 máy chia sẻ).
+4. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
+   `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
+   từng việc kèm file/hàm chính xác, việc nào cần hỏi trước khi làm (đừng để agent tự đoán 2
+   quyết định thiết kế còn treo), việc nào an toàn để tự làm luôn.
+
+**Câu hỏi cần người phụ trách kiến trúc trả lời trước** (không tự đoán, xem chi tiết ở
+`all_remaining_fixes_plan.md` Mục 1/2):
+- 1 private chain kẹt nhiều epoch không kết nối được Root Anchor thì bắt kịp bằng cơ chế mật
+  mã học nào, hay chấp nhận giới hạn và chỉ cảnh báo vận hành?
+- `propose()` cho phép bất kỳ ai đề xuất (chỉ chặn ở bước vote) có phải chủ ý thiết kế không?
+
+**Nếu có nghi ngờ về bất cứ điều gì ở tài liệu này:** đọc trực tiếp
+`note/cross_chain_production_readiness_plan.md` (log đầy đủ, trung thực, kể cả các lần kết
+luận sai rồi tự sửa) thay vì tin lời tóm tắt — đây là quy ước xuyên suốt dự án: mọi khẳng định
+"đã vá"/"đã xong" đều phải có bằng chứng thật (test hồi quy, log chạy sống) đi kèm, không phải
+chỉ lời khẳng định.
