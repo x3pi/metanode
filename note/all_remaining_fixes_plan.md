@@ -63,6 +63,18 @@ phụ trách trước khi implement bất cứ hướng nào. **Test bắt buộ
 chọn hướng nào, phải có 1 test tái hiện đúng kịch bản "chain kẹt N epoch, cố bắt kịp" và
 chứng minh hành vi đã chọn (bắt kịp thật, hoặc cảnh báo thật bắn ra đúng lúc).
 
+**Cập nhật 2026-08-26 — liên quan trực tiếp tới Mục 7 (đã xong, xem bên dưới):**
+`ExecuteGovernanceProposal`'s case mới cho `ProposalUpdateCommittee` cho phép set
+`NewEpoch` **bất kỳ** (không bắt buộc tuần tự `reg.Epoch + 1` như `ApplyCommitteeUpdate`) —
+về bản chất đây CÓ THỂ là câu trả lời thực tế cho hướng (a) ở trên: thay vì cần 1 cơ chế mật
+mã học "skip-ahead" mới, một chain kẹt nhiều epoch có thể được cập nhật epoch/committee mới
+thông qua **quorum governance của Root Anchor** (≥2/3 chain đang hoạt động vote đồng ý) thay
+vì cần chữ ký liên tục từ uỷ ban cũ. Đây là mô hình tin cậy KHÁC (dựa vào quorum Root Anchor
+thay vì tính liên tục mật mã học từ uỷ ban cũ) — **chưa được xác nhận là "câu trả lời chính
+thức" cho mục này**, cần người phụ trách kiến trúc xác nhận đây có phải hướng chấp nhận được
+không trước khi coi Mục 1 là đóng. Nếu chấp nhận, việc còn lại chỉ là viết test tái hiện đúng
+kịch bản "chain kẹt N epoch" bằng cơ chế `ProposalUpdateCommittee` đã có, không cần code mới.
+
 ---
 
 ## Mục 2 — 🟡 `propose()` không có gate — xác nhận chủ ý hay thiếu sót
@@ -89,7 +101,7 @@ nhiều lần liên tiếp lúc mới tham gia).
 
 ---
 
-## Mục 3 — 🟡 `RelayerDaemon` giữ private key thật dạng plain string trong config
+## Mục 3 — ✅ ĐÃ XONG 2026-08-26 — `RelayerDaemon` giữ private key thật dạng plain string trong config
 
 **File:** `execution/pkg/cross_chain/relayer_daemon/daemon.go`, `DaemonConfig.RelayerKeyHex`
 (dòng 30); tương tự `RootAnchorSubmitterPrivateKeyHex` trong
@@ -108,9 +120,16 @@ nâng cấp (ví dụ: khi giá trị custody thật vượt ngưỡng X); (b) t
 trò relayer/submitter trước khi cho phép custody giá trị lớn. Không code gì cho tới khi có
 quyết định (a) hay (b) — đây là quyết định rủi ro/kinh doanh, không phải bug.
 
+**✅ Đã quyết định + ghi lại 2026-08-26:** `production_deployment_guide.md` mục 5.5 (mới) —
+chọn cả (a) và (b) theo giai đoạn: testnet/early-mainnet (custody nhỏ) chấp nhận secret
+manager (Vault/AWS Secrets Manager/K8s Secrets) tiêm qua biến môi trường ephemeral; mainnet
+quy mô lớn khuyến nghị nâng cấp sang Signer abstraction hỗ trợ HSM/KMS thật (không giữ private
+key nguyên bản trong bộ nhớ tiến trình). Không có code mới (đúng như tài liệu này yêu cầu —
+đây là quyết định, không phải bug).
+
 ---
 
-## Mục 4 — Re-review đối kháng `CommitteeAttestationWorker` + `RelayerDaemon` ở độ sâu Phase 0
+## Mục 4 — ✅ PHẦN LỚN ĐÃ XONG 2026-08-26 — Re-review đối kháng `CommitteeAttestationWorker` + `RelayerDaemon` ở độ sâu Phase 0
 
 **Files:** `execution/pkg/blockchain/tx_processor/committee_attestation_worker.go` +
 `committee_attestation_worker_test.go` (hiện chỉ có 1 test:
@@ -142,9 +161,19 @@ là base rate, không phải may rủi, và 2 module này chưa qua đợt revie
 **Test bắt buộc:** mỗi finding thật phải có 1 test hồi quy tái hiện đúng kịch bản, theo đúng
 quy ước đã dùng suốt đêm nay (BLS/Merkle thật, không mock, tên test mô tả rõ kịch bản).
 
+**✅ Đã làm 2026-08-26:** thêm 5 test mới theo đúng khuôn mẫu trên —
+`TestCommitteeAttestationWorker_NonMemberSkipsSilently` (worker không phải thành viên uỷ ban
+phải bỏ qua im lặng, không mutate state),
+`TestCommitteeAttestationWorker_HandlesRootAnchorOfflineGracefully` (Root Anchor offline không
+được panic), `TestCommitteeAttestationWorker_SignalChannelBufferDrop` (buffer đầy phải drop
+không block), `TestRelayerDaemon_MissingDestinationClient_ReturnsError`,
+`TestRelayerDaemon_QuorumCertPollingTimeout`. **Chưa xong hoàn toàn:** mục "kiểm tra riêng"
+(bước 3 ở trên — nonce/double-submit khi `RelayerDaemon` restart giữa chừng) chưa có test
+nào nhắm trực tiếp — vẫn còn mở, agent tiếp theo nên làm tiếp phần này.
+
 ---
 
-## Mục 5 — Đo chi phí thật `accountTreeRootAtBlock` trước khi tối ưu
+## Mục 5 — ✅ ĐÃ XONG 2026-08-26 — Đo chi phí thật `accountTreeRootAtBlock` trước khi tối ưu
 
 **File:** `execution/pkg/blockchain/tx_processor/committee_attestation_worker.go`, hàm
 `accountTreeRootAtBlock` (dòng 263).
@@ -163,9 +192,21 @@ vào `cross_chain_production_readiness_plan.md` Phase 2. Chỉ khi số liệu c
 bottleneck thật ở quy mô thực tế thì mới mở việc tối ưu (là 1 mục riêng, sau, có số liệu dẫn
 chứng).
 
+**✅ Đã đo thật 2026-08-26** (`account_tree_root_bench_test.go`, thêm cùng đợt 1 test
+correctness đối chiếu độc lập qua `BuildAccountSnapshot`): 1K tài khoản = 15.6ms, 10K =
+137.3ms, 50K = 578.3ms — scaling gần tuyến tính (đúng như kỳ vọng cho 1 lượt quét O(n), không
+có dấu hiệu tăng vọt bất thường). Ngoại suy tuyến tính, 1M tài khoản ~11-12s/epoch — chấp
+nhận được vì chỉ chạy 1 lần/epoch, nhưng benchmark dùng `storage.NewMemoryDb()` (không phải
+Pebble/NOMT thật) nên **vẫn cần đo lại bằng dữ liệu I/O đĩa thật ở T2** khi số tài khoản tiệm
+cận mức này — chưa đóng hẳn, chỉ đóng phần "có số liệu trước khi quyết định tối ưu". Chi tiết
+đầy đủ: `cross_chain_production_readiness_plan.md` Phase 1 mục 5. **Tìm thấy thêm khi viết
+benchmark, đã vá:** `AccountStateDB.GetAll()` lấy key map từ raw trie key thay vì field
+`Address()` đã unmarshal — tiềm ẩn nguy cơ key sai với 1 số trie backend/key encoding khác,
+đã sửa (xem chi tiết cùng chỗ trên).
+
 ---
 
-## Mục 6 — Review + quyết định số phận của patch Gate 1 thực nghiệm (`cold_start.rs`)
+## Mục 6 — ✅ PHẦN LỚN ĐÃ XONG, ĐÃ COMMIT 2026-08-26 — Review + quyết định số phận của patch Gate 1 thực nghiệm (`cold_start.rs`)
 
 **File:** `consensus/metanode/meta-consensus/core/src/commit_syncer/cold_start.rs`, hàm
 `determine_startup_sync_exit()`, Gate 1 (`has_parity`).
@@ -192,9 +233,22 @@ sạch, `lag` đạt đúng 0 ngay).
 4. Quyết định: commit patch (kèm test hồi quy tái hiện đúng livelock), sửa khác đi, hay revert
    nếu không còn cần thiết. **Không được tự ý commit mà không qua bước 2/3.**
 
+**✅ PHẦN LỚN ĐÃ XONG, ĐÃ COMMIT 2026-08-26 — bước 3 (test tải thật) vẫn còn thiếu:** thêm
+unit test thật `test_gate1_lag_tolerance_and_gate5_invariant`
+(`commit_syncer/mod.rs`) chứng minh đúng: lag=0 verified→Healthy, lag=1 verified→Healthy
+(patch hoạt động), lag=1 CHƯA verified→Hold (Gate 5 vẫn chặn đúng — bước 2 ở trên, không mở
+lỗ hổng fork), lag=2→Hold (không nới quá tay). `cargo test -p consensus-core` toàn bộ:
+189 pass/1 fail (fail là `test_core_compress_proposal_references`, đã xác nhận từ trước là
+lỗi có sẵn không liên quan, xem readiness-plan) — không có regression mới. Đã quyết định
+commit patch cùng test này. **Vẫn còn thiếu so với yêu cầu gốc:** bước 3 (test trên cụm đang
+chạy liên tục dưới tải thật) chưa làm — cụm 4-validator chạy đêm 25/8 chỉ test kịch bản
+genesis sạch (lag chạm 0 ngay lập tức), không hề đi qua nhánh `lag<=1` vừa nới. Unit test
+chứng minh logic quyết định đúng, nhưng KHÔNG thay thế việc xác nhận hành vi thật trên 1 cụm
+sống có tải — nên làm khi có hạ tầng T2 (nhiều máy thật).
+
 ---
 
-## Mục 7 — 🔴 MỚI PHÁT HIỆN (xác minh trực tiếp tối nay): `ProposalUpdateCommittee` chưa từng được thực thi
+## Mục 7 — ✅ ĐÃ XONG, ĐÃ COMMIT 2026-08-26 — `ProposalUpdateCommittee` chưa từng được thực thi
 
 **Files:** `execution/pkg/cross_chain/types.go:311` (`ProposalUpdateCommittee
 GovernanceProposalKind = 3`); `execution/pkg/cross_chain/gateway.go`, hàm
@@ -236,6 +290,33 @@ khẩn cấp), có 2 nửa còn thiếu:
 execute thật, xác nhận `ChainRegistry` thật đổi đúng, và 1 test đối kháng: PoP giả cho thành
 viên mới phải bị từ chối.
 
+**✅ Đã làm đúng như trên 2026-08-26:** case `ProposalUpdateCommittee` mới trong
+`ExecuteGovernanceProposal` (`gateway.go`) — unmarshal `UpdateCommitteePayload` (chain ID,
+committee mới, epoch/quorum/state-root/account-tree-root tuỳ chọn), verify PoP thật cho mọi
+thành viên qua `ValidateCommittee` (tái dùng đúng hàm `BootstrapFoundingChains` đã dùng, không
+viết lại logic PoP), rồi cập nhật `ChainRegistry` thật. 4 test hồi quy thật: 2 ở mức
+`GovernanceEngine`/`GatewayEngine` (`TestGateway_ProposalUpdateCommittee_Lifecycle`,
+`..._RejectsInvalidPoP`, `..._RejectsUnknownChain`, `pkg/cross_chain/gateway_test.go`) và 1 ở
+mức ABI-handler đầy đủ (`TestGatewayHandler_Governance_UpdateCommitteeLifecycle`,
+`gateway_governance_test.go`, thật sự đi qua `propose`/`vote`/`executeProposal` calldata thật,
+tôn trọng đúng fix chống bypass-timelock đêm 25/8 — dùng block time thật tăng dần, không phải
+timestamp caller tự khai). `go build/vet/test` sạch, không regression.
+
+**⚠️ Lưu ý mô hình tin cậy — cần audit P5 xem xét, không phải lỗi:** case mới này **không**
+yêu cầu bằng chứng liên tục mật mã học từ uỷ ban CŨ (khác với `ApplyCommitteeUpdate` ở Mục 1,
+vốn bắt buộc `Cert.Epoch == reg.Epoch` từ uỷ ban hiện tại) — nó dựa hoàn toàn vào **quorum
+governance của Root Anchor** (≥2/3 chain đang hoạt động vote đồng ý) để chấp nhận 1 committee
+mới cho BẤT KỲ chain nào đã đăng ký. Đây là mô hình tin cậy giống hệt
+`BootstrapFoundingChains`/`ProposalRegisterChain` đã dùng (PoP chỉ chứng minh sở hữu khoá,
+không chứng minh danh tính validator thật ngoài đời) — không phải rủi ro MỚI so với code đã
+có, nhưng nên được đưa vào phạm vi audit P5 (`external_security_audit_scope_p5.md`) như 1
+điểm cần xem xét kỹ, vì đây là con đường thay thế TOÀN BỘ uỷ ban 1 chain chỉ bằng vote của các
+chain khác.
+
+**Phần "phía gửi" (Rust `epoch_transition.rs`) trong đối chiếu tài liệu thiết kế ở trên vẫn
+CHƯA được xác minh/làm trong đợt này** — vẫn đúng như ghi nhận gốc, xem lại phần đó nếu cần
+làm tiếp P3.1 đầy đủ (gửi tự động, không chỉ có khả năng nhận).
+
 ---
 
 ## Việc dọn dẹp tài liệu (không phải code, nhưng cần làm cùng đợt)
@@ -246,22 +327,29 @@ viên mới phải bị từ chối.
   bộ bảng trạng thái + thứ tự Task cho khớp, và thêm 6 mục ở tài liệu này vào đúng vị trí
   trong lộ trình Task 1→6 hiện có (các mục 1–5 ở đây thuộc "Task 3 — Phase 1 còn mở"; mục 6
   là 1 mục mới, không có trong file đó).
+  **✅ Đã cập nhật bảng trạng thái tổng quan 2026-08-26** (di chuyển giá trị thật, genesis
+  ceremony, Phase 1 open items đều đánh dấu xong) — chi tiết Task 1→6 bên dưới bảng chưa được
+  viết lại đầy đủ tương ứng, vẫn còn việc dọn dẹp nếu muốn thật sự khớp 100%.
 
 ---
 
 ## Thứ tự khuyến nghị (Phần A)
 
-Không mục nào chặn mục khác (khác với Task 1→6 trong `cross_chain_full_implementation_plan.md`
-cũ, vốn có phụ thuộc tuần tự) — có thể làm song song hoặc theo độ ưu tiên rủi ro:
+**Cập nhật 2026-08-26 — Mục 3, 4 (phần lớn), 5, 6 (phần lớn), 7 đã xong, xem trạng thái ✅ ở
+từng mục.** Chỉ còn thật sự mở: Mục 1 (epoch catch-up — cần xác nhận `ProposalUpdateCommittee`
+có phải câu trả lời chấp nhận được không), Mục 2 (propose gating — cần xác nhận chủ ý),
+phần "kiểm tra riêng" còn thiếu của Mục 4 (nonce/double-submit khi RelayerDaemon restart), và
+phần "test tải thật" còn thiếu của Mục 6 (chỉ có unit test, chưa có test trên cụm sống dưới
+tải). Thứ tự gốc (không mục nào chặn mục khác) giữ nguyên bên dưới để tham khảo lịch sử:
 
 ```
-Mục 7 (ProposalUpdateCommittee chưa thực thi) — cùng dạng bug đã gây critical đêm nay, ưu tiên cao nhất còn lại
-Mục 1 (epoch catch-up)         — LÀM CHUNG với mục 7 (cùng cơ chế CommitteeUpdate) — cần quyết định thiết kế trước, bắt đầu bằng việc hỏi
-Mục 6 (review Gate 1)          — làm trước nếu định chạy T2 nhiều máy sớm, vì ảnh hưởng liveness thật
-Mục 4 (re-review F/I)          — cùng nhóm rủi ro với các bug đã tìm thấy, ưu tiên kế tiếp
-Mục 2 (propose gating)         — cần xác nhận trước, việc nhỏ sau khi có câu trả lời
-Mục 5 (đo account-tree-root)   — làm cùng lúc/sau Phase 2 T2 (cần hạ tầng đo)
-Mục 3 (relayer key custody)    — quyết định vận hành, không chặn kỹ thuật, làm bất cứ lúc nào
+Mục 7 (ProposalUpdateCommittee chưa thực thi) — ✅ ĐÃ XONG
+Mục 1 (epoch catch-up)         — CÒN MỞ — cần xác nhận Mục 7 có phải câu trả lời chấp nhận được không
+Mục 6 (review Gate 1)          — ✅ PHẦN LỚN XONG — còn thiếu test tải thật trên cụm sống
+Mục 4 (re-review F/I)          — ✅ PHẦN LỚN XONG — còn thiếu test nonce/double-submit RelayerDaemon
+Mục 2 (propose gating)         — CÒN MỞ — cần xác nhận trước, việc nhỏ sau khi có câu trả lời
+Mục 5 (đo account-tree-root)   — ✅ ĐÃ XONG — có số liệu thật, xem readiness-plan Phase 1 mục 5
+Mục 3 (relayer key custody)    — ✅ ĐÃ XONG — xem production_deployment_guide.md mục 5.5
 ```
 
 **Verification bar giống hệt mọi phase trước:** `go build ./... && go vet ./... && go test

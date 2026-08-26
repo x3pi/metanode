@@ -60,17 +60,15 @@ type AccountStateDB struct {
 	// ReloadTrie, Discard, CopyFrom) — exclusive access, blocks readers briefly.
 	muTrie sync.RWMutex
 
-	lockedFlag   atomic.Bool      // CHANGED: Use atomic.Bool
-	trieWarmed   atomic.Bool      // Tracks whether LevelDB cache is warm (skip PreWarm after first block)
-	isFlatTrie   bool             // TPS OPT: Cached flag — true if trie is *FlatStateTrie (thread-safe Get, skip muTrie lock)
+	lockedFlag   atomic.Bool        // CHANGED: Use atomic.Bool
+	trieWarmed   atomic.Bool        // Tracks whether LevelDB cache is warm (skip PreWarm after first block)
+	isFlatTrie   bool               // TPS OPT: Cached flag — true if trie is *FlatStateTrie (thread-safe Get, skip muTrie lock)
 	accountLocks [65536]*sync.Mutex // Sharded locks for concurrent account mutations
 
 	// and updating the live trie reference) happens atomically.
 	muCommit sync.Mutex
 
 	accountBatch []byte // Batch of account data prepared for network transfer during commit (used by master nodes)
-
-
 
 	// FORK-SAFETY: persistReady is closed by PersistAsync after trie swap completes.
 	// IntermediateRoot(true) waits on this channel before acquiring muTrie.Lock,
@@ -110,8 +108,6 @@ func NewAccountStateDB(
 		// Storage is essential.
 		return nil // Or return an error
 	}
-
-
 
 	// Initialize persistReady as an already-closed channel.
 	// This means the first block won't wait (no prior PersistAsync to complete).
@@ -409,16 +405,16 @@ func (db *AccountStateDB) GetAll() (map[common.Address]types.AccountState, error
 	}
 
 	for addressStr, accountStateBytes := range allData {
-		// Need to convert key (likely []byte or string) back to common.Address
-		address := common.HexToAddress(addressStr) // Chuyển đổi string sang common.Address
-
 		// Unmarshal the value into an AccountState implementation
 		accountState := &state.AccountState{} // Use the concrete type
 		err := accountState.Unmarshal(accountStateBytes)
 		if err != nil {
-			// Consider logging the error and skipping the account?
-			logger.Warn("Failed to unmarshal account state during GetAll", "address", address.Hex(), "error", err)
+			logger.Warn("Failed to unmarshal account state during GetAll", "key", addressStr, "error", err)
 			continue // Skip corrupted data
+		}
+		address := accountState.Address()
+		if address == (common.Address{}) {
+			address = common.HexToAddress(addressStr)
 		}
 		allAccounts[address] = accountState
 	}
@@ -468,7 +464,6 @@ func (db *AccountStateDB) Discard() (err error) {
 	db.loadedAccounts.Clear()
 	db.cacheEpoch.Add(2) // FORK-SAFETY FIX: Add(2) to invalidate concurrent reads while preserving SeqLock evenness
 
-
 	// Reload trie from the original hash
 	originHash := db.originRootHash
 
@@ -487,7 +482,7 @@ func (db *AccountStateDB) Discard() (err error) {
 	}
 
 	db.muTrie.Lock()
-	
+
 	// Preserve ChangelogDB
 	var changelogDB *state_changelog.StateChangelogDB
 	if db.trie != nil {
@@ -700,8 +695,6 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	}
 	return finalAs, nil
 }
-
-
 
 // PreloadAccounts batch-loads multiple account states into the dirty cache.
 // PERFORMANCE OPTIMIZATION: Instead of calling AccountState() N times (each acquiring/releasing
@@ -1155,4 +1148,3 @@ func (db *AccountStateDB) ClearCaches() {
 	db.dirtyAccounts.Clear()
 	db.loadedAccounts.Clear()
 }
-

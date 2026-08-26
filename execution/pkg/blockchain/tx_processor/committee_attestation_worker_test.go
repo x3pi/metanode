@@ -23,6 +23,8 @@ import (
 	stake_state_db "github.com/meta-node-blockchain/meta-node/pkg/state_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestCommitteeAttestationWorker_SingleValidatorFullLifecycle is the Milestone C capstone test:
@@ -256,4 +258,91 @@ func writeJSONRPCResult(w http.ResponseWriter, id json.RawMessage, result interf
 		"id":      id,
 		"result":  result,
 	})
+}
+
+func TestCommitteeAttestationWorker_NonMemberSkipsSilently(t *testing.T) {
+	rootAnchorCS, _, _, _ := newPersistentTestChainState(t)
+	const localChainID = 777
+	const oldEpoch = 10
+
+	// Root Anchor committee has kpMember
+	kpMember := bls.GenerateKeyPair()
+	popSig := cross_chain.PopSign(kpMember.PrivateKey(), kpMember.PublicKey())
+	oldEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpMember.PublicKey().Bytes(), Stake: 1000, PopSignature: popSig.Bytes()}
+
+	raEngine, err := loadGatewayEngine(rootAnchorCS)
+	require.NoError(t, err)
+	raEngine.ChainRegistry[localChainID] = cross_chain.ChainRegistry{
+		ChainID:         localChainID,
+		Committee:       []cross_chain.ValidatorEntry{oldEntry},
+		Epoch:           oldEpoch,
+		QuorumThreshold: 6667,
+	}
+	require.NoError(t, saveGatewayEngine(rootAnchorCS, raEngine))
+
+	srv := newRootAnchorTestServer(t, rootAnchorCS, big.NewInt(9099))
+	defer srv.Close()
+
+	client, err := rootanchor.NewClient([]string{srv.URL}, nil)
+	require.NoError(t, err)
+
+	// Worker uses kpNonMember (not in committee)
+	kpNonMember := bls.GenerateKeyPair()
+	privateChainCS, _, _, _ := newPersistentTestChainState(t)
+	valAddr := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	require.NoError(t, privateChainCS.GetAccountStateDB().SetPublicKeyBls(valAddr, kpNonMember.PublicKey().Bytes()))
+
+	submitterKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+
+	worker := NewCommitteeAttestationWorker(
+		privateChainCS, client, localChainID, valAddr,
+		hex.EncodeToString(kpNonMember.BytesPrivateKey()),
+		hex.EncodeToString(crypto.FromECDSA(submitterKey)),
+	)
+
+	// handleEpochTransition should skip silently without error or state mutation
+	worker.handleEpochTransition(context.Background(), epochSignal{newEpoch: oldEpoch + 1, boundaryBlock: 0})
+
+	raEngineAfter, err := loadGatewayEngine(rootAnchorCS)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(oldEpoch), raEngineAfter.ChainRegistry[localChainID].Epoch, "Epoch must not change if non-member triggers worker")
+}
+
+func TestCommitteeAttestationWorker_HandlesRootAnchorOfflineGracefully(t *testing.T) {
+	privateChainCS, _, _, _ := newPersistentTestChainState(t)
+	valAddr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	kp := bls.GenerateKeyPair()
+	require.NoError(t, privateChainCS.GetAccountStateDB().SetPublicKeyBls(valAddr, kp.PublicKey().Bytes()))
+
+	// Client pointing to dead port / offline server
+	client, err := rootanchor.NewClient([]string{"http://127.0.0.1:59999"}, nil)
+	require.NoError(t, err)
+
+	submitterKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+
+	worker := NewCommitteeAttestationWorker(
+		privateChainCS, client, 777, valAddr,
+		hex.EncodeToString(kp.BytesPrivateKey()),
+		hex.EncodeToString(crypto.FromECDSA(submitterKey)),
+	)
+
+	// Must handle offline RPC gracefully without panic
+	require.NotPanics(t, func() {
+		worker.handleEpochTransition(context.Background(), epochSignal{newEpoch: 11, boundaryBlock: 0})
+	})
+}
+
+func TestCommitteeAttestationWorker_SignalChannelBufferDrop(t *testing.T) {
+	worker := NewCommitteeAttestationWorker(nil, nil, 777, common.Address{}, "", "")
+	// Buffer size is 8
+	for i := uint64(1); i <= 8; i++ {
+		worker.OnEpochAdvanced(i, i*10)
+	}
+	assert.Equal(t, 8, len(worker.signalChan))
+
+	// 9th call should drop without blocking
+	worker.OnEpochAdvanced(9, 90)
+	assert.Equal(t, 8, len(worker.signalChan))
 }

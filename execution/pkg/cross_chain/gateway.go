@@ -325,6 +325,39 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		if err := g.SupplyLedger.GrantAllocation(grant.ChainID, grant.Amount); err != nil {
 			return nil, fmt.Errorf("ProposalAllocateSupply: %w", err)
 		}
+
+	case ProposalUpdateCommittee:
+		var update UpdateCommitteePayload
+		if err := json.Unmarshal(proposal.Payload, &update); err != nil {
+			return nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
+		}
+		if update.ChainID == 0 && update.SourceChainID != 0 {
+			update.ChainID = update.SourceChainID
+		}
+		if update.ChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		reg, exists := g.ChainRegistry[update.ChainID]
+		if !exists {
+			return nil, fmt.Errorf("%w: chain %d", ErrUnknownChain, update.ChainID)
+		}
+		if err := ValidateCommittee(update.NewCommittee); err != nil {
+			return nil, fmt.Errorf("ProposalUpdateCommittee: %w", err)
+		}
+		reg.Committee = update.NewCommittee
+		if update.NewEpoch > 0 {
+			reg.Epoch = update.NewEpoch
+		}
+		if update.QuorumThreshold > 0 {
+			reg.QuorumThreshold = update.QuorumThreshold
+		}
+		if update.StateRoot != (common.Hash{}) {
+			reg.StateRoot = update.StateRoot
+		}
+		if update.AccountTreeRoot != (common.Hash{}) {
+			reg.AccountTreeRoot = update.AccountTreeRoot
+		}
+		g.ChainRegistry[update.ChainID] = reg
 	}
 
 	return proposal, nil

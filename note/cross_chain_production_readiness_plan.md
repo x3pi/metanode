@@ -832,13 +832,31 @@ items 1 and 3 in particular are in the same risk family as the bugs already foun
    spam/storage-growth mitigation before mainnet — this is a griefing/cost concern, not a
    fund-safety one, so it's fine to explicitly defer with a written rationale rather than
    fix, but make the decision on purpose.
-5. **Account-tree-root scalability.** Phase 0's `CommitteeAttestationWorker.accountTreeRootAtBlock`
-   walks a chain's *entire* committed account set via `AccountStateDB.GetAll()` on every
-   epoch transition. This is correct and necessary for the security property, but nobody
-   has measured its cost on a chain with a large number of accounts. Get a real number for
-   this during Phase 2's T2 measurements (see the table below) — if it's a bottleneck at
-   realistic account counts, that's a Phase-2-driven follow-up item, not something to
-   pre-optimize now without data.
+5. **Account-tree-root scalability — measured 2026-08-26, no optimization needed yet.**
+   Phase 0's `CommitteeAttestationWorker.accountTreeRootAtBlock` walks a chain's *entire*
+   committed account set via `AccountStateDB.GetAll()` on every epoch transition. Real
+   benchmark added (`account_tree_root_bench_test.go`, real `AccountStateDB`/MPT backend, no
+   mock), run on this machine (Xeon Platinum 8272CL):
+
+   | Accounts | Time/call | Alloc/call |
+   | :--- | :--- | :--- |
+   | 1,000 | 15.6ms | 5.0MB / 49,991 allocs |
+   | 10,000 | 137.3ms | 53.2MB / 532,822 allocs |
+   | 50,000 | 578.3ms | 254.2MB / 2,539,365 allocs |
+
+   Scaling is roughly linear (consistent with a full O(n) scan, no pathological blowup).
+   Extrapolating linearly, ~1M accounts would be on the order of ~11-12s per epoch
+   transition — this runs once per epoch (not per block), so likely acceptable at that scale,
+   but worth a real T2 measurement on real multi-machine hardware once account counts there
+   approach this range, since real disk I/O (this benchmark uses `storage.NewMemoryDb()`, not
+   real Pebble/NOMT) could change the picture. **Also found alongside this benchmark, fixed:**
+   `AccountStateDB.GetAll()` derived each account's map key via
+   `common.HexToAddress(rawTrieKey)` instead of the unmarshaled `AccountState.Address()` field
+   — harmless when the raw trie key happens to already be a clean hex address, but a latent
+   correctness risk for any trie backend/key encoding where it isn't (would have silently
+   keyed accounts wrong in `GetAll()`'s result map, corrupting `accountTreeRootAtBlock`'s real
+   BLS-attested output). Fixed to read `AccountState.Address()` first, falling back to the old
+   behavior only if that field is zero (backward compatible with any pre-existing data).
 
 ---
 

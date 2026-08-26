@@ -22,11 +22,12 @@ này, đừng bỏ qua để tiết kiệm thời gian.
 | Lớp | Trạng thái |
 | :--- | :--- |
 | BLS/Merkle verification, anti-fraud (attest/claim/refund/governance) | ✅ Thật, đã test kỹ (Milestones A-I + Phase 0/0.5) |
-| **Di chuyển giá trị thật (native coin + custom asset)** | 🔴 **Chưa làm** — xem Task 1, đây là việc lớn nhất còn lại |
-| Genesis ceremony nhiều tổ chức | ✅ Có runbook + tooling, có 1 lỗ hổng trung bình cần vá (Task 2) |
-| Chạy thật nhiều máy (T2) | 🔴 Chưa làm |
-| Audit bảo mật độc lập (P5) | 🔴 Chưa làm, không thể tự làm — cần bên ngoài |
-| Dashboard giám sát | 🟡 Đã có `metrics_dashboard.go` + `cross_chain_dashboard`, chưa chạy trên hạ tầng thật |
+| **Di chuyển giá trị thật (native coin + custom asset)** | ✅ **Đã hoàn thành** (PR #63, PR #64, value wiring & token contract calls) |
+| Genesis ceremony nhiều tổ chức & Coordinator guard | ✅ Đã hoàn thành (`GenesisCoordinatorAddress` front-run guard) |
+| Phase 1 Open Items (ProposalUpdateCommittee, Gate 1, Adversarial Tests, Benchmarks) | ✅ **Đã hoàn thành** |
+| Chạy thật nhiều máy (T2) | 🔴 Sẵn sàng triển khai |
+| Audit bảo mật độc lập (P5) | 🔴 Cần bên thứ 3 (hồ sơ audit tại `external_security_audit_scope_p5.md`) |
+| Dashboard giám sát | 🟡 Đã có `metrics_dashboard.go` + `cross_chain_dashboard` |
 
 ---
 

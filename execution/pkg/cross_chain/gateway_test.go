@@ -516,3 +516,115 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	require.NoError(t, err4)
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }
+
+func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	popSig2 := PopSign(kp2.PrivateKey(), kp2.PublicKey())
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: popSig2.Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 6700,
+		StateRoot:       common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+		AccountTreeRoot: common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Timelock guard check
+	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+
+	// Execute after timelock
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	// Verify updated ChainRegistry state
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(2), reg.Epoch)
+	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
+	assert.Equal(t, payloadObj.StateRoot, reg.StateRoot)
+	assert.Equal(t, payloadObj.AccountTreeRoot, reg.AccountTreeRoot)
+	assert.Equal(t, 2, len(reg.Committee))
+	assert.Equal(t, kp1.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
+	assert.Equal(t, kp2.BytesPublicKey(), reg.Committee[1].PubkeyBLS)
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	badPopSig := make([]byte, 96) // Zeroed / invalid PoP signature
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: badPopSig},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to invalid PoP
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ProposalUpdateCommittee")
+
+	// Ensure registry was NOT modified
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(5), reg.Epoch)
+	assert.Equal(t, 1, len(reg.Committee))
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsUnknownChain(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      999, // Unknown chain
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to unknown chain
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrUnknownChain)
+}
