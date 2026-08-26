@@ -331,10 +331,15 @@ func isContractCall(chainState *blockchain.ChainState, target common.Address) bo
 	return scState.CodeHash() != (common.Hash{})
 }
 
+// executeContractCallForGateway returns the real gas consumed by the call (mvmResult.GasUsed)
+// alongside the error, so callers that locked a cross-chain gas budget up front (mục 2.6.5,
+// see the CONTRACT_CALL call sites in claimMessage/verifyAndExecute) can settle/refund the
+// unused portion. Most callers (custom-asset transfer/mint, which use fixed internally-built
+// callData with no attacker-controlled gas-cost risk) simply ignore it.
 func executeContractCallForGateway(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64, sender common.Address, target common.Address, payload []byte, amount *big.Int, gasLimit uint64,
-) error {
+) (uint64, error) {
 	_, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
 
 	lastBlockHeader := *chainState.GetcurrentBlockHeader()
@@ -364,10 +369,47 @@ func executeContractCallForGateway(
 	)
 
 	if mvmResult.Status != pb.RECEIPT_STATUS_RETURNED {
-		return fmt.Errorf("contract execution failed with status %v: %s", mvmResult.Status, mvmResult.Exception.String())
+		return mvmResult.GasUsed, fmt.Errorf("contract execution failed with status %v: %s", mvmResult.Status, mvmResult.Exception.String())
 	}
 
-	return applyFullMvmResultToStateDB(chainState, mvmResult)
+	return mvmResult.GasUsed, applyFullMvmResultToStateDB(chainState, mvmResult)
+}
+
+// settleGasCappedContractCall executes a CONTRACT_CALL payload (mục 2.6.5) with execution gas
+// capped by the message's locked GasFee, converted at mt_common.MINIMUM_BASE_FEE -- the same
+// fixed base fee mvmE.Execute itself charges network-wide, so no cross-chain gas-price oracle is
+// needed. Fails closed with a clear error if GasFee is missing/zero (no free gas for an
+// attacker-controlled arbitrary payload -- mục 5.3 risk #9), rather than falling back to an
+// unbounded tx.MaxGas() the way this call site used to. Any unused portion of GasFee (locked
+// minus real gas actually consumed) is minted back to msg.Sender on THIS chain in the same
+// settlement step -- a deliberate simplification of the doc's literal "hoàn qua message hoàn
+// tiền, dùng chung cơ chế mục 2.4" wording, which would require a brand-new B->A reverse-
+// attestation message type. This keeps the supply invariant identical (nothing is minted beyond
+// what msg.Sender already had burned from them at outbound() time) at the cost of the leftover
+// landing on the destination chain rather than travelling back to the source chain -- a UX/
+// economics simplification, not a security one. Only used for the pure/native-message payload
+// branch (Task 1.3); the custom-asset transfer()/mint() calls use fixed, non-attacker-controlled
+// callData and are intentionally NOT gas-capped here.
+func settleGasCappedContractCall(
+	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
+	blockTime uint64, msgSender common.Address, target common.Address, payload []byte, gasFee *big.Int,
+) error {
+	if gasFee == nil || gasFee.Sign() <= 0 {
+		return fmt.Errorf("CONTRACT_CALL requires a locked gasFee (mục 2.6.5): got %v", gasFee)
+	}
+	gasCap := new(big.Int).Div(gasFee, big.NewInt(mt_common.MINIMUM_BASE_FEE)).Uint64()
+	gasUsed, err := executeContractCallForGateway(ctx, chainState, tx, blockTime, msgSender, target, payload, big.NewInt(0), gasCap)
+	if err != nil {
+		return err
+	}
+	spent := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), big.NewInt(mt_common.MINIMUM_BASE_FEE))
+	unused := new(big.Int).Sub(gasFee, spent)
+	if unused.Sign() > 0 {
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, unused, tx.FromAddress(), msgSender); err != nil {
+			return fmt.Errorf("refund unused gasFee: %w", err)
+		}
+	}
+	return nil
 }
 
 func (h *GatewayHandler) HandleTransaction(
@@ -474,8 +516,9 @@ func (h *GatewayHandler) handleWrite(
 			AssetID:     mustBigInt(args[3]),
 			Value:       mustBigInt(args[4]),
 			Tip:         mustBigInt(args[5]),
-			HopCount:    mustUint8(args[6]),
-			Ordered:     mustBool(args[7]),
+			GasFee:      mustBigInt(args[6]),
+			HopCount:    mustUint8(args[7]),
+			Ordered:     mustBool(args[8]),
 		}
 
 		msg, err := engine.Outbound(tx.FromAddress(), params, tx.Hash())
@@ -490,15 +533,22 @@ func (h *GatewayHandler) handleWrite(
 		// permanently even though the whole TX reports as reverted. See
 		// note/cross_chain_task1_native_value_fix_plan.md for the exploit shape this avoids.
 		if params.AssetID == nil || params.AssetID.Sign() == 0 {
-			// Task 1.1: native path — burn Value + Tip together in ONE call so a failure
-			// (e.g. balance covers Tip but not Tip+Value) can never leave Tip stuck-burned
-			// with Value never taken.
+			// Task 1.1/1.3: native path — burn Value + Tip + GasFee together in ONE call so a
+			// failure partway through (e.g. balance covers Tip+GasFee but not the full total)
+			// can never leave part of it stuck-burned with the rest never taken. GasFee (mục
+			// 2.6.5) is the cross-chain gas budget for a CONTRACT_CALL payload, settled at
+			// claim time (see executeContractCallForGateway call sites in claimMessage/
+			// verifyAndExecute) — always native regardless of AssetID, since it pays for
+			// destination-chain EVM execution, not the bridged value itself.
 			totalDeduct := big.NewInt(0)
 			if params.Value != nil && params.Value.Sign() > 0 {
 				totalDeduct.Add(totalDeduct, params.Value)
 			}
 			if params.Tip != nil && params.Tip.Sign() > 0 {
 				totalDeduct.Add(totalDeduct, params.Tip)
+			}
+			if params.GasFee != nil && params.GasFee.Sign() > 0 {
+				totalDeduct.Add(totalDeduct, params.GasFee)
 			}
 			if totalDeduct.Sign() > 0 {
 				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, totalDeduct, tx.FromAddress(), tx.ToAddress()); err != nil {
@@ -540,15 +590,25 @@ func (h *GatewayHandler) handleWrite(
 				// custom-asset outbound path was unconditionally broken against any real
 				// standards-compliant ERC-20, confirmed by a real deployed-contract test
 				// reverting with ERR_EXECUTION_REVERTED before this fix.
-				if err := executeContractCallForGateway(
+				if _, err := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("outbound custom asset transferFrom failed: %w", err)
 				}
 			}
+			// Tip and GasFee are both always native (mục 2.6.5) regardless of AssetID — burn
+			// them together for the same "no stuck-burn on partial failure" reason as the
+			// native path above.
+			nativeExtras := big.NewInt(0)
 			if params.Tip != nil && params.Tip.Sign() > 0 {
-				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, params.Tip, tx.FromAddress(), tx.ToAddress()); err != nil {
-					return nil, nil, fmt.Errorf("outbound native tip burn failed: %w", err)
+				nativeExtras.Add(nativeExtras, params.Tip)
+			}
+			if params.GasFee != nil && params.GasFee.Sign() > 0 {
+				nativeExtras.Add(nativeExtras, params.GasFee)
+			}
+			if nativeExtras.Sign() > 0 {
+				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, nativeExtras, tx.FromAddress(), tx.ToAddress()); err != nil {
+					return nil, nil, fmt.Errorf("outbound native tip/gasFee burn failed: %w", err)
 				}
 			}
 		}
@@ -590,13 +650,14 @@ func (h *GatewayHandler) handleWrite(
 			Value:         mustBigInt(args[8]),
 			Payload:       mustBytes(args[9]),
 			Tip:           mustBigInt(args[10]),
-			Ordered:       mustBool(args[11]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[12]).Uint64(),
-			Siblings:  mustHashSlice(args[13]),
+			LeafIndex: mustBigInt(args[13]).Uint64(),
+			Siblings:  mustHashSlice(args[14]),
 		}
-		commitRoot := mustHash(args[14])
+		commitRoot := mustHash(args[15])
 		status, err := engine.ClaimMessage(msg, proof, commitRoot, tx.FromAddress())
 		if err != nil {
 			return nil, nil, err
@@ -605,10 +666,17 @@ func (h *GatewayHandler) handleWrite(
 		// Task 1.3: Contract Call (only for Native or Pure messages)
 		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
-			if err := executeContractCallForGateway(
-				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, big.NewInt(0), tx.MaxGas(),
+			if err := settleGasCappedContractCall(
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
 			); err != nil {
 				return nil, nil, fmt.Errorf("claimMessage payload execution failed: %v", err)
+			}
+		} else if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
+			// No real CONTRACT_CALL happened (no code at Target, empty Payload, or this is a
+			// custom-asset message) -- nothing to spend the locked gas budget on, refund it in
+			// full rather than stranding it.
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
+				return nil, nil, fmt.Errorf("claimMessage gasFee refund failed: %v", err)
 			}
 		}
 
@@ -658,7 +726,7 @@ func (h *GatewayHandler) handleWrite(
 				// vault-unlock branch would try to move the RELAYER's own token balance
 				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
 				// and any real access-controlled mint() would reject a non-Gateway caller.
-				if err := executeContractCallForGateway(
+				if _, err := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("claim custom asset execution failed: %w", err)
@@ -689,20 +757,30 @@ func (h *GatewayHandler) handleWrite(
 			Value:         mustBigInt(args[8]),
 			Payload:       mustBytes(args[9]),
 			Tip:           mustBigInt(args[10]),
-			Ordered:       mustBool(args[11]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[12]).Uint64(),
-			Siblings:  mustHashSlice(args[13]),
+			LeafIndex: mustBigInt(args[13]).Uint64(),
+			Siblings:  mustHashSlice(args[14]),
 		}
-		commitRoot := mustHash(args[14])
+		commitRoot := mustHash(args[15])
 		failCert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[15]),
-			AggregateSignature: hexutil.Bytes(mustBytes(args[16])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[17])),
+			Epoch:              mustUint64(args[16]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
 		}
 		if err := engine.Refund(msg, proof, commitRoot, failCert); err != nil {
 			return nil, nil, err
+		}
+
+		// GasFee (mục 2.6.5): the message never executed at all on the destination chain (that's
+		// exactly what this failure cert attests), so the entire locked gas budget is unused --
+		// refund it in full alongside Value, regardless of AssetID (GasFee is always native).
+		if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
+				return nil, nil, fmt.Errorf("refund gasFee restoration failed: %v", err)
+			}
 		}
 
 		// Task 1.1: Real Native Refund Credit back to original sender (msg.Sender) on source chain
@@ -746,7 +824,7 @@ func (h *GatewayHandler) handleWrite(
 				// sites in this file): msg.sender must be the Gateway itself, not
 				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 				// full reasoning.
-				if err := executeContractCallForGateway(
+				if _, err := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
@@ -1121,21 +1199,22 @@ func (h *GatewayHandler) handleWrite(
 			Value:         mustBigInt(args[8]),
 			Payload:       mustBytes(args[9]),
 			Tip:           mustBigInt(args[10]),
-			Ordered:       mustBool(args[11]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
 		}
 		aggregateProof := cross_chain.MerkleProof{
-			LeafIndex: mustUint64(args[12]),
-			Siblings:  mustHashSlice(args[13]),
+			LeafIndex: mustUint64(args[13]),
+			Siblings:  mustHashSlice(args[14]),
 		}
 		messageProof := cross_chain.MerkleProof{
-			LeafIndex: mustUint64(args[14]),
-			Siblings:  mustHashSlice(args[15]),
+			LeafIndex: mustUint64(args[15]),
+			Siblings:  mustHashSlice(args[16]),
 		}
-		commitRoot := mustHash(args[16])
+		commitRoot := mustHash(args[17])
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[17]),
-			AggregateSignature: mustBytes(args[18]),
-			SignerBitmap:       mustBytes(args[19]),
+			Epoch:              mustUint64(args[18]),
+			AggregateSignature: mustBytes(args[19]),
+			SignerBitmap:       mustBytes(args[20]),
 		}
 
 		status, err := engine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, tx.FromAddress())
@@ -1145,10 +1224,15 @@ func (h *GatewayHandler) handleWrite(
 
 		// Task 1.3: Contract Call (only for Native or Pure messages)
 		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
-			if err := executeContractCallForGateway(
-				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, big.NewInt(0), tx.MaxGas(),
+			if err := settleGasCappedContractCall(
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
 			); err != nil {
 				return nil, nil, fmt.Errorf("verifyAndExecute payload execution failed: %v", err)
+			}
+		} else if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
+			// No real CONTRACT_CALL happened -- refund the locked gas budget in full.
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
+				return nil, nil, fmt.Errorf("verifyAndExecute gasFee refund failed: %v", err)
 			}
 		}
 
@@ -1195,7 +1279,7 @@ func (h *GatewayHandler) handleWrite(
 				// sites in this file): msg.sender must be the Gateway itself, not
 				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 				// full reasoning.
-				if err := executeContractCallForGateway(
+				if _, err := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
 				); err != nil {
 					return nil, nil, fmt.Errorf("verifyAndExecute custom asset execution failed: %w", err)

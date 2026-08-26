@@ -55,6 +55,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 		Value:         big.NewInt(0),
 		Payload:       []byte{0x01, 0x02, 0x03},
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()

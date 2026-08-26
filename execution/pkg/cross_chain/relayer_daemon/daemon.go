@@ -166,6 +166,7 @@ func (d *RelayerDaemon) RelayMessage(
 		msg.Value,
 		msg.Payload,
 		msg.Tip,
+		msg.GasFee,
 		msg.Ordered,
 		new(big.Int).SetUint64(aggregateProof.LeafIndex),
 		aggSiblings,

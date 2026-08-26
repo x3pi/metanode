@@ -94,6 +94,7 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 		big.NewInt(0),      // assetId
 		big.NewInt(100),    // value
 		big.NewInt(5),      // tip
+		big.NewInt(0),      // gasFee
 		uint8(1),           // hopCount
 		false,              // ordered
 	)
@@ -246,6 +247,7 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 		Value:         big.NewInt(0),
 		Payload:       []byte{0x01, 0x02, 0x03},
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 	// Real 2-leaf commit tree (message leaf + AggregateValueLeaf, Section 2.3.1) — attestCommit()
@@ -285,7 +287,7 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		new(big.Int).SetUint64(messageProof.LeafIndex), messageProofSiblings, commitRoot,
 	)
 	if err != nil {
@@ -375,7 +377,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	}
 
 	outboundCalldata, err := h.abi.Pack("outbound",
-		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(0), uint8(1), false,
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(0), big.NewInt(0), uint8(1), false,
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -408,6 +410,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 		Value:         big.NewInt(100),
 		Payload:       []byte{},
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 
@@ -456,6 +459,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 		big.NewInt(0),
 		big.NewInt(100),
 		[]byte{},
+		big.NewInt(0),
 		big.NewInt(0),
 		false,
 		big.NewInt(int64(proof.LeafIndex)),
@@ -690,7 +694,7 @@ func TestGatewayHandler_OutboundFailsOnInsufficientBalance(t *testing.T) {
 	}
 
 	calldata, err := h.abi.Pack("outbound",
-		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), uint8(1), false,
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), big.NewInt(0), uint8(1), false,
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -721,7 +725,7 @@ func TestGatewayHandler_OutboundFailsHopCountExceededDoesNotBurn(t *testing.T) {
 	// Wait, engine.Outbound fails if HopCount > cross_chain.MaxHopCount (which is 10).
 	// Let's pass HopCount = 100.
 	calldata, err := h.abi.Pack("outbound",
-		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), uint8(100), false,
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), big.NewInt(0), uint8(100), false,
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -782,6 +786,7 @@ func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
 		Value:         big.NewInt(777),
 		Payload:       []byte{0xDE, 0xAD},
 		Tip:           big.NewInt(33),
+		GasFee:        big.NewInt(0),
 		Ordered:       false,
 	}
 
@@ -813,7 +818,7 @@ func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	if err != nil {
@@ -1198,7 +1203,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 
 	// 1. Outbound on Home Chain (101)
 	outboundCalldata, err := h.abi.Pack("outbound",
-		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), uint8(1), false,
+		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), big.NewInt(0), uint8(1), false,
 	)
 	if err != nil {
 		t.Fatalf("pack outbound: %v", err)
@@ -1243,6 +1248,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 		Value:         big.NewInt(100),
 		Payload:       target.Bytes(), // recipient is in Payload
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 	}
 
 	// Compute leaf hash to mock the root
@@ -1265,7 +1271,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		big.NewInt(0), [][32]byte{}, leafHash,
 	)
 	if err != nil {
