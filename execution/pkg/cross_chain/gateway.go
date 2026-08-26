@@ -246,6 +246,9 @@ func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 				return fmt.Errorf("chain %d: proof-of-possession verification failed for a committee member: %w", reg.ChainID, err)
 			}
 		}
+		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
+			return fmt.Errorf("chain %d: %w", reg.ChainID, err)
+		}
 		registries[reg.ChainID] = reg
 	}
 
@@ -280,6 +283,23 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		}
 		if reg.ChainID == 0 {
 			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		// Security fix: a NON-EMPTY committee here was previously accepted with no PoP
+		// verification at all — unlike BootstrapFoundingChains and ProposalUpdateCommittee,
+		// which both require it — letting a proposal register a chain whose "committee" is
+		// unverifiable rogue keys. An EMPTY committee is still allowed (registers routing
+		// metadata only; VerifyQuorumCertAgainstRegistry fails closed with ErrEmptyCommittee
+		// for any quorum cert against it until a real committee is set via
+		// ProposalUpdateCommittee) — this matches an existing real usage pattern
+		// (gateway_governance_test.go's asset-registration test onboards a chain this way)
+		// that a blanket non-empty requirement would have broken.
+		if len(reg.Committee) > 0 {
+			if err := ValidateCommittee(reg.Committee); err != nil {
+				return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
+			}
+		}
+		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
+			return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
 		}
 		g.Governance.RegisterActiveChain(reg.ChainID)
 		if g.ChainRegistry == nil {
@@ -343,6 +363,13 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		}
 		if err := ValidateCommittee(update.NewCommittee); err != nil {
 			return nil, fmt.Errorf("ProposalUpdateCommittee: %w", err)
+		}
+		// Security fix: QuorumThreshold was applied with no bounds check — a governance
+		// proposal (even an honestly-intended one with a typo) could set it below the 2/3 BFT
+		// floor, letting a minority of this chain's new committee forge a "valid" QuorumCert
+		// for every future attestCommit()/vote() against it.
+		if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
+			return nil, fmt.Errorf("ProposalUpdateCommittee: chain %d: %w", update.ChainID, err)
 		}
 		reg.Committee = update.NewCommittee
 		if update.NewEpoch > 0 {
