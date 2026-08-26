@@ -48,6 +48,26 @@ func HandleRevertedTransaction(
 	// 5. Cập nhật lastHash và newDeviceKey
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	// 6. Consume the sender's nonce. ExecuteNonceOnly's own UpdateStateDB deliberately
+	// SKIPS the sender's own address (vm_processor_state.go's "NONCE-FIX": regular
+	// parallel-EVM transactions already have their nonce bumped beforehand via
+	// mvccDB.PlusOneNonce in true_block_stm.go's runParallelSegment, so applying MVM's
+	// returned nonce there too would double-increment). That assumption does not hold
+	// here: HandleRevertedTransaction/HandleSuccessTransaction are called ONLY from the
+	// barrier-tx path (runBarrierTx, via ValidatorHandler/GatewayHandler.HandleTransaction
+	// -- confirmed by grep, no other caller exists), which never does any such
+	// pre-increment. Without this, a barrier tx's sender nonce silently never advances at
+	// all: found live 2026-08-26 -- a relayer's SECOND gateway transaction (nonce N+1)
+	// stayed stuck as a "future" nonce forever because the FIRST one (nonce N) never
+	// actually incremented the account's real nonce despite its own receipt reporting
+	// success, permanently halting further block production on the chain (not just that
+	// one transfer) since the executor's tx-pool never found another valid transaction to
+	// build the next block from. Matches true_block_stm.go's own "always update nonce even
+	// if [the rest of] the tx fails" rule for the regular path -- a nonce is consumed by
+	// attempting a transaction, not by it succeeding.
+	if err := chainState.GetAccountStateDB().SetNonce(tx.FromAddress(), tx.GetNonce()+1); err != nil {
+		logger.Error("HandleRevertedTransaction: failed to consume sender nonce for %s: %v", tx.Hash().Hex(), err)
+	}
 	return rcp, exRs, true
 }
 
@@ -79,5 +99,12 @@ func HandleSuccessTransaction(
 	rcp.UpdateExecuteResult(exRs.ReceiptStatus(), ret, exRs.Exception(), exRs.GasUsed(), eventLogs)
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	// Consume the sender's nonce -- see HandleRevertedTransaction's matching comment above
+	// for the full root-cause explanation. Without this, a barrier tx's sender nonce never
+	// advances at all, and a second gateway transaction from the same sender gets stuck as
+	// a permanently-unfulfillable "future" nonce, halting all further block production.
+	if err := chainState.GetAccountStateDB().SetNonce(tx.FromAddress(), tx.GetNonce()+1); err != nil {
+		logger.Error("HandleSuccessTransaction: failed to consume sender nonce for %s: %v", tx.Hash().Hex(), err)
+	}
 	return rcp, exRs, false // hasFailed = false
 }
