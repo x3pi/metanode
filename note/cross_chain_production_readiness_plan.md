@@ -1008,6 +1008,24 @@ correctly refunded `47,870,600,000` of the `50,000,000,000` wei locked (~21,294 
 consumed by the `mint()` call — neither 0 (would mean "never executed") nor the full amount
 (would mean "no gas metering happened"), the actual proof this mechanism works for real).
 
+**Second real scenario on the same live infra: the fail-closed path.** Sent a second
+`outbound()` message on the same 101->102 channel (`Sequence: 2`), same real deployed contract,
+but with `gasFee = 0`. `outbound()` itself succeeds (locking 0 is not itself invalid — nothing
+to lock). `attestCommit()` succeeds. `claimMessage()` **reverts**, with the exact real revert
+reason read back from the receipt's return data: `"claimMessage payload execution failed:
+CONTRACT_CALL requires a locked gasFee (mục 2.6.5): got 0"`. Confirmed the target contract's
+real state is provably untouched (`balanceOf(recipient2) == 0`, the `mint(recipient2, 999)`
+call never ran) — the actual security property mục 2.6.5/risk #9 exists for, verified on real
+separate-process infra, not just the in-process
+`TestGatewayHandler_ClaimMessagePayload_FailsClosedWithoutGasFee` test.
+
+Ad-hoc Go scripts used to drive this (deploy contract, submit outbound, bootstrap founding
+chains via direct `bootstrapFoundingChains()` calls working around tooling gap #1, attest+claim
+with revert-reason decoding) were **not committed** — kept as scratch `/tmp` scripts for this
+session only, by explicit user decision (the live devnet itself, and the two write-ups here and
+in the PR, are the durable record; re-deriving the scripts from this description plus
+`live_asset_bridge`'s own pattern is straightforward if a future session needs to re-run this).
+
 **3 real tooling gaps found along the way (not Gateway/gas-lock bugs — deploy/devnet tooling
 bugs), left as-is, not fixed this session:**
 1. `register_private_chains_t2.sh`/`cmd/tool/register_chains` calls `propose(ProposalRegisterChain, ...)`
