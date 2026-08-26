@@ -789,3 +789,60 @@ func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
 	assert.Empty(t, engine.ChainRegistry, "no chain should be registered if any entry fails validation")
 }
+
+// TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind is the decision test
+// for all_remaining_fixes_plan.md's Mục 1 ("epoch catch-up: chain mất kết nối nhiều epoch
+// không có đường bắt kịp"). ApplyCommitteeUpdate (epoch_sync.go) requires strict sequential
+// epoch progression AND a valid quorum cert from the chain's CURRENT committee -- if a chain
+// loses connectivity for many epochs and its old committee's signing keys are gone (validators
+// rotated in the meantime), self-attested continuity is permanently impossible; no amount of
+// clever cryptography can prove continuity from keys that no longer exist. This test proves
+// ProposalUpdateCommittee is a real, working answer: recovery via Root Anchor governance
+// quorum (>=2/3 of OTHER active chains vouching for the stuck chain's claimed new committee,
+// e.g. based on real-world proof the stuck chain's operators published out of band) rather
+// than cryptographic self-continuity -- the same trust model BootstrapFoundingChains and
+// ProposalRegisterChain already use elsewhere in this codebase, not a new risk class.
+func TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	// Chain 101 (from setupTestGatewayEngine) is stuck at Epoch 5. Simulate the real-world
+	// failure this mechanism exists for: its old committee's keys are gone -- nobody in this
+	// test ever produces a QuorumCert signed by the Epoch-5 committee, proving the recovery
+	// path genuinely does not need one.
+	require.Equal(t, uint64(5), engine.ChainRegistry[101].Epoch)
+
+	kpNew := bls.GenerateKeyPair()
+	popSigNew := PopSign(kpNew.PrivateKey(), kpNew.PublicKey())
+	recoveredCommittee := []ValidatorEntry{
+		{PubkeyBLS: kpNew.BytesPublicKey(), Stake: 10000, PopSignature: popSigNew.Bytes()},
+	}
+
+	// A big, non-sequential jump (5 -> 500) -- ApplyCommitteeUpdate would reject this outright
+	// (ErrNonSequentialEpoch expects exactly 6). ProposalUpdateCommittee has no such
+	// restriction: real Root Anchor governance quorum is the safety property here, not epoch
+	// sequencing.
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     500,
+		NewCommittee: recoveredCommittee,
+	}
+	payload, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payload, 1000)
+	require.NoError(t, err)
+	// Active chains here is just {101} (setupTestGatewayEngine's registry), so quorum = 1 --
+	// in a real multi-chain Root Anchor this would be >=2/3 of OTHER active chains vouching
+	// for chain 101, since chain 101 itself is the one that's stuck/unreachable.
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(500), reg.Epoch, "chain recovered to the current epoch despite the 495-epoch gap")
+	assert.Equal(t, 1, len(reg.Committee))
+	assert.Equal(t, kpNew.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
+}

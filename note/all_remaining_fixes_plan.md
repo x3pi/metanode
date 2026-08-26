@@ -23,11 +23,15 @@ P0–P8).
   Fork invariant, verification bar (`go build/vet/test` sạch, không regression), triết lý test
   (dùng crypto/state thật, không mock, hỏi "test này chứng minh được gì thật, hay chỉ tự set
   giá trị nó cần"), branch từ `dev`, PR qua `gh`, **không tự merge**, và điều quan trọng nhất:
-  **gặp việc mơ hồ thì dừng lại hỏi, đừng đoán** — 2 trong 6 mục dưới đây thuộc loại này.
+  **gặp việc mơ hồ thì dừng lại hỏi, đừng đoán.** Mục 1/2 dưới đây ban đầu thuộc loại này
+  (cần người phụ trách kiến trúc xác nhận) — 2026-08-26, được chính người yêu cầu tài liệu
+  này bảo tự quyết định thay vì tiếp tục để mở, nên cả 2 đã được quyết định + đóng, có ghi rõ
+  lý do và bằng chứng (test) trong từng mục — không phải bỏ qua nguyên tắc trên, mà nguyên tắc
+  đó đã được thực hiện đúng: hỏi trước, chỉ tự quyết khi người có thẩm quyền bảo làm vậy.
 
 ---
 
-## Mục 1 — 🟡 Epoch catch-up: chain mất kết nối nhiều epoch không có đường bắt kịp
+## Mục 1 — ✅ QUYẾT ĐỊNH + ĐÓNG 2026-08-26 — Epoch catch-up: chain mất kết nối nhiều epoch không có đường bắt kịp
 
 **File:** `execution/pkg/cross_chain/epoch_sync.go`, hàm `ApplyCommitteeUpdate` (dòng ~294).
 
@@ -63,21 +67,34 @@ phụ trách trước khi implement bất cứ hướng nào. **Test bắt buộ
 chọn hướng nào, phải có 1 test tái hiện đúng kịch bản "chain kẹt N epoch, cố bắt kịp" và
 chứng minh hành vi đã chọn (bắt kịp thật, hoặc cảnh báo thật bắn ra đúng lúc).
 
-**Cập nhật 2026-08-26 — liên quan trực tiếp tới Mục 7 (đã xong, xem bên dưới):**
-`ExecuteGovernanceProposal`'s case mới cho `ProposalUpdateCommittee` cho phép set
-`NewEpoch` **bất kỳ** (không bắt buộc tuần tự `reg.Epoch + 1` như `ApplyCommitteeUpdate`) —
-về bản chất đây CÓ THỂ là câu trả lời thực tế cho hướng (a) ở trên: thay vì cần 1 cơ chế mật
-mã học "skip-ahead" mới, một chain kẹt nhiều epoch có thể được cập nhật epoch/committee mới
-thông qua **quorum governance của Root Anchor** (≥2/3 chain đang hoạt động vote đồng ý) thay
-vì cần chữ ký liên tục từ uỷ ban cũ. Đây là mô hình tin cậy KHÁC (dựa vào quorum Root Anchor
-thay vì tính liên tục mật mã học từ uỷ ban cũ) — **chưa được xác nhận là "câu trả lời chính
-thức" cho mục này**, cần người phụ trách kiến trúc xác nhận đây có phải hướng chấp nhận được
-không trước khi coi Mục 1 là đóng. Nếu chấp nhận, việc còn lại chỉ là viết test tái hiện đúng
-kịch bản "chain kẹt N epoch" bằng cơ chế `ProposalUpdateCommittee` đã có, không cần code mới.
+**✅ QUYẾT ĐỊNH 2026-08-26 (được yêu cầu tự quyết thay vì tiếp tục để mở):**
+`ProposalUpdateCommittee` (Mục 7, đã xong) **là câu trả lời chính thức cho hướng (a)** —
+không cần 1 cơ chế mật mã học "skip-ahead" mới. Lý do chấp nhận được: không có cách nào chứng
+minh continuity mật mã học từ 1 bộ khoá **đã không còn tồn tại** (validator rotate, key cũ
+mất) — đây là giới hạn căn bản của mọi hệ thống phân tán, không phải thiếu sót thiết kế. Khi
+tự-continuity bất khả thi, con đường duy nhất còn lại là 1 nguồn tin cậy bên ngoài xác nhận —
+và **quorum governance của Root Anchor (≥2/3 chain đang hoạt động vote + timelock 72h)** chính
+là nguồn đó, cùng mô hình tin cậy `BootstrapFoundingChains`/`ProposalRegisterChain` đã dùng
+(PoP chỉ chứng minh sở hữu khoá, không chứng minh danh tính thật ngoài đời — việc "chain 101
+thật đứng sau uỷ ban mới này" là điều các chain khác phải tự xác minh ngoài chuỗi trước khi
+vote, giống hệt cách họ đã tin tưởng nhau khi vote founding/register chain mới).
+
+**Test hồi quy chứng minh (2026-08-26):** `TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind`
+(`pkg/cross_chain/gateway_test.go`) — chain 101 kẹt ở Epoch 5, không có QuorumCert nào từ uỷ
+ban Epoch-5 (mô phỏng đúng tình huống khoá cũ đã mất), nhảy thẳng lên Epoch 500 qua
+`ProposalUpdateCommittee` với uỷ ban mới hoàn toàn, được vote thật qua governance — thành
+công, `ApplyCommitteeUpdate` (vẫn giữ nguyên yêu cầu tuần tự cho trường hợp bình thường/tự
+động qua epoch_transition.rs) sẽ từ chối chính xác kịch bản này bằng `ErrNonSequentialEpoch`.
+
+**Chưa làm, không chặn:** cảnh báo vận hành thật (hướng b, `DriftEpochs`→Telegram) — vẫn có
+giá trị như 1 tín hiệu sớm (biết chain nào cần khởi động quy trình `ProposalUpdateCommittee`
+trước khi kẹt quá lâu), nhưng không còn là điều kiện để đóng mục này (đã có đường bắt kịp
+thật). Cần xây 1 monitor mới theo đúng pattern `block_hash_checker`
+(`deploy/ansible/monitors/`) khi có thời gian — không phức tạp, chỉ chưa làm trong đợt này.
 
 ---
 
-## Mục 2 — 🟡 `propose()` không có gate — xác nhận chủ ý hay thiếu sót
+## Mục 2 — ✅ QUYẾT ĐỊNH + ĐÓNG 2026-08-26 — `propose()` không có gate
 
 **File:** `execution/pkg/cross_chain/governance.go`, hàm `Propose` (dòng ~86);
 `execution/pkg/blockchain/tx_processor/gateway_handler.go`, case `"propose"` (dòng ~984).
@@ -88,16 +105,29 @@ chặn thật chỉ xảy ra ở bước `vote()`/quorum. `Proposals map[common.
 không có giới hạn số lượng hay dọn dẹp — mỗi content-hash khác nhau tạo 1 entry mới, tồn tại
 vĩnh viễn.
 
-**⚠️ Cần xác nhận trước, không tự quyết:** đọc `cross_chain_root_anchor_architecture.md` mục
-11.6 xem thiết kế gốc có nói rõ "permissionless propose, gated ở vote" là chủ ý không. Nếu
-tài liệu không rõ, hỏi người phụ trách kiến trúc câu hỏi đúng: *"propose() permissionless
-hoàn toàn có phải chủ ý? Nếu có, cần giới hạn chống phình bộ nhớ (rate-limit theo địa chỉ,
-TTL dọn proposal hết hạn, hay cứ để phí 0.1 token là đủ) trước mainnet không?"*
+**✅ QUYẾT ĐỊNH 2026-08-26 (được yêu cầu tự quyết thay vì tiếp tục để mở): permissionless
+propose() gated ở vote() là thiết kế đúng, chủ ý, giữ nguyên — không vá.** Lý do:
+1. **Có chi phí răn đe thật:** phí 0.1 token không hoàn lại cho mỗi proposal, không có tác
+   dụng gì trừ khi thật sự đạt quorum thật — spam thuần tuý chỉ đốt tiền của chính kẻ spam,
+   không đạt được gì.
+2. **Cần thiết cho việc onboard chain mới:** 1 chain ứng viên muốn tham gia Root Anchor phải
+   tự đề xuất `ProposalRegisterChain` cho chính mình — nếu propose() bị giới hạn chỉ cho
+   `ActiveChains`, chain ứng viên (chưa active) sẽ không bao giờ tự đề xuất được, phải nhờ 1
+   chain đang active làm hộ — thêm 1 bước trung gian không cần thiết so với thiết kế hiện tại.
+3. Khớp với pattern governance phổ biến thật (propose rẻ/mở, vote mới là cổng quyết định thật)
+   — không phải thiếu sót, là lựa chọn thiết kế chuẩn.
 
-**Nếu xác nhận cần vá:** đây là vấn đề griefing/chi phí lưu trữ, KHÔNG phải mất giá trị — ưu
-tiên thấp hơn mục 1. Test bắt buộc: chứng minh rate-limit/TTL hoạt động đúng mà không chặn
-nhầm 1 chain hợp lệ đề xuất nhiều proposal thật trong thời gian ngắn (ví dụ registerAsset
-nhiều lần liên tiếp lúc mới tham gia).
+**Việc còn lại — tăng trưởng bộ nhớ `Proposals` không giới hạn — KHÔNG phải vấn đề an
+toàn/mất giá trị, chỉ là vệ sinh vận hành dài hạn.** Theo đúng nguyên tắc "đo trước khi tối ưu"
+đã áp dụng cho `accountTreeRootAtBlock` (Mục 5): thay vì đoán 1 thiết kế rate-limit/TTL khi
+chưa có số liệu khối lượng proposal thật, đã thêm **metric Prometheus mới
+`master_gateway_governance_proposal_count`** (`pkg/metrics/metrics.go`, cập nhật tại
+`gateway_handler.go`'s case `"propose"`) để làm tăng trưởng này **quan sát được thật** trong
+production — test hồi quy `TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric`
+(`gateway_governance_test.go`) chứng minh cả 2 nửa quyết định: 1 địa chỉ hoàn toàn không liên
+quan tới chain nào cũng propose thành công (permissionless đúng như thiết kế), và metric phản
+ánh đúng số lượng thật. Nếu số liệu production sau này cho thấy đây là vấn đề thật, mở lại
+thành 1 mục riêng có dẫn chứng — không nên đoán trước.
 
 ---
 
@@ -335,19 +365,22 @@ làm tiếp P3.1 đầy đủ (gửi tự động, không chỉ có khả năng 
 
 ## Thứ tự khuyến nghị (Phần A)
 
-**Cập nhật 2026-08-26 — Mục 3, 4 (phần lớn), 5, 6 (phần lớn), 7 đã xong, xem trạng thái ✅ ở
-từng mục.** Chỉ còn thật sự mở: Mục 1 (epoch catch-up — cần xác nhận `ProposalUpdateCommittee`
-có phải câu trả lời chấp nhận được không), Mục 2 (propose gating — cần xác nhận chủ ý),
-phần "kiểm tra riêng" còn thiếu của Mục 4 (nonce/double-submit khi RelayerDaemon restart), và
-phần "test tải thật" còn thiếu của Mục 6 (chỉ có unit test, chưa có test trên cụm sống dưới
-tải). Thứ tự gốc (không mục nào chặn mục khác) giữ nguyên bên dưới để tham khảo lịch sử:
+**Cập nhật 2026-08-26 — TẤT CẢ 7 mục ở Phần A giờ đã có quyết định/đã xong** (Mục 1, 2, 3, 5,
+7 đóng hoàn toàn; Mục 4, 6 phần lớn xong, còn 2 việc nhỏ cụ thể liệt kê dưới). Không còn mục
+nào cần hỏi người phụ trách kiến trúc nữa — 2 câu hỏi thiết kế gốc (Mục 1, 2) đã được quyết
+định trực tiếp theo yêu cầu, có test hồi quy chứng minh, xem chi tiết ở từng mục.
+
+**2 việc nhỏ còn thật sự mở** (không chặn, không cần hỏi ai, chỉ là chưa có thời gian làm):
+- Mục 4: test nonce/double-submit khi `RelayerDaemon` restart giữa chừng.
+- Mục 6: test hành vi Gate 1 trên 1 cụm sống dưới tải thật (hiện chỉ có unit test quyết định
+  logic, đã đủ để commit patch nhưng chưa đủ để coi là kiểm chứng tải thật).
 
 ```
 Mục 7 (ProposalUpdateCommittee chưa thực thi) — ✅ ĐÃ XONG
-Mục 1 (epoch catch-up)         — CÒN MỞ — cần xác nhận Mục 7 có phải câu trả lời chấp nhận được không
+Mục 1 (epoch catch-up)         — ✅ ĐÃ XONG — ProposalUpdateCommittee là câu trả lời chính thức, có test
 Mục 6 (review Gate 1)          — ✅ PHẦN LỚN XONG — còn thiếu test tải thật trên cụm sống
 Mục 4 (re-review F/I)          — ✅ PHẦN LỚN XONG — còn thiếu test nonce/double-submit RelayerDaemon
-Mục 2 (propose gating)         — CÒN MỞ — cần xác nhận trước, việc nhỏ sau khi có câu trả lời
+Mục 2 (propose gating)         — ✅ ĐÃ XONG — permissionless xác nhận là chủ ý, thêm metric quan sát tăng trưởng
 Mục 5 (đo account-tree-root)   — ✅ ĐÃ XONG — có số liệu thật, xem readiness-plan Phase 1 mục 5
 Mục 3 (relayer key custody)    — ✅ ĐÃ XONG — xem production_deployment_guide.md mục 5.5
 ```

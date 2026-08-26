@@ -69,8 +69,11 @@ merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây
 
 **Việc còn mở, không chặn nhưng chưa xong** (chi tiết đầy đủ, cho agent/dev tiếp theo:
 `note/all_remaining_fixes_plan.md`):
-- 2 quyết định thiết kế cần người phụ trách kiến trúc xác nhận (cơ chế epoch catch-up khi 1
-  chain kẹt nhiều epoch; `propose()` có nên giới hạn người gọi hay permissionless là chủ ý).
+- 2 quyết định thiết kế từng cần người phụ trách kiến trúc xác nhận (cơ chế epoch catch-up
+  khi 1 chain kẹt nhiều epoch; `propose()` permissionless có phải chủ ý) **đã được quyết định
+  + đóng 2026-08-26** (`ProposalUpdateCommittee` là câu trả lời chính thức cho epoch catch-up;
+  permissionless-propose xác nhận là chủ ý, thêm metric quan sát tăng trưởng thay vì đoán
+  rate-limit) — xem `all_remaining_fixes_plan.md` Mục 1/2 để có đầy đủ lý do + test hồi quy.
 - Chưa có công cụ production thật để coordinator gửi `bootstrapFoundingChains()` với dữ liệu
   registry thật của ≥4 chain sáng lập (chỉ có công cụ devnet/test).
 - Vài khoảng trống test nhỏ (nonce/double-submit khi `RelayerDaemon` restart giữa chừng; test
@@ -409,14 +412,10 @@ front-run gap".
    bị hạ tầng nhiều máy vật lý/VM độc lập cho T2 (không phải devnet 1 máy chia sẻ).
 4. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
    `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
-   từng việc kèm file/hàm chính xác, việc nào cần hỏi trước khi làm (đừng để agent tự đoán 2
-   quyết định thiết kế còn treo), việc nào an toàn để tự làm luôn.
-
-**Câu hỏi cần người phụ trách kiến trúc trả lời trước** (không tự đoán, xem chi tiết ở
-`all_remaining_fixes_plan.md` Mục 1/2):
-- 1 private chain kẹt nhiều epoch không kết nối được Root Anchor thì bắt kịp bằng cơ chế mật
-  mã học nào, hay chấp nhận giới hạn và chỉ cảnh báo vận hành?
-- `propose()` cho phép bất kỳ ai đề xuất (chỉ chặn ở bước vote) có phải chủ ý thiết kế không?
+   từng việc kèm file/hàm chính xác. 2 quyết định thiết kế từng cần hỏi trước (epoch catch-up,
+   `propose()` gating) đã được quyết định + đóng 2026-08-26 (xem Mục 1/2 trong tài liệu đó để
+   có lý do đầy đủ) — không còn câu hỏi nào cần người phụ trách kiến trúc trả lời trước khi
+   giao việc còn lại cho agent khác.
 
 **Nếu có nghi ngờ về bất cứ điều gì ở tài liệu này:** đọc trực tiếp
 `note/cross_chain_production_readiness_plan.md` (log đầy đủ, trung thực, kể cả các lần kết

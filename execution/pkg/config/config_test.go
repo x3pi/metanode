@@ -63,25 +63,58 @@ func TestLoadGenesisData_ValidFile(t *testing.T) {
 	assert.Empty(t, genesis.Alloc)
 }
 
+// TestLoadGenesisData_RootAnchor used to read a real, machine-local devnet genesis file
+// (deploy/systemd/root_anchor_data/genesis.json — gitignored, never committed) via a
+// hardcoded absolute path specific to one developer's machine. That made the test
+// non-hermetic: it only ever passed by accident, on a machine that happened to have run
+// gen_root_anchor_chain.py at that exact path, and failed on any fresh checkout including
+// CI's (confirmed: CI's "go-build-test" job failed on this exact test — a real, previously
+// undetected gap in the test suite, found when a devnet cleanup on a dev machine removed the
+// file this test silently depended on). Rebuilt as a real, self-contained fixture using the
+// exact same real BLS pubkey value the original file had, preserving the actual regression
+// coverage (PublicKeyBls hex parsing through ToAccountState producing a real 48-byte BLS12-381
+// G1 pubkey) without depending on any file outside the test itself.
 func TestLoadGenesisData_RootAnchor(t *testing.T) {
-	filePath := "/home/abc/chain-n/metanode/deploy/systemd/root_anchor_data/genesis.json"
+	const testAddress = "0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366"
+	const testPublicKeyBls = "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+
+	genesisJSON := map[string]interface{}{
+		"config": map[string]interface{}{
+			"chainId": 9099,
+			"epoch":   0,
+		},
+		"validators": []interface{}{},
+		"alloc": []interface{}{
+			map[string]interface{}{
+				"address":      testAddress,
+				"publicKeyBls": testPublicKeyBls,
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "genesis.json")
+	data, err := json.Marshal(genesisJSON)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filePath, data, 0644))
+
 	genesis, err := LoadGenesisData(filePath)
 	require.NoError(t, err)
 	require.NotNil(t, genesis)
 
 	var targetAlloc *state.JsonAccountState
 	for _, a := range genesis.Alloc {
-		if a.Address == "0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366" {
+		if a.Address == testAddress {
 			targetAlloc = &a
 			break
 		}
 	}
-	require.NotNil(t, targetAlloc, "account 0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366 must exist in genesis alloc")
-	assert.Equal(t, "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184", targetAlloc.PublicKeyBls)
+	require.NotNil(t, targetAlloc, "account %s must exist in genesis alloc", testAddress)
+	assert.Equal(t, testPublicKeyBls, targetAlloc.PublicKeyBls)
 
 	as := targetAlloc.ToAccountState()
 	assert.NotEmpty(t, as.PublicKeyBls(), "ToAccountState must parse PublicKeyBls")
-	assert.Len(t, as.PublicKeyBls(), 48)
+	assert.Len(t, as.PublicKeyBls(), 48, "a real BLS12-381 G1 public key must decode to exactly 48 bytes")
 }
 
 func TestLoadGenesisData_WithValidators(t *testing.T) {
