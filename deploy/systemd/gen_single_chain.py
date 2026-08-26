@@ -394,7 +394,15 @@ def main():
                 "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
                 "root_anchor_poll_interval_seconds": 5,
                 "root_anchor_circuit_breaker_max_failures": 5,
-                "root_anchor_circuit_breaker_timeout_seconds": 10
+                "root_anchor_circuit_breaker_timeout_seconds": 10,
+                # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens
+                # GovernanceEngine's mandatory 72h ProposalAllocateSupply/etc. timelock to 10s so
+                # the full propose->vote->timelock->execute governance path (required to grant any
+                # chain an initial cross-chain spending allocation -- see
+                # TestGateway_ProposalAllocateSupply_UnblocksAttestCommit) is actually exercisable
+                # on a local devnet instead of requiring a literal 72-hour wait. NEVER set this on
+                # a real deployment -- gen_single_chain.py is devnet tooling only.
+                "devnet_governance_timelock_seconds_override": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

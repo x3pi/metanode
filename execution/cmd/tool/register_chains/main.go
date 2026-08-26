@@ -89,7 +89,15 @@ func main() {
 		}
 
 		configPath := filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json")
-		nodeCfg, err := config.LoadConfig(configPath)
+		// Deliberately NOT config.LoadConfig(): it caches into the package-level ConfigApp
+		// singleton behind a sync.Once, so calling it more than once per process (exactly what
+		// this loop does, once per founding chain) silently returns the FIRST chain's config for
+		// every subsequent chain ID, ignoring configPath entirely. Confirmed live: every chain
+		// registered after the first ended up with chain 101's BLSPrivateKey/committee entry,
+		// so only chain 101 could ever pass its own committee-membership check anywhere in the
+		// mesh. Found + fixed 2026-08-26 via live governance-vote testing. Read+unmarshal each
+		// file directly into its own struct instead.
+		nodeCfg, err := loadConfigFresh(configPath)
 		if err != nil {
 			logger.Error("Failed to load node config for chain %s at %s: %v", cidStr, configPath, err)
 			os.Exit(1)
@@ -154,6 +162,21 @@ func main() {
 			bootstrap(ctx, privKey, fromAddress, rpcURL, label, calldata, len(payloads), chainIDsFlag)
 		}
 	}
+}
+
+// loadConfigFresh reads and unmarshals a node config.json directly, bypassing
+// config.LoadConfig's process-wide sync.Once cache -- see the call site's comment for why that
+// cache makes config.LoadConfig unsafe to call more than once per process.
+func loadConfigFresh(configPath string) (*config.SimpleChainConfig, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+	}
+	cfg := &config.SimpleChainConfig{}
+	if err := json.Unmarshal(raw, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+	}
+	return cfg, nil
 }
 
 // bootstrap submits the given (already-packed) bootstrapFoundingChains calldata to a single

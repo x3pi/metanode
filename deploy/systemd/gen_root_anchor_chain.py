@@ -385,7 +385,10 @@ def main():
                 "55798165960a62cED34a0d86e36B1758D1303907"
             ],
             "cross_chain": {
-                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
+                # full rationale. NEVER set this on a real deployment.
+                "devnet_governance_timelock_seconds_override": 10
             },
             "meta_node_rpc_address": f"{ip_address}:{11100 + args.port_offset + node_id}",
             "connection_address": f"0.0.0.0:{14200 + args.port_offset + node_id}",
