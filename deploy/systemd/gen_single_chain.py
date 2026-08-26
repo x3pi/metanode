@@ -112,6 +112,47 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     }
     return bls, eth
 
+_BLS_PUBKEY_BIN_CACHE = None
+
+def derive_min_pk_pubkey(secret_hex: str) -> str:
+    """Derives the real pkg/bls (min-pk, 48-byte G1) public key from a BLS secret scalar, as
+    base64. Real fix for a genesis-generation bug found 2026-08-26 while live-testing P4 relayer
+    automation: this script used to write the min_sig (96-byte G2, Rust consensus authority)
+    public key straight into an account's genesis publicKeyBls field -- but
+    AccountState.SetPublicKeyBls (execution/pkg/state/account_state.go) requires EXACTLY 48
+    bytes, the min-pk convention every cross-chain BLS call in the Go codebase actually uses
+    (CommitteeAttestationWorker/CommitAttestationWorker signing with Databases.BLSPrivateKey,
+    register_chains building founding committees). Writing the wrong 96-byte encoding meant a
+    validator's own on-chain identity never matched the min-pk pubkey it (and register_chains)
+    actually signs with -- committeeContains() never found a match, so validators silently never
+    submitted a single real commit/committee attestation share, and cross-chain automation
+    (RelayerDaemon.WatchChainPair) hung forever waiting for a quorum that could never form.
+    Same secret scalar, but min-pk and min-sig derive genuinely different, incompatible public
+    keys from it -- there is no way to convert one to the other, only to derive both separately
+    (metanode-keytool already generated the min_sig half; this derives the min-pk half via the
+    same execution/pkg/bls Go library every real cross-chain caller uses)."""
+    global _BLS_PUBKEY_BIN_CACHE
+    if _BLS_PUBKEY_BIN_CACHE is None:
+        bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+        if not bin_path.exists():
+            print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+            result = subprocess.run(
+                ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                sys.exit(1)
+        _BLS_PUBKEY_BIN_CACHE = str(bin_path)
+    result = subprocess.run(
+        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
+        sys.exit(1)
+    return result.stdout.strip()
+
 def generate_eth_dev_account(metanode_bin=None):
     """Generates a random secp256k1 Ethereum private key and derives its 0x address without external dependencies."""
     try:
@@ -238,6 +279,10 @@ def main():
         node_keys_dir = out_dir / f"node-{node_id}" / "keys"
         print(f"\n🔑 Generating keys for Validator node-{node_id} ...")
         bls, eth = generate_validator_keys(metanode_bin, str(node_keys_dir))
+        # Real min-pk (48-byte G1) pubkey derived from the SAME secret scalar authority_key
+        # uses -- see derive_min_pk_pubkey's doc comment for why this is a separate value from
+        # bls["authority_key"] (that one stays min_sig/G2, used only for consensus identity).
+        bls["min_pk_pubkey_b64"] = derive_min_pk_pubkey(bls["authority_key_private"])
         validator_keys_list.append((bls, eth))
 
         eth_addr = eth["address"].lower()
@@ -275,7 +320,10 @@ def main():
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "publicKeyBls": bls["authority_key"]
+            # Real min-pk pubkey (see derive_min_pk_pubkey's doc comment) -- NOT
+            # bls["authority_key"] (min_sig/G2, consensus-only). Hex-encoded to match this
+            # field's own convention (see the dev-account publicKeyBls entries below).
+            "publicKeyBls": "0x" + base64.b64decode(bls["min_pk_pubkey_b64"]).hex()
         })
 
     # 2. Load or generate developer accounts from local ignored file (no secrets in git)
@@ -300,6 +348,25 @@ def main():
 
     with open(out_dir / "dev_accounts.json", "w") as f:
         json.dump(dev_accounts, f, indent=2)
+
+    # Also pre-register the shared cross-chain RELAYER dev account (address derived
+    # from start_relayer_daemon.sh's public devnet-only fallback RELAYER_KEY,
+    # 0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8) on THIS
+    # chain's own genesis too -- gen_root_anchor_chain.py already registers it on
+    # Root Anchor, but the RelayerDaemon submits batchOutboundCommit() to the
+    # SOURCE private chain and attestCommit()/claimMessage() to the DESTINATION
+    # private chain (never just Root Anchor), so without this every real relay
+    # was rejected with "no BLS public key registered on-chain" the moment a
+    # single relayer identity tried to act on ANY private chain. Found + fixed
+    # 2026-08-26 via live E2E testing of the relayer's WatchChainPair loop.
+    alloc_list.append({
+        "address": "0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366",
+        "balance": alloc_wei,
+        "pending_balance": "0",
+        "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+    })
 
     # 3. Create genesis.json
     total_stake = args.validators * 1000
@@ -406,7 +473,15 @@ def main():
                 "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
                 "root_anchor_poll_interval_seconds": 5,
                 "root_anchor_circuit_breaker_max_failures": 5,
-                "root_anchor_circuit_breaker_timeout_seconds": 10
+                "root_anchor_circuit_breaker_timeout_seconds": 10,
+                # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens
+                # GovernanceEngine's mandatory 72h ProposalAllocateSupply/etc. timelock to 10s so
+                # the full propose->vote->timelock->execute governance path (required to grant any
+                # chain an initial cross-chain spending allocation -- see
+                # TestGateway_ProposalAllocateSupply_UnblocksAttestCommit) is actually exercisable
+                # on a local devnet instead of requiring a literal 72-hour wait. NEVER set this on
+                # a real deployment -- gen_single_chain.py is devnet tooling only.
+                "devnet_governance_timelock_seconds_override": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

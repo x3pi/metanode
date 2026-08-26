@@ -123,6 +123,14 @@ type BlockProcessor struct {
 	// executor.RequestHandler in runUnixSocket (block_processor_network.go).
 	committeeAttestationWorker *tx_processor.CommitteeAttestationWorker
 
+	// commitAttestationWorker (Milestone F, same enable condition as committeeAttestationWorker
+	// above) — its OnCommitFinalized is wired synchronously into
+	// tx_processor.CommitFinalizedCallback, invoked directly from gateway_handler.go's
+	// batchOutboundCommit() case whenever this node processes that transaction (no FFI/UDS
+	// round trip needed, unlike the epoch-advance callback, since this trigger originates from
+	// a Go-side EVM transaction, not a Rust-side epoch boundary).
+	commitAttestationWorker *tx_processor.CommitAttestationWorker
+
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
 
@@ -694,6 +702,24 @@ func NewBlockProcessor(
 					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
 				)
 				go bp.committeeAttestationWorker.Run(context.Background())
+
+				// COMMIT ATTESTATION WORKER (Milestone F): real multi-validator BLS quorum-cert
+				// production for cross-chain outbound-message commit roots, triggered
+				// synchronously and in-process from gateway_handler.go's batchOutboundCommit()
+				// case (see tx_processor.CommitFinalizedCallback's doc comment) — every
+				// validator node that processes that transaction invokes this identically, so
+				// there's no separate watch/poll loop needed on this side, unlike the epoch
+				// callback which crosses the Go<->Rust FFI boundary.
+				bp.commitAttestationWorker = tx_processor.NewCommitAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					localChainID,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.commitAttestationWorker.Run(context.Background())
+				tx_processor.CommitFinalizedCallback = bp.commitAttestationWorker.OnCommitFinalized
 			} else {
 				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
 			}

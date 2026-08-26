@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -47,6 +48,11 @@ func main() {
 			}
 		}
 	}
+	if len(chainRPCs) < 2 {
+		fmt.Println("Error: -chains must configure at least 2 chain IDs (need both a source and a destination to relay anything)")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	cfg := relayer_daemon.DaemonConfig{
 		RelayerKeyHex:     relayerKeyHex,
@@ -65,11 +71,34 @@ func main() {
 	logger.Info("🚀 [CROSS-CHAIN RELAYER] started for relayer address %s", daemon.Address().Hex())
 	logger.Info("Connected to Root Anchor @ %s with %d private chains configured", rootAnchorRPC, len(chainRPCs))
 
+	// Watch every ordered (source, dest) pair among the configured chains -- any of them could
+	// send an outbound() message to any other. Each pair gets its own independent
+	// WatchChainPair loop (real polling: getPendingOutboundCount -> batchOutboundCommit ->
+	// attestCommit -> claimMessage, see RelayerDaemon.WatchChainPair's doc comment), so one
+	// pair's RPC trouble never blocks another pair's relaying.
+	ctx, cancel := context.WithCancel(context.Background())
+	chainIDs := make([]uint64, 0, len(chainRPCs))
+	for id := range chainRPCs {
+		chainIDs = append(chainIDs, id)
+	}
+	watchCount := 0
+	for _, src := range chainIDs {
+		for _, dst := range chainIDs {
+			if src == dst {
+				continue
+			}
+			go daemon.WatchChainPair(ctx, src, dst)
+			watchCount++
+		}
+	}
+	logger.Info("👀 [CROSS-CHAIN RELAYER] watching %d chain pair(s) for real outbound messages", watchCount)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigCh
 	logger.Info("🛑 [CROSS-CHAIN RELAYER] received shutdown signal, stopping...")
+	cancel()
 	daemon.Stop()
 	logger.Info("✅ [CROSS-CHAIN RELAYER] gracefully stopped")
 }
