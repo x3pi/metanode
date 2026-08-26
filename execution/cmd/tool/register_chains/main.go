@@ -71,6 +71,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	startNonce, err := client.PendingNonceAt(ctx, fromAddress)
+	if err != nil {
+		logger.Error("Failed to get initial nonce: %v", err)
+		os.Exit(1)
+	}
+	currentNonce := startNonce
+
 	chainIDs := strings.Split(chainIDsFlag, ",")
 	for _, cidStr := range chainIDs {
 		cidStr = strings.TrimSpace(cidStr)
@@ -125,15 +132,9 @@ func main() {
 			continue
 		}
 
-		nonce, err := client.PendingNonceAt(ctx, fromAddress)
-		if err != nil {
-			logger.Error("Failed to get nonce: %v", err)
-			continue
-		}
-
 		proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN
 		tx := types.NewTransaction(
-			nonce,
+			currentNonce,
 			p_common.GATEWAY_CONTRACT_ADDRESS,
 			proposeFee,
 			2000000,
@@ -154,8 +155,9 @@ func main() {
 			continue
 		}
 
-		logger.Info("✅ Chain %s registration proposed! Tx Hash: %s", cidStr, signedTx.Hash().Hex())
-		time.Sleep(1 * time.Second)
+		logger.Info("✅ Chain %s registration proposed! Tx Hash: %s (nonce=%d)", cidStr, signedTx.Hash().Hex(), currentNonce)
+		currentNonce++
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
