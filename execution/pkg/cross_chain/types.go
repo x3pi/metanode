@@ -193,7 +193,13 @@ type CrossChainMessage struct {
 	Value         *big.Int       `json:"value"`
 	Payload       []byte         `json:"payload"`
 	Tip           *big.Int       `json:"tip"`
-	Ordered       bool           `json:"ordered"`
+	// GasFee is a native-coin amount locked at outbound() time to pay for CONTRACT_CALL
+	// execution at the destination chain (mục 2.6.5) -- separate from Tip (relayer incentive,
+	// paid regardless of whether the message calls a contract). isContractCall()==true with
+	// GasFee==0 fails closed rather than executing for free (mục 5.3 risk #9). See
+	// gateway_handler.go's executeContractCallForGateway call sites for the settlement logic.
+	GasFee  *big.Int `json:"gas_fee"`
+	Ordered bool     `json:"ordered"`
 }
 
 // Custom JSON marshaler for CrossChainMessage to handle big.Int fields cleanly
@@ -209,6 +215,7 @@ type crossChainMessageJSON struct {
 	Value         *hexutil.Big   `json:"value"`
 	Payload       hexutil.Bytes  `json:"payload"`
 	Tip           *hexutil.Big   `json:"tip"`
+	GasFee        *hexutil.Big   `json:"gas_fee"`
 	Ordered       bool           `json:"ordered"`
 }
 
@@ -225,6 +232,7 @@ func (m CrossChainMessage) MarshalJSON() ([]byte, error) {
 		Value:         (*hexutil.Big)(m.Value),
 		Payload:       m.Payload,
 		Tip:           (*hexutil.Big)(m.Tip),
+		GasFee:        (*hexutil.Big)(m.GasFee),
 		Ordered:       m.Ordered,
 	})
 }
@@ -245,6 +253,7 @@ func (m *CrossChainMessage) UnmarshalJSON(data []byte) error {
 	m.Value = (*big.Int)(aux.Value)
 	m.Payload = aux.Payload
 	m.Tip = (*big.Int)(aux.Tip)
+	m.GasFee = (*big.Int)(aux.GasFee)
 	m.Ordered = aux.Ordered
 	return nil
 }

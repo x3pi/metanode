@@ -460,7 +460,7 @@ func main() {
 		valueBig, _ := new(big.Int).SetString(*value, 10)
 		target := eth_common.HexToAddress(*targetAddr)
 		calldata, err := gatewayABI.Pack("outbound",
-			new(big.Int).SetUint64(*otherChainID), target, []byte{}, assetIDBig, valueBig, big.NewInt(0), uint8(1), false,
+			new(big.Int).SetUint64(*otherChainID), target, []byte{}, assetIDBig, valueBig, big.NewInt(0), big.NewInt(0), uint8(1), false,
 		)
 		if err != nil {
 			fmt.Println("pack outbound:", err)
@@ -488,6 +488,7 @@ func main() {
 			Value:         valueBig,
 			Payload:       eth_common.HexToAddress(*recipientAddr).Bytes(),
 			Tip:           big.NewInt(0),
+			GasFee:        big.NewInt(0),
 		}
 		commitRoot, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
 		if err != nil {
@@ -529,6 +530,7 @@ func main() {
 			Value:         valueBig,
 			Payload:       eth_common.HexToAddress(*recipientAddr).Bytes(),
 			Tip:           big.NewInt(0),
+			GasFee:        big.NewInt(0),
 		}
 		commitRoot, layers, _, _, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
 		if err != nil {
@@ -539,7 +541,7 @@ func main() {
 		calldata, err := gatewayABI.Pack("claimMessage",
 			msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
 			new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
-			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 			new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 		)
 		if err != nil {

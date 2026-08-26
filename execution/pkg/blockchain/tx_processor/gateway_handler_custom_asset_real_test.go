@@ -267,7 +267,7 @@ func TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds(t *testing.T) {
 	}
 
 	outboundCalldata, err := h.abi.Pack("outbound",
-		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), uint8(1), false,
+		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), big.NewInt(0), uint8(1), false,
 	)
 	if err != nil {
 		t.Fatalf("pack outbound: %v", err)
@@ -354,6 +354,7 @@ func TestGatewayHandler_CustomAsset_RealTokenMintSucceeds(t *testing.T) {
 		Value:         big.NewInt(250),
 		Payload:       recipient.Bytes(), // recipient encoded in Payload, per LockAndBridgeAsset's convention
 		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
 	}
 	leafHash := cross_chain.ComputeMessageLeafHash(msg)
 	engine.MessageStatus[msg.MessageID] = cross_chain.MessageStatusPending
@@ -372,7 +373,7 @@ func TestGatewayHandler_CustomAsset_RealTokenMintSucceeds(t *testing.T) {
 	claimCalldata, err := h.abi.Pack("claimMessage",
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
-		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.Ordered,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
 		big.NewInt(0), [][32]byte{}, leafHash,
 	)
 	if err != nil {
