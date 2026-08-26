@@ -1312,3 +1312,84 @@ func makeFoundingChainPayload(t *testing.T, chainID uint64) []byte {
 	}
 	return b
 }
+
+// TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce is the regression guard
+// for a real chain-halting bug found + fixed 2026-08-26 via live E2E testing of the P4 relayer
+// automation: HandleSuccessTransaction/HandleRevertedTransaction (receipt_helper.go) call
+// VmProcessor.ExecuteNonceOnly to bump the sender's nonce, but ExecuteNonceOnly's own
+// UpdateStateDB (vm_processor_state.go) deliberately SKIPS the sender's own address --
+// its "NONCE-FIX" comment explains that regular parallel-EVM transactions already have their
+// nonce bumped beforehand via mvccDB.PlusOneNonce (true_block_stm.go's runParallelSegment), so
+// applying MVM's returned nonce there too would double-increment.
+//
+// That assumption does not hold for barrier transactions (GATEWAY_CONTRACT_ADDRESS /
+// VALIDATOR_CONTRACT_ADDRESS, executed via runBarrierTx): they never go through
+// runParallelSegment's pre-increment at all. Before this fix, a barrier transaction's sender
+// nonce silently never advanced -- the FIRST gateway transaction from an address always
+// succeeded (its own nonce check passed against the account's untouched starting nonce), but a
+// SECOND one from the SAME sender could never pass runBarrierTx's own
+// "fromAccount.Nonce() != tx.GetNonce()" guard, because the account's real nonce had not moved.
+// Live, this manifested as the relayer's automated attestCommit() (nonce N) succeeding and then
+// claimMessage() (nonce N+1) getting stuck as a permanently-unfulfillable "future" transaction
+// in the pool -- which, worse, halted ALL further block production on the chain (not just that
+// one transfer), since the executor's tx-forwarding loop only proceeds when the pool yields at
+// least one valid transaction.
+//
+// This test exercises the exact same code path the live bug went through (HandleTransaction ->
+// handleWrite -> HandleSuccessTransaction), without needing a live multi-node cluster: two
+// outbound() calls from the same sender, at nonce 0 and nonce 1, both real ABI transactions.
+func TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	target := common.HexToAddress("0x5555555555555555555555555555555555555555")
+
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(10_000)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	packOutbound := func() []byte {
+		calldata, err := h.abi.Pack("outbound",
+			big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(1),
+			big.NewInt(0), big.NewInt(0), uint8(0), false,
+		)
+		if err != nil {
+			t.Fatalf("pack outbound() calldata: %v", err)
+		}
+		return marshalCallData(t, calldata)
+	}
+
+	assertNonce := func(want uint64) {
+		t.Helper()
+		as, err := cs.GetAccountStateDB().AccountState(sender)
+		if err != nil || as == nil {
+			t.Fatalf("AccountState(sender) failed: %v", err)
+		}
+		if as.Nonce() != want {
+			t.Fatalf("expected sender nonce %d after processing, got %d", want, as.Nonce())
+		}
+	}
+
+	assertNonce(0)
+
+	tx1 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), packOutbound())
+	rcp1, _, hasFailed1 := h.HandleTransaction(context.Background(), cs, tx1, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if hasFailed1 || rcp1 == nil || rcp1.Status() != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("first outbound() (nonce 0) failed: hasFailed=%v rcp=%+v", hasFailed1, rcp1)
+	}
+	// The actual bug: without the fix, this stays 0 forever, and a second real transaction
+	// from this sender can never be admitted by runBarrierTx's own nonce guard again.
+	assertNonce(1)
+
+	tx2 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), packOutbound())
+	rcp2, _, hasFailed2 := h.HandleTransaction(context.Background(), cs, tx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if hasFailed2 || rcp2 == nil || rcp2.Status() != pb.RECEIPT_STATUS_RETURNED {
+		t.Fatalf("second outbound() (nonce 1) failed: hasFailed=%v rcp=%+v", hasFailed2, rcp2)
+	}
+	assertNonce(2)
+}
