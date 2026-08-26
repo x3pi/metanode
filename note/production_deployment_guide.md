@@ -15,21 +15,26 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 
 ## 0. Tóm tắt điều hành (đọc trước)
 
-*Cập nhật lần cuối: 2026-08-26. Đây là bản trạng thái hiện tại — không phải nhật ký theo
-thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi nào, PR nào) nằm ở
+*Cập nhật lần cuối: 2026-08-26 (phiên làm việc thứ hai trong ngày — sau khi toàn bộ pipeline
+relay tự động P4 được xây xong và một giao dịch chuyển giá trị liên chuỗi THẬT chạy trọn vẹn
+đầu-cuối lần đầu tiên trong lịch sử dự án). Đây là bản trạng thái hiện tại — không phải nhật
+ký theo thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi nào, PR nào) nằm ở
 `note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết "vì sao", còn tài liệu
 này chỉ trả lời "hiện đang ở đâu".*
 
 | Thành phần | Sẵn sàng cho | Chưa sẵn sàng cho |
 | :--- | :--- | :--- |
 | 1 private chain đơn (Go execution + Rust consensus, Ansible/systemd) | Production nội bộ, testnet, mainnet doanh nghiệp riêng lẻ | — |
-| Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer) | Testnet nội bộ, diễn tập ceremony, demo, chạy thật nhiều tiến trình 1 máy (đã kiểm chứng sống) | **Giá trị thật trên mainnet** cho tới khi qua P5 (audit độc lập) + T2 (chạy thật nhiều máy vật lý) |
+| Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer tự động) | Testnet nội bộ, diễn tập ceremony, demo, chạy thật nhiều tiến trình 1 máy — **đã xác nhận sống một giao dịch chuyển native coin thật, đầu-cuối, hoàn toàn tự động** (mục 0 bên dưới) | **Giá trị thật trên mainnet** cho tới khi qua P5 (audit độc lập) + T2 (chạy thật nhiều máy vật lý) |
 
 **Trạng thái code (quan trọng cho bất kỳ ai tiếp quản việc deploy):** toàn bộ các lỗ hổng
 CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống — nhưng code này
-**hiện nằm trên PR #65** (`test/custom-asset-real-token-coverage` → `dev`), **chưa merge**.
-Trước khi triển khai bất cứ thứ gì thật, xác nhận PR #65 (hoặc PR kế tiếp nếu #65 đã đóng) đã
+**hiện nằm trên PR #73** (`feat/p4-relayer-commit-automation` → `dev`), **chưa merge**.
+Trước khi triển khai bất cứ thứ gì thật, xác nhận PR #73 (hoặc PR kế tiếp nếu #73 đã đóng) đã
 merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây chỉ vì tài liệu này nói đã vá.
+PR #73 gồm cả những PR trước đó nó build lên trên (#61/#63/#64/#68/#70/#71) — nếu chỉ merge
+những PR cũ mà bỏ qua #73, các fix mô tả ngay dưới đây (đặc biệt là mục treo chain — nghiêm
+trọng nhất) sẽ KHÔNG có trong `dev`.
 
 **Đã vá + xác nhận sống (không còn là rủi ro mở):**
 - Lớp xác minh mật mã (BLS/Merkle/anti-fraud) đã nối thật vào số dư thật cho cả native coin
@@ -43,9 +48,11 @@ merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây
   `CrossChainConfig.GenesisCoordinatorAddress` giờ khoá người gọi hợp lệ duy nhất (**bắt buộc
   phải set giá trị này trong config thật trước khi gửi giao dịch bootstrap** — bỏ trống vẫn
   giữ hành vi cũ để không phá vỡ devnet/test).
-- Khoá đóng cứng trong `start_relayer_daemon.sh`/`register_private_chains_t2.py` — giờ đọc từ
-  biến môi trường `RELAYER_KEY`/`DEV_PRIV_KEY` (**bắt buộc phải set thật** trước khi chạy cho
-  vai trò thật, không set thì rơi về khoá devnet công khai kèm cảnh báo to).
+- Khoá đóng cứng trong `start_relayer_daemon.sh`/`register_chains` — giờ đọc từ biến môi trường
+  `RELAYER_KEY`/cờ `-key` (**bắt buộc phải set thật** trước khi chạy cho vai trò thật, không
+  set thì rơi về khoá devnet công khai kèm cảnh báo to). `register_private_chains_t2.py`
+  (script Python cũ hơn, dùng `DEV_PRIV_KEY`) đã lỗi thời — dùng `register_private_chains_t2.sh`
+  thay thế (mục 3).
 - Root Anchor "Layer C": 1 cụm multi-validator thật không bao giờ đạt được trạng thái
   `Healthy` do lỗi trong script sinh cấu hình (`gen_root_anchor_chain.py` gán trùng cổng giữa
   server chẩn đoán và cổng gRPC P2P thật) — đã tìm ra nguyên nhân thật (không phải race Tokio
@@ -57,6 +64,40 @@ merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây
 - `ProposalRegisterChain` từng nhận 1 uỷ ban (committee) không rỗng mà không verify PoP (lỗ
   hổng rogue-key) — khác với `BootstrapFoundingChains`/`ProposalUpdateCommittee`, cả 2 đều đã
   verify đúng. Đã vá: bắt buộc verify khi uỷ ban không rỗng.
+- **🔴 [NGHIÊM TRỌNG NHẤT, PR #73] Giao dịch barrier (gateway/validator contract) không bao
+  giờ tăng nonce người gửi** — phát hiện qua chạy sống P4: `HandleSuccessTransaction`/
+  `HandleRevertedTransaction` gọi `ExecuteNonceOnly` để tăng nonce, nhưng hàm này CỐ Ý bỏ qua
+  chính địa chỉ người gửi (giả định nonce "đã được tăng từ trước" — đúng với luồng EVM song
+  song thường, nhưng SAI với luồng barrier-tx, vốn không hề có bước tăng nonce nào khác). Hậu
+  quả: giao dịch gateway ĐẦU TIÊN từ 1 tài khoản luôn thành công, nhưng giao dịch THỨ HAI từ
+  CÙNG tài khoản đó vĩnh viễn bị coi là "nonce tương lai" không bao giờ hợp lệ — và vì executor
+  chỉ tạo block mới khi tx-pool có ít nhất 1 giao dịch hợp lệ, **toàn bộ việc sản xuất block
+  của CHAIN ĐÓ bị treo vĩnh viễn** (không riêng gì giao dịch bị kẹt), xác nhận sống: block
+  height đứng yên nhiều phút trong khi consensus Rust bên dưới vẫn commit bình thường. Đây là
+  bug ảnh hưởng RẤT RỘNG (bất kỳ tài khoản nào gửi ≥2 giao dịch gateway liên tiếp nhanh, không
+  riêng relayer) — nếu deploy từ `dev` mà chưa có PR #73, **tuyệt đối không cho phép bất kỳ tài
+  khoản nào gửi 2 giao dịch tới `GATEWAY_CONTRACT_ADDRESS`/`VALIDATOR_CONTRACT_ADDRESS` liên
+  tiếp** cho tới khi verify đã merge fix này. Có test hồi quy
+  (`TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce`) xác nhận fail nếu
+  thiếu fix, pass nếu có.
+- **[PR #73] `register_chains` dùng `config.LoadConfig()` trong vòng lặp nhiều lần** —
+  `LoadConfig` cache qua `sync.Once` toàn tiến trình, nên gọi lần 2 trở đi âm thầm trả về config
+  của LẦN GỌI ĐẦU TIÊN bất kể đường dẫn truyền vào. Hậu quả: mọi chain đăng ký sau chain đầu
+  tiên trong danh sách `--chains` đều bị gán NHẦM committee/BLS pubkey của chain đầu tiên —
+  khiến chain đó không bao giờ tự nhận ra mình là thành viên uỷ ban của chính nó. Đã vá: đọc +
+  parse trực tiếp từng file config, không qua singleton.
+- **[PR #73] `ChainRegistry` là state cục bộ theo từng chain, không dùng chung** — đăng ký
+  founding chains chỉ trên Root Anchor KHÔNG đủ để `attestCommit()` hoạt động giữa 2 private
+  chain với nhau (mỗi chain cần biết committee của các chain khác qua chính registry CỦA NÓ).
+  `register_chains` giờ có cờ `-target-rpcs` để bootstrap luôn từng private chain, không chỉ
+  Root Anchor (xem mục 3 bước 3 cập nhật bên dưới).
+- **[PR #73, xác nhận sống lần đầu tiên] Một giao dịch chuyển native coin liên chuỗi THẬT đã
+  chạy trọn vẹn đầu-cuối, hoàn toàn tự động**: `outbound()` (khoá tiền thật) →
+  `batchOutboundCommit()` → chữ ký BLS uỷ ban thật → `attestCommit()` → `claimMessage()` → số
+  dư thật tăng đúng giá trị trên chain đích, xác nhận qua `eth_getBalance`, không cần can thiệp
+  thủ công (relayer tự poll/batch/attest/claim qua cơ chế P4, xem mục 3 bước 4 cập nhật). Đây
+  là bằng chứng sống đầu tiên rằng lớp xác minh mật mã + lớp giá trị thật hoạt động khớp nhau
+  hoàn chỉnh, không chỉ đúng riêng lẻ từng phần qua unit test.
 
 **2 điều kiện chặn cứng còn lại trước mainnet giá trị thật, không có đường tắt** (xem
 `note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
@@ -80,7 +121,7 @@ merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây
   tải thật cho Gate 1 trên cụm sống thay vì chỉ unit test).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
-dùng (sau khi PR #65 merge), cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị
+dùng (sau khi PR #73 merge), cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị
 thật** — việc cần làm tiếp theo là lên kế hoạch cho P5 + T2, không phải chạy thêm script.
 
 ---
@@ -148,36 +189,62 @@ khoá devnet đóng cứng trong tooling — **không đại diện cho một tr
 ```bash
 cd deploy/systemd
 
-# 1. Sinh + chạy 4 private chain (101-104)
-bash setup_4_private_chains.sh          # thêm --clean để làm lại từ đầu, --no-build để bỏ qua build
-
-# 2. Sinh + chạy Root Anchor (chain 9099, 4 validator)
-bash setup_root_anchor.sh
+# 1. Sinh + chạy Root Anchor (chain 9099, 4 validator) TRƯỚC — register_chains ở bước 3
+#    cần Root Anchor đã sống để gửi bootstrapFoundingChains() tới.
+bash setup_root_anchor.sh               # thêm --clean để làm lại từ đầu, --no-build để bỏ qua build
 bash root_anchor_data/start_all.sh
 
-# 3. Đăng ký 4 chain vào Root Anchor
-#    (dùng propose()/vote() bình thường CHỈ hoạt động sau khi ChainRegistry không còn rỗng —
-#     script dưới dùng khoá dev đã inject sẵn trong genesis Root Anchor devnet, xem CẢNH BÁO)
+# 2. Sinh + chạy 4 private chain (101-104)
+bash setup_4_private_chains.sh
+
+# 3. Đăng ký 4 chain — cả trên Root Anchor LẪN trên chính từng private chain
+#    (ChainRegistry là state CỤC BỘ theo từng chain, không dùng chung — mỗi chain cần biết
+#    committee của các chain khác qua chính registry của nó, không chỉ Root Anchor biết).
+#    Dùng bootstrapFoundingChains() thật (KHÔNG phải propose()/vote() — ChainRegistry rỗng thì
+#    không ai vote được, xem mục 5.3), tự build binary register_chains nếu chưa có.
 bash register_private_chains_t2.sh
 
-# 4. Chạy Relayer
+# 4. Chạy Relayer — TỰ ĐỘNG hoàn toàn (P4): daemon tự poll từng cặp (source, dest) chain, tự
+#    gọi batchOutboundCommit() khi có outbound() đang chờ, tự chờ QuorumCert BLS thật, tự gọi
+#    attestCommit()/claimMessage() — không cần gọi tay bất kỳ bước nào ở giữa nữa.
 bash start_relayer_daemon.sh
 ```
 
+**Muốn thử một giao dịch chuyển giá trị THẬT (không chỉ khởi động hạ tầng)?** Một chain mới
+đăng ký có **allocation gửi-ra = 0** theo thiết kế (fail-closed — chain không thể gửi ra giá
+trị nó chưa từng nhận được) — `outbound()` đầu tiên sẽ khoá tiền thành công, nhưng
+`attestCommit()` ở chain đích sẽ revert với `"aggregate amount exceeds source chain allocation
+ceiling... available 0"` cho tới khi chain đích tự cấp phát allocation cho chain nguồn qua
+governance thật (`propose(kind=ProposalAllocateSupply, ...)` → `vote()` từ ≥2/3 chain đã đăng
+ký → chờ đủ 72h timelock → `executeProposal()`). Đây không phải bug — là cơ chế bảo toàn giá
+trị bắt buộc của Root Anchor, xác nhận qua `TestGateway_ProposalAllocateSupply_UnblocksAttestCommit`.
+Để test được flow này trên devnet mà không phải chờ 72 giờ thật: set
+`cross_chain.devnet_governance_timelock_seconds_override` (giây, ví dụ `10`) trong
+`config.json` của TỪNG node liên quan **trước khi khởi động** — trường này **chỉ tồn tại để
+test** (`config.go` có doc comment riêng cảnh báo), **không bao giờ được set trên bất kỳ mạng
+nào có giá trị thật**. `gen_single_chain.py`/`gen_root_anchor_chain.py` giờ tự set giá trị này
+(10 giây) cho mọi node devnet sinh ra — không cần chỉnh tay khi đi theo đúng con đường A.
+
 **⚠️ CẢNH BÁO — khoá devnet đóng cứng trong repo public:**
-`start_relayer_daemon.sh` (`RELAYER_KEY=0xd3ae7482...`) và `register_private_chains_t2.py`
-(`dev_priv_key`, cùng giá trị) dùng **chung một private key đã commit vào git** — đây là
-"known dev account we just injected into the root anchor" theo comment gốc trong script,
-tồn tại để devnet chạy được ngay không cần bước sinh/nạp khoá thủ công. Vì repo là
-**public**, khoá này coi như đã bị lộ tuyệt đối. **Không bao giờ dùng lại genesis/khoá này
-cho bất cứ mạng nào có giá trị thật** — dù chỉ là testnet có người ngoài truy cập được RPC.
-Trước khi dùng con đường A cho bất cứ mục đích nào ngoài rehearsal trên máy cá nhân: thay
-khoá này bằng khoá tự sinh (`python3 -c "import secrets; print(secrets.token_hex(32))"`)
-và nạp allocation tương ứng vào genesis Root Anchor thay vì dùng giá trị đóng cứng.
+`start_relayer_daemon.sh` (`RELAYER_KEY=0xd3ae7482...`, cũng là khoá mặc định của
+`register_chains`/`-key`) dùng **một private key đã commit vào git** — đây là "known dev
+account we just injected into the root anchor" theo comment gốc trong script, tồn tại để
+devnet chạy được ngay không cần bước sinh/nạp khoá thủ công (`gen_single_chain.py`/
+`gen_root_anchor_chain.py` tự đăng ký địa chỉ này với BLS pubkey devnet dùng chung trên MỌI
+chain sinh ra, kể cả từng private chain — không chỉ Root Anchor). Vì repo là **public**, khoá
+này coi như đã bị lộ tuyệt đối. **Không bao giờ dùng lại genesis/khoá này cho bất cứ mạng nào
+có giá trị thật** — dù chỉ là testnet có người ngoài truy cập được RPC. Trước khi dùng con
+đường A cho bất cứ mục đích nào ngoài rehearsal trên máy cá nhân: thay khoá này bằng khoá tự
+sinh (`python3 -c "import secrets; print(secrets.token_hex(32))"`) truyền qua `-key`/
+`RELAYER_KEY`, và đăng ký địa chỉ tương ứng (kèm allocation nếu cần) vào genesis thay vì dùng
+giá trị đóng cứng. (`register_private_chains_t2.py`, một script Python cũ hơn cùng thư mục,
+đã lỗi thời từ trước khi `register_chains`/`register_private_chains_t2.sh` được sửa đúng —
+đừng dùng nó, dùng bản `.sh`.)
 
 Dừng: `bash private_chains_data/stop_all.sh` và `bash root_anchor_data/stop_all.sh`.
-Log: `deploy/systemd/private_chains_data/chain_XXX/node-0/logs/node-0.log`,
-`deploy/systemd/root_anchor_data/node-*/logs/`.
+Log THẬT theo từng giao dịch/block (không phải `node-0.log`, file đó chỉ có log khởi động):
+`deploy/systemd/private_chains_data/chain_XXX/node-0/logs/execution/<YYYY-MM-DD>/execution.log`
+(tương tự cho `root_anchor_data/node_*/logs/`).
 
 Chi tiết thêm (dashboard giám sát P7, danh sách port): `deploy/systemd/README.md`.
 
@@ -306,7 +373,14 @@ front-run gap".
 - `CommitteeAttestationWorker`/`GatewayRegistryMonitor` tự chạy kèm node nếu config đúng
   (xem CẢNH BÁO mục 5.1).
 - Chạy `RelayerDaemon` (`cmd/tool/cross_chain_relayer`) — **permissionless, ai cũng chạy
-  được**, nhưng cần khoá của **chính người vận hành relayer đó**. `start_relayer_daemon.sh`
+  được**, nhưng cần khoá của **chính người vận hành relayer đó**. **[PR #73]** Binary này giờ
+  tự chạy 1 goroutine `WatchChainPair` cho MỌI cặp (chain nguồn, chain đích) trong danh sách
+  `-chains` — mỗi cặp tự poll `getPendingOutboundCount()`, tự gọi `batchOutboundCommit()` khi
+  có message chờ, tự chờ `CommitAttestationWorker` sản xuất QuorumCert BLS thật, rồi tự gọi
+  `attestCommit()`/`claimMessage()`. Trước PR #73, binary này chỉ khởi tạo daemon rồi chờ tín
+  hiệu tắt — không hề tự relay gì cả (dead code, `OnCommitFinalized` không nơi nào gọi tới).
+  Không cần gọi tay bất kỳ bước trung gian nào nữa; chỉ cần chạy đúng lệnh dưới đây và để nó
+  chạy nền liên tục. `start_relayer_daemon.sh`
   giờ đọc khoá từ biến môi trường `RELAYER_KEY` — **bắt buộc phải set** trước khi chạy cho vai
   trò thật; không set thì script vẫn chạy được nhưng rơi về khoá devnet công khai (kèm cảnh
   báo to, xem CẢNH BÁO mục 3), không bao giờ được dùng cho relayer thật. Ví dụ chạy với
@@ -349,11 +423,20 @@ front-run gap".
 
 ## 7. Checklist an ninh trước khi go-live (tổng hợp)
 
+- [ ] PR #73 (không chỉ các PR cũ hơn nó build lên trên) đã merge vào `dev` — đặc biệt fix bug
+      treo chain (barrier-tx không tăng nonce, mục 0). Kiểm tra bằng cách tìm hàm
+      `TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce` có tồn tại trong
+      `pkg/blockchain/tx_processor/gateway_handler_test.go` chưa — nếu không có, PR chưa vào.
 - [ ] P5 — security review độc lập đã hoàn tất (mục 0).
 - [ ] Đã chạy thật trên nhiều máy độc lập, không chỉ devnet 1 máy (mục 0, mục 6).
-- [ ] Đã set biến môi trường `RELAYER_KEY` (`start_relayer_daemon.sh`) và `DEV_PRIV_KEY`
-      (`register_private_chains_t2.py`) thành khoá thật của vai trò đó — không còn script nào
-      rơi về khoá devnet công khai đóng cứng trong repo (mục 3, 5.4).
+- [ ] Đã set `-key`/`RELAYER_KEY` (`start_relayer_daemon.sh`, `register_chains`) thành khoá
+      thật của vai trò đó — không còn nơi nào rơi về khoá devnet công khai đóng cứng trong repo
+      (mục 3, 5.4). (`register_private_chains_t2.py` đã lỗi thời — không dùng, không set biến
+      môi trường cho nó.)
+- [ ] `cross_chain.devnet_governance_timelock_seconds_override` **KHÔNG được set** (hoặc bằng
+      0) trong mọi `config.json` thật — trường này chỉ tồn tại để rút ngắn 72h timelock cho
+      test devnet (mục 3); còn set trên mạng thật nghĩa là governance có thể bị thi hành gần
+      như ngay lập tức, phá vỡ toàn bộ mục đích của timelock.
 - [ ] Đã set `CrossChainConfig.GenesisCoordinatorAddress` (config thật, không phải devnet)
       thành địa chỉ coordinator đã cam kết out-of-band, TRƯỚC KHI gửi giao dịch
       `bootstrapFoundingChains` (mục 5.3).
@@ -362,7 +445,8 @@ front-run gap".
 - [ ] Mọi `config.json` khối `cross_chain` đã xác nhận field đúng snake_case bằng cách xem
       log thật (mục 5.1), không chỉ tin node khởi động không lỗi.
 - [ ] Đã đọc và xử lý toàn bộ mục còn mở trong `note/cross_chain_production_readiness_plan.md`
-      (roadmap P0-P8 hiện đang ở P1-P3, còn P4-P8 chưa làm — xem
+      (roadmap P0-P8: P1-P4 đã xong tính tới PR #73 — bao gồm relay tự động P4 và bug treo
+      chain nghiêm trọng nhất từng tìm được — P5-P8 chưa làm; xem
       `note/cross_chain_root_anchor_architecture.md` mục 8).
 - [ ] Firewall/port chỉ mở đúng những gì cần (`open_ports.sh` sinh theo node, xem lại trước
       khi chạy trên mạng công cộng).
@@ -391,16 +475,24 @@ front-run gap".
 
 ## 9. Bàn giao triển khai (đọc nếu bạn mới tiếp quản việc này)
 
-**Trạng thái code tại thời điểm bàn giao (2026-08-26):**
-- Toàn bộ fix mô tả ở mục 0 nằm trên PR #65 (`test/custom-asset-real-token-coverage` →
-  `dev`), **chưa merge**. `dev` hiện chỉ có phần vá đầu tiên (PR #64, `msg.sender`/`SetCode`)
-  — mọi thứ sau đó (SupplyLedger, bypass-timelock, front-run genesis, Layer C,
-  `ProposalUpdateCommittee`, sàn `QuorumThreshold`, PoP cho `ProposalRegisterChain`) **chưa ở
-  trong `dev`** cho tới khi PR đó (hoặc PR kế tiếp nếu nó đã đóng) được merge.
-- **Việc đầu tiên phải làm:** kiểm tra trạng thái PR đó trên GitHub, đảm bảo CI xanh, merge
+**Trạng thái code tại thời điểm bàn giao (2026-08-26, phiên thứ hai):**
+- Toàn bộ fix mô tả ở mục 0 nằm trên PR #73 (`feat/p4-relayer-commit-automation` → `dev`),
+  **chưa merge**. PR này build lên trên chuỗi PR #61/#63/#64/#68/#70/#71 (đã mô tả trong các
+  bản trước của tài liệu này) VÀ thêm: toàn bộ cơ chế relay tự động P4 (trước đó
+  `cross_chain_relayer` là dead code, không tự relay gì), fix bug treo chain nghiêm trọng nhất
+  từng tìm được (barrier-tx không tăng nonce — mục 0), fix `register_chains`'s
+  `config.LoadConfig` singleton bug, và wiring `devnet_governance_timelock_seconds_override`.
+- **Việc đầu tiên phải làm:** kiểm tra trạng thái PR #73 trên GitHub, đảm bảo CI xanh, merge
   vào `dev` trước khi tin bất kỳ dòng nào ở mục 0 phía trên là đã áp dụng cho môi trường thật.
-- Không có gì đang chạy dở/hỏng — `go build/vet/test` và `cargo build/test` đều sạch tại thời
-  điểm bàn giao, không có regression nào chưa xử lý.
+- Không có gì đang chạy dở/hỏng — `go build/vet/test` (43/43 package) đều sạch tại thời điểm
+  bàn giao, không có regression nào chưa xử lý. Có test hồi quy thật cho bug treo chain
+  (`TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce`, xác nhận fail nếu
+  thiếu fix).
+- **Đã xác nhận sống (không chỉ unit test):** một chu trình chuyển native coin liên chuỗi đầy
+  đủ — `outbound()` → `batchOutboundCommit()` → QuorumCert BLS thật → `attestCommit()` →
+  `claimMessage()` → số dư thật tăng đúng giá trị ở chain đích — chạy trọn vẹn, hoàn toàn tự
+  động qua relayer P4, trên 1 devnet 9-tiến-trình (4 validator Root Anchor + 4 private chain +
+  1 relayer) trên **1 máy** (chưa phải T2 nhiều máy thật).
 
 **Việc tiếp theo, theo đúng thứ tự ưu tiên:**
 1. Merge PR (xem trên).
