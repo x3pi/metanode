@@ -84,6 +84,25 @@ type GatewayEngine struct {
 	// PendingCommitAttestations collects individual BLS signature shares for a pending
 	// commit root attestation, keyed by "sourceChainId:epoch:commitRootHex" (Milestone F).
 	PendingCommitAttestations map[string][]CommitAttestationShare
+
+	// PendingOutboundMessages queues real outbound() messages (their sender already validated
+	// and their Value/Tip/GasFee already burned/locked) not yet batched into a commit root for
+	// BLS attestation -- the missing link between Outbound() and Milestone F's
+	// CommitAttestationWorker, which previously had no real trigger (see BatchOutboundCommit's
+	// doc comment). Keyed by DestChainID: a commit's single AggregateValueLeaf debits
+	// per_chain_allocation[LocalChainID] exactly once per BatchOutboundCommit call, so batching
+	// messages bound for DIFFERENT destination chains into the same commit would let each
+	// destination's own independent attestCommit() call debit the SAME source allocation
+	// against its own local ledger copy -- an over-mint risk across destinations. Scoping the
+	// queue (and therefore every batch) to one destination at a time avoids that entirely, and
+	// matches ChannelSequence's existing "LocalChainID:DestChainID" pairing convention.
+	PendingOutboundMessages map[uint64][]CrossChainMessage `json:"pending_outbound_messages,omitempty"`
+	// CommittedBatches records the exact message set (and the epoch it was signed under) behind
+	// every commitRoot BatchOutboundCommit has ever produced, keyed by commitRoot. commitRoot is
+	// a pure function of the message list (BuildCommitTree), so this is the only state needed
+	// for anyone -- this chain's own CommitAttestationWorker, or a relayer, including after a
+	// restart -- to deterministically rebuild the identical Merkle tree/proofs later.
+	CommittedBatches map[common.Hash]CommittedOutboundBatch `json:"committed_batches,omitempty"`
 	// RegisteredPops is a durable, permissionless Proof-of-Possession registry keyed by
 	// hex(pubkeyBls) (Milestone C) — see registerCommitteePop()/getRegisteredPop() in
 	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
@@ -146,6 +165,8 @@ func NewGatewayEngine(
 		RelayerBalances:              make(map[common.Address]*big.Int),
 		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
 		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
+		PendingOutboundMessages:      make(map[uint64][]CrossChainMessage),
+		CommittedBatches:             make(map[common.Hash]CommittedOutboundBatch),
 		RegisteredPops:               make(map[string][]byte),
 		Governance:                   gov,
 		AssetRegistry:                assetReg,
@@ -564,7 +585,50 @@ func (g *GatewayEngine) Outbound(
 		Ordered:       params.Ordered,
 	}
 
+	if g.PendingOutboundMessages == nil {
+		g.PendingOutboundMessages = make(map[uint64][]CrossChainMessage)
+	}
+	g.PendingOutboundMessages[params.DestChainID] = append(g.PendingOutboundMessages[params.DestChainID], *msg)
+
 	return msg, nil
+}
+
+// CommittedOutboundBatch is the message set (and signing epoch) behind one commitRoot ever
+// produced by BatchOutboundCommit — see PendingOutboundMessages/CommittedBatches' doc comments.
+type CommittedOutboundBatch struct {
+	Messages []CrossChainMessage `json:"messages"`
+	Epoch    uint64              `json:"epoch"`
+}
+
+// BatchOutboundCommit takes every currently-pending outbound() message queued for destChainID on
+// this chain, builds a real commit tree (BuildCommitTree), and returns its root -- the same root
+// this chain's own committee must now BLS-attest (via CommitAttestationWorker.OnCommitFinalized,
+// wired from gateway_handler.go's batchOutboundCommit() case) before any relayer can submit
+// attestCommit()/claimMessage() against it on destChainID. Permissionless like committeeUpdate()
+// (anyone may call it, redundant/early calls are harmless) -- every message it ever batches
+// already passed its own outbound() validation and had its sender's funds burned/locked for
+// real, so there is nothing to grief by calling this early, often, or as a non-participant.
+func (g *GatewayEngine) BatchOutboundCommit(destChainID uint64, epoch uint64) (common.Hash, []CrossChainMessage, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	messages := g.PendingOutboundMessages[destChainID]
+	if len(messages) == 0 {
+		return common.Hash{}, nil, fmt.Errorf("no pending outbound messages for destination chain %d", destChainID)
+	}
+
+	commitRoot, _, _, _, err := BuildCommitTree(messages)
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("build commit tree: %w", err)
+	}
+
+	if g.CommittedBatches == nil {
+		g.CommittedBatches = make(map[common.Hash]CommittedOutboundBatch)
+	}
+	g.CommittedBatches[commitRoot] = CommittedOutboundBatch{Messages: messages, Epoch: epoch}
+	delete(g.PendingOutboundMessages, destChainID)
+
+	return commitRoot, messages, nil
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2) for a commit originating from a

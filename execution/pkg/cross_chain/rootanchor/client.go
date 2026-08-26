@@ -318,6 +318,33 @@ func (c *Client) SendRawTransaction(ctx context.Context, rawTxHex string) (commo
 	return common.HexToHash(txHashStr), nil
 }
 
+// TxReceipt is the minimal subset of a Metanode transaction receipt this package needs: standard
+// Ethereum "status" plus the ABI-packed return/revert data this project's RPC always populates
+// for BOTH successful writes (e.g. batchOutboundCommit's (commitRoot, messageCount)) and reverted
+// ones (a standard Error(string) encoding) -- confirmed by reading a real receipt live, not
+// assumed from the Ethereum JSON-RPC spec (which doesn't define this field at all).
+type TxReceipt struct {
+	Status hexutil.Uint64 `json:"status"`
+	Return hexutil.Bytes  `json:"return"`
+}
+
+// TransactionReceipt polls eth_getTransactionReceipt once. Returns (nil, nil) while the
+// transaction is still pending (a JSON-RPC null result is not itself an error) -- callers poll
+// this in a loop with their own backoff, matching every other poll loop in this package.
+func (c *Client) TransactionReceipt(ctx context.Context, txHash common.Hash) (*TxReceipt, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var receipt *TxReceipt
+	err := c.callRPC(ctx, "eth_getTransactionReceipt", &receipt, txHash.Hex())
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return receipt, nil
+}
+
 // callRPC tries each configured URL in order, returning the first success. It does NOT itself
 // touch the circuit breaker — callers record success/failure once for the whole attempt (trying
 // multiple URLs for one logical call is not itself a failure signal).
