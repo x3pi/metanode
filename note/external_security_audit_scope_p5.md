@@ -55,6 +55,8 @@ nay. Danh sách rút gọn theo mức độ (mức độ theo quy ước của c
 | 9 | `GlobalSupplyLedger.PerChainAllocation` không có đường nào (governance/bootstrap) từng cấp phát được — trần luôn = 0 vĩnh viễn | 🔴 chức năng chặn hoàn toàn | Đã vá — `ProposalAllocateSupply`/`GrantAllocation` |
 | 10 | `propose()`/`vote()`/`executeProposal()` tin timestamp caller tự khai — bypass timelock 72h | 🔴 | Đã vá — luôn dùng block time thật |
 | 11 | `bootstrapFoundingChains` không kiểm tra người gửi — front-run ceremony | 🟡 | Đã vá — `GenesisCoordinatorAddress` (opt-in, khoá 1 lần) |
+| 12 | `QuorumThreshold` không có sàn an toàn ở 4 nơi gán giá trị — có thể set dưới 2/3 BFT, cho phép thiểu số giả mạo quorum cert | 🔴 | Đã vá — `ValidateQuorumThreshold`, sàn 2/3 |
+| 13 | `ProposalRegisterChain` nhận committee không rỗng mà không verify PoP — lỗ hổng rogue-key | 🔴 | Đã vá — `ValidateCommittee` bắt buộc khi committee không rỗng |
 
 **Việc đáng làm nhất cho auditor:** không tin danh sách "đã vá" này tại lời — mỗi mục đều có
 test hồi quy thật (BLS/Merkle thật, không mock) đi kèm trong cùng commit, tên test nêu ở
@@ -80,9 +82,9 @@ kịch bản tấn công.
   ceiling chủ động), nhưng đây là quyết định kiến trúc-mức, auditor nên tự đánh giá độc lập
   chứ không chỉ tin implementation đúng đặc tả là đủ.
 
-## 4. Gợi ý cho auditor tập trung trước (dựa trên tỷ lệ tìm bug thật của 2 đợt review nội bộ)
+## 4. Gợi ý cho auditor tập trung trước (dựa trên tỷ lệ tìm bug thật của nhiều đợt review nội bộ)
 
-Base rate quan sát được: **11 bug/gap thật tìm được qua ~4 đợt review độc lập trên cùng 1
+Base rate quan sát được: **13 bug/gap thật tìm được qua ~5 đợt review độc lập trên cùng 1
 module** (không phải review 1 lần rồi xong) — phần lớn nằm ở đúng 2 dạng lặp lại:
 
 1. **"Cơ chế đã thiết kế/code đúng nhưng chưa từng được nối vào production path nào"** — bug
@@ -90,10 +92,15 @@ module** (không phải review 1 lần rồi xong) — phần lớn nằm ở đ
    gọi tới từ đường transaction thật. Cách tìm: với mỗi cơ chế bảo vệ, hỏi "hàm/field này
    được set/gọi từ constructor hay ABI handler thật nào, hay chỉ test tự set giá trị?" —
    `grep -rn` tên hàm ngoài file test là bước đầu tiên, không phải bước cuối.
-2. **"Giá trị caller tự khai được tin mà không đối chiếu state thật"** — bug #1, #7, #10 đều
-   dạng này (root sai, sender sai, timestamp sai). Với mọi tham số ABI đi vào 1 hàm
-   verify/mint/timelock, hỏi "giá trị này có thể được ràng buộc mật mã/đối chiếu state thật
-   không, hay chỉ đang được echo lại?"
+2. **"Giá trị caller tự khai được tin mà không đối chiếu state thật"** — bug #1, #7, #10, #12
+   đều dạng này (root sai, sender sai, timestamp sai, `QuorumThreshold` không sàn). Với mọi
+   tham số ABI đi vào 1 hàm verify/mint/timelock, hỏi "giá trị này có thể được ràng buộc mật
+   mã/đối chiếu state thật không, hay chỉ đang được echo lại?"
+3. **"1 trong nhiều đường ghi cùng 1 field bị bỏ sót khi thêm bảo vệ mới"** — bug #13
+   (`ProposalRegisterChain` thiếu PoP dù `BootstrapFoundingChains`/`ProposalUpdateCommittee`
+   đều có) là ví dụ: khi 1 bảo vệ (PoP, sàn threshold) được thêm ở 1 đường ghi, luôn `grep -rn`
+   TẤT CẢ các đường ghi khác tới cùng field/effect đó — bug #12 cũng là dạng này (áp dụng cho
+   cả 4 nơi gán `QuorumThreshold`, không chỉ đường mới thêm).
 
 ## 5. Cách build + chạy test cho auditor
 

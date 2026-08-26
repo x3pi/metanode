@@ -623,6 +623,55 @@ update. A real multi-validator Root Anchor devnet now reaches Healthy; nothing i
 needed to route around it any more, but this phase's own live run predates that fix and this
 paragraph is left as-written for the historical record.)**
 
+## Phase 0.10 — 2 real security gaps found on request ("kiểm tra lại kỹ luồng và bảo mật",
+## 2026-08-26), by re-applying this doc's own review method to Mục 7's new
+## `ProposalUpdateCommittee` code
+
+Asked to specifically re-check flow/security after the batch of Phase 1 fixes landed. Applied
+the same method that found every other bug in this document: for every safety mechanism, ask
+"is this actually wired to every real call path that needs it, or just the ones already
+reviewed?" Found 2 real, previously-undetected gaps, both fixed same day:
+
+1. **`QuorumThreshold` had no bounds validation anywhere it's set** — 4 write sites
+   (`BootstrapFoundingChains`, `ExecuteGovernanceProposal`'s `ProposalRegisterChain` and
+   `ProposalUpdateCommittee` cases, `epoch_sync.go`'s `ApplyCommitteeUpdate`).
+   `VerifyQuorumCertAgainstRegistry` treats it as the fraction of a committee's *total stake*
+   required to sign before a `QuorumCert` verifies — a nonzero value below 2/3 lets a cert
+   verify without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could
+   forge a "valid" quorum for that chain's `attestCommit()`/`vote()` from then on. **Found a
+   real pre-existing test with unsafe values already in it**
+   (`TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD` used 667/3334 basis points — ~6.7%/~33%
+   — nobody had noticed the security implication) — exactly the "test proves mechanical
+   correctness but not safety" pattern this whole document is full of. Fixed the test's values
+   (6667/6700) rather than weakening the new floor. Fix: `ValidateQuorumThreshold` (`pop.go`)
+   enforcing the same 2/3 floor already used everywhere else in this project
+   (`root_anchor.go`'s `BftQuorumThreshold`, `GovernanceEngine.QuorumThreshold`'s
+   `ceil(2N/3)`) — zero still means "unset, use the real stake-weighted 2/3 fallback."
+2. **`ProposalRegisterChain` accepted a non-empty committee with zero PoP verification** —
+   unlike `BootstrapFoundingChains` and `ProposalUpdateCommittee`, both of which correctly
+   require it via `ValidateCommittee`. A rogue-key attack surface on BLS aggregate signature
+   verification, identical to the one PoP exists to close everywhere else in this codebase.
+   Fixed: non-empty committees now go through `ValidateCommittee`. An **empty** committee is
+   still allowed unconditionally — a real, pre-existing, legitimate pattern (register routing
+   metadata, defer the real committee to a later `ProposalUpdateCommittee`) that
+   `VerifyQuorumCertAgainstRegistry` already makes safe on its own
+   (`ErrEmptyCommittee` fails closed until a committee exists), and an existing test
+   (`TestGatewayHandler_Governance_AssetRegistrationLifecycle`) legitimately depends on it —
+   confirmed via the full test suite before deciding not to make committees unconditionally
+   mandatory here.
+
+6 new regression tests in `pkg/cross_chain/gateway_test.go` (sub-BFT threshold rejected at all
+3 remaining write sites with registry-untouched assertions; unverified non-empty committee
+rejected; empty-committee-deferred-to-update still works end to end). `go build/vet/test`
+clean, zero regressions beyond the 1 pre-existing test whose own unsafe values needed fixing.
+
+**Both gaps require real Root Anchor governance quorum (≥2/3 of active chains + 72h timelock)
+to exploit** — same trust-model caveat already noted for `ProposalUpdateCommittee` in Mục 7 of
+`all_remaining_fixes_plan.md` — so this isn't a single-actor exploit, but it removed 2 real
+defense-in-depth gaps that a captured or colluding governance majority could otherwise have
+used to fully undermine a target chain's BFT security going forward. Both belong in P5 audit
+scope alongside the trust-model note already flagged there.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to
