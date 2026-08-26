@@ -7,12 +7,14 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 )
 
 // signGovernanceVote produces the (signerPubkeyBls, signature) pair a member of voterChainID's
@@ -360,4 +362,49 @@ func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
 	assert.Equal(t, 2, len(reg101.Committee))
 	assert.Equal(t, kpNew1.BytesPublicKey(), reg101.Committee[0].PubkeyBLS)
 	assert.Equal(t, kpNew2.BytesPublicKey(), reg101.Committee[1].PubkeyBLS)
+}
+
+// TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric is the decision test for
+// all_remaining_fixes_plan.md's Mục 2 ("propose() không có gate — xác nhận chủ ý hay thiếu
+// sót"). Decision: permissionless propose(), gated only at vote()/quorum, is intentional --
+// (a) it costs a real, non-refundable 0.1 native token fee per proposal with zero effect
+// unless real quorum later votes yes, a genuine economic disincentive against spam; (b) it is
+// what lets a brand-new chain self-nominate via ProposalRegisterChain without an existing
+// active chain sponsoring it on its behalf, consistent with how BootstrapFoundingChains'
+// genesis bootstrap already works. This test proves BOTH halves: an address with no relation
+// to any registered chain can propose successfully (permissionless holds), and
+// Proposals' unbounded growth (no TTL/cleanup exists, and none is added by this decision) is
+// made observable via metrics.GovernanceProposalCount instead of guessing at a rate-limit
+// design with no real production proposal-volume data behind it.
+func TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	// A totally unrelated address -- not a registered chain, not a committee member, not
+	// anyone with standing in ChainRegistry/ActiveChains -- exercising the permissionless half
+	// of the decision.
+	outsider := common.HexToAddress("0x9999888877776666555544443333222211110000")
+	proposeFee := big.NewInt(100_000_000_000_000_000)
+
+	pack := func(kind uint8, payload []byte, proposedAt uint64) []byte {
+		calldata, err := h.abi.Pack("propose", kind, payload, proposedAt)
+		require.NoError(t, err)
+		return marshalCallData(t, calldata)
+	}
+
+	rcp1, _, failed1 := h.HandleTransaction(context.Background(), cs, newTx(outsider, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, pack(0, []byte("candidate chain A"), 100)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
+	require.False(t, failed1, "an outsider address must be able to propose -- permissionless is intentional")
+	require.NotNil(t, rcp1)
+
+	rcp2, _, failed2 := h.HandleTransaction(context.Background(), cs, newTx(outsider, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, proposeFee, pack(0, []byte("candidate chain B"), 101)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
+	require.False(t, failed2)
+	require.NotNil(t, rcp2)
+
+	// GovernanceProposalCount is Set() (not Inc()) to the calling engine's own current
+	// Proposals map size each time propose() succeeds -- an absolute snapshot of THIS engine,
+	// not a running total across every engine/test in the process. This engine started empty
+	// and just recorded exactly 2 distinct proposals, so the metric must read exactly 2
+	// regardless of what any other test's engine set it to before or after.
+	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.GovernanceProposalCount), "GovernanceProposalCount must reflect the real, unbounded growth of Proposals")
 }

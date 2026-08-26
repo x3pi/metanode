@@ -672,6 +672,67 @@ defense-in-depth gaps that a captured or colluding governance majority could oth
 used to fully undermine a target chain's BFT security going forward. Both belong in P5 audit
 scope alongside the trust-model note already flagged there.
 
+## Phase 0.11 — Both remaining open design questions decided (asked to decide directly,
+## 2026-08-26), plus a real CI-breaking test found during final handover verification
+
+Asked to check the codebase/architecture once more for handover readiness, then explicitly
+told to decide the 2 design questions this document's own "ask, don't guess" rule had left
+open (`all_remaining_fixes_plan.md` Mục 1/2) rather than continue leaving them for a future
+architecture owner.
+
+**Decision 1 — epoch catch-up (Mục 1): `ProposalUpdateCommittee` (Phase 0.10) is the official
+answer.** No new cryptographic "skip-ahead" construction is needed: there is no way to prove
+continuity from signing keys that no longer exist (validators rotated away) — this is a
+fundamental limit of self-attestation, not a design gap. When self-continuity is impossible,
+external attestation is the only remaining path, and Root Anchor governance quorum (>=2/3 of
+active chains + 72h timelock) already IS that external attestation mechanism, same trust
+model as `BootstrapFoundingChains`/`ProposalRegisterChain`. Proved with a new test,
+`TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind`
+(`pkg/cross_chain/gateway_test.go`): chain 101 stuck at Epoch 5 with no QuorumCert available
+from the Epoch-5 committee (simulating lost keys) recovers to Epoch 500 via governance vote
+alone — `ApplyCommitteeUpdate`'s strict sequential-epoch path correctly still rejects this
+exact scenario (`ErrNonSequentialEpoch`), confirming the two mechanisms are complementary, not
+duplicative: automated self-continuity for the normal case, governance recovery for when that
+breaks. Operational alerting on `GatewayRegistryMonitor.DriftEpochs` (the original "option b")
+remains a real, valuable early-warning signal worth building later, but is no longer a
+condition for closing this item.
+
+**Decision 2 — propose() gating (Mục 2): permissionless, gated only at vote(), is intentional
+and stays unchanged.** Confirmed via 2 real reasons rather than just re-stating the status
+quo: (a) the 0.1-token non-refundable fee already makes pure spam economically pointless
+(burns the spammer's own money for zero effect without real quorum); (b) it's structurally
+required for a candidate chain to self-nominate via its own `ProposalRegisterChain` before it
+is an active chain at all — gating propose() to active-chains-only would make that impossible
+without an existing chain sponsoring every newcomer, an unnecessary intermediary this design
+correctly avoids. The one real residual concern -- `Proposals` has no TTL/cleanup and grows
+unbounded -- is a storage-hygiene question, not a fund-safety one, and per this document's own
+"measure before optimizing" precedent (`accountTreeRootAtBlock`, Phase 1 item 5) was not
+guessed at with a speculative rate-limit design. Instead, added a new metric,
+`master_gateway_governance_proposal_count` (`pkg/metrics/metrics.go`, updated in
+`gateway_handler.go`'s `"propose"` case), making the real growth observable in production.
+New test `TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric`
+(`gateway_governance_test.go`) proves both halves: a wallet address with zero relationship to
+any registered chain proposes successfully, and the metric reflects the real count.
+
+**Real finding along the way — CI has been silently failing on `dev`.** Full verification
+pass (checked out `dev` directly, not just the feature branch, and ran the exact CI command)
+found `pkg/config`'s `TestLoadGenesisData_RootAnchor` reading a hardcoded absolute path,
+`/home/abc/chain-n/metanode/deploy/systemd/root_anchor_data/genesis.json` — a gitignored,
+machine-local devnet artifact, not part of the repo. It only ever passed by accident on a
+machine that happened to have generated that exact file, including most of this session
+(until an earlier devnet cleanup removed it, which is what surfaced this). Confirmed via the
+GitHub API that `go-build-test` (`.github/workflows/go-ci.yml`, the actual gate for PRs into
+`dev`) genuinely reported `conclusion: failure` on the commit that merged PR #65 into `dev` —
+this was not hypothetical, it has been red on every fresh checkout (including CI's) for as
+long as this test existed, and PR #65 was merged despite it. Rebuilt as a real, hermetic,
+`t.TempDir()`-based fixture using the exact same real BLS pubkey value the original file had,
+preserving the actual regression coverage (`PublicKeyBls` hex parsing through
+`ToAccountState()` producing a real 48-byte BLS12-381 G1 pubkey) without depending on
+anything outside the test itself. Swept the rest of the test suite for the same
+hardcoded-absolute-path pattern (`grep -rln '"/home/abc'`) — no other instances found.
+`go test -count=1 ./...` (the exact CI command) now passes clean, run twice to rule out
+order-dependent flakiness.
+
 ## How to work (read once, applies to every phase below)
 
 - **Zero-Fork invariant.** Never let a background worker or async path write to

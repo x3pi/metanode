@@ -21,6 +21,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
@@ -1026,6 +1027,12 @@ func (h *GatewayHandler) handleWrite(
 		if err != nil {
 			return nil, nil, err
 		}
+		// propose() is deliberately permissionless (all_remaining_fixes_plan.md Mục 2: gated
+		// only at vote()/quorum, matching common bond-then-vote governance patterns and needed
+		// for a new chain to self-nominate via ProposalRegisterChain without an existing chain
+		// sponsoring it). Proposals has no TTL/cleanup, so surface its real size as a metric
+		// instead of guessing at a rate-limit design with no production data behind it.
+		metrics.GovernanceProposalCount.Set(float64(len(engine.Governance.Proposals)))
 		packed, packErr := method.Outputs.Pack(proposalID)
 		if packErr != nil {
 			return nil, nil, packErr
