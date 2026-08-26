@@ -313,6 +313,12 @@ func ApplyCommitteeUpdate(
 	if err := ValidateCommittee(update.NewCommittee); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidNewCommittee, err)
 	}
+	// Security fix: QuorumThreshold was applied with no bounds check — see
+	// ValidateQuorumThreshold's doc comment (pop.go) for why a nonzero value below the 2/3 BFT
+	// floor would let a minority of the new committee forge a "valid" QuorumCert afterward.
+	if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
+		return fmt.Errorf("chain %d: %w", update.SourceChainID, err)
+	}
 
 	reg.Epoch = update.NewEpoch
 	reg.Committee = update.NewCommittee

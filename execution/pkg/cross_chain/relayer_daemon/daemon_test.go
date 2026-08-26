@@ -245,3 +245,133 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 	_, err = daemon.RelayMessage(context.Background(), msg, commitRoot, epoch, cross_chain.MerkleProof{}, cross_chain.MerkleProof{})
 	assert.Error(t, err, "Duplicate relay of already processed message must be rejected by daemon")
 }
+
+func TestRelayerDaemon_MissingDestinationClient_ReturnsError(t *testing.T) {
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+
+	rootAnchorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0", "id": 1, "result": "0x0",
+		})
+	}))
+	defer rootAnchorSrv.Close()
+
+	// Empty ChainRPCURLs map
+	cfg := DaemonConfig{
+		RelayerKeyHex:     relayerKeyHex,
+		RootAnchorURLs:    []string{rootAnchorSrv.URL},
+		ChainRPCURLs:      map[uint64]string{},
+		PollInterval:      10 * time.Millisecond,
+		MaxPollIterations: 5,
+	}
+
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0x1234"),
+		SourceChainID: 101,
+		DestChainID:   999, // No client for 999
+	}
+
+	_, err = daemon.RelayMessage(context.Background(), msg, common.Hash{}, 1, cross_chain.MerkleProof{}, cross_chain.MerkleProof{})
+	assert.Error(t, err)
+}
+
+func TestRelayerDaemon_QuorumCertPollingTimeout(t *testing.T) {
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+
+	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	require.NoError(t, err)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{
+		PubkeyBLS: kpVal.PublicKey().Bytes(),
+		Stake:     1000,
+	}
+
+	// Server returns registry but ZERO attestation shares
+	rootAnchorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		switch req.Method {
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			dataHex, _ := callObj["data"].(string)
+			calldata, _ := hexutil.Decode(dataHex)
+
+			if len(calldata) >= 4 {
+				if calldata[0] == 0x9f || len(calldata) == 36 { // getChainRegistry
+					packed, _ := parsedABI.Methods["getChainRegistry"].Outputs.Pack(
+						true,
+						uint64(1),
+						[]struct {
+							PubkeyBLS    []byte   `json:"pubkeyBLS"`
+							Stake        *big.Int `json:"stake"`
+							PopSignature []byte   `json:"popSignature"`
+						}{{PubkeyBLS: validatorEntry.PubkeyBLS, Stake: big.NewInt(1000), PopSignature: []byte{}}},
+						uint64(6667),
+						common.Address{},
+						common.Hash{},
+						common.Hash{},
+						"",
+						uint64(1000),
+					)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"jsonrpc": "2.0", "id": req.ID, "result": hexutil.Encode(packed),
+					})
+					return
+				}
+				if calldata[0] == 0x82 || len(calldata) == 100 { // getCommitAttestationShares -> return 0 shares
+					packed, _ := parsedABI.Methods["getCommitAttestationShares"].Outputs.Pack([][]byte{}, [][]byte{})
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"jsonrpc": "2.0", "id": req.ID, "result": hexutil.Encode(packed),
+					})
+					return
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0", "id": req.ID, "result": "0x0",
+		})
+	}))
+	defer rootAnchorSrv.Close()
+
+	cfg := DaemonConfig{
+		RelayerKeyHex:     relayerKeyHex,
+		RootAnchorURLs:    []string{rootAnchorSrv.URL},
+		ChainRPCURLs:      map[uint64]string{202: rootAnchorSrv.URL},
+		PollInterval:      5 * time.Millisecond,
+		MaxPollIterations: 3, // fast timeout
+	}
+
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0x5555"),
+		SourceChainID: 101,
+		DestChainID:   202,
+	}
+
+	_, err = daemon.RelayMessage(context.Background(), msg, common.HexToHash("0x8888"), 1, cross_chain.MerkleProof{}, cross_chain.MerkleProof{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "QuorumCert")
+}

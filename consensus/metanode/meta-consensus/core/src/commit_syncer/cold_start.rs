@@ -154,7 +154,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let is_empty_network = input.quorum_commit == 0 && input.go_sync_completed;
 
         // Gate 1: Mathematical parity
-        let has_parity = input.lag == 0
+        //
+        // Loosened from lag==0 to lag<=1 (2026-08-25 — see
+        // note/cross_chain_production_readiness_plan.md Phase 0.7 / all_remaining_fixes_plan.md
+        // Mục 6): on a continuously-live cluster with no idle/quiescent point (e.g. a devnet
+        // timer-producing empty blocks forever), quorum_commit is a perpetually moving target —
+        // observed lag stuck at exactly 1 indefinitely (synced/local commit count advancing in
+        // lockstep with quorum_commit, always exactly one behind at the instant sampled), never
+        // landing on the exact lag==0 this gate required, livelocking the node in CatchingUp
+        // forever. This ONLY widens Gate 1, a liveness gate; Gate 5 (block_hash_verified, below)
+        // is the actual fork-safety gate and is completely unchanged — a node still cannot exit
+        // CatchingUp without its tip block hash being independently verified against peers.
+        // Validated: (a) live on a fresh devnet, log changed from permanent "lag > 0" to
+        // reaching Gate 5; (b) unit test `test_gate1_lag_tolerance_and_gate5_invariant`
+        // (commit_syncer/mod.rs) proves lag==1 exits only when block_hash_verified is true, lag==1
+        // with block_hash_verified==false still Holds (Gate 5 intact), and lag==2 still Holds
+        // (Gate 1 doesn't over-widen). Not yet stress-tested on a continuously-live cluster
+        // under real network load/latency (only a clean-genesis 4-validator run, where lag hit 0
+        // immediately and this widened path was never exercised) — worth doing before relying on
+        // this under sustained production load, but the decision logic itself is proven correct.
+        let has_parity = input.lag <= 1
             && (input.quorum_commit > 0 || is_empty_network)
             && input.quorum_commit >= input.highest_handled;
 
@@ -231,3 +250,5 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 }
+
+

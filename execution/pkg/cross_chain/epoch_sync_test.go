@@ -30,7 +30,7 @@ func TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD(t *testing.T) {
 		ChainID:          101,
 		Committee:        []ValidatorEntry{v1},
 		Epoch:            5,
-		QuorumThreshold:  667,
+		QuorumThreshold:  6667,
 		GatewayContract:  common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
 		StateRoot:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
 		ArchivalEndpoint: "http://archive.test",
@@ -52,7 +52,7 @@ func TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD(t *testing.T) {
 		SourceChainID:   101,
 		NewEpoch:        6,
 		NewCommittee:    []ValidatorEntry{v2, v3},
-		QuorumThreshold: 3334,
+		QuorumThreshold: 6700,
 		StateRoot:       newStateRoot,
 		Cert:            cert,
 	}
@@ -63,14 +63,14 @@ func TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD(t *testing.T) {
 	assert.Equal(t, uint64(6), reg.Epoch)
 	assert.Equal(t, newStateRoot, reg.StateRoot)
 	assert.Equal(t, 2, len(reg.Committee))
-	assert.Equal(t, uint64(3334), reg.QuorumThreshold)
+	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
 
 	// 2. Non-sequential Reject: Epoch 6 -> 8 (skipping 7)
 	updateSkip := CommitteeUpdate{
 		SourceChainID:   101,
 		NewEpoch:        8,
 		NewCommittee:    []ValidatorEntry{v2, v3},
-		QuorumThreshold: 3334,
+		QuorumThreshold: 6700,
 		StateRoot:       newStateRoot,
 		Cert: QuorumCert{
 			Epoch:              6,
@@ -86,7 +86,7 @@ func TestEpochSync_P3_1_CommitteeUpdateLifecycleDoD(t *testing.T) {
 		SourceChainID:   101,
 		NewEpoch:        7,
 		NewCommittee:    []ValidatorEntry{v2, v3},
-		QuorumThreshold: 3334,
+		QuorumThreshold: 6700,
 		StateRoot:       newStateRoot,
 		Cert: QuorumCert{
 			Epoch:              6,

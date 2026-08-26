@@ -319,6 +319,17 @@ type AllocationGrantPayload struct {
 	Amount  *big.Int `json:"amount"`
 }
 
+// UpdateCommitteePayload is the JSON payload for ProposalUpdateCommittee proposals.
+type UpdateCommitteePayload struct {
+	ChainID         uint64           `json:"chain_id"`
+	SourceChainID   uint64           `json:"source_chain_id,omitempty"`
+	NewEpoch        uint64           `json:"new_epoch"`
+	NewCommittee    []ValidatorEntry `json:"new_committee"`
+	QuorumThreshold uint64           `json:"quorum_threshold,omitempty"`
+	StateRoot       common.Hash      `json:"state_root,omitempty"`
+	AccountTreeRoot common.Hash      `json:"account_tree_root,omitempty"`
+}
+
 // GovernanceProposal tracks on-chain voting across active chains (Section 11.6 & 1.3 #3).
 type GovernanceProposal struct {
 	ProposalID  common.Hash            `json:"proposal_id"`

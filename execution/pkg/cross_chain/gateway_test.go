@@ -516,3 +516,276 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	require.NoError(t, err4)
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }
+
+func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	popSig2 := PopSign(kp2.PrivateKey(), kp2.PublicKey())
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: popSig2.Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 6700,
+		StateRoot:       common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+		AccountTreeRoot: common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Timelock guard check
+	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+
+	// Execute after timelock
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	// Verify updated ChainRegistry state
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(2), reg.Epoch)
+	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
+	assert.Equal(t, payloadObj.StateRoot, reg.StateRoot)
+	assert.Equal(t, payloadObj.AccountTreeRoot, reg.AccountTreeRoot)
+	assert.Equal(t, 2, len(reg.Committee))
+	assert.Equal(t, kp1.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
+	assert.Equal(t, kp2.BytesPublicKey(), reg.Committee[1].PubkeyBLS)
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kp2 := bls.GenerateKeyPair()
+	badPopSig := make([]byte, 96) // Zeroed / invalid PoP signature
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: badPopSig},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to invalid PoP
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ProposalUpdateCommittee")
+
+	// Ensure registry was NOT modified
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(5), reg.Epoch)
+	assert.Equal(t, 1, len(reg.Committee))
+}
+
+func TestGateway_ProposalUpdateCommittee_RejectsUnknownChain(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+	}
+
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      999, // Unknown chain
+		NewEpoch:     2,
+		NewCommittee: newCommittee,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	// Execution must fail due to unknown chain
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrUnknownChain)
+}
+
+// TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold is the regression test for a
+// real gap found reviewing this same feature: QuorumThreshold was applied with no bounds check
+// at all. VerifyQuorumCertAgainstRegistry treats it as the fraction of a committee's TOTAL STAKE
+// required to sign before a QuorumCert verifies — a nonzero value below 2/3 lets a cert verify
+// without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could forge a
+// "valid" quorum for that chain's attestCommit()/vote() from then on.
+func TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold(t *testing.T) {
+	engine, kp1 := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newCommittee := []ValidatorEntry{
+		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
+	}
+
+	// 3334 basis points = 33.34% -- well under the 2/3 BFT floor (6667).
+	payloadObj := UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 3334,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+
+	// Registry must be untouched -- still the original committee/threshold from setupTestGatewayEngine.
+	reg := engine.ChainRegistry[101]
+	assert.Equal(t, uint64(5), reg.Epoch)
+	assert.Equal(t, uint64(6667), reg.QuorumThreshold)
+}
+
+// TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee is the regression test
+// for a real gap found reviewing ProposalUpdateCommittee: unlike BootstrapFoundingChains and
+// ProposalUpdateCommittee (both of which verify PoP for every committee member), the older
+// ProposalRegisterChain case accepted a NON-EMPTY committee wholesale with no PoP check at all
+// -- a rogue-key attack surface identical to the one PoP exists to close everywhere else in this
+// codebase. An EMPTY committee (registering routing metadata only, deferred committee via a
+// later ProposalUpdateCommittee) is a real, pre-existing usage pattern and must still work.
+func TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	kpRogue := bls.GenerateKeyPair()
+	forgedCommittee := []ValidatorEntry{
+		{PubkeyBLS: kpRogue.BytesPublicKey(), Stake: 10000, PopSignature: make([]byte, 96)}, // zeroed/forged PoP
+	}
+
+	newChainReg := ChainRegistry{
+		ChainID:   999,
+		Epoch:     1,
+		Committee: forgedCommittee,
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrPopVerifyFailed)
+
+	_, exists := engine.ChainRegistry[999]
+	assert.False(t, exists, "chain with an unverified committee must not be registered")
+}
+
+// TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate proves the legitimate
+// pattern the fix above must not break: registering routing metadata with no committee yet,
+// verified safe because VerifyQuorumCertAgainstRegistry fails closed (ErrEmptyCommittee) for
+// that chain until a real committee is set via ProposalUpdateCommittee.
+func TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newChainReg := ChainRegistry{
+		ChainID:          104,
+		Epoch:            1,
+		QuorumThreshold:  6667,
+		ArchivalEndpoint: "https://rpc.chain104.test",
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+
+	reg, exists := engine.ChainRegistry[104]
+	require.True(t, exists)
+	assert.Empty(t, reg.Committee)
+}
+
+// TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold mirrors the UpdateCommittee
+// version above for the registration path.
+func TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureGovernance()
+
+	newChainReg := ChainRegistry{
+		ChainID:         104,
+		Epoch:           1,
+		QuorumThreshold: 100, // 1% -- far under the 2/3 BFT floor
+	}
+	payload, err := json.Marshal(newChainReg)
+	require.NoError(t, err)
+
+	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	require.NoError(t, err)
+
+	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+
+	_, exists := engine.ChainRegistry[104]
+	assert.False(t, exists)
+}
+
+// TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold covers the same gap at genesis time.
+func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
+	kp := bls.GenerateKeyPair()
+	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
+
+	makeEntry := func(chainID uint64, threshold uint64) []byte {
+		reg := ChainRegistry{
+			ChainID:         chainID,
+			Committee:       []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: threshold,
+		}
+		b, _ := json.Marshal(reg)
+		return b
+	}
+
+	ledger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
+	require.NoError(t, err)
+	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, ledger)
+
+	payloads := [][]byte{
+		makeEntry(101, 6667),
+		makeEntry(102, 6667),
+		makeEntry(103, 6667),
+		makeEntry(104, 1000), // 10% -- far under the 2/3 BFT floor
+	}
+	err = engine.BootstrapFoundingChains(payloads)
+	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
+	assert.Empty(t, engine.ChainRegistry, "no chain should be registered if any entry fails validation")
+}

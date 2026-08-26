@@ -309,6 +309,16 @@ front-run gap".
       -poll-interval-ms 500
   ```
 
+### 5.5 Quản lý Khoá riêng RelayerDaemon & Submitter cho Production (KMS/HSM vs Plain Config)
+
+- **Hiện trạng:** `RelayerDaemon` (`DaemonConfig.RelayerKeyHex`) và `CommitteeAttestationWorker` (`CrossChainConfig.RootAnchorSubmitterPrivateKeyHex`) đọc private key secp256k1 dạng plain hex string qua file config/biến môi trường (`RELAYER_KEY`, `ROOT_ANCHOR_SUBMITTER_KEY`).
+- **Mức độ rủi ro & Mô hình vận hành:**
+  - **RelayerDaemon là permissionless:** Khoá của relayer chỉ dùng để trả phí gas khi submit giao dịch `verifyAndExecute` lên destination chain và nhận tip qua `withdrawRelayerTip`. Nếu khoá relayer bị lộ, kẻ tấn công **chỉ rút được số dư tip và gas của tài khoản đó**, KHÔNG thể giả mạo chữ ký BLS của uỷ ban hay rút trộm tài sản của người dùng (vì chữ ký uỷ ban và bằng chứng Merkle được xác thực độc lập bởi `GatewayPrecompile`).
+  - **Submitter của CommitteeAttestationWorker:** Khoá này dùng để gửi `submitCommitteeAttestation` lên Root Anchor. Tương tự, nếu bị lộ thì chỉ mất gas của tài khoản submitter — chữ ký BLS share đính kèm bắt buộc phải khớp với `PublicKeyBls` của validator đã đăng ký trên `ChainRegistry`.
+- **Khuyến nghị cho Mainnet:**
+  - **Giai đoạn Testnet / Early Mainnet (giá trị custody nhỏ):** Chấp nhận lưu khoá qua secret manager (HashiCorp Vault, AWS Secrets Manager, Kubernetes Secrets) và inject qua biến môi trường dạng ephemeral runtime.
+  - **Giai đoạn Mainnet quy mô lớn (giá trị custody cao):** Khuyến nghị nâng cấp module submitter/relayer sang giao diện Signer abstraction hỗ trợ HSM/KMS (AWS KMS, GCP Cloud KMS, YubiHSM) qua PKCS#11 hoặc RPC signer tách rời (như HashiCorp Vault Transit Engine), không bao giờ giữ private key nguyên bản trong bộ nhớ tiến trình.
+
 ---
 
 ## 6. Bài học vận hành thật (đã gặp, không phải lý thuyết)

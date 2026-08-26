@@ -282,3 +282,82 @@ func TestGatewayHandler_Governance_AssetRegistrationLifecycle(t *testing.T) {
 	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, fakeRegCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 122)
 	assert.True(t, failed, "Fake proposal asset registration must revert")
 }
+
+func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
+		102: {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
+	}
+	engine.Governance = cross_chain.NewGovernanceEngineWithTimelock([]uint64{101, 102}, 10) // 10s timelock
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	kpNew1 := bls.GenerateKeyPair()
+	kpNew2 := bls.GenerateKeyPair()
+	popSigNew1 := cross_chain.PopSign(kpNew1.PrivateKey(), kpNew1.PublicKey())
+	popSigNew2 := cross_chain.PopSign(kpNew2.PrivateKey(), kpNew2.PublicKey())
+
+	newCommittee := []cross_chain.ValidatorEntry{
+		{PubkeyBLS: kpNew1.BytesPublicKey(), Stake: 5000, PopSignature: popSigNew1.Bytes()},
+		{PubkeyBLS: kpNew2.BytesPublicKey(), Stake: 5000, PopSignature: popSigNew2.Bytes()},
+	}
+
+	payloadObj := cross_chain.UpdateCommitteePayload{
+		ChainID:         101,
+		NewEpoch:        2,
+		NewCommittee:    newCommittee,
+		QuorumThreshold: 6700,
+	}
+	payload, err := json.Marshal(payloadObj)
+	require.NoError(t, err)
+
+	// Step 1: Propose UpdateCommittee
+	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalUpdateCommittee), payload, uint64(100))
+	require.NoError(t, err)
+	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
+	require.False(t, failed)
+	out, err := h.abi.Unpack("propose", rcp.Return())
+	require.NoError(t, err)
+	proposalID := common.Hash(out[0].([32]byte))
+
+	// Step 2: Vote from 101 and 102
+	pub101, sig101 := signGovernanceVote(kp101, proposalID, 101)
+	vote1, _ := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), pub101, sig101)
+	_, _, failVote1 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
+	require.False(t, failVote1)
+
+	pub102, sig102 := signGovernanceVote(kp102, proposalID, 102)
+	vote2, _ := h.abi.Pack("vote", proposalID, big.NewInt(102), uint64(102), pub102, sig102)
+	_, _, failVote2 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
+	require.False(t, failVote2)
+
+	// Step 3: Premature execution before timelock -> REJECTED
+	execPrematureCalldata, _ := h.abi.Pack("executeProposal", proposalID, uint64(105))
+	_, _, failedPremature := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execPrematureCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 105)
+	assert.True(t, failedPremature, "Premature execution must revert")
+
+	// Step 4: Execute proposal after timelock (t=120)
+	execCalldata, _ := h.abi.Pack("executeProposal", proposalID, uint64(120))
+	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
+	require.False(t, failed)
+
+	// Step 5: Verify updated ChainRegistry state
+	engineAfter, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	reg101 := engineAfter.ChainRegistry[101]
+	assert.Equal(t, uint64(2), reg101.Epoch)
+	assert.Equal(t, uint64(6700), reg101.QuorumThreshold)
+	assert.Equal(t, 2, len(reg101.Committee))
+	assert.Equal(t, kpNew1.BytesPublicKey(), reg101.Committee[0].PubkeyBLS)
+	assert.Equal(t, kpNew2.BytesPublicKey(), reg101.Committee[1].PubkeyBLS)
+}

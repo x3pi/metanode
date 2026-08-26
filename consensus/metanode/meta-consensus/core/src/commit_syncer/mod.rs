@@ -2617,6 +2617,7 @@ mod tests {
     use consensus_types::block::{BlockRef, Round};
     use tokio::sync::mpsc;
     use parking_lot::RwLock;
+    use super::{PhaseStateInput, PhaseTransitionDecision};
 
     use crate::{
         block::{TestBlock, VerifiedBlock},
@@ -2852,6 +2853,47 @@ mod tests {
                 CommitRange::new(31..=35),
             ])
         );
+    }
+
+    #[test]
+    fn test_gate1_lag_tolerance_and_gate5_invariant() {
+        use crate::coordination_hub::NodeConsensusPhase;
+
+        let sample_input = |lag: u32, block_hash_verified: bool| PhaseStateInput {
+            current_phase: NodeConsensusPhase::CatchingUp,
+            lag,
+            quorum_commit: 10,
+            highest_handled: 9,
+            synced_commit_index: 10 - lag,
+            local_commit: 10 - lag,
+            network_synced_commits: 5,
+            startup_sync_active: true,
+            go_sync_completed: true,
+            schedule_recovery_pending: false,
+            recovery_barrier_can_propose: true,
+            recovery_barrier_phase: "Ready".to_string(),
+            block_hash_verified,
+        };
+
+        // Case 1: lag == 0, block_hash_verified == true -> Healthy
+        let input_lag0 = sample_input(0, true);
+        let dec0 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag0);
+        assert!(matches!(dec0, PhaseTransitionDecision::TransitionAndClearStartup { to: NodeConsensusPhase::Healthy }));
+
+        // Case 2: lag == 1 (moving-target live cluster), block_hash_verified == true -> Healthy
+        let input_lag1 = sample_input(1, true);
+        let dec1 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag1);
+        assert!(matches!(dec1, PhaseTransitionDecision::TransitionAndClearStartup { to: NodeConsensusPhase::Healthy }));
+
+        // Case 3: lag == 1, but block_hash_verified == false -> Gate 5 MUST hold (Zero-Fork Invariant)
+        let input_lag1_unverified = sample_input(1, false);
+        let dec1_unverified = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag1_unverified);
+        assert!(matches!(dec1_unverified, PhaseTransitionDecision::Hold { reason } if reason.contains("block hash not verified")));
+
+        // Case 4: lag == 2 -> Gate 1 MUST hold (lag > 1)
+        let input_lag2 = sample_input(2, true);
+        let dec2 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag2);
+        assert!(matches!(dec2, PhaseTransitionDecision::Hold { reason } if reason.contains("parity not reached")));
     }
 }
 pub mod fetcher;
