@@ -105,7 +105,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		metaKey := []byte("__meta__:" + c.namespace + ":start_block")
 		blockBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(blockBytes, blockNumber)
-		if err := batch.Set(metaKey, blockBytes, pebble.Sync); err != nil {
+		if err := batch.Set(metaKey, blockBytes, pebble.NoSync); err != nil {
 			c.startBlock.Store(0) // Reset on failure
 			return fmt.Errorf("failed to persist startBlock: %w", err)
 		}
@@ -131,7 +131,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 			val = []byte("DEL")
 		}
 
-		if err := batch.Set(key, val, pebble.Sync); err != nil {
+		if err := batch.Set(key, val, pebble.NoSync); err != nil {
 			return fmt.Errorf("failed to set changelog key: %w", err)
 		}
 
@@ -154,7 +154,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 			if len(oldVal) == 0 {
 				oldVal = []byte("DEL")
 			}
-			if err := batch.Set(oldKey, oldVal, pebble.Sync); err != nil {
+			if err := batch.Set(oldKey, oldVal, pebble.NoSync); err != nil {
 				return fmt.Errorf("failed to set genesis changelog key: %w", err)
 			}
 		}
@@ -163,9 +163,8 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		c.hasEntryCache.Store(addrStr, true)
 	}
 
-	// Use pebble.Sync instead of NoSync to ensure durability of historical changelogs,
-	// protecting against historical state loss during sudden node shutdowns/kills.
-	if err := batch.Commit(pebble.Sync); err != nil {
+	// Use pebble.NoSync instead of Sync to remove blocking fsyncs during block execution.
+	if err := batch.Commit(pebble.NoSync); err != nil {
 		return fmt.Errorf("failed to commit changelog batch: %w", err)
 	}
 
