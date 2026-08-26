@@ -26,10 +26,11 @@ này chỉ trả lời "hiện đang ở đâu".*
 | Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer) | Testnet nội bộ, diễn tập ceremony, demo, chạy thật nhiều tiến trình 1 máy (đã kiểm chứng sống) | **Giá trị thật trên mainnet** cho tới khi qua P5 (audit độc lập) + T2 (chạy thật nhiều máy vật lý) |
 
 **Trạng thái code (quan trọng cho bất kỳ ai tiếp quản việc deploy):** toàn bộ các lỗ hổng
-CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống — nhưng code này
-**hiện nằm trên PR #65** (`test/custom-asset-real-token-coverage` → `dev`), **chưa merge**.
-Trước khi triển khai bất cứ thứ gì thật, xác nhận PR #65 (hoặc PR kế tiếp nếu #65 đã đóng) đã
-merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây chỉ vì tài liệu này nói đã vá.
+CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống, **và đã merge vào
+`dev`** (PR #63, #64, #65, #66 — xác nhận lần cuối 2026-08-26: `dev` build/vet/test sạch
+toàn bộ, `git diff` giữa `dev` và nhánh làm việc lúc merge = rỗng). Vẫn nên tự xác nhận lại
+bằng `git log dev --oneline` trước khi triển khai — tài liệu này có thể lỗi thời hơn `dev`
+nếu có commit mới sau lần cập nhật cuối, đừng chỉ tin dòng chữ này.
 
 **Đã vá + xác nhận sống (không còn là rủi ro mở):**
 - Lớp xác minh mật mã (BLS/Merkle/anti-fraud) đã nối thật vào số dư thật cho cả native coin
@@ -77,8 +78,8 @@ merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây
   tải thật cho Gate 1 trên cụm sống thay vì chỉ unit test).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
-dùng (sau khi PR #65 merge), cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị
-thật** — việc cần làm tiếp theo là lên kế hoạch cho P5 + T2, không phải chạy thêm script.
+dùng, cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị thật** — việc cần làm
+tiếp theo là lên kế hoạch cho P5 + T2, không phải chạy thêm script.
 
 ---
 
@@ -389,25 +390,24 @@ front-run gap".
 ## 9. Bàn giao triển khai (đọc nếu bạn mới tiếp quản việc này)
 
 **Trạng thái code tại thời điểm bàn giao (2026-08-26):**
-- Toàn bộ fix mô tả ở mục 0 nằm trên PR #65 (`test/custom-asset-real-token-coverage` →
-  `dev`), **chưa merge**. `dev` hiện chỉ có phần vá đầu tiên (PR #64, `msg.sender`/`SetCode`)
-  — mọi thứ sau đó (SupplyLedger, bypass-timelock, front-run genesis, Layer C,
-  `ProposalUpdateCommittee`, sàn `QuorumThreshold`, PoP cho `ProposalRegisterChain`) **chưa ở
-  trong `dev`** cho tới khi PR đó (hoặc PR kế tiếp nếu nó đã đóng) được merge.
-- **Việc đầu tiên phải làm:** kiểm tra trạng thái PR đó trên GitHub, đảm bảo CI xanh, merge
-  vào `dev` trước khi tin bất kỳ dòng nào ở mục 0 phía trên là đã áp dụng cho môi trường thật.
-- Không có gì đang chạy dở/hỏng — `go build/vet/test` và `cargo build/test` đều sạch tại thời
-  điểm bàn giao, không có regression nào chưa xử lý.
+- Toàn bộ fix mô tả ở mục 0 **đã merge vào `dev`** (PR #63, #64, #65, #66). Xác nhận lần cuối
+  cùng ngày: `dev` build/vet/test sạch toàn bộ (`go build/vet/test ./...` từ `execution/`,
+  `cargo build --release` từ `consensus/metanode/`), gofmt sạch trên mọi file đã sửa trong
+  các PR trên (còn 1 số file khác trong repo có gofmt drift từ trước, không liên quan, không
+  phải regression mới).
+- **Việc đầu tiên nên làm khi tiếp quản:** chạy `git log dev --oneline -5` để tự xác nhận
+  trạng thái mới nhất — tài liệu này có thể lỗi thời hơn `dev` nếu có commit mới sau lần cập
+  nhật cuối ghi ở đầu mục này, đừng chỉ tin dòng chữ này.
+- Không có gì đang chạy dở/hỏng tại thời điểm bàn giao.
 
 **Việc tiếp theo, theo đúng thứ tự ưu tiên:**
-1. Merge PR (xem trên).
-2. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
+1. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
    giá trị thật (dừng lại lên kế hoạch cho 2 điều kiện chặn ở mục 0 — P5 và T2 — trước khi
    chạy thêm bất kỳ script nào).
-3. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
+2. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
    `note/external_security_audit_scope_p5.md` làm tài liệu bàn giao cho họ), song song chuẩn
    bị hạ tầng nhiều máy vật lý/VM độc lập cho T2 (không phải devnet 1 máy chia sẻ).
-4. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
+3. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
    `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
    từng việc kèm file/hàm chính xác, việc nào cần hỏi trước khi làm (đừng để agent tự đoán 2
    quyết định thiết kế còn treo), việc nào an toàn để tự làm luôn.
