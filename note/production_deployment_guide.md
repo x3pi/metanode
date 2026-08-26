@@ -165,9 +165,12 @@ Tài liệu thiết kế đầy đủ: `note/cross_chain_root_anchor_architectur
 
 ## 2. Yêu cầu hạ tầng
 
-- **Build**: Go ≥ phiên bản trong `execution/go.mod`, Rust toolchain (`consensus/metanode`),
-  cả 2 build qua CGo FFI — dùng `consensus/metanode/scripts/build_check.sh` (kiểm tra cả 2,
-  dùng bởi mọi script `setup_*.sh` trong `deploy/systemd/`).
+- **Build & Công cụ**: 
+  - Go ≥ phiên bản trong `execution/go.mod`, Rust toolchain (`consensus/metanode`), cả 2 build qua CGo FFI — dùng `consensus/metanode/scripts/build_check.sh` (kiểm tra cả 2).
+  - Python 3 và các thư viện hỗ trợ để chạy script sinh genesis/keys:
+    ```bash
+    pip3 install web3 eth-account eth-keys --break-system-packages
+    ```
 - **Máy chủ**: mỗi node cần đủ CPU/RAM cho cả execution (Go) + consensus (Rust) + EVM
   worker pool song song. Tối thiểu để rehearsal: 1 máy nhiều core. Cho production nhiều
   máy: xem mục 4 (Ansible) — mỗi node 1 máy/VM riêng.
