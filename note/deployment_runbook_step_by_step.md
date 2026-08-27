@@ -4,9 +4,8 @@ Tài liệu này khác `note/production_deployment_guide.md` ở chỗ: tài li�
 thống đang ở đâu, cái gì sẵn sàng, cái gì chưa" (bối cảnh, cảnh báo, kiến trúc); tài liệu
 **này** là **sổ tay thao tác** — từng lệnh cụ thể, theo đúng thứ tự, kèm **cách xác nhận
 bước đó đã THÀNH CÔNG** trước khi làm bước tiếp theo. Đọc `production_deployment_guide.md`
-mục 0 trước nếu chưa đọc — **đừng tin theo số PR/tên nhánh** (đã có 3 lần 1 PR hiện "merged"
-trên GitHub nhưng vài commit cuối bị rớt khỏi `dev` — xem cảnh báo squash-merge ở đầu mục 0
-của tài liệu đó); luôn xác nhận bằng grep cụ thể như Phần 0.2/0.3 dưới đây.
+mục 0 trước nếu chưa đọc — luôn tự xác nhận code đang chạy bằng grep cụ thể (Phần 0.2/0.3
+dưới đây), đừng chỉ tin tên nhánh/commit trông có vẻ đúng.
 
 Quy ước xuyên suốt tài liệu này: mỗi bước có khối **"✅ Xác nhận thành công"** — nếu kết quả
 thực tế không khớp, **dừng lại, không làm bước tiếp theo**, xem mục "Xử lý sự cố" (Phần E)
@@ -35,8 +34,7 @@ git branch --show-current
 ```
 
 **✅ Xác nhận thành công:** code có fix bug treo chain nghiêm trọng nhất. Đừng tin theo tên
-nhánh hay số PR (đã có 3 lần "merged" trên GitHub mà commit thật vẫn thiếu — xem cảnh báo
-squash-merge, `production_deployment_guide.md` mục 0) — cách kiểm tra chắc chắn nhất:
+nhánh — cách kiểm tra chắc chắn nhất:
 
 ```bash
 grep -c "TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce" \
@@ -113,8 +111,7 @@ done
 Cả 4 lệnh `curl` phải trả JSON hợp lệ. **Lỗi thật đã gặp:** script tự sinh (bên trong
 `setup_4_private_chains.sh`) từng gọi nhầm tên file khởi động không tồn tại
 (`start_nodes.sh` thay vì `start_single_chain.sh`) — nếu `pgrep` ra ít hơn 8, kiểm tra
-`private_chains_data/chain_XXX/node.log` xem có dòng `No such file or directory` không (đã
-vá ở PR #73, nhưng nếu code cũ hơn vẫn có thể gặp).
+`private_chains_data/chain_XXX/node.log` xem có dòng `No such file or directory` không.
 
 ### A3. Đăng ký 4 chain — cả trên Root Anchor lẫn trên từng private chain
 
@@ -124,14 +121,14 @@ bash register_private_chains_t2.sh
 
 **✅ Xác nhận thành công:** output phải có đúng **5 dòng** `✅ bootstrapFoundingChains
 succeeded on ...` (Root Anchor + chain 101 + 102 + 103 + 104 — **không phải chỉ 1 dòng**).
-Nếu chỉ thấy dòng cho Root Anchor mà thiếu 4 dòng còn lại, đây là dấu hiệu chưa có fix
-`-target-rpcs` (PR #73) — `attestCommit()` giữa 2 private chain sau này sẽ luôn revert với
+Nếu chỉ thấy dòng cho Root Anchor mà thiếu 4 dòng còn lại, đây là dấu hiệu thiếu cờ
+`-target-rpcs` — `attestCommit()` giữa 2 private chain sau này sẽ luôn revert với
 `"unknown source chain ID"`.
 
 Xác nhận sâu hơn (tuỳ chọn nhưng khuyến nghị lần đầu triển khai): mỗi chain phải thấy ĐÚNG
 committee của CHÍNH NÓ, không phải của chain khác — dấu hiệu của bug `config.LoadConfig`
-singleton (đã vá PR #73) là mọi chain đều báo cùng 1 pubkey (của chain đầu tiên trong danh
-sách). Cách kiểm tra: gọi view method `getChainRegistry(chainId)` qua `eth_call` tới từng RPC
+singleton là mọi chain đều báo cùng 1 pubkey (của chain đầu tiên trong danh sách). Cách kiểm
+tra: gọi view method `getChainRegistry(chainId)` qua `eth_call` tới từng RPC
 private chain cho cả 4 `chainId`, so sánh trường `committeePubkeys` — phải KHÁC NHAU cho mỗi
 `chainId`.
 
@@ -168,13 +165,13 @@ Quy trình đầy đủ (propose → vote ≥2/3 chain đã đăng ký → chờ
 outbound → chờ relayer tự relay → kiểm tra số dư) cần viết một script Go ngắn gọi ABI trực
 tiếp — không có sẵn dưới dạng 1 lệnh CLI đơn (đây là việc nên làm: đóng gói bài test này
 thành 1 tool CLI thật, xem mục "Việc nên làm tiếp theo" cuối tài liệu). Các bước ABI chính
-xác (tên hàm, tham số, cách ký) đã được xác nhận chạy đúng và mô tả chi tiết trong lịch sử
-PR #73 (`ProposalAllocateSupply`, `propose`/`vote`/`executeProposal`, rồi `outbound`).
+xác (tên hàm, tham số, cách ký: `ProposalAllocateSupply`, `propose`/`vote`/`executeProposal`,
+rồi `outbound`) đã được xác nhận chạy đúng trên thực tế.
 
 **✅ Xác nhận thành công (nếu chạy bài test):** số dư `eth_getBalance` của địa chỉ nhận trên
 chain đích **tăng đúng bằng giá trị đã gửi** ở `outbound()` — xác nhận bằng 2 lần gọi
-`eth_getBalance` (trước và sau), không chỉ tin log "relayed thành công" (log đó, trước PR
-#73, từng báo "relayed" ngay cả khi `claimMessage` thất bại thầm lặng phía sau).
+`eth_getBalance` (trước và sau), không chỉ tin log "relayed thành công" (log này từng có lúc
+báo "relayed" ngay cả khi `claimMessage` thất bại thầm lặng phía sau).
 
 ### A6. Dừng hệ thống
 

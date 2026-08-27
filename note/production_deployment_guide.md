@@ -15,20 +15,13 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 
 ## 0. Tóm tắt điều hành (đọc trước)
 
-*Cập nhật lần cuối: 2026-08-27 (rà lại cấu trúc/cấu hình deploy + biến bảo mật). Đây là bản
-trạng thái hiện tại — không phải nhật ký theo thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi
-nào, PR nào) nằm ở `note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết
-"vì sao", còn tài liệu này chỉ trả lời "hiện đang ở đâu".*
+*Cập nhật lần cuối: 2026-08-27. Đây là bản trạng thái hiện tại của `dev` — không phải nhật ký
+theo thời gian. Lịch sử phát triển đầy đủ (ai tìm ra gì, khi nào) nằm ở
+`note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết "vì sao", còn tài liệu
+này chỉ trả lời "hiện đang ở đâu, cần làm gì".*
 
-**⚠️ Bài học rút ra (đừng lặp lại): đừng tin số PR, hãy tự xác nhận bằng grep.** Tài liệu này
-từng ghi "PR #73 chưa merge" nhiều ngày sau khi PR #73 ĐÃ được squash-merge — nhưng
-squash-merge trên GitHub chỉ chụp lại đúng trạng thái branch tại THỜI ĐIỂM bấm merge; nếu có
-commit nào được push lên cùng branch đó ngay trước/trong lúc merge, commit đó bị rớt khỏi
-`dev` một cách ÂM THẦM dù PR vẫn hiện `merged: true`. Việc này đã xảy ra **3 lần** trong dự án
-(PR #70; PR #73 → phải phục hồi bằng PR #74; PR #76 → phải phục hồi bằng PR #77) — mỗi lần chỉ
-phát hiện được nhờ tự `git show origin/dev:<path> | grep <thứ vừa thêm>` chứ không phải tin
-trạng thái "merged" trên GitHub. **Luôn tự kiểm tra bằng cách chạy đúng lệnh grep ở mỗi mục
-checklist (mục 7) trên `dev` thật, đừng suy luận từ số PR.**
+**Trước khi tin bất kỳ dòng "đã vá" nào dưới đây: tự xác nhận trên đúng bản code bạn sắp
+deploy**, đừng chỉ tin tài liệu — mỗi mục ở checklist (mục 7) có kèm 1 lệnh kiểm tra cụ thể.
 
 | Thành phần | Sẵn sàng cho | Chưa sẵn sàng cho |
 | :--- | :--- | :--- |
@@ -67,7 +60,7 @@ CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận c
 - `ProposalRegisterChain` từng nhận 1 uỷ ban (committee) không rỗng mà không verify PoP (lỗ
   hổng rogue-key) — khác với `BootstrapFoundingChains`/`ProposalUpdateCommittee`, cả 2 đều đã
   verify đúng. Đã vá: bắt buộc verify khi uỷ ban không rỗng.
-- **🔴 [NGHIÊM TRỌNG NHẤT, PR #73] Giao dịch barrier (gateway/validator contract) không bao
+- **🔴 [NGHIÊM TRỌNG NHẤT] Giao dịch barrier (gateway/validator contract) không bao
   giờ tăng nonce người gửi** — phát hiện qua chạy sống P4: `HandleSuccessTransaction`/
   `HandleRevertedTransaction` gọi `ExecuteNonceOnly` để tăng nonce, nhưng hàm này CỐ Ý bỏ qua
   chính địa chỉ người gửi (giả định nonce "đã được tăng từ trước" — đúng với luồng EVM song
@@ -78,24 +71,24 @@ CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận c
   của CHAIN ĐÓ bị treo vĩnh viễn** (không riêng gì giao dịch bị kẹt), xác nhận sống: block
   height đứng yên nhiều phút trong khi consensus Rust bên dưới vẫn commit bình thường. Đây là
   bug ảnh hưởng RẤT RỘNG (bất kỳ tài khoản nào gửi ≥2 giao dịch gateway liên tiếp nhanh, không
-  riêng relayer) — nếu deploy từ `dev` mà chưa có PR #73, **tuyệt đối không cho phép bất kỳ tài
-  khoản nào gửi 2 giao dịch tới `GATEWAY_CONTRACT_ADDRESS`/`VALIDATOR_CONTRACT_ADDRESS` liên
-  tiếp** cho tới khi verify đã merge fix này. Có test hồi quy
+  riêng relayer) — **tuyệt đối không cho phép bất kỳ tài khoản nào gửi 2 giao dịch tới
+  `GATEWAY_CONTRACT_ADDRESS`/`VALIDATOR_CONTRACT_ADDRESS` liên tiếp** cho tới khi xác nhận code
+  đang chạy đã có fix này (mục 7). Có test hồi quy
   (`TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce`) xác nhận fail nếu
   thiếu fix, pass nếu có.
-- **[PR #73] `register_chains` dùng `config.LoadConfig()` trong vòng lặp nhiều lần** —
+- **`register_chains` dùng `config.LoadConfig()` trong vòng lặp nhiều lần** —
   `LoadConfig` cache qua `sync.Once` toàn tiến trình, nên gọi lần 2 trở đi âm thầm trả về config
   của LẦN GỌI ĐẦU TIÊN bất kể đường dẫn truyền vào. Hậu quả: mọi chain đăng ký sau chain đầu
   tiên trong danh sách `--chains` đều bị gán NHẦM committee/BLS pubkey của chain đầu tiên —
   khiến chain đó không bao giờ tự nhận ra mình là thành viên uỷ ban của chính nó. Đã vá: đọc +
   parse trực tiếp từng file config, không qua singleton.
-- **[PR #73] `ChainRegistry` là state cục bộ theo từng chain, không dùng chung** — đăng ký
+- **`ChainRegistry` là state cục bộ theo từng chain, không dùng chung** — đăng ký
   founding chains chỉ trên Root Anchor KHÔNG đủ để `attestCommit()` hoạt động giữa 2 private
   chain với nhau (mỗi chain cần biết committee của các chain khác qua chính registry CỦA NÓ).
   `register_chains` giờ có cờ `-target-rpcs` để bootstrap luôn từng private chain, không chỉ
   Root Anchor (xem mục 3 bước 3 cập nhật bên dưới).
-- **[PR #73, xác nhận sống lần đầu tiên] Một giao dịch chuyển native coin liên chuỗi THẬT đã
-  chạy trọn vẹn đầu-cuối, hoàn toàn tự động**: `outbound()` (khoá tiền thật) →
+- **Đã xác nhận sống: một giao dịch chuyển native coin liên chuỗi THẬT chạy trọn vẹn đầu-cuối,
+  hoàn toàn tự động**: `outbound()` (khoá tiền thật) →
   `batchOutboundCommit()` → chữ ký BLS uỷ ban thật → `attestCommit()` → `claimMessage()` → số
   dư thật tăng đúng giá trị trên chain đích, xác nhận qua `eth_getBalance`, không cần can thiệp
   thủ công (relayer tự poll/batch/attest/claim qua cơ chế P4, xem mục 3 bước 4 cập nhật). Đây
@@ -399,15 +392,13 @@ front-run gap".
 - `CommitteeAttestationWorker`/`GatewayRegistryMonitor` tự chạy kèm node nếu config đúng
   (xem CẢNH BÁO mục 5.1).
 - Chạy `RelayerDaemon` (`cmd/tool/cross_chain_relayer`) — **permissionless, ai cũng chạy
-  được**, nhưng cần khoá của **chính người vận hành relayer đó**. **[PR #73]** Binary này giờ
-  tự chạy 1 goroutine `WatchChainPair` cho MỌI cặp (chain nguồn, chain đích) trong danh sách
-  `-chains` — mỗi cặp tự poll `getPendingOutboundCount()`, tự gọi `batchOutboundCommit()` khi
-  có message chờ, tự chờ `CommitAttestationWorker` sản xuất QuorumCert BLS thật, rồi tự gọi
-  `attestCommit()`/`claimMessage()`. Trước PR #73, binary này chỉ khởi tạo daemon rồi chờ tín
-  hiệu tắt — không hề tự relay gì cả (dead code, `OnCommitFinalized` không nơi nào gọi tới).
-  Không cần gọi tay bất kỳ bước trung gian nào nữa; chỉ cần chạy đúng lệnh dưới đây và để nó
-  chạy nền liên tục. `start_relayer_daemon.sh`
-  giờ đọc khoá từ biến môi trường `RELAYER_KEY` — **bắt buộc phải set** trước khi chạy cho vai
+  được**, nhưng cần khoá của **chính người vận hành relayer đó**. Binary này tự chạy 1
+  goroutine `WatchChainPair` cho MỌI cặp (chain nguồn, chain đích) trong danh sách `-chains` —
+  mỗi cặp tự poll `getPendingOutboundCount()`, tự gọi `batchOutboundCommit()` khi có message
+  chờ, tự chờ `CommitAttestationWorker` sản xuất QuorumCert BLS thật, rồi tự gọi
+  `attestCommit()`/`claimMessage()`. Không cần gọi tay bất kỳ bước trung gian nào nữa; chỉ cần
+  chạy đúng lệnh dưới đây và để nó chạy nền liên tục. `start_relayer_daemon.sh`
+  đọc khoá từ biến môi trường `RELAYER_KEY` — **bắt buộc phải set** trước khi chạy cho vai
   trò thật; không set thì script vẫn chạy được nhưng rơi về khoá devnet công khai (kèm cảnh
   báo to, xem CẢNH BÁO mục 3), không bao giờ được dùng cho relayer thật. Ví dụ chạy với
   khoá riêng:
@@ -459,12 +450,12 @@ front-run gap".
 
 ## 7. Checklist an ninh trước khi go-live (tổng hợp)
 
-- [ ] **Trên chính `dev` bạn sắp deploy** (không suy luận từ số PR — xem cảnh báo mục 0):
-      chạy `git show origin/dev:execution/pkg/blockchain/tx_processor/gateway_handler_test.go
+- [ ] **Trên chính `dev` bạn sắp deploy**, chạy
+      `git show origin/dev:execution/pkg/blockchain/tx_processor/gateway_handler_test.go
       | grep TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce` — fix bug
       treo chain (barrier-tx không tăng nonce) phải có mặt, đây là bug nghiêm trọng nhất từng
       tìm được.
-- [ ] Tương tự, xác nhận các fix cấu hình bảo mật mới nhất (2026-08-27) đã có trên `dev`:
+- [ ] Tương tự, xác nhận các fix cấu hình bảo mật đã có trên `dev`:
       `git show origin/dev:execution/pkg/config/config.go | grep META_GATEWAY_BLS_KEY` và
       `git show origin/dev:deploy/ansible/roles/node_setup/tasks/main.yml | grep "mode: '0600'"`
       — cả 2 phải ra kết quả khớp, không rỗng.
@@ -492,9 +483,9 @@ front-run gap".
 - [ ] Mọi `config.json` khối `cross_chain` đã xác nhận field đúng snake_case bằng cách xem
       log thật (mục 5.1), không chỉ tin node khởi động không lỗi.
 - [ ] Đã đọc và xử lý toàn bộ mục còn mở trong `note/cross_chain_production_readiness_plan.md`
-      (roadmap P0-P8: P1-P4 đã xong tính tới PR #73 — bao gồm relay tự động P4 và bug treo
-      chain nghiêm trọng nhất từng tìm được — P5-P8 chưa làm; xem
-      `note/cross_chain_root_anchor_architecture.md` mục 8).
+      (roadmap P0-P8: P1-P4 đã xong — bao gồm relay tự động P4 và bug treo chain nghiêm trọng
+      nhất từng tìm được — P5-P8 chưa làm; xem `note/cross_chain_root_anchor_architecture.md`
+      mục 8).
 - [ ] Firewall/port chỉ mở đúng những gì cần (`open_ports.sh` sinh theo node, xem lại trước
       khi chạy trên mạng công cộng).
 - [ ] Giám sát (Health/Resource Monitor, Block Hash Checker, Telegram alert) đã bật trước khi
@@ -525,45 +516,34 @@ front-run gap".
 
 ## 9. Bàn giao triển khai (đọc nếu bạn mới tiếp quản việc này)
 
-**Trạng thái code tại thời điểm bàn giao (2026-08-27):**
-- Toàn bộ fix chức năng/bảo mật lớn (bug treo chain, `config.LoadConfig` singleton, relay tự
-  động P4, ...) đã merge vào `dev` từ lâu (qua PR #73/#74). Đợt rà cấu trúc/cấu hình mới nhất
-  (dọn script chết, sửa doc drift Ansible, thêm 5 biến `META_*`, siết quyền file khoá 0600,
-  sửa `gateway_bls_key` dùng chung) nằm trên PR #77 (`fix/recover-config-security-fixes-dropped-by-squash`)
-  — **có thể chưa merge tại thời điểm bạn đọc**, xác nhận bằng đúng 2 lệnh grep ở checklist
-  mục 7 trước khi tin các mục "đã vá" liên quan trong mục 0.
-- **⚠️ Đọc cảnh báo squash-merge ở đầu mục 0 trước khi merge bất kỳ PR nào của dự án này** — đã
-  xảy ra 3 lần, tốn 2 PR phục hồi (#74, #77) chỉ vì tin trạng thái "merged" trên GitHub thay vì
-  tự grep `origin/dev`.
-- Không có gì đang chạy dở/hỏng — `go build/vet/test` sạch tại thời điểm bàn giao (đã verify
-  lại execution module + toàn bộ script Python/YAML chỉnh sửa trong đợt rà cấu trúc), không có
-  regression nào chưa xử lý.
+**Trạng thái hiện tại (2026-08-27):**
+- Toàn bộ fix chức năng/bảo mật ở mục 0 đã có trên `dev` — xác nhận bằng checklist mục 7 trước
+  khi deploy, đừng chỉ tin dòng chữ này.
+- Không có gì đang chạy dở/hỏng — `go build/vet/test` sạch, không có regression nào chưa xử lý.
 - **Đã xác nhận sống (không chỉ unit test):** một chu trình chuyển native coin liên chuỗi đầy
   đủ — `outbound()` → `batchOutboundCommit()` → QuorumCert BLS thật → `attestCommit()` →
   `claimMessage()` → số dư thật tăng đúng giá trị ở chain đích — chạy trọn vẹn, hoàn toàn tự
-  động qua relayer P4, trên 1 devnet 9-tiến-trình (4 validator Root Anchor + 4 private chain +
+  động qua relayer, trên 1 devnet 9-tiến-trình (4 validator Root Anchor + 4 private chain +
   1 relayer) trên **1 máy** (chưa phải T2 nhiều máy thật).
 - **T2 (nhiều máy thật) đang được thử** (chưa xác nhận thành công tại thời điểm viết) — nếu
-  gặp `AddrInUse`/consensus panic khi khởi động Root Anchor, kiểm tra checkout có commit sửa
-  `peer_rpc_port` (mục 0, dòng "Layer C") chưa trước khi nghi ngờ code; nếu đã có mà vẫn lỗi,
+  gặp `AddrInUse`/consensus panic khi khởi động Root Anchor, kiểm tra checkout có fix
+  `peer_rpc_port` chưa (mục 0, dòng "Layer C") trước khi nghi ngờ code; nếu đã có mà vẫn lỗi,
   nhiều khả năng là process cũ từ lần chạy trước chưa dọn hết (`ss -tlnp` để tìm PID giữ cổng).
 
 **Việc tiếp theo, theo đúng thứ tự ưu tiên:**
-1. Xác nhận PR #77 (hoặc PR kế tiếp) đã merge vào `dev` — bằng grep, không bằng số PR (mục 7).
-2. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
+1. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
    giá trị thật (dừng lại lên kế hoạch cho 2 điều kiện chặn ở mục 0 — P5 và T2 — trước khi
    chạy thêm bất kỳ script nào).
-3. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
+2. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
    `note/external_security_audit_scope_p5.md` làm tài liệu bàn giao cho họ), song song hoàn
    tất T2 (hạ tầng nhiều máy vật lý/VM độc lập đang được thử, xem trên).
-4. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
+3. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
    `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
    từng việc kèm file/hàm chính xác.
-5. 2 việc đã tìm nhưng cố tình CHƯA sửa (cần quyết định của người phụ trách, không phải kỹ
-   thuật thuần — xem `note/security_variables_reference.md` mục 3.2): `gateway_bls_key` dùng
-   chung nay đã vá (mục 3.1 cùng file), nhưng `pkg/devicekey/DeviceKey.go` (secret Telegram
-   token hardcode + cơ chế device-activation đọc khoá SSH thật, hiện bất hoạt nhưng có ngày
-   hết hạn cứng 2026-10-01) vẫn đang chờ quyết định giữ/gỡ.
+4. 1 việc đã tìm nhưng cố tình CHƯA sửa (cần quyết định của người phụ trách, không phải kỹ
+   thuật thuần — xem `note/security_variables_reference.md` mục 3.2): `pkg/devicekey/DeviceKey.go`
+   (secret Telegram token hardcode + cơ chế device-activation đọc khoá SSH thật, hiện bất hoạt
+   nhưng có ngày hết hạn cứng 2026-10-01) đang chờ quyết định giữ/gỡ.
 
 **Nếu có nghi ngờ về bất cứ điều gì ở tài liệu này:** đọc trực tiếp
 `note/cross_chain_production_readiness_plan.md` (log đầy đủ, trung thực, kể cả các lần kết
