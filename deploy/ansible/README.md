@@ -2,7 +2,7 @@
 
 Tài liệu này bao gồm 2 phần:
 - **Phần 1:** Cẩm nang lệnh chạy siêu tốc & Giải thích chi tiết trình tự xử lý của từng lệnh.
-- **Phần 2:** Giải thích chuyên sâu về kiến trúc 6 Roles của Ansible.
+- **Phần 2:** Giải thích chuyên sâu về kiến trúc 8 Roles của Ansible.
 
 ---
 
@@ -28,6 +28,8 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--open-ports` | `false` (Không mở port) | Gọi script cấu hình Firewall (UFW) trên Server để mở thông tất cả các cổng (P2P, RPC, Metrics...). Thường chỉ chạy 1 lần lúc cài đặt máy chủ mới. |
 | `--all-monitors` | `false` (Chỉ chạy trên máy Master) | **Giám Sát Chéo Đa Máy (Mutual Cross-Monitoring):** Phân phối và bật bộ Monitor trên **TẤT CẢ các Server** trong `inventory.yml`. Mỗi Server sẽ chạy 1 bộ monitor ngầm để giám sát chéo tất cả các Node trong toàn mạng lưới, phòng ngừa trường hợp máy Master bị chết thì các máy khác vẫn cảnh báo Telegram bình thường. |
 | `--debug-cpp` | `false` | Ép trình biên dịch C++ (EVM Linker) build ở chế độ Debug (`-O0 -g`) thay vì Release (`-O3`). Dùng khi cần `gdb` dò lỗi CGO. |
+| `--restart` | N/A | Chỉ `systemctl restart` các service (RPC/Execution/Consensus) đang có sẵn — **không** build lại code, không copy lại file, không đụng data/keys. Nhanh nhất trong mọi cờ, dùng khi chỉ cần khởi động lại tiến trình (vd: sau khi đổi biến môi trường thủ công trên server). |
+| `--fast` | `false` | Truyền `--fast` xuống `build_release.sh` ở bước `local_build` — build Rust ở chế độ **debug** (`cargo build` không kèm `--release`) thay vì release, biên dịch nhanh hơn nhiều nhưng binary chạy chậm hơn đáng kể. **Chỉ dùng để lặp lại nhanh khi test, không dùng cho node production thật.** |
 
 ---
 
@@ -136,34 +138,41 @@ Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 
 ## Phần 2: Kiến Trúc Ansible Hoạt Động Như Thế Nào?
 
-**Ansible** là một công cụ "Quản lý Cấu hình và Triển khai" cực kỳ mạnh mẽ. Hệ thống triển khai của Metanode đã được thiết kế thành **6 Roles (Phân hệ)** hoạt động theo một trình tự tuyến tính nghiêm ngặt để đảm bảo an toàn tuyệt đối cho dữ liệu:
+**Ansible** là một công cụ "Quản lý Cấu hình và Triển khai" cực kỳ mạnh mẽ. Hệ thống triển khai của Metanode đã được thiết kế thành **8 Roles (Phân hệ)**, chạy đúng theo thứ tự khai báo trong `deploy.yml` (mỗi role tự `when:` bỏ qua chính nó nếu không khớp cờ đang chạy):
 
-### 1. `local_build` (Chạy ở máy cá nhân)
-- Không kết nối đi đâu cả.
-- Kích hoạt script để compile mã nguồn Rust/Go. Đóng gói toàn bộ thành file `metanode-deploy.tar.gz`.
-- *(Tùy chọn nếu gọi lệnh Setup)*: Chạy mã Python để sinh ra Keys (chứng chỉ bảo mật) và định hình file `genesis.json`.
+### 1. `local_build` (Chạy ở máy cá nhân, không SSH đi đâu)
+- Kích hoạt `build_release.sh` để compile mã nguồn Rust/Go, đóng gói thành `metanode-deploy.tar.gz`.
+- *(Chỉ khi `--reset-all`)*: chạy `gen_validator_entry.py` để sinh Keys + genesis cho từng node — `cluster_nodes`/`peers_map` đã được `deploy.yml` tự dựng từ `inventory.yml` ngay trước bước này.
 
 ### 2. `stop_services` (Dừng tiến trình)
-- SSH song song vào tất cả các server đích.
-- Dừng ngầm các service `metanode-execution` và `metanode-consensus` để nhả khóa file (file lock).
+- SSH song song vào tất cả server đích, dừng mọi monitor/service `metanode-*` đang chạy (kể cả service "rogue" không nằm trong danh sách node đích) để nhả khóa file, có bước SIGTERM → chờ 10s → SIGKILL cho tiến trình cứng đầu.
+- Bỏ qua nếu đang chạy `--restart` (dùng role riêng, xem mục 8).
 
 ### 3. `clean_data` (Dọn dẹp tùy chọn)
-- Nếu lệnh chạy của bạn là `--start` (giữ data), Ansible sẽ **bỏ qua (skip)** role này.
-- Nếu lệnh là `--setup`, nó sẽ xóa sạch hai thư mục `data` và `logs`.
+- Nếu lệnh chạy của bạn giữ data (không có `--clean`/`--reset-all`), Ansible sẽ **bỏ qua (skip)** role này.
+- Nếu có, nó xóa sạch hai thư mục `data` và `logs` của từng node đích.
 
-### 4. `node_setup` (Phân phối cấu hình)
-- Giải nén tệp `metanode-deploy.tar.gz` trên remote server.
-- Phân phối "ai về nhà nấy": Đẩy chính xác file cấu hình và Keys vào từng thư mục Node tương ứng. Đảm bảo node nào chỉ cầm khóa của node đó.
+### 4. `node_setup` (Phân phối cấu hình + BTRFS)
+- Giải nén tệp `metanode-deploy.tar.gz` trên remote server, đẩy đúng Keys vào đúng thư mục node.
+- Tự dò + mount phân vùng BTRFS cho node có `snapshot_enabled: true` (bind-mount `/mnt/metanode_snapshots/node-N` vào `data/`); **chặn cứng (fail)** nếu node cần snapshot mà máy không có BTRFS/XFS — thà dừng sớm còn hơn để node crash lúc runtime.
 
 ### 5. `snapshot_restore` (Tải dữ liệu Snapshot)
 - Role đặc biệt chỉ kích hoạt khi có cờ `--restore-node`. Chạy lệnh ngầm tải trực tiếp kho dữ liệu snapshot và bung nén vào thư mục `data`.
 
-### 6. `systemd_services` (Thiết lập dịch vụ hệ điều hành)
+### 6. `node_exporter` (Giám sát tài nguyên hệ thống)
+- Cài `node_exporter` (Prometheus) làm systemd service riêng trên mỗi máy — có kiểm tra đã cài chưa trước khi tải lại từ GitHub, nên các lần deploy sau (chỉ cập nhật code) không phụ thuộc mạng ra ngoài nữa.
+
+### 7. `systemd_services` (Thiết lập dịch vụ hệ điều hành)
 - Render ra các file cấu hình `metanode-*.service` và đăng ký với `systemd` của Linux.
 - **Boot Sequence (Trình tự mồi):** Bật tiến trình Execution (Go) lên trước, ngủ (pause) 5 giây cho các API RPC khởi động xong, cuối cùng mới bật tiến trình Consensus (Rust).
 
+### 8. `restart_services` (Chỉ khi `--restart`)
+- Thay thế roles 2-7 hoàn toàn khi chạy `--restart`: chỉ `systemctl restart` 3 service (RPC/Execution/Consensus) đang có sẵn, không build/copy/đụng data.
+
+*(Ghi chú: `roles/monitoring_config/` không phải 1 role thật — chỉ là nơi giữ 1 file template `prometheus.yml.j2` được `deploy.yml` đọc trực tiếp ở bước "Post-deployment actions" cuối playbook, không nằm trong danh sách 8 role trên.)*
+
 ### "Danh bạ Điện thoại": `inventory.yml`
-Toàn bộ 6 Role phía trên không hề chứa IP cứng (hardcode). Mọi cấu hình (Tài khoản SSH, sơ đồ IP Node) đều được tự động trích xuất từ file `inventory.yml`. Bạn chỉ cần thêm hoặc sửa IP ở đây, Ansible sẽ tự biết phải làm gì!
+Toàn bộ 8 Role phía trên không hề chứa IP cứng (hardcode). Mọi cấu hình (Tài khoản SSH, sơ đồ IP Node) đều được tự động trích xuất từ file `inventory.yml`. Bạn chỉ cần thêm hoặc sửa IP ở đây, Ansible sẽ tự biết phải làm gì!
 
 ---
 
