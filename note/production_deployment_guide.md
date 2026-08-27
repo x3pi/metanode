@@ -15,12 +15,20 @@ sẵn sàng: phần **1 chain đơn (private chain)** đã chạy production nhi
 
 ## 0. Tóm tắt điều hành (đọc trước)
 
-*Cập nhật lần cuối: 2026-08-26 (phiên làm việc thứ hai trong ngày — sau khi toàn bộ pipeline
-relay tự động P4 được xây xong và một giao dịch chuyển giá trị liên chuỗi THẬT chạy trọn vẹn
-đầu-cuối lần đầu tiên trong lịch sử dự án). Đây là bản trạng thái hiện tại — không phải nhật
-ký theo thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi nào, PR nào) nằm ở
-`note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết "vì sao", còn tài liệu
-này chỉ trả lời "hiện đang ở đâu".*
+*Cập nhật lần cuối: 2026-08-27 (rà lại cấu trúc/cấu hình deploy + biến bảo mật). Đây là bản
+trạng thái hiện tại — không phải nhật ký theo thời gian. Lịch sử đầy đủ (ai tìm ra gì, khi
+nào, PR nào) nằm ở `note/cross_chain_production_readiness_plan.md`; đọc ở đó nếu cần biết
+"vì sao", còn tài liệu này chỉ trả lời "hiện đang ở đâu".*
+
+**⚠️ Bài học rút ra (đừng lặp lại): đừng tin số PR, hãy tự xác nhận bằng grep.** Tài liệu này
+từng ghi "PR #73 chưa merge" nhiều ngày sau khi PR #73 ĐÃ được squash-merge — nhưng
+squash-merge trên GitHub chỉ chụp lại đúng trạng thái branch tại THỜI ĐIỂM bấm merge; nếu có
+commit nào được push lên cùng branch đó ngay trước/trong lúc merge, commit đó bị rớt khỏi
+`dev` một cách ÂM THẦM dù PR vẫn hiện `merged: true`. Việc này đã xảy ra **3 lần** trong dự án
+(PR #70; PR #73 → phải phục hồi bằng PR #74; PR #76 → phải phục hồi bằng PR #77) — mỗi lần chỉ
+phát hiện được nhờ tự `git show origin/dev:<path> | grep <thứ vừa thêm>` chứ không phải tin
+trạng thái "merged" trên GitHub. **Luôn tự kiểm tra bằng cách chạy đúng lệnh grep ở mỗi mục
+checklist (mục 7) trên `dev` thật, đừng suy luận từ số PR.**
 
 | Thành phần | Sẵn sàng cho | Chưa sẵn sàng cho |
 | :--- | :--- | :--- |
@@ -28,13 +36,8 @@ này chỉ trả lời "hiện đang ở đâu".*
 | Root Anchor / cầu nối liên chuỗi (`GatewayPrecompile`, governance, relayer tự động) | Testnet nội bộ, diễn tập ceremony, demo, chạy thật nhiều tiến trình 1 máy — **đã xác nhận sống một giao dịch chuyển native coin thật, đầu-cuối, hoàn toàn tự động** (mục 0 bên dưới) | **Giá trị thật trên mainnet** cho tới khi qua P5 (audit độc lập) + T2 (chạy thật nhiều máy vật lý) |
 
 **Trạng thái code (quan trọng cho bất kỳ ai tiếp quản việc deploy):** toàn bộ các lỗ hổng
-CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống — nhưng code này
-**hiện nằm trên PR #73** (`feat/p4-relayer-commit-automation` → `dev`), **chưa merge**.
-Trước khi triển khai bất cứ thứ gì thật, xác nhận PR #73 (hoặc PR kế tiếp nếu #73 đã đóng) đã
-merge vào `dev` — đừng giả định `dev` đã có các fix dưới đây chỉ vì tài liệu này nói đã vá.
-PR #73 gồm cả những PR trước đó nó build lên trên (#61/#63/#64/#68/#70/#71) — nếu chỉ merge
-những PR cũ mà bỏ qua #73, các fix mô tả ngay dưới đây (đặc biệt là mục treo chain — nghiêm
-trọng nhất) sẽ KHÔNG có trong `dev`.
+CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận chạy sống. Đừng tin danh sách
+"đã vá" dưới đây tại lời — mỗi mục đều verify được bằng 1 lệnh cụ thể, xem checklist mục 7.
 
 **Đã vá + xác nhận sống (không còn là rủi ro mở):**
 - Lớp xác minh mật mã (BLS/Merkle/anti-fraud) đã nối thật vào số dư thật cho cả native coin
@@ -51,8 +54,8 @@ trọng nhất) sẽ KHÔNG có trong `dev`.
 - Khoá đóng cứng trong `start_relayer_daemon.sh`/`register_chains` — giờ đọc từ biến môi trường
   `RELAYER_KEY`/cờ `-key` (**bắt buộc phải set thật** trước khi chạy cho vai trò thật, không
   set thì rơi về khoá devnet công khai kèm cảnh báo to). `register_private_chains_t2.py`
-  (script Python cũ hơn, dùng `DEV_PRIV_KEY`) đã lỗi thời — dùng `register_private_chains_t2.sh`
-  thay thế (mục 3).
+  (script Python cũ hơn, dùng `DEV_PRIV_KEY`) đã **bị xoá khỏi repo (2026-08-27)** — dùng
+  `register_private_chains_t2.sh` (mục 3).
 - Root Anchor "Layer C": 1 cụm multi-validator thật không bao giờ đạt được trạng thái
   `Healthy` do lỗi trong script sinh cấu hình (`gen_root_anchor_chain.py` gán trùng cổng giữa
   server chẩn đoán và cổng gRPC P2P thật) — đã tìm ra nguyên nhân thật (không phải race Tokio
@@ -98,6 +101,20 @@ trọng nhất) sẽ KHÔNG có trong `dev`.
   thủ công (relayer tự poll/batch/attest/claim qua cơ chế P4, xem mục 3 bước 4 cập nhật). Đây
   là bằng chứng sống đầu tiên rằng lớp xác minh mật mã + lớp giá trị thật hoạt động khớp nhau
   hoàn chỉnh, không chỉ đúng riêng lẻ từng phần qua unit test.
+- **[2026-08-27, rà cấu trúc/cấu hình] 3 lỗ hổng cấu hình bảo mật đã vá** — chi tiết đầy đủ,
+  bảng tham chiếu mọi biến bảo mật: `note/security_variables_reference.md`.
+  1. Chỉ 3/9 trường bí mật trong `config.json` (`private_key`, `reward_sender_private_key`,
+     `securepassword`) có đường thoát biến môi trường — 6 trường còn lại (`Databases.BLSPrivateKey`,
+     `cross_chain.root_anchor_submitter_private_key_hex`, `gateway_bls_key`, `master_password`,
+     `app_pepper`) bắt buộc phải nằm thẳng trong file JSON. Đã vá: thêm 5 biến
+     `META_BLS_PRIVATE_KEY`/`META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX`/`META_GATEWAY_BLS_KEY`/
+     `META_MASTER_PASSWORD`/`META_APP_PEPPER`, cùng pattern với các biến `META_*` đã có.
+  2. Khoá thật trên server qua `deploy/ansible` từng world-readable (`mode: '0755'`/`'0644'`) dù
+     service chỉ chạy bằng 1 user (`metanode`) — đã siết về `0600`/`0700`.
+  3. `gateway_bls_key` từng hardcode CÙNG 1 giá trị ở cả 3 script sinh config, kể cả tool
+     ceremony thật (`gen_validator_entry.py`) — chỉ có rủi ro khi bật `enable_private_gateway`.
+     Đã vá: thêm cờ `--gateway-bls-key`/`--random-gateway-bls-key` ở cả 3 script (mặc định
+     không đổi để không phá devnet hiện có — phải chủ động truyền cờ cho triển khai thật).
 
 **2 điều kiện chặn cứng còn lại trước mainnet giá trị thật, không có đường tắt** (xem
 `note/cross_chain_root_anchor_architecture.md` mục 8, lộ trình P0-P8):
@@ -121,8 +138,9 @@ trọng nhất) sẽ KHÔNG có trong `dev`.
   tải thật cho Gate 1 trên cụm sống thay vì chỉ unit test).
 
 Nếu mục tiêu hiện tại là **testnet nội bộ / diễn tập / demo cho đối tác** — hệ thống đã đủ
-dùng (sau khi PR #73 merge), cứ đi theo quy trình dưới. Nếu mục tiêu là **mainnet với giá trị
-thật** — việc cần làm tiếp theo là lên kế hoạch cho P5 + T2, không phải chạy thêm script.
+dùng (sau khi xác nhận checklist mục 7 bằng grep trên `dev` thật), cứ đi theo quy trình dưới.
+Nếu mục tiêu là **mainnet với giá trị thật** — việc cần làm tiếp theo là lên kế hoạch cho
+P5 + T2, không phải chạy thêm script.
 
 ---
 
@@ -269,10 +287,11 @@ cd deploy/ansible
 ./ansible_deploy.sh --start
 ```
 
-Quy trình 6 role tuần tự: `local_build` → `stop_services` → `clean_data` (bỏ qua nếu
-`--start`) → `node_setup` → `snapshot_restore` (chỉ khi `--restore-node`) →
-`systemd_services`. Chi tiết đầy đủ (khôi phục snapshot, thao tác riêng 1 node, giám sát
-chéo đa máy `--all-monitors`, quản lý RPC proxy): `deploy/ansible/README.md`.
+Quy trình 8 role tuần tự: `local_build` → `stop_services` → `clean_data` (bỏ qua nếu
+`--start`) → `node_setup` → `snapshot_restore` (chỉ khi `--restore-node`) → `node_exporter` →
+`systemd_services` → `restart_services` (chỉ khi `--restart`, thay thế toàn bộ 7 role kia).
+Chi tiết đầy đủ (khôi phục snapshot, thao tác riêng 1 node, giám sát chéo đa máy
+`--all-monitors`, quản lý RPC proxy): `deploy/ansible/README.md`.
 
 Cho cụm 1 máy nhiều node (không dùng Ansible đa máy): `deploy/systemd/cluster/systemd-cluster.sh`
 — xem `deploy/systemd/docs/systemd-cluster.md`. Nguyên tắc khởi động: **Execution (Go)
@@ -296,6 +315,10 @@ Làm theo mục 4 (Ansible) — **độc lập hoàn toàn**, không cần phố
 Điểm khác biệt duy nhất so với 1 private chain đơn thuần: bật khối `cross_chain` trong
 `config.json` (RPC Root Anchor sẽ trỏ tới, submitter key riêng của chain đó) — script sinh
 config (`gen_single_chain.py`) đã hỗ trợ cờ `--root-anchor-rpc`/`--root-anchor-submitter-key`.
+**Nếu chain của bạn bật `enable_private_gateway`**: nhớ truyền thêm `--random-gateway-bls-key`
+(hoặc `--gateway-bls-key <hex tự quản lý>`) khi sinh config — mặc định không truyền cờ nào vẫn
+dùng chung 1 khoá devnet công khai với mọi chain khác (xem
+`note/security_variables_reference.md` mục 3.1).
 **Lưu ý đã từng gặp lỗi thật:** khối JSON này dùng key dạng `snake_case`
 (`root_anchor_rpc_urls`, không phải `RootAnchorRpcUrls`) — Go's `encoding/json` không báo lỗi
 khi tên trường sai, nó chỉ âm thầm bỏ qua field và tắt luôn `GatewayRegistryMonitor`/
@@ -398,12 +421,22 @@ front-run gap".
 
 ### 5.5 Quản lý Khoá riêng RelayerDaemon & Submitter cho Production (KMS/HSM vs Plain Config)
 
-- **Hiện trạng:** `RelayerDaemon` (`DaemonConfig.RelayerKeyHex`) và `CommitteeAttestationWorker` (`CrossChainConfig.RootAnchorSubmitterPrivateKeyHex`) đọc private key secp256k1 dạng plain hex string qua file config/biến môi trường (`RELAYER_KEY`, `ROOT_ANCHOR_SUBMITTER_KEY`).
+- **Hiện trạng (đã sửa lại cho đúng 2026-08-27 — bản trước ghi nhầm tên biến môi trường):**
+  - `RelayerDaemon` (binary `cross_chain_relayer`, chạy độc lập ngoài node): khoá secp256k1
+    truyền qua cờ `-key`, hoặc `start_relayer_daemon.sh` đọc từ biến môi trường **`RELAYER_KEY`**
+    rồi tự truyền vào `-key` (bản thân binary không tự đọc env var).
+  - `CommitteeAttestationWorker` (chạy kèm mỗi node): đọc từ
+    `CrossChainConfig.RootAnchorSubmitterPrivateKeyHex` trong `config.json`
+    (`root_anchor_submitter_private_key_hex`) — giờ có thể override qua biến môi trường
+    **`META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX`** (mới thêm 2026-08-27, xem
+    `note/security_variables_reference.md` mục 1 cho bảng đầy đủ mọi biến bí mật + override
+    tương ứng — kể cả `Databases.BLSPrivateKey`, `gateway_bls_key`, `master_password`,
+    `app_pepper` giờ đều có override, trước đó chỉ 3/9 trường có).
 - **Mức độ rủi ro & Mô hình vận hành:**
   - **RelayerDaemon là permissionless:** Khoá của relayer chỉ dùng để trả phí gas khi submit giao dịch `verifyAndExecute` lên destination chain và nhận tip qua `withdrawRelayerTip`. Nếu khoá relayer bị lộ, kẻ tấn công **chỉ rút được số dư tip và gas của tài khoản đó**, KHÔNG thể giả mạo chữ ký BLS của uỷ ban hay rút trộm tài sản của người dùng (vì chữ ký uỷ ban và bằng chứng Merkle được xác thực độc lập bởi `GatewayPrecompile`).
   - **Submitter của CommitteeAttestationWorker:** Khoá này dùng để gửi `submitCommitteeAttestation` lên Root Anchor. Tương tự, nếu bị lộ thì chỉ mất gas của tài khoản submitter — chữ ký BLS share đính kèm bắt buộc phải khớp với `PublicKeyBls` của validator đã đăng ký trên `ChainRegistry`.
 - **Khuyến nghị cho Mainnet:**
-  - **Giai đoạn Testnet / Early Mainnet (giá trị custody nhỏ):** Chấp nhận lưu khoá qua secret manager (HashiCorp Vault, AWS Secrets Manager, Kubernetes Secrets) và inject qua biến môi trường dạng ephemeral runtime.
+  - **Giai đoạn Testnet / Early Mainnet (giá trị custody nhỏ):** Chấp nhận lưu khoá qua secret manager (HashiCorp Vault, AWS Secrets Manager, Kubernetes Secrets) và inject qua biến môi trường dạng ephemeral runtime — dùng `EnvironmentFile=` của systemd (file `0600`, chỉ user `metanode` đọc được) trỏ tới các biến `META_*` ở mục trên, thay vì để khoá nằm trong `config.json` trên đĩa. `deploy/ansible`/`deploy/systemd` **hiện CHƯA làm việc này** (khoá vẫn nằm trong JSON) — đây là khuyến nghị cho bước kế tiếp, không phải hiện trạng.
   - **Giai đoạn Mainnet quy mô lớn (giá trị custody cao):** Khuyến nghị nâng cấp module submitter/relayer sang giao diện Signer abstraction hỗ trợ HSM/KMS (AWS KMS, GCP Cloud KMS, YubiHSM) qua PKCS#11 hoặc RPC signer tách rời (như HashiCorp Vault Transit Engine), không bao giờ giữ private key nguyên bản trong bộ nhớ tiến trình.
 
 ---
@@ -426,16 +459,27 @@ front-run gap".
 
 ## 7. Checklist an ninh trước khi go-live (tổng hợp)
 
-- [ ] PR #73 (không chỉ các PR cũ hơn nó build lên trên) đã merge vào `dev` — đặc biệt fix bug
-      treo chain (barrier-tx không tăng nonce, mục 0). Kiểm tra bằng cách tìm hàm
-      `TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce` có tồn tại trong
-      `pkg/blockchain/tx_processor/gateway_handler_test.go` chưa — nếu không có, PR chưa vào.
+- [ ] **Trên chính `dev` bạn sắp deploy** (không suy luận từ số PR — xem cảnh báo mục 0):
+      chạy `git show origin/dev:execution/pkg/blockchain/tx_processor/gateway_handler_test.go
+      | grep TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce` — fix bug
+      treo chain (barrier-tx không tăng nonce) phải có mặt, đây là bug nghiêm trọng nhất từng
+      tìm được.
+- [ ] Tương tự, xác nhận các fix cấu hình bảo mật mới nhất (2026-08-27) đã có trên `dev`:
+      `git show origin/dev:execution/pkg/config/config.go | grep META_GATEWAY_BLS_KEY` và
+      `git show origin/dev:deploy/ansible/roles/node_setup/tasks/main.yml | grep "mode: '0600'"`
+      — cả 2 phải ra kết quả khớp, không rỗng.
 - [ ] P5 — security review độc lập đã hoàn tất (mục 0).
 - [ ] Đã chạy thật trên nhiều máy độc lập, không chỉ devnet 1 máy (mục 0, mục 6).
 - [ ] Đã set `-key`/`RELAYER_KEY` (`start_relayer_daemon.sh`, `register_chains`) thành khoá
       thật của vai trò đó — không còn nơi nào rơi về khoá devnet công khai đóng cứng trong repo
-      (mục 3, 5.4). (`register_private_chains_t2.py` đã lỗi thời — không dùng, không set biến
-      môi trường cho nó.)
+      (mục 3, 5.4).
+- [ ] Với mọi trường bí mật khác (`Databases.BLSPrivateKey`, `root_anchor_submitter_private_key_hex`,
+      `gateway_bls_key`, `master_password`, `app_pepper`, `securepassword`): đã cân nhắc dùng
+      biến môi trường `META_*` tương ứng thay vì để khoá thật nằm trong `config.json` trên đĩa
+      (bảng đầy đủ + khuyến nghị `EnvironmentFile=`: `note/security_variables_reference.md`).
+- [ ] Nếu chain có bật `enable_private_gateway`: `gateway_bls_key` được sinh riêng qua
+      `--random-gateway-bls-key`/`--gateway-bls-key`, không phải giá trị devnet mặc định dùng
+      chung cho mọi chain (mục 5.1, `security_variables_reference.md` mục 3.1).
 - [ ] `cross_chain.devnet_governance_timelock_seconds_override` **KHÔNG được set** (hoặc bằng
       0) trong mọi `config.json` thật — trường này chỉ tồn tại để rút ngắn 72h timelock cho
       test devnet (mục 3); còn set trên mạng thật nghĩa là governance có thể bị thi hành gần
@@ -468,50 +512,58 @@ front-run gap".
 | Việc còn lại (code + quyết định thiết kế), cho agent khác thực hiện | `note/all_remaining_fixes_plan.md` |
 | Phạm vi + chuẩn bị cho audit bảo mật độc lập (P5) | `note/external_security_audit_scope_p5.md` |
 | Lễ khai sinh Root Anchor nhiều tổ chức | `note/runbook_root_anchor_genesis_ceremony.md` |
-| Vận hành 1 private chain đơn (Ansible) | `deploy/ansible/README.md` |
+| Vận hành 1 private chain đơn (Ansible), 8 role, đầy đủ flag | `deploy/ansible/README.md` |
 | Cụm nhiều node 1 máy (systemd) | `deploy/systemd/docs/systemd-cluster.md` |
-| Devnet nhanh 2/4 chain 1 máy | `deploy/systemd/README.md` |
+| Index script `deploy/systemd/` (script nào dùng/không dùng), devnet 1 máy | `deploy/systemd/README.md` |
 | Khôi phục từ snapshot | `deploy/systemd/docs/restore_snapshot_systemd.md` |
 | Chết node, phục hồi | `note/runbook_chain_death_recovery.md` |
 | Số node tối thiểu cho BFT | `note/bft_fault_tolerance_node_count.md` |
+| **Mọi biến bí mật (private key, password): field JSON, override env var, khuyến nghị** | **`note/security_variables_reference.md`** |
+| Đánh giá bảo mật đã làm/chưa làm, toàn dự án | `note/security_assessment_status_report.md` |
 
 ---
 
 ## 9. Bàn giao triển khai (đọc nếu bạn mới tiếp quản việc này)
 
-**Trạng thái code tại thời điểm bàn giao (2026-08-26, phiên thứ hai):**
-- Toàn bộ fix mô tả ở mục 0 nằm trên PR #73 (`feat/p4-relayer-commit-automation` → `dev`),
-  **chưa merge**. PR này build lên trên chuỗi PR #61/#63/#64/#68/#70/#71 (đã mô tả trong các
-  bản trước của tài liệu này) VÀ thêm: toàn bộ cơ chế relay tự động P4 (trước đó
-  `cross_chain_relayer` là dead code, không tự relay gì), fix bug treo chain nghiêm trọng nhất
-  từng tìm được (barrier-tx không tăng nonce — mục 0), fix `register_chains`'s
-  `config.LoadConfig` singleton bug, và wiring `devnet_governance_timelock_seconds_override`.
-- **Việc đầu tiên phải làm:** kiểm tra trạng thái PR #73 trên GitHub, đảm bảo CI xanh, merge
-  vào `dev` trước khi tin bất kỳ dòng nào ở mục 0 phía trên là đã áp dụng cho môi trường thật.
-- Không có gì đang chạy dở/hỏng — `go build/vet/test` (43/43 package) đều sạch tại thời điểm
-  bàn giao, không có regression nào chưa xử lý. Có test hồi quy thật cho bug treo chain
-  (`TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce`, xác nhận fail nếu
-  thiếu fix).
+**Trạng thái code tại thời điểm bàn giao (2026-08-27):**
+- Toàn bộ fix chức năng/bảo mật lớn (bug treo chain, `config.LoadConfig` singleton, relay tự
+  động P4, ...) đã merge vào `dev` từ lâu (qua PR #73/#74). Đợt rà cấu trúc/cấu hình mới nhất
+  (dọn script chết, sửa doc drift Ansible, thêm 5 biến `META_*`, siết quyền file khoá 0600,
+  sửa `gateway_bls_key` dùng chung) nằm trên PR #77 (`fix/recover-config-security-fixes-dropped-by-squash`)
+  — **có thể chưa merge tại thời điểm bạn đọc**, xác nhận bằng đúng 2 lệnh grep ở checklist
+  mục 7 trước khi tin các mục "đã vá" liên quan trong mục 0.
+- **⚠️ Đọc cảnh báo squash-merge ở đầu mục 0 trước khi merge bất kỳ PR nào của dự án này** — đã
+  xảy ra 3 lần, tốn 2 PR phục hồi (#74, #77) chỉ vì tin trạng thái "merged" trên GitHub thay vì
+  tự grep `origin/dev`.
+- Không có gì đang chạy dở/hỏng — `go build/vet/test` sạch tại thời điểm bàn giao (đã verify
+  lại execution module + toàn bộ script Python/YAML chỉnh sửa trong đợt rà cấu trúc), không có
+  regression nào chưa xử lý.
 - **Đã xác nhận sống (không chỉ unit test):** một chu trình chuyển native coin liên chuỗi đầy
   đủ — `outbound()` → `batchOutboundCommit()` → QuorumCert BLS thật → `attestCommit()` →
   `claimMessage()` → số dư thật tăng đúng giá trị ở chain đích — chạy trọn vẹn, hoàn toàn tự
   động qua relayer P4, trên 1 devnet 9-tiến-trình (4 validator Root Anchor + 4 private chain +
   1 relayer) trên **1 máy** (chưa phải T2 nhiều máy thật).
+- **T2 (nhiều máy thật) đang được thử** (chưa xác nhận thành công tại thời điểm viết) — nếu
+  gặp `AddrInUse`/consensus panic khi khởi động Root Anchor, kiểm tra checkout có commit sửa
+  `peer_rpc_port` (mục 0, dòng "Layer C") chưa trước khi nghi ngờ code; nếu đã có mà vẫn lỗi,
+  nhiều khả năng là process cũ từ lần chạy trước chưa dọn hết (`ss -tlnp` để tìm PID giữ cổng).
 
 **Việc tiếp theo, theo đúng thứ tự ưu tiên:**
-1. Merge PR (xem trên).
+1. Xác nhận PR #77 (hoặc PR kế tiếp) đã merge vào `dev` — bằng grep, không bằng số PR (mục 7).
 2. Xác định mục tiêu triển khai: testnet/demo (đã sẵn sàng, đi thẳng vào mục 3-5) hay mainnet
    giá trị thật (dừng lại lên kế hoạch cho 2 điều kiện chặn ở mục 0 — P5 và T2 — trước khi
    chạy thêm bất kỳ script nào).
 3. Nếu mainnet: liên hệ đơn vị audit độc lập cho P5 (dùng
-   `note/external_security_audit_scope_p5.md` làm tài liệu bàn giao cho họ), song song chuẩn
-   bị hạ tầng nhiều máy vật lý/VM độc lập cho T2 (không phải devnet 1 máy chia sẻ).
+   `note/external_security_audit_scope_p5.md` làm tài liệu bàn giao cho họ), song song hoàn
+   tất T2 (hạ tầng nhiều máy vật lý/VM độc lập đang được thử, xem trên).
 4. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
    `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
-   từng việc kèm file/hàm chính xác. 2 quyết định thiết kế từng cần hỏi trước (epoch catch-up,
-   `propose()` gating) đã được quyết định + đóng 2026-08-26 (xem Mục 1/2 trong tài liệu đó để
-   có lý do đầy đủ) — không còn câu hỏi nào cần người phụ trách kiến trúc trả lời trước khi
-   giao việc còn lại cho agent khác.
+   từng việc kèm file/hàm chính xác.
+5. 2 việc đã tìm nhưng cố tình CHƯA sửa (cần quyết định của người phụ trách, không phải kỹ
+   thuật thuần — xem `note/security_variables_reference.md` mục 3.2): `gateway_bls_key` dùng
+   chung nay đã vá (mục 3.1 cùng file), nhưng `pkg/devicekey/DeviceKey.go` (secret Telegram
+   token hardcode + cơ chế device-activation đọc khoá SSH thật, hiện bất hoạt nhưng có ngày
+   hết hạn cứng 2026-10-01) vẫn đang chờ quyết định giữ/gỡ.
 
 **Nếu có nghi ngờ về bất cứ điều gì ở tài liệu này:** đọc trực tiếp
 `note/cross_chain_production_readiness_plan.md` (log đầy đủ, trung thực, kể cả các lần kết

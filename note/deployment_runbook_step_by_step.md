@@ -4,8 +4,9 @@ Tài liệu này khác `note/production_deployment_guide.md` ở chỗ: tài li�
 thống đang ở đâu, cái gì sẵn sàng, cái gì chưa" (bối cảnh, cảnh báo, kiến trúc); tài liệu
 **này** là **sổ tay thao tác** — từng lệnh cụ thể, theo đúng thứ tự, kèm **cách xác nhận
 bước đó đã THÀNH CÔNG** trước khi làm bước tiếp theo. Đọc `production_deployment_guide.md`
-mục 0 trước nếu chưa đọc — đặc biệt xác nhận **PR #73** đã merge vào `dev` (mục đó giải
-thích vì sao: có một bug treo chain nghiêm trọng chỉ được vá ở PR đó).
+mục 0 trước nếu chưa đọc — **đừng tin theo số PR/tên nhánh** (đã có 3 lần 1 PR hiện "merged"
+trên GitHub nhưng vài commit cuối bị rớt khỏi `dev` — xem cảnh báo squash-merge ở đầu mục 0
+của tài liệu đó); luôn xác nhận bằng grep cụ thể như Phần 0.2/0.3 dưới đây.
 
 Quy ước xuyên suốt tài liệu này: mỗi bước có khối **"✅ Xác nhận thành công"** — nếu kết quả
 thực tế không khớp, **dừng lại, không làm bước tiếp theo**, xem mục "Xử lý sự cố" (Phần E)
@@ -33,8 +34,9 @@ git log --oneline -1
 git branch --show-current
 ```
 
-**✅ Xác nhận thành công:** commit hiện tại nằm SAU (hoặc CHÍNH LÀ) commit merge của PR #73.
-Cách kiểm tra chắc chắn nhất — không tin theo tên nhánh:
+**✅ Xác nhận thành công:** code có fix bug treo chain nghiêm trọng nhất. Đừng tin theo tên
+nhánh hay số PR (đã có 3 lần "merged" trên GitHub mà commit thật vẫn thiếu — xem cảnh báo
+squash-merge, `production_deployment_guide.md` mục 0) — cách kiểm tra chắc chắn nhất:
 
 ```bash
 grep -c "TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce" \
@@ -43,6 +45,22 @@ grep -c "TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce" \
 
 Phải ra `1` (hoặc lớn hơn). Nếu ra `0` — code hiện tại **chưa có** fix bug treo chain nghiêm
 trọng nhất (xem `production_deployment_guide.md` mục 0) — **dừng lại**, cập nhật code trước.
+
+### 0.3 Kiểm tra các fix cấu hình bảo mật (2026-08-27) — bỏ qua được nếu chỉ chạy devnet Phần A
+
+Chỉ thật sự cần cho Phần B/C (triển khai thật) — nhưng chạy luôn cho chắc, không tốn gì:
+
+```bash
+grep -c "META_GATEWAY_BLS_KEY" execution/pkg/config/config.go
+grep -c "mode: '0600'" deploy/ansible/roles/node_setup/tasks/main.yml
+grep -c "random-gateway-bls-key" deploy/systemd/gen_single_chain.py
+```
+
+Cả 3 lệnh phải ra `≥1`. Nếu ra `0` ở bất kỳ lệnh nào: code chưa có đợt vá cấu hình bảo mật mới
+nhất (5 biến môi trường `META_*` còn thiếu, quyền file khoá `0755`/`0644` world-readable,
+`gateway_bls_key` dùng chung cho mọi chain) — xem đầy đủ tại
+`note/security_variables_reference.md`. Không chặn devnet Phần A, nhưng **bắt buộc** trước khi
+đi Phần B/C với khoá thật.
 
 ---
 
@@ -207,7 +225,8 @@ trong `deploy/systemd/node-N_keys/open_ports.sh` được Ansible sinh ra và ch
 ./ansible_deploy.sh --reset-all
 ```
 
-**✅ Xác nhận thành công (từng bước, theo đúng 6 role Ansible chạy tuần tự):**
+**✅ Xác nhận thành công (từng bước, theo đúng 8 role Ansible chạy tuần tự — chi tiết:
+`deploy/ansible/README.md` Phần 2):**
 1. `local_build` — không lỗi biên dịch (giống Phần 0.1, nhưng chạy tại máy điều khiển).
 2. `node_setup` — output Ansible báo `changed` (không phải `failed`) cho mọi host.
 3. `systemd_services` — output báo các service `metanode-execution-N`/`metanode-consensus-N`
@@ -349,11 +368,13 @@ Dùng bảng này làm checklist nhanh sau BẤT KỲ lần triển khai/cập n
 | `eth_sendRawTransaction`: `"account 0x... has no BLS public key registered on-chain"` | Tài khoản gửi giao dịch chưa có `publicKeyBls` hợp lệ trong genesis/alloc CỦA CHÍNH CHAIN đang gửi tới — đây là gate chung cho MỌI giao dịch, không riêng cross-chain | Với dev account: dùng tài khoản trong `dev_accounts.json` (đã có alloc đúng). Với tài khoản tự tạo: phải được đăng ký `publicKeyBls` (48-byte min-pk/G1, hex có tiền tố `0x`) trong genesis của ĐÚNG chain đang gửi giao dịch tới. |
 | `attestCommit()` revert `"unknown source chain ID: chain N"` | `ChainRegistry` là state CỤC BỘ theo từng chain — chain đích chưa từng biết về chain nguồn | Chạy `register_chains` với `-target-rpcs` liệt kê MỌI private chain, không chỉ Root Anchor (Phần A3). |
 | `attestCommit()` revert `"aggregate amount exceeds source chain allocation ceiling... available 0"` | KHÔNG phải bug — chain nguồn chưa từng được cấp phát allocation gửi-ra (thiết kế fail-closed) | Chạy `ProposalAllocateSupply` qua governance thật trên CHAIN ĐÍCH (propose → vote ≥2/3 chain đã đăng ký → chờ timelock → executeProposal) trước khi thử lại. Devnet: dùng `devnet_governance_timelock_seconds_override` để không phải chờ 72h thật. |
-| `vote()` revert `"signer is not a member of chain N's current committee"` | Rất có thể do bug `register_chains`/`config.LoadConfig` singleton (đã vá PR #73) — mọi chain bị gán nhầm committee của chain đầu tiên | Xác nhận PR #73 đã merge (Phần 0.2). Nếu đã merge mà vẫn gặp, kiểm tra lại đúng `Databases.BLSPrivateKey` trong `config.json` của chain đang vote khớp với key dùng để build committee entry lúc `register_chains`. |
-| Block height đứng yên vĩnh viễn, RPC vẫn trả lời bình thường, không có lỗi rõ ràng trong log | Bug treo chain: giao dịch barrier (gateway/validator contract) thứ 2 liên tiếp từ CÙNG 1 tài khoản không bao giờ được chấp nhận do nonce không tăng (đã vá PR #73) | Xác nhận PR #73 đã merge (Phần 0.2, kiểm tra bằng tên test cụ thể). Log dấu hiệu: `TxsProcessor2: Race condition detected! pool_size=1->1, but retrieved 0 transactions` lặp lại liên tục không dừng. |
-| `register_chains` báo thành công cho TẤT CẢ chain nhưng thực ra mọi chain trả về CÙNG 1 committee pubkey | Bug `config.LoadConfig` singleton — hàm này cache qua `sync.Once` toàn tiến trình, gọi 2 lần trở lên trong 1 lần chạy chỉ đọc đúng config CỦA LẦN GỌI ĐẦU | Xác nhận PR #73 đã merge; dùng `getChainRegistry()` (Phần A3, Phần D) để tự kiểm chứng thay vì chỉ tin dòng log "succeeded". |
+| `vote()` revert `"signer is not a member of chain N's current committee"` | Rất có thể do bug `register_chains`/`config.LoadConfig` singleton — mọi chain bị gán nhầm committee của chain đầu tiên | Xác nhận fix đã có trên `dev` (Phần 0.2, grep, không tin theo PR). Nếu đã có mà vẫn gặp, kiểm tra lại đúng `Databases.BLSPrivateKey` trong `config.json` của chain đang vote khớp với key dùng để build committee entry lúc `register_chains`. |
+| Block height đứng yên vĩnh viễn, RPC vẫn trả lời bình thường, không có lỗi rõ ràng trong log | Bug treo chain: giao dịch barrier (gateway/validator contract) thứ 2 liên tiếp từ CÙNG 1 tài khoản không bao giờ được chấp nhận do nonce không tăng | Xác nhận fix đã có trên `dev` (Phần 0.2, grep tên test cụ thể). Log dấu hiệu: `TxsProcessor2: Race condition detected! pool_size=1->1, but retrieved 0 transactions` lặp lại liên tục không dừng. |
+| `register_chains` báo thành công cho TẤT CẢ chain nhưng thực ra mọi chain trả về CÙNG 1 committee pubkey | Bug `config.LoadConfig` singleton — hàm này cache qua `sync.Once` toàn tiến trình, gọi 2 lần trở lên trong 1 lần chạy chỉ đọc đúng config CỦA LẦN GỌI ĐẦU | Xác nhận fix đã có trên `dev`; dùng `getChainRegistry()` (Phần A3, Phần D) để tự kiểm chứng thay vì chỉ tin dòng log "succeeded". |
 | Consensus `failed` ngay sau khi Execution start | Thứ tự/thời gian khởi động sai — Consensus (Rust) nối vào Execution (Go) qua FFI socket, phải đợi Execution mở socket trước | Đảm bảo thứ tự start Execution trước, đợi ≥5 giây, rồi mới start Consensus (Ansible role `systemd_services` đã tự làm đúng thứ tự này — nếu tự viết systemd unit thủ công, sao chép đúng `After=`/`ExecStartPre=sleep 5` từ template Ansible sinh ra). |
+| Rust consensus log lặp lại `Error starting consensus server: Os { code: 98, kind: AddrInUse, ... }` rồi panic `Failed to start consensus server within required deadline`, `eth_blockNumber` đứng ở `0x0` (thường gặp nhất khi chạy `setup_root_anchor.sh`, nhiều validator cùng chain) | 2 khả năng, đã gặp cả 2: (1) checkout cũ hơn 2026-08-25, chưa có fix tách `peer_rpc_port` khỏi `network_port` trong `gen_root_anchor_chain.py` (2 listener khác nhau từng bị gán trùng số cổng — "Layer C", xem `production_deployment_guide.md` mục 0); (2) process cũ từ lần chạy trước chưa bị dọn, vẫn giữ cổng | Trước tiên: `grep -n "peer_rpc_port.*29200" deploy/systemd/gen_root_anchor_chain.py` — phải ra kết quả (nếu không, `git pull` code mới hơn rồi generate lại config). Nếu đã có mà vẫn lỗi: `ss -tlnp \| grep <port>` tìm PID đang giữ cổng, kill rồi chạy lại `start_all.sh`. |
 | Devnet treo/không phản hồi khi restart từ dữ liệu cũ trên máy chia sẻ | Đã điều tra kỹ 1 lần (pprof, I/O, ulimit) — kết luận: KHÔNG phải lỗi code, do 1 tiến trình KHÁC không liên quan chiếm 653% CPU / 110GB+ RAM trên cùng máy | Không chạy T2/production trên máy/VM chia sẻ tải nặng không kiểm soát được — dùng máy/VM riêng biệt (chi tiết: `note/cross_chain_production_readiness_plan.md`). |
+| `execution.json`/khoá thật world-readable trên server (`ls -l` thấy `-rw-r--r--` hoặc thoáng hơn) | Quyền file cũ trong `deploy/ansible` (`0755`/`0644`) — đã siết về `0600`/`0700` (2026-08-27) | Xác nhận `grep "mode: '0600'" deploy/ansible/roles/node_setup/tasks/main.yml` ra kết quả (Phần 0.3). Nếu không, `git pull` code mới hơn trước khi deploy thật. |
 
 ---
 
