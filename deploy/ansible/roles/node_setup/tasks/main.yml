@@ -27,12 +27,20 @@
     extra_opts: ['--strip-components=1']
 
 - name: Copy keys for each node to remote
+  # mode/directory_mode tightened from 0755 (found 2026-08-27 during a config-security
+  # review): this directory holds raw private keys (execution.json's private_key, BLS
+  # authority_key.json, eth_key.json, etc.) and 0755 made every one of them world-readable
+  # to any local account on the server, not just the deploying user. Ansible runs this
+  # task (and the later remote_src copy out of this staging dir in systemd_services) as
+  # root via `become: yes`, which ignores these permission bits entirely, so 0600/0700
+  # changes nothing about whether the deploy itself still works.
   ansible.builtin.copy:
     src: "{{ deploy_dir }}/node-{{ item }}_keys/"
     dest: "{{ remote_deploy_dir }}/node-{{ item }}_keys/"
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
-    mode: '0755'
+    mode: '0600'
+    directory_mode: '0700'
   loop: "{{ active_nodes }}"
   when: ansible_action == 'setup'
 
