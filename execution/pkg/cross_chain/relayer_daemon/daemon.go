@@ -408,7 +408,7 @@ func (d *RelayerDaemon) RelayBatch(
 			// Not necessarily fatal -- another relayer may have already attested this exact
 			// commit/asset first (AttestCommit's write-once guard), which is success from this
 			// batch's point of view. Anything else surfaces on the first claimMessage() below.
-			logger.Info("ℹ️ [RELAYER DAEMON] attestCommit for chain %d asset %s reverted (likely already attested by another relayer): %x", sourceChainID, assetIDStr, receipt.Return)
+			logger.Info("ℹ️ [RELAYER DAEMON] attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
 		}
 	}
 
@@ -432,7 +432,7 @@ func (d *RelayerDaemon) RelayBatch(
 			continue
 		}
 		if receipt.Status != 1 {
-			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s reverted: %x", msg.MessageID.Hex(), receipt.Return)
+			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(receipt.Return))
 			continue
 		}
 		d.mu.Lock()
@@ -647,4 +647,48 @@ func (d *RelayerDaemon) Stop() {
 		close(d.stopCh)
 	}
 	d.wg.Wait()
+}
+
+// DecodeRevertReason decodes EVM revert return bytes (whether raw ABI encoded Error(string) or hex string)
+// into a readable human-friendly message.
+func DecodeRevertReason(raw []byte) string {
+	if len(raw) == 0 {
+		return "empty revert data"
+	}
+	data := raw
+	// If data starts with "0x" (ASCII '0','x'), unhex it first
+	if len(data) >= 2 && data[0] == '0' && (data[1] == 'x' || data[1] == 'X') {
+		decoded, err := hex.DecodeString(string(data[2:]))
+		if err == nil {
+			data = decoded
+		}
+	}
+	// Check standard Error(string) selector: 0x08c379a0
+	if len(data) >= 4 && bytes.Equal(data[:4], []byte{0x08, 0xc3, 0x79, 0xa0}) {
+		if len(data) >= 68 {
+			strLen := new(big.Int).SetBytes(data[36:68]).Uint64()
+			if uint64(len(data)) >= 68+strLen {
+				return string(data[68 : 68+strLen])
+			}
+		}
+	}
+	// Check Panic(uint256) selector: 0x4e487b71
+	if len(data) >= 4 && bytes.Equal(data[:4], []byte{0x4e, 0x48, 0x7b, 0x71}) {
+		if len(data) >= 36 {
+			panicCode := new(big.Int).SetBytes(data[4:36])
+			return fmt.Sprintf("Panic(0x%x)", panicCode)
+		}
+	}
+	// If printable ASCII, return as string
+	isPrintable := true
+	for _, b := range data {
+		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+			isPrintable = false
+			break
+		}
+	}
+	if isPrintable && len(data) > 0 {
+		return string(data)
+	}
+	return hexutil.Encode(raw)
 }

@@ -277,6 +277,7 @@ def main():
     parser.add_argument("--root-anchor-submitter-key", type=str, default="", help="ECDSA private key for the committee attestation worker")
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--reserve-chain-id", type=int, default=None, help="Chain ID of the system's Reserve chain (default: same as --chain-id)")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -500,6 +501,7 @@ def main():
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                "reserve_chain_id": args.reserve_chain_id if args.reserve_chain_id is not None else args.chain_id,
                 # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
                 # exactly (snake_case) — encoding/json silently leaves a field at its zero value
                 # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't

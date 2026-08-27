@@ -420,6 +420,7 @@ def main():
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                "reserve_chain_id": args.chain_id,
                 # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
                 # full rationale. NEVER set this on a real deployment.
                 "devnet_governance_timelock_seconds_override": 10

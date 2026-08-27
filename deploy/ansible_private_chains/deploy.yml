@@ -53,6 +53,7 @@
                 --validators 1 \
                 --root-anchor-rpc "$ROOT_RPC" \
                 --root-anchor-submitter-key "$SUBMITTER_KEY" \
+                --reserve-chain-id "$CHAIN_ID" \
                 --output-dir "$LOCAL_OUT"
             fi
             

@@ -141,7 +141,7 @@ for name, h in hosts.items():
         fi
     else
         # Kết nối Remote SSH
-        SSH_CMD="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8"
+        SSH_CMD="ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=8"
         SCP_CMD="scp -o StrictHostKeyChecking=no -o ConnectTimeout=8 -r"
 
         if [ -n "$key_file" ]; then
@@ -155,7 +155,7 @@ for name, h in hosts.items():
         fi
 
         # 1. Kéo thư mục logs/ từ xa
-        eval $SCP_CMD "${user}@${host_ip}:${inst_dir}/logs" "$CHAIN_OUT_DIR/" 2>/dev/null && \
+        eval $SCP_CMD "${user}@${host_ip}:${inst_dir}/logs" "$CHAIN_OUT_DIR/" </dev/null 2>/dev/null && \
             echo "   ✅ Đã tải thư mục logs từ ${host_ip}:${inst_dir}/logs" || \
             echo "   ⚠️  Không thể scp logs từ ${host_ip}:${inst_dir}/logs"
 
@@ -166,7 +166,7 @@ for name, h in hosts.items():
             REMOTE_JOURNAL_CMD="journalctl -u $SERVICE_NAME --no-pager -n $LINE_COUNT 2>/dev/null"
         fi
 
-        eval $SSH_CMD "${user}@${host_ip}" "\"$REMOTE_JOURNAL_CMD\"" > "$JOURNAL_FILE" 2>/dev/null && \
+        eval $SSH_CMD "${user}@${host_ip}" "\"$REMOTE_JOURNAL_CMD\"" </dev/null > "$JOURNAL_FILE" 2>/dev/null && \
             echo "   ✅ Đã lấy systemd journal ($LINE_COUNT dòng) từ ${host_ip}" || \
             echo "   ⚠️  Không thể lấy journalctl từ ${host_ip}"
     fi
