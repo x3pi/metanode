@@ -1,117 +1,161 @@
-# Hướng Dẫn Setup & Chạy Giao Dịch Cross-Chain (Client + Relayer)
+# 🌐 Hướng Dẫn Thiết Lập & Vận Hành Toàn Diện Multi-Machine Private Chains & Cross-Chain
 
-Tài liệu này hướng dẫn chi tiết quy trình thiết lập mạng lưới đa chuỗi, đăng ký danh bạ chữ ký số BLS (`ChainRegistry`) trên Gateway Precompile (`0x1002`), vận hành Relayer Daemon chạy ngầm và thực hiện giao dịch cross-chain từ phía Client.
-
----
-
-## 📊 Bảng Thông Tin Môi Trường & Cổng RPC
-
-| Mạng | Chain ID | Địa chỉ RPC JSON-RPC | Vai trò |
-| :--- | :---: | :--- | :--- |
-| **Root Anchor** | `991` | `http://127.0.0.1:10746` (hoặc `9099`) | Hub bảo mật & quản lý trần cung toàn cầu |
-| **Private Chain A** | `101` | `http://127.0.0.1:8546` | Chuỗi nguồn gửi giao dịch |
-| **Private Chain B** | `102` | `http://127.0.0.1:8547` | Chuỗi đích nhận tài sản / thực thi contract |
-
-> **Khóa ECDSA Relayer (Devnet):** `3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d` (Địa chỉ: `0x4b51d69B903C136654D168d0d500dA58AFdc5b60`)
+Tài liệu này hướng dẫn chi tiết quy trình triển khai mạng lưới **4 Private Chains (101, 102, 103, 104)** độc lập trên nhiều máy chủ vật lý khác nhau (hoặc trên cùng 1 server) kết nối về **Root Anchor (Public Chain)**, tự động đăng ký danh bạ Gateway Precompile (`0x1002`), chạy Relayer Daemon ngầm và thực hiện giao dịch cross-chain từ phía Client.
 
 ---
 
-## 🚀 Quy Trình Vận Hành 5 Bước
+## 📊 1. Bảng Thông Tin Mạng Lưới & Các Cổng Kết Nối
 
-### Bước 1: Khởi động Root Anchor (Public Chain)
-Mở **Terminal 1**, khởi động Root Anchor:
+| Mạng | Chain ID | RPC Endpoint | Cài đặt tại | Vai trò |
+| :--- | :---: | :--- | :--- | :--- |
+| **Root Anchor (Public)** | `991` | `http://<IP_PUBLIC_CHAIN>:10746` | `/opt/metanode/node-0..3` | Hub bảo mật & quản lý trần cung toàn cầu |
+| **Private Chain 1** | `101` | `http://<IP_CHAIN_101>:8546` | `/opt/metanode/chain-101` | Chuỗi ứng dụng 1 (Sender mặc định) |
+| **Private Chain 2** | `102` | `http://<IP_CHAIN_102>:8547` | `/opt/metanode/chain-102` | Chuỗi ứng dụng 2 (Recipient mặc định) |
+| **Private Chain 3** | `103` | `http://<IP_CHAIN_103>:8548` | `/opt/metanode/chain-103` | Chuỗi ứng dụng 3 |
+| **Private Chain 4** | `104` | `http://<IP_CHAIN_104>:8549` | `/opt/metanode/chain-104` | Chuỗi ứng dụng 4 |
+
+
+> **📄 File JSON Lưu Trữ Toàn Bộ IP & RPC Endpoint:**
+> Sau khi chạy setup, Ansible tự động xuất file thông tin tại:
+> [`/tmp/private_chains.json`](file:///tmp/private_chains.json)
+
+---
+
+## 🚀 2. Quy Trình Triển Khai 4 Private Chains Từ Đầu (Multi-Machine)
+
+### 🔹 Bước 1: Cấu hình danh sách IP các máy trong `inventory.yml`
+Chỉnh sửa file [`deploy/ansible_private_chains/inventory.yml`](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_private_chains/inventory.yml) với IP và thông tin xác thực của các máy chủ:
+
+```yaml
+all:
+  vars:
+    # URL RPC của máy chạy Public Chain (Root Anchor)
+    root_anchor_rpc: "http://<IP_PUBLIC_CHAIN>:10746"
+    ansible_user: "<USER_NAME>"
+    ansible_ssh_pass: "<SSH_PASSWORD>"
+    ansible_become_pass: "<BECOME_PASSWORD>"
+    ansible_connection: ssh  # Dùng ssh khi chạy trên các máy remote thật
+
+  children:
+    private_chains:
+      hosts:
+        # Máy 1: Chạy Chain 101
+        server_chain_101:
+          ansible_host: <IP_CHAIN_101>
+          chain_id: 101
+          rpc_port: 8546
+          port_offset: 10
+          install_dir: "/opt/metanode/chain-101"
+
+        # Máy 2: Chạy Chain 102
+        server_chain_102:
+          ansible_host: <IP_CHAIN_102>
+          chain_id: 102
+          rpc_port: 8546
+          port_offset: 20
+          install_dir: "/opt/metanode/chain-102"
+
+        # Máy 3: Chạy Chain 103
+        server_chain_103:
+          ansible_host: <IP_CHAIN_103>
+          chain_id: 103
+          rpc_port: 8546
+          port_offset: 30
+          install_dir: "/opt/metanode/chain-103"
+
+        # Máy 4: Chạy Chain 104
+        server_chain_104:
+          ansible_host: <IP_CHAIN_104>
+          chain_id: 104
+          rpc_port: 8546
+          port_offset: 40
+          install_dir: "/opt/metanode/chain-104"
+```
+
+---
+
+### 🔹 Bước 2: Triển khai 4 Private Chains Từ Đầu (`--reset-all` & `--open-ports`)
+Mở terminal trên máy quản trị và chạy:
 
 ```bash
-cd ~/nhat/consensus-chain/metanode/deploy/ansible
-./ansible_deploy.sh --reset-all
+cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
+
+# Lệnh triển khai sạch từ đầu + mở tường lửa UFW:
+./deploy_private_chains.sh --reset-all --open-ports
 ```
-> *Đảm bảo RPC Root Anchor phản hồi tại `http://127.0.0.1:10746`.*
+
+**Quá trình này tự động thực hiện:**
+1. Tạo user hệ thống `metanode` trên tất cả các máy chủ.
+2. Sinh genesis block mới (pre-fund các tài khoản trong `private_dev_keys.json`).
+3. Copy binary `simple_chain` và `metanode` vào `/opt/metanode/chain-XXX`.
+4. Thiết lập systemd service `/etc/systemd/system/metanode-private-XXX.service`.
+5. Bật service và mở tường lửa cho các cổng RPC, Peer, Consensus.
+6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor!
 
 ---
 
-### Bước 2: Khởi động 2 Private Chains (101 & 102)
-Mở **Terminal 2**, khởi động 2 Private Chains:
+### 🔹 Bước 3: Kiểm tra trạng thái hoạt động của 4 Private Chains
+```bash
+./deploy_private_chains.sh --status
+```
+> Kết quả mong đợi: Cả 4 chuỗi đều báo `Block Number 0x1` trở lên.
+
+---
+
+### 🔹 Bước 4: Khởi chạy Cross-Chain Relayer Daemon bằng `tmux` (1 Lệnh Tự Động)
+
+Chỉ cần chạy script [`run_relayer_tmux.sh`](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_private_chains/run_relayer_tmux.sh), script sẽ **tự động đọc IP và các chain từ `/tmp/private_chains.json`**, khởi tạo phiên `tmux` tên `relayer`, biên dịch và chạy ngầm, đồng thời ghi log cùng cấp tại `relayer.log`:
 
 ```bash
-cd ~/nhat/consensus-chain/metanode/deploy/systemd
-./setup_2_private_chains.sh --clean
+cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
+
+# 1 Lệnh duy nhất khởi chạy Relayer trong tmux:
+./run_relayer_tmux.sh
 ```
-> *Lệnh này khởi động Chain 101 (`http://127.0.0.1:8546`) và Chain 102 (`http://127.0.0.1:8547`).*
+
+#### 📋 Các lệnh quản lý Relayer thuận tiện:
+* **Xem log realtime:** `./run_relayer_tmux.sh logs` *(hoặc `tail -f relayer.log`)*
+* **Kiểm tra trạng thái:** `./run_relayer_tmux.sh status`
+* **Vào màn hình tmux tương tác:** `./run_relayer_tmux.sh attach` *(Thoát ra bấm `Ctrl+B` rồi bấm `D`)*
+* **Dừng Relayer:** `./run_relayer_tmux.sh stop`
+
 
 ---
 
-### Bước 3: Đăng ký Chain & Ủy ban BLS vào Gateway (`register_chains`)
-Để các chuỗi có thể xác thực chữ ký Quorum Certificate của nhau, cần đăng ký danh bạ committee (`ChainRegistry` với BLS Proof-of-Possession) và hạn mức ban đầu lên Gateway (`0x1002`) của **cả 3 chuỗi**.
-
-Mở **Terminal 3**, chạy lần lượt 3 lệnh:
-
-```bash
-cd ~/nhat/consensus-chain/metanode/execution
-
-# 1. Đăng ký trên Chain 101
-go run ./cmd/tool/register_chains \
-    --key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" \
-    --root-anchor "http://127.0.0.1:8546" \
-    --chains "101,102" \
-    --chains-dir "../deploy/systemd/private_chains_data"
-
-# 2. Đăng ký trên Chain 102
-go run ./cmd/tool/register_chains \
-    --key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" \
-    --root-anchor "http://127.0.0.1:8547" \
-    --chains "101,102" \
-    --chains-dir "../deploy/systemd/private_chains_data"
-
-# 3. Đăng ký trên Root Anchor (Chain 991)
-go run ./cmd/tool/register_chains \
-    --key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" \
-    --root-anchor "http://127.0.0.1:10746" \
-    --chains "101,102" \
-    --chains-dir "../deploy/systemd/private_chains_data"
-```
-
----
-
-### Bước 4: Khởi chạy Relayer Daemon ngầm (Zero-Trust)
-
-Relayer chạy hoàn toàn độc lập, **không cần và không chạm vào bất kỳ file private key nào của Validator**:
-
-```bash
-cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/cross_chain_relayer
-
-# Khởi chạy Relayer Daemon ngầm (-key là ví ECDSA của Relayer trả gas, hoàn toàn không cần key Validator):
-go run main.go \
-    -key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" \
-    -root-anchor "http://127.0.0.1:10746" \
-    -chains "101=http://127.0.0.1:8546,102=http://127.0.0.1:8547" \
-    -poll-interval-ms 100
-```
-# HOẶC Chạy ngầm (nohup background):
-# nohup go run main.go -key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" -root-anchor "http://127.0.0.1:10746" -chains "101=http://127.0.0.1:8546,102=http://127.0.0.1:8547" -poll-interval-ms 100 > relayer.log 2>&1 &
-
----
-
-### Bước 5: Chạy kịch bản Client (`02-client-only-transfer`)
-Client hoạt động thuần túy như một người dùng/ứng dụng dApp: chỉ gọi hàm `Gateway.outbound()` trên Chain 101 và đợi số dư hoặc trạng thái Smart Contract cập nhật trên Chain 102.
-
-Mở **Terminal 5**, chạy kịch bản:
-
+### 🔹 Bước 5: Chạy kịch bản Client kiểm tra chuyển tiền (`02-client-only-transfer`)
 ```bash
 cd ~/nhat/consensus-chain/metanode-suite/test-simple/test-rpc/test-blockstm/cross-chain/02-client-only-transfer
 
-go run .
+go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 ```
 
-#### 🎯 Luồng thực thi tự động:
-1. **Phần 1 - Chuyển tiền (Native Transfer):** Client nộp lệnh chuyển 500 MTN từ Chain 101 -> Chain 102.
-   - Relayer phát hiện event `outbound()` trên Chain 101.
-   - Relayer nộp `attestCommit` lên Root Anchor & Chain 102.
-   - Relayer nộp `claimMessage` lên Chain 102 ➔ Số dư ví người nhận trên Chain 102 tăng thêm 500 MTN.
-2. **Phần 2 - Gọi Smart Contract (Contract Call):** Client nộp lệnh gọi hàm `increment()` từ Chain 101 sang contract `TestCounter` trên Chain 102.
-   - Relayer tự động chuyển tiếp và thực thi lệnh trên Chain 102 ➔ Biến đếm `Counter` trên Chain 102 tăng từ `0` lên `1`.
-3. Client xác nhận cả 2 điều kiện thành công và in thông báo hoàn tất:
-   ```
-   🎉 BINGOOOO! TIỀN ĐÃ MINT BÊN CHAIN B THÀNH CÔNG! (+500.0000 MTN)
-   🎉 BINGOOOO! SMART CONTRACT CHAIN B ĐÃ NHẬN LỆNH TỪ CHAIN A VÀ THỰC THI THÀNH CÔNG! (Counter = 1)
-   ✅ HOÀN TẤT KỊCH BẢN CLIENT!
-   ```
+---
+
+## 🛠️ 3. Bảng Lệnh Quản Lý Vận Hành Hàng Ngày
+
+| Nhu Cầu | Câu Lệnh Thực Hiện |
+| :--- | :--- |
+| **Dừng duy nhất 1 chain (ví dụ Chain 101)** | `./deploy_private_chains.sh --stop --chain=101` |
+| **Khởi động duy nhất 1 chain (ví dụ Chain 101)** | `./deploy_private_chains.sh --start --chain=101` |
+| **Restart duy nhất 1 chain (ví dụ Chain 102)** | `./deploy_private_chains.sh --restart --chain=102` |
+| **Dừng tất cả 4 chains** | `./deploy_private_chains.sh --stop` |
+| **Khởi động lại tất cả 4 chains** | `./deploy_private_chains.sh --restart` |
+| **Xóa dữ liệu DB riêng Chain 102 (giữ keys & genesis)** | `./deploy_private_chains.sh --clean-data --chain=102` |
+| **Xóa dữ liệu DB tất cả 4 chains** | `./deploy_private_chains.sh --clean-data` |
+| **Kéo logs tất cả các node về xem** | `./fetch_node_logs.sh` |
+| **Kéo logs riêng Chain 101 về xem** | `./fetch_node_logs.sh 101` |
+| **Xem log realtime của 1 chain** | `journalctl -u metanode-private-101.service -f` |
+
+---
+
+## 🔐 4. Cơ Chế Xác Thực & Quản Lý Khóa (Lưu ý cho Dev & AI)
+
+### 1. `BootstrapFoundingChains` & Xác thực Proof-of-Possession (`PopVerify`):
+* **Nguyên lý:** Khi khởi tạo hoặc re-deploy/reset các Private Chain, hàm `BootstrapFoundingChains` trên Gateway Precompile (`0x1002`) cho phép nạp/cập nhật lại danh sách committee sáng lập của các chain vào `ChainRegistry`.
+* **Bảo mật tuyệt đối:** Mọi validator entry bắt buộc phải đính kèm chữ ký Proof-of-Possession (`PopSignature`) hợp lệ và được kiểm tra nghiêm ngặt qua hàm `PopVerify(v.PubkeyBLS, v.PopSignature)`. Không có bất kỳ node hay validator nào có thể mạo danh hoặc nạp key giả vào Root Anchor.
+
+### 2. Phân biệt & Trích xuất Khóa của Validator:
+* **Khóa ETH (`eth_key.json` - secp256k1):** Dùng để định danh địa chỉ EVM (`address`), nộp gas fee và ký giao dịch thông thường.
+* **Khóa BLS (`Databases.BLSPrivateKey` / `authority_key` - BLS12-381):** Dùng để ký các phần chữ ký xác thực khối và attestation cross-chain (`commitRoot` / `committeeUpdate`).
+* **Cơ chế Fallback trích xuất BLS Public Key:** `CommitAttestationWorker` và `CommitteeAttestationWorker` luôn ưu tiên dẫn xuất trực tiếp BLS Public Key (48 bytes G1) từ `Databases.BLSPrivateKey` trong file cấu hình `execution.json`. Nếu không cấu hình mới tìm trong `AccountStateDB` (tránh lỗi rỗng tại Genesis khi trạng thái tài khoản chưa được nạp thông tin BLS vào state trie).
+

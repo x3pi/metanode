@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -179,6 +183,35 @@ func loadConfigFresh(configPath string) (*config.SimpleChainConfig, error) {
 	return cfg, nil
 }
 
+func extractRevertReason(rpcURL string, txHash common.Hash) string {
+	rpcClient, err := rpc.Dial(rpcURL)
+	if err != nil {
+		return ""
+	}
+	defer rpcClient.Close()
+
+	var rawReceipt map[string]interface{}
+	if err := rpcClient.Call(&rawReceipt, "eth_getTransactionReceipt", txHash.Hex()); err != nil {
+		return ""
+	}
+	returnHex, ok := rawReceipt["return"].(string)
+	if !ok || len(returnHex) < 10 {
+		return ""
+	}
+	returnBytes, err := hex.DecodeString(strings.TrimPrefix(returnHex, "0x"))
+	if err != nil || len(returnBytes) < 4 {
+		return ""
+	}
+	// ABI Error(string) selector: 0x08c379a0
+	if bytes.Equal(returnBytes[:4], []byte{0x08, 0xc3, 0x79, 0xa0}) && len(returnBytes) >= 68 {
+		strLen := binary.BigEndian.Uint64(returnBytes[60:68])
+		if uint64(len(returnBytes)) >= 68+strLen {
+			return string(returnBytes[68 : 68+strLen])
+		}
+	}
+	return string(returnBytes)
+}
+
 // bootstrap submits the given (already-packed) bootstrapFoundingChains calldata to a single
 // chain's RPC endpoint and blocks until it either confirms or the process exits on failure. It
 // is deliberately fail-loud (os.Exit(1)) rather than fail-soft: a chain silently missing its
@@ -229,7 +262,17 @@ func bootstrap(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress commo
 		os.Exit(1)
 	}
 	if receipt.Status != 1 {
-		logger.Error("❌ bootstrapFoundingChains reverted on %s (tx=%s) -- ChainRegistry may already be bootstrapped, or a committee's PoP failed to verify", label, signedTx.Hash().Hex())
+		revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
+		if strings.Contains(revertMsg, "already has active chains") || strings.Contains(revertMsg, "already bootstrapped") {
+			logger.Info("ℹ️ %s: ChainRegistry is already bootstrapped -- proceeding.", label)
+			return
+		}
+		logger.Error("❌ bootstrapFoundingChains reverted on %s (tx=%s)", label, signedTx.Hash().Hex())
+		if revertMsg != "" {
+			logger.Error("   👉 Error ReturnData từ Receipt: \"%s\"", revertMsg)
+		} else {
+			logger.Error("   👉 Error ReturnData: (không có hoặc mã lỗi rỗng)")
+		}
 		os.Exit(1)
 	}
 	logger.Info("✅ bootstrapFoundingChains succeeded on %s! %d chain(s) registered: %s", label, chainCount, chainIDsFlag)

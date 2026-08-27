@@ -505,3 +505,10 @@ eth_key.json
 deploy/systemd/root_anchor_data/
 deploy/systemd/register_chains
 deploy/systemd/cross_chain_relayer
+deploy/ansible_private_chains/data/
+deploy/ansible_private_chains/data
+deploy/ansible_private_chains/logs/
+deploy/ansible_private_chains/logs
+logs_private_chains/
+deploy/ansible_private_chains/*.retry
+execution/cross_chain_relayer

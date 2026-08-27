@@ -78,6 +78,7 @@ func (w *CommitAttestationWorker) SetPollConfig(interval time.Duration, maxAttem
 // OnCommitFinalized enqueues a finalized commit root for BLS signing and submission.
 // Non-blocking.
 func (w *CommitAttestationWorker) OnCommitFinalized(sourceChainID, epoch uint64, commitRoot common.Hash) {
+	logger.Info("📢 [COMMIT ATTESTATION] OnCommitFinalized received: sourceChain=%d, epoch=%d, commitRoot=%s", sourceChainID, epoch, commitRoot.Hex())
 	select {
 	case w.signalChan <- commitSignal{sourceChainID: sourceChainID, epoch: epoch, commitRoot: commitRoot}:
 	default:
@@ -100,6 +101,7 @@ func (w *CommitAttestationWorker) Run(ctx context.Context) {
 }
 
 func (w *CommitAttestationWorker) handleCommit(ctx context.Context, sig commitSignal) {
+	logger.Info("⚙️ [COMMIT ATTESTATION] handleCommit processing: sourceChain=%d, epoch=%d, commitRoot=%s", sig.sourceChainID, sig.epoch, sig.commitRoot.Hex())
 	registry, exists, err := w.client.GetChainRegistry(ctx, sig.sourceChainID)
 	if err != nil {
 		logger.Warn("⚠️ [COMMIT ATTESTATION] could not fetch chain %d registry from Root Anchor: %v", sig.sourceChainID, err)
@@ -116,11 +118,14 @@ func (w *CommitAttestationWorker) handleCommit(ctx context.Context, sig commitSi
 		return
 	}
 	if !committeeContains(registry.Committee, myPubkeyBls) {
+		logger.Warn("⚠️ [COMMIT ATTESTATION] validator %s (bls=%x) is not in committee for chain %d (committee len=%d)", w.localAddress.Hex(), myPubkeyBls, sig.sourceChainID, len(registry.Committee))
 		return
 	}
 
 	if err := w.submitMyShare(ctx, sig.sourceChainID, sig.epoch, sig.commitRoot); err != nil {
 		logger.Warn("⚠️ [COMMIT ATTESTATION] could not submit share for commit %s: %v", sig.commitRoot.Hex(), err)
+	} else {
+		logger.Info("✅ [COMMIT ATTESTATION] successfully submitted share for commit %s to Root Anchor!", sig.commitRoot.Hex())
 	}
 
 	_, _ = w.PollAndAggregate(ctx, sig.sourceChainID, sig.epoch, sig.commitRoot)
@@ -228,22 +233,19 @@ func (w *CommitAttestationWorker) PollAndAggregate(
 }
 
 func (w *CommitAttestationWorker) myPublicKeyBls() ([]byte, error) {
-	if w.chainState == nil {
+	if w.blsPrivateKeyHex != "" {
 		_, pubKey, err := w.blsKeyPair()
-		if err != nil {
-			return nil, err
+		if err == nil && len(pubKey.Bytes()) > 0 {
+			return pubKey.Bytes(), nil
 		}
-		return pubKey.Bytes(), nil
 	}
-	as, err := w.chainState.GetAccountStateDB().AccountState(w.localAddress)
-	if err != nil {
-		return nil, fmt.Errorf("read own account state: %w", err)
+	if w.chainState != nil {
+		as, err := w.chainState.GetAccountStateDB().AccountState(w.localAddress)
+		if err == nil && as != nil && len(as.PublicKeyBls()) > 0 {
+			return as.PublicKeyBls(), nil
+		}
 	}
-	pk := as.PublicKeyBls()
-	if len(pk) == 0 {
-		return nil, fmt.Errorf("account %s has no PublicKeyBls set", w.localAddress.Hex())
-	}
-	return pk, nil
+	return nil, fmt.Errorf("account %s has no PublicKeyBls set and no valid BLS private key configured", w.localAddress.Hex())
 }
 
 func (w *CommitAttestationWorker) blsKeyPair() (mt_common.PrivateKey, mt_common.PublicKey, error) {

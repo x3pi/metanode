@@ -64,27 +64,34 @@ sleep 8
 
 ```bash
 pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 4 (4 validator)
-curl -s -X POST http://127.0.0.1:9099 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+for port in 9099 9100 9101 9102; do
+  echo -n "Node on RPC port $port: "
+  curl -s -X POST http://127.0.0.1:$port \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+  echo ""
+done
+
 ```
 
 Phải nhận được JSON có trường `"result":"0x..."` (một số hex, không phải lỗi kết nối). Nếu
 `curl` báo `Connection refused` — node chưa lên kịp, đợi thêm vài giây rồi thử lại; nếu vẫn
 lỗi sau 30s, xem log (`root_anchor_data/node_0/logs/node.log`) tìm dòng `ERROR`.
 
-### A2. Sinh + chạy 4 private chain (101–104)
+### A2. Sinh + chạy 2 private chain (101 & 102)
 
 ```bash
-bash setup_4_private_chains.sh --no-build
+bash setup_2_private_chains.sh --no-build
 sleep 5
 ```
+*(Nếu muốn chạy 4 private chain: `bash setup_4_private_chains.sh --no-build`)*
 
 **✅ Xác nhận thành công:**
 
 ```bash
-pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 8 (4 Root Anchor + 4 private chain)
-for port in 8546 8547 8548 8549; do
+pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 6 (4 Root Anchor + 2 private chain)
+for port in 8546 8547; do
+  echo -n "Private Chain RPC port $port: "
   curl -s -X POST http://127.0.0.1:$port \
     -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
@@ -92,36 +99,34 @@ for port in 8546 8547 8548 8549; do
 done
 ```
 
-Cả 4 lệnh `curl` phải trả JSON hợp lệ. **Lỗi thật đã gặp:** script tự sinh (bên trong
-`setup_4_private_chains.sh`) từng gọi nhầm tên file khởi động không tồn tại
-(`start_nodes.sh` thay vì `start_single_chain.sh`) — nếu `pgrep` ra ít hơn 8, kiểm tra
-`private_chains_data/chain_XXX/node.log` xem có dòng `No such file or directory` không (đã
-vá ở PR #73, nhưng nếu code cũ hơn vẫn có thể gặp).
+Cả 2 lệnh `curl` phải trả JSON hợp lệ (ví dụ: `{"jsonrpc":"2.0","id":1,"result":"0x..."}`).
 
-### A3. Đăng ký 4 chain — cả trên Root Anchor lẫn trên từng private chain
+### A3. Đăng ký danh bạ 2 chain — cả trên Root Anchor lẫn trên từng private chain
+
+Chỉ cần chạy 1 lệnh duy nhất (tự động dùng `-target-rpcs` đăng ký đồng thời cả 2 private chain và Root Anchor):
 
 ```bash
-bash register_private_chains_t2.sh
+bash register_2_private_chains.sh "http://127.0.0.1:9099"
 ```
 
-**✅ Xác nhận thành công:** output phải có đúng **5 dòng** `✅ bootstrapFoundingChains
-succeeded on ...` (Root Anchor + chain 101 + 102 + 103 + 104 — **không phải chỉ 1 dòng**).
-Nếu chỉ thấy dòng cho Root Anchor mà thiếu 4 dòng còn lại, đây là dấu hiệu chưa có fix
-`-target-rpcs` (PR #73) — `attestCommit()` giữa 2 private chain sau này sẽ luôn revert với
+*(Hoặc với 4 private chain: `bash register_private_chains_t2.sh`)*
+
+**✅ Xác nhận thành công:** output phải có đủ **3 dòng** `✅ bootstrapFoundingChains succeeded on ...` (Root Anchor + chain 101 + chain 102).
+Nếu chỉ thấy dòng cho Root Anchor mà thiếu 2 dòng còn lại, đây là dấu hiệu chưa có cờ
+`-target-rpcs` — `attestCommit()` giữa 2 private chain sau này sẽ luôn revert với
 `"unknown source chain ID"`.
 
-Xác nhận sâu hơn (tuỳ chọn nhưng khuyến nghị lần đầu triển khai): mỗi chain phải thấy ĐÚNG
-committee của CHÍNH NÓ, không phải của chain khác — dấu hiệu của bug `config.LoadConfig`
-singleton (đã vá PR #73) là mọi chain đều báo cùng 1 pubkey (của chain đầu tiên trong danh
-sách). Cách kiểm tra: gọi view method `getChainRegistry(chainId)` qua `eth_call` tới từng RPC
-private chain cho cả 4 `chainId`, so sánh trường `committeePubkeys` — phải KHÁC NHAU cho mỗi
+Xác nhận sâu hơn: mỗi chain phải thấy ĐÚNG committee của CHÍNH NÓ, không phải của chain khác.
+Cách kiểm tra: gọi view method `getChainRegistry(chainId)` qua `eth_call` tới từng RPC
+private chain cho cả 2 `chainId`, so sánh trường `committeePubkeys` — phải KHÁC NHAU cho mỗi
 `chainId`.
 
 ### A4. Chạy Relayer (tự động hoàn toàn, không cần thao tác gì thêm)
 
 ```bash
 mkdir -p relayer_logs
-nohup bash start_relayer_daemon.sh > relayer_logs/relayer.log 2>&1 &
+ROOT_ANCHOR="http://127.0.0.1:9099" CHAINS="101=http://127.0.0.1:8546,102=http://127.0.0.1:8547" \
+  nohup bash start_relayer_daemon.sh > relayer_logs/relayer.log 2>&1 &
 disown
 sleep 3
 ```
@@ -133,42 +138,37 @@ pgrep -af cross_chain_relayer | grep -v grep
 grep "watching" relayer_logs/relayer.log
 ```
 
-Phải thấy tiến trình đang chạy và dòng log `👀 [CROSS-CHAIN RELAYER] watching 12 chain
-pair(s) for real outbound messages` (12 = 4×3, mọi cặp (nguồn, đích) có thứ tự trong số 4
-chain). Nếu số cặp không phải 12, kiểm tra lại số chain đã cấu hình trong
-`start_relayer_daemon.sh`'s biến `CHAINS`.
+Phải thấy tiến trình đang chạy và dòng log `👀 [CROSS-CHAIN RELAYER] watching 2 chain
+pair(s) for real outbound messages` (2 = 2×1: 101->102 và 102->101). Nếu số cặp không phải 2,
+kiểm tra lại biến `CHAINS`.
 
-### A5. (Tuỳ chọn nhưng khuyến nghị) Test một giao dịch chuyển giá trị THẬT đầu-cuối
+### A5. Test giao dịch chuyển giá trị & gọi smart contract thật đầu-cuối
 
-Bước này xác nhận **toàn bộ pipeline hoạt động đúng**, không chỉ từng tiến trình còn sống —
-đây là bài test có giá trị nhất trong toàn bộ runbook. Một chain mới đăng ký có allocation
-gửi-ra = 0 theo thiết kế (xem `production_deployment_guide.md` mục 3), nên cần cấp phát qua
-governance trước — dùng `devnet_governance_timelock_seconds_override` (đã tự cấu hình 10
-giây bởi `gen_single_chain.py`/`gen_root_anchor_chain.py`) để không phải chờ 72 giờ thật.
+Chạy kịch bản test client tự động:
 
-Quy trình đầy đủ (propose → vote ≥2/3 chain đã đăng ký → chờ timelock → executeProposal →
-outbound → chờ relayer tự relay → kiểm tra số dư) cần viết một script Go ngắn gọi ABI trực
-tiếp — không có sẵn dưới dạng 1 lệnh CLI đơn (đây là việc nên làm: đóng gói bài test này
-thành 1 tool CLI thật, xem mục "Việc nên làm tiếp theo" cuối tài liệu). Các bước ABI chính
-xác (tên hàm, tham số, cách ký) đã được xác nhận chạy đúng và mô tả chi tiết trong lịch sử
-PR #73 (`ProposalAllocateSupply`, `propose`/`vote`/`executeProposal`, rồi `outbound`).
+```bash
+cd ../../metanode-suite/test-simple/test-rpc/test-blockstm/cross-chain/02-client-only-transfer
+go run . -rpcA "http://127.0.0.1:8546" -rpcB "http://127.0.0.1:8547"
+```
 
-**✅ Xác nhận thành công (nếu chạy bài test):** số dư `eth_getBalance` của địa chỉ nhận trên
-chain đích **tăng đúng bằng giá trị đã gửi** ở `outbound()` — xác nhận bằng 2 lần gọi
-`eth_getBalance` (trước và sau), không chỉ tin log "relayed thành công" (log đó, trước PR
-#73, từng báo "relayed" ngay cả khi `claimMessage` thất bại thầm lặng phía sau).
+**✅ Xác nhận thành công:** Terminal in đủ cả 2 thông báo:
+```text
+🎉 BINGOOOO! TIỀN ĐÃ MINT BÊN CHAIN B THÀNH CÔNG! (+500.0000 MTN)
+🎉 BINGOOOO! SMART CONTRACT CHAIN B ĐÃ NHẬN LỆNH TỪ CHAIN A VÀ THỰC THI THÀNH CÔNG! (Counter = 1)
+✅ HOÀN TẤT KỊCH BẢN CLIENT!
+```
 
 ### A6. Dừng hệ thống
 
 ```bash
+cd ../metanode/deploy/systemd
 pkill -TERM -f cross_chain_relayer
 bash private_chains_data/stop_all.sh
 bash root_anchor_data/stop_all.sh
 ```
 
 **✅ Xác nhận thành công:** `pgrep -af "simple_chain|cross_chain_relayer"` không còn kết quả
-nào (ngoài chính lệnh `pgrep` đang chạy). Nếu vẫn còn tiến trình sau `stop_all.sh` (từng gặp
-trong môi trường sandbox — script `stop` không phải lúc nào cũng dọn sạch), dùng
+nào (ngoài chính lệnh `pgrep` đang chạy). Nếu vẫn còn tiến trình sau `stop_all.sh`, dùng
 `kill -9 <pid>` cho từng tiến trình còn sót, xác nhận lại bằng `pgrep`.
 
 ---
@@ -303,6 +303,37 @@ bỏ sót nếu chỉ kiểm tra RPC có trả lời hay không.
 
 **✅ Xác nhận thành công:** `systemctl status metanode-execution-N`/`metanode-consensus-N`
 trên từng máy báo `inactive (dead)`, không phải `failed`.
+
+### B9. Kết nối Cross-Chain: Public Chain (nhiều máy) + 2 Private Chains (101 & 102)
+
+Khi Public Chain (Root Anchor) đang chạy trên nhiều máy (ví dụ RPC endpoint là `http://<IP_PUBLIC_NODE>:10746`):
+
+1. **Khởi động 2 Private Chains trên máy local/server riêng:**
+   ```bash
+   cd deploy/systemd
+   bash setup_2_private_chains.sh --clean --root-anchor-rpc=http://<IP_PUBLIC_NODE>:10746
+   ```
+
+2. **Đăng ký danh bạ committee 2 Private Chains lên Gateway (Root Anchor + 2 Chains):**
+   ```bash
+   bash register_2_private_chains.sh "http://<IP_PUBLIC_NODE>:10746"
+   ```
+   **✅ Xác nhận thành công:** Terminal in đủ 3 dòng `✅ bootstrapFoundingChains succeeded on ...`.
+
+3. **Chạy Relayer Daemon kết nối giữa Public Chain và 2 Private Chains:**
+   ```bash
+   ROOT_ANCHOR="http://<IP_PUBLIC_NODE>:10746" \
+   CHAINS="101=http://127.0.0.1:8546,102=http://127.0.0.1:8547" \
+     nohup bash start_relayer_daemon.sh > relayer_logs/relayer.log 2>&1 &
+   disown
+   ```
+   **✅ Xác nhận thành công:** `grep "watching" relayer_logs/relayer.log` báo `watching 2 chain pair(s)`.
+
+4. **Chạy kịch bản Client kiểm tra chuyển tiền và gọi smart contract:**
+   ```bash
+   cd ../../metanode-suite/test-simple/test-rpc/test-blockstm/cross-chain/02-client-only-transfer
+   go run . -rpcA "http://127.0.0.1:8546" -rpcB "http://127.0.0.1:8547"
+   ```
 
 ---
 

@@ -49,6 +49,8 @@ type RelayerDaemon struct {
 	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
 	nonces            map[uint64]uint64
 	nonceMu           sync.Mutex
+	chainLocks        map[uint64]*sync.Mutex
+	chainLocksMu      sync.Mutex
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
 }
@@ -102,8 +104,23 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
 		nonces:            make(map[uint64]uint64),
+		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
 	}, nil
+}
+
+func (d *RelayerDaemon) getChainLock(chainID uint64) *sync.Mutex {
+	d.chainLocksMu.Lock()
+	defer d.chainLocksMu.Unlock()
+	if d.chainLocks == nil {
+		d.chainLocks = make(map[uint64]*sync.Mutex)
+	}
+	lock, exists := d.chainLocks[chainID]
+	if !exists {
+		lock = &sync.Mutex{}
+		d.chainLocks[chainID] = lock
+	}
+	return lock
 }
 
 // Address returns the Relayer's Ethereum-compatible public address.
@@ -236,8 +253,12 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 
 	txHash, err := client.SendRawTransaction(ctx, hexutil.Encode(rawBytes))
 	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "already exists in pool") || strings.Contains(errLower, "already known") {
+			return signedTx.Hash(), nil
+		}
 		d.nonceMu.Lock()
-		if strings.Contains(strings.ToLower(err.Error()), "nonce") {
+		if strings.Contains(errLower, "nonce") {
 			delete(d.nonces, chainID)
 		} else if d.nonces[chainID] == nonce+1 {
 			d.nonces[chainID] = nonce
@@ -252,12 +273,20 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 // packed return/revert data (see rootanchor.TxReceipt's doc comment) once the transaction is no
 // longer pending.
 func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, calldata []byte, gasLimit uint64) (*rootanchor.TxReceipt, error) {
+	chainLock := d.getChainLock(chainID)
+	chainLock.Lock()
+	defer chainLock.Unlock()
+
 	txHash, err := d.sendToChain(ctx, chainID, calldata, gasLimit)
 	if err != nil {
 		return nil, err
 	}
 	client := d.chainClients[chainID]
-	for i := 0; i < d.config.MaxPollIterations; i++ {
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+	for i := 0; i < maxIterations; i++ {
 		receipt, err := client.TransactionReceipt(ctx, txHash)
 		if err == nil && receipt != nil {
 			return receipt, nil
@@ -549,7 +578,12 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
 	}
 
-	for i := 0; i < d.config.MaxPollIterations; i++ {
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+
+	for i := 0; i < maxIterations; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

@@ -308,7 +308,7 @@ func NewChainStateWithGenesis(
 			}
 		}
 	} else {
-		logger.Info("🚀 [EPOCH PERSISTENCE] Skipping epoch data loading and initialization for virtual/temporary chain state")
+		logger.Debug("🚀 [EPOCH PERSISTENCE] Skipping epoch data loading and initialization for virtual/temporary chain state")
 	}
 
 	headerCopy := currentBlockHeader
