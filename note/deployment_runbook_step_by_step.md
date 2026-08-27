@@ -56,9 +56,16 @@ kỳ mạng nào có giá trị thật, kể cả testnet dùng để tổng duy
 | RelayerDaemon | 1 (có thể chạy chung máy monitoring) | Permissionless, không cần dự phòng BFT — chỉ cần dự phòng vận hành (giám sát + tự restart) |
 | Monitoring | 1 (khuyến nghị riêng, có thể thêm máy phụ chạy `--all-monitors` để dự phòng chéo) | |
 
-**Ví dụ tối thiểu có ý nghĩa cho T2/testnet thật** (Root Anchor + 2 private chain — quy mô đã
-từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy, chưa phải nhiều-máy-thật):
-4 (Root Anchor) + 4×2 (2 private chain) + 1 (relayer) = **13 máy**.
+**⚠️ Quan trọng — kiến trúc KHÔNG cho 2 private chain nói chuyện xuyên chuỗi trực tiếp với
+nhau.** Mọi luồng `outbound()/attestCommit()/claimMessage()` đều bắt buộc đi qua Root Anchor
+làm custodian trung gian (sơ đồ mục 1, `production_deployment_guide.md`) — Root Anchor KHÔNG
+phải tuỳ chọn nếu 2 chain của bạn cần gửi giá trị/message qua lại. Vậy "chỉ 2 private chain"
+có 2 kịch bản chi phí khác hẳn nhau:
+
+| Kịch bản | Số máy | Công thức |
+| :--- | :--- | :--- |
+| **A — 2 private chain độc lập, KHÔNG cross-chain** | **8** | 4×2 (2 chain, không cần Root Anchor/relayer) |
+| **B — 2 private chain CÓ cross-chain với nhau** | **13** | 4 (Root Anchor) + 4×2 (2 chain) + 1 (relayer) — quy mô đã từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy, chưa phải nhiều-máy-thật |
 
 ### -1.3 Bảng chi phí ước tính (tham khảo, KHÔNG phải báo giá)
 
@@ -66,9 +73,15 @@ từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-má
 | :--- | :--- | :--- |
 | 1 máy Validator (8 vCPU / 16–32GB / 200GB+ NVMe) | ~$40–80/tháng (DigitalOcean/Hetzner Cloud/Vultr tầm giá tương đương) | ~$150–400/tháng (Hetzner Dedicated/OVH bare-metal tầm giá tương đương, 16–32 core vật lý/64–128GB/1–2TB NVMe RAID) |
 | 1 máy Relayer/Monitoring (2 vCPU/4GB) | ~$10–20/tháng | ~$20–40/tháng (vẫn nên tách máy vật lý riêng cho production) |
-| **Tổng ví dụ 13 máy (mục -1.2)** | **~$700–900/tháng** | **~$3,000–4,500/tháng** (chưa gồm backup/CDN/firewall managed) |
+| **Kịch bản A — 8 máy (2 chain, không cross-chain)** | **~$320–640/tháng** (+ ~$10–20 nếu thêm máy monitoring) | **~$1.200–3.200/tháng** (+ ~$20–40 nếu thêm máy monitoring) |
+| **Kịch bản B — 13 máy (2 chain + Root Anchor + relayer)** | **~$700–900/tháng** | **~$3.000–4.500/tháng** (chưa gồm backup/CDN/firewall managed) |
+| → Chênh lệch A→B (chi phí riêng của Root Anchor + relayer) | ~$370–420/tháng | ~$1.800–2.100/tháng |
 | Quản lý khoá HSM/KMS (khuyến nghị mainnet giá trị lớn, mục 5.5 `production_deployment_guide.md`) | Không cần | AWS KMS: ~$1/khoá/tháng + phí request rất nhỏ; hoặc YubiHSM2 phần cứng: ~$650–950/thiết bị (mua đứt) |
-| Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
+| Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật — **chỉ áp dụng nếu dùng cross-chain/Kịch bản B**, 2 chain độc lập không qua Root Anchor thì không cần P5) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
+
+**Mức sàn tuyệt đối cho Kịch bản A (chỉ demo/dev, KHÔNG khuyến nghị)**: 1 validator/chain × 2
+= **2 máy** (~$80–160/tháng testnet) — nhưng độ chịu lỗi BFT bằng 0 (n=1), không dùng cho bất
+cứ gì ngoài chạy thử 1 lần.
 
 **Mạng/băng thông:** độ trễ THẤP giữa các validator **CÙNG 1 chain** ảnh hưởng trực tiếp thời
 gian round BFT (khuyến nghị <50ms giữa các node cùng chain — nếu đặt các chain khác nhau/Root
