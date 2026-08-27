@@ -279,12 +279,17 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 	return amount, nil
 }
 
-// BootstrapFoundingChains registers or updates the founding chains (>= MinFoundingChains) in ChainRegistry.
+// BootstrapFoundingChains registers the founding chains (>= MinFoundingChains) in ChainRegistry at genesis.
 // Every validator entry must independently pass strict BLS PopVerify (Proof-of-Possession).
+// Self-closing: fails closed with ErrAlreadyBootstrapped once ActiveChains is non-empty.
 func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.EnsureGovernance()
+
+	if len(g.Governance.ActiveChains) > 0 {
+		return ErrAlreadyBootstrapped
+	}
 
 	if len(payloads) < MinFoundingChains {
 		return fmt.Errorf("%w: got %d, need >= %d", ErrInsufficientFoundingChains, len(payloads), MinFoundingChains)

@@ -92,10 +92,15 @@ var gatewayStateStorageKey = crypto.Keccak256([]byte("gateway_engine_state_v1"))
 // unconfigured engine (empty ChainRegistry, zero-supply ledger) if this is the first write ever
 // made to GATEWAY_CONTRACT_ADDRESS on this chain.
 func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayEngine, error) {
-	if chainState == nil || chainState.GetConfig() == nil || chainState.GetConfig().ChainId == nil || chainState.GetConfig().ChainId.Sign() <= 0 {
-		return nil, fmt.Errorf("loadGatewayEngine: chainState is nil or ChainId is not configured")
+	if chainState == nil {
+		return nil, fmt.Errorf("loadGatewayEngine: chainState is nil")
 	}
-	localChainID := chainState.GetConfig().ChainId.Uint64()
+	localChainID := uint64(0)
+	if chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil && chainState.GetConfig().ChainId.Sign() > 0 {
+		localChainID = chainState.GetConfig().ChainId.Uint64()
+	} else if config.ConfigApp != nil && config.ConfigApp.ChainId != nil && config.ConfigApp.ChainId.Sign() > 0 {
+		localChainID = config.ConfigApp.ChainId.Uint64()
+	}
 
 	scDB := chainState.GetSmartContractDB()
 	if scDB == nil {

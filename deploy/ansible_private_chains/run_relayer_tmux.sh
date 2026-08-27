@@ -155,8 +155,8 @@ if [ -z "$CHAINS_STR" ]; then
     exit 1
 fi
 
-# Key ECDSA mặc định cho Relayer devnet
-RELAYER_KEY="${RELAYER_KEY:-3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d}"
+# Key ECDSA mặc định cho Relayer devnet (Wallet 11: 0x248BF9E035E4C3da95FECC94A0bF9A1e1F648a46)
+RELAYER_KEY="${RELAYER_KEY:-d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9}"
 POLL_MS="${POLL_MS:-100}"
 
 echo "🔨 Biên dịch binary cross_chain_relayer..."

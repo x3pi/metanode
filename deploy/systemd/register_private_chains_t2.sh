@@ -21,7 +21,7 @@ go build -o register_chains ./cmd/tool/register_chains
 ROOT_ANCHOR="${1:-http://127.0.0.1:10746}"
 
 ./register_chains \
-    --key "3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d" \
+    --key "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9" \
     --root-anchor "$ROOT_ANCHOR" \
     --chains "101,102,103,104" \
     --chains-dir "$DIR/private_chains_data" \
