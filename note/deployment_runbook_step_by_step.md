@@ -83,6 +83,51 @@ chưa phải nhiều-máy-thật.
 **Muốn thêm chain thứ 3, thứ 4...**: mỗi chain mới tham gia cross-chain cộng thêm đúng 4 máy
 validator (không cộng thêm Root Anchor/relayer — 2 thành phần này dùng chung cho mọi chain).
 
+### -1.4 Biến thể giảm chi phí: 1 validator + 1 synconly / private chain (CHẤP NHẬN RỦI RO)
+
+Có thể giảm mỗi private chain từ 4 validator xuống **1 validator + 1 synconly = 2 máy/chain**
+— **Root Anchor vẫn phải giữ nguyên n≥4** (lý do ở đánh giá rủi ro bên dưới, mục 3).
+
+| | Số máy | Testnet | Production |
+| :--- | :--- | :--- | :--- |
+| Root Anchor (giữ n≥4, KHÔNG áp dụng biến thể này) | 4 | | |
+| 2 private chain × (1 validator + 1 synconly) | 4 | | |
+| Relayer | 1 | | |
+| **Tổng** | **9** (giảm từ 13 ở mục -1.3) | **~$330–660/tháng** | **~$1.220–3.240/tháng** |
+| Tiết kiệm so với 13 máy (mục -1.3) | −4 máy | ~$370–420/tháng | ~$1.800–2.100/tháng |
+
+**🔒 Đánh giá rủi ro — bắt buộc đọc trước khi chọn biến thể này:**
+
+1. **`synconly` KHÔNG phải dự phòng (standby) cho validator.** Theo đúng thiết kế trong code
+   (`gen_validator_entry.py`: synconly node **không phải thành viên uỷ ban đồng thuận** —
+   không ký, không vote, chỉ đồng bộ đọc theo validator). Nếu validator duy nhất chết,
+   synconly cũng đứng yên theo (không còn gì mới để đồng bộ) — **chain ngừng sinh block hoàn
+   toàn**, không có cơ chế tự động đẩy synconly lên thay thế. Cứu chain đòi hỏi can thiệp thủ
+   công (đăng ký lại synconly thành validator qua cấu hình + governance), không phải failover
+   tức thời.
+
+2. **1 validator/chain = rủi ro TUYỆT ĐỐI, không phải "thấp hơn 1 chút" so với n=3.** Dự án đã
+   xác định n=3 có độ chịu lỗi BFT bằng 0 (`note/bft_fault_tolerance_node_count.md`) —
+   n=1 còn tệ hơn: không chỉ mất khả năng chịu lỗi Byzantine, mà **chính việc chain có còn
+   sống hay không** phụ thuộc 100% vào đúng 1 máy. Nếu chain có tham gia cross-chain thật, an
+   ninh của toàn bộ chain đó phụ thuộc đúng 1 khoá riêng — không cần ai thông đồng, chỉ cần lộ
+   đúng khoá đó là kẻ tấn công ký giả được bất kỳ giao dịch nào của chain này.
+
+3. **Điểm đỡ hơn — vì sao vẫn có thể chấp nhận được cho 1 chain cụ thể, nhưng KHÔNG cho Root
+   Anchor:** thiết kế "weakest-link containment" (mục 5.2 `cross_chain_root_anchor_architecture.md`)
+   giới hạn thiệt hại theo TỪNG chain riêng — nếu 1 private chain 1-validator bị chiếm, kẻ tấn
+   công chỉ rút được tối đa đúng số `per_chain_allocation` **của riêng chain đó**, KHÔNG lan
+   sang chain khác hay rút được từ Root Anchor. Ngược lại, Root Anchor là custodian CHUNG cho
+   MỌI chain tham gia — 1 lỗi ở Root Anchor ảnh hưởng TOÀN HỆ THỐNG, không giới hạn 1 chain —
+   đây là lý do Root Anchor không được áp dụng biến thể giảm chi phí này dù ở bất kỳ tình huống
+   nào.
+
+**Khi nào chấp nhận được**: chain đó dùng cho mục đích nội bộ/giá trị thấp/pilot-demo, VÀ bạn
+chủ động giữ `per_chain_allocation` cấp cho nó ở mức thấp qua governance (`ProposalAllocateSupply`)
+tương xứng với rủi ro chấp nhận — đây là quyết định kinh doanh có thể chấp nhận được, không
+phải lỗi kỹ thuật, miễn là được chọn có ý thức chứ không phải vì tiết kiệm mà bỏ qua bước đọc
+đánh giá này.
+
 **Mạng/băng thông:** độ trễ THẤP giữa các validator **CÙNG 1 chain** ảnh hưởng trực tiếp thời
 gian round BFT (khuyến nghị <50ms giữa các node cùng chain — nếu đặt các chain khác nhau/Root
 Anchor ở nhiều khu vực địa lý xa nhau, đó là bình thường, chỉ cần các node CÙNG 1 chain gần
