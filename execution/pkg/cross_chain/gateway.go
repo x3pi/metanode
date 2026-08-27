@@ -21,25 +21,26 @@ const (
 )
 
 var (
-	ErrHopCountExceeded             = errors.New("hop count exceeds maximum limit of 6")
-	ErrUnknownSourceChain           = errors.New("unknown source chain ID")
-	ErrEpochMismatch                = errors.New("epoch mismatch for source chain")
-	ErrAllocationExceeded           = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
-	ErrQuorumNotReached             = errors.New("BFT quorum stake threshold not reached")
-	ErrCommitNotAttested            = errors.New("commit root has not been attested by source chain")
-	ErrInvalidMerkleProof           = errors.New("invalid Merkle proof")
-	ErrAlreadyClaimed               = errors.New("message has already been claimed or processed (idempotent guard)")
-	ErrInvalidRefundState           = errors.New("cannot refund message: message is not in Pending status")
-	ErrInvalidRefundProof           = errors.New("invalid failed execution proof for refund")
-	ErrChainNotDead                 = errors.New("target chain has not been declared dead")
-	ErrDeadChainAlreadyClaimed      = errors.New("account balance on dead chain has already been claimed")
-	ErrNoActiveContext              = errors.New("no active cross-chain execution context")
-	ErrNotCalledByGateway           = errors.New("caller is not authorized by GatewayPrecompile")
-	ErrInvalidBLSSignature          = errors.New("BLS Quorum Certificate signature is invalid or empty")
-	ErrReserveChainNotConfigured    = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
-	ErrOnlyReserveMayMint           = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
-	ErrGenesisAlreadyMinted         = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
-	ErrNonReserveCeilingAttestation = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
+	ErrHopCountExceeded              = errors.New("hop count exceeds maximum limit of 6")
+	ErrUnknownSourceChain            = errors.New("unknown source chain ID")
+	ErrEpochMismatch                 = errors.New("epoch mismatch for source chain")
+	ErrAllocationExceeded            = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrQuorumNotReached              = errors.New("BFT quorum stake threshold not reached")
+	ErrCommitNotAttested             = errors.New("commit root has not been attested by source chain")
+	ErrInvalidMerkleProof            = errors.New("invalid Merkle proof")
+	ErrAlreadyClaimed                = errors.New("message has already been claimed or processed (idempotent guard)")
+	ErrInvalidRefundState            = errors.New("cannot refund message: message is not in Pending status")
+	ErrInvalidRefundProof            = errors.New("invalid failed execution proof for refund")
+	ErrChainNotDead                  = errors.New("target chain has not been declared dead")
+	ErrDeadChainAlreadyClaimed       = errors.New("account balance on dead chain has already been claimed")
+	ErrNoActiveContext               = errors.New("no active cross-chain execution context")
+	ErrNotCalledByGateway            = errors.New("caller is not authorized by GatewayPrecompile")
+	ErrInvalidBLSSignature           = errors.New("BLS Quorum Certificate signature is invalid or empty")
+	ErrReserveChainNotConfigured     = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
+	ErrOnlyReserveMayMint            = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
+	ErrGenesisAlreadyMinted          = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
+	ErrNonReserveCeilingAttestation  = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
+	ErrInsufficientRegistrationStake = errors.New("ProposalRegisterChain: this chain ID does not yet hold MinRegistrationStake in PerChainAllocation — fund it first via ProposalTransferAllocation from an already-active chain or the Reserve")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -138,6 +139,31 @@ type GatewayEngine struct {
 	// DaemonConfig.ReserveChainID), never by the GatewayEngine itself. See
 	// note/cross_chain_attack_scenario_catalog.md items C7/C8 for the full analysis.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
+
+	// MinRegistrationStake — C6 mitigation (Sybil chain registration, 2026-08-27, see
+	// note/cross_chain_attack_scenario_catalog.md item C6). Registration itself
+	// (BootstrapFoundingChains and ExecuteGovernanceProposal's ProposalRegisterChain case) was
+	// previously fully decoupled from SupplyLedger — a new chain could be voted into
+	// ChainRegistry, and therefore gain 1 full governance vote, while holding zero allocation.
+	// When set (>0), ProposalRegisterChain additionally requires
+	// SupplyLedger.PerChainAllocation[reg.ChainID] >= MinRegistrationStake at execution time —
+	// the candidate chain ID must already have been pre-funded via ProposalTransferAllocation
+	// from an existing active chain (or the Reserve) BEFORE the registration proposal can
+	// execute. TransferAllocation/SetInitialAllocation have no ChainRegistry membership check
+	// (confirmed by direct code reading), so pre-funding a not-yet-registered chain ID works
+	// today with no other change needed. Zero/nil (the default, and every pre-2026-08-27 config)
+	// preserves the exact old permissionless-registration behavior — deliberately opt-in, not a
+	// default-on rate limit, matching the project's standing "measure before guessing" policy
+	// (all_remaining_fixes_plan.md Mục 2: no magic number without real production data on what a
+	// spam registration actually costs an attacker in practice). Does NOT gate
+	// BootstrapFoundingChains — genesis founding chains are pre-funded via a completely separate
+	// mechanism (genesis config's own initial allocations) that runs before this ledger exists,
+	// and the one-time bootstrap is already gated by MinFoundingChains + optional
+	// GenesisCoordinatorAddress, a different threat model (front-running the ceremony, not
+	// steady-state Sybil growth). Set once from config (config.CrossChain
+	// .MinRegistrationStakeWei, gateway_handler.go's applyMinRegistrationStakeConfig) — never
+	// governance-settable, matching ReserveChainID/GenesisCoordinatorAddress's own pattern.
+	MinRegistrationStake *big.Int `json:"min_registration_stake,omitempty"`
 
 	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
 	// an explicit devnet-only config field (config.CrossChainConfig
@@ -346,6 +372,17 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		}
 		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 			return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
+		}
+		// C6 mitigation (opt-in, see MinRegistrationStake's doc comment): require the candidate
+		// chain ID to already hold a minimum pre-funded allocation before it can be admitted.
+		if g.MinRegistrationStake != nil && g.MinRegistrationStake.Sign() > 0 {
+			held := new(big.Int)
+			if g.SupplyLedger != nil {
+				held = g.SupplyLedger.GetAllocation(reg.ChainID)
+			}
+			if held.Cmp(g.MinRegistrationStake) < 0 {
+				return nil, fmt.Errorf("%w: chain %d holds %s, needs >= %s", ErrInsufficientRegistrationStake, reg.ChainID, held.String(), g.MinRegistrationStake.String())
+			}
 		}
 		g.Governance.RegisterActiveChain(reg.ChainID)
 		if g.ChainRegistry == nil {
