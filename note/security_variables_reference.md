@@ -80,31 +80,20 @@ không cần luồng đăng ký thật) — đổi mặc định sẽ âm thầm
 `--gateway-bls-key` với khoá tự quản lý) khi generate config cho 1 chain thật có bật
 `enable_private_gateway` — script không tự ép buộc việc này, chỉ cung cấp lựa chọn.
 
-### 3.2 [CHƯA SỬA — đã hỏi, người dùng chọn "để sau"] `pkg/devicekey/DeviceKey.go` — secret Telegram bot token hardcode trong mã nguồn
+### 3.2 [ĐÃ GỠ 2026-08-27] `pkg/devicekey/DeviceKey.go` — secret Telegram bot token hardcode trong mã nguồn
 
-Hàm `telegramNoti()` (dòng 431-434) hardcode thẳng 1 bot token Telegram thật
-(`674513592:AA...`) và `chat_id` trong mã nguồn đã commit — bất kỳ ai có quyền đọc repo đều
-dùng được token này để gửi tin nhắn thay danh nghĩa bot đó. Đây là 1 phần của cơ chế
-`CalculateUUID`/device-activation (được gọi thật ở mọi lần khởi động `simple_chain`/`exec_node`
-qua `initializeDeviceKey`) — đọc nội dung khoá SSH thật từ đường dẫn `-ssh-key`, tính fingerprint,
-và nếu không khớp 1 "secret" giải mã sẵn thì gửi TOÀN BỘ nội dung khoá SSH đó qua Telegram rồi
-**buộc thoát node**.
+**Quyết định**: gỡ bỏ hẳn, không sửa lại. Người dùng xác nhận: hệ thống chỉ nên có **1 cơ chế
+thông báo Telegram duy nhất** — cơ chế thật, đã dùng trong `deploy/ansible/monitors/`
+(`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` đọc từ `.env`, không hardcode, đã gitignore đúng cách)
+— không cần và không nên có 1 cơ chế Telegram thứ hai nằm trong chính binary node.
 
-**Hiện trạng thật (đã xác minh)**: cơ chế này chỉ kích hoạt khi biến `BuildTime` (inject qua
-`-ldflags -X main.BuildTime=...` lúc build) khác rỗng — **không có script build nào trong repo
-hiện tại set biến này** (`build_release.sh` không có `-ldflags`), và file `encrypted_part2.dat`
-mà hàm cần đọc **không tồn tại trong repo** → với mọi cách build hiện có, hàm này luôn nhận
-`BuildTime == ""` và trả `nil` ngay, **không chạy nhánh gửi Telegram/kiểm tra hết hạn**. Cũng có
-1 điều kiện hết hạn cứng (`requiredDate = 2026-10-01`) — cũng bị vô hiệu hoá bởi cùng lý do trên.
-
-**Không tự xoá/sửa** vì đây rõ ràng là code chủ đích (cơ chế device-activation/license), không
-phải lỗi ngẫu nhiên — có thể bạn (hoặc người viết trước) cố tình giữ lại. Nhưng dù giữ hay bỏ,
-**token Telegram hardcode trong git là vấn đề cần xử lý độc lập** (nên chuyển ra biến môi
-trường tối thiểu, hoặc thu hồi/tạo token mới nếu không còn dùng) — và bản thân cơ chế là 1 quả
-bom hẹn giờ: chỉ cần 1 lần sau này ai đó thêm `-ldflags -X main.BuildTime=...` vào build script
-(vd: để in version info — 1 việc rất bình thường), cơ chế này lập tức sống lại và mọi node build
-kiểu đó sẽ **crash cứng sau 2026-10-01** với lỗi "expired session". Đề nghị bạn xác nhận: giữ
-(và nếu giữ, phải sửa/gỡ ngày hết hạn + xử lý token) hay gỡ bỏ hẳn.
+**Đã xoá**: toàn bộ `pkg/devicekey/` (hàm `telegramNoti` chứa bot token hardcode, `CalculateUUID`
+đọc khoá SSH thật + cơ chế "device-activation" có ngày hết hạn cứng 2026-10-01), cùng 2 điểm gọi
+(`initializeDeviceKey` trong `cmd/simple_chain/main.go` và `cmd/exec_node/main.go`), cờ `-ssh-key`
+không còn dùng ở đâu (xác nhận bằng grep, không có script deploy nào từng truyền cờ này), và 3
+biến `BuildTime`/`EnvDecryptKey`/`EnvFirstKey` không còn build script nào set. Xác nhận trước khi
+xoá: không có nơi nào khác trong repo import bất kỳ hàm nào từ `pkg/devicekey` ngoài 2 điểm gọi
+trên — xoá không ảnh hưởng gì khác. `go build/vet/test` sạch sau khi xoá.
 
 ## 4. Config sprawl ở `execution/cmd/{simple_chain,exec_node,mining,rpc-client}/`
 

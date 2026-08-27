@@ -540,10 +540,10 @@ front-run gap".
 3. Việc code còn lại (không chặn, nhưng nên làm trước khi coi Phase 1 là xong): giao
    `note/all_remaining_fixes_plan.md` cho 1 agent/dev khác — tài liệu đó đã liệt kê đầy đủ
    từng việc kèm file/hàm chính xác.
-4. 1 việc đã tìm nhưng cố tình CHƯA sửa (cần quyết định của người phụ trách, không phải kỹ
-   thuật thuần — xem `note/security_variables_reference.md` mục 3.2): `pkg/devicekey/DeviceKey.go`
-   (secret Telegram token hardcode + cơ chế device-activation đọc khoá SSH thật, hiện bất hoạt
-   nhưng có ngày hết hạn cứng 2026-10-01) đang chờ quyết định giữ/gỡ.
+
+Toàn bộ các phát hiện governance/allocation (C6/C7/C8) và `pkg/devicekey/DeviceKey.go` (D6,
+secret Telegram token hardcode + cơ chế device-activation) đã được xử lý dứt điểm 2026-08-27 —
+xem `note/cross_chain_attack_scenario_catalog.md` để có danh sách đầy đủ + trạng thái từng mục.
 
 **Nếu có nghi ngờ về bất cứ điều gì ở tài liệu này:** đọc trực tiếp
 `note/cross_chain_production_readiness_plan.md` (log đầy đủ, trung thực, kể cả các lần kết

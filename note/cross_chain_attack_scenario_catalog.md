@@ -67,7 +67,7 @@ tổng quan (xem `note/security_assessment_status_report.md` cho bức tranh t�
 | D3 | Khoá thật world-readable trên server (`0755`/`0644`) | Siết `0600`/`0700` | ✅ |
 | D4 | 6/9 trường bí mật không có đường thoát biến môi trường, buộc nằm trong `config.json` | Thêm 5 biến `META_*` còn thiếu | ✅ |
 | D5 | `gateway_bls_key` dùng chung 1 giá trị cho MỌI chain (kể cả tool ceremony thật) | Thêm `--gateway-bls-key`/`--random-gateway-bls-key`, mặc định không đổi (an toàn devnet cũ) | ✅ |
-| D6 | Secret Telegram bot token hardcode trong `pkg/devicekey/DeviceKey.go` + cơ chế đọc khoá SSH thật, có ngày hết hạn cứng 2026-10-01 | Hiện bất hoạt (thiếu `encrypted_part2.dat`, không build script nào set `BuildTime`) | 🔴 **CHƯA vá — người dùng đã chọn "để sau"**, vẫn là quả bom hẹn giờ nếu sau này có ai thêm `-ldflags -X main.BuildTime=...` vì lý do khác (vd: in version) |
+| D6 | Secret Telegram bot token hardcode trong `pkg/devicekey/DeviceKey.go` + cơ chế đọc khoá SSH thật, có ngày hết hạn cứng 2026-10-01 | Đã gỡ bỏ hẳn (2026-08-27) — thống nhất về đúng 1 cơ chế Telegram thật đã dùng trong `deploy/ansible/monitors/` | ✅ Đã xoá toàn bộ `pkg/devicekey/` + 2 điểm gọi, xác nhận không ảnh hưởng gì khác, build/test sạch |
 | D7 | GitHub squash-merge làm rớt commit dù PR hiện "merged" | Không phải lỗi code — quy trình: luôn `git show origin/dev:<path> \| grep` xác nhận trước khi tin | ✅ (kỷ luật quy trình, đã xảy ra 3 lần, đã có cách phát hiện) |
 
 ## E. Chưa làm / không thể tự làm (điều kiện chặn cứng trước mainnet giá trị thật)
@@ -92,9 +92,9 @@ kỳ audit/checklist nào trước đó** — cần xử lý hoặc chấp nhậ
 - **C8** — chưa xác minh đồng bộ trần allocation giữa nhiều chain đích.
 - **C6** — Sybil đăng ký chain dần dần chiếm đa số governance phi-tiền-tệ, hiện chỉ "giám sát", chưa chặn cứng.
 
-Cộng với **D6** (chưa quyết định) và **E1-E3** (chưa làm được, cần bên ngoài/hạ tầng thật) —
-đây là danh sách đầy đủ những gì đứng giữa hệ thống hiện tại và "phòng thủ chắc chắn trước mọi
-tình huống" theo đúng nghĩa đen của yêu cầu. Không có kịch bản tấn công nào được biết mà KHÔNG
-có ít nhất 1 dòng trong bảng trên — nhưng 5 mục vừa liệt kê (C6, C7, C8, D6) là mục thật sự cần
-quyết định/hành động trước khi triển khai giá trị thật, không thể coi là "đã xong" chỉ vì phần
-còn lại đã tốt.
+**D6 đã xử lý** (gỡ bỏ hẳn `pkg/devicekey/`, thống nhất về đúng 1 cơ chế Telegram thật trong
+`deploy/ansible/monitors/`) — không phụ thuộc C6/C7/C8, có thể đã merge trước hoặc sau PR vá
+C6/C7/C8 tuỳ thứ tự thực tế; xem trạng thái mới nhất của C6/C7/C8 ở bảng mục C phía trên (PR
+riêng, không phải PR này). Còn lại **E1-E3** (P5 audit, T2, T3 — chưa làm được, cần bên ngoài/
+hạ tầng thật) — đây là danh sách đầy đủ những gì còn đứng giữa hệ thống hiện tại và "phòng thủ
+chắc chắn trước mọi tình huống" theo đúng nghĩa đen của yêu cầu.

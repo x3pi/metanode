@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/devicekey"
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
@@ -31,20 +30,13 @@ var (
 	defaultConfigPath = flag.String("config", "config.json", "Config path")
 	logLevel          = flag.Int("log-level", logger.FLAG_INFO, "Log level")
 	debug             = flag.Bool("debug", false, "Debug mode")
-	// THÊM FLAG SSH-KEY TẠI ĐÂY
-	sshKeyPath = flag.String("ssh-key", "", "Path to SSH private key")
-	pprofAddr  = flag.String("pprof-addr", "localhost:6060", "Địa chỉ bind pprof (để trống để tắt)")
+	pprofAddr         = flag.String("pprof-addr", "localhost:6060", "Địa chỉ bind pprof (để trống để tắt)")
 
 	// Tool flags
 	toolRegisterValidator = flag.String("tool-register-validator", "", "Path to config.json for validator registration tool. If set, runs the tool and exits.")
 	toolGetAddress        = flag.String("tool-get-address", "", "Hex private key to calculate address. If set, prints address and exits.")
 )
 
-var (
-	BuildTime     string
-	EnvDecryptKey string
-	EnvFirstKey   string
-)
 var logCleaner *loggerfile.LogCleaner
 
 func main() {
@@ -157,14 +149,6 @@ func main() {
 
 	// Log goroutines ban đầu
 	logger.Info("[MAIN] Goroutines ban đầu: %d", runtime.NumGoroutine())
-
-	// Gọi hàm kiểm tra device key SAU KHI đã parse flag
-	// Truyền giá trị của flag sshKeyPath vào
-	if err := initializeDeviceKey(*sshKeyPath); err != nil {
-		logger.Error("[FATAL] Device key initialization failed: %v", err)
-		logger.SyncFileLog()
-		fatal.Exit("Fatal exit from main.go")
-	}
 
 	if *debug {
 		startDebugServer(*pprofAddr)
@@ -305,12 +289,6 @@ func main() {
 	rpcServer := startRPCServer(app)
 	handleExitSignals(app, rpcServer)
 
-}
-
-// Sửa lại hàm để nhận tham số sshKeyPath
-func initializeDeviceKey(sshKeyPath string) error {
-	// Truyền tham số này xuống hàm CalculateUUID
-	return devicekey.CalculateUUID(BuildTime, EnvDecryptKey, EnvFirstKey, sshKeyPath)
 }
 
 // ... các hàm khác giữ nguyên ...
