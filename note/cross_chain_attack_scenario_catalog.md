@@ -55,8 +55,8 @@ tổng quan (xem `note/security_assessment_status_report.md` cho bức tranh t�
 | C4 | `ProposalRegisterChain`/`ProposalUpdateCommittee` nhận uỷ ban không rỗng mà không verify PoP (rogue-key ở tầng đăng ký chain, không phải tầng message) | `ValidateCommittee` bắt buộc khi uỷ ban không rỗng, áp dụng đủ tất cả các đường ghi | ✅ |
 | C5 | Bootstrap Root Anchor với <4 chain sáng lập để 1 bên tự chi phối governance | `MinFoundingChains=4` hardcode, không có cờ hạ xuống | ✅ (đã gặp lỗi thật khi thử làm trái) |
 | C6 | Sybil: đăng ký nhiều chain giả (chi phí thấp) để chiếm đa số phiếu, thao túng các quyết định KHÔNG liên quan tiền (đổi uỷ ban 1 chain khác, tham số hệ thống...) | `ProposalRegisterChain` vẫn cần vote từ chain đã đăng ký — không hoàn toàn tự do, nhưng KHÔNG loại trừ được 1 nhóm đủ lớn thông đồng dần dần chiếm đa số qua nhiều lần đăng ký hợp lệ riêng lẻ | 🟡 **Chấp nhận rủi ro có giám sát, chủ đích, giữ nguyên quyết định cũ** (`all_remaining_fixes_plan.md` Mục 2: không đoán 1 thiết kế rate-limit khi chưa có số liệu thật — permissionless propose/register cần thiết cho 1 chain ứng viên tự đề xuất). **Đã bổ sung (2026-08-27)**: metric Prometheus mới `master_gateway_registered_chain_count` (`pkg/metrics/metrics.go`, cập nhật ở cả `bootstrapFoundingChains` và `executeProposal`) làm tăng trưởng `ChainRegistry` **quan sát được thật** trong production, cùng cơ chế đã áp dụng cho `propose()` spam (`master_gateway_governance_proposal_count`) — có test hồi quy `TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric`. Chưa có rate-limit cứng — nếu số liệu thật sau này cho thấy lạm dụng, mở lại thành việc riêng có dẫn chứng, không suy đoán trước. |
-| C7 | **`ProposalAllocateSupply` — vote để "in tiền mới" cho chính mình (không phải chuyển tiền có sẵn)** | Đây là con đường **duy nhất** trong hệ thống thực sự tăng `GenesisTotalSupply` qua vote (xác nhận trong `types.go`), khác hẳn `ClaimMessage()` (chỉ chuyển tiền đã tồn tại). Nếu kẻ tấn công (hoặc liên minh) chiếm ≥2/3 số chain đã đăng ký, họ tự vote cấp allocation khống cho 1 chain họ kiểm soát | 🔴 **CHƯA vá — phát hiện trong phiên thảo luận kiến trúc vừa rồi (2026-08-27), chưa từng nằm trong danh sách bug/audit trước đó.** Xem `note/eurozone_unified_native_coin_plan.md` mục 1 cho phân tích đầy đủ + hướng vá đề xuất (bỏ con đường này, chỉ giữ cấp allocation qua chuyển tiền thật) |
-| C8 | Đồng bộ trần `per_chain_allocation` giữa NHIỀU chain đích khác nhau cùng attest từ 1 chain nguồn | `SupplyLedger` là state **cục bộ theo từng chain** (mỗi `GatewayEngine` giữ bản sao riêng) — CHƯA XÁC MINH liệu 2 chain đích độc lập có thể cộng dồn vượt quá trần thật của chain nguồn hay không | ⚪ **CHƯA XÁC MINH — cần điều tra trước khi triển khai thật với >2 chain**, xem `note/eurozone_unified_native_coin_plan.md` mục 2.3 |
+| C7 | **`ProposalAllocateSupply` — vote để "in tiền mới" cho chính mình (không phải chuyển tiền có sẵn)** | Đây từng là con đường **duy nhất** trong hệ thống thực sự tăng `GenesisTotalSupply` qua vote. Đã vá: `ProposalAllocateSupply` giờ chỉ cho phép mint **đúng 1 lần** và **chỉ cho chính Reserve** (`ErrOnlyReserveMayMint`/`ErrGenesisAlreadyMinted`); cấp phát cho các chain khác sau đó bắt buộc qua `ProposalTransferAllocation` (chuyển tiền đã tồn tại, không tạo tiền mới) | ✅ `TestGateway_ProposalAllocateSupply_UnblocksAttestCommit` |
+| C8 | Đồng bộ trần `per_chain_allocation` giữa NHIỀU chain đích khác nhau cùng attest từ 1 chain nguồn | Đã vá: thêm field on-chain `ReserveChainID` trên `GatewayEngine` — mọi `attestCommit()` có giá trị >0 (ceiling-enforced) chỉ được chấp nhận nếu `LocalChainID == ReserveChainID`, fail-closed nếu chưa cấu hình (`ErrReserveChainNotConfigured`/`ErrNonReserveCeilingAttestation`). Loại bỏ khả năng 2 chain đích độc lập cùng attest và cộng dồn vượt trần thật | ✅ `TestAudit_OnlyReserveMayAttestNonzeroValueCommit` |
 
 ## D. Tầng deploy/cấu hình/vận hành (đã rà ở các lượt trước trong phiên)
 
@@ -67,7 +67,7 @@ tổng quan (xem `note/security_assessment_status_report.md` cho bức tranh t�
 | D3 | Khoá thật world-readable trên server (`0755`/`0644`) | Siết `0600`/`0700` | ✅ |
 | D4 | 6/9 trường bí mật không có đường thoát biến môi trường, buộc nằm trong `config.json` | Thêm 5 biến `META_*` còn thiếu | ✅ |
 | D5 | `gateway_bls_key` dùng chung 1 giá trị cho MỌI chain (kể cả tool ceremony thật) | Thêm `--gateway-bls-key`/`--random-gateway-bls-key`, mặc định không đổi (an toàn devnet cũ) | ✅ |
-| D6 | Secret Telegram bot token hardcode trong `pkg/devicekey/DeviceKey.go` + cơ chế đọc khoá SSH thật, có ngày hết hạn cứng 2026-10-01 | Hiện bất hoạt (thiếu `encrypted_part2.dat`, không build script nào set `BuildTime`) | 🔴 **CHƯA vá — người dùng đã chọn "để sau"**, vẫn là quả bom hẹn giờ nếu sau này có ai thêm `-ldflags -X main.BuildTime=...` vì lý do khác (vd: in version) |
+| D6 | Secret Telegram bot token hardcode trong `pkg/devicekey/DeviceKey.go` + cơ chế đọc khoá SSH thật, có ngày hết hạn cứng 2026-10-01 | Đã gỡ bỏ hẳn (2026-08-27) — thống nhất về đúng 1 cơ chế Telegram thật đã dùng trong `deploy/ansible/monitors/` | ✅ Đã xoá toàn bộ `pkg/devicekey/` + 2 điểm gọi, xác nhận không ảnh hưởng gì khác, build/test sạch |
 | D7 | GitHub squash-merge làm rớt commit dù PR hiện "merged" | Không phải lỗi code — quy trình: luôn `git show origin/dev:<path> \| grep` xác nhận trước khi tin | ✅ (kỷ luật quy trình, đã xảy ra 3 lần, đã có cách phát hiện) |
 
 ## E. Chưa làm / không thể tự làm (điều kiện chặn cứng trước mainnet giá trị thật)
@@ -97,7 +97,14 @@ audit/checklist nào trước đó — ĐÃ VÁ ngày 2026-08-27**:
   metric `master_gateway_registered_chain_count` để tăng trưởng này quan sát được thật, chưa
   có rate-limit cứng (chủ đích, xem bảng trên).
 
-Cả 3 đều có test hồi quy thật (xem PR tương ứng). Còn lại **D6** (chưa quyết định, giữ hay gỡ
-`DeviceKey.go`) và **E1-E3** (P5 audit, T2, T3 — chưa làm được, cần bên ngoài/hạ tầng thật) —
-đây là danh sách đầy đủ những gì còn đứng giữa hệ thống hiện tại và "phòng thủ chắc chắn trước
-mọi tình huống" theo đúng nghĩa đen của yêu cầu.
+Cả 3 đều có test hồi quy thật (xem test tham chiếu ở từng dòng C6/C7/C8 phía trên).
+
+**D6 cũng đã xử lý** (2026-08-27): gỡ bỏ hẳn `pkg/devicekey/DeviceKey.go` (bot token Telegram
+hardcode + cơ chế device-activation đọc khoá SSH thật, hẹn hết hạn cứng 2026-10-01), thống nhất
+về đúng 1 cơ chế thông báo Telegram thật đã dùng sẵn trong `deploy/ansible/monitors/`. Việc này
+độc lập với C6/C7/C8 — không phụ thuộc thứ tự merge.
+
+Còn lại **E1-E3** (P5 audit độc lập bên ngoài, T2 nhiều máy vật lý thật, T3 kiểm thử đối kháng
+chủ động — chưa làm được, cần bên ngoài/hạ tầng thật) — đây là danh sách đầy đủ những gì còn
+đứng giữa hệ thống hiện tại và "phòng thủ chắc chắn trước mọi tình huống" theo đúng nghĩa đen
+của yêu cầu.
