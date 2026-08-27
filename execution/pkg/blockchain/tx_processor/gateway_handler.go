@@ -122,6 +122,10 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
 		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyGenesisCoordinatorConfig(freshEngine)
+		applyReserveChainIDConfig(freshEngine)
+		if err := applyMinRegistrationStakeConfig(freshEngine); err != nil {
+			return nil, err
+		}
 		return freshEngine, nil
 	}
 
@@ -148,6 +152,10 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	applyDevnetGovernanceTimelockOverride(&engine)
 	applyGenesisCoordinatorConfig(&engine)
+	applyReserveChainIDConfig(&engine)
+	if err := applyMinRegistrationStakeConfig(&engine); err != nil {
+		return nil, err
+	}
 	return &engine, nil
 }
 
@@ -165,6 +173,45 @@ func applyGenesisCoordinatorConfig(engine *cross_chain.GatewayEngine) {
 		return
 	}
 	engine.GenesisCoordinator = common.HexToAddress(config.ConfigApp.CrossChain.GenesisCoordinatorAddress)
+}
+
+// applyReserveChainIDConfig is a no-op unless config.ConfigApp.CrossChain.ReserveChainID is set
+// — see that field's own doc comment (pkg/config/config.go) for why this is required (not
+// opt-in like applyGenesisCoordinatorConfig) for any real cross-chain value deployment.
+func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil || config.ConfigApp.CrossChain.ReserveChainID == 0 {
+		return
+	}
+	if engine.ReserveChainID != 0 {
+		return
+	}
+	engine.ReserveChainID = config.ConfigApp.CrossChain.ReserveChainID
+}
+
+// applyMinRegistrationStakeConfig is a no-op unless config.ConfigApp.CrossChain
+// .MinRegistrationStake is a non-empty, valid, positive decimal string — see that field's own
+// doc comment (pkg/config/config.go) and GatewayEngine.MinRegistrationStake's for why this is
+// opt-in (C6 mitigation, not a default-on rate limit). An empty string preserves the exact old
+// permissionless-registration behavior. A non-empty but unparseable/non-positive string is a
+// config mistake, not a silent no-op — it fails loudly at startup rather than deploying a chain
+// that believes it configured a stake requirement but actually didn't.
+func applyMinRegistrationStakeConfig(engine *cross_chain.GatewayEngine) error {
+	raw := ""
+	if config.ConfigApp != nil {
+		raw = config.ConfigApp.CrossChain.MinRegistrationStake
+	}
+	if raw == "" {
+		return nil
+	}
+	if engine.MinRegistrationStake != nil && engine.MinRegistrationStake.Sign() > 0 {
+		return nil
+	}
+	amount, ok := new(big.Int).SetString(raw, 10)
+	if !ok || amount.Sign() <= 0 {
+		return fmt.Errorf("cross_chain.min_registration_stake_wei %q is not a valid positive base-10 integer", raw)
+	}
+	engine.MinRegistrationStake = amount
+	return nil
 }
 
 // applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
@@ -1090,6 +1137,7 @@ func (h *GatewayHandler) handleWrite(
 			logger.Error("❌ [GATEWAY] bootstrapFoundingChains failed (caller=%s, count=%d): %v", tx.FromAddress().Hex(), len(payloads), err)
 			return nil, nil, err
 		}
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
@@ -1220,6 +1268,11 @@ func (h *GatewayHandler) handleWrite(
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalRegisterChain
+		// execution is one possible outcome of this call among several proposal kinds -- setting
+		// this unconditionally after every successful execute is cheap and correct either way
+		// (a no-op change in registry size for any other proposal kind).
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "registerAsset":
 		engine.EnsureGovernance()

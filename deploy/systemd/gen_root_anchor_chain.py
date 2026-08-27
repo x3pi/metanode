@@ -147,6 +147,30 @@ def derive_devnet_submitter_account(chain_id: int):
     address = Account.from_key(priv_hex).address
     return priv_hex, address
 
+# Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the
+# default so existing devnet/smoke-test flows are unchanged; pass --gateway-bls-key or
+# --random-gateway-bls-key for any real deployment.
+DEVNET_GATEWAY_BLS_KEY = "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+
+def generate_fresh_bls_secret(metanode_bin: str) -> str:
+    """Generates an independent, freshly-random BLS secret scalar via the same `metanode
+    keytool` call used for authority_key -- used for gateway_bls_key when the operator asks
+    for a unique per-node key instead of DEVNET_GATEWAY_BLS_KEY. Real chains must not share
+    this key across nodes/deployments (found 2026-08-27: all 3 genesis generators hardcoded
+    the identical literal here, which is fine for a single-machine devnet smoke test but a
+    real gap the moment enable_private_gateway is ever turned on for anything else)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(red(f"ERROR: metanode keytool failed (gateway BLS key generation):\n{result.stderr}"))
+            sys.exit(1)
+        with open(os.path.join(tmpdir, "authority_key.json")) as f:
+            return json.load(f)["private_key_hex"]
+
 def main():
     parser = argparse.ArgumentParser(description="Generate Root Anchor cluster configurations")
     parser.add_argument("--chain-id", type=int, default=9099, help="Root Anchor Chain ID (default: 9099)")
@@ -156,6 +180,8 @@ def main():
     parser.add_argument("--rpc-port-base", type=int, default=9099, help="Base JSON-RPC port (default: 9099)")
     parser.add_argument("--metanode-bin", type=str, default=None, help="Path to metanode binary")
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset")
+    parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
+    parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     args = parser.parse_args()
 
     ip_address = "127.0.0.1"
@@ -365,13 +391,21 @@ def main():
         # comment above for why conflating the two was the actual root cause of Layer C.
         rust_peers = [f"{ip_address}:{29200 + j}" for j in range(args.validators) if j != node_id]
 
+        if args.gateway_bls_key:
+            gateway_bls_key = args.gateway_bls_key
+        elif args.random_gateway_bls_key:
+            gateway_bls_key = generate_fresh_bls_secret(metanode_bin)
+            print(f"  🔑 node-{node_id}: generated a fresh, independent gateway_bls_key")
+        else:
+            gateway_bls_key = DEVNET_GATEWAY_BLS_KEY
+
         exec_config = {
             "debug": False,
             "tx_trace_enabled": False,
             "go_mem_limit_gb": 8,
             "mvm_cache_enabled": False,
             "enable_private_gateway": True,
-            "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+            "gateway_bls_key": gateway_bls_key,
             "chainId": args.chain_id,
             "private_key": v["keys"]["authority"]["private_key_hex"],
             "address": v["keys"]["eth"]["address"].lstrip("0x").lower(),

@@ -117,6 +117,33 @@ type CrossChainConfig struct {
 	// set a coordinator are unaffected. Any real genesis ceremony MUST set this to the
 	// coordinator's real address before the bootstrap transaction is ever submitted.
 	GenesisCoordinatorAddress string `json:"genesis_coordinator_address,omitempty"`
+
+	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
+	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
+	// every OTHER chain, set this to the Reserve's chainId so it can correctly reject a
+	// ceiling-enforced attestCommit() for a nonzero-value commit unless it comes via
+	// AttestReserveIssuedCommit from that Reserve (C8 fix, 2026-08-27 — see
+	// note/cross_chain_attack_scenario_catalog.md). Empty/zero fails closed on both the
+	// one-time genesis mint (ProposalAllocateSupply) and any nonzero-value ceiling-enforced
+	// attestation — deliberately NOT "any caller accepted" like GenesisCoordinatorAddress's
+	// empty default, because there is no safe legacy behavior to preserve here: the
+	// unrestricted pre-fix behavior was itself the vulnerability, not a working devnet
+	// convenience. Every real chain (Root Anchor AND every private chain) MUST set this before
+	// participating in cross-chain value transfer.
+	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
+
+	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
+	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
+	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). When set
+	// (>0), a candidate chain ID must already hold at least this much in
+	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
+	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
+	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
+	// deliberately opt-in, not a default-on rate limit: the right minimum is an operational
+	// policy decision (how much should a new member chain be required to hold?) that depends on
+	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
+	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
+	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
@@ -364,6 +391,26 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if v := os.Getenv("META_SECURE_PASSWORD"); v != "" {
 			ConfigApp.Securepassword = v
+		}
+		// The 5 overrides below close a real gap: only the 3 fields above had this escape
+		// hatch, while these 5 are equally sensitive (BLS signing keys, a secp256k1 key that
+		// pays real gas on Root Anchor, a BLS keystore master password, a password-hashing
+		// pepper) and previously had NO way to keep them out of config.json on a real
+		// deployment. Found + fixed 2026-08-27 during a config-structure review.
+		if v := os.Getenv("META_BLS_PRIVATE_KEY"); v != "" {
+			ConfigApp.Databases.BLSPrivateKey = v
+		}
+		if v := os.Getenv("META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX"); v != "" {
+			ConfigApp.CrossChain.RootAnchorSubmitterPrivateKeyHex = v
+		}
+		if v := os.Getenv("META_GATEWAY_BLS_KEY"); v != "" {
+			ConfigApp.GatewayBLSKey = v
+		}
+		if v := os.Getenv("META_MASTER_PASSWORD"); v != "" {
+			ConfigApp.MasterPassword = v
+		}
+		if v := os.Getenv("META_APP_PEPPER"); v != "" {
+			ConfigApp.AppPepper = v
 		}
 		if v := os.Getenv("META_IS_RPC_NODE"); v != "" {
 			if v == "true" || v == "1" {

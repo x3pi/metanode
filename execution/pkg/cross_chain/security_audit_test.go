@@ -72,6 +72,12 @@ func setupSecurityAuditEnvironment() (*GatewayEngine, map[uint64]ChainRegistry, 
 	}
 
 	engine := NewGatewayEngine(102, registry, ledger)
+	// C8 fix (2026-08-27): this suite exercises AttestCommit's ceiling enforcement directly
+	// (engine, as chain 102, attesting other chains' commits) -- under the fix, only a chain
+	// configured as its own Reserve may do that for a nonzero-value commit. Every scenario
+	// here is conceptually "the Reserve attesting a source chain's commit" (Section 2.3 step
+	// 2), so engine plays that role for these tests.
+	engine.ReserveChainID = 102
 	return engine, registry, ledger, kp
 }
 
@@ -512,4 +518,54 @@ func TestAudit_ZeroForkDestinationOfflineStability(t *testing.T) {
 	assert.ErrorIs(t, errUnattested, ErrCommitNotAttested)
 	assert.Equal(t, MessageStatusPending, status)
 	assert.Equal(t, MessageStatusPending, engine.GetMessageStatus(msg.MessageID))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AUDIT TEST 10: Only the configured Reserve chain may attest a nonzero-value commit from
+// another chain (C8, note/cross_chain_attack_scenario_catalog.md). Before this fix,
+// GlobalSupplyLedger being per-chain-LOCAL state meant ANY chain could independently call
+// AttestCommit for ANY other chain's commit -- "route value through Reserve" was enforced only
+// by the relayer's own convention (relayer.go's DaemonConfig.ReserveChainID), never by the
+// GatewayEngine itself, so nothing on-chain stopped a non-Reserve chain from accepting a direct,
+// non-Reserve-routed attestation for real value.
+// ──────────────────────────────────────────────────────────────────────────────
+func TestAudit_OnlyReserveMayAttestNonzeroValueCommit(t *testing.T) {
+	engine, _, _, kp := setupSecurityAuditEnvironment()
+
+	signFor := func(amount *big.Int) (common.Hash, QuorumCert) {
+		leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: amount}
+		root := HashAggregateValueLeaf(leaf)
+		commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+		sig := bls.Sign(kp.PrivateKey(), commitMsg)
+		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0xFF}}
+	}
+
+	// 1. ReserveChainID unconfigured (zero value) -> fails closed, not open, even for a
+	// legitimate-looking BLS-signed commit.
+	engine.ReserveChainID = 0
+	root, cert := signFor(big.NewInt(100))
+	_, errUnconfigured := engine.AttestCommit(101, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	assert.ErrorIs(t, errUnconfigured, ErrReserveChainNotConfigured)
+
+	// 2. ReserveChainID configured, but points to a DIFFERENT chain than the one currently
+	// attesting -- this chain (102) is not Reserve, so it may not perform this attestation even
+	// though it knows who Reserve is.
+	engine.ReserveChainID = 1000 // some other chain is Reserve, not engine's own LocalChainID (102)
+	_, errNotReserve := engine.AttestCommit(101, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	assert.ErrorIs(t, errNotReserve, ErrNonReserveCeilingAttestation)
+
+	// 3. Zero-value commits (message type (a), Section 2.2 -- pure contract calls with no value)
+	// are exempt: they never touch SupplyLedger's ceiling regardless (Sub(x, 0) is a no-op), so
+	// direct A->B messaging without Reserve is unaffected by this fix.
+	zeroRoot, zeroCert := signFor(big.NewInt(0))
+	attestedZero, errZero := engine.AttestCommit(101, zeroRoot, big.NewInt(0), big.NewInt(0), MerkleProof{}, zeroCert)
+	require.NoError(t, errZero, "zero-value commits must remain attestable by any chain, not just Reserve")
+	assert.Equal(t, big.NewInt(0), attestedZero.FundedAmount)
+
+	// 4. Once engine is correctly configured AS Reserve, the identical nonzero-value attestation
+	// succeeds normally.
+	engine.ReserveChainID = 102 // engine's own LocalChainID
+	attested, errOk := engine.AttestCommit(101, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	require.NoError(t, errOk)
+	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 }
