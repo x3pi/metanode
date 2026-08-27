@@ -1,5 +1,11 @@
 # Kế hoạch chuyển sang mô hình "1 sổ cái thống nhất" (Root Anchor = Settlement Layer)
 
+> **⚠️ ĐÃ THAY THẾ (2026-08-27) — không còn là hướng khuyến nghị.** Sau khi phát hiện cơ chế
+> "nhận tiền thật = tự tăng allocation, không cần vote" đã tồn tại sẵn trong code
+> (`ClaimMessage()`), hướng nhẹ hơn nhiều đã được chọn thay cho tài liệu này — xem
+> **`note/eurozone_unified_native_coin_plan.md`** (giữ nguyên chủ quyền private chain, không
+> cần sổ cái mới, không cần fraud-proof). Tài liệu này giữ lại làm tham khảo lịch sử/so sánh.
+
 Viết 2026-08-27, theo yêu cầu đánh giá việc chuyển từ mô hình hiện tại (mỗi chain giữ
 `per_chain_allocation` riêng, xem `note/cross_chain_root_anchor_architecture.md` mục 2.3)
 sang mô hình **1 đồng coin, 1 sổ cái số dư thật duy nhất**, dùng chung cho mọi private chain.
