@@ -113,6 +113,23 @@ var (
 		Name: "master_gateway_governance_proposal_count",
 		Help: "Total number of governance proposals ever recorded (Propose() is permissionless; this map has no cleanup)",
 	})
+
+	// RegisteredChainCount tracks the current size of GatewayEngine.ChainRegistry, i.e. how
+	// many chains are currently recognized (bootstrapFoundingChains, or
+	// ProposalRegisterChain via real vote quorum). Same "measure instead of guessing" rationale
+	// as GovernanceProposalCount (note/cross_chain_attack_scenario_catalog.md item C6): a chain
+	// still needs >=2/3 of already-active chains to vote it in, so this isn't a costless Sybil
+	// path the way a permissionless mint would be -- but a large/anomalous influx of newly
+	// registered chains in a short window is exactly the pattern a slow-growing colluding
+	// coalition trying to accumulate majority governance control would produce, and there was
+	// no visibility into that pattern at all before this metric. No hard rate-limit is imposed
+	// (mirrors all_remaining_fixes_plan.md Mục 2's decision not to guess a cap without real
+	// production data) -- if real data later shows abuse, add a cap as a follow-up backed by
+	// evidence, not speculation.
+	RegisteredChainCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "master_gateway_registered_chain_count",
+		Help: "Current number of chains recognized in this GatewayEngine's own ChainRegistry",
+	})
 )
 
 // ─── Histograms ──────────────────────────────────────────────────────────────

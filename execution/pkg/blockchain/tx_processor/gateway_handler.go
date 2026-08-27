@@ -1101,6 +1101,7 @@ func (h *GatewayHandler) handleWrite(
 		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
 			return nil, nil, err
 		}
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
@@ -1228,6 +1229,11 @@ func (h *GatewayHandler) handleWrite(
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalRegisterChain
+		// execution is one possible outcome of this call among several proposal kinds -- setting
+		// this unconditionally after every successful execute is cheap and correct either way
+		// (a no-op change in registry size for any other proposal kind).
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "registerAsset":
 		engine.EnsureGovernance()
