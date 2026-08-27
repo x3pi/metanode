@@ -365,6 +365,26 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		if v := os.Getenv("META_SECURE_PASSWORD"); v != "" {
 			ConfigApp.Securepassword = v
 		}
+		// The 5 overrides below close a real gap: only the 3 fields above had this escape
+		// hatch, while these 5 are equally sensitive (BLS signing keys, a secp256k1 key that
+		// pays real gas on Root Anchor, a BLS keystore master password, a password-hashing
+		// pepper) and previously had NO way to keep them out of config.json on a real
+		// deployment. Found + fixed 2026-08-27 during a config-structure review.
+		if v := os.Getenv("META_BLS_PRIVATE_KEY"); v != "" {
+			ConfigApp.Databases.BLSPrivateKey = v
+		}
+		if v := os.Getenv("META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX"); v != "" {
+			ConfigApp.CrossChain.RootAnchorSubmitterPrivateKeyHex = v
+		}
+		if v := os.Getenv("META_GATEWAY_BLS_KEY"); v != "" {
+			ConfigApp.GatewayBLSKey = v
+		}
+		if v := os.Getenv("META_MASTER_PASSWORD"); v != "" {
+			ConfigApp.MasterPassword = v
+		}
+		if v := os.Getenv("META_APP_PEPPER"); v != "" {
+			ConfigApp.AppPepper = v
+		}
 		if v := os.Getenv("META_IS_RPC_NODE"); v != "" {
 			if v == "true" || v == "1" {
 				ConfigApp.IsRPCNode = true

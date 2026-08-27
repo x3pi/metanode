@@ -33,23 +33,30 @@
   loop: "{{ active_nodes | product(['metanode', 'simple_chain']) | list }}"
 
 - name: Copy execution and consensus config
+  # mode tightened from 0644 (found 2026-08-27, config-security review): both files carry
+  # raw private key material (execution.json's private_key/BLSPrivateKey/etc.,
+  # consensus.toml's node identity keys) and 0644 let ANY local account on the server read
+  # them, not just the `metanode` user the service actually runs as (User=metanode in
+  # metanode-execution.service.j2/metanode-consensus.service.j2) -- 0600 is exactly what
+  # that service user needs and nothing more.
   ansible.builtin.copy:
     src: "{{ remote_deploy_dir }}/node-{{ item[0] }}_keys/{{ item[1] }}"
     dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/config/{{ item[1] }}"
     remote_src: yes
     owner: metanode
     group: metanode
-    mode: '0644'
+    mode: '0600'
   loop: "{{ active_nodes | product(['execution.json', 'consensus.toml']) | list }}"
 
 - name: Copy keys
+  # Same 0644 -> 0600 tightening as above -- these 4 files ARE the raw key material itself.
   ansible.builtin.copy:
     src: "{{ remote_deploy_dir }}/node-{{ item[0] }}_keys/{{ item[1] }}"
     dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/keys/{{ item[1] }}"
     remote_src: yes
     owner: metanode
     group: metanode
-    mode: '0644'
+    mode: '0600'
   loop: "{{ active_nodes | product(['protocol_key.json', 'network_key.json', 'authority_key.json', 'eth_key.json']) | list }}"
   when: ansible_action == 'setup'
 
