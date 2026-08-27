@@ -119,6 +119,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
 		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyGenesisCoordinatorConfig(freshEngine)
+		applyReserveChainIDConfig(freshEngine)
 		return freshEngine, nil
 	}
 
@@ -145,6 +146,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	applyDevnetGovernanceTimelockOverride(&engine)
 	applyGenesisCoordinatorConfig(&engine)
+	applyReserveChainIDConfig(&engine)
 	return &engine, nil
 }
 
@@ -162,6 +164,19 @@ func applyGenesisCoordinatorConfig(engine *cross_chain.GatewayEngine) {
 		return
 	}
 	engine.GenesisCoordinator = common.HexToAddress(config.ConfigApp.CrossChain.GenesisCoordinatorAddress)
+}
+
+// applyReserveChainIDConfig is a no-op unless config.ConfigApp.CrossChain.ReserveChainID is set
+// — see that field's own doc comment (pkg/config/config.go) for why this is required (not
+// opt-in like applyGenesisCoordinatorConfig) for any real cross-chain value deployment.
+func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
+	if config.ConfigApp == nil || config.ConfigApp.CrossChain.ReserveChainID == 0 {
+		return
+	}
+	if engine.ReserveChainID != 0 {
+		return
+	}
+	engine.ReserveChainID = config.ConfigApp.CrossChain.ReserveChainID
 }
 
 // applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
@@ -1086,6 +1101,7 @@ func (h *GatewayHandler) handleWrite(
 		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
 			return nil, nil, err
 		}
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
@@ -1213,6 +1229,11 @@ func (h *GatewayHandler) handleWrite(
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalRegisterChain
+		// execution is one possible outcome of this call among several proposal kinds -- setting
+		// this unconditionally after every successful execute is cheap and correct either way
+		// (a no-op change in registry size for any other proposal kind).
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
 	case "registerAsset":
 		engine.EnsureGovernance()

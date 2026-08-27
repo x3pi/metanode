@@ -408,3 +408,35 @@ func TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric(t *test
 	// regardless of what any other test's engine set it to before or after.
 	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.GovernanceProposalCount), "GovernanceProposalCount must reflect the real, unbounded growth of Proposals")
 }
+
+// TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric is the regression test
+// for note/cross_chain_attack_scenario_catalog.md item C6: ProposalRegisterChain/
+// bootstrapFoundingChains still require real vote quorum from already-active chains (unlike
+// propose(), which is deliberately permissionless -- Mục 2 above), so this isn't a costless
+// Sybil path the way a permissionless mint would have been (C7) -- but there was no visibility
+// at all into ChainRegistry's growth before RegisteredChainCount existed, and a
+// slowly-accumulating colluding coalition would look exactly like unremarkable steady growth
+// without a metric to compare it against. This proves the metric reflects reality after a real
+// bootstrapFoundingChains call, mirroring the propose() test's own style above.
+func TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	var payloads [][]byte
+	for _, id := range []uint64{101, 102, 103, 104} {
+		payloads = append(payloads, makeFoundingChainPayload(t, id))
+	}
+	calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
+	require.NoError(t, err)
+
+	coordinator := common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD00")
+	tx := newTx(coordinator, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed, "bootstrapFoundingChains with 4 valid founding chains must succeed")
+
+	assert.Equal(t, float64(4), testutil.ToFloat64(metrics.RegisteredChainCount), "RegisteredChainCount must reflect the real ChainRegistry size after bootstrap")
+}

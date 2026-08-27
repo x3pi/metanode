@@ -320,12 +320,30 @@ const (
 	ProposalUpdateCommittee  GovernanceProposalKind = 3
 	ProposalDeclareChainDead GovernanceProposalKind = 4
 	ProposalAllocateSupply   GovernanceProposalKind = 5
+	// ProposalTransferAllocation moves already-minted allocation from one chain to another via
+	// GlobalSupplyLedger.TransferAllocation (added 2026-08-27, C7 fix) -- the safe, repeatable,
+	// non-inflationary way for a chain to grow its allocation after genesis, now that
+	// ProposalAllocateSupply is a one-time Reserve-only mint. Typically FromChainID is Reserve
+	// onboarding a newly-registered chain, but any chain with spare allocation may transfer to
+	// any other registered chain -- TransferAllocation itself enforces the sender actually has
+	// the amount, so this can never inflate supply, only redistribute what already exists.
+	ProposalTransferAllocation GovernanceProposalKind = 6
 )
 
-// AllocationGrantPayload is the JSON payload for ProposalAllocateSupply proposals.
+// AllocationGrantPayload is the JSON payload for ProposalAllocateSupply proposals. ChainID must
+// equal the chain's own configured ReserveChainID (enforced in ExecuteGovernanceProposal) --
+// this proposal kind only ever mints the one-time genesis supply, never grants an arbitrary
+// chain allocation out of thin air. Use ProposalTransferAllocation for that instead.
 type AllocationGrantPayload struct {
 	ChainID uint64   `json:"chain_id"`
 	Amount  *big.Int `json:"amount"`
+}
+
+// AllocationTransferPayload is the JSON payload for ProposalTransferAllocation proposals.
+type AllocationTransferPayload struct {
+	FromChainID uint64   `json:"from_chain_id"`
+	ToChainID   uint64   `json:"to_chain_id"`
+	Amount      *big.Int `json:"amount"`
 }
 
 // UpdateCommitteePayload is the JSON payload for ProposalUpdateCommittee proposals.

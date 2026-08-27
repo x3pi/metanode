@@ -364,6 +364,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	engine.SupplyLedger = ledger
+	engine.ReserveChainID = 101 // C8 fix: engine (chain 101) plays Reserve, attesting its own commit
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
 	}
@@ -765,6 +766,7 @@ func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
 			QuorumThreshold: 6667,
 		},
 	}, ledger)
+	engine.ReserveChainID = 102 // C8 fix: engine (chain 102) plays Reserve, attesting chain 101's commit
 
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatalf("saveGatewayEngine failed: %v", err)
@@ -1055,7 +1057,10 @@ func TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue(t *testin
 		t.Fatalf("NewGlobalSupplyLedger: %v", err)
 	}
 	engine := cross_chain.NewGatewayEngine(101, registry, ledger)
-	engine.EnsureGovernance() // ActiveChains = {101} -> quorum threshold = 1
+	engine.EnsureGovernance()   // ActiveChains = {101} -> quorum threshold = 1
+	engine.ReserveChainID = 999 // C7 fix: matches this test's payload chain_id below — this test
+	// is about propose/vote/executeProposal timestamp handling, not allocation semantics, so it
+	// just needs its ProposalAllocateSupply payload to target a validly-configured Reserve.
 	if err := saveGatewayEngine(cs, engine); err != nil {
 		t.Fatalf("saveGatewayEngine: %v", err)
 	}
