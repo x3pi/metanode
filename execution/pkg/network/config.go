@@ -19,6 +19,7 @@ type Config struct {
 	HandlerWorkerPoolSize  int
 	SendChanSize           int // <-- THÊM DÒNG NÀY
 	MaxConnections         int // GO-M2: max concurrent TCP connections (0 = default 1000)
+	MaxConnectionsPerIP    int // NET-02: max concurrent TCP connections per remote IP (0 = default 100)
 }
 
 // DefaultConfig tự động tạo ra một cấu hình mặc định hợp lý
@@ -59,5 +60,6 @@ func DefaultConfig() *Config {
 		DialTimeout:            10 * time.Second,
 		RetryParentInterval:    5 * time.Second,
 		MaxConnections:         1000, // GO-M2: default cap; override in Config if needed
+		MaxConnectionsPerIP:    100,  // NET-02: default per-IP cap; safe for multi-node local testnets
 	}
 }
