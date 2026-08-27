@@ -86,6 +86,29 @@ def find_metanode_bin(override=None):
     return None
 
 
+# Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the
+# default so existing devnet/smoke-test flows are unchanged; pass --gateway-bls-key or
+# --random-gateway-bls-key for any real ceremony deployment.
+DEVNET_GATEWAY_BLS_KEY = "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+
+def generate_fresh_bls_secret(metanode_bin: str) -> str:
+    """Generates an independent, freshly-random BLS secret scalar via the same `metanode
+    keytool` call used for authority_key -- used for gateway_bls_key when the operator asks
+    for a unique key instead of DEVNET_GATEWAY_BLS_KEY. Real validators must not share this
+    key across nodes/deployments (found 2026-08-27: all 3 genesis generators -- including this
+    one, the tool a real ceremony operator uses -- hardcoded the identical literal here)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(red(f"ERROR: metanode keytool failed (gateway BLS key generation):\n{result.stderr}"))
+            sys.exit(1)
+        with open(os.path.join(tmpdir, "authority_key.json")) as f:
+            return json.load(f)["private_key_hex"]
+
 # ─── Step 1 & 2: Generate keys via Rust keytool ─────────────────────────────
 def generate_keys_via_keytool(metanode_bin: str, keys_dir: str) -> tuple:
     """
@@ -298,7 +321,11 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
         "enable_private_gateway": True,
-        "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+        "gateway_bls_key": (
+            args.gateway_bls_key if getattr(args, "gateway_bls_key", None)
+            else generate_fresh_bls_secret(find_metanode_bin(args.metanode_bin)) if getattr(args, "random_gateway_bls_key", False)
+            else DEVNET_GATEWAY_BLS_KEY
+        ),
         "chainId": args.chain_id,
         "private_key": bls_private_hex,
         "address": eth_addr_stripped,
@@ -507,6 +534,8 @@ def parse_args():
                         help="Maximum number of snapshots to keep (default: 2)")
     parser.add_argument("--max-part-size-mb", type=int, default=600,
                         help="Max part size in MB for snapshot archive (default: 600)")
+    parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real ceremony deployment.")
+    parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     parser.add_argument("--epoch-duration-seconds", type=int, default=600,
                         help="Epoch duration in seconds (default: 600 = 10 min)")
     return parser.parse_args()
