@@ -56,27 +56,19 @@ kỳ mạng nào có giá trị thật, kể cả testnet dùng để tổng duy
 | RelayerDaemon | 1 (có thể chạy chung máy monitoring) | Permissionless, không cần dự phòng BFT — chỉ cần dự phòng vận hành (giám sát + tự restart) |
 | Monitoring | 1 (khuyến nghị riêng, có thể thêm máy phụ chạy `--all-monitors` để dự phòng chéo) | |
 
-**⚠️ Quan trọng — bắt buộc phân biệt 2 loại giao tiếp xuyên chuỗi (mục 2.2
-`cross_chain_root_anchor_architecture.md`):**
-- **Message thuần (value=0, chỉ gọi contract)**: chain đích có thể tự verify chữ ký BLS uỷ
-  ban của chain nguồn trực tiếp (dùng registry đã cache sẵn) — **không bắt buộc Root Anchor
-  tham gia vào đường đi của message này**.
-- **Message mang giá trị (native coin/tài sản, value>0)**: **bắt buộc đi qua Root Anchor**
-  làm "Reserve" — đây là quyết định bảo mật chủ đích, không phải giới hạn kỹ thuật: cần 1 sổ
-  cái chung (`GlobalSupplyLedger.per_chain_allocation`) chặn đúng số 1 chain được phép gửi ra,
-  để nếu chain đó bị chiếm (validator thông đồng ký giả), thiệt hại chỉ giới hạn ở đúng số đã
-  được cấp phép trước đó thay vì có thể mint vô hạn sang chain khác — rủi ro "weakest-link" đã
-  ghi nhận riêng ở mục 5.2 tài liệu kiến trúc, giống hạn chế đã biết của cầu nối kiểu IBC
-  (Cosmos): tài sản chỉ an toàn bằng đúng chain yếu nhất nó từng đi qua.
+**⚠️ Vì sao Root Anchor luôn bắt buộc khi nói "2 private chain" trong tài liệu này:** mục
+đích cross-chain trong thực tế luôn là chuyển GIÁ TRỊ (coin/tài sản) qua lại giữa các chain,
+không phải chỉ gọi contract rỗng — mà theo thiết kế (mục 2.2/5.2
+`cross_chain_root_anchor_architecture.md`), giá trị bắt buộc đi qua Root Anchor làm "Reserve":
+cần 1 sổ cái chung (`GlobalSupplyLedger.per_chain_allocation`) chặn đúng số 1 chain được phép
+gửi ra, để nếu chain đó bị chiếm (validator thông đồng ký giả), thiệt hại chỉ giới hạn ở đúng
+số đã được cấp phép trước đó thay vì mint vô hạn sang chain khác — rủi ro "weakest-link", cùng
+hạn chế đã biết của cầu nối kiểu IBC (Cosmos): tài sản chỉ an toàn bằng đúng chain yếu nhất nó
+từng đi qua. Vậy dựng "2 private chain" trong thực tế luôn kèm Root Anchor + Relayer:
 
-Vì mục đích cross-chain phổ biến nhất là chuyển GIÁ TRỊ (không phải chỉ gọi contract rỗng),
-Root Anchor coi như bắt buộc trong thực tế nếu 2 chain của bạn cần trao đổi giá trị qua lại.
-Vậy "chỉ 2 private chain" có 2 kịch bản chi phí khác hẳn nhau:
-
-| Kịch bản | Số máy | Công thức |
-| :--- | :--- | :--- |
-| **A — 2 private chain độc lập, KHÔNG cross-chain** | **8** | 4×2 (2 chain, không cần Root Anchor/relayer) |
-| **B — 2 private chain CÓ cross-chain với nhau** | **13** | 4 (Root Anchor) + 4×2 (2 chain) + 1 (relayer) — quy mô đã từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy, chưa phải nhiều-máy-thật |
+**Ví dụ cụ thể — Root Anchor + 2 private chain**: 4 (Root Anchor) + 4×2 (2 chain) + 1
+(relayer) = **13 máy** — quy mô đã từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy,
+chưa phải nhiều-máy-thật.
 
 ### -1.3 Bảng chi phí ước tính (tham khảo, KHÔNG phải báo giá)
 
@@ -84,15 +76,12 @@ Vậy "chỉ 2 private chain" có 2 kịch bản chi phí khác hẳn nhau:
 | :--- | :--- | :--- |
 | 1 máy Validator (8 vCPU / 16–32GB / 200GB+ NVMe) | ~$40–80/tháng (DigitalOcean/Hetzner Cloud/Vultr tầm giá tương đương) | ~$150–400/tháng (Hetzner Dedicated/OVH bare-metal tầm giá tương đương, 16–32 core vật lý/64–128GB/1–2TB NVMe RAID) |
 | 1 máy Relayer/Monitoring (2 vCPU/4GB) | ~$10–20/tháng | ~$20–40/tháng (vẫn nên tách máy vật lý riêng cho production) |
-| **Kịch bản A — 8 máy (2 chain, không cross-chain)** | **~$320–640/tháng** (+ ~$10–20 nếu thêm máy monitoring) | **~$1.200–3.200/tháng** (+ ~$20–40 nếu thêm máy monitoring) |
-| **Kịch bản B — 13 máy (2 chain + Root Anchor + relayer)** | **~$700–900/tháng** | **~$3.000–4.500/tháng** (chưa gồm backup/CDN/firewall managed) |
-| → Chênh lệch A→B (chi phí riêng của Root Anchor + relayer) | ~$370–420/tháng | ~$1.800–2.100/tháng |
+| **Tổng 13 máy (Root Anchor + 2 chain + relayer)** | **~$700–900/tháng** | **~$3.000–4.500/tháng** (chưa gồm backup/CDN/firewall managed) |
 | Quản lý khoá HSM/KMS (khuyến nghị mainnet giá trị lớn, mục 5.5 `production_deployment_guide.md`) | Không cần | AWS KMS: ~$1/khoá/tháng + phí request rất nhỏ; hoặc YubiHSM2 phần cứng: ~$650–950/thiết bị (mua đứt) |
-| Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật — **chỉ áp dụng nếu dùng cross-chain/Kịch bản B**, 2 chain độc lập không qua Root Anchor thì không cần P5) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
+| Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
 
-**Mức sàn tuyệt đối cho Kịch bản A (chỉ demo/dev, KHÔNG khuyến nghị)**: 1 validator/chain × 2
-= **2 máy** (~$80–160/tháng testnet) — nhưng độ chịu lỗi BFT bằng 0 (n=1), không dùng cho bất
-cứ gì ngoài chạy thử 1 lần.
+**Muốn thêm chain thứ 3, thứ 4...**: mỗi chain mới tham gia cross-chain cộng thêm đúng 4 máy
+validator (không cộng thêm Root Anchor/relayer — 2 thành phần này dùng chung cho mọi chain).
 
 **Mạng/băng thông:** độ trễ THẤP giữa các validator **CÙNG 1 chain** ảnh hưởng trực tiếp thời
 gian round BFT (khuyến nghị <50ms giữa các node cùng chain — nếu đặt các chain khác nhau/Root
