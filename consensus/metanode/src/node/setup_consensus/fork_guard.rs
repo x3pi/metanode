@@ -43,10 +43,12 @@ impl ConsensusNode {
                         Ok(local_blocks) if !local_blocks.is_empty() => {
                             let local_raw = &local_blocks[0].raw_block_bytes;
                             let peer_raw = &peer_blocks[0].raw_block_bytes;
-                            if local_raw == peer_raw {
+                            let local_state_root = &local_blocks[0].state_root;
+                            let peer_state_root = &peer_blocks[0].state_root;
+                            if local_raw == peer_raw && local_state_root == peer_state_root {
                                 if next_check_block % 100 == 0 {
                                     tracing::info!(
-                                        "✅ [LAYER-6] Block #{} verified ({} bytes match)",
+                                        "✅ [LAYER-6] Block #{} verified ({} bytes match, state_root match)",
                                         next_check_block, local_raw.len()
                                     );
                                 }
@@ -54,10 +56,11 @@ impl ConsensusNode {
                             } else {
                                 tracing::error!(
                                     "🚨 [LAYER-6] Block #{} MISMATCH DETECTED! \
-                                     local_bytes={} peer_bytes={}. \
+                                     local_bytes={} peer_bytes={}, local_root=0x{} peer_root=0x{}. \
                                      ENTERING PENDING MODE — will re-verify 3 times before action.",
                                     next_check_block,
-                                    local_raw.len(), peer_raw.len()
+                                    local_raw.len(), peer_raw.len(),
+                                    hex::encode(local_state_root), hex::encode(peer_state_root)
                                 );
 
                                 let mut confirmed_mismatch = true;
@@ -74,7 +77,9 @@ impl ConsensusNode {
                                         Ok(retry_peer_blocks) if !retry_peer_blocks.is_empty() => {
                                             match client.get_blocks_range(next_check_block, next_check_block).await {
                                                 Ok(retry_local) if !retry_local.is_empty() => {
-                                                    if retry_local[0].raw_block_bytes == retry_peer_blocks[0].raw_block_bytes {
+                                                    if retry_local[0].raw_block_bytes == retry_peer_blocks[0].raw_block_bytes
+                                                        && retry_local[0].state_root == retry_peer_blocks[0].state_root
+                                                    {
                                                         tracing::info!(
                                                             "✅ [LAYER-6] Re-verify {}/3: Block #{} NOW MATCHES! \
                                                              Was transient pipeline lag. Resuming.",

@@ -1028,7 +1028,7 @@ impl ConsensusNode {
         is_terminally_failed: Arc<AtomicBool>,
         commit_processor: crate::consensus::commit_processor::CommitProcessor,
         block_receiver: tokio::sync::mpsc::UnboundedReceiver<consensus_core::CertifiedBlocksOutput>,
-        startup_total_synced_blocks: u64,
+        _startup_total_synced_blocks: u64,
         startup_local_block: u64,
         start_as_validator: bool,
         system_transaction_provider: Arc<DefaultSystemTransactionProvider>,
@@ -1154,7 +1154,7 @@ impl ConsensusNode {
         }
 
         // Spawn permanent background network fork guard
-        if startup_total_synced_blocks > 0 && !config.peer_rpc_addresses.is_empty() {
+        if !config.peer_rpc_addresses.is_empty() {
             let guard_client = executor_client_for_proc.clone();
             let guard_peers = config.peer_rpc_addresses.clone();
             let guard_start_block = startup_local_block;
