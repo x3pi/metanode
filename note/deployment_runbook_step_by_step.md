@@ -9,7 +9,72 @@ dưới đây), đừng chỉ tin tên nhánh/commit trông có vẻ đúng.
 
 Quy ước xuyên suốt tài liệu này: mỗi bước có khối **"✅ Xác nhận thành công"** — nếu kết quả
 thực tế không khớp, **dừng lại, không làm bước tiếp theo**, xem mục "Xử lý sự cố" (Phần E)
-trước khi tiếp tục.
+trước khi tiếp tục. Mọi bước có rủi ro bảo mật/cấu hình đều có khối **"🔒 Tránh lỗi"** đi kèm.
+
+**Testnet và Production dùng CHUNG một quy trình (Phần B/C dưới đây)** — không có bộ lệnh
+riêng cho "testnet". Khác biệt duy nhất là quy mô (số máy, thông số phần cứng) và mức độ
+nghiêm ngặt khi áp checklist bảo mật (`production_deployment_guide.md` mục 7): testnet dùng
+để diễn tập/kiểm thử với giá trị không thật, production giữ giá trị thật — bắt buộc làm đủ
+100% checklist mục 7, không rút gọn.
+
+---
+
+## Phần -1 — Chuẩn bị tài nguyên phần cứng & chi phí ước tính
+
+Làm bước này TRƯỚC KHI thuê/mua bất kỳ máy chủ nào. Số liệu dưới đây rút ra trực tiếp từ các
+giá trị mặc định/đã tune thật trong code (`pkg/config/config.go`, template Ansible), không
+phải suy đoán — nhưng **giá tiền là ước tính tham khảo tại thời điểm viết, dao động theo nhà
+cung cấp/khu vực/thời điểm thuê thật** — luôn báo giá lại trước khi cam kết ngân sách.
+
+### -1.1 Cấu hình khuyến nghị theo vai trò node
+
+| Vai trò | CPU | RAM | Ổ đĩa | Ghi chú |
+| :--- | :--- | :--- | :--- | :--- |
+| **Validator** (Go execution + Rust consensus, 1 node = 1 máy) | Tối thiểu 4 vCPU; **khuyến nghị 8–16 vCPU riêng** (không chia sẻ với node khác) | Tối thiểu 8GB (đúng bằng `go_mem_limit_gb` mặc định — **không có margin, dễ OOM**); **khuyến nghị 16GB (testnet) / 32GB+ (production)** | **NVMe SSD bắt buộc** (Pebble/NOMT nhạy độ trễ IO — đã có bài học `Checkpoint()` gây stall hệ thống thật). Tối thiểu 100GB; khuyến nghị ≥500GB cho production (tính cả log/snapshot theo `epochs_to_keep`) | Pebble cache mặc định 4096MB + NOMT page/leaf cache 512MB×2 + Rust consensus + OS — 8GB dễ chạm trần khi tải cao |
+| **RPC/Explorer node** (`is_rpc`/`is_explorer`, không cần tự ký) | Giống Validator | Giống Validator | Có thể LỚN HƠN nếu bật explorer lưu lịch sử đầy đủ (`pruning.mode = "archive"`) | Vẫn chạy full execution+consensus (sync-only), không phải "nhẹ" |
+| **RelayerDaemon** (`cross_chain_relayer`, permissionless) | 2 vCPU | 4GB | 20GB (không lưu state chain, chỉ log) | Nhẹ — chỉ poll RPC + ký + gửi giao dịch, không tham gia đồng thuận |
+| **Monitoring** (node_exporter + Health/Resource Monitor + Block Hash Checker + Dashboard) | 1–2 vCPU | 2GB | 20GB | Khuyến nghị máy RIÊNG (không chung với validator) để giám sát chéo không phụ thuộc máy chính bị chết theo (`--all-monitors`, `deploy/ansible/README.md`) |
+
+**⚠️ Cảnh báo co-location (đã đo thật):** chạy nhiều tiến trình validator trên CÙNG 1 máy
+(devnet/rehearsal) khiến GOMAXPROCS mặc định của mỗi tiến trình cố chiếm TOÀN BỘ core máy —
+N tiến trình đồng thời có thể oversubscribe core lên tới Nx, gây treo round đồng thuận vài
+giây khi tải cao (đo thật trên máy 104-core/5-node: `procs_running` tăng vọt lên 85). Nếu bắt
+buộc chạy nhiều node/máy (chỉ nên làm ở devnet), giới hạn `GOMAXPROCS` mỗi node theo công thức
+`(tổng core máy / số node) - margin` — Ansible role `systemd_services` đã tự làm việc này qua
+biến `gomaxprocs` (mặc định 20). **Production: luôn 1 node = 1 máy/VM riêng, không co-location.**
+
+### -1.2 Số máy tối thiểu — quyết định bởi BFT, không phải tuỳ chọn
+
+Công thức chịu lỗi BFT: `f = ⌊(n-1)/3⌋` (chi tiết: `note/bft_fault_tolerance_node_count.md`).
+**n=3 validator/chain có ĐỘ CHỊU LỖI BẰNG 0** (1 node chết là mất quorum) — không dùng cho bất
+kỳ mạng nào có giá trị thật, kể cả testnet dùng để tổng duyệt trước production.
+
+| Cụm | Số máy tối thiểu (n≥4, chịu 1 node lỗi) | Ghi chú |
+| :--- | :--- | :--- |
+| Root Anchor | 4 | Bắt buộc — đây là custodian giá trị liên chuỗi |
+| Mỗi private chain tham gia cross-chain | 4 | Cùng lý do — 1 chain 3-node vẫn có thể tự chạy riêng lẻ, nhưng KHÔNG nên tham gia nhận giá trị thật qua Root Anchor |
+| RelayerDaemon | 1 (có thể chạy chung máy monitoring) | Permissionless, không cần dự phòng BFT — chỉ cần dự phòng vận hành (giám sát + tự restart) |
+| Monitoring | 1 (khuyến nghị riêng, có thể thêm máy phụ chạy `--all-monitors` để dự phòng chéo) | |
+
+**Ví dụ tối thiểu có ý nghĩa cho T2/testnet thật** (Root Anchor + 2 private chain — quy mô đã
+từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy, chưa phải nhiều-máy-thật):
+4 (Root Anchor) + 4×2 (2 private chain) + 1 (relayer) = **13 máy**.
+
+### -1.3 Bảng chi phí ước tính (tham khảo, KHÔNG phải báo giá)
+
+| Hạng mục | Testnet (cloud VM, chia sẻ hạ tầng) | Production (dedicated bare-metal, khuyến nghị cho giá trị thật) |
+| :--- | :--- | :--- |
+| 1 máy Validator (8 vCPU / 16–32GB / 200GB+ NVMe) | ~$40–80/tháng (DigitalOcean/Hetzner Cloud/Vultr tầm giá tương đương) | ~$150–400/tháng (Hetzner Dedicated/OVH bare-metal tầm giá tương đương, 16–32 core vật lý/64–128GB/1–2TB NVMe RAID) |
+| 1 máy Relayer/Monitoring (2 vCPU/4GB) | ~$10–20/tháng | ~$20–40/tháng (vẫn nên tách máy vật lý riêng cho production) |
+| **Tổng ví dụ 13 máy (mục -1.2)** | **~$700–900/tháng** | **~$3,000–4,500/tháng** (chưa gồm backup/CDN/firewall managed) |
+| Quản lý khoá HSM/KMS (khuyến nghị mainnet giá trị lớn, mục 5.5 `production_deployment_guide.md`) | Không cần | AWS KMS: ~$1/khoá/tháng + phí request rất nhỏ; hoặc YubiHSM2 phần cứng: ~$650–950/thiết bị (mua đứt) |
+| Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
+
+**Mạng/băng thông:** độ trễ THẤP giữa các validator **CÙNG 1 chain** ảnh hưởng trực tiếp thời
+gian round BFT (khuyến nghị <50ms giữa các node cùng chain — nếu đặt các chain khác nhau/Root
+Anchor ở nhiều khu vực địa lý xa nhau, đó là bình thường, chỉ cần các node CÙNG 1 chain gần
+nhau). Băng thông tối thiểu 100Mbps/máy, khuyến nghị 1Gbps nếu nhắm throughput cao (hệ thống
+được thiết kế nhắm mục tiêu >30K TPS khi tune tối đa, xem `HOW_TO_TUNE_BLOCK_SIZE.md`).
 
 ---
 
@@ -188,9 +253,10 @@ trong môi trường sandbox — script `stop` không phải lúc nào cũng d�
 
 ---
 
-## Phần B — Production nhiều máy: 1 private chain (Ansible)
+## Phần B — Testnet/Production nhiều máy: 1 private chain (Ansible)
 
 Con đường đã kiểm chứng qua production thật nhiều lần (khác Phần A, vốn chỉ để luyện tập).
+**Dùng chung 1 quy trình cho cả testnet và production** — xem đầu tài liệu.
 
 ### B1. Chuẩn bị `inventory.yml`
 
@@ -204,6 +270,12 @@ cp inventory.example.yml inventory.yml   # nếu chưa có
 tài khoản đã khai báo, xác nhận đăng nhập được và có quyền `sudo` (role `systemd_services`
 cần quyền này để đăng ký service) **trước khi** chạy Ansible — Ansible sẽ báo lỗi mơ hồ hơn
 nhiều nếu SSH/sudo sai ngay từ đầu.
+
+**🔒 Tránh lỗi:** `inventory.yml` chứa mật khẩu SSH/IP thật — file này đã nằm trong
+`.gitignore` (`**/inventory.yml`), nhưng **tự kiểm tra bằng `git status` trước khi commit bất
+cứ gì** trong `deploy/ansible/`, đừng chỉ tin gitignore là lưới an toàn duy nhất. Ưu tiên SSH
+key thay vì mật khẩu (`ansible_ssh_private_key_file` thay vì `ansible_ssh_pass`) nếu hạ tầng
+cho phép.
 
 ### B2. Mở port firewall (chỉ cần 1 lần, máy mới)
 
@@ -229,6 +301,17 @@ trong `deploy/systemd/node-N_keys/open_ports.sh` được Ansible sinh ra và ch
 3. `systemd_services` — output báo các service `metanode-execution-N`/`metanode-consensus-N`
    đã `started`.
 
+**🔒 Tránh lỗi (bắt buộc đọc trước khi làm bước này cho production giá trị thật):**
+- `gen_validator_entry.py`/`gen_single_chain.py` mặc định KHÔNG tự set khoá relayer/submitter
+  thật — nếu bật `cross_chain`/`enable_private_gateway`, xem đủ bảng biến bí mật + cách set an
+  toàn (biến môi trường `META_*` thay vì để khoá nằm trong `config.json`) tại
+  `note/security_variables_reference.md` trước khi chạy `--reset-all`.
+- File khoá sinh ra ở `deploy/systemd/node-N_keys/` và đích thật trên server phải có quyền
+  `0600` (không phải `0755`/`0644`) — xác nhận bằng `ls -l` trên server sau khi deploy xong
+  (Phần B4 dưới có lệnh cụ thể).
+- KHÔNG dùng lại bất kỳ khoá/genesis nào sinh ra ở Phần A (devnet) cho bước này — khoá devnet
+  coi như đã công khai vì nằm sẵn trong tooling.
+
 ### B4. Xác nhận TỪNG NODE đã lên đúng (bắt buộc, đừng chỉ tin Ansible báo "ok")
 
 SSH vào từng máy, với mỗi node `N` trên máy đó:
@@ -245,6 +328,10 @@ curl -s -X POST http://127.0.0.1:<execution_rpc_port> \
 
 # 3. Consensus Peer RPC có sống không (health check riêng, độc lập với Execution)
 curl -s http://127.0.0.1:<consensus_peer_rpc_port>/health
+
+# 4. (🔒 bắt buộc cho production) Quyền file khoá — phải toàn 0600 (chỉ owner đọc được)
+ls -l /opt/metanode/node-N/config/execution.json /opt/metanode/node-N/config/consensus.toml \
+      /opt/metanode/node-N/keys/*.json
 ```
 
 **✅ Xác nhận thành công:**
@@ -254,6 +341,9 @@ curl -s http://127.0.0.1:<consensus_peer_rpc_port>/health
   chưa kịp mở socket, kiểm tra lại thứ tự/thời gian chờ.
 - `eth_blockNumber` trả JSON hợp lệ (không `Connection refused`).
 - `/health` trả đúng `{"status":"ok"}`.
+- Lệnh 4: mọi dòng phải hiện `-rw-------` (0600). Nếu thấy `-rw-r--r--`/`-rwxr-xr-x`, khoá thật
+  đang world-readable trên server — dừng lại, cập nhật code Ansible mới hơn trước khi coi
+  triển khai này là an toàn (xem `note/security_variables_reference.md` mục 2).
 
 ### B5. Xác nhận CONSENSUS ĐỒNG BỘ thật (không chỉ từng node còn sống riêng lẻ)
 
@@ -322,11 +412,17 @@ trên từng máy báo `inactive (dead)`, không phải `failed`.
 
 ---
 
-## Phần C — Root Anchor nhiều tổ chức độc lập (production multi-org)
+## Phần C — Testnet/Production Root Anchor nhiều tổ chức độc lập (multi-org)
 
 Quy trình đầy đủ nằm ở `note/runbook_root_anchor_genesis_ceremony.md` — đọc file đó trước
 khi làm thật, tài liệu này chỉ tóm tắt các mốc xác thực chính (khớp
-`production_deployment_guide.md` mục 5.2/5.3):
+`production_deployment_guide.md` mục 5.2/5.3).
+
+**🔒 Tránh lỗi quan trọng nhất của Phần này:** trước khi gửi giao dịch `bootstrapFoundingChains`
+ở bước 6, PHẢI đã set `CrossChainConfig.GenesisCoordinatorAddress` (khối `cross_chain` trong
+`config.json`) thành địa chỉ coordinator đã cam kết out-of-band — bỏ trống nghĩa là BẤT KỲ ai
+cũng gọi được lệnh này, mở đường cho tấn công front-run chiếm ghế committee (chi tiết:
+`production_deployment_guide.md` mục 5.3).
 
 | Bước | Việc làm | ✅ Xác nhận thành công |
 | :--- | :--- | :--- |
