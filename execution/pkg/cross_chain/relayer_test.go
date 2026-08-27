@@ -68,6 +68,10 @@ func setupTestRelayerNetwork() (*RelayerEngine, map[uint64]*GatewayEngine) {
 	chains[101] = NewGatewayEngine(101, registry, ledger)
 	chains[102] = NewGatewayEngine(102, registry, ledger)
 	chains[103] = NewGatewayEngine(103, registry, ledger)
+	// C8 fix (2026-08-27): chain 1000 is this test network's Reserve (matches
+	// RelayerConfig.ReserveChainID below) -- only the chain configured as its own Reserve may
+	// perform a ceiling-enforced AttestCommit of another chain's nonzero-value commit.
+	chains[1000].ReserveChainID = 1000
 
 	cfg := RelayerConfig{
 		RelayerAddress: common.HexToAddress("0x7777777777777777777777777777777777777777"),
@@ -321,7 +325,9 @@ func TestRelayer_Scenario10_3_ContractCallFailedAndAutomatedRefund(t *testing.T)
 	proof := GetMerkleProof(layers, 0)
 	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
 
-	// Attest commit on Chain 101
+	// Attest commit on Chain 101 (this scenario attests its own commit directly, standing in
+	// for Reserve for this test's own purposes -- C8 fix requires it be configured as such)
+	chains[101].ReserveChainID = 101
 	commitMsg := ComputeCommitRootAttestMessage(commitRoot)
 	sig101 := bls.Sign(relayerEngine.Signers[101][0].PrivateKey(), commitMsg)
 	cert101 := QuorumCert{

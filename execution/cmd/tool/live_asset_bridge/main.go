@@ -400,12 +400,15 @@ func main() {
 		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, regCalldata, nil, 1_000_000, "registerAsset")
 
 	case "allocate-supply":
-		// See GlobalSupplyLedger.GrantAllocation's doc comment (types.go): without a real
-		// governance-executed ProposalAllocateSupply, attestCommit's per_chain_allocation
-		// ceiling (Scenario 10.7) is 0 for every chain forever — production never wires an
-		// initial allocation. This grants -other-chain an allocation of -value on THIS
-		// chain's (the RPC target's) local Root Anchor ledger, via real propose/vote/timelock/
-		// execute — same quorum protection as every other governance action.
+		// C7 fix (2026-08-27, note/cross_chain_attack_scenario_catalog.md item C7 /
+		// note/eurozone_unified_native_coin_plan.md): ProposalAllocateSupply (kind=5) no longer
+		// grants an arbitrary chain allocation out of thin air via a vote — that was a real
+		// Sybil-mintable path. It now only mints the one-time genesis supply, and only to this
+		// chain's own configured ReserveChainID (config.CrossChain.ReserveChainID must equal
+		// -this-chain for this RPC target to be a valid mint target). This step now uses
+		// ProposalTransferAllocation (kind=6) instead: it moves already-minted allocation from
+		// -this-chain (assumed to be Reserve, already holding real minted supply) to
+		// -other-chain — safe and repeatable, can never inflate supply, only redistribute it.
 		if len(st.Committee) == 0 {
 			fmt.Println("state missing committee — run bootstrap first")
 			os.Exit(1)
@@ -415,17 +418,18 @@ func main() {
 			fmt.Println("invalid -value for allocate-supply")
 			os.Exit(1)
 		}
-		grant := cross_chain.AllocationGrantPayload{
-			ChainID: *otherChainID,
-			Amount:  amountBig,
+		transfer := cross_chain.AllocationTransferPayload{
+			FromChainID: *thisChainID,
+			ToChainID:   *otherChainID,
+			Amount:      amountBig,
 		}
-		payload, err := json.Marshal(grant)
+		payload, err := json.Marshal(transfer)
 		if err != nil {
-			fmt.Println("marshal AllocationGrantPayload:", err)
+			fmt.Println("marshal AllocationTransferPayload:", err)
 			os.Exit(1)
 		}
-		proposeVoteExecute(*deployerKeyHex, 5 /* ProposalAllocateSupply */, payload, st.Committee, *timelockWait)
-		fmt.Println("✅ granted allocation of", amountBig.String(), "to chain", *otherChainID)
+		proposeVoteExecute(*deployerKeyHex, 6 /* ProposalTransferAllocation */, payload, st.Committee, *timelockWait)
+		fmt.Println("✅ transferred allocation of", amountBig.String(), "from chain", *thisChainID, "to chain", *otherChainID)
 
 	case "query-registry":
 		calldata, err := gatewayABI.Pack("getChainRegistry", new(big.Int).SetUint64(*otherChainID))

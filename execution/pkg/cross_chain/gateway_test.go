@@ -42,7 +42,12 @@ func setupTestGatewayEngine() (*GatewayEngine, *bls.KeyPair) {
 		panic(err)
 	}
 
-	return NewGatewayEngine(102, registry, ledger), kp
+	engine := NewGatewayEngine(102, registry, ledger)
+	// C8 fix (2026-08-27): engine (chain 102) plays Reserve in this shared test setup, attesting
+	// other chains' commits directly -- only a chain configured as its own Reserve may do that
+	// for a nonzero-value commit.
+	engine.ReserveChainID = 102
+	return engine, kp
 }
 
 func TestGateway_P2_1_and_P2_5_OutboundAndHopCountGuard(t *testing.T) {
@@ -120,6 +125,8 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
 	engine, kp := setupTestGatewayEngine()
 	engine.EnsureGovernance()
+	// setupTestGatewayEngine sets engine.ReserveChainID = 102 (engine's own LocalChainID) —
+	// engine plays Reserve for this test.
 
 	// Chain 103: registered but never allocated — the exact state a real ProposalRegisterChain
 	// leaves a brand-new chain in today.
@@ -140,28 +147,54 @@ func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
 		return root, QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
 	}
 
-	// Before the grant: even a modest amount is rejected, ceiling is 0.
+	// Before anything: even a modest amount is rejected, ceiling is 0.
 	root, cert := signFor(big.NewInt(100))
 	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, errBefore, ErrAllocationExceeded)
 
-	// Grant allocation via real governance: propose -> vote (>=2/3 of active chains) -> 72h
-	// timelock -> execute. Active chains here is just {101} (setupTestGatewayEngine's registry
-	// plus 103 just added, but 103 isn't RegisterActiveChain'd), so quorum = 1.
-	grant := AllocationGrantPayload{ChainID: 103, Amount: big.NewInt(1000)}
-	payload, err := json.Marshal(grant)
+	// C7 fix (2026-08-27): ProposalAllocateSupply attempting to grant a REGULAR chain (103, not
+	// Reserve) is now rejected outright — this used to be exactly how a Sybil-controlled
+	// governance majority could mint itself free money (note/cross_chain_attack_scenario_catalog.md
+	// item C7). It only ever mints the one-time genesis supply, and only to this chain's own
+	// configured Reserve (102).
+	badGrant := AllocationGrantPayload{ChainID: 103, Amount: big.NewInt(1000)}
+	badPayload, err := json.Marshal(badGrant)
 	require.NoError(t, err)
+	badProposalID, err := engine.Governance.Propose(ProposalAllocateSupply, badPayload, 1000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(badProposalID, 101, 1010)
+	require.NoError(t, err)
+	_, errBadGrant := engine.ExecuteGovernanceProposal(badProposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, errBadGrant, ErrOnlyReserveMayMint)
+	assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103), "rejected grant must not move any allocation")
 
-	proposalID, err := engine.Governance.Propose(ProposalAllocateSupply, payload, 1000)
+	// setupTestGatewayEngine's fixture already constructs the ledger with a nonzero
+	// GenesisTotalSupply (102 already holds 5000, as if its one-time genesis mint already
+	// happened) — so attempting ProposalAllocateSupply again, even correctly targeting Reserve
+	// (102) itself, must now fail: genesis mint is one-time only, never a repeatable grant.
+	timelockProposalID, err := engine.Governance.Propose(ProposalAllocateSupply, json.RawMessage(`{"chain_id":102,"amount":1000}`), 1000)
 	require.NoError(t, err)
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
+	_, err = engine.Governance.Vote(timelockProposalID, 101, 1010)
 	require.NoError(t, err)
-
-	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
+	_, errEarly := engine.ExecuteGovernanceProposal(timelockProposalID, 1010+100)
 	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
+	_, errSecondMint := engine.ExecuteGovernanceProposal(timelockProposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	assert.ErrorIs(t, errSecondMint, ErrGenesisAlreadyMinted)
+	assert.Equal(t, big.NewInt(5000), engine.SupplyLedger.GetAllocation(102), "rejected re-mint must not change Reserve's existing allocation")
 
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	// Correct flow: Reserve (102) transfers part of its own already-minted supply (from the
+	// fixture's initial 5000) to chain 103 via ProposalTransferAllocation — safe and
+	// repeatable, moves existing supply only, never mints.
+	transfer := AllocationTransferPayload{FromChainID: 102, ToChainID: 103, Amount: big.NewInt(1000)}
+	transferPayload, err := json.Marshal(transfer)
 	require.NoError(t, err)
+	transferProposalID, err := engine.Governance.Propose(ProposalTransferAllocation, transferPayload, 3000)
+	require.NoError(t, err)
+	_, err = engine.Governance.Vote(transferProposalID, 101, 3010)
+	require.NoError(t, err)
+	_, err = engine.ExecuteGovernanceProposal(transferProposalID, 3010+DefaultGovernanceTimelockSeconds+1)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(4000), engine.SupplyLedger.GetAllocation(102), "5000 fixture balance minus the 1000 transferred out")
 	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
 
 	// The exact same commit now succeeds, and debits normally afterward.
@@ -323,6 +356,7 @@ func TestGateway_P2_4_RefundPathwayAndSupplyRestoration(t *testing.T) {
 	require.NoError(t, err)
 
 	engine := NewGatewayEngine(101, registry, ledger)
+	engine.ReserveChainID = 101 // C8 fix: engine plays Reserve, attesting its own outbound commit
 
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -455,6 +489,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	require.NoError(t, err)
 
 	gateway := NewGatewayEngine(1000, registry, ledger)
+	gateway.ReserveChainID = 1000 // C8 fix: gateway plays Reserve, attesting chain 201's commit
 	// aggregateAmount is now bound to commitRoot via a real Merkle proof (Section 2.3.1) — each
 	// case's commitRoot is its declared amount's own single-leaf AggregateValueLeaf hash (proof =
 	// no siblings), a faithful minimal case.

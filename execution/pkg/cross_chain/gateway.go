@@ -21,21 +21,25 @@ const (
 )
 
 var (
-	ErrHopCountExceeded        = errors.New("hop count exceeds maximum limit of 6")
-	ErrUnknownSourceChain      = errors.New("unknown source chain ID")
-	ErrEpochMismatch           = errors.New("epoch mismatch for source chain")
-	ErrAllocationExceeded      = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
-	ErrQuorumNotReached        = errors.New("BFT quorum stake threshold not reached")
-	ErrCommitNotAttested       = errors.New("commit root has not been attested by source chain")
-	ErrInvalidMerkleProof      = errors.New("invalid Merkle proof")
-	ErrAlreadyClaimed          = errors.New("message has already been claimed or processed (idempotent guard)")
-	ErrInvalidRefundState      = errors.New("cannot refund message: message is not in Pending status")
-	ErrInvalidRefundProof      = errors.New("invalid failed execution proof for refund")
-	ErrChainNotDead            = errors.New("target chain has not been declared dead")
-	ErrDeadChainAlreadyClaimed = errors.New("account balance on dead chain has already been claimed")
-	ErrNoActiveContext         = errors.New("no active cross-chain execution context")
-	ErrNotCalledByGateway      = errors.New("caller is not authorized by GatewayPrecompile")
-	ErrInvalidBLSSignature     = errors.New("BLS Quorum Certificate signature is invalid or empty")
+	ErrHopCountExceeded             = errors.New("hop count exceeds maximum limit of 6")
+	ErrUnknownSourceChain           = errors.New("unknown source chain ID")
+	ErrEpochMismatch                = errors.New("epoch mismatch for source chain")
+	ErrAllocationExceeded           = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrQuorumNotReached             = errors.New("BFT quorum stake threshold not reached")
+	ErrCommitNotAttested            = errors.New("commit root has not been attested by source chain")
+	ErrInvalidMerkleProof           = errors.New("invalid Merkle proof")
+	ErrAlreadyClaimed               = errors.New("message has already been claimed or processed (idempotent guard)")
+	ErrInvalidRefundState           = errors.New("cannot refund message: message is not in Pending status")
+	ErrInvalidRefundProof           = errors.New("invalid failed execution proof for refund")
+	ErrChainNotDead                 = errors.New("target chain has not been declared dead")
+	ErrDeadChainAlreadyClaimed      = errors.New("account balance on dead chain has already been claimed")
+	ErrNoActiveContext              = errors.New("no active cross-chain execution context")
+	ErrNotCalledByGateway           = errors.New("caller is not authorized by GatewayPrecompile")
+	ErrInvalidBLSSignature          = errors.New("BLS Quorum Certificate signature is invalid or empty")
+	ErrReserveChainNotConfigured    = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
+	ErrOnlyReserveMayMint           = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
+	ErrGenesisAlreadyMinted         = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
+	ErrNonReserveCeilingAttestation = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -114,6 +118,26 @@ type GatewayEngine struct {
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 
 	GenesisCoordinator common.Address `json:"genesisCoordinator,omitempty"`
+
+	// ReserveChainID identifies which registered chain is the system's unconditional issuer
+	// ("Reserve", Section 2.3) — the only chain allowed to (a) receive the one-time genesis
+	// supply mint via ProposalAllocateSupply, and (b) perform a ceiling-enforced AttestCommit
+	// of a nonzero-value commit from ANY other chain. Set once from config (config.CrossChain
+	// .ReserveChainID, gateway_handler.go's applyReserveChainIDConfig) — never governance-
+	// settable, matching GenesisCoordinator's own pattern. Zero means "not configured" and
+	// fails closed on both operations above (see GrantAllocation call site and
+	// attestCommitInternal) rather than silently falling back to the old, unrestricted
+	// behavior — found 2026-08-27 that neither restriction existed at all before this field:
+	// (1) ProposalAllocateSupply could mint fresh GenesisTotalSupply to ANY chain, repeatedly,
+	// via nothing but a governance vote (a real Sybil-mintable path, distinct from
+	// ClaimMessage's safe transfer-based auto-credit); (2) any non-Reserve chain could call
+	// the plain (ceiling-enforced) AttestCommit for ANY other non-Reserve chain's commit,
+	// decrementing only ITS OWN local copy of that source's allocation (GlobalSupplyLedger is
+	// per-chain-local state) with no cross-chain synchronization — since "route value through
+	// Reserve" was previously enforced only by relayer.go's own convention (RelayerDaemon's
+	// DaemonConfig.ReserveChainID), never by the GatewayEngine itself. See
+	// note/cross_chain_attack_scenario_catalog.md items C7/C8 for the full analysis.
+	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
 	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
 	// an explicit devnet-only config field (config.CrossChainConfig
@@ -352,8 +376,18 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		g.DeadChains[chainID] = true
 
 	case ProposalAllocateSupply:
-		// See GlobalSupplyLedger.GrantAllocation's doc comment (types.go) for why this exists:
-		// without it, no chain can ever pass attestCommit's per_chain_allocation ceiling check.
+		// C7 fix (2026-08-27): this used to accept ANY chainID, repeatably, effectively minting
+		// fresh GenesisTotalSupply via nothing but a governance vote every time -- a real
+		// Sybil-mintable path distinct from ClaimMessage's safe transfer-based auto-credit (see
+		// note/cross_chain_attack_scenario_catalog.md item C7 and
+		// note/eurozone_unified_native_coin_plan.md). Restricted to what the design doc's own
+		// mục 2.1/2.3 actually specifies: genesis_total_supply is minted EXACTLY ONCE, entirely
+		// TO Reserve -- this is now that one-time act, not a repeatable grant to arbitrary
+		// chains. Every chain other than Reserve must earn allocation the safe way: receive a
+		// real transfer via outbound()/ClaimMessage (already-existing, already-tested,
+		// non-inflationary), or via GlobalSupplyLedger.TransferAllocation moving Reserve's own
+		// already-minted supply outward (existing primitive, was never wired to any proposal
+		// kind before this fix -- see ProposalTransferAllocation below).
 		var grant AllocationGrantPayload
 		if err := json.Unmarshal(proposal.Payload, &grant); err != nil {
 			return nil, fmt.Errorf("invalid AllocationGrantPayload: %w", err)
@@ -364,8 +398,37 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 		if g.SupplyLedger == nil {
 			return nil, fmt.Errorf("ProposalAllocateSupply: SupplyLedger not initialized")
 		}
+		if g.ReserveChainID == 0 {
+			return nil, fmt.Errorf("ProposalAllocateSupply: %w", ErrReserveChainNotConfigured)
+		}
+		if grant.ChainID != g.ReserveChainID {
+			return nil, fmt.Errorf("ProposalAllocateSupply: %w (got chain %d, reserve is %d)", ErrOnlyReserveMayMint, grant.ChainID, g.ReserveChainID)
+		}
+		if g.SupplyLedger.GenesisTotalSupply != nil && g.SupplyLedger.GenesisTotalSupply.Sign() > 0 {
+			return nil, fmt.Errorf("ProposalAllocateSupply: %w", ErrGenesisAlreadyMinted)
+		}
 		if err := g.SupplyLedger.GrantAllocation(grant.ChainID, grant.Amount); err != nil {
 			return nil, fmt.Errorf("ProposalAllocateSupply: %w", err)
+		}
+
+	case ProposalTransferAllocation:
+		// C7 fix (2026-08-27): the safe, repeatable, non-inflationary path for a chain to gain
+		// allocation after genesis -- redistributes already-minted supply (TransferAllocation
+		// itself enforces FromChainID actually has the amount; it can never create new supply,
+		// only move existing supply, so no ceiling/Reserve restriction is needed here the way
+		// ProposalAllocateSupply needed one).
+		var transfer AllocationTransferPayload
+		if err := json.Unmarshal(proposal.Payload, &transfer); err != nil {
+			return nil, fmt.Errorf("invalid AllocationTransferPayload: %w", err)
+		}
+		if transfer.FromChainID == 0 || transfer.ToChainID == 0 {
+			return nil, fmt.Errorf("invalid chain ID: 0")
+		}
+		if g.SupplyLedger == nil {
+			return nil, fmt.Errorf("ProposalTransferAllocation: SupplyLedger not initialized")
+		}
+		if err := g.SupplyLedger.TransferAllocation(transfer.FromChainID, transfer.ToChainID, transfer.Amount); err != nil {
+			return nil, fmt.Errorf("ProposalTransferAllocation: %w", err)
 		}
 
 	case ProposalUpdateCommittee:
@@ -723,6 +786,24 @@ func (g *GatewayEngine) attestCommitInternal(
 			return nil, fmt.Errorf("attestCommit: aggregateAmount mismatch for already-attested asset")
 		}
 		return &existing, nil
+	}
+
+	if enforceCeiling && aggregateAmount.Sign() > 0 {
+		// C8 fix (2026-08-27): only the configured Reserve chain may perform a ceiling-enforced
+		// attestation of a nonzero-value commit. Before this check, GlobalSupplyLedger being
+		// per-chain-LOCAL state meant ANY chain could independently call this same AttestCommit
+		// for ANY other chain's commit, decrementing only its own local copy of that source's
+		// allocation with zero cross-chain synchronization -- "route value through Reserve" was
+		// enforced only by relayer.go's own convention, never by the contract itself. A
+		// zero-value commit (message type (a), Section 2.2 -- pure contract calls) is exempt:
+		// it never touches the ledger below regardless (Sub(x, 0) is a no-op), so direct A->B
+		// messaging without Reserve stays fully intact.
+		if g.ReserveChainID == 0 {
+			return nil, ErrReserveChainNotConfigured
+		}
+		if g.LocalChainID != g.ReserveChainID {
+			return nil, fmt.Errorf("%w: this chain (%d) is not the configured Reserve (%d)", ErrNonReserveCeilingAttestation, g.LocalChainID, g.ReserveChainID)
+		}
 	}
 
 	if enforceCeiling {
