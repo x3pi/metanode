@@ -131,6 +131,19 @@ type CrossChainConfig struct {
 	// convenience. Every real chain (Root Anchor AND every private chain) MUST set this before
 	// participating in cross-chain value transfer.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
+
+	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
+	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
+	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). When set
+	// (>0), a candidate chain ID must already hold at least this much in
+	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
+	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
+	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
+	// deliberately opt-in, not a default-on rate limit: the right minimum is an operational
+	// policy decision (how much should a new member chain be required to hold?) that depends on
+	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
+	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
+	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy

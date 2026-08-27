@@ -794,6 +794,73 @@ func TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold(t *testing.T
 	assert.False(t, exists)
 }
 
+// TestGateway_ProposalRegisterChain_MinRegistrationStake is the regression test for the C6
+// mitigation (2026-08-27, see note/cross_chain_attack_scenario_catalog.md item C6): opt-in via
+// GatewayEngine.MinRegistrationStake, a candidate chain ID must already hold at least that much
+// allocation before ProposalRegisterChain can execute for it, closing the previous gap where
+// registration was fully decoupled from SupplyLedger.
+func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
+	newChainReg := func(chainID uint64) []byte {
+		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		return payload
+	}
+
+	t.Run("unconfigured (zero) preserves old permissionless behavior", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// engine.MinRegistrationStake left nil -- the default on every pre-2026-08-27 config.
+
+		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
+		require.NoError(t, err)
+		_, err = engine.Governance.Vote(proposalID, 101, 1010)
+		require.NoError(t, err)
+
+		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+		require.NoError(t, err)
+		_, exists := engine.ChainRegistry[104]
+		assert.True(t, exists, "unconfigured MinRegistrationStake must not block registration")
+	})
+
+	t.Run("configured, unfunded candidate fails closed", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+
+		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
+		require.NoError(t, err)
+		_, err = engine.Governance.Vote(proposalID, 101, 1010)
+		require.NoError(t, err)
+
+		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+		assert.ErrorIs(t, err, ErrInsufficientRegistrationStake)
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists, "unfunded candidate must not be registered once a stake floor is configured")
+	})
+
+	t.Run("configured, pre-funded candidate succeeds", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+
+		// Pre-fund chain 104 (not yet in ChainRegistry) from Reserve (102, holding 5000) via the
+		// same TransferAllocation primitive ProposalTransferAllocation uses -- proving no
+		// ChainRegistry membership is required to pre-fund a genuinely new chain ID.
+		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
+
+		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
+		require.NoError(t, err)
+		_, err = engine.Governance.Vote(proposalID, 101, 1010)
+		require.NoError(t, err)
+
+		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+		require.NoError(t, err)
+		_, exists := engine.ChainRegistry[104]
+		assert.True(t, exists, "candidate holding exactly MinRegistrationStake must be admitted")
+	})
+}
+
 // TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold covers the same gap at genesis time.
 func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
 	kp := bls.GenerateKeyPair()

@@ -120,6 +120,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyGenesisCoordinatorConfig(freshEngine)
 		applyReserveChainIDConfig(freshEngine)
+		if err := applyMinRegistrationStakeConfig(freshEngine); err != nil {
+			return nil, err
+		}
 		return freshEngine, nil
 	}
 
@@ -147,6 +150,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	applyDevnetGovernanceTimelockOverride(&engine)
 	applyGenesisCoordinatorConfig(&engine)
 	applyReserveChainIDConfig(&engine)
+	if err := applyMinRegistrationStakeConfig(&engine); err != nil {
+		return nil, err
+	}
 	return &engine, nil
 }
 
@@ -177,6 +183,32 @@ func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
 		return
 	}
 	engine.ReserveChainID = config.ConfigApp.CrossChain.ReserveChainID
+}
+
+// applyMinRegistrationStakeConfig is a no-op unless config.ConfigApp.CrossChain
+// .MinRegistrationStake is a non-empty, valid, positive decimal string — see that field's own
+// doc comment (pkg/config/config.go) and GatewayEngine.MinRegistrationStake's for why this is
+// opt-in (C6 mitigation, not a default-on rate limit). An empty string preserves the exact old
+// permissionless-registration behavior. A non-empty but unparseable/non-positive string is a
+// config mistake, not a silent no-op — it fails loudly at startup rather than deploying a chain
+// that believes it configured a stake requirement but actually didn't.
+func applyMinRegistrationStakeConfig(engine *cross_chain.GatewayEngine) error {
+	raw := ""
+	if config.ConfigApp != nil {
+		raw = config.ConfigApp.CrossChain.MinRegistrationStake
+	}
+	if raw == "" {
+		return nil
+	}
+	if engine.MinRegistrationStake != nil && engine.MinRegistrationStake.Sign() > 0 {
+		return nil
+	}
+	amount, ok := new(big.Int).SetString(raw, 10)
+	if !ok || amount.Sign() <= 0 {
+		return fmt.Errorf("cross_chain.min_registration_stake_wei %q is not a valid positive base-10 integer", raw)
+	}
+	engine.MinRegistrationStake = amount
+	return nil
 }
 
 // applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
