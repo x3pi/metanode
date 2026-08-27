@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/mvcc"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/vm_processor"
@@ -684,7 +685,15 @@ func (stm *TrueBlockSTM) execOne(
 
 		if tx.IsRegularTransaction() {
 			// Native Transfer
-			totalGasUsed := mt_common.TRANSFER_GAS_COST + authGasUsed
+			var newAccountGas uint64
+			toAddr := tx.ToAddress()
+			toAcc, errTo := mvccDB.AccountState(toAddr)
+			if errTo == nil {
+				if toAcc == nil || (toAcc.Nonce() == 0 && (toAcc.Balance() == nil || toAcc.Balance().Sign() == 0) && len(toAcc.PublicKeyBls()) == 0) {
+					newAccountGas = params.CallNewAccountGas
+				}
+			}
+			totalGasUsed := mt_common.TRANSFER_GAS_COST + newAccountGas + authGasUsed
 			gasFee := new(big.Int).Mul(new(big.Int).SetUint64(totalGasUsed), tx.EffectiveGasPrice())
 
 			// EIP-4844: blob fee is burned (never added to totalGasFee / leader
