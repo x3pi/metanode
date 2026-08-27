@@ -117,6 +117,20 @@ type CrossChainConfig struct {
 	// set a coordinator are unaffected. Any real genesis ceremony MUST set this to the
 	// coordinator's real address before the bootstrap transaction is ever submitted.
 	GenesisCoordinatorAddress string `json:"genesis_coordinator_address,omitempty"`
+
+	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
+	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
+	// every OTHER chain, set this to the Reserve's chainId so it can correctly reject a
+	// ceiling-enforced attestCommit() for a nonzero-value commit unless it comes via
+	// AttestReserveIssuedCommit from that Reserve (C8 fix, 2026-08-27 — see
+	// note/cross_chain_attack_scenario_catalog.md). Empty/zero fails closed on both the
+	// one-time genesis mint (ProposalAllocateSupply) and any nonzero-value ceiling-enforced
+	// attestation — deliberately NOT "any caller accepted" like GenesisCoordinatorAddress's
+	// empty default, because there is no safe legacy behavior to preserve here: the
+	// unrestricted pre-fix behavior was itself the vulnerability, not a working devnet
+	// convenience. Every real chain (Root Anchor AND every private chain) MUST set this before
+	// participating in cross-chain value transfer.
+	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy

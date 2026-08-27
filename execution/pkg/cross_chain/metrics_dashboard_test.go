@@ -45,6 +45,7 @@ func setupDashboardTestEnv() (*CrossChainDashboardEngine, *GatewayEngine, *Globa
 	}
 
 	gateway := NewGatewayEngine(101, chainRegistry, supplyLedger)
+	gateway.ReserveChainID = 101 // C8 fix: gateway plays Reserve, attesting other chains' commits
 
 	dashboard := NewCrossChainDashboardEngine(
 		86400, // 24h grace period
