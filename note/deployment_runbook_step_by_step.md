@@ -43,32 +43,44 @@ buộc chạy nhiều node/máy (chỉ nên làm ở devnet), giới hạn `GOMA
 `(tổng core máy / số node) - margin` — Ansible role `systemd_services` đã tự làm việc này qua
 biến `gomaxprocs` (mặc định 20). **Production: luôn 1 node = 1 máy/VM riêng, không co-location.**
 
-### -1.2 Số máy tối thiểu — quyết định bởi BFT, không phải tuỳ chọn
+### -1.2 Số máy tối thiểu — quyết định bởi BFT VÀ 1 ràng buộc protocol cứng, không phải tuỳ chọn
 
-Công thức chịu lỗi BFT: `f = ⌊(n-1)/3⌋` (chi tiết: `note/bft_fault_tolerance_node_count.md`).
+**⚠️ SỬA LẠI — phát hiện quan trọng, các ví dụ "2 private chain" ở bản trước của tài liệu này
+SAI:** Root Anchor **bắt buộc tối thiểu 4 chain sáng lập (founding chains)** để khởi tạo —
+hardcode `MinFoundingChains = 4` trong `pkg/cross_chain/root_anchor.go`, **không phải giá trị
+cấu hình, không có cờ nào để hạ xuống**. `bootstrapFoundingChains()` từ chối thẳng nếu ít hơn
+4 chain, đúng lỗi thật: `"Root Anchor requires at least 4 founding chains: got N, need >= 4"`.
+
+**Lý do (đọc comment gốc trong `gateway.go`):** nếu cho phép khởi tạo với ít hơn 4 chain, ai
+gọi bootstrap đầu tiên có thể trở thành chain hoạt động DUY NHẤT và một mình chi phối toàn bộ
+governance sau đó — phá vỡ nguyên tắc "1 chain = 1 phiếu, không chain nào chi phối" (mục 1.2
+tài liệu kiến trúc). Đây là rào cản công bằng governance, không phải giới hạn kỹ thuật ngẫu
+nhiên — **không có cách nào hợp lệ để bootstrap Root Anchor thật với chỉ 2 chain sáng lập.**
+
+**Tin tốt — ràng buộc này CHỈ áp dụng lúc khởi tạo:** sau khi bootstrap thành công 1 lần (đủ
+≥4 chain), chain thứ 5, 6... gia nhập sau đó qua governance bình thường
+(`ProposalRegisterChain` → vote → executeProposal), **không** cần lặp lại điều kiện ≥4.
+
+Công thức chịu lỗi BFT (áp dụng cho từng chain riêng, kể cả Root Anchor):
+`f = ⌊(n-1)/3⌋` (chi tiết: `note/bft_fault_tolerance_node_count.md`).
 **n=3 validator/chain có ĐỘ CHỊU LỖI BẰNG 0** (1 node chết là mất quorum) — không dùng cho bất
 kỳ mạng nào có giá trị thật, kể cả testnet dùng để tổng duyệt trước production.
 
 | Cụm | Số máy tối thiểu (n≥4, chịu 1 node lỗi) | Ghi chú |
 | :--- | :--- | :--- |
 | Root Anchor | 4 | Bắt buộc — đây là custodian giá trị liên chuỗi |
-| Mỗi private chain tham gia cross-chain | 4 | Cùng lý do — 1 chain 3-node vẫn có thể tự chạy riêng lẻ, nhưng KHÔNG nên tham gia nhận giá trị thật qua Root Anchor |
+| **Số chain sáng lập bắt buộc** | **≥4 chain** (không phải 2!) | `MinFoundingChains`, xem cảnh báo trên |
+| Mỗi chain sáng lập (nếu chạy full BFT) | 4 | 1 chain 3-node vẫn có thể tự chạy riêng lẻ, nhưng KHÔNG nên tham gia nhận giá trị thật qua Root Anchor |
 | RelayerDaemon | 1 (có thể chạy chung máy monitoring) | Permissionless, không cần dự phòng BFT — chỉ cần dự phòng vận hành (giám sát + tự restart) |
 | Monitoring | 1 (khuyến nghị riêng, có thể thêm máy phụ chạy `--all-monitors` để dự phòng chéo) | |
 
-**⚠️ Vì sao Root Anchor luôn bắt buộc khi nói "2 private chain" trong tài liệu này:** mục
-đích cross-chain trong thực tế luôn là chuyển GIÁ TRỊ (coin/tài sản) qua lại giữa các chain,
-không phải chỉ gọi contract rỗng — mà theo thiết kế (mục 2.2/5.2
-`cross_chain_root_anchor_architecture.md`), giá trị bắt buộc đi qua Root Anchor làm "Reserve":
-cần 1 sổ cái chung (`GlobalSupplyLedger.per_chain_allocation`) chặn đúng số 1 chain được phép
-gửi ra, để nếu chain đó bị chiếm (validator thông đồng ký giả), thiệt hại chỉ giới hạn ở đúng
-số đã được cấp phép trước đó thay vì mint vô hạn sang chain khác — rủi ro "weakest-link", cùng
-hạn chế đã biết của cầu nối kiểu IBC (Cosmos): tài sản chỉ an toàn bằng đúng chain yếu nhất nó
-từng đi qua. Vậy dựng "2 private chain" trong thực tế luôn kèm Root Anchor + Relayer:
+**Ví dụ đúng — Root Anchor + 4 chain sáng lập (tất cả full BFT n=4)**: 4 (Root Anchor) +
+4×4 (4 chain) + 1 (relayer) = **21 máy** — đây mới là quy mô tối thiểu thật sự bootstrap được,
+không phải 13 máy như ví dụ sai trước đó.
 
-**Ví dụ cụ thể — Root Anchor + 2 private chain**: 4 (Root Anchor) + 4×2 (2 chain) + 1
-(relayer) = **13 máy** — quy mô đã từng chạy thật trong dự án, mới ở mức nhiều-tiến-trình-1-máy,
-chưa phải nhiều-máy-thật.
+**Nếu bạn chỉ thực sự CẦN 2 chain "thật" (2 chain còn lại chỉ để đủ điều kiện sáng lập)**: xem
+biến thể ở mục -1.4 — 2 chain "thật" vẫn chạy full n=4, 2 chain "placeholder" dùng biến thể
+giảm chi phí, tổng còn 17 máy thay vì 21.
 
 ### -1.3 Bảng chi phí ước tính (tham khảo, KHÔNG phải báo giá)
 
@@ -76,25 +88,34 @@ chưa phải nhiều-máy-thật.
 | :--- | :--- | :--- |
 | 1 máy Validator (8 vCPU / 16–32GB / 200GB+ NVMe) | ~$40–80/tháng (DigitalOcean/Hetzner Cloud/Vultr tầm giá tương đương) | ~$150–400/tháng (Hetzner Dedicated/OVH bare-metal tầm giá tương đương, 16–32 core vật lý/64–128GB/1–2TB NVMe RAID) |
 | 1 máy Relayer/Monitoring (2 vCPU/4GB) | ~$10–20/tháng | ~$20–40/tháng (vẫn nên tách máy vật lý riêng cho production) |
-| **Tổng 13 máy (Root Anchor + 2 chain + relayer)** | **~$700–900/tháng** | **~$3.000–4.500/tháng** (chưa gồm backup/CDN/firewall managed) |
+| **Tổng 21 máy (Root Anchor + 4 chain sáng lập, full BFT + relayer)** | **~$810–1.620/tháng** | **~$3.020–8.040/tháng** (chưa gồm backup/CDN/firewall managed) |
 | Quản lý khoá HSM/KMS (khuyến nghị mainnet giá trị lớn, mục 5.5 `production_deployment_guide.md`) | Không cần | AWS KMS: ~$1/khoá/tháng + phí request rất nhỏ; hoặc YubiHSM2 phần cứng: ~$650–950/thiết bị (mua đứt) |
 | Audit bảo mật độc lập (P5, bắt buộc trước mainnet giá trị thật) | Không áp dụng | Dao động rất rộng theo phạm vi/uy tín đơn vị — tham khảo thị trường: **20,000–150,000+ USD** cho 1 đợt audit cross-chain bridge đầy đủ. Tài liệu chuẩn bị sẵn để giảm effort audit: `note/external_security_audit_scope_p5.md` |
 
-**Muốn thêm chain thứ 3, thứ 4...**: mỗi chain mới tham gia cross-chain cộng thêm đúng 4 máy
-validator (không cộng thêm Root Anchor/relayer — 2 thành phần này dùng chung cho mọi chain).
+**Muốn thêm chain thứ 5, thứ 6...** (sau khi đã bootstrap đủ 4 chain sáng lập): mỗi chain mới
+gia nhập qua governance bình thường cộng thêm đúng 4 máy validator (không cộng thêm Root
+Anchor/relayer — 2 thành phần này dùng chung cho mọi chain, và không cần lặp lại điều kiện ≥4).
 
-### -1.4 Biến thể giảm chi phí: 1 validator + 1 synconly / private chain (CHẤP NHẬN RỦI RO)
+### -1.4 Biến thể giảm chi phí: dùng 1 validator + 1 synconly cho chain "placeholder" (CHẤP NHẬN RỦI RO)
 
-Có thể giảm mỗi private chain từ 4 validator xuống **1 validator + 1 synconly = 2 máy/chain**
-— **Root Anchor vẫn phải giữ nguyên n≥4** (lý do ở đánh giá rủi ro bên dưới, mục 3).
+Vì bắt buộc phải có ≥4 chain sáng lập (mục -1.2) nhưng bạn có thể chỉ thực sự CẦN 2 chain
+"thật" (sản phẩm/khách hàng thật) — 2 chain sáng lập còn lại chỉ tồn tại để đáp ứng đủ điều
+kiện `MinFoundingChains`, có thể giảm xuống **1 validator + 1 synconly = 2 máy/chain** cho
+đúng 2 chain "placeholder" đó. **Root Anchor và 2 chain "thật" vẫn phải giữ n≥4** (lý do ở
+đánh giá rủi ro bên dưới, mục 3).
 
-| | Số máy | Testnet | Production |
-| :--- | :--- | :--- | :--- |
-| Root Anchor (giữ n≥4, KHÔNG áp dụng biến thể này) | 4 | | |
-| 2 private chain × (1 validator + 1 synconly) | 4 | | |
-| Relayer | 1 | | |
-| **Tổng** | **9** (giảm từ 13 ở mục -1.3) | **~$330–660/tháng** | **~$1.220–3.240/tháng** |
-| Tiết kiệm so với 13 máy (mục -1.3) | −4 máy | ~$370–420/tháng | ~$1.800–2.100/tháng |
+| | Số máy | Ghi chú |
+| :--- | :--- | :--- |
+| Root Anchor (giữ n≥4) | 4 | |
+| 2 chain "thật" × 4 validator (giữ n≥4) | 8 | |
+| 2 chain "placeholder" × (1 validator + 1 synconly) | 4 | Chỉ để đủ điều kiện sáng lập — xem đánh giá rủi ro |
+| Relayer | 1 | |
+| **Tổng** | **17** (giảm từ 21 ở mục -1.3) | |
+
+| | Testnet | Production |
+| :--- | :--- | :--- |
+| **Tổng chi phí (17 máy)** | **~$650–1.300/tháng** | **~$2.420–6.440/tháng** |
+| Tiết kiệm so với 21 máy (mục -1.3) | ~$160–320/tháng | ~$600–1.600/tháng |
 
 **🔒 Đánh giá rủi ro — bắt buộc đọc trước khi chọn biến thể này:**
 
@@ -121,6 +142,14 @@ Có thể giảm mỗi private chain từ 4 validator xuống **1 validator + 1 
    MỌI chain tham gia — 1 lỗi ở Root Anchor ảnh hưởng TOÀN HỆ THỐNG, không giới hạn 1 chain —
    đây là lý do Root Anchor không được áp dụng biến thể giảm chi phí này dù ở bất kỳ tình huống
    nào.
+
+4. **Rủi ro riêng cho chain "placeholder" — vẫn nắm quyền BIỂU QUYẾT vĩnh viễn ở Root Anchor.**
+   Vì `bootstrapFoundingChains` áp dụng "1 chain = 1 phiếu" (mục 1.2 tài liệu kiến trúc) bất kể
+   chain đó thật hay chỉ để đủ điều kiện sáng lập, 2 chain placeholder chiếm **2/4 tổng số
+   phiếu governance của Root Anchor** — nếu quorum yêu cầu ví dụ ≥2/3 (3/4 chain), validator
+   duy nhất của 1 chain placeholder có quyền ảnh hưởng thật tới mọi quyết định
+   `propose`/`vote`/`executeProposal` sau này (cấp allocation, đổi uỷ ban...), dù chain đó
+   không hề có giá trị thật. Cân nhắc kỹ trước khi coi đây "chỉ là hạ tầng cho có".
 
 **Khi nào chấp nhận được**: chain đó dùng cho mục đích nội bộ/giá trị thấp/pilot-demo, VÀ bạn
 chủ động giữ `per_chain_allocation` cấp cho nó ở mức thấp qua governance (`ProposalAllocateSupply`)
