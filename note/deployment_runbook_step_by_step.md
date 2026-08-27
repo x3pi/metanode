@@ -56,11 +56,22 @@ kỳ mạng nào có giá trị thật, kể cả testnet dùng để tổng duy
 | RelayerDaemon | 1 (có thể chạy chung máy monitoring) | Permissionless, không cần dự phòng BFT — chỉ cần dự phòng vận hành (giám sát + tự restart) |
 | Monitoring | 1 (khuyến nghị riêng, có thể thêm máy phụ chạy `--all-monitors` để dự phòng chéo) | |
 
-**⚠️ Quan trọng — kiến trúc KHÔNG cho 2 private chain nói chuyện xuyên chuỗi trực tiếp với
-nhau.** Mọi luồng `outbound()/attestCommit()/claimMessage()` đều bắt buộc đi qua Root Anchor
-làm custodian trung gian (sơ đồ mục 1, `production_deployment_guide.md`) — Root Anchor KHÔNG
-phải tuỳ chọn nếu 2 chain của bạn cần gửi giá trị/message qua lại. Vậy "chỉ 2 private chain"
-có 2 kịch bản chi phí khác hẳn nhau:
+**⚠️ Quan trọng — bắt buộc phân biệt 2 loại giao tiếp xuyên chuỗi (mục 2.2
+`cross_chain_root_anchor_architecture.md`):**
+- **Message thuần (value=0, chỉ gọi contract)**: chain đích có thể tự verify chữ ký BLS uỷ
+  ban của chain nguồn trực tiếp (dùng registry đã cache sẵn) — **không bắt buộc Root Anchor
+  tham gia vào đường đi của message này**.
+- **Message mang giá trị (native coin/tài sản, value>0)**: **bắt buộc đi qua Root Anchor**
+  làm "Reserve" — đây là quyết định bảo mật chủ đích, không phải giới hạn kỹ thuật: cần 1 sổ
+  cái chung (`GlobalSupplyLedger.per_chain_allocation`) chặn đúng số 1 chain được phép gửi ra,
+  để nếu chain đó bị chiếm (validator thông đồng ký giả), thiệt hại chỉ giới hạn ở đúng số đã
+  được cấp phép trước đó thay vì có thể mint vô hạn sang chain khác — rủi ro "weakest-link" đã
+  ghi nhận riêng ở mục 5.2 tài liệu kiến trúc, giống hạn chế đã biết của cầu nối kiểu IBC
+  (Cosmos): tài sản chỉ an toàn bằng đúng chain yếu nhất nó từng đi qua.
+
+Vì mục đích cross-chain phổ biến nhất là chuyển GIÁ TRỊ (không phải chỉ gọi contract rỗng),
+Root Anchor coi như bắt buộc trong thực tế nếu 2 chain của bạn cần trao đổi giá trị qua lại.
+Vậy "chỉ 2 private chain" có 2 kịch bản chi phí khác hẳn nhau:
 
 | Kịch bản | Số máy | Công thức |
 | :--- | :--- | :--- |
