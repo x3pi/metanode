@@ -52,9 +52,9 @@ vẫn nằm trong file JSON) — đây là khuyến nghị cho bước tiếp th
 bằng chính user `metanode` sở hữu file, Ansible copy bằng quyền root qua `become: yes` nên
 không bị ảnh hưởng bởi việc siết quyền này). Không có tác dụng phụ, chỉ bớt quyền đọc thừa.
 
-## 3. 2 vấn đề tìm được, CHƯA sửa — cần bạn quyết định
+## 3. 1 vấn đề đã sửa (2026-08-27), 1 vấn đề CHƯA sửa — cần bạn quyết định
 
-### 3.1 `gateway_bls_key` — cùng 1 giá trị hardcode trên MỌI chain, kể cả tool ceremony thật
+### 3.1 [ĐÃ VÁ] `gateway_bls_key` — cùng 1 giá trị hardcode trên MỌI chain, kể cả tool ceremony thật
 
 Cả 3 script sinh cấu hình chính thức (`gen_root_anchor_chain.py`, `gen_single_chain.py`, VÀ
 `gen_validator_entry.py` — công cụ dùng cho vận hành viên ceremony THẬT) đều ghi cứng cùng 1
@@ -62,11 +62,25 @@ giá trị `gateway_bls_key` (`2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa
 không có cờ CLI nào để sinh khoá riêng. Chỉ ảnh hưởng khi `enable_private_gateway=true`
 (tính năng "Private Gateway"/speculative execution, mặc định TẮT) — nhưng nếu tính năng này bật
 trên bất kỳ chain nào dùng tooling mặc định, khoá ký "bảo lãnh" là công khai (nằm sẵn trong mã
-nguồn mở), ai cũng giả mạo được. Không tự sửa vì cần hiểu rõ luồng đăng ký `publicKeyBls` khớp
-theo devnet account trước (xem comment trong `gen_single_chain.py` dòng ~287) — đây là thay đổi
-logic sinh genesis, ngoài phạm vi đợt dọn cấu hình này.
+nguồn mở), ai cũng giả mạo được.
 
-### 3.2 `pkg/devicekey/DeviceKey.go` — secret Telegram bot token hardcode trong mã nguồn
+**Đã vá**: cả 3 script giờ có 2 cờ mới:
+- `--gateway-bls-key <hex>`: truyền thẳng 1 khoá cụ thể.
+- `--random-gateway-bls-key`: tự sinh khoá BLS ngẫu nhiên riêng cho từng node (dùng chính
+  `metanode keytool generate validator`, không phát minh cơ chế crypto mới).
+
+**Mặc định KHÔNG đổi** khi không truyền cờ nào — vẫn dùng đúng giá trị hardcode cũ, vì
+`dev_accounts.json` của `gen_single_chain.py` đã đăng ký sẵn 1 `publicKeyBls` khớp CHÍNH XÁC
+với khoá hardcode này (để giao dịch devnet thường qua được kiểm tra đăng ký BLS on-chain mà
+không cần luồng đăng ký thật) — đổi mặc định sẽ âm thầm phá luồng smoke-test devnet hiện có.
+Đã verify sống: chạy cả 2 chế độ, xác nhận mặc định ra đúng giá trị cũ (không đổi), còn
+`--random-gateway-bls-key` ra khoá hex hợp lệ khác nhau cho từng node.
+
+**Việc còn lại cho bất kỳ triển khai thật nào**: nhớ truyền `--random-gateway-bls-key` (hoặc
+`--gateway-bls-key` với khoá tự quản lý) khi generate config cho 1 chain thật có bật
+`enable_private_gateway` — script không tự ép buộc việc này, chỉ cung cấp lựa chọn.
+
+### 3.2 [CHƯA SỬA — đã hỏi, người dùng chọn "để sau"] `pkg/devicekey/DeviceKey.go` — secret Telegram bot token hardcode trong mã nguồn
 
 Hàm `telegramNoti()` (dòng 431-434) hardcode thẳng 1 bot token Telegram thật
 (`674513592:AA...`) và `chat_id` trong mã nguồn đã commit — bất kỳ ai có quyền đọc repo đều
