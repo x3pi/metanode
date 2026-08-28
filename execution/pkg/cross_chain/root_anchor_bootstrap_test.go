@@ -10,10 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// makeFoundingChainPayload builds a real, PoP-signed single-validator ChainRegistry JSON payload
-// for chainID — the same shape register_private_chains_t2.py / propose(ProposalRegisterChain,...)
-// already send.
-func makeFoundingChainPayload(t *testing.T, chainID uint64) []byte {
+// This file used to cover BootstrapFoundingChains -- a genesis-only, >= MinFoundingChains BATCH
+// registration call from a single (optionally GenesisCoordinator-restricted) caller. Retired
+// 2026-08-28 in favor of RegisterChainViaStake (already per-chain) becoming the universal,
+// vote-free registration path for every chain, including chain #1 -- see
+// note/cross_chain_stake_and_value_flow.md for the full rationale. GatewayEngine.
+// RegisterChainViaStake itself performs no stake check (that lives one layer up, in
+// gateway_handler.go, which has the AccountStateDB access needed to verify a real wallet
+// balance -- see gateway_handler_test.go for that coverage); this file covers what
+// RegisterChainViaStake is still responsible for on its own: PoP verification and
+// duplicate-chain-ID rejection, now evaluated per-call instead of per-batch.
+
+// makeRegistrationPayload builds a real, PoP-signed single-validator ChainRegistry JSON payload
+// for chainID — the same shape register_chains' registerChainViaStake calls already send.
+func makeRegistrationPayload(t *testing.T, chainID uint64) []byte {
 	t.Helper()
 	kp := bls.GenerateKeyPair()
 	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
@@ -35,16 +45,13 @@ func makeFoundingChainPayload(t *testing.T, chainID uint64) []byte {
 	return b
 }
 
-func TestBootstrapFoundingChains_Success(t *testing.T) {
+func TestGateway_RegisterChainViaStake_MultipleChainsSucceed(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
+	engine.EnsureGovernance()
 
-	var payloads [][]byte
 	for _, id := range []uint64{101, 102, 103, 104} {
-		payloads = append(payloads, makeFoundingChainPayload(t, id))
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
 	}
-
-	err := engine.BootstrapFoundingChains(payloads)
-	require.NoError(t, err)
 
 	assert.Len(t, engine.ChainRegistry, 4)
 	assert.Len(t, engine.Governance.ActiveChains, 4)
@@ -60,32 +67,37 @@ func TestBootstrapFoundingChains_Success(t *testing.T) {
 	assert.Equal(t, uint64(3), threshold) // ceil(2*4/3) = 3
 }
 
-func TestBootstrapFoundingChains_RejectsFewerThanMinimum(t *testing.T) {
+// TestGateway_RegisterChainViaStake_NoFoundingChainFloor proves the specific behavior change
+// this retirement was for: unlike the old BootstrapFoundingChains, which refused to run at all
+// below MinFoundingChains(=4) entries in a single batch, RegisterChainViaStake happily registers
+// a single chain (chain #1 -- Root Anchor's very first registrant) with no count floor at this
+// layer. MinFoundingChains(=4)/NewRootAnchorCommittee (root_anchor.go) is a completely separate,
+// pre-genesis mechanism for Root Anchor's OWN validator committee and is untouched by this.
+func TestGateway_RegisterChainViaStake_NoFoundingChainFloor(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	var payloads [][]byte
-	for _, id := range []uint64{101, 102, 103} { // only 3, need >= 4
-		payloads = append(payloads, makeFoundingChainPayload(t, id))
-	}
-	err := engine.BootstrapFoundingChains(payloads)
-	assert.ErrorIs(t, err, ErrInsufficientFoundingChains)
-	assert.Len(t, engine.ChainRegistry, 0, "a rejected bootstrap must not partially apply")
+	engine.EnsureGovernance()
+
+	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101)))
+
+	assert.Len(t, engine.ChainRegistry, 1)
+	_, exists := engine.ChainRegistry[101]
+	assert.True(t, exists)
 }
 
-func TestBootstrapFoundingChains_RejectsDuplicateChainID(t *testing.T) {
+func TestGateway_RegisterChainViaStake_RejectsDuplicateChainID(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	payloads := [][]byte{
-		makeFoundingChainPayload(t, 101),
-		makeFoundingChainPayload(t, 102),
-		makeFoundingChainPayload(t, 103),
-		makeFoundingChainPayload(t, 101), // duplicate
-	}
-	err := engine.BootstrapFoundingChains(payloads)
-	assert.ErrorIs(t, err, ErrDuplicateChainID)
-	assert.Len(t, engine.ChainRegistry, 0)
+	engine.EnsureGovernance()
+
+	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101)))
+
+	err := engine.RegisterChainViaStake(makeRegistrationPayload(t, 101))
+	assert.ErrorIs(t, err, ErrChainAlreadyRegistered)
+	assert.Len(t, engine.ChainRegistry, 1, "the original registration must be unaffected")
 }
 
-func TestBootstrapFoundingChains_RejectsForgedPop(t *testing.T) {
+func TestGateway_RegisterChainViaStake_RejectsForgedPop(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
+	engine.EnsureGovernance()
 
 	kp := bls.GenerateKeyPair()
 	other := bls.GenerateKeyPair()
@@ -97,34 +109,28 @@ func TestBootstrapFoundingChains_RejectsForgedPop(t *testing.T) {
 	badPayload, err := json.Marshal(reg)
 	require.NoError(t, err)
 
-	payloads := [][]byte{
-		makeFoundingChainPayload(t, 101),
-		makeFoundingChainPayload(t, 102),
-		makeFoundingChainPayload(t, 103),
-		badPayload,
-	}
-	err = engine.BootstrapFoundingChains(payloads)
+	err = engine.RegisterChainViaStake(badPayload)
 	require.Error(t, err)
-	assert.Len(t, engine.ChainRegistry, 0, "a rejected bootstrap must not partially apply, even if only 1 of N payloads is bad")
+	assert.Len(t, engine.ChainRegistry, 0, "a rejected registration must not apply")
 }
 
-func TestBootstrapFoundingChains_SelfClosesAfterFirstSuccess(t *testing.T) {
+// TestGateway_RegisterChainViaStake_RepeatableAcrossManyChains proves the specific behavior
+// change from the old BootstrapFoundingChains's self-closing-after-first-success design: since
+// this is now the universal, permanent registration path (not a one-shot genesis mechanism),
+// it must keep working for chain after chain, with no "already bootstrapped" lockout.
+func TestGateway_RegisterChainViaStake_RepeatableAcrossManyChains(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	var payloads [][]byte
-	for _, id := range []uint64{101, 102, 103, 104} {
-		payloads = append(payloads, makeFoundingChainPayload(t, id))
-	}
-	require.NoError(t, engine.BootstrapFoundingChains(payloads))
+	engine.EnsureGovernance()
 
-	// A second attempt — even with an entirely different, otherwise-valid set of chains — must
-	// be rejected now that the registry is no longer genesis-empty.
-	var payloads2 [][]byte
-	for _, id := range []uint64{201, 202, 203, 204} {
-		payloads2 = append(payloads2, makeFoundingChainPayload(t, id))
+	for _, id := range []uint64{101, 102, 103, 104} {
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
 	}
-	err := engine.BootstrapFoundingChains(payloads2)
-	assert.ErrorIs(t, err, ErrAlreadyBootstrapped)
-	assert.Len(t, engine.ChainRegistry, 4, "second bootstrap attempt must not add anything")
+
+	for _, id := range []uint64{201, 202, 203, 204} {
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
+	}
+
+	assert.Len(t, engine.ChainRegistry, 8, "later registrations must not be locked out by earlier ones")
 	_, exists := engine.ChainRegistry[201]
-	assert.False(t, exists)
+	assert.True(t, exists)
 }

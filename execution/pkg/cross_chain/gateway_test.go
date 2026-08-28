@@ -861,10 +861,15 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 	})
 }
 
-// TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path
-// (2026-08-28, user request: registration gated purely by stake, no committee vote at all --
-// distinct from MinRegistrationStake's original role of ADDING a stake precondition on top of
-// ProposalRegisterChain's existing vote requirement).
+// TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
+// As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake check at all --
+// it has no AccountStateDB access, so it cannot verify a real wallet balance. The real gate (a
+// REAL native-coin deposit from the caller's own wallet, checked+burned against
+// GatewayEngine.MinNativeStakeToRegister) lives one layer up, in gateway_handler.go's
+// "registerChainViaStake" case -- see TestGatewayHandler_RegisterChainViaStake_RequiresRealNative
+// StakeDeposit (gateway_handler_test.go) for that coverage. This file only covers what
+// RegisterChainViaStake itself is still responsible for: duplicate-registration and PoP/quorum
+// validation, vote-free.
 func TestGateway_RegisterChainViaStake(t *testing.T) {
 	newChainReg := func(chainID uint64) []byte {
 		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
@@ -873,45 +878,17 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		return payload
 	}
 
-	t.Run("unconfigured (zero) fails closed -- not a way to skip both vote and stake", func(t *testing.T) {
+	t.Run("succeeds with ZERO votes cast and no stake precondition at this layer", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
 		engine.EnsureGovernance()
-		// engine.MinRegistrationStake left nil.
-
-		err := engine.RegisterChainViaStake(newChainReg(104))
-		assert.ErrorIs(t, err, ErrRegistrationStakeNotConfigured)
-		_, exists := engine.ChainRegistry[104]
-		assert.False(t, exists)
-	})
-
-	t.Run("configured, unfunded candidate fails closed, no vote involved", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-
-		err := engine.RegisterChainViaStake(newChainReg(104))
-		assert.ErrorIs(t, err, ErrInsufficientRegistrationStake)
-		_, exists := engine.ChainRegistry[104]
-		assert.False(t, exists)
-	})
-
-	t.Run("configured, pre-funded candidate succeeds with ZERO votes cast", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-
-		// Pre-fund chain 104 from Reserve (102, holding 5000) -- same primitive
-		// ProposalTransferAllocation uses, which itself still requires a real quorum vote to
-		// have moved this allocation in the first place (the barrier moves to "vote to fund",
-		// it is not removed system-wide).
-		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
 
 		// No Governance.Propose/Vote/ExecuteGovernanceProposal call anywhere in this sub-test --
-		// that absence IS the point being tested.
+		// that absence IS the point being tested. No SupplyLedger pre-funding either -- this
+		// function no longer looks at PerChainAllocation at all.
 		err := engine.RegisterChainViaStake(newChainReg(104))
 		require.NoError(t, err)
 		reg, exists := engine.ChainRegistry[104]
-		assert.True(t, exists, "candidate holding exactly MinRegistrationStake must be admitted with no vote")
+		assert.True(t, exists, "RegisterChainViaStake must admit a valid candidate with no vote")
 		assert.Equal(t, uint64(104), reg.ChainID)
 		assert.Contains(t, engine.Governance.ActiveChains, uint64(104), "must also become a voting member for FUTURE proposals")
 	})
@@ -919,8 +896,6 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 	t.Run("already-registered chain ID is rejected", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
 		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 101, big.NewInt(1000)))
 
 		// Chain 101 is already in ChainRegistry via setupTestGatewayEngine's fixture.
 		err := engine.RegisterChainViaStake(newChainReg(101))
@@ -930,8 +905,6 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 	t.Run("rejects an unverified non-empty committee (same PoP bar as everywhere else)", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
 		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
 
 		kpRogue := bls.GenerateKeyPair()
 		forgedCommittee := []ValidatorEntry{
@@ -948,8 +921,11 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 	})
 }
 
-// TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold covers the same gap at genesis time.
-func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
+// TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold covers the same gap at genesis
+// time, now via RegisterChainViaStake -- BootstrapFoundingChains (and its batch-of->=
+// MinFoundingChains shape) was retired 2026-08-28 in favor of RegisterChainViaStake being usable,
+// per-chain, from chain #1 onward (see note/cross_chain_stake_and_value_flow.md).
+func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T) {
 	kp := bls.GenerateKeyPair()
 	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
 
@@ -967,16 +943,20 @@ func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
 	ledger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
 	require.NoError(t, err)
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, ledger)
+	engine.EnsureGovernance()
 
-	payloads := [][]byte{
-		makeEntry(101, 6667),
-		makeEntry(102, 6667),
-		makeEntry(103, 6667),
-		makeEntry(104, 1000), // 10% -- far under the 2/3 BFT floor
-	}
-	err = engine.BootstrapFoundingChains(payloads)
+	// RegisterChainViaStake registers ONE chain per call (not a batch like the retired
+	// BootstrapFoundingChains), so each entry now succeeds or fails independently -- a bad
+	// sub-BFT entry no longer poisons any other, already-valid, entry's registration.
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(101, 6667)))
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(102, 6667)))
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(103, 6667)))
+
+	err = engine.RegisterChainViaStake(makeEntry(104, 1000)) // 10% -- far under the 2/3 BFT floor
 	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
-	assert.Empty(t, engine.ChainRegistry, "no chain should be registered if any entry fails validation")
+	_, exists := engine.ChainRegistry[104]
+	assert.False(t, exists, "the sub-BFT entry itself must still be rejected")
+	assert.Len(t, engine.ChainRegistry, 3, "the three valid entries registered before it must be unaffected")
 }
 
 // TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind is the decision test

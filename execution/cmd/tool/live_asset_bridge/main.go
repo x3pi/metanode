@@ -306,7 +306,13 @@ func main() {
 		saveState(*statePath, st)
 
 	case "bootstrap":
-		var payloads [][]byte
+		// Registers 4 fresh fake chains via registerChainViaStake (retired bootstrapFoundingChains's
+		// replacement, 2026-08-28 -- see note/cross_chain_stake_and_value_flow.md) purely to give
+		// Governance.ActiveChains some members for "register-chain"'s later propose/vote/execute
+		// quorum -- registerChainViaStake itself needs no quorum at all (that's the whole point of
+		// this path), but each call debits *deployerKeyHex's real wallet by the target chain's
+		// configured MinNativeStakeToRegisterWei, so this step requires that config to be set on
+		// the target chain AND *deployerKeyHex to hold >= 4x that amount in real balance.
 		var committee []committeeMember
 		for i := 0; i < 4; i++ {
 			kp := bls.GenerateKeyPair()
@@ -327,18 +333,17 @@ func main() {
 				fmt.Println("marshal registry:", err)
 				os.Exit(1)
 			}
-			payloads = append(payloads, payload)
+			calldata, err := gatewayABI.Pack("registerChainViaStake", payload)
+			if err != nil {
+				fmt.Println("pack registerChainViaStake:", err)
+				os.Exit(1)
+			}
+			sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, calldata, nil, 3_000_000, fmt.Sprintf("registerChainViaStake(chain %d)", fakeChainID))
 			committee = append(committee, committeeMember{
 				ChainID: fakeChainID,
 				PrivHex: eth_common.Bytes2Hex(kp.BytesPrivateKey()),
 			})
 		}
-		calldata, err := gatewayABI.Pack("bootstrapFoundingChains", payloads)
-		if err != nil {
-			fmt.Println("pack bootstrapFoundingChains:", err)
-			os.Exit(1)
-		}
-		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, calldata, nil, 3_000_000, "bootstrapFoundingChains")
 		st.Committee = committee
 		saveState(*statePath, st)
 

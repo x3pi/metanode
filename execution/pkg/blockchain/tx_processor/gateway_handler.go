@@ -126,9 +126,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		}
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
 		applyDevnetGovernanceTimelockOverride(freshEngine)
-		applyGenesisCoordinatorConfig(freshEngine)
 		applyReserveChainIDConfig(freshEngine)
 		if err := applyMinRegistrationStakeConfig(freshEngine); err != nil {
+			return nil, err
+		}
+		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
 			return nil, err
 		}
 		return freshEngine, nil
@@ -156,33 +158,19 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		engine.RegisteredPops = make(map[string][]byte)
 	}
 	applyDevnetGovernanceTimelockOverride(&engine)
-	applyGenesisCoordinatorConfig(&engine)
 	applyReserveChainIDConfig(&engine)
 	if err := applyMinRegistrationStakeConfig(&engine); err != nil {
+		return nil, err
+	}
+	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
 		return nil, err
 	}
 	return &engine, nil
 }
 
-// applyGenesisCoordinatorConfig is a no-op unless config.ConfigApp explicitly sets
-// CrossChain.GenesisCoordinatorAddress AND the engine's GenesisCoordinator is still unset (the
-// zero address) — see that field's own doc comment (pkg/config/config.go). Only ever sets the
-// coordinator once, from the pristine/never-configured state: once a coordinator is recorded
-// (whether from an earlier config application or restored from persisted state), it is locked in
-// for the life of this GatewayEngine and a later config change cannot silently swap it out.
-func applyGenesisCoordinatorConfig(engine *cross_chain.GatewayEngine) {
-	if config.ConfigApp == nil || config.ConfigApp.CrossChain.GenesisCoordinatorAddress == "" {
-		return
-	}
-	if engine.GenesisCoordinator != (common.Address{}) {
-		return
-	}
-	engine.GenesisCoordinator = common.HexToAddress(config.ConfigApp.CrossChain.GenesisCoordinatorAddress)
-}
-
 // applyReserveChainIDConfig is a no-op unless config.ConfigApp.CrossChain.ReserveChainID is set
-// — see that field's own doc comment (pkg/config/config.go) for why this is required (not
-// opt-in like applyGenesisCoordinatorConfig) for any real cross-chain value deployment.
+// — see that field's own doc comment (pkg/config/config.go) for why this is required for any
+// real cross-chain value deployment.
 func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
 	if config.ConfigApp == nil || config.ConfigApp.CrossChain.ReserveChainID == 0 {
 		return
@@ -216,6 +204,36 @@ func applyMinRegistrationStakeConfig(engine *cross_chain.GatewayEngine) error {
 		return fmt.Errorf("cross_chain.min_registration_stake_wei %q is not a valid positive base-10 integer", raw)
 	}
 	engine.MinRegistrationStake = amount
+	return nil
+}
+
+// applyMinNativeStakeToRegisterConfig sets GatewayEngine.MinNativeStakeToRegister once from
+// config.ConfigApp.CrossChain.MinNativeStakeToRegisterWei — see that field's own doc comment
+// (pkg/config/config.go) and GatewayEngine.MinNativeStakeToRegister's own doc comment for why
+// this is REQUIRED (not opt-in, unlike applyMinRegistrationStakeConfig): with
+// BootstrapFoundingChains retired (2026-08-28), gateway_handler.go's "registerChainViaStake" case
+// is the only vote-free chain registration path left, so it must always have a real, configured
+// native-coin minimum to check the caller's wallet against — an unset value there fails closed at
+// the call site, not silently here. This function itself stays a no-op when the raw config string
+// is empty (lets a chain start up at all before an operator has decided the value — the call site
+// is what actually refuses registerChainViaStake transactions until it's set), same "lock in once
+// from the pristine state" pattern as every other config-applied GatewayEngine field.
+func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) error {
+	raw := ""
+	if config.ConfigApp != nil {
+		raw = config.ConfigApp.CrossChain.MinNativeStakeToRegisterWei
+	}
+	if raw == "" {
+		return nil
+	}
+	if engine.MinNativeStakeToRegister != nil && engine.MinNativeStakeToRegister.Sign() > 0 {
+		return nil
+	}
+	amount, ok := new(big.Int).SetString(raw, 10)
+	if !ok || amount.Sign() <= 0 {
+		return fmt.Errorf("cross_chain.min_native_stake_to_register_wei %q is not a valid positive base-10 integer", raw)
+	}
+	engine.MinNativeStakeToRegister = amount
 	return nil
 }
 
@@ -493,7 +511,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"bootstrapFoundingChains", "registerChainViaStake", "batchOutboundCommit",
+		"registerChainViaStake", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -1224,28 +1242,46 @@ func (h *GatewayHandler) handleWrite(
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
 		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
-	case "bootstrapFoundingChains":
-		// See GatewayEngine.BootstrapFoundingChains's doc comment (pkg/cross_chain/gateway.go)
-		// and this file's ABI doc comment for why this exists and why it's safe: self-closing
-		// after the first successful call, requires >= MinFoundingChains, requires real PoP for
-		// every committee member. Task 2: Pass tx.FromAddress() to restrict to GenesisCoordinator if set.
-		payloads := mustBytesSlice(args[0])
-		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
-			logger.Error("❌ [GATEWAY] bootstrapFoundingChains failed (caller=%s, count=%d): %v", tx.FromAddress().Hex(), len(payloads), err)
-			return nil, nil, err
-		}
-		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
-
 	case "registerChainViaStake":
 		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
-		// why this exists: an opt-in, vote-free alternative to ExecuteGovernanceProposal's
-		// ProposalRegisterChain case, for operators who want registration gated purely by
-		// MinRegistrationStake (must be configured, >0) rather than a committee vote. Fails
-		// closed if MinRegistrationStake isn't configured -- ProposalRegisterChain's normal
-		// vote-gated path is unaffected either way.
+		// why this exists: a vote-free alternative to ExecuteGovernanceProposal's
+		// ProposalRegisterChain case, gated by a REAL, liquid native-coin deposit from the
+		// caller's own wallet -- not PerChainAllocation (a governance-only, non-transferable
+		// ledger entry) and not any ERC-20-style token (2026-08-28 user request: "dùng tiền từ ví
+		// từ tài khoản thật ... không phải loại token erc 20 gì cả"). This is now the ONLY
+		// vote-free registration path (BootstrapFoundingChains was retired the same day -- see
+		// note/cross_chain_stake_and_value_flow.md), so an unconfigured MinNativeStakeToRegister
+		// fails closed here rather than silently falling back to permissionless registration.
+		if engine.MinNativeStakeToRegister == nil || engine.MinNativeStakeToRegister.Sign() <= 0 {
+			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
+		}
 		payload := mustBytes(args[0])
 		if err := engine.RegisterChainViaStake(payload); err != nil {
 			return nil, nil, err
+		}
+		// Balance mutation comes last, after every check that can still fail -- same ordering
+		// rationale as the "outbound" case above: a barrier TX has no rollback-on-later-error, so
+		// the real deposit move must be the last thing that can fail. engine's in-memory
+		// ChainRegistry mutation from RegisterChainViaStake above is still fully discardable at
+		// this point -- it is only ever persisted by saveGatewayEngine() at the very end of
+		// handleWrite, which this case never reaches on an early return, so a failure here
+		// (insufficient balance) cleanly leaves BOTH the registration and every balance
+		// untouched.
+		//
+		// Moved as burn-then-mint (debit tx.FromAddress(), credit GATEWAY_CONTRACT_ADDRESS) --
+		// the same total-supply-conserving primitive pair "outbound"/"claimMessage" already use
+		// for cross-chain value transfer, just both legs landing on this same chain here. A plain
+		// burn call alone only debits `from` -- ProcessNativeMintBurn's operationType==1 path
+		// ignores `to` entirely (see mvm_linker.cpp's processNativeMintBurn) -- so the mint leg is
+		// what actually makes this a real, held deposit rather than a fee that vanishes from
+		// total supply.
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake native stake deposit failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+			return nil, nil, fmt.Errorf("registerChainViaStake native stake deposit failed: %w", err)
+		}
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake stake re-mint into GATEWAY_CONTRACT_ADDRESS failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+			return nil, nil, fmt.Errorf("registerChainViaStake stake deposit re-mint failed: %w", err)
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 

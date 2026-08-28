@@ -31,13 +31,19 @@ import (
 )
 
 // register_chains bootstraps a fresh Root Anchor's ChainRegistry with a set of founding chains
-// via bootstrapFoundingChains() -- the real, self-closing genesis path (PR #61), NOT the normal
-// propose()/vote() governance flow this tool used before 2026-08-26. That was a real bug, not
-// just a devnet convenience gap: propose()/vote() require the voter to already be an
-// ActiveChains member, and a fresh Root Anchor's ChainRegistry starts empty -- there is no
-// committee that could ever vote those per-chain proposals through, so the old code always sent
-// N proposals that would sit pending forever (confirmed live: getChainRegistry still returned
-// exists=false after running it against a real Root Anchor).
+// via registerChainViaStake() -- the vote-free, real-native-coin-gated registration path, one
+// transaction per chain. This replaced bootstrapFoundingChains() (a single-transaction, >=
+// MinFoundingChains BATCH call, retired 2026-08-28 -- see note/cross_chain_stake_and_value_flow.md)
+// for the same reason bootstrapFoundingChains itself replaced the propose()/vote() governance flow
+// before it: propose()/vote() require the voter to already be an ActiveChains member, and a fresh
+// Root Anchor's ChainRegistry starts empty -- there is no committee that could ever vote those
+// per-chain proposals through. registerChainViaStake() solves this identically for chain #1 and
+// every chain after it, gated instead by a REAL, liquid native-coin deposit from -key's own
+// wallet (config.CrossChain.MinNativeStakeToRegisterWei on the target chain) -- NOT any
+// ERC-20-style token, and NOT the old PerChainAllocation/MinFoundingChains-count gate. -key's
+// wallet is debited by that deposit amount ONCE PER CHAIN registered in this run (N chains needs
+// N * MinNativeStakeToRegisterWei of real balance up front) -- fund it accordingly before running
+// this tool against a real target.
 //
 // Each founding chain's real committee entry is built from ITS OWN node's Databases.BLSPrivateKey
 // (config.json) -- not the genesis validator's consensus authority_key/PubkeyBls, and not the
@@ -74,7 +80,7 @@ func main() {
 	flag.StringVar(&submitterKeyHex, "key", "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8", "Sender ECDSA private key hex (must hold real gas balance on Root Anchor; the default is a public devnet-only key, see start_relayer_daemon.sh's own warning)")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", "http://127.0.0.1:9099", "Root Anchor JSON-RPC endpoint")
 	flag.StringVar(&chainsDir, "chains-dir", "deploy/systemd/private_chains_data", "Directory containing private chain data (chain_<id>/node-0/config.json for each) -- pass an ABSOLUTE path unless running this from the repo root")
-	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of founding chain IDs to register (>= MinFoundingChains)")
+	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of founding chain IDs to register (no minimum count -- registerChainViaStake works from chain #1 onward; -key's wallet needs real balance >= len(chains) * MinNativeStakeToRegisterWei)")
 	flag.StringVar(&targetRPCsFlag, "target-rpcs", "", "Comma-separated chainID=rpcURL pairs (e.g. \"101=http://127.0.0.1:8546,102=http://127.0.0.1:8547\") -- ChainRegistry is PER-CHAIN local state, not shared: attestCommit() on chain 102 needs ITS OWN copy of chain 101's committee, not just Root Anchor's. Without this flag, only Root Anchor's registry is seeded and every attestCommit() from one private chain to another fails with \"unknown source chain ID\" (found + fixed 2026-08-26 via live E2E testing). Pass every founding chain's own RPC here in addition to -root-anchor.")
 	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint the one-time genesis supply on Root Anchor (ProposalAllocateSupply, Reserve-only) and distribute it to each founding chain (ProposalTransferAllocation) -- see note/threat_matrix... PR #84 review. Off by default: bootstrapFoundingChains alone never touches SupplyLedger (by design, C7 fix), so this is opt-in.")
 	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total one-time genesis supply to mint on Root Anchor, base-10 wei string (required if -fund-genesis; e.g. a devnet default like \"400000000000000000000000000\" for 400,000,000 tokens at 18 decimals -- this is an operational/ceremony decision, not a protocol constant, hence a flag rather than a hardcoded literal)")
@@ -160,13 +166,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	calldata, err := parsedABI.Pack("bootstrapFoundingChains", payloads)
-	if err != nil {
-		logger.Error("Failed to pack bootstrapFoundingChains call: %v", err)
-		os.Exit(1)
+	var registerCalldatas [][]byte
+	for i, payloadBytes := range payloads {
+		calldata, err := parsedABI.Pack("registerChainViaStake", payloadBytes)
+		if err != nil {
+			logger.Error("Failed to pack registerChainViaStake call for chain %d: %v", chainIDs[i], err)
+			os.Exit(1)
+		}
+		registerCalldatas = append(registerCalldatas, calldata)
 	}
 
-	bootstrap(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", calldata, len(payloads), chainIDsFlag)
+	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
 
 	if fundGenesisFlag {
 		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds)
@@ -190,7 +200,7 @@ func main() {
 				os.Exit(1)
 			}
 			label, rpcURL := "chain "+parts[0], parts[1]
-			bootstrap(ctx, privKey, fromAddress, rpcURL, label, calldata, len(payloads), chainIDsFlag)
+			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
 		}
 	}
 }
@@ -239,12 +249,16 @@ func extractRevertReason(rpcURL string, txHash common.Hash) string {
 	return string(returnBytes)
 }
 
-// bootstrap submits the given (already-packed) bootstrapFoundingChains calldata to a single
-// chain's RPC endpoint and blocks until it either confirms or the process exits on failure. It
-// is deliberately fail-loud (os.Exit(1)) rather than fail-soft: a chain silently missing its
-// siblings' committees would surface much later as a hard-to-diagnose "unknown source chain ID"
-// revert during a real cross-chain attestation, not at registration time.
-func bootstrap(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL, label string, calldata []byte, chainCount int, chainIDsFlag string) {
+// registerChains submits one registerChainViaStake calldata per chain (registerCalldatas[i] for
+// chainIDs[i]) to a single chain's RPC endpoint, sequentially, blocking on each one's receipt
+// before sending the next -- so an early chain's failure never leaves later chains' registration
+// state ambiguous, and so -key's wallet nonce advances correctly between calls. It is deliberately
+// fail-loud (os.Exit(1)) rather than fail-soft on any UNEXPECTED failure: a chain silently missing
+// its siblings' committees would surface much later as a hard-to-diagnose "unknown source chain
+// ID" revert during a real cross-chain attestation, not at registration time. "already registered"
+// is tolerated per-chain (this run may be a safe re-run over a partially-registered set), matching
+// the retired bootstrapFoundingChains's own self-closing tolerance.
+func registerChains(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL, label string, chainIDs []uint64, registerCalldatas [][]byte) {
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		logger.Error("Failed to connect to %s at %s: %v", label, rpcURL, err)
@@ -252,57 +266,66 @@ func bootstrap(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress commo
 	}
 	defer client.Close()
 
-	chainID, err := client.ChainID(ctx)
+	onChainID, err := client.ChainID(ctx)
 	if err != nil {
 		logger.Error("Failed to fetch %s ChainID: %v", label, err)
 		os.Exit(1)
 	}
-	logger.Info("Connected to %s (ChainID: %s)", label, chainID.String())
+	logger.Info("Connected to %s (ChainID: %s)", label, onChainID.String())
 
-	nonce, err := client.PendingNonceAt(ctx, fromAddress)
-	if err != nil {
-		logger.Error("Failed to get nonce on %s: %v", label, err)
-		os.Exit(1)
-	}
-	tx := types.NewTransaction(nonce, p_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 5_000_000, big.NewInt(1_000_000_000), calldata)
-	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), privKey)
-	if err != nil {
-		logger.Error("Failed to sign bootstrapFoundingChains transaction for %s: %v", label, err)
-		os.Exit(1)
-	}
-	if err := client.SendTransaction(ctx, signedTx); err != nil {
-		logger.Error("Failed to send bootstrapFoundingChains transaction to %s: %v", label, err)
-		os.Exit(1)
-	}
-	logger.Info("bootstrapFoundingChains submitted to %s, tx=%s -- waiting for receipt...", label, signedTx.Hash().Hex())
+	for i, calldata := range registerCalldatas {
+		targetChainID := chainIDs[i]
 
-	var receipt *types.Receipt
-	for i := 0; i < 30; i++ {
-		receipt, err = client.TransactionReceipt(ctx, signedTx.Hash())
-		if err == nil {
-			break
+		nonce, err := client.PendingNonceAt(ctx, fromAddress)
+		if err != nil {
+			logger.Error("Failed to get nonce on %s: %v", label, err)
+			os.Exit(1)
 		}
-		time.Sleep(1 * time.Second)
-	}
-	if receipt == nil {
-		logger.Error("Timed out waiting for bootstrapFoundingChains receipt on %s (tx=%s): %v", label, signedTx.Hash().Hex(), err)
-		os.Exit(1)
-	}
-	if receipt.Status != 1 {
-		revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
-		if strings.Contains(revertMsg, "already has active chains") || strings.Contains(revertMsg, "already bootstrapped") {
-			logger.Info("ℹ️ %s: ChainRegistry is already bootstrapped -- proceeding.", label)
-			return
+		tx := types.NewTransaction(nonce, p_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 5_000_000, big.NewInt(1_000_000_000), calldata)
+		signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(onChainID), privKey)
+		if err != nil {
+			logger.Error("Failed to sign registerChainViaStake transaction (chain %d) for %s: %v", targetChainID, label, err)
+			os.Exit(1)
 		}
-		logger.Error("❌ bootstrapFoundingChains reverted on %s (tx=%s)", label, signedTx.Hash().Hex())
-		if revertMsg != "" {
-			logger.Error("   👉 Error ReturnData từ Receipt: \"%s\"", revertMsg)
-		} else {
-			logger.Error("   👉 Error ReturnData: (không có hoặc mã lỗi rỗng)")
+		if err := client.SendTransaction(ctx, signedTx); err != nil {
+			logger.Error("Failed to send registerChainViaStake transaction (chain %d) to %s: %v", targetChainID, label, err)
+			os.Exit(1)
 		}
-		os.Exit(1)
+		logger.Info("registerChainViaStake(chain %d) submitted to %s, tx=%s -- waiting for receipt...", targetChainID, label, signedTx.Hash().Hex())
+
+		var receipt *types.Receipt
+		for j := 0; j < 30; j++ {
+			receipt, err = client.TransactionReceipt(ctx, signedTx.Hash())
+			if err == nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if receipt == nil {
+			logger.Error("Timed out waiting for registerChainViaStake receipt (chain %d) on %s (tx=%s): %v", targetChainID, label, signedTx.Hash().Hex(), err)
+			os.Exit(1)
+		}
+		if receipt.Status != 1 {
+			revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
+			if strings.Contains(revertMsg, "already in ChainRegistry") {
+				logger.Info("ℹ️ %s: chain %d is already registered -- proceeding.", label, targetChainID)
+				continue
+			}
+			logger.Error("❌ registerChainViaStake(chain %d) reverted on %s (tx=%s)", targetChainID, label, signedTx.Hash().Hex())
+			if revertMsg != "" {
+				logger.Error("   👉 Error ReturnData từ Receipt: \"%s\"", revertMsg)
+				if strings.Contains(revertMsg, "min_native_stake_to_register_wei") {
+					logger.Error("   👉 %s has no MinNativeStakeToRegisterWei configured -- registerChainViaStake fails closed until an operator sets it.", label)
+				} else if strings.Contains(revertMsg, "insufficient balance") {
+					logger.Error("   👉 -key's wallet (%s) does not hold enough real native balance on %s -- fund it, or reduce -chains.", fromAddress.Hex(), label)
+				}
+			} else {
+				logger.Error("   👉 Error ReturnData: (không có hoặc mã lỗi rỗng)")
+			}
+			os.Exit(1)
+		}
+		logger.Info("✅ registerChainViaStake(chain %d) succeeded on %s!", targetChainID, label)
 	}
-	logger.Info("✅ bootstrapFoundingChains succeeded on %s! %d chain(s) registered: %s", label, chainCount, chainIDsFlag)
 }
 
 // fundGenesis mints the one-time genesis supply on Root Anchor and distributes it to every

@@ -104,20 +104,6 @@ type CrossChainConfig struct {
 	// local devnet.
 	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
 
-	// GenesisCoordinatorAddress — hex address pre-committed out of band (matching
-	// runbook_root_anchor_genesis_ceremony.md's genesis_digest.txt convention) as the ONLY
-	// caller allowed to submit bootstrapFoundingChains(). Real fix for the front-run gap
-	// documented in cross_chain_production_readiness_plan.md's Phase 1 hardening item:
-	// GatewayEngine.GenesisCoordinator/BootstrapFoundingChainsWithCaller already enforce this
-	// check in code, but nothing in production ever set the field, so the check was always a
-	// no-op (zero address = any caller accepted) — anyone racing a founding_entry.json leak
-	// could front-run the real ceremony and permanently occupy a founding committee seat.
-	// Empty/omitted preserves that exact pre-existing behavior (any caller may bootstrap) —
-	// this is opt-in, not a breaking default change, so existing devnet/test flows that never
-	// set a coordinator are unaffected. Any real genesis ceremony MUST set this to the
-	// coordinator's real address before the bootstrap transaction is ever submitted.
-	GenesisCoordinatorAddress string `json:"genesis_coordinator_address,omitempty"`
-
 	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
 	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
 	// every OTHER chain, set this to the Reserve's chainId so it can correctly reject a
@@ -125,17 +111,18 @@ type CrossChainConfig struct {
 	// AttestReserveIssuedCommit from that Reserve (C8 fix, 2026-08-27 — see
 	// note/cross_chain_attack_scenario_catalog.md). Empty/zero fails closed on both the
 	// one-time genesis mint (ProposalAllocateSupply) and any nonzero-value ceiling-enforced
-	// attestation — deliberately NOT "any caller accepted" like GenesisCoordinatorAddress's
-	// empty default, because there is no safe legacy behavior to preserve here: the
-	// unrestricted pre-fix behavior was itself the vulnerability, not a working devnet
-	// convenience. Every real chain (Root Anchor AND every private chain) MUST set this before
-	// participating in cross-chain value transfer.
+	// attestation — there is no safe legacy behavior to preserve here: the unrestricted pre-fix
+	// behavior was itself the vulnerability, not a working devnet convenience. Every real chain
+	// (Root Anchor AND every private chain) MUST set this before participating in cross-chain
+	// value transfer.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
 	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
 	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
-	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). When set
-	// (>0), a candidate chain ID must already hold at least this much in
+	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). Gates ONLY
+	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path) — see
+	// MinNativeStakeToRegisterWei below for the vote-free RegisterChainViaStake path's own,
+	// unrelated gate. When set (>0), a candidate chain ID must already hold at least this much in
 	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
 	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
 	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
@@ -144,6 +131,25 @@ type CrossChainConfig struct {
 	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
 	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
 	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
+
+	// MinNativeStakeToRegisterWei — the REQUIRED minimum real, liquid native-coin (Root Anchor's
+	// own base asset — deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) balance
+	// gateway_handler.go's "registerChainViaStake" case requires the caller's own wallet
+	// (tx.FromAddress()) to hold before it will register a new chain, then moves exactly this
+	// amount out of that real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held deposit
+	// (burn-then-mint; 2026-08-28 user request: "dùng tiền từ ví từ tài khoản thật làm điều kiện khởi tạo private
+	// chain ... không phải loại token erc 20 gì cả"). This is the universal, vote-free chain
+	// registration gate — usable identically for chain #1 and every chain after it — that
+	// replaced the retired bootstrapFoundingChains()/MinFoundingChains batch mechanism, so unlike
+	// MinRegistrationStake above this is NOT opt-in: leaving it empty/zero on a real deployment
+	// reopens fully permissionless Sybil chain registration (RegisterChainViaStake's own doc
+	// comment, GatewayEngine.MinNativeStakeToRegister's doc comment). Every node that will process
+	// registerChainViaStake transactions MUST set this to the SAME value — a value that differs
+	// between validators is a Zero-Fork Invariant risk (different nodes would accept/reject the
+	// same registration transaction differently). Parsed as a base-10 decimal string of wei (not
+	// a JSON number) to avoid float64 precision loss for large amounts, same convention as
+	// MinRegistrationStake.
+	MinNativeStakeToRegisterWei string `json:"min_native_stake_to_register_wei,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy

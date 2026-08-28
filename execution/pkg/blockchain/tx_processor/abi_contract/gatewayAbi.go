@@ -57,15 +57,17 @@ package abi_contract
 // the destination chain rather than back on the source chain. See gateway_handler.go's
 // executeContractCallForGateway call sites for the settlement logic.
 //
-// bootstrapFoundingChains() was added while running a real T2 devnet smoke-test: a Root Anchor
-// starts with zero ChainRegistry entries (NewGatewayEngine is always called with an empty
-// registry — see gateway_handler.go's loadGatewayEngine), but GovernanceEngine.Vote requires the
-// voter to already be a ChainRegistry member and ExecuteGovernanceProposal's
-// ProposalRegisterChain case requires a proposal to have already passed a vote — a genuine
-// circular dependency with no path to register the very first chains through governance alone.
-// See GatewayEngine.BootstrapFoundingChains's doc comment (pkg/cross_chain/gateway.go) for the
-// full design rationale (mirrors the >= MinFoundingChains requirement of the real
-// founding_entry.json/assemble_root_anchor ceremony, and is self-closing after first use).
+// registerChainViaStake() solves the same "chain #1 has no vote path" circular dependency a
+// deleted bootstrapFoundingChains() method (retired 2026-08-28) used to solve with a one-time,
+// coordinator-only batch call: a Root Anchor starts with zero ChainRegistry entries
+// (NewGatewayEngine is always called with an empty registry — see gateway_handler.go's
+// loadGatewayEngine), but GovernanceEngine.Vote requires the voter to already be a ChainRegistry
+// member and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have
+// already passed a vote. registerChainViaStake() is vote-free and per-chain (not a batch), gated
+// instead by a REAL native-coin deposit from the caller's own wallet (gateway_handler.go's
+// "registerChainViaStake" case checks+burns it, see GatewayEngine.MinNativeStakeToRegister's own
+// doc comment) — usable identically for chain #1 and every chain after it, which is what let
+// bootstrapFoundingChains() (and its >= MinFoundingChains batch requirement) be retired entirely.
 const GatewayABI = `[
 	{
 		"inputs": [
@@ -348,15 +350,6 @@ const GatewayABI = `[
 		],
 		"name": "CommitBatched",
 		"type": "event"
-	},
-	{
-		"inputs": [
-			{"internalType": "bytes[]", "name": "payloads", "type": "bytes[]"}
-		],
-		"name": "bootstrapFoundingChains",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
 	},
 	{
 		"inputs": [
