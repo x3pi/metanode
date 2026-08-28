@@ -182,6 +182,7 @@ def main():
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset")
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--min-native-stake-to-register-wei", type=str, default="1000000000000000000", help="Minimum native coin balance in wei required for registerChainViaStake (default: 1000000000000000000 = 1 token)")
     args = parser.parse_args()
 
     ip_address = "127.0.0.1"
@@ -421,6 +422,7 @@ def main():
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
                 "reserve_chain_id": args.chain_id,
+                "min_native_stake_to_register_wei": args.min_native_stake_to_register_wei,
                 # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
                 # full rationale. NEVER set this on a real deployment.
                 "devnet_governance_timelock_seconds_override": 10

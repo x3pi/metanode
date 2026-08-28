@@ -27,6 +27,8 @@
       --epochs-to-keep "{{ item.epochs_to_keep | default(0) }}" \
       --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
       --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
+      --root-anchor-rpc "{{ root_anchor_rpc | default('http://192.168.1.233:10746') }}" \
+      --root-anchor-submitter-key "{{ root_anchor_submitter_key | default('d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9') }}" \
       --metanode-bin "{{ deploy_dir }}/../../target/release/metanode"
   args:
     chdir: "{{ deploy_dir }}"

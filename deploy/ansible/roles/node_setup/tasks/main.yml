@@ -42,7 +42,6 @@
     mode: '0600'
     directory_mode: '0700'
   loop: "{{ active_nodes }}"
-  when: ansible_action == 'setup'
 
 - name: Auto-detect BTRFS device path for /opt/metanode
   ansible.builtin.shell: |

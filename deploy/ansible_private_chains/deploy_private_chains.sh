@@ -254,6 +254,7 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
         --root-anchor "$ROOT_ANCHOR_RPC" \
         --chains "$CHAINS_LIST" \
         --chains-dir "$SCRIPT_DIR/data" \
+        --root-anchor-keys-dir "$SCRIPT_DIR/../systemd" \
         --target-rpcs "$TARGET_RPCS" \
         --fund-genesis \
         --genesis-supply "$GENESIS_SUPPLY" \

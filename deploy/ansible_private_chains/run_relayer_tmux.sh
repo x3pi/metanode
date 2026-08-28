@@ -136,19 +136,37 @@ fi
 
 echo "📖 Đang đọc cấu hình từ $CONFIG_JSON ..."
 PARSED_DATA=$(python3 -c "
-import json
+import json, urllib.request
+
 with open('$CONFIG_JSON') as f:
     d = json.load(f)
 
 root_anchor = d.get('root_anchor', 'http://127.0.0.1:10746')
 nodes = d.get('nodes', {})
-chain_parts = [f'{cid}={url}' for cid, url in sorted(nodes.items())]
+
+# Tự động lấy chain ID của Root Anchor (Reserve Chain)
+reserve_chain_id = 991
+try:
+    req = urllib.request.Request(root_anchor, data=b'{\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\",\"params\":[],\"id\":1}', headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        res = json.loads(resp.read().decode())
+        if 'result' in res and res['result']:
+            reserve_chain_id = int(res['result'], 16)
+except Exception:
+    pass
+
+# Đưa cả Reserve Chain vào danh sách chains để Relayer theo dõi cả luồng 2-hop
+all_chains = dict(nodes)
+all_chains[str(reserve_chain_id)] = root_anchor
+
+chain_parts = [f'{cid}={url}' for cid, url in sorted(all_chains.items(), key=lambda x: int(x[0]))]
 chains_str = ','.join(chain_parts)
-print(f'{root_anchor}|{chains_str}')
+print(f'{root_anchor}|{chains_str}|{reserve_chain_id}')
 ")
 
 ROOT_ANCHOR=$(echo "$PARSED_DATA" | cut -d'|' -f1)
 CHAINS_STR=$(echo "$PARSED_DATA" | cut -d'|' -f2)
+RESERVE_ID=$(echo "$PARSED_DATA" | cut -d'|' -f3)
 
 if [ -z "$CHAINS_STR" ]; then
     echo "❌ Lỗi: Không tìm thấy danh sách chains trong $CONFIG_JSON"
@@ -173,13 +191,14 @@ echo "════════════════════════�
 echo "🚀 KHỞI CHẠY CROSS-CHAIN RELAYER TRONG TMUX"
 echo "   - Session Name:    $SESSION_NAME"
 echo "   - Root Anchor RPC: $ROOT_ANCHOR"
-echo "   - Private Chains:  $CHAINS_STR"
+echo "   - Reserve Chain:   Chain $RESERVE_ID"
+echo "   - Active Chains:   $CHAINS_STR"
 echo "   - Poll Interval:   ${POLL_MS}ms"
 echo "   - Log File:        $LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 
 # Tạo lệnh chạy ngầm với tee ghi log mới
-CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
+CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' -reserve-chain-id '$RESERVE_ID' -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
 
 # Khởi tạo tmux detached session
 tmux new-session -d -s "$SESSION_NAME" bash -c "$CMD"

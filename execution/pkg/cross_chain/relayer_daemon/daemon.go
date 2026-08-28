@@ -291,8 +291,8 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 	}
 	client := d.chainClients[chainID]
 	maxIterations := d.config.MaxPollIterations
-	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
-		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 60*time.Second {
+		maxIterations = int((60 * time.Second) / d.config.PollInterval)
 	}
 	for i := 0; i < maxIterations; i++ {
 		receipt, err := client.TransactionReceipt(ctx, txHash)
@@ -302,11 +302,20 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 		select {
 		case <-time.After(d.config.PollInterval):
 		case <-ctx.Done():
+			d.nonceMu.Lock()
+			delete(d.nonces, chainID)
+			d.nonceMu.Unlock()
 			return nil, ctx.Err()
 		case <-d.stopCh:
+			d.nonceMu.Lock()
+			delete(d.nonces, chainID)
+			d.nonceMu.Unlock()
 			return nil, fmt.Errorf("relayer daemon stopping")
 		}
 	}
+	d.nonceMu.Lock()
+	delete(d.nonces, chainID)
+	d.nonceMu.Unlock()
 	return nil, fmt.Errorf("timed out waiting for receipt of tx %s on chain %d", txHash.Hex(), chainID)
 }
 

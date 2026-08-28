@@ -341,7 +341,16 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "Ea004b9aE1F60516210df2fDfcE9342618729d98"
         ],
         "cross_chain": {
-            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+            "reserve_chain_id": args.reserve_chain_id if getattr(args, "reserve_chain_id", None) is not None else args.chain_id,
+            "root_anchor_rpc_urls": (
+                args.root_anchor_rpc.split(",") if getattr(args, "root_anchor_rpc", None)
+                else [f"http://127.0.0.1:{rpc_port.lstrip(':')}" if rpc_port else "http://127.0.0.1:10746"]
+            ),
+            "root_anchor_submitter_private_key_hex": getattr(args, "root_anchor_submitter_key", None) or "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9",
+            "root_anchor_poll_interval_seconds": 1,
+            "min_native_stake_to_register_wei": getattr(args, "min_native_stake_to_register_wei", "1000000000000000000"),
+            "devnet_governance_timelock_seconds_override": 10
         },
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",
@@ -536,6 +545,10 @@ def parse_args():
                         help="Max part size in MB for snapshot archive (default: 600)")
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real ceremony deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--reserve-chain-id", type=int, default=None, help="Cross-chain Reserve Chain ID (default: same as chain_id)")
+    parser.add_argument("--root-anchor-rpc", default=None, help="Root Anchor JSON-RPC URL(s)")
+    parser.add_argument("--root-anchor-submitter-key", default=None, help="Root Anchor submitter private key hex")
+    parser.add_argument("--min-native-stake-to-register-wei", type=str, default="1000000000000000000", help="Minimum native coin balance in wei required for registerChainViaStake (default: 1000000000000000000 = 1 token)")
     parser.add_argument("--epoch-duration-seconds", type=int, default=600,
                         help="Epoch duration in seconds (default: 600 = 10 min)")
     return parser.parse_args()

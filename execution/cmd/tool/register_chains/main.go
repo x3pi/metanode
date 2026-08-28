@@ -12,6 +12,8 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,11 +77,13 @@ func main() {
 		genesisSupplyFlag   string
 		perChainAllocFlag   string
 		timelockWaitSeconds int
+		rootAnchorKeysDir   string
 	)
 
 	flag.StringVar(&submitterKeyHex, "key", "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8", "Sender ECDSA private key hex (must hold real gas balance on Root Anchor; the default is a public devnet-only key, see start_relayer_daemon.sh's own warning)")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", "http://127.0.0.1:9099", "Root Anchor JSON-RPC endpoint")
 	flag.StringVar(&chainsDir, "chains-dir", "deploy/systemd/private_chains_data", "Directory containing private chain data (chain_<id>/node-0/config.json for each) -- pass an ABSOLUTE path unless running this from the repo root")
+	flag.StringVar(&rootAnchorKeysDir, "root-anchor-keys-dir", "", "Directory containing Root Anchor's node-*_keys (or config) to register Root Anchor's own committee into ChainRegistry on Root Anchor and all target RPCs")
 	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of founding chain IDs to register (no minimum count -- registerChainViaStake works from chain #1 onward; -key's wallet needs real balance >= len(chains) * MinNativeStakeToRegisterWei)")
 	flag.StringVar(&targetRPCsFlag, "target-rpcs", "", "Comma-separated chainID=rpcURL pairs (e.g. \"101=http://127.0.0.1:8546,102=http://127.0.0.1:8547\") -- ChainRegistry is PER-CHAIN local state, not shared: attestCommit() on chain 102 needs ITS OWN copy of chain 101's committee, not just Root Anchor's. Without this flag, only Root Anchor's registry is seeded and every attestCommit() from one private chain to another fails with \"unknown source chain ID\" (found + fixed 2026-08-26 via live E2E testing). Pass every founding chain's own RPC here in addition to -root-anchor.")
 	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint the one-time genesis supply on Root Anchor (ProposalAllocateSupply, Reserve-only) and distribute it to each founding chain (ProposalTransferAllocation) -- see note/threat_matrix... PR #84 review. Off by default: bootstrapFoundingChains alone never touches SupplyLedger (by design, C7 fix), so this is opt-in.")
@@ -108,6 +112,36 @@ func main() {
 	var payloads [][]byte
 	var committee []committeeMember
 	var chainIDs []uint64
+
+	// 1. Discover and register Root Anchor's own committee (Reserve Chain)
+	rootClient, err := ethclient.Dial(rootAnchorRPC)
+	if err == nil {
+		if onChainID, err := rootClient.ChainID(ctx); err == nil {
+			reserveChainID := onChainID.Uint64()
+			rootEntries, rootMembers, err := discoverRootAnchorCommittee(rootAnchorKeysDir, chainsDir, reserveChainID)
+			if err == nil && len(rootEntries) > 0 {
+				rootRegistry := cross_chain.ChainRegistry{
+					ChainID:         reserveChainID,
+					Epoch:           0,
+					Committee:       rootEntries,
+					QuorumThreshold: 6667,
+					GatewayContract: p_common.GATEWAY_CONTRACT_ADDRESS,
+				}
+				rootPayloadBytes, err := json.Marshal(rootRegistry)
+				if err == nil {
+					payloads = append(payloads, rootPayloadBytes)
+					committee = append(committee, rootMembers...)
+					chainIDs = append(chainIDs, reserveChainID)
+					logger.Info("Prepared founding entry for Root Anchor (chain %d) with %d validator(s) (real BLS pubkey, real PoP)", reserveChainID, len(rootEntries))
+				}
+			} else {
+				logger.Warn("Could not discover Root Anchor node keys (%v) -- skipping Root Anchor self-registration", err)
+			}
+		}
+		rootClient.Close()
+	}
+
+	// 2. Discover and register all private founding chains
 	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
 		cidStr = strings.TrimSpace(cidStr)
 		if cidStr == "" {
@@ -203,6 +237,122 @@ func main() {
 			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
 		}
 	}
+}
+
+// parseInventoryActiveNodeIDs searches for ansible/inventory.yml to determine which Root Anchor
+// validator nodes are currently active in the cluster, preventing stale/unused key directories from
+// inflating the total committee size and blocking QuorumCert accumulation.
+func parseInventoryActiveNodeIDs(deployDir string) map[int]bool {
+	active := make(map[int]bool)
+	inventoryPaths := []string{
+		filepath.Join(deployDir, "inventory.yml"),
+		filepath.Join(deployDir, "../ansible/inventory.yml"),
+		filepath.Join(deployDir, "ansible/inventory.yml"),
+		"deploy/ansible/inventory.yml",
+		"../ansible/inventory.yml",
+	}
+	re := regexp.MustCompile(`node_ids:\s*\[([^\]]+)\]`)
+	for _, p := range inventoryPaths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			matches := re.FindAllStringSubmatch(string(data), -1)
+			for _, m := range matches {
+				if len(m) >= 2 {
+					for _, part := range strings.Split(m[1], ",") {
+						part = strings.TrimSpace(part)
+						if id, err := strconv.Atoi(part); err == nil {
+							active[id] = true
+						}
+					}
+				}
+			}
+			if len(active) > 0 {
+				break
+			}
+		}
+	}
+	return active
+}
+
+// discoverRootAnchorCommittee inspects directories to discover Root Anchor's validator BLS keys
+// and construct its ValidatorEntry list with real BLS public keys and real PoP signatures.
+func discoverRootAnchorCommittee(keysDir, chainsDir string, reserveChainID uint64) ([]cross_chain.ValidatorEntry, []committeeMember, error) {
+	var entries []cross_chain.ValidatorEntry
+	var members []committeeMember
+
+	activeNodeIDs := parseInventoryActiveNodeIDs(keysDir)
+
+	dirsToTry := []string{
+		keysDir,
+		"deploy/systemd",
+		"../systemd",
+		"../../systemd",
+		filepath.Join(chainsDir, "..", "..", "systemd"),
+		filepath.Join(chainsDir, "..", "systemd"),
+	}
+
+	seenKeys := make(map[string]bool)
+
+	for _, d := range dirsToTry {
+		if d == "" {
+			continue
+		}
+		absD, err := filepath.Abs(d)
+		if err != nil {
+			continue
+		}
+		entriesFound, err := os.ReadDir(absD)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entriesFound {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, "node-") {
+				if len(activeNodeIDs) > 0 {
+					var nodeIdx int
+					if _, err := fmt.Sscanf(name, "node-%d", &nodeIdx); err == nil {
+						if !activeNodeIDs[nodeIdx] {
+							continue
+						}
+					}
+				}
+				for _, cfgName := range []string{"execution.json", "config.json"} {
+					cfgPath := filepath.Join(absD, name, cfgName)
+					if _, err := os.Stat(cfgPath); err == nil {
+						cfg, err := loadConfigFresh(cfgPath)
+						if err == nil && cfg.Databases.BLSPrivateKey != "" {
+							blsKeyHex := strings.TrimPrefix(cfg.Databases.BLSPrivateKey, "0x")
+							if !seenKeys[blsKeyHex] {
+								seenKeys[blsKeyHex] = true
+								blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(blsKeyHex)
+								popSig := cross_chain.PopSign(blsPriv, blsPub)
+								entries = append(entries, cross_chain.ValidatorEntry{
+									PubkeyBLS:    blsPub.Bytes(),
+									Stake:        1000,
+									PopSignature: popSig.Bytes(),
+								})
+								members = append(members, committeeMember{
+									ChainID: reserveChainID,
+									PrivHex: blsKeyHex,
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+		if len(entries) > 0 {
+			break
+		}
+	}
+
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("no Root Anchor node keys found in inspected directories")
+	}
+	return entries, members, nil
 }
 
 // loadConfigFresh reads and unmarshals a node config.json directly, bypassing
@@ -362,12 +512,6 @@ func fundGenesis(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress com
 		logger.Error("Invalid -per-chain-allocation %q (must be a positive base-10 integer)", perChainAllocStr)
 		os.Exit(1)
 	}
-	totalDistributed := new(big.Int).Mul(perChainAlloc, big.NewInt(int64(len(chainIDs))))
-	if totalDistributed.Cmp(genesisSupply) > 0 {
-		logger.Error("len(chains)=%d * -per-chain-allocation=%s = %s exceeds -genesis-supply=%s",
-			len(chainIDs), perChainAlloc.String(), totalDistributed.String(), genesisSupply.String())
-		os.Exit(1)
-	}
 
 	client, err := ethclient.Dial(rootAnchorRPC)
 	if err != nil {
@@ -382,6 +526,19 @@ func fundGenesis(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress com
 	}
 	reserveChainID := onChainID.Uint64()
 	logger.Info("fundGenesis: Root Anchor's real chain ID (used as ReserveChainID) is %d", reserveChainID)
+
+	foundingChainsCount := 0
+	for _, cid := range chainIDs {
+		if cid != reserveChainID {
+			foundingChainsCount++
+		}
+	}
+	totalDistributed := new(big.Int).Mul(perChainAlloc, big.NewInt(int64(foundingChainsCount)))
+	if totalDistributed.Cmp(genesisSupply) > 0 {
+		logger.Error("len(founding_chains)=%d * -per-chain-allocation=%s = %s exceeds -genesis-supply=%s",
+			foundingChainsCount, perChainAlloc.String(), totalDistributed.String(), genesisSupply.String())
+		os.Exit(1)
+	}
 
 	grant := cross_chain.AllocationGrantPayload{ChainID: reserveChainID, Amount: genesisSupply}
 	grantPayload, err := json.Marshal(grant)
@@ -404,6 +561,9 @@ func fundGenesis(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress com
 	}
 
 	for _, cid := range chainIDs {
+		if cid == reserveChainID {
+			continue // Skip Reserve itself -- only distribute to private chains
+		}
 		transfer := cross_chain.AllocationTransferPayload{FromChainID: reserveChainID, ToChainID: cid, Amount: perChainAlloc}
 		transferPayload, err := json.Marshal(transfer)
 		if err != nil {
@@ -440,21 +600,30 @@ func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *
 	// Anti-spam fee enforced by gateway_handler.go's "propose" case (0.1 native token) -- see
 	// its own comment for why this exists.
 	proposeFee := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(100_000_000))
-	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
-		fmt.Sprintf("%s: propose", label)); err != nil {
+	proposeReceipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
+		fmt.Sprintf("%s: propose", label))
+	if err != nil {
 		return err
 	}
 
-	var buf []byte
-	buf = append(buf, kind)
-	var tsBytes [8]byte
-	for i := 0; i < 8; i++ {
-		tsBytes[7-i] = byte(now >> (8 * i))
+	var proposalID common.Hash
+	returnHex := extractRawReturnHex(rpcURL, proposeReceipt.TxHash)
+	if returnBytes, err := hex.DecodeString(strings.TrimPrefix(returnHex, "0x")); err == nil && len(returnBytes) >= 32 {
+		proposalID = common.BytesToHash(returnBytes[len(returnBytes)-32:])
+	} else {
+		propTs := now
+		if block, err := client.BlockByNumber(ctx, proposeReceipt.BlockNumber); err == nil && block != nil {
+			propTs = block.Time()
+		}
+		var buf []byte
+		buf = append(buf, kind)
+		var tsBytes [8]byte
+		binary.BigEndian.PutUint64(tsBytes[:], propTs)
+		buf = append(buf, tsBytes[:]...)
+		buf = append(buf, payload...)
+		proposalID = crypto.Keccak256Hash(buf)
 	}
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	proposalID := crypto.Keccak256Hash(buf)
-	logger.Info("%s: computed proposalID=%s", label, proposalID.Hex())
+	logger.Info("%s: on-chain proposalID=%s", label, proposalID.Hex())
 
 	voteNow := uint64(time.Now().Unix())
 	for _, m := range committee {
@@ -485,6 +654,24 @@ func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *
 	_, err = sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, execCalldata,
 		fmt.Sprintf("%s: executeProposal", label))
 	return err
+}
+
+func extractRawReturnHex(rpcURL string, txHash common.Hash) string {
+	rpcClient, err := rpc.Dial(rpcURL)
+	if err != nil {
+		return ""
+	}
+	defer rpcClient.Close()
+
+	var rawReceipt map[string]interface{}
+	if err := rpcClient.Call(&rawReceipt, "eth_getTransactionReceipt", txHash.Hex()); err != nil {
+		return ""
+	}
+	returnHex, ok := rawReceipt["return"].(string)
+	if !ok {
+		return ""
+	}
+	return returnHex
 }
 
 // sendTxAndWait signs, sends, and waits for a single transaction's receipt, returning an error
