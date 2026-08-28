@@ -120,7 +120,6 @@ Hệ thống Ansible giờ đây sẽ lo trọn gói việc khởi động **Pro
 **Lệnh này sẽ làm gì?**
 Thực thi script `open_ports.sh` trên từng máy chủ tương ứng để tự động thêm rule `ufw allow` cho tất cả các cổng cần thiết (Execution, Consensus, RPC, Snapshot, Metrics). Vì Firewall chỉ cần mở 1 lần duy nhất, bạn không cần dùng cờ này trong các lần cập nhật tiếp theo.
 
-<<<<<<< HEAD
 ### 7. Giám Sát Chéo Đa Máy (`--all-monitors`)
 Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 ```bash
@@ -133,9 +132,7 @@ Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 - Mỗi máy Server sẽ chạy 1 cụm Monitor ngầm riêng biệt để **giám sát chéo toàn bộ các Node trong toàn mạng lưới**.
 - **Cơ chế dự phòng:** Nếu máy chủ Master (ví dụ `192.168.1.234`) bị sập nguồn hoặc mất mạng, tiến trình Monitor chạy trên các máy Slave (ví dụ `192.168.1.230`) vẫn sống và sẽ ngay lập tức bắn cảnh báo lên Telegram rằng Node 0 trên máy Master đã chết.
 
-=======
->>>>>>> ac01ea78599f2df6964c42344e3ee17e4fd51b63
----
+
 
 ## Phần 2: Kiến Trúc Ansible Hoạt Động Như Thế Nào?
 
