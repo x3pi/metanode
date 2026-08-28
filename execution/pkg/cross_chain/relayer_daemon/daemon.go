@@ -225,16 +225,21 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 		return common.Hash{}, fmt.Errorf("query chain ID: %w", err)
 	}
 
-	d.nonceMu.Lock()
-	nonce, exists := d.nonces[chainID]
-	if !exists {
-		pendingNonce, err := client.GetPendingTransactionCount(ctx, d.relayerAddr)
-		if err != nil {
-			d.nonceMu.Unlock()
-			return common.Hash{}, fmt.Errorf("query relayer pending nonce: %w", err)
-		}
+	var nonce uint64
+	pendingNonce, errPending := client.GetPendingTransactionCount(ctx, d.relayerAddr)
+	if errPending == nil {
 		nonce = pendingNonce
+	} else {
+		d.nonceMu.Lock()
+		cached, exists := d.nonces[chainID]
+		if !exists {
+			d.nonceMu.Unlock()
+			return common.Hash{}, fmt.Errorf("query relayer pending nonce: %w", errPending)
+		}
+		nonce = cached
+		d.nonceMu.Unlock()
 	}
+	d.nonceMu.Lock()
 	d.nonces[chainID] = nonce + 1
 	d.nonceMu.Unlock()
 
@@ -266,11 +271,7 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 			return signedTx.Hash(), nil
 		}
 		d.nonceMu.Lock()
-		if strings.Contains(errLower, "nonce") {
-			delete(d.nonces, chainID)
-		} else if d.nonces[chainID] == nonce+1 {
-			d.nonces[chainID] = nonce
-		}
+		delete(d.nonces, chainID)
 		d.nonceMu.Unlock()
 		return common.Hash{}, err
 	}
@@ -302,11 +303,20 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 		select {
 		case <-time.After(d.config.PollInterval):
 		case <-ctx.Done():
+			d.nonceMu.Lock()
+			delete(d.nonces, chainID)
+			d.nonceMu.Unlock()
 			return nil, ctx.Err()
 		case <-d.stopCh:
+			d.nonceMu.Lock()
+			delete(d.nonces, chainID)
+			d.nonceMu.Unlock()
 			return nil, fmt.Errorf("relayer daemon stopping")
 		}
 	}
+	d.nonceMu.Lock()
+	delete(d.nonces, chainID)
+	d.nonceMu.Unlock()
 	return nil, fmt.Errorf("timed out waiting for receipt of tx %s on chain %d", txHash.Hex(), chainID)
 }
 
