@@ -25,5 +25,8 @@ ROOT_ANCHOR="${1:-http://127.0.0.1:10746}"
     --root-anchor "$ROOT_ANCHOR" \
     --chains "101,102,103,104" \
     --chains-dir "$DIR/private_chains_data" \
-    --target-rpcs "101=http://127.0.0.1:8546,102=http://127.0.0.1:8547,103=http://127.0.0.1:8548,104=http://127.0.0.1:8549"
+    --target-rpcs "101=http://127.0.0.1:8546,102=http://127.0.0.1:8547,103=http://127.0.0.1:8548,104=http://127.0.0.1:8549" \
+    --fund-genesis \
+    --genesis-supply "400000000000000000000000000" \
+    --per-chain-allocation "100000000000000000000000000"
 echo "✅ Hoàn tất!"

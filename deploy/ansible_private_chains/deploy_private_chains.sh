@@ -192,9 +192,29 @@ else:
 print(','.join(rpcs))
 ")
 
+    # Ceremony/devnet supply values -- see register_chains -fund-genesis's own flag docs for why
+    # these are config, not a hardcoded protocol constant (PR #84 review, C7 fix). Overridable via
+    # inventory.yml's root_anchor_genesis_supply/root_anchor_per_chain_allocation; falls back to a
+    # devnet-only default (400,000,000 tokens total genesis supply, split evenly across the
+    # founding chains) so the guide's own end-to-end flow (bootstrap -> fund -> transfer test)
+    # works out of the box without requiring a manual extra step.
+    GENESIS_SUPPLY=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_genesis_supply', '400000000000000000000000000'))
+")
+    PER_CHAIN_ALLOCATION=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation', '100000000000000000000000000'))
+")
+
     echo "   - Root Anchor RPC: $ROOT_ANCHOR_RPC"
     echo "   - Private Chains:  $CHAINS_LIST"
     echo "   - Target RPCs:     $TARGET_RPCS"
+    echo "   - Genesis supply:  $GENESIS_SUPPLY (per-chain: $PER_CHAIN_ALLOCATION)"
     echo ""
 
     # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
@@ -242,7 +262,10 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
         --root-anchor "$ROOT_ANCHOR_RPC" \
         --chains "$CHAINS_LIST" \
         --chains-dir "$SCRIPT_DIR/data" \
-        --target-rpcs "$TARGET_RPCS"
+        --target-rpcs "$TARGET_RPCS" \
+        --fund-genesis \
+        --genesis-supply "$GENESIS_SUPPLY" \
+        --per-chain-allocation "$PER_CHAIN_ALLOCATION"
 fi
 
 echo ""

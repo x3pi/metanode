@@ -111,8 +111,8 @@ impl PostRecoveryHealthCheck {
                     }
                 }
                 _ => {
-                    tracing::warn!("⚠️ [HEALTH] Failed to fetch block window [{}..{}] from peer for state root check", fetch_start, fetch_end);
-                    result.state_root_match = true; // Best effort check, pass if network fails
+                    tracing::warn!("⚠️ [HEALTH] Unverified: Failed to fetch block window [{}..{}] from peer for state root check", fetch_start, fetch_end);
+                    result.state_root_match = false; // Fail-safe: do not falsely mark unverified network failures as matched
                 }
             }
         } else {

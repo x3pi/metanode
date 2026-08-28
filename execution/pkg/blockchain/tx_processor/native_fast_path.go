@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/grouptxns"
@@ -188,7 +189,11 @@ func processNativeTransfersFastPath(
 					// ═══════════════════════════════════════════════════
 					toAddress := tx.ToAddress()
 					_, isFree := chainState.GetFreeFeeAddress()[toAddress]
-					gasLimit := uint64(mt_common.TRANSFER_GAS_COST)
+					baseGasCost := uint64(mt_common.TRANSFER_GAS_COST)
+					if !globalAccountDB.ExistAccount(toAddress) {
+						baseGasCost += params.CallNewAccountGas
+					}
+					gasLimit := baseGasCost
 					if isFree {
 						gasLimit = uint64(mt_common.MAX_GASS_FEE)
 					}
@@ -240,14 +245,14 @@ func processNativeTransfersFastPath(
 					rcp := receipt.NewReceipt(
 						tx.Hash(), tx.FromAddress(), toAddress, tx.Amount(),
 						pb.RECEIPT_STATUS_RETURNED, nil, pb.EXCEPTION_NONE,
-						tx.EffectiveGasPrice().Uint64(), mt_common.TRANSFER_GAS_COST,
+						tx.EffectiveGasPrice().Uint64(), baseGasCost,
 						[]types.EventLog{}, 0, common.Hash{}, 0,
 					)
 
 					// Create minimal ExecuteSCResult (for consistency with pipeline)
 					exRs := smart_contract.NewExecuteSCResult(
 						tx.Hash(), pb.RECEIPT_STATUS_RETURNED, pb.EXCEPTION_NONE, nil,
-						mt_common.TRANSFER_GAS_COST, common.Hash{},
+						baseGasCost, common.Hash{},
 						nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 					)
 

@@ -90,7 +90,15 @@ cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
 3. Copy binary `simple_chain` và `metanode` vào `/opt/metanode/chain-XXX`.
 4. Thiết lập systemd service `/etc/systemd/system/metanode-private-XXX.service`.
 5. Bật service và mở tường lửa cho các cổng RPC, Peer, Consensus.
-6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor!
+6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor (bootstrapFoundingChains).
+7. Tự động mint genesis supply 1 lần trên Reserve (Root Anchor) và chia cho 4 founding chain
+   (`ProposalAllocateSupply` + `ProposalTransferAllocation`, qua `register_chains -fund-genesis`)
+   — **bắt buộc phải có bước này** thì Bước 5 (kiểm tra chuyển tiền cross-chain thật) mới chạy
+   được, vì mỗi chain khởi tạo xong đều có `PerChainAllocation = 0` cho tới khi được cấp thật qua
+   đúng luồng governance này (xem `note/cross_chain_attack_scenario_catalog.md` mục C7/C8 — sửa
+   2026-08-28, PR #84 review). Số lượng mint mặc định là giá trị devnet
+   (`root_anchor_genesis_supply`/`root_anchor_per_chain_allocation` trong `inventory.yml`, có thể
+   chỉnh) — **không dùng mặc định này cho triển khai thật**, số thật phải qua ceremony quyết định.
 
 ---
 

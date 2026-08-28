@@ -861,6 +861,93 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 	})
 }
 
+// TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path
+// (2026-08-28, user request: registration gated purely by stake, no committee vote at all --
+// distinct from MinRegistrationStake's original role of ADDING a stake precondition on top of
+// ProposalRegisterChain's existing vote requirement).
+func TestGateway_RegisterChainViaStake(t *testing.T) {
+	newChainReg := func(chainID uint64) []byte {
+		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		return payload
+	}
+
+	t.Run("unconfigured (zero) fails closed -- not a way to skip both vote and stake", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// engine.MinRegistrationStake left nil.
+
+		err := engine.RegisterChainViaStake(newChainReg(104))
+		assert.ErrorIs(t, err, ErrRegistrationStakeNotConfigured)
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists)
+	})
+
+	t.Run("configured, unfunded candidate fails closed, no vote involved", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+
+		err := engine.RegisterChainViaStake(newChainReg(104))
+		assert.ErrorIs(t, err, ErrInsufficientRegistrationStake)
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists)
+	})
+
+	t.Run("configured, pre-funded candidate succeeds with ZERO votes cast", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+
+		// Pre-fund chain 104 from Reserve (102, holding 5000) -- same primitive
+		// ProposalTransferAllocation uses, which itself still requires a real quorum vote to
+		// have moved this allocation in the first place (the barrier moves to "vote to fund",
+		// it is not removed system-wide).
+		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
+
+		// No Governance.Propose/Vote/ExecuteGovernanceProposal call anywhere in this sub-test --
+		// that absence IS the point being tested.
+		err := engine.RegisterChainViaStake(newChainReg(104))
+		require.NoError(t, err)
+		reg, exists := engine.ChainRegistry[104]
+		assert.True(t, exists, "candidate holding exactly MinRegistrationStake must be admitted with no vote")
+		assert.Equal(t, uint64(104), reg.ChainID)
+		assert.Contains(t, engine.Governance.ActiveChains, uint64(104), "must also become a voting member for FUTURE proposals")
+	})
+
+	t.Run("already-registered chain ID is rejected", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 101, big.NewInt(1000)))
+
+		// Chain 101 is already in ChainRegistry via setupTestGatewayEngine's fixture.
+		err := engine.RegisterChainViaStake(newChainReg(101))
+		assert.ErrorIs(t, err, ErrChainAlreadyRegistered)
+	})
+
+	t.Run("rejects an unverified non-empty committee (same PoP bar as everywhere else)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.MinRegistrationStake = big.NewInt(1000)
+		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
+
+		kpRogue := bls.GenerateKeyPair()
+		forgedCommittee := []ValidatorEntry{
+			{PubkeyBLS: kpRogue.BytesPublicKey(), Stake: 10000, PopSignature: make([]byte, 96)},
+		}
+		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667, Committee: forgedCommittee}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+
+		err = engine.RegisterChainViaStake(payload)
+		assert.ErrorIs(t, err, ErrPopVerifyFailed)
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists)
+	})
+}
+
 // TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold covers the same gap at genesis time.
 func TestBootstrapFoundingChains_RejectsSubBftQuorumThreshold(t *testing.T) {
 	kp := bls.GenerateKeyPair()

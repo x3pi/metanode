@@ -103,6 +103,23 @@ const GatewayABI = `[
 	},
 	{
 		"inputs": [
+			{"internalType": "uint256", "name": "reserveChainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint256", "name": "aggregateAmount", "type": "uint256"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "attestReserveIssuedCommit",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
 			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
 			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
 			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
@@ -337,6 +354,15 @@ const GatewayABI = `[
 			{"internalType": "bytes[]", "name": "payloads", "type": "bytes[]"}
 		],
 		"name": "bootstrapFoundingChains",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes", "name": "payload", "type": "bytes"}
+		],
+		"name": "registerChainViaStake",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"

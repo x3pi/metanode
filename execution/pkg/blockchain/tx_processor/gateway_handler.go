@@ -491,9 +491,9 @@ func (h *GatewayHandler) HandleTransaction(
 	}
 
 	switch method.Name {
-	case "outbound", "attestCommit", "claimMessage", "refund",
+	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"bootstrapFoundingChains", "batchOutboundCommit",
+		"bootstrapFoundingChains", "registerChainViaStake", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -701,6 +701,27 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+	case "attestReserveIssuedCommit":
+		// The second leg of a 2-hop A -> Reserve -> B value route (see
+		// note/cross_chain_stake_and_value_flow.md and GatewayEngine.AttestReserveIssuedCommit's
+		// own doc comment): Reserve is the unconditional issuer for a commit IT originates, so
+		// this skips attestCommitInternal's ceiling/Reserve-identity check entirely (enforceCeiling
+		// =false) rather than requiring the CLAIMING chain to itself be the Reserve, which is
+		// exactly what a plain attestCommit() call would otherwise require and fail here.
+		assetId := mustBigInt(args[3])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[4]).Uint64(),
+			Siblings:  mustHashSlice(args[5]),
+		}
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[6]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
+		}
+		if _, err := engine.AttestReserveIssuedCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
+			return nil, nil, err
+		}
+
 	case "claimMessage":
 		msg := cross_chain.CrossChainMessage{
 			MessageID:     mustHash(args[0]),
@@ -727,8 +748,75 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+		// 2-hop A -> Reserve -> B value & CONTRACT_CALL routing
+		// (note/cross_chain_stake_and_value_flow.md): a native message whose Payload carries a
+		// valid relay marker (cross_chain.EncodeRelayPayload) means "relay Value AND the real
+		// inner payload onward to finalDestChainID instead of settling them HERE". The marker's
+		// presence is the sole, authoritative signal -- deliberately NOT gated on
+		// !isContractCall(chainState, msg.Target): Target's real contract (if any) lives on the
+		// FINAL destination chain, not necessarily on this intermediate hop, so checking this
+		// hop's own code state would be both unnecessary and, in the unlucky case where the same
+		// address happens to also have code here, actively wrong. Fails closed (does not fall
+		// through to a normal credit/contract-call) rather than silently ignoring a malformed/
+		// self-referential/unknown relay target -- a message that claims to want relaying but
+		// can't be relayed should never instead be settled here as if it were a normal message,
+		// since that's not what its sender asked for and would let a relay-marker message double
+		// as a way to dodge the eventual real destination chain's own checks.
+		relayedOnward := false
+		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+			if finalDestChainID, innerPayload, ok := cross_chain.DecodeRelayPayload(msg.Payload); ok {
+				if finalDestChainID == engine.LocalChainID {
+					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is this chain itself -- not a valid relay target", finalDestChainID)
+				}
+				if _, known := engine.ChainRegistry[finalDestChainID]; !known {
+					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is not a registered chain", finalDestChainID)
+				}
+				relayValue := big.NewInt(0)
+				if msg.Value != nil {
+					relayValue = new(big.Int).Set(msg.Value)
+				}
+				// GasFee carries forward unchanged: it was already burned from the ORIGINAL
+				// sender's real balance on the source chain at the very first Outbound() call,
+				// and is settled EXACTLY ONCE -- at the final destination's own claimMessage
+				// (settleGasCappedContractCall / the unused-refund path), never here on an
+				// intermediate hop. Re-embedding the same already-committed amount into this new
+				// message (itself freshly Merkle-committed by THIS chain's own BatchOutboundCommit
+				// right after) does not create or destroy budget, it only carries forward what the
+				// original sender already paid for.
+				relayGasFee := big.NewInt(0)
+				if msg.GasFee != nil {
+					relayGasFee = new(big.Int).Set(msg.GasFee)
+				}
+				relayParams := cross_chain.OutboundParams{
+					DestChainID: finalDestChainID,
+					Target:      msg.Target,
+					Payload:     innerPayload,
+					Value:       relayValue,
+					AssetID:     big.NewInt(0),
+					Tip:         big.NewInt(0),
+					GasFee:      relayGasFee,
+					HopCount:    msg.HopCount + 1,
+					Ordered:     false,
+				}
+				// Sender is the ORIGINAL cross-chain sender (msg.Sender), carried forward
+				// unchanged -- NOT msg.Target. The resulting leg-2 message's own Sender field is
+				// what settleGasCappedContractCall later refunds unused GasFee to and uses as the
+				// CONTRACT_CALL's internal msg.sender identity on the final destination, so it
+				// must stay the real original sender, not the recipient/contract address.
+				if _, err := engine.Outbound(msg.Sender, relayParams, tx.Hash()); err != nil {
+					return nil, nil, fmt.Errorf("claimMessage relay onward: %w", err)
+				}
+				relayedOnward = true
+				logger.Info("🔀 [GATEWAY] claimMessage relaying onward: chain %d -> chain %d (via chain %d), target=%s, value=%s, payloadLen=%d", msg.SourceChainID, finalDestChainID, engine.LocalChainID, msg.Target.Hex(), relayValue.String(), len(innerPayload))
+			}
+		}
+
 		// Task 1.3: Contract Call (only for Native or Pure messages)
-		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
+		if relayedOnward {
+			// Relayed onward above -- no contract-call/gas-fee settlement applies here, the
+			// eventual destination chain's own claimMessage (against the NEW outbound message
+			// just queued) is where any of that would happen, for that hop's own Payload/GasFee.
+		} else if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
 			if err := settleGasCappedContractCall(
 				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
@@ -744,7 +832,11 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
-		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+		if relayedOnward {
+			// Value already re-queued for the onward hop above -- do NOT also credit Target's
+			// real balance here, that would double-spend the same Value (once as a queued
+			// outbound message, once as a direct real-balance credit).
+		} else if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
 			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
 			if msg.Value != nil && msg.Value.Sign() > 0 {
 				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Target); err != nil {
@@ -1140,6 +1232,19 @@ func (h *GatewayHandler) handleWrite(
 		payloads := mustBytesSlice(args[0])
 		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
 			logger.Error("❌ [GATEWAY] bootstrapFoundingChains failed (caller=%s, count=%d): %v", tx.FromAddress().Hex(), len(payloads), err)
+			return nil, nil, err
+		}
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
+
+	case "registerChainViaStake":
+		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
+		// why this exists: an opt-in, vote-free alternative to ExecuteGovernanceProposal's
+		// ProposalRegisterChain case, for operators who want registration gated purely by
+		// MinRegistrationStake (must be configured, >0) rather than a committee vote. Fails
+		// closed if MinRegistrationStake isn't configured -- ProposalRegisterChain's normal
+		// vote-gated path is unaffected either way.
+		payload := mustBytes(args[0])
+		if err := engine.RegisterChainViaStake(payload); err != nil {
 			return nil, nil, err
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))

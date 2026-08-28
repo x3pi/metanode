@@ -696,6 +696,42 @@ func (db *AccountStateDB) getOrCreateAccountState(
 	return finalAs, nil
 }
 
+// ExistAccount checks if an account exists in dirty cache, loaded cache, or the underlying trie.
+// Returns false if the account has no balance, zero nonce, no code/keys, and does not exist in trie.
+func (db *AccountStateDB) ExistAccount(address common.Address) bool {
+	if db == nil {
+		return false
+	}
+	if value, ok := db.dirtyAccounts.Load(address); ok && value != nil {
+		as := value
+		if as.Nonce() > 0 || (as.Balance() != nil && as.Balance().Sign() > 0) || len(as.PublicKeyBls()) > 0 {
+			return true
+		}
+	}
+	if value, ok := db.loadedAccounts.Load(address); ok && value != nil {
+		as := value
+		if as.Nonce() > 0 || (as.Balance() != nil && as.Balance().Sign() > 0) || len(as.PublicKeyBls()) > 0 {
+			return true
+		}
+	}
+
+	if db.trie == nil {
+		return false
+	}
+	var bData []byte
+	var err error
+	if db.isFlatTrie {
+		bData, err = db.trie.Get(address.Bytes())
+	} else {
+		db.muTrie.Lock()
+		if db.trie != nil {
+			bData, err = db.trie.Get(address.Bytes())
+		}
+		db.muTrie.Unlock()
+	}
+	return err == nil && len(bData) > 0
+}
+
 // PreloadAccounts batch-loads multiple account states into the dirty cache.
 // PERFORMANCE OPTIMIZATION: Instead of calling AccountState() N times (each acquiring/releasing
 // muTrie.Lock individually), this method:

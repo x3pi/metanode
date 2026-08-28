@@ -37,6 +37,14 @@ static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[cfg(test)]
 static FORCE_PANIC_FOR_TEST: AtomicBool = AtomicBool::new(false);
 
+// Same test-only fault-injection pattern as FORCE_PANIC_FOR_TEST above, but for
+// `metanode_register_callbacks` specifically -- kept as a separate flag (rather than reusing
+// FORCE_PANIC_FOR_TEST) so this test can't race with
+// `metanode_submit_transaction_batch_survives_internal_panic` when `cargo test` runs both
+// concurrently on separate threads.
+#[cfg(test)]
+static FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
 #[repr(C)]
 pub struct GoCallbacks {
     /// Send an executable block to Go for execution.
@@ -91,8 +99,17 @@ pub fn update_go_tx_trace(hash: &[u8], step: &str, details: &str) {
 /// Register the CGo callbacks.
 #[no_mangle]
 pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
-    if GO_CALLBACKS.set(callbacks).is_err() {
-        eprintln!("Warning: metanode_register_callbacks called multiple times");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.load(Ordering::SeqCst) {
+            panic!("forced panic for catch_unwind regression test");
+        }
+        if GO_CALLBACKS.set(callbacks).is_err() {
+            eprintln!("Warning: metanode_register_callbacks called multiple times");
+        }
+    }));
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_register_callbacks: {:?}", e);
     }
 }
 
@@ -299,31 +316,29 @@ pub unsafe extern "C" fn metanode_start_consensus(
     config_path_ptr: *const c_char,
     data_dir_ptr: *const c_char,
 ) {
-    let config_path_str = unsafe {
-        if config_path_ptr.is_null() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let config_path_str = if config_path_ptr.is_null() {
             eprintln!("Error: config_path_ptr is null");
             return;
-        }
-        CStr::from_ptr(config_path_ptr)
-            .to_string_lossy()
-            .into_owned()
-    };
+        } else {
+            CStr::from_ptr(config_path_ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
 
-    let data_dir_str = unsafe {
-        if data_dir_ptr.is_null() {
+        let data_dir_str = if data_dir_ptr.is_null() {
             "".to_string()
         } else {
             CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
-        }
-    };
+        };
 
-    println!(
-        "Starting MetaNode Consensus Engine via CGo FFI. Config: {}",
-        config_path_str
-    );
+        println!(
+            "Starting MetaNode Consensus Engine via CGo FFI. Config: {}",
+            config_path_str
+        );
 
-    // We must spawn a new OS thread to run Tokio, because the caller is Go's C-thread
-    std::thread::spawn(move || {
+        // We must spawn a new OS thread to run Tokio, because the caller is Go's C-thread
+        std::thread::spawn(move || {
         // Install panic hook for diagnostic output BEFORE any Rust code runs
         std::panic::set_hook(Box::new(|info| {
             eprintln!("🚨 [RUST PANIC] {}", info);
@@ -513,6 +528,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             // DO NOT re-panic — that would abort() the Go process
         }
     });
+    }));
+
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_start_consensus: {:?}", e);
+    }
 }
 
 fn copy_dir_all(
@@ -642,5 +662,32 @@ mod tests {
             !result,
             "a panic inside the wrapped FFI fn must be caught and reported as `false`"
         );
+    }
+
+    // Regression test (FFI-03 residual, 2026-08-27, see
+    // note/threat_matrix_verified_fixes_execution_plan.md Task 5): `metanode_register_callbacks`
+    // was previously the one exported FFI function NOT wrapped in `catch_unwind`. Same rationale
+    // as `metanode_submit_transaction_batch_survives_internal_panic` above: this function is
+    // `extern "C"` (non-unwind ABI), so an uncaught panic here would abort the whole test process
+    // rather than fail an assertion -- a passing `cargo test` run on this test is itself part of
+    // the proof that the wrapper works. `metanode_register_callbacks` has no natural
+    // input-driven panic path (unlike the batch function above), so this uses its own dedicated
+    // test-only fault-injection flag instead.
+    #[test]
+    fn metanode_register_callbacks_survives_internal_panic() {
+        let callbacks = GoCallbacks {
+            execute_block: None,
+            process_rpc_request: None,
+            free_go_buffer: None,
+            get_state_root: None,
+            update_tx_trace: None,
+            log_message: None,
+        };
+
+        FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.store(true, Ordering::SeqCst);
+        metanode_register_callbacks(callbacks);
+        FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.store(false, Ordering::SeqCst);
+
+        // Reaching this line at all (instead of the test process aborting) is the proof.
     }
 }

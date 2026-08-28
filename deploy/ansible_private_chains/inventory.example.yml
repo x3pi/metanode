@@ -6,6 +6,18 @@ all:
     ansible_ssh_pass: "password"
     ansible_become_pass: "password"
 
+    # ECDSA private key (hex) của tài khoản submit các giao dịch bootstrapFoundingChains/
+    # propose/vote/executeProposal lên Root Anchor -- BẮT BUỘC phải có sẵn coin gas thật trên
+    # Root Anchor. Bắt buộc phải khai báo, deploy_private_chains.sh sẽ báo lỗi và dừng nếu thiếu.
+    root_anchor_submitter_key: "[SUBMITTER_ECDSA_PRIVATE_KEY_HEX]"
+
+    # Tổng genesis supply mint 1 lần trên Reserve (Root Anchor) + số cấp cho MỖI founding chain,
+    # base-10 wei string -- xem register_chains -fund-genesis. Optional: bỏ qua 2 dòng dưới để
+    # dùng mặc định devnet (400,000,000 / 100,000,000 token, 18 decimals). KHÔNG dùng mặc định
+    # devnet cho triển khai thật -- số thật phải quyết định qua ceremony, không đoán mò.
+    # root_anchor_genesis_supply: "400000000000000000000000000"
+    # root_anchor_per_chain_allocation: "100000000000000000000000000"
+
   children:
     private_chains:
       hosts:
