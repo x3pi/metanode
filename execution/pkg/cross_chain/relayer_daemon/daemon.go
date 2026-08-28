@@ -293,8 +293,8 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 	}
 	client := d.chainClients[chainID]
 	maxIterations := d.config.MaxPollIterations
-	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 60*time.Second {
-		maxIterations = int((60 * time.Second) / d.config.PollInterval)
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 10*time.Second {
+		maxIterations = int((10 * time.Second) / d.config.PollInterval)
 	}
 	for i := 0; i < maxIterations; i++ {
 		receipt, err := client.TransactionReceipt(ctx, txHash)

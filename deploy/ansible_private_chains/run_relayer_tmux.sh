@@ -169,8 +169,8 @@ if [ -n "$RESERVE_CHAIN_ID_HEX" ]; then
     fi
 fi
 
-# Key ECDSA mặc định cho Relayer devnet (Wallet 11: 0x248BF9E035E4C3da95FECC94A0bF9A1e1F648a46)
-RELAYER_KEY="${RELAYER_KEY:-d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9}"
+# Key ECDSA mặc định cho Relayer devnet (Wallet 12: 0xF925262a405194Db7fbDFF02f111cDfaa3F8E54F)
+RELAYER_KEY="${RELAYER_KEY:-f5e6ba1cb14367c5264317dcb5f6e13f0d3cb0e3618e0a91f768570ab94b489c}"
 POLL_MS="${POLL_MS:-100}"
 
 echo "🔨 Biên dịch binary cross_chain_relayer..."
