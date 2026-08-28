@@ -1,0 +1,6 @@
+data/
+relayer.log
+metanode-deploy.tar.gz
+__pycache__/
+*.pyc
+.last_deployed_commit

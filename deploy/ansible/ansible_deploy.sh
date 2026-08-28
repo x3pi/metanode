@@ -1,24 +1,35 @@
 #!/bin/bash
-# ╔═══════════════════════════════════════════════════════════════════╗
-# ║  ANSIBLE MULTI-SERVER CLUSTER DEPLOYMENT WRAPPER                  ║
-# ║                                                                   ║
-# ║  Usage: ./ansible_deploy.sh [OPTIONS]                             ║
-# ║  Options:                                                         ║
-# ║    --start             Start nodes (re-distribute binaries)       ║
-# ║    --restart           Fast restart systemd services              ║
-# ║    --setup             Fresh setup (gen keys, clears data)        ║
-# ║    --stop              Stop nodes                                 ║
-# ║    --clean             Clear data before starting nodes           ║
-# ║    --only-node N       Only apply actions to node N               ║
-# ║    --restore-node N    Restore node N from snapshot url           ║
-# ║    --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)  ║
-# ║    --open-ports        Open firewall ports for the nodes          ║
-# ║    --all-monitors      Run monitors mutually across ALL machines  ║
-# ╚═══════════════════════════════════════════════════════════════════╝
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  METANODE UNIFIED ANSIBLE DEPLOYMENT MANAGER                              ║
+# ║  Quản lý hợp nhất Public Chain (Root Anchor) và Private Chains            ║
+# ║                                                                           ║
+# ║  Cách dùng: ./ansible_deploy.sh [OPTIONS]                                 ║
+# ║                                                                           ║
+# ║  Chế độ Public Chain (Root Anchor - Mặc định):                            ║
+# ║    ./ansible_deploy.sh --start           Bắt đầu chạy cụm Public Nodes    ║
+# ║    ./ansible_deploy.sh --restart         Khởi động lại nhanh systemd      ║
+# ║    ./ansible_deploy.sh --reset-all       Khởi tạo lại từ đầu (xóa data)   ║
+# ║    ./ansible_deploy.sh --stop            Dừng các nodes Public            ║
+# ║    ./ansible_deploy.sh --only-node N     Chỉ thao tác trên node N         ║
+# ║                                                                           ║
+# ║  Chế độ Private Chains (--private hoặc --chain=ID):                       ║
+# ║    ./ansible_deploy.sh --private --reset-all     Reset & tạo mới all chains ║
+# ║    ./ansible_deploy.sh --private --start         Khởi chạy all private chains║
+# ║    ./ansible_deploy.sh --private --stop          Dừng all private chains  ║
+# ║    ./ansible_deploy.sh --chain=101 --start       Chỉ thao tác với Chain 101║
+# ║    ./ansible_deploy.sh --chain=102 --reset-all   Chỉ reset Chain 102      ║
+# ║    ./ansible_deploy.sh --private --clean-data    Xóa data DB giữ nguyên key║
+# ║                                                                           ║
+# ║  Công cụ Cross-Chain & Gateway:                                            ║
+# ║    ./ansible_deploy.sh --register                Đăng ký Private Chains   ║
+# ║    ./ansible_deploy.sh --register --chain=101    Đăng ký riêng Chain 101  ║
+# ║    ./ansible_deploy.sh --relayer [start|stop|status|logs|restart]         ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Load environment variables from .env if exists
 load_env_file() {
@@ -41,23 +52,11 @@ load_env_file() {
     fi
 }
 
-# Auto load configuration from different possible locations
 load_env_file "${SCRIPT_DIR}/.env"
 load_env_file "${SCRIPT_DIR}/../.env"
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
-
-if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo -e "\033[0;31m❌ [ERROR] TELEGRAM_BOT_TOKEN is not set! Telegram notifications will not be sent.\033[0m"
-    echo -e "   To enable notifications, please create a \`.env\` file in one of these locations:"
-    echo -e "     📍 \033[0;36m${SCRIPT_DIR}/.env\033[0m"
-    echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/..")/.env\033[0m"
-    echo -e "   With the following structure:"
-    echo -e "     \033[0;33mTELEGRAM_BOT_TOKEN=your_bot_token_here\033[0m"
-    echo -e "     \033[0;33mTELEGRAM_CHAT_ID=your_chat_id_here\033[0m"
-    echo -e "   Or export them directly to your environment.\n"
-fi
 
 send_telegram_notification() {
     local message="$1"
@@ -70,18 +69,165 @@ send_telegram_notification() {
 }
 
 INVENTORY="${SCRIPT_DIR}/inventory.yml"
-PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
 
 # Defaults
+DEPLOY_MODE="public"    # "public" hoặc "private"
 ACTION="start"
 KEEP_DATA="true"
 TARGET_NODE="all"
+TARGET_CHAIN="all"
 RESTORE_NODE="none"
 SNAPSHOT_URL=""
 OPEN_PORTS="false"
 BUILD_FAST="false"
 DEBUG_CPP="false"
 ALL_MONITORS="false"
+REGISTER=0
+NO_REGISTER=0
+FUND_GENESIS=1
+RELAYER_ACTION=""
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --private|--private-chain|--private-chains)
+            DEPLOY_MODE="private"
+            ;;
+        --public|--root-anchor)
+            DEPLOY_MODE="public"
+            ;;
+        --chain=*|-c=*)
+            DEPLOY_MODE="private"
+            TARGET_CHAIN="${1#*=}"
+            ;;
+        --chain|-c)
+            DEPLOY_MODE="private"
+            TARGET_CHAIN="$2"
+            shift
+            ;;
+        --start)
+            ACTION="start"; KEEP_DATA="true"
+            ;;
+        --restart)
+            ACTION="restart"; KEEP_DATA="true"
+            ;;
+        --setup)
+            ACTION="setup"; KEEP_DATA="false"
+            ;;
+        --reset-all|--reset)
+            ACTION="reset"; KEEP_DATA="false"
+            ;;
+        --clean-data)
+            ACTION="clean_data"; KEEP_DATA="false"
+            ;;
+        --stop)
+            ACTION="stop"
+            ;;
+        --status)
+            ACTION="status"
+            ;;
+        --clean)
+            KEEP_DATA="false"
+            ;;
+        --only-node)
+            TARGET_NODE="$2"
+            shift
+            ;;
+        --restore-node)
+            RESTORE_NODE="$2"
+            shift
+            ;;
+        --snapshot-url)
+            SNAPSHOT_URL="$2"
+            shift
+            ;;
+        --open-ports)
+            OPEN_PORTS="true"
+            ;;
+        --fast)
+            BUILD_FAST="true"
+            ;;
+        --debug-cpp)
+            DEBUG_CPP="true"
+            ;;
+        --all-monitors|--monitor-all)
+            ALL_MONITORS="true"
+            ;;
+        --register)
+            REGISTER=1
+            ;;
+        --no-register)
+            NO_REGISTER=1
+            ;;
+        --fund-genesis)
+            FUND_GENESIS=1
+            ;;
+        --no-fund-genesis)
+            FUND_GENESIS=0
+            ;;
+        --relayer)
+            if [[ "$#" -gt 1 && ! "$2" =~ ^-- ]]; then
+                RELAYER_ACTION="$2"
+                shift
+            else
+                RELAYER_ACTION="start"
+            fi
+            ;;
+        -i|--inventory)
+            INVENTORY="$2"
+            shift
+            ;;
+        -h|--help)
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "🌐 METANODE UNIFIED ANSIBLE DEPLOYMENT MANAGER"
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "🎯 Chế độ triển khai (Deployment Mode):"
+            echo "  --public             Chế độ Public Chain / Root Anchor (Mặc định)"
+            echo "  --private            Chế độ Private Chains"
+            echo "  --chain=ID, -c=ID    Chỉ thao tác trên 1 Private Chain (ví dụ: --chain=101)"
+            echo ""
+            echo "⚡ Các hành động (Actions):"
+            echo "  --start              Khởi động hệ thống nodes"
+            echo "  --restart            Khởi động lại nhanh systemd services"
+            echo "  --setup              Khởi tạo nodes mới"
+            echo "  --reset-all          Reset sạch và cài đặt lại toàn bộ (/opt/metanode)"
+            echo "  --clean-data         Xóa trắng data/logs, giữ nguyên keys & cấu hình"
+            echo "  --stop               Dừng toàn bộ nodes"
+            echo "  --status             Kiểm tra trạng thái RPC và block number"
+            echo ""
+            echo "🌉 Công cụ Cross-Chain & Relayer:"
+            echo "  --register           Đăng ký Private Chains lên Root Anchor"
+            echo "  --relayer [ACTION]   Quản lý tmux Relayer (start|stop|restart|status|logs|attach)"
+            echo ""
+            echo "⚙️ Tùy chọn khác:"
+            echo "  --open-ports         Tự động mở firewall ports qua UFW"
+            echo "  --fast               Biên dịch nhanh"
+            echo "  --inventory FILE     Chỉ định file inventory tùy chỉnh"
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown parameter passed: $1"
+            echo "👉 Run: $0 --help for usage instructions."
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Xử lý lệnh Relayer độc lập nếu có
+if [ -n "$RELAYER_ACTION" ]; then
+    if [ -f "${SCRIPT_DIR}/run_relayer_tmux.sh" ]; then
+        exec bash "${SCRIPT_DIR}/run_relayer_tmux.sh" "$RELAYER_ACTION"
+    else
+        echo "❌ ERROR: Không tìm thấy ${SCRIPT_DIR}/run_relayer_tmux.sh"
+        exit 1
+    fi
+fi
+
+# Detect Deployer Server IP dynamically
+DEPLOY_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1 || hostname -I | awk '{print $1}')
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -94,57 +240,170 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
     fi
 fi
 
-# Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --start) ACTION="start"; KEEP_DATA="true" ;;
-        --restart) ACTION="restart"; KEEP_DATA="true" ;;
-        --reset-all) ACTION="setup"; KEEP_DATA="false" ;;
-        --stop) ACTION="stop" ;;
-        --clean) KEEP_DATA="false" ;;
-        --only-node) TARGET_NODE="$2"; shift ;;
-        --restore-node) RESTORE_NODE="$2"; shift ;;
-        --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
-        --open-ports) OPEN_PORTS="true" ;;
-        --fast) BUILD_FAST="true" ;;
-        --debug-cpp) DEBUG_CPP="true" ;;
-        --all-monitors|--monitor-all) ALL_MONITORS="true" ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS]"
-            echo "Options:"
-            echo "  --start             Start nodes (re-distribute binaries)"
-            echo "  --restart           Fast restart systemd services"
-            echo "  --reset-all         Fresh setup (gen keys, clears data)"
-            echo "  --stop              Stop nodes and monitors"
-            echo "  --clean             Clear data before starting nodes"
-            echo "  --only-node N       Only apply actions to node N"
-            echo "  --restore-node N    Restore node N from snapshot url"
-            echo "  --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)"
-            echo "  --open-ports        Open firewall ports for the nodes"
-            echo "  --all-monitors      Run monitors mutually across ALL machines"
-            echo "  --fast              Fast build (skip redundant steps)"
-            echo "  --debug-cpp         Enable debug mode for C++ MVM linker"
-            exit 0
-            ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
-    esac
-    shift
-done
+# ==============================================================================
+# 1. THỰC THI CHẾ ĐỘ PRIVATE CHAINS
+# ==============================================================================
+if [ "$DEPLOY_MODE" == "private" ]; then
+    PLAYBOOK="${SCRIPT_DIR}/deploy_private.yml"
 
-# Detect Deployer Server IP dynamically
-DEPLOY_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
-if [ -z "$DEPLOY_IP" ]; then
-    DEPLOY_IP=$(hostname -I | awk '{print $1}')
+    # Nếu action là setup/reset và người dùng không cấm register thì tự động đăng ký
+    if [ "$ACTION" = "setup" ] || [ "$ACTION" = "reset" ]; then
+        if [ "$NO_REGISTER" -eq 0 ]; then
+            REGISTER=1
+        fi
+    fi
+
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🌐 METANODE PRIVATE CHAINS — ANSIBLE DEPLOYMENT"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "📋 Cấu hình thực thi:"
+    echo "   - Mode:         Private Chains"
+    echo "   - Action:       $ACTION"
+    echo "   - Target Chain: $TARGET_CHAIN"
+    echo "   - Open Ports:   $OPEN_PORTS"
+    echo "   - Auto Register:$REGISTER"
+    echo "   - Inventory:    $INVENTORY"
+    echo ""
+
+    echo "🚀 Đang thực thi Ansible Playbook deploy_private.yml ..."
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+        -e "deploy_action=$ACTION" \
+        -e "target_chain=$TARGET_CHAIN" \
+        -e "open_ports=$OPEN_PORTS"
+
+    # Đăng ký Gateway Root Anchor nếu được kích hoạt
+    if [ "$REGISTER" -eq 1 ]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════"
+        echo "📝 ĐĂNG KÝ CÁC PRIVATE CHAINS LÊN GATEWAY (ROOT ANCHOR)"
+        echo "═══════════════════════════════════════════════════════════════"
+
+        ROOT_ANCHOR_RPC=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746'))
+")
+
+        CHAINS_LIST=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+target = '$TARGET_CHAIN'
+if target != 'all':
+    c_ids = [str(h['chain_id']) for h in hosts.values() if 'chain_id' in h and str(h['chain_id']) == target]
+else:
+    c_ids = [str(h['chain_id']) for h in hosts.values() if 'chain_id' in h]
+print(','.join(c_ids))
+")
+
+        TARGET_RPCS=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+target = '$TARGET_CHAIN'
+if target != 'all':
+    rpcs = [f\"{h['chain_id']}=http://{h.get('ansible_host', '127.0.0.1')}:{h.get('rpc_port', 8546)}\" for h in hosts.values() if 'chain_id' in h and str(h['chain_id']) == target]
+else:
+    rpcs = [f\"{h['chain_id']}=http://{h.get('ansible_host', '127.0.0.1')}:{h.get('rpc_port', 8546)}\" for h in hosts.values() if 'chain_id' in h]
+print(','.join(rpcs))
+")
+
+        GENESIS_SUPPLY=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_genesis_supply', '400000000000000000000000000'))
+")
+        PER_CHAIN_ALLOCATION=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation', '100000000000000000000000000'))
+")
+
+        echo "   - Root Anchor RPC: $ROOT_ANCHOR_RPC"
+        echo "   - Private Chains:  $CHAINS_LIST"
+        echo "   - Target RPCs:     $TARGET_RPCS"
+        echo "   - Genesis supply:  $GENESIS_SUPPLY (per-chain: $PER_CHAIN_ALLOCATION)"
+        echo ""
+
+        # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
+        python3 -c "
+import yaml, json
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
+
+out = {
+    'root_anchor': root_rpc,
+    'nodes': {},
+    'tcp_nodes': {}
+}
+for h in hosts.values():
+    if 'chain_id' in h:
+        cid = str(h['chain_id'])
+        ip = h.get('ansible_host', '127.0.0.1')
+        port = h.get('rpc_port', 8546)
+        p_offset = int(h.get('port_offset', 10))
+        out['nodes'][cid] = f'http://{ip}:{port}'
+        out['tcp_nodes'][cid] = f'{ip}:{4200 + p_offset}'
+
+with open('/tmp/private_chains.json', 'w') as f:
+    json.dump(out, f, indent=2)
+print('📄 Đã xuất cấu hình ngắn gọn ra: /tmp/private_chains.json')
+"
+
+        SUBMITTER_KEY=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
+")
+
+        if [ -n "$CHAINS_LIST" ] && [ -n "$SUBMITTER_KEY" ]; then
+            EXTRA_REGISTER_FLAGS=""
+            if [ "$FUND_GENESIS" -eq 1 ]; then
+                EXTRA_REGISTER_FLAGS="-fund-genesis -genesis-supply $GENESIS_SUPPLY -per-chain-allocation $PER_CHAIN_ALLOCATION"
+            fi
+
+            echo "🚀 Đang thực thi tool register_chains..."
+            (
+                cd "${REPO_ROOT}/execution"
+                go run ./cmd/tool/register_chains \
+                    -root-anchor "$ROOT_ANCHOR_RPC" \
+                    -chains "$CHAINS_LIST" \
+                    -target-rpcs "$TARGET_RPCS" \
+                    -chains-dir "${SCRIPT_DIR}/data" \
+                    -key "$SUBMITTER_KEY" \
+                    $EXTRA_REGISTER_FLAGS
+            )
+        fi
+    fi
+
+    echo ""
+    echo "🎉 Hoàn tất thao tác Private Chains!"
+    exit 0
 fi
 
-# Check if Git Auto-Deploy Watcher daemon is running
+# ==============================================================================
+# 2. THỰC THI CHẾ ĐỘ PUBLIC CHAIN (ROOT ANCHOR - CHAIN 991)
+# ==============================================================================
+PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
+
+if [ "$ACTION" == "reset" ]; then
+    ACTION="setup"
+fi
+
 if pgrep -f "auto_rebuild_deploy.sh" >/dev/null 2>&1; then
     WATCHER_STATUS="Đang hoạt động (Active) 🟢"
 else
     WATCHER_STATUS="Đã tắt (Inactive) 🔴"
 fi
 
-# Resolve Target Node IPs dynamically from inventory.yml
 TARGET_NODES_IPS=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE" || echo "")
@@ -153,7 +412,7 @@ fi
 
 ACTION_LABEL=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
 
-echo -e "\n🚀 Starting Ansible ${ACTION_LABEL} with:"
+echo -e "\n🚀 Starting Ansible Public Cluster ${ACTION_LABEL} with:"
 echo "   Deployer Server IP: $DEPLOY_IP"
 echo "   Target Node IPs:    $TARGET_NODES_IPS"
 echo "   Source:             $DEPLOY_SOURCE"
@@ -172,7 +431,7 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     echo "$ROLES_OUTPUT"
 fi
 
-send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trình Ansible ${ACTION_LABEL}:
+send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trình Ansible Public Cluster ${ACTION_LABEL}:
 - Deployer Server IP: <code>${DEPLOY_IP}</code>
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Source: <code>${DEPLOY_SOURCE}</code>
@@ -189,7 +448,6 @@ send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trì
 ${ROLES_OUTPUT}
 </pre>"
 
-# Prepare extra vars
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
@@ -218,12 +476,10 @@ ansible_exit=$?
 set -e
 
 if [ $ansible_exit -eq 0 ]; then
-    # Update last deployed commit file if it's a git repo
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" 2>/dev/null || true
     fi
 
-    # Read and pretty-print /tmp/rpc_nodes.json
     RPC_CONFIG=""
     if [ -f "/tmp/rpc_nodes.json" ]; then
         RPC_CONFIG=$(jq . /tmp/rpc_nodes.json 2>/dev/null || cat /tmp/rpc_nodes.json)
@@ -234,7 +490,7 @@ if [ $ansible_exit -eq 0 ]; then
 
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
-    send_telegram_notification "✅ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
+    send_telegram_notification "✅ <b>[${ACTION_LABEL}]</b> Quá trình Ansible Public Cluster ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> hoàn tất thành công!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
@@ -246,35 +502,11 @@ ${ROLES_OUTPUT}
 ⚙️ <b>Cấu hình kết nối client:</b>
 <pre>
 ${RPC_CONFIG}
-</pre>
-
-🔍 <b>Lệnh lấy log hữu ích:</b>
-• <b>Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):</b>
-  - <b>Consensus logs:</b>
-    <code>sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager</code>
-  - <b>Execution logs:</b>
-    <code>tail -n 100 /opt/metanode/node-X/logs/execution/*/execution.log</code>
-• <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
-  - <b>Consensus logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
-  - <b>Execution logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/*/execution.log\"</code>"
+</pre>"
 else
-    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible Public Cluster ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
-- Watcher Daemon: <code>${WATCHER_STATUS}</code>
-
-🔍 <b>Lệnh lấy log kiểm tra lỗi:</b>
-• <b>Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):</b>
-  - <b>Consensus logs:</b>
-    <code>sudo journalctl -u \"metanode-consensus-*\" -n 100 --no-pager</code>
-  - <b>Execution logs:</b>
-    <code>tail -n 100 /opt/metanode/node-X/logs/execution/*/execution.log</code>
-• <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
-  - <b>Consensus logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
-  - <b>Execution logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/*/execution.log\"</code>"
+- Watcher Daemon: <code>${WATCHER_STATUS}</code>"
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"

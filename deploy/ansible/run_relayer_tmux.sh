@@ -130,7 +130,7 @@ fi
 # 5. Xử lý lệnh START / RESTART
 if [ ! -f "$CONFIG_JSON" ]; then
     echo "❌ Lỗi: Không tìm thấy file $CONFIG_JSON"
-    echo "👉 Hãy chạy deploy private chains trước: ./deploy_private_chains.sh --setup"
+    echo "👉 Hãy chạy deploy private chains trước: ./ansible_deploy.sh --private --setup"
     exit 1
 fi
 

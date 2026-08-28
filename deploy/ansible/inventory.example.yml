@@ -1,41 +1,81 @@
-# Ví dụ cấu hình cho nhiều máy (Mỗi máy 1 mật khẩu riêng biệt)
 all:
+  vars:
+    # URL RPC của Root Anchor (Public Chain 991) để các Private Chains kết nối đến Gateway
+    root_anchor_rpc: "http://192.168.1.233:10746"
+    root_anchor_submitter_key: "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
+    root_anchor_genesis_supply: "400000000000000000000000000"
+    root_anchor_per_chain_allocation: "100000000000000000000000000"
+    ansible_user: "abc"
+    ansible_ssh_pass: "1234@abcd"
+    ansible_become_pass: "1234@abcd"
+
   children:
+    # =========================================================================
+    # 1. PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)
+    # =========================================================================
     metanode_cluster:
       vars:
-        ansible_user: "abc"
         telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN_HERE"
         telegram_chat_id: "YOUR_TELEGRAM_CHAT_ID_HERE"
       hosts:
-        192.168.1.230_validator:
-          node_ids: [4]
-          is_synconly: true
-          ansible_host: 192.168.1.230
-          ansible_ssh_pass: "MẬT_KHẨU_MÁY_230"
-          ansible_become_pass: "MẬT_KHẨU_MÁY_230"
+        192.168.1.233_validator:
+          node_ids: [0, 1]
+          rpc_nodes: [0, 1]
+          ansible_connection: local # Sử dụng local nếu chạy ngay trên máy chủ này
+          ansible_host: 192.168.1.233
+          ansible_user: "abc"
+          ansible_ssh_pass: "1234@abcd"
+          ansible_become_pass: "1234@abcd"
         
-        192.168.1.231_validator:
-          node_ids: [3]
-          ansible_host: 192.168.1.231
-          ansible_ssh_pass: "MẬT_KHẨU_MÁY_231"
-          ansible_become_pass: "MẬT_KHẨU_MÁY_231"
+        192.168.1.232_validator:
+          node_ids: [2]
+          rpc_nodes: [2]
+          ansible_host: 192.168.1.232
+          ansible_user: "abc"
+          ansible_ssh_pass: "1234@abcd"
+          ansible_become_pass: "1234@abcd"
 
-# ---------------------------------------------------------
-# Ví dụ cấu hình chạy TẤT CẢ trên 1 máy tính (Máy Local)
-# ---------------------------------------------------------
-# hosts:
-#   192.168.1.234_sync:
-#     node_ids: [4]
-#     synconly_nodes: [4]
-#     rpc_nodes: [4]
-#     ansible_connection: local # <- Chạy trực tiếp trên máy đang gõ lệnh deploy
-#     ansible_host: 192.168.1.234
-#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
-#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"
-#
-#   192.168.1.234_validator:
-#     node_ids: [0,1,2,3]
-#     ansible_connection: local # <- Bỏ dòng này nếu muốn dùng SSH thay vì cài trực tiếp
-#     ansible_host: 192.168.1.234
-#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
-#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"
+    # =========================================================================
+    # 2. PRIVATE CHAINS (CROSS-CHAIN ECOSYSTEM)
+    # =========================================================================
+    private_chains:
+      hosts:
+        # Private Chain 101 - 1 Node (Mặc định)
+        private_chain_101:
+          ansible_host: 192.168.1.233
+          ansible_connection: local
+          chain_id: 101
+          validators: 1
+          rpc_port: 8546
+          port_offset: 10
+          install_dir: "/opt/metanode/chain-101"
+
+        # Private Chain 102 - 1 Node (Mặc định)
+        private_chain_102:
+          ansible_host: 192.168.1.233
+          ansible_connection: local
+          chain_id: 102
+          validators: 1
+          rpc_port: 8550
+          port_offset: 20
+          install_dir: "/opt/metanode/chain-102"
+
+        # Private Chain 103 - 1 Node (Mặc định)
+        private_chain_103:
+          ansible_host: 192.168.1.233
+          ansible_connection: local
+          chain_id: 103
+          validators: 1
+          rpc_port: 8554
+          port_offset: 30
+          install_dir: "/opt/metanode/chain-103"
+
+        # Private Chain 104 - 1 Node (Mặc định)
+        private_chain_104:
+          ansible_host: 192.168.1.233
+          ansible_connection: local
+          chain_id: 104
+          validators: 1
+          rpc_port: 8558
+          port_offset: 40
+          install_dir: "/opt/metanode/chain-104"

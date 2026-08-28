@@ -24,13 +24,14 @@ Tài liệu này hướng dẫn chi tiết quy trình triển khai mạng lướ
 ## 🚀 2. Quy Trình Triển Khai 4 Private Chains Từ Đầu (Multi-Machine)
 
 ### 🔹 Bước 1: Cấu hình danh sách IP các máy trong `inventory.yml`
-Chỉnh sửa file [`deploy/ansible_private_chains/inventory.yml`](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_private_chains/inventory.yml) với IP và thông tin xác thực của các máy chủ:
+Chỉnh sửa file [`deploy/ansible/inventory.yml`](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible/inventory.yml) với IP và thông tin xác thực của các máy chủ:
 
 ```yaml
 all:
   vars:
     # URL RPC của máy chạy Public Chain (Root Anchor)
     root_anchor_rpc: "http://<IP_PUBLIC_CHAIN>:10746"
+    root_anchor_submitter_key: "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
     ansible_user: "<USER_NAME>"
     ansible_ssh_pass: "<SSH_PASSWORD>"
     ansible_become_pass: "<BECOME_PASSWORD>"
@@ -43,6 +44,7 @@ all:
         server_chain_101:
           ansible_host: <IP_CHAIN_101>
           chain_id: 101
+          validators: 1
           rpc_port: 8546
           port_offset: 10
           install_dir: "/opt/metanode/chain-101"
@@ -51,7 +53,8 @@ all:
         server_chain_102:
           ansible_host: <IP_CHAIN_102>
           chain_id: 102
-          rpc_port: 8546
+          validators: 1
+          rpc_port: 8550
           port_offset: 20
           install_dir: "/opt/metanode/chain-102"
 
@@ -59,7 +62,8 @@ all:
         server_chain_103:
           ansible_host: <IP_CHAIN_103>
           chain_id: 103
-          rpc_port: 8546
+          validators: 1
+          rpc_port: 8554
           port_offset: 30
           install_dir: "/opt/metanode/chain-103"
 
@@ -67,21 +71,22 @@ all:
         server_chain_104:
           ansible_host: <IP_CHAIN_104>
           chain_id: 104
-          rpc_port: 8546
+          validators: 1
+          rpc_port: 8558
           port_offset: 40
           install_dir: "/opt/metanode/chain-104"
 ```
 
 ---
 
-### 🔹 Bước 2: Triển khai 4 Private Chains Từ Đầu (`--reset-all` & `--open-ports`)
+### 🔹 Bước 2: Triển khai 4 Private Chains Từ Đầu (`--private --reset-all` & `--open-ports`)
 Mở terminal trên máy quản trị và chạy:
 
 ```bash
-cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
+cd ~/nhat/consensus-chain/metanode/deploy/ansible
 
 # Lệnh triển khai sạch từ đầu + mở tường lửa UFW:
-./deploy_private_chains.sh --reset-all --open-ports
+./ansible_deploy.sh --private --reset-all --open-ports
 ```
 
 **Quá trình này tự động thực hiện:**
@@ -104,7 +109,7 @@ cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
 
 ### 🔹 Bước 3: Kiểm tra trạng thái hoạt động của 4 Private Chains
 ```bash
-./deploy_private_chains.sh --status
+./ansible_deploy.sh --private --status
 ```
 > Kết quả mong đợi: Cả 4 chuỗi đều báo `Block Number 0x1` trở lên.
 
@@ -112,20 +117,20 @@ cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
 
 ### 🔹 Bước 4: Khởi chạy Cross-Chain Relayer Daemon bằng `tmux` (1 Lệnh Tự Động)
 
-Chỉ cần chạy script [`run_relayer_tmux.sh`](file:///home/abc/nhat/consensus-chain/metanode/deploy/ansible_private_chains/run_relayer_tmux.sh), script sẽ **tự động đọc IP và các chain từ `/tmp/private_chains.json`**, khởi tạo phiên `tmux` tên `relayer`, biên dịch và chạy ngầm, đồng thời ghi log cùng cấp tại `relayer.log`:
+Chỉ cần chạy lệnh sau từ thư mục `deploy/ansible/`, hệ thống sẽ **tự động đọc IP và các chain từ `/tmp/private_chains.json`**, khởi tạo phiên `tmux` tên `relayer`, biên dịch và chạy ngầm, đồng thời ghi log cùng cấp tại `relayer.log`:
 
 ```bash
-cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
+cd ~/nhat/consensus-chain/metanode/deploy/ansible
 
 # 1 Lệnh duy nhất khởi chạy Relayer trong tmux:
-./run_relayer_tmux.sh
+./ansible_deploy.sh --relayer start
 ```
 
 #### 📋 Các lệnh quản lý Relayer thuận tiện:
-* **Xem log realtime:** `./run_relayer_tmux.sh logs` *(hoặc `tail -f relayer.log`)*
-* **Kiểm tra trạng thái:** `./run_relayer_tmux.sh status`
-* **Vào màn hình tmux tương tác:** `./run_relayer_tmux.sh attach` *(Thoát ra bấm `Ctrl+B` rồi bấm `D`)*
-* **Dừng Relayer:** `./run_relayer_tmux.sh stop`
+* **Xem log realtime:** `./ansible_deploy.sh --relayer logs` *(hoặc `tail -f relayer.log`)*
+* **Kiểm tra trạng thái:** `./ansible_deploy.sh --relayer status`
+* **Vào màn hình tmux tương tác:** `./ansible_deploy.sh --relayer attach` *(Thoát ra bấm `Ctrl+B` rồi bấm `D`)*
+* **Dừng Relayer:** `./ansible_deploy.sh --relayer stop`
 
 
 ---
