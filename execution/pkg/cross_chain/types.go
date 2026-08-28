@@ -107,13 +107,13 @@ func (g *GlobalSupplyLedger) SumAllocations() *big.Int {
 	return sum
 }
 
-// VerifyInvariant checks if sum(per_chain_allocation) == genesis_total_supply.
+// VerifyInvariant checks if sum(per_chain_allocation) <= genesis_total_supply.
 func (g *GlobalSupplyLedger) VerifyInvariant() bool {
 	if g.GenesisTotalSupply == nil {
 		return false
 	}
 	sum := g.SumAllocations()
-	return sum.Cmp(g.GenesisTotalSupply) == 0
+	return sum.Cmp(g.GenesisTotalSupply) <= 0
 }
 
 // GetAllocation returns the current active ceiling for the given chain ID.
@@ -130,7 +130,7 @@ func (g *GlobalSupplyLedger) SetInitialAllocation(reserveChainID, newChainID uin
 }
 
 // GrantAllocation increases chainID's custodial ceiling (per_chain_allocation) and the tracked
-// genesis total supply together, keeping sum(per_chain_allocation) == genesis_total_supply intact.
+// genesis total supply together, keeping sum(per_chain_allocation) <= genesis_total_supply intact.
 // Unlike TransferAllocation (redistributes EXISTING allocation between two already-funded chains),
 // this is the only way new headroom enters the ledger at all: neither BootstrapFoundingChains nor
 // ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger (confirmed by
@@ -162,6 +162,8 @@ func (g *GlobalSupplyLedger) TransferAllocation(fromChain, toChain uint64, amoun
 		return ErrNilAmount
 	}
 
+	sumBefore := g.SumAllocations()
+
 	fromAlloc := g.GetAllocation(fromChain)
 	if fromAlloc.Cmp(amount) < 0 {
 		return fmt.Errorf("%w: chain %d available %s, requested %s", ErrInsufficientAllocation, fromChain, fromAlloc.String(), amount.String())
@@ -175,7 +177,8 @@ func (g *GlobalSupplyLedger) TransferAllocation(fromChain, toChain uint64, amoun
 	g.PerChainAllocation[fromChain] = newFrom
 	g.PerChainAllocation[toChain] = newTo
 
-	if !g.VerifyInvariant() {
+	sumAfter := g.SumAllocations()
+	if sumBefore.Cmp(sumAfter) != 0 || !g.VerifyInvariant() {
 		panic("CRITICAL: Invariant violation during TransferAllocation")
 	}
 

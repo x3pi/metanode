@@ -226,22 +226,23 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 	}
 
 	var nonce uint64
-	pendingNonce, errPending := client.GetPendingTransactionCount(ctx, d.relayerAddr)
-	if errPending == nil {
-		nonce = pendingNonce
+	d.nonceMu.Lock()
+	cached, exists := d.nonces[chainID]
+	if exists {
+		nonce = cached
+		d.nonces[chainID] = cached + 1
+		d.nonceMu.Unlock()
 	} else {
-		d.nonceMu.Lock()
-		cached, exists := d.nonces[chainID]
-		if !exists {
-			d.nonceMu.Unlock()
+		d.nonceMu.Unlock()
+		pendingNonce, errPending := client.GetPendingTransactionCount(ctx, d.relayerAddr)
+		if errPending != nil {
 			return common.Hash{}, fmt.Errorf("query relayer pending nonce: %w", errPending)
 		}
-		nonce = cached
+		nonce = pendingNonce
+		d.nonceMu.Lock()
+		d.nonces[chainID] = nonce + 1
 		d.nonceMu.Unlock()
 	}
-	d.nonceMu.Lock()
-	d.nonces[chainID] = nonce + 1
-	d.nonceMu.Unlock()
 
 	gwAddr := mt_common.GATEWAY_CONTRACT_ADDRESS
 	txData := &ethtypes.LegacyTx{
