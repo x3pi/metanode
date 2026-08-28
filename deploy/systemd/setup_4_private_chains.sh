@@ -76,6 +76,29 @@ derive_submitter_key() {
     echo -n "metanode-devnet-submitter-chain-${chain_id}" | sha256sum | cut -d' ' -f1
 }
 
+# SECURITY (C8 fix, PR #84 review, 2026-08-28): every private chain's ReserveChainID must point
+# at the SAME single chain -- Root Anchor, which self-configures reserve_chain_id to its own
+# chain ID in gen_root_anchor_chain.py -- never at itself. Without this flag, gen_single_chain.py
+# defaults reserve_chain_id to --chain-id (i.e. each chain configures itself as its own Reserve),
+# which trivially satisfies the C8 check (LocalChainID==ReserveChainID) for EVERY chain and
+# defeats it entirely: any private chain could then independently perform a ceiling-enforced
+# attestCommit() against its own local ledger copy of another chain's allocation, letting
+# multiple destinations overdraw the same source chain in aggregate -- exactly the C8 fix exists
+# to prevent (see note/cross_chain_attack_scenario_catalog.md item C8). Resolve Root Anchor's
+# REAL on-chain chain ID via eth_chainId rather than assuming/hardcoding it.
+echo ""
+echo "🔎 Resolving Reserve chain ID from Root Anchor ($ROOT_ANCHOR_RPC) via eth_chainId..."
+RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_ANCHOR_RPC" -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))")
+if [ -z "$RESERVE_CHAIN_ID_HEX" ]; then
+    echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_ANCHOR_RPC"
+    echo "   (Root Anchor must already be running -- setup_root_anchor.sh runs before this script)"
+    exit 1
+fi
+RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
+echo "✅ Reserve chain ID = $RESERVE_CHAIN_ID"
+
 if [ ! -d "$DATA_DIR/chain_101" ]; then
     mkdir -p "$DATA_DIR"
     
@@ -89,6 +112,7 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --validators 1 \
         --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_1" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_101"
 
     echo ""
@@ -101,6 +125,7 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --validators 1 \
         --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_2" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_102"
 
     echo ""
@@ -113,6 +138,7 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --validators 1 \
         --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_3" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_103"
 
     echo ""
@@ -125,6 +151,7 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --validators 1 \
         --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_4" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_104"
 
     # Lưu lại Submitter Keys để dễ debug nếu cần thiết

@@ -39,11 +39,31 @@
               echo "❌ ERROR: root_anchor_submitter_key chưa được cấu hình trong inventory.yml"
               exit 1
             fi
-            
+
+            # SECURITY (C8 fix, PR #84 review, 2026-08-28): ReserveChainID must be the SAME
+            # single chain across every participant, and it must NOT be each private chain's own
+            # ID -- if a private chain configures itself as its own Reserve, it trivially passes
+            # its own LocalChainID==ReserveChainID check and is free to do ceiling-enforced
+            # attestCommit for ANY source chain's value against its own local ledger copy,
+            # exactly the multi-destination overdraw C8 was meant to prevent (see
+            # note/cross_chain_attack_scenario_catalog.md item C8). Root Anchor is the intended
+            # Reserve (gen_root_anchor_chain.py already self-configures reserve_chain_id to its
+            # own chain ID) -- fetch Root Anchor's REAL on-chain chain ID via eth_chainId rather
+            # than trusting a hand-typed inventory value that could drift from reality.
+            RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_RPC" -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))")
+            if [ -z "$RESERVE_CHAIN_ID_HEX" ]; then
+              echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_RPC"
+              exit 1
+            fi
+            RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
+            echo "ℹ️  Reserve chain ID resolved from Root Anchor ($ROOT_RPC) = $RESERVE_CHAIN_ID"
+
             if [ "{{ ansible_action }}" = "reset" ]; then
               rm -rf "$LOCAL_OUT"
             fi
-            
+
             if [ ! -f "$LOCAL_OUT/node-0/config.json" ]; then
               python3 "{{ playbook_dir }}/../systemd/gen_single_chain.py" \
                 --chain-id "$CHAIN_ID" \
@@ -53,7 +73,7 @@
                 --validators 1 \
                 --root-anchor-rpc "$ROOT_RPC" \
                 --root-anchor-submitter-key "$SUBMITTER_KEY" \
-                --reserve-chain-id "$CHAIN_ID" \
+                --reserve-chain-id "$RESERVE_CHAIN_ID" \
                 --output-dir "$LOCAL_OUT"
             fi
             
