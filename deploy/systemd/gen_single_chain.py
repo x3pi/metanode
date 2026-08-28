@@ -469,7 +469,7 @@ def main():
         metrics_port = 12100 + args.port_offset + node_id
 
         # Node peers
-        go_peers = [f"{args.ip}:{7200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
+        go_peers = [f"{args.ip}:{4200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
         rust_peers = [f"{args.ip}:{20200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
 
         if args.gateway_bls_key:

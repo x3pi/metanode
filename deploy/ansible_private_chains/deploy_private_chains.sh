@@ -171,7 +171,11 @@ import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
-c_ids = [str(h['chain_id']) for h in hosts.values() if 'chain_id' in h]
+target = '$TARGET_CHAIN'
+if target != 'all':
+    c_ids = [str(h['chain_id']) for h in hosts.values() if 'chain_id' in h and str(h['chain_id']) == target]
+else:
+    c_ids = [str(h['chain_id']) for h in hosts.values() if 'chain_id' in h]
 print(','.join(c_ids))
 ")
 
@@ -180,7 +184,11 @@ import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
-rpcs = [f\"{h['chain_id']}=http://{h.get('ansible_host', '127.0.0.1')}:{h.get('rpc_port', 8546)}\" for h in hosts.values() if 'chain_id' in h]
+target = '$TARGET_CHAIN'
+if target != 'all':
+    rpcs = [f\"{h['chain_id']}=http://{h.get('ansible_host', '127.0.0.1')}:{h.get('rpc_port', 8546)}\" for h in hosts.values() if 'chain_id' in h and str(h['chain_id']) == target]
+else:
+    rpcs = [f\"{h['chain_id']}=http://{h.get('ansible_host', '127.0.0.1')}:{h.get('rpc_port', 8546)}\" for h in hosts.values() if 'chain_id' in h]
 print(','.join(rpcs))
 ")
 
