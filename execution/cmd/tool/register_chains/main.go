@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -43,13 +47,28 @@ import (
 // committeeUpdate quorum certs) sign with Databases.BLSPrivateKey specifically -- registering a
 // different key here would mean their real signature shares never match the committee this
 // registers, and every later attestCommit()/committeeUpdate() would silently never reach quorum.
+
+// committeeMember pairs a founding chain's ID with its own committee BLS private key hex --
+// needed to cast a real, individually-signed governance vote() on that chain's behalf (see
+// fundGenesis below). Mirrors live_asset_bridge's own committeeMember/proposeVoteExecute, which
+// already live-verified this exact propose->vote->timelock->execute sequence
+// (note/cross_chain_production_readiness_plan.md Phase 0.9).
+type committeeMember struct {
+	ChainID uint64
+	PrivHex string
+}
+
 func main() {
 	var (
-		submitterKeyHex string
-		rootAnchorRPC   string
-		chainsDir       string
-		chainIDsFlag    string
-		targetRPCsFlag  string
+		submitterKeyHex     string
+		rootAnchorRPC       string
+		chainsDir           string
+		chainIDsFlag        string
+		targetRPCsFlag      string
+		fundGenesisFlag     bool
+		genesisSupplyFlag   string
+		perChainAllocFlag   string
+		timelockWaitSeconds int
 	)
 
 	flag.StringVar(&submitterKeyHex, "key", "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8", "Sender ECDSA private key hex (must hold real gas balance on Root Anchor; the default is a public devnet-only key, see start_relayer_daemon.sh's own warning)")
@@ -57,6 +76,10 @@ func main() {
 	flag.StringVar(&chainsDir, "chains-dir", "deploy/systemd/private_chains_data", "Directory containing private chain data (chain_<id>/node-0/config.json for each) -- pass an ABSOLUTE path unless running this from the repo root")
 	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of founding chain IDs to register (>= MinFoundingChains)")
 	flag.StringVar(&targetRPCsFlag, "target-rpcs", "", "Comma-separated chainID=rpcURL pairs (e.g. \"101=http://127.0.0.1:8546,102=http://127.0.0.1:8547\") -- ChainRegistry is PER-CHAIN local state, not shared: attestCommit() on chain 102 needs ITS OWN copy of chain 101's committee, not just Root Anchor's. Without this flag, only Root Anchor's registry is seeded and every attestCommit() from one private chain to another fails with \"unknown source chain ID\" (found + fixed 2026-08-26 via live E2E testing). Pass every founding chain's own RPC here in addition to -root-anchor.")
+	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint the one-time genesis supply on Root Anchor (ProposalAllocateSupply, Reserve-only) and distribute it to each founding chain (ProposalTransferAllocation) -- see note/threat_matrix... PR #84 review. Off by default: bootstrapFoundingChains alone never touches SupplyLedger (by design, C7 fix), so this is opt-in.")
+	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total one-time genesis supply to mint on Root Anchor, base-10 wei string (required if -fund-genesis; e.g. a devnet default like \"400000000000000000000000000\" for 400,000,000 tokens at 18 decimals -- this is an operational/ceremony decision, not a protocol constant, hence a flag rather than a hardcoded literal)")
+	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred from Root Anchor's Reserve to EACH founding chain in -chains, base-10 wei string (required if -fund-genesis). Must satisfy len(chains)*per-chain-allocation <= genesis-supply.")
+	flag.IntVar(&timelockWaitSeconds, "timelock-wait", 12, "Seconds to sleep after voting, before executeProposal -- must exceed the target chain's cross_chain.devnet_governance_timelock_seconds_override (gen_root_anchor_chain.py's default is 10s). NEVER use this against a real production Root Anchor with the real 72h timelock -- -fund-genesis is a devnet/ceremony-rehearsal convenience, not a production automation path.")
 	flag.Parse()
 
 	submitterKeyHex = strings.TrimPrefix(submitterKeyHex, "0x")
@@ -77,6 +100,8 @@ func main() {
 	}
 
 	var payloads [][]byte
+	var committee []committeeMember
+	var chainIDs []uint64
 	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
 		cidStr = strings.TrimSpace(cidStr)
 		if cidStr == "" {
@@ -125,6 +150,8 @@ func main() {
 			os.Exit(1)
 		}
 		payloads = append(payloads, payloadBytes)
+		committee = append(committee, committeeMember{ChainID: targetChainID, PrivHex: nodeCfg.Databases.BLSPrivateKey})
+		chainIDs = append(chainIDs, targetChainID)
 		logger.Info("Prepared founding entry for chain %s (real BLS pubkey from Databases.BLSPrivateKey, real PoP)", cidStr)
 	}
 
@@ -140,6 +167,10 @@ func main() {
 	}
 
 	bootstrap(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", calldata, len(payloads), chainIDsFlag)
+
+	if fundGenesisFlag {
+		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds)
+	}
 
 	// ChainRegistry is PER-CHAIN local state (see gateway.go's g.ChainRegistry map) -- Root
 	// Anchor bootstrapping its own registry does NOT give any private chain knowledge of its
@@ -177,6 +208,35 @@ func loadConfigFresh(configPath string) (*config.SimpleChainConfig, error) {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 	return cfg, nil
+}
+
+func extractRevertReason(rpcURL string, txHash common.Hash) string {
+	rpcClient, err := rpc.Dial(rpcURL)
+	if err != nil {
+		return ""
+	}
+	defer rpcClient.Close()
+
+	var rawReceipt map[string]interface{}
+	if err := rpcClient.Call(&rawReceipt, "eth_getTransactionReceipt", txHash.Hex()); err != nil {
+		return ""
+	}
+	returnHex, ok := rawReceipt["return"].(string)
+	if !ok || len(returnHex) < 10 {
+		return ""
+	}
+	returnBytes, err := hex.DecodeString(strings.TrimPrefix(returnHex, "0x"))
+	if err != nil || len(returnBytes) < 4 {
+		return ""
+	}
+	// ABI Error(string) selector: 0x08c379a0
+	if bytes.Equal(returnBytes[:4], []byte{0x08, 0xc3, 0x79, 0xa0}) && len(returnBytes) >= 68 {
+		strLen := binary.BigEndian.Uint64(returnBytes[60:68])
+		if uint64(len(returnBytes)) >= 68+strLen {
+			return string(returnBytes[68 : 68+strLen])
+		}
+	}
+	return string(returnBytes)
 }
 
 // bootstrap submits the given (already-packed) bootstrapFoundingChains calldata to a single
@@ -229,8 +289,225 @@ func bootstrap(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress commo
 		os.Exit(1)
 	}
 	if receipt.Status != 1 {
-		logger.Error("❌ bootstrapFoundingChains reverted on %s (tx=%s) -- ChainRegistry may already be bootstrapped, or a committee's PoP failed to verify", label, signedTx.Hash().Hex())
+		revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
+		if strings.Contains(revertMsg, "already has active chains") || strings.Contains(revertMsg, "already bootstrapped") {
+			logger.Info("ℹ️ %s: ChainRegistry is already bootstrapped -- proceeding.", label)
+			return
+		}
+		logger.Error("❌ bootstrapFoundingChains reverted on %s (tx=%s)", label, signedTx.Hash().Hex())
+		if revertMsg != "" {
+			logger.Error("   👉 Error ReturnData từ Receipt: \"%s\"", revertMsg)
+		} else {
+			logger.Error("   👉 Error ReturnData: (không có hoặc mã lỗi rỗng)")
+		}
 		os.Exit(1)
 	}
 	logger.Info("✅ bootstrapFoundingChains succeeded on %s! %d chain(s) registered: %s", label, chainCount, chainIDsFlag)
+}
+
+// fundGenesis mints the one-time genesis supply on Root Anchor and distributes it to every
+// founding chain, using the real propose->vote->timelock->execute governance flow -- NOT a
+// direct SupplyLedger.GrantAllocation() call from inside BootstrapFoundingChains, which is
+// exactly the bug this replaces (an earlier version of gateway.go auto-minted a hardcoded
+// allocation to every founding chain from inside bootstrap itself, completely bypassing the C7
+// fix's Reserve-only/one-time-mint gate -- see PR #84's review comment and
+// note/cross_chain_attack_scenario_catalog.md item C7).
+//
+// Scope: this ONLY ever needs to run against Root Anchor's own RPC, not every founding chain's.
+// GlobalSupplyLedger is per-chain-local state, but the C8 fix restricts any ceiling-enforced
+// (nonzero-value) attestCommit() to the chain whose OWN LocalChainID equals its OWN configured
+// ReserveChainID -- so as long as every founding chain's config points reserve_chain_id at Root
+// Anchor's real chain ID (see gen_root_anchor_chain.py/gen_single_chain.py and PR #84's
+// deploy.yml fix), only Root Anchor's own GatewayEngine will ever pass that check. A private
+// chain's own local SupplyLedger copy is therefore never consulted for the ceiling check, and
+// does not need its own mint/transfer sequence run against it.
+//
+// reserveChainID is NOT taken from a flag -- it's read directly off Root Anchor's own RPC via
+// eth_chainId, so this can never target the wrong chain by a typo'd/stale config value.
+func fundGenesis(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rootAnchorRPC string, committee []committeeMember, chainIDs []uint64, genesisSupplyStr, perChainAllocStr string, timelockWaitSeconds int) {
+	if genesisSupplyStr == "" || perChainAllocStr == "" {
+		logger.Error("-fund-genesis requires both -genesis-supply and -per-chain-allocation")
+		os.Exit(1)
+	}
+	genesisSupply, ok := new(big.Int).SetString(genesisSupplyStr, 10)
+	if !ok || genesisSupply.Sign() <= 0 {
+		logger.Error("Invalid -genesis-supply %q (must be a positive base-10 integer)", genesisSupplyStr)
+		os.Exit(1)
+	}
+	perChainAlloc, ok := new(big.Int).SetString(perChainAllocStr, 10)
+	if !ok || perChainAlloc.Sign() <= 0 {
+		logger.Error("Invalid -per-chain-allocation %q (must be a positive base-10 integer)", perChainAllocStr)
+		os.Exit(1)
+	}
+	totalDistributed := new(big.Int).Mul(perChainAlloc, big.NewInt(int64(len(chainIDs))))
+	if totalDistributed.Cmp(genesisSupply) > 0 {
+		logger.Error("len(chains)=%d * -per-chain-allocation=%s = %s exceeds -genesis-supply=%s",
+			len(chainIDs), perChainAlloc.String(), totalDistributed.String(), genesisSupply.String())
+		os.Exit(1)
+	}
+
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		logger.Error("fundGenesis: failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+	onChainID, err := client.ChainID(ctx)
+	if err != nil {
+		logger.Error("fundGenesis: failed to fetch Root Anchor's real ChainID: %v", err)
+		os.Exit(1)
+	}
+	reserveChainID := onChainID.Uint64()
+	logger.Info("fundGenesis: Root Anchor's real chain ID (used as ReserveChainID) is %d", reserveChainID)
+
+	grant := cross_chain.AllocationGrantPayload{ChainID: reserveChainID, Amount: genesisSupply}
+	grantPayload, err := json.Marshal(grant)
+	if err != nil {
+		logger.Error("fundGenesis: marshal AllocationGrantPayload: %v", err)
+		os.Exit(1)
+	}
+	mintErr := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
+		5 /* ProposalAllocateSupply */, grantPayload, committee, timelockWaitSeconds,
+		"mint genesis supply")
+	if mintErr != nil {
+		if strings.Contains(mintErr.Error(), "already been minted") {
+			logger.Info("ℹ️ fundGenesis: genesis supply already minted on Root Anchor -- proceeding to distribute.")
+		} else {
+			logger.Error("❌ fundGenesis: genesis mint failed: %v", mintErr)
+			os.Exit(1)
+		}
+	} else {
+		logger.Info("✅ fundGenesis: minted %s to Reserve (chain %d) on Root Anchor", genesisSupply.String(), reserveChainID)
+	}
+
+	for _, cid := range chainIDs {
+		transfer := cross_chain.AllocationTransferPayload{FromChainID: reserveChainID, ToChainID: cid, Amount: perChainAlloc}
+		transferPayload, err := json.Marshal(transfer)
+		if err != nil {
+			logger.Error("fundGenesis: marshal AllocationTransferPayload for chain %d: %v", cid, err)
+			os.Exit(1)
+		}
+		if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
+			6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+			fmt.Sprintf("transfer allocation to chain %d", cid)); err != nil {
+			logger.Error("❌ fundGenesis: allocation transfer to chain %d failed: %v", cid, err)
+			os.Exit(1)
+		}
+		logger.Info("✅ fundGenesis: transferred %s from Reserve (chain %d) to chain %d", perChainAlloc.String(), reserveChainID, cid)
+	}
+}
+
+// proposeVoteExecute submits propose(), then a real BLS-signed vote() from every committee
+// member, then (after the devnet timelock override) executeProposal() -- the same real,
+// live-verified sequence as live_asset_bridge's own proposeVoteExecute
+// (note/cross_chain_production_readiness_plan.md Phase 0.9), adapted to reuse this tool's own
+// sendTxAndWait/extractRevertReason helpers instead of duplicating a second transaction-sending
+// implementation.
+func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, kind uint8, payload []byte, committee []committeeMember, timelockWaitSeconds int, label string) error {
+	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	if err != nil {
+		return fmt.Errorf("parse Gateway ABI: %w", err)
+	}
+
+	now := uint64(time.Now().Unix())
+	proposeCalldata, err := parsedABI.Pack("propose", kind, payload, now)
+	if err != nil {
+		return fmt.Errorf("pack propose(kind=%d): %w", kind, err)
+	}
+	// Anti-spam fee enforced by gateway_handler.go's "propose" case (0.1 native token) -- see
+	// its own comment for why this exists.
+	proposeFee := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(100_000_000))
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
+		fmt.Sprintf("%s: propose", label)); err != nil {
+		return err
+	}
+
+	var buf []byte
+	buf = append(buf, kind)
+	var tsBytes [8]byte
+	for i := 0; i < 8; i++ {
+		tsBytes[7-i] = byte(now >> (8 * i))
+	}
+	buf = append(buf, tsBytes[:]...)
+	buf = append(buf, payload...)
+	proposalID := crypto.Keccak256Hash(buf)
+	logger.Info("%s: computed proposalID=%s", label, proposalID.Hex())
+
+	voteNow := uint64(time.Now().Unix())
+	for _, m := range committee {
+		kp := bls.NewKeyPair(common.FromHex(m.PrivHex))
+		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, m.ChainID)
+		sig := bls.Sign(kp.PrivateKey(), voteMsg)
+		voteCalldata, err := parsedABI.Pack("vote", proposalID, new(big.Int).SetUint64(m.ChainID), voteNow, kp.BytesPublicKey(), sig.Bytes())
+		if err != nil {
+			return fmt.Errorf("pack vote(chain=%d): %w", m.ChainID, err)
+		}
+		// Soft: tolerate "already voted"/"already timelocked"/"quorum already reached" reverts
+		// past the real threshold as expected, not fatal -- mirrors live_asset_bridge's own
+		// sendCalldataSoft rationale (quorum is computed off the CURRENT ActiveChains size, not
+		// a size this tool tracks externally).
+		if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, voteCalldata,
+			fmt.Sprintf("%s: vote(chain=%d)", label, m.ChainID)); err != nil {
+			logger.Info("ℹ️ %s: vote(chain=%d) did not succeed (likely already past quorum/timelock): %v", label, m.ChainID, err)
+		}
+	}
+
+	logger.Info("%s: waiting %ds for devnet timelock before executeProposal...", label, timelockWaitSeconds)
+	time.Sleep(time.Duration(timelockWaitSeconds) * time.Second)
+	execNow := uint64(time.Now().Unix())
+	execCalldata, err := parsedABI.Pack("executeProposal", proposalID, execNow)
+	if err != nil {
+		return fmt.Errorf("pack executeProposal(kind=%d): %w", kind, err)
+	}
+	_, err = sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, execCalldata,
+		fmt.Sprintf("%s: executeProposal", label))
+	return err
+}
+
+// sendTxAndWait signs, sends, and waits for a single transaction's receipt, returning an error
+// (with decoded revert reason where available) on any failure instead of os.Exit(1) -- unlike
+// bootstrap()'s deliberately fail-loud style, propose/vote/executeProposal callers need to
+// distinguish real failures from expected/tolerable reverts (already-minted, already-voted,
+// quorum-already-reached) themselves.
+func sendTxAndWait(ctx context.Context, client *ethclient.Client, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, value *big.Int, gasLimit uint64, calldata []byte, label string) (*types.Receipt, error) {
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: fetch ChainID: %w", label, err)
+	}
+	nonce, err := client.PendingNonceAt(ctx, fromAddress)
+	if err != nil {
+		return nil, fmt.Errorf("%s: get nonce: %w", label, err)
+	}
+	if value == nil {
+		value = big.NewInt(0)
+	}
+	tx := types.NewTransaction(nonce, p_common.GATEWAY_CONTRACT_ADDRESS, value, gasLimit, big.NewInt(1_000_000_000), calldata)
+	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), privKey)
+	if err != nil {
+		return nil, fmt.Errorf("%s: sign tx: %w", label, err)
+	}
+	if err := client.SendTransaction(ctx, signedTx); err != nil {
+		return nil, fmt.Errorf("%s: send tx: %w", label, err)
+	}
+
+	var receipt *types.Receipt
+	for i := 0; i < 30; i++ {
+		receipt, err = client.TransactionReceipt(ctx, signedTx.Hash())
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if receipt == nil {
+		return nil, fmt.Errorf("%s: timed out waiting for receipt (tx=%s): %w", label, signedTx.Hash().Hex(), err)
+	}
+	if receipt.Status != 1 {
+		revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
+		if revertMsg != "" {
+			return receipt, fmt.Errorf("%s: reverted (tx=%s): %s", label, signedTx.Hash().Hex(), revertMsg)
+		}
+		return receipt, fmt.Errorf("%s: reverted (tx=%s), no revert reason decoded", label, signedTx.Hash().Hex())
+	}
+	logger.Info("✅ %s succeeded (tx=%s)", label, signedTx.Hash().Hex())
+	return receipt, nil
 }

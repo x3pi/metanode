@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-25
+> **Last updated:** 2026-08-27
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -9,9 +9,10 @@
 ```
 metanode/
 ├── deploy/                 ← Deployment configurations and scripts parent folder
-│   ├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
+│   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
+│   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging

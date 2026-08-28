@@ -49,6 +49,8 @@ type RelayerDaemon struct {
 	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
 	nonces            map[uint64]uint64
 	nonceMu           sync.Mutex
+	chainLocks        map[uint64]*sync.Mutex
+	chainLocksMu      sync.Mutex
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
 }
@@ -102,8 +104,23 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
 		nonces:            make(map[uint64]uint64),
+		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
 	}, nil
+}
+
+func (d *RelayerDaemon) getChainLock(chainID uint64) *sync.Mutex {
+	d.chainLocksMu.Lock()
+	defer d.chainLocksMu.Unlock()
+	if d.chainLocks == nil {
+		d.chainLocks = make(map[uint64]*sync.Mutex)
+	}
+	lock, exists := d.chainLocks[chainID]
+	if !exists {
+		lock = &sync.Mutex{}
+		d.chainLocks[chainID] = lock
+	}
+	return lock
 }
 
 // Address returns the Relayer's Ethereum-compatible public address.
@@ -236,8 +253,12 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 
 	txHash, err := client.SendRawTransaction(ctx, hexutil.Encode(rawBytes))
 	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "already exists in pool") || strings.Contains(errLower, "already known") {
+			return signedTx.Hash(), nil
+		}
 		d.nonceMu.Lock()
-		if strings.Contains(strings.ToLower(err.Error()), "nonce") {
+		if strings.Contains(errLower, "nonce") {
 			delete(d.nonces, chainID)
 		} else if d.nonces[chainID] == nonce+1 {
 			d.nonces[chainID] = nonce
@@ -252,12 +273,20 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 // packed return/revert data (see rootanchor.TxReceipt's doc comment) once the transaction is no
 // longer pending.
 func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, calldata []byte, gasLimit uint64) (*rootanchor.TxReceipt, error) {
+	chainLock := d.getChainLock(chainID)
+	chainLock.Lock()
+	defer chainLock.Unlock()
+
 	txHash, err := d.sendToChain(ctx, chainID, calldata, gasLimit)
 	if err != nil {
 		return nil, err
 	}
 	client := d.chainClients[chainID]
-	for i := 0; i < d.config.MaxPollIterations; i++ {
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+	for i := 0; i < maxIterations; i++ {
 		receipt, err := client.TransactionReceipt(ctx, txHash)
 		if err == nil && receipt != nil {
 			return receipt, nil
@@ -379,7 +408,7 @@ func (d *RelayerDaemon) RelayBatch(
 			// Not necessarily fatal -- another relayer may have already attested this exact
 			// commit/asset first (AttestCommit's write-once guard), which is success from this
 			// batch's point of view. Anything else surfaces on the first claimMessage() below.
-			logger.Info("ℹ️ [RELAYER DAEMON] attestCommit for chain %d asset %s reverted (likely already attested by another relayer): %x", sourceChainID, assetIDStr, receipt.Return)
+			logger.Info("ℹ️ [RELAYER DAEMON] attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
 		}
 	}
 
@@ -403,7 +432,7 @@ func (d *RelayerDaemon) RelayBatch(
 			continue
 		}
 		if receipt.Status != 1 {
-			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s reverted: %x", msg.MessageID.Hex(), receipt.Return)
+			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(receipt.Return))
 			continue
 		}
 		d.mu.Lock()
@@ -549,7 +578,12 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
 	}
 
-	for i := 0; i < d.config.MaxPollIterations; i++ {
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+
+	for i := 0; i < maxIterations; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -613,4 +647,48 @@ func (d *RelayerDaemon) Stop() {
 		close(d.stopCh)
 	}
 	d.wg.Wait()
+}
+
+// DecodeRevertReason decodes EVM revert return bytes (whether raw ABI encoded Error(string) or hex string)
+// into a readable human-friendly message.
+func DecodeRevertReason(raw []byte) string {
+	if len(raw) == 0 {
+		return "empty revert data"
+	}
+	data := raw
+	// If data starts with "0x" (ASCII '0','x'), unhex it first
+	if len(data) >= 2 && data[0] == '0' && (data[1] == 'x' || data[1] == 'X') {
+		decoded, err := hex.DecodeString(string(data[2:]))
+		if err == nil {
+			data = decoded
+		}
+	}
+	// Check standard Error(string) selector: 0x08c379a0
+	if len(data) >= 4 && bytes.Equal(data[:4], []byte{0x08, 0xc3, 0x79, 0xa0}) {
+		if len(data) >= 68 {
+			strLen := new(big.Int).SetBytes(data[36:68]).Uint64()
+			if uint64(len(data)) >= 68+strLen {
+				return string(data[68 : 68+strLen])
+			}
+		}
+	}
+	// Check Panic(uint256) selector: 0x4e487b71
+	if len(data) >= 4 && bytes.Equal(data[:4], []byte{0x4e, 0x48, 0x7b, 0x71}) {
+		if len(data) >= 36 {
+			panicCode := new(big.Int).SetBytes(data[4:36])
+			return fmt.Sprintf("Panic(0x%x)", panicCode)
+		}
+	}
+	// If printable ASCII, return as string
+	isPrintable := true
+	for _, b := range data {
+		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+			isPrintable = false
+			break
+		}
+	}
+	if isPrintable && len(data) > 0 {
+		return string(data)
+	}
+	return hexutil.Encode(raw)
 }

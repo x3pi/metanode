@@ -247,23 +247,19 @@ func (g *GatewayEngine) EnsureGovernance() {
 // ErrAlreadyBootstrapped guards BootstrapFoundingChains — see its doc comment.
 var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has active chains — bootstrap is only for genesis, use governance propose/vote/executeProposal instead")
 
-// BootstrapFoundingChains seeds ChainRegistry/Governance.ActiveChains directly, once, from a
-// genesis-time batch of founding chains — the one gap the normal governance flow cannot cover on
-// its own: GovernanceEngine.Vote requires the voting chain to already be a member of
-// engine.ChainRegistry (gateway_handler.go's "vote" case looks up the signer's committee there),
-// and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have already
-// passed a vote — so a Root Anchor with zero active chains has no path to ever register its
-// first chain through governance alone. This mirrors the real founding_entry.json/
-// assemble_root_anchor ceremony's own >= MinFoundingChains requirement (mục 1.3 #5) for the
-// SAME reason that requirement exists there: a bootstrap path open to only 1 chain would let
-// whoever calls it first become the sole active chain and unilaterally control all governance
-// thereafter, defeating the "1 chain = 1 vote, no chain dominates" design (mục 1.2).
+// BootstrapFoundingChainsWithCaller seeds ChainRegistry/Governance.ActiveChains from a genesis-
+// time batch of founding chains (>= MinFoundingChains), gated by an optional caller check.
 //
-// Self-closing: succeeds at most once per Root Anchor — the moment it succeeds,
-// Governance.ActiveChains is non-empty, so every subsequent call (by anyone) fails closed with
-// ErrAlreadyBootstrapped. Every founding chain's committee must independently pass the same
-// PopVerify check attestCommit()/committeeUpdate() already require, so bootstrapping cannot be
-// used to seed a fake/unverifiable committee either.
+// Access Control & Zero-Fork Security:
+//  1. If GenesisCoordinator is configured, only the authorized coordinator address can invoke this.
+//  2. Cryptographic PoP Verification: Every validator entry in every chain registry is strictly verified
+//     via PopVerify(v.PubkeyBLS, v.PopSignature). This guarantees proof-of-possession of the corresponding
+//     BLS private key and strictly prevents rogue-key or fake-validator injection into the committee.
+//  3. Quorum Thresholds: Every chain's QuorumThreshold is validated against network invariants.
+//  4. Self-closing, like BootstrapFoundingChains itself (see its own doc comment): succeeds at
+//     most once per Root Anchor. NOT a re-seed/reset mechanism -- once Governance.ActiveChains is
+//     non-empty, every subsequent call fails closed with ErrAlreadyBootstrapped, by design (see
+//     BootstrapFoundingChains's doc comment for why a repeatable bootstrap path would be unsafe).
 func (g *GatewayEngine) BootstrapFoundingChainsWithCaller(caller common.Address, payloads [][]byte) error {
 	if g.GenesisCoordinator != (common.Address{}) && g.GenesisCoordinator != caller {
 		return fmt.Errorf("unauthorized bootstrap coordinator %s (expected %s)", caller.Hex(), g.GenesisCoordinator.Hex())
@@ -285,6 +281,9 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 	return amount, nil
 }
 
+// BootstrapFoundingChains registers the founding chains (>= MinFoundingChains) in ChainRegistry at genesis.
+// Every validator entry must independently pass strict BLS PopVerify (Proof-of-Possession).
+// Self-closing: fails closed with ErrAlreadyBootstrapped once ActiveChains is non-empty.
 func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -293,6 +292,7 @@ func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	if len(g.Governance.ActiveChains) > 0 {
 		return ErrAlreadyBootstrapped
 	}
+
 	if len(payloads) < MinFoundingChains {
 		return fmt.Errorf("%w: got %d, need >= %d", ErrInsufficientFoundingChains, len(payloads), MinFoundingChains)
 	}
@@ -330,6 +330,21 @@ func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	for chainID, reg := range registries {
 		g.ChainRegistry[chainID] = reg
 		g.Governance.RegisterActiveChain(chainID)
+		// Deliberately does NOT touch g.SupplyLedger here. An earlier version of this loop
+		// auto-minted a hardcoded 100,000,000-token allocation to every founding chain via
+		// GrantAllocation() -- GrantAllocation is a raw ledger primitive with no Reserve/
+		// governance restriction built in (see its doc comment in types.go), so that call
+		// bypassed the C7 fix entirely (ProposalAllocateSupply's Reserve-only, one-time-mint
+		// gate in ExecuteGovernanceProposal) and silently minted GenesisTotalSupply out of
+		// thin air for every founding chain, with no vote, no audit trail, and a hardcoded
+		// amount with no ceremony/config backing. Removed 2026-08-28 -- see
+		// note/cross_chain_attack_scenario_catalog.md item C7 and PR #84's review comment.
+		//
+		// If founding chains need initial headroom right after bootstrap, that must go
+		// through the already-implemented, already-tested governance flow instead: the
+		// Reserve mints once via ProposalAllocateSupply, then distributes to each founding
+		// chain via ProposalTransferAllocation -- both real, voted, timelocked, auditable
+		// on-chain transactions, not an implicit side effect of registration.
 	}
 	return nil
 }

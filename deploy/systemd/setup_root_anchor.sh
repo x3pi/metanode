@@ -43,6 +43,15 @@ if [ "$CLEAN" -eq 1 ] && [ -d "$DATA_DIR" ]; then
     if [ -f "$DATA_DIR/stop_all.sh" ]; then
         bash "$DATA_DIR/stop_all.sh" || true
     fi
+    for pidfile in "$DATA_DIR"/node_*/node.pid; do
+        if [ -f "$pidfile" ]; then
+            PID=$(cat "$pidfile")
+            kill -9 "$PID" 2>/dev/null || true
+            rm -f "$pidfile"
+        fi
+    done
+    fuser -k 9099/tcp 9100/tcp 9101/tcp 9102/tcp 4200/tcp 4201/tcp 4202/tcp 4203/tcp 10200/tcp 10201/tcp 10202/tcp 10203/tcp 19200/tcp 19201/tcp 19202/tcp 19203/tcp 20200/tcp 20201/tcp 20202/tcp 20203/tcp >/dev/null 2>&1 || true
+    sleep 1
     echo "🧹 Cleaning up data directory..."
     rm -rf "$DATA_DIR"
 fi

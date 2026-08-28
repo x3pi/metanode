@@ -5,10 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_PATH="$SCRIPT_DIR/cross_chain_relayer"
 
-if [ ! -f "$BIN_PATH" ]; then
-    echo "🔨 Building cross_chain_relayer binary..."
-    (cd "$SCRIPT_DIR/../../execution" && go build -o "$BIN_PATH" ./cmd/tool/cross_chain_relayer)
-fi
+echo "🔨 Building cross_chain_relayer binary..."
+(cd "$SCRIPT_DIR/../../execution" && go build -o "$BIN_PATH" ./cmd/tool/cross_chain_relayer)
 
 # RELAYER_KEY must come from the environment for any real deployment — the fallback below is a
 # PUBLIC devnet-only key committed to this repo, safe only because nothing of real value is ever
@@ -23,9 +21,10 @@ if [ -z "$RELAYER_KEY" ]; then
     echo "⚠️  RELAYER_KEY yourself before running this against any real network." >&2
     RELAYER_KEY="0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8"
 fi
-ROOT_ANCHOR="http://127.0.0.1:9099"
-CHAINS="101=http://127.0.0.1:8546,102=http://127.0.0.1:8547,103=http://127.0.0.1:8548,104=http://127.0.0.1:8549"
-POLL_MS=500
+
+ROOT_ANCHOR="${ROOT_ANCHOR:-${1:-http://127.0.0.1:10746}}"
+CHAINS="${CHAINS:-${2:-101=http://127.0.0.1:8546,102=http://127.0.0.1:8547}}"
+POLL_MS="${POLL_MS:-100}"
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "🌐 STARTING CROSS-CHAIN RELAYER DAEMON"
@@ -39,3 +38,4 @@ exec "$BIN_PATH" \
     -root-anchor "$ROOT_ANCHOR" \
     -chains "$CHAINS" \
     -poll-interval-ms "$POLL_MS"
+

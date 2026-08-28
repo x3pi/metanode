@@ -1,0 +1,8 @@
+# Generated data & keys for private chains
+data/
+data
+logs/
+logs
+*.log
+*.retry
+.last_deployed_commit

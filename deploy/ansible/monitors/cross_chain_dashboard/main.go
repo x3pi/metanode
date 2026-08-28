@@ -327,7 +327,7 @@ func getAccountNonce(endpoint string, addr common.Address) uint64 {
 }
 
 func sendLiveChainTx(endpoint string, chainID uint64, to common.Address, value *big.Int, data []byte) string {
-	privKeySender, _ := crypto.HexToECDSA("3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d")
+	privKeySender, _ := crypto.HexToECDSA("d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9")
 	senderAddr := crypto.PubkeyToAddress(privKeySender.PublicKey)
 
 	nonce := getAccountNonce(endpoint, senderAddr)
@@ -354,7 +354,7 @@ func sendLiveChainTx(endpoint string, chainID uint64, to common.Address, value *
 }
 
 func handleTriggerBridge(w http.ResponseWriter, r *http.Request) {
-	privKeySender, _ := crypto.HexToECDSA("3f7a0514531a1485edc4270f06dbed62da4974c3b5bbd54a4534060514b8023d")
+	privKeySender, _ := crypto.HexToECDSA("d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9")
 	senderAddr := crypto.PubkeyToAddress(privKeySender.PublicKey)
 	recipientAddr := common.HexToAddress("0xd5D1c7e1c276288Fa0993bB7B1cF40C73f1226A4")
 	burnLockAddr := common.HexToAddress("0x000000000000000000000000000000000000dEaD")

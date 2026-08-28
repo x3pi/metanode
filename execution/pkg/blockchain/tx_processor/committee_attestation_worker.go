@@ -174,15 +174,19 @@ func (w *CommitteeAttestationWorker) handleEpochTransition(ctx context.Context, 
 // how the genesis ceremony already ties an eth account to its BLS identity (see
 // execution/pkg/cross_chain/ceremony's genesis_alloc/genesis_validator split).
 func (w *CommitteeAttestationWorker) myPublicKeyBls() ([]byte, error) {
-	as, err := w.chainState.GetAccountStateDB().AccountState(w.localAddress)
-	if err != nil {
-		return nil, fmt.Errorf("read own account state: %w", err)
+	if w.blsPrivateKeyHex != "" {
+		_, pubKey, err := w.blsKeyPair()
+		if err == nil && len(pubKey.Bytes()) > 0 {
+			return pubKey.Bytes(), nil
+		}
 	}
-	pk := as.PublicKeyBls()
-	if len(pk) == 0 {
-		return nil, fmt.Errorf("account %s has no PublicKeyBls set", w.localAddress.Hex())
+	if w.chainState != nil {
+		as, err := w.chainState.GetAccountStateDB().AccountState(w.localAddress)
+		if err == nil && as != nil && len(as.PublicKeyBls()) > 0 {
+			return as.PublicKeyBls(), nil
+		}
 	}
-	return pk, nil
+	return nil, fmt.Errorf("account %s has no PublicKeyBls set and no valid BLS private key configured", w.localAddress.Hex())
 }
 
 // buildNewCommittee assembles []cross_chain.ValidatorEntry for every currently-active

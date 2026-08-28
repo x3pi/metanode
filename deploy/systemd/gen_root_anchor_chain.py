@@ -420,6 +420,7 @@ def main():
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                "reserve_chain_id": args.chain_id,
                 # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
                 # full rationale. NEVER set this on a real deployment.
                 "devnet_governance_timelock_seconds_override": 10
@@ -495,8 +496,21 @@ time_based_epoch_change = true
             f.write(f"export ETH_ADDRESS={v['keys']['eth']['address']}\n")
 
         start_lines.append(f'echo "Starting Root Anchor Node {v["index"]} (RPC :{v["rpc_port"]})..."\n')
-        start_lines.append(f'(cd "{v["dir"]}" && "$SIMPLE_CHAIN_BIN" --config config.json > logs/node.log 2>&1 & echo $! > node.pid)')
-        stop_lines.append(f'if [ -f "{v["dir"]}/node.pid" ]; then kill -15 $(cat "{v["dir"]}/node.pid") 2>/dev/null || true; rm "{v["dir"]}/node.pid"; fi\n')
+        stop_lines.append(f'''if [ -f "{v["dir"]}/node.pid" ]; then
+    PID=$(cat "{v["dir"]}/node.pid")
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "Stopping node {v["index"]} (PID $PID)..."
+        kill -15 "$PID" 2>/dev/null || true
+        sleep 0.5
+        kill -9 "$PID" 2>/dev/null || true
+    fi
+    rm -f "{v["dir"]}/node.pid"
+fi''')
+
+    stop_lines.append("""
+# Kill any remaining processes listening on Root Anchor ports
+fuser -k 9099/tcp 9100/tcp 9101/tcp 9102/tcp 4200/tcp 4201/tcp 4202/tcp 4203/tcp 10200/tcp 10201/tcp 10202/tcp 10203/tcp 19200/tcp 19201/tcp 19202/tcp 19203/tcp 20200/tcp 20201/tcp 20202/tcp 20203/tcp >/dev/null 2>&1 || true
+""")
 
     start_script = out_dir / "start_all.sh"
     stop_script = out_dir / "stop_all.sh"

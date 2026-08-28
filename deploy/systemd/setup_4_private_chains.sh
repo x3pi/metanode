@@ -10,6 +10,8 @@ echo "════════════════════════�
 
 CLEAN=0
 NO_BUILD=0
+ROOT_ANCHOR_RPC="http://127.0.0.1:10746"
+
 for arg in "$@"; do
     case $arg in
         --clean|-c)
@@ -18,8 +20,11 @@ for arg in "$@"; do
         --no-build)
             NO_BUILD=1
             ;;
+        --root-anchor-rpc=*)
+            ROOT_ANCHOR_RPC="${arg#*=}"
+            ;;
         --help|-h)
-            echo "Usage: bash setup_4_private_chains.sh [--clean] [--no-build]"
+            echo "Usage: bash setup_4_private_chains.sh [--clean] [--no-build] [--root-anchor-rpc=URL]"
             exit 0
             ;;
     esac
@@ -33,9 +38,15 @@ fi
 
 if [ "$CLEAN" -eq 1 ] && [ -d "$DATA_DIR" ]; then
     echo "🛑 Đang dừng các Private Chains cũ nếu đang chạy..."
+    for chain in "$DATA_DIR"/chain_*; do
+        if [ -f "$chain/stop_single_chain.sh" ]; then
+            bash "$chain/stop_single_chain.sh" || true
+        fi
+    done
     if [ -f "$DATA_DIR/stop_all.sh" ]; then
         bash "$DATA_DIR/stop_all.sh" || true
     fi
+    pkill -f "chain_101|chain_102|chain_103|chain_104" || true
     echo "🧹 Dọn dẹp thư mục dữ liệu cũ..."
     rm -rf "$DATA_DIR"
 fi
@@ -65,6 +76,29 @@ derive_submitter_key() {
     echo -n "metanode-devnet-submitter-chain-${chain_id}" | sha256sum | cut -d' ' -f1
 }
 
+# SECURITY (C8 fix, PR #84 review, 2026-08-28): every private chain's ReserveChainID must point
+# at the SAME single chain -- Root Anchor, which self-configures reserve_chain_id to its own
+# chain ID in gen_root_anchor_chain.py -- never at itself. Without this flag, gen_single_chain.py
+# defaults reserve_chain_id to --chain-id (i.e. each chain configures itself as its own Reserve),
+# which trivially satisfies the C8 check (LocalChainID==ReserveChainID) for EVERY chain and
+# defeats it entirely: any private chain could then independently perform a ceiling-enforced
+# attestCommit() against its own local ledger copy of another chain's allocation, letting
+# multiple destinations overdraw the same source chain in aggregate -- exactly the C8 fix exists
+# to prevent (see note/cross_chain_attack_scenario_catalog.md item C8). Resolve Root Anchor's
+# REAL on-chain chain ID via eth_chainId rather than assuming/hardcoding it.
+echo ""
+echo "🔎 Resolving Reserve chain ID from Root Anchor ($ROOT_ANCHOR_RPC) via eth_chainId..."
+RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_ANCHOR_RPC" -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))")
+if [ -z "$RESERVE_CHAIN_ID_HEX" ]; then
+    echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_ANCHOR_RPC"
+    echo "   (Root Anchor must already be running -- setup_root_anchor.sh runs before this script)"
+    exit 1
+fi
+RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
+echo "✅ Reserve chain ID = $RESERVE_CHAIN_ID"
+
 if [ ! -d "$DATA_DIR/chain_101" ]; then
     mkdir -p "$DATA_DIR"
     
@@ -76,8 +110,9 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --rpc-port 8546 \
         --port-offset 10 \
         --validators 1 \
-        --root-anchor-rpc "http://127.0.0.1:9099" \
+        --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_1" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_101"
 
     echo ""
@@ -88,8 +123,9 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --rpc-port 8547 \
         --port-offset 20 \
         --validators 1 \
-        --root-anchor-rpc "http://127.0.0.1:9099" \
+        --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_2" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_102"
 
     echo ""
@@ -100,8 +136,9 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --rpc-port 8548 \
         --port-offset 30 \
         --validators 1 \
-        --root-anchor-rpc "http://127.0.0.1:9099" \
+        --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_3" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_103"
 
     echo ""
@@ -112,8 +149,9 @@ if [ ! -d "$DATA_DIR/chain_101" ]; then
         --rpc-port 8549 \
         --port-offset 40 \
         --validators 1 \
-        --root-anchor-rpc "http://127.0.0.1:9099" \
+        --root-anchor-rpc "$ROOT_ANCHOR_RPC" \
         --root-anchor-submitter-key "$SUBMITTER_4" \
+        --reserve-chain-id "$RESERVE_CHAIN_ID" \
         --output-dir "$DATA_DIR/chain_104"
 
     # Lưu lại Submitter Keys để dễ debug nếu cần thiết
@@ -124,18 +162,36 @@ Chain 103 Submitter Key: $SUBMITTER_3
 Chain 104 Submitter Key: $SUBMITTER_4
 EOF
 
+    # Tạo start_all.sh và stop_all.sh cho private_chains_data
+    cat << 'EOF' > "$DATA_DIR/start_all.sh"
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for chain in chain_101 chain_102 chain_103 chain_104; do
+    if [ -d "$DIR/$chain" ]; then
+        echo "Starting $chain..."
+        (cd "$DIR/$chain" && nohup bash start_single_chain.sh > node.log 2>&1 & disown)
+    fi
+done
+EOF
+    chmod +x "$DATA_DIR/start_all.sh"
+
+    cat << 'EOF' > "$DATA_DIR/stop_all.sh"
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for chain in chain_101 chain_102 chain_103 chain_104; do
+    if [ -d "$DIR/$chain" ] && [ -f "$DIR/$chain/stop_single_chain.sh" ]; then
+        echo "Stopping $chain..."
+        bash "$DIR/$chain/stop_single_chain.sh" || true
+    fi
+done
+pkill -f "chain_101|chain_102|chain_103|chain_104" || true
+EOF
+    chmod +x "$DATA_DIR/stop_all.sh"
+
     echo "✅ Sinh dữ liệu 4 chains hoàn tất."
 fi
 
 echo "🚀 Bắt đầu chạy các nodes..."
-cd "$DATA_DIR"
-for chain in chain_101 chain_102 chain_103 chain_104; do
-    echo "Starting $chain..."
-    # NOTE: the script generated by gen_single_chain.py is start_single_chain.sh,
-    # NOT start_nodes.sh (that file never exists) -- the old name here silently
-    # failed with "No such file or directory" and no chain ever actually started.
-    # Found + fixed 2026-08-26.
-    (cd "$chain" && nohup bash start_single_chain.sh > node.log 2>&1 & disown)
-done
+bash "$DATA_DIR/start_all.sh"
 
 echo "✅ Đã start 4 private chains! Logs tại deploy/systemd/private_chains_data/chain_XXX/node.log"

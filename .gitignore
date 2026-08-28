@@ -478,6 +478,11 @@ deploy/ansible/monitors/parse_inventory.py
 
 # Genesis dynamically generated files
 deploy/systemd/genesis.json
+deploy/systemd/genesis-*.json
+deploy/systemd/genesis-101.json
+deploy/systemd/genesis-102.json
+deploy/systemd/private_dev_keys.json
+*dev_keys.json
 note/commit_review_fc17b2d2_xapian_manager.md
 deploy/systemd/single_chain_data/
 deploy/systemd/private_chains_data/
@@ -500,3 +505,10 @@ eth_key.json
 deploy/systemd/root_anchor_data/
 deploy/systemd/register_chains
 deploy/systemd/cross_chain_relayer
+deploy/ansible_private_chains/data/
+deploy/ansible_private_chains/data
+deploy/ansible_private_chains/logs/
+deploy/ansible_private_chains/logs
+logs_private_chains/
+deploy/ansible_private_chains/*.retry
+execution/cross_chain_relayer

@@ -92,12 +92,20 @@ var gatewayStateStorageKey = crypto.Keccak256([]byte("gateway_engine_state_v1"))
 // unconfigured engine (empty ChainRegistry, zero-supply ledger) if this is the first write ever
 // made to GATEWAY_CONTRACT_ADDRESS on this chain.
 func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayEngine, error) {
+	if chainState == nil {
+		return nil, fmt.Errorf("loadGatewayEngine: chainState is nil")
+	}
 	localChainID := uint64(0)
-	if config.ConfigApp != nil && config.ConfigApp.ChainId != nil {
+	if chainState.GetConfig() != nil && chainState.GetConfig().ChainId != nil && chainState.GetConfig().ChainId.Sign() > 0 {
+		localChainID = chainState.GetConfig().ChainId.Uint64()
+	} else if config.ConfigApp != nil && config.ConfigApp.ChainId != nil && config.ConfigApp.ChainId.Sign() > 0 {
 		localChainID = config.ConfigApp.ChainId.Uint64()
 	}
 
 	scDB := chainState.GetSmartContractDB()
+	if scDB == nil {
+		return nil, fmt.Errorf("loadGatewayEngine: SmartContractDB is nil")
+	}
 	data, ok := scDB.StorageValue(mt_common.GATEWAY_CONTRACT_ADDRESS, gatewayStateStorageKey)
 	// StorageValue's `ok` is false ONLY on a genuine read failure (e.g. the storage trie for
 	// GATEWAY_CONTRACT_ADDRESS can't be loaded from the given root — corrupt/missing data). That
@@ -1131,6 +1139,7 @@ func (h *GatewayHandler) handleWrite(
 		// every committee member. Task 2: Pass tx.FromAddress() to restrict to GenesisCoordinator if set.
 		payloads := mustBytesSlice(args[0])
 		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
+			logger.Error("❌ [GATEWAY] bootstrapFoundingChains failed (caller=%s, count=%d): %v", tx.FromAddress().Hex(), len(payloads), err)
 			return nil, nil, err
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
@@ -1163,7 +1172,10 @@ func (h *GatewayHandler) handleWrite(
 		// validator node processes this same transaction identically, so every one of them
 		// invokes its own local worker with the exact same (chainID, epoch, commitRoot).
 		if CommitFinalizedCallback != nil {
+			logger.Info("📢 [GATEWAY] CommitFinalizedCallback firing for chain=%d, epoch=%d, commitRoot=%s", engine.LocalChainID, epoch, commitRoot.Hex())
 			CommitFinalizedCallback(engine.LocalChainID, epoch, commitRoot)
+		} else {
+			logger.Warn("⚠️ [GATEWAY] CommitFinalizedCallback is NIL for chain=%d, commitRoot=%s", engine.LocalChainID, commitRoot.Hex())
 		}
 
 	case "propose":

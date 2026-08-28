@@ -232,27 +232,34 @@ sleep 8
 
 ```bash
 pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 4 (4 validator)
-curl -s -X POST http://127.0.0.1:9099 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+for port in 9099 9100 9101 9102; do
+  echo -n "Node on RPC port $port: "
+  curl -s -X POST http://127.0.0.1:$port \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+  echo ""
+done
+
 ```
 
 Phải nhận được JSON có trường `"result":"0x..."` (một số hex, không phải lỗi kết nối). Nếu
 `curl` báo `Connection refused` — node chưa lên kịp, đợi thêm vài giây rồi thử lại; nếu vẫn
 lỗi sau 30s, xem log (`root_anchor_data/node_0/logs/node.log`) tìm dòng `ERROR`.
 
-### A2. Sinh + chạy 4 private chain (101–104)
+### A2. Sinh + chạy 2 private chain (101 & 102)
 
 ```bash
-bash setup_4_private_chains.sh --no-build
+bash setup_2_private_chains.sh --no-build
 sleep 5
 ```
+*(Nếu muốn chạy 4 private chain: `bash setup_4_private_chains.sh --no-build`)*
 
 **✅ Xác nhận thành công:**
 
 ```bash
-pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 8 (4 Root Anchor + 4 private chain)
-for port in 8546 8547 8548 8549; do
+pgrep -af simple_chain | grep -v grep | wc -l    # phải ra 6 (4 Root Anchor + 2 private chain)
+for port in 8546 8547; do
+  echo -n "Private Chain RPC port $port: "
   curl -s -X POST http://127.0.0.1:$port \
     -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
@@ -268,8 +275,10 @@ Cả 4 lệnh `curl` phải trả JSON hợp lệ. **Lỗi thật đã gặp:** 
 ### A3. Đăng ký 4 chain — cả trên Root Anchor lẫn trên từng private chain
 
 ```bash
-bash register_private_chains_t2.sh
+bash register_2_private_chains.sh "http://127.0.0.1:9099"
 ```
+
+*(Hoặc với 4 private chain: `bash register_private_chains_t2.sh`)*
 
 **✅ Xác nhận thành công:** output phải có đúng **5 dòng** `✅ bootstrapFoundingChains
 succeeded on ...` (Root Anchor + chain 101 + 102 + 103 + 104 — **không phải chỉ 1 dòng**).
@@ -288,7 +297,8 @@ private chain cho cả 4 `chainId`, so sánh trường `committeePubkeys` — ph
 
 ```bash
 mkdir -p relayer_logs
-nohup bash start_relayer_daemon.sh > relayer_logs/relayer.log 2>&1 &
+ROOT_ANCHOR="http://127.0.0.1:9099" CHAINS="101=http://127.0.0.1:8546,102=http://127.0.0.1:8547" \
+  nohup bash start_relayer_daemon.sh > relayer_logs/relayer.log 2>&1 &
 disown
 sleep 3
 ```
@@ -300,10 +310,9 @@ pgrep -af cross_chain_relayer | grep -v grep
 grep "watching" relayer_logs/relayer.log
 ```
 
-Phải thấy tiến trình đang chạy và dòng log `👀 [CROSS-CHAIN RELAYER] watching 12 chain
-pair(s) for real outbound messages` (12 = 4×3, mọi cặp (nguồn, đích) có thứ tự trong số 4
-chain). Nếu số cặp không phải 12, kiểm tra lại số chain đã cấu hình trong
-`start_relayer_daemon.sh`'s biến `CHAINS`.
+Phải thấy tiến trình đang chạy và dòng log `👀 [CROSS-CHAIN RELAYER] watching 2 chain
+pair(s) for real outbound messages` (2 = 2×1: 101->102 và 102->101). Nếu số cặp không phải 2,
+kiểm tra lại biến `CHAINS`.
 
 ### A5. (Tuỳ chọn nhưng khuyến nghị) Test một giao dịch chuyển giá trị THẬT đầu-cuối
 
@@ -328,14 +337,14 @@ báo "relayed" ngay cả khi `claimMessage` thất bại thầm lặng phía sau
 ### A6. Dừng hệ thống
 
 ```bash
+cd ../metanode/deploy/systemd
 pkill -TERM -f cross_chain_relayer
 bash private_chains_data/stop_all.sh
 bash root_anchor_data/stop_all.sh
 ```
 
 **✅ Xác nhận thành công:** `pgrep -af "simple_chain|cross_chain_relayer"` không còn kết quả
-nào (ngoài chính lệnh `pgrep` đang chạy). Nếu vẫn còn tiến trình sau `stop_all.sh` (từng gặp
-trong môi trường sandbox — script `stop` không phải lúc nào cũng dọn sạch), dùng
+nào (ngoài chính lệnh `pgrep` đang chạy). Nếu vẫn còn tiến trình sau `stop_all.sh`, dùng
 `kill -9 <pid>` cho từng tiến trình còn sót, xác nhận lại bằng `pgrep`.
 
 ---

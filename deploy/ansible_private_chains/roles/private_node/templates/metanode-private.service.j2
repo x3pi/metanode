@@ -1,0 +1,31 @@
+[Unit]
+Description=Metanode Private Chain {{ chain_id }} Execution Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=metanode
+Group=metanode
+WorkingDirectory={{ target_install_dir }}/bin
+
+ExecStart={{ target_install_dir }}/bin/simple_chain -config={{ target_install_dir }}/config/execution.json --pprof-addr=127.0.0.1:{{ 6070 + (port_offset | int) }}
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+TimeoutStopSec=90
+Restart=always
+RestartSec=3s
+
+# Environment
+Environment="GOTRACEBACK=crash" "SKIP_MEMPOOL_SIG_VERIFY=true" "NODE_TYPE=validator" "GOMAXPROCS=16"
+
+LimitNOFILE=100000
+LimitCORE=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=append:{{ target_install_dir }}/logs/execution/panic.log
+SyslogIdentifier=metanode-private-{{ chain_id }}
+
+[Install]
+WantedBy=multi-user.target
