@@ -485,7 +485,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"bootstrapFoundingChains", "batchOutboundCommit",
+		"bootstrapFoundingChains", "registerChainViaStake", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -1131,6 +1131,19 @@ func (h *GatewayHandler) handleWrite(
 		// every committee member. Task 2: Pass tx.FromAddress() to restrict to GenesisCoordinator if set.
 		payloads := mustBytesSlice(args[0])
 		if err := engine.BootstrapFoundingChainsWithCaller(tx.FromAddress(), payloads); err != nil {
+			return nil, nil, err
+		}
+		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
+
+	case "registerChainViaStake":
+		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
+		// why this exists: an opt-in, vote-free alternative to ExecuteGovernanceProposal's
+		// ProposalRegisterChain case, for operators who want registration gated purely by
+		// MinRegistrationStake (must be configured, >0) rather than a committee vote. Fails
+		// closed if MinRegistrationStake isn't configured -- ProposalRegisterChain's normal
+		// vote-gated path is unaffected either way.
+		payload := mustBytes(args[0])
+		if err := engine.RegisterChainViaStake(payload); err != nil {
 			return nil, nil, err
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
