@@ -440,3 +440,40 @@ func TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric(t *tes
 
 	assert.Equal(t, float64(4), testutil.ToFloat64(metrics.RegisteredChainCount), "RegisteredChainCount must reflect the real ChainRegistry size after bootstrap")
 }
+
+// TestGatewayHandler_RegisterChainViaStake_NoVoteRequired is the end-to-end (real calldata,
+// real dispatch) regression test for the vote-free registration path added 2026-08-28: a
+// pre-funded candidate must be admitted into ChainRegistry via a SINGLE registerChainViaStake
+// transaction, with no propose()/vote()/executeProposal() transaction anywhere in this test --
+// that absence is the behavior under test, not an oversight.
+func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(5000), map[uint64]*big.Int{102: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{}, ledger)
+	engine.MinRegistrationStake = big.NewInt(1000)
+	// Pre-fund the candidate (104) from the already-funded chain 102 -- same primitive
+	// ProposalTransferAllocation uses; this step alone is what a real quorum vote gates upstream
+	// (see gateway_test.go's TestGateway_RegisterChainViaStake for the unit-level proof).
+	require.NoError(t, ledger.TransferAllocation(102, 104, big.NewInt(1000)))
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	payload := makeFoundingChainPayload(t, 104)
+	calldata, err := h.abi.Pack("registerChainViaStake", payload)
+	require.NoError(t, err)
+
+	caller := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
+	tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed, "registerChainViaStake with a pre-funded candidate must succeed with zero votes cast")
+
+	reloaded, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	_, exists := reloaded.ChainRegistry[104]
+	assert.True(t, exists, "chain 104 must be registered")
+	assert.Contains(t, reloaded.Governance.ActiveChains, uint64(104))
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.RegisteredChainCount))
+}
