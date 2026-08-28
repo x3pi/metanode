@@ -748,42 +748,66 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
-		// 2-hop A -> Reserve -> B value routing (note/cross_chain_stake_and_value_flow.md): a
-		// native, non-contract-call message whose Payload carries a valid relay marker
-		// (cross_chain.EncodeRelayPayload) means "relay this value onward to finalDestChainID
-		// instead of crediting it to Target's real balance HERE". Gated on !isContractCall so an
-		// unlucky coincidence (Target happens to have code deployed at the same address on this
-		// chain) falls through to ordinary CONTRACT_CALL handling instead of silently routing
-		// value away from a real contract. Fails closed (does not fall through to a normal
-		// credit) rather than silently ignoring a malformed/self-referential/unknown relay target
-		// -- a message that claims to want relaying but can't be relayed should never instead be
-		// credited here as if it were a normal transfer, since that's not what its sender asked
-		// for and would let a relay-marker message double as a way to dodge the eventual real
-		// destination chain's own checks.
+		// 2-hop A -> Reserve -> B value & CONTRACT_CALL routing
+		// (note/cross_chain_stake_and_value_flow.md): a native message whose Payload carries a
+		// valid relay marker (cross_chain.EncodeRelayPayload) means "relay Value AND the real
+		// inner payload onward to finalDestChainID instead of settling them HERE". The marker's
+		// presence is the sole, authoritative signal -- deliberately NOT gated on
+		// !isContractCall(chainState, msg.Target): Target's real contract (if any) lives on the
+		// FINAL destination chain, not necessarily on this intermediate hop, so checking this
+		// hop's own code state would be both unnecessary and, in the unlucky case where the same
+		// address happens to also have code here, actively wrong. Fails closed (does not fall
+		// through to a normal credit/contract-call) rather than silently ignoring a malformed/
+		// self-referential/unknown relay target -- a message that claims to want relaying but
+		// can't be relayed should never instead be settled here as if it were a normal message,
+		// since that's not what its sender asked for and would let a relay-marker message double
+		// as a way to dodge the eventual real destination chain's own checks.
 		relayedOnward := false
-		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && msg.Value != nil && msg.Value.Sign() > 0 && !isContractCall(chainState, msg.Target) {
-			if finalDestChainID, ok := cross_chain.DecodeRelayPayload(msg.Payload); ok {
+		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+			if finalDestChainID, innerPayload, ok := cross_chain.DecodeRelayPayload(msg.Payload); ok {
 				if finalDestChainID == engine.LocalChainID {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is this chain itself -- not a valid relay target", finalDestChainID)
 				}
 				if _, known := engine.ChainRegistry[finalDestChainID]; !known {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is not a registered chain", finalDestChainID)
 				}
+				relayValue := big.NewInt(0)
+				if msg.Value != nil {
+					relayValue = new(big.Int).Set(msg.Value)
+				}
+				// GasFee carries forward unchanged: it was already burned from the ORIGINAL
+				// sender's real balance on the source chain at the very first Outbound() call,
+				// and is settled EXACTLY ONCE -- at the final destination's own claimMessage
+				// (settleGasCappedContractCall / the unused-refund path), never here on an
+				// intermediate hop. Re-embedding the same already-committed amount into this new
+				// message (itself freshly Merkle-committed by THIS chain's own BatchOutboundCommit
+				// right after) does not create or destroy budget, it only carries forward what the
+				// original sender already paid for.
+				relayGasFee := big.NewInt(0)
+				if msg.GasFee != nil {
+					relayGasFee = new(big.Int).Set(msg.GasFee)
+				}
 				relayParams := cross_chain.OutboundParams{
 					DestChainID: finalDestChainID,
 					Target:      msg.Target,
-					Value:       new(big.Int).Set(msg.Value),
+					Payload:     innerPayload,
+					Value:       relayValue,
 					AssetID:     big.NewInt(0),
 					Tip:         big.NewInt(0),
-					GasFee:      big.NewInt(0),
+					GasFee:      relayGasFee,
 					HopCount:    msg.HopCount + 1,
 					Ordered:     false,
 				}
-				if _, err := engine.Outbound(msg.Target, relayParams, tx.Hash()); err != nil {
+				// Sender is the ORIGINAL cross-chain sender (msg.Sender), carried forward
+				// unchanged -- NOT msg.Target. The resulting leg-2 message's own Sender field is
+				// what settleGasCappedContractCall later refunds unused GasFee to and uses as the
+				// CONTRACT_CALL's internal msg.sender identity on the final destination, so it
+				// must stay the real original sender, not the recipient/contract address.
+				if _, err := engine.Outbound(msg.Sender, relayParams, tx.Hash()); err != nil {
 					return nil, nil, fmt.Errorf("claimMessage relay onward: %w", err)
 				}
 				relayedOnward = true
-				logger.Info("🔀 [GATEWAY] claimMessage relaying %s onward: chain %d -> chain %d (via chain %d), target=%s", msg.Value.String(), msg.SourceChainID, finalDestChainID, engine.LocalChainID, msg.Target.Hex())
+				logger.Info("🔀 [GATEWAY] claimMessage relaying onward: chain %d -> chain %d (via chain %d), target=%s, value=%s, payloadLen=%d", msg.SourceChainID, finalDestChainID, engine.LocalChainID, msg.Target.Hex(), relayValue.String(), len(innerPayload))
 			}
 		}
 

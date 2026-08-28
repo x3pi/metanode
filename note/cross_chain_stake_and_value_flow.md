@@ -68,8 +68,9 @@ qua bước này trước, rồi mới dùng nó để đăng ký (Đường A h
 ### Bước 3 — Gửi giá trị cross-chain thật, đúng như code THẬT đang chạy (không phải lý thuyết)
 
 **Cập nhật 2026-08-28: A → B (2 private chain, không chain nào là Reserve) giờ đã nối dây thật,
-tự động, đúng theo khoảng trống tính năng tìm thấy lúc viết bản đầu tài liệu này.** Chi tiết bên
-dưới.
+tự động, đúng theo khoảng trống tính năng tìm thấy lúc viết bản đầu tài liệu này.**
+**Cập nhật 2026-08-29: mở rộng thêm cho cả CONTRACT_CALL (gọi contract thật giữa 2 private
+chain), không chỉ chuyển tiền thuần.** Chi tiết bên dưới.
 
 #### Trường hợp 1 — gửi thẳng tới/từ Reserve (1 chặng, đã hoạt động từ trước)
 
@@ -87,12 +88,13 @@ Reserve:        claimMessage()        → verify Merkle proof, cộng (credit) P
 
 Người gửi trên chain A gọi `Outbound()` **y hệt Trường hợp 1** nhưng với 2 điểm khác:
 `DestChainID = ReserveChainID` (chặng đi trước mắt, bắt buộc để qua được check C8) và
-`Payload = EncodeRelayPayload(finalDestChainID = B)` (đánh dấu "chuyển tiếp, không phải nhận
-thật").
+`Payload = EncodeRelayPayload(finalDestChainID = B, innerPayload)` (đánh dấu "chuyển tiếp, không
+phải nhận thật" — `innerPayload` để trống cho chuyển tiền thuần, hoặc là calldata thật nếu muốn
+**gọi contract trên B** — xem Trường hợp 3).
 
 ```
 Chặng 1 (A → Reserve, y hệt Trường hợp 1):
-  A:        Outbound(DestChainID=Reserve, Target=recipientOnB, Payload=EncodeRelayPayload(B))
+  A:        Outbound(DestChainID=Reserve, Target=recipientOnB, Payload=EncodeRelayPayload(B, ...))
   A:        BatchOutboundCommit()
   Reserve:  attestCommit(A, ...)   → C8 pass vì LocalChainID==ReserveChainID
   Reserve:  claimMessage()         → engine.ClaimMessage() verify + credit allocation như thường,
@@ -100,22 +102,29 @@ Chặng 1 (A → Reserve, y hệt Trường hợp 1):
                                       hợp lệ (chain B đã đăng ký, khác chính Reserve) →
                                       KHÔNG cộng thẳng số dư thật cho Target trên Reserve, thay
                                       vào đó gọi engine.Outbound() NGAY TRONG CÙNG giao dịch, xếp
-                                      1 message MỚI vào PendingOutboundMessages[B] — HopCount+1
+                                      1 message MỚI vào PendingOutboundMessages[B] — HopCount+1,
+                                      Payload = innerPayload (calldata thật, không phải marker
+                                      nữa), GasFee giữ nguyên (chuyển tiếp, không settle ở đây)
 
 Chặng 2 (Reserve → B, tự động, RelayerDaemon watch cả cặp (Reserve,B) như mọi cặp khác):
   Reserve:  BatchOutboundCommit()   → gom message vừa xếp ở chặng 1
   B:        attestReserveIssuedCommit(Reserve, ...) → enforceCeiling=false (Reserve là
                                       unconditional issuer, không cần B tự là Reserve mới attest
                                       được — đây chính là mảnh còn thiếu trước đây)
-  B:        claimMessage()          → không có relay marker (chặng 2 không đánh dấu tiếp) →
-                                      cộng thẳng số dư thật cho recipientOnB, xong
+  B:        claimMessage()          → không có relay marker (chặng 2 mang calldata thật, không
+                                      phải marker) → xử lý như 1 message bình thường: cộng số dư
+                                      thật cho recipientOnB (nếu Value>0) và/hoặc thực thi
+                                      calldata thật trên contract tại Target (nếu có code) —
+                                      y hệt luồng CONTRACT_CALL 1 chặng đã có từ trước
 ```
 
 **Vì sao an toàn (không double-spend)**: `gateway_handler.go`'s `claimMessage` case ở Chặng 1
 KHÔNG BAO GIỜ vừa cộng số dư thật cho Target vừa xếp message chặng 2 — 2 nhánh loại trừ nhau
 (`relayedOnward` guard). Value chỉ tồn tại ở đúng 1 nơi tại 1 thời điểm: hoặc đang "đi trên
 đường" (nằm trong `PendingOutboundMessages`/`AttestedCommits`, chưa claim), hoặc đã claim thật ở
-đích cuối cùng — không bao giờ cả hai.
+đích cuối cùng — không bao giờ cả hai. `GasFee` cũng chỉ settle đúng 1 lần — tại đích cuối cùng
+(B), không phải ở chặng trung gian (Reserve) — verify bằng test thật
+(`TestGatewayHandler_ClaimMessageRelay_FullTwoHopContractCall`).
 
 **Rào chắn fail-closed**: relay marker trỏ về chính chain đang xử lý (self-loop) hoặc trỏ tới 1
 chain chưa đăng ký đều bị từ chối thẳng (transaction revert), không âm thầm bỏ qua hay credit
@@ -128,11 +137,18 @@ nhầm chỗ.
 watch cặp (Reserve, B) **không cần code mới** — `cross_chain_relayer/main.go` vốn đã watch MỌI
 cặp (nguồn, đích) trong danh sách `-chains` từ trước, chỉ cần Reserve nằm trong danh sách đó.
 
-**Điểm mấu chốt về ý nghĩa của cọc/allocation**: `PerChainAllocation[chainID]` **không phải** số
-dư ví người dùng — nó là **trần tín nhiệm cấp chain** (chain-level trust ceiling): "chain đích
-tin chain X đã thực sự gửi ra tối đa bao nhiêu, dựa trên số đã cấp". Số dư ví người dùng (EVM
-balance) là chuyện hoàn toàn khác, bị khoá/mở ở tầng `Outbound()`/thực thi payload, không đụng
-tới `SupplyLedger`.
+#### Trường hợp 3 — gọi contract giữa 2 private chain qua Reserve (2026-08-29, mới nối dây)
+
+Giống hệt Trường hợp 2, chỉ khác `innerPayload` trong `EncodeRelayPayload` là **calldata thật**
+(ví dụ `mint(recipient, 42)` ABI-encoded) thay vì để trống, và `GasFee` phải >0 (ngân sách gas
+khoá sẵn cho lệnh gọi contract ở đích cuối cùng — đúng quy tắc `settleGasCappedContractCall` đã
+có từ trước cho luồng 1 chặng). `Target` là địa chỉ contract THẬT trên chain B — Reserve không
+cần biết B có contract gì ở đó, chỉ chuyển tiếp `Target`+`innerPayload` nguyên vẹn.
+
+Điểm quan trọng: điều kiện kích hoạt relay **không còn dựa vào "Target có code hay không"** —
+dựa hoàn toàn vào việc `Payload` có giải mã được thành marker hợp lệ hay không. Lý do: contract
+thật nằm trên B, không nhất thiết có code tại cùng địa chỉ đó trên Reserve — kiểm tra `isContractCall`
+trên Reserve là vô nghĩa (và có thể sai) cho mục đích này.
 
 **Điểm mấu chốt về ý nghĩa của cọc/allocation**: `PerChainAllocation[chainID]` **không phải** số
 dư ví người dùng — nó là **trần tín nhiệm cấp chain** (chain-level trust ceiling): "chain đích
@@ -184,9 +200,17 @@ chain đang hoạt động, không phải 1 chain tự quyết.
 
 **Hỏi: A → B (2 private chain, không chain nào là Reserve) chuyển giá trị thật được chưa?**
 **Đã có (2026-08-28)** — xem mục Bước 3, Trường hợp 2: người gửi trên A gọi `Outbound()` với
-`Payload = EncodeRelayPayload(B)`, phần còn lại (chặng Reserve→B) tự động, không cần A hay người
-dùng thao tác lần 2. Cần `RelayerDaemon` chạy với `-reserve-chain-id` trỏ đúng Reserve, và Reserve
-phải nằm trong danh sách `-chains` của daemon (để daemon watch được cặp Reserve→B).
+`Payload = EncodeRelayPayload(B, nil)`, phần còn lại (chặng Reserve→B) tự động, không cần A hay
+người dùng thao tác lần 2. Cần `RelayerDaemon` chạy với `-reserve-chain-id` trỏ đúng Reserve, và
+Reserve phải nằm trong danh sách `-chains` của daemon (để daemon watch được cặp Reserve→B).
+
+**Hỏi: A → B gọi contract (CONTRACT_CALL) thật được chưa, không chỉ chuyển tiền thuần?**
+**Đã có (2026-08-29)** — xem Trường hợp 3. `EncodeRelayPayload(B, innerPayload)` với
+`innerPayload` là calldata ABI-encoded thật (ví dụ gọi `mint(...)` trên 1 contract deploy sẵn
+trên B). Đã verify bằng test thật deploy contract thật trên 1 `ChainState` riêng đóng vai chain B,
+chạy đủ 2 chặng, đọc lại state contract sau khi xong
+(`TestGatewayHandler_ClaimMessageRelay_FullTwoHopContractCall`) — không chỉ tin bookkeeping của
+`claimMessage`.
 
 **Hỏi: Nếu Reserve bị chiếm (≥2/3 uỷ ban của chính Reserve bị compromise) thì sao?**
 Đây là kịch bản A3 trong `cross_chain_attack_scenario_catalog.md` (weakest-link) — phòng thủ DUY
