@@ -491,7 +491,7 @@ func (h *GatewayHandler) HandleTransaction(
 	}
 
 	switch method.Name {
-	case "outbound", "attestCommit", "claimMessage", "refund",
+	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
 		"bootstrapFoundingChains", "registerChainViaStake", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
@@ -701,6 +701,27 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+	case "attestReserveIssuedCommit":
+		// The second leg of a 2-hop A -> Reserve -> B value route (see
+		// note/cross_chain_stake_and_value_flow.md and GatewayEngine.AttestReserveIssuedCommit's
+		// own doc comment): Reserve is the unconditional issuer for a commit IT originates, so
+		// this skips attestCommitInternal's ceiling/Reserve-identity check entirely (enforceCeiling
+		// =false) rather than requiring the CLAIMING chain to itself be the Reserve, which is
+		// exactly what a plain attestCommit() call would otherwise require and fail here.
+		assetId := mustBigInt(args[3])
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[4]).Uint64(),
+			Siblings:  mustHashSlice(args[5]),
+		}
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[6]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
+		}
+		if _, err := engine.AttestReserveIssuedCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
+			return nil, nil, err
+		}
+
 	case "claimMessage":
 		msg := cross_chain.CrossChainMessage{
 			MessageID:     mustHash(args[0]),
@@ -727,8 +748,51 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+		// 2-hop A -> Reserve -> B value routing (note/cross_chain_stake_and_value_flow.md): a
+		// native, non-contract-call message whose Payload carries a valid relay marker
+		// (cross_chain.EncodeRelayPayload) means "relay this value onward to finalDestChainID
+		// instead of crediting it to Target's real balance HERE". Gated on !isContractCall so an
+		// unlucky coincidence (Target happens to have code deployed at the same address on this
+		// chain) falls through to ordinary CONTRACT_CALL handling instead of silently routing
+		// value away from a real contract. Fails closed (does not fall through to a normal
+		// credit) rather than silently ignoring a malformed/self-referential/unknown relay target
+		// -- a message that claims to want relaying but can't be relayed should never instead be
+		// credited here as if it were a normal transfer, since that's not what its sender asked
+		// for and would let a relay-marker message double as a way to dodge the eventual real
+		// destination chain's own checks.
+		relayedOnward := false
+		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && msg.Value != nil && msg.Value.Sign() > 0 && !isContractCall(chainState, msg.Target) {
+			if finalDestChainID, ok := cross_chain.DecodeRelayPayload(msg.Payload); ok {
+				if finalDestChainID == engine.LocalChainID {
+					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is this chain itself -- not a valid relay target", finalDestChainID)
+				}
+				if _, known := engine.ChainRegistry[finalDestChainID]; !known {
+					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is not a registered chain", finalDestChainID)
+				}
+				relayParams := cross_chain.OutboundParams{
+					DestChainID: finalDestChainID,
+					Target:      msg.Target,
+					Value:       new(big.Int).Set(msg.Value),
+					AssetID:     big.NewInt(0),
+					Tip:         big.NewInt(0),
+					GasFee:      big.NewInt(0),
+					HopCount:    msg.HopCount + 1,
+					Ordered:     false,
+				}
+				if _, err := engine.Outbound(msg.Target, relayParams, tx.Hash()); err != nil {
+					return nil, nil, fmt.Errorf("claimMessage relay onward: %w", err)
+				}
+				relayedOnward = true
+				logger.Info("🔀 [GATEWAY] claimMessage relaying %s onward: chain %d -> chain %d (via chain %d), target=%s", msg.Value.String(), msg.SourceChainID, finalDestChainID, engine.LocalChainID, msg.Target.Hex())
+			}
+		}
+
 		// Task 1.3: Contract Call (only for Native or Pure messages)
-		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
+		if relayedOnward {
+			// Relayed onward above -- no contract-call/gas-fee settlement applies here, the
+			// eventual destination chain's own claimMessage (against the NEW outbound message
+			// just queued) is where any of that would happen, for that hop's own Payload/GasFee.
+		} else if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
 			if err := settleGasCappedContractCall(
 				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
@@ -744,7 +808,11 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
-		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+		if relayedOnward {
+			// Value already re-queued for the onward hop above -- do NOT also credit Target's
+			// real balance here, that would double-spend the same Value (once as a queued
+			// outbound message, once as a direct real-balance credit).
+		} else if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
 			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
 			if msg.Value != nil && msg.Value.Sign() > 0 {
 				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Target); err != nil {

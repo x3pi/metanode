@@ -21,12 +21,14 @@ func main() {
 		rootAnchorRPC  string
 		chainRPCsFlag  string
 		pollIntervalMs int
+		reserveChainID uint64
 	)
 
 	flag.StringVar(&relayerKeyHex, "key", "", "Relayer ECDSA private key hex (with or without 0x prefix)")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", "http://127.0.0.1:9099", "Root Anchor JSON-RPC endpoint")
 	flag.StringVar(&chainRPCsFlag, "chains", "", "Comma-separated chainID=URL mapping (e.g. 101=http://127.0.0.1:8545,202=http://127.0.0.1:8546)")
 	flag.IntVar(&pollIntervalMs, "poll-interval-ms", 500, "Polling interval in milliseconds")
+	flag.Uint64Var(&reserveChainID, "reserve-chain-id", 0, "Chain ID of the system's Reserve -- MUST be included in -chains. When set, batches whose source is this chain use attestReserveIssuedCommit instead of attestCommit (see DaemonConfig.ReserveChainID's own doc comment), which is what makes a genuine A -> Reserve -> B 2-hop value transfer actually complete on the second (Reserve -> B) leg. Leave 0 to keep the pre-2026-08-28 behavior (every batch uses attestCommit; only [chain] <-> Reserve direct transfers work).")
 	flag.Parse()
 
 	if relayerKeyHex == "" {
@@ -54,12 +56,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if reserveChainID != 0 {
+		if _, ok := chainRPCs[reserveChainID]; !ok {
+			fmt.Printf("Error: -reserve-chain-id %d is not one of the chain IDs in -chains\n", reserveChainID)
+			os.Exit(1)
+		}
+	}
+
 	cfg := relayer_daemon.DaemonConfig{
 		RelayerKeyHex:     relayerKeyHex,
 		RootAnchorURLs:    []string{rootAnchorRPC},
 		ChainRPCURLs:      chainRPCs,
 		PollInterval:      time.Duration(pollIntervalMs) * time.Millisecond,
 		MaxPollIterations: 30,
+		ReserveChainID:    reserveChainID,
 	}
 
 	daemon, err := relayer_daemon.NewRelayerDaemon(cfg)

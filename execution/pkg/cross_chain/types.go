@@ -1,6 +1,8 @@
 package cross_chain
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,4 +389,41 @@ type AccountLeaf struct {
 type AggregateValueLeaf struct {
 	AssetID         *big.Int
 	AggregateAmount *big.Int
+}
+
+// relayMarkerPrefix tags a CrossChainMessage.Payload as a "relay this value onward to another
+// chain instead of crediting it here" instruction, for the 2-hop A -> Reserve -> B value routing
+// added 2026-08-28 (see note/cross_chain_stake_and_value_flow.md). Distinct, unlikely-to-collide
+// 8-byte tag rather than a single marker byte -- Payload is otherwise always empty for a plain
+// native-value transfer to a code-less EOA (isContractCall() already gates the ONLY other
+// existing use of a non-empty Payload for a non-custom-asset message), so this is safe to
+// introduce without touching CrossChainMessage's wire format, Merkle leaf hashing
+// (ComputeMessageLeafHash hashes Payload as opaque bytes either way), or any existing message
+// that predates this feature (their Payload is empty and DecodeRelayPayload correctly returns
+// ok=false for anything that isn't this exact tag).
+var relayMarkerPrefix = []byte("MTNRELAY1:")
+
+// EncodeRelayPayload builds a CrossChainMessage.Payload that instructs the RECEIVING chain (once
+// it verifies and claims this message via ClaimMessage) to relay the value onward to
+// finalDestChainID instead of crediting it to Target's own real balance on the receiving chain.
+// Intended for the FIRST leg of an A -> Reserve -> B transfer: the message's own DestChainID is
+// Reserve (the immediate hop, required so attestCommit's ceiling check -- C8 -- can actually
+// pass), while this payload carries the TRUE final destination B.
+func EncodeRelayPayload(finalDestChainID uint64) []byte {
+	buf := make([]byte, len(relayMarkerPrefix)+8)
+	copy(buf, relayMarkerPrefix)
+	binary.BigEndian.PutUint64(buf[len(relayMarkerPrefix):], finalDestChainID)
+	return buf
+}
+
+// DecodeRelayPayload returns (finalDestChainID, true) if payload was built by EncodeRelayPayload,
+// or (0, false) for anything else (including the empty payload every pre-existing message uses).
+func DecodeRelayPayload(payload []byte) (uint64, bool) {
+	if len(payload) != len(relayMarkerPrefix)+8 {
+		return 0, false
+	}
+	if !bytes.Equal(payload[:len(relayMarkerPrefix)], relayMarkerPrefix) {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(payload[len(relayMarkerPrefix):]), true
 }

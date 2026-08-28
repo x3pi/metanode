@@ -262,3 +262,39 @@ func TestGlobalSupplyLedger_FuzzInvariant(t *testing.T) {
 		assert.Equal(t, 0, ledger.SumAllocations().Cmp(totalSupply))
 	}
 }
+
+// TestEncodeDecodeRelayPayload is the regression test for the 2-hop A -> Reserve -> B value
+// routing marker (2026-08-28, note/cross_chain_stake_and_value_flow.md).
+func TestEncodeDecodeRelayPayload(t *testing.T) {
+	t.Run("round trip", func(t *testing.T) {
+		for _, chainID := range []uint64{1, 101, 999, 18446744073709551615} {
+			payload := EncodeRelayPayload(chainID)
+			got, ok := DecodeRelayPayload(payload)
+			require.True(t, ok)
+			assert.Equal(t, chainID, got)
+		}
+	})
+
+	t.Run("empty payload (every pre-existing message) is not a relay marker", func(t *testing.T) {
+		_, ok := DecodeRelayPayload(nil)
+		assert.False(t, ok)
+		_, ok = DecodeRelayPayload([]byte{})
+		assert.False(t, ok)
+	})
+
+	t.Run("arbitrary contract-call payload is not mistaken for a relay marker", func(t *testing.T) {
+		_, ok := DecodeRelayPayload([]byte{0xde, 0xad, 0xbe, 0xef})
+		assert.False(t, ok)
+		// Same length as a real relay payload, but wrong prefix -- must not false-positive.
+		wrongPrefix := make([]byte, len(EncodeRelayPayload(1)))
+		copy(wrongPrefix, "NOTRELAY01:")
+		_, ok = DecodeRelayPayload(wrongPrefix)
+		assert.False(t, ok)
+	})
+
+	t.Run("truncated marker is rejected, not misread", func(t *testing.T) {
+		full := EncodeRelayPayload(12345)
+		_, ok := DecodeRelayPayload(full[:len(full)-1])
+		assert.False(t, ok)
+	})
+}

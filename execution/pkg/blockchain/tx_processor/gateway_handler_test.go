@@ -21,6 +21,8 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // hashesToBytes32 converts a MerkleProof's []common.Hash siblings into the [][32]byte shape the
@@ -844,6 +846,185 @@ func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
 	} else if asRelayer.Balance().Cmp(big.NewInt(0)) != 0 {
 		t.Fatalf("expected relayer balance 0 (accumulates only), got %v (err=%v)", asRelayer.Balance(), err)
 	}
+}
+
+// setupAndAttestRelayTestCommit builds a real 1-message commit tree, attests it on engine (chain
+// 102 playing Reserve, matching TestGatewayHandler_ClaimMessageMintsRealValue's own fixture), and
+// returns everything needed to then submit claimMessage against it. Shared by the 2-hop relay
+// tests below to avoid repeating the BuildCommitTree/attestCommit boilerplate 3 times.
+func setupAndAttestRelayTestCommit(t *testing.T, cs *blockchain.ChainState, h *GatewayHandler, msg cross_chain.CrossChainMessage, attesterKp *bls.KeyPair) (commitRoot common.Hash, messageProof cross_chain.MerkleProof) {
+	t.Helper()
+	commitRootLocal, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	messageProofLocal := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRootLocal)
+	sig := bls.Sign(attesterKp.PrivateKey(), commitMsg)
+
+	attestCalldata, err := h.abi.Pack("attestCommit",
+		new(big.Int).SetUint64(msg.SourceChainID), commitRootLocal, aggAmounts["0"], big.NewInt(0),
+		new(big.Int).SetUint64(aggregateProof.LeafIndex), hashesToBytes32(aggregateProof.Siblings),
+		uint64(1), sig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	attestTx := newTx(msg.Sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, attestCalldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, attestTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed, "attestCommit setup step must succeed")
+
+	return commitRootLocal, messageProofLocal
+}
+
+// TestGatewayHandler_ClaimMessageRelaysOnwardViaReserve is the end-to-end regression test for the
+// 2-hop A -> Reserve -> B value routing added 2026-08-28 (note/cross_chain_stake_and_value_flow.md):
+// a claimMessage on Reserve (chain 102) for a message whose Payload carries a relay marker for
+// chain 103 must (a) NOT credit the target's real balance directly on Reserve, and (b) queue a new
+// real outbound message to chain 103 for the exact same Value/Target instead.
+func TestGatewayHandler_ClaimMessageRelaysOnwardViaReserve(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp := bls.GenerateKeyPair()
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}, Epoch: 1, QuorumThreshold: 6667},
+		// 103 must be a KNOWN chain for the relay-onward check to accept it as a valid final
+		// destination -- an unregistered target fails closed (see the rejection test below).
+		103: {ChainID: 103, Epoch: 0, QuorumThreshold: 6667},
+	}, ledger)
+	engine.ReserveChainID = 102
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222") // final recipient, on chain 103
+	relayer := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111AAAA1111"),
+		SourceChainID: 101,
+		DestChainID:   102, // immediate hop = Reserve, required for attestCommit's C8 ceiling check to pass
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(777),
+		Payload:       cross_chain.EncodeRelayPayload(103), // final destination
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+		Ordered:       false,
+	}
+	commitRoot, messageProof := setupAndAttestRelayTestCommit(t, cs, h, msg, kp)
+
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
+	)
+	require.NoError(t, err)
+	claimTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed, "claimMessage with a valid relay marker must succeed: %+v", rcp)
+
+	// (a) target must NOT have received a direct real-balance credit on Reserve (chain 102) --
+	// that would double-spend the same Value once here and once on the eventual real destination.
+	asTarget, err := cs.GetAccountStateDB().AccountState(target)
+	if err == nil && asTarget != nil {
+		assert.Equal(t, 0, asTarget.Balance().Sign(), "target must NOT be credited directly on the relay hub -- value must be relayed onward, not double-paid")
+	}
+
+	// (b) a new real outbound message to chain 103 must now be queued, for the same Target/Value,
+	// with HopCount incremented.
+	reloaded, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	pending := reloaded.PendingOutboundMessages[103]
+	require.Len(t, pending, 1, "exactly one relayed-onward message must be queued for chain 103")
+	assert.Equal(t, target, pending[0].Target)
+	assert.Equal(t, 0, pending[0].Value.Cmp(big.NewInt(777)))
+	assert.Equal(t, uint64(103), pending[0].DestChainID)
+	assert.Equal(t, msg.HopCount+1, pending[0].HopCount)
+}
+
+// TestGatewayHandler_ClaimMessageRelay_RejectsSelfLoop proves a relay marker naming the CLAIMING
+// chain itself as the final destination fails closed rather than silently doing nothing useful.
+func TestGatewayHandler_ClaimMessageRelay_RejectsSelfLoop(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp := bls.GenerateKeyPair()
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}, Epoch: 1, QuorumThreshold: 6667},
+	}, ledger)
+	engine.ReserveChainID = 102
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xBBBB2222BBBB2222BBBB2222BBBB2222BBBB2222BBBB2222BBBB2222BBBB2222"), SourceChainID: 101, DestChainID: 102,
+		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(777),
+		Payload: cross_chain.EncodeRelayPayload(102), // self-loop: names the claiming chain itself
+		Tip:     big.NewInt(0), GasFee: big.NewInt(0), Ordered: false,
+	}
+	commitRoot, messageProof := setupAndAttestRelayTestCommit(t, cs, h, msg, kp)
+
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
+	)
+	require.NoError(t, err)
+	claimTx := newTx(common.HexToAddress("0x4444444444444444444444444444444444444444"), mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.True(t, failed, "a relay marker naming the claiming chain itself must fail closed")
+}
+
+// TestGatewayHandler_ClaimMessageRelay_RejectsUnknownDestination proves a relay marker naming a
+// chain ID that isn't registered fails closed rather than silently crediting nothing to anyone.
+func TestGatewayHandler_ClaimMessageRelay_RejectsUnknownDestination(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp := bls.GenerateKeyPair()
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000}}, Epoch: 1, QuorumThreshold: 6667},
+		// note: chain 999 (the relay target below) is deliberately NOT registered here.
+	}, ledger)
+	engine.ReserveChainID = 102
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID: common.HexToHash("0xCCCC3333CCCC3333CCCC3333CCCC3333CCCC3333CCCC3333CCCC3333CCCC3333"), SourceChainID: 101, DestChainID: 102,
+		Sequence: 1, HopCount: 1, Sender: sender, Target: target, AssetID: big.NewInt(0), Value: big.NewInt(777),
+		Payload: cross_chain.EncodeRelayPayload(999), // unregistered final destination
+		Tip:     big.NewInt(0), GasFee: big.NewInt(0), Ordered: false,
+	}
+	commitRoot, messageProof := setupAndAttestRelayTestCommit(t, cs, h, msg, kp)
+
+	claimCalldata, err := h.abi.Pack("claimMessage",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
+	)
+	require.NoError(t, err)
+	claimTx := newTx(common.HexToAddress("0x4444444444444444444444444444444444444444"), mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	assert.True(t, failed, "a relay marker naming an unregistered chain must fail closed")
 }
 
 func TestGatewayHandler_WithdrawRelayerTip(t *testing.T) {
