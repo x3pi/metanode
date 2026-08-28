@@ -247,17 +247,19 @@ func (g *GatewayEngine) EnsureGovernance() {
 // ErrAlreadyBootstrapped guards BootstrapFoundingChains — see its doc comment.
 var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has active chains — bootstrap is only for genesis, use governance propose/vote/executeProposal instead")
 
-// BootstrapFoundingChainsWithCaller seeds or updates ChainRegistry/Governance.ActiveChains from a
-// batch of founding chains (>= MinFoundingChains).
+// BootstrapFoundingChainsWithCaller seeds ChainRegistry/Governance.ActiveChains from a genesis-
+// time batch of founding chains (>= MinFoundingChains), gated by an optional caller check.
 //
 // Access Control & Zero-Fork Security:
-// 1. If GenesisCoordinator is configured, only the authorized coordinator address can invoke this.
-// 2. Cryptographic PoP Verification: Every validator entry in every chain registry is strictly verified
-//    via PopVerify(v.PubkeyBLS, v.PopSignature). This guarantees proof-of-possession of the corresponding
-//    BLS private key and strictly prevents rogue-key or fake-validator injection into the committee.
-// 3. Quorum Thresholds: Every chain's QuorumThreshold is validated against network invariants.
-// 4. Multi-Deploy & Reset Resilience: Allows re-seeding/updating founding chain committee keys upon
-//    private chain reset/re-deployment without bricking cross-chain attestations or requiring full Root Anchor DB wipes.
+//  1. If GenesisCoordinator is configured, only the authorized coordinator address can invoke this.
+//  2. Cryptographic PoP Verification: Every validator entry in every chain registry is strictly verified
+//     via PopVerify(v.PubkeyBLS, v.PopSignature). This guarantees proof-of-possession of the corresponding
+//     BLS private key and strictly prevents rogue-key or fake-validator injection into the committee.
+//  3. Quorum Thresholds: Every chain's QuorumThreshold is validated against network invariants.
+//  4. Self-closing, like BootstrapFoundingChains itself (see its own doc comment): succeeds at
+//     most once per Root Anchor. NOT a re-seed/reset mechanism -- once Governance.ActiveChains is
+//     non-empty, every subsequent call fails closed with ErrAlreadyBootstrapped, by design (see
+//     BootstrapFoundingChains's doc comment for why a repeatable bootstrap path would be unsafe).
 func (g *GatewayEngine) BootstrapFoundingChainsWithCaller(caller common.Address, payloads [][]byte) error {
 	if g.GenesisCoordinator != (common.Address{}) && g.GenesisCoordinator != caller {
 		return fmt.Errorf("unauthorized bootstrap coordinator %s (expected %s)", caller.Hex(), g.GenesisCoordinator.Hex())
@@ -328,15 +330,21 @@ func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 	for chainID, reg := range registries {
 		g.ChainRegistry[chainID] = reg
 		g.Governance.RegisterActiveChain(chainID)
-		if g.SupplyLedger != nil {
-			if g.SupplyLedger.PerChainAllocation == nil {
-				g.SupplyLedger.PerChainAllocation = make(map[uint64]*big.Int)
-			}
-			if _, exists := g.SupplyLedger.PerChainAllocation[chainID]; !exists {
-				defaultHeadroom := new(big.Int).Mul(big.NewInt(100_000_000), big.NewInt(1e18))
-				_ = g.SupplyLedger.GrantAllocation(chainID, defaultHeadroom)
-			}
-		}
+		// Deliberately does NOT touch g.SupplyLedger here. An earlier version of this loop
+		// auto-minted a hardcoded 100,000,000-token allocation to every founding chain via
+		// GrantAllocation() -- GrantAllocation is a raw ledger primitive with no Reserve/
+		// governance restriction built in (see its doc comment in types.go), so that call
+		// bypassed the C7 fix entirely (ProposalAllocateSupply's Reserve-only, one-time-mint
+		// gate in ExecuteGovernanceProposal) and silently minted GenesisTotalSupply out of
+		// thin air for every founding chain, with no vote, no audit trail, and a hardcoded
+		// amount with no ceremony/config backing. Removed 2026-08-28 -- see
+		// note/cross_chain_attack_scenario_catalog.md item C7 and PR #84's review comment.
+		//
+		// If founding chains need initial headroom right after bootstrap, that must go
+		// through the already-implemented, already-tested governance flow instead: the
+		// Reserve mints once via ProposalAllocateSupply, then distributes to each founding
+		// chain via ProposalTransferAllocation -- both real, voted, timelocked, auditable
+		// on-chain transactions, not an implicit side effect of registration.
 	}
 	return nil
 }
