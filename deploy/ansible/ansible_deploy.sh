@@ -438,9 +438,9 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
                 reg_exit=$?
                 set -e
                 if [ $reg_exit -eq 0 ]; then
-                    REGISTER_STATUS="✅ Đã đăng ký thành công lên Root Anchor Gateway"
+                    REGISTER_STATUS="✅ Đã đăng ký & cấp phát Genesis Supply thành công"
                 else
-                    REGISTER_STATUS="⚠️ Đã đăng ký Gateway (Hoàn tất Bootstrap founding chains)"
+                    REGISTER_STATUS="❌ Đăng ký Gateway thất bại (Mã lỗi: $reg_exit - Root Anchor có thể đang lưu Committee cũ)"
                 fi
             fi
         fi
@@ -469,7 +469,28 @@ for name, h in hosts.items():
     print(f'• Chain {cid}: http://{ip}:{rpc} | Block: {blk}')
 " 2>/dev/null || echo "")
 
-        send_telegram_notification "✅ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thành công!
+        if [ "$REGISTER" -eq 1 ] && [ -n "${reg_exit:-}" ] && [ "$reg_exit" -ne 0 ]; then
+            send_telegram_notification "⚠️ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Deploy Private Chains xong nhưng <b>ĐĂNG KÝ GATEWAY THẤT BẠI</b>!
+- Target Chains: <code>${TARGET_CHAIN}</code>
+- Source: <code>${DEPLOY_SOURCE}</code>
+
+⚙️ <b>Cấu hình RPC & Endpoints các Chain:</b>
+<pre>
+${RPC_SUMMARY}
+</pre>
+
+🌉 <b>Trạng thái Gateway:</b>
+<code>${REGISTER_STATUS}</code>
+
+⚠️ <b>Nguyên nhân khả dĩ:</b> Root Anchor đã được bootstrap trước đó với bộ key cũ. Khi reset lại Private Chains với key mới, Root Anchor không nhận diện được signer.
+👉 <b>Cách khắc phục:</b> Reset lại Public Chain (Root Anchor) trước: <code>./ansible_deploy.sh --reset-all</code> sau đó chạy lại Private Chains."
+
+            echo ""
+            echo "⚠️ CẢNH BÁO: Deploy Private Chains xong nhưng Đăng ký Gateway thất bại (Mã lỗi: $reg_exit)!"
+            echo "   (Root Anchor có thể đang lưu Committee của lần chạy trước. Hãy reset Root Anchor nếu cần bộ keys mới)"
+            exit $reg_exit
+        else
+            send_telegram_notification "✅ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thành công!
 - Target Chains: <code>${TARGET_CHAIN}</code>
 - Source: <code>${DEPLOY_SOURCE}</code>
 
@@ -486,9 +507,10 @@ ${RPC_SUMMARY}
 • <b>Xem logs:</b> <code>./fetch_node_logs.sh --private</code>
 • <b>Bật Relayer:</b> <code>./ansible_deploy.sh --relayer start</code>"
 
-        echo ""
-        echo "🎉 Hoàn tất thao tác Private Chains!"
-        exit 0
+            echo ""
+            echo "🎉 Hoàn tất thao tác Private Chains!"
+            exit 0
+        fi
     else
         send_telegram_notification "❌ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thất bại với mã lỗi <code>${ansible_exit}</code>!
 - Target Chains: <code>${TARGET_CHAIN}</code>
