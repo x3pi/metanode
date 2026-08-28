@@ -31,7 +31,7 @@ all:
   vars:
     # URL RPC của máy chạy Public Chain (Root Anchor)
     root_anchor_rpc: "http://<IP_PUBLIC_CHAIN>:10746"
-    root_anchor_submitter_key: "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
+    root_anchor_submitter_key: "<YOUR_SUBMITTER_PRIVATE_KEY_HEX>"
     ansible_user: "<USER_NAME>"
     ansible_ssh_pass: "<SSH_PASSWORD>"
     ansible_become_pass: "<BECOME_PASSWORD>"

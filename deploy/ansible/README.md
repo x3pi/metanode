@@ -55,19 +55,19 @@ Mở file [`inventory.yml`](inventory.yml) và khai báo trong khối **`private
 all:
   vars:
     # URL RPC của Public Chain (Root Anchor)
-    root_anchor_rpc: "http://192.168.1.233:10746"
-    root_anchor_submitter_key: "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
-    ansible_user: "abc"
-    ansible_ssh_pass: "1234@abcd"
-    ansible_become_pass: "1234@abcd"
+    root_anchor_rpc: "http://<ROOT_ANCHOR_IP>:10746"
+    root_anchor_submitter_key: "<YOUR_SUBMITTER_PRIVATE_KEY_HEX>"
+    ansible_user: "your_username"
+    ansible_ssh_pass: "your_ssh_password"
+    ansible_become_pass: "your_sudo_password"
 
   children:
     # Cấu hình danh sách Private Chains
     private_chains:
       hosts:
         private_chain_101:
-          ansible_host: 192.168.1.233
-          ansible_connection: local   # Dùng local nếu chạy trên máy chủ hiện tại, hoặc ssh nếu qua mạng
+          ansible_host: 192.168.1.101
+          ansible_connection: ssh     # Dùng local nếu chạy trên máy chủ hiện tại, hoặc ssh nếu qua mạng
           chain_id: 101               # ID định danh của Chain
           validators: 1               # Số validator node (Mặc định: 1)
           rpc_port: 8546              # Cổng RPC của chain
