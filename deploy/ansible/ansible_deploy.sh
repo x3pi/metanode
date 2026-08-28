@@ -487,7 +487,6 @@ ${RPC_SUMMARY}
 
             echo ""
             echo "⚠️ CẢNH BÁO: Deploy Private Chains xong nhưng Đăng ký Gateway thất bại (Mã lỗi: $reg_exit)!"
-            echo "   (Root Anchor có thể đang lưu Committee của lần chạy trước. Hãy reset Root Anchor nếu cần bộ keys mới)"
             exit $reg_exit
         else
             send_telegram_notification "✅ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thành công!

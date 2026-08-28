@@ -502,6 +502,7 @@ def main():
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
                 "reserve_chain_id": args.reserve_chain_id if args.reserve_chain_id is not None else args.chain_id,
+                "min_native_stake_to_register_wei": "1000000000000000000",
                 # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
                 # exactly (snake_case) — encoding/json silently leaves a field at its zero value
                 # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't
