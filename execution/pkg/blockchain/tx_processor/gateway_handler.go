@@ -154,6 +154,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if engine.PendingCommitteeAttestations == nil {
 		engine.PendingCommitteeAttestations = make(map[string][]cross_chain.CommitteeAttestationShare)
 	}
+	if engine.PendingCommitAttestations == nil {
+		engine.PendingCommitAttestations = make(map[string][]cross_chain.CommitAttestationShare)
+	}
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
 	}
