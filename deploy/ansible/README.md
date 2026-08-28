@@ -49,60 +49,15 @@ Private Chains là mạng lưới các blockchain riêng biệt (Chain 101, 102,
 
 ### 🌟 1. Cấu hình Private Chains trong `inventory.yml`
 
-Mở file [`inventory.yml`](inventory.yml) và khai báo trong khối **`private_chains`**:
+Tham khảo mẫu hoàn chỉnh tại [`inventory.example.yml`](inventory.example.yml). Trong file [`inventory.yml`](inventory.yml), bạn chỉ cần khai báo danh sách các chuỗi trong nhóm **`private_chains`**:
 
-```yaml
-all:
-  vars:
-    # URL RPC của Public Chain (Root Anchor)
-    root_anchor_rpc: "http://<ROOT_ANCHOR_IP>:10746"
-    root_anchor_submitter_key: "<YOUR_SUBMITTER_PRIVATE_KEY_HEX>"
-    ansible_user: "your_username"
-    ansible_ssh_pass: "your_ssh_password"
-    ansible_become_pass: "your_sudo_password"
-
-  children:
-    # Cấu hình danh sách Private Chains
-    private_chains:
-      hosts:
-        private_chain_101:
-          ansible_host: 192.168.1.101
-          ansible_connection: ssh     # Dùng local nếu chạy trên máy chủ hiện tại, hoặc ssh nếu qua mạng
-          chain_id: 101               # ID định danh của Chain
-          validators: 1               # Số validator node (Mặc định: 1)
-          rpc_port: 8546              # Cổng RPC của chain
-          port_offset: 10             # Độ lệch cổng để tránh xung đột trên cùng máy
-          install_dir: "/opt/metanode/chain-101"
-
-        private_chain_102:
-          ansible_host: 192.168.1.233
-          ansible_connection: local
-          chain_id: 102
-          validators: 1
-          rpc_port: 8550
-          port_offset: 20
-          install_dir: "/opt/metanode/chain-102"
-
-        private_chain_103:
-          ansible_host: 192.168.1.233
-          ansible_connection: local
-          chain_id: 103
-          validators: 1
-          rpc_port: 8554
-          port_offset: 30
-          install_dir: "/opt/metanode/chain-103"
-
-        private_chain_104:
-          ansible_host: 192.168.1.233
-          ansible_connection: local
-          chain_id: 104
-          validators: 1
-          rpc_port: 8558
-          port_offset: 40
-          install_dir: "/opt/metanode/chain-104"
-```
-
----
+* **`chain_id`**: ID định danh của Private Chain (ví dụ: `101`, `102`, `103`, `104`...).
+* **`validators`**: Số lượng validator node của chain (Mặc định: `1`).
+* **`rpc_port`**: Cổng JSON-RPC của chain (ví dụ: `8546`, `8550`, `8554`, `8558`...).
+* **`port_offset`**: Độ lệch cổng để tránh đụng độ khi chạy nhiều chain trên cùng 1 server (`10`, `20`, `30`, `40`...).
+* **`install_dir`**: Thư mục cài đặt trên server (ví dụ: `/opt/metanode/chain-101`).
+* **`ansible_host`**: Địa chỉ IP của server chạy chuỗi đó.
+* **`ansible_connection`**: `local` nếu chạy ngay trên máy chủ này, hoặc `ssh` nếu qua mạng.
 
 ### 🚀 2. Quy trình 3 bước triển khai nhanh Private Chains
 
