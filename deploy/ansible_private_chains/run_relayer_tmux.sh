@@ -155,6 +155,20 @@ if [ -z "$CHAINS_STR" ]; then
     exit 1
 fi
 
+# Tự động truy vấn Chain ID của Root Anchor để cấu hình Reserve Chain (2-hop Value Routing)
+RESERVE_FLAG=""
+RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_ANCHOR" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', ''))" 2>/dev/null || true)
+if [ -n "$RESERVE_CHAIN_ID_HEX" ]; then
+    RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
+    if [ "$RESERVE_CHAIN_ID" -gt 0 ]; then
+        if [[ ! ",$CHAINS_STR," =~ ",$RESERVE_CHAIN_ID=" ]]; then
+            CHAINS_STR="$RESERVE_CHAIN_ID=$ROOT_ANCHOR,$CHAINS_STR"
+        fi
+        RESERVE_FLAG="-reserve-chain-id $RESERVE_CHAIN_ID"
+        echo "ℹ️  Tự động nhận diện Reserve Chain ID: $RESERVE_CHAIN_ID từ Root Anchor"
+    fi
+fi
+
 # Key ECDSA mặc định cho Relayer devnet (Wallet 11: 0x248BF9E035E4C3da95FECC94A0bF9A1e1F648a46)
 RELAYER_KEY="${RELAYER_KEY:-d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9}"
 POLL_MS="${POLL_MS:-100}"
@@ -173,13 +187,14 @@ echo "════════════════════════�
 echo "🚀 KHỞI CHẠY CROSS-CHAIN RELAYER TRONG TMUX"
 echo "   - Session Name:    $SESSION_NAME"
 echo "   - Root Anchor RPC: $ROOT_ANCHOR"
-echo "   - Private Chains:  $CHAINS_STR"
+echo "   - All Chains:      $CHAINS_STR"
+echo "   - Reserve Flag:    $RESERVE_FLAG"
 echo "   - Poll Interval:   ${POLL_MS}ms"
 echo "   - Log File:        $LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 
 # Tạo lệnh chạy ngầm với tee ghi log mới
-CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
+CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' $RESERVE_FLAG -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
 
 # Khởi tạo tmux detached session
 tmux new-session -d -s "$SESSION_NAME" bash -c "$CMD"
