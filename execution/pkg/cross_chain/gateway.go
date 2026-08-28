@@ -21,28 +21,27 @@ const (
 )
 
 var (
-	ErrHopCountExceeded               = errors.New("hop count exceeds maximum limit of 6")
-	ErrUnknownSourceChain             = errors.New("unknown source chain ID")
-	ErrEpochMismatch                  = errors.New("epoch mismatch for source chain")
-	ErrAllocationExceeded             = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
-	ErrQuorumNotReached               = errors.New("BFT quorum stake threshold not reached")
-	ErrCommitNotAttested              = errors.New("commit root has not been attested by source chain")
-	ErrInvalidMerkleProof             = errors.New("invalid Merkle proof")
-	ErrAlreadyClaimed                 = errors.New("message has already been claimed or processed (idempotent guard)")
-	ErrInvalidRefundState             = errors.New("cannot refund message: message is not in Pending status")
-	ErrInvalidRefundProof             = errors.New("invalid failed execution proof for refund")
-	ErrChainNotDead                   = errors.New("target chain has not been declared dead")
-	ErrDeadChainAlreadyClaimed        = errors.New("account balance on dead chain has already been claimed")
-	ErrNoActiveContext                = errors.New("no active cross-chain execution context")
-	ErrNotCalledByGateway             = errors.New("caller is not authorized by GatewayPrecompile")
-	ErrInvalidBLSSignature            = errors.New("BLS Quorum Certificate signature is invalid or empty")
-	ErrReserveChainNotConfigured      = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
-	ErrOnlyReserveMayMint             = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
-	ErrGenesisAlreadyMinted           = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
-	ErrNonReserveCeilingAttestation   = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
-	ErrInsufficientRegistrationStake  = errors.New("ProposalRegisterChain: this chain ID does not yet hold MinRegistrationStake in PerChainAllocation — fund it first via ProposalTransferAllocation from an already-active chain or the Reserve")
-	ErrRegistrationStakeNotConfigured = errors.New("RegisterChainViaStake requires MinRegistrationStake to be configured (>0) -- this is a stake-gated alternative to the vote-gated ProposalRegisterChain path, not a way to skip both")
-	ErrChainAlreadyRegistered         = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use ProposalUpdateCommittee to change an existing chain's committee")
+	ErrHopCountExceeded              = errors.New("hop count exceeds maximum limit of 6")
+	ErrUnknownSourceChain            = errors.New("unknown source chain ID")
+	ErrEpochMismatch                 = errors.New("epoch mismatch for source chain")
+	ErrAllocationExceeded            = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrQuorumNotReached              = errors.New("BFT quorum stake threshold not reached")
+	ErrCommitNotAttested             = errors.New("commit root has not been attested by source chain")
+	ErrInvalidMerkleProof            = errors.New("invalid Merkle proof")
+	ErrAlreadyClaimed                = errors.New("message has already been claimed or processed (idempotent guard)")
+	ErrInvalidRefundState            = errors.New("cannot refund message: message is not in Pending status")
+	ErrInvalidRefundProof            = errors.New("invalid failed execution proof for refund")
+	ErrChainNotDead                  = errors.New("target chain has not been declared dead")
+	ErrDeadChainAlreadyClaimed       = errors.New("account balance on dead chain has already been claimed")
+	ErrNoActiveContext               = errors.New("no active cross-chain execution context")
+	ErrNotCalledByGateway            = errors.New("caller is not authorized by GatewayPrecompile")
+	ErrInvalidBLSSignature           = errors.New("BLS Quorum Certificate signature is invalid or empty")
+	ErrReserveChainNotConfigured     = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
+	ErrOnlyReserveMayMint            = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
+	ErrGenesisAlreadyMinted          = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
+	ErrNonReserveCeilingAttestation  = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
+	ErrInsufficientRegistrationStake = errors.New("ProposalRegisterChain: this chain ID does not yet hold MinRegistrationStake in PerChainAllocation — fund it first via ProposalTransferAllocation from an already-active chain or the Reserve")
+	ErrChainAlreadyRegistered        = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use ProposalUpdateCommittee to change an existing chain's committee")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -120,14 +119,12 @@ type GatewayEngine struct {
 	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 
-	GenesisCoordinator common.Address `json:"genesisCoordinator,omitempty"`
-
 	// ReserveChainID identifies which registered chain is the system's unconditional issuer
 	// ("Reserve", Section 2.3) — the only chain allowed to (a) receive the one-time genesis
 	// supply mint via ProposalAllocateSupply, and (b) perform a ceiling-enforced AttestCommit
 	// of a nonzero-value commit from ANY other chain. Set once from config (config.CrossChain
 	// .ReserveChainID, gateway_handler.go's applyReserveChainIDConfig) — never governance-
-	// settable, matching GenesisCoordinator's own pattern. Zero means "not configured" and
+	// settable. Zero means "not configured" and
 	// fails closed on both operations above (see GrantAllocation call site and
 	// attestCommitInternal) rather than silently falling back to the old, unrestricted
 	// behavior — found 2026-08-27 that neither restriction existed at all before this field:
@@ -143,9 +140,9 @@ type GatewayEngine struct {
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
 	// MinRegistrationStake — C6 mitigation (Sybil chain registration, 2026-08-27, see
-	// note/cross_chain_attack_scenario_catalog.md item C6). Registration itself
-	// (BootstrapFoundingChains and ExecuteGovernanceProposal's ProposalRegisterChain case) was
-	// previously fully decoupled from SupplyLedger — a new chain could be voted into
+	// note/cross_chain_attack_scenario_catalog.md item C6), gating ONLY
+	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path). Registration
+	// there was previously fully decoupled from SupplyLedger — a new chain could be voted into
 	// ChainRegistry, and therefore gain 1 full governance vote, while holding zero allocation.
 	// When set (>0), ProposalRegisterChain additionally requires
 	// SupplyLedger.PerChainAllocation[reg.ChainID] >= MinRegistrationStake at execution time —
@@ -154,18 +151,37 @@ type GatewayEngine struct {
 	// execute. TransferAllocation/SetInitialAllocation have no ChainRegistry membership check
 	// (confirmed by direct code reading), so pre-funding a not-yet-registered chain ID works
 	// today with no other change needed. Zero/nil (the default, and every pre-2026-08-27 config)
-	// preserves the exact old permissionless-registration behavior — deliberately opt-in, not a
-	// default-on rate limit, matching the project's standing "measure before guessing" policy
-	// (all_remaining_fixes_plan.md Mục 2: no magic number without real production data on what a
-	// spam registration actually costs an attacker in practice). Does NOT gate
-	// BootstrapFoundingChains — genesis founding chains are pre-funded via a completely separate
-	// mechanism (genesis config's own initial allocations) that runs before this ledger exists,
-	// and the one-time bootstrap is already gated by MinFoundingChains + optional
-	// GenesisCoordinatorAddress, a different threat model (front-running the ceremony, not
-	// steady-state Sybil growth). Set once from config (config.CrossChain
-	// .MinRegistrationStakeWei, gateway_handler.go's applyMinRegistrationStakeConfig) — never
-	// governance-settable, matching ReserveChainID/GenesisCoordinatorAddress's own pattern.
+	// preserves the exact old permissionless-registration behavior for this vote-gated path.
+	// Does NOT gate RegisterChainViaStake (2026-08-28: that vote-free path now runs on a
+	// completely different instrument — a REAL native-coin wallet deposit, checked+burned by
+	// gateway_handler.go against engine.MinNativeStakeToRegister — see RegisterChainViaStake's
+	// own doc comment). Set once from config (config.CrossChain.MinRegistrationStakeWei,
+	// gateway_handler.go's applyMinRegistrationStakeConfig) — never governance-settable, matching
+	// ReserveChainID's own pattern.
 	MinRegistrationStake *big.Int `json:"min_registration_stake,omitempty"`
+
+	// MinNativeStakeToRegister is the real, liquid native-coin (Root Anchor's own base asset —
+	// deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) minimum wallet balance
+	// gateway_handler.go's "registerChainViaStake" case requires tx.FromAddress() to hold before
+	// it will call RegisterChainViaStake, then moves exactly this amount out of that real wallet
+	// into GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (2026-08-28 user
+	// request: "dùng tiền từ ví từ tài khoản thật làm điều kiện khởi tạo private chain ... không
+	// phải loại token erc 20 gì cả" -- use real wallet money as the founding condition, not any
+	// ERC-20-style token). GatewayEngine itself has no AccountStateDB access, so this field is
+	// only a threshold record — the actual balance check and the move happen one layer up, in
+	// gateway_handler.go (which does have AccountStateDB access), as a burn-then-mint pair
+	// (debit tx.FromAddress(), credit GATEWAY_CONTRACT_ADDRESS) — the same total-supply-
+	// conserving primitive pair "outbound"/"claimMessage" already use for cross-chain value
+	// transfer, just both legs landing on this same chain here (a plain burn call alone only
+	// debits `from` and credits nowhere — see gateway_handler.go's "registerChainViaStake" case
+	// for why the mint leg is required). Set once from config
+	// (config.CrossChain.MinNativeStakeToRegisterWei, gateway_handler.go's
+	// applyMinNativeStakeToRegisterConfig) — never governance-settable, and, unlike
+	// MinRegistrationStake, REQUIRED (not opt-in): with BootstrapFoundingChains retired,
+	// RegisterChainViaStake is the only vote-free registration path left, so an unconfigured
+	// minimum here must fail closed rather than silently reopening permissionless Sybil
+	// registration for every chain, founding or not.
+	MinNativeStakeToRegister *big.Int `json:"min_native_stake_to_register,omitempty"`
 
 	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
 	// an explicit devnet-only config field (config.CrossChainConfig
@@ -246,29 +262,6 @@ func (g *GatewayEngine) EnsureGovernance() {
 	}
 }
 
-// ErrAlreadyBootstrapped guards BootstrapFoundingChains — see its doc comment.
-var ErrAlreadyBootstrapped = errors.New("Root Anchor ChainRegistry already has active chains — bootstrap is only for genesis, use governance propose/vote/executeProposal instead")
-
-// BootstrapFoundingChainsWithCaller seeds ChainRegistry/Governance.ActiveChains from a genesis-
-// time batch of founding chains (>= MinFoundingChains), gated by an optional caller check.
-//
-// Access Control & Zero-Fork Security:
-//  1. If GenesisCoordinator is configured, only the authorized coordinator address can invoke this.
-//  2. Cryptographic PoP Verification: Every validator entry in every chain registry is strictly verified
-//     via PopVerify(v.PubkeyBLS, v.PopSignature). This guarantees proof-of-possession of the corresponding
-//     BLS private key and strictly prevents rogue-key or fake-validator injection into the committee.
-//  3. Quorum Thresholds: Every chain's QuorumThreshold is validated against network invariants.
-//  4. Self-closing, like BootstrapFoundingChains itself (see its own doc comment): succeeds at
-//     most once per Root Anchor. NOT a re-seed/reset mechanism -- once Governance.ActiveChains is
-//     non-empty, every subsequent call fails closed with ErrAlreadyBootstrapped, by design (see
-//     BootstrapFoundingChains's doc comment for why a repeatable bootstrap path would be unsafe).
-func (g *GatewayEngine) BootstrapFoundingChainsWithCaller(caller common.Address, payloads [][]byte) error {
-	if g.GenesisCoordinator != (common.Address{}) && g.GenesisCoordinator != caller {
-		return fmt.Errorf("unauthorized bootstrap coordinator %s (expected %s)", caller.Hex(), g.GenesisCoordinator.Hex())
-	}
-	return g.BootstrapFoundingChains(payloads)
-}
-
 func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -283,74 +276,6 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 	return amount, nil
 }
 
-// BootstrapFoundingChains registers the founding chains (>= MinFoundingChains) in ChainRegistry at genesis.
-// Every validator entry must independently pass strict BLS PopVerify (Proof-of-Possession).
-// Self-closing: fails closed with ErrAlreadyBootstrapped once ActiveChains is non-empty.
-func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.EnsureGovernance()
-
-	if len(g.Governance.ActiveChains) > 0 {
-		return ErrAlreadyBootstrapped
-	}
-
-	if len(payloads) < MinFoundingChains {
-		return fmt.Errorf("%w: got %d, need >= %d", ErrInsufficientFoundingChains, len(payloads), MinFoundingChains)
-	}
-
-	registries := make(map[uint64]ChainRegistry, len(payloads))
-	for _, p := range payloads {
-		var reg ChainRegistry
-		if err := json.Unmarshal(p, &reg); err != nil {
-			return fmt.Errorf("invalid ChainRegistry payload: %w", err)
-		}
-		if reg.ChainID == 0 {
-			return fmt.Errorf("invalid chain ID: 0")
-		}
-		if _, dup := registries[reg.ChainID]; dup {
-			return fmt.Errorf("%w: chain %d", ErrDuplicateChainID, reg.ChainID)
-		}
-		if len(reg.Committee) == 0 {
-			return fmt.Errorf("chain %d: empty committee", reg.ChainID)
-		}
-		for _, v := range reg.Committee {
-			ok, err := PopVerify(v.PubkeyBLS, v.PopSignature)
-			if err != nil || !ok {
-				return fmt.Errorf("chain %d: proof-of-possession verification failed for a committee member: %w", reg.ChainID, err)
-			}
-		}
-		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
-			return fmt.Errorf("chain %d: %w", reg.ChainID, err)
-		}
-		registries[reg.ChainID] = reg
-	}
-
-	if g.ChainRegistry == nil {
-		g.ChainRegistry = make(map[uint64]ChainRegistry)
-	}
-	for chainID, reg := range registries {
-		g.ChainRegistry[chainID] = reg
-		g.Governance.RegisterActiveChain(chainID)
-		// Deliberately does NOT touch g.SupplyLedger here. An earlier version of this loop
-		// auto-minted a hardcoded 100,000,000-token allocation to every founding chain via
-		// GrantAllocation() -- GrantAllocation is a raw ledger primitive with no Reserve/
-		// governance restriction built in (see its doc comment in types.go), so that call
-		// bypassed the C7 fix entirely (ProposalAllocateSupply's Reserve-only, one-time-mint
-		// gate in ExecuteGovernanceProposal) and silently minted GenesisTotalSupply out of
-		// thin air for every founding chain, with no vote, no audit trail, and a hardcoded
-		// amount with no ceremony/config backing. Removed 2026-08-28 -- see
-		// note/cross_chain_attack_scenario_catalog.md item C7 and PR #84's review comment.
-		//
-		// If founding chains need initial headroom right after bootstrap, that must go
-		// through the already-implemented, already-tested governance flow instead: the
-		// Reserve mints once via ProposalAllocateSupply, then distributes to each founding
-		// chain via ProposalTransferAllocation -- both real, voted, timelocked, auditable
-		// on-chain transactions, not an implicit side effect of registration.
-	}
-	return nil
-}
-
 // RegisterChainViaStake admits a new chain into ChainRegistry/Governance.ActiveChains WITHOUT a
 // committee vote -- a deliberate alternative to ExecuteGovernanceProposal's ProposalRegisterChain
 // case, for operators who want registration gated purely by economic stake, not by a
@@ -358,26 +283,28 @@ func (g *GatewayEngine) BootstrapFoundingChains(payloads [][]byte) error {
 // "bỏ cơ chế vote rồi mà sao vẫn còn" -- MinRegistrationStake previously only ADDED a stake
 // precondition on top of the existing vote requirement; this is the actual vote-free path).
 //
-// This does NOT reopen C6 (Sybil registration): getting a candidate chain ID funded to
-// MinRegistrationStake in the first place still requires a real ProposalTransferAllocation to
-// have been proposed AND voted through by >= 2/3 of the CURRENT active set (or minted once by
-// the Reserve via ProposalAllocateSupply) -- the quorum barrier moves from "vote to register" to
-// "vote to fund", it is not removed. A single active chain (or even the Reserve alone) cannot
-// unilaterally fund and self-register Sybil chain IDs without that same quorum's cooperation.
-//
-// Fails closed unless MinRegistrationStake is explicitly configured (>0) -- this is an opt-in
-// alternative registration path, not a way to bypass registration entirely; when
-// MinRegistrationStake is unset (the default, matching every pre-2026-08-28 config),
-// ProposalRegisterChain's normal vote-gated path remains the only way to register a chain,
-// unchanged.
+// STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version): this
+// function performs NO stake check itself anymore. GatewayEngine has no AccountStateDB access, so
+// it cannot verify a real wallet balance -- and PerChainAllocation (the old basis) turned out to
+// be the wrong instrument entirely: it is a chain-ID-keyed, governance-vote-only ledger entry
+// (moved solely via ProposalTransferAllocation/ProposalAllocateSupply), not something any wallet
+// actually holds or can pay with, which does not match "cọc tiền từ ví thật" (a real, liquid
+// deposit from an actual wallet, in Root Anchor's own native coin -- explicitly NOT an ERC-20-style
+// token) -- the user's explicit design for this path. The real gate now lives one layer up, in
+// gateway_handler.go's "registerChainViaStake" case: it requires engine.MinNativeStakeToRegister
+// to be configured (>0), checks tx.FromAddress()'s REAL native balance via AccountStateDB against
+// it, calls this function, and -- only if that succeeds -- moves the stake out of the caller's
+// real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (burn-then-mint,
+// same balance-mutation-last-after-every-checkable-failure ordering as the "outbound" case's
+// Value/Tip/GasFee lock). This is also why BootstrapFoundingChains was retired the same day (2026-08-28, see
+// note/cross_chain_stake_and_value_flow.md): it processed a BATCH of founding chains from ONE
+// coordinator transaction, with no natural per-chain caller wallet to check a real balance
+// against -- RegisterChainViaStake (already per-chain) is now the universal registration path for
+// every chain, including chain #1, founding or not.
 func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.EnsureGovernance()
-
-	if g.MinRegistrationStake == nil || g.MinRegistrationStake.Sign() <= 0 {
-		return ErrRegistrationStakeNotConfigured
-	}
 
 	var reg ChainRegistry
 	if err := json.Unmarshal(payload, &reg); err != nil {
@@ -389,9 +316,9 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if _, exists := g.ChainRegistry[reg.ChainID]; exists {
 		return fmt.Errorf("%w: chain %d", ErrChainAlreadyRegistered, reg.ChainID)
 	}
-	// Same PoP bar as BootstrapFoundingChains and ProposalRegisterChain's non-empty-committee
-	// case -- an empty committee is still allowed here too (routing-metadata-only registration,
-	// deferred to a later ProposalUpdateCommittee), matching the existing pattern.
+	// Same PoP bar as ProposalRegisterChain's non-empty-committee case -- an empty committee is
+	// still allowed here too (routing-metadata-only registration, deferred to a later
+	// ProposalUpdateCommittee), matching the existing pattern.
 	if len(reg.Committee) > 0 {
 		if err := ValidateCommittee(reg.Committee); err != nil {
 			return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
@@ -401,13 +328,9 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
 
-	held := new(big.Int)
-	if g.SupplyLedger != nil {
-		held = g.SupplyLedger.GetAllocation(reg.ChainID)
-	}
-	if held.Cmp(g.MinRegistrationStake) < 0 {
-		return fmt.Errorf("%w: chain %d holds %s, needs >= %s", ErrInsufficientRegistrationStake, reg.ChainID, held.String(), g.MinRegistrationStake.String())
-	}
+	// No stake/balance check here -- see this function's doc comment. The caller
+	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
+	// native-coin deposit from tx.FromAddress() before invoking this function.
 
 	if g.ChainRegistry == nil {
 		g.ChainRegistry = make(map[uint64]ChainRegistry)

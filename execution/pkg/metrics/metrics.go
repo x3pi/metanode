@@ -115,8 +115,8 @@ var (
 	})
 
 	// RegisteredChainCount tracks the current size of GatewayEngine.ChainRegistry, i.e. how
-	// many chains are currently recognized (bootstrapFoundingChains, or
-	// ProposalRegisterChain via real vote quorum). Same "measure instead of guessing" rationale
+	// many chains are currently recognized (registerChainViaStake against a real native-coin
+	// deposit, or ProposalRegisterChain via real vote quorum). Same "measure instead of guessing" rationale
 	// as GovernanceProposalCount (note/cross_chain_attack_scenario_catalog.md item C6): a chain
 	// still needs >=2/3 of already-active chains to vote it in, so this isn't a costless Sybil
 	// path the way a permissionless mint would be -- but a large/anomalous influx of newly

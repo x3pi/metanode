@@ -15,7 +15,6 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -1264,133 +1263,117 @@ func TestGatewayHandler_WithdrawRelayerTip(t *testing.T) {
 	}
 }
 
-func TestGatewayHandler_BootstrapFoundingChains_CoordinatorGuards(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
+// TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit is the regression test
+// for the 2026-08-28 rewrite of the vote-free registration path: BootstrapFoundingChains (a
+// genesis-only, GenesisCoordinator-gated BATCH call) was retired, and RegisterChainViaStake's own
+// stake check (previously against PerChainAllocation, a governance-only, non-wallet-transferable
+// ledger entry) moved here, to gateway_handler.go, which is the only layer with real
+// AccountStateDB access — gated by MinNativeStakeToRegister against the caller's REAL wallet
+// balance (deliberately NOT any ERC-20-style token), burned/locked into GATEWAY_CONTRACT_ADDRESS
+// as a permanent on-chain deposit on success.
+func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *testing.T) {
 	h, err := GetGatewayHandler()
 	if err != nil {
 		t.Fatalf("GetGatewayHandler: %v", err)
 	}
+	minStake := big.NewInt(10_000)
 
-	coordinator := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
-	attacker := common.HexToAddress("0xAA00AA00AA00AA00AA00AA00AA00AA00AA00AA00")
-
-	engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
-	engine.GenesisCoordinator = coordinator
-	if err := saveGatewayEngine(cs, engine); err != nil {
-		t.Fatalf("saveGatewayEngine failed: %v", err)
-	}
-
-	var payloads [][]byte
-	for _, id := range []uint64{101, 102, 103, 104} {
-		payloads = append(payloads, makeFoundingChainPayload(t, id))
-	}
-
-	calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
-	if err != nil {
-		t.Fatalf("pack bootstrapFoundingChains: %v", err)
-	}
-
-	// Attacker tries to bootstrap -> must fail
-	attackTx := newTx(attacker, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
-	_, _, failedAttack := h.HandleTransaction(context.Background(), cs, attackTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
-	if !failedAttack {
-		t.Fatalf("expected attacker bootstrap to fail due to GenesisCoordinator check")
-	}
-
-	// Coordinator submits -> must succeed
-	successTx := newTx(coordinator, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
-	_, _, failedSuccess := h.HandleTransaction(context.Background(), cs, successTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
-	if failedSuccess {
-		t.Fatalf("expected coordinator bootstrap to succeed")
-	}
-}
-
-// TestLoadGatewayEngine_GenesisCoordinatorConfig is the regression test for the
-// bootstrapFoundingChains front-run gap tracked in
-// note/cross_chain_production_readiness_plan.md (Phase 1 hardening item): GenesisCoordinator/
-// BootstrapFoundingChainsWithCaller already enforced this check in code, but nothing in
-// production ever populated the field, so it was always the zero address — a no-op that let
-// any caller bootstrap. CrossChain.GenesisCoordinatorAddress (config.go) plus
-// applyGenesisCoordinatorConfig (gateway_handler.go) close that gap.
-func TestLoadGatewayEngine_GenesisCoordinatorConfig(t *testing.T) {
-	prevConfig := config.ConfigApp
-	t.Cleanup(func() { config.ConfigApp = prevConfig })
-
-	coordinatorAddr := "0xC0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0"
-
-	t.Run("fresh engine picks up configured coordinator", func(t *testing.T) {
+	t.Run("unconfigured minimum fails closed", func(t *testing.T) {
 		cs, _, _, _ := newPersistentTestChainState(t)
-		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
-		engine, err := loadGatewayEngine(cs)
-		if err != nil {
-			t.Fatalf("loadGatewayEngine: %v", err)
-		}
-		if engine.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
-			t.Fatalf("GenesisCoordinator = %s, want %s", engine.GenesisCoordinator.Hex(), coordinatorAddr)
-		}
-	})
-
-	t.Run("unconfigured leaves existing any-caller behavior unchanged", func(t *testing.T) {
-		cs, _, _, _ := newPersistentTestChainState(t)
-		config.ConfigApp = &config.SimpleChainConfig{}
-		engine, err := loadGatewayEngine(cs)
-		if err != nil {
-			t.Fatalf("loadGatewayEngine: %v", err)
-		}
-		if engine.GenesisCoordinator != (common.Address{}) {
-			t.Fatalf("expected zero-address GenesisCoordinator when unconfigured, got %s", engine.GenesisCoordinator.Hex())
-		}
-	})
-
-	t.Run("once set, persisted value is locked in against a later config change", func(t *testing.T) {
-		cs, _, _, _ := newPersistentTestChainState(t)
-		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
-		engine, err := loadGatewayEngine(cs)
-		if err != nil {
-			t.Fatalf("loadGatewayEngine: %v", err)
-		}
+		engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+		// engine.MinNativeStakeToRegister left nil.
 		if err := saveGatewayEngine(cs, engine); err != nil {
 			t.Fatalf("saveGatewayEngine: %v", err)
 		}
 
-		attackerAddr := "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: attackerAddr}}
-		reloaded, err := loadGatewayEngine(cs)
-		if err != nil {
-			t.Fatalf("loadGatewayEngine (reload): %v", err)
+		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
+		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(1_000_000)); err != nil {
+			t.Fatalf("AddBalance: %v", err)
 		}
-		if reloaded.GenesisCoordinator != common.HexToAddress(coordinatorAddr) {
-			t.Fatalf("GenesisCoordinator changed on reload despite already being locked in: got %s, want original %s", reloaded.GenesisCoordinator.Hex(), coordinatorAddr)
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201))
+		if err != nil {
+			t.Fatalf("pack registerChainViaStake: %v", err)
+		}
+		tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
+			t.Fatalf("expected registerChainViaStake to fail closed when MinNativeStakeToRegister is unconfigured, even with a well-funded caller")
 		}
 	})
 
-	t.Run("end-to-end: front-running caller rejected, configured coordinator accepted", func(t *testing.T) {
+	t.Run("insufficient real wallet balance fails closed, nothing registered, balance untouched", func(t *testing.T) {
 		cs, _, _, _ := newPersistentTestChainState(t)
-		config.ConfigApp = &config.SimpleChainConfig{CrossChain: config.CrossChainConfig{GenesisCoordinatorAddress: coordinatorAddr}}
+		engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+		engine.MinNativeStakeToRegister = minStake
+		if err := saveGatewayEngine(cs, engine); err != nil {
+			t.Fatalf("saveGatewayEngine: %v", err)
+		}
 
-		h, err := GetGatewayHandler()
+		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0001")
+		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)); err != nil { // < minStake
+			t.Fatalf("AddBalance: %v", err)
+		}
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202))
 		if err != nil {
-			t.Fatalf("GetGatewayHandler: %v", err)
+			t.Fatalf("pack registerChainViaStake: %v", err)
+		}
+		tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
+			t.Fatalf("expected registerChainViaStake to fail closed with insufficient real balance")
 		}
 
-		var payloads [][]byte
-		for _, id := range []uint64{201, 202, 203, 204} {
-			payloads = append(payloads, makeFoundingChainPayload(t, id))
+		as, err := cs.GetAccountStateDB().AccountState(caller)
+		if err != nil || as == nil || as.Balance().Cmp(big.NewInt(5_000)) != 0 {
+			t.Fatalf("expected caller balance to remain untouched at 5000, got %v", as.Balance())
 		}
-		calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
+		reloaded, err := loadGatewayEngine(cs)
 		if err != nil {
-			t.Fatalf("pack bootstrapFoundingChains: %v", err)
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if _, exists := reloaded.ChainRegistry[202]; exists {
+			t.Fatalf("chain 202 must not be registered when the real stake deposit failed")
+		}
+	})
+
+	t.Run("sufficient real wallet balance succeeds: balance debited, deposit locked, chain registered, no vote", func(t *testing.T) {
+		cs, _, _, _ := newPersistentTestChainState(t)
+		engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+		engine.MinNativeStakeToRegister = minStake
+		if err := saveGatewayEngine(cs, engine); err != nil {
+			t.Fatalf("saveGatewayEngine: %v", err)
 		}
 
-		frontRunner := common.HexToAddress("0xF00DF00DF00DF00DF00DF00DF00DF00DF00DF00D")
-		attackTx := newTx(frontRunner, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
-		if _, _, failed := h.HandleTransaction(context.Background(), cs, attackTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
-			t.Fatalf("expected front-running caller to be rejected once a coordinator is configured")
+		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0002")
+		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(15_000)); err != nil {
+			t.Fatalf("AddBalance: %v", err)
+		}
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203))
+		if err != nil {
+			t.Fatalf("pack registerChainViaStake: %v", err)
+		}
+		tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+		if failed {
+			t.Fatalf("expected registerChainViaStake to succeed with sufficient real balance: %+v", rcp)
 		}
 
-		coordinatorTx := newTx(common.HexToAddress(coordinatorAddr), mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
-		if _, _, failed := h.HandleTransaction(context.Background(), cs, coordinatorTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
-			t.Fatalf("expected the configured coordinator's bootstrap to succeed")
+		as, err := cs.GetAccountStateDB().AccountState(caller)
+		if err != nil || as == nil || as.Balance().Cmp(big.NewInt(5_000)) != 0 {
+			t.Fatalf("expected caller balance to be debited by exactly minStake (15000-10000=5000), got %v", as.Balance())
+		}
+		gatewayAs, err := cs.GetAccountStateDB().AccountState(mt_common.GATEWAY_CONTRACT_ADDRESS)
+		if err != nil || gatewayAs == nil || gatewayAs.Balance().Cmp(minStake) != 0 {
+			t.Fatalf("expected GATEWAY_CONTRACT_ADDRESS to hold the locked deposit (%s), got %v", minStake.String(), gatewayAs)
+		}
+
+		reloaded, err := loadGatewayEngine(cs)
+		if err != nil {
+			t.Fatalf("loadGatewayEngine: %v", err)
+		}
+		if _, exists := reloaded.ChainRegistry[203]; !exists {
+			t.Fatalf("chain 203 must be registered after a sufficient real stake deposit")
+		}
+		if !reloaded.Governance.ActiveChains[203] {
+			t.Fatalf("chain 203 must also become a voting member, with no vote ever cast")
 		}
 	})
 }

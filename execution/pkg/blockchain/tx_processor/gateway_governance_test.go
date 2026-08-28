@@ -370,8 +370,8 @@ func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
 // (a) it costs a real, non-refundable 0.1 native token fee per proposal with zero effect
 // unless real quorum later votes yes, a genuine economic disincentive against spam; (b) it is
 // what lets a brand-new chain self-nominate via ProposalRegisterChain without an existing
-// active chain sponsoring it on its behalf, consistent with how BootstrapFoundingChains'
-// genesis bootstrap already works. This test proves BOTH halves: an address with no relation
+// active chain sponsoring it on its behalf, consistent with how RegisterChainViaStake's
+// vote-free path already works. This test proves BOTH halves: an address with no relation
 // to any registered chain can propose successfully (permissionless holds), and
 // Proposals' unbounded growth (no TTL/cleanup exists, and none is added by this decision) is
 // made observable via metrics.GovernanceProposalCount instead of guessing at a rate-limit
@@ -409,66 +409,72 @@ func TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric(t *test
 	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.GovernanceProposalCount), "GovernanceProposalCount must reflect the real, unbounded growth of Proposals")
 }
 
-// TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric is the regression test
-// for note/cross_chain_attack_scenario_catalog.md item C6: ProposalRegisterChain/
-// bootstrapFoundingChains still require real vote quorum from already-active chains (unlike
-// propose(), which is deliberately permissionless -- Mục 2 above), so this isn't a costless
-// Sybil path the way a permissionless mint would have been (C7) -- but there was no visibility
-// at all into ChainRegistry's growth before RegisteredChainCount existed, and a
-// slowly-accumulating colluding coalition would look exactly like unremarkable steady growth
-// without a metric to compare it against. This proves the metric reflects reality after a real
-// bootstrapFoundingChains call, mirroring the propose() test's own style above.
-func TestGatewayHandler_BootstrapFoundingChains_TracksChainCountViaMetric(t *testing.T) {
+// TestGatewayHandler_RegisterChainViaStake_TracksChainCountViaMetric is the regression test for
+// note/cross_chain_attack_scenario_catalog.md item C6: with BootstrapFoundingChains retired
+// (2026-08-28), registerChainViaStake is now gated by a REAL native-coin deposit from the
+// caller's own wallet instead (MinNativeStakeToRegister, checked+burned in gateway_handler.go),
+// not a vote -- so a metric on ChainRegistry's growth stays just as important: a slowly-
+// accumulating colluding coalition would look exactly like unremarkable steady growth without
+// one. This proves the metric reflects reality across 4 real, individually-funded
+// registerChainViaStake calls, mirroring the propose() test's own style above.
+func TestGatewayHandler_RegisterChainViaStake_TracksChainCountViaMetric(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 	h, err := GetGatewayHandler()
 	require.NoError(t, err)
 
+	minStake := big.NewInt(1000)
 	engine := cross_chain.NewGatewayEngine(9099, map[uint64]cross_chain.ChainRegistry{}, nil)
+	engine.MinNativeStakeToRegister = minStake
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
-	var payloads [][]byte
-	for _, id := range []uint64{101, 102, 103, 104} {
-		payloads = append(payloads, makeFoundingChainPayload(t, id))
+	callers := []common.Address{
+		common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD01"),
+		common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD02"),
+		common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD03"),
+		common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD04"),
 	}
-	calldata, err := h.abi.Pack("bootstrapFoundingChains", payloads)
-	require.NoError(t, err)
+	for i, id := range []uint64{101, 102, 103, 104} {
+		caller := callers[i]
+		require.NoError(t, cs.GetAccountStateDB().AddBalance(caller, minStake))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, id))
+		require.NoError(t, err)
+		tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+		require.False(t, failed, "registerChainViaStake for chain %d with a real, sufficient deposit must succeed", id)
+	}
 
-	coordinator := common.HexToAddress("0xDD00DD00DD00DD00DD00DD00DD00DD00DD00DD00")
-	tx := newTx(coordinator, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
-	_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
-	require.False(t, failed, "bootstrapFoundingChains with 4 valid founding chains must succeed")
-
-	assert.Equal(t, float64(4), testutil.ToFloat64(metrics.RegisteredChainCount), "RegisteredChainCount must reflect the real ChainRegistry size after bootstrap")
+	assert.Equal(t, float64(4), testutil.ToFloat64(metrics.RegisteredChainCount), "RegisteredChainCount must reflect the real ChainRegistry size after 4 individual registrations")
 }
 
 // TestGatewayHandler_RegisterChainViaStake_NoVoteRequired is the end-to-end (real calldata,
-// real dispatch) regression test for the vote-free registration path added 2026-08-28: a
-// pre-funded candidate must be admitted into ChainRegistry via a SINGLE registerChainViaStake
-// transaction, with no propose()/vote()/executeProposal() transaction anywhere in this test --
-// that absence is the behavior under test, not an oversight.
+// real dispatch) regression test for the vote-free registration path: a candidate must be
+// admitted into ChainRegistry via a SINGLE registerChainViaStake transaction backed by a REAL
+// native-coin deposit from the caller's own wallet, with no propose()/vote()/executeProposal()
+// transaction anywhere in this test -- that absence is the behavior under test, not an
+// oversight.
 func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 	h, err := GetGatewayHandler()
 	require.NoError(t, err)
 
-	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(5000), map[uint64]*big.Int{102: big.NewInt(5000)})
-	require.NoError(t, err)
-	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{}, ledger)
-	engine.MinRegistrationStake = big.NewInt(1000)
-	// Pre-fund the candidate (104) from the already-funded chain 102 -- same primitive
-	// ProposalTransferAllocation uses; this step alone is what a real quorum vote gates upstream
-	// (see gateway_test.go's TestGateway_RegisterChainViaStake for the unit-level proof).
-	require.NoError(t, ledger.TransferAllocation(102, 104, big.NewInt(1000)))
+	minStake := big.NewInt(1000)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{}, nil)
+	engine.MinNativeStakeToRegister = minStake
 	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	caller := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
+	// Fund the caller's REAL wallet -- not any PerChainAllocation/SupplyLedger primitive -- with
+	// exactly the required deposit (see gateway_test.go's TestGateway_RegisterChainViaStake for
+	// the unit-level proof that RegisterChainViaStake itself performs no stake check at all).
+	require.NoError(t, cs.GetAccountStateDB().AddBalance(caller, minStake))
 
 	payload := makeFoundingChainPayload(t, 104)
 	calldata, err := h.abi.Pack("registerChainViaStake", payload)
 	require.NoError(t, err)
 
-	caller := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
 	tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
 	_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
-	require.False(t, failed, "registerChainViaStake with a pre-funded candidate must succeed with zero votes cast")
+	require.False(t, failed, "registerChainViaStake with a sufficiently-funded real wallet must succeed with zero votes cast")
 
 	reloaded, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
