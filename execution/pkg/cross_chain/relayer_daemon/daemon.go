@@ -33,6 +33,14 @@ type DaemonConfig struct {
 	ChainRPCURLs      map[uint64]string `json:"chain_rpc_urls" yaml:"chain_rpc_urls"`
 	PollInterval      time.Duration     `json:"poll_interval" yaml:"poll_interval"`
 	MaxPollIterations int               `json:"max_poll_iterations" yaml:"max_poll_iterations"`
+	// ReserveChainID identifies which configured chain is the system's Reserve -- when
+	// RelayBatch's sourceChainID equals this, it packs attestReserveIssuedCommit instead of the
+	// normal attestCommit, since a Reserve-issued commit is exempt from the ceiling check (C8)
+	// that would otherwise make attestCommit fail on any non-Reserve claiming chain. Zero/unset
+	// means this daemon never sends attestReserveIssuedCommit -- every batch uses the normal
+	// attestCommit path, matching pre-2026-08-28 behavior exactly (opt-in, not a default-on
+	// behavior change).
+	ReserveChainID uint64 `json:"reserve_chain_id,omitempty" yaml:"reserve_chain_id,omitempty"`
 }
 
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
@@ -334,6 +342,22 @@ func (d *RelayerDaemon) getMessageStatus(ctx context.Context, client *rootanchor
 	return cross_chain.MessageStatus(status)
 }
 
+// chooseAttestMethod returns which Gateway ABI method a batch's attestation should use: a commit
+// whose sourceChainID IS the configured Reserve is exempt from the ceiling check (C8) -- Reserve
+// is the unconditional issuer -- so it needs attestReserveIssuedCommit; the claiming (dest) chain
+// would otherwise reject a plain attestCommit unless IT happened to be the Reserve too (see
+// note/cross_chain_stake_and_value_flow.md for the full A->Reserve->B routing picture this makes
+// possible). reserveChainID==0 (unconfigured) always returns attestCommit, matching the exact
+// pre-2026-08-28 behavior -- this is an opt-in capability, not a default-on behavior change.
+// Pulled out as its own pure function so this one decision is directly unit-testable without
+// standing up RelayBatch's full RPC-mocking harness.
+func chooseAttestMethod(sourceChainID, reserveChainID uint64) string {
+	if reserveChainID != 0 && sourceChainID == reserveChainID {
+		return "attestReserveIssuedCommit"
+	}
+	return "attestCommit"
+}
+
 // RelayBatch relays every message in a batch produced by batchOutboundCommit() (all sharing one
 // destination chain -- see GatewayEngine.PendingOutboundMessages' doc comment for why batches
 // are always scoped to a single (sourceChain, destChain) pair). Groups messages by AssetID and
@@ -392,23 +416,24 @@ func (d *RelayerDaemon) RelayBatch(
 		}
 		aggProof := cross_chain.GetMerkleProof(layers, idx)
 
-		attestCalldata, err := d.abi.Pack("attestCommit",
+		attestMethod := chooseAttestMethod(sourceChainID, d.config.ReserveChainID)
+		attestCalldata, err := d.abi.Pack(attestMethod,
 			new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
 			new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
 			cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
 		)
 		if err != nil {
-			return fmt.Errorf("pack attestCommit for assetId %s: %w", assetIDStr, err)
+			return fmt.Errorf("pack %s for assetId %s: %w", attestMethod, assetIDStr, err)
 		}
 		receipt, err := d.sendToChainAndWait(ctx, destChainID, attestCalldata, 3_000_000)
 		if err != nil {
-			return fmt.Errorf("attestCommit for assetId %s: %w", assetIDStr, err)
+			return fmt.Errorf("%s for assetId %s: %w", attestMethod, assetIDStr, err)
 		}
 		if receipt.Status != 1 {
 			// Not necessarily fatal -- another relayer may have already attested this exact
 			// commit/asset first (AttestCommit's write-once guard), which is success from this
 			// batch's point of view. Anything else surfaces on the first claimMessage() below.
-			logger.Info("ℹ️ [RELAYER DAEMON] attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
+			logger.Info("ℹ️ [RELAYER DAEMON] %s for chain %d asset %s reverted: %s", attestMethod, sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
 		}
 	}
 

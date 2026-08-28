@@ -1,6 +1,8 @@
 package cross_chain
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,4 +389,57 @@ type AccountLeaf struct {
 type AggregateValueLeaf struct {
 	AssetID         *big.Int
 	AggregateAmount *big.Int
+}
+
+// relayMarkerPrefix tags a CrossChainMessage.Payload as a "relay this value/call onward to
+// another chain instead of settling it here" instruction, for the 2-hop A -> Reserve -> B value
+// & CONTRACT_CALL routing added 2026-08-28/2026-08-29 (see
+// note/cross_chain_stake_and_value_flow.md). Distinct, unlikely-to-collide tag rather than a
+// single marker byte -- Payload is otherwise always empty for a plain native-value transfer with
+// no payload, so this is safe to introduce without touching CrossChainMessage's wire format,
+// Merkle leaf hashing (ComputeMessageLeafHash hashes Payload as opaque bytes either way), or any
+// existing message that predates this feature (their Payload is empty and DecodeRelayPayload
+// correctly returns ok=false for anything that isn't this exact tag).
+var relayMarkerPrefix = []byte("MTNRELAY1:")
+
+// relayMarkerHeaderLen is the fixed-size portion of an encoded relay payload: the tag plus an
+// 8-byte big-endian finalDestChainID. Anything after that is the caller-supplied inner payload,
+// forwarded verbatim to the FINAL destination chain's own claimMessage handling (CONTRACT_CALL if
+// Target has code there, otherwise ignored exactly like any other pure-value message's payload).
+var relayMarkerHeaderLen = len(relayMarkerPrefix) + 8
+
+// EncodeRelayPayload builds a CrossChainMessage.Payload that instructs the RECEIVING chain (once
+// it verifies and claims this message via ClaimMessage) to relay the value AND innerPayload
+// onward to finalDestChainID instead of settling them here. Intended for the FIRST leg of an
+// A -> Reserve -> B transfer: the message's own DestChainID is Reserve (the immediate hop,
+// required so attestCommit's ceiling check -- C8 -- can actually pass), while this payload
+// carries the TRUE final destination B plus whatever payload B's own claimMessage should act on
+// (nil/empty for a plain value transfer; real ABI-encoded calldata for a cross-chain
+// CONTRACT_CALL -- see settleGasCappedContractCall's own doc comment for how that executes once
+// it reaches the real final destination).
+func EncodeRelayPayload(finalDestChainID uint64, innerPayload []byte) []byte {
+	buf := make([]byte, relayMarkerHeaderLen+len(innerPayload))
+	copy(buf, relayMarkerPrefix)
+	binary.BigEndian.PutUint64(buf[len(relayMarkerPrefix):relayMarkerHeaderLen], finalDestChainID)
+	copy(buf[relayMarkerHeaderLen:], innerPayload)
+	return buf
+}
+
+// DecodeRelayPayload returns (finalDestChainID, innerPayload, true) if payload was built by
+// EncodeRelayPayload, or (0, nil, false) for anything else (including the empty payload every
+// pre-existing message uses). innerPayload is nil (not just len-0) when EncodeRelayPayload was
+// called with an empty/nil innerPayload, so callers can use it directly as a CrossChainMessage's
+// own Payload field without an extra empty-vs-nil normalization step.
+func DecodeRelayPayload(payload []byte) (finalDestChainID uint64, innerPayload []byte, ok bool) {
+	if len(payload) < relayMarkerHeaderLen {
+		return 0, nil, false
+	}
+	if !bytes.Equal(payload[:len(relayMarkerPrefix)], relayMarkerPrefix) {
+		return 0, nil, false
+	}
+	finalDestChainID = binary.BigEndian.Uint64(payload[len(relayMarkerPrefix):relayMarkerHeaderLen])
+	if len(payload) > relayMarkerHeaderLen {
+		innerPayload = payload[relayMarkerHeaderLen:]
+	}
+	return finalDestChainID, innerPayload, true
 }

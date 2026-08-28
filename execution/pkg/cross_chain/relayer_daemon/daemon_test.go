@@ -1101,6 +1101,17 @@ func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
 	assert.Equal(t, 0, n2)
 }
 
+// TestChooseAttestMethod is the regression test for the 2-hop A -> Reserve -> B value routing
+// wiring (2026-08-28, note/cross_chain_stake_and_value_flow.md): a commit whose source is the
+// configured Reserve must use attestReserveIssuedCommit, everything else (including the
+// unconfigured default) must keep using plain attestCommit exactly as before.
+func TestChooseAttestMethod(t *testing.T) {
+	assert.Equal(t, "attestCommit", chooseAttestMethod(101, 0), "unconfigured ReserveChainID must preserve the pre-2026-08-28 default")
+	assert.Equal(t, "attestCommit", chooseAttestMethod(101, 999), "a non-Reserve source must keep using plain attestCommit")
+	assert.Equal(t, "attestReserveIssuedCommit", chooseAttestMethod(999, 999), "a source that IS the configured Reserve must use the ceiling-exempt attest path")
+	assert.Equal(t, "attestCommit", chooseAttestMethod(999, 0), "Reserve as source with ReserveChainID left unconfigured must still default to attestCommit (fail to the OLD behavior, not silently assume Reserve status)")
+}
+
 func bytes32SliceToHashes(in [][32]byte) []common.Hash {
 	out := make([]common.Hash, len(in))
 	for i, b := range in {
