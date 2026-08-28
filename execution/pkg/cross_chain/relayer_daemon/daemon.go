@@ -291,8 +291,8 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 	}
 	client := d.chainClients[chainID]
 	maxIterations := d.config.MaxPollIterations
-	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
-		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 60*time.Second {
+		maxIterations = int((60 * time.Second) / d.config.PollInterval)
 	}
 	for i := 0; i < maxIterations; i++ {
 		receipt, err := client.TransactionReceipt(ctx, txHash)
@@ -416,24 +416,61 @@ func (d *RelayerDaemon) RelayBatch(
 		}
 		aggProof := cross_chain.GetMerkleProof(layers, idx)
 
-		attestMethod := chooseAttestMethod(sourceChainID, d.config.ReserveChainID)
-		attestCalldata, err := d.abi.Pack(attestMethod,
-			new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
-			new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
-			cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
-		)
-		if err != nil {
-			return fmt.Errorf("pack %s for assetId %s: %w", attestMethod, assetIDStr, err)
-		}
-		receipt, err := d.sendToChainAndWait(ctx, destChainID, attestCalldata, 3_000_000)
-		if err != nil {
-			return fmt.Errorf("%s for assetId %s: %w", attestMethod, assetIDStr, err)
-		}
-		if receipt.Status != 1 {
-			// Not necessarily fatal -- another relayer may have already attested this exact
-			// commit/asset first (AttestCommit's write-once guard), which is success from this
-			// batch's point of view. Anything else surfaces on the first claimMessage() below.
-			logger.Info("ℹ️ [RELAYER DAEMON] %s for chain %d asset %s reverted: %s", attestMethod, sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
+		if d.config.ReserveChainID != 0 && sourceChainID != d.config.ReserveChainID && aggAmounts[assetIDStr].Sign() > 0 {
+			// 2-Hop Value Routing (Phase 1):
+			// 1. Submit attestCommit to the Reserve Chain (Root Anchor) to enforce & debit source's allocation
+			reserveCalldata, err := d.abi.Pack("attestCommit",
+				new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
+				new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
+				cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+			)
+			if err != nil {
+				return fmt.Errorf("pack attestCommit on reserve for assetId %s: %w", assetIDStr, err)
+			}
+			reserveReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, reserveCalldata, 3_000_000)
+			if err != nil {
+				return fmt.Errorf("attestCommit on reserve (%d) for assetId %s: %w", d.config.ReserveChainID, assetIDStr, err)
+			}
+			if reserveReceipt.Status != 1 {
+				logger.Info("ℹ️ [RELAYER DAEMON] reserve attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(reserveReceipt.Return))
+			}
+
+			// 2. If destination is a private chain (not the Reserve itself), submit attestReserveIssuedCommit to destination
+			if destChainID != d.config.ReserveChainID {
+				destCalldata, err := d.abi.Pack("attestReserveIssuedCommit",
+					new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
+					new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
+					cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+				)
+				if err != nil {
+					return fmt.Errorf("pack attestReserveIssuedCommit for assetId %s: %w", assetIDStr, err)
+				}
+				destReceipt, err := d.sendToChainAndWait(ctx, destChainID, destCalldata, 3_000_000)
+				if err != nil {
+					return fmt.Errorf("attestReserveIssuedCommit on dest (%d) for assetId %s: %w", destChainID, assetIDStr, err)
+				}
+				if destReceipt.Status != 1 {
+					logger.Info("ℹ️ [RELAYER DAEMON] dest attestReserveIssuedCommit for chain %d asset %s reverted: %s", destChainID, assetIDStr, DecodeRevertReason(destReceipt.Return))
+				}
+			}
+		} else {
+			// Direct 1-hop (Source is Reserve, destination is Reserve, or zero-value pure contract call)
+			attestMethod := chooseAttestMethod(sourceChainID, d.config.ReserveChainID)
+			attestCalldata, err := d.abi.Pack(attestMethod,
+				new(big.Int).SetUint64(sourceChainID), commitRoot, aggAmounts[assetIDStr], assetIDBig,
+				new(big.Int).SetUint64(aggProof.LeafIndex), toBytes32Slice(aggProof.Siblings),
+				cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+			)
+			if err != nil {
+				return fmt.Errorf("pack %s for assetId %s: %w", attestMethod, assetIDStr, err)
+			}
+			receipt, err := d.sendToChainAndWait(ctx, destChainID, attestCalldata, 3_000_000)
+			if err != nil {
+				return fmt.Errorf("%s for assetId %s: %w", attestMethod, assetIDStr, err)
+			}
+			if receipt.Status != 1 {
+				logger.Info("ℹ️ [RELAYER DAEMON] %s for chain %d asset %s reverted: %s", attestMethod, sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
+			}
 		}
 	}
 
