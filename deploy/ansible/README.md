@@ -1,5 +1,7 @@
 # Hệ Thống Triển Khai Metanode (Ansible Edition)
 
+> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md) để nắm toàn bộ quy trình 4 bước chuẩn kết nối Root Anchor, Private Chains, Relayer Daemon và bộ kiểm thử E2E.
+
 Tài liệu này bao gồm 2 phần:
 - **Phần 1:** Cẩm nang lệnh chạy siêu tốc & Giải thích chi tiết trình tự xử lý của từng lệnh.
 - **Phần 2:** Giải thích chuyên sâu về kiến trúc 8 Roles của Ansible.

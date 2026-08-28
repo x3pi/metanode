@@ -440,21 +440,25 @@ func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *
 	// Anti-spam fee enforced by gateway_handler.go's "propose" case (0.1 native token) -- see
 	// its own comment for why this exists.
 	proposeFee := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(100_000_000))
-	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
-		fmt.Sprintf("%s: propose", label)); err != nil {
+	receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
+		fmt.Sprintf("%s: propose", label))
+	if err != nil {
 		return err
+	}
+
+	header, err := client.HeaderByNumber(ctx, receipt.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("fetch block header for propose: %w", err)
 	}
 
 	var buf []byte
 	buf = append(buf, kind)
 	var tsBytes [8]byte
-	for i := 0; i < 8; i++ {
-		tsBytes[7-i] = byte(now >> (8 * i))
-	}
+	binary.BigEndian.PutUint64(tsBytes[:], header.Time)
 	buf = append(buf, tsBytes[:]...)
 	buf = append(buf, payload...)
 	proposalID := crypto.Keccak256Hash(buf)
-	logger.Info("%s: computed proposalID=%s", label, proposalID.Hex())
+	logger.Info("%s: computed proposalID=%s (blockTime=%d)", label, proposalID.Hex(), header.Time)
 
 	voteNow := uint64(time.Now().Unix())
 	for _, m := range committee {

@@ -341,7 +341,10 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "Ea004b9aE1F60516210df2fDfcE9342618729d98"
         ],
         "cross_chain": {
-            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+            "reserve_chain_id": 991,
+            "min_native_stake_to_register_wei": "1000000000000000000",
+            "devnet_governance_timelock_seconds_override": 10
         },
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",

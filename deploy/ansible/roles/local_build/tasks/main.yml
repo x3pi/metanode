@@ -11,6 +11,12 @@
   register: build_result
   changed_when: build_result.rc == 0
 
+- name: Reset genesis.json from example template on fresh setup
+  ansible.builtin.file:
+    path: "{{ deploy_dir }}/genesis.json"
+    state: absent
+  when: ansible_action == 'setup'
+
 - name: Generate Validator Keys
   ansible.builtin.shell: |
     python3 gen_validator_entry.py \

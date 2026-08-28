@@ -510,7 +510,8 @@ def main():
                 # config.go directly, not assumed.
                 "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
                 "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
-                "root_anchor_poll_interval_seconds": 5,
+                "root_anchor_poll_interval_seconds": 1,
+                "min_native_stake_to_register_wei": "1000000000000000000",
                 "root_anchor_circuit_breaker_max_failures": 5,
                 "root_anchor_circuit_breaker_timeout_seconds": 10,
                 # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens

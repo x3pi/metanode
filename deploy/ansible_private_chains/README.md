@@ -1,5 +1,7 @@
 # 🌐 Metanode Private Chains — Ansible Deployment Guide
 
+> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md) để nắm toàn bộ quy trình 4 bước chuẩn kết nối Root Anchor, Private Chains, Relayer Daemon và bộ kiểm thử E2E.
+
 Thư mục này cung cấp hệ thống tự động hóa **Ansible độc lập 100%** dành riêng cho việc triển khai, cấu hình và quản lý **Private Chains** trên nhiều máy chủ khác nhau (hoặc trên cùng 1 máy chủ phát triển).
 
 Toàn bộ các Private Chains được triển khai chuẩn hóa tại `/opt/metanode/chain-XXX` và chạy dưới quyền user hệ thống `metanode:metanode` (giống y hệt kiến trúc triển khai của Public Chain trong `deploy/ansible`).

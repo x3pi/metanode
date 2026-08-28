@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-27
+> **Last updated:** 2026-08-28
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -27,7 +27,8 @@ metanode/
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
-└── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+├── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+└── OPERATIONS_GUIDE.md  ← Complete End-to-End deployment & Day-2 Operations Runbook
 ```
 
 ### Layer Interaction
