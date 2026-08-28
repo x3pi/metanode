@@ -21,94 +21,23 @@
             chdir: "{{ playbook_dir }}/../../execution/cmd/simple_chain"
 
     - name: Generate configurations for targeted private chains
-      when: "ansible_action in ['setup', 'reset']"
-      block:
-        - name: Run gen_single_chain.py for each targeted private chain
-          ansible.builtin.shell: |
-            set -e
-            CHAIN_ID="{{ hostvars[item]['chain_id'] }}"
-            RPC_PORT="{{ hostvars[item]['rpc_port'] }}"
-            PORT_OFFSET="{{ hostvars[item]['port_offset'] }}"
-            IP="{{ hostvars[item]['ansible_host'] }}"
-            ROOT_RPC="{{ root_anchor_rpc }}"
-            LOCAL_OUT="{{ playbook_dir }}/data/chain_{{ hostvars[item]['chain_id'] }}"
-            TARGET_DIR="{{ hostvars[item]['install_dir'] | default('/opt/metanode/chain-' ~ hostvars[item]['chain_id']) }}"
-            
-            SUBMITTER_KEY="{{ root_anchor_submitter_key | default('') }}"
-            if [ -z "$SUBMITTER_KEY" ]; then
-              echo "❌ ERROR: root_anchor_submitter_key chưa được cấu hình trong inventory.yml"
-              exit 1
-            fi
-            # SECURITY (C8 fix, PR #84 review, 2026-08-28): ReserveChainID must be the SAME
-            # single chain across every participant, and it must NOT be each private chain's own
-            # ID -- if a private chain configures itself as its own Reserve, it trivially passes
-            # its own LocalChainID==ReserveChainID check and is free to do ceiling-enforced
-            # attestCommit for ANY source chain's value against its own local ledger copy,
-            # exactly the multi-destination overdraw C8 was meant to prevent (see
-            # note/cross_chain_attack_scenario_catalog.md item C8). Root Anchor is the intended
-            # Reserve (gen_root_anchor_chain.py already self-configures reserve_chain_id to its
-            # own chain ID) -- fetch Root Anchor's REAL on-chain chain ID via eth_chainId rather
-            # than trusting a hand-typed inventory value that could drift from reality.
-            RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_RPC" -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))")
-            if [ -z "$RESERVE_CHAIN_ID_HEX" ]; then
-              echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_RPC"
-              exit 1
-            fi
-            RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
-            echo "ℹ️  Reserve chain ID resolved from Root Anchor ($ROOT_RPC) = $RESERVE_CHAIN_ID"
-
-            if [ "{{ ansible_action }}" = "reset" ]; then
-              rm -rf "$LOCAL_OUT"
-            fi
-
-            if [ ! -f "$LOCAL_OUT/node-0/config.json" ]; then
-              python3 "{{ playbook_dir }}/../systemd/gen_single_chain.py" \
-                --chain-id "$CHAIN_ID" \
-                --ip "$IP" \
-                --rpc-port "$RPC_PORT" \
-                --port-offset "$PORT_OFFSET" \
-                --validators 1 \
-                --root-anchor-rpc "$ROOT_RPC" \
-                --root-anchor-submitter-key "$SUBMITTER_KEY" \
-                --reserve-chain-id "$RESERVE_CHAIN_ID" \
-                --output-dir "$LOCAL_OUT"
-            fi
-            
-            # Chuẩn hóa đường dẫn trong config.json cho thư mục cài đặt mục tiêu (/opt/metanode/chain-XXX)
-            python3 -c "
-            import json
-            cfg_path = '$LOCAL_OUT/node-0/config.json'
-            with open(cfg_path) as f:
-                c = json.load(f)
-            t_dir = '$TARGET_DIR'
-            c['log_path'] = f'{t_dir}/logs/execution'
-            c['backup_path'] = f'{t_dir}/data/execution/backup'
-            c['genesis_file_path'] = f'{t_dir}/config/genesis.json'
-            c['rust_config_path'] = f'{t_dir}/config/node.toml'
-            if 'Databases' in c:
-                c['Databases']['RootPath'] = f'{t_dir}/data/execution/db'
-                c['Databases']['SnapshotPath'] = f'{t_dir}/data/execution/snapshots'
-            with open(cfg_path, 'w') as f:
-                json.dump(c, f, indent=2)
-            "
-
-            # Chuẩn hóa đường dẫn trong node.toml
-            python3 -c "
-            toml_path = '$LOCAL_OUT/node-0/node.toml'
-            t_dir = '$TARGET_DIR'
-            with open(toml_path) as f:
-                content = f.read()
-            import re
-            content = re.sub(r'protocol_key_path\s*=\s*\".*?\"', f'protocol_key_path = \"{t_dir}/keys/protocol_key.json\"', content)
-            content = re.sub(r'network_key_path\s*=\s*\".*?\"', f'network_key_path = \"{t_dir}/keys/network_key.json\"', content)
-            content = re.sub(r'storage_path\s*=\s*\".*?\"', f'storage_path = \"{t_dir}/data/consensus\"', content)
-            with open(toml_path, 'w') as f:
-                f.write(content)
-            "
-          loop: "{{ groups['private_chains'] }}"
-          when: "active_target == 'all' or active_target | string == hostvars[item]['chain_id'] | string"
+      ansible.builtin.command:
+        cmd: >
+          python3 "{{ playbook_dir }}/generate_chain_config.py"
+          --chain-id "{{ hostvars[item].chain_id }}"
+          --ip "{{ hostvars[item].ansible_host }}"
+          --rpc-port "{{ hostvars[item].rpc_port }}"
+          --port-offset "{{ hostvars[item].port_offset }}"
+          --validators "{{ hostvars[item].validators | default(1) }}"
+          --root-anchor-rpc "{{ root_anchor_rpc }}"
+          --root-anchor-submitter-key "{{ root_anchor_submitter_key | default('') }}"
+          --target-dir "{{ hostvars[item].install_dir | default('/opt/metanode/chain-' ~ hostvars[item].chain_id) }}"
+          --output-dir "{{ playbook_dir }}/data/chain_{{ hostvars[item].chain_id }}"
+          --action "{{ ansible_action }}"
+      loop: "{{ groups['private_chains'] }}"
+      when:
+        - "ansible_action in ['setup', 'reset']"
+        - "active_target == 'all' or active_target | string == hostvars[item].chain_id | string"
 
 - name: Deploy and Manage Private Chains across Nodes (/opt/metanode)
   hosts: private_chains
