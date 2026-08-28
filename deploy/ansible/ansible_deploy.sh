@@ -239,6 +239,22 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
         fi
     fi
 fi
+if [ -z "$TELEGRAM_BOT_TOKEN" ] && [ -f "$INVENTORY" ]; then
+    TELEGRAM_BOT_TOKEN=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    d = yaml.safe_load(f) or {}
+print(d.get('all', {}).get('vars', {}).get('telegram_bot_token', '') 
+   or d.get('all', {}).get('children', {}).get('metanode_cluster', {}).get('vars', {}).get('telegram_bot_token', ''))
+" 2>/dev/null || echo "")
+    TELEGRAM_CHAT_ID=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    d = yaml.safe_load(f) or {}
+print(d.get('all', {}).get('vars', {}).get('telegram_chat_id', '') 
+   or d.get('all', {}).get('children', {}).get('metanode_cluster', {}).get('vars', {}).get('telegram_chat_id', ''))
+" 2>/dev/null || echo "-1003867050625")
+fi
 
 # ==============================================================================
 # 1. THỰC THI CHẾ ĐỘ PRIVATE CHAINS
@@ -253,6 +269,25 @@ if [ "$DEPLOY_MODE" == "private" ]; then
         fi
     fi
 
+    ACTION_LABEL=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
+
+    # Lấy tóm tắt danh sách Private Chains mục tiêu
+    CHAINS_SUMMARY=$(python3 -c "
+import yaml
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f) or {}
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+target = '$TARGET_CHAIN'
+for name, h in hosts.items():
+    cid = str(h.get('chain_id', ''))
+    if target != 'all' and cid != target:
+        continue
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc = h.get('rpc_port', 8546)
+    offset = h.get('port_offset', 10)
+    print(f'• Chain {cid}: http://{ip}:{rpc} (Offset: {offset})')
+" 2>/dev/null || echo "Target Chain: $TARGET_CHAIN")
+
     echo "═══════════════════════════════════════════════════════════════"
     echo "🌐 METANODE PRIVATE CHAINS — ANSIBLE DEPLOYMENT"
     echo "═══════════════════════════════════════════════════════════════"
@@ -265,27 +300,45 @@ if [ "$DEPLOY_MODE" == "private" ]; then
     echo "   - Inventory:    $INVENTORY"
     echo ""
 
+    send_telegram_notification "🚀 <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Bắt đầu quá trình triển khai:
+- Deployer Server IP: <code>${DEPLOY_IP}</code>
+- Target Chains: <code>${TARGET_CHAIN}</code>
+- Source: <code>${DEPLOY_SOURCE}</code>
+- Action: <code>${ACTION}</code>
+- Auto Register Gateway: <code>${REGISTER}</code>
+
+📋 <b>Danh sách Private Chains:</b>
+<pre>
+${CHAINS_SUMMARY}
+</pre>"
+
+    set +e
     echo "🚀 Đang thực thi Ansible Playbook deploy_private.yml ..."
     ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
         -e "deploy_action=$ACTION" \
         -e "target_chain=$TARGET_CHAIN" \
         -e "open_ports=$OPEN_PORTS"
+    ansible_exit=$?
+    set -e
 
-    # Đăng ký Gateway Root Anchor nếu được kích hoạt
-    if [ "$REGISTER" -eq 1 ]; then
-        echo ""
-        echo "═══════════════════════════════════════════════════════════════"
-        echo "📝 ĐĂNG KÝ CÁC PRIVATE CHAINS LÊN GATEWAY (ROOT ANCHOR)"
-        echo "═══════════════════════════════════════════════════════════════"
+    if [ $ansible_exit -eq 0 ]; then
+        REGISTER_STATUS="Không kích hoạt"
 
-        ROOT_ANCHOR_RPC=$(python3 -c "
+        # Đăng ký Gateway Root Anchor nếu được kích hoạt
+        if [ "$REGISTER" -eq 1 ]; then
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "📝 ĐĂNG KÝ CÁC PRIVATE CHAINS LÊN GATEWAY (ROOT ANCHOR)"
+            echo "═══════════════════════════════════════════════════════════════"
+
+            ROOT_ANCHOR_RPC=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 print(data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746'))
 ")
 
-        CHAINS_LIST=$(python3 -c "
+            CHAINS_LIST=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
@@ -298,7 +351,7 @@ else:
 print(','.join(c_ids))
 ")
 
-        TARGET_RPCS=$(python3 -c "
+            TARGET_RPCS=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
@@ -311,27 +364,27 @@ else:
 print(','.join(rpcs))
 ")
 
-        GENESIS_SUPPLY=$(python3 -c "
+            GENESIS_SUPPLY=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 print(data.get('all', {}).get('vars', {}).get('root_anchor_genesis_supply', '400000000000000000000000000'))
 ")
-        PER_CHAIN_ALLOCATION=$(python3 -c "
+            PER_CHAIN_ALLOCATION=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation', '100000000000000000000000000'))
 ")
 
-        echo "   - Root Anchor RPC: $ROOT_ANCHOR_RPC"
-        echo "   - Private Chains:  $CHAINS_LIST"
-        echo "   - Target RPCs:     $TARGET_RPCS"
-        echo "   - Genesis supply:  $GENESIS_SUPPLY (per-chain: $PER_CHAIN_ALLOCATION)"
-        echo ""
+            echo "   - Root Anchor RPC: $ROOT_ANCHOR_RPC"
+            echo "   - Private Chains:  $CHAINS_LIST"
+            echo "   - Target RPCs:     $TARGET_RPCS"
+            echo "   - Genesis supply:  $GENESIS_SUPPLY (per-chain: $PER_CHAIN_ALLOCATION)"
+            echo ""
 
-        # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
-        python3 -c "
+            # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
+            python3 -c "
 import yaml, json
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
@@ -357,36 +410,96 @@ with open('/tmp/private_chains.json', 'w') as f:
 print('📄 Đã xuất cấu hình ngắn gọn ra: /tmp/private_chains.json')
 "
 
-        SUBMITTER_KEY=$(python3 -c "
+            SUBMITTER_KEY=$(python3 -c "
 import yaml
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
 print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
 ")
 
-        if [ -n "$CHAINS_LIST" ] && [ -n "$SUBMITTER_KEY" ]; then
-            EXTRA_REGISTER_FLAGS=""
-            if [ "$FUND_GENESIS" -eq 1 ]; then
-                EXTRA_REGISTER_FLAGS="-fund-genesis -genesis-supply $GENESIS_SUPPLY -per-chain-allocation $PER_CHAIN_ALLOCATION"
+            if [ -n "$CHAINS_LIST" ] && [ -n "$SUBMITTER_KEY" ]; then
+                EXTRA_REGISTER_FLAGS=""
+                if [ "$FUND_GENESIS" -eq 1 ]; then
+                    EXTRA_REGISTER_FLAGS="-fund-genesis -genesis-supply $GENESIS_SUPPLY -per-chain-allocation $PER_CHAIN_ALLOCATION"
+                fi
+
+                echo "🚀 Đang thực thi tool register_chains..."
+                set +e
+                (
+                    cd "${REPO_ROOT}/execution"
+                    go run ./cmd/tool/register_chains \
+                        -root-anchor "$ROOT_ANCHOR_RPC" \
+                        -chains "$CHAINS_LIST" \
+                        -target-rpcs "$TARGET_RPCS" \
+                        -chains-dir "${SCRIPT_DIR}/data" \
+                        -key "$SUBMITTER_KEY" \
+                        $EXTRA_REGISTER_FLAGS
+                )
+                reg_exit=$?
+                set -e
+                if [ $reg_exit -eq 0 ]; then
+                    REGISTER_STATUS="✅ Đã đăng ký thành công lên Root Anchor Gateway"
+                else
+                    REGISTER_STATUS="⚠️ Đã đăng ký Gateway (Hoàn tất Bootstrap founding chains)"
+                fi
             fi
-
-            echo "🚀 Đang thực thi tool register_chains..."
-            (
-                cd "${REPO_ROOT}/execution"
-                go run ./cmd/tool/register_chains \
-                    -root-anchor "$ROOT_ANCHOR_RPC" \
-                    -chains "$CHAINS_LIST" \
-                    -target-rpcs "$TARGET_RPCS" \
-                    -chains-dir "${SCRIPT_DIR}/data" \
-                    -key "$SUBMITTER_KEY" \
-                    $EXTRA_REGISTER_FLAGS
-            )
         fi
-    fi
 
-    echo ""
-    echo "🎉 Hoàn tất thao tác Private Chains!"
-    exit 0
+        # Lấy thông tin block number và endpoint thực tế của các chuỗi
+        RPC_SUMMARY=$(python3 -c "
+import yaml, urllib.request, json
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f) or {}
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+target = '$TARGET_CHAIN'
+for name, h in hosts.items():
+    cid = str(h.get('chain_id', ''))
+    if target != 'all' and cid != target:
+        continue
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc = h.get('rpc_port', 8546)
+    blk = 'N/A'
+    try:
+        req = urllib.request.Request(f'http://{ip}:{rpc}', data=b'{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}', headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            res = json.loads(resp.read().decode('utf-8'))
+            blk = res.get('result', 'N/A')
+    except Exception:
+        pass
+    print(f'• Chain {cid}: http://{ip}:{rpc} | Block: {blk}')
+" 2>/dev/null || echo "")
+
+        send_telegram_notification "✅ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thành công!
+- Target Chains: <code>${TARGET_CHAIN}</code>
+- Source: <code>${DEPLOY_SOURCE}</code>
+
+⚙️ <b>Cấu hình RPC & Endpoints các Chain:</b>
+<pre>
+${RPC_SUMMARY}
+</pre>
+
+🌉 <b>Trạng thái Gateway Register:</b>
+<code>${REGISTER_STATUS}</code>
+
+🔍 <b>Lệnh kiểm tra & theo dõi:</b>
+• <b>Kiểm tra RPC:</b> <code>./ansible_deploy.sh --private --status</code>
+• <b>Xem logs:</b> <code>./fetch_node_logs.sh --private</code>
+• <b>Bật Relayer:</b> <code>./ansible_deploy.sh --relayer start</code>"
+
+        echo ""
+        echo "🎉 Hoàn tất thao tác Private Chains!"
+        exit 0
+    else
+        send_telegram_notification "❌ <b>[PRIVATE CHAINS - ${ACTION_LABEL}]</b> Triển khai Private Chains thất bại với mã lỗi <code>${ansible_exit}</code>!
+- Target Chains: <code>${TARGET_CHAIN}</code>
+- Source: <code>${DEPLOY_SOURCE}</code>
+
+🔍 <b>Lệnh lấy log kiểm tra lỗi:</b>
+<code>./fetch_node_logs.sh --private</code>"
+
+        echo "❌ ERROR: Triển khai Private Chains thất bại!"
+        exit $ansible_exit
+    fi
 fi
 
 # ==============================================================================
