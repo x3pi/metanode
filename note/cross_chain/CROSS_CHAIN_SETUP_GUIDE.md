@@ -167,3 +167,52 @@ go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 * **Khóa BLS (`Databases.BLSPrivateKey` / `authority_key` - BLS12-381):** Dùng để ký các phần chữ ký xác thực khối và attestation cross-chain (`commitRoot` / `committeeUpdate`).
 * **Cơ chế Fallback trích xuất BLS Public Key:** `CommitAttestationWorker` và `CommitteeAttestationWorker` luôn ưu tiên dẫn xuất trực tiếp BLS Public Key (48 bytes G1) từ `Databases.BLSPrivateKey` trong file cấu hình `execution.json`. Nếu không cấu hình mới tìm trong `AccountStateDB` (tránh lỗi rỗng tại Genesis khi trạng thái tài khoản chưa được nạp thông tin BLS vào state trie).
 
+---
+
+## 🆕 5. Hướng Dẫn Đăng Ký Chain Mới (Sau Genesis)
+
+Đối với một Private Chain hoàn toàn mới (không nằm trong danh sách founding chains lúc khởi tạo), bạn không thể dùng hàm `bootstrapFoundingChains`. Quy trình đăng ký chain mới yêu cầu tuân thủ cơ chế đồng thuận an toàn (chống Sybil Attack) thông qua các bước sau:
+
+### Bước 1: Cấp phát Allocation (Tiền cọc) cho Chain Mới
+Theo cơ chế bảo mật (từ bản vá 2026-08-27), một chain mới khi đăng ký bắt buộc phải có số dư trong `PerChainAllocation` lớn hơn hoặc bằng `MinRegistrationStake`. 
+Bạn dùng công cụ `live_asset_bridge` để lấy một phần Allocation đã có sẵn từ Reserve Chain (991) chuyển sang Chain ID mới:
+
+```bash
+cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/live_asset_bridge
+go build -o live_asset_bridge main.go
+
+./live_asset_bridge -action allocate-supply \
+  -this-chain 991 \
+  -other-chain <NEW_CHAIN_ID> \
+  -value 100000000000000000000000000 \
+  -timelock 12
+```
+*(Ghi chú: Lệnh trên sẽ tự động đệ trình `ProposalTransferAllocation`, tự động lấy chữ ký BLS của các Validator để Vote đạt Quorum, chờ hết 12s Timelock rồi tự động Execute).*
+
+### Bước 2: Đăng ký danh bạ qua Stake (`RegisterChainViaStake`)
+Sau khi đủ cọc, dùng công cụ `register_chains` để đăng ký Chain Mới vào Root Anchor. Tool này sẽ tự tìm đọc file `execution.json` của Chain Mới để lấy Public Key BLS và tạo bằng chứng PoP hợp lệ:
+
+```bash
+cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/register_chains
+go build -o register_chains main.go
+
+./register_chains \
+  -chains <NEW_CHAIN_ID> \
+  -base-dir /opt/metanode \
+  -rpc http://<IP_PUBLIC_CHAIN>:10746 \
+  -key <PRIVATE_KEY_ETH_CÓ_SẴN_GAS_CỦA_BẠN>
+```
+*(Cơ chế `RegisterChainViaStake`: Smart Contract tự kiểm tra `PerChainAllocation` có đủ ở Bước 1 hay không, nếu đủ sẽ ghi danh bạ lập tức mà không cần qua quy trình Vote phức tạp nữa).*
+
+### Bước 3: Đăng ký chéo danh bạ vào các Chain hiện hữu
+Sổ cái danh bạ (ChainRegistry) nằm rải rác độc lập trên từng chain. Để các chain cũ nhận diện được chain mới, bạn phải chạy lệnh đăng ký trên vào tất cả các RPC của chain cũ:
+
+```bash
+./register_chains -chains <NEW_CHAIN_ID> -base-dir /opt/metanode -rpc http://<IP_CHAIN_101>:8546 -key <PRIVATE_KEY_ETH>
+./register_chains -chains <NEW_CHAIN_ID> -base-dir /opt/metanode -rpc http://<IP_CHAIN_102>:8547 -key <PRIVATE_KEY_ETH>
+# Tương tự cho 103, 104...
+```
+
+### Bước 4: Cấu hình Relayer & Tích hợp
+- Cập nhật file `inventory.yml` (nếu dùng Ansible) và cấu hình của **Relayer Daemon** để bổ sung URL RPC và Chain ID của chuỗi mới.
+- Khởi động lại (Restart) Relayer. Khi Relayer quét thấy Chain ID mới đã hiển thị `Active` trên Root Anchor, nó sẽ tự động nhận diện và định tuyến giao dịch Cross-chain cho chuỗi mới này.
