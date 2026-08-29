@@ -22,6 +22,7 @@ typedef struct {
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
+void metanode_init_rocksdb();
 void metanode_start_consensus(const char* config_path, const char* data_dir);
 void metanode_pause_consensus();
 void metanode_resume_consensus();
@@ -127,7 +128,11 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	defer C.free(unsafe.Pointer(cConfigPath))
 	defer C.free(unsafe.Pointer(cDataDir))
 
-	logger.Info("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+	fmt.Println("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+
+	// Call the new C++ static initialization function on the main thread safely
+	C.metanode_init_rocksdb()
+
 	C.metanode_start_consensus(cConfigPath, cDataDir)
 
 	return nil

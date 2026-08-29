@@ -188,6 +188,13 @@ pub fn get_ffi_tx_queue_depth() -> usize {
     0
 }
 
+/// Initialize RocksDB C++ static variables safely.
+/// This should be called from Go's main thread on startup.
+#[no_mangle]
+pub extern "C" fn metanode_init_rocksdb() {
+    let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new("/tmp/rocksdb_dummy_init");
+}
+
 pub fn setup_ffi_transaction_channel(sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
     // Acquire the lock and update the channel
     if let Ok(mut guard) = FFI_TX_SENDER.write() {
@@ -493,11 +500,6 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                         // open connections to old ports, causing bind/connect failures.
                         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     }
-                    if let Some(store_path) = node_config.storage_path.to_str() {
-                        info!("🛠️ [STARTUP] Pre-initializing RocksDB C++ static variables to prevent corruption after long syncs...");
-                        let _pre_init = consensus_core::storage::rocksdb_store::RocksDBStore::new(store_path);
-                    }
-
                     let startup_config = StartupConfig::new(node_config, registry, None);
 
                     let initialized_node = match InitializedNode::initialize(startup_config).await {
