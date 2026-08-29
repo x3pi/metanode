@@ -55,6 +55,8 @@ type RelayerDaemon struct {
 	abi               abi.ABI
 	processedMessages map[common.Hash]bool
 	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
+	watchedPairs      map[string]bool // key: "srcChainId:destChainId"
+	watchedPairsMu    sync.Mutex
 	nonces            map[uint64]uint64
 	nonceMu           sync.Mutex
 	chainLocks        map[uint64]*sync.Mutex
@@ -136,6 +138,65 @@ func (d *RelayerDaemon) Address() common.Address {
 	return d.relayerAddr
 }
 
+// GetChainClient returns the rootanchor.Client for chainID in a thread-safe manner.
+func (d *RelayerDaemon) GetChainClient(chainID uint64) (*rootanchor.Client, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	client, exists := d.chainClients[chainID]
+	return client, exists
+}
+
+// ConfiguredChains returns a snapshot of all configured chain IDs.
+func (d *RelayerDaemon) ConfiguredChains() []uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	chains := make([]uint64, 0, len(d.chainClients))
+	for id := range d.chainClients {
+		chains = append(chains, id)
+	}
+	return chains
+}
+
+// AddChain dynamically registers a new chain RPC client at runtime and spawns watchers if ctx is provided.
+func (d *RelayerDaemon) AddChain(ctx context.Context, chainID uint64, rpcURL string) error {
+	d.mu.Lock()
+	if _, exists := d.chainClients[chainID]; exists {
+		d.mu.Unlock()
+		return nil
+	}
+	c, err := rootanchor.NewClient([]string{rpcURL}, nil)
+	if err != nil {
+		d.mu.Unlock()
+		return fmt.Errorf("connecting to chain %d @ %s: %w", chainID, rpcURL, err)
+	}
+	if d.chainClients == nil {
+		d.chainClients = make(map[uint64]*rootanchor.Client)
+	}
+	d.chainClients[chainID] = c
+	if d.config.ChainRPCURLs == nil {
+		d.config.ChainRPCURLs = make(map[uint64]string)
+	}
+	d.config.ChainRPCURLs[chainID] = rpcURL
+
+	existingChains := make([]uint64, 0, len(d.chainClients))
+	for id := range d.chainClients {
+		if id != chainID {
+			existingChains = append(existingChains, id)
+		}
+	}
+	d.mu.Unlock()
+
+	logger.Info("✨ [DYNAMIC RELAYER] Discovered new chain %d (@ %s) — auto-spawning watchers!", chainID, rpcURL)
+
+	if ctx != nil {
+		for _, other := range existingChains {
+			go d.WatchChainPair(ctx, chainID, other)
+			go d.WatchChainPair(ctx, other, chainID)
+		}
+	}
+	return nil
+}
+
 // RelayMessage handles the full attestation and dispatch cycle for a single cross-chain message.
 func (d *RelayerDaemon) RelayMessage(
 	ctx context.Context,
@@ -215,7 +276,7 @@ func (d *RelayerDaemon) RelayMessage(
 // claimMessage, batchOutboundCommit) shares one nonce-safety implementation instead of
 // duplicating it per call site.
 func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldata []byte, gasLimit uint64) (common.Hash, error) {
-	client, exists := d.chainClients[chainID]
+	client, exists := d.GetChainClient(chainID)
 	if !exists {
 		return common.Hash{}, fmt.Errorf("no RPC client configured for chain %d", chainID)
 	}
@@ -291,7 +352,10 @@ func (d *RelayerDaemon) sendToChainAndWait(ctx context.Context, chainID uint64, 
 	if err != nil {
 		return nil, err
 	}
-	client := d.chainClients[chainID]
+	client, exists := d.GetChainClient(chainID)
+	if !exists {
+		return nil, fmt.Errorf("no RPC client configured for chain %d", chainID)
+	}
 	maxIterations := d.config.MaxPollIterations
 	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 10*time.Second {
 		maxIterations = int((10 * time.Second) / d.config.PollInterval)
@@ -388,7 +452,7 @@ func (d *RelayerDaemon) RelayBatch(
 		return fmt.Errorf("RelayBatch: empty message batch")
 	}
 	destChainID := messages[0].DestChainID
-	destClient, exists := d.chainClients[destChainID]
+	destClient, exists := d.GetChainClient(destChainID)
 	if !exists {
 		return fmt.Errorf("no RPC client configured for destination chain %d", destChainID)
 	}
@@ -522,7 +586,7 @@ func (d *RelayerDaemon) RelayBatch(
 // batch (RelayBatch). Returns (0, nil) with no error when there was nothing pending -- not an
 // error case, just nothing to do this tick.
 func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destChainID uint64) (int, error) {
-	sourceClient, exists := d.chainClients[sourceChainID]
+	sourceClient, exists := d.GetChainClient(sourceChainID)
 	if !exists {
 		return 0, fmt.Errorf("no RPC client configured for source chain %d", sourceChainID)
 	}
@@ -595,8 +659,25 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 // never calling RelayMessage on its own). Errors are logged, not fatal -- a transient RPC hiccup
 // on one tick must not kill the whole watch loop.
 func (d *RelayerDaemon) WatchChainPair(ctx context.Context, sourceChainID, destChainID uint64) {
+	pairKey := fmt.Sprintf("%d:%d", sourceChainID, destChainID)
+	d.watchedPairsMu.Lock()
+	if d.watchedPairs == nil {
+		d.watchedPairs = make(map[string]bool)
+	}
+	if d.watchedPairs[pairKey] {
+		d.watchedPairsMu.Unlock()
+		return
+	}
+	d.watchedPairs[pairKey] = true
+	d.watchedPairsMu.Unlock()
+
 	d.wg.Add(1)
-	defer d.wg.Done()
+	defer func() {
+		d.watchedPairsMu.Lock()
+		delete(d.watchedPairs, pairKey)
+		d.watchedPairsMu.Unlock()
+		d.wg.Done()
+	}()
 	logger.Info("👀 [RELAYER DAEMON] watching chain %d -> chain %d for outbound messages", sourceChainID, destChainID)
 	for {
 		select {

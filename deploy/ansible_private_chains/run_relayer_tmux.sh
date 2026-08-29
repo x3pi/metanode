@@ -194,7 +194,7 @@ echo "   - Log File:        $LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 
 # Tạo lệnh chạy ngầm với tee ghi log mới
-CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' $RESERVE_FLAG -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
+CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' -config-file '$CONFIG_JSON' $RESERVE_FLAG -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
 
 # Khởi tạo tmux detached session
 tmux new-session -d -s "$SESSION_NAME" bash -c "$CMD"
