@@ -493,6 +493,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                         // open connections to old ports, causing bind/connect failures.
                         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                     }
+                    if let Some(store_path) = node_config.storage_path.to_str() {
+                        info!("🛠️ [STARTUP] Pre-initializing RocksDB C++ static variables to prevent corruption after long syncs...");
+                        let _pre_init = consensus_core::storage::rocksdb_store::RocksDBStore::new(store_path);
+                    }
 
                     let startup_config = StartupConfig::new(node_config, registry, None);
 
