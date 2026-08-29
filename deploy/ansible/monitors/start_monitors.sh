@@ -295,41 +295,53 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                                 cons_status=$(systemctl is-active "metanode-consensus-$node_id" 2>/dev/null || echo "unknown")
                                 
                                 # Kéo nhật ký journalctl mới nhất
-                                journalctl -u "metanode-execution-$node_id" -n 200 --no-pager > "$crash_dir/journal_execution.log" 2>/dev/null || true
-                                journalctl -u "metanode-consensus-$node_id" -n 200 --no-pager > "$crash_dir/journal_consensus.log" 2>/dev/null || true
+                                journalctl -u "metanode-execution-$node_id" -n 500 --no-pager > "$crash_dir/journal_execution.log" 2>/dev/null || true
+                                journalctl -u "metanode-consensus-$node_id" -n 500 --no-pager > "$crash_dir/journal_consensus.log" 2>/dev/null || true
                                 
                                 # Kéo panic dump nếu có
                                 cp /opt/metanode/node-$node_id/logs/execution/panic.log "$crash_dir/" 2>/dev/null || true
                                 
-                                # Kéo file log execution mới nhất (chỉ lấy 1 file mới nhất trong thư mục ngày)
-                                latest_exec=$(ls -t /opt/metanode/node-$node_id/logs/execution/*/*.log /opt/metanode/node-$node_id/logs/execution/*.log 2>/dev/null | head -n 1 || true)
-                                if [ -n "$latest_exec" ]; then cp "$latest_exec" "$crash_dir/" 2>/dev/null || true; fi
+                                # Kéo thư mục log execution ngày mới nhất (chứa execution.log, App.log, IntermediateRoot.log...)
+                                mkdir -p "$crash_dir/execution"
+                                latest_exec_date_dir=$(ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1 || true)
+                                if [ -n "$latest_exec_date_dir" ]; then
+                                    cp -r "$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
+                                fi
+                                cp /opt/metanode/node-$node_id/logs/execution/*.log "$crash_dir/execution/" 2>/dev/null || true
                                 
-                                # Kéo file log consensus mới nhất
-                                latest_cons=$(ls -t /opt/metanode/node-$node_id/logs/consensus/*/*.log /opt/metanode/node-$node_id/logs/consensus/*.log 2>/dev/null | head -n 1 || true)
-                                if [ -n "$latest_cons" ]; then cp "$latest_cons" "$crash_dir/" 2>/dev/null || true; fi
+                                # Kéo thư mục log consensus ngày mới nhất
+                                mkdir -p "$crash_dir/consensus"
+                                latest_cons_date_dir=$(ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1 || true)
+                                if [ -n "$latest_cons_date_dir" ]; then
+                                    cp -r "$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
+                                fi
+                                cp /opt/metanode/node-$node_id/logs/consensus/*.log "$crash_dir/consensus/" 2>/dev/null || true
                             else
                                 exec_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
                                 cons_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
                                 
                                 # Kéo nhật ký journalctl mới nhất
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 200 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 200 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
+                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 500 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
+                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 500 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
                                 
                                 # Kéo panic dump nếu có
                                 sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/panic.log" "$crash_dir/" 2>/dev/null || true
                                 
-                                # Kéo file log execution mới nhất
-                                latest_exec=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -t /opt/metanode/node-$node_id/logs/execution/*/*.log /opt/metanode/node-$node_id/logs/execution/*.log 2>/dev/null | head -n 1" 2>/dev/null || true)
-                                if [ -n "$latest_exec" ]; then
-                                    sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec" "$crash_dir/" 2>/dev/null || true
+                                # Kéo thư mục log execution ngày mới nhất
+                                mkdir -p "$crash_dir/execution"
+                                latest_exec_date_dir=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                if [ -n "$latest_exec_date_dir" ]; then
+                                    sshpass -p "$ssh_pass" scp -r -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
                                 fi
+                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/*.log" "$crash_dir/execution/" 2>/dev/null || true
                                 
-                                # Kéo file log consensus mới nhất
-                                latest_cons=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -t /opt/metanode/node-$node_id/logs/consensus/*/*.log /opt/metanode/node-$node_id/logs/consensus/*.log 2>/dev/null | head -n 1" 2>/dev/null || true)
-                                if [ -n "$latest_cons" ]; then
-                                    sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons" "$crash_dir/" 2>/dev/null || true
+                                # Kéo thư mục log consensus ngày mới nhất
+                                mkdir -p "$crash_dir/consensus"
+                                latest_cons_date_dir=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                if [ -n "$latest_cons_date_dir" ]; then
+                                    sshpass -p "$ssh_pass" scp -r -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
                                 fi
+                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/consensus/*.log" "$crash_dir/consensus/" 2>/dev/null || true
                             fi
 
                             # Xóa bớt các thư mục backup cũ, chỉ giữ lại 5 bản mới nhất
