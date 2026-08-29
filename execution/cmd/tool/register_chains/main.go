@@ -430,7 +430,7 @@ func handleRegisterChains(
 	}
 
 	if fundGenesisFlag {
-		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds)
+		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
 	}
 }
 
@@ -559,6 +559,7 @@ func fundGenesis(
 	chainIDs []uint64,
 	genesisSupplyFlag, perChainAllocFlag string,
 	timelockWaitSeconds int,
+	parsedABI abi.ABI,
 ) {
 	if genesisSupplyFlag == "" || perChainAllocFlag == "" {
 		logger.Error("-fund-genesis requires both -genesis-supply and -per-chain-allocation flags to be set")
@@ -612,7 +613,21 @@ func fundGenesis(
 		logger.Info("✅ fundGenesis: minted %s to Reserve (chain %d) on Root Anchor", genesisSupply.String(), reserveChainID)
 	}
 
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
 	for _, cid := range chainIDs {
+		// 1. Kiểm tra xem chain đã có allocation trước đó chưa
+		calldata, packErr := parsedABI.Pack("getAllocation", new(big.Int).SetUint64(cid))
+		if packErr == nil {
+			if out, callErr := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil); callErr == nil {
+				if results, unpackErr := parsedABI.Unpack("getAllocation", out); unpackErr == nil && len(results) > 0 {
+					if existingAlloc, ok := results[0].(*big.Int); ok && existingAlloc.Sign() > 0 {
+						logger.Info("ℹ️ fundGenesis: chain %d already has allocation (%s wei) -- skipping distribution.", cid, existingAlloc.String())
+						continue
+					}
+				}
+			}
+		}
+
 		transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
 			FromChainID: reserveChainID,
 			ToChainID:   cid,
@@ -625,12 +640,8 @@ func fundGenesis(
 		if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
 			6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
 			fmt.Sprintf("transfer allocation to chain %d", cid)); err != nil {
-			if strings.Contains(err.Error(), "insufficient allocation") {
-				logger.Info("ℹ️ fundGenesis: allocation transfer to chain %d skipped (Reserve supply already distributed: %v)", cid, err)
-				continue
-			}
-			logger.Error("❌ fundGenesis: allocation transfer to chain %d failed: %v", cid, err)
-			os.Exit(1)
+			logger.Info("ℹ️ fundGenesis: allocation transfer to chain %d skipped (%v)", cid, err)
+			continue
 		}
 		logger.Info("✅ fundGenesis: transferred %s from Reserve (chain %d) to chain %d", perChainAlloc.String(), reserveChainID, cid)
 	}
