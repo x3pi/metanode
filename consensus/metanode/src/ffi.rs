@@ -191,7 +191,7 @@ pub fn get_ffi_tx_queue_depth() -> usize {
 /// Initialize RocksDB C++ static variables safely.
 /// This should be called from Go's main thread on startup.
 #[no_mangle]
-pub extern "C" fn metanode_init_rocksdb(data_dir: *const libc::c_char) {
+pub extern "C" fn metanode_init_rocksdb(data_dir: *const std::os::raw::c_char) {
     if data_dir.is_null() { return; }
     let c_str = unsafe { std::ffi::CStr::from_ptr(data_dir) };
     if let Ok(dir) = c_str.to_str() {
