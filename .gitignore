@@ -514,3 +514,8 @@ deploy/ansible_private_chains/*.retry
 execution/cross_chain_relayer
 execution/cmd/tool/register_chains/register_chains
 execution/cmd/tool/live_asset_bridge/live_asset_bridge
+
+# Local testing tools
+execution/cmd/tool/test_cross_chain_tx/
+execution/cmd/tool/tx_sender/config_*.json
+execution/cmd/tool/tx_sender/data_deploy.json
