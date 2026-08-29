@@ -128,13 +128,43 @@ if [ "$ACTION" = "logs" ]; then
 fi
 
 # 5. Xử lý lệnh START / RESTART
+INVENTORY_YML="$SCRIPT_DIR/inventory.yml"
+
+if [ -f "$INVENTORY_YML" ]; then
+    echo "📖 Đang đọc cấu hình trực tiếp từ $INVENTORY_YML ..."
+    python3 -c "
+import yaml, json
+with open('$INVENTORY_YML') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
+root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
+out = {
+    'root_anchor': root_rpc,
+    'nodes': {},
+    'tcp_nodes': {}
+}
+for h in hosts.values():
+    if isinstance(h, dict) and 'chain_id' in h:
+        cid = str(h['chain_id'])
+        ip = h.get('ansible_host', '127.0.0.1')
+        rpc_port = h.get('rpc_port', 8546)
+        port_offset = h.get('port_offset', 10)
+        tcp_port = 4200 + port_offset
+        out['nodes'][cid] = f'http://{ip}:{rpc_port}'
+        out['tcp_nodes'][cid] = f'{ip}:{tcp_port}'
+
+with open('$CONFIG_JSON', 'w') as f:
+    json.dump(out, f, indent=2)
+"
+fi
+
 if [ ! -f "$CONFIG_JSON" ]; then
-    echo "❌ Lỗi: Không tìm thấy file $CONFIG_JSON"
+    echo "❌ Lỗi: Không tìm thấy file $CONFIG_JSON và $INVENTORY_YML"
     echo "👉 Hãy chạy deploy private chains trước: ./deploy_private_chains.sh --setup"
     exit 1
 fi
 
-echo "📖 Đang đọc cấu hình từ $CONFIG_JSON ..."
+echo "📖 Đang trích xuất danh sách nodes từ $CONFIG_JSON ..."
 PARSED_DATA=$(python3 -c "
 import json
 with open('$CONFIG_JSON') as f:

@@ -464,6 +464,27 @@ func main() {
 			fmt.Println("my derived pubkey:      ", eth_common.Bytes2Hex(kp.BytesPublicKey()))
 		}
 
+	case "query-allocation":
+		calldata, err := gatewayABI.Pack("getAllocation", new(big.Int).SetUint64(*otherChainID))
+		if err != nil {
+			fmt.Println("pack getAllocation:", err)
+			os.Exit(1)
+		}
+		gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+		if err != nil {
+			fmt.Println("call getAllocation:", err)
+			os.Exit(1)
+		}
+		results, err := gatewayABI.Unpack("getAllocation", out)
+		if err != nil {
+			fmt.Println("unpack getAllocation:", err)
+			os.Exit(1)
+		}
+		alloc := results[0].(*big.Int)
+		allocFloat := new(big.Float).Quo(new(big.Float).SetInt(alloc), big.NewFloat(1e18))
+		fmt.Printf("📊 Chain %d Allocation: %s wei (%s MTN)\n", *otherChainID, alloc.String(), allocFloat.Text('f', 4))
+
 	case "outbound":
 		assetIDBig, _ := new(big.Int).SetString(*assetID, 10)
 		valueBig, _ := new(big.Int).SetString(*value, 10)

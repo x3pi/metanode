@@ -483,10 +483,13 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
 
     if [ -s "$RPC_JSON_PATH" ]; then
         cp -f "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
+        if [ -d "/opt/metanode/monitors/block_hash_checker" ]; then
+            cp -f "$RPC_JSON_PATH" "/opt/metanode/monitors/block_hash_checker/config-m-nodes.json" 2>/dev/null || true
+        fi
     fi
     cd "$BLOCK_CHECKER_DIR" || exit 1
     
-    if [ ! -f "block_hash_checker" ] && command -v go >/dev/null 2>&1; then
+    if { [ ! -f "block_hash_checker" ] || [ "main.go" -nt "block_hash_checker" ]; } && command -v go >/dev/null 2>&1; then
         go build -o block_hash_checker main.go || true
     fi
     

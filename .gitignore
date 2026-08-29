@@ -512,3 +512,5 @@ deploy/ansible_private_chains/logs
 logs_private_chains/
 deploy/ansible_private_chains/*.retry
 execution/cross_chain_relayer
+execution/cmd/tool/register_chains/register_chains
+execution/cmd/tool/live_asset_bridge/live_asset_bridge
