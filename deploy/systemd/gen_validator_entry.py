@@ -14,11 +14,21 @@ Usage:
     --keys-dir  ./validator_keys \
     --output    my_validator.json
 
-  # Then merge into genesis:
-  python3 update_genesis.py genesis.json my_validator.json
+  # Merging into genesis.json happens automatically (see below). There is no
+  # separate update_genesis.py script — that name is historical and does not
+  # exist in this repo.
+  #
+  # For bootstrapping a NEW Root Anchor network from >= 4 independent founding
+  # chains (each operator generating keys on their own machine, no shared
+  # genesis.json, no eth_private_key leaving the operator's machine), use
+  # execution/cmd/tool/founding_entry + execution/cmd/tool/assemble_root_anchor
+  # instead — see note/runbook_root_anchor_genesis_ceremony.md. This script
+  # remains the right tool for the single-shared-genesis.json workflow (one
+  # coordinator, --chain-id 991 by default).
 
 Options:
   --hostname    NAME      Validator hostname, e.g. node-0 (required)
+  --chain-id    ID        Chain ID written into execution.json (default: 991)
   --ip          IP        Public IP of this validator (default: 127.0.0.1)
   --p2p-port    PORT      Rust consensus P2P port (default: 9000 + node_id)
   --primary-port PORT     Go P2P primary port (default: 6200 + node_id)
@@ -75,6 +85,29 @@ def find_metanode_bin(override=None):
             return str(candidate)
     return None
 
+
+# Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the
+# default so existing devnet/smoke-test flows are unchanged; pass --gateway-bls-key or
+# --random-gateway-bls-key for any real ceremony deployment.
+DEVNET_GATEWAY_BLS_KEY = "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+
+def generate_fresh_bls_secret(metanode_bin: str) -> str:
+    """Generates an independent, freshly-random BLS secret scalar via the same `metanode
+    keytool` call used for authority_key -- used for gateway_bls_key when the operator asks
+    for a unique key instead of DEVNET_GATEWAY_BLS_KEY. Real validators must not share this
+    key across nodes/deployments (found 2026-08-27: all 3 genesis generators -- including this
+    one, the tool a real ceremony operator uses -- hardcoded the identical literal here)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(red(f"ERROR: metanode keytool failed (gateway BLS key generation):\n{result.stderr}"))
+            sys.exit(1)
+        with open(os.path.join(tmpdir, "authority_key.json")) as f:
+            return json.load(f)["private_key_hex"]
 
 # ─── Step 1 & 2: Generate keys via Rust keytool ─────────────────────────────
 def generate_keys_via_keytool(metanode_bin: str, keys_dir: str) -> tuple:
@@ -149,7 +182,9 @@ def build_validator_entry(bls: dict, eth: dict, args) -> dict:
 
     return {
         "address":                       eth_address_lower,
-        "eth_private_key":               eth["private_key"],
+        # NOTE: no "eth_private_key" here. This entry is what gets shared with
+        # a ceremony coordinator / merged into a shared genesis.json — the
+        # private key stays on this machine, in <keys_dir>/eth_key.json.
         "primary_address":               primary_address,
         "worker_address":                worker_address,
         "p2p_address":                   p2p_address,
@@ -168,6 +203,58 @@ def build_validator_entry(bls: dict, eth: dict, args) -> dict:
         "authority_key":  bls["authority_key"],
         "protocol_key":   bls["protocol_key"],
     }
+
+
+def run_founding_entry_tool(args, keys_dir: str) -> None:
+    """
+    Shell out to execution/cmd/tool/founding_entry to build a
+    founding_entry.json for the Root Anchor genesis ceremony — the artifact
+    for bootstrapping a NEW multi-chain network, distinct from this script's
+    own single-shared-genesis.json auto-merge. No private key material is
+    passed on the command line or read by this function; founding_entry reads
+    keys_dir itself and only ever writes public data.
+    """
+    if not args.founding_chain_name:
+        print(red("ERROR: --founding-chain-name is required together with --founding-entry"))
+        sys.exit(1)
+
+    # The subprocess below runs with cwd=REPO_ROOT/execution (required for
+    # `go run` to find the module) — resolve every filesystem path arg to
+    # absolute BEFORE building the command, or relative paths the operator
+    # passed (--keys-dir, --out, --founding-entry-bin) would silently
+    # re-resolve against the wrong directory.
+    if args.founding_entry_bin:
+        cmd = [os.path.abspath(args.founding_entry_bin)]
+    else:
+        cmd = ["go", "run", str(REPO_ROOT / "execution" / "cmd" / "tool" / "founding_entry")]
+
+    cmd += [
+        "--keys-dir", os.path.abspath(keys_dir),
+        "--chain-id", str(args.chain_id),
+        "--chain-name", args.founding_chain_name,
+        "--hostname", args.hostname,
+        "--ip", args.ip,
+        "--p2p-port", str(args.p2p_port),
+        "--primary-port", str(args.primary_port),
+        "--worker-port", str(args.worker_port),
+        "--stake", str(args.stake),
+        "--commission", str(args.commission),
+        "--out", os.path.abspath(args.founding_entry),
+    ]
+    if args.description:
+        cmd += ["--description", args.description]
+    if args.website:
+        cmd += ["--website", args.website]
+    if args.image:
+        cmd += ["--image", args.image]
+
+    print(bold(f"\nStep 3/3 — Building founding_entry.json via {' '.join(cmd[:2])}"))
+    result = subprocess.run(cmd, cwd=str(REPO_ROOT / "execution"))
+    if result.returncode != 0:
+        print(red(f"ERROR: founding_entry tool exited with code {result.returncode}"))
+        sys.exit(1)
+    print(green(f"  ✅ founding_entry.json written to {args.founding_entry}"))
+    print(green("     Contains NO private key material — safe to publish/share with the ceremony coordinator."))
 
 
 def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
@@ -234,8 +321,12 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "go_mem_limit_gb": 32,
         "mvm_cache_enabled": False,
         "enable_private_gateway": True,
-        "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
-        "chainId": 991,
+        "gateway_bls_key": (
+            args.gateway_bls_key if getattr(args, "gateway_bls_key", None)
+            else generate_fresh_bls_secret(find_metanode_bin(args.metanode_bin)) if getattr(args, "random_gateway_bls_key", False)
+            else DEVNET_GATEWAY_BLS_KEY
+        ),
+        "chainId": args.chain_id,
         "private_key": bls_private_hex,
         "address": eth_addr_stripped,
         "log_path": f"{install_dir}/logs/execution/go-master",
@@ -250,7 +341,10 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "Ea004b9aE1F60516210df2fDfcE9342618729d98"
         ],
         "cross_chain": {
-            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+            "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+            "reserve_chain_id": 991,
+            "min_native_stake_to_register_wei": "1000000000000000000",
+            "devnet_governance_timelock_seconds_override": 10
         },
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",
@@ -393,6 +487,7 @@ def parse_args():
         description="All-in-one: generate keys via keytool + genesis validator entry"
     )
     parser.add_argument("--hostname",     required=True, help="Validator hostname, e.g. node-0")
+    parser.add_argument("--chain-id",     type=int, default=991, help="Chain ID written into execution.json (default: 991, the existing shared-genesis default)")
     parser.add_argument("--node-type",    default="validator", choices=["validator", "synconly"],
                         help="Node type: validator (default) or synconly")
     parser.add_argument("--is-rpc",       action="store_true", help="Enable RPC for this node")
@@ -413,6 +508,15 @@ def parse_args():
     parser.add_argument("--keys-dir",     default=None, help="Directory to save keys (default: ./<hostname>_keys)")
     parser.add_argument("--output",       default=None, help="Output genesis entry JSON file")
     parser.add_argument("--metanode-bin", default=None)
+    parser.add_argument("--founding-entry", default=None,
+                        help="If set, also run execution/cmd/tool/founding_entry to produce a "
+                             "founding_entry.json at this path — the artifact for a NEW Root "
+                             "Anchor genesis ceremony (see note/runbook_root_anchor_genesis_ceremony.md), "
+                             "as opposed to this script's own shared-genesis.json auto-merge.")
+    parser.add_argument("--founding-chain-name", default=None,
+                        help="Required with --founding-entry: human-readable name of this founding chain")
+    parser.add_argument("--founding-entry-bin", default=None,
+                        help="Path to a pre-built founding_entry binary (default: `go run` the tool from source)")
     parser.add_argument("--consensus-max-txs-per-block", type=int, default=4000,
                         help="Maximum number of transactions proposed in a single consensus block (default: 4000)")
     parser.add_argument("--nomt-commit-concurrency", type=int, default=4,
@@ -433,6 +537,8 @@ def parse_args():
                         help="Maximum number of snapshots to keep (default: 2)")
     parser.add_argument("--max-part-size-mb", type=int, default=600,
                         help="Max part size in MB for snapshot archive (default: 600)")
+    parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real ceremony deployment.")
+    parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     parser.add_argument("--epoch-duration-seconds", type=int, default=600,
                         help="Epoch duration in seconds (default: 600 = 10 min)")
     return parser.parse_args()
@@ -473,6 +579,9 @@ def main():
     bls, eth = generate_keys_via_keytool(metanode_bin, keys_dir)
     print(green(f"  ✅ Keys generated and saved to {keys_dir}"))
     print(green(f"  ✅ ETH address: {eth['address']}"))
+
+    if args.founding_entry:
+        run_founding_entry_tool(args, keys_dir)
 
     # Step 3: Build genesis entry
     print(bold("\nStep 2/2 — Building genesis validator entry"))

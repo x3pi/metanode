@@ -1,0 +1,38 @@
+all:
+  vars:
+    # URL RPC của Public Chain (Root Anchor Cluster)
+    root_anchor_rpc: "http://[IP_ADDRESS]"
+    ansible_user: "name"
+    ansible_ssh_pass: "password"
+    ansible_become_pass: "password"
+
+    # ECDSA private key (hex) của tài khoản submit các giao dịch bootstrapFoundingChains/
+    # propose/vote/executeProposal lên Root Anchor -- BẮT BUỘC phải có sẵn coin gas thật trên
+    # Root Anchor. Bắt buộc phải khai báo, deploy_private_chains.sh sẽ báo lỗi và dừng nếu thiếu.
+    root_anchor_submitter_key: "[SUBMITTER_ECDSA_PRIVATE_KEY_HEX]"
+
+    # Tổng genesis supply mint 1 lần trên Reserve (Root Anchor) + số cấp cho MỖI founding chain,
+    # base-10 wei string -- xem register_chains -fund-genesis. Optional: bỏ qua 2 dòng dưới để
+    # dùng mặc định devnet (400,000,000 / 100,000,000 token, 18 decimals). KHÔNG dùng mặc định
+    # devnet cho triển khai thật -- số thật phải quyết định qua ceremony, không đoán mò.
+    # root_anchor_genesis_supply: "400000000000000000000000000"
+    # root_anchor_per_chain_allocation: "100000000000000000000000000"
+
+  children:
+    private_chains:
+      hosts:
+        # Máy 1 chạy Private Chain 101 tại /opt/metanode/chain-101
+        server_201_chain_101:
+          ansible_host: [IP_ADDRESS]
+          chain_id: 101
+          rpc_port: 8546
+          port_offset: 10
+          install_dir: "/opt/metanode/chain-101"
+
+        # Máy 2 chạy Private Chain 102 tại /opt/metanode/chain-102
+        server_202_chain_102:
+          ansible_host: [IP_ADDRESS]
+          chain_id: 102
+          rpc_port: 8546
+          port_offset: 20
+          install_dir: "/opt/metanode/chain-102"

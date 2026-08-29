@@ -1,4 +1,14 @@
 ---
+# This role used to unconditionally re-download+re-extract node_exporter from GitHub on every
+# single `--start`/`--reset-all` deploy run (i.e. on every code update, not just first install),
+# which is wasteful and a real failure risk on a network-restricted/air-gapped server -- a
+# transient GitHub outage would fail an otherwise unrelated code-update deploy. Guard on the
+# binary already being present so this only actually runs once per host.
+- name: Check whether node_exporter binary is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/node_exporter
+  register: node_exporter_bin
+
 - name: Download node_exporter
   ansible.builtin.get_url:
     url: "https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz"
@@ -9,12 +19,14 @@
   until: result is success
   retries: 5
   delay: 5
+  when: not node_exporter_bin.stat.exists
 
 - name: Extract node_exporter
   ansible.builtin.unarchive:
     src: "/tmp/node_exporter.tar.gz"
     dest: "/tmp/"
     remote_src: yes
+  when: not node_exporter_bin.stat.exists
 
 - name: Move node_exporter binary to /usr/local/bin
   ansible.builtin.copy:
@@ -22,6 +34,7 @@
     dest: "/usr/local/bin/node_exporter"
     mode: '0755'
     remote_src: yes
+  when: not node_exporter_bin.stat.exists
 
 - name: Create node_exporter systemd service file
   ansible.builtin.template:

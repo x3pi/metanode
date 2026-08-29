@@ -96,7 +96,52 @@ impl PeerRpcServer {
     pub async fn start(self) -> Result<()> {
         // Listen on all interfaces for WAN access
         let addr = format!("0.0.0.0:{}", self.port);
-        let listener = TcpListener::bind(&addr).await?;
+        // Defensive hardening, not the fix for Layer C (see
+        // note/cross_chain_production_readiness_plan.md Phase 0.7 for the full writeup): the
+        // "full" server started from startup.rs binds this exact port right after
+        // startup_sync.rs stops an "early" PeerRpcServer instance that briefly served the same
+        // port to unblock pre-quorum peer queries. Two earlier sessions (2026-08-25) observed a
+        // permanent "Address already in use" here on a live 4-validator devnet and initially
+        // assumed a Tokio task-cancellation race — this retry loop and the abort()+await fix in
+        // startup_sync.rs were written on that theory. Root-caused later the same day: the real
+        // occupant was never the early server at all, but a config generator
+        // (gen_root_anchor_chain.py) accidentally assigning this exact port number to BOTH
+        // peer_rpc_port and the validator's real gRPC consensus P2P listener
+        // (tonic_network.rs) — a permanent collision with a process that never releases the
+        // port, which 20 retries over 5+ seconds correctly could never have fixed and did not.
+        // That generator bug is now fixed (peer_rpc_port uses a disjoint port range) and is the
+        // actual, verified fix — confirmed live: all 4 validators reach Healthy with zero bind
+        // failures. This retry loop is kept as cheap, real insurance against a genuine but much
+        // narrower transient case (e.g. a fast manual restart into a socket the OS hasn't fully
+        // released yet) — harmless if never needed, and it costs nothing when the bind succeeds
+        // on the first attempt, as it now always does with the port collision fixed.
+        let listener = {
+            const MAX_BIND_RETRIES: u32 = 20;
+            const BIND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+            let mut last_err = None;
+            let mut bound = None;
+            for attempt in 1..=MAX_BIND_RETRIES {
+                match TcpListener::bind(&addr).await {
+                    Ok(l) => {
+                        bound = Some(l);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "🌐 [PEER RPC] bind({}) failed (attempt {}/{}): {} — retrying, likely \
+                             a not-yet-released socket from a preceding early server instance.",
+                            addr, attempt, MAX_BIND_RETRIES, e
+                        );
+                        last_err = Some(e);
+                        tokio::time::sleep(BIND_RETRY_DELAY).await;
+                    }
+                }
+            }
+            match bound {
+                Some(l) => l,
+                None => return Err(last_err.unwrap().into()),
+            }
+        };
         info!(
             "🌐 [PEER RPC] Started on {} (node_id={}, network_address={})",
             addr, self.node_id, self.network_address

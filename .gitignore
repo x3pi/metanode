@@ -478,8 +478,15 @@ deploy/ansible/monitors/parse_inventory.py
 
 # Genesis dynamically generated files
 deploy/systemd/genesis.json
+deploy/systemd/genesis-*.json
+deploy/systemd/genesis-101.json
+deploy/systemd/genesis-102.json
+deploy/systemd/private_dev_keys.json
+*dev_keys.json
 note/commit_review_fc17b2d2_xapian_manager.md
 deploy/systemd/single_chain_data/
+deploy/systemd/private_chains_data/
+private_chains_data/
 private_chain_3node/
 
 # aarch64 cross-compile (scripts/build-aarch64.sh, scripts/package-for-board.sh)
@@ -488,3 +495,22 @@ private_chain_3node/
 .aarch64-xapian-extract/
 simple_chain-aarch64
 .board_bundle/
+
+# Root Anchor / cross-chain T2 testnet local artifacts — generated validator/dev
+# private keys (single_chain_data/*/keys/*.json, eth_key.json) must never be
+# committed to this public repo, and the compiled tool binaries don't belong
+# in source control either.
+single_chain_data/
+eth_key.json
+deploy/systemd/root_anchor_data/
+deploy/systemd/register_chains
+deploy/systemd/cross_chain_relayer
+deploy/ansible_private_chains/data/
+deploy/ansible_private_chains/data
+deploy/ansible_private_chains/logs/
+deploy/ansible_private_chains/logs
+logs_private_chains/
+deploy/ansible_private_chains/*.retry
+execution/cross_chain_relayer
+execution/cmd/tool/register_chains/register_chains
+execution/cmd/tool/live_asset_bridge/live_asset_bridge

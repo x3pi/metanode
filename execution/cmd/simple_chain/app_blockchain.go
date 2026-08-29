@@ -648,7 +648,28 @@ func (app *App) initBlockchain() error {
 			logger.Warn("🛡️ [STARTUP] Mismatch detected: NOMT state is at block #%d, but LevelDB block database has blocks up to #%d. Catching up NOMT trie state...",
 				app.startLastBlock.Header().BlockNumber(), originalLastBlock.Header().BlockNumber())
 			if err := app.reexecuteBlocksToCatchUp(blockDatabase, app.startLastBlock.Header().BlockNumber(), originalLastBlock.Header().BlockNumber()); err != nil {
-				logger.Fatal("🚨 [STARTUP] NOMT catch-up failed: %v", err)
+				logger.Warn("⚠️ [STARTUP] NOMT catch-up re-execution encountered incomplete historical block data: %v", err)
+				logger.Warn("🛡️ [STARTUP] Truncating uncommitted block database tip to valid NOMT state #%d so network consensus/sync can cleanly replay from peers...", app.startLastBlock.Header().BlockNumber())
+				// Truncate missing/uncommitted block mappings from block database
+				for bn := app.startLastBlock.Header().BlockNumber() + 1; bn <= originalLastBlock.Header().BlockNumber(); bn++ {
+					key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+					app.storageManager.GetStorageMapping().Delete(key)
+				}
+				if flushErr := app.storageManager.GetStorageMapping().Flush(); flushErr != nil {
+					logger.Error("❌ [STARTUP] Failed to flush mapping DB after truncation: %v", flushErr)
+				}
+				storage.ResetAllBlockCounters(app.startLastBlock.Header().BlockNumber())
+				storage.ForceSetLastGlobalExecIndex(app.startLastBlock.Header().GlobalExecIndex())
+				storage.ForceSetLastHandledCommitIndex(uint32(app.startLastBlock.Header().CommitIndex()))
+				storage.UpdateLastHandledCommitEpoch(uint64(app.startLastBlock.Header().Epoch()))
+				blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
+				blockchain.GetBlockChainInstance().Commit()
+				
+				// 🛡️ CRITICAL FIX: We MUST update the master block pointer (lastBlockHashKey) and backup JSON
+				// to point to the rolled-back tip. Otherwise, the next restart will read the orphaned originalLastBlock!
+				if saveErr := blockDatabase.SaveLastBlockSync(app.startLastBlock); saveErr != nil {
+					logger.Error("❌ [STARTUP] Failed to SaveLastBlockSync during tip rollback: %v", saveErr)
+				}
 			}
 		}
 

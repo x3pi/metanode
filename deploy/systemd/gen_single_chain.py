@@ -112,7 +112,48 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     }
     return bls, eth
 
-def generate_eth_dev_account():
+_BLS_PUBKEY_BIN_CACHE = None
+
+def derive_min_pk_pubkey(secret_hex: str) -> str:
+    """Derives the real pkg/bls (min-pk, 48-byte G1) public key from a BLS secret scalar, as
+    base64. Real fix for a genesis-generation bug found 2026-08-26 while live-testing P4 relayer
+    automation: this script used to write the min_sig (96-byte G2, Rust consensus authority)
+    public key straight into an account's genesis publicKeyBls field -- but
+    AccountState.SetPublicKeyBls (execution/pkg/state/account_state.go) requires EXACTLY 48
+    bytes, the min-pk convention every cross-chain BLS call in the Go codebase actually uses
+    (CommitteeAttestationWorker/CommitAttestationWorker signing with Databases.BLSPrivateKey,
+    register_chains building founding committees). Writing the wrong 96-byte encoding meant a
+    validator's own on-chain identity never matched the min-pk pubkey it (and register_chains)
+    actually signs with -- committeeContains() never found a match, so validators silently never
+    submitted a single real commit/committee attestation share, and cross-chain automation
+    (RelayerDaemon.WatchChainPair) hung forever waiting for a quorum that could never form.
+    Same secret scalar, but min-pk and min-sig derive genuinely different, incompatible public
+    keys from it -- there is no way to convert one to the other, only to derive both separately
+    (metanode-keytool already generated the min_sig half; this derives the min-pk half via the
+    same execution/pkg/bls Go library every real cross-chain caller uses)."""
+    global _BLS_PUBKEY_BIN_CACHE
+    if _BLS_PUBKEY_BIN_CACHE is None:
+        bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+        if not bin_path.exists():
+            print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+            result = subprocess.run(
+                ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                sys.exit(1)
+        _BLS_PUBKEY_BIN_CACHE = str(bin_path)
+    result = subprocess.run(
+        [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(red(f"ERROR: bls_pubkey helper failed:\n{result.stderr}"))
+        sys.exit(1)
+    return result.stdout.strip()
+
+def generate_eth_dev_account(metanode_bin=None):
     """Generates a random secp256k1 Ethereum private key and derives its 0x address without external dependencies."""
     try:
         from eth_keys import keys
@@ -123,9 +164,97 @@ def generate_eth_dev_account():
             "address": pk.public_key.to_checksum_address()
         }
     except ImportError:
-        print(red("ERROR: 'eth_keys' python module is required to generate dev accounts."))
-        print(yellow("Please install it using: pip install eth_keys eth-hash[pycryptodome]"))
+        if metanode_bin:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                subprocess.run([metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir], capture_output=True)
+                eth_file = os.path.join(tmpdir, "eth_key.json")
+                if os.path.exists(eth_file):
+                    with open(eth_file) as f:
+                        data = json.load(f)
+                    return {
+                        "private_key": data["ETH_PRIVATE_KEY"],
+                        "address": data["ETH_ADDRESS"]
+                    }
+        print(red("ERROR: 'eth_keys' python module or 'metanode' binary is required to generate dev accounts."))
         sys.exit(1)
+
+def load_or_generate_private_dev_keys(keys_file: Path, chain_id: int, count: int = 6, metanode_bin: str = None) -> tuple:
+    """
+    Loads fixed/persistent developer keys from a local (git-ignored) JSON file.
+    If the file or the chain_id entry does not exist, generates fresh accounts and persists them locally.
+    Returns:
+      (current_chain_dev_accounts, all_system_dev_accounts)
+    """
+    data = {}
+    if keys_file.exists():
+        try:
+            with open(keys_file, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(yellow(f"  ⚠️ Warning reading {keys_file}: {e}. Creating new storage."))
+            data = {}
+
+    chain_key_str = str(chain_id)
+    if chain_key_str not in data or not isinstance(data[chain_key_str], list) or len(data[chain_key_str]) == 0:
+        roles = [
+            f"Sender ({'A' if chain_id % 2 != 0 else 'B'}0)",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}1",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}2",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}3",
+            f"Dev {'A' if chain_id % 2 != 0 else 'B'}4",
+            f"Relayer {'A' if chain_id % 2 != 0 else 'B'} ({'A' if chain_id % 2 != 0 else 'B'}5)",
+        ]
+        new_chain_accounts = []
+        for i in range(max(count, len(roles))):
+            acc = generate_eth_dev_account(metanode_bin)
+            role_name = roles[i] if i < len(roles) else f"Dev {i}"
+            acc["role"] = role_name
+            new_chain_accounts.append(acc)
+
+        data[chain_key_str] = new_chain_accounts
+        try:
+            with open(keys_file, "w") as fw:
+                json.dump(data, fw, indent=2)
+            os.chmod(keys_file, 0o600)
+            print(green(f"  🔑 Generated & saved {len(new_chain_accounts)} dev keys to local ignored file: {keys_file.name}"))
+        except Exception as e:
+            print(yellow(f"  ⚠️ Could not persist dev keys to {keys_file}: {e}"))
+
+    current_chain_accounts = data.get(chain_key_str, [])
+    all_system_accounts = []
+    for cid_str, accs in data.items():
+        if isinstance(accs, list):
+            all_system_accounts.extend(accs)
+
+    return current_chain_accounts, all_system_accounts
+
+# Devnet-only fallback: the literal value every gateway_bls_key defaulted to before
+# --random-gateway-bls-key existed (see note/security_variables_reference.md mục 3.1). Kept as
+# the default so existing devnet/smoke-test flows are byte-for-byte unchanged -- dev_accounts.json
+# above pre-registers a publicKeyBls derived from THIS EXACT secret (see its own comment) so that
+# plain eth_sendRawTransaction from those throwaway accounts passes the on-chain BLS registration
+# check without a real registration flow. Changing this default would silently break that.
+DEVNET_GATEWAY_BLS_KEY = "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+
+def generate_fresh_bls_secret(metanode_bin: str) -> str:
+    """Generates an independent, freshly-random BLS secret scalar via the same `metanode
+    keytool` call used for authority_key -- used for gateway_bls_key when the operator asks
+    for a unique per-node key instead of DEVNET_GATEWAY_BLS_KEY. Real chains must not share
+    this key across nodes/deployments (found 2026-08-27: all 3 genesis generators hardcoded
+    the identical literal here, which is fine for a single-machine devnet smoke test but a
+    real gap the moment enable_private_gateway is ever turned on for anything else)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [metanode_bin, "keytool", "generate", "validator", "--out-dir", tmpdir],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(red(f"ERROR: metanode keytool failed (gateway BLS key generation):\n{result.stderr}"))
+            sys.exit(1)
+        with open(os.path.join(tmpdir, "authority_key.json")) as f:
+            return json.load(f)["private_key_hex"]
 
 def main():
     parser = argparse.ArgumentParser(description="Generate single chain configs for Metanode")
@@ -135,10 +264,20 @@ def main():
     parser.add_argument("--output-dir", default="./single_chain_data", help="Output directory (default: ./single_chain_data)")
     parser.add_argument("--alloc-balance", type=int, default=1000000, help="Initial MTN balance per account (default: 1000000)")
     parser.add_argument("--dev-accounts", type=int, default=5, help="Number of funded dev accounts (default: 5)")
+    parser.add_argument("--dev-keys-file", default=None, help="Path to local dev keys JSON file (default: deploy/systemd/private_dev_keys.json)")
     parser.add_argument("--metanode-bin", default=None, help="Path to metanode binary")
     parser.add_argument("--rpc-port", type=int, default=8545, help="Base RPC Port (default: 8545)")
+    parser.add_argument("--port-offset", type=int, default=0, help="Port offset for primary, worker, p2p, dns ports (default: 0)")
     parser.add_argument("--is-rpc", action="store_true", help="Enable RPC node mode for the validators")
     parser.add_argument("--epochs-to-keep", type=int, default=None, help="Number of epochs to keep (default: 0 if --is-rpc else 5)")
+    parser.add_argument("--genesis-template", default=None, help="Path to genesis template file (default: deploy/systemd/genesis.json.example)")
+    parser.add_argument("--no-example-alloc", action="store_true", help="Do not inject accounts from genesis.json.example")
+    parser.add_argument("--inject-example-alloc", action="store_true", default=True, help="Inject accounts from genesis.json.example (default: True)")
+    parser.add_argument("--root-anchor-rpc", type=str, default="", help="Comma-separated list of Root Anchor RPC URLs (e.g. http://127.0.0.1:9099)")
+    parser.add_argument("--root-anchor-submitter-key", type=str, default="", help="ECDSA private key for the committee attestation worker")
+    parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
+    parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--reserve-chain-id", type=int, default=None, help="Chain ID of the system's Reserve chain (default: same as --chain-id)")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -170,12 +309,16 @@ def main():
         node_keys_dir = out_dir / f"node-{node_id}" / "keys"
         print(f"\n🔑 Generating keys for Validator node-{node_id} ...")
         bls, eth = generate_validator_keys(metanode_bin, str(node_keys_dir))
+        # Real min-pk (48-byte G1) pubkey derived from the SAME secret scalar authority_key
+        # uses -- see derive_min_pk_pubkey's doc comment for why this is a separate value from
+        # bls["authority_key"] (that one stays min_sig/G2, used only for consensus identity).
+        bls["min_pk_pubkey_b64"] = derive_min_pk_pubkey(bls["authority_key_private"])
         validator_keys_list.append((bls, eth))
 
         eth_addr = eth["address"].lower()
-        p2p_port = 10000 + node_id
-        primary_port = 4200 + node_id
-        worker_port = 5012 + node_id
+        p2p_port = 10200 + args.port_offset + node_id
+        primary_port = 4200 + args.port_offset + node_id
+        worker_port = 5012 + args.port_offset + node_id
 
         val_entry = {
             "address": eth_addr,
@@ -207,32 +350,79 @@ def main():
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "publicKeyBls": bls["authority_key"]
+            # Real min-pk pubkey (see derive_min_pk_pubkey's doc comment) -- NOT
+            # bls["authority_key"] (min_sig/G2, consensus-only). Hex-encoded to match this
+            # field's own convention (see the dev-account publicKeyBls entries below).
+            "publicKeyBls": "0x" + base64.b64decode(bls["min_pk_pubkey_b64"]).hex()
         })
 
-    # 2. Generate pre-funded dev accounts
-    print(f"\n💰 Generating {args.dev_accounts} pre-funded developer accounts ...")
-    dev_accounts = []
-    for i in range(args.dev_accounts):
-        dev_acc = generate_eth_dev_account()
-        dev_accounts.append(dev_acc)
+    # 2. Load or generate developer accounts from local ignored file (no secrets in git)
+    dev_keys_path = Path(args.dev_keys_file) if args.dev_keys_file else (SCRIPT_DIR / "private_dev_keys.json")
+    print(f"\n💰 Loading pre-funded developer accounts for Chain {args.chain_id} from {dev_keys_path.name} ...")
+    dev_accounts, all_system_dev_accounts = load_or_generate_private_dev_keys(dev_keys_path, args.chain_id, args.dev_accounts, metanode_bin)
+
+    seen_addrs = set(a["address"].lower() for a in alloc_list)
+    for acc in all_system_dev_accounts:
+        addr_str = acc["address"].lower()
+        if addr_str in seen_addrs:
+            continue
+        seen_addrs.add(addr_str)
         alloc_list.append({
-            "address": dev_acc["address"].lower(),
+            "address": addr_str,
             "balance": alloc_wei,
             "pending_balance": "0",
             "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            # Must match the gateway BLS keypair (gateway_bls_key below) so that
-            # standard eth_sendRawTransaction from these dev accounts passes the
-            # on-chain BLS registration check in eth_tx_converter.go — otherwise
-            # every tx is rejected with "no BLS public key registered on-chain".
             "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
         })
 
     with open(out_dir / "dev_accounts.json", "w") as f:
         json.dump(dev_accounts, f, indent=2)
 
+    # Also pre-register the shared cross-chain RELAYER dev account (address derived
+    # from start_relayer_daemon.sh's public devnet-only fallback RELAYER_KEY,
+    # 0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8) on THIS
+    # chain's own genesis too -- gen_root_anchor_chain.py already registers it on
+    # Root Anchor, but the RelayerDaemon submits batchOutboundCommit() to the
+    # SOURCE private chain and attestCommit()/claimMessage() to the DESTINATION
+    # private chain (never just Root Anchor), so without this every real relay
+    # was rejected with "no BLS public key registered on-chain" the moment a
+    # single relayer identity tried to act on ANY private chain. Found + fixed
+    # 2026-08-26 via live E2E testing of the relayer's WatchChainPair loop.
+    alloc_list.append({
+        "address": "0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366",
+        "balance": alloc_wei,
+        "pending_balance": "0",
+        "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+    })
+
     # 3. Create genesis.json
+    total_stake = args.validators * 1000
+    fault_tolerance = (total_stake - 1) // 3 if total_stake > 1 else 0
+    quorum_threshold = total_stake - fault_tolerance
+    validity_threshold = fault_tolerance + 1
+
+    # Inject all accounts from genesis template (default: genesis.json.example) with deduplication
+    template_path = Path(args.genesis_template) if args.genesis_template else (REPO_ROOT / "deploy" / "systemd" / "genesis.json.example")
+    if not args.no_example_alloc and template_path.exists():
+        try:
+            with open(template_path, "r") as ef:
+                example_data = json.load(ef)
+                if "alloc" in example_data:
+                    injected_count = 0
+                    for ex_acc in example_data["alloc"]:
+                        addr = ex_acc.get("address", "").lower()
+                        if not addr or addr in seen_addrs:
+                            continue
+                        seen_addrs.add(addr)
+                        alloc_list.append(ex_acc)
+                        injected_count += 1
+                    print(f"  💉 Injected {injected_count} accounts from {template_path.name} (Total unique alloc accounts: {len(alloc_list)})")
+        except Exception as e:
+            print(yellow(f"  ⚠️ Warning: could not merge {template_path} allocs: {e}"))
+
     genesis_data = {
         "config": {
             "chainId": args.chain_id,
@@ -242,25 +432,25 @@ def main():
             "epoch_duration_seconds": 345600
         },
         "validators": validators_entries,
-        "alloc": alloc_list
+        "alloc": alloc_list,
+        "total_stake": total_stake,
+        "quorum_threshold": quorum_threshold,
+        "validity_threshold": validity_threshold
     }
-    
-    # BƠM CÁC VÍ CỐ ĐỊNH TỪ genesis.json.example VÀO ĐÂY
-    example_path = REPO_ROOT / "deploy" / "systemd" / "genesis.json.example"
-    if example_path.exists():
-        try:
-            with open(example_path, "r") as ef:
-                example_data = json.load(ef)
-                if "alloc" in example_data:
-                    genesis_data["alloc"].extend(example_data["alloc"])
-                    print(f"  💉 Injected {len(example_data['alloc'])} accounts from genesis.json.example")
-        except Exception as e:
-            print(yellow(f"  ⚠️ Warning: could not merge genesis.json.example allocs: {e}"))
 
     genesis_path = out_dir / "genesis.json"
     with open(genesis_path, "w") as f:
         json.dump(genesis_data, f, indent=2)
     print(f"  ✅ Written genesis.json to {green(str(genesis_path))}")
+
+    # Xuất thêm file genesis-<chain_id>.json tại deploy/systemd/ để quản lý tập trung và phân biệt rõ từng chain
+    systemd_genesis_path = REPO_ROOT / "deploy" / "systemd" / f"genesis-{args.chain_id}.json"
+    try:
+        with open(systemd_genesis_path, "w") as f:
+            json.dump(genesis_data, f, indent=2)
+        print(f"  📑 Exported chain-specific genesis template to {green(str(systemd_genesis_path))}")
+    except Exception as e:
+        print(yellow(f"  ⚠️ Warning: could not export {systemd_genesis_path}: {e}"))
 
     # 4. Generate per-node runtime configs (config.json & node.toml)
     for node_id in range(args.validators):
@@ -271,15 +461,24 @@ def main():
         os.makedirs(node_dir / "data" / "consensus" / "db", exist_ok=True)
 
         rpc_port = args.rpc_port + node_id
-        primary_port = 4200 + node_id
-        dns_port = 10080 + node_id
-        peer_rpc_port = 20200 + node_id
-        consensus_port = 10000 + node_id
-        meta_rpc_port = 11100 + node_id
+        primary_port = 4200 + args.port_offset + node_id
+        dns_port = 13000 + args.port_offset + node_id
+        peer_rpc_port = 20200 + args.port_offset + node_id
+        consensus_port = 10200 + args.port_offset + node_id
+        meta_rpc_port = 11100 + args.port_offset + node_id
+        metrics_port = 12100 + args.port_offset + node_id
 
         # Node peers
-        go_peers = [f"{args.ip}:{7200 + j}" for j in range(args.validators) if j != node_id]
-        rust_peers = [f"{args.ip}:{20200 + j}" for j in range(args.validators) if j != node_id]
+        go_peers = [f"{args.ip}:{7200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
+        rust_peers = [f"{args.ip}:{20200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
+
+        if args.gateway_bls_key:
+            gateway_bls_key = args.gateway_bls_key
+        elif args.random_gateway_bls_key:
+            gateway_bls_key = generate_fresh_bls_secret(metanode_bin)
+            print(f"  🔑 node-{node_id}: generated a fresh, independent gateway_bls_key")
+        else:
+            gateway_bls_key = DEVNET_GATEWAY_BLS_KEY
 
         exec_config = {
             "debug": False,
@@ -287,7 +486,7 @@ def main():
             "go_mem_limit_gb": 8,
             "mvm_cache_enabled": False,
             "enable_private_gateway": True,
-            "gateway_bls_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+            "gateway_bls_key": gateway_bls_key,
             "chainId": args.chain_id,
             "private_key": bls["authority_key_private"],
             "address": eth["address"].lstrip("0x").lower(),
@@ -301,7 +500,28 @@ def main():
                 "55798165960a62cED34a0d86e36B1758D1303907"
             ],
             "cross_chain": {
-                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198"
+                "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
+                "reserve_chain_id": args.reserve_chain_id if args.reserve_chain_id is not None else args.chain_id,
+                # Keys MUST match execution/pkg/config/config.go's CrossChainConfig json tags
+                # exactly (snake_case) — encoding/json silently leaves a field at its zero value
+                # on a case/spelling mismatch instead of erroring, so a wrong key here doesn't
+                # fail loudly: it just silently disables the ChainRegistry refresh worker /
+                # CommitteeAttestationWorker on every node this script generates. Verified against
+                # config.go directly, not assumed.
+                "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
+                "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
+                "root_anchor_poll_interval_seconds": 1,
+                "min_native_stake_to_register_wei": "1000000000000000000",
+                "root_anchor_circuit_breaker_max_failures": 5,
+                "root_anchor_circuit_breaker_timeout_seconds": 10,
+                # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens
+                # GovernanceEngine's mandatory 72h ProposalAllocateSupply/etc. timelock to 10s so
+                # the full propose->vote->timelock->execute governance path (required to grant any
+                # chain an initial cross-chain spending allocation -- see
+                # TestGateway_ProposalAllocateSupply_UnblocksAttestCommit) is actually exercisable
+                # on a local devnet instead of requiring a literal 72-hour wait. NEVER set this on
+                # a real deployment -- gen_single_chain.py is devnet tooling only.
+                "devnet_governance_timelock_seconds_override": 10
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",
@@ -350,7 +570,7 @@ network_key_path = "{node_dir}/keys/network_key.json"
 storage_path = "{node_dir}/data/consensus/db"
 
 enable_metrics = true
-metrics_port = {10100 + node_id}
+metrics_port = {metrics_port}
 peer_rpc_port = {peer_rpc_port}
 peer_rpc_addresses = [{peers_toml}]
 executor_read_enabled = true
@@ -369,7 +589,7 @@ time_based_epoch_change = true
     start_script_content = f"""#!/usr/bin/env bash
 set -e
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🚀 Starting Metanode Single Chain..."
+echo "🚀 Starting Metanode Single Chain (Chain ID {args.chain_id})..."
 
 METANODE_BIN="{metanode_bin}"
 SIMPLE_CHAIN_BIN="{simple_chain_bin}"
@@ -387,7 +607,7 @@ echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node
 """
 
     start_script_content += f"""
-echo "✅ Single Chain started successfully!"
+echo "✅ Single Chain {args.chain_id} started successfully!"
 echo "   Node-0 RPC URL: http://{args.ip}:{args.rpc_port}"
 echo "   Chain ID: {args.chain_id}"
 echo "   Check logs in $DIR/node-0/logs/node-0.log"
@@ -395,20 +615,22 @@ echo "   Check logs in $DIR/node-0/logs/node-0.log"
 
     stop_script_content = f"""#!/usr/bin/env bash
 DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-echo "🛑 Stopping Metanode Single Chain..."
+echo "🛑 Stopping Metanode Single Chain (Chain ID {args.chain_id})..."
 
 for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
     if [ -f "$pid_file" ]; then
         PID=$(cat "$pid_file")
-        echo "  → Stopping node process PID $PID..."
-        kill -15 "$PID" 2>/dev/null || true
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "  → Stopping node process PID $PID..."
+            kill -15 "$PID" 2>/dev/null || true
+            sleep 0.5
+            kill -9 "$PID" 2>/dev/null || true
+        fi
         rm -f "$pid_file"
     fi
 done
 
-pkill -f "simple_chain --config" 2>/dev/null || true
-pkill -f "metanode start --config" 2>/dev/null || true
-echo "✅ Single Chain stopped."
+echo "✅ Single Chain {args.chain_id} stopped."
 """
 
     with open(start_sh, "w") as f:

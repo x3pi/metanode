@@ -134,6 +134,24 @@ func (kv *MemoryDB) BatchPut(kvs [][2][]byte) error {
 	return nil
 }
 
+// BatchDelete removes multiple keys, matching storage.Storage. Missing keys are ignored
+// (same tolerance BatchPut already has for its per-key errors), unlike the single-key
+// Delete which errors on a missing key.
+func (kv *MemoryDB) BatchDelete(keys [][]byte) error {
+	kv.Lock()
+	defer kv.Unlock()
+	for _, key := range keys {
+		var bytes32 [32]byte
+		copy(bytes32[:], key)
+		delete(kv.db, bytes32)
+	}
+	return nil
+}
+
+// GetBackupPath satisfies storage.Storage. MemoryDB has no on-disk backing, so this is
+// always empty — matching DummyStorage's unconfigured case.
+func (kv *MemoryDB) GetBackupPath() string { return "" }
+
 func (kv *MemoryDB) PrefixScan(prefix []byte) ([][2][]byte, error) {
 	return nil, fmt.Errorf("PrefixScan not implemented for MemoryDB")
 }

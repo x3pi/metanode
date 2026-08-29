@@ -451,7 +451,7 @@ impl ChannelPool {
 
     async fn get_channel(
         &self,
-        _network_keypair: NetworkKeyPair,
+        network_keypair: NetworkKeyPair,
         peer: AuthorityIndex,
         timeout: Duration,
     ) -> ConsensusResult<Channel> {
@@ -469,19 +469,24 @@ impl ChannelPool {
         let config = &self.context.parameters.tonic;
         let buffer_size = config.connection_buffer_size;
 
-        // Check if TLS should be disabled (for local development)
-        let disable_tls = true; // Hardcode for testing
+        let server_name = certificate_server_name(&self.context);
+        let client_tls_config = meta_tls::create_rustls_client_config(
+            authority.network_key.clone().into_inner(),
+            server_name,
+            Some(network_keypair.private_key().into_inner()),
+        );
+
+        let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(client_tls_config)
+            .https_only()
+            .enable_http2()
+            .build();
 
         let deadline = tokio::time::Instant::now() + timeout;
         let channel = loop {
             trace!("Connecting to endpoint at {}", address);
-            let addr = if disable_tls {
-                format!("http://{address}")
-            } else {
-                format!("https://{address}")
-            };
+            let addr = format!("https://{address}");
 
-            // Use plain TCP without TLS
             let endpoint = tonic::transport::Channel::from_shared(addr.clone())
                 .expect("valid HTTP/HTTPS URI from committee address config")
                 .connect_timeout(timeout)
@@ -492,7 +497,8 @@ impl ChannelPool {
                 .http2_keep_alive_interval(config.keepalive_interval)
                 .user_agent("mysticeti")
                 .expect("static user_agent string is always valid");
-            let result = endpoint.connect().await;
+
+            let result = tonic::transport::Channel::connect(https_connector.clone(), endpoint).await;
 
             match result {
                 Ok(channel) => break channel,
@@ -963,15 +969,27 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
         let connections = self.connections.clone();
         let layers = tower::ServiceBuilder::new()
             .map_request(move |mut request: http::Request<_>| {
-                // Get remote address first
-                let remote_addr = request.extensions().get::<std::net::SocketAddr>();
+                // Try to get peer authority index from mTLS PeerCertificates first
+                let tls_auth_index = request
+                    .extensions()
+                    .get::<meta_http::PeerCertificates>()
+                    .and_then(|certs| certs.peer_certs().first())
+                    .and_then(|cert| meta_tls::public_key_from_certificate(cert).ok())
+                    .and_then(|pubkey| {
+                        committee.authorities().find_map(|(idx, authority)| {
+                            if authority.network_key.clone().into_inner() == pubkey {
+                                Some(idx)
+                            } else {
+                                None
+                            }
+                        })
+                    });
 
-                // Lookup authority index from committee by matching address/port
-                let authority_index = if let Some(addr) = remote_addr {
+                let authority_index = if let Some(idx) = tls_auth_index {
+                    idx
+                } else if let Some(addr) = request.extensions().get::<std::net::SocketAddr>() {
                     let peer_ip = addr.ip();
                     let peer_port = addr.port();
-
-                    // Search through committee authorities to find matching address
                     let mut found_index = None;
                     for (idx, authority) in committee.authorities() {
                         if let Ok(auth_addr) = authority.address.to_socket_addr() {
@@ -981,19 +999,17 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                             }
                         }
                     }
-
-                    found_index.unwrap_or(AuthorityIndex::new_for_test(0)) // Fallback to 0 if not found
+                    found_index.unwrap_or(AuthorityIndex::new_for_test(0))
                 } else {
-                    AuthorityIndex::new_for_test(0) // Fallback if no remote address
+                    AuthorityIndex::new_for_test(0)
                 };
 
                 let peer_info = PeerInfo { authority_index };
-                
+
                 // Track connection health
                 connections.update_peer(authority_index);
-                
-                trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?} for remote_addr={:?}",
-                      authority_index, remote_addr);
+
+                trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?}", authority_index);
                 request.extensions_mut().insert(peer_info);
                 request
             })
@@ -1025,25 +1041,17 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
             .into_axum_router()
             .route_layer(layers);
 
-        // Check if TLS should be disabled (for local development)
-        let _disable_tls = true; // Hardcode for testing
-
-        let tls_server_config = if true {
-            // Hardcode disable TLS for testing
-            None
-        } else {
-            Some(meta_tls::create_rustls_server_config_with_client_verifier(
-                self.network_keypair.clone().private_key().into_inner(),
-                certificate_server_name(&self.context),
-                AllowPublicKeys::new(
-                    self.context
-                        .committee
-                        .authorities()
-                        .map(|(_i, a)| a.network_key.to_bytes())
-                        .collect(),
-                ),
-            ))
-        };
+        let tls_server_config = Some(meta_tls::create_rustls_server_config_with_client_verifier(
+            self.network_keypair.clone().private_key().into_inner(),
+            certificate_server_name(&self.context),
+            AllowPublicKeys::new(
+                self.context
+                    .committee
+                    .authorities()
+                    .map(|(_i, a)| a.network_key.to_bytes())
+                    .collect(),
+            ),
+        ));
 
         // Calculate some metrics around send/recv buffer sizes for the current machine/OS
         #[cfg(not(msim))]

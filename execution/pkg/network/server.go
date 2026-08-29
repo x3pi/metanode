@@ -36,8 +36,11 @@ type SocketServer struct {
 	onDisconnectedCallBack []func(connection network.Connection)
 	requestChan            chan network.Request
 	wg                     sync.WaitGroup
-	closeOnce              sync.Once     // GO-H3: ensure requestChan closed exactly once
-	connSem                chan struct{} // GO-M2: max concurrent connections semaphore
+	closeOnce              sync.Once      // GO-H3: ensure requestChan closed exactly once
+	connSem                chan struct{}  // GO-M2: max concurrent connections semaphore
+	maxConnsPerIP          int            // NET-02: max concurrent connections per remote IP
+	ipMu                   sync.Mutex     // NET-02: protects ipConns
+	ipConns                map[string]int // NET-02: active connections per IP
 }
 
 func NewSocketServer(
@@ -65,6 +68,10 @@ func NewSocketServer(
 	if maxConns <= 0 {
 		maxConns = 1000
 	}
+	maxConnsPerIP := cfg.MaxConnectionsPerIP
+	if maxConnsPerIP <= 0 {
+		maxConnsPerIP = 100
+	}
 	s := &SocketServer{
 		config:             cfg,
 		keyPair:            keyPair,
@@ -75,6 +82,8 @@ func NewSocketServer(
 		cancelFunc:         cancelFunc,
 		requestChan:        make(chan network.Request, cfg.RequestChanSize),
 		connSem:            make(chan struct{}, maxConns),
+		maxConnsPerIP:      maxConnsPerIP,
+		ipConns:            make(map[string]int),
 	}
 	return s, nil
 }
@@ -289,9 +298,34 @@ func (s *SocketServer) Listen(listenAddress string) error {
 				continue
 			}
 
+			// Extract remote IP (strip port)
+			remoteAddr := tcpConn.RemoteAddr().String()
+			host, _, errSplit := net.SplitHostPort(remoteAddr)
+			if errSplit != nil {
+				host = remoteAddr
+			}
+
+			// NET-02: check per-IP connection limit before processing
+			s.ipMu.Lock()
+			currentIPCount := s.ipConns[host]
+			if currentIPCount >= s.maxConnsPerIP {
+				s.ipMu.Unlock()
+				logger.Warn("Listen: Max per-IP connections reached (%d) for %s, rejecting", s.maxConnsPerIP, host)
+				_ = tcpConn.Close()
+				continue
+			}
+			s.ipConns[host] = currentIPCount + 1
+			s.ipMu.Unlock()
+
 			conn, errCreation := ConnectionFromTcpConnection(tcpConn, s.config)
 			if errCreation != nil {
 				logger.Error("Listen: Error creating Connection from TCP conn: %v", errCreation)
+				s.ipMu.Lock()
+				s.ipConns[host]--
+				if s.ipConns[host] <= 0 {
+					delete(s.ipConns, host)
+				}
+				s.ipMu.Unlock()
 				_ = tcpConn.Close()
 				continue
 			}
@@ -299,14 +333,28 @@ func (s *SocketServer) Listen(listenAddress string) error {
 			select {
 			case s.connSem <- struct{}{}:
 				// Slot acquired — handle connection in goroutine
-				go func() {
-					defer func() { <-s.connSem }() // release slot on disconnect
+				go func(ip string) {
+					defer func() {
+						<-s.connSem
+						s.ipMu.Lock()
+						s.ipConns[ip]--
+						if s.ipConns[ip] <= 0 {
+							delete(s.ipConns, ip)
+						}
+						s.ipMu.Unlock()
+					}() // release slot on disconnect
 					s.OnConnect(conn)
 					_ = s.HandleConnection(conn)
-				}()
+				}(host)
 			default:
 				logger.Warn("Listen: Max connections reached (%d), rejecting %s",
 					cap(s.connSem), tcpConn.RemoteAddr())
+				s.ipMu.Lock()
+				s.ipConns[host]--
+				if s.ipConns[host] <= 0 {
+					delete(s.ipConns, host)
+				}
+				s.ipMu.Unlock()
 				_ = tcpConn.Close()
 				_ = conn.Disconnect() // Crucial to prevent goroutine leak!
 			}

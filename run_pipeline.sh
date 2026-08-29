@@ -1,0 +1,1 @@
+deploy/ansible/run_full_pipeline.sh

@@ -11,6 +11,12 @@
   register: build_result
   changed_when: build_result.rc == 0
 
+- name: Reset genesis.json from example template on fresh setup
+  ansible.builtin.file:
+    path: "{{ deploy_dir }}/genesis.json"
+    state: absent
+  when: ansible_action == 'setup'
+
 - name: Generate Validator Keys
   ansible.builtin.shell: |
     python3 gen_validator_entry.py \
@@ -33,6 +39,7 @@
   loop: "{{ cluster_nodes }}"
   when: cluster_nodes is defined and ansible_action == 'setup'
 
-# Note: For full automation, `cluster_nodes` and `peers_map` should be constructed dynamically from the inventory
-# using set_fact before running these tasks.
+# `cluster_nodes`/`peers_map` are already built dynamically from inventory.yml -- see
+# deploy.yml's "Local build and configuration generation" play (pre_tasks, `set_fact`), which
+# always runs before this role. Nothing further to do here.
 

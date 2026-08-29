@@ -253,3 +253,10 @@ patch_http_handler.sh
 
 # ===== Prometheus configuration =====
 deploy/prometheus/prometheus.yml
+
+# ===== T2 testnet tooling binaries (deploy/systemd/register_private_chains_t2.sh
+# builds this in-place at the execution/ module root) =====
+/register_chains
+# built in-place by gen_root_anchor_chain.py/gen_single_chain.py's derive_devnet_submitter_account()/
+# derive_min_pk_pubkey() helpers to shell out for real min-pk pubkey derivation
+/bls_pubkey

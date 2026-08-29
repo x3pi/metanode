@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-24
+> **Last updated:** 2026-08-28
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -9,9 +9,10 @@
 ```
 metanode/
 ├── deploy/                 ← Deployment configurations and scripts parent folder
-│   ├── ansible/            ← Ansible deployment scripts, playbooks, and inventory
+│   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
+│   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates
 ├── execution/          ← Go execution engine (EVM-compatible layer)
 │   └── debug_nil/      ← Go standalone tests for nil/slice panic debugging
@@ -26,7 +27,8 @@ metanode/
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
-└── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+├── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+└── OPERATIONS_GUIDE.md  ← Complete End-to-End deployment & Day-2 Operations Runbook
 ```
 
 ### Layer Interaction
@@ -219,7 +221,8 @@ metanode/
 | `snapshot/` | State snapshot/restore | 🟡 MED — large I/O |
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
-| `proto/` | gRPC proto definitions | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine, GovernanceEngine, AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
+| `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 
 ---
 
@@ -368,6 +371,13 @@ metanode/
 |------|------|
 | `transaction.rs` | Core Tx type |
 | `tx_hash.rs` | Tx hash utilities |
+| `cross_chain.rs` | Root Anchor & Cross-Chain schema types |
+| `governance.rs` | On-chain governance lifecycle & 72h timelock |
+| `pop.rs` | BLS12-381 Proof-of-Possession & rogue key guard |
+| `root_anchor.rs` | Root Anchor founding committee & BFT stake quorum |
+| `gateway.rs` | GatewayPrecompile & cross-chain execution state machine |
+| `epoch_sync.rs` | Epoch transition committee sync & account-level state root checkpoints |
+
 
 ---
 

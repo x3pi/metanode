@@ -67,6 +67,89 @@ type NodesConfig struct {
 // CrossChainConfig chứa cấu hình cross-chain
 type CrossChainConfig struct {
 	GatewayContract string `json:"gateway_contract,omitempty"` // Contract/Precompile xử lý giao dịch cross-chain
+
+	// RootAnchorRpcUrls — JSON-RPC endpoint(s) of the Root Anchor network this chain talks to
+	// (Milestone B of the wiring plan; see execution/pkg/cross_chain/rootanchor). Tried in order,
+	// first success wins. Empty/omitted disables the ChainRegistry refresh worker entirely — a
+	// private chain not yet participating in cross-chain has no Root Anchor to reach.
+	RootAnchorRpcUrls []string `json:"root_anchor_rpc_urls,omitempty"`
+	// RootAnchorPollIntervalSeconds — how often the background worker refreshes each already-
+	// registered ChainRegistry entry from Root Anchor. Default 60 if zero. Deliberately NOT
+	// per-transaction (mục 5.4 of the design doc requires this).
+	RootAnchorPollIntervalSeconds int `json:"root_anchor_poll_interval_seconds,omitempty"`
+	// RootAnchorCircuitBreakerMaxFailures / RootAnchorCircuitBreakerTimeoutSeconds configure the
+	// pkg/network.CircuitBreaker wrapping every Root Anchor RPC call. Defaults (10 failures / 60s)
+	// from network.DefaultCircuitBreakerConfig() are used when zero.
+	RootAnchorCircuitBreakerMaxFailures    int `json:"root_anchor_circuit_breaker_max_failures,omitempty"`
+	RootAnchorCircuitBreakerTimeoutSeconds int `json:"root_anchor_circuit_breaker_timeout_seconds,omitempty"`
+
+	// RootAnchorSubmitterPrivateKeyHex (Milestone C) — a secp256k1 private key, distinct from
+	// this node's BLS key (Databases.BLSPrivateKey), used to sign+submit transactions TO Root
+	// Anchor (registerCommitteePop/submitCommitteeAttestation/committeeUpdate) via
+	// eth_sendRawTransaction. The corresponding address must hold enough native coin on Root
+	// Anchor to pay gas — an operational requirement, not a new design (every relayer already
+	// needs this; mục 2.2 of the design doc: "Relayer bất kỳ ai, không cần đăng ký"). Empty
+	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
+	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
+
+	// DevnetGovernanceTimelockSecondsOverride — EXPLICIT OPT-IN devnet/testing accommodation
+	// only: shortens GovernanceEngine's mandatory 72h (DefaultGovernanceTimelockSeconds)
+	// proposal timelock to this many seconds instead. Zero/omitted (the only value any real
+	// production config should ever use) leaves the real 72h timelock completely unchanged —
+	// this field does not exist in any production config and defaults to inert. Exists because
+	// exercising the full propose->vote->timelock->execute->registerAsset governance path on a
+	// real running devnet is otherwise a literal 72-hour wait, which makes it untestable in
+	// practice; see note/cross_chain_production_readiness_plan.md Phase 0.8 for why this was
+	// added and the live verification it unblocked. Never set this on anything but a disposable
+	// local devnet.
+	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
+
+	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
+	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
+	// every OTHER chain, set this to the Reserve's chainId so it can correctly reject a
+	// ceiling-enforced attestCommit() for a nonzero-value commit unless it comes via
+	// AttestReserveIssuedCommit from that Reserve (C8 fix, 2026-08-27 — see
+	// note/cross_chain_attack_scenario_catalog.md). Empty/zero fails closed on both the
+	// one-time genesis mint (ProposalAllocateSupply) and any nonzero-value ceiling-enforced
+	// attestation — there is no safe legacy behavior to preserve here: the unrestricted pre-fix
+	// behavior was itself the vulnerability, not a working devnet convenience. Every real chain
+	// (Root Anchor AND every private chain) MUST set this before participating in cross-chain
+	// value transfer.
+	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
+
+	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
+	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
+	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). Gates ONLY
+	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path) — see
+	// MinNativeStakeToRegisterWei below for the vote-free RegisterChainViaStake path's own,
+	// unrelated gate. When set (>0), a candidate chain ID must already hold at least this much in
+	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
+	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
+	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
+	// deliberately opt-in, not a default-on rate limit: the right minimum is an operational
+	// policy decision (how much should a new member chain be required to hold?) that depends on
+	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
+	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
+	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
+
+	// MinNativeStakeToRegisterWei — the REQUIRED minimum real, liquid native-coin (Root Anchor's
+	// own base asset — deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) balance
+	// gateway_handler.go's "registerChainViaStake" case requires the caller's own wallet
+	// (tx.FromAddress()) to hold before it will register a new chain, then moves exactly this
+	// amount out of that real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held deposit
+	// (burn-then-mint; 2026-08-28 user request: "dùng tiền từ ví từ tài khoản thật làm điều kiện khởi tạo private
+	// chain ... không phải loại token erc 20 gì cả"). This is the universal, vote-free chain
+	// registration gate — usable identically for chain #1 and every chain after it — that
+	// replaced the retired bootstrapFoundingChains()/MinFoundingChains batch mechanism, so unlike
+	// MinRegistrationStake above this is NOT opt-in: leaving it empty/zero on a real deployment
+	// reopens fully permissionless Sybil chain registration (RegisterChainViaStake's own doc
+	// comment, GatewayEngine.MinNativeStakeToRegister's doc comment). Every node that will process
+	// registerChainViaStake transactions MUST set this to the SAME value — a value that differs
+	// between validators is a Zero-Fork Invariant risk (different nodes would accept/reject the
+	// same registration transaction differently). Parsed as a base-10 decimal string of wei (not
+	// a JSON number) to avoid float64 precision loss for large amounts, same convention as
+	// MinRegistrationStake.
+	MinNativeStakeToRegisterWei string `json:"min_native_stake_to_register_wei,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
@@ -129,7 +212,7 @@ type SimpleChainConfig struct {
 	GenesisFilePath                    string         `json:"genesis_file_path"`
 	Securepassword                     string         `json:"securepassword"`
 	//
-	PkAdminFileStorage string `json:"pk_admin_file_storage"`
+	PkAdminFileStorage        string   `json:"pk_admin_file_storage"`
 	RustConfigPath            string   `json:"rust_config_path,omitempty"`  // FFI: Path to Rust node-X.toml
 	ValidatorForwardAddresses []string `json:"validator_forward_addresses"` // TCP addresses of validator Go Subs for sync-only nodes (e.g., ["192.168.1.1:4200"])
 	MetaNodeRPCAddress        string   `json:"meta_node_rpc_address"`       // Address of Rust MetaNode RPC (fallback for TX)
@@ -200,15 +283,15 @@ type SimpleChainConfig struct {
 
 	TxVerificationChunkSize int                `json:"tx_verification_chunk_size,omitempty"`
 	Pruning                 PruningConfig      `json:"pruning,omitempty"`
-	RpcRateLimit   RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
-	TraceEnabled   bool               `json:"trace_enabled,omitempty"`
-	TraceEndpoint  string             `json:"trace_endpoint,omitempty"`
-	TxTraceEnabled bool               `json:"tx_trace_enabled,omitempty"`
-	TlsCert        string             `json:"tls_cert,omitempty"`
-	TlsKey         string             `json:"tls_key,omitempty"`
-	Databases      DatabasesConfig    `json:"Databases"`
-	Nodes          NodesConfig        `json:"nodes"`
-	Log            LogConfig          `json:"log"`
+	RpcRateLimit            RpcRateLimitConfig `json:"rpc_rate_limit,omitempty"`
+	TraceEnabled            bool               `json:"trace_enabled,omitempty"`
+	TraceEndpoint           string             `json:"trace_endpoint,omitempty"`
+	TxTraceEnabled          bool               `json:"tx_trace_enabled,omitempty"`
+	TlsCert                 string             `json:"tls_cert,omitempty"`
+	TlsKey                  string             `json:"tls_key,omitempty"`
+	Databases               DatabasesConfig    `json:"Databases"`
+	Nodes                   NodesConfig        `json:"nodes"`
+	Log                     LogConfig          `json:"log"`
 
 	// C++ MVM State cache control
 	MVMCacheEnabled *bool `json:"mvm_cache_enabled,omitempty"`
@@ -314,6 +397,26 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 		}
 		if v := os.Getenv("META_SECURE_PASSWORD"); v != "" {
 			ConfigApp.Securepassword = v
+		}
+		// The 5 overrides below close a real gap: only the 3 fields above had this escape
+		// hatch, while these 5 are equally sensitive (BLS signing keys, a secp256k1 key that
+		// pays real gas on Root Anchor, a BLS keystore master password, a password-hashing
+		// pepper) and previously had NO way to keep them out of config.json on a real
+		// deployment. Found + fixed 2026-08-27 during a config-structure review.
+		if v := os.Getenv("META_BLS_PRIVATE_KEY"); v != "" {
+			ConfigApp.Databases.BLSPrivateKey = v
+		}
+		if v := os.Getenv("META_ROOT_ANCHOR_SUBMITTER_PRIVATE_KEY_HEX"); v != "" {
+			ConfigApp.CrossChain.RootAnchorSubmitterPrivateKeyHex = v
+		}
+		if v := os.Getenv("META_GATEWAY_BLS_KEY"); v != "" {
+			ConfigApp.GatewayBLSKey = v
+		}
+		if v := os.Getenv("META_MASTER_PASSWORD"); v != "" {
+			ConfigApp.MasterPassword = v
+		}
+		if v := os.Getenv("META_APP_PEPPER"); v != "" {
+			ConfigApp.AppPepper = v
 		}
 		if v := os.Getenv("META_IS_RPC_NODE"); v != "" {
 			if v == "true" || v == "1" {

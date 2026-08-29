@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
+	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
@@ -115,6 +117,19 @@ type BlockProcessor struct {
 	config                           *config.SimpleChainConfig
 	isSyncCompleted                  atomic.Bool
 	ProcessedVirtualTransactionChain chan []byte
+
+	// committeeAttestationWorker (Milestone C, nil unless RootAnchorRpcUrls +
+	// RootAnchorSubmitterPrivateKeyHex are both configured) — its OnEpochAdvanced is wired into
+	// executor.RequestHandler in runUnixSocket (block_processor_network.go).
+	committeeAttestationWorker *tx_processor.CommitteeAttestationWorker
+
+	// commitAttestationWorker (Milestone F, same enable condition as committeeAttestationWorker
+	// above) — its OnCommitFinalized is wired synchronously into
+	// tx_processor.CommitFinalizedCallback, invoked directly from gateway_handler.go's
+	// batchOutboundCommit() case whenever this node processes that transaction (no FFI/UDS
+	// round trip needed, unlike the epoch-advance callback, since this trigger originates from
+	// a Go-side EVM transaction, not a Rust-side epoch boundary).
+	commitAttestationWorker *tx_processor.CommitAttestationWorker
 
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
@@ -392,8 +407,6 @@ func (bp *BlockProcessor) ConnectionsByType(connType int) map[common.Address]net
 	return nil
 }
 
-
-
 // NewBlockProcessor creates a new block processor
 func NewBlockProcessor(
 	lastBlock types.Block,
@@ -641,7 +654,83 @@ func NewBlockProcessor(
 	// go bp.commitWorker()
 	go bp.backupDbWorker() // Coalesced BackupDb builder
 	go bp.geiWorker()      // Coalesced GEI updates
-	go bp.runUnixSocket()  // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
+
+	// ROOT ANCHOR CHAIN REGISTRY MONITOR (Milestone B of the Root Anchor wiring plan): read-only
+	// drift detection against Root Anchor's ChainRegistry — see
+	// tx_processor.GatewayRegistryMonitor's doc comment for why this never writes to consensus
+	// state. Disabled unless RootAnchorRpcUrls is configured (a chain not yet participating in
+	// cross-chain has nothing to poll).
+	//
+	// MUST run before `go bp.runUnixSocket()` below: that goroutine reads
+	// bp.committeeAttestationWorker (to wire its epoch-advanced callback) concurrently with this
+	// goroutine, so the field must be fully assigned before runUnixSocket is launched — not just
+	// "usually happens first" by scheduling luck.
+	if cfg := config; cfg != nil && len(cfg.CrossChain.RootAnchorRpcUrls) > 0 {
+		defBreaker := p_network.DefaultCircuitBreakerConfig()
+		breakerCfg := &p_network.CircuitBreakerConfig{
+			MaxFailures: cfg.CrossChain.RootAnchorCircuitBreakerMaxFailures,
+			MaxRequests: defBreaker.MaxRequests,
+			Interval:    defBreaker.Interval,
+			Timeout:     time.Duration(cfg.CrossChain.RootAnchorCircuitBreakerTimeoutSeconds) * time.Second,
+		}
+		if breakerCfg.MaxFailures <= 0 {
+			breakerCfg.MaxFailures = defBreaker.MaxFailures
+		}
+		if breakerCfg.Timeout <= 0 {
+			breakerCfg.Timeout = defBreaker.Timeout
+		}
+
+		if rootAnchorClient, err := rootanchor.NewClient(cfg.CrossChain.RootAnchorRpcUrls, breakerCfg); err != nil {
+			logger.Error("❌ [ROOT ANCHOR MONITOR] failed to build client, monitor disabled: %v", err)
+		} else {
+			pollInterval := time.Duration(cfg.CrossChain.RootAnchorPollIntervalSeconds) * time.Second
+			monitor := tx_processor.NewGatewayRegistryMonitor(rootAnchorClient, bp.chainState, pollInterval)
+			go monitor.Run(context.Background())
+
+			// COMMITTEE ATTESTATION WORKER (Milestone C): real multi-validator BLS quorum-cert
+			// production for CommitteeUpdate, triggered from local epoch transitions (wired via
+			// SetEpochAdvancedCallback in runUnixSocket below). Needs its OWN submitter key
+			// (distinct from the BLS key) to sign transactions TO Root Anchor — disabled if
+			// that isn't configured, same as the monitor above is disabled without RPC URLs.
+			if cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex != "" {
+				var localChainID uint64
+				if cfg.ChainId != nil {
+					localChainID = cfg.ChainId.Uint64()
+				}
+				bp.committeeAttestationWorker = tx_processor.NewCommitteeAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					localChainID,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.committeeAttestationWorker.Run(context.Background())
+
+				// COMMIT ATTESTATION WORKER (Milestone F): real multi-validator BLS quorum-cert
+				// production for cross-chain outbound-message commit roots, triggered
+				// synchronously and in-process from gateway_handler.go's batchOutboundCommit()
+				// case (see tx_processor.CommitFinalizedCallback's doc comment) — every
+				// validator node that processes that transaction invokes this identically, so
+				// there's no separate watch/poll loop needed on this side, unlike the epoch
+				// callback which crosses the Go<->Rust FFI boundary.
+				bp.commitAttestationWorker = tx_processor.NewCommitAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					localChainID,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.commitAttestationWorker.Run(context.Background())
+				tx_processor.CommitFinalizedCallback = bp.commitAttestationWorker.OnCommitFinalized
+			} else {
+				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
+			}
+		}
+	}
+
+	go bp.runUnixSocket() // FFI Bridge: Khởi chạy Rust Consensus Engine nhúng via CGo FFI
 	go bp.inputTPSWorker()
 
 	// PEER DISCOVERY: Disabled to prevent port conflict with Rust PeerRpcServer

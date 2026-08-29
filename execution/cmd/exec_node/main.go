@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/devicekey"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 )
@@ -18,27 +17,14 @@ var (
 	defaultConfigPath = flag.String("config", "config.json", "Config path")
 	logLevel          = flag.Int("log-level", logger.FLAG_INFO, "Log level")
 	debug             = flag.Bool("debug", false, "Debug mode")
-	// THÊM FLAG SSH-KEY TẠI ĐÂY
-	sshKeyPath = flag.String("ssh-key", "", "Path to SSH private key")
 )
 
-var (
-	BuildTime     string
-	EnvDecryptKey string
-	EnvFirstKey   string
-)
 var logCleaner *loggerfile.LogCleaner
 
 func main() {
 	// KHỞI TẠO CỜ LỆNH
 	// Gọi Parse() sau khi đã định nghĩa TẤT CẢ các flag
 	flag.Parse()
-
-	// Gọi hàm kiểm tra device key SAU KHI đã parse flag
-	// Truyền giá trị của flag sshKeyPath vào
-	if err := initializeDeviceKey(*sshKeyPath); err != nil {
-		log.Fatalf("Device key initialization failed: %v", err)
-	}
 
 	// if *debug {
 	// 	startDebugServer()
@@ -60,12 +46,6 @@ func main() {
 
 	initializeLogCleaner(app.config.LogPath)
 	handleExitSignals(app)
-}
-
-// Sửa lại hàm để nhận tham số sshKeyPath
-func initializeDeviceKey(sshKeyPath string) error {
-	// Truyền tham số này xuống hàm CalculateUUID
-	return devicekey.CalculateUUID(BuildTime, EnvDecryptKey, EnvFirstKey, sshKeyPath)
 }
 
 func initializeLogCleaner(logDir string) {

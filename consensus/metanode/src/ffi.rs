@@ -30,6 +30,21 @@ pub static mut PAUSE_GUARD: Option<std::sync::RwLockWriteGuard<'static, ()>> = N
 /// Tracks whether pause is active
 static PAUSE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// Test-only fault injection: lets the regression test below deterministically trigger a real
+// `panic!` from *inside* `metanode_submit_transaction_batch`'s catch_unwind closure, to prove the
+// wrapper actually converts it into a safe `false` return instead of unwinding across the C-ABI
+// boundary (which would abort the whole process). Compiled out entirely in non-test builds.
+#[cfg(test)]
+static FORCE_PANIC_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+// Same test-only fault-injection pattern as FORCE_PANIC_FOR_TEST above, but for
+// `metanode_register_callbacks` specifically -- kept as a separate flag (rather than reusing
+// FORCE_PANIC_FOR_TEST) so this test can't race with
+// `metanode_submit_transaction_batch_survives_internal_panic` when `cargo test` runs both
+// concurrently on separate threads.
+#[cfg(test)]
+static FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
 #[repr(C)]
 pub struct GoCallbacks {
     /// Send an executable block to Go for execution.
@@ -84,8 +99,17 @@ pub fn update_go_tx_trace(hash: &[u8], step: &str, details: &str) {
 /// Register the CGo callbacks.
 #[no_mangle]
 pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
-    if GO_CALLBACKS.set(callbacks).is_err() {
-        eprintln!("Warning: metanode_register_callbacks called multiple times");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.load(Ordering::SeqCst) {
+            panic!("forced panic for catch_unwind regression test");
+        }
+        if GO_CALLBACKS.set(callbacks).is_err() {
+            eprintln!("Warning: metanode_register_callbacks called multiple times");
+        }
+    }));
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_register_callbacks: {:?}", e);
     }
 }
 
@@ -94,35 +118,47 @@ pub extern "C" fn metanode_register_callbacks(callbacks: GoCallbacks) {
 /// This prevents State Corruption if Go takes a long time to snapshot.
 #[no_mangle]
 pub extern "C" fn metanode_pause_consensus() {
-    info!(
-        "⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK..."
-    );
-    let guard = match consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write() {
-        Ok(g) => g,
-        Err(poisoned) => {
-            warn!("⚠️ [FFI] RUST_EXECUTION_LOCK was poisoned! Recovering lock to pause consensus.");
-            poisoned.into_inner()
+    let result = std::panic::catch_unwind(|| {
+        info!(
+            "⏸️ [FFI] metanode_pause_consensus called - acquiring write lock on RUST_EXECUTION_LOCK..."
+        );
+        let guard = match consensus_core::storage::rocksdb_store::RUST_EXECUTION_LOCK.write() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                warn!("⚠️ [FFI] RUST_EXECUTION_LOCK was poisoned! Recovering lock to pause consensus.");
+                poisoned.into_inner()
+            }
+        };
+        unsafe {
+            PAUSE_GUARD = Some(std::mem::transmute(guard));
         }
-    };
-    unsafe {
-        PAUSE_GUARD = Some(std::mem::transmute(guard));
+        PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        
+        info!(
+            "⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED indefinitely until Go resumes."
+        );
+    });
+
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_pause_consensus: {:?}", e);
     }
-    PAUSE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-    
-    info!(
-        "⏸️ [FFI] metanode_pause_consensus: RocksDB writes are now PAUSED indefinitely until Go resumes."
-    );
 }
 
 /// Resume Rust consensus
 #[no_mangle]
 pub extern "C" fn metanode_resume_consensus() {
-    info!("▶️ [FFI] metanode_resume_consensus called - dropping write lock...");
-    PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-    unsafe {
-        PAUSE_GUARD = None;
+    let result = std::panic::catch_unwind(|| {
+        info!("▶️ [FFI] metanode_resume_consensus called - dropping write lock...");
+        PAUSE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            PAUSE_GUARD = None;
+        }
+        info!("▶️ [FFI] metanode_resume_consensus: RocksDB writes RESUMED.");
+    });
+
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_resume_consensus: {:?}", e);
     }
-    info!("▶️ [FFI] metanode_resume_consensus: RocksDB writes RESUMED.");
 }
 
 /// Call into Go to get the exact final StateRoot
@@ -165,95 +201,110 @@ pub fn setup_ffi_transaction_channel(sender: tokio::sync::mpsc::Sender<Vec<u8>>)
 /// Directly submit a transaction batch from Go mempool to Rust consensus over FFI
 #[no_mangle]
 pub unsafe extern "C" fn metanode_submit_transaction_batch(payload: *const u8, len: usize) -> bool {
-    if payload.is_null() || len == 0 {
-        return true; // Ignore empty payload safely
-    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if payload.is_null() || len == 0 {
+            return true; // Ignore empty payload safely
+        }
 
-    let tx_data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
+        let tx_data = std::slice::from_raw_parts(payload, len).to_vec();
 
-    // Wait for the channel to be initialized (blocks Go caller until Rust is ready, with 5s timeout)
-    let mut sender_opt = None;
-    for _ in 0..100 {
-        if let Ok(guard) = FFI_TX_SENDER.read() {
-            if let Some(ref s) = *guard {
-                sender_opt = Some(s.clone());
-                break;
+        #[cfg(test)]
+        if FORCE_PANIC_FOR_TEST.load(Ordering::SeqCst) {
+            panic!("forced panic for FFI panic-safety regression test");
+        }
+
+        // Wait for the channel to be initialized (blocks Go caller until Rust is ready, with 5s timeout)
+        let mut sender_opt = None;
+        for _ in 0..100 {
+            if let Ok(guard) = FFI_TX_SENDER.read() {
+                if let Some(ref s) = *guard {
+                    sender_opt = Some(s.clone());
+                    break;
+                }
             }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    
-    let sender = match sender_opt {
-        Some(s) => s,
-        None => {
-            tracing::warn!("⚠️ [FFI TX FLOW] Timeout waiting for FFI_TX_SENDER to be initialized! Returning false.");
-            return false;
+        
+        let sender = match sender_opt {
+            Some(s) => s,
+            None => {
+                tracing::warn!("⚠️ [FFI TX FLOW] Timeout waiting for FFI_TX_SENDER to be initialized! Returning false.");
+                return false;
+            }
+        };
+
+        // Instrumentation: Queue Saturation metrics
+        let remaining_capacity = sender.capacity();
+        if remaining_capacity < 1000 {
+            tracing::warn!(
+                "⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000",
+                remaining_capacity
+            );
         }
-    };
 
-    // Instrumentation: Queue Saturation metrics
-    let remaining_capacity = sender.capacity();
-    if remaining_capacity < 1000 {
-        tracing::warn!(
-            "⚠️ [FFI TX FLOW] Rust FFI channel is highly saturated! Capacity remaining: {}/10000",
-            remaining_capacity
-        );
-    }
+        // try_send is non-blocking and synchronous
+        let batch_size = tx_data.len();
+        match sender.try_send(tx_data) {
+            Ok(_) => {
+                FFI_TX_SUBMIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
 
-    // try_send is non-blocking and synchronous
-    let batch_size = tx_data.len();
-    match sender.try_send(tx_data) {
-        Ok(_) => {
-            FFI_TX_SUBMIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-            FFI_TX_SUBMIT_BYTES.fetch_add(batch_size as u64, AtomicOrdering::Relaxed);
-
-            // DIAGNOSTIC: Periodic summary every 5s
-            let current_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let last_log = FFI_TX_LAST_LOG_SECS.load(AtomicOrdering::Relaxed);
-            let should_log = if current_secs >= last_log + 5 {
-                if FFI_TX_LAST_LOG_SECS.compare_exchange(
-                    last_log,
-                    current_secs,
-                    AtomicOrdering::Relaxed,
-                    AtomicOrdering::Relaxed
-                ).is_ok() {
-                    true
+                // DIAGNOSTIC: Periodic summary every 5s
+                let current_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                let last_log = FFI_TX_LAST_LOG_SECS.load(AtomicOrdering::Relaxed);
+                let should_log = if current_secs >= last_log + 5 {
+                    if FFI_TX_LAST_LOG_SECS.compare_exchange(
+                        last_log,
+                        current_secs,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed
+                    ).is_ok() {
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
+                };
+                if should_log {
+                    let total_batches = FFI_TX_SUBMIT_COUNT.load(AtomicOrdering::Relaxed);
+                    let total_bytes = FFI_TX_SUBMIT_BYTES.load(AtomicOrdering::Relaxed);
+                    let full_count = FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed);
+                    info!(
+                        "📊 [FFI TX METRICS] total_batches={}, total_bytes={}, channel_full_events={}, \
+                         capacity_remaining={}/10000",
+                        total_batches, total_bytes, full_count, remaining_capacity
+                    );
                 }
-            } else {
-                false
-            };
-            if should_log {
-                let total_batches = FFI_TX_SUBMIT_COUNT.load(AtomicOrdering::Relaxed);
-                let total_bytes = FFI_TX_SUBMIT_BYTES.load(AtomicOrdering::Relaxed);
-                let full_count = FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed);
-                info!(
-                    "📊 [FFI TX METRICS] total_batches={}, total_bytes={}, channel_full_events={}, \
-                     capacity_remaining={}/10000",
-                    total_batches, total_bytes, full_count, remaining_capacity
+
+                debug!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Channel is full. Go side will see `false` and automatically sleep/retry.
+                FFI_TX_FULL_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                warn!(
+                    "⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}",
+                    FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed)
                 );
+                false
             }
+            Err(_) => {
+                error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed due to restart)");
 
-            debug!("📨 [TX-FLOW-TRACE] ▶ PHASE 1: Go→Rust FFI entry | batch_size={} bytes | channel_status=accepted", batch_size);
-            true
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            // Channel is full. Go side will see `false` and automatically sleep/retry.
-            FFI_TX_FULL_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-            warn!(
-                "⚠️ [FFI TX FLOW] Channel FULL! Go will retry. full_events_total={}",
-                FFI_TX_FULL_COUNT.load(AtomicOrdering::Relaxed)
-            );
-            false
-        }
-        Err(_) => {
-            error!("❌ [FFI TX FLOW] Failed to send to FFI channel (channel may be closed due to restart)");
-
-            // Channel closed. Reset sender to None so the next call blocks on the spin loop until a new channel is registered.
-            if let Ok(mut guard) = FFI_TX_SENDER.write() {
-                *guard = None;
+                // Channel closed. Reset sender to None so the next call blocks on the spin loop until a new channel is registered.
+                if let Ok(mut guard) = FFI_TX_SENDER.write() {
+                    *guard = None;
+                }
+                false
             }
+        }
+    }));
+
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("🚨 [RUST FFI PANIC] in metanode_submit_transaction_batch: {:?}", e);
             false
         }
     }
@@ -265,31 +316,29 @@ pub unsafe extern "C" fn metanode_start_consensus(
     config_path_ptr: *const c_char,
     data_dir_ptr: *const c_char,
 ) {
-    let config_path_str = unsafe {
-        if config_path_ptr.is_null() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let config_path_str = if config_path_ptr.is_null() {
             eprintln!("Error: config_path_ptr is null");
             return;
-        }
-        CStr::from_ptr(config_path_ptr)
-            .to_string_lossy()
-            .into_owned()
-    };
+        } else {
+            CStr::from_ptr(config_path_ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
 
-    let data_dir_str = unsafe {
-        if data_dir_ptr.is_null() {
+        let data_dir_str = if data_dir_ptr.is_null() {
             "".to_string()
         } else {
             CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
-        }
-    };
+        };
 
-    println!(
-        "Starting MetaNode Consensus Engine via CGo FFI. Config: {}",
-        config_path_str
-    );
+        println!(
+            "Starting MetaNode Consensus Engine via CGo FFI. Config: {}",
+            config_path_str
+        );
 
-    // We must spawn a new OS thread to run Tokio, because the caller is Go's C-thread
-    std::thread::spawn(move || {
+        // We must spawn a new OS thread to run Tokio, because the caller is Go's C-thread
+        std::thread::spawn(move || {
         // Install panic hook for diagnostic output BEFORE any Rust code runs
         std::panic::set_hook(Box::new(|info| {
             eprintln!("🚨 [RUST PANIC] {}", info);
@@ -479,6 +528,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             // DO NOT re-panic — that would abort() the Go process
         }
     });
+    }));
+
+    if let Err(e) = result {
+        eprintln!("🚨 [RUST FFI PANIC] in metanode_start_consensus: {:?}", e);
+    }
 }
 
 fn copy_dir_all(
@@ -505,61 +559,135 @@ pub unsafe extern "C" fn metanode_restore_from_snapshot(
     data_dir_ptr: *const c_char,
     snapshot_dir_ptr: *const c_char,
 ) -> bool {
-    let data_dir_str = unsafe {
-        if data_dir_ptr.is_null() {
-            return false;
-        }
-        CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
-    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let data_dir_str = unsafe {
+            if data_dir_ptr.is_null() {
+                return false;
+            }
+            CStr::from_ptr(data_dir_ptr).to_string_lossy().into_owned()
+        };
 
-    let snapshot_dir_str = unsafe {
-        if snapshot_dir_ptr.is_null() {
-            return false;
-        }
-        CStr::from_ptr(snapshot_dir_ptr)
-            .to_string_lossy()
-            .into_owned()
-    };
+        let snapshot_dir_str = unsafe {
+            if snapshot_dir_ptr.is_null() {
+                return false;
+            }
+            CStr::from_ptr(snapshot_dir_ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
 
-    // Target directory (the working consensus directory that needs to be replaced)
-    let target_dir = std::path::PathBuf::from(&data_dir_str)
-        .join("consensus")
-        .join("rust_consensus");
-    let source_dir = std::path::PathBuf::from(&snapshot_dir_str)
-        .join("consensus")
-        .join("rust_consensus");
+        // Target directory (the working consensus directory that needs to be replaced)
+        let target_dir = std::path::PathBuf::from(&data_dir_str)
+            .join("consensus")
+            .join("rust_consensus");
+        let source_dir = std::path::PathBuf::from(&snapshot_dir_str)
+            .join("consensus")
+            .join("rust_consensus");
 
-    if !source_dir.exists() {
-        error!(
-            "[FFI Restore] Snapshot source dir not found: {:?}",
-            source_dir
-        );
-        return false;
-    }
-
-    info!(
-        "[FFI Restore] Restoring DAG from snapshot: {:?} -> {:?}",
-        source_dir, target_dir
-    );
-
-    if target_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&target_dir) {
+        if !source_dir.exists() {
             error!(
-                "[FFI Restore] Failed to remove old target dir {:?}: {}",
-                target_dir, e
+                "[FFI Restore] Snapshot source dir not found: {:?}",
+                source_dir
             );
             return false;
         }
-    }
 
-    if let Err(e) = copy_dir_all(&source_dir, &target_dir) {
-        error!(
-            "[FFI Restore] Failed to copy snapshot files to target: {}",
-            e
+        info!(
+            "[FFI Restore] Restoring DAG from snapshot: {:?} -> {:?}",
+            source_dir, target_dir
         );
-        return false;
+
+        if target_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&target_dir) {
+                error!(
+                    "[FFI Restore] Failed to remove old target dir {:?}: {}",
+                    target_dir, e
+                );
+                return false;
+            }
+        }
+
+        if let Err(e) = copy_dir_all(&source_dir, &target_dir) {
+            error!(
+                "[FFI Restore] Failed to copy snapshot files to target: {}",
+                e
+            );
+            return false;
+        }
+
+        info!("[FFI Restore] Successfully restored rust_consensus!");
+        true
+    }));
+
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("🚨 [RUST FFI PANIC] in metanode_restore_from_snapshot: {:?}", e);
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Null/zero-length payload must stay a safe no-op (returns true) regardless of the
+    // forced-panic flag below -- it's checked before that flag is ever read, so this test is
+    // safe to run in parallel with `metanode_submit_transaction_batch_survives_internal_panic`.
+    #[test]
+    fn metanode_submit_transaction_batch_null_payload_is_noop() {
+        let result = unsafe { metanode_submit_transaction_batch(std::ptr::null(), 0) };
+        assert!(result, "null payload must be treated as a safe no-op");
+
+        let payload = [0u8; 4];
+        let result = unsafe { metanode_submit_transaction_batch(payload.as_ptr(), 0) };
+        assert!(result, "zero-length payload must be treated as a safe no-op");
     }
 
-    info!("[FFI Restore] Successfully restored rust_consensus!");
-    true
+    // Regression test for the catch_unwind wrapping added around
+    // `metanode_submit_transaction_batch`: a real Rust panic triggered from inside the FFI call
+    // must be caught and surfaced as the documented safe fallback (`false`), never unwind across
+    // the C-ABI boundary. Since this function is `extern "C"` (non-unwind ABI), an uncaught panic
+    // here would abort the whole test process rather than fail this assertion -- so a passing
+    // `cargo test` run on this test is itself part of the proof that the wrapper works.
+    #[test]
+    fn metanode_submit_transaction_batch_survives_internal_panic() {
+        FORCE_PANIC_FOR_TEST.store(true, Ordering::SeqCst);
+        let payload = [0u8; 4];
+        let result = unsafe { metanode_submit_transaction_batch(payload.as_ptr(), payload.len()) };
+        FORCE_PANIC_FOR_TEST.store(false, Ordering::SeqCst);
+
+        assert!(
+            !result,
+            "a panic inside the wrapped FFI fn must be caught and reported as `false`"
+        );
+    }
+
+    // Regression test (FFI-03 residual, 2026-08-27, see
+    // note/threat_matrix_verified_fixes_execution_plan.md Task 5): `metanode_register_callbacks`
+    // was previously the one exported FFI function NOT wrapped in `catch_unwind`. Same rationale
+    // as `metanode_submit_transaction_batch_survives_internal_panic` above: this function is
+    // `extern "C"` (non-unwind ABI), so an uncaught panic here would abort the whole test process
+    // rather than fail an assertion -- a passing `cargo test` run on this test is itself part of
+    // the proof that the wrapper works. `metanode_register_callbacks` has no natural
+    // input-driven panic path (unlike the batch function above), so this uses its own dedicated
+    // test-only fault-injection flag instead.
+    #[test]
+    fn metanode_register_callbacks_survives_internal_panic() {
+        let callbacks = GoCallbacks {
+            execute_block: None,
+            process_rpc_request: None,
+            free_go_buffer: None,
+            get_state_root: None,
+            update_tx_trace: None,
+            log_message: None,
+        };
+
+        FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.store(true, Ordering::SeqCst);
+        metanode_register_callbacks(callbacks);
+        FORCE_REGISTER_CALLBACKS_PANIC_FOR_TEST.store(false, Ordering::SeqCst);
+
+        // Reaching this line at all (instead of the test process aborting) is the proof.
+    }
 }

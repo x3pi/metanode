@@ -28,6 +28,7 @@ impl SocketAddress {
     ///
     /// # Examples
     /// ```
+    /// use metanode::node::executor_client::SocketAddress;
     /// let unix_addr = SocketAddress::parse("/tmp/socket.sock").unwrap();
     /// let tcp_addr = SocketAddress::parse("tcp://192.168.1.100:9001").unwrap();
     /// let tcp_addr2 = SocketAddress::parse("192.168.1.100:9001").unwrap();
