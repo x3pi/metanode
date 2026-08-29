@@ -213,6 +213,18 @@ Sổ cái danh bạ (ChainRegistry) nằm rải rác độc lập trên từng c
 # Tương tự cho 103, 104...
 ```
 
-### Bước 4: Cấu hình Relayer & Tích hợp
-- Cập nhật file `inventory.yml` (nếu dùng Ansible) và cấu hình của **Relayer Daemon** để bổ sung URL RPC và Chain ID của chuỗi mới.
-- Khởi động lại (Restart) Relayer. Khi Relayer quét thấy Chain ID mới đã hiển thị `Active` trên Root Anchor, nó sẽ tự động nhận diện và định tuyến giao dịch Cross-chain cho chuỗi mới này.
+### Bước 4: Tích hợp Relayer (Auto-Discovery - Không cần khởi động lại)
+Chương trình **Relayer Daemon** đã được trang bị tính năng dò tìm tự động (Dynamic Auto-Discovery). Nó sẽ tự động quét file cấu hình mỗi 2 giây. Bạn **không cần** phải khởi động lại Relayer.
+- Chỉ cần mở file cấu hình gốc của mạng lưới (thường là `/tmp/private_chains.json`):
+```bash
+nano /tmp/private_chains.json
+```
+- Bổ sung Chain ID và RPC của chuỗi mới vào mục `nodes`. Ví dụ:
+```json
+"nodes": {
+  "101": "http://<IP_CHAIN_101>:8546",
+  "102": "http://<IP_CHAIN_102>:8547",
+  "<NEW_CHAIN_ID>": "http://<IP_NEW_CHAIN>:85XX"
+}
+```
+- Lưu file lại. Relayer sẽ tự động phát hiện, kết nối và bắt đầu định tuyến tin nhắn 2 chiều cho chuỗi mới ngay lập tức!
