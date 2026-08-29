@@ -1,6 +1,7 @@
 # Hệ Thống Triển Khai Metanode (Ansible Edition)
 
-> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md) để nắm toàn bộ quy trình 4 bước chuẩn kết nối Root Anchor, Private Chains, Relayer Daemon và bộ kiểm thử E2E.
+> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md).
+> 🚀 **Script Tự Động Hóa 1 Lệnh (Full Pipeline):** Xem [RUN_PIPELINE_GUIDE.md](RUN_PIPELINE_GUIDE.md) để chạy trọn gói từ Deploy Public/Private Chains đến Full Test Cross-Chain & Block-STM với `./run_full_pipeline.sh` (hoặc `./run_pipeline.sh` tại root).
 
 Tài liệu này bao gồm 2 phần:
 - **Phần 1:** Cẩm nang lệnh chạy siêu tốc & Giải thích chi tiết trình tự xử lý của từng lệnh.

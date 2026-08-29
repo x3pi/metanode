@@ -215,6 +215,13 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getAllocation",
+		"outputs": [{"internalType": "uint256", "name": "allocation", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"inputs": [
 			{"internalType": "bytes", "name": "pubkeyBls", "type": "bytes"},
 			{"internalType": "bytes", "name": "popSignature", "type": "bytes"}

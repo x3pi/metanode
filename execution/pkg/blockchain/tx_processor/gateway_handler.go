@@ -1769,6 +1769,21 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(true, new(big.Int).SetUint64(entry.HomeChainID), entry.CanonicalContract, entry.Active)
 
+	case "getAllocation":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getAllocation input: %w", err)
+		}
+		targetChainID := mustUint64(args[0])
+		var alloc *big.Int
+		if engine.SupplyLedger != nil {
+			alloc = engine.SupplyLedger.GetAllocation(targetChainID)
+		}
+		if alloc == nil {
+			alloc = big.NewInt(0)
+		}
+		return method.Outputs.Pack(alloc)
+
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)
 	}

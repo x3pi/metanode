@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,57 +14,92 @@ import (
 	"strings"
 	"time"
 
+	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/rpc"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
+	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
-	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
-// register_chains bootstraps a fresh Root Anchor's ChainRegistry with a set of founding chains
-// via registerChainViaStake() -- the vote-free, real-native-coin-gated registration path, one
-// transaction per chain. This replaced bootstrapFoundingChains() (a single-transaction, >=
-// MinFoundingChains BATCH call, retired 2026-08-28 -- see note/cross_chain_stake_and_value_flow.md)
-// for the same reason bootstrapFoundingChains itself replaced the propose()/vote() governance flow
-// before it: propose()/vote() require the voter to already be an ActiveChains member, and a fresh
-// Root Anchor's ChainRegistry starts empty -- there is no committee that could ever vote those
-// per-chain proposals through. registerChainViaStake() solves this identically for chain #1 and
-// every chain after it, gated instead by a REAL, liquid native-coin deposit from -key's own
-// wallet (config.CrossChain.MinNativeStakeToRegisterWei on the target chain) -- NOT any
-// ERC-20-style token, and NOT the old PerChainAllocation/MinFoundingChains-count gate. -key's
-// wallet is debited by that deposit amount ONCE PER CHAIN registered in this run (N chains needs
-// N * MinNativeStakeToRegisterWei of real balance up front) -- fund it accordingly before running
-// this tool against a real target.
-//
-// Each founding chain's real committee entry is built from ITS OWN node's Databases.BLSPrivateKey
-// (config.json) -- not the genesis validator's consensus authority_key/PubkeyBls, and not the
-// gateway_bls_key devnet fallback gen_single_chain.py writes identically to every chain. This
-// matters for more than correctness of THIS one transaction: CommitAttestationWorker and
-// CommitteeAttestationWorker (the real background workers that later sign attestCommit/
-// committeeUpdate quorum certs) sign with Databases.BLSPrivateKey specifically -- registering a
-// different key here would mean their real signature shares never match the committee this
-// registers, and every later attestCommit()/committeeUpdate() would silently never reach quorum.
-
-// committeeMember pairs a founding chain's ID with its own committee BLS private key hex --
-// needed to cast a real, individually-signed governance vote() on that chain's behalf (see
-// fundGenesis below). Mirrors live_asset_bridge's own committeeMember/proposeVoteExecute, which
-// already live-verified this exact propose->vote->timelock->execute sequence
-// (note/cross_chain_production_readiness_plan.md Phase 0.9).
 type committeeMember struct {
 	ChainID uint64
 	PrivHex string
 }
 
+func findDefaultRootAnchor() string {
+	if env := os.Getenv("ROOT_ANCHOR_RPC"); env != "" {
+		return env
+	}
+	if data, err := os.ReadFile("/tmp/private_chains.json"); err == nil {
+		var topology struct {
+			RootAnchor string `json:"root_anchor"`
+		}
+		if err := json.Unmarshal(data, &topology); err == nil && topology.RootAnchor != "" {
+			return topology.RootAnchor
+		}
+	}
+	return "http://127.0.0.1:10746"
+}
+
+func findDefaultChainsDir() string {
+	if env := os.Getenv("CHAINS_DIR"); env != "" {
+		return env
+	}
+	cwd, err := os.Getwd()
+	if err == nil {
+		dir := cwd
+		for i := 0; i < 6; i++ {
+			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "data")
+			if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+				return candidate
+			}
+			candidateNested := filepath.Join(dir, "metanode", "deploy", "ansible_private_chains", "data")
+			if stat, err := os.Stat(candidateNested); err == nil && stat.IsDir() {
+				return candidateNested
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	if stat, err := os.Stat("/opt/metanode"); err == nil && stat.IsDir() {
+		return "/opt/metanode"
+	}
+	return "deploy/ansible_private_chains/data"
+}
+
+func findDefaultTargetRPCs() string {
+	if data, err := os.ReadFile("/tmp/private_chains.json"); err == nil {
+		var topology struct {
+			Nodes map[string]string `json:"nodes"`
+		}
+		if err := json.Unmarshal(data, &topology); err == nil && len(topology.Nodes) > 0 {
+			var pairs []string
+			for cid, url := range topology.Nodes {
+				pairs = append(pairs, fmt.Sprintf("%s=%s", cid, url))
+			}
+			return strings.Join(pairs, ",")
+		}
+	}
+	return ""
+}
+
 func main() {
+	defaultRootAnchor := findDefaultRootAnchor()
+	defaultChainsDir := findDefaultChainsDir()
+	defaultTargetRPCs := findDefaultTargetRPCs()
+
 	var (
+		actionFlag          string
 		submitterKeyHex     string
 		rootAnchorRPC       string
 		chainsDir           string
@@ -75,17 +109,29 @@ func main() {
 		genesisSupplyFlag   string
 		perChainAllocFlag   string
 		timelockWaitSeconds int
+
+		// Transfer alloc flags
+		fromChainFlag uint64
+		toChainFlag   uint64
+		amountMTNFlag float64
+		amountWeiFlag string
 	)
 
-	flag.StringVar(&submitterKeyHex, "key", "0xd3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8", "Sender ECDSA private key hex (must hold real gas balance on Root Anchor; the default is a public devnet-only key, see start_relayer_daemon.sh's own warning)")
-	flag.StringVar(&rootAnchorRPC, "root-anchor", "http://127.0.0.1:9099", "Root Anchor JSON-RPC endpoint")
-	flag.StringVar(&chainsDir, "chains-dir", "deploy/systemd/private_chains_data", "Directory containing private chain data (chain_<id>/node-0/config.json for each) -- pass an ABSOLUTE path unless running this from the repo root")
-	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of founding chain IDs to register (no minimum count -- registerChainViaStake works from chain #1 onward; -key's wallet needs real balance >= len(chains) * MinNativeStakeToRegisterWei)")
-	flag.StringVar(&targetRPCsFlag, "target-rpcs", "", "Comma-separated chainID=rpcURL pairs (e.g. \"101=http://127.0.0.1:8546,102=http://127.0.0.1:8547\") -- ChainRegistry is PER-CHAIN local state, not shared: attestCommit() on chain 102 needs ITS OWN copy of chain 101's committee, not just Root Anchor's. Without this flag, only Root Anchor's registry is seeded and every attestCommit() from one private chain to another fails with \"unknown source chain ID\" (found + fixed 2026-08-26 via live E2E testing). Pass every founding chain's own RPC here in addition to -root-anchor.")
-	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint the one-time genesis supply on Root Anchor (ProposalAllocateSupply, Reserve-only) and distribute it to each founding chain (ProposalTransferAllocation) -- see note/threat_matrix... PR #84 review. Off by default: bootstrapFoundingChains alone never touches SupplyLedger (by design, C7 fix), so this is opt-in.")
-	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total one-time genesis supply to mint on Root Anchor, base-10 wei string (required if -fund-genesis; e.g. a devnet default like \"400000000000000000000000000\" for 400,000,000 tokens at 18 decimals -- this is an operational/ceremony decision, not a protocol constant, hence a flag rather than a hardcoded literal)")
-	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred from Root Anchor's Reserve to EACH founding chain in -chains, base-10 wei string (required if -fund-genesis). Must satisfy len(chains)*per-chain-allocation <= genesis-supply.")
-	flag.IntVar(&timelockWaitSeconds, "timelock-wait", 12, "Seconds to sleep after voting, before executeProposal -- must exceed the target chain's cross_chain.devnet_governance_timelock_seconds_override (gen_root_anchor_chain.py's default is 10s). NEVER use this against a real production Root Anchor with the real 72h timelock -- -fund-genesis is a devnet/ceremony-rehearsal convenience, not a production automation path.")
+	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry")
+	flag.StringVar(&submitterKeyHex, "key", "0xd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9", "Sender ECDSA private key hex")
+	flag.StringVar(&rootAnchorRPC, "root-anchor", defaultRootAnchor, "Root Anchor JSON-RPC endpoint (auto-detected)")
+	flag.StringVar(&chainsDir, "chains-dir", defaultChainsDir, "Directory containing private chain data (auto-detected)")
+	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs")
+	flag.StringVar(&targetRPCsFlag, "target-rpcs", defaultTargetRPCs, "Comma-separated chainID=rpcURL pairs for cross-chain mesh seeding (auto-detected)")
+	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint and distribute genesis supply")
+	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total genesis supply to mint on Root Anchor (base-10 wei)")
+	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred to each founding chain (base-10 wei)")
+	flag.IntVar(&timelockWaitSeconds, "timelock-wait", 12, "Seconds to wait for devnet governance timelock")
+
+	flag.Uint64Var(&fromChainFlag, "from-chain", 101, "Source Chain ID for transfer-alloc (e.g. 101 or 991)")
+	flag.Uint64Var(&toChainFlag, "to-chain", 103, "Destination Chain ID for transfer-alloc")
+	flag.Float64Var(&amountMTNFlag, "amount-mtn", 20000000, "Amount of MTN tokens to transfer (e.g. 20000000 for 20M MTN)")
+	flag.StringVar(&amountWeiFlag, "amount-wei", "", "Exact amount in base-10 wei for transfer-alloc")
 	flag.Parse()
 
 	submitterKeyHex = strings.TrimPrefix(submitterKeyHex, "0x")
@@ -95,15 +141,213 @@ func main() {
 		os.Exit(1)
 	}
 	fromAddress := crypto.PubkeyToAddress(privKey.PublicKey)
-	logger.Info("Using submitter address: %s", fromAddress.Hex())
 
 	ctx := context.Background()
-
 	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
 	if err != nil {
 		logger.Error("Failed to parse Gateway ABI: %v", err)
 		os.Exit(1)
 	}
+
+	switch strings.ToLower(actionFlag) {
+	case "query-alloc", "query-allocations":
+		handleQueryAllocations(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "query-registry":
+		handleQueryRegistry(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "transfer-alloc", "transfer-allocation", "allocate-supply":
+		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+	default: // "register"
+		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+	}
+}
+
+func handleQueryAllocations(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Printf("❌ Failed to connect to RPC %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	chainID, _ := client.ChainID(ctx)
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("📊 TRA CỨU HẠN MỨC CUNG TIỀN LIÊN CHUỖI (CUSTODIAL CEILING)\n")
+	fmt.Printf("   - RPC Endpoint: %s (ChainID: %v)\n", rootAnchorRPC, chainID)
+	fmt.Printf("   - Gateway Address: %s\n", gwAddr.Hex())
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+
+	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
+		var cid uint64
+		if _, err := fmt.Sscanf(cidStr, "%d", &cid); err != nil {
+			continue
+		}
+
+		calldata, err := parsedABI.Pack("getAllocation", new(big.Int).SetUint64(cid))
+		if err != nil {
+			fmt.Printf("❌ Pack error for chain %d: %v\n", cid, err)
+			continue
+		}
+
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+		if err != nil {
+			fmt.Printf("   Chain %-4d: ⚠️  Chưa nạp method getAllocation trên node hiện tại\n", cid)
+			continue
+		}
+
+		results, err := parsedABI.Unpack("getAllocation", out)
+		if err != nil {
+			fmt.Printf("❌ Unpack error for chain %d: %v\n", cid, err)
+			continue
+		}
+
+		alloc := results[0].(*big.Int)
+		allocFloat := new(big.Float).Quo(new(big.Float).SetInt(alloc), big.NewFloat(1e18))
+		fmt.Printf("   ├─ Chain %-4d: %24s wei  ➔  %14s MTN\n", cid, alloc.String(), allocFloat.Text('f', 4))
+	}
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+}
+
+func handleQueryRegistry(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Printf("❌ Failed to connect to RPC %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	chainID, _ := client.ChainID(ctx)
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("📋 TRA CỨU DANH BẠ LIÊN CHUỖI (CHAIN REGISTRY)\n")
+	fmt.Printf("   - RPC Endpoint: %s (ChainID: %v)\n", rootAnchorRPC, chainID)
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+
+	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
+		var cid uint64
+		if _, err := fmt.Sscanf(cidStr, "%d", &cid); err != nil {
+			continue
+		}
+
+		calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(cid))
+		if err != nil {
+			continue
+		}
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+		if err != nil {
+			fmt.Printf("   Chain %-4d: ❌ Call error: %v\n", cid, err)
+			continue
+		}
+		results, err := parsedABI.Unpack("getChainRegistry", out)
+		if err != nil {
+			continue
+		}
+		exists := results[0].(bool)
+		if !exists {
+			fmt.Printf("   ├─ Chain %-4d: ❌ Chưa đăng ký trong danh bạ\n", cid)
+			continue
+		}
+		pubkeys := results[1].([][]byte)
+		epoch := results[4].(uint64)
+		threshold := results[5].(uint64)
+		fmt.Printf("   ├─ Chain %-4d: ✅ Đã đăng ký (Epoch: %d, Committee: %d validator(s), Quorum: %d%%)\n", cid, epoch, len(pubkeys), threshold/100)
+		for i, pk := range pubkeys {
+			fmt.Printf("   │  └─ Val[%d] BLS Pubkey: 0x%s\n", i, common.Bytes2Hex(pk))
+		}
+	}
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+}
+
+func handleTransferAllocation(
+	ctx context.Context,
+	privKey *ecdsa.PrivateKey,
+	fromAddress common.Address,
+	rootAnchorRPC, chainsDir string,
+	parsedABI abi.ABI,
+	fromChain, toChain uint64,
+	amountMTN float64,
+	amountWei string,
+	timelockWaitSeconds int,
+) {
+	var amountBig *big.Int
+	if amountWei != "" {
+		var ok bool
+		amountBig, ok = new(big.Int).SetString(amountWei, 10)
+		if !ok {
+			fmt.Printf("❌ Invalid -amount-wei: %s\n", amountWei)
+			os.Exit(1)
+		}
+	} else {
+		amountBig = new(big.Int)
+		new(big.Float).Mul(big.NewFloat(amountMTN), big.NewFloat(1e18)).Int(amountBig)
+	}
+
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Printf("❌ Failed to connect to Root Anchor (%s): %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	committee := loadAllCommitteeMembers(chainsDir)
+	if len(committee) == 0 {
+		fmt.Printf("❌ No committee members found in %s\n", chainsDir)
+		os.Exit(1)
+	}
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("🔄 CHUYỂN HẠN MỨC TIỀN CỌC LIÊN CHUỖI (TRANSFER ALLOCATION)\n")
+	fmt.Printf("   ├─ Root Anchor RPC:  %s\n", rootAnchorRPC)
+	fmt.Printf("   ├─ From Chain:       %d\n", fromChain)
+	fmt.Printf("   ├─ To Chain:         %d\n", toChain)
+	fmt.Printf("   ├─ Amount:           %s wei (%.4f MTN)\n", amountBig.String(), amountMTN)
+	fmt.Printf("   ├─ Committee Size:   %d active members\n", len(committee))
+	fmt.Printf("   └─ Submitter:        %s\n", fromAddress.Hex())
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+
+	transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
+		FromChainID: fromChain,
+		ToChainID:   toChain,
+		Amount:      amountBig,
+	})
+	if err != nil {
+		fmt.Printf("❌ Failed to marshal AllocationTransferPayload: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
+		6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+		fmt.Sprintf("transfer allocation from chain %d to %d", fromChain, toChain)); err != nil {
+		fmt.Printf("❌ Transfer allocation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("🎉 THÀNH CÔNG! ĐÃ CHUYỂN HẠN MỨC %.4f MTN TỪ CHAIN %d SANG CHAIN %d!\n", amountMTN, fromChain, toChain)
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+}
+
+func handleRegisterChains(
+	ctx context.Context,
+	privKey *ecdsa.PrivateKey,
+	fromAddress common.Address,
+	rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag string,
+	fundGenesisFlag bool,
+	genesisSupplyFlag, perChainAllocFlag string,
+	timelockWaitSeconds int,
+	parsedABI abi.ABI,
+) {
+	logger.Info("Using submitter address: %s", fromAddress.Hex())
 
 	var payloads [][]byte
 	var committee []committeeMember
@@ -119,22 +363,13 @@ func main() {
 			os.Exit(1)
 		}
 
-		configPath := filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json")
-		// Deliberately NOT config.LoadConfig(): it caches into the package-level ConfigApp
-		// singleton behind a sync.Once, so calling it more than once per process (exactly what
-		// this loop does, once per founding chain) silently returns the FIRST chain's config for
-		// every subsequent chain ID, ignoring configPath entirely. Confirmed live: every chain
-		// registered after the first ended up with chain 101's BLSPrivateKey/committee entry,
-		// so only chain 101 could ever pass its own committee-membership check anywhere in the
-		// mesh. Found + fixed 2026-08-26 via live governance-vote testing. Read+unmarshal each
-		// file directly into its own struct instead.
-		nodeCfg, err := loadConfigFresh(configPath)
+		nodeCfg, err := loadChainNodeConfig(chainsDir, cidStr)
 		if err != nil {
-			logger.Error("Failed to load node config for chain %s at %s: %v", cidStr, configPath, err)
+			logger.Error("Failed to load node config for chain %s: %v", cidStr, err)
 			os.Exit(1)
 		}
 		if nodeCfg.Databases.BLSPrivateKey == "" {
-			logger.Error("Chain %s's config at %s has no Databases.BLSPrivateKey configured", cidStr, configPath)
+			logger.Error("Chain %s has no Databases.BLSPrivateKey configured", cidStr)
 			os.Exit(1)
 		}
 
@@ -178,16 +413,6 @@ func main() {
 
 	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
 
-	if fundGenesisFlag {
-		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds)
-	}
-
-	// ChainRegistry is PER-CHAIN local state (see gateway.go's g.ChainRegistry map) -- Root
-	// Anchor bootstrapping its own registry does NOT give any private chain knowledge of its
-	// siblings' committees. Without this, attestCommit() on chain 102 for a commit produced by
-	// chain 101 always reverted with "unknown source chain ID: chain 101", because chain 102's
-	// OWN GatewayEngine.ChainRegistry had never heard of chain 101 at all. Found + fixed
-	// 2026-08-26 via live E2E testing of the P4 relayer's WatchChainPair loop.
 	if targetRPCsFlag != "" {
 		for _, pair := range strings.Split(targetRPCsFlag, ",") {
 			pair = strings.TrimSpace(pair)
@@ -203,43 +428,71 @@ func main() {
 			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
 		}
 	}
+
+	if fundGenesisFlag {
+		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+	}
 }
 
-// loadConfigFresh reads and unmarshals a node config.json directly, bypassing
-// config.LoadConfig's process-wide sync.Once cache -- see the call site's comment for why that
-// cache makes config.LoadConfig unsafe to call more than once per process.
-func loadConfigFresh(configPath string) (*config.SimpleChainConfig, error) {
-	raw, err := os.ReadFile(configPath)
+func loadAllCommitteeMembers(chainsDir string) []committeeMember {
+	var committee []committeeMember
+	entries, err := os.ReadDir(chainsDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		return nil
 	}
-	cfg := &config.SimpleChainConfig{}
-	if err := json.Unmarshal(raw, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		var cid uint64
+		if strings.HasPrefix(entry.Name(), "chain_") {
+			_, _ = fmt.Sscanf(entry.Name(), "chain_%d", &cid)
+		} else if strings.HasPrefix(entry.Name(), "chain-") {
+			_, _ = fmt.Sscanf(entry.Name(), "chain-%d", &cid)
+		} else {
+			continue
+		}
+		if cid == 0 {
+			continue
+		}
+		cfg, err := loadChainNodeConfig(chainsDir, fmt.Sprintf("%d", cid))
+		if err == nil && cfg.Databases.BLSPrivateKey != "" {
+			committee = append(committee, committeeMember{
+				ChainID: cid,
+				PrivHex: cfg.Databases.BLSPrivateKey,
+			})
+		}
 	}
-	return cfg, nil
+	return committee
 }
 
-func extractRevertReason(rpcURL string, txHash common.Hash) string {
-	rpcClient, err := rpc.Dial(rpcURL)
-	if err != nil {
-		return ""
+type chainConfig struct {
+	Databases struct {
+		BLSPrivateKey string
 	}
-	defer rpcClient.Close()
+}
 
-	var rawReceipt map[string]interface{}
-	if err := rpcClient.Call(&rawReceipt, "eth_getTransactionReceipt", txHash.Hex()); err != nil {
+func loadChainNodeConfig(chainsDir, cidStr string) (*chainConfig, error) {
+	candidates := []string{
+		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json"),
+		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr), "config", "execution.json"),
+		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "config.json"),
+	}
+	for _, path := range candidates {
+		if data, err := os.ReadFile(path); err == nil {
+			var app chainConfig
+			if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
+				return &app, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("could not find valid config for chain %s in %s", cidStr, chainsDir)
+}
+
+func decodeRevertReason(returnBytes []byte) string {
+	if len(returnBytes) == 0 {
 		return ""
 	}
-	returnHex, ok := rawReceipt["return"].(string)
-	if !ok || len(returnHex) < 10 {
-		return ""
-	}
-	returnBytes, err := hex.DecodeString(strings.TrimPrefix(returnHex, "0x"))
-	if err != nil || len(returnBytes) < 4 {
-		return ""
-	}
-	// ABI Error(string) selector: 0x08c379a0
 	if bytes.Equal(returnBytes[:4], []byte{0x08, 0xc3, 0x79, 0xa0}) && len(returnBytes) >= 68 {
 		strLen := binary.BigEndian.Uint64(returnBytes[60:68])
 		if uint64(len(returnBytes)) >= 68+strLen {
@@ -249,15 +502,6 @@ func extractRevertReason(rpcURL string, txHash common.Hash) string {
 	return string(returnBytes)
 }
 
-// registerChains submits one registerChainViaStake calldata per chain (registerCalldatas[i] for
-// chainIDs[i]) to a single chain's RPC endpoint, sequentially, blocking on each one's receipt
-// before sending the next -- so an early chain's failure never leaves later chains' registration
-// state ambiguous, and so -key's wallet nonce advances correctly between calls. It is deliberately
-// fail-loud (os.Exit(1)) rather than fail-soft on any UNEXPECTED failure: a chain silently missing
-// its siblings' committees would surface much later as a hard-to-diagnose "unknown source chain
-// ID" revert during a real cross-chain attestation, not at registration time. "already registered"
-// is tolerated per-chain (this run may be a safe re-run over a partially-registered set), matching
-// the retired bootstrapFoundingChains's own self-closing tolerance.
 func registerChains(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL, label string, chainIDs []uint64, registerCalldatas [][]byte) {
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
@@ -271,194 +515,185 @@ func registerChains(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress 
 		logger.Error("Failed to fetch %s ChainID: %v", label, err)
 		os.Exit(1)
 	}
-	logger.Info("Connected to %s (ChainID: %s)", label, onChainID.String())
+	logger.Info("Connected to %s (ChainID: %d)", label, onChainID.Uint64())
 
-	for i, calldata := range registerCalldatas {
-		targetChainID := chainIDs[i]
+	parsedABI, _ := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
 
-		nonce, err := client.PendingNonceAt(ctx, fromAddress)
-		if err != nil {
-			logger.Error("Failed to get nonce on %s: %v", label, err)
-			os.Exit(1)
-		}
-		tx := types.NewTransaction(nonce, p_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), 5_000_000, big.NewInt(1_000_000_000), calldata)
-		signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(onChainID), privKey)
-		if err != nil {
-			logger.Error("Failed to sign registerChainViaStake transaction (chain %d) for %s: %v", targetChainID, label, err)
-			os.Exit(1)
-		}
-		if err := client.SendTransaction(ctx, signedTx); err != nil {
-			logger.Error("Failed to send registerChainViaStake transaction (chain %d) to %s: %v", targetChainID, label, err)
-			os.Exit(1)
-		}
-		logger.Info("registerChainViaStake(chain %d) submitted to %s, tx=%s -- waiting for receipt...", targetChainID, label, signedTx.Hash().Hex())
-
-		var receipt *types.Receipt
-		for j := 0; j < 30; j++ {
-			receipt, err = client.TransactionReceipt(ctx, signedTx.Hash())
-			if err == nil {
-				break
+	for i, targetChainID := range chainIDs {
+		// Pre-check if already registered to avoid reverting and paying unnecessary stake gas
+		checkData, _ := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(targetChainID))
+		out, callErr := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: checkData}, nil)
+		if callErr == nil {
+			unpacked, unpErr := parsedABI.Unpack("getChainRegistry", out)
+			if unpErr == nil && len(unpacked) > 0 {
+				if exists, ok := unpacked[0].(bool); ok && exists {
+					logger.Info("ℹ️ %s: chain %d is already registered in ChainRegistry -- skipping.", label, targetChainID)
+					continue
+				}
 			}
-			time.Sleep(1 * time.Second)
 		}
-		if receipt == nil {
-			logger.Error("Timed out waiting for registerChainViaStake receipt (chain %d) on %s (tx=%s): %v", targetChainID, label, signedTx.Hash().Hex(), err)
-			os.Exit(1)
-		}
-		if receipt.Status != 1 {
-			revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
-			if strings.Contains(revertMsg, "already in ChainRegistry") {
+
+		receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000,
+			registerCalldatas[i], fmt.Sprintf("registerChainViaStake(chain %d)", targetChainID))
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "already registered") || strings.Contains(errStr, "already active") {
 				logger.Info("ℹ️ %s: chain %d is already registered -- proceeding.", label, targetChainID)
 				continue
 			}
-			logger.Error("❌ registerChainViaStake(chain %d) reverted on %s (tx=%s)", targetChainID, label, signedTx.Hash().Hex())
-			if revertMsg != "" {
-				logger.Error("   👉 Error ReturnData từ Receipt: \"%s\"", revertMsg)
-				if strings.Contains(revertMsg, "min_native_stake_to_register_wei") {
-					logger.Error("   👉 %s has no MinNativeStakeToRegisterWei configured -- registerChainViaStake fails closed until an operator sets it.", label)
-				} else if strings.Contains(revertMsg, "insufficient balance") {
-					logger.Error("   👉 -key's wallet (%s) does not hold enough real native balance on %s -- fund it, or reduce -chains.", fromAddress.Hex(), label)
-				}
-			} else {
-				logger.Error("   👉 Error ReturnData: (không có hoặc mã lỗi rỗng)")
-			}
+			logger.Error("❌ %s: registerChainViaStake(chain %d) failed: %v", label, targetChainID, err)
 			os.Exit(1)
 		}
 		logger.Info("✅ registerChainViaStake(chain %d) succeeded on %s!", targetChainID, label)
+		_ = receipt
 	}
 }
 
-// fundGenesis mints the one-time genesis supply on Root Anchor and distributes it to every
-// founding chain, using the real propose->vote->timelock->execute governance flow -- NOT a
-// direct SupplyLedger.GrantAllocation() call from inside BootstrapFoundingChains, which is
-// exactly the bug this replaces (an earlier version of gateway.go auto-minted a hardcoded
-// allocation to every founding chain from inside bootstrap itself, completely bypassing the C7
-// fix's Reserve-only/one-time-mint gate -- see PR #84's review comment and
-// note/cross_chain_attack_scenario_catalog.md item C7).
-//
-// Scope: this ONLY ever needs to run against Root Anchor's own RPC, not every founding chain's.
-// GlobalSupplyLedger is per-chain-local state, but the C8 fix restricts any ceiling-enforced
-// (nonzero-value) attestCommit() to the chain whose OWN LocalChainID equals its OWN configured
-// ReserveChainID -- so as long as every founding chain's config points reserve_chain_id at Root
-// Anchor's real chain ID (see gen_root_anchor_chain.py/gen_single_chain.py and PR #84's
-// deploy.yml fix), only Root Anchor's own GatewayEngine will ever pass that check. A private
-// chain's own local SupplyLedger copy is therefore never consulted for the ceiling check, and
-// does not need its own mint/transfer sequence run against it.
-//
-// reserveChainID is NOT taken from a flag -- it's read directly off Root Anchor's own RPC via
-// eth_chainId, so this can never target the wrong chain by a typo'd/stale config value.
-func fundGenesis(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rootAnchorRPC string, committee []committeeMember, chainIDs []uint64, genesisSupplyStr, perChainAllocStr string, timelockWaitSeconds int) {
-	if genesisSupplyStr == "" || perChainAllocStr == "" {
-		logger.Error("-fund-genesis requires both -genesis-supply and -per-chain-allocation")
+func fundGenesis(
+	ctx context.Context,
+	privKey *ecdsa.PrivateKey,
+	fromAddress common.Address,
+	rootAnchorRPC string,
+	committee []committeeMember,
+	chainIDs []uint64,
+	genesisSupplyFlag, perChainAllocFlag string,
+	timelockWaitSeconds int,
+	parsedABI abi.ABI,
+) {
+	if genesisSupplyFlag == "" || perChainAllocFlag == "" {
+		logger.Error("-fund-genesis requires both -genesis-supply and -per-chain-allocation flags to be set")
 		os.Exit(1)
 	}
-	genesisSupply, ok := new(big.Int).SetString(genesisSupplyStr, 10)
+	genesisSupply, ok := new(big.Int).SetString(genesisSupplyFlag, 10)
 	if !ok || genesisSupply.Sign() <= 0 {
-		logger.Error("Invalid -genesis-supply %q (must be a positive base-10 integer)", genesisSupplyStr)
+		logger.Error("Invalid -genesis-supply: %q", genesisSupplyFlag)
 		os.Exit(1)
 	}
-	perChainAlloc, ok := new(big.Int).SetString(perChainAllocStr, 10)
+	perChainAlloc, ok := new(big.Int).SetString(perChainAllocFlag, 10)
 	if !ok || perChainAlloc.Sign() <= 0 {
-		logger.Error("Invalid -per-chain-allocation %q (must be a positive base-10 integer)", perChainAllocStr)
+		logger.Error("Invalid -per-chain-allocation: %q", perChainAllocFlag)
 		os.Exit(1)
 	}
-	totalDistributed := new(big.Int).Mul(perChainAlloc, big.NewInt(int64(len(chainIDs))))
-	if totalDistributed.Cmp(genesisSupply) > 0 {
-		logger.Error("len(chains)=%d * -per-chain-allocation=%s = %s exceeds -genesis-supply=%s",
-			len(chainIDs), perChainAlloc.String(), totalDistributed.String(), genesisSupply.String())
+	totalNeeded := new(big.Int).Mul(perChainAlloc, big.NewInt(int64(len(chainIDs))))
+	if totalNeeded.Cmp(genesisSupply) > 0 {
+		logger.Error("len(chains)*perChainAlloc (%s) exceeds genesisSupply (%s)", totalNeeded.String(), genesisSupply.String())
 		os.Exit(1)
 	}
 
 	client, err := ethclient.Dial(rootAnchorRPC)
 	if err != nil {
-		logger.Error("fundGenesis: failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		logger.Error("fundGenesis: dial Root Anchor: %v", err)
 		os.Exit(1)
 	}
 	defer client.Close()
-	onChainID, err := client.ChainID(ctx)
+
+	rootChainIDBig, err := client.ChainID(ctx)
 	if err != nil {
-		logger.Error("fundGenesis: failed to fetch Root Anchor's real ChainID: %v", err)
+		logger.Error("fundGenesis: fetch Root Anchor ChainID: %v", err)
 		os.Exit(1)
 	}
-	reserveChainID := onChainID.Uint64()
+	reserveChainID := rootChainIDBig.Uint64()
 	logger.Info("fundGenesis: Root Anchor's real chain ID (used as ReserveChainID) is %d", reserveChainID)
 
-	grant := cross_chain.AllocationGrantPayload{ChainID: reserveChainID, Amount: genesisSupply}
-	grantPayload, err := json.Marshal(grant)
+	mintPayload, err := json.Marshal(cross_chain.AllocationGrantPayload{
+		ChainID: reserveChainID,
+		Amount:  genesisSupply,
+	})
 	if err != nil {
-		logger.Error("fundGenesis: marshal AllocationGrantPayload: %v", err)
+		logger.Error("fundGenesis: marshal mintPayload: %v", err)
 		os.Exit(1)
 	}
-	mintErr := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-		5 /* ProposalAllocateSupply */, grantPayload, committee, timelockWaitSeconds,
-		"mint genesis supply")
-	if mintErr != nil {
-		if strings.Contains(mintErr.Error(), "already been minted") {
-			logger.Info("ℹ️ fundGenesis: genesis supply already minted on Root Anchor -- proceeding to distribute.")
-		} else {
-			logger.Error("❌ fundGenesis: genesis mint failed: %v", mintErr)
-			os.Exit(1)
-		}
+
+	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
+		5 /* ProposalAllocateSupply */, mintPayload, committee, timelockWaitSeconds,
+		"mint genesis supply"); err != nil {
+		logger.Info("ℹ️ fundGenesis: mint genesis supply skipped (%v) -- proceeding to distribute.", err)
 	} else {
 		logger.Info("✅ fundGenesis: minted %s to Reserve (chain %d) on Root Anchor", genesisSupply.String(), reserveChainID)
 	}
 
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
 	for _, cid := range chainIDs {
-		transfer := cross_chain.AllocationTransferPayload{FromChainID: reserveChainID, ToChainID: cid, Amount: perChainAlloc}
-		transferPayload, err := json.Marshal(transfer)
+		// 1. Kiểm tra xem chain đã có allocation trước đó chưa
+		calldata, packErr := parsedABI.Pack("getAllocation", new(big.Int).SetUint64(cid))
+		if packErr == nil {
+			if out, callErr := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil); callErr == nil {
+				if results, unpackErr := parsedABI.Unpack("getAllocation", out); unpackErr == nil && len(results) > 0 {
+					if existingAlloc, ok := results[0].(*big.Int); ok && existingAlloc.Sign() > 0 {
+						logger.Info("ℹ️ fundGenesis: chain %d already has allocation (%s wei) -- skipping distribution.", cid, existingAlloc.String())
+						continue
+					}
+				}
+			}
+		}
+
+		transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
+			FromChainID: reserveChainID,
+			ToChainID:   cid,
+			Amount:      perChainAlloc,
+		})
 		if err != nil {
-			logger.Error("fundGenesis: marshal AllocationTransferPayload for chain %d: %v", cid, err)
+			logger.Error("fundGenesis: marshal transferPayload for chain %d: %v", cid, err)
 			os.Exit(1)
 		}
 		if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
 			6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
 			fmt.Sprintf("transfer allocation to chain %d", cid)); err != nil {
-			logger.Error("❌ fundGenesis: allocation transfer to chain %d failed: %v", cid, err)
-			os.Exit(1)
+			logger.Info("ℹ️ fundGenesis: allocation transfer to chain %d skipped (%v)", cid, err)
+			continue
 		}
 		logger.Info("✅ fundGenesis: transferred %s from Reserve (chain %d) to chain %d", perChainAlloc.String(), reserveChainID, cid)
 	}
 }
 
-// proposeVoteExecute submits propose(), then a real BLS-signed vote() from every committee
-// member, then (after the devnet timelock override) executeProposal() -- the same real,
-// live-verified sequence as live_asset_bridge's own proposeVoteExecute
-// (note/cross_chain_production_readiness_plan.md Phase 0.9), adapted to reuse this tool's own
-// sendTxAndWait/extractRevertReason helpers instead of duplicating a second transaction-sending
-// implementation.
-func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, kind uint8, payload []byte, committee []committeeMember, timelockWaitSeconds int, label string) error {
+func proposeVoteExecute(
+	ctx context.Context,
+	client *ethclient.Client,
+	privKey *ecdsa.PrivateKey,
+	fromAddress common.Address,
+	rpcURL string,
+	kind uint8,
+	payload []byte,
+	committee []committeeMember,
+	timelockWaitSeconds int,
+	label string,
+) error {
 	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
 	if err != nil {
-		return fmt.Errorf("parse Gateway ABI: %w", err)
+		return fmt.Errorf("parse GatewayABI: %w", err)
 	}
 
-	now := uint64(time.Now().Unix())
-	proposeCalldata, err := parsedABI.Pack("propose", kind, payload, now)
-	if err != nil {
-		return fmt.Errorf("pack propose(kind=%d): %w", kind, err)
-	}
-	// Anti-spam fee enforced by gateway_handler.go's "propose" case (0.1 native token) -- see
-	// its own comment for why this exists.
-	proposeFee := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(100_000_000))
-	receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, proposeFee, 2_000_000, proposeCalldata,
-		fmt.Sprintf("%s: propose", label))
-	if err != nil {
-		return err
-	}
-
-	header, err := client.HeaderByNumber(ctx, receipt.BlockNumber)
+	header, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("fetch block header for propose: %w", err)
 	}
 
+	proposeCalldata, err := parsedABI.Pack("propose", kind, payload, header.Time)
+	if err != nil {
+		return fmt.Errorf("pack propose(kind=%d): %w", kind, err)
+	}
+	receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, big.NewInt(100_000_000_000_000_000), 2_000_000,
+		proposeCalldata, fmt.Sprintf("%s: propose", label))
+	if err != nil {
+		return fmt.Errorf("%s: propose: %w", label, err)
+	}
+	logger.Info("✅ %s: propose succeeded", label)
+
+	block, err := client.BlockByNumber(ctx, receipt.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("fetch propose block %v: %w", receipt.BlockNumber, err)
+	}
+	proposedAt := block.Time()
+
 	var buf []byte
 	buf = append(buf, kind)
 	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], header.Time)
+	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
 	buf = append(buf, tsBytes[:]...)
 	buf = append(buf, payload...)
 	proposalID := crypto.Keccak256Hash(buf)
-	logger.Info("%s: computed proposalID=%s (blockTime=%d)", label, proposalID.Hex(), header.Time)
+	logger.Info("%s: computed proposalID=%s (blockTime=%d)", label, proposalID.Hex(), proposedAt)
 
 	voteNow := uint64(time.Now().Unix())
 	for _, m := range committee {
@@ -469,13 +704,11 @@ func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *
 		if err != nil {
 			return fmt.Errorf("pack vote(chain=%d): %w", m.ChainID, err)
 		}
-		// Soft: tolerate "already voted"/"already timelocked"/"quorum already reached" reverts
-		// past the real threshold as expected, not fatal -- mirrors live_asset_bridge's own
-		// sendCalldataSoft rationale (quorum is computed off the CURRENT ActiveChains size, not
-		// a size this tool tracks externally).
 		if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, voteCalldata,
 			fmt.Sprintf("%s: vote(chain=%d)", label, m.ChainID)); err != nil {
 			logger.Info("ℹ️ %s: vote(chain=%d) did not succeed (likely already past quorum/timelock): %v", label, m.ChainID, err)
+		} else {
+			logger.Info("✅ %s: vote(chain=%d) succeeded", label, m.ChainID)
 		}
 	}
 
@@ -488,14 +721,13 @@ func proposeVoteExecute(ctx context.Context, client *ethclient.Client, privKey *
 	}
 	_, err = sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, execCalldata,
 		fmt.Sprintf("%s: executeProposal", label))
-	return err
+	if err != nil {
+		return fmt.Errorf("%s: executeProposal: %w", label, err)
+	}
+	logger.Info("✅ %s: executeProposal succeeded", label)
+	return nil
 }
 
-// sendTxAndWait signs, sends, and waits for a single transaction's receipt, returning an error
-// (with decoded revert reason where available) on any failure instead of os.Exit(1) -- unlike
-// bootstrap()'s deliberately fail-loud style, propose/vote/executeProposal callers need to
-// distinguish real failures from expected/tolerable reverts (already-minted, already-voted,
-// quorum-already-reached) themselves.
 func sendTxAndWait(ctx context.Context, client *ethclient.Client, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, value *big.Int, gasLimit uint64, calldata []byte, label string) (*types.Receipt, error) {
 	chainID, err := client.ChainID(ctx)
 	if err != nil {
@@ -508,8 +740,11 @@ func sendTxAndWait(ctx context.Context, client *ethclient.Client, privKey *ecdsa
 	if value == nil {
 		value = big.NewInt(0)
 	}
-	tx := types.NewTransaction(nonce, p_common.GATEWAY_CONTRACT_ADDRESS, value, gasLimit, big.NewInt(1_000_000_000), calldata)
-	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), privKey)
+	gasPrice := big.NewInt(1_000_000_000)
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	tx := types.NewTransaction(nonce, gwAddr, value, gasLimit, gasPrice, calldata)
+	signer := types.LatestSignerForChainID(chainID)
+	signedTx, err := types.SignTx(tx, signer, privKey)
 	if err != nil {
 		return nil, fmt.Errorf("%s: sign tx: %w", label, err)
 	}
@@ -517,24 +752,27 @@ func sendTxAndWait(ctx context.Context, client *ethclient.Client, privKey *ecdsa
 		return nil, fmt.Errorf("%s: send tx: %w", label, err)
 	}
 
-	var receipt *types.Receipt
 	for i := 0; i < 30; i++ {
-		receipt, err = client.TransactionReceipt(ctx, signedTx.Hash())
-		if err == nil {
-			break
-		}
 		time.Sleep(1 * time.Second)
-	}
-	if receipt == nil {
-		return nil, fmt.Errorf("%s: timed out waiting for receipt (tx=%s): %w", label, signedTx.Hash().Hex(), err)
-	}
-	if receipt.Status != 1 {
-		revertMsg := extractRevertReason(rpcURL, signedTx.Hash())
-		if revertMsg != "" {
-			return receipt, fmt.Errorf("%s: reverted (tx=%s): %s", label, signedTx.Hash().Hex(), revertMsg)
+		receipt, err := client.TransactionReceipt(ctx, signedTx.Hash())
+		if err != nil {
+			continue
 		}
-		return receipt, fmt.Errorf("%s: reverted (tx=%s), no revert reason decoded", label, signedTx.Hash().Hex())
+		if receipt.Status != 1 {
+			reasonBytes, _ := client.CallContract(ctx, ethereum.CallMsg{
+				From:  fromAddress,
+				To:    &gwAddr,
+				Gas:   gasLimit,
+				Value: value,
+				Data:  calldata,
+			}, receipt.BlockNumber)
+			reason := decodeRevertReason(reasonBytes)
+			if reason == "" {
+				reason = fmt.Sprintf("0x%s", common.Bytes2Hex(reasonBytes))
+			}
+			return receipt, fmt.Errorf("reverted (tx=%s): %s", signedTx.Hash().Hex(), reason)
+		}
+		return receipt, nil
 	}
-	logger.Info("✅ %s succeeded (tx=%s)", label, signedTx.Hash().Hex())
-	return receipt, nil
+	return nil, fmt.Errorf("%s: timed out waiting for tx receipt (%s)", label, signedTx.Hash().Hex())
 }

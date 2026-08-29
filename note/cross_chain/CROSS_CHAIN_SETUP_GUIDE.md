@@ -169,52 +169,46 @@ go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 
 ---
 
-## 🆕 5. Hướng Dẫn Đăng Ký Chain Mới (Sau Genesis)
+## 🆕 5. Hướng Dẫn Đăng Ký Chain Mới & Quản Trị Hạn Mức
 
-Đối với một Private Chain hoàn toàn mới (không nằm trong danh sách founding chains lúc khởi tạo), quy trình đăng ký hiện tại (từ bản vá 2026-08-28) là **hoàn toàn Permissionless (Không cần Vote)**. Bất kỳ người dùng nào có đủ số dư Native Coin thật trong ví đều có thể đăng ký chuỗi mới.
-
-### Bước 1: Đăng ký danh bạ bằng Tiền cọc Thật (`RegisterChainViaStake`)
-Để ngăn chặn Sybil Attack, thao tác đăng ký yêu cầu bạn phải nạp một khoản tiền cọc (bằng đúng `MinNativeStakeToRegister`). Số tiền này bị trừ trực tiếp từ số dư Native Coin (EVM) trong ví cá nhân của bạn và khóa lại tại Smart Contract (`GATEWAY_CONTRACT_ADDRESS`) trên Root Anchor.
-
-Dùng công cụ `register_chains` để đăng ký Chain Mới. Tool sẽ tự đọc file `execution.json` của Chain Mới lấy Public Key BLS, tạo bằng chứng PoP hợp lệ, và dùng khóa Private Key ETH của bạn để trả tiền cọc:
+Tất cả các tác vụ quản trị Gateway Contract (`0x1002`) đã được hợp nhất vào công cụ duy nhất: [`register_chains`](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains/README.md).
 
 ```bash
-cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/register_chains
-go build -o register_chains main.go
-
-./register_chains \
-  -chains <NEW_CHAIN_ID> \
-  -chains-dir /home/abc/chain-n/metanode/deploy/ansible_private_chains/data \
-  -root-anchor http://<IP_PUBLIC_CHAIN>:10746 \
-  -target-rpcs "101=http://<IP_CHAIN_101>:8546,102=http://<IP_CHAIN_102>:8547,<NEW_CHAIN_ID>=http://<IP_NEW_CHAIN>:85XX" \
-  -key <PRIVATE_KEY_ETH_CÓ_SẴN_SỐ_DƯ_ĐỂ_CỌC>
+cd /home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains
+go build -o register_chains .
 ```
-*(Ngay sau khi lệnh này chạy thành công, Smart Contract tự động trừ tiền ví của bạn và thêm ngay Chain Mới vào danh bạ của Root Anchor và tất cả các chuỗi đích mà **KHÔNG CẦN CHỜ AI VOTE DUYỆT**).*
 
-### Bước 2: Đăng ký danh bạ các Chain cũ sang Chain mới
-Để Chain mới nhận diện được tất cả các chain đã có từ trước (101, 102, 103...), chạy lệnh sau trỏ thẳng vào RPC của Chain mới:
-
+### Bước 1: Khởi động node cho Chain Mới (nếu dùng Ansible)
 ```bash
-./register_chains \
-  -chains 101,102,103 \
-  -chains-dir /home/abc/chain-n/metanode/deploy/ansible_private_chains/data \
-  -root-anchor http://<IP_PUBLIC_CHAIN>:10746 \
-  -target-rpcs "<NEW_CHAIN_ID>=http://<IP_NEW_CHAIN>:85XX" \
-  -key <PRIVATE_KEY_ETH>
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible_private_chains
+./deploy_private_chains.sh --setup --chain=103 --open-ports
 ```
 
-### Bước 3: Tích hợp Relayer (Auto-Discovery - Không cần khởi động lại)
-Chương trình **Relayer Daemon** đã được trang bị tính năng dò tìm tự động (Dynamic Auto-Discovery). Nó sẽ tự động quét file cấu hình mỗi 2 giây. Bạn **không cần** phải khởi động lại Relayer.
-- Chỉ cần mở file cấu hình gốc của mạng lưới (thường là `/tmp/private_chains.json`):
+### Bước 2: Đăng ký danh bạ & Khóa BLS (`register`)
+Tool tự động đọc khóa BLS, tạo bằng chứng PoP và đăng ký danh bạ chéo lên Root Anchor và toàn bộ các Private Chains:
 ```bash
-nano /tmp/private_chains.json
+cd /home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains
+./register_chains -chains "101,102,103"
 ```
-- Bổ sung Chain ID và RPC của chuỗi mới vào mục `nodes`. Ví dụ:
-```json
-"nodes": {
-  "101": "http://<IP_CHAIN_101>:8546",
-  "102": "http://<IP_CHAIN_102>:8547",
-  "<NEW_CHAIN_ID>": "http://<IP_NEW_CHAIN>:85XX"
-}
+
+### Bước 3: Cấp hạn mức tiền cọc cho Chain Mới (`transfer-alloc`)
+Nếu Chain Mới cần xuất tiền liên chuỗi (Value Transfer), trích chuyển hạn mức từ một chain đang dư (VD: Chain 101) sang Chain Mới:
+```bash
+./register_chains -action transfer-alloc -from-chain 101 -to-chain 103 -amount-mtn 10000000
 ```
-- Lưu file lại. Relayer sẽ tự động phát hiện, kết nối và bắt đầu định tuyến tin nhắn 2 chiều cho chuỗi mới ngay lập tức!
+
+### Bước 4: Tra cứu kiểm tra (`query-alloc` & `query-registry`)
+```bash
+# Kiểm tra hạn mức của các chain:
+./register_chains -action query-alloc -chains "991,101,102,103"
+
+# Kiểm tra danh bạ và validator keys:
+./register_chains -action query-registry -chains "101,102,103"
+```
+
+### Bước 5: Khởi động lại Relayer
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible_private_chains
+./run_relayer_tmux.sh restart
+```
+

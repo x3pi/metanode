@@ -10,7 +10,7 @@ echo "════════════════════════�
 echo "🌐 METANODE PRIVATE CHAINS — ANSIBLE DEPLOYMENT MANAGER"
 echo "═══════════════════════════════════════════════════════════════"
 
-ACTION="setup"
+ACTION=""
 TARGET_CHAIN="all"
 OPEN_PORTS="false"
 REGISTER=0
@@ -47,7 +47,6 @@ for arg in "$@"; do
             TARGET_CHAIN="${arg#*=}"
             ;;
         --register)
-            ACTION="none"
             REGISTER=1
             ;;
         --inventory=*)
@@ -85,6 +84,14 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ -z "$ACTION" ]; then
+    if [ "$REGISTER" -eq 1 ]; then
+        ACTION="none"
+    else
+        ACTION="setup"
+    fi
+fi
 
 if [ ! -f "$INVENTORY" ]; then
     echo "❌ ERROR: Inventory file not found: $INVENTORY"
@@ -141,6 +148,18 @@ for host_key, hvars in hosts.items():
             print(f'\033[0;33m   - Chain {cid} được khai báo ở cả \'{host_key}\' và \'{prev_host}\'.\033[0m', file=sys.stderr)
             sys.exit(1)
         seen_chains[cid] = host_key
+
+target_chain_str = '$TARGET_CHAIN'
+if target_chain_str != 'all':
+    try:
+        t_cid = int(target_chain_str)
+        if t_cid not in seen_chains:
+            print(f'\n\033[0;31m❌ [LỖI] Chain ID [{t_cid}] KHÔNG TỒN TẠI hoặc đang bị comment (#) trong file $INVENTORY!\033[0m', file=sys.stderr)
+            print(f'\033[0;33m   👉 Các Chain ID hiện có sẵn: {sorted(list(seen_chains.keys()))}\033[0m', file=sys.stderr)
+            print(f'\033[0;36m   👉 Hãy mở comment hoặc khai báo thêm chain_id: {t_cid} vào $INVENTORY trước khi chạy.\033[0m\n', file=sys.stderr)
+            sys.exit(1)
+    except ValueError:
+        pass
 "
 
 # Chạy Ansible Playbook
@@ -207,6 +226,11 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation'
     echo "   - Private Chains:  $CHAINS_LIST"
     echo "   - Target RPCs:     $TARGET_RPCS"
     echo "   - Genesis supply:  $GENESIS_SUPPLY (per-chain: $PER_CHAIN_ALLOCATION)"
+    if [ "$TARGET_CHAIN" != "all" ]; then
+        echo ""
+        echo "   ℹ️  Mục tiêu: Đăng ký Chain $TARGET_CHAIN mới."
+        echo "   ℹ️  Các chain cũ ($CHAINS_LIST) sẽ được kiểm tra và tự động bỏ qua (already registered) để đồng bộ danh bạ chéo."
+    fi
     echo ""
 
     # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
