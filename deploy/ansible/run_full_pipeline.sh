@@ -19,7 +19,9 @@ MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve absolute path even when run via symlink
+REAL_SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${REAL_SCRIPT_PATH}")" && pwd)"
 METANODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SUITE_DIR="$(cd "${METANODE_DIR}/../metanode-suite" 2>/dev/null && pwd || echo "${METANODE_DIR}/metanode-suite")"
 
@@ -36,7 +38,7 @@ print_banner() {
     echo -e "📁 ${BOLD}Metanode Suite Directory:${NC} ${SUITE_DIR}"
     echo -e "🌿 ${BOLD}Git Pull Option:${NC}          $( [ "$DO_PULL" = true ] && echo -e "${GREEN}Enabled (Branch: ${GIT_BRANCH})${NC}" || echo -e "${YELLOW}Disabled (Using local workspace)${NC}" )"
     echo -e "🧪 ${BOLD}Run BlockSTM Tests:${NC}       $( [ "$SKIP_TESTS" = true ] && echo -e "${YELLOW}Skipped${NC}" || echo -e "${GREEN}Enabled (run_all_tests.sh)${NC}" )"
-    echo -e "🌉 ${BOLD}Run Cross-Chain Test:${NC}     $( [ "$SKIP_CROSS_CHAIN" = true ] && echo -e "${YELLOW}Skipped${NC}" || echo -e "${GREEN}Enabled (01-client-only-transfer)${NC}" )"
+    echo -e "🌉 ${BOLD}Run Cross-Chain Test:${NC}     $( [ "$SKIP_CROSS_CHAIN" = true ] && echo -e "${YELLOW}Skipped${NC}" || echo -e "${GREEN}Enabled (cross-chain/run_all_tests.sh)${NC}" )"
     echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}\n"
 }
 
