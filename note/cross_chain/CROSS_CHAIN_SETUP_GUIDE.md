@@ -171,26 +171,12 @@ go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 
 ## 🆕 5. Hướng Dẫn Đăng Ký Chain Mới (Sau Genesis)
 
-Đối với một Private Chain hoàn toàn mới (không nằm trong danh sách founding chains lúc khởi tạo), bạn không thể dùng hàm `bootstrapFoundingChains`. Quy trình đăng ký chain mới yêu cầu tuân thủ cơ chế đồng thuận an toàn (chống Sybil Attack) thông qua các bước sau:
+Đối với một Private Chain hoàn toàn mới (không nằm trong danh sách founding chains lúc khởi tạo), quy trình đăng ký hiện tại (từ bản vá 2026-08-28) là **hoàn toàn Permissionless (Không cần Vote)**. Bất kỳ người dùng nào có đủ số dư Native Coin thật trong ví đều có thể đăng ký chuỗi mới.
 
-### Bước 1: Cấp phát Allocation (Tiền cọc) cho Chain Mới
-Theo cơ chế bảo mật (từ bản vá 2026-08-27), một chain mới khi đăng ký bắt buộc phải có số dư trong `PerChainAllocation` lớn hơn hoặc bằng `MinRegistrationStake`. 
-Bạn dùng công cụ `live_asset_bridge` để lấy một phần Allocation đã có sẵn từ Reserve Chain (991) chuyển sang Chain ID mới:
+### Bước 1: Đăng ký danh bạ bằng Tiền cọc Thật (`RegisterChainViaStake`)
+Để ngăn chặn Sybil Attack, thao tác đăng ký yêu cầu bạn phải nạp một khoản tiền cọc (bằng đúng `MinNativeStakeToRegister`). Số tiền này bị trừ trực tiếp từ số dư Native Coin (EVM) trong ví cá nhân của bạn và khóa lại tại Smart Contract (`GATEWAY_CONTRACT_ADDRESS`) trên Root Anchor.
 
-```bash
-cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/live_asset_bridge
-go build -o live_asset_bridge main.go
-
-./live_asset_bridge -action allocate-supply \
-  -this-chain 991 \
-  -other-chain <NEW_CHAIN_ID> \
-  -value 100000000000000000000000000 \
-  -timelock 12
-```
-*(Ghi chú: Lệnh trên sẽ tự động đệ trình `ProposalTransferAllocation`, tự động lấy chữ ký BLS của các Validator để Vote đạt Quorum, chờ hết 12s Timelock rồi tự động Execute).*
-
-### Bước 2: Đăng ký danh bạ qua Stake (`RegisterChainViaStake`)
-Sau khi đủ cọc, dùng công cụ `register_chains` để đăng ký Chain Mới vào Root Anchor. Tool này sẽ tự tìm đọc file `execution.json` của Chain Mới để lấy Public Key BLS và tạo bằng chứng PoP hợp lệ:
+Dùng công cụ `register_chains` để đăng ký Chain Mới. Tool sẽ tự đọc file `execution.json` của Chain Mới lấy Public Key BLS, tạo bằng chứng PoP hợp lệ, và dùng khóa Private Key ETH của bạn để trả tiền cọc:
 
 ```bash
 cd ~/nhat/consensus-chain/metanode/execution/cmd/tool/register_chains
@@ -198,22 +184,26 @@ go build -o register_chains main.go
 
 ./register_chains \
   -chains <NEW_CHAIN_ID> \
-  -base-dir /opt/metanode \
-  -rpc http://<IP_PUBLIC_CHAIN>:10746 \
-  -key <PRIVATE_KEY_ETH_CÓ_SẴN_GAS_CỦA_BẠN>
+  -chains-dir /home/abc/chain-n/metanode/deploy/ansible_private_chains/data \
+  -root-anchor http://<IP_PUBLIC_CHAIN>:10746 \
+  -target-rpcs "101=http://<IP_CHAIN_101>:8546,102=http://<IP_CHAIN_102>:8547,<NEW_CHAIN_ID>=http://<IP_NEW_CHAIN>:85XX" \
+  -key <PRIVATE_KEY_ETH_CÓ_SẴN_SỐ_DƯ_ĐỂ_CỌC>
 ```
-*(Cơ chế `RegisterChainViaStake`: Smart Contract tự kiểm tra `PerChainAllocation` có đủ ở Bước 1 hay không, nếu đủ sẽ ghi danh bạ lập tức mà không cần qua quy trình Vote phức tạp nữa).*
+*(Ngay sau khi lệnh này chạy thành công, Smart Contract tự động trừ tiền ví của bạn và thêm ngay Chain Mới vào danh bạ của Root Anchor và tất cả các chuỗi đích mà **KHÔNG CẦN CHỜ AI VOTE DUYỆT**).*
 
-### Bước 3: Đăng ký chéo danh bạ vào các Chain hiện hữu
-Sổ cái danh bạ (ChainRegistry) nằm rải rác độc lập trên từng chain. Để các chain cũ nhận diện được chain mới, bạn phải chạy lệnh đăng ký trên vào tất cả các RPC của chain cũ:
+### Bước 2: Đăng ký danh bạ các Chain cũ sang Chain mới
+Để Chain mới nhận diện được tất cả các chain đã có từ trước (101, 102, 103...), chạy lệnh sau trỏ thẳng vào RPC của Chain mới:
 
 ```bash
-./register_chains -chains <NEW_CHAIN_ID> -base-dir /opt/metanode -rpc http://<IP_CHAIN_101>:8546 -key <PRIVATE_KEY_ETH>
-./register_chains -chains <NEW_CHAIN_ID> -base-dir /opt/metanode -rpc http://<IP_CHAIN_102>:8547 -key <PRIVATE_KEY_ETH>
-# Tương tự cho 103, 104...
+./register_chains \
+  -chains 101,102,103 \
+  -chains-dir /home/abc/chain-n/metanode/deploy/ansible_private_chains/data \
+  -root-anchor http://<IP_PUBLIC_CHAIN>:10746 \
+  -target-rpcs "<NEW_CHAIN_ID>=http://<IP_NEW_CHAIN>:85XX" \
+  -key <PRIVATE_KEY_ETH>
 ```
 
-### Bước 4: Tích hợp Relayer (Auto-Discovery - Không cần khởi động lại)
+### Bước 3: Tích hợp Relayer (Auto-Discovery - Không cần khởi động lại)
 Chương trình **Relayer Daemon** đã được trang bị tính năng dò tìm tự động (Dynamic Auto-Discovery). Nó sẽ tự động quét file cấu hình mỗi 2 giây. Bạn **không cần** phải khởi động lại Relayer.
 - Chỉ cần mở file cấu hình gốc của mạng lưới (thường là `/tmp/private_chains.json`):
 ```bash
