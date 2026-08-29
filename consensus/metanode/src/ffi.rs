@@ -191,8 +191,15 @@ pub fn get_ffi_tx_queue_depth() -> usize {
 /// Initialize RocksDB C++ static variables safely.
 /// This should be called from Go's main thread on startup.
 #[no_mangle]
-pub extern "C" fn metanode_init_rocksdb() {
-    let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new("/tmp/rocksdb_dummy_init");
+pub extern "C" fn metanode_init_rocksdb(data_dir: *const libc::c_char) {
+    if data_dir.is_null() { return; }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(data_dir) };
+    if let Ok(dir) = c_str.to_str() {
+        let path = format!("{}/rocksdb_dummy_init", dir);
+        let _ = std::panic::catch_unwind(|| {
+            let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new(&path);
+        });
+    }
 }
 
 pub fn setup_ffi_transaction_channel(sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
