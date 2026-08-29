@@ -425,6 +425,41 @@ func (se *SpeculativeExecutor) WaitForInFlight(timeout time.Duration) {
 	}
 }
 
+// AbortAllSpeculative forcefully cancels all in-flight speculative execution workers
+// and aborts all completed speculative sessions currently waiting in activeSessions.
+// It closes and aborts all cloned NOMT sessions immediately, resetting NOMT activeCount to 0
+// and sending rescue responses to unblock any waiting Rust FFI channels.
+func (se *SpeculativeExecutor) AbortAllSpeculative() {
+	// 1. Cancel in-flight EVM worker contexts and wait for them to exit
+	se.CancelInFlight()
+	se.WaitForInFlight(200 * time.Millisecond)
+
+	// 2. Discard and abort all FinishedSessions in activeSessions
+	se.activeSessions.Range(func(key, value interface{}) bool {
+		gei := key.(uint64)
+		if res, ok := value.(*SpeculativeResult); ok && res != nil {
+			if res.ClonedState != nil {
+				res.ClonedState.CloseSpeculative()
+			}
+			if res.AuthRespCh != nil {
+				select {
+				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true, // Treat as success so Rust proceeds
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+				}:
+					logger.Info("✅ [AbortAllSpeculative] Sent rescue response for GEI=%d", res.GEI)
+				default:
+				}
+			}
+		}
+		se.activeSessions.Delete(gei)
+		se.inFlight.Delete(gei)
+		return true
+	})
+}
+
 // CleanGEI cleans speculative results older than or equal to a target GEI.
 //
 // ARCHITECTURAL NOTE: Why `if !res.IsFinished` was intentionally removed:
@@ -609,6 +644,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var hasConflict bool
 	if lastBlock == nil {
 		hasConflict = false // Genesis
+	} else if res.ClonedState == nil && len(res.Txs) > 0 {
+		logger.Warn("⚠️ [COMMITTER] Speculative ClonedState is nil for GEI=%d (aborted/closed by Sync). Re-executing sequentially.", res.GEI)
+		hasConflict = true
 	} else if res.ClonedState == nil {
 		hasConflict = false // Empty block, no speculative state, no conflict
 	} else {
@@ -676,7 +714,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetAccountStateDB(csCopy.GetAccountStateDB())
 		bp.chainState.SetSmartContractDB(csCopy.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(csCopy.GetStakeStateDB())
-	} else if len(res.Txs) > 0 {
+	} else if len(res.Txs) > 0 && res.ClonedState != nil {
 		// Không conflict -> Sử dụng speculative results và database đã thực thi sẵn
 		accumulatedResults = res.ProcessResult
 

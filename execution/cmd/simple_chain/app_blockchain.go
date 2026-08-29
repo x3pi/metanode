@@ -569,40 +569,11 @@ func (app *App) initBlockchain() error {
 
 					if !found {
 						if trie.GetStateBackend() == trie.BackendNOMT {
-							logger.Warn("🛡️ [STARTUP] ⚠️ No matching block found in LevelDB for NOMT roots. Wiping NOMT database and resetting block tip to genesis to force clean sync!")
-
-							// Close all handles
-							trie.CloseNomtDB()
-
-							// Wipe nomt_db directory
-							nomtDbDir := filepath.Join(app.config.Databases.RootPath, "consensus", "nomt_db")
-							if err := os.RemoveAll(nomtDbDir); err != nil {
-								logger.Error("❌ [STARTUP] Failed to wipe NOMT database directory at %s: %v", nomtDbDir, err)
-							} else {
-								logger.Info("✅ [STARTUP] Successfully wiped NOMT database directory at %s", nomtDbDir)
-							}
-
-							// Reset startup block tip to genesis (block 0)
-							key := []byte("blockNumber_0")
-							data, err := app.storageManager.GetStorageMapping().Get(key)
-							if err == nil && data != nil && len(data) == 32 {
-								blockHash := e_common.BytesToHash(data)
-								blk0, err := blockDatabase.GetBlockByHash(blockHash)
-								if err == nil && blk0 != nil {
-									logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0. Resetting startup block tip to genesis.")
-									app.startLastBlock = blk0
-									storage.ResetAllBlockCounters(0)
-									storage.ForceSetLastGlobalExecIndex(blk0.Header().GlobalExecIndex())
-									storage.ForceSetLastHandledCommitIndex(uint32(blk0.Header().CommitIndex()))
-									storage.UpdateLastHandledCommitEpoch(uint64(blk0.Header().Epoch()))
-								} else {
-									logger.Fatal("🚨 [STARTUP] CRITICAL: Failed to load genesis block #0 by hash %s: %v", blockHash.Hex(), err)
-								}
-							} else {
-								logger.Fatal("🚨 [STARTUP] CRITICAL: Failed to find blockNumber_0 in LevelDB mapping: %v", err)
-							}
+							logger.Warn("🛡️ [STARTUP] ⚠️ No exact block match found in LevelDB for NOMT roots (nomtAccount=%s, nomtStake=%s). Preserving NOMT state at startup tip block #%d (headerAccount=%s, headerStake=%s) and registering future unaligned root for catch-up bypass.",
+								nomtAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], app.startLastBlock.Header().BlockNumber(), headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+							futureNomtRoot = nomtAccountRoot
 						} else {
-							logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: NOMT roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
+							logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
 								nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
 						}
 					}
@@ -1434,12 +1405,12 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		key := []byte(fmt.Sprintf("blockNumber_%d", bn))
 		data, err := app.storageManager.GetStorageMapping().Get(key)
 		if err != nil || data == nil || len(data) != 32 {
-			return fmt.Errorf("failed to get block hash mapping for block #%d: %v", bn, err)
+			return fmt.Errorf("failed to get block hash mapping for block #%d (block data may have been pruned): %v", bn, err)
 		}
 		blockHash := e_common.BytesToHash(data)
 		blk, err := blockDatabase.GetBlockByHash(blockHash)
 		if err != nil || blk == nil {
-			return fmt.Errorf("failed to get block #%d by hash %s: %v", bn, blockHash.Hex(), err)
+			return fmt.Errorf("failed to get block #%d by hash %s (block data may have been pruned): %v", bn, blockHash.Hex(), err)
 		}
 
 		// 1. Align chainState to parent block's roots so EVM execution is consistent

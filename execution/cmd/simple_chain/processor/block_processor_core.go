@@ -303,8 +303,12 @@ func (bp *BlockProcessor) ResumeExecution() {
 // and waits briefly for workers to release Xapian/EVM locks.
 func (bp *BlockProcessor) CancelSpeculativeExecution(geis ...uint64) {
 	if bp.speculativeExecutor != nil {
-		bp.speculativeExecutor.CancelInFlight(geis...)
-		bp.speculativeExecutor.WaitForInFlight(200 * time.Millisecond)
+		if len(geis) == 0 {
+			bp.speculativeExecutor.AbortAllSpeculative()
+		} else {
+			bp.speculativeExecutor.CancelInFlight(geis...)
+			bp.speculativeExecutor.WaitForInFlight(200 * time.Millisecond)
+		}
 	}
 }
 
