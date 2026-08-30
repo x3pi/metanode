@@ -111,7 +111,7 @@ json decodeString(const uint8_t *bytes, uint32_t i, json abi, uint32_t totalLeng
 //        cout << "DB String 3: " << element_str << endl;
         
         // Remove NUL characters
-        element_str.erase(remove(element_str.begin(), element_str.end(), '\0'), element_str.end());
+        // element_str.erase(remove(element_str.begin(), element_str.end(), '\0'), element_str.end());
         
         // Replace unwanted characters (adjust as per your use case)
         element_str = replaceAllDoubleSlashes(element_str, "\"", "\\\"");

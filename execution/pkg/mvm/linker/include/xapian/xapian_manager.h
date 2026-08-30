@@ -50,7 +50,7 @@ public:
   // --- Search Database Pool ---
   // Mỗi goroutine search cần Xapian::Database riêng (không thread-safe).
   // Pool chứa sẵn MAX_CONCURRENT_SEARCHES Database objects, tái sử dụng thay vì create/destroy mỗi call.
-  static constexpr int MAX_CONCURRENT_SEARCHES = 4;
+  static constexpr int MAX_CONCURRENT_SEARCHES = 1024;
   struct SearchDbPool {
     std::vector<Xapian::Database*> pool; // Pre-created Database objects
     std::vector<uint8_t> in_use;         // Non-zero nếu DB đang được dùng
@@ -63,7 +63,7 @@ public:
   // --- Simple Read Database Pool ---
   // Pool lớn dành riêng cho các thao tác đọc nhẹ (get_data, get_value, get_document).
   // Tách biệt khỏi SearchDbPool để tránh bị block bởi các câu lệnh full-text search nặng nề.
-  static constexpr int MAX_CONCURRENT_SIMPLE_READS = 64;
+  static constexpr int MAX_CONCURRENT_SIMPLE_READS = 1024;
   struct SimpleReadDbPool {
     std::vector<Xapian::Database*> pool;
     std::vector<uint8_t> in_use;

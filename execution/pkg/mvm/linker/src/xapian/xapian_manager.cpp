@@ -228,6 +228,8 @@ Xapian::Database* XapianManager::acquireSearchDb()
     uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < search_pool.pool.size(); ++i) {
         if (!search_pool.in_use[i]) {
+            search_pool.in_use[i] = true;
+            lock.unlock(); // Release lock before disk I/O
             if (search_pool.pool[i] == nullptr) {
                 // Lazy init
                 try {
@@ -237,7 +239,10 @@ Xapian::Database* XapianManager::acquireSearchDb()
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSearchDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
-                    continue; // try next slot
+                    lock.lock();
+                    search_pool.in_use[i] = false;
+                    search_pool.pool_cv.notify_one();
+                    return nullptr;
                 }
             } else if (search_pool.last_gen[i] < current_gen) {
                 // Reopen existing
@@ -256,11 +261,13 @@ Xapian::Database* XapianManager::acquireSearchDb()
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSearchDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
-                        continue;
+                        lock.lock();
+                        search_pool.in_use[i] = false;
+                        search_pool.pool_cv.notify_one();
+                        return nullptr;
                     }
                 }
             }
-            search_pool.in_use[i] = true;
             return search_pool.pool[i];
         }
     }
@@ -309,6 +316,8 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
     uint64_t current_gen = db_generation.load(std::memory_order_acquire);
     for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
         if (!simple_read_pool.in_use[i]) {
+            simple_read_pool.in_use[i] = true;
+            lock.unlock(); // Release lock before disk I/O
             if (simple_read_pool.pool[i] == nullptr) {
                 // Lazy init
                 try {
@@ -318,7 +327,10 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                 } catch (const std::exception& e) {
                     std::cerr << "[FATAL] acquireSimpleReadDb: failed to init slot " << i
                               << ": " << e.what() << std::endl;
-                    continue; // try next slot
+                    lock.lock();
+                    simple_read_pool.in_use[i] = false;
+                    simple_read_pool.pool_cv.notify_one();
+                    return nullptr;
                 }
             } else if (simple_read_pool.last_gen[i] < current_gen) {
                 // Reopen existing
@@ -337,11 +349,13 @@ Xapian::Database* XapianManager::acquireSimpleReadDb()
                     } catch (const std::exception& e2) {
                         std::cerr << "[FATAL] acquireSimpleReadDb: failed to recreate slot " << i
                                   << ": " << e2.what() << std::endl;
-                        continue;
+                        lock.lock();
+                        simple_read_pool.in_use[i] = false;
+                        simple_read_pool.pool_cv.notify_one();
+                        return nullptr;
                     }
                 }
             }
-            simple_read_pool.in_use[i] = true;
             return simple_read_pool.pool[i];
         }
     }
