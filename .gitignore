@@ -519,3 +519,9 @@ execution/cmd/tool/live_asset_bridge/live_asset_bridge
 execution/cmd/tool/test_cross_chain_tx/
 execution/cmd/tool/tx_sender/config_*.json
 execution/cmd/tool/tx_sender/data_deploy.json
+
+# Local testing databases and crash logs
+xdb/
+xdb_large/
+crash_bt*.txt
+*.patch
