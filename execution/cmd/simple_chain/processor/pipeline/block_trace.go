@@ -11,38 +11,51 @@ type BlockTrace struct {
 	TxCount     int    `json:"tx_count"`
 
 	// Rust Consensus
-	ConsensusDurationUs          int64 `json:"consensus_duration_ms"`
-	RustMempoolProposeDurationUs int64 `json:"rust_mempool_propose_duration_ms"`
-	RustDagConsensusDurationUs   int64 `json:"rust_dag_consensus_duration_ms"`
-	RustDeliveryFFIDurationUs    int64 `json:"rust_delivery_ffi_duration_ms"`
+	//
+	// NOTE (found 2026-08-31 while profiling for throughput headroom): every
+	// field below is genuinely microseconds -- both the Go field name (...Us)
+	// and every caller that populates it (see AddConsensusAndExecTime etc.
+	// below, all named/commented *Us) agree on that. Only the JSON tags were
+	// wrong, saying "_ms" -- so eth_getBlockTraces was reporting real
+	// double-digit-millisecond block times (e.g. a ~30ms block) as "30818"
+	// under a "_duration_ms" key, reading as a 30-SECOND block. Nothing that
+	// actually reads GetTraces()'s return value elsewhere in this repo uses
+	// these JSON tag strings (grepped clean), so this is a pure relabeling,
+	// not a behavior change -- but a real, misleading-diagnostics bug: it's
+	// exactly the kind of thing that makes a profiling session conclude the
+	// executor is 1000x slower than it is.
+	ConsensusDurationUs          int64 `json:"consensus_duration_us"`
+	RustMempoolProposeDurationUs int64 `json:"rust_mempool_propose_duration_us"`
+	RustDagConsensusDurationUs   int64 `json:"rust_dag_consensus_duration_us"`
+	RustDeliveryFFIDurationUs    int64 `json:"rust_delivery_ffi_duration_us"`
 
 	// Pre-mempool
-	ClientBatchProcessingUs int64 `json:"client_batch_processing_ms"`
+	ClientBatchProcessingUs int64 `json:"client_batch_processing_us"`
 	WaitGoUs                int64 `json:"wait_go_us"`
 	WaitRustUs              int64 `json:"wait_rust_us"`
 
 	// Phase 1: Execution & Processing (Root Calc)
-	ProcessTxsDurationUs   int64 `json:"process_txs_duration_ms"`
-	ReceiptsRootDurationUs int64 `json:"receipts_root_duration_ms"`
-	TxsRootDurationUs      int64 `json:"txs_root_duration_ms"`
-	Phase1TotalDurationUs  int64 `json:"phase1_total_duration_ms"`
+	ProcessTxsDurationUs   int64 `json:"process_txs_duration_us"`
+	ReceiptsRootDurationUs int64 `json:"receipts_root_duration_us"`
+	TxsRootDurationUs      int64 `json:"txs_root_duration_us"`
+	Phase1TotalDurationUs  int64 `json:"phase1_total_duration_us"`
 
 	// Phase 2: Create Block Data
-	BlockDataDurationUs int64 `json:"block_data_duration_ms"`
+	BlockDataDurationUs int64 `json:"block_data_duration_us"`
 
 	// Phase 3.1: Mapping Generate
-	MappingDurationUs int64 `json:"mapping_duration_ms"`
+	MappingDurationUs int64 `json:"mapping_duration_us"`
 
 	// Phase 3.2: Commit Memory (Trie Commit)
-	CommitMemoryDurationUs int64 `json:"commit_memory_duration_ms"`
+	CommitMemoryDurationUs int64 `json:"commit_memory_duration_us"`
 
 	// Phase 4: Job Prep & Snap
-	JobPrepAndSnapDurationUs int64 `json:"job_prep_and_snap_duration_ms"`
-	DispatchDurationUs       int64 `json:"dispatch_duration_ms"`
+	JobPrepAndSnapDurationUs int64 `json:"job_prep_and_snap_duration_us"`
+	DispatchDurationUs       int64 `json:"dispatch_duration_us"`
 
 	// Phase 5: DB Persistence (Async)
-	SaveDBDurationUs     int64 `json:"save_db_duration_ms"`
-	TotalBlockDurationUs int64 `json:"total_block_duration_ms"`
+	SaveDBDurationUs     int64 `json:"save_db_duration_us"`
+	TotalBlockDurationUs int64 `json:"total_block_duration_us"`
 	GCPauseUs            int64 `json:"gc_pause_us"` // Tracks GC pause duration during block processing
 }
 
