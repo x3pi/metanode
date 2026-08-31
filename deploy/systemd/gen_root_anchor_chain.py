@@ -116,9 +116,34 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
     return result.stdout.strip()
 
 def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
-    """
-    Deterministically computes the secp256k1 keypair used by the devnet
-    CommitAttestationWorker "submitter" account of a given private chain ID and node index.
+    """Deterministically derive a devnet-only secp256k1 keypair for the
+    CommitAttestationWorker "submitter" account of a given private chain ID and
+    node index.
+
+    Root Anchor's genesis is generated BEFORE the private chains it will later
+    register (gen_root_anchor_chain.py runs first in setup_root_anchor.sh, then
+    setup_4_private_chains.sh generates the private chains and their submitter
+    keys) -- so there is no way for a *randomly*-generated submitter key to ever
+    be present in Root Anchor's genesis alloc. Every submitCommitAttestation()
+    tx from such a key was rejected by Root Anchor's tx-validation gate with
+    "no BLS public key registered on-chain" (the same generic "every tx sender
+    needs a registered BLS pubkey" gate documented next to gateway_bls_key
+    below), permanently blocking Milestone F's real BLS-share submission.
+
+    Fix: derive the key deterministically from (chain ID, node index), so BOTH
+    this script (at Root Anchor genesis time) and setup_4_private_chains.sh (at
+    private-chain genesis time) can independently compute the *same* keypair
+    for a given chain ID/node with zero data-passing between the two scripts,
+    and pre-register its address here with the same shared devnet BLS pubkey
+    already used for the "known dev account" below. node_index distinguishes
+    each validator node of a multi-validator private chain so they don't all
+    submit attestations from the same account/nonce sequence.
+
+    DEVNET ONLY. This key is derivable by anyone who reads this source file --
+    never use it to hold real value. Production deployments must generate a
+    real, secret, per-chain, per-node submitter key and register it on Root
+    Anchor (a real registration transaction/process, not a hardcoded genesis
+    alloc).
     """
     from eth_account import Account
     if node_index == 0:
@@ -164,6 +189,7 @@ def main():
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset")
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--max-nodes-per-founding-chain", type=int, default=10, help="Number of devnet submitter accounts (node index 0..N-1) to pre-register in Root Anchor's genesis for EACH founding chain (default: 10). This script has no visibility into how many validator nodes a founding private chain actually runs -- if a founding chain has more validators than this, the extra nodes' CommitAttestationWorker will silently hit the same 'no BLS public key registered' rejection this flag exists to prevent. Raise it to at least that chain's validator count.")
     args = parser.parse_args()
 
     ip_address = "127.0.0.1"
@@ -319,7 +345,7 @@ def main():
     # txs to Root Anchor from this account, and Root Anchor rejects txs from
     # any account with no BLS pubkey registered on its own chain).
     for founding_chain_id in founding_chains:
-        for node_idx in range(10):
+        for node_idx in range(args.max_nodes_per_founding_chain):
             _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id, node_idx)
             alloc_list.append({
                 "address": submitter_address,

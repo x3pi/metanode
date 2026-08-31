@@ -36,6 +36,21 @@ import hashlib
 from pathlib import Path
 
 def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
+    """Deterministically derive a devnet-only secp256k1 keypair for this node's
+    CommitAttestationWorker "submitter" account, keyed by (chain_id, node_index).
+
+    Must match gen_root_anchor_chain.py's derive_devnet_submitter_account()
+    bit-for-bit -- Root Anchor's genesis pre-registers this same account so
+    submitCommitAttestation() txs from it aren't rejected for "no BLS public
+    key registered on-chain". See that function's docstring for the full
+    root-cause writeup.
+
+    DEVNET ONLY. This key is derivable by anyone who reads this source file --
+    never use it to hold real value. Production deployments must generate a
+    real, secret, per-chain, per-node submitter key and register it on Root
+    Anchor (a real registration transaction/process, not a hardcoded genesis
+    alloc).
+    """
     from eth_account import Account
     if node_index == 0:
         seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
