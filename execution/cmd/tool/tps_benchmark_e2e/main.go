@@ -84,8 +84,17 @@ type RoundResult struct {
 	SettleTimeMs int64      `json:"settle_time_ms"`
 	InjectTPS    float64    `json:"inject_tps"`
 	SettleTPS    float64    `json:"settle_tps"`
-	SendErrors   int64      `json:"send_errors"`
-	BlockStats   BlockStats `json:"block_stats"`
+	// EndToEndTPS is the number that actually answers "how many tx/s did this
+	// round sustain" — txs_confirmed / (inject_time + settle_time), i.e. wall
+	// clock from the first tx sent to the last one confirmed on-chain.
+	// SettleTPS on its own is NOT that: it only covers the post-injection
+	// drain phase, so quoting it alone overstates throughput by ignoring the
+	// injection-phase wall time entirely (confirmed independently: many txs
+	// land on-chain *during* injection, but that concurrency doesn't shrink
+	// the round's actual start-to-finish duration one bit).
+	EndToEndTPS float64    `json:"end_to_end_tps"`
+	SendErrors  int64      `json:"send_errors"`
+	BlockStats  BlockStats `json:"block_stats"`
 }
 
 type ForkCheckResult struct {
@@ -109,7 +118,14 @@ type BenchReport struct {
 	AvgTPS    float64          `json:"avg_settle_tps"`
 	MaxTPS    float64          `json:"max_settle_tps"`
 	MinTPS    float64          `json:"min_settle_tps"`
-	Timestamp string           `json:"timestamp"`
+	// *EndToEndTPS is the real headline number (see RoundResult.EndToEndTPS) —
+	// *TPS above (settle-only) is kept for backward compat with existing
+	// tooling/dashboards that already parse this JSON, not because it's the
+	// more meaningful figure.
+	AvgEndToEndTPS float64 `json:"avg_end_to_end_tps"`
+	MaxEndToEndTPS float64 `json:"max_end_to_end_tps"`
+	MinEndToEndTPS float64 `json:"min_end_to_end_tps"`
+	Timestamp      string  `json:"timestamp"`
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -251,6 +267,17 @@ func sendTransactions(nodes []string, payloads [][]byte, workers int, quiet bool
 func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Duration, expectedTxs int, quiet bool) (BlockStats, time.Duration) {
 	pollInterval := 2 * time.Second
 	processStart := time.Now()
+	// lastProgressTime tracks when we last actually saw new txs land in a block.
+	// The loop below keeps polling for a fixed 12s of confirmed idleness after
+	// that before it's willing to declare settlement done (requiredEmptyStreak),
+	// which is necessary to be sure nothing is still trickling in — but that 12s
+	// is detection overhead, not settling work, and reporting settle_tps against
+	// a duration that includes it silently understates real throughput more and
+	// more as expectedTxs shrinks (12s fixed against, say, a 2s real settling
+	// window for a small run swamps the number, while barely denting it for a
+	// large one) — making runs of different sizes look artificially different in
+	// settle_tps even when the chain's real per-tx cost didn't change at all.
+	lastProgressTime := processStart
 
 	emptyBlockStreak := 0
 	rpcErrorStreak := 0
@@ -323,6 +350,7 @@ func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Dur
 			}
 		} else {
 			emptyBlockStreak = 0
+			lastProgressTime = time.Now()
 		}
 	}
 
@@ -332,7 +360,7 @@ func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Dur
 		stats.AvgTxPerBlock = float64(totalTxsInBlocks) / float64(stats.TotalBlocks)
 	}
 
-	return stats, time.Since(processStart)
+	return stats, lastProgressTime.Sub(processStart)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -520,6 +548,15 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 		globalEndBlock = stats.EndBlock
 
+		// True end-to-end: wall clock from the first tx sent to the last one
+		// confirmed on-chain, i.e. the full round, not just the post-injection
+		// drain tail that settleTPS alone covers.
+		endToEndSecs := injectTime.Seconds() + settleTime.Seconds()
+		endToEndTPS := float64(0)
+		if endToEndSecs > 0 {
+			endToEndTPS = float64(stats.TotalTxBlocks) / endToEndSecs
+		}
+
 		result := RoundResult{
 			Round:        round,
 			TxsSent:      int(sent),
@@ -528,6 +565,7 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 			SettleTimeMs: settleTime.Milliseconds(),
 			InjectTPS:    injectTPS,
 			SettleTPS:    settleTPS,
+			EndToEndTPS:  endToEndTPS,
 			SendErrors:   sendErrors,
 			BlockStats:   stats,
 		}
@@ -539,10 +577,16 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 		if settleTPS < report.MinTPS {
 			report.MinTPS = settleTPS
 		}
+		if endToEndTPS > report.MaxEndToEndTPS {
+			report.MaxEndToEndTPS = endToEndTPS
+		}
+		if report.MinEndToEndTPS == 0 || endToEndTPS < report.MinEndToEndTPS {
+			report.MinEndToEndTPS = endToEndTPS
+		}
 
 		if !quiet {
-			fmt.Printf("  📊 Round %d: %d TXs confirmed | %.0f inject TPS | %.0f settle TPS\n",
-				round, stats.TotalTxBlocks, injectTPS, settleTPS)
+			fmt.Printf("  📊 Round %d: %d TXs confirmed | %.0f inject TPS | %.0f settle TPS | %.0f end-to-end TPS\n",
+				round, stats.TotalTxBlocks, injectTPS, settleTPS, endToEndTPS)
 		}
 
 		// Cooldown between rounds
@@ -556,11 +600,14 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 	// Compute average
 	totalTPS := 0.0
+	totalEndToEndTPS := 0.0
 	for _, r := range report.Rounds {
 		totalTPS += r.SettleTPS
+		totalEndToEndTPS += r.EndToEndTPS
 	}
 	if len(report.Rounds) > 0 {
 		report.AvgTPS = totalTPS / float64(len(report.Rounds))
+		report.AvgEndToEndTPS = totalEndToEndTPS / float64(len(report.Rounds))
 	}
 
 	// Fork check across all nodes
@@ -589,6 +636,8 @@ func printReport(report BenchReport) {
 		fmt.Printf("║   TXs: %d sent → %d confirmed                       \n", r.TxsSent, r.TxsConfirmed)
 		fmt.Printf("║   Inject: %.0f tx/s (%dms) | Settle: %.0f tx/s (%dms)\n",
 			r.InjectTPS, r.InjectTimeMs, r.SettleTPS, r.SettleTimeMs)
+		fmt.Printf("║   End-to-end (submit→confirmed, full round): %.0f tx/s (%dms)\n",
+			r.EndToEndTPS, r.InjectTimeMs+r.SettleTimeMs)
 		fmt.Printf("║   Blocks: %d (empty: %d, max: %d tx/blk, avg: %.1f)\n",
 			r.BlockStats.TotalBlocks, r.BlockStats.EmptyBlocks,
 			r.BlockStats.MaxTxInBlock, r.BlockStats.AvgTxPerBlock)
@@ -598,8 +647,10 @@ func printReport(report BenchReport) {
 	}
 
 	fmt.Println("╠═══════════════════════════════════════════════════════════╣")
-	fmt.Printf("║ Average TPS: %.0f  |  Max: %.0f  |  Min: %.0f\n",
+	fmt.Printf("║ Settle-only TPS:   Average: %.0f  |  Max: %.0f  |  Min: %.0f\n",
 		report.AvgTPS, report.MaxTPS, report.MinTPS)
+	fmt.Printf("║ End-to-end TPS:    Average: %.0f  |  Max: %.0f  |  Min: %.0f\n",
+		report.AvgEndToEndTPS, report.MaxEndToEndTPS, report.MinEndToEndTPS)
 
 	if report.ForkCheck != nil {
 		fmt.Println("╠═══════════════════════════════════════════════════════════╣")

@@ -182,11 +182,23 @@ impl TransactionConsumer {
         }
     }
 
-    // Checks if there are enough pending transactions to skip the aggregation delay.
-    // E.g., if there are already 25k pending or multiple FFI batches queued.
+    // Checks if there are enough pending transactions to skip the aggregation delay
+    // (MIN_PROPOSAL_AGGREGATION_DELAY in core.rs). Threshold is the block's own
+    // max_num_transactions_in_block: once a full block's worth is already waiting,
+    // there is no aggregation benefit left to wait for, so proposing immediately is
+    // strictly better than idling out the rest of the floor.
+    //
+    // Previously hardcoded to 45_000 (and, before that per a stale comment, "25k") —
+    // a value disconnected from the actual block capacity and, since
+    // max_num_transactions_in_block defaults to far less than 45_000, one this could
+    // never reach in practice. That silently defeated this bypass under any real
+    // sustained load, forcing every proposal to eat the full aggregation floor
+    // regardless of how much was already pending (measured: a rock-steady ~100-110ms
+    // per block even with a large backlog and sub-block capacity of Go execution
+    // capacity to spare).
     pub(crate) fn has_sufficient_transactions(&self) -> bool {
         let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
-        pending_len >= 45000
+        pending_len as u64 >= self.max_num_transactions_in_block
     }
 
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
