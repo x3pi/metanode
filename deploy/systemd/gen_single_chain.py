@@ -278,6 +278,7 @@ def main():
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     parser.add_argument("--reserve-chain-id", type=int, default=None, help="Chain ID of the system's Reserve chain (default: same as --chain-id)")
+    parser.add_argument("--debug", action="store_true", help="Generate nodes with debug logging and a pprof HTTP listener enabled (localhost only). Off by default -- intended for local benchmarking, not production deploys.")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -469,7 +470,6 @@ def main():
         metrics_port = 12100 + args.port_offset + node_id
 
         # Node peers
-        go_peers = [f"{args.ip}:{7200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
         rust_peers = [f"{args.ip}:{20200 + args.port_offset + j}" for j in range(args.validators) if j != node_id]
 
         if args.gateway_bls_key:
@@ -484,7 +484,7 @@ def main():
             "debug": False,
             "tx_trace_enabled": False,
             "go_mem_limit_gb": 8,
-            "mvm_cache_enabled": False,
+            "mvm_cache_enabled": True,
             "enable_private_gateway": True,
             "gateway_bls_key": gateway_bls_key,
             "chainId": args.chain_id,
@@ -546,11 +546,10 @@ def main():
             },
             "nodes": {
                 "network_sync_enabled": (args.validators > 1),
-                "list_sub_address": go_peers,
                 "dynamic_discovery": True
             },
             "log": {
-                "level": "info",
+                "level": "debug" if args.debug else "info",
                 "format": "text",
                 "console_output": True,
                 "file_output": True
@@ -601,9 +600,10 @@ fi
 
 """
     for node_id in range(args.validators):
+        node_flags = f" --debug --pprof-addr=127.0.0.1:{6060 + node_id}" if args.debug else ""
         start_script_content += f"""
 echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node_id})..."
-(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
+(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json{node_flags} > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
 """
 
     start_script_content += f"""

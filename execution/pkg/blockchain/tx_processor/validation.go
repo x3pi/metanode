@@ -422,6 +422,10 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
 		if err != nil || as == nil || len(as.PublicKeyBls()) == 0 {
+			// fallback to ECDSA pre-verification if BLS key is missing
+			if tx.ValidEthSign() {
+				StoreVerifiedSignature(txHash)
+			}
 			return
 		}
 
@@ -431,6 +435,9 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 			tx.Sign(),
 		)
 		if request.Valid() {
+			StoreVerifiedSignature(txHash)
+		} else if tx.ValidEthSign() {
+			// Fallback just in case a registered BLS account sent an EVM tx
 			StoreVerifiedSignature(txHash)
 		}
 	}

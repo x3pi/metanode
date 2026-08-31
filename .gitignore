@@ -525,3 +525,15 @@ xdb/
 xdb_large/
 crash_bt*.txt
 *.patch
+
+# TPS/latency benchmark run artifacts (compiled tool binaries, per-run logs and reports)
+/benchmark_out*.txt
+/pprof_top*.txt
+/tps_report_*.json
+scripts/tps_report_*.json
+scripts/tps_benchmark_e2e
+execution/tps_benchmark_e2e
+execution/cmd/tool/tps_benchmark_e2e/tps_benchmark
+
+# Generated local devnet cluster (data dirs, keys, logs) — never commit private keys
+deploy/cluster/

@@ -39,11 +39,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -152,37 +151,30 @@ func generateAccounts(n int) []TestAccount {
 func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64) [][]byte {
 	txPayloads := make([][]byte, 0, numTxs)
 	amount := big.NewInt(0)
-	relBytes := make([][]byte, 1)
-	relBytes[0] = common.Hex2Bytes("1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5")
 
 	for i := 0; i < numTxs; i++ {
 		acc := accounts[i%len(accounts)]
 		ecdsaKey, _ := crypto.ToECDSA(acc.PrivateKey)
-		fromAddr := crypto.PubkeyToAddress(ecdsaKey.PublicKey)
 		destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
 
 		nonce := acc.Nonce + uint64(i/len(accounts))
 
-		tx := transaction.NewTransaction(
-			fromAddr,
+		tx := types.NewTransaction(
+			nonce,
 			destAddr,
 			amount,
 			10000000,
-			1000000,
-			0,
+			big.NewInt(1000000),
 			nil,
-			relBytes,
-			common.Hash{},
-			common.Hash{},
-			nonce,
-			chainID,
 		)
 
-		var pKey p_common.PrivateKey
-		copy(pKey[:], acc.PrivateKey)
-		tx.SetSign(pKey)
+		signer := types.LatestSignerForChainID(big.NewInt(int64(chainID)))
+		signedTx, err := types.SignTx(tx, signer, ecdsaKey)
+		if err != nil {
+			continue
+		}
 
-		bTx, err := tx.Marshal()
+		bTx, err := signedTx.MarshalBinary()
 		if err != nil {
 			continue
 		}
@@ -225,6 +217,9 @@ func sendTransactions(nodes []string, payloads [][]byte, workers int, quiet bool
 					_, err := client.SendRawTransaction(payload)
 					if err != nil {
 						atomic.AddInt64(&errors, 1)
+						if atomic.LoadInt64(&errors) == 1 {
+							fmt.Printf("\nFirst RPC Error: %v\n", err)
+						}
 					} else {
 						atomic.AddInt64(&sent, 1)
 					}
@@ -452,10 +447,11 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 	quiet := cfg.JSONOutput
 
-	accounts := generateAccounts(cfg.NumAccounts)
+	// Pre-generate accounts (1 per transaction to avoid nonce ordering issues in concurrent injection)
 	if !quiet {
-		fmt.Printf("🔑 Generated %d test accounts\n", len(accounts))
+		fmt.Printf("⏳ Generating %d test accounts...\n", cfg.NumTxs)
 	}
+	accounts := generateAccounts(cfg.NumTxs)
 
 	// Use first node for polling
 	rpcClient := NewRPCClient(cfg.Nodes[0])
