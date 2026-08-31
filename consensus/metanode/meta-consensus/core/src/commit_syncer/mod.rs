@@ -1356,8 +1356,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         info!(
-                            "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Network Quorum: {} | Lag: {} | Block Source: {}",
-                            new_state, local_commit, quorum_commit, lag,
+                            "🛡️ [UNIFIED STATE] Phase: {:?} | Local DAG Commit: {} | Synced: {} | Network Quorum: {} | Lag(dag): {} | Lag(synced,gates-on-this): {} | Block Source: {}",
+                            new_state, local_commit, self.synced_commit_index, quorum_commit, lag,
+                            quorum_commit.saturating_sub(self.synced_commit_index),
                             match new_state {
                                 crate::coordination_hub::NodeConsensusPhase::Initializing => "INITIALIZING",
                                 crate::coordination_hub::NodeConsensusPhase::CatchingUp => "SYNC_ONLY (CatchingUp)",
@@ -1495,7 +1496,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // FORK-SAFETY: During startup sync OR catch-up, don't advance from DAG state alone —
         // the DAG can be reconstructed/populated from peers before Go processes the commits.
         // Only advance when Healthy (all commits already delivered to Core).
-        if !self.coordination_hub.is_startup_sync_active() && !self.coordination_hub.is_catching_up() {
+        //
+        // SINGLE-VALIDATOR EXCEPTION (is_catching_up only — startup_sync_active is left
+        // fully guarded for everyone, single-validator included, since crash/snapshot
+        // recovery has its own, separate correctness concerns this doesn't reason about):
+        // this specific guard exists to distrust the local DAG while catching up in a
+        // *multi*-validator cluster, where the DAG can be filled in from peer data before
+        // an independent, peer-verified fetch confirms it really matches consensus. With
+        // only one validator that risk doesn't exist by construction — there is no other
+        // validator this node's own DAG could have diverged from, so local_commit_index
+        // already IS the verified truth. Without this exception, synced_commit_index can
+        // never advance while is_catching_up() is true, but is_catching_up() can only
+        // clear once lag (quorum - synced_commit_index) reaches 0 — a self-locking cycle
+        // that, once entered (e.g. a transient Healthy->CatchingUp flip under heavy load),
+        // never recovers on its own. Reproduced directly: a single-validator devnet stuck
+        // >1 minute reporting zero DAG lag (local_commit == quorum_commit) while
+        // synced_commit_index sat permanently behind under sustained high-throughput load.
+        let is_single_validator = self.inner.context.committee.size() <= 1;
+        if !self.coordination_hub.is_startup_sync_active()
+            && (is_single_validator || !self.coordination_hub.is_catching_up())
+        {
             self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
         }
 
@@ -2620,9 +2640,9 @@ mod tests {
     use super::{PhaseStateInput, PhaseTransitionDecision};
 
     use crate::{
-        block::{TestBlock, VerifiedBlock},
+        block::{BlockAPI, TestBlock, VerifiedBlock},
         block_verifier::NoopBlockVerifier,
-        commit::CommitRange,
+        commit::{CommitRange, TrustedCommit},
         commit_syncer::CommitSyncer,
         commit_vote_monitor::CommitVoteMonitor,
         context::Context,
@@ -2852,6 +2872,108 @@ mod tests {
                 CommitRange::new(11..=30),
                 CommitRange::new(31..=35),
             ])
+        );
+    }
+
+    // Builds a minimal CommitSyncer with the given committee size, forced into the
+    // CatchingUp phase, with one real commit already in the DAG (so
+    // dag_state.last_commit_index() == 1) but synced_commit_index still at 0 — the
+    // exact "DAG has real local progress, but the bookkeeping counter that gates
+    // CatchingUp -> Healthy hasn't caught up" state that reproduced the permanent
+    // single-validator livelock this covers.
+    fn build_catching_up_syncer_with_one_commit(committee_size: usize) -> CommitSyncer<FakeNetworkClient> {
+        let (context, _) = Context::new_for_test(committee_size);
+        let context = Arc::new(context);
+        let block_verifier = Arc::new(NoopBlockVerifier {});
+        let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
+        let network_client = Arc::new(FakeNetworkClient::default());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+        let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let coordination_hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+        coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::CatchingUp);
+
+        // Construct with an empty DAG first — CommitSyncer::new() seeds its initial
+        // synced_commit_index from the DAG's commit state at construction time, so the
+        // commit added below (simulating real local progress the syncer hasn't yet
+        // reconciled) must land strictly *after* this to reproduce the gap.
+        let commit_syncer = CommitSyncer::new(
+            context,
+            core_thread_dispatcher,
+            commit_vote_monitor,
+            commit_consumer_monitor,
+            block_verifier,
+            transaction_certifier,
+            network_client,
+            dag_state.clone(),
+            coordination_hub,
+            None,
+            dag_state_writer,
+        );
+        assert_eq!(commit_syncer.synced_commit_index(), 0);
+
+        let leader_block = VerifiedBlock::new_for_test(TestBlock::new(1, 0).build());
+        let commit = TrustedCommit::new_for_test(
+            1,
+            CommitDigest::MIN,
+            leader_block.timestamp_ms(),
+            leader_block.reference(),
+            vec![leader_block.reference()],
+            1,
+        );
+        dag_state.write().add_commit(commit);
+        assert_eq!(dag_state.read().last_commit_index(), 1);
+
+        commit_syncer
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn single_validator_advances_synced_commit_index_while_catching_up() {
+        let mut commit_syncer = build_catching_up_syncer_with_one_commit(1);
+        assert_eq!(commit_syncer.synced_commit_index(), 0);
+
+        commit_syncer.try_schedule_once();
+
+        // The single-validator exception in try_schedule_once must let
+        // synced_commit_index track the DAG's own real progress even while
+        // nominally CatchingUp, since there is no other validator this node's
+        // DAG could have diverged from. Without it, this stays 0 forever —
+        // lag against quorum never reaches 0, and the node never leaves
+        // CatchingUp (the exact livelock reproduced on a real single-validator
+        // devnet under sustained load).
+        assert_eq!(
+            commit_syncer.synced_commit_index(),
+            1,
+            "single-validator synced_commit_index must advance to match real local DAG progress \
+             even while CatchingUp, or the node can never exit CatchingUp"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn multi_validator_does_not_advance_synced_commit_index_while_catching_up() {
+        // Same setup, but a real (4-authority) committee — the fork-safety guard this
+        // test protects must remain fully intact here: a multi-validator node's local
+        // DAG can be filled in from peer data before being independently verified, so
+        // synced_commit_index must NOT blindly follow it while still CatchingUp.
+        let mut commit_syncer = build_catching_up_syncer_with_one_commit(4);
+        assert_eq!(commit_syncer.synced_commit_index(), 0);
+
+        commit_syncer.try_schedule_once();
+
+        assert_eq!(
+            commit_syncer.synced_commit_index(),
+            0,
+            "multi-validator synced_commit_index must stay guarded while CatchingUp — \
+             only a peer-verified fetch may advance it, never local DAG state alone"
         );
     }
 

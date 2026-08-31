@@ -28,9 +28,18 @@ func NewRPCClient(endpoint string) *RPCClient {
 	}
 
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.MaxIdleConns = 100
-	t.MaxConnsPerHost = 100
-	t.MaxIdleConnsPerHost = 100
+	// MaxConnsPerHost=100 silently capped total concurrent connections to the
+	// target node regardless of -workers: every worker goroutine for a node
+	// shares this one RPCClient/Transport, so raising -workers past ~100 just
+	// added goroutines queueing for the same 100 connections instead of any
+	// real additional concurrency — measured directly: 100 workers reached
+	// ~15-17k inject tx/s, but 300 and 600 workers did *not* go higher (and
+	// were occasionally slightly lower from added queueing/scheduling
+	// overhead), which is the signature of a saturated connection pool, not a
+	// saturated target node. 0 means unlimited in net/http.
+	t.MaxIdleConns = 0
+	t.MaxConnsPerHost = 0
+	t.MaxIdleConnsPerHost = 2048
 
 	return &RPCClient{
 		Endpoint: endpoint,
