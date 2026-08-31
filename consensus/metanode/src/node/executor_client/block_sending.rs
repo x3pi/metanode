@@ -21,6 +21,29 @@ use super::proto::{ExecutableBlock, TransactionExe};
 use super::ExecutorClient;
 use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};
 
+/// Wall-clock timestamp in nanoseconds since the Unix epoch. Used only for
+/// [FFI-TRACE] diagnostics: Rust and Go share the same OS clock (CGo links
+/// them into one process), so these timestamps can be directly correlated
+/// with the `time.Now().UnixNano()` timestamps Go logs on its side of the
+/// same FFI call, keyed by `gei`, to attribute the Rust<->Go round trip.
+fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Gates the [FFI-TRACE] diagnostics (see `now_ns` above) behind
+/// `METANODE_FFI_TRACE=true`. They're `warn!`, which — like Go's
+/// `logger.Warn` counterpart these are paired with — shows at any configured
+/// log level and fires on every block, so they stay opt-in rather than an
+/// always-on log-volume cost every production node would pay forever for a
+/// diagnostic only needed when actively chasing a perf regression again.
+fn ffi_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("METANODE_FFI_TRACE").as_deref() == Ok("true"))
+}
+
 /// Maximum transactions per Go block.
 /// When a DAG commit exceeds this threshold, Rust splits it into multiple
 /// ExecutableBlock payloads with incrementing global_exec_index values.
@@ -691,10 +714,18 @@ impl ExecutorClient {
                         idx, data.len()
                     );
                     let ffi_start = std::time::Instant::now();
+                    let sched_start_ns = now_ns();
                     let data_clone = data.clone();
-                    
+
+                    // [PERF-TRACE] Split the FFI round trip into its 3 real components so a
+                    // slow block can be attributed correctly instead of lumped into one
+                    // "FFI execute_block" number:
+                    //   1. sched_ns   — clone() + waiting for a spawn_blocking thread pool slot
+                    //   2. cgo_ns     — time actually inside the CGo call (== all of Go's work)
+                    //   3. decode_ns  — time to resolve the .await + protobuf-decode the response
                     let (success, response) = {
                         let ffi_res = tokio::task::spawn_blocking(move || {
+                            let thread_enter_ns = now_ns();
                             let mut out_payload: *mut u8 = std::ptr::null_mut();
                             let mut out_len = 0usize;
                             let success = c_fn(
@@ -703,14 +734,27 @@ impl ExecutorClient {
                                 &mut out_payload,
                                 &mut out_len,
                             );
-                            (success, out_payload as usize, out_len)
+                            let thread_exit_ns = now_ns();
+                            (success, out_payload as usize, out_len, thread_enter_ns, thread_exit_ns)
                         })
                         .await
-                        .unwrap_or((false, 0usize, 0));
+                        .unwrap_or((false, 0usize, 0, 0, 0));
 
                         let success = ffi_res.0;
                         let out_payload = ffi_res.1 as *mut u8;
                         let out_len = ffi_res.2;
+                        let thread_enter_ns = ffi_res.3;
+                        let thread_exit_ns = ffi_res.4;
+                        if ffi_trace_enabled() {
+                            let await_done_ns = now_ns();
+                            tracing::warn!(
+                                "⏱️ [FFI-TRACE] gei={} stage=RUST sched_ns={} cgo_ns={} decode_ns={}",
+                                idx,
+                                thread_enter_ns.saturating_sub(sched_start_ns),
+                                thread_exit_ns.saturating_sub(thread_enter_ns),
+                                await_done_ns.saturating_sub(thread_exit_ns),
+                            );
+                        }
 
                         let response = if !out_payload.is_null() && out_len > 0 {
                             let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };

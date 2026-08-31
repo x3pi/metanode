@@ -52,6 +52,7 @@ static inline void register_callbacks_to_rust() {
 import "C"
 import (
 	"fmt"
+	"os"
 	"time"
 	"unsafe"
 
@@ -60,6 +61,16 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
 )
+
+// ffiTraceEnabled gates the [FFI-TRACE] diagnostics added while profiling the
+// Rust<->Go block-delivery round trip. They're logger.Warn (so they'd show at
+// any configured log level, unlike Debug/Info) and fire on every block, so
+// they stay opt-in via METANODE_FFI_TRACE=true rather than always-on —
+// otherwise every production node would pay the log volume forever for a
+// diagnostic only needed when actively chasing a perf regression again. See
+// the same-named flag's use in cmd/simple_chain/processor/speculative_executor.go
+// and consensus/metanode/src/node/executor_client/block_sending.rs.
+var ffiTraceEnabled = os.Getenv("METANODE_FFI_TRACE") == "true"
 
 // Global reference for our handlers since CGo callbacks are global.
 var defaultRequestHandler *RequestHandler
@@ -146,6 +157,17 @@ func GetAuthoritativeBlockQueue() <-chan *AuthoritativeBlockRequest {
 
 //export cgo_execute_block
 func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8_t, outLen *C.size_t) (ret C.bool) {
+	// [FFI-TRACE] Wall-clock (UnixNano) checkpoints for attributing the Rust<->Go
+	// round trip. Rust logs its own [FFI-TRACE] line for the same gei on the same
+	// OS clock (CGo links both into one process), so after a run the two can be
+	// joined by gei to see exactly where each block's time went: CGo entry ->
+	// unmarshal -> queued for speculative execution -> response received -> serialized.
+	// Only timestamped when ffiTraceEnabled, to skip the (cheap but nonzero,
+	// and pointless when nothing reads it) clock reads on the hot path.
+	var tEntry int64
+	if ffiTraceEnabled {
+		tEntry = time.Now().UnixNano()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_execute_block: %v", r)
@@ -182,6 +204,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 
 	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d, authoritative=%v",
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
+	var tAfterUnmarshal int64
+	if ffiTraceEnabled {
+		tAfterUnmarshal = time.Now().UnixNano()
+	}
 
 	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
@@ -194,6 +220,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		// If queue is full, Go is severely behind — drop block.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
+			var tQueued int64
+			if ffiTraceEnabled {
+				tQueued = time.Now().UnixNano()
+			}
 			// Wait for speculative executor to finish and return actual authoritative response.
 			//
 			// BOUNDED WAIT (Aug 2026): previously this was an unbounded `<-req.ResponseCh`
@@ -211,7 +241,19 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 			// permanent hang requiring a manual restart.
 			select {
 			case response := <-req.ResponseCh:
-				serializeAndSetResponse(response, outPayload, outLen)
+				if ffiTraceEnabled {
+					tRespRecv := time.Now().UnixNano()
+					serializeAndSetResponse(response, outPayload, outLen)
+					tSerialized := time.Now().UnixNano()
+					logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
+						subDag.GetGlobalExecIndex(),
+						tAfterUnmarshal-tEntry,
+						tRespRecv-tQueued,
+						tSerialized-tRespRecv,
+						tSerialized-tEntry)
+				} else {
+					serializeAndSetResponse(response, outPayload, outLen)
+				}
 				return C.bool(true)
 			case <-time.After(executeBlockResponseTimeout):
 				logger.Error("[FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
