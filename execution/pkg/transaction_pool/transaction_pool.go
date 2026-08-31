@@ -37,6 +37,12 @@ type TransactionPool struct {
 	shards     [NumShards]*poolShard
 	NotifyChan chan struct{} // GO-2: Event channel to notify workers of new transactions
 	count      int64         // Atomic counter for lock-free count queries
+	// drainCursor rotates the shard TransactionsWithAggSign() starts draining
+	// from on each call (see there for why: the caller caps how many of the
+	// returned txs it forwards per tick and re-queues the rest, so a fixed
+	// 0->255 start order lets whichever low-numbered shards are currently hot
+	// perpetually starve every higher-numbered shard under sustained load).
+	drainCursor uint32
 }
 
 func NewTransactionPool() *TransactionPool {
@@ -223,7 +229,23 @@ func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byt
 	var allTxs []types.Transaction
 	var totalDrained int64
 
-	for i := 0; i < NumShards; i++ {
+	// FAIRNESS: start from a rotating shard each call instead of always shard 0.
+	// The caller (TxBatchForwarder) caps how many of the txs returned here it
+	// actually forwards per tick (targetBlockSize) and re-queues the remainder
+	// — which lands back in the SAME shards it came from. With a fixed 0->255
+	// start, under sustained load where the low shards refill as fast as they
+	// drain, every higher-numbered shard's txs sit at the tail of `allTxs` on
+	// every single tick and can be pushed past the cap indefinitely: not just
+	// slower, but genuinely starved for as long as the burst lasts (measured:
+	// a single unrelated tx landing in a "wrong" shard during a 1000-worker
+	// burst waited 10+ seconds — 30-40x the normal ~300ms — while txs in
+	// early shards kept confirming on schedule). Rotating the start point
+	// means whichever shards got starved this tick are first in line next
+	// tick, bounding the unfairness to one rotation cycle instead of the
+	// whole burst.
+	start := int(atomic.AddUint32(&tp.drainCursor, 1) % NumShards)
+	for k := 0; k < NumShards; k++ {
+		i := (start + k) % NumShards
 		shard := tp.shards[i]
 		shard.mu.Lock()
 		if len(shard.transactions) > 0 {

@@ -163,6 +163,45 @@ func TestTransactionsWithAggSign_CanReAddAfterDrain(t *testing.T) {
 	assert.Equal(t, 1, pool.CountTransactions())
 }
 
+func TestTransactionsWithAggSign_RotatesDrainStartAcrossCalls(t *testing.T) {
+	pool := NewTransactionPool()
+
+	// One tx in shard 0x00 and one in shard 0x01, re-added identically before
+	// every drain so each call sees the exact same two-shard pool.
+	refill := func() {
+		require.NoError(t, pool.AddTransaction(makeTestTx(0x00, 0)))
+		require.NoError(t, pool.AddTransaction(makeTestTx(0x01, 0)))
+	}
+
+	firstAddrByte := func() byte {
+		txs, _ := pool.TransactionsWithAggSign()
+		require.Len(t, txs, 2)
+		return txs[0].FromAddress()[0]
+	}
+
+	refill()
+	first := firstAddrByte()
+
+	// Regression guard for the pre-fix behavior: draining always started at
+	// shard 0, so the first element was 0x00 on every single call. That's
+	// exactly what let a low-numbered shard's traffic perpetually crowd out
+	// a higher-numbered shard's under the caller's per-tick cap (see
+	// TransactionsWithAggSign's comment) — reproduced live as a single
+	// transaction waiting 10+ seconds (~30-40x the normal ~300ms) behind an
+	// unrelated 1000-worker burst. The rotating cursor must eventually make
+	// shard 0x01 come first instead.
+	sawOtherFirst := false
+	for i := 0; i < NumShards+1; i++ {
+		refill()
+		if firstAddrByte() != first {
+			sawOtherFirst = true
+			break
+		}
+	}
+	assert.True(t, sawOtherFirst,
+		"drain start must rotate across calls — got the same first shard every time in a full cycle")
+}
+
 // ──────────────────────────────────────────────
 // GetTransactionByHash
 // ──────────────────────────────────────────────
