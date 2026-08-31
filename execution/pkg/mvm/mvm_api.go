@@ -1616,8 +1616,23 @@ func GetBlockHash(blockNumber C.int) C.struct_Value_return {
 // callback mid-flight kiểu tiền-B1, giống GetChainId ngay dưới đây).
 //export GetXapianPruneRetentionBlocks
 func GetXapianPruneRetentionBlocks() C.struct_Value_return {
+	// Defensive nil guard (same reasoning as buildB1Context's config.ConfigApp
+	// guard above): this fires from XapianManager's background cleaner_thread
+	// on its own timer, completely independent of any transaction/test
+	// executing — including well after a short-lived test binary's own
+	// process has started but before it ever calls config.Init(). Confirmed
+	// live: TestCommitAttestationWorker_NegativeCases' new retry-with-backoff
+	// loop (10 attempts, several seconds each) runs long enough real
+	// wall-clock time for this background timer to fire mid-test and panic
+	// the whole test binary on a nil config.ConfigApp. 0 = "prune nothing",
+	// the documented default/off value, so nil-config here fails safe
+	// exactly like it does in production before config.Init() runs.
+	var retention uint64
+	if config.ConfigApp != nil {
+		retention = config.ConfigApp.XapianPruneRetentionBlocks
+	}
 	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, config.ConfigApp.XapianPruneRetentionBlocks)
+	binary.BigEndian.PutUint64(buf, retention)
 	data_p := (*C.uchar)(C.CBytes(buf))
 	return C.struct_Value_return{
 		data_p:    data_p,
