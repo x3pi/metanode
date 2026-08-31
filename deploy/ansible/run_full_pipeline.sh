@@ -25,6 +25,67 @@ SCRIPT_DIR="$(cd "$(dirname "${REAL_SCRIPT_PATH}")" && pwd)"
 METANODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SUITE_DIR="$(cd "${METANODE_DIR}/../metanode-suite" 2>/dev/null && pwd || echo "${METANODE_DIR}/metanode-suite")"
 
+# Nạp file .env cho Telegram
+load_env_file() {
+    local env_file="$1"
+    if [ -f "$env_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "$line" ]]; then
+                continue
+            fi
+            if [[ "$line" =~ = ]]; then
+                local key=$(echo "${line%%=*}" | xargs)
+                local val=$(echo "${line#*=}" | xargs)
+                val="${val%\"}"
+                val="${val#\"}"
+                val="${val%\'}"
+                val="${val#\'}"
+                export "$key"="$val"
+            fi
+        done < "$env_file"
+    fi
+}
+
+load_env_file "${SCRIPT_DIR}/.env"
+load_env_file "${SCRIPT_DIR}/../.env"
+load_env_file "${SUITE_DIR}/scripts/.env"
+
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+
+send_telegram_notification() {
+    local message="$1"
+    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${message}" \
+            -d "parse_mode=HTML" > /dev/null 2>&1 || true
+    fi
+}
+
+CURRENT_STEP="Khởi tạo Pipeline"
+
+on_pipeline_error() {
+    local exit_code=$1
+    local line_no=$2
+    local server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+    local timestamp=$(date '+%H:%M:%S %d/%m/%Y')
+
+    echo -e "\n${RED}🚨 [LỖI PIPELINE KHẨN CẤP] Bước '${CURRENT_STEP}' thất bại tại dòng ${line_no} với mã lỗi ${exit_code}!${NC}"
+
+    local msg="🚨 <b>[METANODE FULL PIPELINE THẤT BẠI]</b>
+
+🌐 <b>Server:</b> <code>${server_ip}</code>
+⏰ <b>Thời gian:</b> <code>${timestamp}</code>
+📍 <b>Giai đoạn bị lỗi:</b> <code>${CURRENT_STEP}</code>
+⚠️ <b>Mã lỗi:</b> <code>${exit_code}</code> (Dòng: ${line_no})
+
+👉 <i>Vui lòng kiểm tra terminal hoặc file log liên quan để xử lý.</i>"
+    send_telegram_notification "$msg"
+}
+
+trap 'on_pipeline_error $? $LINENO' ERR
+
 DO_PULL=false
 GIT_BRANCH="dev"
 SKIP_TESTS=false
@@ -105,6 +166,7 @@ print_banner
 # BƯỚC 0: PULL CODE TỪ GIT NẾU CÓ OPTION --pull
 # ==============================================================================
 if [ "$DO_PULL" = true ]; then
+    CURRENT_STEP="[Bước 0/6] Pull code mới nhất từ Git"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}📥 [BƯỚC 0/6] PULL CODE MỚI NHẤT TỪ GIT (Nhánh: ${GIT_BRANCH})${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -126,6 +188,7 @@ fi
 # ==============================================================================
 # BƯỚC 1: DEPLOY PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)
 # ==============================================================================
+CURRENT_STEP="[Bước 1/6] Triển khai Public Chain (Root Anchor - Chain 991)"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}🏗️  [BƯỚC 1/6] TRIỂN KHAI PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -136,6 +199,7 @@ echo -e "${GREEN}✅ Triển khai Public Chain (Root Anchor) hoàn tất!${NC}\n
 # ==============================================================================
 # BƯỚC 2: DEPLOY 4 PRIVATE CHAINS (101, 102, 103, 104) & BOOTSTRAP GATEWAY
 # ==============================================================================
+CURRENT_STEP="[Bước 2/6] Triển khai Private Chains & Bootstrap Gateway"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}🌐 [BƯỚC 2/6] TRIỂN KHAI PRIVATE CHAINS & ĐĂNG KÝ DANH BẠ GATEWAY${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -146,6 +210,7 @@ echo -e "${GREEN}✅ Triển khai Private Chains & cấp hạn mức Genesis th�
 # ==============================================================================
 # BƯỚC 3: KHỞI ĐỘNG LẠI CROSS-CHAIN RELAYER DAEMON
 # ==============================================================================
+CURRENT_STEP="[Bước 3/6] Khởi động lại Cross-Chain Relayer Daemon"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}🔄 [BƯỚC 3/6] KHỞI ĐỘNG LẠI CROSS-CHAIN RELAYER DAEMON TRONG TMUX${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -158,6 +223,7 @@ echo -e "${GREEN}✅ Relayer Daemon đã hoạt động ổn định!${NC}\n"
 # ==============================================================================
 # BƯỚC 4: CẬP NHẬT CẤU HÌNH IP / RPC ENDPOINTS TRONG METANODE-SUITE
 # ==============================================================================
+CURRENT_STEP="[Bước 4/6] Cập nhật IP & RPC Endpoints (Update-IP)"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}⚙️  [BƯỚC 4/6] CẬP NHẬT IP & RPC ENDPOINTS CHO BỘ TEST (UPDATE-IP)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -169,6 +235,7 @@ echo -e "${GREEN}✅ Đã đồng bộ toàn bộ file cấu hình test!${NC}\n"
 # BƯỚC 5: CHẠY FULL BỘ TEST CROSS-CHAIN (CROSS-CHAIN RUN_ALL_TESTS.SH)
 # ==============================================================================
 if [ "$SKIP_CROSS_CHAIN" = false ]; then
+    CURRENT_STEP="[Bước 5/6] Chạy bộ test Cross-Chain (cross-chain/run_all_tests.sh)"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}🌉 [BƯỚC 5/6] CHẠY FULL BỘ TEST CROSS-CHAIN (RUN_ALL_TESTS.SH)${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -190,6 +257,7 @@ fi
 # BƯỚC 6: CHẠY TOÀN BỘ BỘ TEST BLOCK-STM
 # ==============================================================================
 if [ "$SKIP_TESTS" = false ]; then
+    CURRENT_STEP="[Bước 6/6] Chạy bộ kiểm thử Block-STM (test-blockstm/run_all_tests.sh)"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}🧪 [BƯỚC 6/6] CHẠY TOÀN BỘ BỘ KIỂM THỬ BLOCK-STM (RUN_ALL_TESTS.SH)${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

@@ -578,17 +578,31 @@ impl CommitProcessor {
                 } else {
                     "no_verifier"
                 };
-                warn!(
-                    "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
-                     pending_local={}, first_idx={}, oldest_age={}s, \
-                     next_expected={}, qci={}, digest_has_data={}, \
-                     is_transitioning={}, verifier({})={}, \
-                     pending_ooo={}, epoch={}",
-                    pending_local_commits.len(), first_pending_idx, oldest_age,
-                    next_expected_index, qci_val, digest_has_data,
-                    is_trans, first_pending_idx, first_verifier_result,
-                    pending_commits.len(), current_epoch
-                );
+                if oldest_age >= 10 {
+                    warn!(
+                        "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP (STALLED) | \
+                         pending_local={}, first_idx={}, oldest_age={}s, \
+                         next_expected={}, qci={}, digest_has_data={}, \
+                         is_transitioning={}, verifier({})={}, \
+                         pending_ooo={}, epoch={}",
+                        pending_local_commits.len(), first_pending_idx, oldest_age,
+                        next_expected_index, qci_val, digest_has_data,
+                        is_trans, first_pending_idx, first_verifier_result,
+                        pending_commits.len(), current_epoch
+                    );
+                } else {
+                    tracing::debug!(
+                        "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
+                         pending_local={}, first_idx={}, oldest_age={}s, \
+                         next_expected={}, qci={}, digest_has_data={}, \
+                         is_transitioning={}, verifier({})={}, \
+                         pending_ooo={}, epoch={}",
+                        pending_local_commits.len(), first_pending_idx, oldest_age,
+                        next_expected_index, qci_val, digest_has_data,
+                        is_trans, first_pending_idx, first_verifier_result,
+                        pending_commits.len(), current_epoch
+                    );
+                }
                 last_diag_log = std::time::Instant::now();
             }
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
@@ -1432,7 +1446,7 @@ impl CommitProcessor {
                         let per_block: Vec<String> = subdag.blocks.iter().map(|b| {
                             format!("{}:{}", b.reference(), b.transactions().len())
                         }).collect();
-                        info!(
+                        debug!(
                             "📊 [TX-AUDIT] commit_index={} | path={} | gei={} | epoch={} | \
                              digest={} | txs={} | blocks={} | per_block=[{}] | \
                              leader={:?} (auth_idx={}, eth={}) | decided_local={} | timestamp={}",

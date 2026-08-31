@@ -363,25 +363,37 @@ func handleRegisterChains(
 			os.Exit(1)
 		}
 
-		nodeCfg, err := loadChainNodeConfig(chainsDir, cidStr)
+		nodeConfigs, err := loadChainAllNodeConfigs(chainsDir, cidStr)
 		if err != nil {
 			logger.Error("Failed to load node config for chain %s: %v", cidStr, err)
 			os.Exit(1)
 		}
-		if nodeCfg.Databases.BLSPrivateKey == "" {
-			logger.Error("Chain %s has no Databases.BLSPrivateKey configured", cidStr)
+
+		var committeeEntries []cross_chain.ValidatorEntry
+		for _, nCfg := range nodeConfigs {
+			if nCfg.Databases.BLSPrivateKey == "" {
+				continue
+			}
+			blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(nCfg.Databases.BLSPrivateKey)
+			popSig := cross_chain.PopSign(blsPriv, blsPub)
+
+			committeeEntries = append(committeeEntries, cross_chain.ValidatorEntry{
+				PubkeyBLS:    blsPub.Bytes(),
+				Stake:        1000,
+				PopSignature: popSig.Bytes(),
+			})
+			committee = append(committee, committeeMember{ChainID: targetChainID, PrivHex: nCfg.Databases.BLSPrivateKey})
+		}
+
+		if len(committeeEntries) == 0 {
+			logger.Error("Chain %s has no valid Databases.BLSPrivateKey configured in any node", cidStr)
 			os.Exit(1)
 		}
 
-		blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(nodeCfg.Databases.BLSPrivateKey)
-		popSig := cross_chain.PopSign(blsPriv, blsPub)
-
 		registry := cross_chain.ChainRegistry{
-			ChainID: targetChainID,
-			Epoch:   0,
-			Committee: []cross_chain.ValidatorEntry{
-				{PubkeyBLS: blsPub.Bytes(), Stake: 1000, PopSignature: popSig.Bytes()},
-			},
+			ChainID:         targetChainID,
+			Epoch:           0,
+			Committee:       committeeEntries,
 			QuorumThreshold: 6667,
 			GatewayContract: p_common.GATEWAY_CONTRACT_ADDRESS,
 		}
@@ -391,9 +403,8 @@ func handleRegisterChains(
 			os.Exit(1)
 		}
 		payloads = append(payloads, payloadBytes)
-		committee = append(committee, committeeMember{ChainID: targetChainID, PrivHex: nodeCfg.Databases.BLSPrivateKey})
 		chainIDs = append(chainIDs, targetChainID)
-		logger.Info("Prepared founding entry for chain %s (real BLS pubkey from Databases.BLSPrivateKey, real PoP)", cidStr)
+		logger.Info("Prepared founding entry for chain %s (%d validators, real BLS pubkeys, real PoP)", cidStr, len(committeeEntries))
 	}
 
 	if len(payloads) == 0 {
@@ -455,12 +466,16 @@ func loadAllCommitteeMembers(chainsDir string) []committeeMember {
 		if cid == 0 {
 			continue
 		}
-		cfg, err := loadChainNodeConfig(chainsDir, fmt.Sprintf("%d", cid))
-		if err == nil && cfg.Databases.BLSPrivateKey != "" {
-			committee = append(committee, committeeMember{
-				ChainID: cid,
-				PrivHex: cfg.Databases.BLSPrivateKey,
-			})
+		cfgs, err := loadChainAllNodeConfigs(chainsDir, fmt.Sprintf("%d", cid))
+		if err == nil {
+			for _, cfg := range cfgs {
+				if cfg.Databases.BLSPrivateKey != "" {
+					committee = append(committee, committeeMember{
+						ChainID: cid,
+						PrivHex: cfg.Databases.BLSPrivateKey,
+					})
+				}
+			}
 		}
 	}
 	return committee
@@ -472,17 +487,55 @@ type chainConfig struct {
 	}
 }
 
-func loadChainNodeConfig(chainsDir, cidStr string) (*chainConfig, error) {
-	candidates := []string{
+func loadChainAllNodeConfigs(chainsDir, cidStr string) ([]*chainConfig, error) {
+	var results []*chainConfig
+
+	// 1. Try multi-node directories: chain_XXX/node-* or chain-XXX/node-*
+	dirCandidates := []string{
+		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr)),
+		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr)),
+		filepath.Join("/opt/metanode", fmt.Sprintf("chain-%s", cidStr)),
+	}
+
+	for _, d := range dirCandidates {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "node-") {
+				continue
+			}
+			cfgPaths := []string{
+				filepath.Join(d, entry.Name(), "config.json"),
+				filepath.Join(d, entry.Name(), "config", "execution.json"),
+			}
+			for _, p := range cfgPaths {
+				if data, err := os.ReadFile(p); err == nil {
+					var app chainConfig
+					if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
+						results = append(results, &app)
+						break
+					}
+				}
+			}
+		}
+		if len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	// 2. Single-node fallback
+	singleCandidates := []string{
 		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json"),
 		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr), "config", "execution.json"),
 		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "config.json"),
 	}
-	for _, path := range candidates {
+	for _, path := range singleCandidates {
 		if data, err := os.ReadFile(path); err == nil {
 			var app chainConfig
 			if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
-				return &app, nil
+				return []*chainConfig{&app}, nil
 			}
 		}
 	}

@@ -790,7 +790,7 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 		}
 	}
 
-	return nil, fmt.Errorf("quorum not reached for chain %d epoch %d commit %s after %d polls", sourceChainID, epoch, commitRoot.Hex(), d.config.MaxPollIterations)
+	return nil, fmt.Errorf("quorum not reached for chain %d epoch %d commit %s after %d polls", sourceChainID, epoch, commitRoot.Hex(), maxIterations)
 }
 
 // Stop gracefully signals the daemon to stop.

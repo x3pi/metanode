@@ -91,7 +91,7 @@ func main() {
 		RootAnchorURLs:    []string{rootAnchorRPC},
 		ChainRPCURLs:      chainRPCs,
 		PollInterval:      time.Duration(pollIntervalMs) * time.Millisecond,
-		MaxPollIterations: 30,
+		MaxPollIterations: 200,
 		ReserveChainID:    reserveChainID,
 	}
 

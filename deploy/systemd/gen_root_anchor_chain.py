@@ -115,34 +115,16 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
         sys.exit(1)
     return result.stdout.strip()
 
-def derive_devnet_submitter_account(chain_id: int):
-    """Deterministically derive a devnet-only secp256k1 keypair for the
-    CommitAttestationWorker "submitter" account of a given private chain ID.
-
-    Root Anchor's genesis is generated BEFORE the private chains it will later
-    register (gen_root_anchor_chain.py runs first in setup_root_anchor.sh, then
-    setup_4_private_chains.sh generates the private chains and their submitter
-    keys) -- so there is no way for a *randomly*-generated submitter key to ever
-    be present in Root Anchor's genesis alloc. Every submitCommitAttestation()
-    tx from such a key was rejected by Root Anchor's tx-validation gate with
-    "no BLS public key registered on-chain" (the same generic "every tx sender
-    needs a registered BLS pubkey" gate documented next to gateway_bls_key
-    below), permanently blocking Milestone F's real BLS-share submission.
-
-    Fix: derive the key deterministically from the chain ID alone (sha256 of a
-    fixed seed string), so BOTH this script (at Root Anchor genesis time) and
-    setup_4_private_chains.sh (at private-chain genesis time) can independently
-    compute the *same* keypair for a given chain ID with zero data-passing
-    between the two scripts, and pre-register its address here with the same
-    shared devnet BLS pubkey already used for the "known dev account" below.
-
-    DEVNET ONLY. This key is derivable by anyone who reads this source file --
-    never use it to hold real value. Production deployments must generate a
-    real, secret, per-chain submitter key and register it on Root Anchor
-    (a real registration transaction/process, not a hardcoded genesis alloc).
+def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
+    """
+    Deterministically computes the secp256k1 keypair used by the devnet
+    CommitAttestationWorker "submitter" account of a given private chain ID and node index.
     """
     from eth_account import Account
-    seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    if node_index == 0:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    else:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
     address = Account.from_key(priv_hex).address
     return priv_hex, address
@@ -337,16 +319,17 @@ def main():
     # txs to Root Anchor from this account, and Root Anchor rejects txs from
     # any account with no BLS pubkey registered on its own chain).
     for founding_chain_id in founding_chains:
-        _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id)
-        alloc_list.append({
-            "address": submitter_address,
-            "balance": "1000000000000000000000000",
-            "pending_balance": "0",
-            "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
-        })
-        print(f"  🔑 Pre-registered devnet submitter account for chain {founding_chain_id}: {submitter_address}")
+        for node_idx in range(10):
+            _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id, node_idx)
+            alloc_list.append({
+                "address": submitter_address,
+                "balance": "1000000000000000000000000",
+                "pending_balance": "0",
+                "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+            })
+            print(f"  🔑 Pre-registered devnet submitter account for chain {founding_chain_id} node {node_idx}: {submitter_address}")
 
     genesis_data = {
         "config": {

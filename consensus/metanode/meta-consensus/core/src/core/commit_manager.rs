@@ -199,7 +199,7 @@ impl Core {
                     // will NEVER be used to propose blocks!
                     // So we can safely let it update, BUT we MUST NOT call `schedule_verified()`
                     // or `set_schedule_recovery_pending(false)`.
-                    tracing::info!(
+                    tracing::debug!(
                         "Leader schedule change triggered at commit index {last_commit_index} (SPARSE DAG)"
                     );
 
@@ -222,7 +222,7 @@ impl Core {
                         .leader_schedule
                         .commits_until_leader_schedule_update(self.dag_state.clone());
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "Leader schedule change triggered at commit index {last_commit_index}"
                     );
 
@@ -556,7 +556,7 @@ impl Core {
 
     /// Sets the delay by round for propagating blocks to a quorum.
     pub(crate) fn set_propagation_delay(&mut self, delay: Round) {
-        info!("Propagation round delay set to: {delay}");
+        tracing::debug!("Propagation round delay set to: {delay}");
         self.propagation_delay = delay;
     }
 

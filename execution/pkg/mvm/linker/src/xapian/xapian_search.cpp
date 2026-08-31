@@ -66,11 +66,7 @@ decodeQuerySearchCallData(const std::vector<uint8_t> &call_data) {
   uint64_t params_struct_start_offset =
       encoding::readUint256AsUint64(call_data, params_struct_offset_ptr);
   current_offset += 32;
-  std::cerr << "params_struct_offset_ptr : " << params_struct_offset_ptr
-            << std::endl;
 
-  std::cerr << "params_struct_start_offset : " << params_struct_start_offset
-            << std::endl;
 
   // Decode dbname (dùng offset đọc từ vị trí 4)
   result.dbname = encoding::readStringDynamic(call_data, 0);
@@ -249,10 +245,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
                     << std::endl;
         }
 
-        std::cerr << "[DOCID: " << *i << "] Rank: " << i.get_rank()
-                  << ", Percent: " << i.get_percent() << ", Slot253: " << val253
-                  << ", Slot254: " << val254 << ", Data: " << doc.get_data()
-                  << std::endl;
+
 
         results.push_back({*i, i.get_rank(), i.get_percent(), doc.get_data()});
       } catch (const Xapian::Error &e) {
@@ -302,7 +295,7 @@ std::pair<std::vector<SearchResult>, Xapian::doccount> XapianSearcher::search(
   }
   if (!need_retry) break; // success, exit retry loop
   } // end retry loop
-  std::cerr << "Estimated_total: " << estimated_total << std::endl;
+
   return {results, estimated_total};
 }
 
@@ -619,7 +612,7 @@ std::vector<uint8_t> XapianSearcher::internalEncodeResultsArrayContent(
     current_offset += encoded_element_sizes[i - 1];
     encoding::appendUint256(encoded_content, current_offset);
   }
-  std::cerr << "results length " << results.size() << std::endl;
+
 
   // === Phần 3: Mã hóa dữ liệu của từng phần tử SearchResult ===
   // Phần này cần khớp với cách tính size ở trên
