@@ -430,8 +430,15 @@ impl TxSocketServer {
                         // Fire-and-forget causes unbounded mempool growth during blast tests,
                         // leading to SyncOnly states. By awaiting here, we propagate backpressure
                         // up to the FFI channel -> Go mempool -> TCP sockets.
-                        // Timeout lowered to 2s to prevent holding FFI semaphore permits for too long.
-                        match tokio::time::timeout(std::time::Duration::from_secs(2), included_in_block_rx).await {
+                        // [DIAGNOSTIC — temporary, not the final fix] Raised from 2s to 30s to test
+                        // whether this ack-wait timing out under heavy load correlates with the
+                        // ~3-22% permanent tx loss observed at 500k-tx scale (batches whose ack
+                        // times out are never retried or tracked past this point — see the warn!
+                        // below). If loss disappears with a longer timeout, that's strong evidence
+                        // this is where it happens, even though the tx should still be sitting in
+                        // consensus's mempool at timeout time; if it doesn't, the loss is elsewhere
+                        // and this revert is a one-line diff.
+                        match tokio::time::timeout(std::time::Duration::from_secs(30), included_in_block_rx).await {
                             Ok(Ok((_block_ref, _indices, status_receiver))) => {
                                 tokio::spawn(async move {
                                     if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
@@ -443,7 +450,7 @@ impl TxSocketServer {
                                 warn!("⚠️ [FFI TX FLOW] Failed to get inclusion confirmation: {}", e);
                             }
                             Err(_) => {
-                                warn!("⏰ [FFI TX FLOW] Timeout waiting for block inclusion. Consensus might be congested.");
+                                warn!("⏰ [FFI TX FLOW] Timeout waiting for block inclusion ({} txs). Consensus might be congested.", chunk_len);
                             }
                         }
                     }

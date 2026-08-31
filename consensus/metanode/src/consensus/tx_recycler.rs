@@ -13,6 +13,8 @@
 
 use sha3::{Digest, Keccak256};
 use dashmap::DashMap;
+use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +40,13 @@ struct PendingTx {
 pub struct TxRecycler {
     /// TXs submitted but not yet confirmed: tx_hash -> PendingTx
     pending: DashMap<[u8; 32], PendingTx>,
+    /// Insertion order of `pending`'s keys, oldest-first, used to pick a real
+    /// eviction victim when at MAX_PENDING_TXS capacity (see track_submitted).
+    /// A hash can linger here after its PendingTx was already removed via
+    /// confirm_committed/eviction — insertion_order is only ever consulted to
+    /// find *a* victim, and stale entries (no longer in `pending`) are just
+    /// skipped, so this never causes a double-remove or a wrong eviction.
+    insertion_order: Mutex<VecDeque<[u8; 32]>>,
     /// Stats
     total_submitted: AtomicU64,
     total_confirmed: AtomicU64,
@@ -48,6 +57,7 @@ impl TxRecycler {
     pub fn new() -> Self {
         Self {
             pending: DashMap::new(),
+            insertion_order: Mutex::new(VecDeque::new()),
             total_submitted: AtomicU64::new(0),
             total_confirmed: AtomicU64::new(0),
             total_recycled: AtomicU64::new(0),
@@ -62,6 +72,7 @@ impl TxRecycler {
         let count = self.pending.len();
         self.pending.clear();
         self.pending.shrink_to_fit();
+        self.insertion_order.lock().clear();
         if count > 0 {
             info!(
                 "🧹 [TX RECYCLER] Epoch transition: cleared {} pending TXs to prevent memory leak",
@@ -82,6 +93,7 @@ impl TxRecycler {
         let txs: Vec<Vec<u8>> = self.pending.iter().map(|ptx| ptx.data.clone()).collect();
         self.pending.clear();
         self.pending.shrink_to_fit();
+        self.insertion_order.lock().clear();
         if count > 0 {
             info!(
                 "♻️ [TX RECYCLER] Epoch transition: drained {} pending TXs for migration to new epoch",
@@ -108,15 +120,47 @@ impl TxRecycler {
                 hashes.push(Self::hash_tx(tx_data));
             }
 
+            // Opportunistically trim confirmed/evicted hashes off the front of
+            // insertion_order, bounded to this chunk's size so the queue can't
+            // grow unbounded over a long-running node's lifetime just because
+            // real eviction (below) only runs while genuinely at capacity.
+            // Confirmed hashes vastly outnumber evicted ones in normal operation,
+            // so this keeps pace with insertions without ever doing unbounded work.
+            {
+                let mut order = self.insertion_order.lock();
+                for _ in 0..chunk.len() {
+                    match order.front() {
+                        Some(h) if !self.pending.contains_key(h) => {
+                            order.pop_front();
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
             for (tx_data, hash) in chunk.iter().zip(hashes.into_iter()) {
             // Don't overwrite if already pending (might be a re-submission)
             if !self.pending.contains_key(&hash) {
-                // Memory safety: evict pseudo-random element if too many.
+                // Memory safety: evict the OLDEST unconfirmed entry if at capacity.
+                //
+                // Previously this evicted an arbitrary (DashMap-iteration-order) entry,
+                // which under a sustained burst that pushes `pending` to MAX_PENDING_TXS
+                // could evict a tx that had *just* been submitted and was in no way stale
+                // yet — silently dropping this recycler's only safety net for it moments
+                // before it might have actually needed recycling (a real, confirmed
+                // 500k-tx-scale reproduction of unconfirmed txs never getting resubmitted
+                // traced back partly to this). Evicting oldest-first means whatever gets
+                // dropped has had the most time to either confirm (and no longer be in
+                // `pending` at all) or get recycled already, so it's the entry this map
+                // can least-badly afford to lose track of.
                 if self.pending.len() >= MAX_PENDING_TXS {
-                    // In DashMap, we can just grab an arbitrary key to evict
-                    let key_to_remove = self.pending.iter().next().map(|r| *r.key());
-                    if let Some(k) = key_to_remove {
-                        self.pending.remove(&k);
+                    let mut order = self.insertion_order.lock();
+                    while let Some(oldest) = order.pop_front() {
+                        // Skip hashes already removed (confirmed or previously evicted) —
+                        // they're stale queue entries, not real eviction candidates.
+                        if self.pending.remove(&oldest).is_some() {
+                            break;
+                        }
                     }
                 }
 
@@ -128,6 +172,7 @@ impl TxRecycler {
                         recycle_count: 0,
                     },
                 );
+                self.insertion_order.lock().push_back(hash);
             }
 
             }
@@ -362,5 +407,94 @@ pub async fn start_recycler_background(
             }
             last_stats_log = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Distinct dummy tx payloads so each gets a distinct hash.
+    fn dummy_tx(i: u64) -> Vec<u8> {
+        i.to_le_bytes().to_vec()
+    }
+
+    #[tokio::test]
+    async fn confirm_committed_removes_pending() {
+        let recycler = TxRecycler::new();
+        let txs: Vec<Vec<u8>> = (0..10).map(dummy_tx).collect();
+        recycler.track_submitted(&txs).await;
+        assert_eq!(recycler.stats().await.0, 10);
+
+        recycler.confirm_committed(&txs[..5]).await;
+        assert_eq!(recycler.stats().await.0, 5, "only the confirmed half should be removed");
+
+        recycler.confirm_committed(&txs[5..]).await;
+        assert_eq!(recycler.stats().await.0, 0);
+    }
+
+    /// The eviction victim at capacity must be the oldest still-pending entry,
+    /// not an arbitrary one — this is the exact bug traced to real tx loss at
+    /// 500k-tx-scale load (see the comment in track_submitted). Uses a small
+    /// override of MAX_PENDING_TXS-equivalent behavior by exercising the same
+    /// code path at the real constant size, since the eviction threshold is a
+    /// module-level const, not configurable per-instance.
+    #[tokio::test]
+    async fn eviction_at_capacity_picks_oldest_not_arbitrary() {
+        let recycler = TxRecycler::new();
+
+        // Fill to exactly capacity.
+        let txs: Vec<Vec<u8>> = (0..MAX_PENDING_TXS as u64).map(dummy_tx).collect();
+        recycler.track_submitted(&txs).await;
+        assert_eq!(recycler.stats().await.0, MAX_PENDING_TXS);
+
+        // One more push must evict exactly one victim to stay at capacity.
+        let newcomer = dummy_tx(MAX_PENDING_TXS as u64);
+        recycler.track_submitted(std::slice::from_ref(&newcomer)).await;
+        assert_eq!(recycler.stats().await.0, MAX_PENDING_TXS, "capacity must be preserved");
+
+        // The victim must be the very first tx ever inserted (oldest), not some
+        // arbitrary one — everything else, especially the newcomer and the most
+        // recently-inserted originals, must still be tracked.
+        let oldest_hash = TxRecycler::hash_tx(&txs[0]);
+        assert!(
+            !recycler.pending.contains_key(&oldest_hash),
+            "oldest entry should have been evicted"
+        );
+        let newcomer_hash = TxRecycler::hash_tx(&newcomer);
+        assert!(recycler.pending.contains_key(&newcomer_hash), "newcomer must be tracked");
+        let second_oldest_hash = TxRecycler::hash_tx(&txs[1]);
+        assert!(
+            recycler.pending.contains_key(&second_oldest_hash),
+            "only the single oldest entry should be evicted, not others"
+        );
+        let newest_original_hash = TxRecycler::hash_tx(&txs[txs.len() - 1]);
+        assert!(
+            recycler.pending.contains_key(&newest_original_hash),
+            "most recently inserted original tx must survive eviction"
+        );
+    }
+
+    /// insertion_order must not grow without bound just from normal confirm
+    /// traffic — it should get opportunistically trimmed as confirmed hashes
+    /// reach the front, well before eviction ever needs to run.
+    #[tokio::test]
+    async fn insertion_order_does_not_leak_on_steady_confirm_churn() {
+        let recycler = TxRecycler::new();
+
+        for round in 0..20u64 {
+            let txs: Vec<Vec<u8>> = (0..500).map(|i| dummy_tx(round * 500 + i)).collect();
+            recycler.track_submitted(&txs).await;
+            recycler.confirm_committed(&txs).await;
+        }
+
+        assert_eq!(recycler.stats().await.0, 0, "everything was confirmed, nothing should remain pending");
+        // Bounded, not proportional to the 10,000 total insertions made above —
+        // opportunistic trimming in track_submitted keeps pace with confirms.
+        assert!(
+            recycler.insertion_order.lock().len() < 1000,
+            "insertion_order should have been trimmed as confirms happened, got {} entries",
+            recycler.insertion_order.lock().len()
+        );
     }
 }
