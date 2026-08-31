@@ -31,6 +31,7 @@
               export RPC_PORT="{{ hostvars[item]['rpc_port'] }}"
               export PORT_OFFSET="{{ hostvars[item]['port_offset'] }}"
               export IP="{{ hostvars[item]['ansible_host'] }}"
+              export VALIDATORS="{{ hostvars[item]['validators'] | default(1) }}"
               export ROOT_RPC="{{ root_anchor_rpc }}"
               export LOCAL_OUT="{{ playbook_dir }}/data/chain_{{ hostvars[item]['chain_id'] }}"
               export TARGET_DIR="{{ hostvars[item]['install_dir'] | default('/opt/metanode/chain-' ~ hostvars[item]['chain_id']) }}"
@@ -71,54 +72,51 @@
                   --ip "$IP" \
                   --rpc-port "$RPC_PORT" \
                   --port-offset "$PORT_OFFSET" \
-                  --validators 1 \
+                  --validators "$VALIDATORS" \
                   --root-anchor-rpc "$ROOT_RPC" \
                   --root-anchor-submitter-key "$SUBMITTER_KEY" \
                   --reserve-chain-id "$RESERVE_CHAIN_ID" \
                   --output-dir "$LOCAL_OUT"
               fi
               
-              # Chuẩn hóa đường dẫn trong config.json cho thư mục cài đặt mục tiêu (/opt/metanode/chain-XXX)
+              # Chuẩn hóa đường dẫn trong config.json và node.toml cho từng validator node (/opt/metanode/chain-XXX/node-N)
               python3 << 'EOF'
               import json
-              import os
-              
-              local_out = os.environ.get('LOCAL_OUT', '')
-              t_dir = os.environ.get('TARGET_DIR', '')
-              
-              cfg_path = f'{local_out}/node-0/config.json'
-              with open(cfg_path) as f:
-                  c = json.load(f)
-              
-              c['log_path'] = f'{t_dir}/logs/execution'
-              c['backup_path'] = f'{t_dir}/data/execution/backup'
-              c['genesis_file_path'] = f'{t_dir}/config/genesis.json'
-              c['rust_config_path'] = f'{t_dir}/config/node.toml'
-              if 'Databases' in c:
-                  c['Databases']['RootPath'] = f'{t_dir}/data/execution/db'
-                  c['Databases']['SnapshotPath'] = f'{t_dir}/data/execution/snapshots'
-              with open(cfg_path, 'w') as f:
-                  json.dump(c, f, indent=2)
-              EOF
-  
-              # Chuẩn hóa đường dẫn trong node.toml
-              python3 << 'EOF'
               import os
               import re
               
               local_out = os.environ.get('LOCAL_OUT', '')
               t_dir = os.environ.get('TARGET_DIR', '')
+              num_validators = int(os.environ.get('VALIDATORS', '1'))
               
-              toml_path = f'{local_out}/node-0/node.toml'
-              with open(toml_path) as f:
-                  content = f.read()
-              
-              content = re.sub(r'protocol_key_path\s*=\s*".*?"', f'protocol_key_path = "{t_dir}/keys/protocol_key.json"', content)
-              content = re.sub(r'network_key_path\s*=\s*".*?"', f'network_key_path = "{t_dir}/keys/network_key.json"', content)
-              content = re.sub(r'storage_path\s*=\s*".*?"', f'storage_path = "{t_dir}/data/consensus"', content)
-              
-              with open(toml_path, 'w') as f:
-                  f.write(content)
+              for node_id in range(num_validators):
+                  n_dir = f'{t_dir}/node-{node_id}'
+                  cfg_path = f'{local_out}/node-{node_id}/config.json'
+                  if os.path.exists(cfg_path):
+                      with open(cfg_path) as f:
+                          c = json.load(f)
+                      
+                      c['log_path'] = f'{n_dir}/logs/execution'
+                      c['backup_path'] = f'{n_dir}/data/execution/backup'
+                      c['genesis_file_path'] = f'{t_dir}/config/genesis.json'
+                      c['rust_config_path'] = f'{n_dir}/config/node.toml'
+                      if 'Databases' in c:
+                          c['Databases']['RootPath'] = f'{n_dir}/data/execution/db'
+                          c['Databases']['SnapshotPath'] = f'{n_dir}/data/execution/snapshots'
+                      with open(cfg_path, 'w') as f:
+                          json.dump(c, f, indent=2)
+
+                  toml_path = f'{local_out}/node-{node_id}/node.toml'
+                  if os.path.exists(toml_path):
+                      with open(toml_path) as f:
+                          content = f.read()
+                      
+                      content = re.sub(r'protocol_key_path\s*=\s*".*?"', f'protocol_key_path = "{n_dir}/keys/protocol_key.json"', content)
+                      content = re.sub(r'network_key_path\s*=\s*".*?"', f'network_key_path = "{n_dir}/keys/network_key.json"', content)
+                      content = re.sub(r'storage_path\s*=\s*".*?"', f'storage_path = "{n_dir}/data/consensus"', content)
+                      
+                      with open(toml_path, 'w') as f:
+                          f.write(content)
               EOF
           loop: "{{ groups['private_chains'] }}"
           when: "active_target == 'all' or active_target | string == hostvars[item]['chain_id'] | string"
@@ -131,6 +129,8 @@
     ansible_action: "{{ deploy_action | default('setup') }}"
     active_target: "{{ target_chain | default('all') }}"
     open_ports_enabled: "{{ open_ports | default(false) | bool }}"
+    num_validators: "{{ validators | default(1) | int }}"
+    node_list: "{{ range(0, (validators | default(1) | int)) | list }}"
   tasks:
     - name: Check if host is targeted
       ansible.builtin.set_fact:
@@ -152,23 +152,34 @@
         create_home: no
         shell: /usr/sbin/nologin
 
-    - name: Stop systemd service
+    - name: Stop systemd service(s)
       when: "is_targeted and ansible_action in ['stop', 'restart', 'reset', 'clean_data']"
-      ansible.builtin.systemd:
-        name: "metanode-private-{{ chain_id }}.service"
-        state: stopped
-      ignore_errors: true
+      block:
+        - name: Stop individual node services
+          ansible.builtin.systemd:
+            name: "metanode-private-{{ chain_id }}-node-{{ item }}.service"
+            state: stopped
+          loop: "{{ node_list }}"
+          ignore_errors: true
+
+        - name: Stop legacy service if exists
+          ansible.builtin.systemd:
+            name: "metanode-private-{{ chain_id }}.service"
+            state: stopped
+          ignore_errors: true
 
     - name: Clean data directories only (preserve keys & configs)
       when: "is_targeted and ansible_action == 'clean_data'"
       ansible.builtin.shell: |
-        rm -rf "{{ target_install_dir }}/data"/*
-        rm -rf "{{ target_install_dir }}/logs"/*
-        mkdir -p "{{ target_install_dir }}/data/execution/db" \
-                 "{{ target_install_dir }}/data/execution/backup" \
-                 "{{ target_install_dir }}/data/execution/snapshots" \
-                 "{{ target_install_dir }}/data/consensus" \
-                 "{{ target_install_dir }}/logs/execution"
+        for nid in {{ node_list | join(' ') }}; do
+          rm -rf "{{ target_install_dir }}/node-$nid/data"/*
+          rm -rf "{{ target_install_dir }}/node-$nid/logs"/*
+          mkdir -p "{{ target_install_dir }}/node-$nid/data/execution/db" \
+                   "{{ target_install_dir }}/node-$nid/data/execution/backup" \
+                   "{{ target_install_dir }}/node-$nid/data/execution/snapshots" \
+                   "{{ target_install_dir }}/node-$nid/data/consensus" \
+                   "{{ target_install_dir }}/node-$nid/logs/execution"
+        done
         chown -R metanode:metanode "{{ target_install_dir }}"
 
     - name: Clean entire installation directory on reset
@@ -180,7 +191,7 @@
     - name: Deploy directories and files
       when: "is_targeted and ansible_action in ['setup', 'reset']"
       block:
-        - name: Create subdirectories under /opt/metanode/chain-{{ chain_id }}
+        - name: Create base directory structure under /opt/metanode/chain-{{ chain_id }}
           ansible.builtin.file:
             path: "{{ item }}"
             state: directory
@@ -191,12 +202,17 @@
             - "{{ target_install_dir }}"
             - "{{ target_install_dir }}/bin"
             - "{{ target_install_dir }}/config"
-            - "{{ target_install_dir }}/keys"
-            - "{{ target_install_dir }}/logs/execution"
-            - "{{ target_install_dir }}/data/execution/db"
-            - "{{ target_install_dir }}/data/execution/backup"
-            - "{{ target_install_dir }}/data/execution/snapshots"
-            - "{{ target_install_dir }}/data/consensus"
+
+        - name: Create subdirectories for each validator node
+          ansible.builtin.file:
+            path: "{{ target_install_dir }}/node-{{ item.0 }}/{{ item.1 }}"
+            state: directory
+            owner: metanode
+            group: metanode
+            mode: '0755'
+          with_nested:
+            - "{{ node_list }}"
+            - [ 'config', 'keys', 'logs/execution', 'data/execution/db', 'data/execution/backup', 'data/execution/snapshots', 'data/consensus' ]
 
         - name: Copy simple_chain binary
           ansible.builtin.copy:
@@ -215,36 +231,42 @@
             mode: '0755'
           ignore_errors: true
 
-        - name: Copy configuration and genesis files
+        - name: Copy shared genesis file
           ansible.builtin.copy:
-            src: "{{ playbook_dir }}/data/chain_{{ chain_id }}/{{ item.src }}"
-            dest: "{{ target_install_dir }}/{{ item.dest }}"
+            src: "{{ playbook_dir }}/data/chain_{{ chain_id }}/genesis.json"
+            dest: "{{ target_install_dir }}/config/genesis.json"
             owner: metanode
             group: metanode
             mode: '0644'
-          loop:
-            - { src: 'node-0/config.json', dest: 'config/execution.json' }
-            - { src: 'genesis.json', dest: 'config/genesis.json' }
-            - { src: 'node-0/node.toml', dest: 'config/node.toml' }
 
-        - name: Copy keys
+        - name: Copy node configurations
           ansible.builtin.copy:
-            src: "{{ playbook_dir }}/data/chain_{{ chain_id }}/node-0/keys/{{ item }}"
-            dest: "{{ target_install_dir }}/keys/{{ item }}"
+            src: "{{ playbook_dir }}/data/chain_{{ chain_id }}/node-{{ item.0 }}/{{ item.1.src }}"
+            dest: "{{ target_install_dir }}/node-{{ item.0 }}/{{ item.1.dest }}"
+            owner: metanode
+            group: metanode
+            mode: '0644'
+          with_nested:
+            - "{{ node_list }}"
+            - [ { src: 'config.json', dest: 'config/execution.json' }, { src: 'node.toml', dest: 'config/node.toml' } ]
+
+        - name: Copy node keys
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/data/chain_{{ chain_id }}/node-{{ item.0 }}/keys/{{ item.1 }}"
+            dest: "{{ target_install_dir }}/node-{{ item.0 }}/keys/{{ item.1 }}"
             owner: metanode
             group: metanode
             mode: '0600'
-          loop:
-            - "protocol_key.json"
-            - "network_key.json"
-            - "authority_key.json"
-            - "eth_key.json"
+          with_nested:
+            - "{{ node_list }}"
+            - [ "protocol_key.json", "network_key.json", "authority_key.json", "eth_key.json" ]
 
-        - name: Create systemd service file
+        - name: Create systemd service files for each validator node
           ansible.builtin.template:
             src: "{{ playbook_dir }}/roles/private_node/templates/metanode-private.service.j2"
-            dest: "/etc/systemd/system/metanode-private-{{ chain_id }}.service"
+            dest: "/etc/systemd/system/metanode-private-{{ chain_id }}-node-{{ item }}.service"
             mode: '0644'
+          loop: "{{ node_list }}"
 
         - name: Ensure correct recursive ownership
           ansible.builtin.file:
@@ -261,19 +283,22 @@
       when: "is_targeted and open_ports_enabled"
       ansible.builtin.shell: |
         which ufw > /dev/null 2>&1 || exit 0
-        ufw allow {{ rpc_port }}/tcp comment "Metanode Chain {{ chain_id }} RPC" || true
-        ufw allow {{ 20200 + (port_offset | int) }}/tcp comment "Metanode Chain {{ chain_id }} Peer RPC" || true
-        ufw allow {{ 10200 + (port_offset | int) }}/tcp comment "Metanode Chain {{ chain_id }} Consensus" || true
-        ufw allow {{ 12100 + (port_offset | int) }}/tcp comment "Metanode Chain {{ chain_id }} Metrics" || true
-        ufw allow {{ 13000 + (port_offset | int) }}/tcp comment "Metanode Chain {{ chain_id }} DNS" || true
+        for nid in {{ node_list | join(' ') }}; do
+          ufw allow $(( {{ rpc_port }} + nid ))/tcp comment "Metanode Chain {{ chain_id }} Node $nid RPC" || true
+          ufw allow $(( 20200 + {{ port_offset | int }} + nid ))/tcp comment "Metanode Chain {{ chain_id }} Node $nid Peer RPC" || true
+          ufw allow $(( 10200 + {{ port_offset | int }} + nid ))/tcp comment "Metanode Chain {{ chain_id }} Node $nid Consensus" || true
+          ufw allow $(( 12100 + {{ port_offset | int }} + nid ))/tcp comment "Metanode Chain {{ chain_id }} Node $nid Metrics" || true
+          ufw allow $(( 13000 + {{ port_offset | int }} + nid ))/tcp comment "Metanode Chain {{ chain_id }} Node $nid DNS" || true
+        done
       ignore_errors: true
 
-    - name: Start / Restart systemd service
+    - name: Start / Restart systemd service(s)
       when: "is_targeted and ansible_action in ['setup', 'reset', 'start', 'restart', 'clean_data']"
       ansible.builtin.systemd:
-        name: "metanode-private-{{ chain_id }}.service"
+        name: "metanode-private-{{ chain_id }}-node-{{ item }}.service"
         state: restarted
         enabled: yes
+      loop: "{{ node_list }}"
 
 - name: Post-Deployment Verification
   hosts: localhost

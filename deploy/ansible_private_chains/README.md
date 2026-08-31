@@ -79,13 +79,19 @@ Khi chạy với cờ `--open-ports`, script sẽ tự động tạo rule `ufw a
 ---
 
 ### 🔍 5. Xem Log & Quản Lý Systemd Trực Tiếp:
+Mỗi validator node của một chain chạy trên unit riêng, đặt tên
+`metanode-private-<chain_id>-node-<node_index>.service` (node_index bắt đầu từ 0).
+
 ```bash
-# Xem log realtime của Chain 101:
-journalctl -u metanode-private-101.service -f
+# Xem log realtime của node 0 thuộc Chain 101:
+journalctl -u metanode-private-101-node-0.service -f
 
 # Quản lý service trực tiếp qua systemctl:
-sudo systemctl status metanode-private-101.service
-sudo systemctl restart metanode-private-101.service
-sudo systemctl stop metanode-private-101.service
+sudo systemctl status metanode-private-101-node-0.service
+sudo systemctl restart metanode-private-101-node-0.service
+sudo systemctl stop metanode-private-101-node-0.service
+
+# Liệt kê tất cả unit của Chain 101 (nhiều node):
+systemctl list-units 'metanode-private-101-node-*.service'
 ```
 

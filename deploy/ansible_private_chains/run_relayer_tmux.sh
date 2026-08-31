@@ -141,17 +141,32 @@ root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://12
 out = {
     'root_anchor': root_rpc,
     'nodes': {},
-    'tcp_nodes': {}
+    'tcp_nodes': {},
+    'chain_nodes': {}
 }
 for h in hosts.values():
     if isinstance(h, dict) and 'chain_id' in h:
         cid = str(h['chain_id'])
         ip = h.get('ansible_host', '127.0.0.1')
-        rpc_port = h.get('rpc_port', 8546)
-        port_offset = h.get('port_offset', 10)
-        tcp_port = 4200 + port_offset
+        rpc_port = int(h.get('rpc_port', 8546))
+        port_offset = int(h.get('port_offset', 10))
+        num_vals = int(h.get('validators', 1))
+
         out['nodes'][cid] = f'http://{ip}:{rpc_port}'
-        out['tcp_nodes'][cid] = f'{ip}:{tcp_port}'
+        out['tcp_nodes'][cid] = f'{ip}:{4200 + port_offset}'
+
+        c_rpc_nodes = {}
+        c_tcp_nodes = {}
+        for v in range(num_vals):
+            c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
+            c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + port_offset + v}'
+
+        out['chain_nodes'][cid] = {
+            'validators': num_vals,
+            'rpc_url': f'http://{ip}:{rpc_port}',
+            'rpc_nodes': c_rpc_nodes,
+            'tcp_nodes': c_tcp_nodes
+        }
 
 with open('$CONFIG_JSON', 'w') as f:
     json.dump(out, f, indent=2)

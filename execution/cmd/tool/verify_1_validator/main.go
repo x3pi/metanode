@@ -19,7 +19,8 @@ const (
 
 func main() {
 	fmt.Println(colorCyan + colorBold + "🔬 BÀI TEST: MẠNG PRIVATE CHAIN 1 VALIDATOR (CENTRALIZED)" + colorReset)
-	fmt.Println("Kiểm tra tính hợp lệ của việc dùng 1 validator để đăng ký và gửi giao dịch xuyên chuỗi.\n")
+	fmt.Println("Kiểm tra tính hợp lệ của việc dùng 1 validator để đăng ký và gửi giao dịch xuyên chuỗi.")
+	fmt.Println()
 
 	// 1. Tạo 1 BLS KeyPair
 	kp := bls.GenerateKeyPair()

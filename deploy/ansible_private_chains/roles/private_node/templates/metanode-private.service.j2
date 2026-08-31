@@ -1,5 +1,5 @@
 [Unit]
-Description=Metanode Private Chain {{ chain_id }} Execution Service
+Description=Metanode Private Chain {{ chain_id }} Node {{ item }} Service
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=metanode
 Group=metanode
 WorkingDirectory={{ target_install_dir }}/bin
 
-ExecStart={{ target_install_dir }}/bin/simple_chain -config={{ target_install_dir }}/config/execution.json --pprof-addr=127.0.0.1:{{ 6070 + (port_offset | int) }}
+ExecStart={{ target_install_dir }}/bin/simple_chain -config={{ target_install_dir }}/node-{{ item }}/config/execution.json --pprof-addr=127.0.0.1:{{ 6070 + (port_offset | int) + (item | int) }}
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 TimeoutStopSec=90
@@ -24,8 +24,8 @@ LimitCORE=infinity
 
 # Logging
 StandardOutput=journal
-StandardError=append:{{ target_install_dir }}/logs/execution/panic.log
-SyslogIdentifier=metanode-private-{{ chain_id }}
+StandardError=append:{{ target_install_dir }}/node-{{ item }}/logs/execution/panic.log
+SyslogIdentifier=metanode-private-{{ chain_id }}-node-{{ item }}
 
 [Install]
 WantedBy=multi-user.target

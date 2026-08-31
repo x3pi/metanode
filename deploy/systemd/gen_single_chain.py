@@ -32,7 +32,33 @@ import argparse
 import shutil
 import base64
 import secrets
+import hashlib
 from pathlib import Path
+
+def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
+    """Deterministically derive a devnet-only secp256k1 keypair for this node's
+    CommitAttestationWorker "submitter" account, keyed by (chain_id, node_index).
+
+    Must match gen_root_anchor_chain.py's derive_devnet_submitter_account()
+    bit-for-bit -- Root Anchor's genesis pre-registers this same account so
+    submitCommitAttestation() txs from it aren't rejected for "no BLS public
+    key registered on-chain". See that function's docstring for the full
+    root-cause writeup.
+
+    DEVNET ONLY. This key is derivable by anyone who reads this source file --
+    never use it to hold real value. Production deployments must generate a
+    real, secret, per-chain, per-node submitter key and register it on Root
+    Anchor (a real registration transaction/process, not a hardcoded genesis
+    alloc).
+    """
+    from eth_account import Account
+    if node_index == 0:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    else:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
+    priv_hex = hashlib.sha256(seed).hexdigest()
+    address = Account.from_key(priv_hex).address
+    return priv_hex, address
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 def green(s):  return f"\033[32m{s}\033[0m"
@@ -480,6 +506,11 @@ def main():
         else:
             gateway_bls_key = DEVNET_GATEWAY_BLS_KEY
 
+        # Derive dedicated per-node submitter key so multiple validators never collide on Root Anchor nonce/LastHash
+        node_submitter_key, _ = derive_devnet_submitter_account(args.chain_id, node_id)
+        if args.root_anchor_submitter_key and args.validators == 1:
+            node_submitter_key = args.root_anchor_submitter_key
+
         exec_config = {
             "debug": False,
             "tx_trace_enabled": False,
@@ -509,7 +540,7 @@ def main():
                 # CommitteeAttestationWorker on every node this script generates. Verified against
                 # config.go directly, not assumed.
                 "root_anchor_rpc_urls": args.root_anchor_rpc.split(",") if args.root_anchor_rpc else [],
-                "root_anchor_submitter_private_key_hex": args.root_anchor_submitter_key,
+                "root_anchor_submitter_private_key_hex": node_submitter_key,
                 "root_anchor_poll_interval_seconds": 1,
                 "min_native_stake_to_register_wei": "1000000000000000000",
                 "root_anchor_circuit_breaker_max_failures": 5,
