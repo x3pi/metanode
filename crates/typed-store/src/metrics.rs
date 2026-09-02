@@ -52,6 +52,21 @@ impl SamplingInterval {
         let counter = Arc::new(AtomicU64::new(1));
         if !once_every_duration.is_zero() {
             let counter = counter.clone();
+            // NOTE (investigated 2026-09-02): this spawn() panics with "no
+            // reactor running" every time RocksDBStore::new() is invoked from
+            // metanode_init_rocksdb() (ffi.rs), which runs on a plain Go/CGo
+            // thread with no Tokio runtime. That call site wraps the whole
+            // RocksDBStore::new() in catch_unwind specifically for this
+            // reason, so the panic is caught and harmless there today.
+            // Confirmed via a temporary diagnostic that this is NOT the cause
+            // of the real, reproducible node crash under heavy real-transfer
+            // load investigated the same day — that crash's actual root
+            // cause was execution/pkg/logger's single global mutex around
+            // synchronous log I/O causing a goroutine pileup (fixed
+            // separately, see logger.go). Left here only as a pointer for
+            // whoever next touches RocksDBStore::new()'s call sites: any
+            // future *unwrapped* caller invoked from a non-Tokio thread will
+            // hit this exact panic, uncaught.
             tokio::task::spawn(async move {
                 loop {
                     if counter.load(Ordering::SeqCst) > after_num_ops {

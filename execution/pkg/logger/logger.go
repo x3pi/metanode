@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -147,7 +148,7 @@ func DebugP(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Purple, "DEBUG_P", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Trace(message interface{}, a ...interface{}) {
@@ -155,7 +156,7 @@ func Trace(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Blue, "TRACE", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Debug(message interface{}, a ...interface{}) {
@@ -163,7 +164,7 @@ func Debug(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Cyan, "DEBUG", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Info(message interface{}, a ...interface{}) {
@@ -171,7 +172,7 @@ func Info(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Green, "INFO", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Warn(message interface{}, a ...interface{}) {
@@ -179,7 +180,7 @@ func Warn(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Yellow, "WARN", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Error(message interface{}, a ...interface{}) {
@@ -370,6 +371,82 @@ func buildLogLine(color string, prefix string, message interface{}, a []interfac
 
 	buffer.WriteString("\n")
 	return buffer.Bytes()
+}
+
+// ============================================================================
+// Async log queue — root-cause fix (2026-09-02)
+//
+// writeToOutputsSplit used to be called SYNCHRONOUSLY, under writeMu, by every
+// caller of DebugP/Trace/Debug/Info/Warn — meaning every one of those log
+// calls blocked the calling goroutine for the full duration of a real disk
+// (or stdout) write while holding a single PROCESS-WIDE mutex. Found live via
+// pprof under real (non-reverting, actually state-mutating) transaction load
+// at high concurrency (3000 concurrent eth_sendRawTransaction connections):
+// every request handler calls logger.Info at least once on its hot path
+// (e.g. rpc_transaction.go's per-tx "TX executed speculatively" line), so
+// once real disk I/O contention (from genuine NOMT/state-trie commits
+// competing for the same disk) made even one log write slow, every other
+// concurrent request-handling goroutine piled up waiting on writeMu behind
+// it. Captured one goroutine profile that went from 764 to 6703 goroutines
+// in a single second, 2955 of them blocked exactly in
+// writeToOutputsSplit->sync.Mutex.Lock; heap ballooned past the configured
+// go_mem_limit_gb (8GB) to 11GB+ and the process was killed shortly after
+// (Go's fatal out-of-memory exit, code 2). Never manifested under the
+// zero-value/reverting transactions used earlier in this session's
+// benchmarking, since those do almost no real disk I/O and so never made the
+// log write slow enough to matter.
+//
+// Fix: DebugP/Trace/Debug/Info/Warn (the high-frequency, hot-path levels) now
+// enqueue onto a bounded channel drained by a single dedicated writer
+// goroutine, so a slow disk write only ever blocks that one goroutine, never
+// the caller. If the queue is ever fully backed up (sustained I/O far slower
+// than log volume), enqueueLog drops the line rather than block — losing a
+// diagnostic log line is an acceptable trade, taking down the whole node
+// under real transaction load is not. Error/Fatal are deliberately left
+// exactly as before (direct, synchronous writeToOutputsSplit + syncFileOutputs)
+// since they're rare, not part of any per-transaction hot path, and existing
+// callers rely on Fatal/Error's log being durably on disk before the process
+// can exit.
+const logQueueCapacity = 65536
+
+var (
+	logQueue     chan logJob
+	logQueueOnce sync.Once
+	droppedLogs  atomic.Uint64
+)
+
+type logJob struct {
+	colored []byte
+	plain   []byte
+}
+
+func startLogWriter() {
+	logQueue = make(chan logJob, logQueueCapacity)
+	go func() {
+		for job := range logQueue {
+			logger.writeToOutputsSplit(job.colored, job.plain)
+		}
+	}()
+}
+
+// enqueueLog hands a formatted log line to the async writer goroutine.
+// Never blocks the caller: if the queue is full, the line is dropped and
+// counted (see DroppedLogCount) instead of applying backpressure to whatever
+// hot path called Info/Debug/Warn/Trace/DebugP.
+func enqueueLog(colored, plain []byte) {
+	logQueueOnce.Do(startLogWriter)
+	select {
+	case logQueue <- logJob{colored: colored, plain: plain}:
+	default:
+		droppedLogs.Add(1)
+	}
+}
+
+// DroppedLogCount returns how many log lines have been discarded because the
+// async log queue was full (sustained log-write I/O slower than log volume).
+// Exposed for diagnostics/metrics; 0 in the overwhelming common case.
+func DroppedLogCount() uint64 {
+	return droppedLogs.Load()
 }
 
 // writeMu protects concurrent writes to outputs to prevent deadlock
