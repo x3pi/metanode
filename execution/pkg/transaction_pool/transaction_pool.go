@@ -57,11 +57,14 @@ type TransactionPool struct {
 	shards     [NumShards]*poolShard
 	NotifyChan chan struct{} // GO-2: Event channel to notify workers of new transactions
 	count      int64         // Atomic counter for lock-free count queries
-	// drainCursor rotates the shard TransactionsWithAggSign() starts draining
-	// from on each call (see there for why: the caller caps how many of the
+	// drainCursor tracks where TransactionsWithAggSign() left off, so each
+	// call resumes exactly where the last one stopped instead of restarting
+	// from shard 0 (see there for why: the caller caps how many of the
 	// returned txs it forwards per tick and re-queues the rest, so a fixed
-	// 0->255 start order lets whichever low-numbered shards are currently hot
-	// perpetually starve every higher-numbered shard under sustained load).
+	// restart point lets whichever low-numbered shards are currently hot
+	// perpetually starve every higher-numbered shard under sustained load --
+	// and, since 2026-09-02, also lets a single call stop early once it has
+	// collected enough transactions rather than always sweeping every shard).
 	drainCursor uint32
 }
 
@@ -298,27 +301,57 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 	}
 }
 
-func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byte) {
+// TransactionsWithAggSign drains up to maxDrain transactions from the pool
+// (0 or negative means unbounded -- drain everything, the original
+// behavior), starting from wherever the previous call left off.
+//
+// maxDrain was added 2026-09-02 measuring sustained real-transfer throughput
+// after a retry fix elsewhere made the RPC layer accept nearly all offered
+// load: with a multi-million-transaction backlog sitting in the pool, this
+// function -- called every ~1ms tick by TxBatchForwarder -- used to drain
+// and re-sort the ENTIRE backlog every single call, even though the caller
+// only ever forwards targetBlockSize (8,000) of the result and immediately
+// re-queues the rest right back into the same shards. That's O(backlog) work
+// per tick to make O(targetBlockSize) forward progress: measured at a
+// 3.7-million-tx backlog, a single tick's nonce-sort-and-validate pass alone
+// took 16-24 SECONDS, and since each tick only nets ~8,000 fewer pending
+// transactions, draining the full backlog would have taken on the order of
+// (backlog/8,000) such ticks -- projected at ~2.5 hours for that one run,
+// versus completing in low minutes once this cap was added.
+//
+// Capping the drain at a small multiple of targetBlockSize bounds this
+// function's cost to that constant, independent of how large the backlog
+// gets, while the pre-existing round-robin drainCursor (below) guarantees
+// every shard still gets its turn -- a capped call just means it takes a
+// few more ticks to complete one full rotation instead of one, which is
+// the entire point: the rotation's total cost across those extra ticks is
+// still O(backlog) exactly once, not O(backlog) repeated on every tick.
+func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transaction, []byte) {
 	var allTxs []types.Transaction
 	var totalDrained int64
 
-	// FAIRNESS: start from a rotating shard each call instead of always shard 0.
-	// The caller (TxBatchForwarder) caps how many of the txs returned here it
-	// actually forwards per tick (targetBlockSize) and re-queues the remainder
-	// — which lands back in the SAME shards it came from. With a fixed 0->255
-	// start, under sustained load where the low shards refill as fast as they
-	// drain, every higher-numbered shard's txs sit at the tail of `allTxs` on
-	// every single tick and can be pushed past the cap indefinitely: not just
-	// slower, but genuinely starved for as long as the burst lasts (measured:
-	// a single unrelated tx landing in a "wrong" shard during a 1000-worker
-	// burst waited 10+ seconds — 30-40x the normal ~300ms — while txs in
-	// early shards kept confirming on schedule). Rotating the start point
-	// means whichever shards got starved this tick are first in line next
-	// tick, bounding the unfairness to one rotation cycle instead of the
-	// whole burst.
-	start := int(atomic.AddUint32(&tp.drainCursor, 1) % NumShards)
-	for k := 0; k < NumShards; k++ {
-		i := (start + k) % NumShards
+	// FAIRNESS: start from wherever the previous call left off (see the cursor
+	// update below) instead of always shard 0. The caller (TxBatchForwarder)
+	// caps how many of the txs returned here it actually forwards per tick
+	// (targetBlockSize) and re-queues the remainder — which lands back in the
+	// SAME shards it came from. With a fixed 0->255 start, under sustained
+	// load where the low shards refill as fast as they drain, every
+	// higher-numbered shard's txs sit at the tail of `allTxs` on every single
+	// tick and can be pushed past the cap indefinitely: not just slower, but
+	// genuinely starved for as long as the burst lasts (measured: a single
+	// unrelated tx landing in a "wrong" shard during a 1000-worker burst
+	// waited 10+ seconds — 30-40x the normal ~300ms — while txs in early
+	// shards kept confirming on schedule). Resuming from where the last call
+	// stopped means every shard gets visited exactly once per full rotation,
+	// whether that rotation completes in one call (maxDrain<=0, or the pool
+	// is smaller than maxDrain) or is spread across many capped calls.
+	start := int(atomic.LoadUint32(&tp.drainCursor) % NumShards)
+	visited := 0
+	for visited < NumShards {
+		if maxDrain > 0 && len(allTxs) >= maxDrain {
+			break
+		}
+		i := (start + visited) % NumShards
 		shard := tp.shards[i]
 		shard.mu.Lock()
 		if len(shard.transactions) > 0 {
@@ -329,7 +362,19 @@ func (tp *TransactionPool) TransactionsWithAggSign() ([]types.Transaction, []byt
 			shard.txHashMap = make(map[common.Hash]types.Transaction)
 		}
 		shard.mu.Unlock()
+		visited++
 	}
+	// Advance by exactly how far we got, so a capped call resumes at the next
+	// unvisited shard next time. The one exception: a full, uninterrupted lap
+	// (visited==NumShards, i.e. maxDrain<=0 or the whole pool fit under it)
+	// would otherwise land the cursor right back on `start` -- advance by 1
+	// instead, matching the original always-rotate-by-1 behavior, so repeated
+	// full sweeps of a small pool still vary which shard's txs lead `allTxs`.
+	advance := visited
+	if visited >= NumShards {
+		advance = 1
+	}
+	atomic.StoreUint32(&tp.drainCursor, uint32((start+advance)%NumShards))
 
 	atomic.AddInt64(&tp.count, -totalDrained)
 

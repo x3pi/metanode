@@ -179,31 +179,84 @@ func main() {
 
 	startBlock, _ := rpcClient.GetBlockNumber()
 	var sent, sendErrors int64
-	workCh := make(chan []byte, totalTxs)
-	for _, p := range payloads {
-		if p != nil {
-			workCh <- p
-		}
+
+	// Partition by ACCOUNT rather than a flat shared work channel, and send
+	// each account's transactions sequentially within its own goroutine.
+	//
+	// Found 2026-09-02 chasing why a real-transfer run still lost ~20% of
+	// transactions even after the node accepted 100% of them (0 send
+	// errors): the old code built payloads in nonce order per account but
+	// then pushed them all into one channel drained by *workers generic
+	// goroutines. With thousands of concurrent consumers pulling from that
+	// single channel, whichever goroutine happens to win its HTTP round trip
+	// first decides arrival order at the node -- completely unrelated to the
+	// nonce order the channel was filled in. A later nonce for an account
+	// could easily reach the node well before an earlier one, so the node
+	// (correctly) parks it as a "future" transaction waiting for its
+	// predecessor -- and if that predecessor itself is delayed the same way,
+	// or hasn't even been picked up by a worker yet given a big enough
+	// backlog, the wait can exceed the node's 5-minute future-tx TTL and the
+	// transaction is dropped for good. This is a client bug, not something
+	// the node should (or safely could) work around: a real wallet or
+	// backend submitting its own account's nonces always sends them in
+	// order for exactly this reason. Grouping work by account and sending
+	// each account's nonces back-to-back on the SAME goroutine (still up to
+	// *workers accounts concurrently) fixes it structurally: the node never
+	// sees a nonce before its predecessor for any account this tool
+	// controls, so nothing should ever need the future-tx path at all.
+	numSendWorkers := *workers
+	if numSendWorkers > len(accounts) {
+		numSendWorkers = len(accounts) // more workers than accounts is meaningless here
 	}
-	close(workCh)
+	if numSendWorkers < 1 {
+		numSendWorkers = 1
+	}
+	acctCh := make(chan int, len(accounts))
+	for ai := range accounts {
+		acctCh <- ai
+	}
+	close(acctCh)
 
 	injectStart := time.Now()
 	var sendWg sync.WaitGroup
-	for w := 0; w < *workers; w++ {
+	for w := 0; w < numSendWorkers; w++ {
 		sendWg.Add(1)
-		go func() {
+		go func(workerIdx int) {
 			defer sendWg.Done()
-			for p := range workCh {
-				if _, err := rpcClient.SendRawTransaction(p); err != nil {
-					n := atomic.AddInt64(&sendErrors, 1)
-					if n <= 5 {
-						fmt.Fprintf(os.Stderr, "SEND ERROR #%d: %v\n", n, err)
+			// Stagger each worker's very first send instead of every one of
+			// them firing in the same instant. Sending sequentially per
+			// account (see above) means the natural staggering the old
+			// flat-shared-queue design had for free is gone -- all workers'
+			// first request used to land here at once, driving "system
+			// overloaded" harder and for longer than a steady, ramping start
+			// would. Spreading starts across ~1s per 1,000 workers costs at
+			// most a few seconds of wall-clock time on the whole run but
+			// measurably softens that opening spike.
+			time.Sleep(time.Duration(workerIdx) * time.Millisecond)
+			for ai := range acctCh {
+				base := ai * (*txsPerAccount)
+				for j := 0; j < *txsPerAccount; j++ {
+					p := payloads[base+j]
+					if p == nil {
+						continue // signing failed earlier for this one; already excluded from totals
 					}
-				} else {
+					if _, err := rpcClient.SendRawTransaction(p); err != nil {
+						n := atomic.AddInt64(&sendErrors, 1)
+						if n <= 5 {
+							fmt.Fprintf(os.Stderr, "SEND ERROR #%d: %v\n", n, err)
+						}
+						// Do not send this account's later nonces if an earlier
+						// one failed outright (as opposed to being retried
+						// transparently inside SendRawTransaction) -- they would
+						// just queue as future transactions behind a nonce that
+						// is never coming, recreating the exact problem this
+						// change exists to avoid.
+						break
+					}
 					atomic.AddInt64(&sent, 1)
 				}
 			}
-		}()
+		}(w)
 	}
 	sendWg.Wait()
 	injectTime := time.Since(injectStart)

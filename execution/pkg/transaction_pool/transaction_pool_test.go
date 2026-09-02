@@ -136,7 +136,7 @@ func TestTransactionsWithAggSign_ReturnsAndClears(t *testing.T) {
 	require.NoError(t, pool.AddTransaction(tx1))
 	require.NoError(t, pool.AddTransaction(tx2))
 
-	txs, aggSign := pool.TransactionsWithAggSign()
+	txs, aggSign := pool.TransactionsWithAggSign(0)
 	assert.Len(t, txs, 2, "should return 2 transactions")
 	assert.Nil(t, aggSign, "aggSign is currently nil per implementation")
 
@@ -147,7 +147,7 @@ func TestTransactionsWithAggSign_ReturnsAndClears(t *testing.T) {
 func TestTransactionsWithAggSign_EmptyPool(t *testing.T) {
 	pool := NewTransactionPool()
 
-	txs, aggSign := pool.TransactionsWithAggSign()
+	txs, aggSign := pool.TransactionsWithAggSign(0)
 	assert.Empty(t, txs, "empty pool should return empty slice")
 	assert.Nil(t, aggSign)
 }
@@ -156,7 +156,7 @@ func TestTransactionsWithAggSign_CanReAddAfterDrain(t *testing.T) {
 	pool := NewTransactionPool()
 
 	require.NoError(t, pool.AddTransaction(makeTestTx(0x01, 0)))
-	txs, _ := pool.TransactionsWithAggSign()
+	txs, _ := pool.TransactionsWithAggSign(0)
 	assert.Len(t, txs, 1)
 
 	// Should be able to add new transactions after drain
@@ -175,7 +175,7 @@ func TestTransactionsWithAggSign_RotatesDrainStartAcrossCalls(t *testing.T) {
 	}
 
 	firstAddrByte := func() byte {
-		txs, _ := pool.TransactionsWithAggSign()
+		txs, _ := pool.TransactionsWithAggSign(0)
 		require.Len(t, txs, 2)
 		return txs[0].FromAddress()[0]
 	}
@@ -201,6 +201,78 @@ func TestTransactionsWithAggSign_RotatesDrainStartAcrossCalls(t *testing.T) {
 	}
 	assert.True(t, sawOtherFirst,
 		"drain start must rotate across calls — got the same first shard every time in a full cycle")
+}
+
+// Regression test for the fix found 2026-09-02 measuring sustained
+// real-transfer throughput: TransactionsWithAggSign() used to have no way to
+// stop early, so with a huge backlog it re-drained (and the caller then
+// re-sorted, re-nonce-validated, and mostly re-queued) the ENTIRE pool on
+// every single tick to make progress on only a small slice of it -- O(n)
+// work per tick regardless of how much of it was actually used, measured at
+// 16-24 SECONDS per tick against a 3.7-million-tx backlog. This verifies the
+// maxDrain parameter added to fix that: a single capped call must not return
+// more than roughly maxDrain transactions, and repeated capped calls (as
+// TxBatchForwarder makes every tick) must together return every originally
+// queued transaction exactly once -- no duplicates, nothing skipped -- by
+// resuming from wherever the previous call's cursor left off.
+func TestTransactionsWithAggSign_MaxDrainCapsAndResumesAcrossCalls(t *testing.T) {
+	pool := NewTransactionPool()
+	const numAddrs = 200
+	const maxDrain = 50
+
+	seeded := make(map[common.Hash]bool, numAddrs)
+	for i := 0; i < numAddrs; i++ {
+		tx := makeTestTx(byte(i%256), uint64(i/256))
+		require.NoError(t, pool.AddTransaction(tx))
+		seeded[tx.Hash()] = true
+	}
+	require.Len(t, seeded, numAddrs, "test fixture sanity: every seeded tx must be unique")
+
+	seen := make(map[common.Hash]bool, numAddrs)
+	// Bounded loop: each call drains a small slice of the shard space, so
+	// completing a full rotation takes multiple calls but must terminate
+	// well within NumShards+1 of them (matching the rotation test above).
+	for i := 0; i < NumShards+1 && len(seen) < numAddrs; i++ {
+		txs, _ := pool.TransactionsWithAggSign(maxDrain)
+		for _, tx := range txs {
+			h := tx.Hash()
+			require.False(t, seen[h], "the same transaction was returned twice across capped calls")
+			seen[h] = true
+		}
+	}
+
+	assert.Len(t, seen, numAddrs,
+		"repeated capped calls must together return every originally queued transaction exactly once")
+	assert.Equal(t, 0, pool.CountTransactions(), "pool must be fully drained once every transaction has been seen")
+}
+
+// White-box companion to the test above, pinning down the exact cursor
+// arithmetic rather than just observing convergence over many calls (a naive
+// "always advance by 1" bug would still eventually visit every shard within
+// NumShards+1 calls, just wastefully re-scanning mostly-already-drained
+// ground each time -- that regression wouldn't reliably show up as a failure
+// in a call-count-bounded loop, only as pointless extra work). makeTestTx
+// only varies address byte 0, so with getShardIndex hashing bytes 0 and 1,
+// fromByte N lands in shard N*256 exactly -- letting this compute precisely
+// how many shards a capped drain must visit to collect a known count of
+// transactions, and assert the cursor lands exactly there afterward.
+func TestTransactionsWithAggSign_CursorAdvancesByShardsActuallyVisited(t *testing.T) {
+	pool := NewTransactionPool()
+	const seededAddrs = 50 // fromByte 0..49 -> shards 0, 256, 512, ..., 12544
+	const maxDrain = 10    // the 10th transaction (fromByte 9) sits at shard 9*256=2304
+
+	for i := 0; i < seededAddrs; i++ {
+		require.NoError(t, pool.AddTransaction(makeTestTx(byte(i), 0)))
+	}
+
+	txs, _ := pool.TransactionsWithAggSign(maxDrain)
+	assert.Len(t, txs, maxDrain, "a call over a dense-enough pool must return exactly maxDrain, not more or fewer")
+
+	wantCursor := uint32(9*256 + 1) // one past the shard the 10th (last-needed) tx was found in
+	assert.Equal(t, wantCursor, pool.drainCursor,
+		"cursor must advance by exactly the shards visited to collect maxDrain transactions, "+
+			"not by a fixed amount -- otherwise the next call re-scans mostly-already-drained ground "+
+			"instead of picking up where this one stopped")
 }
 
 // ──────────────────────────────────────────────
@@ -246,7 +318,7 @@ func TestConcurrent_AddAndDrain(t *testing.T) {
 	wg.Wait()
 
 	// Drain and verify
-	txs, _ := pool.TransactionsWithAggSign()
+	txs, _ := pool.TransactionsWithAggSign(0)
 	assert.Equal(t, numGoroutines, len(txs),
 		"all unique transactions should be in pool")
 	assert.Equal(t, 0, pool.CountTransactions(), "pool should be empty after drain")
@@ -300,7 +372,7 @@ func TestConcurrent_EvictAndDrain_NoPanic(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			pool.TransactionsWithAggSign()
+			pool.TransactionsWithAggSign(0)
 		}
 	}()
 
@@ -341,7 +413,7 @@ func TestEvictLowestGasPrice_PrefersHighestNonceOnGasTie(t *testing.T) {
 	evicted := pool.EvictLowestGasPrice(evictCount)
 	assert.Equal(t, evictCount, evicted)
 
-	remaining, _ := pool.TransactionsWithAggSign()
+	remaining, _ := pool.TransactionsWithAggSign(0)
 	require.Len(t, remaining, total-evictCount)
 
 	remainingNonces := make([]uint64, 0, len(remaining))

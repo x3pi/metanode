@@ -69,6 +69,26 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// isTransientOverloadError reports whether a JSON-RPC error message is one of
+// the node's known "please retry, not a real failure" backpressure signals
+// rather than a genuine, permanent rejection (bad nonce, bad signature,
+// insufficient balance, etc). Found 2026-09-02 measuring what it actually
+// takes to hit 100% delivery locally: at extreme injection rates the node
+// legitimately rejects new sends for a moment when its admission-control
+// gates trip (RPC concurrency limiter's pendingOverloaded check, or the
+// mempool's 200,000-entry hard cap with an eviction already in flight) --
+// both are explicitly transient by design (the whole point of "waiting" /
+// "eviction already in progress" is that trying again shortly after
+// succeeds), but this tool was previously counting them as permanent send
+// failures on the very first attempt, undercounting what the node could
+// actually absorb. A real client (a wallet, a backend service) retrying a
+// user's transaction submission would do exactly this.
+func isTransientOverloadError(msg string) bool {
+	return strings.Contains(msg, "overloaded") ||
+		strings.Contains(msg, "pool is full") ||
+		strings.Contains(msg, "eviction already in progress")
+}
+
 // call makes an RPC request with retry and backoff for rate limiting.
 func (c *RPCClient) call(method string, params ...interface{}) ([]byte, error) {
 	reqBody := rpcRequest{
@@ -83,15 +103,35 @@ func (c *RPCClient) call(method string, params ...interface{}) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	maxRetries := 5
+	// maxRetries/maxDelay sized for the transient-overload case above, not just
+	// the original transport hiccups this loop was written for: an admission
+	// gate tripping under a genuine burst can stay tripped far longer than a
+	// single 429's worth of backoff. 30 retries capped at 1s (a ~26s budget)
+	// turned out to still be too short once this tool started sending each
+	// account's transactions sequentially through one goroutine (see
+	// per-account send loop below): every worker's very first send now lands
+	// at the same instant, a synchronized spike worse than the old flat
+	// shared-queue design's naturally-staggered arrivals. Observed 5,000
+	// workers hammering a 200,000-entry mempool cap simultaneously keeping
+	// "system overloaded" tripped for well over a minute -- 120 retries
+	// capped at 2s (a ~4 minute budget) gives realistic headroom for that
+	// initial spike to clear without ever blocking a caller indefinitely.
+	maxRetries := 120
 	baseDelay := 50 * time.Millisecond
+	const maxDelay = 2 * time.Second
+	backoff := func() {
+		time.Sleep(baseDelay)
+		baseDelay *= 2
+		if baseDelay > maxDelay {
+			baseDelay = maxDelay
+		}
+	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		resp, err := c.client.Post(c.Endpoint, "application/json", bytes.NewReader(payload))
 		if err != nil {
 			if attempt < maxRetries-1 {
-				time.Sleep(baseDelay)
-				baseDelay *= 2
+				backoff()
 				continue
 			}
 			return nil, fmt.Errorf("rpc request failed: %v", err)
@@ -99,8 +139,7 @@ func (c *RPCClient) call(method string, params ...interface{}) ([]byte, error) {
 
 		if resp.StatusCode == 429 {
 			resp.Body.Close()
-			time.Sleep(baseDelay)
-			baseDelay *= 2
+			backoff()
 			continue
 		}
 
@@ -116,13 +155,17 @@ func (c *RPCClient) call(method string, params ...interface{}) ([]byte, error) {
 		}
 
 		if rpcResp.Error != nil {
+			if isTransientOverloadError(rpcResp.Error.Message) && attempt < maxRetries-1 {
+				backoff()
+				continue
+			}
 			return nil, fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 		}
 
 		return rpcResp.Result, nil
 	}
 
-	return nil, fmt.Errorf("rpc request exceeded max retries for 429 Too Many Requests")
+	return nil, fmt.Errorf("rpc request exceeded max retries")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

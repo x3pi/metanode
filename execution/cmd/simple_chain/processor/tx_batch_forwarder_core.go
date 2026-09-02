@@ -49,6 +49,32 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 	// LOCALHOST OPTIMIZATION: Max transactions per batch limit
 	const maxTransactionsPerBatch = 2000
 
+	// Block size capping: Limit total transactions processed per block tick.
+	// Return any excess transactions back to the pool to be processed in the
+	// next blocks.
+	const targetBlockSize = 8000
+
+	// maxPoolDrainPerTick bounds how many raw transactions
+	// ProcessTransactionsInPoolSub pulls from the pool this tick, before
+	// nonce-order filtering. Added 2026-09-02: without a cap, a large backlog
+	// (built up whenever the offered load exceeds targetBlockSize per tick --
+	// now common since a client-side retry fix elsewhere makes the RPC layer
+	// accept nearly all offered load instead of hard-rejecting the excess)
+	// meant every tick re-sorted and re-nonce-validated the ENTIRE backlog
+	// just to use targetBlockSize of it, and re-queued the rest -- an
+	// O(backlog) cost paid on every tick regardless of backlog size. Measured
+	// at a 3.7-million-tx backlog: 16-24 SECONDS per tick just for that sort,
+	// while only netting ~8,000 fewer pending afterwards -- draining fully
+	// projected at ~2.5 hours. 5x targetBlockSize gives real headroom for
+	// nonce-order filtering losses (some drained txs will be "future" and
+	// get re-queued rather than used) while keeping each tick's cost bounded
+	// by a constant instead of by the backlog. The pre-existing round-robin
+	// drainCursor (see TransactionsWithAggSign) still guarantees every
+	// shard's transactions get their turn -- capping just spreads that
+	// guarantee's cost across the ticks it takes to complete one rotation,
+	// instead of paying for a full rotation on every single tick.
+	const maxPoolDrainPerTick = targetBlockSize * 5
+
 	// TBAB: Throughput-Based Adaptive Batching state
 	emaTPS := 0.0
 	lastBatchTime := time.Now()
@@ -117,7 +143,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 		}
 
 		poolSizeBefore = bf.transactionProcessor.transactionPool.CountTransactions()
-		txs := bf.transactionProcessor.ProcessTransactionsInPoolSub(setEmptyBlock)
+		txs := bf.transactionProcessor.ProcessTransactionsInPoolSub(setEmptyBlock, maxPoolDrainPerTick)
 		poolSizeAfter := bf.transactionProcessor.transactionPool.CountTransactions()
 
 		// TBAB: Update TPS
@@ -140,9 +166,6 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			continue
 		}
 
-		// Block size capping: Limit total transactions processed per block tick to ~100000 txs.
-		// Return any excess transactions back to the pool to be processed in the next blocks.
-		const targetBlockSize = 8000
 		if len(txs) > targetBlockSize {
 			remainingTxs := txs[targetBlockSize:]
 			bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)

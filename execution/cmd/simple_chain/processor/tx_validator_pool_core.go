@@ -735,13 +735,17 @@ func (vp *TxValidatorPool) ProcessTransactions(txs []types.Transaction, blockTim
 	return res, execErr
 }
 
-// ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node forwarding
-func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []types.Transaction {
+// ProcessTransactionsInPoolSub retrieves transactions from pool for sub-node
+// forwarding. maxDrain bounds how many raw transactions get pulled from the
+// pool this call (0 = unbounded) -- see TransactionsWithAggSign's comment for
+// why: with a huge backlog, sorting/validating everything on every tick just
+// to use a small slice of it made a single tick take tens of seconds.
+func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxDrain int) []types.Transaction {
 	var txs []types.Transaction
 	if setEmptyBlock {
 		txs = make([]types.Transaction, 0)
 	} else {
-		allTxs, _ := vp.transactionPool.TransactionsWithAggSign()
+		allTxs, _ := vp.transactionPool.TransactionsWithAggSign(maxDrain)
 
 		if len(allTxs) == 0 {
 			return allTxs
@@ -875,6 +879,35 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool) []ty
 				// Past nonce (actual < expected) -> drop permanently
 				// logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
+			}
+		}
+
+		// ROOT CAUSE (found 2026-09-02, measuring sustained real-transfer
+		// throughput after adding TransactionsWithAggSign's maxDrain cap):
+		// nonceMap[from]++ above only ever updated this call's LOCAL map --
+		// the noncesCache above only ever gets written on a cache MISS
+		// (first sight of an address), never refreshed with the progress
+		// this tick just made. Before maxDrain existed, a single burst's
+		// entire backlog was always pulled and validated in ONE call, so
+		// the local increments walked an address all the way from its
+		// cached starting nonce to wherever it ended up, in one pass --
+		// masking the staleness, since there was never a SECOND call left
+		// needing the cache to reflect that address's new progress. Once a
+		// large backlog started spanning multiple capped ticks, an address
+		// whose transactions got split across two ticks would have its
+		// second tick reload the SAME stale cached nonce from tick one --
+		// but the transaction that would have satisfied that stale
+		// expectation was already consumed and gone. Every later
+		// transaction for that address then permanently reads as "future"
+		// waiting for a predecessor nonce that no longer exists anywhere,
+		// until FutureTxTimeout eventually drops it. Syncing the cache with
+		// this tick's final nonceMap values -- for every address touched,
+		// whether it advanced or not -- keeps the next tick's view accurate
+		// regardless of how many ticks a backlog ends up spanning.
+		if cacheVal := vp.noncesCache.Load(); cacheVal != nil {
+			cache := cacheVal.(*sync.Map)
+			for addr, nonce := range nonceMap {
+				cache.Store(addr, nonce)
 			}
 		}
 
