@@ -3,10 +3,42 @@ use crate::node::tx_submitter::TransactionSubmitter;
 use crate::node::ConsensusNode;
 use anyhow::Result;
 use consensus_core;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+
+// TEMPORARY DIAGNOSTIC (2026-09-02): counts block-inclusion outcomes for
+// submit_no_wait, bypassing the tracing subscriber entirely (eprintln!
+// writes straight to stderr) to settle whether the tracing-level warn!s a
+// few lines below are actually firing under extreme load or are themselves
+// being dropped by the tracing subscriber the same way Go's own logger was
+// found silently dropping lines under load earlier the same day (see
+// execution/pkg/logger's async queue fix). Remove once that's settled.
+static DIAG_GC_COUNT: AtomicU64 = AtomicU64::new(0);
+static DIAG_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
+static DIAG_OK_COUNT: AtomicU64 = AtomicU64::new(0);
+static DIAG_LAST_PRINT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_maybe_print() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_LAST_PRINT_SECS.load(Ordering::Relaxed);
+    if now >= last + 2
+        && DIAG_LAST_PRINT_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG submit_no_wait] ok={} gc={} timeout={}",
+            DIAG_OK_COUNT.load(Ordering::Relaxed),
+            DIAG_GC_COUNT.load(Ordering::Relaxed),
+            DIAG_TIMEOUT_COUNT.load(Ordering::Relaxed)
+        );
+    }
+}
 
 pub struct TxSocketServer {
     transaction_client: Arc<dyn TransactionSubmitter>,
@@ -440,9 +472,53 @@ impl TxSocketServer {
                         // and this revert is a one-line diff.
                         match tokio::time::timeout(std::time::Duration::from_secs(30), included_in_block_rx).await {
                             Ok(Ok((_block_ref, _indices, status_receiver))) => {
+                                DIAG_OK_COUNT.fetch_add(1, Ordering::Relaxed);
+                                diag_maybe_print();
                                 tokio::spawn(async move {
                                     if let Ok(consensus_core::BlockStatus::GarbageCollected(gc_block)) = status_receiver.await {
+                                        DIAG_GC_COUNT.fetch_add(1, Ordering::Relaxed);
                                         warn!("♻️ [FFI TX STATUS] Block {:?} Garbage Collected.", gc_block);
+                                        // FOLLOW-UP (found 2026-09-02, continuing the "DIAGNOSTIC"
+                                        // comment a few lines above this one from an earlier
+                                        // investigation into the same tx-loss symptom): after
+                                        // exhausting every possible Go-side cause of transaction
+                                        // loss (see execution/pkg/transaction_pool and
+                                        // tx_validator_pool_core.go's localNonceFloor -- confirmed
+                                        // via live tracing that the Go mempool now validates and
+                                        // forwards 100% of what it receives, 0 evictions, 0
+                                        // duplicate-key rejections, 0 stuck future-nonce
+                                        // transactions, at every injection rate tested including
+                                        // 45,000+ tx/s sustained), this branch was suspected as the
+                                        // source of the REMAINING end-to-end loss at that same
+                                        // extreme scale (garbage collection dropping already-
+                                        // forwarded transactions with no resubmit). RULED OUT by
+                                        // DIAG_OK_COUNT/DIAG_GC_COUNT/DIAG_TIMEOUT_COUNT (added
+                                        // specifically for this, eprintln! bypassing tracing
+                                        // entirely so a dropped-log explanation couldn't hide the
+                                        // answer): during a live 1,000,000-tx run that still lost
+                                        // ~51% end-to-end, the "[DIAG submit_no_wait]" line never
+                                        // printed even once -- meaning Ok(Ok(..)) here, this GC
+                                        // check, Ok(Err(..)) just below, AND the 30s timeout arm all
+                                        // stayed at zero for the entire run, despite ~487,000
+                                        // transactions genuinely landing on-chain in that same run.
+                                        // That can only mean this specific call site
+                                        // (current_client.submit_no_wait(chunk_vec) a few lines up,
+                                        // reached via TxSocketServer::start()'s ffi_tx_receiver loop)
+                                        // was NOT the path those on-chain transactions -- or the lost
+                                        // ones -- actually took. tx_submitter.rs defines FOUR
+                                        // different TransactionSubmitter implementations; which one
+                                        // `current_client` resolves to for a single-validator/
+                                        // block-signer node (this devnet's role) was not confirmed
+                                        // before this session ended, and is the actual next question
+                                        // -- not garbage collection, and not this file, unless that
+                                        // confirms this IS the active implementation and something
+                                        // upstream of this match (e.g. the node.read() acceptance
+                                        // check a few dozen lines above, or the loop in
+                                        // TxSocketServer::start() never being reached at all for
+                                        // this node's config) is what actually needs the next
+                                        // diagnostic pass. Do not assume GC is the cause without
+                                        // first re-confirming DIAG_OK_COUNT actually increments for
+                                        // this node's real submission path.
                                     }
                                 });
                             }
@@ -450,6 +526,8 @@ impl TxSocketServer {
                                 warn!("⚠️ [FFI TX FLOW] Failed to get inclusion confirmation: {}", e);
                             }
                             Err(_) => {
+                                DIAG_TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                                diag_maybe_print();
                                 warn!("⏰ [FFI TX FLOW] Timeout waiting for block inclusion ({} txs). Consensus might be congested.", chunk_len);
                             }
                         }
