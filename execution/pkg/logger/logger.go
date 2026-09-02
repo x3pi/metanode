@@ -193,8 +193,27 @@ func Error(message interface{}, a ...interface{}) {
 	}
 	colored, _ := getLogBuffers(Red, "ERROR", message, a)
 	logger.writeToOutputsSplit(colored, plain)
-	// Force sync to disk — đảm bảo Error logs không bị mất khi crash
-	syncFileOutputs()
+	// NOTE (2026-09-02): syncFileOutputs() — a real fsync(2), not just a
+	// write() — used to run on every single Error() call. write() already
+	// hands the bytes to the kernel's page cache, which is enough to survive
+	// THIS PROCESS crashing or panicking (the actual concern the comment
+	// here used to describe); fsync only additionally protects against a
+	// full power-loss/OS crash at exactly that instant, a much rarer risk
+	// not worth paying for on every call.
+	//
+	// Found live: Rust calls this exact function via CGo (ffi.rs's
+	// GoLogWriter -> cgo_log_message, case 3) directly from its own OS
+	// threads (Tokio workers), synchronously — so a slow fsync here doesn't
+	// just block a Go goroutine, it blocks a Rust consensus worker thread
+	// too. Under the same real-transaction-load conditions that caused the
+	// Info/Debug/Warn mutex pileup fixed above, this synchronous fsync-per-
+	// Error call reproduced the identical pattern one level up: reproduced
+	// a multi-minute full consensus stall (all 112 tokio-runtime-worker
+	// threads and the dag-state-actor thread sleeping, zero new blocks)
+	// under a 1,000,000-tx real-transfer burst, with every relevant Go
+	// goroutine blocked on this same writeMu. Fatal() below still syncs —
+	// it runs once, immediately before os.Exit(), where the durability
+	// guarantee actually matters and the cost is paid exactly once.
 }
 
 // Fatal logs a fatal error message and terminates the program with os.Exit(1).
