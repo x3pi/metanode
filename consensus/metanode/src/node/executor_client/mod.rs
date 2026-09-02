@@ -477,6 +477,26 @@ impl ExecutorClient {
             .map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
         const MAX_RETRIES: u32 = 3;
         const BACKOFF_MS: [u64; 3] = [100, 500, 1000];
+        // Found 2026-09-02 alongside the mempool eviction-panic root-cause fix
+        // (see transaction_pool.go): this call previously had NO timeout at all,
+        // so a Go side that ever hangs mid-request (that bug, or any future one)
+        // would leave the spawn_blocking future pending forever. Since
+        // rpc_semaphore only has 4 permits shared by every caller of this
+        // function (epoch transitions, block sync, and all rpc_queries*), 4
+        // simultaneous hangs -- or even one hang hit 4 times in a row -- would
+        // permanently starve every other consumer of this bridge, well beyond
+        // just the RPC path that happened to trigger it. A timeout can't cancel
+        // the underlying blocking OS thread (spawn_blocking closures aren't
+        // preemptible, and the CGo call has no cancellation hook), so a hung
+        // call still leaks one thread from Tokio's blocking pool for good --
+        // but it lets THIS caller stop waiting and release its semaphore permit,
+        // which is what actually matters: one bad call degrades to one leaked
+        // thread instead of cascading into a total, permanent lockup of this
+        // entire bridge. 10s is generous headroom over observed real latencies
+        // (production BLOCK-TRACE logs show this path completing in low
+        // milliseconds) while still bounding the worst case to a small multiple
+        // of it across all retries.
+        const CALL_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
         let req_buf_clone = request_buf.to_vec();
 
@@ -485,9 +505,21 @@ impl ExecutorClient {
 
             // Execute the blocking CGo FFI call in a spawn_blocking block to prevent
             // blocking the async executor.
-            let result = tokio::task::spawn_blocking(move || Self::execute_rpc_request_inner(&req))
-                .await
-                .map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?;
+            let join_result = tokio::time::timeout(
+                CALL_TIMEOUT,
+                tokio::task::spawn_blocking(move || Self::execute_rpc_request_inner(&req)),
+            )
+            .await;
+
+            let result = match join_result {
+                Ok(joined) => joined.map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?,
+                Err(_elapsed) => Err(anyhow::anyhow!(
+                    "Go FFI call timed out after {:?} (attempt {}/{})",
+                    CALL_TIMEOUT,
+                    attempt + 1,
+                    MAX_RETRIES + 1
+                )),
+            };
 
             match result {
                 Ok(buf) if !buf.is_empty() => return Ok(buf),
@@ -568,6 +600,70 @@ impl ExecutorClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression test for the 2026-09-02 fix adding a timeout around
+    // execute_rpc_request's spawn_blocking call. execute_rpc_request_inner
+    // itself is coupled to the process-global crate::ffi::GO_CALLBACKS
+    // OnceCell, which isn't practical to mock here without leaking state into
+    // other tests that share the same process -- so this instead verifies the
+    // exact tokio::time::timeout(spawn_blocking(...)) pattern used there, in
+    // isolation: a blocking closure that never returns must not hang the
+    // caller past the timeout, and the timeout must fire even though the
+    // underlying blocking task is still running (it cannot be cancelled --
+    // that's the whole reason this matters: the fix accepts one leaked
+    // blocking-pool thread in exchange for the caller, and everyone waiting
+    // behind it on the real rpc_semaphore, not hanging forever).
+    // Deliberately a plain #[test] driving its own runtime rather than
+    // #[tokio::test]: the whole point of this test is a spawn_blocking
+    // closure that never returns, and #[tokio::test]'s generated wrapper
+    // drops its Runtime at the end of the test function -- Runtime::drop()
+    // calls the *blocking* pool-shutdown path, which waits (by default,
+    // forever) for every outstanding blocking-pool task to finish. That
+    // would make this test hang on its own cleanup for the exact reason it
+    // exists to prove doesn't happen to the *caller*. shutdown_background()
+    // is the non-waiting equivalent: it stops polling the runtime without
+    // blocking on tasks still running in its blocking pool. The leaked
+    // thread itself is still alive after that (as it would be in
+    // production) until it finishes or the process exits, which happens
+    // moments later when the rest of the test suite completes.
+    #[test]
+    fn test_rpc_timeout_pattern_does_not_hang_on_stuck_blocking_call() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build test runtime");
+
+        let started = std::time::Instant::now();
+
+        let result = runtime.block_on(async {
+            let call_timeout = tokio::time::Duration::from_millis(100);
+            tokio::time::timeout(
+                call_timeout,
+                tokio::task::spawn_blocking(|| {
+                    // Simulates a Go FFI call that never returns (e.g. wedged
+                    // on a permanently-held lock, as in the mempool eviction
+                    // bug this fix was found alongside).
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                    42
+                }),
+            )
+            .await
+        });
+
+        assert!(
+            result.is_err(),
+            "expected the timeout to fire before the stuck blocking call ever returns"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "caller must be released promptly by the timeout, not wait on the stuck call \
+             (took {:?})",
+            started.elapsed()
+        );
+
+        runtime.shutdown_background(); // see comment above -- must not wait on the leaked thread
+    }
 
     #[test]
     fn test_executor_client_creation_defaults() {
