@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -164,37 +165,81 @@ func generateAccounts(n int) []TestAccount {
 // Transaction Building
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// buildTransactions signs numTxs transactions. This is CPU-bound (ECDSA key
+// derivation + signing per tx) and was found to be the single largest hidden
+// cost in this tool's own "end-to-end" wall-clock measurement: profiled at
+// 2026-09-02 via pidstat, a plain sequential loop pinned ONE core at ~105%
+// CPU for ~17s while signing 200k txs on a 104-core machine — a huge, silent
+// chunk of real wall-clock time that isn't even counted in injectTime (which
+// only times sendTransactions), let alone reported anywhere in the tool's
+// own throughput numbers. Since each index maps to an independent account
+// (generateAccounts(cfg.NumTxs) — 1 account per tx, see caller), every
+// worker's slice of indices is fully independent: no shared mutable state,
+// each writes only to its own pre-allocated slot, so this parallelizes with
+// zero coordination overhead across all available cores.
 func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64) [][]byte {
-	txPayloads := make([][]byte, 0, numTxs)
 	amount := big.NewInt(0)
+	signer := types.LatestSignerForChainID(big.NewInt(int64(chainID)))
+	gasPrice := big.NewInt(1000000)
 
-	for i := 0; i < numTxs; i++ {
-		acc := accounts[i%len(accounts)]
-		ecdsaKey, _ := crypto.ToECDSA(acc.PrivateKey)
-		destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
+	payloads := make([][]byte, numTxs)
 
-		nonce := acc.Nonce + uint64(i/len(accounts))
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 32 {
+		numWorkers = 32
+	}
+	if numWorkers > numTxs {
+		numWorkers = numTxs
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 
-		tx := types.NewTransaction(
-			nonce,
-			destAddr,
-			amount,
-			10000000,
-			big.NewInt(1000000),
-			nil,
-		)
-
-		signer := types.LatestSignerForChainID(big.NewInt(int64(chainID)))
-		signedTx, err := types.SignTx(tx, signer, ecdsaKey)
-		if err != nil {
-			continue
+	chunk := (numTxs + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunk
+		end := start + chunk
+		if start >= numTxs {
+			break
 		}
-
-		bTx, err := signedTx.MarshalBinary()
-		if err != nil {
-			continue
+		if end > numTxs {
+			end = numTxs
 		}
-		txPayloads = append(txPayloads, bTx)
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				acc := accounts[i%len(accounts)]
+				ecdsaKey, err := crypto.ToECDSA(acc.PrivateKey)
+				if err != nil {
+					continue
+				}
+				destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
+				nonce := acc.Nonce + uint64(i/len(accounts))
+
+				tx := types.NewTransaction(nonce, destAddr, amount, 10000000, gasPrice, nil)
+				signedTx, err := types.SignTx(tx, signer, ecdsaKey)
+				if err != nil {
+					continue
+				}
+				bTx, err := signedTx.MarshalBinary()
+				if err != nil {
+					continue
+				}
+				payloads[i] = bTx
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
+	// Compact out any nil slots left by per-tx sign/marshal errors above,
+	// preserving the original "skip and continue" behavior.
+	txPayloads := payloads[:0]
+	for _, p := range payloads {
+		if p != nil {
+			txPayloads = append(txPayloads, p)
+		}
 	}
 	return txPayloads
 }
