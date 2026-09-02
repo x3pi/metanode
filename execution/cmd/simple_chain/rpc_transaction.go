@@ -559,6 +559,48 @@ func (api *MetaAPI) GetSendRawTransaction(ctx context.Context, input hexutil.Byt
 //
 // Falls back to synchronous processing if the async queue is not available.
 
+// rpcTxConcurrencyLimiter bounds how many eth_sendRawTransaction requests can
+// be ACTIVELY executing the heavy synchronous path (sendRawEthTransactionSpeculative
+// / sendRawEthTransactionSync — state reads, transaction-pool shard locks, and
+// in the speculative-gateway case a real EVM execution) at the same time.
+//
+// Found live (2026-09-02) root-causing a multi-minute consensus stall under an
+// extreme burst (1,000,000 real transfers, 3,000 concurrent RPC connections):
+// this path has NO concurrency bound at all — every concurrent HTTP connection
+// runs the full pipeline synchronously on its own goroutine, unlike every other
+// tx-intake path in this codebase (the injectionQueue and ReadTxQueue worker
+// pools both cap concurrency deliberately). At 3,000 simultaneous real
+// (non-reverting, genuinely state-mutating) transactions, that's 3,000
+// goroutines simultaneously doing real state I/O and occasionally locking to
+// an OS thread for a CGo call into Rust (e.g. execute_rpc_request's go_lag
+// verification) — a live gdb thread dump + /proc/<pid>/task inspection during
+// the stall showed hundreds of OS threads parked "locked to thread" and
+// Rust's own tokio-runtime-worker threads and dag-state-actor all sleeping,
+// consistent with genuine OS-level scheduling starvation rather than a
+// logical deadlock in either language's code (no lock holder was ever found
+// stuck inside a blocking call). This never manifested with the zero-value/
+// reverting transactions used earlier in this session's benchmarking, since
+// those return almost immediately (no real state work, no CGo pressure).
+//
+// By Little's Law, the concurrency actually NEEDED to sustain this system's
+// measured real throughput ceiling (~5,800-8,700 tx/s, see the 2026-09-02
+// benchmarking session) is throughput x per-request latency — at even a
+// generous 100ms per synchronous request under real (lock + state-I/O)
+// contention, that's under 1,000. 3,000 concurrent connections was never
+// required to reach that ceiling; it was simply how many the load-testing
+// client happened to open to maximize its OWN injection rate. Set to 1000:
+// meaningfully below the 3,000-concurrency level that reproduced the stall
+// (so this cap provides real protection, not just a number equal to what
+// already failed), while comfortably above the Little's-Law estimate so
+// throughput is not the limiting factor. Requests beyond the cap wait on a
+// cheap channel (no OS thread consumed while waiting) instead of each
+// independently piling onto the OS scheduler; a request whose own context
+// is cancelled while waiting (e.g. client-side timeout) gives up its place
+// immediately rather than holding a slot until GC'd.
+const rpcTxConcurrencyLimit = 1000
+
+var rpcTxConcurrencyLimiter = make(chan struct{}, rpcTxConcurrencyLimit)
+
 // SendRawEthTransaction accepts a raw Ethereum-format transaction (the same
 // payload as eth_sendRawTransaction in MetaMask), converts it locally to a
 // Metanode transaction (MetaTx) by signing it with a BLS key, and submits it.
@@ -577,7 +619,14 @@ func (api *MetaAPI) SendRawEthTransaction(ctx context.Context, input hexutil.Byt
 			return common.Hash{}, fmt.Errorf("system overloaded. waiting")
 		}
 	}
-	
+
+	select {
+	case rpcTxConcurrencyLimiter <- struct{}{}:
+		defer func() { <-rpcTxConcurrencyLimiter }()
+	case <-ctx.Done():
+		return common.Hash{}, fmt.Errorf("request cancelled while waiting for processing capacity")
+	}
+
 	if api.App.config.EnablePrivateGateway {
 		return api.sendRawEthTransactionSpeculative(ctx, input)
 	}

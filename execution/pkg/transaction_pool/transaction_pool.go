@@ -11,7 +11,27 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
-const NumShards = 256
+// NumShards was 256 (keyed by a single address byte) until 2026-09-02. Found
+// live while root-causing a multi-minute consensus stall under an extreme
+// burst (1,000,000 real transfers, 3,000 concurrent RPC connections, all
+// genuinely state-mutating — not the near-free reverting transactions used
+// earlier in that day's benchmarking): even after bounding concurrent RPC
+// execution (see rpc_transaction.go's rpcTxConcurrencyLimiter) and fixing two
+// unrelated synchronous-I/O bottlenecks upstream of it, several hundred
+// goroutines still queued for minutes on individual shard mutexes in
+// AddTransaction — whose own critical section (map/slice inserts, an
+// already-async-queued log call, a non-blocking notify) has no other known
+// blocking operation. With the mempool sitting at its 200,000-entry hard cap
+// under sustained load, 256 shards means ~780 transactions and correspondingly
+// deep contention per shard mutex; going to 65,536 shards (a 256x finer
+// split, keyed by the first two address bytes instead of one) cuts that to
+// ~3 transactions per shard at the same pool size, directly addressing the
+// contention without changing any locking semantics. Per-shard overhead
+// (a sync.RWMutex + two maps + a slice header) is a few dozen bytes, so the
+// fixed cost of always allocating all shards up front (unchanged from
+// before) is on the order of single-digit MB total — negligible next to the
+// pool's actual transaction payload.
+const NumShards = 65536
 
 type txPoolKey struct {
 	addr  common.Address
@@ -63,8 +83,10 @@ func (tp *TransactionPool) notifyWork() {
 	}
 }
 
-func (tp *TransactionPool) getShardIndex(addr common.Address) uint8 {
-	return addr[0] // 0-255 based on the first byte of the address
+func (tp *TransactionPool) getShardIndex(addr common.Address) uint16 {
+	// First two address bytes -> 0-65535, matching NumShards (see its comment
+	// for why one byte/256 shards stopped being enough contention headroom).
+	return uint16(addr[0])<<8 | uint16(addr[1])
 }
 
 func (tp *TransactionPool) CountTransactions() int {
@@ -133,22 +155,50 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 	var totalEvicted int
 	for i, hashesToRemove := range toRemoveByShard {
 		shard := tp.shards[i]
-		shard.mu.Lock()
+		// ROOT CAUSE (found 2026-09-02, extreme-scale real-transfer load): this used to
+		// compute cap(newTxs) as len(shard.transactions)-len(hashesToRemove), and unlock
+		// non-deferred. `hashesToRemove` for this shard was decided from an earlier RLock
+		// snapshot pass (allInfos, above) taken *before* this write-lock is acquired.
+		// Nothing prevents TransactionsWithAggSign() from concurrently draining and
+		// zeroing this exact shard in between those two passes -- there is no coordination
+		// between it and eviction, only single-flight *within* eviction itself (see
+		// evictionInProgress). When that race hit, shard.transactions was already empty
+		// (len=0) here while hashesToRemove still held entries from the stale scan, so
+		// len(shard.transactions)-len(hashesToRemove) went negative and
+		// make([]types.Transaction, 0, <negative>) panicked ("makeslice: cap out of
+		// range"). Go's net/http recovers panics per-request, so the process itself
+		// survived -- but the non-deferred Unlock() below never ran, permanently locking
+		// this one shard's mutex. Every later call touching that shard (most importantly
+		// TransactionsWithAggSign's per-tick full round-robin drain, run from the single
+		// block-forwarding goroutine) then blocked forever, which was the real root cause
+		// of the multi-minute consensus stall this whole investigation was chasing: Rust's
+		// DAG kept committing empty rounds normally throughout, since the hang was entirely
+		// downstream in Go's mempool, invisible from the Rust side.
+		// Fix is two-fold: (1) never derive a possibly-negative capacity -- len(shard.
+		// transactions) alone is always a safe, if occasionally slightly-oversized, upper
+		// bound regardless of what hashesToRemove contains; (2) defer the unlock (inside a
+		// per-iteration closure, since a bare defer in a for-loop body only fires when the
+		// whole function returns, not per shard -- that would hold every touched shard's
+		// lock simultaneously until the entire eviction pass finishes) so that even an
+		// unrelated future panic here can't wedge a shard's mutex forever.
+		func() {
+			shard.mu.Lock()
+			defer shard.mu.Unlock()
 
-		newTxs := make([]types.Transaction, 0, len(shard.transactions)-len(hashesToRemove))
-		for _, tx := range shard.transactions {
-			h := tx.Hash()
-			if hashesToRemove[h] {
-				key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
-				delete(shard.transactionKeys, key)
-				delete(shard.txHashMap, h)
-				totalEvicted++
-			} else {
-				newTxs = append(newTxs, tx)
+			newTxs := make([]types.Transaction, 0, len(shard.transactions))
+			for _, tx := range shard.transactions {
+				h := tx.Hash()
+				if hashesToRemove[h] {
+					key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
+					delete(shard.transactionKeys, key)
+					delete(shard.txHashMap, h)
+					totalEvicted++
+				} else {
+					newTxs = append(newTxs, tx)
+				}
 			}
-		}
-		shard.transactions = newTxs
-		shard.mu.Unlock()
+			shard.transactions = newTxs
+		}()
 	}
 
 	atomic.AddInt64(&tp.count, int64(-totalEvicted))
@@ -189,7 +239,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 
 func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 	// Group transactions by shard to minimize lock contention
-	txsByShard := make(map[uint8][]types.Transaction)
+	txsByShard := make(map[uint16][]types.Transaction)
 	for _, tx := range txs {
 		idx := tp.getShardIndex(tx.FromAddress())
 		txsByShard[idx] = append(txsByShard[idx], tx)

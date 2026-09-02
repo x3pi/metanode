@@ -251,6 +251,70 @@ func TestConcurrent_AddAndDrain(t *testing.T) {
 	assert.Equal(t, 0, pool.CountTransactions(), "pool should be empty after drain")
 }
 
+// Regression test for a 2026-09-02 production incident: EvictLowestGasPrice's
+// per-shard removal used to size newTxs as
+// len(shard.transactions)-len(hashesToRemove), where hashesToRemove was decided
+// from an earlier RLock snapshot pass taken *before* this removal pass's write
+// lock. TransactionsWithAggSign (the block-forming drain, run continuously by
+// its own goroutine in production) can fully empty a shard in between those two
+// passes -- nothing coordinates the two. When that race hit, shard.transactions
+// was already empty here while hashesToRemove still held entries from the stale
+// scan, so the subtraction went negative and
+// make([]types.Transaction, 0, <negative>) panicked. Because the unlock wasn't
+// deferred, that panic (recovered per-request by net/http, so the process
+// itself survived) left that one shard's mutex locked forever -- wedging every
+// later caller of AddTransaction/TransactionsWithAggSign/EvictLowestGasPrice
+// that happened to hash to the same shard. In production this was the real
+// root cause of a multi-minute full consensus stall with no crash and no error
+// visible from the Rust side (Rust's DAG kept committing empty rounds normally
+// throughout; the hang was entirely downstream in Go's mempool).
+// This hammers AddTransaction, EvictLowestGasPrice, and TransactionsWithAggSign
+// concurrently against a small, heavily-shared set of shards to make that race
+// window likely to hit on every run; the only correctness requirement is that
+// none of it ever panics (an unrecovered panic in any goroutine here fails the
+// whole test binary).
+func TestConcurrent_EvictAndDrain_NoPanic(t *testing.T) {
+	pool := NewTransactionPool()
+	const numAddrs = 64
+	const perAddrTxs = 500
+	const iterations = 300
+
+	var wg sync.WaitGroup
+
+	// Adders: each address injects a burst of sequential-nonce txs, so there's
+	// always fresh material for both the drainer and the evictor to race over.
+	for i := 0; i < numAddrs; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for n := uint64(0); n < perAddrTxs; n++ {
+				_ = pool.AddTransaction(makeTestTx(byte(idx), n))
+			}
+		}(i)
+	}
+
+	// Drainer: repeatedly does exactly what the block-forwarding loop does in
+	// production -- pull everything currently queued.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			pool.TransactionsWithAggSign()
+		}
+	}()
+
+	// Evictor: repeatedly evicts small batches, same as the mempool-full path.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			pool.EvictLowestGasPrice(numAddrs)
+		}
+	}()
+
+	wg.Wait() // must return without a panic anywhere above
+}
+
 func TestConcurrent_AddAndCount(t *testing.T) {
 	pool := NewTransactionPool()
 
