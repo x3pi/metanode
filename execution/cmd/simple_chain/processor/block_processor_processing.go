@@ -736,6 +736,13 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 
 	if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
 		bp.transactionProcessor.ClearNoncesCache()
+		// A revert means transactions this node previously forwarded (and
+		// AdvanceLocalNonceFloor already credited as "confirmed forwarded")
+		// might not actually end up on-chain after all -- the floor's core
+		// guarantee no longer holds here, so it must be rebuilt from scratch
+		// like noncesCache is, via ClearNoncesCache above. See
+		// TxValidatorPool.localNonceFloor's doc comment for the full picture.
+		bp.transactionProcessor.ClearLocalNonceFloor()
 	}
 }
 

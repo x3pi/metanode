@@ -47,6 +47,33 @@ type TxValidatorPool struct {
 
 	noncesCache atomic.Value // Holds *sync.Map for expected nonces caching
 
+	// localNonceFloor holds, per address, the highest "expected next nonce"
+	// this node has confirmed FORWARDED for actual block inclusion -- unlike
+	// noncesCache, it is never cleared on commit (only on revert, alongside
+	// noncesCache -- see ClearNoncesCache). Second attempt (2026-09-02): the
+	// first attempt at this exact idea advanced the floor from
+	// ProcessTransactionsInPoolSub's local nonceMap, which walks every
+	// transaction in validTxs BEFORE the caller (TxBatchForwarder.
+	// StartForwardingLoop) truncates it to targetBlockSize and re-queues the
+	// excess back into the pool -- so the floor got advanced for
+	// transactions that were simultaneously being put back as still-pending,
+	// and every later attempt to actually process them read them as
+	// permanently "past" and dropped them for good. That version was
+	// reverted in full (see git history / that commit's message for the
+	// live-traced proof). This version is fed exclusively by
+	// AdvanceLocalNonceFloor, called from StartForwardingLoop with the
+	// FINAL, POST-TRUNCATION transaction list -- i.e. only transactions that
+	// are actually about to be marshaled and handed to Rust via FFI, never
+	// ones being requeued. The floor exists at all to close a real, narrow
+	// race: noncesCache gets wiped on every commit, and a mempool tick that
+	// re-populates it via a fresh AccountStateReadOnly DB read can race that
+	// same commit's own asynchronous NOMT flush and read the trie before
+	// this block's nonce changes landed, caching a stale (pre-this-block)
+	// expected nonce -- which without this floor stranded every later
+	// transaction for that address as an unresolvable "future" until
+	// FutureTxTimeout (5 min) eventually dropped it.
+	localNonceFloor atomic.Value // Holds *sync.Map, uint64 -- cleared only on revert
+
 	// evictionInProgress guards EvictLowestGasPrice against being triggered
 	// concurrently — see addTransactionToPoolInternal for why this matters.
 	evictionInProgress atomic.Bool
@@ -73,6 +100,7 @@ func NewTxValidatorPool(
 		blockProcessingLock: blockProcessingLock,
 	}
 	vp.noncesCache.Store(&sync.Map{})
+	vp.localNonceFloor.Store(&sync.Map{})
 
 	vp.StartMemoryMonitor()
 	return vp
@@ -80,9 +108,60 @@ func NewTxValidatorPool(
 
 // ClearNoncesCache clears the local cache of expected nonces.
 // Called on block commits or reverts to reflect updated on-chain state.
+// Deliberately does NOT clear localNonceFloor -- see ClearLocalNonceFloor
+// (called separately, only from the revert path) for why the two need
+// different lifetimes.
 func (vp *TxValidatorPool) ClearNoncesCache() {
 	vp.noncesCache.Store(&sync.Map{})
 	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed/reverted)")
+}
+
+// ClearLocalNonceFloor resets the floor described on TxValidatorPool's
+// localNonceFloor field. Called ONLY on revert, never on a normal commit:
+// a revert is exactly the case where this node's own previously-forwarded
+// transactions might not actually be on-chain after all, so the floor's
+// "we know this landed" guarantee no longer holds and must be rebuilt from
+// scratch (falling back to noncesCache/DB reads, same as before the floor
+// existed).
+func (vp *TxValidatorPool) ClearLocalNonceFloor() {
+	vp.localNonceFloor.Store(&sync.Map{})
+	logger.Debug("🧹 [POOL] Local nonce floor cleared (revert)")
+}
+
+// AdvanceLocalNonceFloor raises the floor (see TxValidatorPool.
+// localNonceFloor) for every address in txs to (that address's highest
+// nonce in txs) + 1, merging with max so it can never regress. Call this
+// with the FINAL, post-truncation transaction list -- i.e. exactly what is
+// about to be forwarded for actual block inclusion -- never with a
+// pre-truncation candidate list that the caller might still requeue.
+func (vp *TxValidatorPool) AdvanceLocalNonceFloor(txs []types.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	floorVal := vp.localNonceFloor.Load()
+	if floorVal == nil {
+		return // not initialized yet (shouldn't happen post-NewTxValidatorPool)
+	}
+	floor := floorVal.(*sync.Map)
+	next := make(map[common.Address]uint64, len(txs))
+	for _, tx := range txs {
+		addr := tx.FromAddress()
+		n := tx.GetNonce() + 1
+		if n > next[addr] {
+			next[addr] = n
+		}
+	}
+	// AdvanceLocalNonceFloor is only ever called from the single, sequential
+	// StartForwardingLoop goroutine (never concurrently with itself), so a
+	// plain Load-then-Store is race-free here -- no CAS loop needed. The
+	// only other writer of this *sync.Map's contents is ClearLocalNonceFloor,
+	// which replaces the map wholesale via localNonceFloor.Store(), not by
+	// mutating this one's keys.
+	for addr, n := range next {
+		if existing, ok := floor.Load(addr); !ok || n > existing.(uint64) {
+			floor.Store(addr, n)
+		}
+	}
 }
 
 // SetEnvironment updates the environment reference
@@ -839,6 +918,23 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 					}(start, end)
 				}
 				wg.Wait()
+			}
+		}
+
+		// Apply the never-cleared-on-commit local floor: whatever noncesCache
+		// or the DB just resolved, never let it regress below the highest
+		// nonce this node has already confirmed FORWARDED for that address
+		// (see localNonceFloor's doc comment on TxValidatorPool for the
+		// exact race this closes). A genuinely-ahead external read -- e.g.
+		// from a peer's block in a multi-validator cluster -- still wins
+		// normally, since this only ever pushes the resolved value UP.
+		if floorVal := vp.localNonceFloor.Load(); floorVal != nil {
+			floor := floorVal.(*sync.Map)
+			for addr, resolved := range nonceMap {
+				if f, ok := floor.Load(addr); ok && f.(uint64) > resolved {
+					nonceMap[addr] = f.(uint64)
+					transaction_pool.TraceTx("FLOOR-APPLIED", addr, f.(uint64), fmt.Sprintf("resolved=%d", resolved))
+				}
 			}
 		}
 
