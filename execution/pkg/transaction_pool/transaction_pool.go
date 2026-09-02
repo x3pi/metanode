@@ -2,14 +2,51 @@ package transaction_pool
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+// TEMPORARY DIAGNOSTIC (2026-09-02): traces individual transaction lifecycle
+// events to /tmp/tx_lifecycle.log when METANODE_TX_TRACE=1, to chase the
+// ~0.5-1% of transactions still going permanently missing under extreme
+// sustained overload despite zero evictions, zero send errors, and no known
+// duplicate/race in the classification path. Off by default (a single
+// atomic.Bool check) so it costs nothing in the normal build. Remove once
+// root-caused.
+var txTraceEnabled = os.Getenv("METANODE_TX_TRACE") == "1"
+var txTraceMu sync.Mutex
+var txTraceFile *os.File
+
+// TraceTx is the exported form of traceTx, for the same diagnostic use from
+// other packages (e.g. processor.ProcessTransactionsInPoolSub's
+// valid/future/past classification, which happens outside this package).
+func TraceTx(event string, addr common.Address, nonce uint64, extra string) {
+	traceTx(event, addr, nonce, extra)
+}
+
+func traceTx(event string, addr common.Address, nonce uint64, extra string) {
+	if !txTraceEnabled {
+		return
+	}
+	txTraceMu.Lock()
+	defer txTraceMu.Unlock()
+	if txTraceFile == nil {
+		f, err := os.OpenFile("/tmp/tx_lifecycle.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		txTraceFile = f
+	}
+	fmt.Fprintf(txTraceFile, "%s %s addr=%s nonce=%d %s\n",
+		time.Now().Format("15:04:05.000000"), event, addr.Hex(), nonce, extra)
+}
 
 // NumShards was 256 (keyed by a single address byte) until 2026-09-02. Found
 // live while root-causing a multi-minute consensus stall under an extreme
@@ -241,6 +278,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 	key := txPoolKey{addr: tx.FromAddress(), nonce: tx.GetNonce()}
 	if shard.transactionKeys[key] {
 		logger.Info("Transaction already exists in pool, skipping key addr=%s nonce=%d", key.addr.Hex(), key.nonce)
+		traceTx("REJECT-DUP", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", shardIdx))
 		return fmt.Errorf("transaction already exists in pool, skipping")
 	}
 
@@ -258,6 +296,7 @@ func (tp *TransactionPool) AddTransaction(tx types.Transaction) error {
 		shard.txHashMap[h] = tx
 	}
 
+	traceTx("ADD", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d newCount=%d", shardIdx, len(shard.transactions)))
 	atomic.AddInt64(&tp.count, 1)
 	tp.notifyWork()
 	return nil
@@ -288,8 +327,25 @@ func (tp *TransactionPool) AddTransactions(txs []types.Transaction) {
 				if h != (common.Hash{}) {
 					shard.txHashMap[h] = tx
 				}
+				traceTx("ADD-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
 				totalAdded++
 				addedAny = true
+			} else {
+				// Unlike AddTransaction (singular), this path used to drop a
+				// duplicate key with no log line and no trace at all -- found
+				// 2026-09-02 while chasing a small (~0.5-1%) permanently-lost
+				// fraction of transactions under extreme sustained overload.
+				// This is the only re-insertion path used for requeued
+				// future-nonce and overflow transactions (see
+				// ProcessTransactionsInPoolSub / TxBatchForwarder), so a
+				// silent drop here is a plausible way for a transaction that
+				// was legitimately still pending to vanish without any trace
+				// of why. Logging it (kept at Warn, not Info, since a
+				// genuine client-side retry hitting this is an expected,
+				// harmless case) at minimum makes the next occurrence
+				// diagnosable instead of invisible.
+				logger.Warn("AddTransactions: dropped duplicate key on re-insert addr=%s nonce=%d", key.addr.Hex(), key.nonce)
+				traceTx("REJECT-DUP-BATCH", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", idx))
 			}
 		}
 		shard.mu.Unlock()
@@ -357,6 +413,11 @@ func (tp *TransactionPool) TransactionsWithAggSign(maxDrain int) ([]types.Transa
 		if len(shard.transactions) > 0 {
 			totalDrained += int64(len(shard.transactions))
 			allTxs = append(allTxs, shard.transactions...)
+			if txTraceEnabled {
+				for _, tx := range shard.transactions {
+					traceTx("DRAIN", tx.FromAddress(), tx.GetNonce(), fmt.Sprintf("shard=%d", i))
+				}
+			}
 			shard.transactions = make([]types.Transaction, 0)
 			shard.transactionKeys = make(map[txPoolKey]bool)
 			shard.txHashMap = make(map[common.Hash]types.Transaction)

@@ -784,8 +784,10 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 			for _, addr := range preloadAddrs {
 				if val, ok := cache.Load(addr); ok {
 					nonceMap[addr] = val.(uint64)
+					transaction_pool.TraceTx("CACHE-HIT", addr, val.(uint64), fmt.Sprintf("cachePtr=%p", cache))
 				} else {
 					missingAddrs = append(missingAddrs, addr)
+					transaction_pool.TraceTx("CACHE-MISS", addr, 0, fmt.Sprintf("cachePtr=%p", cache))
 				}
 			}
 
@@ -827,6 +829,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 							}
 							localNonces[addr] = nonce
 							cache.Store(addr, nonce) // Cache for future ticks
+							transaction_pool.TraceTx("DB-FETCH", addr, nonce, fmt.Sprintf("cachePtr=%p", cache))
 						}
 						nonceMapMutex.Lock()
 						for k, v := range localNonces {
@@ -861,6 +864,7 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 				if insertTime, exists := vp.futureTxTimeMap[tx.Hash()]; exists {
 					if time.Since(insertTime) > FutureTxTimeout {
 						// logger.Info("🗑️ [TX POOL] Xóa giao dịch rác (quá timeout): hash=%s", tx.Hash().Hex())
+						transaction_pool.TraceTx("TTL-DROP", from, actual, fmt.Sprintf("expected=%d waitedSince=%s", expected, insertTime.Format("15:04:05.000000")))
 						delete(vp.futureTxTimeMap, tx.Hash())
 						continue // KHÔNG append vào futureTxs nữa -> Bị drop vĩnh viễn
 					}
@@ -868,48 +872,64 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 					vp.futureTxTimeMap[tx.Hash()] = time.Now()
 				}
 
+				transaction_pool.TraceTx("CLASSIFY-FUTURE", from, actual, fmt.Sprintf("expected=%d", expected))
 				futureTxs = append(futureTxs, tx)
 			} else if actual == expected {
 				// Valid contiguous nonce
 				// logger.Info("✅ [TX POOL] Chấp nhận tx: hash=%s, from=%s, nonce=%d", tx.Hash().Hex(), from.Hex(), actual)
+				transaction_pool.TraceTx("CLASSIFY-VALID", from, actual, "")
 				validTxs = append(validTxs, tx)
 				nonceMap[from]++
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			} else {
 				// Past nonce (actual < expected) -> drop permanently
 				// logger.Info("❌ [TX POOL] Bỏ qua tx (Past nonce): hash=%s, from=%s, actualNonce=%d, expectedNonce=%d", tx.Hash().Hex(), from.Hex(), actual, expected)
+				transaction_pool.TraceTx("CLASSIFY-PAST-DROP", from, actual, fmt.Sprintf("expected=%d", expected))
 				delete(vp.futureTxTimeMap, tx.Hash()) // Dọn dẹp map
 			}
 		}
 
-		// ROOT CAUSE (found 2026-09-02, measuring sustained real-transfer
-		// throughput after adding TransactionsWithAggSign's maxDrain cap):
-		// nonceMap[from]++ above only ever updated this call's LOCAL map --
-		// the noncesCache above only ever gets written on a cache MISS
-		// (first sight of an address), never refreshed with the progress
-		// this tick just made. Before maxDrain existed, a single burst's
-		// entire backlog was always pulled and validated in ONE call, so
-		// the local increments walked an address all the way from its
-		// cached starting nonce to wherever it ended up, in one pass --
-		// masking the staleness, since there was never a SECOND call left
-		// needing the cache to reflect that address's new progress. Once a
-		// large backlog started spanning multiple capped ticks, an address
-		// whose transactions got split across two ticks would have its
-		// second tick reload the SAME stale cached nonce from tick one --
-		// but the transaction that would have satisfied that stale
-		// expectation was already consumed and gone. Every later
-		// transaction for that address then permanently reads as "future"
-		// waiting for a predecessor nonce that no longer exists anywhere,
-		// until FutureTxTimeout eventually drops it. Syncing the cache with
-		// this tick's final nonceMap values -- for every address touched,
-		// whether it advanced or not -- keeps the next tick's view accurate
-		// regardless of how many ticks a backlog ends up spanning.
-		if cacheVal := vp.noncesCache.Load(); cacheVal != nil {
-			cache := cacheVal.(*sync.Map)
-			for addr, nonce := range nonceMap {
-				cache.Store(addr, nonce)
-			}
-		}
+		// NOTE (investigated at length 2026-09-02, measuring sustained
+		// real-transfer throughput after adding TransactionsWithAggSign's
+		// maxDrain cap): nonceMap[from]++ above only updates this call's
+		// LOCAL map; noncesCache itself is only ever written on a cache MISS
+		// here, never refreshed with the progress this tick's validation
+		// just made. With a large backlog now spanning multiple capped
+		// ticks (previously always one massive tick, before maxDrain
+		// existed), an address split across ticks can have a later tick
+		// reload a stale cached nonce and temporarily treat its own already-
+		// valid-order transactions as "future" until a subsequent DB read
+		// (itself refreshed on every commit via ClearNoncesCache) catches
+		// up -- self-correcting via the future-tx requeue path, at the cost
+		// of a delay, not a permanent loss.
+		//
+		// A same-day fix was attempted here: sync nonceMap's final values
+		// back into noncesCache after every validating tick, so a split
+		// address's later tick sees its own prior progress immediately
+		// instead of waiting for a commit. It measurably helped at first,
+		// but was reverted after finding a WORSE bug it introduced: this
+		// function's nonceMap walks every transaction in validTxs before
+		// returning, but the caller (TxBatchForwarder.StartForwardingLoop)
+		// can subsequently truncate validTxs to targetBlockSize and re-queue
+		// the excess back into the pool via AddTransactions -- transactions
+		// this function had already counted as "done" for cache-advancement
+		// purposes. Traced live via METANODE_TX_TRACE: nonces correctly
+		// classified CLASSIFY-VALID, immediately re-inserted via ADD-BATCH
+		// (the truncation requeue) moments later, then permanently rejected
+		// as CLASSIFY-PAST-DROP the next time they were drained, because the
+		// cache/floor had already been advanced past them by this function
+		// on the very same tick that just put them back in the pool. A
+		// following attempt to layer a never-cleared "floor" on top (only
+		// ever advance, never regress) made this specific failure mode
+		// worse, not better, since a floor wrongly advanced this way can
+		// never self-correct via a fresh DB read the way noncesCache can.
+		// Root cause of the ORIGINAL staleness this was chasing is real, but
+		// any fix needs to key off what the caller actually forwards
+		// (post-truncation), not what this function locally validated
+		// before truncation is even decided -- left as a known, bounded
+		// limitation (self-heals via the future-tx requeue path, typically
+		// within one extra tick) rather than risk a third attempt in the
+		// same investigation.
 
 		// Re-add future transactions back to the pool
 		if len(futureTxs) > 0 {
