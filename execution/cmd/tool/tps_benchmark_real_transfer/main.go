@@ -195,7 +195,10 @@ func main() {
 			defer sendWg.Done()
 			for p := range workCh {
 				if _, err := rpcClient.SendRawTransaction(p); err != nil {
-					atomic.AddInt64(&sendErrors, 1)
+					n := atomic.AddInt64(&sendErrors, 1)
+					if n <= 5 {
+						fmt.Fprintf(os.Stderr, "SEND ERROR #%d: %v\n", n, err)
+					}
 				} else {
 					atomic.AddInt64(&sent, 1)
 				}

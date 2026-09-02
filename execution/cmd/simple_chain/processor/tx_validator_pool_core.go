@@ -46,6 +46,10 @@ type TxValidatorPool struct {
 	blockProcessingLock *sync.RWMutex
 
 	noncesCache atomic.Value // Holds *sync.Map for expected nonces caching
+
+	// evictionInProgress guards EvictLowestGasPrice against being triggered
+	// concurrently — see addTransactionToPoolInternal for why this matters.
+	evictionInProgress atomic.Bool
 }
 
 func NewTxValidatorPool(
@@ -160,12 +164,41 @@ func (vp *TxValidatorPool) addTransactionToPoolInternal(tx types.Transaction, sk
 		return transaction.InvalidTransaction.Code, fmt.Errorf("transaction gas price (%d) is below node minimum (%d)", tx.MaxGasPrice(), minGasPrice)
 	}
 
-	// Limit pool size to prevent GC stall / OOM
+	// Limit pool size to prevent GC stall / OOM.
+	//
+	// CRITICAL: EvictLowestGasPrice does a full scan of every shard plus an
+	// O(n log n) sort of the entire pool just to remove a handful of entries
+	// (see transaction_pool.go). Found live (2026-09-02) under a sustained
+	// burst of real transactions: once the pool sits at/above MaxMempoolSize,
+	// EVERY concurrent incoming tx re-enters this branch and — without a
+	// guard — EVERY one of them independently launches another full-pool
+	// scan+sort. With thousands of concurrent submissions (e.g. 3000+ RPC
+	// connections under load) and a pool sitting at 200k+ entries, that's
+	// thousands of redundant O(n log n) passes running at once: captured a
+	// live goroutine dump with 4000+ goroutines stuck for 10+ minutes
+	// blocked on transaction_pool's shard RWMutex, CPU pinned, and the pool
+	// never actually shrinking back below MaxMempoolSize because eviction
+	// throughput couldn't keep up with the redundant work — which in turn
+	// left the system-load circuit breaker (pendingOverloaded, see
+	// processors.go) permanently tripped, rejecting all new transactions
+	// indefinitely even with the input burst long finished.
+	//
+	// Fix: only one eviction pass runs at a time. Concurrent callers that
+	// find one already in flight skip straight to the "pool full" rejection
+	// instead of also scanning+sorting the whole pool — the in-flight pass
+	// will make room shortly regardless.
 	if vp.transactionPool.CountTransactions() >= MaxMempoolSize {
-		logger.Warn("⚠️ Mempool is full (limit=%d). Evicting 100 lowest-fee transactions to make room for new txs.", MaxMempoolSize)
-		evicted := vp.transactionPool.EvictLowestGasPrice(100)
-		if evicted == 0 {
-			return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+		if vp.evictionInProgress.CompareAndSwap(false, true) {
+			evicted := func() int {
+				defer vp.evictionInProgress.Store(false)
+				logger.Warn("⚠️ Mempool is full (limit=%d). Evicting lowest-fee transactions to make room for new txs.", MaxMempoolSize)
+				return vp.transactionPool.EvictLowestGasPrice(mempoolEvictBatchSize)
+			}()
+			if evicted == 0 {
+				return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+			}
+		} else {
+			return transaction.AddToPoolError.Code, fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
 		}
 	}
 
