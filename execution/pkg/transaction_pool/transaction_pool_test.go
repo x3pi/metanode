@@ -2,6 +2,7 @@ package transaction_pool
 
 import (
 	"math/big"
+	"sort"
 	"sync"
 	"testing"
 
@@ -313,6 +314,48 @@ func TestConcurrent_EvictAndDrain_NoPanic(t *testing.T) {
 	}()
 
 	wg.Wait() // must return without a panic anywhere above
+}
+
+// Regression test for a gap found 2026-09-02 measuring sustained real-transfer
+// throughput: EvictLowestGasPrice sorted purely by gas price ascending, so
+// with equal-gas-price transactions (the common case for same-priority
+// transfers, and exactly what that benchmark used) which specific
+// transactions got evicted at the pool's cap was effectively arbitrary with
+// respect to nonce. Evicting a low-nonce transaction while a same-sender
+// higher-nonce one survives permanently strands that higher nonce -- it can
+// never execute out of order, so it just occupies pool space as an eternal
+// future-tx instead of being usefully evicted itself. This verifies the fix:
+// for a single sender queued at nonces 0..9, evicting a count that removes
+// some-but-not-all of them must always remove exactly the highest nonces,
+// leaving a contiguous gap-free run starting at nonce 0.
+func TestEvictLowestGasPrice_PrefersHighestNonceOnGasTie(t *testing.T) {
+	pool := NewTransactionPool()
+	const sender = byte(0x01)
+	const total = 10
+
+	for n := uint64(0); n < total; n++ {
+		require.NoError(t, pool.AddTransaction(makeTestTx(sender, n)))
+	}
+
+	const evictCount = 4
+	evicted := pool.EvictLowestGasPrice(evictCount)
+	assert.Equal(t, evictCount, evicted)
+
+	remaining, _ := pool.TransactionsWithAggSign()
+	require.Len(t, remaining, total-evictCount)
+
+	remainingNonces := make([]uint64, 0, len(remaining))
+	for _, tx := range remaining {
+		remainingNonces = append(remainingNonces, tx.GetNonce())
+	}
+	sort.Slice(remainingNonces, func(i, j int) bool { return remainingNonces[i] < remainingNonces[j] })
+
+	expected := make([]uint64, total-evictCount)
+	for i := range expected {
+		expected[i] = uint64(i) // 0..5: the lowest nonces, a contiguous run with no internal gap
+	}
+	assert.Equal(t, expected, remainingNonces,
+		"eviction must remove the highest nonces first, leaving a gap-free run starting at 0")
 }
 
 func TestConcurrent_AddAndCount(t *testing.T) {

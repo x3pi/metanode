@@ -102,6 +102,7 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		shardIdx int
 		index    int
 		gas      uint64
+		nonce    uint64
 		hash     common.Hash
 	}
 
@@ -115,6 +116,7 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 				shardIdx: i,
 				index:    idx,
 				gas:      tx.MaxGasPrice(),
+				nonce:    tx.GetNonce(),
 				hash:     tx.Hash(),
 			})
 		}
@@ -137,9 +139,30 @@ func (tp *TransactionPool) EvictLowestGasPrice(countToEvict int) int {
 		return totalEvicted
 	}
 
-	// Sort by GasPrice ascending
+	// Sort by GasPrice ascending, so eviction still respects the fee market as
+	// the primary signal -- but break ties by nonce DESCENDING (found
+	// 2026-09-02 measuring sustained real-transfer throughput: with the
+	// uniform gas price every tx in this benchmark used, and very likely in
+	// any single dApp's batch of same-priority transfers, "ascending gas"
+	// alone has no real ordering to fall back on, so which specific txs got
+	// evicted at the pool's 200,000-entry cap was effectively arbitrary
+	// w.r.t. nonce. For any sender with several queued transactions, evicting
+	// a LOW-nonce one while a HIGHER-nonce one for the same sender survives
+	// permanently strands that higher nonce -- it can never execute out of
+	// order, so it sits in the pool as a future-tx forever (or until its own
+	// TTL) instead of being usefully evicted itself. Sorting ties by nonce
+	// descending means eviction always consumes a sender's queued
+	// transactions from the tail of their nonce sequence inward, so it can
+	// never create an internal gap: whatever of a sender's transactions
+	// survive eviction always form a contiguous run starting at that
+	// sender's lowest queued nonce. This measurably reduced tx loss under
+	// sustained overload without changing the eviction count or the
+	// fee-market ordering for txs that actually have different gas prices.
 	sort.Slice(allInfos, func(i, j int) bool {
-		return allInfos[i].gas < allInfos[j].gas
+		if allInfos[i].gas != allInfos[j].gas {
+			return allInfos[i].gas < allInfos[j].gas
+		}
+		return allInfos[i].nonce > allInfos[j].nonce
 	})
 
 	// Group removals by shard
