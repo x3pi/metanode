@@ -533,7 +533,8 @@ crash_bt*.txt
 scripts/tps_report_*.json
 scripts/tps_benchmark_e2e
 execution/tps_benchmark_e2e
-execution/cmd/tool/tps_benchmark_e2e/tps_benchmark
+execution/cmd/tool/tps_benchmark_e2e/tps_benchmark_e2e
+execution/cmd/tool/tps_benchmark_e2e/tps_report_*.json
 execution/cmd/tool/tps_benchmark_real_transfer/tps_benchmark_real_transfer
 execution/cmd/tool/tps_latency_probe/tps_latency_probe
 execution/cmd/tool/zero_balance_check/
