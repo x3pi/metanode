@@ -43,6 +43,25 @@ echo "════════════════════════�
 echo "🚀 Load test: ${TXS} txs, ${ACCOUNTS} accounts, ${ROUNDS} round(s)"
 echo "═══════════════════════════════════════════════════════════════"
 
+PROJECT_ROOT="$(cd "$DIR/../../.." && pwd)"
+
+# The Go binary links the Rust consensus engine statically via cgo, whose
+# LDFLAGS point at consensus/metanode/target/release/libmetanode.a --
+# NOT the workspace-root target/release/ that `cargo build` from anywhere
+# in this repo actually writes to (consensus/metanode is a workspace
+# *member*, sharing the root target/ dir; its own target/ subdirectory is
+# a stale leftover, last touched 2026-07/08). Only build_release.sh (the
+# ansible-driven production path) knows to copy the fresh artifact into
+# that expected location; a bare `go build` here silently links against
+# whatever old snapshot happens to already be sitting there. Found live
+# 2026-09-03 chasing a consensus-timing change that a first `go build`
+# alone did not pick up. Rebuild + copy explicitly so this recipe never
+# silently tests stale Rust code again.
+echo "🔨 Building Rust consensus engine (release)..."
+(cd "$PROJECT_ROOT" && cargo build --release -p metanode)
+mkdir -p "$PROJECT_ROOT/consensus/metanode/target/release"
+cp -p "$PROJECT_ROOT/target/release/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/release/libmetanode.a"
+
 echo "🔨 Building simple_chain, tps_benchmark_e2e, fund_tps_bench_accounts from current source..."
 (cd "$EXEC_DIR/cmd/simple_chain" && go build -o simple_chain .)
 (cd "$EXEC_DIR/cmd/tool/tps_benchmark_e2e" && go build -o tps_benchmark_e2e .)
