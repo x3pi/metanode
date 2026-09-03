@@ -148,21 +148,51 @@ impl SubmitOrderGate {
 struct SubmitTicket {
     gate: Arc<SubmitOrderGate>,
     ticket: u64,
+    released: bool,
 }
 
 impl SubmitTicket {
     fn new(gate: Arc<SubmitOrderGate>, ticket: u64) -> Self {
-        Self { gate, ticket }
+        Self { gate, ticket, released: false }
     }
 
     async fn wait_for_turn(&self, timeout: Duration) {
         self.gate.wait_for_turn(self.ticket, timeout).await;
     }
+
+    /// Releases this ticket NOW, letting the next ticket proceed
+    /// immediately, instead of waiting for this value to be dropped at the
+    /// end of its enclosing scope.
+    ///
+    /// LATENCY FIX (2026-09-03): must be called right after submit_no_wait
+    /// returns -- the actual, only order-determining moment (the handoff
+    /// to consensus's own submission channel) -- not left to fire on
+    /// scope exit. process_ffi_batch's submission phase, AFTER
+    /// submit_no_wait returns, awaits its own block-inclusion confirmation
+    /// for up to 30s (a per-caller backpressure mechanism, unrelated to
+    /// ordering) via `included_in_block_rx`. Before this fix, that 30s
+    /// wait ran INSIDE this ticket's still-held scope, so every later
+    /// ticket's wait_for_turn blocked on it too -- turning what used to be
+    /// up to 512 (pipeline_semaphore) *concurrent* backpressure waits into
+    /// a fully serial chain. Confirmed live: sustained 800 tx/s showed a
+    /// tight, suspicious ~65-75s latency band -- 512 * ~130ms lines up
+    /// almost exactly with a full pipeline_semaphore's worth of batches
+    /// each serialized through roughly a consensus-round's cost. Calling
+    /// release() here restores the original parallel backpressure-waiting
+    /// behavior while still keeping the actual fix (ordered handoff to
+    /// consensus) intact. Idempotent -- Drop only acts if this was never
+    /// called (e.g. an early return before ever reaching submission).
+    fn release(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.gate.advance_past(self.ticket);
+        }
+    }
 }
 
 impl Drop for SubmitTicket {
     fn drop(&mut self) {
-        self.gate.advance_past(self.ticket);
+        self.release();
     }
 }
 
@@ -292,7 +322,7 @@ impl TxSocketServer {
         peer_rpc_addresses: Vec<String>,
         peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
-        submit_ticket: SubmitTicket,
+        mut submit_ticket: SubmitTicket,
     ) {
         use prost::bytes::Buf;
         let mut individual_txs = Vec::new();
@@ -630,7 +660,17 @@ impl TxSocketServer {
                         crate::ffi::update_go_tx_trace(&tx_hash, "RUST_SUBMITTED", "Transaction submitted to Rust consensus DAG proposer");
                     }
                 }
-                match current_client.submit_no_wait(chunk_vec).await {
+                let submit_result = current_client.submit_no_wait(chunk_vec).await;
+                // ORDER GATE: release now. The handoff to consensus's own
+                // submission channel just happened (or definitively
+                // failed) -- the only moment that actually determines
+                // cross-batch order. See SubmitTicket::release's doc
+                // comment: everything after this point, including the
+                // up-to-30s block-inclusion backpressure wait a few lines
+                // below, is this task's own concern and must not
+                // serialize every later ticket behind it too.
+                submit_ticket.release();
+                match submit_result {
                     Ok(included_in_block_rx) => {
                         debug!("✅ [TX-FLOW-TRACE] ▶ PHASE 2: Submitted batch of {} txs to consensus Proposer", chunk_len);
                         // total_submitted += chunk_len;
@@ -776,6 +816,41 @@ mod submit_order_gate_tests {
             vec![0, 1, 2],
             "submission must happen in ticket (arrival) order despite prep work finishing in the opposite order"
         );
+    }
+
+    /// Regression test for the CONFIRMED latency incident (2026-09-03): a
+    /// ticket that calls `release()` explicitly must unblock the next
+    /// ticket IMMEDIATELY, without waiting for its own scope to end. Before
+    /// this fix, only Drop released a ticket -- so a task that kept doing
+    /// unrelated work (in production: a real, up-to-30s block-inclusion
+    /// backpressure wait) after its own order-critical section serialized
+    /// every later ticket behind that unrelated work too. Confirmed live:
+    /// a sustained-load benchmark showed per-tx latency clustering tightly
+    /// around ~65-75s, matching pipeline_semaphore's 512-permit depth times
+    /// roughly one consensus round each -- i.e. batches were being forced
+    /// through that 30s wait sequentially instead of in parallel.
+    #[tokio::test]
+    async fn explicit_release_unblocks_next_ticket_before_scope_ends() {
+        let gate = Arc::new(SubmitOrderGate::new());
+
+        let mut t0 = SubmitTicket::new(gate.clone(), 0);
+        t0.wait_for_turn(Duration::from_secs(5)).await; // ticket 0 is already current
+        t0.release(); // release explicitly -- t0 itself stays alive (not dropped) below
+
+        let t1 = SubmitTicket::new(gate.clone(), 1);
+        let start = std::time::Instant::now();
+        t1.wait_for_turn(Duration::from_secs(5)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "ticket 1 should proceed immediately once ticket 0 is explicitly released, even though ticket 0's own SubmitTicket value is still alive (not yet dropped): {:?}",
+            start.elapsed()
+        );
+
+        // t0 is still in scope here, simulating the caller doing more
+        // unrelated work (e.g. the real 30s backpressure wait) after
+        // release() -- this must not affect anything, and Drop firing
+        // later must not double-advance the gate incorrectly.
+        drop(t0);
     }
 
     /// A ticket that's dropped WITHOUT ever calling wait_for_turn (simulating
