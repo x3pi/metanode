@@ -219,6 +219,35 @@ impl ConsensusNode {
 
         recovery::perform_fork_detection_check(&node).await?;
 
+        // Start the TX recycler's background loop: periodically re-submits
+        // TXs whose proposed DAG block was garbage-collected instead of
+        // committed (see tx_recycler.rs's module doc for the mechanism).
+        //
+        // Found 2026-09-03 while investigating a residual tx-loss gap that
+        // persisted after fixing the TxPayloadCache and MAX_PENDING_TXS
+        // capacity bugs (both hardcoded, too-small limits found the same
+        // day): `start_recycler_background` was defined but never spawned
+        // anywhere in the codebase. TxRecycler still tracked and evicted
+        // submitted TXs correctly (track_submitted/confirm_committed are
+        // called from the real submission/commit paths independent of this
+        // loop), but its only actual recovery mechanism — collect_stale()
+        // finding stale entries and re-submitting them — never ran. A TX
+        // whose block got garbage-collected therefore had zero chance of
+        // recovery, no matter how generous MAX_PENDING_TXS was: the safety
+        // net existed in name only.
+        if let (Some(recycler), Some(submitter)) =
+            (node.tx_recycler.clone(), node.transaction_client_proxy.clone())
+        {
+            tokio::spawn(crate::consensus::tx_recycler::start_recycler_background(
+                recycler,
+                submitter as Arc<dyn crate::node::tx_submitter::TransactionSubmitter>,
+                config.storage_path.to_string_lossy().to_string(),
+            ));
+            info!("♻️ [TX RECYCLER] Background recycler task spawned");
+        } else {
+            info!("♻️ [TX RECYCLER] Not spawning background recycler: no transaction_client_proxy (non-validator/SyncOnly node)");
+        }
+
         Ok(node)
     }
 
