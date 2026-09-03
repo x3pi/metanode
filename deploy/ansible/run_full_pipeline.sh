@@ -64,6 +64,7 @@ send_telegram_notification() {
 }
 
 CURRENT_STEP="Khởi tạo Pipeline"
+PIPELINE_START_TIME=$(date +%s)
 
 on_pipeline_error() {
     local exit_code=$1
@@ -271,3 +272,25 @@ fi
 echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}${GREEN}🎉🎉🎉 CHÚC MỪNG! TOÀN BỘ QUY TRÌNH TRIỂN KHAI VÀ KIỂM THỬ ĐÃ THÀNH CÔNG RỰC RỠ!${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
+
+# ==============================================================================
+# THÔNG BÁO TELEGRAM KHI TOÀN BỘ PIPELINE THÀNH CÔNG (đối xứng với
+# on_pipeline_error ở trên -- trước đây chỉ báo khi lỗi, không báo khi thành
+# công, nên không phân biệt được "đang chạy" với "đã xong tốt" từ xa)
+# ==============================================================================
+PIPELINE_END_TIME=$(date +%s)
+PIPELINE_ELAPSED=$((PIPELINE_END_TIME - PIPELINE_START_TIME))
+PIPELINE_ELAPSED_FMT="$((PIPELINE_ELAPSED / 60))m $((PIPELINE_ELAPSED % 60))s"
+SUCCESS_SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+SUCCESS_TIMESTAMP=$(date '+%H:%M:%S %d/%m/%Y')
+SUCCESS_MSG="✅ <b>[METANODE FULL PIPELINE THÀNH CÔNG]</b>
+
+🌐 <b>Server:</b> <code>${SUCCESS_SERVER_IP}</code>
+⏰ <b>Hoàn tất lúc:</b> <code>${SUCCESS_TIMESTAMP}</code>
+⏱️ <b>Tổng thời gian chạy:</b> <code>${PIPELINE_ELAPSED_FMT}</code>
+🌿 <b>Nhánh:</b> <code>${GIT_BRANCH}</code>
+🧪 <b>Test Block-STM:</b> <code>$( [ "$SKIP_TESTS" = true ] && echo "Bỏ qua" || echo "Đã chạy" )</code>
+🌉 <b>Test Cross-Chain:</b> <code>$( [ "$SKIP_CROSS_CHAIN" = true ] && echo "Bỏ qua" || echo "Đã chạy" )</code>
+
+🎉 <i>Cả 6 bước (Root Anchor, Private Chains, Relayer, Update-IP, Cross-Chain, Block-STM) đã hoàn tất không lỗi.</i>"
+send_telegram_notification "$SUCCESS_MSG"

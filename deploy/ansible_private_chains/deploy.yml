@@ -20,6 +20,81 @@
             cmd: "go build -o simple_chain ."
             chdir: "{{ playbook_dir }}/../../execution/cmd/simple_chain"
 
+    # gen_single_chain.py's dev-key file (private_dev_keys.json, *dev_keys.json-gitignored --
+    # "no secrets in git") is normally random-and-persisted per machine, so a fresh clone gets
+    # keys nobody else has. metanode-suite's cross-chain test clients (01/02/03 under
+    # test-blockstm/cross-chain) hardcode a FIXED wallet set instead (checked into that repo's
+    # own git history, config.json's private_chains.*.private_keys) -- on a machine where those
+    # two never matched, every cross-chain test timed out with the sender/relayer wallet at 0
+    # balance ("outbound native burn failed: mvm execution failed with status THREW", found live
+    # 2026-09-03). Sync metanode-suite's fixed keys into private_dev_keys.json BEFORE
+    # gen_single_chain.py runs so every private chain's genesis funds the exact wallets the test
+    # suite actually signs with -- makes the whole pipeline reproducible on any machine that has
+    # both repos cloned as siblings (same layout run_full_pipeline.sh's SUITE_DIR already
+    # assumes), no manual key-syncing step required. Silently skipped if metanode-suite isn't
+    # present (falls back to gen_single_chain.py's normal random-key behavior).
+    - name: Sync cross-chain test-suite dev wallet keys into private_dev_keys.json
+      when: "ansible_action in ['setup', 'reset']"
+      vars:
+        suite_test_config: "{{ playbook_dir }}/../../../metanode-suite/test-simple/test-rpc/test-blockstm/config.json"
+      block:
+        - name: Check for metanode-suite's cross-chain test config
+          ansible.builtin.stat:
+            path: "{{ suite_test_config }}"
+          register: suite_config_stat
+
+        - name: Sync dev wallet keys from metanode-suite config.json
+          when: suite_config_stat.stat.exists
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              export SUITE_CONFIG="{{ suite_test_config }}"
+              export OUT_PATH="{{ playbook_dir }}/private_dev_keys.json"
+              python3 << 'EOF'
+              import json, os
+              from pathlib import Path
+              from eth_account import Account
+
+              suite_config = Path(os.environ['SUITE_CONFIG'])
+              out_path = Path(os.environ['OUT_PATH'])
+
+              with open(suite_config) as f:
+                  cfg = json.load(f)
+
+              data = {}
+              if out_path.exists():
+                  try:
+                      with open(out_path) as f:
+                          data = json.load(f)
+                  except Exception:
+                      data = {}
+
+              role_names = ["Sender (A0)", "Dev A1", "Dev A2", "Dev A3", "Dev A4", "Relayer A (A5)"]
+              changed = False
+              for chain_cfg in cfg.get('private_chains', {}).values():
+                  chain_id = str(chain_cfg.get('chain_id', ''))
+                  keys = chain_cfg.get('private_keys', [])
+                  if not chain_id or not keys:
+                      continue
+                  accounts = []
+                  for i, pk in enumerate(keys):
+                      pk_hex = pk if pk.startswith('0x') else '0x' + pk
+                      addr = Account.from_key(pk_hex).address
+                      role = role_names[i] if i < len(role_names) else f"Dev {i}"
+                      accounts.append({"private_key": pk_hex[2:], "address": addr, "role": role})
+                  if data.get(chain_id) != accounts:
+                      data[chain_id] = accounts
+                      changed = True
+
+              if changed:
+                  with open(out_path, 'w') as f:
+                      json.dump(data, f, indent=2)
+                  os.chmod(out_path, 0o600)
+                  print(f"🔑 Synced dev wallet keys for {len(data)} chain(s) from metanode-suite config.json")
+              else:
+                  print("🔑 Dev wallet keys already in sync with metanode-suite config.json")
+              EOF
+
     - name: Generate configurations for targeted private chains
       when: "ansible_action in ['setup', 'reset']"
       block:
@@ -76,7 +151,8 @@
                   --root-anchor-rpc "$ROOT_RPC" \
                   --root-anchor-submitter-key "$SUBMITTER_KEY" \
                   --reserve-chain-id "$RESERVE_CHAIN_ID" \
-                  --output-dir "$LOCAL_OUT"
+                  --output-dir "$LOCAL_OUT" \
+                  --dev-keys-file "{{ playbook_dir }}/private_dev_keys.json"
               fi
               
               # Chuẩn hóa đường dẫn trong config.json và node.toml cho từng validator node (/opt/metanode/chain-XXX/node-N)
