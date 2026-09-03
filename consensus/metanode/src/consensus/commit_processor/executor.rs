@@ -17,6 +17,42 @@ static DEFERRED_TASK_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>>
 static LAST_FORCE_COMMIT: std::sync::LazyLock<std::sync::atomic::AtomicU64> =
     std::sync::LazyLock::new(|| std::sync::atomic::AtomicU64::new(0));
 
+// TEMPORARY DIAGNOSTIC (2026-09-03): counts commits skipped by the GEI GUARD
+// below (Rust believes Go's already-reported GEI is at or past this commit's
+// end, so it never dispatches it -- returning Ok() as if it had) and, of
+// those, how many actually carried real transactions. Same investigation as
+// tx_socket_server.rs's DIAG_* and commit_processor/processor.rs's
+// DIAG_DIGEST_* counters (both ruled out their respective hypotheses); this
+// is the third lead. eprintln! bypasses tracing entirely for the same
+// reason as those two. Remove once settled.
+static DIAG_GEI_GUARD_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_GEI_GUARD_SKIPPED_TXS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_FAST_SKIP_EMPTY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_DISPATCHED_TXS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_EXEC_LAST_PRINT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn diag_exec_maybe_print() {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_EXEC_LAST_PRINT_SECS.load(Ordering::Relaxed);
+    if now >= last + 2
+        && DIAG_EXEC_LAST_PRINT_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG dispatch_commit] dispatched_txs={} gei_guard_skips={} gei_guard_skipped_txs={} fast_skip_empty={}",
+            DIAG_DISPATCHED_TXS.load(Ordering::Relaxed),
+            DIAG_GEI_GUARD_SKIPS.load(Ordering::Relaxed),
+            DIAG_GEI_GUARD_SKIPPED_TXS.load(Ordering::Relaxed),
+            DIAG_FAST_SKIP_EMPTY.load(Ordering::Relaxed)
+        );
+    }
+}
+
 use crate::node::executor_client::ExecutorClient;
 
 pub async fn dispatch_commit(
@@ -101,6 +137,8 @@ pub async fn dispatch_commit(
     //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
     if total_transactions == 0 && !has_system_tx && commit_index > 1 {
+        DIAG_FAST_SKIP_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        diag_exec_maybe_print();
         tracing::trace!(
             "⏭️ [FAST-SKIP] Empty commit #{} (GEI expected={}) skipped — no transactions",
             commit_index, global_exec_index
@@ -148,6 +186,9 @@ pub async fn dispatch_commit(
         if go_current_gei > 0 && global_exec_index > 0 && go_current_gei >= (global_exec_index + expected_fragments - 1) {
             let has_end_of_epoch = subdag.extract_end_of_epoch_transaction().is_some();
             if !has_end_of_epoch {
+                DIAG_GEI_GUARD_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                DIAG_GEI_GUARD_SKIPPED_TXS.fetch_add(total_transactions as u64, std::sync::atomic::Ordering::Relaxed);
+                diag_exec_maybe_print();
                 trace!(
                     "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit end GEI={}.",
                     commit_index, go_current_gei, global_exec_index + expected_fragments - 1
@@ -176,6 +217,7 @@ pub async fn dispatch_commit(
                         error!("🚨 [FATAL] Failed to send commit to DeliveryManager: {}", e);
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
+                    DIAG_DISPATCHED_TXS.fetch_add(total_transactions as u64, std::sync::atomic::Ordering::Relaxed);
 
                     // PIPELINE FIX: We return expected_fragments immediately to unblock CommitProcessor.
                     // This eliminates the IPC serialization bottleneck. Backpressure is now handled

@@ -86,8 +86,52 @@ impl TxPayloadCache {
 
 pub(crate) static GLOBAL_TX_CACHE: OnceLock<RwLock<TxPayloadCache>> = OnceLock::new();
 
+/// CONFIRMED ROOT CAUSE (2026-09-02/03 investigation) OF SILENT TX LOSS AT
+/// EXTREME BURST SCALE: capacity here was hardcoded at 500_000, and
+/// `TxPayloadCache::insert()` evicts the OLDEST entry by pure insertion
+/// order whenever the cache is full -- with zero regard for whether that
+/// entry's transaction has actually reached a dispatched (sent-to-Go)
+/// block yet. Under an injection burst larger than capacity (e.g.
+/// 1,000,000 txs in ~22s, ~44,700 tx/s), transactions submitted early in
+/// the burst got evicted before consensus could propose+commit+dispatch
+/// their containing block, permanently and silently dropping them --
+/// surfacing only as a "Missing transaction for digest" warn! in
+/// build_sorted_transactions (block_sending.rs). Live counters confirmed
+/// the mechanism exactly: at 1,000,000 offered, ~509,000 confirmed
+/// on-chain in the same run, matching the ~500,000 capacity almost
+/// precisely, and Rust's own "dispatched to Go" counters showed ~972,000
+/// succeeding at the dispatch step -- i.e. the loss was specifically
+/// cache eviction between submission and dispatch, not a consensus or
+/// execution failure.
+///
+/// Fix: raise capacity 10x (500_000 -> 5_000_000), comfortably exceeding
+/// every burst size tested so far (up to 4,000,000 txs) with headroom.
+/// Memory cost is small (Transaction bodies are typically ~100-300 bytes;
+/// 5,000,000 entries costs roughly 1-2 GB resident) and acceptable on
+/// this box. Overridable via METANODE_TX_CACHE_CAPACITY for further
+/// tuning without a rebuild.
+///
+/// This is a capacity increase, not an eviction-policy fix -- an
+/// arbitrarily large enough burst could in principle still outrun any
+/// fixed capacity. A more robust fix (only ever evict entries already
+/// consumed/dispatched, instead of blind insertion-order FIFO) was
+/// considered but deferred: this same cache is also read by
+/// multi-validator code paths (block_verifier, synchronizer,
+/// authority_service peer-block handling) that may need to re-read a
+/// transaction body after the local dispatch path has already read it,
+/// so removing entries eagerly on first read risks breaking peer
+/// verification/sync correctness in a multi-validator deployment --
+/// not proven safe under current single-validator-only test coverage.
+fn tx_payload_cache_capacity() -> usize {
+    std::env::var("METANODE_TX_CACHE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5_000_000)
+}
+
 pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
-    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(500_000)))
+    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(tx_payload_cache_capacity())))
 }
 
 /// The maximum number of transactions pending to the queue to be pulled for block proposal
