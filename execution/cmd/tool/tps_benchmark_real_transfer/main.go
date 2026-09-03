@@ -54,6 +54,7 @@ func main() {
 	workers := flag.Int("workers", 200, "concurrent send workers")
 	settleSecs := flag.Int("settle", 60, "max seconds to wait for settlement")
 	sampleReceipts := flag.Int("sample-receipts", 30, "number of random receipts to fetch and verify status=0x1 at the end")
+	dumpSentHashes := flag.String("dump-sent-hashes", "", "if set, write every successfully-sent tx hash (one per line) to this path for later diffing against on-chain contents")
 	flag.Parse()
 
 	if *accountsFile == "" {
@@ -217,6 +218,12 @@ func main() {
 	}
 	close(acctCh)
 
+	// Per-index flag: did this specific built transaction actually get a
+	// successful send ack? Only written by the single goroutine that owns
+	// its account's indices (see partition-by-account above), so plain
+	// writes are safe without atomics.
+	sentOK := make([]bool, totalTxs)
+
 	injectStart := time.Now()
 	var sendWg sync.WaitGroup
 	for w := 0; w < numSendWorkers; w++ {
@@ -253,6 +260,7 @@ func main() {
 						// change exists to avoid.
 						break
 					}
+					sentOK[base+j] = true
 					atomic.AddInt64(&sent, 1)
 				}
 			}
@@ -263,6 +271,23 @@ func main() {
 
 	fmt.Printf("Injected %d txs in %v (%.0f tx/s, %d errors)\n",
 		sent, injectTime, float64(sent)/injectTime.Seconds(), sendErrors)
+
+	if *dumpSentHashes != "" {
+		f, err := os.Create(*dumpSentHashes)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  could not open -dump-sent-hashes path %s: %v\n", *dumpSentHashes, err)
+		} else {
+			w := 0
+			for idx, ok := range sentOK {
+				if ok {
+					fmt.Fprintln(f, txHashes[idx])
+					w++
+				}
+			}
+			f.Close()
+			fmt.Printf("Wrote %d successfully-sent tx hashes to %s\n", w, *dumpSentHashes)
+		}
+	}
 
 	fmt.Printf("Waiting for settlement (max %ds)...\n", *settleSecs)
 	settleStart := time.Now()

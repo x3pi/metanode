@@ -882,12 +882,11 @@ impl CommitProcessor {
                             }
                             shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                             if let Some(ref recycler) = tx_recycler {
-                                let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
-                                if total_txs > 0 {
-                                    let committed_tx_data: Vec<&[u8]> = confirmed
-                                        .blocks.iter()
-                                        .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                                        .collect();
+                                // Digest-aware extraction (see extract_committed_tx_data's doc
+                                // comment) -- a bare block.transactions() sum/collect silently
+                                // sees zero transactions for BlockV3 (compact) blocks.
+                                let committed_tx_data = super::executor::extract_committed_tx_data(&confirmed);
+                                if !committed_tx_data.is_empty() {
                                     recycler.confirm_committed(&committed_tx_data).await;
                                 }
                             }
@@ -1080,13 +1079,11 @@ impl CommitProcessor {
                 Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
 
                 if let Some(ref recycler) = tx_recycler {
-                    let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
-                    if total_txs > 0 {
-                        let committed_tx_data: Vec<&[u8]> = pending
-                            .blocks
-                            .iter()
-                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                            .collect();
+                    // Digest-aware extraction (see extract_committed_tx_data's doc
+                    // comment) -- a bare block.transactions() sum/collect silently
+                    // sees zero transactions for BlockV3 (compact) blocks.
+                    let committed_tx_data = super::executor::extract_committed_tx_data(&pending);
+                    if !committed_tx_data.is_empty() {
                         recycler.confirm_committed(&committed_tx_data).await;
                     }
                 }
@@ -1559,15 +1556,16 @@ impl CommitProcessor {
                         shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                         
                         // ♻️ TX RECYCLER: Confirm committed TXs
+                        //
+                        // Digest-aware extraction (see extract_committed_tx_data's doc
+                        // comment) -- a bare block.transactions() flat_map silently sees
+                        // zero transactions for BlockV3 (compact) blocks. Gate on the
+                        // extracted list's own emptiness rather than total_txs_in_commit
+                        // (computed the same buggy way above, kept as-is there since it
+                        // also feeds unrelated logging) so this doesn't inherit that bug.
                         if let Some(ref recycler) = tx_recycler {
-                            if total_txs_in_commit > 0 {
-                                let committed_tx_data: Vec<&[u8]> = subdag
-                                    .blocks
-                                    .iter()
-                                    .flat_map(|b| {
-                                        b.transactions().iter().map(|tx| tx.data())
-                                    })
-                                    .collect();
+                            let committed_tx_data = super::executor::extract_committed_tx_data(&subdag);
+                            if !committed_tx_data.is_empty() {
                                 recycler.confirm_committed(&committed_tx_data).await;
                             }
                         }
@@ -1729,12 +1727,11 @@ impl CommitProcessor {
                                     hex::encode(&certified_digest[..4])
                                 );
                                 if let Some(ref recycler) = tx_recycler {
-                                    let total_txs: usize = certified.blocks.iter().map(|b| b.transactions().len()).sum();
-                                    if total_txs > 0 {
-                                        let committed_tx_data: Vec<&[u8]> = certified
-                                            .blocks.iter()
-                                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                                            .collect();
+                                    // Digest-aware extraction (see extract_committed_tx_data's
+                                    // doc comment) -- a bare block.transactions() sum/collect
+                                    // silently sees zero transactions for BlockV3 blocks.
+                                    let committed_tx_data = super::executor::extract_committed_tx_data(&certified);
+                                    if !committed_tx_data.is_empty() {
                                         recycler.confirm_committed(&committed_tx_data).await;
                                     }
                                 }
