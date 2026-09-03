@@ -22,9 +22,12 @@ Tài liệu này hướng dẫn chi tiết cách vận hành script tự động
 | :--- | :---: | :---: | :--- |
 | `--pull` | `-p` | `false` | Tự động `git checkout` & `git pull` code mới nhất từ remote Git trước khi build & deploy. |
 | `--branch <tên_nhánh>` | `-b` | `dev` | Chỉ định tên nhánh Git cần pull. Tự động kích hoạt cờ `--pull`. |
-| `--skip-tests` | | `false` | Bỏ qua bước chạy 32+ bài test Block-STM (`run_all_tests.sh`) để rút ngắn thời gian deploy. |
+| `--rounds <N>` | | `3` | Số vòng chạy lặp lại toàn bộ bộ test Block-STM (mỗi vòng gồm 33 bài test). |
+| `--skip-tests` | | `false` | Bỏ qua bước chạy 33 bài test Block-STM (`run_all_tests.sh`) để rút ngắn thời gian deploy. |
 | `--skip-cross-chain` | | `false` | Bỏ qua bộ test Cross-Chain (`cross-chain/run_all_tests.sh`). |
 | `--help` | `-h` | | Hiển thị bảng trợ giúp và các ví dụ thực thi. |
+
+> 📱 **Tự Động Báo Cáo Telegram:** Script tự động đọc `telegram_bot_token` & `telegram_chat_id` từ [inventory.yml](inventory.yml). Nếu gặp bất kỳ lỗi nào ở bất kỳ bước nào, script sẽ **lập tức gửi thông báo khẩn cấp qua Telegram** kèm IP, nhánh Git, tên bước và lệnh bị lỗi! Khi chạy thành công toàn bộ, một tin nhắn báo cáo kết quả tổng kết cũng sẽ được gửi.
 
 ---
 
@@ -37,8 +40,8 @@ flowchart TD
     C --> D["[Bước 3] Khởi động lại Cross-Chain Relayer Daemon trong Tmux"]
     D --> E["[Bước 4] Đồng bộ RPC & IP Endpoints vào file config test (update-ip)"]
     E --> F["[Bước 5] Chạy Full Test Suite Cross-Chain (3 tests x 3 runs)"]
-    F --> G["[Bước 6] Chạy Full Test Suite Block-STM (32+ tests)"]
-    G --> H["🎉 Hoàn tất toàn bộ Pipeline thành công!"]
+    F --> G["[Bước 6] Chạy Full Test Suite Block-STM (3 Vòng x 33 tests)"]
+    G --> H["📱 Báo Cáo Kết Quả Lên Telegram & Hoàn Tất!"]
 ```
 
 1. **[Bước 0 - Git Pull]** *(Kích hoạt khi có cờ `-p`)*:
