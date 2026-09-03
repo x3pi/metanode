@@ -606,6 +606,10 @@ def main():
                     g_data = json.load(gf)
                 
                 if "validators" in g_data:
+                    # If starting fresh from template (genesis.json does not exist yet), clear sample validators
+                    if not os.path.exists(genesis_target):
+                        g_data["validators"] = []
+
                     updated = False
                     for i, v in enumerate(g_data["validators"]):
                         if v.get("hostname") == args.hostname:
