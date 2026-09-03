@@ -6,9 +6,47 @@ use consensus_core::{BlockAPI, CommittedSubDag};
 use consensus_core::coordination_hub::PeerAttestResult;
 use tokio::sync::mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as StdOrdering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
+
+// TEMPORARY DIAGNOSTIC (2026-09-02/03): counts DIGEST-GATE outcomes,
+// bypassing the tracing subscriber (eprintln!, same rationale as
+// tx_socket_server.rs's DIAG_* counters from the same investigation) to
+// confirm whether the pending_local_commits buffer (MAX_PENDING_LOCAL_
+// COMMITS=2000) actually overflows and drops commits under extreme
+// sustained load for a single-validator node, given
+// set_peer_commit_attestation is never called anywhere in this codebase
+// (confirmed via grep) -- meaning PeerAttestResult::Ok can never be
+// returned by that fallback path, so the ONLY way a commit dispatches for
+// a lone validator is the primary digest_verifier path succeeding fast
+// enough to keep the buffer from filling. Remove once this is settled.
+static DIAG_DIGEST_DIRECT_OK: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_BUFFERED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_DROPPED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_POLL_RECOVERED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_LAST_PRINT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_digest_maybe_print() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_DIGEST_LAST_PRINT_SECS.load(StdOrdering::Relaxed);
+    if now >= last + 2
+        && DIAG_DIGEST_LAST_PRINT_SECS
+            .compare_exchange(last, now, StdOrdering::Relaxed, StdOrdering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG digest-gate] direct_ok={} buffered={} poll_recovered={} dropped={}",
+            DIAG_DIGEST_DIRECT_OK.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_BUFFERED.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_POLL_RECOVERED.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_DROPPED.load(StdOrdering::Relaxed)
+        );
+    }
+}
 
 use crate::consensus::tx_recycler::TxRecycler;
 
@@ -793,7 +831,12 @@ impl CommitProcessor {
                         pending_local_commits.remove(&idx);
                         pending_local_timestamps.remove(&idx);
                     }
-                    
+
+                    if !verified_indices.is_empty() {
+                        DIAG_DIGEST_POLL_RECOVERED.fetch_add(verified_indices.len() as u64, StdOrdering::Relaxed);
+                        diag_digest_maybe_print();
+                    }
+
                     // Dispatch verified commits in strict ascending order
                     let mut digest_gate_epoch_break = false;
                     for local_idx in verified_indices {
@@ -1286,8 +1329,12 @@ impl CommitProcessor {
                             };
 
                             if digest_match {
+                                DIAG_DIGEST_DIRECT_OK.fetch_add(1, StdOrdering::Relaxed);
+                                diag_digest_maybe_print();
                                 dispatch_subdag = Some(subdag);
                             } else {
+                                DIAG_DIGEST_BUFFERED.fetch_add(1, StdOrdering::Relaxed);
+                                diag_digest_maybe_print();
                                 debug!(
                                     "🛡️ [TX-FLOW-TRACE DIGEST-GATE] ▶ PHASE 3 DIGEST-GATE: Local commit BUFFERED | \
                                      commit_index={}, leader={:?}, digest={}, buffered_count={}",
@@ -1296,13 +1343,15 @@ impl CommitProcessor {
                                 );
                                 pending_local_commits.insert(commit_index, subdag);
                                 pending_local_timestamps.insert(commit_index, std::time::Instant::now());
-                                
+
                                 // MEMORY-GUARD: Drop oldest if buffer exceeds MAX.
                                 // Dropped commits are NOT dispatched — they are simply discarded.
                                 // CommitSyncer will re-deliver them as CertifiedCommit from peers.
                                 // This guarantees: no fork from buffer management, ever.
                                 while pending_local_commits.len() > MAX_PENDING_LOCAL_COMMITS {
                                     if let Some((&oldest_idx, _)) = pending_local_commits.iter().next() {
+                                        DIAG_DIGEST_DROPPED.fetch_add(1, StdOrdering::Relaxed);
+                                        diag_digest_maybe_print();
                                         warn!(
                                             "⚠️ [MEMORY-GUARD] Buffer full ({}/{}). DROPPING (not dispatching) oldest commit {}. \
                                              CommitSyncer will re-deliver as CertifiedCommit.",
