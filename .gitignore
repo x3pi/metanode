@@ -541,3 +541,5 @@ execution/cmd/tool/zero_balance_check/
 
 # Generated local devnet cluster (data dirs, keys, logs) — never commit private keys
 deploy/cluster/
+execution/cmd/tool/cross_chain_relayer/cross_chain_relayer
+deploy/ansible_private_chains/gateway_register.json

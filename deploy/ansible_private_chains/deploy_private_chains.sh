@@ -233,47 +233,101 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation'
     fi
     echo ""
 
-    # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
+    # Xuất file json cấu hình tường minh đăng ký Gateway & cấu hình mạng Relayer
     python3 -c "
-import yaml, json
+import os, yaml, json
+
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
-hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
-root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
 
-out = {
+global_vars = data.get('all', {}).get('vars', {}) or {}
+root_rpc = global_vars.get('root_anchor_rpc', 'http://127.0.0.1:10746')
+submitter_key = global_vars.get('root_anchor_submitter_key', '')
+gen_supply = str(global_vars.get('genesis_supply_to_mint', '$GENESIS_SUPPLY'))
+per_chain = str(global_vars.get('per_chain_allocation', '$PER_CHAIN_ALLOCATION'))
+
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {}) or {}
+
+chains_config = []
+out_simple = {
     'root_anchor': root_rpc,
     'nodes': {},
     'tcp_nodes': {},
     'chain_nodes': {}
 }
-for h in hosts.values():
-    if isinstance(h, dict) and 'chain_id' in h:
-        cid = str(h['chain_id'])
-        ip = h.get('ansible_host', '127.0.0.1')
-        rpc_port = int(h.get('rpc_port', 8546))
-        p_offset = int(h.get('port_offset', 10))
-        num_vals = int(h.get('validators', 1))
 
-        out['nodes'][cid] = f'http://{ip}:{rpc_port}'
-        out['tcp_nodes'][cid] = f'{ip}:{4200 + p_offset}'
+for host_key, h in sorted(hosts.items()):
+    if not isinstance(h, dict) or 'chain_id' not in h:
+        continue
+    cid = int(h['chain_id'])
+    cid_str = str(cid)
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc_port = int(h.get('rpc_port', 8546))
+    p_offset = int(h.get('port_offset', 10))
+    num_vals = int(h.get('validators', 1))
 
-        c_rpc_nodes = {}
-        c_tcp_nodes = {}
-        for v in range(num_vals):
-            c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
-            c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + p_offset + v}'
+    out_simple['nodes'][cid_str] = f'http://{ip}:{rpc_port}'
+    out_simple['tcp_nodes'][cid_str] = f'{ip}:{4200 + p_offset}'
 
-        out['chain_nodes'][cid] = {
-            'validators': num_vals,
-            'rpc_url': f'http://{ip}:{rpc_port}',
-            'rpc_nodes': c_rpc_nodes,
-            'tcp_nodes': c_tcp_nodes
-        }
+    c_rpc_nodes = {}
+    c_tcp_nodes = {}
+    validators_list = []
 
-with open('/tmp/private_chains.json', 'w') as f:
-    json.dump(out, f, indent=2)
-print('📄 Đã xuất cấu hình ngắn gọn ra: /tmp/private_chains.json')
+    for v in range(num_vals):
+        c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
+        c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + p_offset + v}'
+
+        # Đọc validator BLS private key từ thư mục data cục bộ
+        bls_priv = ''
+        cfg_candidates = [
+            os.path.join('$SCRIPT_DIR', 'data', f'chain_{cid}', f'node-{v}', 'config.json'),
+            os.path.join('$SCRIPT_DIR', 'data', f'chain_{cid}', f'node-{v}', 'config', 'execution.json'),
+            os.path.join('/opt/metanode', f'chain-{cid}', f'node-{v}', 'config.json'),
+        ]
+        for cfg_p in cfg_candidates:
+            if os.path.exists(cfg_p):
+                try:
+                    with open(cfg_p) as cf:
+                        cd = json.load(cf)
+                        bls_priv = cd.get('Databases', {}).get('BLSPrivateKey', '')
+                        if bls_priv:
+                            break
+                except Exception:
+                    pass
+
+        validators_list.append({
+            'name': f'node-{v}',
+            'node_id': v,
+            'bls_private_key': bls_priv,
+            'stake': 1000
+        })
+
+    out_simple['chain_nodes'][cid_str] = {
+        'validators': num_vals,
+        'rpc_url': f'http://{ip}:{rpc_port}',
+        'rpc_nodes': c_rpc_nodes,
+        'tcp_nodes': c_tcp_nodes
+    }
+
+    chains_config.append({
+        'chain_id': cid,
+        'rpc_url': f'http://{ip}:{rpc_port}',
+        'quorum_threshold': 6667,
+        'validators': validators_list
+    })
+
+gateway_register_data = {
+    'root_anchor_rpc': root_rpc,
+    'submitter_key': submitter_key,
+    'genesis_supply': gen_supply,
+    'per_chain_allocation': per_chain,
+    'fund_genesis': True,
+    'chains': chains_config
+}
+
+with open('$SCRIPT_DIR/gateway_register.json', 'w') as f:
+    json.dump(gateway_register_data, f, indent=2)
+print('📄 Đã xuất cấu hình Gateway & Relayer ra: $SCRIPT_DIR/gateway_register.json')
 "
 
     SUBMITTER_KEY=$(python3 -c "
@@ -289,15 +343,7 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
 
     cd "$SCRIPT_DIR/../../execution"
     go build -o register_chains ./cmd/tool/register_chains
-    ./register_chains \
-        --key "$SUBMITTER_KEY" \
-        --root-anchor "$ROOT_ANCHOR_RPC" \
-        --chains "$CHAINS_LIST" \
-        --chains-dir "$SCRIPT_DIR/data" \
-        --target-rpcs "$TARGET_RPCS" \
-        --fund-genesis \
-        --genesis-supply "$GENESIS_SUPPLY" \
-        --per-chain-allocation "$PER_CHAIN_ALLOCATION"
+    ./register_chains --config "$SCRIPT_DIR/gateway_register.json"
 fi
 
 echo ""

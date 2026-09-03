@@ -48,21 +48,22 @@ func findDefaultRootAnchor() string {
 	return "http://127.0.0.1:10746"
 }
 
-func findDefaultChainsDir() string {
-	if env := os.Getenv("CHAINS_DIR"); env != "" {
+func findDefaultConfigFile() string {
+	if env := os.Getenv("GATEWAY_CONFIG"); env != "" {
 		return env
 	}
-	cwd, err := os.Getwd()
-	if err == nil {
+
+	// 1. Tìm từ thư mục làm việc hiện tại (working directory) đi ngược lên
+	if cwd, err := os.Getwd(); err == nil {
 		dir := cwd
 		for i := 0; i < 6; i++ {
-			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "data")
-			if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
 				return candidate
 			}
-			candidateNested := filepath.Join(dir, "metanode", "deploy", "ansible_private_chains", "data")
-			if stat, err := os.Stat(candidateNested); err == nil && stat.IsDir() {
-				return candidateNested
+			candidateDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(candidateDirect); err == nil && !stat.IsDir() {
+				return candidateDirect
 			}
 			parent := filepath.Dir(dir)
 			if parent == dir {
@@ -71,40 +72,46 @@ func findDefaultChainsDir() string {
 			dir = parent
 		}
 	}
-	if stat, err := os.Stat("/opt/metanode"); err == nil && stat.IsDir() {
-		return "/opt/metanode"
-	}
-	return "deploy/ansible_private_chains/data"
-}
 
-func findDefaultTargetRPCs() string {
-	if data, err := os.ReadFile("/tmp/private_chains.json"); err == nil {
-		var topology struct {
-			Nodes map[string]string `json:"nodes"`
-		}
-		if err := json.Unmarshal(data, &topology); err == nil && len(topology.Nodes) > 0 {
-			var pairs []string
-			for cid, url := range topology.Nodes {
-				pairs = append(pairs, fmt.Sprintf("%s=%s", cid, url))
+	// 2. Tìm từ vị trí file thực thi binary (executable directory) đi ngược lên
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(execPath)
+		for i := 0; i < 6; i++ {
+			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
+				return candidate
 			}
-			return strings.Join(pairs, ",")
+			candidateDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(candidateDirect); err == nil && !stat.IsDir() {
+				return candidateDirect
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
 	}
-	return ""
+
+	// 3. Fallback cho production cài đặt tại /opt/metanode
+	optPath := "/opt/metanode/deploy/ansible_private_chains/gateway_register.json"
+	if _, err := os.Stat(optPath); err == nil {
+		return optPath
+	}
+
+	return "deploy/ansible_private_chains/gateway_register.json"
 }
 
 func main() {
 	defaultRootAnchor := findDefaultRootAnchor()
-	defaultChainsDir := findDefaultChainsDir()
-	defaultTargetRPCs := findDefaultTargetRPCs()
+	defaultConfigFile := findDefaultConfigFile()
 
 	var (
+		configFileFlag      string
 		actionFlag          string
 		submitterKeyHex     string
 		rootAnchorRPC       string
-		chainsDir           string
 		chainIDsFlag        string
-		targetRPCsFlag      string
 		fundGenesisFlag     bool
 		genesisSupplyFlag   string
 		perChainAllocFlag   string
@@ -117,12 +124,11 @@ func main() {
 		amountWeiFlag string
 	)
 
+	flag.StringVar(&configFileFlag, "config", defaultConfigFile, "Path to JSON configuration file (declarative gateway register config)")
 	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry")
 	flag.StringVar(&submitterKeyHex, "key", "0xd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9", "Sender ECDSA private key hex")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", defaultRootAnchor, "Root Anchor JSON-RPC endpoint (auto-detected)")
-	flag.StringVar(&chainsDir, "chains-dir", defaultChainsDir, "Directory containing private chain data (auto-detected)")
-	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs")
-	flag.StringVar(&targetRPCsFlag, "target-rpcs", defaultTargetRPCs, "Comma-separated chainID=rpcURL pairs for cross-chain mesh seeding (auto-detected)")
+	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs (for query actions)")
 	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint and distribute genesis supply")
 	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total genesis supply to mint on Root Anchor (base-10 wei)")
 	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred to each founding chain (base-10 wei)")
@@ -133,6 +139,36 @@ func main() {
 	flag.Float64Var(&amountMTNFlag, "amount-mtn", 20000000, "Amount of MTN tokens to transfer (e.g. 20000000 for 20M MTN)")
 	flag.StringVar(&amountWeiFlag, "amount-wei", "", "Exact amount in base-10 wei for transfer-alloc")
 	flag.Parse()
+
+	var fileConfig *GatewayConfigFile
+	if configFileFlag != "" {
+		cfg, err := loadGatewayConfigFile(configFileFlag)
+		if err != nil {
+			logger.Error("Failed to load config file %s: %v", configFileFlag, err)
+			os.Exit(1)
+		}
+		fileConfig = cfg
+		logger.Info("Loaded configuration directly from file: %s (%d chains configured)", configFileFlag, len(fileConfig.Chains))
+
+		if fileConfig.RootAnchorRPC != "" {
+			rootAnchorRPC = fileConfig.RootAnchorRPC
+		}
+		if fileConfig.SubmitterKey != "" {
+			submitterKeyHex = fileConfig.SubmitterKey
+		}
+		if fileConfig.GenesisSupply != "" {
+			genesisSupplyFlag = fileConfig.GenesisSupply
+		}
+		if fileConfig.PerChainAllocation != "" {
+			perChainAllocFlag = fileConfig.PerChainAllocation
+		}
+		if fileConfig.FundGenesis != nil {
+			fundGenesisFlag = *fileConfig.FundGenesis
+		}
+		if fileConfig.TimelockWaitSeconds != nil {
+			timelockWaitSeconds = *fileConfig.TimelockWaitSeconds
+		}
+	}
 
 	submitterKeyHex = strings.TrimPrefix(submitterKeyHex, "0x")
 	privKey, err := crypto.HexToECDSA(submitterKeyHex)
@@ -155,9 +191,13 @@ func main() {
 	case "query-registry":
 		handleQueryRegistry(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "transfer-alloc", "transfer-allocation", "allocate-supply":
-		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
 	default: // "register"
-		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+		if fileConfig == nil || len(fileConfig.Chains) == 0 {
+			logger.Error("No gateway register config file found. Please provide --config <gateway_register.json>")
+			os.Exit(1)
+		}
+		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
 	}
 }
 
@@ -272,7 +312,8 @@ func handleTransferAllocation(
 	ctx context.Context,
 	privKey *ecdsa.PrivateKey,
 	fromAddress common.Address,
-	rootAnchorRPC, chainsDir string,
+	rootAnchorRPC string,
+	fileConfig *GatewayConfigFile,
 	parsedABI abi.ABI,
 	fromChain, toChain uint64,
 	amountMTN float64,
@@ -299,9 +340,24 @@ func handleTransferAllocation(
 	}
 	defer client.Close()
 
-	committee := loadAllCommitteeMembers(chainsDir)
+	if fileConfig == nil || len(fileConfig.Chains) == 0 {
+		fmt.Printf("❌ Config file required for committee signatures in transfer-alloc. Provide --config <path>\n")
+		os.Exit(1)
+	}
+
+	var committee []committeeMember
+	for _, c := range fileConfig.Chains {
+		for _, v := range c.Validators {
+			if v.BLSPrivateKey != "" {
+				committee = append(committee, committeeMember{
+					ChainID: c.ChainID,
+					PrivHex: v.BLSPrivateKey,
+				})
+			}
+		}
+	}
 	if len(committee) == 0 {
-		fmt.Printf("❌ No committee members found in %s\n", chainsDir)
+		fmt.Printf("❌ No validator BLSPrivateKeys found in config file\n")
 		os.Exit(1)
 	}
 
@@ -337,11 +393,49 @@ func handleTransferAllocation(
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 }
 
+type GatewayConfigFile struct {
+	RootAnchorRPC       string               `json:"root_anchor_rpc,omitempty"`
+	SubmitterKey        string               `json:"submitter_key,omitempty"`
+	GenesisSupply       string               `json:"genesis_supply,omitempty"`
+	PerChainAllocation  string               `json:"per_chain_allocation,omitempty"`
+	FundGenesis         *bool                `json:"fund_genesis,omitempty"`
+	TimelockWaitSeconds *int                 `json:"timelock_wait_seconds,omitempty"`
+	Chains              []ChainConfigEntry   `json:"chains"`
+}
+
+type ChainConfigEntry struct {
+	ChainID         uint64                 `json:"chain_id"`
+	RPCURL          string                 `json:"rpc_url"`
+	QuorumThreshold uint64                 `json:"quorum_threshold,omitempty"`
+	GatewayContract string                 `json:"gateway_contract,omitempty"`
+	Validators      []ValidatorConfigEntry `json:"validators"`
+}
+
+type ValidatorConfigEntry struct {
+	Name          string `json:"name,omitempty"`
+	NodeID        int    `json:"node_id,omitempty"`
+	BLSPrivateKey string `json:"bls_private_key"`
+	Stake         uint64 `json:"stake,omitempty"`
+}
+
+func loadGatewayConfigFile(filePath string) (*GatewayConfigFile, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
+	}
+	var cfg GatewayConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config json: %w", err)
+	}
+	return &cfg, nil
+}
+
 func handleRegisterChains(
 	ctx context.Context,
 	privKey *ecdsa.PrivateKey,
 	fromAddress common.Address,
-	rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag string,
+	rootAnchorRPC string,
+	cfg *GatewayConfigFile,
 	fundGenesisFlag bool,
 	genesisSupplyFlag, perChainAllocFlag string,
 	timelockWaitSeconds int,
@@ -352,63 +446,74 @@ func handleRegisterChains(
 	var payloads [][]byte
 	var committee []committeeMember
 	var chainIDs []uint64
-	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
-		cidStr = strings.TrimSpace(cidStr)
-		if cidStr == "" {
-			continue
-		}
-		var targetChainID uint64
-		if _, err := fmt.Sscanf(cidStr, "%d", &targetChainID); err != nil {
-			logger.Error("Invalid chain ID %q: %v", cidStr, err)
-			os.Exit(1)
-		}
+	var targetRPCs []string
 
-		nodeConfigs, err := loadChainAllNodeConfigs(chainsDir, cidStr)
-		if err != nil {
-			logger.Error("Failed to load node config for chain %s: %v", cidStr, err)
+	for _, c := range cfg.Chains {
+		if c.ChainID == 0 {
+			logger.Error("Encountered invalid ChainID 0 in config")
 			os.Exit(1)
 		}
 
 		var committeeEntries []cross_chain.ValidatorEntry
-		for _, nCfg := range nodeConfigs {
-			if nCfg.Databases.BLSPrivateKey == "" {
+		for _, v := range c.Validators {
+			if v.BLSPrivateKey == "" {
 				continue
 			}
-			blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(nCfg.Databases.BLSPrivateKey)
+			blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(v.BLSPrivateKey)
 			popSig := cross_chain.PopSign(blsPriv, blsPub)
+
+			stake := v.Stake
+			if stake == 0 {
+				stake = 1000
+			}
 
 			committeeEntries = append(committeeEntries, cross_chain.ValidatorEntry{
 				PubkeyBLS:    blsPub.Bytes(),
-				Stake:        1000,
+				Stake:        stake,
 				PopSignature: popSig.Bytes(),
 			})
-			committee = append(committee, committeeMember{ChainID: targetChainID, PrivHex: nCfg.Databases.BLSPrivateKey})
+			committee = append(committee, committeeMember{
+				ChainID: c.ChainID,
+				PrivHex: v.BLSPrivateKey,
+			})
 		}
 
 		if len(committeeEntries) == 0 {
-			logger.Error("Chain %s has no valid Databases.BLSPrivateKey configured in any node", cidStr)
+			logger.Error("Chain %d has no valid validators with BLSPrivateKey in config", c.ChainID)
 			os.Exit(1)
+		}
+
+		qThreshold := c.QuorumThreshold
+		if qThreshold == 0 {
+			qThreshold = 6667
+		}
+		gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+		if c.GatewayContract != "" {
+			gwAddr = common.HexToAddress(c.GatewayContract)
 		}
 
 		registry := cross_chain.ChainRegistry{
-			ChainID:         targetChainID,
+			ChainID:         c.ChainID,
 			Epoch:           0,
 			Committee:       committeeEntries,
-			QuorumThreshold: 6667,
-			GatewayContract: p_common.GATEWAY_CONTRACT_ADDRESS,
+			QuorumThreshold: qThreshold,
+			GatewayContract: gwAddr,
 		}
 		payloadBytes, err := json.Marshal(registry)
 		if err != nil {
-			logger.Error("Failed to marshal registry for chain %s: %v", cidStr, err)
+			logger.Error("Failed to marshal registry for chain %d: %v", c.ChainID, err)
 			os.Exit(1)
 		}
 		payloads = append(payloads, payloadBytes)
-		chainIDs = append(chainIDs, targetChainID)
-		logger.Info("Prepared founding entry for chain %s (%d validators, real BLS pubkeys, real PoP)", cidStr, len(committeeEntries))
+		chainIDs = append(chainIDs, c.ChainID)
+		if c.RPCURL != "" {
+			targetRPCs = append(targetRPCs, fmt.Sprintf("%d=%s", c.ChainID, c.RPCURL))
+		}
+		logger.Info("Prepared founding entry for chain %d (%d validators, real BLS pubkeys, real PoP)", c.ChainID, len(committeeEntries))
 	}
 
 	if len(payloads) == 0 {
-		logger.Error("No chains to register (-chains was empty)")
+		logger.Error("No valid chains found in config file")
 		os.Exit(1)
 	}
 
@@ -424,17 +529,9 @@ func handleRegisterChains(
 
 	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
 
-	if targetRPCsFlag != "" {
-		for _, pair := range strings.Split(targetRPCsFlag, ",") {
-			pair = strings.TrimSpace(pair)
-			if pair == "" {
-				continue
-			}
-			parts := strings.SplitN(pair, "=", 2)
-			if len(parts) != 2 {
-				logger.Error("Invalid -target-rpcs entry %q (expected chainID=url)", pair)
-				os.Exit(1)
-			}
+	for _, pair := range targetRPCs {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
 			label, rpcURL := "chain "+parts[0], parts[1]
 			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
 		}
@@ -443,103 +540,6 @@ func handleRegisterChains(
 	if fundGenesisFlag {
 		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
 	}
-}
-
-func loadAllCommitteeMembers(chainsDir string) []committeeMember {
-	var committee []committeeMember
-	entries, err := os.ReadDir(chainsDir)
-	if err != nil {
-		return nil
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		var cid uint64
-		if strings.HasPrefix(entry.Name(), "chain_") {
-			_, _ = fmt.Sscanf(entry.Name(), "chain_%d", &cid)
-		} else if strings.HasPrefix(entry.Name(), "chain-") {
-			_, _ = fmt.Sscanf(entry.Name(), "chain-%d", &cid)
-		} else {
-			continue
-		}
-		if cid == 0 {
-			continue
-		}
-		cfgs, err := loadChainAllNodeConfigs(chainsDir, fmt.Sprintf("%d", cid))
-		if err == nil {
-			for _, cfg := range cfgs {
-				if cfg.Databases.BLSPrivateKey != "" {
-					committee = append(committee, committeeMember{
-						ChainID: cid,
-						PrivHex: cfg.Databases.BLSPrivateKey,
-					})
-				}
-			}
-		}
-	}
-	return committee
-}
-
-type chainConfig struct {
-	Databases struct {
-		BLSPrivateKey string
-	}
-}
-
-func loadChainAllNodeConfigs(chainsDir, cidStr string) ([]*chainConfig, error) {
-	var results []*chainConfig
-
-	// 1. Try multi-node directories: chain_XXX/node-* or chain-XXX/node-*
-	dirCandidates := []string{
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr)),
-		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr)),
-		filepath.Join("/opt/metanode", fmt.Sprintf("chain-%s", cidStr)),
-	}
-
-	for _, d := range dirCandidates {
-		entries, err := os.ReadDir(d)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "node-") {
-				continue
-			}
-			cfgPaths := []string{
-				filepath.Join(d, entry.Name(), "config.json"),
-				filepath.Join(d, entry.Name(), "config", "execution.json"),
-			}
-			for _, p := range cfgPaths {
-				if data, err := os.ReadFile(p); err == nil {
-					var app chainConfig
-					if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
-						results = append(results, &app)
-						break
-					}
-				}
-			}
-		}
-		if len(results) > 0 {
-			return results, nil
-		}
-	}
-
-	// 2. Single-node fallback
-	singleCandidates := []string{
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json"),
-		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr), "config", "execution.json"),
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "config.json"),
-	}
-	for _, path := range singleCandidates {
-		if data, err := os.ReadFile(path); err == nil {
-			var app chainConfig
-			if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
-				return []*chainConfig{&app}, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("could not find valid config for chain %s in %s", cidStr, chainsDir)
 }
 
 func decodeRevertReason(returnBytes []byte) string {

@@ -106,12 +106,14 @@ func NewTxValidatorPool(
 	return vp
 }
 
-// ClearNoncesCache clears the local cache of expected nonces and local nonce floor.
-// Called on block commits or reverts to reflect updated on-chain state.
+// ClearNoncesCache clears the local cache of expected nonces.
+// Called on block commits to invalidate cached nonces and re-evaluate on-chain state.
+// NOTE: localNonceFloor is intentionally NOT wiped here (satisfying PR review); instead,
+// it is reconciled via ReconcileLocalNonceFloorFromBlock to protect against async NOMT DB
+// flush races under high TPS while preventing stale-floor deadlocks when txs fail/drop.
 func (vp *TxValidatorPool) ClearNoncesCache() {
 	vp.noncesCache.Store(&sync.Map{})
-	vp.localNonceFloor.Store(&sync.Map{})
-	logger.Debug("🧹 [POOL] Expected nonces cache and local nonce floor cleared (block committed/reverted)")
+	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed)")
 }
 
 // ClearLocalNonceFloor resets the floor described on TxValidatorPool's
