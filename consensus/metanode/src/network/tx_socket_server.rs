@@ -5,8 +5,166 @@ use anyhow::Result;
 use consensus_core;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+
+/// Bounds how long a single FFI batch may wait for its turn to actually
+/// submit to consensus (see SubmitOrderGate below) before proceeding out
+/// of order anyway. This is a pure liveness safety valve, not a
+/// performance tuning knob -- per this fix's "thà pending chứ không fork"
+/// mandate, waiting longer only ever slows the pipeline down (the bounded
+/// pipeline_semaphore and ffi_tx_receiver channel naturally propagate that
+/// as backpressure all the way back to Go's own SubmitTransactionBatch
+/// caller -- a safe, correct outcome), whereas timing out too early risks
+/// the exact reordering this fix exists to prevent.
+///
+/// CONFIRMED LIVE (2026-09-03): an earlier, much shorter value (5s) was
+/// tried first and looked perfect at 1,000,000-tx scale (0 nonce-rejects,
+/// 384 timeouts fired but none happened to collide with a shared sender)
+/// -- but at 4,000,000-tx scale, sustained load caused some predecessor
+/// batch to genuinely take longer than 5s, and this time the timeout's
+/// "proceed out of order anyway" fallback DID collide with a shared
+/// sender, reproducing 5,331 FAST-PATH-NONCE-REJECT events (far fewer
+/// than the ~178-direct-plus-cascade seen before this fix entirely, but
+/// not zero). Raised to comfortably exceed process_ffi_batch's own
+/// internal epoch-transition retry cap (60s, `attempt >= 1200` at 50ms
+/// each, a few dozen lines below) so this gate is never the shorter
+/// timeout in that race -- a batch legitimately taking that long to clear
+/// its own retry loop should still get to submit in order once it does,
+/// not have this gate give up on it first.
+const SUBMIT_ORDER_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// CONFIRMED ROOT CAUSE (2026-09-03): `TxSocketServer::start()`'s receive
+/// loop `tokio::spawn`s an independent, concurrently-scheduled task for
+/// every incoming FFI batch (see the 512-permit `pipeline_semaphore` a few
+/// lines below -- added for throughput, to avoid a *different*,
+/// already-fixed livelock). Go's own FFI calls arrive at `ffi_tx_receiver`
+/// in strict order, but nothing then constrains which spawned task's
+/// `submit_no_wait()` call actually reaches Rust's consensus submission
+/// channel first -- tokio task scheduling under load is not required to
+/// preserve spawn order. When a single sender's sequential nonces get
+/// split across two separate Go-side batches (very common under
+/// sustained load: a batch-size cap, a per-tick backlog cap, or simply
+/// the sender's transactions arriving to Go's mempool at different real
+/// times), the *later* nonces' batch can win this race and reach Rust's
+/// TransactionConsumer before the *earlier* nonces' batch -- Rust just
+/// includes what it received into blocks in received order, since it has
+/// no way to know two unrelated FFI calls actually belonged to the same
+/// logical sequence.
+///
+/// This surfaced downstream as Go's own execution engine
+/// (native_fast_path.go) permanently, silently dropping the "ahead of
+/// state" transaction and everything after it for that sender in that
+/// block (confirmed live: ~178 "FAST-PATH-NONCE-REJECT" log lines in a
+/// single 1,000,000-tx run, with gaps up to 25 between tx.Nonce() and
+/// state.Nonce()) -- but the true defect is here: two validators could,
+/// under different real-time scheduling/load conditions, order the SAME
+/// two batches differently and compute genuinely different results for
+/// the same GEI. That is a real correctness/determinism hazard, not just
+/// a throughput one -- explicitly treated as fork-risk-adjacent per this
+/// project's Zero-Fork invariant, even though this specific devnet only
+/// ever ran a single validator so no divergence could be *observed* here.
+///
+/// Fix: assign each batch a ticket in strict arrival order (in the single
+/// receive loop, before spawning), and have its task wait for that ticket
+/// to become current immediately before its own submission phase -- so
+/// concurrent PARSING/validation/epoch-transition-waiting is unaffected
+/// (preserving the throughput this concurrency exists for), but the
+/// actual handoff to consensus always happens in the same order Go
+/// originally sent it in. Bounded by SUBMIT_ORDER_TIMEOUT so a stuck or
+/// slow batch can only ever delay, never permanently block, everything
+/// behind it: "thà pending chứ không fork" -- prefer waiting (or, in the
+/// worst case, a late fallback) to correctness risk, but never a
+/// node-wide hang. SubmitTicket's Drop impl advances the gate on every
+/// exit path (early return, error, or normal completion) so a batch that
+/// never reaches wait_for_turn at all (e.g. a parse error, or being
+/// queued for the next epoch) can never starve tickets behind it either.
+struct SubmitOrderGate {
+    next_ticket: AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+impl SubmitOrderGate {
+    fn new() -> Self {
+        Self {
+            next_ticket: AtomicU64::new(0),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_for_turn(&self, my_ticket: u64, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.next_ticket.load(Ordering::Acquire) >= my_ticket {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    "⏰ [FFI-ORDER] Timed out after {:?} waiting for submit ticket {} (current={}) -- proceeding out of order rather than stalling the pipeline.",
+                    timeout,
+                    my_ticket,
+                    self.next_ticket.load(Ordering::Acquire)
+                );
+                return;
+            }
+            // A spurious/unrelated wakeup just re-checks the condition above
+            // and goes back to waiting for the remaining time -- never a
+            // correctness issue, at most a few redundant loop iterations.
+            let _ = tokio::time::timeout(remaining, self.notify.notified()).await;
+        }
+    }
+
+    /// Advances the gate to at least `ticket + 1` (never backwards, safe to
+    /// call redundantly or out of order) and wakes every waiter to
+    /// re-check its own turn.
+    fn advance_past(&self, ticket: u64) {
+        let mut current = self.next_ticket.load(Ordering::Acquire);
+        loop {
+            let target = current.max(ticket + 1);
+            if target == current {
+                break;
+            }
+            match self.next_ticket.compare_exchange_weak(
+                current,
+                target,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        self.notify.notify_waiters();
+    }
+}
+
+/// RAII ticket: guarantees `SubmitOrderGate::advance_past` is called
+/// exactly once when this value is dropped, on ANY exit path from the
+/// scope holding it -- see SubmitOrderGate's doc comment for why this
+/// matters (a missed advance on one of process_ffi_batch's many early
+/// returns would otherwise starve every ticket behind it).
+struct SubmitTicket {
+    gate: Arc<SubmitOrderGate>,
+    ticket: u64,
+}
+
+impl SubmitTicket {
+    fn new(gate: Arc<SubmitOrderGate>, ticket: u64) -> Self {
+        Self { gate, ticket }
+    }
+
+    async fn wait_for_turn(&self, timeout: Duration) {
+        self.gate.wait_for_turn(self.ticket, timeout).await;
+    }
+}
+
+impl Drop for SubmitTicket {
+    fn drop(&mut self) {
+        self.gate.advance_past(self.ticket);
+    }
+}
 
 // TEMPORARY DIAGNOSTIC (2026-09-02): counts block-inclusion outcomes for
 // submit_no_wait, bypassing the tracing subscriber entirely (eprintln!
@@ -90,6 +248,12 @@ impl TxSocketServer {
         // reducing End-to-End TPS. FFI channel will block when 512 batches are pending.
         let pipeline_semaphore = Arc::new(tokio::sync::Semaphore::new(512));
 
+        // See SubmitOrderGate's doc comment: preserves Go's original FFI
+        // call order at the point of actual consensus submission, without
+        // giving up the concurrency pipeline_semaphore exists for.
+        let submit_order_gate = Arc::new(SubmitOrderGate::new());
+        let mut next_ticket: u64 = 0;
+
         while let Some(tx_data) = ffi_tx_receiver.recv().await {
             let permit = pipeline_semaphore.clone().acquire_owned().await.unwrap();
 
@@ -99,6 +263,8 @@ impl TxSocketServer {
             let peer_rpc_addresses_ref = peer_rpc_addresses.clone();
             let peer_discovery_addresses_ref = peer_discovery_addresses.clone();
             let tx_recycler_ref = tx_recycler.clone();
+            let my_ticket = SubmitTicket::new(submit_order_gate.clone(), next_ticket);
+            next_ticket += 1;
 
             tokio::spawn(async move {
                 Self::process_ffi_batch(
@@ -109,6 +275,7 @@ impl TxSocketServer {
                     peer_rpc_addresses_ref,
                     peer_discovery_addresses_ref,
                     tx_recycler_ref,
+                    my_ticket,
                 )
                 .await;
                 drop(permit);
@@ -125,6 +292,7 @@ impl TxSocketServer {
         peer_rpc_addresses: Vec<String>,
         peer_discovery_addresses: Option<Arc<RwLock<Vec<String>>>>,
         tx_recycler: Option<Arc<TxRecycler>>,
+        submit_ticket: SubmitTicket,
     ) {
         use prost::bytes::Buf;
         let mut individual_txs = Vec::new();
@@ -370,6 +538,14 @@ impl TxSocketServer {
                 }
             }
 
+            // ORDER GATE: wait for this batch's turn before actually handing
+            // anything to consensus (see SubmitOrderGate's doc comment for
+            // the full incident this closes). Everything above this point
+            // (parsing, epoch-transition/node-acceptance waiting, SyncOnly
+            // peer-forwarding) still runs fully concurrently across batches
+            // -- only the final submission is ordered.
+            submit_ticket.wait_for_turn(SUBMIT_ORDER_TIMEOUT).await;
+
             // Submission phase
             const MAX_BUNDLE_SIZE: usize = 50000;
             let total_tx_count = transactions_to_submit.len();
@@ -558,5 +734,95 @@ impl TxSocketServer {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod submit_order_gate_tests {
+    use super::*;
+
+    /// Regression test for the CONFIRMED root cause: without SubmitOrderGate,
+    /// two concurrently-spawned batches' actual submission order depends on
+    /// which one finishes its own prep work first, not the order they
+    /// arrived in. Ticket 2 here finishes prep fastest, ticket 0 slowest --
+    /// a naive concurrent implementation would submit in completion order
+    /// [2, 1, 0]; SubmitOrderGate must enforce arrival order [0, 1, 2]
+    /// regardless.
+    #[tokio::test]
+    async fn tickets_enter_submission_in_ticket_order_not_completion_order() {
+        let gate = Arc::new(SubmitOrderGate::new());
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for (ticket, prep_delay_ms) in [(0u64, 30u64), (1, 15), (2, 0)] {
+            let gate = gate.clone();
+            let order = order.clone();
+            handles.push(tokio::spawn(async move {
+                // Simulates each batch's own variable-length prep work
+                // (parsing, node-acceptance checks, etc.) finishing at
+                // different real times, independent of arrival order.
+                tokio::time::sleep(Duration::from_millis(prep_delay_ms)).await;
+                let t = SubmitTicket::new(gate.clone(), ticket);
+                t.wait_for_turn(Duration::from_secs(5)).await;
+                order.lock().await.push(ticket);
+                // t drops here, advancing the gate for the next ticket.
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            *order.lock().await,
+            vec![0, 1, 2],
+            "submission must happen in ticket (arrival) order despite prep work finishing in the opposite order"
+        );
+    }
+
+    /// A ticket that's dropped WITHOUT ever calling wait_for_turn (simulating
+    /// process_ffi_batch returning early -- a parse error, being queued for
+    /// the next epoch, a SyncOnly forward, etc. -- before ever reaching its
+    /// submission phase) must still release later tickets immediately, not
+    /// starve them.
+    #[tokio::test]
+    async fn ticket_dropped_without_waiting_still_releases_later_tickets() {
+        let gate = Arc::new(SubmitOrderGate::new());
+        {
+            let _t0 = SubmitTicket::new(gate.clone(), 0);
+        } // dropped here, never having called wait_for_turn
+
+        let t1 = SubmitTicket::new(gate.clone(), 1);
+        let start = std::time::Instant::now();
+        t1.wait_for_turn(Duration::from_secs(5)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "ticket 1 should proceed almost immediately once ticket 0 is dropped, not wait out the full timeout: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A ticket that's alive but never advances (simulating a genuinely
+    /// stuck batch, e.g. an epoch-transition wait that never resolves) must
+    /// only ever DELAY later tickets by the timeout, never block them
+    /// forever -- this is the liveness safety valve that keeps this fix
+    /// from introducing the same class of hang already fixed in TxRecycler.
+    #[tokio::test]
+    async fn stuck_ticket_times_out_instead_of_blocking_forever() {
+        let gate = Arc::new(SubmitOrderGate::new());
+        let _t0 = SubmitTicket::new(gate.clone(), 0); // held alive for the whole test
+
+        let t1 = SubmitTicket::new(gate.clone(), 1);
+        let start = std::time::Instant::now();
+        t1.wait_for_turn(Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "should wait out the timeout, not skip immediately: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "should proceed promptly once the timeout fires, not hang further: {:?}",
+            elapsed
+        );
     }
 }
