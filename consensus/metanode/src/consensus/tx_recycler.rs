@@ -424,6 +424,43 @@ impl TxRecycler {
     }
 }
 
+/// Bound how long a single stale-TX resubmission attempt may block the
+/// recycler's background loop. See the CONFIRMED ROOT CAUSE comment at this
+/// function's call site in `start_recycler_background` for the full
+/// incident this fixes: without this bound, one stuck
+/// `transaction_client.submit()` call permanently froze the entire
+/// background loop (collect_stale, save_to_disk, and stats logging all
+/// stopped from that point on), silently disabling GC-recovery for the
+/// rest of the node's lifetime.
+const RESUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Attempts to resubmit one stale (previously-submitted, still-unconfirmed)
+/// transaction, bounded by RESUBMIT_TIMEOUT so a single hung attempt can
+/// never block the caller (the recycler's periodic background loop, or a
+/// test) forever.
+async fn resubmit_one_stale_tx(
+    transaction_client: &(dyn crate::node::tx_submitter::TransactionSubmitter + Send + Sync),
+    tx: Vec<u8>,
+) {
+    match tokio::time::timeout(RESUBMIT_TIMEOUT, transaction_client.submit(vec![tx])).await {
+        Ok(Ok((block_ref, _indices, _))) => {
+            info!(
+                "♻️ [TX RECYCLER] Successfully recycled stale TX into block {:?}",
+                block_ref
+            );
+        }
+        Ok(Err(e)) => {
+            warn!("♻️ [TX RECYCLER] Failed to re-submit stale TX: {}", e);
+        }
+        Err(_) => {
+            warn!(
+                "♻️ [TX RECYCLER] Re-submit of stale TX timed out after {:?} -- will retry on next sweep instead of blocking this loop indefinitely.",
+                RESUBMIT_TIMEOUT
+            );
+        }
+    }
+}
+
 /// Start background recycler task that periodically re-submits stale TXs
 pub async fn start_recycler_background(
     recycler: Arc<TxRecycler>,
@@ -448,22 +485,41 @@ pub async fn start_recycler_background(
         // Collect stale TXs
         let stale_txs = recycler.collect_stale().await;
 
+        // CONFIRMED ROOT CAUSE (2026-09-03) of a large fraction of the
+        // residual tx-loss investigation: `transaction_client.submit()`
+        // waits for the tx to actually be picked up into a proposed block
+        // (see TransactionClient::submit in meta-consensus/core -- it awaits
+        // submit_no_wait's outer oneshot), with no timeout of its own. Under
+        // heavy sustained load this can legitimately take a while, but was
+        // observed live to occasionally never resolve at all -- and because
+        // this `for` loop processes `stale_txs` sequentially with a plain
+        // `.await`, one stuck resubmission permanently froze this entire
+        // background loop for the rest of the node's lifetime: no further
+        // ticks, no further collect_stale(), no further save_to_disk(), no
+        // further stats logging. Confirmed via the on-disk
+        // tx_recycler_pending.dat's mtime staying frozen at the exact
+        // moment of the last successful loop iteration, 4+ minutes into an
+        // otherwise-healthy, still-block-producing node. Since this is the
+        // ONLY mechanism that ever resubmits a tx whose proposed block was
+        // genuinely garbage-collected, this silently disabled that recovery
+        // path for the remainder of every run after the first hang -- for
+        // however many real GC events happened after that point, none had
+        // a chance of recovery. Matches every symptom observed across this
+        // investigation: recycled=0 and expired=0 in every run regardless
+        // of how large the residual on-chain gap was, and the gap growing
+        // with load/duration (more time = more chances for a real GC event
+        // after the loop had already frozen).
+        //
+        // Fix: bound each attempt with the same timeout pattern already
+        // proven for exactly this class of bug in executor_client's FFI
+        // call (see test_rpc_timeout_pattern_does_not_hang_on_stuck_blocking_call).
+        // A single slow-but-working resubmission just logs and moves on;
+        // it will be picked up again on the next collect_stale() pass if it
+        // still hasn't confirmed. Extracted into resubmit_one_stale_tx so
+        // this can be exercised directly by a unit test with a mock
+        // submitter that hangs forever.
         for tx in stale_txs {
-            let single_tx_vec = vec![tx];
-            match transaction_client.submit(single_tx_vec).await {
-                Ok((block_ref, _indices, _)) => {
-                    info!(
-                        "♻️ [TX RECYCLER] Successfully recycled stale TX into block {:?}",
-                        block_ref
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "♻️ [TX RECYCLER] Failed to re-submit stale TX: {}",
-                        e
-                    );
-                }
-            }
+            resubmit_one_stale_tx(&*transaction_client, tx).await;
         }
 
         // Persist state to disk periodically (every 5s)
@@ -472,16 +528,20 @@ pub async fn start_recycler_background(
             last_save = Instant::now();
         }
 
-        // Log stats periodically (every 60s)
+        // Log stats periodically (every 60s). Unconditional print (no longer
+        // gated on pending>0||recycled>0): a submitted/confirmed gap that
+        // closes to pending=0 is itself a meaningful data point (e.g. for
+        // tracing whether every submitted TX was ever tracked at all), and
+        // the old gate silently stopped this log the moment pending drained
+        // to 0, making it impossible to get a reliable final reading after
+        // a clean run.
         if last_stats_log.elapsed() > Duration::from_secs(60) {
             let (pending, submitted, confirmed, recycled) = recycler.stats().await;
             let (expired, capacity_evicted) = recycler.extended_stats().await;
-            if pending > 0 || recycled > 0 {
-                info!(
-                    "♻️ [TX RECYCLER STATS] pending={}, submitted={}, confirmed={}, recycled={}, expired={}, capacity_evicted={}",
-                    pending, submitted, confirmed, recycled, expired, capacity_evicted
-                );
-            }
+            info!(
+                "♻️ [TX RECYCLER STATS] pending={}, submitted={}, confirmed={}, recycled={}, expired={}, capacity_evicted={}",
+                pending, submitted, confirmed, recycled, expired, capacity_evicted
+            );
             last_stats_log = Instant::now();
         }
 
@@ -510,6 +570,75 @@ mod tests {
     /// Distinct dummy tx payloads so each gets a distinct hash.
     fn dummy_tx(i: u64) -> Vec<u8> {
         i.to_le_bytes().to_vec()
+    }
+
+    /// Mock TransactionSubmitter whose `submit()` future never resolves,
+    /// simulating the CONFIRMED live incident (see resubmit_one_stale_tx's
+    /// doc comment / the CONFIRMED ROOT CAUSE comment in
+    /// start_recycler_background) where a real submit() call hung
+    /// indefinitely and froze the entire recycler background loop.
+    struct HangingSubmitter;
+
+    #[async_trait::async_trait]
+    impl crate::node::tx_submitter::TransactionSubmitter for HangingSubmitter {
+        async fn submit(
+            &self,
+            _transactions: Vec<Vec<u8>>,
+        ) -> anyhow::Result<(
+            consensus_types::block::BlockRef,
+            Vec<consensus_types::block::TransactionIndex>,
+            tokio::sync::oneshot::Receiver<consensus_core::BlockStatus>,
+        )> {
+            std::future::pending().await
+        }
+
+        async fn submit_no_wait(
+            &self,
+            _transactions: Vec<Vec<u8>>,
+        ) -> anyhow::Result<
+            tokio::sync::oneshot::Receiver<(
+                consensus_types::block::BlockRef,
+                Vec<consensus_types::block::TransactionIndex>,
+                tokio::sync::oneshot::Receiver<consensus_core::BlockStatus>,
+            )>,
+        > {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn resubmit_one_stale_tx_does_not_hang_on_stuck_submit() {
+        // Regression test for the CONFIRMED live incident: a real
+        // transaction_client.submit() call that never resolved used to
+        // freeze the entire recycler background loop forever -- proven live
+        // via tx_recycler_pending.dat's mtime staying frozen 4+ minutes into
+        // an otherwise-healthy, still-block-producing node. This function
+        // must always return within its own internal timeout, regardless of
+        // how long the underlying submit() call takes.
+        let submitter = HangingSubmitter;
+        let start = std::time::Instant::now();
+
+        // Outer safety-net timeout: if THIS fires, resubmit_one_stale_tx's
+        // own internal timeout failed to bound the call -- fail loudly
+        // rather than hang the whole test suite.
+        tokio::time::timeout(
+            RESUBMIT_TIMEOUT + Duration::from_secs(5),
+            resubmit_one_stale_tx(&submitter, dummy_tx(1)),
+        )
+        .await
+        .expect("resubmit_one_stale_tx must never hang past its own internal timeout");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= RESUBMIT_TIMEOUT,
+            "should have waited out the internal timeout, not returned instantly: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < RESUBMIT_TIMEOUT + Duration::from_secs(5),
+            "should return promptly once its own internal timeout fires, not hang further: {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

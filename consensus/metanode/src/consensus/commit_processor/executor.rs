@@ -55,6 +55,66 @@ fn diag_exec_maybe_print() {
 
 use crate::node::executor_client::ExecutorClient;
 
+/// Extracts the raw byte data of every real (non-system, non-empty-payload)
+/// transaction actually contained in a committed sub-DAG. Shared by every
+/// caller of `TxRecycler::confirm_committed` (this file's own call below,
+/// plus four in `commit_processor/processor.rs`).
+///
+/// BUG FIX (2026-09-03): every one of those 5 call sites previously
+/// extracted transactions via `block.transactions()` alone. `BlockV3`
+/// (compact block) stores only `tx_digests()` and unconditionally returns
+/// `&[]` from `transactions()` -- the exact same class of bug already
+/// found and fixed for this function's own FAST-SKIP counting a few dozen
+/// lines below (see that comment for the full BlockV3 explanation), and
+/// for the real dispatch path in `build_sorted_transactions`
+/// (block_sending.rs). So for any commit made of compact blocks, every
+/// `confirm_committed` call site saw zero (or an incomplete list of)
+/// transactions and skipped or under-reported confirmation, even though
+/// those transactions were genuinely committed and correctly dispatched to
+/// Go via this same function's separate, already-digest-aware path a few
+/// lines above.
+///
+/// Consequence: TxRecycler's `pending` map never learned these
+/// already-successful transactions had confirmed, leaving them stuck until
+/// RECYCLE_TIMEOUT elapsed -- at which point `collect_stale()` resubmitted
+/// an already-committed transaction with an already-used nonce. This is
+/// exactly the "stale TX re-submission ... nonce conflicts ... chain
+/// stall" failure mode the comment on this file's own confirm_committed
+/// call site already describes as a past, supposedly-fixed incident: it
+/// recurred because that fix used the wrong (digest-blind) extraction
+/// method, not because confirm_committed was never called at all.
+pub(crate) fn extract_committed_tx_data(subdag: &CommittedSubDag) -> Vec<Vec<u8>> {
+    let cache = consensus_core::get_global_tx_cache().read();
+    let mut out = Vec::new();
+    for block in &subdag.blocks {
+        let tx_digests = block.tx_digests();
+        if !tx_digests.is_empty() {
+            for digest in &tx_digests {
+                if let Some(tx) = cache.get(digest) {
+                    let data = tx.data();
+                    if data.len() == 64 && data.iter().all(|&b| b == 0) {
+                        continue;
+                    }
+                    out.push(data.to_vec());
+                }
+                // Not yet in cache: nothing to confirm with here.
+                // build_sorted_transactions() will warn/skip it at actual
+                // send time if it's truly missing -- this function is
+                // best-effort recycler bookkeeping, not the dispatch path.
+            }
+        } else {
+            for tx in block.transactions() {
+                let data = tx.data();
+                if data.len() == 64 && data.iter().all(|&b| b == 0) {
+                    continue;
+                }
+                out.push(data.to_vec());
+            }
+        }
+    }
+    out
+}
+
 pub async fn dispatch_commit(
     subdag: &CommittedSubDag,
     global_exec_index: u64,
@@ -267,25 +327,19 @@ pub async fn dispatch_commit(
 
                         let mut tracked_count = 0;
                         let mut batch_hashes = Vec::new();
-                        // Collect committed TX data for TxRecycler confirmation
-                        let mut committed_tx_data: Vec<&[u8]> = Vec::new();
-                        for block in &subdag.blocks {
-                            for tx in block.transactions() {
-                                let tx_data = tx.data();
-                                // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                                if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                                    continue;
-                                }
-                                let tx_hash =
-                                    crate::types::tx_hash::calculate_transaction_hash_single(
-                                        tx_data,
-                                    );
-                                hashes_arc.insert(tx_hash.clone());
-                                
-                                committed_tx_data.push(tx_data);
-                                batch_hashes.push(tx_hash);
-                                tracked_count += 1;
-                            }
+                        // Collect committed TX data for TxRecycler confirmation. Uses the
+                        // digest-aware extractor (see its doc comment) instead of a bare
+                        // block.transactions() loop, which silently sees zero transactions
+                        // for BlockV3 (compact) blocks.
+                        let committed_tx_data = extract_committed_tx_data(subdag);
+                        for tx_data in &committed_tx_data {
+                            let tx_hash =
+                                crate::types::tx_hash::calculate_transaction_hash_single(
+                                    tx_data,
+                                );
+                            hashes_arc.insert(tx_hash.clone());
+                            batch_hashes.push(tx_hash);
+                            tracked_count += 1;
                         }
 
                         // STABILITY FIX: Confirm committed TXs in TxRecycler.
