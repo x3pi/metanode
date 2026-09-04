@@ -111,12 +111,14 @@ func (m *mockRootAnchorServer) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				[][]byte{{0x01, 0x02}}, []uint64{1000}, [][]byte{{0xAA}},
 				uint64(7), uint64(6667), common.HexToAddress("0x1234567890123456789012345678901234567890"),
 				[32]byte{0xBE, 0xEF}, [32]byte{0xCA, 0xFE}, "https://example.com/archive", uint64(42),
+				common.HexToAddress("0x9999999999999999999999999999999999999999"), [32]byte{0xD1, 0x9E, 0x57},
 			)
 		} else {
 			out, _ = method.Outputs.Pack(
 				false,
 				[][]byte{}, []uint64{}, [][]byte{},
 				uint64(0), uint64(0), common.Address{}, [32]byte{}, [32]byte{}, "", uint64(0),
+				common.Address{}, [32]byte{},
 			)
 		}
 		writeJSONRPC(w, req.ID, hexutil.Encode(out), nil)
@@ -165,6 +167,12 @@ func TestClient_GetChainRegistry_Found(t *testing.T) {
 	}
 	if len(registry.Committee) != 1 || registry.Committee[0].Stake != 1000 {
 		t.Fatalf("unexpected committee: %+v", registry.Committee)
+	}
+	if registry.GenesisWallet != common.HexToAddress("0x9999999999999999999999999999999999999999") {
+		t.Fatalf("genesisWallet not round-tripped correctly: %+v", registry)
+	}
+	if registry.GenesisDigest != (common.Hash{0xD1, 0x9E, 0x57}) {
+		t.Fatalf("genesisDigest not round-tripped correctly: %+v", registry)
 	}
 	if atomic.LoadInt32(&mock.requests) != 1 {
 		t.Fatalf("expected exactly 1 HTTP request, got %d", mock.requests)

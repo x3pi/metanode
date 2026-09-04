@@ -333,6 +333,18 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
+	// GenesisWallet (2026-09-04, deterministic-genesis design) must be a real address whenever
+	// this registration will actually credit an initial allocation below -- a zero address here
+	// would mean the credited supply gets baked into the new chain's genesis.json pointing at
+	// nobody, permanently unspendable and impossible to later publish a digest for (SetGenesisDigest
+	// requires caller == GenesisWallet). Only enforced when funding is about to happen (matches the
+	// exact same LocalChainID==ReserveChainID && MinNativeStakeToRegister>0 gate below) so an
+	// unfunded/routing-only registration (MinNativeStakeToRegister unset) is unaffected.
+	if g.LocalChainID == g.ReserveChainID && g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if reg.GenesisWallet == (common.Address{}) {
+			return fmt.Errorf("RegisterChainViaStake: chain %d: genesis_wallet must be set (non-zero) whenever a stake-funded allocation will be credited", reg.ChainID)
+		}
+	}
 
 	// No stake/balance check here -- see this function's doc comment. The caller
 	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
@@ -392,6 +404,53 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	g.ChainRegistry[reg.ChainID] = reg
 	g.Governance.RegisterActiveChain(reg.ChainID)
 
+	return nil
+}
+
+// SetGenesisDigest publishes the canonical genesis.json digest for a chain registered via
+// RegisterChainViaStake (2026-09-04, deterministic-genesis design) -- a 2-phase flow, not
+// combinable into RegisterChainViaStake itself, because the digest can only be computed AFTER
+// genesis.json actually exists: register first (this is what determines GenesisWallet and, via
+// PerChainAllocation, the exact initial alloc amount every validator's genesis.json must agree
+// on) -- then every validator independently builds genesis.json from that public record and
+// SHOULD arrive at byte-identical output -- then the registrant publishes ONE of those (or an
+// independently recomputed) digest back here, so any future observer can fetch this digest
+// FIRST and verify their own locally-built genesis.json against it before trusting/joining the
+// chain, the same "recompute and compare, fail closed on mismatch" defense
+// pkg/cross_chain/ceremony.VerifyGenesisFile already provides for the founding-chain ceremony
+// path -- this is that same idea, just recorded on-chain instead of in a hand-distributed
+// genesis_digest.txt.
+//
+// Settable exactly once (ErrGenesisDigestAlreadySet on any later call, matching
+// ProposalAllocateSupply's own one-time-only pattern) and only by the chain's own recorded
+// GenesisWallet (ErrNotGenesisWallet otherwise) -- restricting the caller, not leaving this
+// permissionless, specifically closes a front-running race: a permissionless "first digest wins"
+// design would let an attacker publish a WRONG digest before the honest registrant gets to it,
+// silently locking every honest future validator out of ever passing verification while the
+// attacker's own tampered genesis file (built to match their own submitted digest) sails
+// through. Requiring GenesisWallet closes that: only the address that actually paid the real
+// stake (see RegisterChainViaStake's own doc comment on why GenesisWallet can't be spoofed to a
+// third party) can publish, so an attacker without that key cannot front-run at all.
+func (g *GatewayEngine) SetGenesisDigest(chainID uint64, digest common.Hash, caller common.Address) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	reg, exists := g.ChainRegistry[chainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, chainID)
+	}
+	if reg.GenesisDigest != (common.Hash{}) {
+		return fmt.Errorf("%w: chain %d", ErrGenesisDigestAlreadySet, chainID)
+	}
+	if reg.GenesisWallet == (common.Address{}) || caller != reg.GenesisWallet {
+		return fmt.Errorf("%w: chain %d", ErrNotGenesisWallet, chainID)
+	}
+	if digest == (common.Hash{}) {
+		return fmt.Errorf("SetGenesisDigest: chain %d: digest must be non-zero", chainID)
+	}
+
+	reg.GenesisDigest = digest
+	g.ChainRegistry[chainID] = reg
 	return nil
 }
 

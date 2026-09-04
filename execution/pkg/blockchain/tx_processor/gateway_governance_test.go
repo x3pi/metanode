@@ -483,3 +483,47 @@ func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
 	assert.Contains(t, reloaded.Governance.ActiveChains, uint64(104))
 	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.RegisteredChainCount))
 }
+
+// TestGatewayHandler_SetGenesisDigest_UsesRealCallerNotCalldata is the end-to-end regression test
+// proving the "setGenesisDigest" case forces tx.FromAddress() as the caller identity (never
+// something read out of calldata) -- the exact property GatewayEngine.SetGenesisDigest's own doc
+// comment says closes the front-running race. An attacker crafting a transaction FROM their own
+// address can never successfully impersonate the real genesis wallet, no matter what the calldata
+// itself claims.
+func TestGatewayHandler_SetGenesisDigest_UsesRealCallerNotCalldata(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	genesisWallet := common.HexToAddress("0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed")
+	attacker := common.HexToAddress("0xbadbadbadbadbadbadbadbadbadbadbadbadbad")
+
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{
+		104: {ChainID: 104, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet},
+	}, nil)
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	digest := common.HexToHash("0x1234567890123456789012345678901234567890123456789012345678901234")
+	calldata, err := h.abi.Pack("setGenesisDigest", new(big.Int).SetUint64(104), digest)
+	require.NoError(t, err)
+
+	t.Run("attacker's own transaction cannot publish the digest even though calldata targets chain 104", func(t *testing.T) {
+		tx := newTx(attacker, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+		require.True(t, failed, "setGenesisDigest from a non-genesis-wallet address must fail")
+
+		reloaded, err := loadGatewayEngine(cs)
+		require.NoError(t, err)
+		assert.Equal(t, common.Hash{}, reloaded.ChainRegistry[104].GenesisDigest, "a rejected attempt must never move the digest")
+	})
+
+	t.Run("the real genesis wallet's own transaction succeeds", func(t *testing.T) {
+		tx := newTx(genesisWallet, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+		_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+		require.False(t, failed, "setGenesisDigest from the real genesis wallet must succeed")
+
+		reloaded, err := loadGatewayEngine(cs)
+		require.NoError(t, err)
+		assert.Equal(t, digest, reloaded.ChainRegistry[104].GenesisDigest)
+	})
+}

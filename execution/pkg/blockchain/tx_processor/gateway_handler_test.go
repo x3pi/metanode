@@ -574,8 +574,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unpack getChainRegistry() output: %v", err)
 	}
-	if len(outValues) != 11 {
-		t.Fatalf("expected 11 output values, got %d", len(outValues))
+	if len(outValues) != 13 {
+		t.Fatalf("expected 13 output values, got %d", len(outValues))
 	}
 	exists, _ := outValues[0].(bool)
 	pubkeys, _ := outValues[1].([][]byte)
@@ -588,6 +588,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	accountTreeRootRaw, _ := outValues[8].([32]byte)
 	archivalEndpoint, _ := outValues[9].(string)
 	registeredAt, _ := outValues[10].(uint64)
+	genesisWallet, _ := outValues[11].(common.Address)
+	genesisDigestRaw, _ := outValues[12].([32]byte)
 
 	if !exists {
 		t.Fatal("expected exists=true for a registered chain")
@@ -621,6 +623,12 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	}
 	if registeredAt != 1234567890 {
 		t.Fatalf("registeredAt = %d, want 1234567890", registeredAt)
+	}
+	if genesisWallet != (common.Address{}) {
+		t.Fatalf("genesisWallet = %s, want zero (this fixture registers via ProposalRegisterChain, not RegisterChainViaStake)", genesisWallet.Hex())
+	}
+	if common.Hash(genesisDigestRaw) != (common.Hash{}) {
+		t.Fatalf("genesisDigest = %s, want zero (not yet published)", common.Hash(genesisDigestRaw).Hex())
 	}
 }
 

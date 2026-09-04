@@ -514,7 +514,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"registerChainViaStake", "batchOutboundCommit",
+		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -1288,6 +1288,18 @@ func (h *GatewayHandler) handleWrite(
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
+	case "setGenesisDigest":
+		// See GatewayEngine.SetGenesisDigest's own doc comment for the full 2-phase
+		// register-then-publish-digest rationale. tx.FromAddress() is passed as the caller (not
+		// trusted from calldata) so the GenesisWallet-only restriction is enforced against who
+		// ACTUALLY signed this transaction, the same pattern every other caller-identity check in
+		// this file uses.
+		targetChainID := mustUint64(args[0])
+		digest := mustHash(args[1])
+		if err := engine.SetGenesisDigest(targetChainID, digest, tx.FromAddress()); err != nil {
+			return nil, nil, err
+		}
+
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
 		epoch := chainState.GetCurrentEpoch()
@@ -1675,6 +1687,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 				false,
 				[][]byte{}, []uint64{}, [][]byte{},
 				uint64(0), uint64(0), common.Address{}, [32]byte{}, [32]byte{}, "", uint64(0),
+				common.Address{}, [32]byte{},
 			)
 		}
 
@@ -1692,6 +1705,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			pubkeys, stakes, popSignatures,
 			registry.Epoch, registry.QuorumThreshold, registry.GatewayContract,
 			[32]byte(registry.StateRoot), [32]byte(registry.AccountTreeRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
+			registry.GenesisWallet, [32]byte(registry.GenesisDigest),
 		)
 
 	case "getRegisteredPop":
@@ -1783,6 +1797,18 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			alloc = big.NewInt(0)
 		}
 		return method.Outputs.Pack(alloc)
+
+	case "getMinNativeStakeToRegister":
+		// Lets tooling (gen_single_chain.py's genesis builder, register_chains) fetch the current
+		// stake requirement instead of hardcoding/duplicating it -- see ChainRegistry.GenesisWallet
+		// and RegisterChainViaStake's doc comments for why this matters for the deterministic-
+		// genesis design (2026-09-04): every validator's genesis.json alloc amount must agree
+		// exactly, and that amount IS this value.
+		minStake := engine.MinNativeStakeToRegister
+		if minStake == nil {
+			minStake = big.NewInt(0)
+		}
+		return method.Outputs.Pack(minStake)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

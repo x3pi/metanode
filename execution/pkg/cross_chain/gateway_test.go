@@ -939,8 +939,13 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 // asserts GenesisTotalSupply stays byte-for-byte constant, and the one proving an exhausted
 // Reserve pool fails the whole registration closed rather than minting the gap.
 func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) {
+	// genesisWallet stands in for "the caller that actually paid the stake" (forced by
+	// gateway_handler.go in production, see RegisterChainViaStake's own doc comment) -- required
+	// non-zero here whenever a sub-test configures MinNativeStakeToRegister>0, per this same
+	// function's own genesis_wallet validation.
+	genesisWallet := common.HexToAddress("0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed")
 	newChainReg := func(chainID uint64) []byte {
-		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
+		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
 		payload, err := json.Marshal(reg)
 		require.NoError(t, err)
 		return payload
@@ -997,6 +1002,72 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104))
+	})
+}
+
+// TestGateway_SetGenesisDigest is the regression test for the 2026-09-04 deterministic-genesis
+// design's second phase -- publishing the canonical genesis.json digest AFTER a chain has already
+// been registered via RegisterChainViaStake. See SetGenesisDigest's own doc comment for why this
+// is a separate call (the digest can't be known at registration time) and why it's restricted to
+// exactly the chain's own GenesisWallet (closes a front-running race a permissionless "first
+// digest wins" design would otherwise have).
+func TestGateway_SetGenesisDigest(t *testing.T) {
+	genesisWallet := common.HexToAddress("0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed")
+	attacker := common.HexToAddress("0xbadbadbadbadbadbadbadbadbadbadbadbadbad")
+	someDigest := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	otherDigest := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+
+	newRegisteredEngine := func(t *testing.T) *GatewayEngine {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		require.NoError(t, engine.RegisterChainViaStake(payload))
+		return engine
+	}
+
+	t.Run("genesis wallet publishes successfully", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		require.NoError(t, engine.SetGenesisDigest(104, someDigest, genesisWallet))
+		assert.Equal(t, someDigest, engine.ChainRegistry[104].GenesisDigest)
+	})
+
+	t.Run("wrong caller (not genesis wallet) is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		err := engine.SetGenesisDigest(104, someDigest, attacker)
+		assert.ErrorIs(t, err, ErrNotGenesisWallet)
+		assert.Equal(t, common.Hash{}, engine.ChainRegistry[104].GenesisDigest, "a rejected caller must never move the digest, even to the same value a later honest call would use")
+	})
+
+	t.Run("settable exactly once -- second attempt, even by the same wallet, is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		require.NoError(t, engine.SetGenesisDigest(104, someDigest, genesisWallet))
+		err := engine.SetGenesisDigest(104, otherDigest, genesisWallet)
+		assert.ErrorIs(t, err, ErrGenesisDigestAlreadySet)
+		assert.Equal(t, someDigest, engine.ChainRegistry[104].GenesisDigest, "must keep the FIRST published digest, never silently overwrite")
+	})
+
+	t.Run("unregistered chain is rejected", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		err := engine.SetGenesisDigest(999999, someDigest, genesisWallet)
+		assert.ErrorIs(t, err, ErrUnknownSourceChain)
+	})
+
+	t.Run("zero digest is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		err := engine.SetGenesisDigest(104, common.Hash{}, genesisWallet)
+		assert.Error(t, err)
+		assert.Equal(t, common.Hash{}, engine.ChainRegistry[104].GenesisDigest)
+	})
+
+	t.Run("a chain registered without a GenesisWallet (e.g. via governance ProposalRegisterChain) can never have its digest published by anyone", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// Chain 101 comes from setupTestGatewayEngine's fixture, registered with no GenesisWallet.
+		err := engine.SetGenesisDigest(101, someDigest, common.Address{})
+		assert.ErrorIs(t, err, ErrNotGenesisWallet, "caller==zero-address must not accidentally match an unset GenesisWallet")
 	})
 }
 

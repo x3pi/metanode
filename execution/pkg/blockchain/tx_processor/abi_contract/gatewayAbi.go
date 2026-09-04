@@ -209,7 +209,9 @@ const GatewayABI = `[
 			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
 			{"internalType": "bytes32", "name": "accountTreeRoot", "type": "bytes32"},
 			{"internalType": "string", "name": "archivalEndpoint", "type": "string"},
-			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"}
+			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"},
+			{"internalType": "address", "name": "genesisWallet", "type": "address"},
+			{"internalType": "bytes32", "name": "genesisDigest", "type": "bytes32"}
 		],
 		"stateMutability": "view",
 		"type": "function"
@@ -219,6 +221,23 @@ const GatewayABI = `[
 		"name": "getAllocation",
 		"outputs": [{"internalType": "uint256", "name": "allocation", "type": "uint256"}],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "getMinNativeStakeToRegister",
+		"outputs": [{"internalType": "uint256", "name": "minStake", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "digest", "type": "bytes32"}
+		],
+		"name": "setGenesisDigest",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{
