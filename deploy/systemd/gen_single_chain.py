@@ -345,7 +345,24 @@ def main():
 
     # Auto-resolve reserve_chain_id from Root Anchor RPC if not explicitly provided
     if args.reserve_chain_id is None:
-        args.reserve_chain_id = 991 if args.root_anchor_rpc else args.chain_id
+        if args.root_anchor_rpc:
+            detected_id = None
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    args.root_anchor_rpc,
+                    data=b'{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}',
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    rdata = json.loads(resp.read().decode())
+                    if "result" in rdata and isinstance(rdata["result"], str):
+                        detected_id = int(rdata["result"], 16)
+            except Exception:
+                pass
+            args.reserve_chain_id = detected_id if detected_id is not None else 991
+        else:
+            args.reserve_chain_id = args.chain_id
 
     # Default submitter key to shared devnet key if Root Anchor is configured
     if not args.root_anchor_submitter_key and args.root_anchor_rpc:
