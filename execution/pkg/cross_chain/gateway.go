@@ -393,8 +393,11 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// leaves ChainRegistry/Governance completely untouched, with no separate rollback needed.
 	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
 		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
-		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
-			return fmt.Errorf("RegisterChainViaStake: chain %d: Reserve's allocation pool cannot cover the stake amount (no new supply is ever minted here): %w", reg.ChainID, err)
+		isColdStart := g.SupplyLedger.GenesisTotalSupply == nil || g.SupplyLedger.GenesisTotalSupply.Sign() == 0
+		if !isColdStart {
+			if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+				return fmt.Errorf("RegisterChainViaStake: chain %d: Reserve's allocation pool cannot cover the stake amount (no new supply is ever minted here): %w", reg.ChainID, err)
+			}
 		}
 	}
 

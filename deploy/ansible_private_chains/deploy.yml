@@ -128,11 +128,24 @@
               # Reserve (gen_root_anchor_chain.py already self-configures reserve_chain_id to its
               # own chain ID) -- fetch Root Anchor's REAL on-chain chain ID via eth_chainId rather
               # than trusting a hand-typed inventory value that could drift from reality.
-              RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_RPC" -H "Content-Type: application/json" \
-                -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-                | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))")
+              MAX_RETRIES=15
+              RETRY_COUNT=0
+              RESERVE_CHAIN_ID_HEX=""
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                RAW_OUT=$(curl -s -X POST "$ROOT_RPC" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' || true)
+                if [ -n "$RAW_OUT" ]; then
+                  RESERVE_CHAIN_ID_HEX=$(echo "$RAW_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || true)
+                  if [ -n "$RESERVE_CHAIN_ID_HEX" ]; then
+                    break
+                  fi
+                fi
+                echo "⏳ Waiting for Root Anchor RPC ($ROOT_RPC) to be ready (attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
+                sleep 2
+                RETRY_COUNT=$((RETRY_COUNT+1))
+              done
+              
               if [ -z "$RESERVE_CHAIN_ID_HEX" ]; then
-                echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_RPC"
+                echo "❌ ERROR: could not fetch Root Anchor's chain ID via eth_chainId from $ROOT_RPC after $MAX_RETRIES attempts"
                 exit 1
               fi
               RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
