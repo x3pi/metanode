@@ -1290,13 +1290,22 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
 		}
 		payload := mustBytes(args[0])
+		// amount (2026-09-04, user request: "người gửi tự chọn số tiền, >= mức sàn"): the caller
+		// now picks how much of their own real wallet balance becomes this chain's initial
+		// circulating allocation -- MinNativeStakeToRegister is enforced only as the FLOOR (still
+		// the anti-Sybil-spam bound), not the fixed amount, inside RegisterChainViaStake itself.
+		// This is what actually gets burned from the caller's wallet below, not a protocol
+		// constant, so a caller who wants a bigger initial allocation for their chain pays for it
+		// with a bigger real deposit.
+		amount := mustBigInt(args[1])
 		// GenesisWallet (2026-09-04, deterministic-genesis design) is forced to tx.FromAddress()
 		// here, overwriting whatever the submitted payload itself claims -- never trusted from
 		// calldata, same identity-forcing pattern the new "setGenesisDigest" case below uses. A
 		// spoofed GenesisWallet wouldn't let an attacker steal funds (the credited amount is
-		// always engine.MinNativeStakeToRegister regardless of whose address it names), but it
-		// could impersonate/confuse an unrelated well-known address into looking like it
-		// requested and funded a chain it never touched -- cheap to close, so it's closed.
+		// always the real `amount` burned from tx.FromAddress() below, regardless of whose
+		// address the payload names), but it could impersonate/confuse an unrelated well-known
+		// address into looking like it requested and funded a chain it never touched -- cheap to
+		// close, so it's closed.
 		var reg cross_chain.ChainRegistry
 		if err := json.Unmarshal(payload, &reg); err != nil {
 			return nil, nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
@@ -1306,7 +1315,7 @@ func (h *GatewayHandler) handleWrite(
 		if err != nil {
 			return nil, nil, fmt.Errorf("re-marshal ChainRegistry with forced genesis_wallet: %w", err)
 		}
-		if err := engine.RegisterChainViaStake(forcedPayload); err != nil {
+		if err := engine.RegisterChainViaStake(forcedPayload, amount); err != nil {
 			return nil, nil, err
 		}
 		// Balance mutation comes last, after every check that can still fail -- same ordering
@@ -1325,12 +1334,12 @@ func (h *GatewayHandler) handleWrite(
 		// ignores `to` entirely (see mvm_linker.cpp's processNativeMintBurn) -- so the mint leg is
 		// what actually makes this a real, held deposit rather than a fee that vanishes from
 		// total supply.
-		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
-			logger.Error("❌ [GATEWAY] registerChainViaStake native stake deposit failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, amount, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake native stake deposit failed (caller=%s, amount=%s): %v", tx.FromAddress().Hex(), amount.String(), err)
 			return nil, nil, fmt.Errorf("registerChainViaStake native stake deposit failed: %w", err)
 		}
-		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
-			logger.Error("❌ [GATEWAY] registerChainViaStake stake re-mint into GATEWAY_CONTRACT_ADDRESS failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, amount, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake stake re-mint into GATEWAY_CONTRACT_ADDRESS failed (caller=%s, amount=%s): %v", tx.FromAddress().Hex(), amount.String(), err)
 			return nil, nil, fmt.Errorf("registerChainViaStake stake deposit re-mint failed: %w", err)
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))

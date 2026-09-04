@@ -403,7 +403,8 @@ const GatewayABI = `[
 	},
 	{
 		"inputs": [
-			{"internalType": "bytes", "name": "payload", "type": "bytes"}
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"}
 		],
 		"name": "registerChainViaStake",
 		"outputs": [],

@@ -1298,7 +1298,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(1_000_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1320,7 +1320,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)); err != nil { // < minStake
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1354,7 +1354,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(15_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}

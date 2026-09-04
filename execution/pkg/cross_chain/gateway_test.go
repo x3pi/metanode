@@ -976,7 +976,7 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		// No Governance.Propose/Vote/ExecuteGovernanceProposal call anywhere in this sub-test --
 		// that absence IS the point being tested. No SupplyLedger pre-funding either -- this
 		// function no longer looks at PerChainAllocation at all.
-		err := engine.RegisterChainViaStake(newChainReg(104))
+		err := engine.RegisterChainViaStake(newChainReg(104), nil)
 		require.NoError(t, err)
 		reg, exists := engine.ChainRegistry[104]
 		assert.True(t, exists, "RegisterChainViaStake must admit a valid candidate with no vote")
@@ -989,7 +989,7 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		engine.EnsureGovernance()
 
 		// Chain 101 is already in ChainRegistry via setupTestGatewayEngine's fixture.
-		err := engine.RegisterChainViaStake(newChainReg(101))
+		err := engine.RegisterChainViaStake(newChainReg(101), nil)
 		assert.ErrorIs(t, err, ErrChainAlreadyRegistered)
 	})
 
@@ -1005,7 +1005,7 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		payload, err := json.Marshal(reg)
 		require.NoError(t, err)
 
-		err = engine.RegisterChainViaStake(payload)
+		err = engine.RegisterChainViaStake(payload, nil)
 		assert.ErrorIs(t, err, ErrPopVerifyFailed)
 		_, exists := engine.ChainRegistry[104]
 		assert.False(t, exists)
@@ -1044,7 +1044,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
 		reserveBefore := engine.SupplyLedger.GetAllocation(102)
 
-		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), engine.MinNativeStakeToRegister))
 
 		assert.Equal(t, big.NewInt(777), engine.SupplyLedger.GetAllocation(104), "new chain must walk away with allocation == its real stake deposit")
 		assert.Equal(t, new(big.Int).Sub(reserveBefore, big.NewInt(777)), engine.SupplyLedger.GetAllocation(102), "the credited amount must come OUT of Reserve's own pool, not out of thin air")
@@ -1066,7 +1066,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
 		reserveBefore := engine.SupplyLedger.GetAllocation(102)
 
-		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), engine.MinNativeStakeToRegister))
 		_, exists := engine.ChainRegistry[104]
 		assert.True(t, exists, "registration must succeed even when Reserve's pool can't cover the stake yet -- this is the normal bootstrap case, not an error")
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "unfunded for now -- must recover later via ProposalTransferAllocation (e.g. fundGenesis), not via a silent mint")
@@ -1083,7 +1083,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		payload, err := json.Marshal(reg)
 		require.NoError(t, err)
 
-		require.NoError(t, engine.RegisterChainViaStake(payload))
+		require.NoError(t, engine.RegisterChainViaStake(payload, engine.MinNativeStakeToRegister))
 		_, exists := engine.ChainRegistry[104]
 		assert.True(t, exists, "registration must still succeed")
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "must not credit a chain with no wallet to credit")
@@ -1097,7 +1097,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
 
-		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), engine.MinNativeStakeToRegister))
 
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "non-Reserve chain's own local ledger has no enforcement power -- must not be credited")
 		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply)
@@ -1108,7 +1108,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		engine.EnsureGovernance()
 		// MinNativeStakeToRegister left nil -- matches every pre-2026-09-04 config.
 
-		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), nil))
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104))
 	})
 }
@@ -1131,7 +1131,7 @@ func TestGateway_SetGenesisDigest(t *testing.T) {
 		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
 		payload, err := json.Marshal(reg)
 		require.NoError(t, err)
-		require.NoError(t, engine.RegisterChainViaStake(payload))
+		require.NoError(t, engine.RegisterChainViaStake(payload, nil))
 		return engine
 	}
 
@@ -1206,11 +1206,11 @@ func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T
 	// RegisterChainViaStake registers ONE chain per call (not a batch like the retired
 	// BootstrapFoundingChains), so each entry now succeeds or fails independently -- a bad
 	// sub-BFT entry no longer poisons any other, already-valid, entry's registration.
-	require.NoError(t, engine.RegisterChainViaStake(makeEntry(101, 6667)))
-	require.NoError(t, engine.RegisterChainViaStake(makeEntry(102, 6667)))
-	require.NoError(t, engine.RegisterChainViaStake(makeEntry(103, 6667)))
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(101, 6667), nil))
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(102, 6667), nil))
+	require.NoError(t, engine.RegisterChainViaStake(makeEntry(103, 6667), nil))
 
-	err = engine.RegisterChainViaStake(makeEntry(104, 1000)) // 10% -- far under the 2/3 BFT floor
+	err = engine.RegisterChainViaStake(makeEntry(104, 1000), nil) // 10% -- far under the 2/3 BFT floor
 	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
 	_, exists := engine.ChainRegistry[104]
 	assert.False(t, exists, "the sub-BFT entry itself must still be rejected")

@@ -640,6 +640,15 @@ type ChainConfigEntry struct {
 	QuorumThreshold uint64                 `json:"quorum_threshold,omitempty"`
 	GatewayContract string                 `json:"gateway_contract,omitempty"`
 	Validators      []ValidatorConfigEntry `json:"validators"`
+	// StakeAmount (2026-09-04, wei as a base-10 decimal string, same convention as GenesisSupply/
+	// PerChainAllocation): how much of the submitter's own real wallet balance to commit as THIS
+	// chain's registerChainViaStake deposit / initial circulating allocation -- see
+	// GatewayEngine.RegisterChainViaStake's doc comment for why this is now caller-chosen rather
+	// than a fixed protocol constant. Empty/unset falls back to the live on-chain
+	// getMinNativeStakeToRegister() floor (handleRegisterChains queries it once, lazily, only if
+	// at least one chain entry needs it) -- the exact old fixed-amount behavior, unchanged for any
+	// existing config that doesn't set this field.
+	StakeAmount string `json:"stake_amount,omitempty"`
 }
 
 type ValidatorConfigEntry struct {
@@ -675,9 +684,49 @@ func handleRegisterChains(
 	logger.Info("Using submitter address: %s", fromAddress.Hex())
 
 	var payloads [][]byte
+	var amounts []*big.Int
 	var committee []committeeMember
 	var chainIDs []uint64
 	var targetRPCs []string
+
+	// Lazily-fetched fallback for any chain entry that doesn't set its own StakeAmount -- the
+	// live on-chain getMinNativeStakeToRegister() floor, i.e. exactly the old fixed-amount
+	// behavior for any config that doesn't opt into a caller-chosen amount.
+	var floorAmount *big.Int
+	fetchFloorAmount := func() *big.Int {
+		if floorAmount != nil {
+			return floorAmount
+		}
+		client, err := ethclient.Dial(rootAnchorRPC)
+		if err != nil {
+			logger.Error("Failed to connect to %s to query getMinNativeStakeToRegister: %v", rootAnchorRPC, err)
+			os.Exit(1)
+		}
+		defer client.Close()
+		gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+		calldata, err := parsedABI.Pack("getMinNativeStakeToRegister")
+		if err != nil {
+			logger.Error("Failed to pack getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+		if err != nil {
+			logger.Error("Failed to call getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		results, err := parsedABI.Unpack("getMinNativeStakeToRegister", out)
+		if err != nil {
+			logger.Error("Failed to unpack getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		amt, _ := results[0].(*big.Int)
+		if amt == nil || amt.Sign() <= 0 {
+			logger.Error("getMinNativeStakeToRegister returned %v -- Root Anchor has no configured floor, set stake_amount explicitly in the config for every chain", amt)
+			os.Exit(1)
+		}
+		floorAmount = amt
+		return floorAmount
+	}
 
 	for _, c := range cfg.Chains {
 		if c.ChainID == 0 {
@@ -746,6 +795,16 @@ func handleRegisterChains(
 		}
 		payloads = append(payloads, payloadBytes)
 		chainIDs = append(chainIDs, c.ChainID)
+		if c.StakeAmount != "" {
+			amt, ok := new(big.Int).SetString(c.StakeAmount, 10)
+			if !ok || amt.Sign() <= 0 {
+				logger.Error("Chain %d: stake_amount %q is not a valid positive base-10 wei integer", c.ChainID, c.StakeAmount)
+				os.Exit(1)
+			}
+			amounts = append(amounts, amt)
+		} else {
+			amounts = append(amounts, fetchFloorAmount())
+		}
 		if c.RPCURL != "" {
 			targetRPCs = append(targetRPCs, fmt.Sprintf("%d=%s", c.ChainID, c.RPCURL))
 		}
@@ -759,7 +818,7 @@ func handleRegisterChains(
 
 	var registerCalldatas [][]byte
 	for i, payloadBytes := range payloads {
-		calldata, err := parsedABI.Pack("registerChainViaStake", payloadBytes)
+		calldata, err := parsedABI.Pack("registerChainViaStake", payloadBytes, amounts[i])
 		if err != nil {
 			logger.Error("Failed to pack registerChainViaStake call for chain %d: %v", chainIDs[i], err)
 			os.Exit(1)

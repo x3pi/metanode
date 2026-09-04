@@ -50,7 +50,7 @@ func TestGateway_RegisterChainViaStake_MultipleChainsSucceed(t *testing.T) {
 	engine.EnsureGovernance()
 
 	for _, id := range []uint64{101, 102, 103, 104} {
-		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id), nil))
 	}
 
 	assert.Len(t, engine.ChainRegistry, 4)
@@ -77,7 +77,7 @@ func TestGateway_RegisterChainViaStake_NoFoundingChainFloor(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
 	engine.EnsureGovernance()
 
-	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101)))
+	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101), nil))
 
 	assert.Len(t, engine.ChainRegistry, 1)
 	_, exists := engine.ChainRegistry[101]
@@ -88,9 +88,9 @@ func TestGateway_RegisterChainViaStake_RejectsDuplicateChainID(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
 	engine.EnsureGovernance()
 
-	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101)))
+	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101), nil))
 
-	err := engine.RegisterChainViaStake(makeRegistrationPayload(t, 101))
+	err := engine.RegisterChainViaStake(makeRegistrationPayload(t, 101), nil)
 	assert.ErrorIs(t, err, ErrChainAlreadyRegistered)
 	assert.Len(t, engine.ChainRegistry, 1, "the original registration must be unaffected")
 }
@@ -109,7 +109,7 @@ func TestGateway_RegisterChainViaStake_RejectsForgedPop(t *testing.T) {
 	badPayload, err := json.Marshal(reg)
 	require.NoError(t, err)
 
-	err = engine.RegisterChainViaStake(badPayload)
+	err = engine.RegisterChainViaStake(badPayload, nil)
 	require.Error(t, err)
 	assert.Len(t, engine.ChainRegistry, 0, "a rejected registration must not apply")
 }
@@ -123,11 +123,11 @@ func TestGateway_RegisterChainViaStake_RepeatableAcrossManyChains(t *testing.T) 
 	engine.EnsureGovernance()
 
 	for _, id := range []uint64{101, 102, 103, 104} {
-		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id), nil))
 	}
 
 	for _, id := range []uint64{201, 202, 203, 204} {
-		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id)))
+		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id), nil))
 	}
 
 	assert.Len(t, engine.ChainRegistry, 8, "later registrations must not be locked out by earlier ones")

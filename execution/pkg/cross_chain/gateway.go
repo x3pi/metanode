@@ -290,20 +290,23 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 // "bỏ cơ chế vote rồi mà sao vẫn còn" -- MinRegistrationStake previously only ADDED a stake
 // precondition on top of the existing vote requirement; this is the actual vote-free path).
 //
-// STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version): this
-// function performs NO stake check itself anymore. GatewayEngine has no AccountStateDB access, so
-// it cannot verify a real wallet balance -- and PerChainAllocation (the old basis) turned out to
-// be the wrong instrument entirely: it is a chain-ID-keyed, governance-vote-only ledger entry
-// (moved solely via ProposalTransferAllocation/ProposalAllocateSupply), not something any wallet
-// actually holds or can pay with, which does not match "cọc tiền từ ví thật" (a real, liquid
-// deposit from an actual wallet, in Root Anchor's own native coin -- explicitly NOT an ERC-20-style
-// token) -- the user's explicit design for this path. The real gate now lives one layer up, in
-// gateway_handler.go's "registerChainViaStake" case: it requires engine.MinNativeStakeToRegister
-// to be configured (>0), checks tx.FromAddress()'s REAL native balance via AccountStateDB against
-// it, calls this function, and -- only if that succeeds -- moves the stake out of the caller's
-// real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (burn-then-mint,
-// same balance-mutation-last-after-every-checkable-failure ordering as the "outbound" case's
-// Value/Tip/GasFee lock). This is also why BootstrapFoundingChains was retired the same day (2026-08-28, see
+// STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version; amount made
+// caller-chosen 2026-09-04, see below): this function performs no wallet-balance check itself --
+// GatewayEngine has no AccountStateDB access, so it cannot verify a real wallet balance -- and
+// PerChainAllocation (the old basis) turned out to be the wrong instrument entirely: it is a
+// chain-ID-keyed, governance-vote-only ledger entry (moved solely via
+// ProposalTransferAllocation/ProposalAllocateSupply), not something any wallet actually holds or
+// can pay with, which does not match "cọc tiền từ ví thật" (a real, liquid deposit from an actual
+// wallet, in Root Anchor's own native coin -- explicitly NOT an ERC-20-style token) -- the user's
+// explicit design for this path. The real gate now lives one layer up, in gateway_handler.go's
+// "registerChainViaStake" case: it requires engine.MinNativeStakeToRegister to be configured
+// (>0), calls this function (which itself enforces `amount >= MinNativeStakeToRegister`, below),
+// and -- only if that succeeds -- moves `amount` out of the caller's real wallet into
+// GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (burn-then-mint, same balance-
+// mutation-last-after-every-checkable-failure ordering as the "outbound" case's Value/Tip/GasFee
+// lock; an insufficient real balance simply makes that burn call itself fail, which -- because it
+// runs last -- cleanly discards this call's in-memory registration too). This is also why
+// BootstrapFoundingChains was retired the same day (2026-08-28, see
 // note/cross_chain_stake_and_value_flow.md): it processed a BATCH of founding chains from ONE
 // coordinator transaction, with no natural per-chain caller wallet to check a real balance
 // against -- RegisterChainViaStake (already per-chain) is now the universal registration path for
@@ -314,7 +317,7 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 // this function credits the SAME amount into the new chain's PerChainAllocation on the Reserve's
 // ledger, unifying "stake to register" and "circulating cross-chain allocation" -- see the
 // dedicated comment at the bottom of this function's body for the full rationale.
-func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
+func (g *GatewayEngine) RegisterChainViaStake(payload []byte, amount *big.Int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.EnsureGovernance()
@@ -340,9 +343,25 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
-	// No stake/balance check here -- see this function's doc comment. The caller
-	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
-	// native-coin deposit from tx.FromAddress() before invoking this function.
+	// Caller-chosen stake amount (2026-09-04, superseding the earlier fixed-MinNativeStakeToRegister-
+	// only version): the registrant picks how much of their own real wallet balance to commit as
+	// this chain's initial circulating allocation, not just a flat protocol minimum -- user request
+	// ("người gửi tự chọn số tiền, >= mức sàn"), matching a genuine chain's real economic size
+	// instead of forcing every chain (a tiny testnet or a large real deployment alike) through the
+	// same fixed fee. MinNativeStakeToRegister stays as the floor -- still the anti-Sybil-spam
+	// bound (see that field's own doc comment) -- just no longer also the ceiling. No stake/balance
+	// check beyond the floor happens here: the caller (gateway_handler.go's "registerChainViaStake"
+	// case) already verified and burns `amount` (not a fixed constant) from tx.FromAddress()'s real
+	// native balance right after this call succeeds.
+	if g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if amount == nil || amount.Cmp(g.MinNativeStakeToRegister) < 0 {
+			gotStr := "nil"
+			if amount != nil {
+				gotStr = amount.String()
+			}
+			return fmt.Errorf("RegisterChainViaStake: chain %d: amount %s is below the minimum stake %s", reg.ChainID, gotStr, g.MinNativeStakeToRegister.String())
+		}
+	}
 
 	// Unify "stake to register" and "circulating cross-chain allocation" into one real
 	// instrument (2026-09-04 user request: "dùng số tiền cọc và nạp đấy là số tiền để luân
@@ -405,9 +424,9 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// this only matters for a direct caller, e.g. a test, that sets MinNativeStakeToRegister
 	// without also setting GenesisWallet).
 	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
-		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 &&
+		amount != nil && amount.Sign() > 0 &&
 		reg.GenesisWallet != (common.Address{}) {
-		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, amount); err != nil {
 			if !errors.Is(err, ErrInsufficientAllocation) {
 				return fmt.Errorf("RegisterChainViaStake: chain %d: crediting stake into Reserve's allocation pool: %w", reg.ChainID, err)
 			}

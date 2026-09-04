@@ -45,7 +45,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -76,7 +76,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -111,7 +111,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -162,7 +162,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -194,7 +194,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")

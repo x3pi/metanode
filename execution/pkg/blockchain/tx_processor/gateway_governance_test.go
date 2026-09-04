@@ -436,7 +436,7 @@ func TestGatewayHandler_RegisterChainViaStake_TracksChainCountViaMetric(t *testi
 	for i, id := range []uint64{101, 102, 103, 104} {
 		caller := callers[i]
 		require.NoError(t, cs.GetAccountStateDB().AddBalance(caller, minStake))
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, id))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, id), minStake)
 		require.NoError(t, err)
 		tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
 		_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
@@ -469,7 +469,7 @@ func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
 	require.NoError(t, cs.GetAccountStateDB().AddBalance(caller, minStake))
 
 	payload := makeFoundingChainPayload(t, 104)
-	calldata, err := h.abi.Pack("registerChainViaStake", payload)
+	calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 	require.NoError(t, err)
 
 	tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
@@ -515,7 +515,7 @@ func TestGatewayHandler_RegisterChainViaStake_ForcesGenesisWalletToRealCaller(t 
 	}
 	payload, err := json.Marshal(reg)
 	require.NoError(t, err)
-	calldata, err := h.abi.Pack("registerChainViaStake", payload)
+	calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 	require.NoError(t, err)
 
 	tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))

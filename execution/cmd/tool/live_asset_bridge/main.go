@@ -313,6 +313,33 @@ func main() {
 		// this path), but each call debits *deployerKeyHex's real wallet by the target chain's
 		// configured MinNativeStakeToRegisterWei, so this step requires that config to be set on
 		// the target chain AND *deployerKeyHex to hold >= 4x that amount in real balance.
+		// registerChainViaStake now takes a caller-chosen amount (2026-09-04) instead of always
+		// debiting the fixed protocol MinNativeStakeToRegisterWei -- fetch that same live floor
+		// once here and use it as the amount for every bootstrap chain, preserving this tool's
+		// exact old behavior/comment above ("debits ... by the target chain's configured
+		// MinNativeStakeToRegisterWei").
+		minStakeCalldata, err := gatewayABI.Pack("getMinNativeStakeToRegister")
+		if err != nil {
+			fmt.Println("pack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		gwAddrForMinStake := p_common.GATEWAY_CONTRACT_ADDRESS
+		minStakeOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddrForMinStake, Data: minStakeCalldata}, nil)
+		if err != nil {
+			fmt.Println("call getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeResults, err := gatewayABI.Unpack("getMinNativeStakeToRegister", minStakeOut)
+		if err != nil {
+			fmt.Println("unpack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeAmount, _ := minStakeResults[0].(*big.Int)
+		if minStakeAmount == nil || minStakeAmount.Sign() <= 0 {
+			fmt.Println("getMinNativeStakeToRegister returned no configured floor -- set cross_chain.min_native_stake_to_register_wei on the target chain first")
+			os.Exit(1)
+		}
+
 		var committee []committeeMember
 		for i := 0; i < 4; i++ {
 			kp := bls.GenerateKeyPair()
@@ -333,7 +360,7 @@ func main() {
 				fmt.Println("marshal registry:", err)
 				os.Exit(1)
 			}
-			calldata, err := gatewayABI.Pack("registerChainViaStake", payload)
+			calldata, err := gatewayABI.Pack("registerChainViaStake", payload, minStakeAmount)
 			if err != nil {
 				fmt.Println("pack registerChainViaStake:", err)
 				os.Exit(1)

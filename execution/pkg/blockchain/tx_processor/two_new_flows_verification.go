@@ -143,7 +143,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			// Even a well-funded real wallet must not help -- unconfigured fails closed regardless.
@@ -190,7 +190,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			_ = cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)) // 5,000 < 10,000 minStake
@@ -236,7 +236,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			_ = cs.GetAccountStateDB().AddBalance(caller, minStake) // exactly minStake
@@ -298,7 +298,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			// Fund the caller well past minStake so a failure here is isolated to the PoP check,
