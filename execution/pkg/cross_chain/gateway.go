@@ -301,6 +301,12 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 // coordinator transaction, with no natural per-chain caller wallet to check a real balance
 // against -- RegisterChainViaStake (already per-chain) is now the universal registration path for
 // every chain, including chain #1, founding or not.
+//
+// PerChainAllocation as an OUTCOME (2026-09-04, distinct from the above -- that section is about
+// the STAKE CHECK, never PerChainAllocation-based): once the real deposit is verified+burned,
+// this function credits the SAME amount into the new chain's PerChainAllocation on the Reserve's
+// ledger, unifying "stake to register" and "circulating cross-chain allocation" -- see the
+// dedicated comment at the bottom of this function's body for the full rationale.
 func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -327,16 +333,124 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
+	// GenesisWallet (2026-09-04, deterministic-genesis design) must be a real address whenever
+	// this registration will actually credit an initial allocation below -- a zero address here
+	// would mean the credited supply gets baked into the new chain's genesis.json pointing at
+	// nobody, permanently unspendable and impossible to later publish a digest for (SetGenesisDigest
+	// requires caller == GenesisWallet). Only enforced when funding is about to happen (matches the
+	// exact same LocalChainID==ReserveChainID && MinNativeStakeToRegister>0 gate below) so an
+	// unfunded/routing-only registration (MinNativeStakeToRegister unset) is unaffected.
+	if g.LocalChainID == g.ReserveChainID && g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if reg.GenesisWallet == (common.Address{}) {
+			return fmt.Errorf("RegisterChainViaStake: chain %d: genesis_wallet must be set (non-zero) whenever a stake-funded allocation will be credited", reg.ChainID)
+		}
+	}
 
 	// No stake/balance check here -- see this function's doc comment. The caller
 	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
 	// native-coin deposit from tx.FromAddress() before invoking this function.
+
+	// Unify "stake to register" and "circulating cross-chain allocation" into one real
+	// instrument (2026-09-04 user request: "dùng số tiền cọc và nạp đấy là số tiền để luân
+	// chuyển" -- use the staked deposit itself as the money that circulates), instead of
+	// requiring a SEPARATE ProposalAllocateSupply/ProposalTransferAllocation step before a
+	// freshly-registered chain has any cross-chain-outbound capacity at all (the old "chain
+	// nghèo mãi mãi" gap, note/eurozone_unified_native_coin_plan.md mục 2.4).
+	//
+	// SECURITY FIX (2026-09-04, same day): the very first version of this block called
+	// GrantAllocation, which INCREASES GenesisTotalSupply by the credited amount -- a real,
+	// unbounded, repeatable, vote-free mint (found on user request to re-check for exactly this).
+	// The "real deposit" backing that mint (tx.FromAddress()'s balance on Root Anchor, checked
+	// one layer up in gateway_handler.go) is NOT itself provably traceable to GenesisTotalSupply:
+	// Root Anchor's own AccountStateDB balances come from its own genesis.json alloc, which is
+	// independently, arbitrarily set (gen_root_anchor_chain.py) with zero relation to
+	// GenesisTotalSupply. So crediting via GrantAllocation let ANYONE holding ANY Root Anchor
+	// wallet balance -- genesis-arbitrary or not -- mint fresh GenesisTotalSupply once per chain
+	// registered, unlimited times, no vote, no cap. That is strictly worse than
+	// ProposalAllocateSupply's own one-time+Reserve-only mint gate.
+	//
+	// Fixed by using TransferAllocation instead: it MOVES allocation the Reserve already holds in
+	// its own PerChainAllocation[ReserveChainID] pool (itself bounded by the one-time
+	// ProposalAllocateSupply mint) to the new chain -- GenesisTotalSupply never changes, "no vote
+	// needed" is preserved (TransferAllocation itself has no governance gate, matching
+	// RegisterChainViaStake's whole vote-free premise), and the constraint becomes exactly what
+	// the user asked for: Reserve must ALREADY hold enough real, previously-minted allocation to
+	// cover the amount, or the whole registration fails closed (ErrInsufficientAllocation) --
+	// never silently prints more. If Reserve's pool is ever exhausted, no further chain can
+	// register-with-funding via this path until the community moves more allocation to Reserve's
+	// pool via ProposalTransferAllocation (still vote-gated) -- same "fixed pie, redistributed"
+	// principle as every other allocation movement in this ledger (mục 3,
+	// note/eurozone_unified_native_coin_plan.md).
+	//
+	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note §2.3
+	// (and attestCommitInternal's enforceCeiling check), every OTHER chain's local copy of
+	// PerChainAllocation has no real enforcement power, so crediting it there would just be
+	// confusing, powerless bookkeeping.
+	//
+	// Deliberately done BEFORE the ChainRegistry/Governance writes below (not after, unlike the
+	// very first version of this fix): a chain whose promised funding Reserve's pool can't
+	// actually cover must never end up registered at all -- checking first means a failure here
+	// leaves ChainRegistry/Governance completely untouched, with no separate rollback needed.
+	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
+		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+			return fmt.Errorf("RegisterChainViaStake: chain %d: Reserve's allocation pool cannot cover the stake amount (no new supply is ever minted here): %w", reg.ChainID, err)
+		}
+	}
 
 	if g.ChainRegistry == nil {
 		g.ChainRegistry = make(map[uint64]ChainRegistry)
 	}
 	g.ChainRegistry[reg.ChainID] = reg
 	g.Governance.RegisterActiveChain(reg.ChainID)
+
+	return nil
+}
+
+// SetGenesisDigest publishes the canonical genesis.json digest for a chain registered via
+// RegisterChainViaStake (2026-09-04, deterministic-genesis design) -- a 2-phase flow, not
+// combinable into RegisterChainViaStake itself, because the digest can only be computed AFTER
+// genesis.json actually exists: register first (this is what determines GenesisWallet and, via
+// PerChainAllocation, the exact initial alloc amount every validator's genesis.json must agree
+// on) -- then every validator independently builds genesis.json from that public record and
+// SHOULD arrive at byte-identical output -- then the registrant publishes ONE of those (or an
+// independently recomputed) digest back here, so any future observer can fetch this digest
+// FIRST and verify their own locally-built genesis.json against it before trusting/joining the
+// chain, the same "recompute and compare, fail closed on mismatch" defense
+// pkg/cross_chain/ceremony.VerifyGenesisFile already provides for the founding-chain ceremony
+// path -- this is that same idea, just recorded on-chain instead of in a hand-distributed
+// genesis_digest.txt.
+//
+// Settable exactly once (ErrGenesisDigestAlreadySet on any later call, matching
+// ProposalAllocateSupply's own one-time-only pattern) and only by the chain's own recorded
+// GenesisWallet (ErrNotGenesisWallet otherwise) -- restricting the caller, not leaving this
+// permissionless, specifically closes a front-running race: a permissionless "first digest wins"
+// design would let an attacker publish a WRONG digest before the honest registrant gets to it,
+// silently locking every honest future validator out of ever passing verification while the
+// attacker's own tampered genesis file (built to match their own submitted digest) sails
+// through. Requiring GenesisWallet closes that: only the address that actually paid the real
+// stake (see RegisterChainViaStake's own doc comment on why GenesisWallet can't be spoofed to a
+// third party) can publish, so an attacker without that key cannot front-run at all.
+func (g *GatewayEngine) SetGenesisDigest(chainID uint64, digest common.Hash, caller common.Address) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	reg, exists := g.ChainRegistry[chainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, chainID)
+	}
+	if reg.GenesisDigest != (common.Hash{}) {
+		return fmt.Errorf("%w: chain %d", ErrGenesisDigestAlreadySet, chainID)
+	}
+	if reg.GenesisWallet == (common.Address{}) || caller != reg.GenesisWallet {
+		return fmt.Errorf("%w: chain %d", ErrNotGenesisWallet, chainID)
+	}
+	if digest == (common.Hash{}) {
+		return fmt.Errorf("SetGenesisDigest: chain %d: digest must be non-zero", chainID)
+	}
+
+	reg.GenesisDigest = digest
+	g.ChainRegistry[chainID] = reg
 	return nil
 }
 

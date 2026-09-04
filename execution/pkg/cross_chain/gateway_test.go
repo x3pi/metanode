@@ -862,7 +862,7 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 }
 
 // TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
-// As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake check at all --
+// As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake CHECK at all --
 // it has no AccountStateDB access, so it cannot verify a real wallet balance. The real gate (a
 // REAL native-coin deposit from the caller's own wallet, checked+burned against
 // GatewayEngine.MinNativeStakeToRegister) lives one layer up, in gateway_handler.go's
@@ -870,6 +870,12 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 // StakeDeposit (gateway_handler_test.go) for that coverage. This file only covers what
 // RegisterChainViaStake itself is still responsible for: duplicate-registration and PoP/quorum
 // validation, vote-free.
+//
+// 2026-09-04: RegisterChainViaStake now DOES touch PerChainAllocation, as an outcome rather than
+// a check -- it credits MinNativeStakeToRegister into the new chain's allocation on the Reserve's
+// own ledger (see the function's own doc comment). None of the sub-tests below set
+// MinNativeStakeToRegister on their engine, so that new branch stays a no-op here by construction
+// -- see TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation for that coverage instead.
 func TestGateway_RegisterChainViaStake(t *testing.T) {
 	newChainReg := func(chainID uint64) []byte {
 		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
@@ -918,6 +924,150 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		assert.ErrorIs(t, err, ErrPopVerifyFailed)
 		_, exists := engine.ChainRegistry[104]
 		assert.False(t, exists)
+	})
+}
+
+// TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation is the regression test for the
+// 2026-09-04 unification of "stake to register" and "circulating cross-chain allocation" (see
+// RegisterChainViaStake's own doc comment, and note/eurozone_unified_native_coin_plan.md mục 2.4)
+// -- a freshly-registered chain must walk away with real cross-chain-outbound capacity equal to
+// its own stake deposit, with zero separate ProposalTransferAllocation/ClaimMessage step needed.
+//
+// Same-day security fix covered here (user explicitly asked to re-check "không được in từ hư
+// không" -- must never print from nothing): the credit MUST be a TRANSFER out of Reserve's own
+// existing PerChainAllocation pool, never a GrantAllocation-style mint -- see the sub-test that
+// asserts GenesisTotalSupply stays byte-for-byte constant, and the one proving an exhausted
+// Reserve pool fails the whole registration closed rather than minting the gap.
+func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) {
+	// genesisWallet stands in for "the caller that actually paid the stake" (forced by
+	// gateway_handler.go in production, see RegisterChainViaStake's own doc comment) -- required
+	// non-zero here whenever a sub-test configures MinNativeStakeToRegister>0, per this same
+	// function's own genesis_wallet validation.
+	genesisWallet := common.HexToAddress("0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed")
+	newChainReg := func(chainID uint64) []byte {
+		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		return payload
+	}
+
+	t.Run("Reserve's own copy: TRANSFERS from Reserve's own pool -- GenesisTotalSupply never changes", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102, holding 5000
+		engine.EnsureGovernance()
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+		reserveBefore := engine.SupplyLedger.GetAllocation(102)
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+
+		assert.Equal(t, big.NewInt(777), engine.SupplyLedger.GetAllocation(104), "new chain must walk away with allocation == its real stake deposit")
+		assert.Equal(t, new(big.Int).Sub(reserveBefore, big.NewInt(777)), engine.SupplyLedger.GetAllocation(102), "the credited amount must come OUT of Reserve's own pool, not out of thin air")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must NEVER change here -- this is a transfer, not a mint")
+		assert.True(t, engine.SupplyLedger.VerifyInvariant())
+	})
+
+	t.Run("Reserve's pool exhausted: whole registration fails closed, never mints the shortfall", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // Reserve (102) holds only 5000
+		engine.EnsureGovernance()
+		engine.MinNativeStakeToRegister = big.NewInt(999999) // far more than Reserve actually holds
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		err := engine.RegisterChainViaStake(newChainReg(104))
+		assert.ErrorIs(t, err, ErrInsufficientAllocation, "must fail closed, not silently mint the gap")
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists, "a registration whose promised funding can't actually be paid must not be admitted at all")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "a failed registration must leave GenesisTotalSupply completely untouched")
+	})
+
+	t.Run("non-Reserve chain's local copy: SupplyLedger untouched (no enforcement power there anyway)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.ReserveChainID = 999 // now LocalChainID(102) != ReserveChainID
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "non-Reserve chain's own local ledger has no enforcement power -- must not be credited")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply)
+	})
+
+	t.Run("MinNativeStakeToRegister unset: no crediting, registration still succeeds (vote-free path unaffected)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// MinNativeStakeToRegister left nil -- matches every pre-2026-09-04 config.
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104))
+	})
+}
+
+// TestGateway_SetGenesisDigest is the regression test for the 2026-09-04 deterministic-genesis
+// design's second phase -- publishing the canonical genesis.json digest AFTER a chain has already
+// been registered via RegisterChainViaStake. See SetGenesisDigest's own doc comment for why this
+// is a separate call (the digest can't be known at registration time) and why it's restricted to
+// exactly the chain's own GenesisWallet (closes a front-running race a permissionless "first
+// digest wins" design would otherwise have).
+func TestGateway_SetGenesisDigest(t *testing.T) {
+	genesisWallet := common.HexToAddress("0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed")
+	attacker := common.HexToAddress("0xbadbadbadbadbadbadbadbadbadbadbadbadbad")
+	someDigest := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	otherDigest := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+
+	newRegisteredEngine := func(t *testing.T) *GatewayEngine {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		require.NoError(t, engine.RegisterChainViaStake(payload))
+		return engine
+	}
+
+	t.Run("genesis wallet publishes successfully", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		require.NoError(t, engine.SetGenesisDigest(104, someDigest, genesisWallet))
+		assert.Equal(t, someDigest, engine.ChainRegistry[104].GenesisDigest)
+	})
+
+	t.Run("wrong caller (not genesis wallet) is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		err := engine.SetGenesisDigest(104, someDigest, attacker)
+		assert.ErrorIs(t, err, ErrNotGenesisWallet)
+		assert.Equal(t, common.Hash{}, engine.ChainRegistry[104].GenesisDigest, "a rejected caller must never move the digest, even to the same value a later honest call would use")
+	})
+
+	t.Run("settable exactly once -- second attempt, even by the same wallet, is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		require.NoError(t, engine.SetGenesisDigest(104, someDigest, genesisWallet))
+		err := engine.SetGenesisDigest(104, otherDigest, genesisWallet)
+		assert.ErrorIs(t, err, ErrGenesisDigestAlreadySet)
+		assert.Equal(t, someDigest, engine.ChainRegistry[104].GenesisDigest, "must keep the FIRST published digest, never silently overwrite")
+	})
+
+	t.Run("unregistered chain is rejected", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		err := engine.SetGenesisDigest(999999, someDigest, genesisWallet)
+		assert.ErrorIs(t, err, ErrUnknownSourceChain)
+	})
+
+	t.Run("zero digest is rejected", func(t *testing.T) {
+		engine := newRegisteredEngine(t)
+		err := engine.SetGenesisDigest(104, common.Hash{}, genesisWallet)
+		assert.Error(t, err)
+		assert.Equal(t, common.Hash{}, engine.ChainRegistry[104].GenesisDigest)
+	})
+
+	t.Run("a chain registered without a GenesisWallet (e.g. via governance ProposalRegisterChain) can never have its digest published by anyone", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// Chain 101 comes from setupTestGatewayEngine's fixture, registered with no GenesisWallet.
+		err := engine.SetGenesisDigest(101, someDigest, common.Address{})
+		assert.ErrorIs(t, err, ErrNotGenesisWallet, "caller==zero-address must not accidentally match an unset GenesisWallet")
 	})
 }
 

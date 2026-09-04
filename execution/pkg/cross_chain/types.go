@@ -21,6 +21,12 @@ var (
 	ErrSameChainTransfer = errors.New("source and destination chain IDs must be distinct")
 	// ErrNilAmount occurs when an operation receives a nil or negative amount.
 	ErrNilAmount = errors.New("allocation amount cannot be nil or negative")
+	// ErrGenesisDigestAlreadySet occurs when SetGenesisDigest is called for a chain that already
+	// has a non-zero GenesisDigest recorded -- settable exactly once, see ChainRegistry.GenesisDigest.
+	ErrGenesisDigestAlreadySet = errors.New("genesis digest already published for this chain")
+	// ErrNotGenesisWallet occurs when SetGenesisDigest's caller does not match the chain's
+	// recorded GenesisWallet (the address that actually paid the registration stake).
+	ErrNotGenesisWallet = errors.New("caller is not this chain's recorded genesis wallet")
 )
 
 // ValidatorEntry represents a committee validator with BLS pubkey and Proof-of-Possession signature.
@@ -61,6 +67,31 @@ type ChainRegistry struct {
 	AccountTreeRoot  common.Hash      `json:"account_tree_root"`
 	ArchivalEndpoint string           `json:"archival_endpoint"`
 	RegisteredAt     uint64           `json:"registered_at"`
+
+	// GenesisWallet and GenesisDigest (2026-09-04) support the stake-funded onboarding flow's
+	// deterministic-genesis design: a chain registered via RegisterChainViaStake bakes its
+	// initial allocation directly into its OWN genesis.json (no live post-registration bridge
+	// transfer needed) rather than starting at 0 and waiting for a separate ClaimMessage. See
+	// RegisterChainViaStake and SetGenesisDigest's own doc comments for the full mechanism.
+	//
+	// GenesisWallet is the address that must hold the chain's initial native-coin supply in its
+	// own genesis.json alloc -- forced to equal the caller that actually paid the stake
+	// (gateway_handler.go's "registerChainViaStake" case passes tx.FromAddress(), overwriting
+	// whatever the submitted payload claimed), never operator-suppliable, so it can't be spoofed
+	// to point at an unrelated wallet.
+	GenesisWallet common.Address `json:"genesis_wallet,omitempty"`
+
+	// GenesisDigest is keccak256 of the chain's canonical genesis.json bytes (same primitive as
+	// pkg/cross_chain/ceremony.Digest -- kept identical on purpose so the two verification paths
+	// share one well-tested definition of "digest"), published via SetGenesisDigest AFTER the
+	// registrant has actually built genesis.json for every validator (chicken-and-egg: the
+	// digest can only be computed once the file exists, so it can't be part of the original
+	// registration payload). Zero means "not yet published" -- any observer bootstrapping a node
+	// for this chain should treat an unpublished digest as "cannot verify yet", not "verified
+	// empty". Settable exactly once (ErrGenesisDigestAlreadySet on a second attempt) and only by
+	// GenesisWallet, so a would-be attacker can't front-run the real registrant with a wrong
+	// digest that later locks out the honest genesis file.
+	GenesisDigest common.Hash `json:"genesis_digest,omitempty"`
 }
 
 // GlobalSupplyLedger is the active issuer and custodial ceiling ledger on Root Anchor (Section 2.1 & 2.3).

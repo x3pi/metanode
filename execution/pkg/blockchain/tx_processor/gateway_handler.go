@@ -514,7 +514,7 @@ func (h *GatewayHandler) HandleTransaction(
 	switch method.Name {
 	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"registerChainViaStake", "batchOutboundCommit",
+		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
@@ -1259,7 +1259,23 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
 		}
 		payload := mustBytes(args[0])
-		if err := engine.RegisterChainViaStake(payload); err != nil {
+		// GenesisWallet (2026-09-04, deterministic-genesis design) is forced to tx.FromAddress()
+		// here, overwriting whatever the submitted payload itself claims -- never trusted from
+		// calldata, same identity-forcing pattern the new "setGenesisDigest" case below uses. A
+		// spoofed GenesisWallet wouldn't let an attacker steal funds (the credited amount is
+		// always engine.MinNativeStakeToRegister regardless of whose address it names), but it
+		// could impersonate/confuse an unrelated well-known address into looking like it
+		// requested and funded a chain it never touched -- cheap to close, so it's closed.
+		var reg cross_chain.ChainRegistry
+		if err := json.Unmarshal(payload, &reg); err != nil {
+			return nil, nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		reg.GenesisWallet = tx.FromAddress()
+		forcedPayload, err := json.Marshal(reg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("re-marshal ChainRegistry with forced genesis_wallet: %w", err)
+		}
+		if err := engine.RegisterChainViaStake(forcedPayload); err != nil {
 			return nil, nil, err
 		}
 		// Balance mutation comes last, after every check that can still fail -- same ordering
@@ -1287,6 +1303,18 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("registerChainViaStake stake deposit re-mint failed: %w", err)
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
+
+	case "setGenesisDigest":
+		// See GatewayEngine.SetGenesisDigest's own doc comment for the full 2-phase
+		// register-then-publish-digest rationale. tx.FromAddress() is passed as the caller (not
+		// trusted from calldata) so the GenesisWallet-only restriction is enforced against who
+		// ACTUALLY signed this transaction, the same pattern every other caller-identity check in
+		// this file uses.
+		targetChainID := mustUint64(args[0])
+		digest := mustHash(args[1])
+		if err := engine.SetGenesisDigest(targetChainID, digest, tx.FromAddress()); err != nil {
+			return nil, nil, err
+		}
 
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
@@ -1675,6 +1703,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 				false,
 				[][]byte{}, []uint64{}, [][]byte{},
 				uint64(0), uint64(0), common.Address{}, [32]byte{}, [32]byte{}, "", uint64(0),
+				common.Address{}, [32]byte{},
 			)
 		}
 
@@ -1692,6 +1721,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			pubkeys, stakes, popSignatures,
 			registry.Epoch, registry.QuorumThreshold, registry.GatewayContract,
 			[32]byte(registry.StateRoot), [32]byte(registry.AccountTreeRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
+			registry.GenesisWallet, [32]byte(registry.GenesisDigest),
 		)
 
 	case "getRegisteredPop":
@@ -1783,6 +1813,18 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			alloc = big.NewInt(0)
 		}
 		return method.Outputs.Pack(alloc)
+
+	case "getMinNativeStakeToRegister":
+		// Lets tooling (gen_single_chain.py's genesis builder, register_chains) fetch the current
+		// stake requirement instead of hardcoding/duplicating it -- see ChainRegistry.GenesisWallet
+		// and RegisterChainViaStake's doc comments for why this matters for the deterministic-
+		// genesis design (2026-09-04): every validator's genesis.json alloc amount must agree
+		// exactly, and that amount IS this value.
+		minStake := engine.MinNativeStakeToRegister
+		if minStake == nil {
+			minStake = big.NewInt(0)
+		}
+		return method.Outputs.Pack(minStake)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

@@ -122,10 +122,13 @@ func main() {
 		toChainFlag   uint64
 		amountMTNFlag float64
 		amountWeiFlag string
+
+		// Deterministic-genesis flags (2026-09-04) -- see publish-genesis-digest/verify-genesis
+		genesisFileFlag string
 	)
 
 	flag.StringVar(&configFileFlag, "config", defaultConfigFile, "Path to JSON configuration file (declarative gateway register config)")
-	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry")
+	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry | publish-genesis-digest | verify-genesis")
 	flag.StringVar(&submitterKeyHex, "key", "0xd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9", "Sender ECDSA private key hex")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", defaultRootAnchor, "Root Anchor JSON-RPC endpoint (auto-detected)")
 	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs (for query actions)")
@@ -138,6 +141,7 @@ func main() {
 	flag.Uint64Var(&toChainFlag, "to-chain", 103, "Destination Chain ID for transfer-alloc")
 	flag.Float64Var(&amountMTNFlag, "amount-mtn", 20000000, "Amount of MTN tokens to transfer (e.g. 20000000 for 20M MTN)")
 	flag.StringVar(&amountWeiFlag, "amount-wei", "", "Exact amount in base-10 wei for transfer-alloc")
+	flag.StringVar(&genesisFileFlag, "genesis-file", "", "Path to a chain's genesis.json (for publish-genesis-digest / verify-genesis)")
 	flag.Parse()
 
 	var fileConfig *GatewayConfigFile
@@ -188,10 +192,24 @@ func main() {
 	switch strings.ToLower(actionFlag) {
 	case "query-alloc", "query-allocations":
 		handleQueryAllocations(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "query-alloc-raw":
+		// Machine-readable counterpart to query-alloc: prints ONLY the decimal wei amount for
+		// exactly one chain ID to stdout, nothing else -- no banner, no logging -- so scripts
+		// (gen_single_chain.py's deterministic-genesis cross-check) can parse it directly instead
+		// of scraping human-formatted text.
+		handleQueryAllocationRaw(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "query-genesis-wallet-raw":
+		// Same idea as query-alloc-raw but for ChainRegistry.GenesisWallet -- prints just the
+		// 0x-prefixed address (or the zero address if not yet set/registered), nothing else.
+		handleQueryGenesisWalletRaw(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "query-registry":
 		handleQueryRegistry(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "transfer-alloc", "transfer-allocation", "allocate-supply":
 		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+	case "publish-genesis-digest":
+		handlePublishGenesisDigest(ctx, privKey, fromAddress, rootAnchorRPC, chainIDsFlag, genesisFileFlag, parsedABI)
+	case "verify-genesis":
+		handleVerifyGenesis(ctx, rootAnchorRPC, chainIDsFlag, genesisFileFlag, parsedABI)
 	default: // "register"
 		if fileConfig == nil || len(fileConfig.Chains) == 0 {
 			logger.Error("No gateway register config file found. Please provide --config <gateway_register.json>")
@@ -253,6 +271,75 @@ func handleQueryAllocations(ctx context.Context, rootAnchorRPC, chainIDsFlag str
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 }
 
+func handleQueryAllocationRaw(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query-alloc-raw requires exactly one chain ID via -chains: %v\n", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect to %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getAllocation", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pack getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "call getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getAllocation", out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpack getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	alloc, _ := results[0].(*big.Int)
+	if alloc == nil {
+		alloc = big.NewInt(0)
+	}
+	fmt.Println(alloc.String())
+}
+
+func handleQueryGenesisWalletRaw(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query-genesis-wallet-raw requires exactly one chain ID via -chains: %v\n", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect to %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pack getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "call getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getChainRegistry", out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpack getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	genesisWallet, _ := results[11].(common.Address)
+	fmt.Println(genesisWallet.Hex())
+}
+
 func handleQueryRegistry(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
 	client, err := ethclient.Dial(rootAnchorRPC)
 	if err != nil {
@@ -300,12 +387,156 @@ func handleQueryRegistry(ctx context.Context, rootAnchorRPC, chainIDsFlag string
 		pubkeys := results[1].([][]byte)
 		epoch := results[4].(uint64)
 		threshold := results[5].(uint64)
+		genesisWallet, _ := results[11].(common.Address)
+		genesisDigestRaw, _ := results[12].([32]byte)
+		genesisDigest := common.Hash(genesisDigestRaw)
 		fmt.Printf("   ├─ Chain %-4d: ✅ Đã đăng ký (Epoch: %d, Committee: %d validator(s), Quorum: %d%%)\n", cid, epoch, len(pubkeys), threshold/100)
 		for i, pk := range pubkeys {
 			fmt.Printf("   │  └─ Val[%d] BLS Pubkey: 0x%s\n", i, common.Bytes2Hex(pk))
 		}
+		if genesisWallet != (common.Address{}) {
+			fmt.Printf("   │  └─ Genesis wallet: %s\n", genesisWallet.Hex())
+			if genesisDigest != (common.Hash{}) {
+				fmt.Printf("   │  └─ Genesis digest: %s (published)\n", genesisDigest.Hex())
+			} else {
+				fmt.Printf("   │  └─ Genesis digest: chưa publish (dùng -action publish-genesis-digest)\n")
+			}
+		}
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════════")
+}
+
+// handlePublishGenesisDigest computes the keccak256 digest of a chain's canonical genesis.json
+// (raw file bytes -- same definition as pkg/cross_chain/ceremony.Digest, kept identical on
+// purpose) and publishes it on Root Anchor via setGenesisDigest(), the second phase of the
+// deterministic-genesis design (see GatewayEngine.SetGenesisDigest's own doc comment). Restricted
+// server-side to the chain's own GenesisWallet -- this simply fails if the signing key here isn't
+// that wallet, so no client-side check is needed to make this safe.
+func handlePublishGenesisDigest(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rootAnchorRPC, chainIDsFlag, genesisFile string, parsedABI abi.ABI) {
+	if genesisFile == "" {
+		logger.Error("publish-genesis-digest requires -genesis-file <path to genesis.json>")
+		os.Exit(1)
+	}
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		logger.Error("publish-genesis-digest requires exactly one chain ID via -chains: %v", err)
+		os.Exit(1)
+	}
+	raw, err := os.ReadFile(genesisFile)
+	if err != nil {
+		logger.Error("Failed to read genesis file %s: %v", genesisFile, err)
+		os.Exit(1)
+	}
+	digest := crypto.Keccak256Hash(raw)
+	fmt.Printf("📐 Genesis digest cho chain %d (%s): %s\n", chainID, genesisFile, digest.Hex())
+
+	calldata, err := parsedABI.Pack("setGenesisDigest", new(big.Int).SetUint64(chainID), digest)
+	if err != nil {
+		logger.Error("Failed to pack setGenesisDigest: %v", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		logger.Error("Failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rootAnchorRPC, nil, 200_000, calldata, fmt.Sprintf("setGenesisDigest(chain %d)", chainID)); err != nil {
+		logger.Error("❌ setGenesisDigest(chain %d) failed: %v", chainID, err)
+		os.Exit(1)
+	}
+	fmt.Printf("✅ Đã publish genesis digest cho chain %d: %s\n", chainID, digest.Hex())
+}
+
+// handleVerifyGenesis is the read-only counterpart: fetch the digest Root Anchor has on record for
+// a chain and compare it against a local genesis.json's own recomputed digest -- exactly the same
+// "recompute and compare, fail closed on mismatch" defense
+// pkg/cross_chain/ceremony.VerifyGenesisFile already provides for the founding-chain ceremony
+// path, just checking against an on-chain record instead of a hand-distributed genesis_digest.txt.
+// Exits non-zero on any mismatch or on "not yet published" -- meant to gate node startup /
+// operator trust decisions, so it fails loud rather than warn-and-continue.
+func handleVerifyGenesis(ctx context.Context, rootAnchorRPC, chainIDsFlag, genesisFile string, parsedABI abi.ABI) {
+	if genesisFile == "" {
+		logger.Error("verify-genesis requires -genesis-file <path to genesis.json>")
+		os.Exit(1)
+	}
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		logger.Error("verify-genesis requires exactly one chain ID via -chains: %v", err)
+		os.Exit(1)
+	}
+	raw, err := os.ReadFile(genesisFile)
+	if err != nil {
+		logger.Error("Failed to read genesis file %s: %v", genesisFile, err)
+		os.Exit(1)
+	}
+	localDigest := crypto.Keccak256Hash(raw)
+
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		logger.Error("Failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		logger.Error("Pack getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		logger.Error("Call getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getChainRegistry", out)
+	if err != nil {
+		logger.Error("Unpack getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	exists, _ := results[0].(bool)
+	if !exists {
+		fmt.Printf("❌ Chain %d chưa được đăng ký trên Root Anchor -- không có gì để đối chiếu.\n", chainID)
+		os.Exit(1)
+	}
+	remoteDigestRaw, _ := results[12].([32]byte)
+	remoteDigest := common.Hash(remoteDigestRaw)
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("🔍 XÁC MINH GENESIS -- chain %d\n", chainID)
+	fmt.Printf("   - File local:              %s\n", genesisFile)
+	fmt.Printf("   - Digest tính lại:         %s\n", localDigest.Hex())
+	fmt.Printf("   - Digest trên Root Anchor: %s\n", remoteDigest.Hex())
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+
+	if remoteDigest == (common.Hash{}) {
+		fmt.Println("⚠️  Chưa có digest nào được publish cho chain này -- KHÔNG THỂ xác minh, đừng coi là an toàn.")
+		os.Exit(1)
+	}
+	if localDigest != remoteDigest {
+		fmt.Println("❌ LỆCH -- genesis.json cục bộ KHÔNG khớp bản đã công bố trên Root Anchor. KHÔNG chạy node với file này.")
+		os.Exit(1)
+	}
+	fmt.Println("✅ KHỚP -- genesis.json cục bộ đúng với bản đã công bố trên Root Anchor.")
+}
+
+// parseSingleChainID reuses the shared -chains flag (comma-separated, for the query actions) but
+// takes only the first entry -- publish-genesis-digest/verify-genesis operate on exactly one chain.
+func parseSingleChainID(chainIDsFlag string) (uint64, error) {
+	for _, p := range strings.Split(chainIDsFlag, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var cid uint64
+		if _, err := fmt.Sscanf(p, "%d", &cid); err != nil {
+			return 0, err
+		}
+		return cid, nil
+	}
+	return 0, fmt.Errorf("no chain ID found in %q", chainIDsFlag)
 }
 
 func handleTransferAllocation(
@@ -446,7 +677,6 @@ func handleRegisterChains(
 	var payloads [][]byte
 	var committee []committeeMember
 	var chainIDs []uint64
-	var targetRPCs []string
 
 	for _, c := range cfg.Chains {
 		if c.ChainID == 0 {
@@ -498,6 +728,15 @@ func handleRegisterChains(
 			Committee:       committeeEntries,
 			QuorumThreshold: qThreshold,
 			GatewayContract: gwAddr,
+			// GenesisWallet (2026-09-04, deterministic-genesis design): the address that pays
+			// for this registration also becomes the wallet that must hold the chain's initial
+			// native-coin supply in its own genesis.json alloc -- see ChainRegistry.GenesisWallet
+			// and RegisterChainViaStake's own doc comments. gateway_handler.go's
+			// "registerChainViaStake" case forces this to tx.FromAddress() regardless of what
+			// this payload says, so setting it to anything else here would be pointless, not
+			// just wrong -- kept equal to fromAddress for clarity, not as a real security
+			// boundary (the real boundary is enforced server-side).
+			GenesisWallet: fromAddress,
 		}
 		payloadBytes, err := json.Marshal(registry)
 		if err != nil {
@@ -506,9 +745,6 @@ func handleRegisterChains(
 		}
 		payloads = append(payloads, payloadBytes)
 		chainIDs = append(chainIDs, c.ChainID)
-		if c.RPCURL != "" {
-			targetRPCs = append(targetRPCs, fmt.Sprintf("%d=%s", c.ChainID, c.RPCURL))
-		}
 		logger.Info("Prepared founding entry for chain %d (%d validators, real BLS pubkeys, real PoP)", c.ChainID, len(committeeEntries))
 	}
 
@@ -527,15 +763,15 @@ func handleRegisterChains(
 		registerCalldatas = append(registerCalldatas, calldata)
 	}
 
+	// 2026-09-04 (deterministic-genesis design): registration now lives SOLELY on Root Anchor --
+	// no longer double-submitted to each private chain's own RPC. The old second submission was
+	// architecturally broken under the new design anyway: a freshly-created private chain starts
+	// with genesis alloc == exactly what THIS registration credits (see gen_single_chain.py's
+	// --initial-supply flag), so it could never have paid a SECOND stake deposit against its own,
+	// not-yet-funded ledger. ChainRegistry membership on the private chain's own node is now
+	// established by the deterministic genesis.json itself (baked in at chain-creation time),
+	// not by a live registerChainViaStake transaction against a chain that doesn't exist yet.
 	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
-
-	for _, pair := range targetRPCs {
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			label, rpcURL := "chain "+parts[0], parts[1]
-			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
-		}
-	}
 
 	if fundGenesisFlag {
 		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)

@@ -15,6 +15,7 @@ TARGET_CHAIN="all"
 OPEN_PORTS="false"
 REGISTER=0
 START_RELAYER=0
+DETERMINISTIC_GENESIS=0
 
 for arg in "$@"; do
     case $arg in
@@ -49,6 +50,10 @@ for arg in "$@"; do
         --register)
             REGISTER=1
             ;;
+        --deterministic-genesis)
+            DETERMINISTIC_GENESIS=1
+            REGISTER=1
+            ;;
         --inventory=*)
             INVENTORY="${arg#*=}"
             ;;
@@ -72,6 +77,11 @@ for arg in "$@"; do
             echo ""
             echo "🌉 Gateway:"
             echo "  --register          Đăng ký toàn bộ danh bạ các Private Chains lên Gateway (Root Anchor)"
+            echo "  --deterministic-genesis"
+            echo "                      (2026-09-04) Genesis native-coin của private chain = ĐÚNG số tiền cọc thật"
+            echo "                      đã được Root Anchor cấp khi đăng ký (không còn tự bịa alloc). Tự bật --register."
+            echo "                      Tách deploy thành: sinh key cục bộ -> đăng ký lên Root Anchor -> sinh lại genesis"
+            echo "                      đúng số thật -> publish+verify digest -> MỚI đẩy lên node thật và khởi động."
             echo "  --inventory=F       Đường dẫn file inventory tùy chỉnh (mặc định: inventory.yml)"
             echo ""
             echo "💡 Ví dụ:"
@@ -163,12 +173,32 @@ if target_chain_str != 'all':
 "
 
 # Chạy Ansible Playbook
+# Chế độ --deterministic-genesis (2026-09-04): tách làm 2 lần chạy ansible-playbook thay vì 1,
+# xen giữa là bước đăng ký+sinh lại genesis đúng số thật (khối "Đăng ký Gateway" bên dưới) --
+# KHÔNG được đẩy genesis lên node thật / khởi động node trước khi biết số tiền cọc thật đã đăng
+# ký, nếu không node sẽ chạy với genesis sai (tự bịa số), không thể sửa lại sau khi đã có block 0.
+#   Pha 1 (--limit localhost): chỉ chạy đúng Play "Local build and config generation" trong
+#   deploy.yml (sinh key + file cấu hình cục bộ tại $SCRIPT_DIR/data/chain_<id>/) -- Play "Deploy
+#   and Manage Private Chains across Nodes" nhắm vào group private_chains nên tự động bị bỏ qua
+#   hoàn toàn khi limit=localhost, không cần sửa gì trong deploy.yml.
+#   Pha 2 (sau khi đăng ký+sinh lại genesis xong, full playbook không giới hạn): chạy lại y hệt --
+#   Play 1 tự bỏ qua gen_single_chain.py vì node-0/config.json đã tồn tại (idempotent sẵn), Play 2
+#   mới thật sự copy genesis ĐÃ ĐÚNG lên node và khởi động.
 if [ "$ACTION" != "none" ]; then
-    echo "🚀 Đang thực thi Ansible Playbook ..."
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
-        -e "deploy_action=$ACTION" \
-        -e "target_chain=$TARGET_CHAIN" \
-        -e "open_ports=$OPEN_PORTS"
+    if [ "$DETERMINISTIC_GENESIS" -eq 1 ] && { [ "$ACTION" = "setup" ] || [ "$ACTION" = "reset" ]; }; then
+        echo "🚀 [Pha 1/2 -- deterministic-genesis] Sinh key + cấu hình cục bộ (CHƯA đẩy lên node/khởi động) ..."
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+            -e "deploy_action=$ACTION" \
+            -e "target_chain=$TARGET_CHAIN" \
+            -e "open_ports=$OPEN_PORTS" \
+            --limit localhost
+    else
+        echo "🚀 Đang thực thi Ansible Playbook ..."
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+            -e "deploy_action=$ACTION" \
+            -e "target_chain=$TARGET_CHAIN" \
+            -e "open_ports=$OPEN_PORTS"
+    fi
 fi
 
 # Đăng ký Gateway nếu được yêu cầu
@@ -344,6 +374,117 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
     cd "$SCRIPT_DIR/../../execution"
     go build -o register_chains ./cmd/tool/register_chains
     ./register_chains --config "$SCRIPT_DIR/gateway_register.json"
+
+    # ─── Deterministic-genesis (2026-09-04): sinh lại genesis đúng số tiền THẬT đã đăng ký ───
+    # Tại đây mỗi chain đã có PerChainAllocation thật trên Root Anchor (RegisterChainViaStake ->
+    # TransferAllocation từ pool Reserve, xem note/eurozone_unified_native_coin_plan.md mục 5) --
+    # đọc lại đúng số đó (không tự bịa), sinh lại genesis.json cục bộ (key giữ nguyên nhờ
+    # gen_single_chain.py đã idempotent), rồi publish+verify digest TRƯỚC KHI Pha 2 (bên dưới) đẩy
+    # nó lên node thật. Dừng cứng (set -e) nếu bất kỳ bước nào lệch -- không đẩy genesis sai lên
+    # node thật.
+    if [ "$DETERMINISTIC_GENESIS" -eq 1 ]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════"
+        echo "🔒 SINH LẠI GENESIS THEO ĐÚNG SỐ TIỀN ĐÃ ĐĂNG KÝ TRÊN ROOT ANCHOR"
+        echo "═══════════════════════════════════════════════════════════════"
+
+        python3 -c "
+import subprocess, sys, yaml
+
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {}) or {}
+target = '$TARGET_CHAIN'
+root_rpc = '$ROOT_ANCHOR_RPC'
+submitter_key = '$SUBMITTER_KEY'
+register_chains_bin = '$SCRIPT_DIR/../../execution/register_chains'
+gen_script = '$SCRIPT_DIR/../systemd/gen_single_chain.py'
+
+def run(cmd, capture=False):
+    print('   $ ' + ' '.join(cmd))
+    if capture:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout, file=sys.stderr); print(r.stderr, file=sys.stderr)
+            sys.exit(1)
+        return r.stdout.strip()
+    else:
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            sys.exit(1)
+
+for host_key, h in sorted(hosts.items()):
+    if not isinstance(h, dict) or 'chain_id' not in h:
+        continue
+    cid = h['chain_id']
+    if target != 'all' and str(target) != str(cid):
+        continue
+
+    print(f'\n➡️  Chain {cid} ({host_key}):')
+    amount = run([register_chains_bin, '-action', 'query-alloc-raw', '-root-anchor', root_rpc, '-chains', str(cid)], capture=True)
+    wallet = run([register_chains_bin, '-action', 'query-genesis-wallet-raw', '-root-anchor', root_rpc, '-chains', str(cid)], capture=True)
+    if amount in ('', '0') or wallet.lower() in ('', '0x0000000000000000000000000000000000000000'):
+        print(f'❌ Chain {cid}: chưa có allocation thật trên Root Anchor (amount={amount!r}, wallet={wallet!r}).')
+        print('   Kiểm tra: cross_chain.min_native_stake_to_register_wei đã cấu hình trên Root Anchor chưa,')
+        print('   và ví submitter có đủ số dư thật để trả cọc không (xem log registerChainViaStake ở trên).')
+        sys.exit(1)
+    print(f'   ✅ Root Anchor xác nhận: allocation={amount} wei, genesis_wallet={wallet}')
+
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc_port = h.get('rpc_port', 8546)
+    port_offset = h.get('port_offset', 0)
+    validators = h.get('validators', 1)
+    submitter = h.get('node_submitter_key', submitter_key)
+    local_out = f'$SCRIPT_DIR/data/chain_{cid}'
+
+    reserve_chain_id_hex = run(['curl', '-s', '-X', 'POST', root_rpc,
+                                 '-H', 'Content-Type: application/json',
+                                 '-d', '{\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\",\"params\":[],\"id\":1}'], capture=True)
+    import json as _json
+    reserve_chain_id = int(_json.loads(reserve_chain_id_hex).get('result', '0x0'), 16)
+
+    run(['python3', gen_script,
+         '--chain-id', str(cid), '--ip', str(ip), '--rpc-port', str(rpc_port),
+         '--port-offset', str(port_offset), '--validators', str(validators),
+         '--root-anchor-rpc', root_rpc, '--root-anchor-submitter-key', submitter,
+         '--reserve-chain-id', str(reserve_chain_id), '--output-dir', local_out,
+         '--dev-keys-file', '$SCRIPT_DIR/private_dev_keys.json',
+         '--initial-supply-wallet', wallet, '--initial-supply', amount])
+
+    genesis_file = f'{local_out}/genesis.json'
+    run([register_chains_bin, '-action', 'publish-genesis-digest', '-root-anchor', root_rpc,
+         '-chains', str(cid), '-genesis-file', genesis_file, '-key', submitter_key])
+    run([register_chains_bin, '-action', 'verify-genesis', '-root-anchor', root_rpc,
+         '-chains', str(cid), '-genesis-file', genesis_file])
+    print(f'   ✅ Chain {cid}: genesis đã xác minh khớp với Root Anchor -- an toàn để đẩy lên node thật.')
+"
+    fi
+fi
+
+# Pha 2 của --deterministic-genesis: giờ mới thật sự đẩy genesis (đã đúng) lên node và khởi động.
+#
+# CỐ Ý dùng deploy_action=setup ở đây, KHÔNG dùng lại $ACTION gốc (dù người dùng gọi --reset-all):
+# Play 1 trong deploy.yml có bước "rm -rf $LOCAL_OUT" khi ansible_action=='reset' -- nếu Pha 2
+# cũng truyền "reset", Play 1 sẽ chạy lại lần nữa (dù đã --limit localhost ở Pha 1, playbook đầy
+# đủ ở Pha 2 KHÔNG giới hạn host nên Play 1 vẫn chạy) và XOÁ SẠCH genesis.json/keys vừa đăng ký +
+# sinh lại đúng số ở trên -- sinh committee MỚI ngẫu nhiên, không khớp với cái vừa đăng ký trên
+# Root Anchor. "setup" không có bước rm -rf này, và vẫn kích hoạt đúng toàn bộ khối "Deploy
+# directories and files" (chạy cho cả setup lẫn reset như nhau) nên vẫn đẩy đủ genesis/config/keys
+# lên node thật và khởi động bình thường.
+#
+# Đánh đổi đã biết: nếu chain này TỪNG deploy trước đó (dữ liệu cũ còn trên node thật) và người
+# dùng gọi --reset-all --deterministic-genesis muốn xoá sạch dữ liệu cũ trên node thật, bước xoá
+# đó sẽ KHÔNG tự động chạy nữa (thuộc "Clean entire installation directory on reset" trong Play 2,
+# chỉ chạy khi ansible_action=='reset'). Trường hợp này cần tự xoá thủ công
+# /opt/metanode/chain-<id> trên node thật trước khi chạy lại, hoặc chạy --reset-all thường (không
+# kèm --deterministic-genesis) 1 lần trước để dọn sạch, rồi mới bật --deterministic-genesis.
+if [ "$DETERMINISTIC_GENESIS" -eq 1 ] && { [ "$ACTION" = "setup" ] || [ "$ACTION" = "reset" ]; }; then
+    echo ""
+    echo "🚀 [Pha 2/2 -- deterministic-genesis] Đẩy genesis đã xác minh lên node thật và khởi động ..."
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+        -e "deploy_action=setup" \
+        -e "target_chain=$TARGET_CHAIN" \
+        -e "open_ports=$OPEN_PORTS"
 fi
 
 echo ""
