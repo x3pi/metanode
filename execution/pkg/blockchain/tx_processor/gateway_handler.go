@@ -512,7 +512,7 @@ func (h *GatewayHandler) HandleTransaction(
 	}
 
 	switch method.Name {
-	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
+	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "creditReserveAllocation", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
 		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
 		"propose", "vote", "executeProposal", "registerAsset",
@@ -919,6 +919,37 @@ func (h *GatewayHandler) handleWrite(
 					[][]byte{event.ID.Bytes(), msg.MessageID.Bytes()},
 				))
 			}
+		}
+
+	case "creditReserveAllocation":
+		// Destination-side counterpart of AttestCommit's source-side debit -- see
+		// GatewayEngine.CreditReserveAllocation's doc comment for the full root-cause writeup
+		// (2026-09-04 finding: ClaimMessage's own PerChainAllocation credit lands on the CLAIMING
+		// chain's local ledger copy, which is non-authoritative for any chain other than Reserve
+		// itself). Same calldata shape as claimMessage, submitted by the relayer against Reserve's
+		// own node right after that same message's claimMessage succeeds on its real destination.
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustUint64(args[3]),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
+		}
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[13]).Uint64(),
+			Siblings:  mustHashSlice(args[14]),
+		}
+		commitRoot := mustHash(args[15])
+		if err := engine.CreditReserveAllocation(msg, proof, commitRoot); err != nil {
+			return nil, nil, err
 		}
 
 	case "refund":

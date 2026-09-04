@@ -363,3 +363,59 @@ thay thế bước đồng bộ đồng bộ (synchronous) này ngay lúc mới 
 **Bài học chung**: cả 2 lỗi đều là loại "chỉ lộ ra khi chạy thật trên cụm thật", đúng lý do ban đầu
 tại sao user yêu cầu chạy `run_full_pipeline.sh` thay vì chỉ tin code review/unit test. Sau khi sửa
 lỗi #2 (đang chờ chạy lại lượt 3 để xác nhận toàn bộ 6 bước xanh).
+
+**Lượt 3 — xanh toàn bộ, phát hiện lỗi #3 (đào sâu theo yêu cầu "tiếp tục đào sâu vấn đề relayer
+luôn đi")**: lượt 3 pass 6/6 bước, nhưng lượt 2 (trước khi sửa lỗi #2 xong hẳn) từng timeout 60s ở
+lượt thử 2/3 của Bước 5 — đào sâu tìm ra nguyên nhân thật khác lỗi #2: `cross_chain_relayer` không
+có key riêng, fallback dùng CHUNG `submitter_key` với `register_chains` — cả 2 tiến trình tự track
+nonce độc lập cho CÙNG một địa chỉ, đua nhau khi relayer khởi động chỉ ~3s sau khi `register_chains`
+xong, làm 1 tx của relayer bị "mồ côi" nonce vĩnh viễn (`eth_getTransactionReceipt` trả `null`,
+không có gap nonce — chứng tỏ tx KHÁC đã chiếm đúng slot đó). **Đã sửa** (`dab2f3fb`): cho relayer
+danh tính riêng (`devnetDefaultRelayerKeyHex`, cùng địa chỉ devnet đã có sẵn BLS/gas-exempt từ
+trước), bỏ hẳn fallback dùng `submitter_key`. Xác nhận lại bằng lượt chạy đầy đủ tiếp theo: xanh
+toàn bộ 9/9 lượt cross-chain (kể cả lượt 2/3 từng fail), 102/102 Block-STM.
+
+### 5.3 Lỗ hổng kế toán relay 2-hop A→Reserve→B: credit phía đích không tới được ledger có thẩm
+### quyền (2026-09-04, cùng ngày — phát hiện khi user yêu cầu "xem kỹ có vấn đề bảo mật gì không")
+
+Sau khi lượt 3 xanh toàn bộ, kiểm tra bất biến `Σ PerChainAllocation == GenesisTotalSupply` trên
+chính ledger của Reserve (qua `eth_call getAllocation()` thật, không suy đoán) phát hiện **thiếu
+đúng 2100 MTN** — khớp chính xác tổng giá trị đã relay thật 101→102 trong Bước 5 (500×3 + 200×3).
+Chain 101 bị trừ đúng, chain 102 KHÔNG được cộng tương ứng trên bản ghi có thẩm quyền của Reserve.
+
+**Nguyên nhân** (xác nhận qua đọc code, không suy đoán): relay 2-hop A→Reserve→B gồm 3 lệnh gọi
+riêng biệt, trên 3 "node"/process riêng biệt (`relayer_daemon.go:494-533`):
+1. `attestCommit` gửi tới node Reserve → trừ `PerChainAllocation[101]` trên ledger CỦA RESERVE.
+2. `attestReserveIssuedCommit` gửi tới node chain 102 → không đụng `SupplyLedger` (đúng thiết kế,
+   xem doc comment `AttestReserveIssuedCommit`).
+3. `claimMessage` gửi tới node chain 102 → cộng `PerChainAllocation[102]` — nhưng đây là bản
+   `SupplyLedger` CỤC BỘ CỦA NODE CHAIN 102 (`g.LocalChainID=102`), một struct hoàn toàn tách biệt
+   với bản của Reserve. Đúng như mục 2.3 đã kết luận trước đó: "chỉ có đúng 1 bản sao có ý nghĩa
+   bảo mật" (bản của Reserve) — nhưng bước cộng tiền lại ghi vào bản KHÔNG có thẩm quyền.
+
+Trừ đúng chỗ (Reserve), cộng sai chỗ (bản cục bộ của B) → tổng trên Reserve co lại vĩnh viễn sau
+mỗi lần relay 2-hop. Không mất tiền thật của người dùng (B vẫn nhận đủ tiền thật), nhưng là rủi ro
+tự-DoS/kẹt quỹ tích lũy dần: allocation của B trên Reserve bị ghi nhận thấp hơn thực tế, nên sau
+này B tự gửi tiền đi (tự nó gọi `AttestCommit`) có thể bị `ErrAllocationExceeded` từ chối dù B thực
+sự có đủ tiền.
+
+**Đã sửa**: thêm `GatewayEngine.CreditReserveAllocation` (gateway.go) — chặng thứ 3, đối xứng với
+`AttestCommit`'s debit, gọi trực tiếp vào node Reserve (tự chặn nếu gọi sai node, giống C8),
+idempotent (write-once theo `MessageID` qua `ReserveCreditedMessages`), verify cùng Merkle proof
+với `ClaimMessage`. `relayer_daemon.go`'s `RelayBatch` gọi endpoint mới này ngay sau khi
+`claimMessage` thành công trên đích, mỗi khi đích khác Reserve — best-effort (lỗi ở bước này không
+rollback tiền đã claim thật, chỉ risk ceiling false-reject sau này, tự sửa được bằng cách gọi lại
+vì idempotent). ABI mới `creditReserveAllocation` (`gatewayAbi.go`) + case dispatch mới
+(`gateway_handler.go`).
+
+**Verify thật trên cụm m0** (không chỉ unit test): rebuild+redeploy cả 4 node Root Anchor
+(`ansible_deploy.sh --start --fast`) + relayer, chạy lại `01-client-only-transfer -amount 500`
+(101→102). Log relayer: `💰 credited chain 102's allocation on Reserve for message 0x...`. Số liệu
+`eth_call` trước/sau khớp chính xác: chain 101 giảm đúng 500 MTN, chain 102 (trên ledger Reserve,
+KHÔNG phải bản cục bộ) tăng đúng 500 MTN — bất biến giữ đúng cho giao dịch mới. Khoảng thiếu 2100
+MTN cũ (từ trước khi sửa, 9 message Bước 5's lượt trước) vẫn còn tồn đọng — các message đó đã được
+relayer đánh dấu "processed" nên không tự retry; đây là devnet nên không backfill, nhưng một hệ
+thống thật cần công cụ đối soát/backfill riêng nếu gặp tình huống tương tự trên dữ liệu đã tồn tại
+trước bản vá. Unit test mới: `TestGateway_CreditReserveAllocation_2HopDestCredit`
+(`gateway_test.go`) — cộng đúng chain đích (không phụ thuộc claim cục bộ), idempotent, chặn sai
+node, chặn Merkle proof sai.

@@ -576,6 +576,39 @@ func (d *RelayerDaemon) RelayBatch(
 		d.processedMessages[msg.MessageID] = true
 		d.mu.Unlock()
 		logger.Info("🚀 [RELAYER DAEMON] relayed message %s to chain %d via batch %s", msg.MessageID.Hex(), destChainID, commitRoot.Hex())
+
+		// Destination-side counterpart of step 1's attestCommit debit (2026-09-04 finding, see
+		// GatewayEngine.CreditReserveAllocation's doc comment): claimMessage above just credited
+		// destChainID's own LOCAL PerChainAllocation copy, on destChainID's own separate node --
+		// never Reserve's authoritative one, unless destChainID happens to BE Reserve (in which
+		// case claimMessage already ran on Reserve's own node and this is correctly skipped
+		// below). Left uncredited, Reserve's ledger permanently under-records what destChainID
+		// really, legitimately holds, which can later spuriously reject destChainID's own
+		// legitimate outbound transfers against an artificially-low ceiling. Best-effort: a failed
+		// or unsent credit here does not roll back the real, already-settled claim above (the
+		// user's funds already landed) -- it only risks a future ceiling false-reject, which is
+		// safe (fails closed, never lets more value out than was ever really allocated) and can be
+		// resolved by re-running this same call later since it is idempotent.
+		if d.config.ReserveChainID != 0 && destChainID != d.config.ReserveChainID && msg.Value != nil && msg.Value.Sign() > 0 {
+			creditCalldata, err := d.abi.Pack("creditReserveAllocation",
+				msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
+				new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
+				msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+				new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
+			)
+			if err != nil {
+				logger.Warn("⚠️ [RELAYER DAEMON] pack creditReserveAllocation for %s: %v", msg.MessageID.Hex(), err)
+			} else {
+				creditReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, creditCalldata, 3_000_000)
+				if err != nil {
+					logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s failed to send: %v", msg.MessageID.Hex(), err)
+				} else if creditReceipt.Status != 1 {
+					logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(creditReceipt.Return))
+				} else {
+					logger.Info("💰 [RELAYER DAEMON] credited chain %d's allocation on Reserve for message %s", destChainID, msg.MessageID.Hex())
+				}
+			}
+		}
 	}
 	return nil
 }

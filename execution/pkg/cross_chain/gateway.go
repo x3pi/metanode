@@ -75,7 +75,13 @@ type GatewayEngine struct {
 	SupplyLedger               *GlobalSupplyLedger
 	AttestedCommits            map[string]AttestedCommit
 	MessageStatus              map[common.Hash]MessageStatus
-	DeadChains                 map[uint64]bool
+	// ReserveCreditedMessages guards CreditReserveAllocation's write-once semantics, keyed by
+	// MessageID -- see that function's doc comment for why it exists (the destination-side
+	// counterpart of AttestCommit's source-side debit, since ClaimMessage's own credit lands on
+	// the CLAIMING chain's local ledger copy, which is non-authoritative for any chain other than
+	// Reserve itself).
+	ReserveCreditedMessages map[common.Hash]bool
+	DeadChains              map[uint64]bool
 	DeadChainClaimed           map[string]bool
 	ActiveContext              *CrossChainContext
 	LockedTips                 map[common.Hash]*big.Int
@@ -226,6 +232,7 @@ func NewGatewayEngine(
 		SupplyLedger:                 ledger,
 		AttestedCommits:              make(map[string]AttestedCommit),
 		MessageStatus:                make(map[common.Hash]MessageStatus),
+		ReserveCreditedMessages:      make(map[common.Hash]bool),
 		DeadChains:                   make(map[uint64]bool),
 		DeadChainClaimed:             make(map[string]bool),
 		LockedTips:                   make(map[common.Hash]*big.Int),
@@ -1096,6 +1103,81 @@ func (g *GatewayEngine) ClaimMessage(
 	}
 
 	return execStatus, nil
+}
+
+// CreditReserveAllocation is the missing third leg of a 2-hop A -> Reserve -> B value route
+// (Section 2.3.1 finding, 2026-09-04). ClaimMessage's own PerChainAllocation credit (see its doc
+// comment above) writes to g.LocalChainID's copy of the ledger -- correct when the claiming chain
+// IS Reserve (a private chain sending straight to Reserve), but silently wrong for a private-to-
+// private transfer, where ClaimMessage instead runs on the DESTINATION's own separate
+// GatewayEngine instance/process, crediting a copy of PerChainAllocation nobody else ever reads.
+// Reserve's own authoritative ledger then only ever sees AttestCommit's debit (source chain, step
+// 1) with no matching credit -- proven live: after several transfers totalling V from chain A to
+// chain B via the standard A->Reserve->B relay, Σ PerChainAllocation on Reserve was short by
+// exactly V, even though B's real balance legitimately received it in full. Left unfixed this is a
+// growing self-DoS/stuck-funds risk: chain B's own future outbound AttestCommit calls are ceiling-
+// checked against Reserve's (artificially low) record of B's allocation, not what B actually,
+// legitimately holds.
+//
+// This is the destination-side counterpart of AttestCommit's source-side debit: submitted by the
+// relayer against RESERVE's own node (mirroring ClaimMessage's exact proof-verification, but
+// crediting message.DestChainID instead of g.LocalChainID) right after that same message's
+// ClaimMessage has succeeded on its real destination chain. Idempotent (write-once via
+// ReserveCreditedMessages, keyed by MessageID) so a redundant call from a retry or a second
+// relayer is harmless, matching AttestCommit/ClaimMessage's own write-once guards. Fails closed
+// off Reserve's own node -- callable only where g.LocalChainID == g.ReserveChainID -- since
+// crediting any other chain's local ledger copy here would just recreate the exact same non-
+// authoritative-copy problem this function exists to fix.
+func (g *GatewayEngine) CreditReserveAllocation(
+	message CrossChainMessage,
+	proof MerkleProof,
+	commitRoot common.Hash,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if message.Value == nil || message.Value.Sign() <= 0 {
+		// Nothing to credit -- matches ClaimMessage's own "only touch the ledger for real value"
+		// gating, so a zero-value / pure-contract-call message is always a harmless no-op here.
+		return nil
+	}
+
+	if g.ReserveChainID == 0 {
+		return ErrReserveChainNotConfigured
+	}
+	if g.LocalChainID != g.ReserveChainID {
+		return fmt.Errorf("%w: this chain (%d) is not the configured Reserve (%d)", ErrNonReserveCeilingAttestation, g.LocalChainID, g.ReserveChainID)
+	}
+
+	if g.ReserveCreditedMessages == nil {
+		g.ReserveCreditedMessages = make(map[common.Hash]bool)
+	}
+	if g.ReserveCreditedMessages[message.MessageID] {
+		// Already credited by an earlier call (retry / second relayer) -- idempotent no-op.
+		return nil
+	}
+
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
+	if _, exists := g.AttestedCommits[key]; !exists {
+		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+	}
+
+	leafHash := ComputeMessageLeafHash(message)
+	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
+		return ErrInvalidMerkleProof
+	}
+
+	if g.SupplyLedger != nil {
+		currentAlloc := g.SupplyLedger.GetAllocation(message.DestChainID)
+		g.SupplyLedger.PerChainAllocation[message.DestChainID] = new(big.Int).Add(currentAlloc, message.Value)
+	}
+	g.ReserveCreditedMessages[message.MessageID] = true
+
+	return nil
 }
 
 // VerifyQuorumCertAgainstRegistry validates the BLS signature and threshold stake against a chain's committee.

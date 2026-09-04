@@ -323,6 +323,91 @@ func TestGateway_P2_3_1_HardCapCommitCapacityDefense(t *testing.T) {
 	assert.ErrorIs(t, errOverClaim, ErrAllocationExceeded)
 }
 
+// TestGateway_CreditReserveAllocation_2HopDestCredit reproduces, at the unit level, the live-
+// verified 2026-09-04 finding: in a private-to-private A->Reserve->B relay, ClaimMessage's own
+// PerChainAllocation credit lands on B's own separate, non-authoritative ledger copy, never on
+// Reserve's -- leaving Reserve's authoritative Σ PerChainAllocation permanently short by every
+// such transfer's value. CreditReserveAllocation is the fix: called directly against Reserve's own
+// engine (this test's `engine` plays Reserve, per setupTestGatewayEngine), it must credit the
+// message's real DestChainID (103 here -- deliberately NOT engine.LocalChainID/102, to prove this
+// does not depend on the claim itself having happened locally), be idempotent against a repeat
+// call, and refuse to run at all on a non-Reserve node.
+func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
+		SourceChainID: 101,
+		DestChainID:   103, // a THIRD chain, distinct from both the source (101) and Reserve (102)
+		Sender:        sender,
+		Target:        target,
+		Payload:       []byte{},
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(500),
+		Sequence:      1,
+		Tip:           big.NewInt(0),
+		HopCount:      1,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{
+		Epoch:              5,
+		AggregateSignature: sig.Bytes(),
+		SignerBitmap:       []byte{0x0F},
+	}
+	// Step 1 (source debit, on Reserve): matches the real relayer's first leg.
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	require.NoError(t, errAttest)
+	preCreditSourceAlloc := engine.SupplyLedger.GetAllocation(101)
+	assert.Equal(t, big.NewInt(4500), preCreditSourceAlloc) // 5000 - 500
+
+	assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103))
+
+	// Step 3 (this test's actual subject): destination credit, on Reserve -- deliberately called
+	// BEFORE any local claim on chain 103 would happen in the real 2-hop flow, since Reserve does
+	// not depend on or wait for that separate node's own state.
+	errCredit := engine.CreditReserveAllocation(msg, proof, commitRoot)
+	require.NoError(t, errCredit)
+	assert.Equal(t, big.NewInt(500), engine.SupplyLedger.GetAllocation(103))
+	// Source side must be untouched by the credit step (only the debit above touches it).
+	assert.Equal(t, preCreditSourceAlloc, engine.SupplyLedger.GetAllocation(101))
+
+	// Idempotent: a second call (retry / second relayer) must NOT double-credit.
+	errCreditAgain := engine.CreditReserveAllocation(msg, proof, commitRoot)
+	require.NoError(t, errCreditAgain)
+	assert.Equal(t, big.NewInt(500), engine.SupplyLedger.GetAllocation(103))
+
+	// Fails closed off Reserve's own node.
+	nonReserveEngine, _ := setupTestGatewayEngine()
+	nonReserveEngine.ReserveChainID = 999 // this engine is chain 102, but Reserve is configured as 999
+	errWrongNode := nonReserveEngine.CreditReserveAllocation(msg, proof, commitRoot)
+	assert.ErrorIs(t, errWrongNode, ErrNonReserveCeilingAttestation)
+
+	// Invalid Merkle proof must be rejected, not silently credited.
+	badEngine, kpBad := setupTestGatewayEngine()
+	badMsg := msg
+	badMsg.MessageID = common.HexToHash("0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
+	badCommitRoot, badLayers, badAggAmounts, badAggIndex, errBadTree := BuildCommitTree([]CrossChainMessage{badMsg})
+	require.NoError(t, errBadTree)
+	badAggregateProof := GetMerkleProof(badLayers, badAggIndex["0"])
+	badSig := bls.Sign(kpBad.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), badCommitRoot.Bytes()...))
+	badCert := QuorumCert{Epoch: 5, AggregateSignature: badSig.Bytes(), SignerBitmap: []byte{0x0F}}
+	_, errBadAttest := badEngine.AttestCommit(101, badCommitRoot, badAggAmounts["0"], big.NewInt(0), badAggregateProof, badCert)
+	require.NoError(t, errBadAttest)
+	wrongProof := MerkleProof{LeafIndex: 0, Siblings: []common.Hash{common.HexToHash("0xFF")}}
+	errBadProof := badEngine.CreditReserveAllocation(badMsg, wrongProof, badCommitRoot)
+	assert.ErrorIs(t, errBadProof, ErrInvalidMerkleProof)
+	assert.Equal(t, big.NewInt(0), badEngine.SupplyLedger.GetAllocation(103))
+}
+
 func TestGateway_P2_4_RefundPathwayAndSupplyRestoration(t *testing.T) {
 	kp101 := bls.GenerateKeyPair()
 	kp102 := bls.GenerateKeyPair()
