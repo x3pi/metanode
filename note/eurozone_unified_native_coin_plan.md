@@ -46,6 +46,25 @@ thế đã tạo ra 2 lỗ hổng thật, phát hiện + vá + verify thực ngh
    thể rollback uỷ ban/epoch của chain về trạng thái cũ, kể cả sau khi chain đã tiến hợp lệ qua
    nhiều epoch mới — chiếm quyền uỷ ban. Vá bằng bắt buộc `NewEpoch > epoch hiện tại`.
 
+## CẬP NHẬT (2026-09-04, live-verify qua run_full_pipeline.sh) — bug bootstrap thật, đã vá
+
+Sau khi xoá `GovernanceEngine` (đoạn trên), chạy `run_full_pipeline.sh` thật trên cụm 4-validator
+Root Anchor (chain 991) để live-verify thì phát hiện: **Reserve (991) không bao giờ tự đăng ký
+được vào ChainRegistry của chính nó** — `RegisterChainViaStake` khi Reserve đăng ký CHÍNH MÌNH gọi
+nội bộ `TransferAllocation(991, 991, amount)` (same-chain), bị `TransferAllocation` từ chối thẳng
+(`ErrSameChainTransfer`), lỗi này KHÔNG được nuốt (chỉ `ErrInsufficientAllocation` được nuốt) →
+toàn bộ self-registration fail. Hệ quả: 1 Root Anchor mới triển khai KHÔNG BAO GIỜ mint được
+genesis supply (`AllocateSupplyWithCert`/`TransferAllocationWithCert` đều tự-ký-only, cần
+`ChainRegistry[991]` tồn tại trước). Đã vá (commit `ae42cd63`): bỏ qua bước credit khi
+`reg.ChainID == g.ReserveChainID` (same-chain credit vốn là no-op) — tiền cọc thật vẫn bị trừ ví
+người gọi như mọi chain khác, chỉ không cộng vô allocation vô nghĩa. Test hồi quy verify thực
+nghiệm cả lỗi lẫn fix (`TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation/"Reserve
+registering ITSELF..."`).
+
+**Còn lại (việc deploy-tooling, không phải lỗi code)**: `deploy/ansible_private_chains/
+gateway_register.json` chưa có entry chain 991 với uỷ ban BLS thật của Root Anchor — cần thêm để
+lần redeploy tiếp theo thực sự tự-đăng-ký + mint genesis supply live, thay vì tiếp tục "skip".
+
 ## KẾT LUẬN CUỐI CÙNG (2026-09-04) — ĐÃ ĐIỀU TRA XONG, KHÔNG CẦN SỬA CODE
 
 Bản kế hoạch gốc (mục 1-4 dưới đây) đề xuất **khoá/xoá `ProposalAllocateSupply`**, dựa trên giả
