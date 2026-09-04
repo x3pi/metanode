@@ -167,6 +167,10 @@ pub(crate) struct TransactionConsumer {
     max_num_transactions_in_block: u64,
     pending_transactions: Option<TransactionsGuard>,
     block_status_subscribers: Arc<Mutex<BTreeMap<BlockRef, Vec<oneshot::Sender<BlockStatus>>>>>,
+    /// See Context::oldest_pending_tx_at_ms's doc comment. Kept here (rather than reaching
+    /// through some other handle) so `next()` can clear it in the same place it already
+    /// determines "queue is now fully empty".
+    context: Arc<Context>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -223,6 +227,7 @@ impl TransactionConsumer {
             max_num_transactions_in_block,
             pending_transactions: None,
             block_status_subscribers: Arc::new(Mutex::new(BTreeMap::new())),
+            context,
         }
     }
 
@@ -243,6 +248,23 @@ impl TransactionConsumer {
     pub(crate) fn has_sufficient_transactions(&self) -> bool {
         let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
         pending_len as u64 >= self.max_num_transactions_in_block
+    }
+
+    // How long (ms) the oldest currently-unproposed transaction has been waiting, or 0 if the
+    // queue is empty. See Context::oldest_pending_tx_at_ms's doc comment for the full mechanism
+    // (stamped by TransactionClient::submit_no_wait, cleared here in next() once fully drained).
+    // Used by proposer.rs to bound worst-case latency: a batch that's still young can keep
+    // aggregating (good for throughput), but once the oldest entry has waited too long, propose
+    // now regardless of how full the batch is.
+    pub(crate) fn oldest_pending_wait_ms(&self) -> u64 {
+        let stamped_at = self
+            .context
+            .oldest_pending_tx_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if stamped_at == 0 {
+            return 0;
+        }
+        self.context.clock.timestamp_utc_ms().saturating_sub(stamped_at)
     }
 
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
@@ -375,6 +397,17 @@ impl TransactionConsumer {
             }
         }
         drop(handle_txs);
+
+        // LATENCY: the loop above only stops once pending_transactions is Some (a remainder
+        // exists) or the channel is genuinely empty (the `else { break; }` case) -- so reaching
+        // here with pending_transactions still None means nothing is left waiting anywhere.
+        // Clear the shared timestamp so a future arrival stamps a fresh wait, not this drained
+        // batch's already-served one. See Context::oldest_pending_tx_at_ms's doc comment.
+        if self.pending_transactions.is_none() {
+            self.context
+                .oldest_pending_tx_at_ms
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
 
         if transactions.len() > 0 || recv_count > 0 {
             tracing::error!("🔥 [DEBUG] transaction_consumer.next() returning {} txs. recv_count: {}, limit_reached: {:?}", transactions.len(), recv_count, limit_reached);
@@ -607,6 +640,19 @@ impl TransactionClient {
             transactions: txs,
             included_in_block_ack: included_in_block_ack_send,
         };
+        // LATENCY: stamp the arrival time of the oldest pending tx, but only if the queue was
+        // previously empty (0) -- an already-nonzero value means something older is still
+        // waiting, and that older arrival time is what should govern the aggregation-delay
+        // bypass in proposer.rs, not this (later) submission. See Context::
+        // oldest_pending_tx_at_ms's own doc comment for the full mechanism.
+        let now_ms = self.context.clock.timestamp_utc_ms();
+        let _ = self.context.oldest_pending_tx_at_ms.compare_exchange(
+            0,
+            now_ms,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         self.sender
             .send(t)
             .await

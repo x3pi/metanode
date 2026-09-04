@@ -180,10 +180,26 @@ impl Core {
             // [USER REQUIREMENT] Force 40K-50K block aggregation by increasing the base proposal delay.
             // Reduced to 20ms to speed up empty block proposals which carry CommitVotes.
             let min_aggregation_delay = crate::core::MIN_PROPOSAL_AGGREGATION_DELAY;
-            
+
             // ADAPTIVE BYPASS: If the queue already has enough TXs waiting, propose immediately!
             let has_sufficient_txs = self.transaction_consumer.has_sufficient_transactions();
-            if effective_delay < min_aggregation_delay && !has_sufficient_txs {
+
+            // ADAPTIVE BYPASS (2026-09-03): also propose immediately once the OLDEST pending
+            // transaction has already waited at least one floor's worth of time -- without
+            // this, a lightly-loaded queue (never "sufficient" by count) eats this floor again
+            // on every single round it's re-checked, and those can compound across several
+            // consecutive rounds before enough transactions happen to accumulate, not just
+            // once. Traced live to a ~630ms single-transaction submit-to-confirm latency
+            // (measured via tps_latency_probe) that was actually ~5-6 rounds' worth of this
+            // exact floor stacking, not genuine BFT round/commit overhead. Bounding it to one
+            // floor's duration keeps the throughput benefit for a batch that's still young
+            // (freely allowed to keep aggregating) while capping the worst case this
+            // mechanism can add to any single transaction's latency -- never removes the floor
+            // outright, just refuses to reapply it indefinitely to the same waiting backlog.
+            let oldest_wait_ms = self.transaction_consumer.oldest_pending_wait_ms();
+            let oldest_tx_waited_long_enough = oldest_wait_ms >= min_aggregation_delay.as_millis() as u64;
+
+            if effective_delay < min_aggregation_delay && !has_sufficient_txs && !oldest_tx_waited_long_enough {
                 effective_delay = min_aggregation_delay;
             }
 

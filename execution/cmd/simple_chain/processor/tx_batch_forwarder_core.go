@@ -230,21 +230,13 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 					logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
 						batchNum, totalBatches, len(batchTxs))
 				}
-				// Advance TxValidatorPool's localNonceFloor only now, for
-				// exactly this batch -- the point where these specific
-				// transactions are confirmed actually handed to Rust, not
-				// merely selected as candidates. Two earlier placements were
-				// tried and reverted: advancing from ProcessTransactionsIn
-				// PoolSub's pre-truncation validTxs, and advancing from this
-				// tick's full post-truncation `txs` before this loop even
-				// ran -- both credited transactions that could still end up
-				// re-queued (by the truncation above, or by this exact
-				// batch's own SubmitTransactionBatch call failing, see the
-				// `if !success` branch just above) as already forwarded,
-				// permanently stranding them as "past nonce" once actually
-				// reprocessed. See localNonceFloor's doc comment for the
-				// full race this exists to close.
-				bf.transactionProcessor.AdvanceLocalNonceFloor(batchTxs)
+				// (A "localNonceFloor" optimistic-advance step used to run
+				// here, crediting this batch as forwarded the moment FFI
+				// accepted it. Removed 2026-09-03 -- see ClearNoncesCache's
+				// doc comment in tx_validator_pool_core.go for why: it
+				// could permanently strand a sender if the batch didn't
+				// fully land on-chain, which turned out to be a worse
+				// failure mode than the narrow race it was meant to close.)
 				for _, tx := range batchTxs {
 					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "FORWARDED_TO_RUST", "Transaction batch forwarded to Rust consensus engine via FFI")
 					if entry, ok := bf.transactionProcessor.env.GetTxHashConnEntry(tx.Hash()); ok {

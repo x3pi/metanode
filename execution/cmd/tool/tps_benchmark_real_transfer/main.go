@@ -30,6 +30,7 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,11 @@ func main() {
 	settleSecs := flag.Int("settle", 60, "max seconds to wait for settlement")
 	sampleReceipts := flag.Int("sample-receipts", 30, "number of random receipts to fetch and verify status=0x1 at the end")
 	dumpSentHashes := flag.String("dump-sent-hashes", "", "if set, write every successfully-sent tx hash (one per line) to this path for later diffing against on-chain contents")
+	latencySamples := flag.Int("latency-samples", 300, "number of tx indices, evenly spread across the whole run, to track send-to-confirm latency for (0 disables latency measurement)")
+	latencyPollEvery := flag.Duration("latency-poll", 20*time.Millisecond, "receipt poll interval for latency-sampled txs")
+	latencyMaxWait := flag.Duration("latency-max-wait", 60*time.Second, "max time to wait for a single latency-sampled tx's receipt")
+	targetRate := flag.Int("target-rate", 0, "if set (tx/s), paces sending at this steady rate instead of max speed -- for measuring SUSTAINED latency at a realistic rate rather than burst-absorption latency (a full-speed burst's tail latency is dominated by queue depth, not real per-tx processing time)")
+	latencyVerbose := flag.Bool("latency-verbose", false, "print each latency sample's (send-offset, latency) pair, sorted by send offset, to see how latency correlates with when a tx was sent during the run")
 	flag.Parse()
 
 	if *accountsFile == "" {
@@ -224,6 +230,89 @@ func main() {
 	// writes are safe without atomics.
 	sentOK := make([]bool, totalTxs)
 
+	// Latency sampling: pick a fixed number of tx indices evenly spread
+	// across the whole run (not just the first N, which would only measure
+	// the ramp-up before the queue builds up) and record each one's real
+	// send-to-first-confirmed wall-clock latency. Answers "how long does a
+	// transaction actually take under this real load", separate from the
+	// aggregate throughput numbers below.
+	sampledForLatency := make([]bool, totalTxs)
+	sendTimestamps := make([]time.Time, totalTxs)
+	if *latencySamples > 0 && totalTxs > 0 {
+		n := *latencySamples
+		if n > totalTxs {
+			n = totalTxs
+		}
+		step := float64(totalTxs) / float64(n)
+		for i := 0; i < n; i++ {
+			idx := int(float64(i) * step)
+			if idx >= totalTxs {
+				idx = totalTxs - 1
+			}
+			sampledForLatency[idx] = true
+		}
+	}
+
+	// Optional pacing: a simple token-bucket so aggregate send rate across
+	// all workers matches -target-rate instead of going as fast as
+	// possible. Ticked at a fine enough granularity to stay accurate up to
+	// tens of thousands of tx/s without meaningfully loading the tool
+	// itself (each tick just does a non-blocking channel send).
+	var rateLimiter chan struct{}
+	if *targetRate > 0 {
+		rateLimiter = make(chan struct{}, *targetRate)
+		ticksPerSec := 200
+		if *targetRate < ticksPerSec {
+			ticksPerSec = *targetRate
+		}
+		tokensPerTick := *targetRate / ticksPerSec
+		if tokensPerTick < 1 {
+			tokensPerTick = 1
+		}
+		go func() {
+			ticker := time.NewTicker(time.Second / time.Duration(ticksPerSec))
+			defer ticker.Stop()
+			for range ticker.C {
+				for i := 0; i < tokensPerTick; i++ {
+					select {
+					case rateLimiter <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+		fmt.Printf("Pacing sends at target %d tx/s (paced, not max-speed burst)...\n", *targetRate)
+	}
+
+	// Latency tracking state: declared here (before sending starts) so each
+	// sampled tx's poller can be spawned IMMEDIATELY when it's actually
+	// sent, not after the whole send loop finishes.
+	//
+	// BUG FOUND AND FIXED (2026-09-03): the first version of this spawned
+	// every poller goroutine in a separate loop AFTER sendWg.Wait() --
+	// meaning a tx sent at t=0 didn't get its first poll attempt until the
+	// ENTIRE injection phase finished (e.g. t=75s for a 75s-long paced
+	// run), even though it may have confirmed within a few seconds of
+	// being sent. Since a poller's very first attempt after that point
+	// would immediately succeed (the tx was long since confirmed) and the
+	// measured "latency" is time.Since(sentAt), this reported
+	// send_offset + latency == total injection duration for EVERY sample
+	// -- a suspiciously exact constant that was the tell (confirmed live:
+	// 40 samples spanning a 75s run all summed to 75.00-75.02s). This is
+	// the same class of bug already flagged in this project's own history
+	// (never do timed-portion work whose cost scales with total run
+	// length outside the actual per-item measurement) -- purely a
+	// measurement artifact, not real node-side latency.
+	type latencySample struct {
+		sendOffsetMs float64 // time since injectStart when this tx was sent
+		latencyMs    float64
+	}
+	var latencyMu sync.Mutex
+	var latenciesMs []float64
+	var latencyDetails []latencySample
+	var latencyTimeouts int64
+	var latencyWg sync.WaitGroup
+
 	injectStart := time.Now()
 	var sendWg sync.WaitGroup
 	for w := 0; w < numSendWorkers; w++ {
@@ -247,6 +336,10 @@ func main() {
 					if p == nil {
 						continue // signing failed earlier for this one; already excluded from totals
 					}
+					if rateLimiter != nil {
+						<-rateLimiter
+					}
+					sendAttemptTime := time.Now()
 					if _, err := rpcClient.SendRawTransaction(p); err != nil {
 						n := atomic.AddInt64(&sendErrors, 1)
 						if n <= 5 {
@@ -261,6 +354,35 @@ func main() {
 						break
 					}
 					sentOK[base+j] = true
+					if sampledForLatency[base+j] {
+						sendTimestamps[base+j] = sendAttemptTime
+						// Spawn this sample's receipt poller RIGHT NOW, not
+						// after the whole send loop finishes -- see the
+						// bug-fix comment on the latency state declarations
+						// above.
+						latencyWg.Add(1)
+						hash := txHashes[base+j]
+						go func(hash string, sentAt time.Time) {
+							defer latencyWg.Done()
+							deadline := sentAt.Add(*latencyMaxWait)
+							for time.Now().Before(deadline) {
+								rcp, err := rpcClient.GetTransactionReceipt(hash)
+								if err == nil && rcp != nil {
+									lat := float64(time.Since(sentAt).Microseconds()) / 1000.0
+									latencyMu.Lock()
+									latenciesMs = append(latenciesMs, lat)
+									latencyDetails = append(latencyDetails, latencySample{
+										sendOffsetMs: float64(sentAt.Sub(injectStart).Microseconds()) / 1000.0,
+										latencyMs:    lat,
+									})
+									latencyMu.Unlock()
+									return
+								}
+								time.Sleep(*latencyPollEvery)
+							}
+							atomic.AddInt64(&latencyTimeouts, 1)
+						}(hash, sendAttemptTime)
+					}
 					atomic.AddInt64(&sent, 1)
 				}
 			}
@@ -368,4 +490,46 @@ func main() {
 	} else if successCount == 0 {
 		fmt.Println("⚠️  NONE of the sampled transactions succeeded — check account balances / amount-wei.")
 	}
+
+	if *latencySamples > 0 {
+		fmt.Printf("\nWaiting for %d latency-sampled tx receipts (max %s each)...\n", *latencySamples, *latencyMaxWait)
+		latencyWg.Wait()
+		latencyMu.Lock()
+		samples := append([]float64(nil), latenciesMs...)
+		latencyMu.Unlock()
+		fmt.Printf("\n═══ LATENCY (send → first-confirmed, real load) ═══\n")
+		fmt.Printf("Samples: %d confirmed, %d timed out (of %d attempted)\n",
+			len(samples), atomic.LoadInt64(&latencyTimeouts), len(samples)+int(atomic.LoadInt64(&latencyTimeouts)))
+		if len(samples) > 0 {
+			sort.Float64s(samples)
+			sum := 0.0
+			for _, l := range samples {
+				sum += l
+			}
+			fmt.Printf("Min:  %10.2f ms\n", samples[0])
+			fmt.Printf("p50:  %10.2f ms\n", percentile(samples, 0.50))
+			fmt.Printf("p90:  %10.2f ms\n", percentile(samples, 0.90))
+			fmt.Printf("p99:  %10.2f ms\n", percentile(samples, 0.99))
+			fmt.Printf("Max:  %10.2f ms\n", samples[len(samples)-1])
+			fmt.Printf("Mean: %10.2f ms\n", sum/float64(len(samples)))
+		}
+		if *latencyVerbose {
+			details := append([]latencySample(nil), latencyDetails...)
+			sort.Slice(details, func(i, j int) bool { return details[i].sendOffsetMs < details[j].sendOffsetMs })
+			fmt.Println("\n--- per-sample detail (sorted by send offset since injection start) ---")
+			fmt.Println("send_offset_s  latency_s")
+			for _, d := range details {
+				fmt.Printf("%13.2f  %9.2f\n", d.sendOffsetMs/1000.0, d.latencyMs/1000.0)
+			}
+		}
+		fmt.Println("════════════════════════════════════════════════")
+	}
+}
+
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(p * float64(len(sorted)-1))
+	return sorted[idx]
 }

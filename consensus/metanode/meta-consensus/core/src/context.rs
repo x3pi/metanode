@@ -33,6 +33,17 @@ pub struct Context {
     pub clock: Arc<Clock>,
     /// FORK-SAFETY: Global flag to disable reputation swaps when recovering from Case C deadlock
     pub reputation_swaps_disabled_for_epoch: Arc<std::sync::atomic::AtomicBool>,
+    /// LATENCY: UTC ms timestamp of when the oldest currently-unproposed transaction arrived
+    /// (0 = queue empty). Set by TransactionClient::submit_no_wait the moment a submission
+    /// finds the queue empty (compare-exchange from 0, so only the first arrival after empty
+    /// stamps it); cleared back to 0 by TransactionConsumer::next() once it has drained both
+    /// `pending_transactions` and the channel down to nothing. proposer.rs's aggregation-delay
+    /// bypass reads this to force an early proposal once the oldest pending tx has waited too
+    /// long, instead of applying MIN_PROPOSAL_AGGREGATION_DELAY as a flat per-round tax
+    /// regardless of how long anything has actually been waiting -- see that bypass's own doc
+    /// comment for the full rationale (2026-09-03, found chasing a ~630ms single-tx latency
+    /// floor traced to this constant applying unconditionally at every round).
+    pub oldest_pending_tx_at_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Context {
@@ -54,6 +65,7 @@ impl Context {
             metrics,
             clock,
             reputation_swaps_disabled_for_epoch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            oldest_pending_tx_at_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
