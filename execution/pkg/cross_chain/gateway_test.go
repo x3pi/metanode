@@ -1043,6 +1043,60 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), nil))
 		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104))
 	})
+
+	t.Run("Reserve registering ITSELF must succeed, not hit ErrSameChainTransfer (real bootstrap bug, found live via run_full_pipeline.sh)", func(t *testing.T) {
+		// setupTestGatewayEngine's fixture ChainRegistry only has chain 101 -- Reserve (102) is
+		// NOT in its own registry, mirroring a genuinely fresh Root Anchor before this exact call.
+		// Before the fix, RegisterChainViaStake(reg.ChainID=102, ...) called from chain 102 (Reserve
+		// registering itself) always called TransferAllocation(102, 102, amount) internally -- a
+		// same-chain transfer, which TransferAllocation unconditionally rejects with
+		// ErrSameChainTransfer -- and that error is NOT swallowed (only ErrInsufficientAllocation
+		// is), so the whole self-registration failed closed, forever. Live-reproduced: a freshly
+		// deployed Root Anchor's own chain ID could never register into its own ChainRegistry,
+		// which meant AllocateSupplyWithCert/TransferAllocationWithCert (both require
+		// ChainRegistry[ReserveChainID] to already exist, being self-sign-only) could never run --
+		// genesis supply minting was permanently broken for any brand-new deployment.
+		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102
+		engine.EnsureAssetRegistry()
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		reserveKP := bls.GenerateKeyPair()
+		reservePop := PopSign(reserveKP.PrivateKey(), reserveKP.PublicKey())
+		selfReg := ChainRegistry{
+			ChainID:         102,
+			Committee:       []ValidatorEntry{{PubkeyBLS: reserveKP.BytesPublicKey(), Stake: 10000, PopSignature: reservePop.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+			GenesisWallet:   genesisWallet,
+		}
+		payload, err := json.Marshal(selfReg)
+		require.NoError(t, err)
+
+		reserveBefore := engine.SupplyLedger.GetAllocation(102)
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		require.NoError(t, engine.RegisterChainViaStake(payload, engine.MinNativeStakeToRegister), "Reserve must be able to register itself into its own ChainRegistry")
+		reg, exists := engine.ChainRegistry[102]
+		require.True(t, exists, "self-registration must actually create the ChainRegistry entry")
+		assert.Equal(t, reserveKP.BytesPublicKey(), reg.Committee[0].PubkeyBLS, "the real committee from the self-registration payload must be stored")
+		assert.Equal(t, reserveBefore, engine.SupplyLedger.GetAllocation(102), "a same-chain credit is a no-op -- Reserve's own pool must be completely unchanged, not doubled or drained")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must never change here")
+
+		// End-to-end proof this actually unblocks the real bootstrap sequence: with Reserve now
+		// self-registered, the one-time genesis mint (self-signed by the committee just installed)
+		// must now succeed too. Swap in a genuinely pristine ledger first -- the fixture's own
+		// ledger already starts with GenesisTotalSupply=10000 (simulating an already-bootstrapped
+		// system), which would trip ErrGenesisAlreadyMinted and prove nothing about THIS fix.
+		freshLedger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
+		require.NoError(t, err)
+		engine.SupplyLedger = freshLedger
+
+		mintDigest := ComputeAllocateSupplyMessage(102, big.NewInt(1_000_000))
+		mintSig := bls.Sign(reserveKP.PrivateKey(), mintDigest)
+		mintCert := QuorumCert{Epoch: 1, AggregateSignature: mintSig.Bytes(), SignerBitmap: []byte{0x01}}
+		require.NoError(t, engine.AllocateSupplyWithCert(102, big.NewInt(1_000_000), mintCert), "genesis mint must now succeed using the self-registered committee's own signature")
+		assert.Equal(t, big.NewInt(1_000_000), engine.SupplyLedger.GenesisTotalSupply)
+	})
 }
 
 // TestGateway_SetGenesisDigest is the regression test for the 2026-09-04 deterministic-genesis

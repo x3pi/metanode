@@ -397,8 +397,26 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte, amount *big.Int) e
 	// ever sees the payload, and a real signed transaction's sender is never the zero address --
 	// this only matters for a direct caller, e.g. a test, that sets MinNativeStakeToRegister
 	// without also setting GenesisWallet).
+	// BOOTSTRAP FIX (2026-09-04, found live via run_full_pipeline.sh): reg.ChainID != g.ReserveChainID
+	// is REQUIRED here. Without it, the Reserve chain registering ITSELF (the only way, pre-this-fix,
+	// for a fresh Root Anchor to ever get a ChainRegistry entry for its own chain ID -- see
+	// AllocateSupplyWithCert/TransferAllocationWithCert's own doc comments: both require
+	// ChainRegistry[ReserveChainID] to already exist, since they're self-sign-only, no third-party
+	// vote) would call TransferAllocation(ReserveChainID, ReserveChainID, amount) -- a same-chain
+	// transfer, which TransferAllocation always rejects with ErrSameChainTransfer (types.go) --
+	// and ErrSameChainTransfer is NOT swallowed below (only ErrInsufficientAllocation is), so the
+	// error would propagate up and fail the WHOLE self-registration closed. That made a fresh Root
+	// Anchor's own chain ID permanently unregistrable in its own ChainRegistry, which permanently
+	// blocked genesis supply minting -- live-reproduced: registerChainViaStake(reg.ChainID=991,
+	// caller on chain 991 itself) always failed until this fix. Self-registration's real deposit
+	// still burns from the caller's wallet (gateway_handler.go's "registerChainViaStake" case,
+	// unconditional on this skip) as the same anti-Sybil stake fee every other chain pays; it's
+	// simply not ALSO credited into a same-chain allocation no-op. The actual genesis supply mint
+	// stays exactly where it already correctly lives -- the separate, one-time, Reserve-only,
+	// self-signed AllocateSupplyWithCert call, run after this self-registration succeeds.
 	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
 		amount != nil && amount.Sign() > 0 &&
+		reg.ChainID != g.ReserveChainID &&
 		reg.GenesisWallet != (common.Address{}) {
 		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, amount); err != nil {
 			if !errors.Is(err, ErrInsufficientAllocation) {
