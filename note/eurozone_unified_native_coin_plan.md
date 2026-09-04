@@ -6,6 +6,46 @@ mất chủ quyền coin") — tài liệu đó vẫn giữ nguyên làm tham kh
 hướng khuyến nghị**. Hướng này nhẹ hơn nhiều, dựa gần như hoàn toàn vào cơ chế đã có sẵn trong
 code, không cần bỏ chủ quyền private chain.
 
+## CẬP NHẬT (2026-09-04, phiên sau) — C6 (Sybil-vote mua governance qua stake) ĐÃ ĐÓNG
+
+Mục 2.6 dưới đây ghi C6 là "PHÁT HIỆN THẬT, CÒN MỞ" — đã đóng trong phiên làm việc sau, theo
+quyết định trực tiếp của người dùng: **"ý tôi bỏ hoàn toàn vote này có thể sẽ an toàn hơn đó vì
+không có ai thao túng vote cả"**. Không chọn bất kỳ hướng nào trong 3 hướng mục 2.6 từng liệt kê
+(tách quyền vote riêng / vote theo trọng số stake / nâng sàn kinh tế) — thay vào đó **xoá hẳn
+`GovernanceEngine`** (toàn bộ propose/vote/quorum(≥2/3 active chains)/timelock 72h/execute), vì
+không còn vote nào để mà thao túng nữa.
+
+**Thiết kế thay thế** (đã triển khai + security-review + live test xanh 45/45 package,
+commit `95cb5fd7`):
+- Hành động chỉ ảnh hưởng tài nguyên CỦA CHÍNH actor (chuyển allocation của mình, mint supply
+  genesis của mình, đăng ký asset của mình qua `HomeChainID`) → **tự ký (self-signed) bằng đúng
+  uỷ ban BLS thật đang sống trên chain đó** — không vote, đúng yêu cầu "chuyển tiền cần mỗi chữ
+  ký là được rồi không cần vote". Hàm mới: `AllocateSupplyWithCert`, `TransferAllocationWithCert`.
+- Hành động ảnh hưởng BÊN THỨ BA không tự ký được (đổi uỷ ban 1 chain khác, tuyên bố chain khác
+  chết, huỷ đăng ký chain khác) → **`RecoveryCommittee`** — 1 uỷ ban nhỏ, CỐ ĐỊNH, cấu hình 1 lần
+  qua config (`cross_chain.recovery_committee_json`), KHÔNG lớn lên theo `RegisterChainViaStake`
+  (nên không Sybil được) và KHÔNG chỉ nằm ở Reserve (tránh tập trung quyền lực lại, đúng kết luận
+  mục 2.2 cũ). Hàm mới: `DeclareChainDeadWithCert`, `UnregisterChainWithCert`,
+  `UpdateCommitteeWithRecoveryCert`. Nếu `recovery_committee_json` để trống, cả 3 hàm này LUÔN từ
+  chối (`VerifyQuorumCertAgainstRegistry` fail-closed trên committee rỗng) — "cứu hộ" không tự
+  bật, phải cấu hình tường minh.
+
+**Hệ quả cho các mục dưới đây**: mục 2.2 (mô tả `ProposalTransferAllocation` qua
+`GovernanceEngine.Propose/Vote/Execute` là "multisig ≥2/3 founding chains") **đã LỖI THỜI** —
+`TransferAllocationWithCert` giờ chỉ cần đúng chain nguồn tự ký, không còn multisig liên-chain
+nữa (đổi hướng theo yêu cầu người dùng "mỗi chữ ký là được"). Mục 2.6 giữ nguyên làm nhật ký điều
+tra rủi ro gốc; xem đoạn này để biết hướng xử lý cuối cùng KHÁC với 3 hướng mục 2.6 từng đề xuất.
+
+**Rà soát bảo mật khi xoá `GovernanceEngine`**: `GovernanceProposal.Executed` từng là chốt chống
+replay/double-execute duy nhất cho toàn bộ hệ thống propose/vote/execute — xoá nó mà không thay
+thế đã tạo ra 2 lỗ hổng thật, phát hiện + vá + verify thực nghiệm (tắt fix, xác nhận đúng lỗi dự
+đoán, bật lại, xác nhận test xanh) ngay trong phiên này trước khi commit:
+1. `TransferAllocationWithCert` không có gì chặn replay 1 cert hợp lệ (public) → rút cạn
+   allocation lặp lại nhiều lần. Vá bằng nonce theo từng `fromChainID`.
+2. `UpdateCommitteeWithRecoveryCert` không kiểm tra epoch đơn điệu → replay 1 cert cứu hộ CŨ có
+   thể rollback uỷ ban/epoch của chain về trạng thái cũ, kể cả sau khi chain đã tiến hợp lệ qua
+   nhiều epoch mới — chiếm quyền uỷ ban. Vá bằng bắt buộc `NewEpoch > epoch hiện tại`.
+
 ## KẾT LUẬN CUỐI CÙNG (2026-09-04) — ĐÃ ĐIỀU TRA XONG, KHÔNG CẦN SỬA CODE
 
 Bản kế hoạch gốc (mục 1-4 dưới đây) đề xuất **khoá/xoá `ProposalAllocateSupply`**, dựa trên giả
