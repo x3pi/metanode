@@ -2,12 +2,18 @@ all:
   vars:
     # URL RPC của Public Chain (Root Anchor Cluster)
     root_anchor_rpc: "http://[IP_ADDRESS]"
+    # Chain ID thật của cụm Root Anchor (khớp giá trị dùng lúc dựng Root Anchor, vd 991) -- dùng
+    # để tự đăng ký chính Root Anchor vào ChainRegistry của nó (self-registration, cần thiết để
+    # AllocateSupplyWithCert/TransferAllocationWithCert -- đều tự-ký-only -- có thể chạy, xem
+    # note/eurozone_unified_native_coin_plan.md mục "live-verify qua run_full_pipeline.sh").
+    root_anchor_chain_id: 991
     ansible_user: "name"
     ansible_ssh_pass: "password"
     ansible_become_pass: "password"
 
-    # ECDSA private key (hex) của tài khoản submit các giao dịch registerChainViaStake/
-    # propose/vote/executeProposal lên Root Anchor -- BẮT BUỘC phải có sẵn coin gas thật trên
+    # ECDSA private key (hex) của tài khoản submit các giao dịch registerChainViaStake lên Root
+    # Anchor (đã bỏ propose/vote/executeProposal cùng GovernanceEngine 2026-09-04 -- xem
+    # note/eurozone_unified_native_coin_plan.md) -- BẮT BUỘC phải có sẵn coin gas thật trên
     # Root Anchor. Bắt buộc phải khai báo, deploy_private_chains.sh sẽ báo lỗi và dừng nếu thiếu.
     root_anchor_submitter_key: "[SUBMITTER_ECDSA_PRIVATE_KEY_HEX]"
 

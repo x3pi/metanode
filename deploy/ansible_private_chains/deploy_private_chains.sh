@@ -265,7 +265,7 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation'
 
     # Xuất file json cấu hình tường minh đăng ký Gateway & cấu hình mạng Relayer
     python3 -c "
-import os, yaml, json
+import os, yaml, json, glob
 
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
@@ -285,6 +285,88 @@ per_chain = str(global_vars.get('per_chain_allocation', '$PER_CHAIN_ALLOCATION')
 hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {}) or {}
 
 chains_config = []
+
+# Root Anchor self-registration (2026-09-04, real bootstrap bug found+fixed via a live
+# run_full_pipeline.sh run -- see note/eurozone_unified_native_coin_plan.md and commit ae42cd63):
+# AllocateSupplyWithCert/TransferAllocationWithCert are both self-sign-only and require
+# ChainRegistry[ReserveChainID] to already exist -- but nothing ever registered the Root Anchor's
+# OWN chain ID into its OWN ChainRegistry, so genesis supply could never be minted on a fresh
+# deployment. Fixed at the gateway.go level (RegisterChainViaStake no longer errors on a same-chain
+# credit), but that fix is only reachable if something actually SUBMITS a registerChainViaStake
+# call for the Root Anchor's own chain ID -- this block does that, using the SAME real BLS
+# authority keys ansible's local_build role already generated for the Root Anchor's own validators
+# (deploy/systemd/node-N_keys/authority_key.json, written locally on this machine before
+# distribution -- see deploy/ansible/roles/local_build/tasks/main.yml). No rpc_url is set for this
+# entry: unlike a private chain, the Root Anchor's own committee never needs to be independently
+# pushed onto ANOTHER chain's local ChainRegistry for this specific goal (TransferAllocationWithCert
+# is a purely-internal Root Anchor ledger operation, no cross-chain message involved) -- setting one
+# here would just submit the exact same registration twice to the exact same RPC.
+root_anchor_chain_id = int(global_vars.get('root_anchor_chain_id', 991))
+# Match against the LIVE genesis's own validators list (source of truth for who is actually
+# running consensus right now) by eth address, rather than blindly globbing every
+# node-*_keys/ directory under deploy/systemd/ -- that directory accumulates stale leftovers
+# from earlier experiments (found live: a 5th 'node-4_keys' dated 2026-08-28 08:40, older than
+# and unrelated to the real 4-validator node-0..3_keys generated later the same day, whose eth
+# address does not appear anywhere in the live genesis's 4 real validators). Registering a
+# phantom extra committee member would misrepresent the real BFT committee and skew the
+# QuorumThreshold math (5 members needing 4-of-5 instead of the real 4 members needing 3-of-4).
+live_genesis_candidates = [
+    os.path.join('/opt/metanode', 'node-0', 'config', 'genesis.json'),
+    os.path.join('$SCRIPT_DIR', '..', 'systemd', 'root_anchor_data', 'node_0', 'genesis.json'),
+]
+live_validator_addresses = set()
+for gp in live_genesis_candidates:
+    if os.path.exists(gp):
+        try:
+            with open(gp) as gf:
+                gd = json.load(gf)
+            for v in gd.get('validators', []):
+                addr = v.get('address', '')
+                if addr:
+                    live_validator_addresses.add(addr.lower())
+            if live_validator_addresses:
+                break
+        except Exception:
+            pass
+
+root_anchor_keys_glob = os.path.join('$SCRIPT_DIR', '..', 'systemd', 'node-*_keys')
+root_anchor_validators = []
+for key_dir in sorted(glob.glob(root_anchor_keys_glob)):
+    summary_path = os.path.join(key_dir, 'keys_summary.json')
+    auth_path = os.path.join(key_dir, 'authority_key.json')
+    if not (os.path.exists(summary_path) and os.path.exists(auth_path)):
+        continue
+    try:
+        with open(summary_path) as sf:
+            eth_addr = json.load(sf).get('eth_address', '').lower()
+        if live_validator_addresses and eth_addr not in live_validator_addresses:
+            continue  # stale/unrelated key dir -- not part of the currently-live committee
+        with open(auth_path) as kf:
+            priv_hex = json.load(kf).get('private_key_hex', '')
+        node_dir = os.path.basename(key_dir)  # e.g. 'node-0_keys'
+        node_id_str = node_dir.replace('node-', '').replace('_keys', '')
+        if priv_hex:
+            root_anchor_validators.append({
+                'name': f'root_anchor_node_{node_id_str}',
+                'node_id': int(node_id_str) if node_id_str.isdigit() else 0,
+                'bls_private_key': priv_hex,
+                'stake': 1000
+            })
+    except Exception:
+        pass
+if live_validator_addresses and len(root_anchor_validators) != len(live_validator_addresses):
+    print(f'⚠️  Root Anchor self-registration: live genesis has {len(live_validator_addresses)} validators but only found local keys for {len(root_anchor_validators)} of them -- committee below will be INCOMPLETE')
+if root_anchor_validators:
+    chains_config.append({
+        'chain_id': root_anchor_chain_id,
+        'rpc_url': '',
+        'quorum_threshold': 6667,
+        'validators': root_anchor_validators
+    })
+    print(f'📄 Root Anchor self-registration: chain {root_anchor_chain_id}, {len(root_anchor_validators)} validators (from local authority_key.json)')
+else:
+    print(f'⚠️  Root Anchor self-registration SKIPPED: no deploy/systemd/node-*_keys/authority_key.json found -- run the Root Anchor deploy step first, or genesis minting will keep failing with \"chain {root_anchor_chain_id} is not registered\"')
+
 out_simple = {
     'root_anchor': root_rpc,
     'nodes': {},
