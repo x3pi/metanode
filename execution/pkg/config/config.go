@@ -92,17 +92,19 @@ type CrossChainConfig struct {
 	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
 	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
 
-	// DevnetGovernanceTimelockSecondsOverride — EXPLICIT OPT-IN devnet/testing accommodation
-	// only: shortens GovernanceEngine's mandatory 72h (DefaultGovernanceTimelockSeconds)
-	// proposal timelock to this many seconds instead. Zero/omitted (the only value any real
-	// production config should ever use) leaves the real 72h timelock completely unchanged —
-	// this field does not exist in any production config and defaults to inert. Exists because
-	// exercising the full propose->vote->timelock->execute->registerAsset governance path on a
-	// real running devnet is otherwise a literal 72-hour wait, which makes it untestable in
-	// practice; see note/cross_chain_production_readiness_plan.md Phase 0.8 for why this was
-	// added and the live verification it unblocked. Never set this on anything but a disposable
-	// local devnet.
-	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
+	// RecoveryCommitteeJSON + RecoveryQuorumThreshold (2026-09-04, replacing GovernanceEngine's
+	// whole propose/vote/72h-timelock/execute machinery — see
+	// cross_chain.GatewayEngine.RecoveryCommittee's own doc comment for the full rationale): a
+	// small, FIXED, JSON-encoded BLS committee ([]cross_chain.ValidatorEntry — pubkey_bls/stake/
+	// pop_signature per member) that authorizes the 3 actions no affected chain can ever self-
+	// authorize (declareChainDeadWithCert, unregisterChainWithCert,
+	// updateCommitteeWithRecoveryCert). Empty/omitted leaves those 3 calls failing closed
+	// (VerifyQuorumCertAgainstRegistry's own ErrEmptyCommittee) rather than silently permissive.
+	// RecoveryQuorumThreshold follows the same convention as ChainRegistry.QuorumThreshold: basis
+	// points, 0 meaning "use the real 2/3 BFT default". Set once, never on-chain-settable — same
+	// "lock in from the pristine state" pattern as ReserveChainID.
+	RecoveryCommitteeJSON   string `json:"recovery_committee_json,omitempty"`
+	RecoveryQuorumThreshold uint64 `json:"recovery_quorum_threshold,omitempty"`
 
 	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
 	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On

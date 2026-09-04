@@ -436,55 +436,6 @@ func TestRelayer_Scenario10_5_TwoWayHopCountLoopGuard(t *testing.T) {
 	assert.ErrorIs(t, err7, ErrHopCountExceeded)
 }
 
-// TestRelayer_Scenario10_6_GovernanceProposeVoteTimelockExecute covers the generic
-// propose/vote/72h-timelock/execute lifecycle these Reserve-side governance mechanics still
-// provide (used today by ProposalTransferAllocation, ProposalUpdateCommittee, etc.) -- kind is a
-// placeholder value here, not asserting anything registration-specific: chain onboarding itself
-// is RegisterChainViaStake's job now (vote-free), not a governance proposal (the vote-gated
-// ProposalRegisterChain kind this test used to exercise was removed 2026-09-04).
-func TestRelayer_Scenario10_6_GovernanceProposeVoteTimelockExecute(t *testing.T) {
-	_, chains := setupTestRelayerNetwork()
-
-	// 4 active chains: 1000, 101, 102, 103 -> Quorum >= 2/3 of 4 chains = 3 chains
-	activeChains := []uint64{1000, 101, 102, 103}
-	timelock := uint64(72 * 3600)
-	gov := NewGovernanceEngineWithTimelock(activeChains, timelock)
-
-	newChainPayload := []byte(`{"chain_id": 104, "name": "Chain D"}`)
-	propID, err := gov.Propose(ProposalUnregisterChain, newChainPayload, 1000)
-	require.NoError(t, err)
-
-	// Vote by Chain 1000, 101, 102 (3 votes >= 3)
-	_, err = gov.Vote(propID, 1000, 1050)
-	require.NoError(t, err)
-	_, err = gov.Vote(propID, 101, 1060)
-	require.NoError(t, err)
-	status, err := gov.Vote(propID, 102, 1070)
-	require.NoError(t, err)
-	assert.Equal(t, ProposalStatusTimelocked, status)
-
-	// Cannot execute before 72h delay
-	_, errEarly := gov.Execute(propID, 1070+100)
-	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
-
-	// Executes successfully after 72h delay
-	_, errExec := gov.Execute(propID, 1070+timelock+1)
-	require.NoError(t, errExec)
-
-	// Manually register Chain 104 in Reserve registry with 0 initial allocation (real chain
-	// onboarding is RegisterChainViaStake's job, not this generic governance-mechanics test).
-	kp104 := bls.GenerateKeyPair()
-	chains[1000].ChainRegistry[104] = ChainRegistry{
-		ChainID:         104,
-		Epoch:           1,
-		QuorumThreshold: 6667,
-		Committee:       []ValidatorEntry{{PubkeyBLS: kp104.PublicKey().Bytes(), Stake: 100}},
-	}
-	chains[1000].SupplyLedger.PerChainAllocation[104] = big.NewInt(0)
-
-	assert.Equal(t, big.NewInt(0), chains[1000].SupplyLedger.PerChainAllocation[104])
-}
-
 func TestRelayer_Scenario10_7_AdversarialOverdrawAttackBlocked(t *testing.T) {
 	relayerEngine, chains := setupTestRelayerNetwork()
 

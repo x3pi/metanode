@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -67,24 +68,164 @@ func ComputeMessageFailureAttestMessage(messageID common.Hash, destChainID uint6
 	return buf
 }
 
-// GovernanceVoteDomainTag domain-separates the payload a committee member signs to cast their
-// chain's single governance vote (Milestone G security fix), distinct from every other signed
-// payload in this package so a signature over one can never be replayed as another.
-var GovernanceVoteDomainTag = []byte("GOVERNANCE_VOTE_V1:")
+// The 5 domain tags and digest functions below (2026-09-04) replace GovernanceEngine's whole
+// propose/vote/72h-timelock/execute machinery, removed the same day per explicit user request
+// ("bỏ hoàn toàn vote... vì không có ai thao túng vote cả" -- if there is no vote mechanism, there
+// is nothing to Sybil-manipulate). Vote from Governance.ActiveChains (grown for free by every
+// RegisterChainViaStake call, see note/eurozone_unified_native_coin_plan.md mục 2.6) was itself the
+// Sybil-exploitable primitive; replacing it with a real cryptographic QuorumCert -- from either the
+// affected party's OWN committee (self-authorization) or a small, config-set, non-Sybil-able
+// RecoveryCommittee (for actions a party genuinely cannot self-authorize) -- removes the
+// vote-buying attack surface entirely rather than trying to patch it. Each of these mirrors
+// ComputeCommitRootAttestMessage/ComputeGovernanceVoteMessage's own domain-separation pattern —
+// a distinct tag per action so a signature over one can never be replayed as another.
 
-// ComputeGovernanceVoteMessage computes the domain-separated payload a member of voterChainID's
-// CURRENT committee (per Root Anchor's own ChainRegistry) must sign to cast that chain's one vote
-// for a proposal. This is what gateway_handler.go's "vote" case verifies before ever calling
-// GovernanceEngine.Vote — without it, any unauthenticated caller could cast a vote "as" any
-// registered chain merely by naming its ID, since GovernanceEngine.Vote itself trusts its caller.
-func ComputeGovernanceVoteMessage(proposalID common.Hash, voterChainID uint64) []byte {
+// TransferAllocationDomainTag domain-separates GatewayEngine.TransferAllocationWithCert's payload:
+// the SOURCE chain's own committee self-authorizes moving its own allocation elsewhere.
+var TransferAllocationDomainTag = []byte("TRANSFER_ALLOCATION_V1:")
+
+// ComputeTransferAllocationMessage computes the digest fromChainID's own committee signs to
+// authorize moving `amount` of its own allocation to toChainID. nonce (2026-09-04, found in
+// review: without it a captured valid cert could be replayed indefinitely to drain fromChainID's
+// entire allocation -- see GatewayEngine.TransferAllocationNonce's own doc comment) must equal
+// fromChainID's current TransferAllocationNonce for TransferAllocationWithCert to accept it, and
+// is bumped by exactly 1 on every successful transfer, so the exact same signed digest can never
+// verify against the live nonce a second time.
+func ComputeTransferAllocationMessage(fromChainID, toChainID uint64, amount *big.Int, nonce uint64) []byte {
 	var buf []byte
-	buf = append(buf, GovernanceVoteDomainTag...)
-	buf = append(buf, proposalID.Bytes()...)
+	buf = append(buf, TransferAllocationDomainTag...)
 	var idBuf [8]byte
-	binary.BigEndian.PutUint64(idBuf[:], voterChainID)
+	binary.BigEndian.PutUint64(idBuf[:], fromChainID)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], toChainID)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, padTo32(amount)...)
+	binary.BigEndian.PutUint64(idBuf[:], nonce)
 	buf = append(buf, idBuf[:]...)
 	return buf
+}
+
+// AllocateSupplyDomainTag domain-separates GatewayEngine.AllocateSupplyWithCert's payload:
+// Reserve's own committee self-authorizes the one-time genesis mint to itself.
+var AllocateSupplyDomainTag = []byte("ALLOCATE_SUPPLY_V1:")
+
+// ComputeAllocateSupplyMessage computes the digest Reserve's own committee signs to authorize the
+// one-time genesis mint of `amount` to itself (chainID, always == g.ReserveChainID by the time
+// this is checked, included here anyway so the signed payload is fully self-describing).
+func ComputeAllocateSupplyMessage(chainID uint64, amount *big.Int) []byte {
+	var buf []byte
+	buf = append(buf, AllocateSupplyDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, padTo32(amount)...)
+	return buf
+}
+
+// DeclareChainDeadDomainTag domain-separates GatewayEngine.DeclareChainDeadWithCert's payload:
+// this is NOT self-authorizable (the whole point is the target chain is unresponsive), so it is
+// signed by the config-set RecoveryCommittee instead.
+var DeclareChainDeadDomainTag = []byte("DECLARE_CHAIN_DEAD_V1:")
+
+// ComputeDeclareChainDeadMessage computes the digest the RecoveryCommittee signs to declare
+// chainID dead (unlocking ClaimDeadChainBalance for its stranded account holders).
+func ComputeDeclareChainDeadMessage(chainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, DeclareChainDeadDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	return buf
+}
+
+// UnregisterChainDomainTag domain-separates GatewayEngine.UnregisterChainWithCert's payload —
+// same non-self-authorizable rationale as DeclareChainDead, signed by RecoveryCommittee.
+var UnregisterChainDomainTag = []byte("UNREGISTER_CHAIN_V1:")
+
+// ComputeUnregisterChainMessage computes the digest the RecoveryCommittee signs to remove chainID
+// from ChainRegistry entirely.
+func ComputeUnregisterChainMessage(chainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, UnregisterChainDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	return buf
+}
+
+// RecoveryUpdateCommitteeDomainTag domain-separates GatewayEngine.UpdateCommitteeWithRecoveryCert's
+// payload — distinct from CommitteeUpdateDomainTag (ApplyCommitteeUpdate's OWN-committee-signs-its-
+// successor path, epoch_sync.go above) on purpose: that path requires the chain's CURRENT/OLD
+// committee to still be reachable to sign, which is exactly what is impossible in the recovery
+// scenario this path exists for (old committee's keys lost/unreachable) — signed by
+// RecoveryCommittee instead, and deliberately does NOT require sequential epoch progression the
+// way ApplyCommitteeUpdate does, since a stuck chain's epoch counter may be arbitrarily far behind.
+var RecoveryUpdateCommitteeDomainTag = []byte("RECOVERY_UPDATE_COMMITTEE_V1:")
+
+// ComputeRecoveryUpdateCommitteeMessage computes the digest the RecoveryCommittee signs to install
+// a brand new committee for chainID. newCommittee is sorted by PubkeyBLS first (same rationale as
+// ComputeCommitteeUpdateDigest) so the digest is independent of slice order.
+func ComputeRecoveryUpdateCommitteeMessage(chainID, newEpoch uint64, newCommittee []ValidatorEntry, quorumThreshold uint64, stateRoot, accountTreeRoot common.Hash) []byte {
+	sorted := make([]ValidatorEntry, len(newCommittee))
+	copy(sorted, newCommittee)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i].PubkeyBLS, sorted[j].PubkeyBLS) < 0
+	})
+	var committeeBuf []byte
+	for _, v := range sorted {
+		committeeBuf = append(committeeBuf, v.PubkeyBLS...)
+		var stakeBuf [8]byte
+		binary.BigEndian.PutUint64(stakeBuf[:], v.Stake)
+		committeeBuf = append(committeeBuf, stakeBuf[:]...)
+		committeeBuf = append(committeeBuf, v.PopSignature...)
+	}
+	committeeHash := Keccak256(committeeBuf)
+
+	var buf []byte
+	buf = append(buf, RecoveryUpdateCommitteeDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], newEpoch)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, committeeHash.Bytes()...)
+	var qtBuf [8]byte
+	binary.BigEndian.PutUint64(qtBuf[:], quorumThreshold)
+	buf = append(buf, qtBuf[:]...)
+	buf = append(buf, stateRoot.Bytes()...)
+	buf = append(buf, accountTreeRoot.Bytes()...)
+	return buf
+}
+
+// RegisterAssetDomainTag domain-separates GatewayEngine.RegisterAssetOnRootAnchor's payload: the
+// asset's own HomeChainID self-authorizes bridging it onto the shared registry.
+var RegisterAssetDomainTag = []byte("REGISTER_ASSET_V1:")
+
+// ComputeRegisterAssetMessage computes the digest an asset's HomeChainID own committee signs to
+// authorize registering it.
+func ComputeRegisterAssetMessage(assetID *big.Int, homeChainID uint64, canonicalContract common.Address) []byte {
+	var buf []byte
+	buf = append(buf, RegisterAssetDomainTag...)
+	buf = append(buf, padTo32(assetID)...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], homeChainID)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, canonicalContract.Bytes()...)
+	return buf
+}
+
+// padTo32 left-pads a big.Int's big-endian bytes to exactly 32 bytes (uint256 convention), same
+// truncation-avoidance pattern HashAggregateValueLeaf already uses -- nil/negative treated as 0.
+func padTo32(v *big.Int) []byte {
+	out := make([]byte, 32)
+	if v == nil {
+		return out
+	}
+	raw := v.Bytes()
+	if len(raw) <= 32 {
+		copy(out[32-len(raw):], raw)
+	}
+	return out
 }
 
 // BuildSignerBitmap constructs a deterministic bit vector for a committee indicating which

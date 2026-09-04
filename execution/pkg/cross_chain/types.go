@@ -169,9 +169,10 @@ func (g *GlobalSupplyLedger) SetInitialAllocation(reserveChainID, newChainID uin
 // constructs the ledger with genesis_total_supply=0 and an empty allocation map
 // (gateway_handler.go's loadGatewayEngine) — so without this method, EVERY attestCommit() ceiling
 // check (Scenario 10.7) rejects with "available 0" forever, for every chain, native coin or custom
-// asset alike. Gated by full governance (ProposalAllocateSupply, >= 2/3 active-chain quorum +
-// timelock, mục 11.6) so a captured single chain can never self-grant — same protection level as
-// ProposalRegisterAsset.
+// asset alike. Callers are cert-gated (2026-09-04): AllocateSupplyWithCert requires the Reserve
+// chain's own committee to self-sign a one-time genesis mint, and RegisterAssetOnRootAnchor
+// requires the new asset's HomeChainID committee to self-sign its registration — so a captured
+// single OTHER chain can never self-grant an allocation it doesn't own.
 func (g *GlobalSupplyLedger) GrantAllocation(chainID uint64, amount *big.Int) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrNilAmount
@@ -347,49 +348,15 @@ type AttestedCommit struct {
 	ClaimedAmount *big.Int    `json:"claimed_amount"`
 }
 
-// GovernanceProposalKind represents governance action types on Root Anchor (Section 11.6 & 1.3 #3).
-type GovernanceProposalKind uint8
-
-const (
-	// Kind 0 was ProposalRegisterChain (vote-gated chain admission) -- removed 2026-09-04.
-	// RegisterChainViaStake (gateway.go) has been the sole registration path since 2026-08-28;
-	// nothing in this codebase's own deploy tooling ever called ProposalRegisterChain again after
-	// that, and the user explicitly asked for it to be removed rather than kept as dead code. Left
-	// unassigned (not reused) so an old on-chain proposal or external caller that still encodes
-	// kind=0 fails closed (unhandled kind, no-op in ExecuteGovernanceProposal's switch) instead of
-	// silently hitting a different, reassigned meaning.
-	ProposalUnregisterChain  GovernanceProposalKind = 1
-	ProposalRegisterAsset    GovernanceProposalKind = 2
-	ProposalUpdateCommittee  GovernanceProposalKind = 3
-	ProposalDeclareChainDead GovernanceProposalKind = 4
-	ProposalAllocateSupply   GovernanceProposalKind = 5
-	// ProposalTransferAllocation moves already-minted allocation from one chain to another via
-	// GlobalSupplyLedger.TransferAllocation (added 2026-08-27, C7 fix) -- the safe, repeatable,
-	// non-inflationary way for a chain to grow its allocation after genesis, now that
-	// ProposalAllocateSupply is a one-time Reserve-only mint. Typically FromChainID is Reserve
-	// onboarding a newly-registered chain, but any chain with spare allocation may transfer to
-	// any other registered chain -- TransferAllocation itself enforces the sender actually has
-	// the amount, so this can never inflate supply, only redistribute what already exists.
-	ProposalTransferAllocation GovernanceProposalKind = 6
-)
-
-// AllocationGrantPayload is the JSON payload for ProposalAllocateSupply proposals. ChainID must
-// equal the chain's own configured ReserveChainID (enforced in ExecuteGovernanceProposal) --
-// this proposal kind only ever mints the one-time genesis supply, never grants an arbitrary
-// chain allocation out of thin air. Use ProposalTransferAllocation for that instead.
-type AllocationGrantPayload struct {
-	ChainID uint64   `json:"chain_id"`
-	Amount  *big.Int `json:"amount"`
-}
-
-// AllocationTransferPayload is the JSON payload for ProposalTransferAllocation proposals.
-type AllocationTransferPayload struct {
-	FromChainID uint64   `json:"from_chain_id"`
-	ToChainID   uint64   `json:"to_chain_id"`
-	Amount      *big.Int `json:"amount"`
-}
-
-// UpdateCommitteePayload is the JSON payload for ProposalUpdateCommittee proposals.
+// UpdateCommitteePayload is the JSON payload for UpdateCommitteeWithRecoveryCert (RecoveryCommittee-
+// authorized committee replacement -- see gateway.go). Was formerly also used by the deleted
+// GovernanceEngine's ProposalUpdateCommittee proposal kind; that whole propose/vote/execute
+// machinery (GovernanceProposalKind, GovernanceProposal, AllocationGrantPayload,
+// AllocationTransferPayload and the numbered Proposal* kinds) was removed 2026-09-04 in favor of
+// per-action cert-based self-authorization / RecoveryCommittee-authorization (see gateway.go's
+// AllocateSupplyWithCert/TransferAllocationWithCert/DeclareChainDeadWithCert/
+// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). This struct is the only piece of that
+// old payload family still live.
 type UpdateCommitteePayload struct {
 	ChainID         uint64           `json:"chain_id"`
 	SourceChainID   uint64           `json:"source_chain_id,omitempty"`
@@ -398,18 +365,6 @@ type UpdateCommitteePayload struct {
 	QuorumThreshold uint64           `json:"quorum_threshold,omitempty"`
 	StateRoot       common.Hash      `json:"state_root,omitempty"`
 	AccountTreeRoot common.Hash      `json:"account_tree_root,omitempty"`
-}
-
-// GovernanceProposal tracks on-chain voting across active chains (Section 11.6 & 1.3 #3).
-type GovernanceProposal struct {
-	ProposalID  common.Hash            `json:"proposal_id"`
-	Kind        GovernanceProposalKind `json:"kind"`
-	Payload     []byte                 `json:"payload"`
-	VotesFor    uint64                 `json:"votes_for"`
-	VotedChains map[uint64]bool        `json:"voted_chains"`
-	ProposedAt  uint64                 `json:"proposed_at"`
-	EffectiveAt uint64                 `json:"effective_at"`
-	Executed    bool                   `json:"executed"`
 }
 
 // AccountLeaf represents account state snapshot for Chain-Death Recovery (Section 11.6 & 5.2.2).

@@ -125,9 +125,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 			return nil, fmt.Errorf("bootstrap empty GlobalSupplyLedger: %w", err)
 		}
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
-		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyReserveChainIDConfig(freshEngine)
 		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
+			return nil, err
+		}
+		if err := applyRecoveryCommitteeConfig(freshEngine); err != nil {
 			return nil, err
 		}
 		return freshEngine, nil
@@ -157,9 +159,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
 	}
-	applyDevnetGovernanceTimelockOverride(&engine)
 	applyReserveChainIDConfig(&engine)
 	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
+		return nil, err
+	}
+	if err := applyRecoveryCommitteeConfig(&engine); err != nil {
 		return nil, err
 	}
 	return &engine, nil
@@ -208,15 +212,41 @@ func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) erro
 	return nil
 }
 
-// applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
-// CrossChain.DevnetGovernanceTimelockSecondsOverride — see that field's own doc comment
-// (pkg/config/config.go) for why this exists and why it never affects a real production
-// config.
-func applyDevnetGovernanceTimelockOverride(engine *cross_chain.GatewayEngine) {
+// applyRecoveryCommitteeConfig sets GatewayEngine.RecoveryCommittee/RecoveryQuorumThreshold once
+// from config.ConfigApp.CrossChain.RecoveryCommitteeJSON/RecoveryQuorumThreshold — see
+// GatewayEngine.RecoveryCommittee's own doc comment for the full rationale (2026-09-04, replacing
+// GovernanceEngine.ActiveChains as the authorizer for DeclareChainDeadWithCert/
+// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). A no-op when the raw config string is
+// empty (lets a chain start up before an operator has decided its RecoveryCommittee — the 3 call
+// sites above fail closed on an empty committee via VerifyQuorumCertAgainstRegistry's own
+// ErrEmptyCommittee check, not silently here) or already set (lock-in-once, same pattern as every
+// other config-applied GatewayEngine field). A non-empty but unparseable JSON string is a config
+// mistake, not a silent no-op — fails loudly at startup.
+func applyRecoveryCommitteeConfig(engine *cross_chain.GatewayEngine) error {
 	if config.ConfigApp == nil {
-		return
+		return nil
 	}
-	engine.ApplyGovernanceTimelockOverride(config.ConfigApp.CrossChain.DevnetGovernanceTimelockSecondsOverride)
+	if len(engine.RecoveryCommittee) > 0 {
+		return nil
+	}
+	raw := config.ConfigApp.CrossChain.RecoveryCommitteeJSON
+	if raw == "" {
+		return nil
+	}
+	var committee []cross_chain.ValidatorEntry
+	if err := json.Unmarshal([]byte(raw), &committee); err != nil {
+		return fmt.Errorf("cross_chain.recovery_committee_json is not valid JSON: %w", err)
+	}
+	if err := cross_chain.ValidateCommittee(committee); err != nil {
+		return fmt.Errorf("cross_chain.recovery_committee_json: %w", err)
+	}
+	threshold := config.ConfigApp.CrossChain.RecoveryQuorumThreshold
+	if err := cross_chain.ValidateQuorumThreshold(threshold); err != nil {
+		return fmt.Errorf("cross_chain.recovery_quorum_threshold: %w", err)
+	}
+	engine.RecoveryCommittee = committee
+	engine.RecoveryQuorumThreshold = threshold
+	return nil
 }
 
 // allZero reports whether data is exactly common.Hash{}.Bytes() — SmartContractDB.StorageValue
@@ -483,7 +513,8 @@ func (h *GatewayHandler) HandleTransaction(
 	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "creditReserveAllocation", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
 		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
-		"propose", "vote", "executeProposal", "registerAsset",
+		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
+		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
@@ -1358,115 +1389,98 @@ func (h *GatewayHandler) handleWrite(
 			logger.Warn("⚠️ [GATEWAY] CommitFinalizedCallback is NIL for chain=%d, commitRoot=%s", engine.LocalChainID, commitRoot.Hex())
 		}
 
-	case "propose":
-		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose
-		fee := tx.Amount()
-		requiredFee := big.NewInt(100_000_000_000_000_000) // 0.1 native token
-		if fee == nil || fee.Cmp(requiredFee) < 0 {
-			return nil, nil, fmt.Errorf("propose requires a fee of at least 0.1 native tokens to prevent spam (got %v)", fee)
+	case "transferAllocationWithCert":
+		// 2026-09-04: replaces the old propose/vote/72h-timelock/executeProposal dance for
+		// ProposalTransferAllocation with a single call, authorized by fromChainId's OWN
+		// committee self-signing (no third-party vote needed or trusted) -- see
+		// GatewayEngine.TransferAllocationWithCert's own doc comment for the full rationale.
+		fromChainID := mustUint64(args[0])
+		toChainID := mustUint64(args[1])
+		amount := mustBigInt(args[2])
+		nonce := mustUint64(args[3])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[4]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[5])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[6])),
 		}
-
-		engine.EnsureGovernance()
-		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
-		payload := mustBytes(args[1])
-		// Security fix: args[2] (the ABI's declared "proposedAt") is a raw caller-supplied
-		// value with nothing to cross-check it against — GovernanceEngine.Propose/Vote/Execute
-		// were written as pure functions that trust whatever timestamp they're given, never
-		// meant to be fed directly from unauthenticated calldata. A caller naming a future
-		// timestamp here (and an equally fake future one at vote/executeProposal time) can walk
-		// EffectiveAt arbitrarily far ahead and immediately satisfy it, bypassing the mandatory
-		// 72h timelock outright — the same trust class of bug already fixed for voterChainID
-		// above. Fail-closed like every other consensus-relevant value in this file: ignore the
-		// caller's claim and always use the real, consensus-agreed block time instead. The ABI
-		// parameter itself is left in place (removing it would be an ABI-breaking change with no
-		// safety benefit); its value is simply never trusted.
-		proposedAt := blockTime
-		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
-		if err != nil {
+		if err := engine.TransferAllocationWithCert(fromChainID, toChainID, amount, nonce, cert); err != nil {
 			return nil, nil, err
 		}
-		// propose() is deliberately permissionless (all_remaining_fixes_plan.md Mục 2: gated
-		// only at vote()/quorum, matching common bond-then-vote governance patterns). Proposals
-		// has no TTL/cleanup, so surface its real size as a metric instead of guessing at a
-		// rate-limit design with no production data behind it.
-		metrics.GovernanceProposalCount.Set(float64(len(engine.Governance.Proposals)))
-		packed, packErr := method.Outputs.Pack(proposalID)
-		if packErr != nil {
-			return nil, nil, packErr
-		}
-		returnData = packed
 
-	case "vote":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		voterChainID := mustUint64(args[1])
-		// Security fix: see the matching comment on "propose" above — args[2] is untrusted
-		// caller-supplied input; always use the real block time instead.
-		currentTimestamp := blockTime
-		signerPubkeyBls := mustBytes(args[3])
-		signature := mustBytes(args[4])
-
-		// Security fix: GovernanceEngine.Vote itself trusts whatever voterChainID its caller
-		// passes — it was never meant to be called from an unauthenticated public entry point.
-		// Require proof that the caller actually speaks for voterChainID: a valid BLS signature
-		// from a member of that chain's CURRENT committee (per Root Anchor's own ChainRegistry)
-		// over this specific (proposalId, voterChainId) pair. Without this, any caller could cast
-		// any registered chain's single governance vote just by naming its ID.
-		voterRegistry, exists := engine.ChainRegistry[voterChainID]
-		if !exists {
-			return nil, nil, fmt.Errorf("vote: %w: chain %d", cross_chain.ErrUnknownSourceChain, voterChainID)
+	case "allocateSupplyWithCert":
+		// 2026-09-04: replaces ProposalAllocateSupply's governance-vote gate -- authorized by
+		// Reserve's OWN committee self-signing the one-time genesis mint to itself.
+		chainID := mustUint64(args[0])
+		amount := mustBigInt(args[1])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[2]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
 		}
-		isMember := false
-		for _, v := range voterRegistry.Committee {
-			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
-				isMember = true
-				break
-			}
-		}
-		if !isMember {
-			return nil, nil, fmt.Errorf("vote: signer is not a member of chain %d's current committee", voterChainID)
-		}
-		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, voterChainID)
-		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
-		sig := mt_common.SignFromBytes(signature)
-		if !bls.VerifySign(pubKey, sig, voteMsg) {
-			return nil, nil, cross_chain.ErrInvalidBLSSignature
-		}
-
-		status, err := engine.Governance.Vote(proposalID, voterChainID, currentTimestamp)
-		if err != nil {
+		if err := engine.AllocateSupplyWithCert(chainID, amount, cert); err != nil {
 			return nil, nil, err
 		}
-		packed, packErr := method.Outputs.Pack(uint8(status))
-		if packErr != nil {
-			return nil, nil, packErr
-		}
-		returnData = packed
 
-	case "executeProposal":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		// Security fix: see the matching comment on "propose" above — args[1] is untrusted
-		// caller-supplied input; always use the real block time instead.
-		currentTimestamp := blockTime
-		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
+	case "declareChainDeadWithCert":
+		// 2026-09-04: replaces ProposalDeclareChainDead's governance-vote gate -- authorized by
+		// RecoveryCommittee (a fixed, config-set, non-Sybil-able set; the target chain being
+		// declared dead cannot, by definition, self-authorize this).
+		chainID := mustUint64(args[0])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.DeclareChainDeadWithCert(chainID, cert); err != nil {
 			return nil, nil, err
 		}
-		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalUnregisterChain
-		// execution is one possible outcome of this call among several proposal kinds -- setting
-		// this unconditionally after every successful execute is cheap and correct either way
-		// (a no-op change in registry size for any other proposal kind).
+
+	case "unregisterChainWithCert":
+		// 2026-09-04: replaces ProposalUnregisterChain's governance-vote gate -- same
+		// RecoveryCommittee rationale as declareChainDeadWithCert above.
+		chainID := mustUint64(args[0])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.UnregisterChainWithCert(chainID, cert); err != nil {
+			return nil, nil, err
+		}
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): keep RegisteredChainCount
+		// accurate after a real registry-size change.
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
-	case "registerAsset":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		totalSupply := mustBigInt(args[1])
-		proposal := engine.Governance.GetProposal(proposalID)
-		if proposal == nil {
-			return nil, nil, cross_chain.ErrProposalNotFound
+	case "updateCommitteeWithRecoveryCert":
+		// 2026-09-04: replaces ProposalUpdateCommittee's governance-vote gate -- authorized by
+		// RecoveryCommittee, for the case where a chain's OWN current committee is unreachable
+		// (ApplyCommitteeUpdate above still handles the normal self-attested successor case).
+		payload := mustBytes(args[0])
+		var update cross_chain.UpdateCommitteePayload
+		if err := json.Unmarshal(payload, &update); err != nil {
+			return nil, nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
 		}
-		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(proposal, totalSupply); err != nil {
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.UpdateCommitteeWithRecoveryCert(update, cert); err != nil {
+			return nil, nil, err
+		}
+
+	case "registerAssetWithCert":
+		// 2026-09-04: replaces ProposalRegisterAsset's governance-vote gate -- authorized by the
+		// asset's own HomeChainID self-signing (see AssetRegistryEngine's own doc comment).
+		engine.EnsureAssetRegistry()
+		payload := mustBytes(args[0])
+		totalSupply := mustBigInt(args[1])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[2]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
+		}
+		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(payload, totalSupply, cert); err != nil {
 			return nil, nil, err
 		}
 
@@ -1779,26 +1793,12 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
-	case "getProposal":
-		args, err := method.Inputs.Unpack(argData)
-		if err != nil {
-			return nil, fmt.Errorf("unpack getProposal input: %w", err)
-		}
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		proposal := engine.Governance.GetProposal(proposalID)
-		status, exists := engine.Governance.GetStatus(proposalID)
-		if !exists || proposal == nil {
-			return method.Outputs.Pack(false, uint8(0), []byte{}, uint64(0), uint64(0), uint64(0), false, uint8(0))
-		}
-		return method.Outputs.Pack(true, uint8(proposal.Kind), proposal.Payload, proposal.VotesFor, proposal.ProposedAt, proposal.EffectiveAt, proposal.Executed, uint8(status))
-
 	case "getAsset":
 		args, err := method.Inputs.Unpack(argData)
 		if err != nil {
 			return nil, fmt.Errorf("unpack getAsset input: %w", err)
 		}
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		assetID := mustBigInt(args[0])
 		entry, err := engine.AssetRegistry.GetAsset(assetID)
 		if err != nil || entry == nil {
@@ -1820,6 +1820,18 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			alloc = big.NewInt(0)
 		}
 		return method.Outputs.Pack(alloc)
+
+	case "getTransferAllocationNonce":
+		// Lets tooling (register_chains, live_asset_bridge) fetch the exact nonce a real
+		// TransferAllocationWithCert cert must be signed against -- see
+		// GatewayEngine.TransferAllocationNonce's own doc comment for why this exists (replay
+		// protection for the self-signed transfer-allocation path).
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getTransferAllocationNonce input: %w", err)
+		}
+		targetChainID := mustUint64(args[0])
+		return method.Outputs.Pack(engine.GetTransferAllocationNonce(targetChainID))
 
 	case "getMinNativeStakeToRegister":
 		// Lets tooling (gen_single_chain.py's genesis builder, register_chains) fetch the current

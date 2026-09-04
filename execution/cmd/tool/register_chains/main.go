@@ -602,18 +602,8 @@ func handleTransferAllocation(
 	fmt.Printf("   └─ Submitter:        %s\n", fromAddress.Hex())
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 
-	transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
-		FromChainID: fromChain,
-		ToChainID:   toChain,
-		Amount:      amountBig,
-	})
-	if err != nil {
-		fmt.Printf("❌ Failed to marshal AllocationTransferPayload: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-		6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+	if err := transferAllocationWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+		fromChain, toChain, amountBig, committee,
 		fmt.Sprintf("transfer allocation from chain %d to %d", fromChain, toChain)); err != nil {
 		fmt.Printf("❌ Transfer allocation failed: %v\n", err)
 		os.Exit(1)
@@ -960,18 +950,8 @@ func fundGenesis(
 	reserveChainID := rootChainIDBig.Uint64()
 	logger.Info("fundGenesis: Root Anchor's real chain ID (used as ReserveChainID) is %d", reserveChainID)
 
-	mintPayload, err := json.Marshal(cross_chain.AllocationGrantPayload{
-		ChainID: reserveChainID,
-		Amount:  genesisSupply,
-	})
-	if err != nil {
-		logger.Error("fundGenesis: marshal mintPayload: %v", err)
-		os.Exit(1)
-	}
-
-	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-		5 /* ProposalAllocateSupply */, mintPayload, committee, timelockWaitSeconds,
-		"mint genesis supply"); err != nil {
+	if err := allocateSupplyWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+		reserveChainID, genesisSupply, committee, "mint genesis supply"); err != nil {
 		logger.Info("ℹ️ fundGenesis: mint genesis supply skipped (%v) -- proceeding to distribute.", err)
 	} else {
 		logger.Info("✅ fundGenesis: minted %s to Reserve (chain %d) on Root Anchor", genesisSupply.String(), reserveChainID)
@@ -992,17 +972,8 @@ func fundGenesis(
 			}
 		}
 
-		transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
-			FromChainID: reserveChainID,
-			ToChainID:   cid,
-			Amount:      perChainAlloc,
-		})
-		if err != nil {
-			logger.Error("fundGenesis: marshal transferPayload for chain %d: %v", cid, err)
-			os.Exit(1)
-		}
-		if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-			6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+		if err := transferAllocationWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+			reserveChainID, cid, perChainAlloc, committee,
 			fmt.Sprintf("transfer allocation to chain %d", cid)); err != nil {
 			logger.Info("ℹ️ fundGenesis: allocation transfer to chain %d skipped (%v)", cid, err)
 			continue
@@ -1011,84 +982,131 @@ func fundGenesis(
 	}
 }
 
-func proposeVoteExecute(
-	ctx context.Context,
-	client *ethclient.Client,
-	privKey *ecdsa.PrivateKey,
-	fromAddress common.Address,
-	rpcURL string,
-	kind uint8,
-	payload []byte,
-	committee []committeeMember,
-	timelockWaitSeconds int,
-	label string,
-) error {
-	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+// fetchChainCommittee queries getChainRegistry for chainID's real on-chain committee (as
+// []cross_chain.ValidatorEntry, in registry order) + epoch -- needed to build a
+// BuildSignerBitmap-aligned QuorumCert for that chain's own self-authorization (2026-09-04,
+// replacing the removed propose/vote/executeProposal governance dance).
+func fetchChainCommittee(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, chainID uint64) ([]cross_chain.ValidatorEntry, uint64, error) {
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
 	if err != nil {
-		return fmt.Errorf("parse GatewayABI: %w", err)
+		return nil, 0, fmt.Errorf("pack getChainRegistry: %w", err)
 	}
-
-	header, err := client.HeaderByNumber(ctx, nil)
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
 	if err != nil {
-		return fmt.Errorf("fetch block header for propose: %w", err)
+		return nil, 0, fmt.Errorf("call getChainRegistry: %w", err)
 	}
-
-	proposeCalldata, err := parsedABI.Pack("propose", kind, payload, header.Time)
+	results, err := parsedABI.Unpack("getChainRegistry", out)
 	if err != nil {
-		return fmt.Errorf("pack propose(kind=%d): %w", kind, err)
+		return nil, 0, fmt.Errorf("unpack getChainRegistry: %w", err)
 	}
-	receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, big.NewInt(100_000_000_000_000_000), 2_000_000,
-		proposeCalldata, fmt.Sprintf("%s: propose", label))
+	exists, _ := results[0].(bool)
+	if !exists {
+		return nil, 0, fmt.Errorf("chain %d is not registered", chainID)
+	}
+	pubkeys, _ := results[1].([][]byte)
+	stakes, _ := results[2].([]uint64)
+	popSigs, _ := results[3].([][]byte)
+	epoch, _ := results[4].(uint64)
+	committee := make([]cross_chain.ValidatorEntry, len(pubkeys))
+	for i := range pubkeys {
+		var stake uint64
+		if i < len(stakes) {
+			stake = stakes[i]
+		}
+		var pop []byte
+		if i < len(popSigs) {
+			pop = popSigs[i]
+		}
+		committee[i] = cross_chain.ValidatorEntry{PubkeyBLS: pubkeys[i], Stake: stake, PopSignature: pop}
+	}
+	return committee, epoch, nil
+}
+
+// signCertForChain builds a real QuorumCert authorizing digest, signed by chainID's own real
+// on-chain committee members whose private keys are present in signers (2026-09-04, replacing
+// the removed propose/vote/executeProposal governance dance -- see
+// cross_chain.GatewayEngine.TransferAllocationWithCert/AllocateSupplyWithCert's own doc comments
+// for why self-authorization by the affected chain's own committee replaced community voting).
+func signCertForChain(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, chainID uint64, digest []byte, signers []committeeMember) (cross_chain.QuorumCert, error) {
+	onChainCommittee, epoch, err := fetchChainCommittee(ctx, client, parsedABI, chainID)
 	if err != nil {
-		return fmt.Errorf("%s: propose: %w", label, err)
+		return cross_chain.QuorumCert{}, err
 	}
-	logger.Info("✅ %s: propose succeeded", label)
-
-	block, err := client.BlockByNumber(ctx, receipt.BlockNumber)
-	if err != nil {
-		return fmt.Errorf("fetch propose block %v: %w", receipt.BlockNumber, err)
-	}
-	proposedAt := block.Time()
-
-	var buf []byte
-	buf = append(buf, kind)
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	proposalID := crypto.Keccak256Hash(buf)
-	logger.Info("%s: computed proposalID=%s (blockTime=%d)", label, proposalID.Hex(), proposedAt)
-
-	voteNow := uint64(time.Now().Unix())
-	for _, m := range committee {
+	var sigs [][]byte
+	var votingPubkeys [][]byte
+	for _, m := range signers {
+		if m.ChainID != chainID {
+			continue
+		}
 		kp := bls.NewKeyPair(common.FromHex(m.PrivHex))
-		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, m.ChainID)
-		sig := bls.Sign(kp.PrivateKey(), voteMsg)
-		voteCalldata, err := parsedABI.Pack("vote", proposalID, new(big.Int).SetUint64(m.ChainID), voteNow, kp.BytesPublicKey(), sig.Bytes())
-		if err != nil {
-			return fmt.Errorf("pack vote(chain=%d): %w", m.ChainID, err)
-		}
-		if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, voteCalldata,
-			fmt.Sprintf("%s: vote(chain=%d)", label, m.ChainID)); err != nil {
-			logger.Info("ℹ️ %s: vote(chain=%d) did not succeed (likely already past quorum/timelock): %v", label, m.ChainID, err)
-		} else {
-			logger.Info("✅ %s: vote(chain=%d) succeeded", label, m.ChainID)
-		}
+		sig := bls.Sign(kp.PrivateKey(), digest)
+		sigs = append(sigs, sig.Bytes())
+		votingPubkeys = append(votingPubkeys, kp.BytesPublicKey())
 	}
+	if len(sigs) == 0 {
+		return cross_chain.QuorumCert{}, fmt.Errorf("no known private key for any of chain %d's real on-chain committee members", chainID)
+	}
+	aggSig := bls.CreateAggregateSign(sigs)
+	bitmap := cross_chain.BuildSignerBitmap(onChainCommittee, votingPubkeys)
+	return cross_chain.QuorumCert{Epoch: epoch, AggregateSignature: aggSig, SignerBitmap: bitmap}, nil
+}
 
-	logger.Info("%s: waiting %ds for devnet timelock before executeProposal...", label, timelockWaitSeconds)
-	time.Sleep(time.Duration(timelockWaitSeconds) * time.Second)
-	execNow := uint64(time.Now().Unix())
-	execCalldata, err := parsedABI.Pack("executeProposal", proposalID, execNow)
+// transferAllocationWithCert moves amount of fromChainID's own allocation to toChainID,
+// authorized by fromChainID's own real on-chain committee self-signing (replaces the old
+// propose/vote/executeProposal(ProposalTransferAllocation) dance, 2026-09-04).
+func transferAllocationWithCert(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, fromChainID, toChainID uint64, amount *big.Int, committee []committeeMember, label string) error {
+	// SECURITY (2026-09-04, found in review): the signed cert must bind to fromChainID's current
+	// nonce -- without it, this exact calldata (public, once submitted) could be replayed to drain
+	// fromChainID's entire allocation. See GatewayEngine.TransferAllocationNonce's own doc comment.
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	nonceCalldata, err := parsedABI.Pack("getTransferAllocationNonce", new(big.Int).SetUint64(fromChainID))
 	if err != nil {
-		return fmt.Errorf("pack executeProposal(kind=%d): %w", kind, err)
+		return fmt.Errorf("%s: pack getTransferAllocationNonce: %w", label, err)
 	}
-	_, err = sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, execCalldata,
-		fmt.Sprintf("%s: executeProposal", label))
+	nonceOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: nonceCalldata}, nil)
 	if err != nil {
-		return fmt.Errorf("%s: executeProposal: %w", label, err)
+		return fmt.Errorf("%s: call getTransferAllocationNonce: %w", label, err)
 	}
-	logger.Info("✅ %s: executeProposal succeeded", label)
+	nonceResults, err := parsedABI.Unpack("getTransferAllocationNonce", nonceOut)
+	if err != nil {
+		return fmt.Errorf("%s: unpack getTransferAllocationNonce: %w", label, err)
+	}
+	nonce, _ := nonceResults[0].(uint64)
+
+	digest := cross_chain.ComputeTransferAllocationMessage(fromChainID, toChainID, amount, nonce)
+	cert, err := signCertForChain(ctx, client, parsedABI, fromChainID, digest, committee)
+	if err != nil {
+		return fmt.Errorf("%s: sign cert: %w", label, err)
+	}
+	calldata, err := parsedABI.Pack("transferAllocationWithCert", new(big.Int).SetUint64(fromChainID), new(big.Int).SetUint64(toChainID), amount, nonce, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
+	if err != nil {
+		return fmt.Errorf("%s: pack transferAllocationWithCert: %w", label, err)
+	}
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, calldata, fmt.Sprintf("%s: transferAllocationWithCert", label)); err != nil {
+		return fmt.Errorf("%s: transferAllocationWithCert: %w", label, err)
+	}
+	logger.Info("✅ %s: transferAllocationWithCert succeeded", label)
+	return nil
+}
+
+// allocateSupplyWithCert mints amount to chainID (must be Reserve, exactly once), authorized by
+// Reserve's own real on-chain committee self-signing (replaces the old propose/vote/
+// executeProposal(ProposalAllocateSupply) dance, 2026-09-04).
+func allocateSupplyWithCert(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, chainID uint64, amount *big.Int, committee []committeeMember, label string) error {
+	digest := cross_chain.ComputeAllocateSupplyMessage(chainID, amount)
+	cert, err := signCertForChain(ctx, client, parsedABI, chainID, digest, committee)
+	if err != nil {
+		return fmt.Errorf("%s: sign cert: %w", label, err)
+	}
+	calldata, err := parsedABI.Pack("allocateSupplyWithCert", new(big.Int).SetUint64(chainID), amount, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
+	if err != nil {
+		return fmt.Errorf("%s: pack allocateSupplyWithCert: %w", label, err)
+	}
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, calldata, fmt.Sprintf("%s: allocateSupplyWithCert", label)); err != nil {
+		return fmt.Errorf("%s: allocateSupplyWithCert: %w", label, err)
+	}
+	logger.Info("✅ %s: allocateSupplyWithCert succeeded", label)
 	return nil
 }
 

@@ -47,24 +47,17 @@ func makeRegistrationPayload(t *testing.T, chainID uint64) []byte {
 
 func TestGateway_RegisterChainViaStake_MultipleChainsSucceed(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	for _, id := range []uint64{101, 102, 103, 104} {
 		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id), nil))
 	}
 
 	assert.Len(t, engine.ChainRegistry, 4)
-	assert.Len(t, engine.Governance.ActiveChains, 4)
 	for _, id := range []uint64{101, 102, 103, 104} {
-		assert.True(t, engine.Governance.ActiveChains[id])
 		_, exists := engine.ChainRegistry[id]
 		assert.True(t, exists)
 	}
-
-	// Governance must now actually work: a normal chain can vote using its own committee key.
-	threshold, err := engine.Governance.QuorumThreshold()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(3), threshold) // ceil(2*4/3) = 3
 }
 
 // TestGateway_RegisterChainViaStake_NoFoundingChainFloor proves the specific behavior change
@@ -75,7 +68,7 @@ func TestGateway_RegisterChainViaStake_MultipleChainsSucceed(t *testing.T) {
 // pre-genesis mechanism for Root Anchor's OWN validator committee and is untouched by this.
 func TestGateway_RegisterChainViaStake_NoFoundingChainFloor(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101), nil))
 
@@ -86,7 +79,7 @@ func TestGateway_RegisterChainViaStake_NoFoundingChainFloor(t *testing.T) {
 
 func TestGateway_RegisterChainViaStake_RejectsDuplicateChainID(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, 101), nil))
 
@@ -97,7 +90,7 @@ func TestGateway_RegisterChainViaStake_RejectsDuplicateChainID(t *testing.T) {
 
 func TestGateway_RegisterChainViaStake_RejectsForgedPop(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	kp := bls.GenerateKeyPair()
 	other := bls.GenerateKeyPair()
@@ -120,7 +113,7 @@ func TestGateway_RegisterChainViaStake_RejectsForgedPop(t *testing.T) {
 // it must keep working for chain after chain, with no "already bootstrapped" lockout.
 func TestGateway_RegisterChainViaStake_RepeatableAcrossManyChains(t *testing.T) {
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, nil)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	for _, id := range []uint64{101, 102, 103, 104} {
 		require.NoError(t, engine.RegisterChainViaStake(makeRegistrationPayload(t, id), nil))

@@ -17,98 +17,23 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/metrics"
 )
 
-// signGovernanceVote produces the (signerPubkeyBls, signature) pair a member of voterChainID's
-// committee must supply to vote() so gateway_handler.go's BLS-membership check passes (Milestone
-// G security fix — GovernanceEngine.Vote itself trusts whatever voterChainID its caller names, so
-// the handler requires proof the caller actually speaks for that chain).
-func signGovernanceVote(kp *bls.KeyPair, proposalID common.Hash, voterChainID uint64) ([]byte, []byte) {
-	msg := cross_chain.ComputeGovernanceVoteMessage(proposalID, voterChainID)
-	sig := bls.Sign(kp.PrivateKey(), msg)
-	return kp.PublicKey().Bytes(), sig.Bytes()
-}
-
-// TestGatewayHandler_Vote_RejectsUnauthenticatedImpersonation is the regression test for the
-// Milestone G security fix: GovernanceEngine.Vote itself trusts whatever voterChainID its caller
-// names, with no notion of who is actually calling — the ORIGINAL Milestone G wiring called it
-// straight from the public "vote" ABI method with no authentication at all, so any caller could
-// cast any registered chain's single governance vote just by naming its ID. This must now be
-// rejected: only a valid BLS signature from a member of that chain's own CURRENT committee may
-// cast its vote.
-func TestGatewayHandler_Vote_RejectsUnauthenticatedImpersonation(t *testing.T) {
+// TestGatewayHandler_RegisterAssetWithCert_Lifecycle is the end-to-end (real calldata, real
+// dispatch) regression test for asset registration, authorized by the asset's own HomeChainID
+// self-signing a real QuorumCert (2026-09-04, replacing the removed propose/vote/
+// 72h-timelock/executeProposal(ProposalRegisterAsset)+registerAsset dance -- see
+// AssetRegistryEngine.RegisterAssetOnRootAnchor's own doc comment).
+func TestGatewayHandler_RegisterAssetWithCert_Lifecycle(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 	h, err := GetGatewayHandler()
 	require.NoError(t, err)
 
 	kp101 := bls.GenerateKeyPair()
-	kpRogue := bls.GenerateKeyPair() // NOT a member of chain 101's committee
-
+	pop101 := cross_chain.PopSign(kp101.PrivateKey(), kp101.PublicKey())
 	engine, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
-		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
-		102: {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: bls.GenerateKeyPair().PublicKey().Bytes(), Stake: 100}}},
+		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.BytesPublicKey(), Stake: 100, PopSignature: pop101.Bytes()}}},
 	}
-	engine.Governance = cross_chain.NewGovernanceEngine([]uint64{101, 102})
-	require.NoError(t, saveGatewayEngine(cs, engine))
-
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	payload, err := json.Marshal(uint64(999))
-	require.NoError(t, err)
-	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalDeclareChainDead), payload, uint64(100))
-	require.NoError(t, err)
-	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
-	require.False(t, failed)
-	out, err := h.abi.Unpack("propose", rcp.Return())
-	require.NoError(t, err)
-	proposalID := common.Hash(out[0].([32]byte))
-
-	// Attack 1: rogue key not on chain 101's committee at all -> REJECTED
-	pubRogue, sigRogue := signGovernanceVote(kpRogue, proposalID, 101)
-	voteRogue, err := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), pubRogue, sigRogue)
-	require.NoError(t, err)
-	_, _, failedRogue := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, voteRogue)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	assert.True(t, failedRogue, "vote from a non-committee-member key must be rejected")
-
-	// Attack 2: a REAL committee member's key, but for the WRONG chain (101's own valid key/sig
-	// replayed to cast chain 102's vote) -> REJECTED, since kp101 is not a member of 102's committee.
-	pub101As102, sig101As102 := signGovernanceVote(kp101, proposalID, 102)
-	voteWrongChain, err := h.abi.Pack("vote", proposalID, big.NewInt(102), uint64(101), pub101As102, sig101As102)
-	require.NoError(t, err)
-	_, _, failedWrongChain := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, voteWrongChain)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	assert.True(t, failedWrongChain, "a chain's own committee key must not be able to cast a DIFFERENT chain's vote")
-
-	// Attack 3: real committee member, but signature is over a DIFFERENT proposalId (replay) -> REJECTED
-	otherProposalID := common.HexToHash("0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF")
-	_, sigWrongProposal := signGovernanceVote(kp101, otherProposalID, 101)
-	voteReplayed, err := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), kp101.PublicKey().Bytes(), sigWrongProposal)
-	require.NoError(t, err)
-	_, _, failedReplay := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, voteReplayed)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	assert.True(t, failedReplay, "a signature over a different proposalId must not authenticate this vote")
-
-	// Sanity: the REAL vote, correctly signed, must succeed.
-	pub101, sig101 := signGovernanceVote(kp101, proposalID, 101)
-	voteValid, err := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), pub101, sig101)
-	require.NoError(t, err)
-	_, _, failedValid := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, voteValid)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	assert.False(t, failedValid, "correctly-authenticated vote must succeed")
-}
-
-func TestGatewayHandler_Governance_AssetRegistrationLifecycle(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
-	h, err := GetGatewayHandler()
-	require.NoError(t, err)
-
-	// Seed with chain 101 and 102, each with a real committee member (Milestone G security fix).
-	kp101 := bls.GenerateKeyPair()
-	kp102 := bls.GenerateKeyPair()
-	engine, err := loadGatewayEngine(cs)
-	require.NoError(t, err)
-	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
-		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
-		102: {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
-	}
-	engine.Governance = cross_chain.NewGovernanceEngineWithTimelock([]uint64{101, 102}, 10) // 10s timelock for test
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
 	sender := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -121,36 +46,11 @@ func TestGatewayHandler_Governance_AssetRegistrationLifecycle(t *testing.T) {
 	payload, err := json.Marshal(assetEntry)
 	require.NoError(t, err)
 
-	// Propose asset
-	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalRegisterAsset), payload, uint64(100))
+	digest := cross_chain.ComputeRegisterAssetMessage(assetEntry.AssetID, assetEntry.HomeChainID, assetEntry.CanonicalContract)
+	sig := bls.Sign(kp101.PrivateKey(), digest)
+	regAssetCalldata, err := h.abi.Pack("registerAssetWithCert", payload, big.NewInt(1_000_000), uint64(1), sig.Bytes(), []byte{0x01})
 	require.NoError(t, err)
-	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
-	require.False(t, failed)
-	out, err := h.abi.Unpack("propose", rcp.Return())
-	require.NoError(t, err)
-	proposalID := common.Hash(out[0].([32]byte))
-
-	// Vote from 101 and 102
-	pub101, sig101 := signGovernanceVote(kp101, proposalID, 101)
-	vote1, _ := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), pub101, sig101)
-	_, _, failVote1 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	require.False(t, failVote1)
-
-	pub102, sig102 := signGovernanceVote(kp102, proposalID, 102)
-	vote2, _ := h.abi.Pack("vote", proposalID, big.NewInt(102), uint64(102), pub102, sig102)
-	_, _, failVote2 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
-	require.False(t, failVote2)
-
-	// Execute proposal at t=120
-	execCalldata, _ := h.abi.Pack("executeProposal", proposalID, uint64(120))
-	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
-	require.False(t, failed)
-
-	// Register Asset on Root Anchor with total supply 1,000,000
-	regAssetCalldata, err := h.abi.Pack("registerAsset", proposalID, big.NewInt(1_000_000))
-	require.NoError(t, err)
-	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, regAssetCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 121)
+	_, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, regAssetCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 121)
 	require.False(t, failed)
 
 	// Query Asset via getAsset
@@ -164,27 +64,38 @@ func TestGatewayHandler_Governance_AssetRegistrationLifecycle(t *testing.T) {
 	assert.Equal(t, common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), assetFields[2].(common.Address))
 	assert.True(t, assetFields[3].(bool), "Asset must be active")
 
-	// Negative Test: Unapproved / Fake proposal cannot register asset
-	fakeProposalID := common.HexToHash("0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF")
-	fakeRegCalldata, _ := h.abi.Pack("registerAsset", fakeProposalID, big.NewInt(100))
+	// Negative Test: a forged cert (signed by a key that is NOT chain 101's real committee member)
+	// cannot register a second asset.
+	rogueKP := bls.GenerateKeyPair()
+	otherAsset := cross_chain.AssetEntry{AssetID: big.NewInt(888), HomeChainID: 101, CanonicalContract: common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")}
+	otherPayload, _ := json.Marshal(otherAsset)
+	forgedDigest := cross_chain.ComputeRegisterAssetMessage(otherAsset.AssetID, otherAsset.HomeChainID, otherAsset.CanonicalContract)
+	forgedSig := bls.Sign(rogueKP.PrivateKey(), forgedDigest)
+	fakeRegCalldata, _ := h.abi.Pack("registerAssetWithCert", otherPayload, big.NewInt(100), uint64(1), forgedSig.Bytes(), []byte{0x01})
 	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, fakeRegCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 122)
-	assert.True(t, failed, "Fake proposal asset registration must revert")
+	assert.True(t, failed, "a cert not actually signed by chain 101's own committee must be rejected")
 }
 
-func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
+// TestGatewayHandler_UpdateCommitteeWithRecoveryCert_Lifecycle is the end-to-end regression test
+// for chain-committee recovery, authorized by RecoveryCommittee's real QuorumCert (2026-09-04,
+// replacing the removed propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) dance
+// -- see GatewayEngine.UpdateCommitteeWithRecoveryCert's own doc comment).
+func TestGatewayHandler_UpdateCommitteeWithRecoveryCert_Lifecycle(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 	h, err := GetGatewayHandler()
 	require.NoError(t, err)
 
 	kp101 := bls.GenerateKeyPair()
-	kp102 := bls.GenerateKeyPair()
+	recoveryKP := bls.GenerateKeyPair()
+	recoveryPop := cross_chain.PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
 	engine, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
 		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
-		102: {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
 	}
-	engine.Governance = cross_chain.NewGovernanceEngineWithTimelock([]uint64{101, 102}, 10) // 10s timelock
+	engine.RecoveryCommittee = []cross_chain.ValidatorEntry{
+		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
+	}
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
 	sender := common.HexToAddress("0x3333333333333333333333333333333333333333")
@@ -208,38 +119,14 @@ func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
 	payload, err := json.Marshal(payloadObj)
 	require.NoError(t, err)
 
-	// Step 1: Propose UpdateCommittee
-	proposeCalldata, err := h.abi.Pack("propose", uint8(cross_chain.ProposalUpdateCommittee), payload, uint64(100))
+	digest := cross_chain.ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
+	updateCalldata, err := h.abi.Pack("updateCommitteeWithRecoveryCert", payload, uint64(0), sig.Bytes(), []byte{0x01})
 	require.NoError(t, err)
-	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
-	require.False(t, failed)
-	out, err := h.abi.Unpack("propose", rcp.Return())
-	require.NoError(t, err)
-	proposalID := common.Hash(out[0].([32]byte))
-
-	// Step 2: Vote from 101 and 102
-	pub101, sig101 := signGovernanceVote(kp101, proposalID, 101)
-	vote1, _ := h.abi.Pack("vote", proposalID, big.NewInt(101), uint64(101), pub101, sig101)
-	_, _, failVote1 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	require.False(t, failVote1)
-
-	pub102, sig102 := signGovernanceVote(kp102, proposalID, 102)
-	vote2, _ := h.abi.Pack("vote", proposalID, big.NewInt(102), uint64(102), pub102, sig102)
-	_, _, failVote2 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
-	require.False(t, failVote2)
-
-	// Step 3: Premature execution before timelock -> REJECTED
-	execPrematureCalldata, _ := h.abi.Pack("executeProposal", proposalID, uint64(105))
-	_, _, failedPremature := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execPrematureCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 105)
-	assert.True(t, failedPremature, "Premature execution must revert")
-
-	// Step 4: Execute proposal after timelock (t=120)
-	execCalldata, _ := h.abi.Pack("executeProposal", proposalID, uint64(120))
-	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
+	_, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, updateCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
 	require.False(t, failed)
 
-	// Step 5: Verify updated ChainRegistry state
+	// Verify updated ChainRegistry state
 	engineAfter, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
 	reg101 := engineAfter.ChainRegistry[101]
@@ -248,52 +135,6 @@ func TestGatewayHandler_Governance_UpdateCommitteeLifecycle(t *testing.T) {
 	assert.Equal(t, 2, len(reg101.Committee))
 	assert.Equal(t, kpNew1.BytesPublicKey(), reg101.Committee[0].PubkeyBLS)
 	assert.Equal(t, kpNew2.BytesPublicKey(), reg101.Committee[1].PubkeyBLS)
-}
-
-// TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric is the decision test for
-// all_remaining_fixes_plan.md's Mục 2 ("propose() không có gate — xác nhận chủ ý hay thiếu
-// sót"). Decision: permissionless propose(), gated only at vote()/quorum, is intentional --
-// it costs a real, non-refundable 0.1 native token fee per proposal with zero effect
-// unless real quorum later votes yes, a genuine economic disincentive against spam. (Chain
-// onboarding itself no longer goes through this at all -- RegisterChainViaStake is the sole,
-// vote-free registration path; the vote-gated ProposalRegisterChain kind this comment used to
-// cite as propose()'s other rationale was removed 2026-09-04.) This test proves BOTH halves: an
-// address with no relation
-// to any registered chain can propose successfully (permissionless holds), and
-// Proposals' unbounded growth (no TTL/cleanup exists, and none is added by this decision) is
-// made observable via metrics.GovernanceProposalCount instead of guessing at a rate-limit
-// design with no real production proposal-volume data behind it.
-func TestGatewayHandler_Propose_IsPermissionlessAndTracksGrowthViaMetric(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
-	h, err := GetGatewayHandler()
-	require.NoError(t, err)
-
-	// A totally unrelated address -- not a registered chain, not a committee member, not
-	// anyone with standing in ChainRegistry/ActiveChains -- exercising the permissionless half
-	// of the decision.
-	outsider := common.HexToAddress("0x9999888877776666555544443333222211110000")
-	proposeFee := big.NewInt(100_000_000_000_000_000)
-
-	pack := func(kind uint8, payload []byte, proposedAt uint64) []byte {
-		calldata, err := h.abi.Pack("propose", kind, payload, proposedAt)
-		require.NoError(t, err)
-		return marshalCallData(t, calldata)
-	}
-
-	rcp1, _, failed1 := h.HandleTransaction(context.Background(), cs, newTx(outsider, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, pack(0, []byte("candidate chain A"), 100)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
-	require.False(t, failed1, "an outsider address must be able to propose -- permissionless is intentional")
-	require.NotNil(t, rcp1)
-
-	rcp2, _, failed2 := h.HandleTransaction(context.Background(), cs, newTx(outsider, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, proposeFee, pack(0, []byte("candidate chain B"), 101)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	require.False(t, failed2)
-	require.NotNil(t, rcp2)
-
-	// GovernanceProposalCount is Set() (not Inc()) to the calling engine's own current
-	// Proposals map size each time propose() succeeds -- an absolute snapshot of THIS engine,
-	// not a running total across every engine/test in the process. This engine started empty
-	// and just recorded exactly 2 distinct proposals, so the metric must read exactly 2
-	// regardless of what any other test's engine set it to before or after.
-	assert.Equal(t, float64(2), testutil.ToFloat64(metrics.GovernanceProposalCount), "GovernanceProposalCount must reflect the real, unbounded growth of Proposals")
 }
 
 // TestGatewayHandler_RegisterChainViaStake_TracksChainCountViaMetric is the regression test for
@@ -367,7 +208,6 @@ func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
 	require.NoError(t, err)
 	_, exists := reloaded.ChainRegistry[104]
 	assert.True(t, exists, "chain 104 must be registered")
-	assert.Contains(t, reloaded.Governance.ActiveChains, uint64(104))
 	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.RegisteredChainCount))
 }
 

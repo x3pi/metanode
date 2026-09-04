@@ -17,7 +17,7 @@ var (
 	ErrInvalidCanonicalContract = errors.New("canonical contract address cannot be zero")
 	ErrInvalidHomeChain         = errors.New("home chain ID is invalid or not registered")
 	ErrInvalidWrappedContract   = errors.New("wrapped contract address cannot be zero")
-	ErrUnauthorizedRegistration = errors.New("unauthorized asset registration attempt (must pass governance >= 2/3)")
+	ErrUnauthorizedRegistration = errors.New("unauthorized asset registration attempt (must be self-authorized by the asset's own HomeChainID committee via a valid QuorumCert)")
 	ErrInsufficientVaultBalance = errors.New("insufficient vault balance on home chain for unlock")
 	ErrInsufficientCirculation  = errors.New("insufficient wrapped token circulation on source chain for burn")
 	ErrAssetSupplyMismatch      = errors.New("asset total supply does not match sum of vault and circulation balances")
@@ -25,7 +25,11 @@ var (
 )
 
 // AssetRegistryEngine manages cross-chain custom tokens (ERC-20 / Wrapped assets) (P6.1 & P6.2).
-// Governed on Root Anchor via ProposalRegisterAsset (>= 2/3 active chains + 72h timelock).
+// Governed on Root Anchor via the asset's own HomeChainID self-authorizing with a real QuorumCert
+// (2026-09-04, replacing the old ProposalRegisterAsset governance-vote gate -- see
+// GatewayEngine.RecoveryCommittee's own doc comment for the full removal rationale. A new asset's
+// home chain is the natural, sole legitimate authority over whether its own token gets bridged --
+// no third-party vote needed or trusted).
 type AssetRegistryEngine struct {
 	mu                  sync.RWMutex
 	Assets              map[string]*AssetEntry // key: assetID.String()
@@ -33,39 +37,32 @@ type AssetRegistryEngine struct {
 	CirculationBalances map[string]*big.Int    // key: "assetID:chainID" -> wrapped tokens circulating on dest chains
 	TotalSupplies       map[string]*big.Int    // key: assetID.String() -> canonical total supply
 	ChainRegistry       map[uint64]ChainRegistry
-	Governance          *GovernanceEngine
 }
 
 // NewAssetRegistryEngine creates a new multi-asset registry.
-func NewAssetRegistryEngine(chainRegistry map[uint64]ChainRegistry, gov *GovernanceEngine) *AssetRegistryEngine {
+func NewAssetRegistryEngine(chainRegistry map[uint64]ChainRegistry) *AssetRegistryEngine {
 	return &AssetRegistryEngine{
 		Assets:              make(map[string]*AssetEntry),
 		VaultBalances:       make(map[string]*big.Int),
 		CirculationBalances: make(map[string]*big.Int),
 		TotalSupplies:       make(map[string]*big.Int),
 		ChainRegistry:       chainRegistry,
-		Governance:          gov,
 	}
 }
 
-// RegisterAssetOnRootAnchor registers a new token under AssetRegistry via Governance (P6.1).
+// RegisterAssetOnRootAnchor registers a new token under AssetRegistry, authorized by the asset's
+// own HomeChainID self-signing a real QuorumCert (2026-09-04, replacing the governance-vote gate
+// -- see this struct's own doc comment).
 func (a *AssetRegistryEngine) RegisterAssetOnRootAnchor(
-	proposal *GovernanceProposal,
+	entryPayload []byte,
 	totalSupply *big.Int,
+	cert QuorumCert,
 ) (*AssetEntry, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if proposal == nil || proposal.Kind != ProposalRegisterAsset {
-		return nil, ErrUnauthorizedRegistration
-	}
-
-	if !proposal.Executed {
-		return nil, fmt.Errorf("%w: proposal %s has not been executed by governance", ErrUnauthorizedRegistration, proposal.ProposalID.Hex())
-	}
-
 	var entry AssetEntry
-	if err := json.Unmarshal(proposal.Payload, &entry); err != nil {
+	if err := json.Unmarshal(entryPayload, &entry); err != nil {
 		return nil, fmt.Errorf("invalid asset entry payload: %w", err)
 	}
 
@@ -82,10 +79,16 @@ func (a *AssetRegistryEngine) RegisterAssetOnRootAnchor(
 		return nil, ErrInvalidCanonicalContract
 	}
 
-	if a.ChainRegistry != nil {
-		if _, exists := a.ChainRegistry[entry.HomeChainID]; !exists {
-			return nil, fmt.Errorf("%w: home chain %d", ErrInvalidHomeChain, entry.HomeChainID)
-		}
+	// Fail-closed (2026-09-04, tightened from the old soft "if a.ChainRegistry != nil" check):
+	// cert verification below structurally needs the home chain's own real committee, so a nil/
+	// missing ChainRegistry can no longer silently skip the home-chain-exists check the way it
+	// used to -- that used to just skip validation; now it correctly fails the whole call instead.
+	homeRegistry, exists := a.ChainRegistry[entry.HomeChainID]
+	if !exists {
+		return nil, fmt.Errorf("%w: home chain %d", ErrInvalidHomeChain, entry.HomeChainID)
+	}
+	if err := VerifyQuorumCertAgainstRegistry(homeRegistry, cert, ComputeRegisterAssetMessage(entry.AssetID, entry.HomeChainID, entry.CanonicalContract)); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnauthorizedRegistration, err)
 	}
 
 	if totalSupply == nil || totalSupply.Sign() < 0 {

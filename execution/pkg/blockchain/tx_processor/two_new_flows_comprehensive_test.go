@@ -136,7 +136,6 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		require.True(t, exists, "chain 203 must be present in ChainRegistry")
 		assert.Equal(t, uint64(203), reg.ChainID)
 		assert.Equal(t, uint64(6667), reg.QuorumThreshold)
-		assert.Contains(t, reloaded.Governance.ActiveChains, uint64(203), "chain 203 must be admitted into ActiveChains")
 	})
 
 	t.Run("1.4 Rejection of already-registered chain ID", func(t *testing.T) {

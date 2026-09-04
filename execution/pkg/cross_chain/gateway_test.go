@@ -114,19 +114,34 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 	assert.Equal(t, big.NewInt(3000), engine.SupplyLedger.PerChainAllocation[101])
 }
 
-// TestGateway_ProposalAllocateSupply_UnblocksAttestCommit proves the fix for a real dead end
+// TestGateway_AllocateSupplyWithCert_UnblocksAttestCommit proves the fix for a real dead end
 // found via live 2-node RPC testing: neither BootstrapFoundingChains, the retired vote-gated
 // ProposalRegisterChain, nor RegisterChainViaStake's own registration step ever grants
 // allocation this way, and production always constructs SupplyLedger with genesis_total_supply=0
 // and an empty allocation map (gateway_handler.go's loadGatewayEngine) — so a freshly onboarded
-// chain's attestCommit rejects with "available 0" forever, with no prior governance-reachable way
-// to fund it. ProposalAllocateSupply (GrantAllocation) closes that gap through the same propose/
-// vote/timelock/execute path as every other governance action.
-func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
+// chain's attestCommit rejects with "available 0" forever, with no prior reachable way to fund it.
+// AllocateSupplyWithCert (GrantAllocation), authorized by Reserve's own committee self-signing
+// (2026-09-04, replacing the removed propose/vote/72h-timelock/executeProposal governance dance),
+// closes that gap.
+func TestGateway_AllocateSupplyWithCert_UnblocksAttestCommit(t *testing.T) {
 	engine, kp := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 	// setupTestGatewayEngine sets engine.ReserveChainID = 102 (engine's own LocalChainID) —
-	// engine plays Reserve for this test.
+	// engine plays Reserve for this test. Reserve (102) itself is not in the shared fixture's
+	// ChainRegistry, so give it a real committee here (its own key, reused for both self-sign
+	// calls below).
+	reserveKP := bls.GenerateKeyPair()
+	reservePop := PopSign(reserveKP.PrivateKey(), reserveKP.PublicKey())
+	engine.ChainRegistry[102] = ChainRegistry{
+		ChainID:         102,
+		Committee:       []ValidatorEntry{{PubkeyBLS: reserveKP.BytesPublicKey(), Stake: 10000, PopSignature: reservePop.Bytes()}},
+		Epoch:           1,
+		QuorumThreshold: 6667,
+	}
+	signReserveCert := func(digest []byte) QuorumCert {
+		sig := bls.Sign(reserveKP.PrivateKey(), digest)
+		return QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
+	}
 
 	// Chain 103: registered but never allocated — the exact state a freshly-registered chain
 	// (via RegisterChainViaStake, with Reserve's own pool exhausted) can be left in today.
@@ -152,48 +167,35 @@ func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
 	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
 	assert.ErrorIs(t, errBefore, ErrAllocationExceeded)
 
-	// C7 fix (2026-08-27): ProposalAllocateSupply attempting to grant a REGULAR chain (103, not
-	// Reserve) is now rejected outright — this used to be exactly how a Sybil-controlled
-	// governance majority could mint itself free money (note/cross_chain_attack_scenario_catalog.md
-	// item C7). It only ever mints the one-time genesis supply, and only to this chain's own
-	// configured Reserve (102).
-	badGrant := AllocationGrantPayload{ChainID: 103, Amount: big.NewInt(1000)}
-	badPayload, err := json.Marshal(badGrant)
-	require.NoError(t, err)
-	badProposalID, err := engine.Governance.Propose(ProposalAllocateSupply, badPayload, 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(badProposalID, 101, 1010)
-	require.NoError(t, err)
-	_, errBadGrant := engine.ExecuteGovernanceProposal(badProposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	// C7 fix (2026-08-27, mechanism updated 2026-09-04): AllocateSupplyWithCert attempting to
+	// grant a REGULAR chain (103, not Reserve) is rejected outright — this used to be exactly how
+	// a Sybil-controlled governance majority could mint itself free money
+	// (note/cross_chain_attack_scenario_catalog.md item C7). It only ever mints the one-time
+	// genesis supply, and only to this chain's own configured Reserve (102) -- note this call is
+	// deliberately made with chain 103's OWN cert (not Reserve's), since a real attacker would
+	// never have Reserve's signature to begin with; the ChainID mismatch check must reject this
+	// before cert verification even matters.
+	_, badCert := signFor(big.NewInt(1000)) // wrong chain's cert, doesn't matter -- rejected before it's ever checked
+	errBadGrant := engine.AllocateSupplyWithCert(103, big.NewInt(1000), badCert)
 	assert.ErrorIs(t, errBadGrant, ErrOnlyReserveMayMint)
 	assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103), "rejected grant must not move any allocation")
 
 	// setupTestGatewayEngine's fixture already constructs the ledger with a nonzero
 	// GenesisTotalSupply (102 already holds 5000, as if its one-time genesis mint already
-	// happened) — so attempting ProposalAllocateSupply again, even correctly targeting Reserve
-	// (102) itself, must now fail: genesis mint is one-time only, never a repeatable grant.
-	timelockProposalID, err := engine.Governance.Propose(ProposalAllocateSupply, json.RawMessage(`{"chain_id":102,"amount":1000}`), 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(timelockProposalID, 101, 1010)
-	require.NoError(t, err)
-	_, errEarly := engine.ExecuteGovernanceProposal(timelockProposalID, 1010+100)
-	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
-	_, errSecondMint := engine.ExecuteGovernanceProposal(timelockProposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	// happened) — so attempting AllocateSupplyWithCert again, even correctly targeting Reserve
+	// (102) itself with a real, valid Reserve cert, must now fail: genesis mint is one-time only,
+	// never a repeatable grant.
+	secondMintDigest := ComputeAllocateSupplyMessage(102, big.NewInt(1000))
+	errSecondMint := engine.AllocateSupplyWithCert(102, big.NewInt(1000), signReserveCert(secondMintDigest))
 	assert.ErrorIs(t, errSecondMint, ErrGenesisAlreadyMinted)
 	assert.Equal(t, big.NewInt(5000), engine.SupplyLedger.GetAllocation(102), "rejected re-mint must not change Reserve's existing allocation")
 
 	// Correct flow: Reserve (102) transfers part of its own already-minted supply (from the
-	// fixture's initial 5000) to chain 103 via ProposalTransferAllocation — safe and
-	// repeatable, moves existing supply only, never mints.
-	transfer := AllocationTransferPayload{FromChainID: 102, ToChainID: 103, Amount: big.NewInt(1000)}
-	transferPayload, err := json.Marshal(transfer)
-	require.NoError(t, err)
-	transferProposalID, err := engine.Governance.Propose(ProposalTransferAllocation, transferPayload, 3000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(transferProposalID, 101, 3010)
-	require.NoError(t, err)
-	_, err = engine.ExecuteGovernanceProposal(transferProposalID, 3010+DefaultGovernanceTimelockSeconds+1)
-	require.NoError(t, err)
+	// fixture's initial 5000) to chain 103 via TransferAllocationWithCert (self-signed by
+	// Reserve's own committee) — safe and repeatable, moves existing supply only, never mints.
+	transferDigest := ComputeTransferAllocationMessage(102, 103, big.NewInt(1000), 0)
+	errTransfer := engine.TransferAllocationWithCert(102, 103, big.NewInt(1000), 0, signReserveCert(transferDigest))
+	require.NoError(t, errTransfer)
 	assert.Equal(t, big.NewInt(4000), engine.SupplyLedger.GetAllocation(102), "5000 fixture balance minus the 1000 transferred out")
 	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
 
@@ -202,6 +204,58 @@ func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
 	require.NoError(t, errAfter)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 	assert.Equal(t, big.NewInt(900), engine.SupplyLedger.GetAllocation(103))
+}
+
+// TestGateway_TransferAllocationWithCert_RejectsReplayedCert is the regression test for a real
+// vulnerability found in review, the same day TransferAllocationWithCert replaced
+// ProposalTransferAllocation's governance-vote gate: unlike every other cert-authorized action in
+// this file, moving allocation is NOT naturally idempotent on replay, and the removed
+// GovernanceProposal.Executed flag was the ONLY thing that had been stopping a captured, valid,
+// necessarily-public (it travels in on-chain calldata) cert from being resubmitted indefinitely to
+// drain fromChainID's entire allocation. The fix: nonce must match fromChainID's current
+// TransferAllocationNonce and is bumped by exactly 1 on every real success — see
+// GatewayEngine.TransferAllocationNonce's own doc comment.
+func TestGateway_TransferAllocationWithCert_RejectsReplayedCert(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureAssetRegistry()
+	reserveKP := bls.GenerateKeyPair()
+	reservePop := PopSign(reserveKP.PrivateKey(), reserveKP.PublicKey())
+	engine.ChainRegistry[102] = ChainRegistry{
+		ChainID:         102,
+		Committee:       []ValidatorEntry{{PubkeyBLS: reserveKP.BytesPublicKey(), Stake: 10000, PopSignature: reservePop.Bytes()}},
+		Epoch:           1,
+		QuorumThreshold: 6667,
+	}
+	engine.ChainRegistry[103] = ChainRegistry{ChainID: 103, Epoch: 1, QuorumThreshold: 6667}
+
+	require.Equal(t, uint64(0), engine.GetTransferAllocationNonce(102), "a chain that has never transferred starts at nonce 0")
+
+	digest := ComputeTransferAllocationMessage(102, 103, big.NewInt(1000), 0)
+	sig := bls.Sign(reserveKP.PrivateKey(), digest)
+	cert := QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
+
+	// First use of this exact cert: MUST SUCCEED, and bump the nonce.
+	require.NoError(t, engine.TransferAllocationWithCert(102, 103, big.NewInt(1000), 0, cert))
+	assert.Equal(t, big.NewInt(4000), engine.SupplyLedger.GetAllocation(102))
+	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
+	assert.Equal(t, uint64(1), engine.GetTransferAllocationNonce(102), "nonce must advance after a real success")
+
+	// REPLAY: the exact same (fromChainID, toChainID, amount, nonce, cert) tuple resubmitted --
+	// this is precisely what a real attacker does (blockchain calldata is public, no signing key
+	// needed to replay it). MUST FAIL, and must NOT move any additional allocation.
+	errReplay := engine.TransferAllocationWithCert(102, 103, big.NewInt(1000), 0, cert)
+	assert.ErrorIs(t, errReplay, ErrInvalidTransferNonce, "a replayed cert (stale nonce) must be rejected")
+	assert.Equal(t, big.NewInt(4000), engine.SupplyLedger.GetAllocation(102), "replay must not move any additional allocation out")
+	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103), "replay must not credit any additional allocation in")
+
+	// A genuinely NEW transfer, correctly signed against the now-current nonce (1), still works --
+	// the fix blocks replay specifically, not all future transfers from this chain.
+	digest2 := ComputeTransferAllocationMessage(102, 103, big.NewInt(500), 1)
+	sig2 := bls.Sign(reserveKP.PrivateKey(), digest2)
+	cert2 := QuorumCert{Epoch: 1, AggregateSignature: sig2.Bytes(), SignerBitmap: []byte{0x01}}
+	require.NoError(t, engine.TransferAllocationWithCert(102, 103, big.NewInt(500), 1, cert2))
+	assert.Equal(t, big.NewInt(3500), engine.SupplyLedger.GetAllocation(102))
+	assert.Equal(t, uint64(2), engine.GetTransferAllocationNonce(102))
 }
 
 // TestGlobalSupplyLedger_GrantAllocation is the focused unit test for the ledger primitive
@@ -637,9 +691,26 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }
 
-func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
+// setupRecoveryCommittee gives engine a real, single-member RecoveryCommittee and returns a
+// closure that signs a real QuorumCert against it -- the authorization
+// UpdateCommitteeWithRecoveryCert now requires (2026-09-04, replacing the removed
+// propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) governance dance).
+func setupRecoveryCommittee(engine *GatewayEngine) func(digest []byte) QuorumCert {
+	kp := bls.GenerateKeyPair()
+	pop := PopSign(kp.PrivateKey(), kp.PublicKey())
+	engine.RecoveryCommittee = []ValidatorEntry{
+		{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: pop.Bytes()},
+	}
+	return func(digest []byte) QuorumCert {
+		sig := bls.Sign(kp.PrivateKey(), digest)
+		return QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
+	}
+}
+
+func TestGateway_UpdateCommitteeWithRecoveryCert_Lifecycle(t *testing.T) {
 	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
 
 	kp2 := bls.GenerateKeyPair()
 	popSig2 := PopSign(kp2.PrivateKey(), kp2.PublicKey())
@@ -651,32 +722,21 @@ func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
 
 	payloadObj := UpdateCommitteePayload{
 		ChainID:         101,
-		NewEpoch:        2,
+		NewEpoch:        6, // must be > setupTestGatewayEngine's fixture epoch (5) -- see the
+		// epoch-monotonicity SECURITY FIX on UpdateCommitteeWithRecoveryCert (2026-09-04)
 		NewCommittee:    newCommittee,
 		QuorumThreshold: 6700,
 		StateRoot:       common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
 		AccountTreeRoot: common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
 	}
-	payloadBytes, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
 
-	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
-	require.NoError(t, err)
-
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	// Timelock guard check
-	_, errEarly := engine.ExecuteGovernanceProposal(proposalID, 1010+100)
-	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
-
-	// Execute after timelock
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
 	require.NoError(t, err)
 
 	// Verify updated ChainRegistry state
 	reg := engine.ChainRegistry[101]
-	assert.Equal(t, uint64(2), reg.Epoch)
+	assert.Equal(t, uint64(6), reg.Epoch)
 	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
 	assert.Equal(t, payloadObj.StateRoot, reg.StateRoot)
 	assert.Equal(t, payloadObj.AccountTreeRoot, reg.AccountTreeRoot)
@@ -685,9 +745,10 @@ func TestGateway_ProposalUpdateCommittee_Lifecycle(t *testing.T) {
 	assert.Equal(t, kp2.BytesPublicKey(), reg.Committee[1].PubkeyBLS)
 }
 
-func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
+func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsInvalidPoP(t *testing.T) {
 	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
 
 	kp2 := bls.GenerateKeyPair()
 	badPopSig := make([]byte, 96) // Zeroed / invalid PoP signature
@@ -699,22 +760,14 @@ func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
 
 	payloadObj := UpdateCommitteePayload{
 		ChainID:      101,
-		NewEpoch:     2,
+		NewEpoch:     6, // must be > setupTestGatewayEngine's fixture epoch (5), else the epoch
+		// check rejects this first -- this test is specifically about PoP rejection
 		NewCommittee: newCommittee,
 	}
-	payloadBytes, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
 
-	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
-	require.NoError(t, err)
-
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	// Execution must fail due to invalid PoP
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ProposalUpdateCommittee")
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
+	assert.ErrorIs(t, err, ErrPopVerifyFailed)
 
 	// Ensure registry was NOT modified
 	reg := engine.ChainRegistry[101]
@@ -722,9 +775,10 @@ func TestGateway_ProposalUpdateCommittee_RejectsInvalidPoP(t *testing.T) {
 	assert.Equal(t, 1, len(reg.Committee))
 }
 
-func TestGateway_ProposalUpdateCommittee_RejectsUnknownChain(t *testing.T) {
+func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsUnknownChain(t *testing.T) {
 	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
 
 	newCommittee := []ValidatorEntry{
 		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
@@ -735,29 +789,22 @@ func TestGateway_ProposalUpdateCommittee_RejectsUnknownChain(t *testing.T) {
 		NewEpoch:     2,
 		NewCommittee: newCommittee,
 	}
-	payloadBytes, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
 
-	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
-	require.NoError(t, err)
-
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	// Execution must fail due to unknown chain
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
 	assert.ErrorIs(t, err, ErrUnknownChain)
 }
 
-// TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold is the regression test for a
-// real gap found reviewing this same feature: QuorumThreshold was applied with no bounds check
-// at all. VerifyQuorumCertAgainstRegistry treats it as the fraction of a committee's TOTAL STAKE
-// required to sign before a QuorumCert verifies — a nonzero value below 2/3 lets a cert verify
-// without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could forge a
-// "valid" quorum for that chain's attestCommit()/vote() from then on.
-func TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold(t *testing.T) {
+// TestGateway_UpdateCommitteeWithRecoveryCert_RejectsSubBftQuorumThreshold is the regression test
+// for a real gap found reviewing this same feature: QuorumThreshold was applied with no bounds
+// check at all. VerifyQuorumCertAgainstRegistry treats it as the fraction of a committee's TOTAL
+// STAKE required to sign before a QuorumCert verifies — a nonzero value below 2/3 lets a cert
+// verify without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could
+// forge a "valid" quorum for that chain's attestCommit()/vote() from then on.
+func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsSubBftQuorumThreshold(t *testing.T) {
 	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
 
 	newCommittee := []ValidatorEntry{
 		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
@@ -766,25 +813,70 @@ func TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold(t *testing
 	// 3334 basis points = 33.34% -- well under the 2/3 BFT floor (6667).
 	payloadObj := UpdateCommitteePayload{
 		ChainID:         101,
-		NewEpoch:        2,
+		NewEpoch:        6, // must be > setupTestGatewayEngine's fixture epoch (5) -- this test is
+		// specifically about QuorumThreshold rejection
 		NewCommittee:    newCommittee,
 		QuorumThreshold: 3334,
 	}
-	payloadBytes, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
 
-	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payloadBytes, 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
 	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
 
 	// Registry must be untouched -- still the original committee/threshold from setupTestGatewayEngine.
 	reg := engine.ChainRegistry[101]
 	assert.Equal(t, uint64(5), reg.Epoch)
 	assert.Equal(t, uint64(6667), reg.QuorumThreshold)
+}
+
+// TestGateway_UpdateCommitteeWithRecoveryCert_RejectsReplayAsRollback is the regression test for
+// a second real vulnerability found in the same review pass as the TransferAllocationWithCert
+// replay bug: a RecoveryCommittee cert, once signed, is necessarily public forever (it travels in
+// on-chain calldata) -- without an epoch-monotonicity check, the EXACT SAME cert that legitimately
+// recovered a chain once could be replayed at ANY LATER TIME to roll that chain's committee back
+// to the old, recovered one, even after it has since progressed through many further epochs of
+// its own via ApplyCommitteeUpdate (self-attested, epoch_sync.go) with a completely different,
+// possibly-rotated-out committee. This is arguably worse than a simple double-spend: it can
+// silently hijack a chain's entire validator set at an attacker-chosen future time.
+func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsReplayAsRollback(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
+
+	// Chain 101 starts at Epoch 5 (setupTestGatewayEngine's fixture).
+	recoveredKP := bls.GenerateKeyPair()
+	recoveredPop := PopSign(recoveredKP.PrivateKey(), recoveredKP.PublicKey())
+	payloadObj := UpdateCommitteePayload{
+		ChainID:      101,
+		NewEpoch:     6,
+		NewCommittee: []ValidatorEntry{{PubkeyBLS: recoveredKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveredPop.Bytes()}},
+	}
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	cert := signRecovery(digest)
+
+	// First use: a genuine recovery -- MUST SUCCEED.
+	require.NoError(t, engine.UpdateCommitteeWithRecoveryCert(payloadObj, cert))
+	require.Equal(t, uint64(6), engine.ChainRegistry[101].Epoch)
+
+	// Chain 101 now legitimately progresses on its own, self-attested, to a much later epoch with
+	// a brand new (rotated) committee -- simulated directly here since ApplyCommitteeUpdate's own
+	// mechanics are exercised elsewhere; this test is specifically about what happens to the OLD
+	// recovery cert afterward.
+	kpNew := bls.GenerateKeyPair()
+	popNew := PopSign(kpNew.PrivateKey(), kpNew.PublicKey())
+	engine.ChainRegistry[101] = ChainRegistry{
+		ChainID:   101,
+		Epoch:     50,
+		Committee: []ValidatorEntry{{PubkeyBLS: kpNew.BytesPublicKey(), Stake: 10000, PopSignature: popNew.Bytes()}},
+	}
+
+	// REPLAY: the exact same recovery cert from epoch 6, resubmitted now that the chain is
+	// genuinely at epoch 50 -- this is precisely what a real attacker does (the cert is public,
+	// no signing key needed to replay it). MUST FAIL, and must NOT roll the committee back.
+	errReplay := engine.UpdateCommitteeWithRecoveryCert(payloadObj, cert)
+	assert.ErrorIs(t, errReplay, ErrNonSequentialEpoch, "a recovery cert targeting an epoch <= the chain's CURRENT epoch must be rejected")
+	assert.Equal(t, uint64(50), engine.ChainRegistry[101].Epoch, "replay must not roll the epoch back")
+	assert.Equal(t, kpNew.BytesPublicKey(), engine.ChainRegistry[101].Committee[0].PubkeyBLS, "replay must not reinstall the old recovered committee")
 }
 
 // TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
@@ -812,22 +904,21 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 
 	t.Run("succeeds with ZERO votes cast and no stake precondition at this layer", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 
-		// No Governance.Propose/Vote/ExecuteGovernanceProposal call anywhere in this sub-test --
-		// that absence IS the point being tested. No SupplyLedger pre-funding either -- this
-		// function no longer looks at PerChainAllocation at all.
+		// No vote/proposal call anywhere in this sub-test -- that absence IS the point being
+		// tested (GovernanceEngine itself was removed 2026-09-04). No SupplyLedger pre-funding
+		// either -- this function no longer looks at PerChainAllocation at all.
 		err := engine.RegisterChainViaStake(newChainReg(104), nil)
 		require.NoError(t, err)
 		reg, exists := engine.ChainRegistry[104]
 		assert.True(t, exists, "RegisterChainViaStake must admit a valid candidate with no vote")
 		assert.Equal(t, uint64(104), reg.ChainID)
-		assert.Contains(t, engine.Governance.ActiveChains, uint64(104), "must also become a voting member for FUTURE proposals")
 	})
 
 	t.Run("already-registered chain ID is rejected", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 
 		// Chain 101 is already in ChainRegistry via setupTestGatewayEngine's fixture.
 		err := engine.RegisterChainViaStake(newChainReg(101), nil)
@@ -836,7 +927,7 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 
 	t.Run("rejects an unverified non-empty committee (same PoP bar as everywhere else)", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 
 		kpRogue := bls.GenerateKeyPair()
 		forgedCommittee := []ValidatorEntry{
@@ -879,7 +970,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 	t.Run("Reserve's own copy: TRANSFERS from Reserve's own pool -- GenesisTotalSupply never changes", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102, holding 5000
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		engine.MinNativeStakeToRegister = big.NewInt(777)
 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
@@ -901,7 +992,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		// registration, which made that impossible (circular: register needs mint, mint needs
 		// registered voters). Fixed: registration always succeeds; funding is best-effort.
 		engine, _ := setupTestGatewayEngine() // Reserve (102) holds only 5000
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		engine.MinNativeStakeToRegister = big.NewInt(999999) // far more than Reserve actually holds
 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
@@ -917,7 +1008,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 	t.Run("GenesisWallet unset: registration still succeeds, just unfunded (same best-effort treatment)", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine() // Reserve (102) holds 5000, plenty
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		engine.MinNativeStakeToRegister = big.NewInt(777)
 
 		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667} // GenesisWallet left zero
@@ -932,7 +1023,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 	t.Run("non-Reserve chain's local copy: SupplyLedger untouched (no enforcement power there anyway)", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		engine.ReserveChainID = 999 // now LocalChainID(102) != ReserveChainID
 		engine.MinNativeStakeToRegister = big.NewInt(777)
 
@@ -946,7 +1037,7 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 
 	t.Run("MinNativeStakeToRegister unset: no crediting, registration still succeeds (vote-free path unaffected)", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		// MinNativeStakeToRegister left nil -- matches every pre-2026-09-04 config.
 
 		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104), nil))
@@ -968,7 +1059,7 @@ func TestGateway_SetGenesisDigest(t *testing.T) {
 
 	newRegisteredEngine := func(t *testing.T) *GatewayEngine {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667, GenesisWallet: genesisWallet}
 		payload, err := json.Marshal(reg)
 		require.NoError(t, err)
@@ -999,7 +1090,7 @@ func TestGateway_SetGenesisDigest(t *testing.T) {
 
 	t.Run("unregistered chain is rejected", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		err := engine.SetGenesisDigest(999999, someDigest, genesisWallet)
 		assert.ErrorIs(t, err, ErrUnknownSourceChain)
 	})
@@ -1013,7 +1104,7 @@ func TestGateway_SetGenesisDigest(t *testing.T) {
 
 	t.Run("a chain registered without a GenesisWallet (e.g. a direct/test call to RegisterChainViaStake that doesn't set it) can never have its digest published by anyone", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		// Chain 101 comes from setupTestGatewayEngine's fixture, registered with no GenesisWallet.
 		err := engine.SetGenesisDigest(101, someDigest, common.Address{})
 		assert.ErrorIs(t, err, ErrNotGenesisWallet, "caller==zero-address must not accidentally match an unset GenesisWallet")
@@ -1042,7 +1133,7 @@ func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T
 	ledger, err := NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
 	require.NoError(t, err)
 	engine := NewGatewayEngine(9099, map[uint64]ChainRegistry{}, ledger)
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
 
 	// RegisterChainViaStake registers ONE chain per call (not a batch like the retired
 	// BootstrapFoundingChains), so each entry now succeeds or fails independently -- a bad
@@ -1058,21 +1149,22 @@ func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T
 	assert.Len(t, engine.ChainRegistry, 3, "the three valid entries registered before it must be unaffected")
 }
 
-// TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind is the decision test
-// for all_remaining_fixes_plan.md's Mục 1 ("epoch catch-up: chain mất kết nối nhiều epoch
+// TestGateway_UpdateCommitteeWithRecoveryCert_RecoversChainStuckManyEpochsBehind is the decision
+// test for all_remaining_fixes_plan.md's Mục 1 ("epoch catch-up: chain mất kết nối nhiều epoch
 // không có đường bắt kịp"). ApplyCommitteeUpdate (epoch_sync.go) requires strict sequential
 // epoch progression AND a valid quorum cert from the chain's CURRENT committee -- if a chain
 // loses connectivity for many epochs and its old committee's signing keys are gone (validators
 // rotated in the meantime), self-attested continuity is permanently impossible; no amount of
-// clever cryptography can prove continuity from keys that no longer exist. This test proves
-// ProposalUpdateCommittee is a real, working answer: recovery via Root Anchor governance
-// quorum (>=2/3 of OTHER active chains vouching for the stuck chain's claimed new committee,
-// e.g. based on real-world proof the stuck chain's operators published out of band) rather
-// than cryptographic self-continuity -- the same trust model the retired BootstrapFoundingChains
-// used elsewhere in this codebase, not a new risk class.
-func TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind(t *testing.T) {
+// clever cryptography can prove continuity from keys that no longer exist.
+// UpdateCommitteeWithRecoveryCert (2026-09-04, replacing the removed
+// propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) governance dance) is the
+// real, working answer: recovery via RecoveryCommittee -- a fixed, config-set, non-Sybil-able
+// set vouching for the stuck chain's claimed new committee (e.g. based on real-world proof the
+// stuck chain's operators published out of band) -- rather than cryptographic self-continuity.
+func TestGateway_UpdateCommitteeWithRecoveryCert_RecoversChainStuckManyEpochsBehind(t *testing.T) {
 	engine, _ := setupTestGatewayEngine()
-	engine.EnsureGovernance()
+	engine.EnsureAssetRegistry()
+	signRecovery := setupRecoveryCommittee(engine)
 
 	// Chain 101 (from setupTestGatewayEngine) is stuck at Epoch 5. Simulate the real-world
 	// failure this mechanism exists for: its old committee's keys are gone -- nobody in this
@@ -1087,26 +1179,17 @@ func TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind(t *t
 	}
 
 	// A big, non-sequential jump (5 -> 500) -- ApplyCommitteeUpdate would reject this outright
-	// (ErrNonSequentialEpoch expects exactly 6). ProposalUpdateCommittee has no such
-	// restriction: real Root Anchor governance quorum is the safety property here, not epoch
+	// (ErrNonSequentialEpoch expects exactly 6). UpdateCommitteeWithRecoveryCert has no such
+	// restriction: RecoveryCommittee's real signature is the safety property here, not epoch
 	// sequencing.
 	payloadObj := UpdateCommitteePayload{
 		ChainID:      101,
 		NewEpoch:     500,
 		NewCommittee: recoveredCommittee,
 	}
-	payload, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
 
-	proposalID, err := engine.Governance.Propose(ProposalUpdateCommittee, payload, 1000)
-	require.NoError(t, err)
-	// Active chains here is just {101} (setupTestGatewayEngine's registry), so quorum = 1 --
-	// in a real multi-chain Root Anchor this would be >=2/3 of OTHER active chains vouching
-	// for chain 101, since chain 101 itself is the one that's stuck/unreachable.
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
+	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
+	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
 	require.NoError(t, err)
 
 	reg := engine.ChainRegistry[101]

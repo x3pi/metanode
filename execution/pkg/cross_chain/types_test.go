@@ -153,22 +153,8 @@ func TestTypes_RoundTripJSON(t *testing.T) {
 	assert.Equal(t, commit.FundedAmount.String(), commitDeser.FundedAmount.String())
 	assert.Equal(t, commit.ClaimedAmount.String(), commitDeser.ClaimedAmount.String())
 
-	// 9. GovernanceProposal
-	prop := GovernanceProposal{
-		ProposalID:  hash,
-		Kind:        ProposalUnregisterChain,
-		Payload:     []byte{1, 2, 3},
-		VotesFor:    2,
-		VotedChains: map[uint64]bool{101: true, 102: true},
-		ProposedAt:  1700000000,
-		EffectiveAt: 1700000000 + 72*3600,
-		Executed:    false,
-	}
-	propData, err := json.Marshal(prop)
-	require.NoError(t, err)
-	var propDeser GovernanceProposal
-	require.NoError(t, json.Unmarshal(propData, &propDeser))
-	assert.Equal(t, prop, propDeser)
+	// 9. GovernanceProposal was removed 2026-09-04 along with the whole GovernanceEngine
+	// propose/vote/execute machinery -- see UpdateCommitteePayload's doc comment in types.go.
 
 	// 10. AccountLeaf
 	leaf := AccountLeaf{
