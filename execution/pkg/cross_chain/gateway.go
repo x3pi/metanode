@@ -301,6 +301,12 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 // coordinator transaction, with no natural per-chain caller wallet to check a real balance
 // against -- RegisterChainViaStake (already per-chain) is now the universal registration path for
 // every chain, including chain #1, founding or not.
+//
+// PerChainAllocation as an OUTCOME (2026-09-04, distinct from the above -- that section is about
+// the STAKE CHECK, never PerChainAllocation-based): once the real deposit is verified+burned,
+// this function credits the SAME amount into the new chain's PerChainAllocation on the Reserve's
+// ledger, unifying "stake to register" and "circulating cross-chain allocation" -- see the
+// dedicated comment at the bottom of this function's body for the full rationale.
 func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -337,6 +343,37 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	}
 	g.ChainRegistry[reg.ChainID] = reg
 	g.Governance.RegisterActiveChain(reg.ChainID)
+
+	// Unify "stake to register" and "circulating cross-chain allocation" into one real
+	// instrument (2026-09-04 user request: "dùng số tiền cọc và nạp đấy là số tiền để luân
+	// chuyển" -- use the staked deposit itself as the money that circulates), instead of
+	// requiring a SEPARATE ProposalAllocateSupply/ProposalTransferAllocation step before a
+	// freshly-registered chain has any cross-chain-outbound capacity at all (the old "chain
+	// nghèo mãi mãi" gap, note/eurozone_unified_native_coin_plan.md mục 2.4).
+	//
+	// The caller (gateway_handler.go's "registerChainViaStake" case) verifies+burns this exact
+	// amount from tx.FromAddress()'s real wallet and re-mints it into GATEWAY_CONTRACT_ADDRESS as
+	// a permanent held deposit -- but only AFTER this function returns (see that case's own
+	// comment on ordering: balance mutation must come last). That is still safe to credit here,
+	// ahead of the real deposit move: this GatewayEngine mutation is, like the ChainRegistry
+	// write two lines up, fully in-memory and discardable, only persisted by saveGatewayEngine()
+	// at the very end of handleWrite. If the balance move fails afterward, this SupplyLedger
+	// credit is discarded right along with the registration itself, so the two stay atomic.
+	//
+	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note
+	// §2.3 (and attestCommitInternal's enforceCeiling check), every OTHER chain's local copy of
+	// PerChainAllocation has no real enforcement power, so crediting it there would just be
+	// confusing, powerless bookkeeping. GrantAllocation grows GenesisTotalSupply by the same
+	// amount, keeping the ledger's sum(PerChainAllocation) <= GenesisTotalSupply invariant
+	// intact -- and unlike ProposalAllocateSupply's vote-only growth of that same total, this
+	// growth is backed by a real, held, non-withdrawable deposit, not a committee's say-so.
+	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
+		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if err := g.SupplyLedger.GrantAllocation(reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+			return fmt.Errorf("RegisterChainViaStake: chain %d: crediting stake deposit into SupplyLedger: %w", reg.ChainID, err)
+		}
+	}
+
 	return nil
 }
 

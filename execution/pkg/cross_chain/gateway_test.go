@@ -862,7 +862,7 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 }
 
 // TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
-// As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake check at all --
+// As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake CHECK at all --
 // it has no AccountStateDB access, so it cannot verify a real wallet balance. The real gate (a
 // REAL native-coin deposit from the caller's own wallet, checked+burned against
 // GatewayEngine.MinNativeStakeToRegister) lives one layer up, in gateway_handler.go's
@@ -870,6 +870,12 @@ func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
 // StakeDeposit (gateway_handler_test.go) for that coverage. This file only covers what
 // RegisterChainViaStake itself is still responsible for: duplicate-registration and PoP/quorum
 // validation, vote-free.
+//
+// 2026-09-04: RegisterChainViaStake now DOES touch PerChainAllocation, as an outcome rather than
+// a check -- it credits MinNativeStakeToRegister into the new chain's allocation on the Reserve's
+// own ledger (see the function's own doc comment). None of the sub-tests below set
+// MinNativeStakeToRegister on their engine, so that new branch stays a no-op here by construction
+// -- see TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation for that coverage instead.
 func TestGateway_RegisterChainViaStake(t *testing.T) {
 	newChainReg := func(chainID uint64) []byte {
 		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
@@ -918,6 +924,58 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 		assert.ErrorIs(t, err, ErrPopVerifyFailed)
 		_, exists := engine.ChainRegistry[104]
 		assert.False(t, exists)
+	})
+}
+
+// TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation is the regression test for the
+// 2026-09-04 unification of "stake to register" and "circulating cross-chain allocation" (see
+// RegisterChainViaStake's own doc comment, and note/eurozone_unified_native_coin_plan.md mục 2.4)
+// -- a freshly-registered chain must walk away with real cross-chain-outbound capacity equal to
+// its own stake deposit, with zero separate ProposalTransferAllocation/ClaimMessage step needed.
+func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) {
+	newChainReg := func(chainID uint64) []byte {
+		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+		return payload
+	}
+
+	t.Run("Reserve's own copy: credits PerChainAllocation and grows GenesisTotalSupply by the stake amount", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102
+		engine.EnsureGovernance()
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+
+		assert.Equal(t, big.NewInt(777), engine.SupplyLedger.GetAllocation(104), "new chain must walk away with allocation == its real stake deposit")
+		wantSupply := new(big.Int).Add(supplyBefore, big.NewInt(777))
+		assert.Equal(t, wantSupply, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must grow by exactly the credited amount, keeping the invariant intact")
+		assert.True(t, engine.SupplyLedger.VerifyInvariant())
+	})
+
+	t.Run("non-Reserve chain's local copy: SupplyLedger untouched (no enforcement power there anyway)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		engine.ReserveChainID = 999 // now LocalChainID(102) != ReserveChainID
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "non-Reserve chain's own local ledger has no enforcement power -- must not be credited")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply)
+	})
+
+	t.Run("MinNativeStakeToRegister unset: no crediting, registration still succeeds (vote-free path unaffected)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine()
+		engine.EnsureGovernance()
+		// MinNativeStakeToRegister left nil -- matches every pre-2026-09-04 config.
+
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104))
 	})
 }
 
