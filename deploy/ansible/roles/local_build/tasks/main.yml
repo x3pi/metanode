@@ -43,3 +43,31 @@
 # deploy.yml's "Local build and configuration generation" play (pre_tasks, `set_fact`), which
 # always runs before this role. Nothing further to do here.
 
+# RecoveryCommittee self-config (2026-09-04 -- see GatewayEngine.RecoveryCommittee's own doc
+# comment and note/eurozone_unified_native_coin_plan.md): declareChainDeadWithCert/
+# unregisterChainWithCert/updateCommitteeWithRecoveryCert are RecoveryCommittee-authorized and
+# fail closed (VerifyQuorumCertAgainstRegistry's ErrEmptyCommittee) if this cluster's own
+# cross_chain.recovery_committee_json is left unset -- which it always was until this task, since
+# nothing generated it. Reuses this cluster's OWN real validator authority keys as the Recovery
+# Committee (matches this devnet's trust model: the same operators already trusted to run
+# consensus for the whole chain), computed by execution/cmd/tool/gen_recovery_committee (needs
+# real BLS pubkey derivation + a real Proof-of-Possession signature -- not safe to reimplement in
+# Python). Runs once, after Generate Validator Keys has produced a complete genesis.json with
+# every node's real validator entry (this task reads it for the definitive address list, rather
+# than trusting node-*_keys/ directory names alone -- that directory accumulates unrelated
+# leftovers from other experiments over time, and registering a stale/phantom committee member
+# would misrepresent the real committee and skew QuorumThreshold math).
+- name: Build gen_recovery_committee helper
+  ansible.builtin.shell: |
+    cd "{{ deploy_dir }}/../../execution" && go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
+
+- name: Compute and inject RecoveryCommittee config into every node's execution.json
+  ansible.builtin.shell: |
+    python3 inject_recovery_committee.py "{{ deploy_dir }}" "{{ cluster_nodes | length }}" "{{ deploy_dir }}/../../execution/gen_recovery_committee"
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
+

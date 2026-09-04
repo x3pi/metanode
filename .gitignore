@@ -514,6 +514,8 @@ deploy/ansible_private_chains/*.retry
 execution/cross_chain_relayer
 execution/cmd/tool/register_chains/register_chains
 execution/cmd/tool/live_asset_bridge/live_asset_bridge
+execution/gen_recovery_committee
+execution/cmd/tool/gen_recovery_committee/gen_recovery_committee
 
 # Local testing tools
 execution/cmd/tool/test_cross_chain_tx/

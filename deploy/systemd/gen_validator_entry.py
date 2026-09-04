@@ -352,8 +352,15 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "cross_chain": {
             "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
             "reserve_chain_id": 991,
-            "min_native_stake_to_register_wei": "1000000000000000000",
-            "devnet_governance_timelock_seconds_override": 10
+            "min_native_stake_to_register_wei": "1000000000000000000"
+            # recovery_committee_json/recovery_quorum_threshold (2026-09-04, replacing the
+            # deleted GovernanceEngine's propose/vote/execute gate for
+            # declareChainDeadWithCert/unregisterChainWithCert/updateCommitteeWithRecoveryCert)
+            # are injected AFTER this script runs, by
+            # deploy/ansible/roles/local_build/tasks/main.yml's "Compute and inject
+            # RecoveryCommittee config" task -- not here, because building that value needs every
+            # OTHER node's real BLS authority key too, which this per-node invocation doesn't
+            # have visibility into yet (see that task's own comment for the full rationale).
         },
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",

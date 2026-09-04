@@ -835,14 +835,11 @@ def main():
                 "min_native_stake_to_register_wei": "1000000000000000000",
                 "root_anchor_circuit_breaker_max_failures": 5,
                 "root_anchor_circuit_breaker_timeout_seconds": 10,
-                # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens
-                # GovernanceEngine's mandatory 72h ProposalAllocateSupply/etc. timelock to 10s so
-                # the full propose->vote->timelock->execute governance path (required to grant any
-                # chain an initial cross-chain spending allocation -- see
-                # TestGateway_ProposalAllocateSupply_UnblocksAttestCommit) is actually exercisable
-                # on a local devnet instead of requiring a literal 72-hour wait. NEVER set this on
-                # a real deployment -- gen_single_chain.py is devnet tooling only.
-                "devnet_governance_timelock_seconds_override": 10
+                # devnet_governance_timelock_seconds_override removed 2026-09-04: dead config,
+                # GovernanceEngine (the only thing that ever read it) was deleted the same day --
+                # granting a chain its initial cross-chain spending allocation is now
+                # AllocateSupplyWithCert/TransferAllocationWithCert (self-sign, no timelock at
+                # all any more) or RecoveryCommittee-authorized, not a 72h governance vote.
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",
