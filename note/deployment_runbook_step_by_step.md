@@ -145,19 +145,20 @@ kiện `MinFoundingChains`, có thể giảm xuống **1 validator + 1 synconly 
    đây là lý do Root Anchor không được áp dụng biến thể giảm chi phí này dù ở bất kỳ tình huống
    nào.
 
-4. **Rủi ro riêng cho chain "placeholder" — vẫn nắm quyền BIỂU QUYẾT vĩnh viễn ở Root Anchor.**
-   Vì `bootstrapFoundingChains` áp dụng "1 chain = 1 phiếu" (mục 1.2 tài liệu kiến trúc) bất kể
-   chain đó thật hay chỉ để đủ điều kiện sáng lập, 2 chain placeholder chiếm **2/4 tổng số
-   phiếu governance của Root Anchor** — nếu quorum yêu cầu ví dụ ≥2/3 (3/4 chain), validator
-   duy nhất của 1 chain placeholder có quyền ảnh hưởng thật tới mọi quyết định
-   `propose`/`vote`/`executeProposal` sau này (cấp allocation, đổi uỷ ban...), dù chain đó
-   không hề có giá trị thật. Cân nhắc kỹ trước khi coi đây "chỉ là hạ tầng cho có".
+4. ~~Rủi ro riêng cho chain "placeholder" — vẫn nắm quyền BIỂU QUYẾT vĩnh viễn ở Root
+   Anchor~~ — **MOOT (2026-09-04):** `bootstrapFoundingChains`/`GovernanceEngine`/
+   `propose`/`vote`/`executeProposal` đã bị xoá hẳn, không còn "1 chain = 1 phiếu" nào để
+   chiếm nữa. `RegisterChainViaStake` không cấp bất kỳ quyền biểu quyết nào — đăng ký chỉ
+   tạo `ChainRegistry` entry, không có khái niệm "phiếu governance" nào còn tồn tại trong
+   codebase. Rủi ro tập trung quyền lực CÒN LẠI duy nhất liên quan tới chain sáng lập là
+   `RecoveryCommittee` (nếu bạn chọn tái dùng khoá của chính các founding chain cho
+   RecoveryCommittee — **không nên**, xem `production_deployment_guide.md` mục 7 checklist).
 
 **Khi nào chấp nhận được**: chain đó dùng cho mục đích nội bộ/giá trị thấp/pilot-demo, VÀ bạn
-chủ động giữ `per_chain_allocation` cấp cho nó ở mức thấp qua governance (`ProposalAllocateSupply`)
-tương xứng với rủi ro chấp nhận — đây là quyết định kinh doanh có thể chấp nhận được, không
-phải lỗi kỹ thuật, miễn là được chọn có ý thức chứ không phải vì tiết kiệm mà bỏ qua bước đọc
-đánh giá này.
+chủ động giữ `per_chain_allocation` cấp cho nó ở mức thấp (qua `register_chains -action
+transfer-alloc`, tự-ký bởi Reserve — không còn governance nào cả) tương xứng với rủi ro chấp
+nhận — đây là quyết định kinh doanh có thể chấp nhận được, không phải lỗi kỹ thuật, miễn là
+được chọn có ý thức chứ không phải vì tiết kiệm mà bỏ qua bước đọc đánh giá này.
 
 **Mạng/băng thông:** độ trễ THẤP giữa các validator **CÙNG 1 chain** ảnh hưởng trực tiếp thời
 gian round BFT (khuyến nghị <50ms giữa các node cùng chain — nếu đặt các chain khác nhau/Root
@@ -282,7 +283,8 @@ bash register_2_private_chains.sh "http://127.0.0.1:9099"
 
 *(Hoặc với 4 private chain: `bash register_private_chains_t2.sh`)*
 
-**✅ Xác nhận thành công:** output phải có đúng **5 dòng** `✅ bootstrapFoundingChains
+**✅ Xác nhận thành công (2026-09-04: `bootstrapFoundingChains` đã bị xoá, output giờ khác
+bản gốc runbook này):** output phải có đúng **5 dòng** `✅ registerChainViaStake(chain X)
 succeeded on ...` (Root Anchor + chain 101 + 102 + 103 + 104 — **không phải chỉ 1 dòng**).
 Nếu chỉ thấy dòng cho Root Anchor mà thiếu 4 dòng còn lại, đây là dấu hiệu thiếu cờ
 `-target-rpcs` — `attestCommit()` giữa 2 private chain sau này sẽ luôn revert với
@@ -320,16 +322,23 @@ kiểm tra lại biến `CHAINS`.
 
 Bước này xác nhận **toàn bộ pipeline hoạt động đúng**, không chỉ từng tiến trình còn sống —
 đây là bài test có giá trị nhất trong toàn bộ runbook. Một chain mới đăng ký có allocation
-gửi-ra = 0 theo thiết kế (xem `production_deployment_guide.md` mục 3), nên cần cấp phát qua
-governance trước — dùng `devnet_governance_timelock_seconds_override` (đã tự cấu hình 10
-giây bởi `gen_single_chain.py`/`gen_root_anchor_chain.py`) để không phải chờ 72 giờ thật.
+gửi-ra = 0 theo thiết kế (xem `production_deployment_guide.md` mục 3), nên cần cấp phát trước.
 
-Quy trình đầy đủ (propose → vote ≥2/3 chain đã đăng ký → chờ timelock → executeProposal →
-outbound → chờ relayer tự relay → kiểm tra số dư) cần viết một script Go ngắn gọi ABI trực
-tiếp — không có sẵn dưới dạng 1 lệnh CLI đơn (đây là việc nên làm: đóng gói bài test này
-thành 1 tool CLI thật, xem mục "Việc nên làm tiếp theo" cuối tài liệu). Các bước ABI chính
-xác (tên hàm, tham số, cách ký: `ProposalAllocateSupply`, `propose`/`vote`/`executeProposal`,
-rồi `outbound`) đã được xác nhận chạy đúng trên thực tế.
+**Cập nhật 2026-09-04 (đơn giản hơn hẳn bản gốc runbook này — không còn governance/vote/72h
+timelock nào cả):** chạy thẳng, đã có sẵn dưới dạng 1 lệnh CLI đơn, không cần viết script Go
+riêng nữa:
+
+```bash
+./register_chains -root-anchor "http://127.0.0.1:9099" -chains "101,102" \
+  -fund-genesis -genesis-supply "400000000000000000000000000" \
+  -per-chain-allocation "100000000000000000000000000"
+```
+
+Lệnh này gọi thẳng `allocateSupplyWithCert` (mint genesis supply đúng 1 lần cho Reserve,
+tự-ký bởi chính uỷ ban BLS thật của Reserve) rồi `transferAllocationWithCert` cho từng chain
+(cũng tự-ký, không qua bên thứ 3) — chạy xong ngay trong vài giây thật, không cần chờ gì cả.
+Xác nhận: log phải có dòng `✅ fundGenesis: minted ...` và `✅ fundGenesis: transferred ...`
+cho mỗi chain đích.
 
 **✅ Xác nhận thành công (nếu chạy bài test):** số dư `eth_getBalance` của địa chỉ nhận trên
 chain đích **tăng đúng bằng giá trị đã gửi** ở `outbound()` — xác nhận bằng 2 lần gọi
@@ -516,11 +525,14 @@ Quy trình đầy đủ nằm ở `note/runbook_root_anchor_genesis_ceremony.md`
 khi làm thật, tài liệu này chỉ tóm tắt các mốc xác thực chính (khớp
 `production_deployment_guide.md` mục 5.2/5.3).
 
-**🔒 Tránh lỗi quan trọng nhất của Phần này:** trước khi gửi giao dịch `bootstrapFoundingChains`
-ở bước 6, PHẢI đã set `CrossChainConfig.GenesisCoordinatorAddress` (khối `cross_chain` trong
-`config.json`) thành địa chỉ coordinator đã cam kết out-of-band — bỏ trống nghĩa là BẤT KỲ ai
-cũng gọi được lệnh này, mở đường cho tấn công front-run chiếm ghế committee (chi tiết:
-`production_deployment_guide.md` mục 5.3).
+**Cập nhật 2026-09-04:** `bootstrapFoundingChains`/`CrossChainConfig.GenesisCoordinatorAddress`
+đã bị xoá hẳn (`production_deployment_guide.md` mục 5.3) — không còn "lỗi quan trọng nhất" nào
+để tránh ở bước 6 theo kiểu cũ nữa. Bước 6 giờ chỉ là mỗi tổ chức tự gửi
+`registerChainViaStake` của riêng mình, trả tiền cọc thật từ ví của chính mình — không có
+coordinator/cửa sổ front-run nào để lo (chi tiết: `production_deployment_guide.md` mục 5.3).
+**🔒 Điều cần chú ý thay thế:** nếu dự định dùng chính uỷ ban các founding chain làm luôn
+`RecoveryCommittee` — ĐỪNG, sinh khoá RecoveryCommittee hoàn toàn riêng, out-of-band (xem
+`production_deployment_guide.md` mục 7 checklist).
 
 | Bước | Việc làm | ✅ Xác nhận thành công |
 | :--- | :--- | :--- |
@@ -529,7 +541,7 @@ cũng gọi được lệnh này, mở đường cho tấn công front-run chi�
 | 3 | Coordinator chạy `assemble_root_anchor assemble` | Sinh ra `genesis.json` + `genesis_digest.txt` — xác nhận `genesis_digest.txt` không rỗng, và số lượng entry trong `genesis.json`'s `validators` khớp đúng số tổ chức tham gia. |
 | 4 | Công bố `genesis_digest.txt` qua kênh khác | Mỗi tổ chức nhận digest qua kênh KHÁC với kênh nhận `genesis.json` — nếu chỉ có 1 kênh, không có gì chống giả mạo giữa đường. |
 | 5 | Mỗi node chạy `assemble_root_anchor verify --expect-digest ...` **trước khi start** | Lệnh phải thoát với exit code `0` và in ra thông báo khớp digest — **không start node nếu bước này thất bại**, dù chỉ 1 tổ chức. |
-| 6 | Start node, đăng ký `bootstrapFoundingChains` | Coordinator gửi giao dịch NGAY sau khi nhận đủ file (giảm cửa sổ front-run, xem mục 5.3) — xác nhận qua `getChainRegistry()` trả `exists=true` cho đủ số chain sáng lập mong đợi. |
+| 6 | Start node, mỗi tổ chức tự gửi `registerChainViaStake` cho chain của mình | Không cần coordinator gửi hộ (`bootstrapFoundingChains` đã bị xoá 2026-09-04) — xác nhận qua `getChainRegistry()` trả `exists=true` cho đủ số chain sáng lập mong đợi. |
 | 7 | Diễn tập trước khi làm thật | `bash deploy/systemd/rehearse_root_anchor_ceremony.sh` — script tự chạy toàn bộ quy trình trên với 4 thư mục key giả lập, xác nhận đạt BFT quorum thật. **Bắt buộc chạy qua 1 lần thành công trước khi làm ceremony thật**, không phải tuỳ chọn. |
 
 ---
@@ -558,7 +570,7 @@ Dùng bảng này làm checklist nhanh sau BẤT KỲ lần triển khai/cập n
 | `node-0.log`/`node.log` không thấy log giao dịch nào, dù chain đang chạy tốt | File đó **chỉ chứa log khởi động**. Toàn bộ log theo từng giao dịch/block nằm ở file khác | Xem `logs/execution/<YYYY-MM-DD>/execution.log` (cùng thư mục node, phân theo ngày) — đừng tốn thời gian nghi ngờ code sai chỉ vì không thấy log ở `node-0.log`. |
 | `eth_sendRawTransaction`: `"account 0x... has no BLS public key registered on-chain"` | Tài khoản gửi giao dịch chưa có `publicKeyBls` hợp lệ trong genesis/alloc CỦA CHÍNH CHAIN đang gửi tới — đây là gate chung cho MỌI giao dịch, không riêng cross-chain | Với dev account: dùng tài khoản trong `dev_accounts.json` (đã có alloc đúng). Với tài khoản tự tạo: phải được đăng ký `publicKeyBls` (48-byte min-pk/G1, hex có tiền tố `0x`) trong genesis của ĐÚNG chain đang gửi giao dịch tới. |
 | `attestCommit()` revert `"unknown source chain ID: chain N"` | `ChainRegistry` là state CỤC BỘ theo từng chain — chain đích chưa từng biết về chain nguồn | Chạy `register_chains` với `-target-rpcs` liệt kê MỌI private chain, không chỉ Root Anchor (Phần A3). |
-| `attestCommit()` revert `"aggregate amount exceeds source chain allocation ceiling... available 0"` | KHÔNG phải bug — chain nguồn chưa từng được cấp phát allocation gửi-ra (thiết kế fail-closed) | Chạy `ProposalAllocateSupply` qua governance thật trên CHAIN ĐÍCH (propose → vote ≥2/3 chain đã đăng ký → chờ timelock → executeProposal) trước khi thử lại. Devnet: dùng `devnet_governance_timelock_seconds_override` để không phải chờ 72h thật. |
+| `attestCommit()` revert `"aggregate amount exceeds source chain allocation ceiling... available 0"` | KHÔNG phải bug — chain nguồn chưa từng được cấp phát allocation gửi-ra (thiết kế fail-closed) | Chạy `register_chains -fund-genesis` (gọi `allocateSupplyWithCert`/`transferAllocationWithCert`, tự-ký bởi Reserve — không còn governance/vote/timelock nào từ 2026-09-04) trên CHAIN ĐÍCH trước khi thử lại. Chạy xong ngay, không cần chờ gì cả trên cả devnet lẫn production. |
 | `vote()` revert `"signer is not a member of chain N's current committee"` | Rất có thể do bug `register_chains`/`config.LoadConfig` singleton — mọi chain bị gán nhầm committee của chain đầu tiên | Xác nhận fix đã có trên `dev` (Phần 0.2, grep, không tin theo PR). Nếu đã có mà vẫn gặp, kiểm tra lại đúng `Databases.BLSPrivateKey` trong `config.json` của chain đang vote khớp với key dùng để build committee entry lúc `register_chains`. |
 | Block height đứng yên vĩnh viễn, RPC vẫn trả lời bình thường, không có lỗi rõ ràng trong log | Bug treo chain: giao dịch barrier (gateway/validator contract) thứ 2 liên tiếp từ CÙNG 1 tài khoản không bao giờ được chấp nhận do nonce không tăng | Xác nhận fix đã có trên `dev` (Phần 0.2, grep tên test cụ thể). Log dấu hiệu: `TxsProcessor2: Race condition detected! pool_size=1->1, but retrieved 0 transactions` lặp lại liên tục không dừng. |
 | `register_chains` báo thành công cho TẤT CẢ chain nhưng thực ra mọi chain trả về CÙNG 1 committee pubkey | Bug `config.LoadConfig` singleton — hàm này cache qua `sync.Once` toàn tiến trình, gọi 2 lần trở lên trong 1 lần chạy chỉ đọc đúng config CỦA LẦN GỌI ĐẦU | Xác nhận fix đã có trên `dev`; dùng `getChainRegistry()` (Phần A3, Phần D) để tự kiểm chứng thay vì chỉ tin dòng log "succeeded". |

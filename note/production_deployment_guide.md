@@ -37,13 +37,16 @@ CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận c
   (`ProcessNativeMintBurn` gọi thật từ `outbound`/`claimMessage`) và tài sản tuỳ biến
   (`msg.sender`/`SetCode` đúng, custom-asset round trip chạy thật đầu-cuối trên 2 node thật).
 - `GlobalSupplyLedger.PerChainAllocation` từng không có đường nào cấp phát được (trần luôn =
-  0 vĩnh viễn) — đã vá bằng `ProposalAllocateSupply`/`GrantAllocation` qua governance thật.
+  0 vĩnh viễn) — đã vá bằng `ProposalAllocateSupply`/`GrantAllocation` qua governance thật
+  (2026-08-27; governance đó đã bị xoá hẳn 2026-09-04, xem mục 1 — đường hiện tại là
+  `allocateSupplyWithCert`, tự-ký bởi Reserve, không qua vote).
 - `vote()`/`executeProposal()` từng tin timestamp do caller tự khai (đủ để bypass timelock
-  72h bắt buộc) — giờ luôn dùng block time thật.
+  72h bắt buộc) — giờ luôn dùng block time thật (2 hàm này đã bị xoá hẳn cùng
+  `GovernanceEngine` 2026-09-04, không còn timelock nào để bypass nữa).
 - `bootstrapFoundingChains` từng không kiểm tra người gửi (front-run ceremony) —
-  `CrossChainConfig.GenesisCoordinatorAddress` giờ khoá người gọi hợp lệ duy nhất (**bắt buộc
-  phải set giá trị này trong config thật trước khi gửi giao dịch bootstrap** — bỏ trống vẫn
-  giữ hành vi cũ để không phá vỡ devnet/test).
+  `CrossChainConfig.GenesisCoordinatorAddress` giờ khoá người gọi hợp lệ duy nhất. **Cả hàm
+  `bootstrapFoundingChains` lẫn `GenesisCoordinatorAddress` đã bị xoá hẳn 2026-08-28** — xem
+  mục 5.3 đã cập nhật cho cơ chế thay thế (`registerChainViaStake`).
 - Khoá đóng cứng trong `start_relayer_daemon.sh`/`register_chains` — giờ đọc từ biến môi trường
   `RELAYER_KEY`/cờ `-key` (**bắt buộc phải set thật** trước khi chạy cho vai trò thật, không
   set thì rơi về khoá devnet công khai kèm cảnh báo to). `register_private_chains_t2.py`
@@ -125,8 +128,9 @@ CRITICAL đã biết đều đã vá + có test hồi quy thật + xác nhận c
   + đóng 2026-08-26** (`ProposalUpdateCommittee` là câu trả lời chính thức cho epoch catch-up;
   permissionless-propose xác nhận là chủ ý, thêm metric quan sát tăng trưởng thay vì đoán
   rate-limit) — xem `all_remaining_fixes_plan.md` Mục 1/2 để có đầy đủ lý do + test hồi quy.
-- Chưa có công cụ production thật để coordinator gửi `bootstrapFoundingChains()` với dữ liệu
-  registry thật của ≥4 chain sáng lập (chỉ có công cụ devnet/test).
+- ~~Chưa có công cụ production thật để coordinator gửi `bootstrapFoundingChains()`~~ — MOOT
+  (2026-08-28): `bootstrapFoundingChains` đã bị xoá hẳn, không còn coordinator/công cụ nào cần
+  xây cho nó nữa. Đăng ký chain sáng lập giờ chỉ cần `registerChainViaStake` (mục 5.3).
 - Vài khoảng trống test nhỏ (nonce/double-submit khi `RelayerDaemon` restart giữa chừng; test
   tải thật cho Gate 1 trên cụm sống thay vì chỉ unit test).
 
@@ -157,17 +161,25 @@ P5 + T2, không phải chạy thêm script.
   là trần thực thi chủ động, không phải audit thụ động).
 - **`GatewayPrecompile`** (địa chỉ `0x1002`) chạy trên cả private chain lẫn Root Anchor,
   expose `outbound`, `attestCommit`, `claimMessage`, `verifyAndExecute`,
-  `claimDeadChainBalance`, `refund`, `propose`/`vote`/`executeProposal`,
-  `bootstrapFoundingChains`.
+  `claimDeadChainBalance`, `refund`, `registerChainViaStake`,
+  `allocateSupplyWithCert`/`transferAllocationWithCert`/`registerAssetWithCert` (tự-ký),
+  `declareChainDeadWithCert`/`unregisterChainWithCert`/`updateCommitteeWithRecoveryCert`
+  (RecoveryCommittee-ký). (`propose`/`vote`/`executeProposal` và `bootstrapFoundingChains` đã
+  bị xoá — lần lượt 2026-09-04 và 2026-08-28, xem `note/eurozone_unified_native_coin_plan.md`.)
 - **`CommitteeAttestationWorker`** và **`GatewayRegistryMonitor`** chạy kèm mỗi node (cấu
   hình qua khối `cross_chain` trong `config.json`, xem mục 5.1) — theo dõi trạng thái
   registry, ký attest.
 - **`RelayerDaemon`** (`cmd/tool/cross_chain_relayer`) là dịch vụ độc lập, permissionless —
   bất kỳ ai cũng chạy được, relay message giữa các chain và Root Anchor.
-- **Governance** trên Root Anchor: `propose`/`vote`/`executeProposal`, timelock 72h, quorum
-  ≥2/3, 1-chain-1-vote. Root Anchor genesis rỗng nên có vòng gà-trứng (không ai vote được vì
-  chưa ai đăng ký) — giải quyết bằng `bootstrapFoundingChains` (mục 5.2/5.3) hoặc ceremony
-  (mục 5.3).
+- **Không còn governance/vote trên Root Anchor** (xoá 2026-09-04, quyết định trực tiếp của
+  người dùng — xem `note/eurozone_unified_native_coin_plan.md`). Đăng ký chain mới:
+  `registerChainViaStake` — không cần vote, không cần "ai đó đã đăng ký trước" (không còn
+  vòng gà-trứng nữa). Hành động ảnh hưởng chain KHÁC (đổi uỷ ban/tuyên bố chết/huỷ đăng ký):
+  ký bởi `RecoveryCommittee` — 1 uỷ ban cố định, cấu hình qua
+  `cross_chain.recovery_committee_json`, KHÔNG lớn lên theo đăng ký chain mới. Production thật:
+  sinh khoá RecoveryCommittee hoàn toàn out-of-band (air-gapped), set qua
+  `recovery_committee_json_override_file` trong `inventory.yml` — KHÔNG dùng bộ tự sinh devnet
+  (`deploy/systemd/gen_recovery_committee_keys.py`) cho mạng có giá trị thật (mục 7 checklist).
 
 Tài liệu thiết kế đầy đủ: `note/cross_chain_root_anchor_architecture.md`. Tiến độ/lỗi đã sửa:
 `note/cross_chain_production_readiness_plan.md`.
@@ -204,7 +216,7 @@ khoá devnet đóng cứng trong tooling — **không đại diện cho một tr
 cd deploy/systemd
 
 # 1. Sinh + chạy Root Anchor (chain 9099, 4 validator) TRƯỚC — register_chains ở bước 3
-#    cần Root Anchor đã sống để gửi bootstrapFoundingChains() tới.
+#    cần Root Anchor đã sống để gửi registerChainViaStake() tới.
 bash setup_root_anchor.sh               # thêm --clean để làm lại từ đầu, --no-build để bỏ qua build
 bash root_anchor_data/start_all.sh
 
@@ -214,8 +226,8 @@ bash setup_4_private_chains.sh
 # 3. Đăng ký 4 chain — cả trên Root Anchor LẪN trên chính từng private chain
 #    (ChainRegistry là state CỤC BỘ theo từng chain, không dùng chung — mỗi chain cần biết
 #    committee của các chain khác qua chính registry của nó, không chỉ Root Anchor biết).
-#    Dùng bootstrapFoundingChains() thật (KHÔNG phải propose()/vote() — ChainRegistry rỗng thì
-#    không ai vote được, xem mục 5.3), tự build binary register_chains nếu chưa có.
+#    Dùng registerChainViaStake() (không cần vote, không cần coordinator -- xem mục 5.3),
+#    tự build binary register_chains nếu chưa có.
 bash register_private_chains_t2.sh
 
 # 4. Chạy Relayer — TỰ ĐỘNG hoàn toàn (P4): daemon tự poll từng cặp (source, dest) chain, tự
@@ -228,16 +240,16 @@ bash start_relayer_daemon.sh
 đăng ký có **allocation gửi-ra = 0** theo thiết kế (fail-closed — chain không thể gửi ra giá
 trị nó chưa từng nhận được) — `outbound()` đầu tiên sẽ khoá tiền thành công, nhưng
 `attestCommit()` ở chain đích sẽ revert với `"aggregate amount exceeds source chain allocation
-ceiling... available 0"` cho tới khi chain đích tự cấp phát allocation cho chain nguồn qua
-governance thật (`propose(kind=ProposalAllocateSupply, ...)` → `vote()` từ ≥2/3 chain đã đăng
-ký → chờ đủ 72h timelock → `executeProposal()`). Đây không phải bug — là cơ chế bảo toàn giá
-trị bắt buộc của Root Anchor, xác nhận qua `TestGateway_ProposalAllocateSupply_UnblocksAttestCommit`.
-Để test được flow này trên devnet mà không phải chờ 72 giờ thật: set
-`cross_chain.devnet_governance_timelock_seconds_override` (giây, ví dụ `10`) trong
-`config.json` của TỪNG node liên quan **trước khi khởi động** — trường này **chỉ tồn tại để
-test** (`config.go` có doc comment riêng cảnh báo), **không bao giờ được set trên bất kỳ mạng
-nào có giá trị thật**. `gen_single_chain.py`/`gen_root_anchor_chain.py` giờ tự set giá trị này
-(10 giây) cho mọi node devnet sinh ra — không cần chỉnh tay khi đi theo đúng con đường A.
+ceiling... available 0"` cho tới khi chain đích được cấp allocation. Đây không phải bug — là
+cơ chế bảo toàn giá trị bắt buộc của Root Anchor.
+
+**Cập nhật 2026-09-04 (đơn giản hơn nhiều so với bản gốc):** không còn `GovernanceEngine`
+(propose/vote/timelock/execute) nữa — cấp allocation giờ là `register_chains -fund-genesis`
+gọi thẳng `allocateSupplyWithCert` (mint genesis supply đúng 1 lần cho Reserve, tự-ký bởi
+chính uỷ ban BLS thật của Reserve) rồi `transferAllocationWithCert` (chuyển 1 phần cho mỗi
+chain sáng lập, cũng tự-ký, không qua bên thứ 3). Không cần vote, không cần chờ timelock —
+chạy xong ngay trong vài giây thật trên cả devnet lẫn production, không cần cấu hình rút ngắn
+gì cả. Chi tiết đầy đủ: `note/eurozone_unified_native_coin_plan.md`.
 
 **⚠️ CẢNH BÁO — khoá devnet đóng cứng trong repo public:**
 `start_relayer_daemon.sh` (`RELAYER_KEY=0xd3ae7482...`, cũng là khoá mặc định của
@@ -321,9 +333,12 @@ vì node khởi động không lỗi.
 
 ### 5.2 Lễ khai sinh Root Anchor (genesis ceremony) — con đường trust-minimized đúng nghĩa
 
-Đây là quy trình **khuyến nghị cho production thật nhiều tổ chức**, khác với
-`bootstrapFoundingChains` (mục 5.3) ở chỗ **không một coordinator nào giữ khoá của ai
-khác**, và có bước xác minh digest bắt buộc chống lệch genesis âm thầm.
+Đây là quy trình **khuyến nghị cho production thật nhiều tổ chức**. Lưu ý: đây là ceremony
+cho **genesis CONSENSUS (Rust)** — uỷ ban BFT thật của Root Anchor — hoàn toàn khác tầng với
+`ChainRegistry` của `GatewayEngine` (Go), mà từ 2026-08-28 chỉ còn 1 đường ghi duy nhất là
+`registerChainViaStake` (`bootstrapFoundingChains` đã bị xoá hẳn — xem mục 5.3 đã cập nhật).
+Ceremony dưới đây **không một coordinator nào giữ khoá của ai khác**, và có bước xác minh
+digest bắt buộc chống lệch genesis âm thầm.
 
 Quy trình đầy đủ, từng bước: **`note/runbook_root_anchor_genesis_ceremony.md`** — đọc file
 đó trước khi làm thật, tài liệu này chỉ tóm tắt:
@@ -350,42 +365,23 @@ Diễn tập trước khi làm thật (bắt buộc, không phải tuỳ chọn)
 thư mục key độc lập giả lập 4 tổ chức, tới tận việc start 4 node thật và xác nhận đạt BFT
 quorum.
 
-### 5.3 ⚠️ Rủi ro cần biết trước khi làm ceremony thật: front-run `bootstrapFoundingChains`
+### 5.3 SUPERSEDED (2026-08-28) — `bootstrapFoundingChains` đã bị xoá hẳn, không còn front-run risk để nói
 
-Root Anchor mới sinh có `ChainRegistry` rỗng → không ai vote được (`Vote()` yêu cầu người
-vote đã có trong `ChainRegistry`) → vòng gà-trứng. `bootstrapFoundingChains(bytes[]
-payloads)` phá vòng lặp này: nạp thẳng ≥4 `ChainRegistry` (yêu cầu PoP thật cho mọi thành
-viên committee), tự khoá vĩnh viễn ngay sau lần gọi thành công đầu tiên.
+Mục này (nguyên bản 2026-08-25) mô tả 1 rủi ro front-run thật của `bootstrapFoundingChains` —
+hàm đó **đã bị xoá hoàn toàn khỏi codebase 2026-08-28**, cùng với `GenesisCoordinatorAddress`,
+`founding_entry`/`assemble_root_anchor`'s ChainRegistry-bootstrap vai trò (không phải vai trò
+genesis-consensus ở mục 5.2, vẫn còn dùng). Toàn bộ đoạn mô tả rủi ro dưới đây **không còn áp
+dụng**, giữ lại làm nhật ký lịch sử — xem git history/`note/cross_chain_stake_and_value_flow.md`
+nếu cần chi tiết quyết định retire.
 
-**Phát hiện khi viết tài liệu này (2026-08-25 sáng, ✅ đã vá code cùng ngày tối, xem cuối mục
-này):** lệnh này (mặc định, nếu không cấu hình mục dưới) **không kiểm tra người gửi giao
-dịch** — bất kỳ địa chỉ nào cũng gọi được, miễn payload hợp lệ cấu trúc + PoP thật. Vì `founding_entry.json` được thiết kế "an toàn để công khai" (không có private key),
-ai lấy được ≥3 trong 4 file thật của các nhà sáng lập **trước khi** giao dịch bootstrap của
-coordinator được xác nhận trên chain, có thể ghép chúng với 1 entry tự tạo (khoá + PoP của
-chính họ, không cần chiếm đoạt gì) rồi đua gửi giao dịch `bootstrapFoundingChains` của riêng
-mình trước. Vì lệnh tự khoá sau lần gọi đầu tiên thành công, kẻ tấn công sẽ chiếm vĩnh viễn 1
-ghế committee/governance thay vì nhà sáng lập thật thứ 4.
-
-**Mức độ nghiêm trọng: 🟡 trung bình, không phải mất giá trị thật** — `ChainRegistry` không
-mang trường số dư nào, nên lúc genesis không có gì để rút; `ProposalUnregisterChain` đã tồn
-tại nên 3 nhà sáng lập thật (đủ quorum `ceil(2*4/3)=3`) có thể vote loại chain giả ra ngay,
-rồi đăng ký lại nhà sáng lập thật thứ 4 qua governance bình thường (lúc này đã hoạt động vì
-`ActiveChains` không còn rỗng). Đây là tấn công gây rối/trì hoãn có thể khắc phục, không phải
-lỗ hổng rút tiền — nhưng vẫn cần xử lý trước khi coi ceremony là "đáng tin cậy tuyệt đối".
-
-**Việc phải làm khi ceremony thật (giảm thiểu quy trình, đã áp dụng ở mục 5.2 bước 2):**
-gửi `founding_entry.json` **trực tiếp, riêng tư** cho coordinator (không kênh công khai);
-coordinator gửi giao dịch bootstrap **ngay** sau khi nhận đủ 4 file, và theo dõi mempool xem
-có giao dịch nào khác gọi cùng địa chỉ Gateway đang chờ xử lý trước khi giao dịch của mình
-xác nhận không.
-
-**✅ Đã vá (2026-08-25 tối):** `CrossChainConfig.GenesisCoordinatorAddress` (khối `cross_chain`
-trong `config.json`, key `genesis_coordinator_address`) — set địa chỉ coordinator đã cam kết
-từ trước (out-of-band, cùng kiểu với `genesis_digest.txt`) và `bootstrapFoundingChains` sẽ từ
-chối mọi người gọi khác. **Bắt buộc phải set giá trị này trước khi gửi giao dịch bootstrap
-thật** — bỏ trống vẫn giữ hành vi cũ (ai gọi cũng được, chỉ an toàn cho devnet/rehearsal). Chi
-tiết: `note/cross_chain_production_readiness_plan.md`, commit "bootstrapFoundingChains
-front-run gap".
+**Cơ chế thay thế hiện tại (đơn giản hơn nhiều, đã đóng luôn class rủi ro này):**
+`registerChainViaStake` là đường đăng ký DUY NHẤT vào `ChainRegistry` — của Root Anchor lẫn của
+từng chain sáng lập — không cần coordinator, không cần gom file trước, không có "lần gọi đầu
+khoá vĩnh viễn" để mà đua giành. Mỗi chain (kể cả Root Anchor tự đăng ký chính nó, xem
+`RegisterChainViaStake`'s doc comment, `pkg/cross_chain/gateway.go`) tự gửi giao dịch
+`registerChainViaStake` của riêng mình, trả tiền cọc thật từ chính ví của người gửi — không có
+"payload công khai an toàn" nào của người KHÁC để front-run, vì tiền cọc luôn phải đến từ ví
+của chính người gửi giao dịch đó. Không cần diễn tập/rehearsal riêng cho bước này nữa.
 
 ### 5.4 Sau khi Root Anchor sống: bật attestation + relayer
 
@@ -471,15 +467,21 @@ front-run gap".
 - [ ] Nếu chain có bật `enable_private_gateway`: `gateway_bls_key` được sinh riêng qua
       `--random-gateway-bls-key`/`--gateway-bls-key`, không phải giá trị devnet mặc định dùng
       chung cho mọi chain (mục 5.1, `security_variables_reference.md` mục 3.1).
-- [ ] `cross_chain.devnet_governance_timelock_seconds_override` **KHÔNG được set** (hoặc bằng
-      0) trong mọi `config.json` thật — trường này chỉ tồn tại để rút ngắn 72h timelock cho
-      test devnet (mục 3); còn set trên mạng thật nghĩa là governance có thể bị thi hành gần
-      như ngay lập tức, phá vỡ toàn bộ mục đích của timelock.
-- [ ] Đã set `CrossChainConfig.GenesisCoordinatorAddress` (config thật, không phải devnet)
-      thành địa chỉ coordinator đã cam kết out-of-band, TRƯỚC KHI gửi giao dịch
-      `bootstrapFoundingChains` (mục 5.3).
-- [ ] Ceremony genesis (nếu dùng) đã áp dụng giảm thiểu mục 5.3: không công khai
-      `founding_entry.json`, coordinator gửi bootstrap tx ngay lập tức.
+- [ ] ~~`cross_chain.devnet_governance_timelock_seconds_override` KHÔNG được set~~ — MOOT
+      (2026-09-04): trường này đã bị xoá khỏi code, `GovernanceEngine`/72h timelock không còn
+      tồn tại nữa (mục 1). Không cần kiểm tra field này nữa.
+- [ ] ~~Đã set `CrossChainConfig.GenesisCoordinatorAddress`~~ / ~~ceremony giảm thiểu front-run
+      `bootstrapFoundingChains`~~ — MOOT (2026-08-28): cả field lẫn hàm đã bị xoá (mục 5.3).
+- [ ] **`cross_chain.recovery_committee_json` được set từ khoá RecoveryCommittee sinh HOÀN
+      TOÀN out-of-band/air-gapped** (`recovery_committee_json_override_file` trong
+      `inventory.yml`) — **KHÔNG** dùng bộ khoá tự sinh của
+      `deploy/systemd/gen_recovery_committee_keys.py` (mặc định devnet), và **KHÔNG** trùng
+      với bất kỳ khoá validator/consensus nào của chính Root Anchor hay chain nào khác (tập
+      trung quyền lực thật — phát hiện + vá 2026-09-04, xem
+      `note/eurozone_unified_native_coin_plan.md`). RecoveryCommittee là bên duy nhất có thể
+      `declareChainDeadWithCert`/`unregisterChainWithCert`/`updateCommitteeWithRecoveryCert`
+      cho MỌI chain đã đăng ký — mất khoá này hoặc để nó trùng khoá consensus là mất toàn bộ
+      ý nghĩa "cứu hộ tách biệt quyền lực".
 - [ ] Mọi `config.json` khối `cross_chain` đã xác nhận field đúng snake_case bằng cách xem
       log thật (mục 5.1), không chỉ tin node khởi động không lỗi.
 - [ ] Đã đọc và xử lý toàn bộ mục còn mở trong `note/cross_chain_production_readiness_plan.md`
