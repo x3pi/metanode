@@ -788,7 +788,7 @@ func (h *GatewayHandler) handleWrite(
 				if finalDestChainID == engine.LocalChainID {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is this chain itself -- not a valid relay target", finalDestChainID)
 				}
-				if _, known := engine.ChainRegistry[finalDestChainID]; !known {
+				if _, known := engine.GetChainRegistryEntry(finalDestChainID); !known {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is not a registered chain", finalDestChainID)
 				}
 				relayValue := big.NewInt(0)
@@ -1060,7 +1060,7 @@ func (h *GatewayHandler) handleWrite(
 		if valid, popErr := cross_chain.PopVerify(pubkeyBls, popSig); popErr != nil || !valid {
 			return nil, nil, fmt.Errorf("registerCommitteePop: %w", cross_chain.ErrPopVerifyFailed)
 		}
-		engine.RegisteredPops[hex.EncodeToString(pubkeyBls)] = popSig
+		engine.SetRegisteredPop(hex.EncodeToString(pubkeyBls), popSig)
 
 	case "submitCommitteeAttestation":
 		sourceChainID := mustUint64(args[0])
@@ -1069,7 +1069,7 @@ func (h *GatewayHandler) handleWrite(
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1111,7 +1111,7 @@ func (h *GatewayHandler) handleWrite(
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1169,7 +1169,7 @@ func (h *GatewayHandler) handleWrite(
 			// submitting the final tx could fabricate a "valid-looking" PoP for a rogue key
 			// they don't actually hold the matching secret for is exactly what PoP exists to
 			// prevent, so it must come from the durable, separately-verified registry.
-			registered := engine.RegisteredPops[hex.EncodeToString(newCommitteePubkeys[i])]
+			registered := engine.GetRegisteredPop(hex.EncodeToString(newCommitteePubkeys[i]))
 			if len(registered) == 0 || !bytes.Equal(registered, newCommitteePopSignatures[i]) {
 				return nil, nil, fmt.Errorf("committeeUpdate: pubkey %x has no matching registered PoP (call registerCommitteePop first)", newCommitteePubkeys[i])
 			}
@@ -1188,7 +1188,7 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("committeeUpdate: payloadHash %s does not match recomputed digest %s", payloadHash.Hex(), expectedDigest.Hex())
 		}
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("committeeUpdate: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1269,7 +1269,7 @@ func (h *GatewayHandler) handleWrite(
 		if err := cross_chain.ApplyCommitteeUpdate(adapter, update, true); err != nil {
 			return nil, nil, err
 		}
-		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
+		engine.SetChainRegistryEntry(sourceChainID, *adapter[sourceChainID])
 		engine.ClearPendingCommitteeAttestations(committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
 	case "registerChainViaStake":
@@ -1711,10 +1711,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		chainID := mustUint64(args[0])
 
-		// engine is a fresh, single-goroutine local deserialization from loadGatewayEngine()
-		// above (see its doc comment) — not a value shared across concurrent callers, so no
-		// locking is needed to read its ChainRegistry map here.
-		registry, exists := engine.ChainRegistry[chainID]
+		registry, exists := engine.GetChainRegistryEntry(chainID)
 
 		if !exists {
 			return method.Outputs.Pack(
@@ -1748,7 +1745,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getRegisteredPop input: %w", err)
 		}
 		pubkeyBls := mustBytes(args[0])
-		pop := engine.RegisteredPops[hex.EncodeToString(pubkeyBls)]
+		pop := engine.GetRegisteredPop(hex.EncodeToString(pubkeyBls))
 		if pop == nil {
 			pop = []byte{}
 		}

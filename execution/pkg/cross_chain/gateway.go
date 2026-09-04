@@ -68,6 +68,26 @@ type CrossChainContext struct {
 type AllocationRejectedListener func(chainID uint64, requested, available *big.Int)
 
 // GatewayEngine implements the native light-client bridge state machine (Section 2.1 & 2.2).
+//
+// Concurrency model (clarified 2026-09-04, after a security re-review of PR #99's "thread-safe
+// gateway attestations" fix): every write/view call in gateway_handler.go obtains its OWN
+// GatewayEngine via loadGatewayEngine(chainState) -- a fresh json.Unmarshal of the single
+// gatewayStateStorageKey storage slot, done single-goroutine, once per transaction (no goroutine
+// is ever spawned anywhere in that call path). Two transactions in the same block therefore never
+// share one GatewayEngine value or its mu -- each gets its own, freshly zero-valued, mutex. The
+// actual cross-transaction consistency guarantee (two transactions racing to read-modify-write
+// the same storage slot) comes entirely from Block-STM's own read/write-set conflict detection at
+// the storage layer, not from mu.
+//
+// mu still exists and is used consistently by every exported mutation/read method on this type
+// (including the ones below wrapping ChainRegistry/RegisteredPops) as defense-in-depth: it costs
+// nothing under the current single-goroutine-per-instance model, and it means this type stays
+// safe to use correctly should a future caller ever hold onto and share one GatewayEngine across
+// goroutines (a test harness, an off-chain monitor, a future caching layer) -- exactly the kind of
+// assumption that is cheap to guarantee now and expensive to retrofit correctly later. Every
+// field read or written outside this file (i.e. from gateway_handler.go) MUST go through an
+// exported accessor below rather than touching a map field directly, so this guarantee actually
+// holds for the whole codebase, not just for calls made from within this file.
 type GatewayEngine struct {
 	mu                         sync.RWMutex
 	LocalChainID               uint64
@@ -963,6 +983,46 @@ func (g *GatewayEngine) GetCommittedBatch(commitRoot common.Hash) (CommittedOutb
 	defer g.mu.RUnlock()
 	batch, exists := g.CommittedBatches[commitRoot]
 	return batch, exists
+}
+
+// GetChainRegistryEntry thread-safely reads one ChainRegistry entry (2026-09-04 -- completes the
+// PR #99 thread-safety pass, which covered PendingCommitteeAttestations/PendingCommitAttestations/
+// PendingOutboundMessages/CommittedBatches but left ChainRegistry and RegisteredPops -- arguably
+// the most security-sensitive fields on this type, since they gate every cert-authorized write --
+// with direct, unwrapped map access from gateway_handler.go. See GatewayEngine's own doc comment
+// for why this is defense-in-depth rather than a fix for an observed race.
+func (g *GatewayEngine) GetChainRegistryEntry(chainID uint64) (ChainRegistry, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	reg, exists := g.ChainRegistry[chainID]
+	return reg, exists
+}
+
+// SetChainRegistryEntry thread-safely writes one ChainRegistry entry.
+func (g *GatewayEngine) SetChainRegistryEntry(chainID uint64, reg ChainRegistry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ChainRegistry == nil {
+		g.ChainRegistry = make(map[uint64]ChainRegistry)
+	}
+	g.ChainRegistry[chainID] = reg
+}
+
+// GetRegisteredPop thread-safely reads one RegisteredPops entry (nil if never registered).
+func (g *GatewayEngine) GetRegisteredPop(pubkeyHex string) []byte {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.RegisteredPops[pubkeyHex]
+}
+
+// SetRegisteredPop thread-safely writes one RegisteredPops entry.
+func (g *GatewayEngine) SetRegisteredPop(pubkeyHex string, pop []byte) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.RegisteredPops == nil {
+		g.RegisteredPops = make(map[string][]byte)
+	}
+	g.RegisteredPops[pubkeyHex] = pop
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2) for a commit originating from a
