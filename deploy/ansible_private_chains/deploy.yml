@@ -111,11 +111,12 @@
               export LOCAL_OUT="{{ playbook_dir }}/data/chain_{{ hostvars[item]['chain_id'] }}"
               export TARGET_DIR="{{ hostvars[item]['install_dir'] | default('/opt/metanode/chain-' ~ hostvars[item]['chain_id']) }}"
               
-              SUBMITTER_KEY="{{ root_anchor_submitter_key | default('') }}"
+              SUBMITTER_KEY="{{ hostvars[item]['node_submitter_key'] | default(root_anchor_submitter_key) }}"
               if [ -z "$SUBMITTER_KEY" ]; then
                 echo "❌ ERROR: root_anchor_submitter_key chưa được cấu hình trong inventory.yml"
                 exit 1
               fi
+              export SUBMITTER_KEY
   
               # SECURITY (C8 fix, PR #84 review, 2026-08-28): ReserveChainID must be the SAME
               # single chain across every participant, and it must NOT be each private chain's own
@@ -176,6 +177,11 @@
                       c['backup_path'] = f'{n_dir}/data/execution/backup'
                       c['genesis_file_path'] = f'{t_dir}/config/genesis.json'
                       c['rust_config_path'] = f'{n_dir}/config/node.toml'
+                      sub_key = os.environ.get('SUBMITTER_KEY', '')
+                      if sub_key:
+                          if 'cross_chain' not in c:
+                              c['cross_chain'] = {}
+                          c['cross_chain']['root_anchor_submitter_private_key_hex'] = sub_key
                       if 'Databases' in c:
                           c['Databases']['RootPath'] = f'{n_dir}/data/execution/db'
                           c['Databases']['SnapshotPath'] = f'{n_dir}/data/execution/snapshots'
@@ -242,6 +248,13 @@
           ansible.builtin.systemd:
             name: "metanode-private-{{ chain_id }}.service"
             state: stopped
+          ignore_errors: true
+
+        - name: Kill any orphan simple_chain or metanode processes for this chain
+          ansible.builtin.shell: |
+            pkill -9 -f "chain-{{ chain_id }}" || true
+            pkill -9 -f "chain_{{ chain_id }}" || true
+            pkill -9 -f "private_chain_kit/chain-{{ chain_id }}" || true
           ignore_errors: true
 
     - name: Clean data directories only (preserve keys & configs)
