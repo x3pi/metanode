@@ -202,6 +202,33 @@ multisig quyết định. Treasury multisig (mục 2.2, `ProposalTransferAllocat
 khai, tránh tài liệu/tool nói sai cơ chế thật (đúng bài học "PR gì đó" tài liệu bị lag sau code
 đã gặp nhiều lần trong phiên này).
 
+### 2.6 Sybil đăng ký chain để MUA phiếu vote governance qua stake — PHÁT HIỆN THẬT, CÒN MỞ
+### (2026-09-04, cùng ngày — khác với rủi ro mục 2.1)
+
+Khác với mục 2.1 (giả định đăng ký vẫn qua vote-gate), `RegisterChainViaStake` (đường đăng ký
+KHÔNG qua vote, cố ý theo yêu cầu người dùng 2026-08-28) gọi thẳng
+`Governance.RegisterActiveChain(chainID)` (`gateway.go`) — cho chain mới **toàn quyền vote
+governance ngay lập tức**, không qua bất kỳ vote-gate nào. Governance là **1-chain-1-vote không
+trọng số theo stake** (`QuorumThreshold = ceil(2N/3)` trên SỐ LƯỢNG chain, không phải theo tiền).
+
+**Live-verify trên cụm thật**: `MinNativeStakeToRegister = 1 MTN` (xác nhận qua `eth_call`), 4
+chain active lúc đó → quorum = 3. Với ~10-20 MTN (rẻ), kẻ tấn công tự đăng ký đủ Sybil chain để
+MỘT MÌNH đạt quorum, thao túng toàn bộ governance (`ProposalUpdateCommittee` — đổi uỷ ban BFT của
+BẤT KỲ chain nào khác; `ProposalTransferAllocation` — chuyển allocation đi; tuyên bố chain chết...)
+mà không cần ai đồng ý.
+
+**Quyết định của người dùng (2026-09-04)**: KHÔNG thêm lại vote-gate cho voting rights — việc bỏ
+toàn bộ logic vote liên quan tới private chain là chủ ý, không phải sơ suất cần vá. Thay vào đó,
+người dùng chuyển hướng sang tách "tiền ví" và "tiền lưu thông": `RegisterChainViaStake` giờ nhận
+`amount` do người gửi tự chọn (>= `MinNativeStakeToRegister` làm sàn), thay vì luôn lấy đúng 1 mức
+cố định — xem mục "5.4" bên dưới. **Rủi ro Sybil-vote ở mục này CHƯA ĐƯỢC ĐÓNG** — amount tự chọn
+không nâng chi phí sàn để mua 1 phiếu vote (kẻ tấn công vẫn có thể chọn amount = đúng sàn cho mỗi
+Sybil), đây là 1 tính năng khác (định cỡ kinh tế linh hoạt lúc đăng ký), không phải fix cho rủi ro
+này. Cần quyết định riêng sau nếu muốn đóng: ví dụ tách quyền vote khỏi `RegisterChainViaStake`
+(cần 1 proposal riêng, vẫn vote-gate, để CHUYỂN từ "đã đăng ký kinh tế" sang "có quyền vote"), hoặc
+chuyển governance sang trọng số theo stake thay vì 1-chain-1-vote, hoặc nâng sàn đủ cao để Sybil
+kinh tế không khả thi — cả 3 đều là thay đổi chính sách lớn, chưa làm.
+
 ## 3. Việc còn lại thật sự (đã thu hẹp sau kết luận 2026-09-04 — không còn sửa code)
 
 Các bước điều tra (mục 2.3) và thiết kế treasury (mục 2.2) đã xong, kết quả: **cơ chế cần thiết
@@ -419,3 +446,37 @@ thống thật cần công cụ đối soát/backfill riêng nếu gặp tình h
 trước bản vá. Unit test mới: `TestGateway_CreditReserveAllocation_2HopDestCredit`
 (`gateway_test.go`) — cộng đúng chain đích (không phụ thuộc claim cục bộ), idempotent, chặn sai
 node, chặn Merkle proof sai.
+
+### 5.4 `registerChainViaStake` — amount do người gửi tự chọn (2026-09-04, cùng ngày, sau mục 2.6)
+
+Theo yêu cầu người dùng khi thảo luận rủi ro Sybil-vote (mục 2.6): tách "tiền ví" khỏi "tiền lưu
+thông", cho người đăng ký TỰ CHỌN số tiền đưa vào lưu thông (>= `MinNativeStakeToRegister` làm
+sàn), thay vì luôn lấy đúng 1 mức cố định như trước. `GatewayEngine.RegisterChainViaStake` nhận
+thêm tham số `amount`; `MinNativeStakeToRegister` giờ chỉ còn là SÀN (vẫn là chặn Sybil-spam C6),
+không còn là số tiền credit cố định. ABI `registerChainViaStake` thêm tham số `amount uint256`;
+`register_chains` có field config mới `stake_amount` (per-chain, để trống thì tự query
+`getMinNativeStakeToRegister()` làm mặc định — hành vi cũ nguyên vẹn nếu không set).
+
+**Nhắc lại rõ (đã ghi ở mục 2.6)**: tính năng này KHÔNG đóng rủi ro Sybil-vote — chỉ là tính năng
+định cỡ kinh tế linh hoạt, tách biệt khỏi câu hỏi "đăng ký có nên tự động có quyền vote không".
+
+**Verify thật trên cụm m0**: đăng ký chain 9202 với `stake_amount=5 MTN` (> sàn 1 MTN) → credit
+đúng 5 MTN (không phải 1 MTN sàn). Đăng ký chain 9203 với `stake_amount=0.5 MTN` (< sàn) → revert
+sạch, log `amount 500000000000000000 is below the minimum stake 1000000000000000000`, allocation
+vẫn = 0 (không có state một phần nào bị ghi).
+
+**Phát hiện phụ, KHÔNG liên quan tới thay đổi này** (tình cờ gặp lúc rebuild+redeploy Root Anchor
+lần 2 để verify): restart cả 4 node Root Anchor ngay sau khi cụm đã tích luỹ ~9300 commit (từ đợt
+test Bước 5/6 nặng trước đó) khiến node-1/2/3 (không phải node-0) panic 100% xác định ở tầng Rust
+consensus-core, tại `leader_scoring.rs:198`
+(`self.commit_range.clone().expect("CommitRange should be set...")`). Root cause đầy đủ: nhánh
+"SCHEDULE-RECOVERY" trong `commit_manager.rs` (bug tiềm ẩn từ commit tháng 5/2026 "fork-safe subdag
+scoring for schedule recovery", lần đầu bị kích hoạt hôm nay) gọi `update_leader_schedule_v2()`
+ngay cả khi `scoring_subdag` HOÀN TOÀN RỖNG (đúng nghĩa đen của "DAG lacks 300 commits") — lúc đó
+`ScoringSubdag.commit_range` vẫn là `None` (chỉ được set bên trong `add_subdags()`, không được gọi
+nếu rỗng), khiến `.expect()` panic thay vì trả về "0 subdags, chưa có gì để tính điểm". Có ít nhất
+2 điểm `.expect()` giống hệt nhau sẽ panic (`leader_scoring.rs:198` và
+`dag_state/write.rs:660`'s `scoring_subdag_commit_range()`) — sửa 1 chỗ chưa chắc đủ, cần sửa cả
+2. Đây là bug fork-safety-critical, CHƯA SỬA (ngoài phạm vi phiên này, cần cẩn trọng hơn vì đụng
+tới logic BFT/leader-election) — cụm được khôi phục bằng cách chạy lại `run_full_pipeline.sh` từ
+genesis mới (đường phục hồi đã biết chắc chắn hoạt động), không phải bằng cách sửa bug Rust này.
