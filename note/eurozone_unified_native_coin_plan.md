@@ -61,9 +61,26 @@ người gọi như mọi chain khác, chỉ không cộng vô allocation vô ng
 nghiệm cả lỗi lẫn fix (`TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation/"Reserve
 registering ITSELF..."`).
 
-**Còn lại (việc deploy-tooling, không phải lỗi code)**: `deploy/ansible_private_chains/
-gateway_register.json` chưa có entry chain 991 với uỷ ban BLS thật của Root Anchor — cần thêm để
-lần redeploy tiếp theo thực sự tự-đăng-ký + mint genesis supply live, thay vì tiếp tục "skip".
+**Đã hoàn tất tiếp (cùng ngày)**: nối dây tự động — `deploy_private_chains.sh` giờ tự sinh entry
+chain 991 (uỷ ban BLS thật của Root Anchor, đối chiếu địa chỉ với genesis sống để loại bỏ khoá cũ/
+rác) và `deploy/ansible/roles/local_build/tasks/main.yml` tự sinh + tiêm `recovery_committee_json`
+vào mọi node (dùng lại chính uỷ ban validator thật của Root Anchor làm RecoveryCommittee) — xem
+commit `54869f43`, `017374e8`. Redeploy live xác nhận cả 2: self-registration + mint genesis supply
+thành công thật (không còn "skip"), và cả 3 hàm RecoveryCommittee-authorized
+(`updateCommitteeWithRecoveryCert`/`declareChainDeadWithCert`/`unregisterChainWithCert`) chạy thật
+trên 1 chain thử nghiệm dùng riêng, có đọc lại state qua `eth_call` xác nhận thay đổi thật (đổi
+uỷ ban + epoch, xoá đăng ký). **Toàn bộ 6/6 hàm cert-based mới đều đã live-verify, không chỉ unit
+test.**
+
+**Phát hiện vận hành đáng lưu ý (tránh nhầm lẫn sau này)**: khoá BLS validator của Root Anchor
+KHÔNG ổn định qua các lần redeploy `Action: setup` — `gen_validator_entry.py` gọi thẳng
+`metanode keytool generate validator` mỗi lần chạy, không kiểm tra khoá cũ đã có để tái dùng, nên
+MỖI lần setup lại đều sinh khoá HOÀN TOÀN MỚI cho cả 4 validator. Từng nhầm là khoá ổn định (dựa
+trên mtime file cũ trùng hợp từ 28/8) — sai, dẫn tới 1 lần chạy live-test dùng nhầm khoá cũ, cert
+bị revert vì sai chữ ký (không phải lỗi logic, chỉ là khoá test đã lỗi thời qua lần redeploy kế
+tiếp). Bài học: sau MỖI lần `run_full_pipeline.sh`/`setup_root_anchor.sh --clean`, phải đọc lại
+`deploy/systemd/node-N_keys/authority_key.json` MỚI trước khi ký bất kỳ cert nào bằng tay, không
+được cache khoá từ lần chạy trước.
 
 ## KẾT LUẬN CUỐI CÙNG (2026-09-04) — ĐÃ ĐIỀU TRA XONG, KHÔNG CẦN SỬA CODE
 
