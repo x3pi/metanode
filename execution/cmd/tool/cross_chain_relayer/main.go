@@ -21,7 +21,11 @@ import (
 type GatewayConfig struct {
 	RootAnchorRPC string `json:"root_anchor_rpc"`
 	SubmitterKey  string `json:"submitter_key"`
-	Chains        []struct {
+	// RelayerKey (2026-09-04) is the relayer daemon's OWN signing key -- deliberately a SEPARATE
+	// field from SubmitterKey, never falling back to it (see the doc comment on
+	// devnetDefaultRelayerKeyHex below for why that fallback was a real, live bug).
+	RelayerKey string `json:"relayer_key"`
+	Chains     []struct {
 		ChainID uint64 `json:"chain_id"`
 		RPCURL  string `json:"rpc_url"`
 	} `json:"chains"`
@@ -30,6 +34,24 @@ type GatewayConfig struct {
 	RootAnchor string            `json:"root_anchor"`
 	Nodes      map[string]string `json:"nodes"`
 }
+
+// devnetDefaultRelayerKeyHex is the SAME shared cross-chain relayer devnet identity
+// gen_single_chain.py/gen_root_anchor_chain.py/gen_validator_entry.py already pre-register (BLS
+// pubkey) and fund/gas-exempt on every chain (address 0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366)
+// -- used here ONLY as a last-resort default when neither -key nor the config file's relayer_key
+// sets one, purely for devnet convenience (matches DEVNET_GATEWAY_BLS_KEY's own pattern).
+//
+// SECURITY FIX (2026-09-04, found via a real run_full_pipeline.sh run): this used to fall back to
+// the config file's submitter_key instead -- the SAME account register_chains uses for every
+// governance/registration transaction on Root Anchor. Two independent processes (a short-lived
+// CLI tool and this long-running daemon) sharing one account, each tracking its own nonce
+// completely independently, is a real nonce-collision hazard: when the daemon starts moments
+// after register_chains finishes (run_full_pipeline.sh's Step 2 -> Step 3, only a 3s gap), both
+// can race to use the same nonce, silently orphaning whichever transaction loses -- confirmed
+// live: a relayer attestCommit transaction to Root Anchor got permanently dropped this way,
+// verified via eth_getTransactionReceipt returning null minutes later. Giving the relayer its own
+// dedicated identity closes this at the root, not just papers over the symptom.
+const devnetDefaultRelayerKeyHex = "d3ae7482f46f11cee2447bc711e9eb0fb79d4f2549781554cb962f54604e50f8"
 
 func findDefaultConfigFile() string {
 	if env := os.Getenv("GATEWAY_CONFIG"); env != "" {
@@ -128,8 +150,8 @@ func main() {
 	if configFileFlag != "" {
 		if cfg, err := parseConfigFile(configFileFlag); err == nil {
 			logger.Info("📖 Đã nạp cấu hình Relayer trực tiếp từ file: %s", configFileFlag)
-			if relayerKeyHex == "" && cfg.SubmitterKey != "" {
-				relayerKeyHex = cfg.SubmitterKey
+			if relayerKeyHex == "" && cfg.RelayerKey != "" {
+				relayerKeyHex = cfg.RelayerKey
 			}
 			if rootAnchorRPC == "" {
 				if cfg.RootAnchorRPC != "" {
@@ -174,9 +196,8 @@ func main() {
 	}
 
 	if relayerKeyHex == "" {
-		fmt.Println("❌ Error: -key (relayer private key hex) is required or must be present in config file")
-		flag.Usage()
-		os.Exit(1)
+		relayerKeyHex = devnetDefaultRelayerKeyHex
+		logger.Info("ℹ️ No -key or config relayer_key given -- using the shared devnet relayer identity (0x7d8bfbaba9268b59bab9ef8ff3f314d3f5747366). Set relayer_key in config (or -key) for any real deployment.")
 	}
 
 	// Tự động truy vấn ReserveChainID từ Root Anchor nếu chưa set
