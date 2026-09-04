@@ -677,6 +677,7 @@ func handleRegisterChains(
 	var payloads [][]byte
 	var committee []committeeMember
 	var chainIDs []uint64
+	var targetRPCs []string
 
 	for _, c := range cfg.Chains {
 		if c.ChainID == 0 {
@@ -745,6 +746,9 @@ func handleRegisterChains(
 		}
 		payloads = append(payloads, payloadBytes)
 		chainIDs = append(chainIDs, c.ChainID)
+		if c.RPCURL != "" {
+			targetRPCs = append(targetRPCs, fmt.Sprintf("%d=%s", c.ChainID, c.RPCURL))
+		}
 		logger.Info("Prepared founding entry for chain %d (%d validators, real BLS pubkeys, real PoP)", c.ChainID, len(committeeEntries))
 	}
 
@@ -763,15 +767,27 @@ func handleRegisterChains(
 		registerCalldatas = append(registerCalldatas, calldata)
 	}
 
-	// 2026-09-04 (deterministic-genesis design): registration now lives SOLELY on Root Anchor --
-	// no longer double-submitted to each private chain's own RPC. The old second submission was
-	// architecturally broken under the new design anyway: a freshly-created private chain starts
-	// with genesis alloc == exactly what THIS registration credits (see gen_single_chain.py's
-	// --initial-supply flag), so it could never have paid a SECOND stake deposit against its own,
-	// not-yet-funded ledger. ChainRegistry membership on the private chain's own node is now
-	// established by the deterministic genesis.json itself (baked in at chain-creation time),
-	// not by a live registerChainViaStake transaction against a chain that doesn't exist yet.
 	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
+
+	// REVERTED 2026-09-04 (same day, found via a real run_full_pipeline.sh end-to-end run): a
+	// prior version of this fix removed this second loop, reasoning it was pure self-registration
+	// (redundant once genesis.json ships ChainRegistry directly). That reasoning was wrong -- this
+	// submits the SAME registerChainViaStake payload to EVERY OTHER chain's own RPC too, which is
+	// what makes chain 101's committee known on chain 102's OWN LOCAL ChainRegistry (and vice
+	// versa) -- attestCommit/attestReserveIssuedCommit look up g.ChainRegistry[sourceChainID] on
+	// whichever chain is actually processing the call, not Root Anchor's copy. Without this,
+	// relaying breaks immediately with "unknown source chain ID" the moment any real cross-chain
+	// message is attempted (confirmed live: relayer.log showed exactly that revert, the deploy
+	// pipeline's cross-chain test timed out at 60s). GatewayRegistryMonitor exists to eventually
+	// converge this same state via polling, but is not fast/reliable enough to substitute for this
+	// synchronous step during a fresh deploy.
+	for _, pair := range targetRPCs {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			label, rpcURL := "chain "+parts[0], parts[1]
+			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
+		}
+	}
 
 	if fundGenesisFlag {
 		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)

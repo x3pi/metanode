@@ -338,7 +338,16 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "free_fee_addresses": [
             "55798165960a62cED34a0d86e36B1758D1303907",
             "0000000000000000000000000000000000000001",
-            "Ea004b9aE1F60516210df2fDfcE9342618729d98"
+            "Ea004b9aE1F60516210df2fDfcE9342618729d98",
+            # Shared cross-chain RELAYER devnet identity -- see gen_root_anchor_chain.py's own
+            # comment on this exact same entry for the full 2026-09-04 rationale (real
+            # run_full_pipeline.sh run found register_chains and cross_chain_relayer were sharing
+            # one Ethereum account with independently-tracked nonces, causing a real orphaned
+            # transaction the moment both ran within a few seconds of each other; this is the
+            # OTHER half of that fix -- gen_validator_entry.py, not gen_root_anchor_chain.py, is
+            # what deploy/ansible's ansible_deploy.sh (run_full_pipeline.sh Step 1) actually uses
+            # to generate Root Anchor's real exec_config).
+            "7d8bfbaba9268b59bab9ef8ff3f314d3f5747366"
         ],
         "cross_chain": {
             "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",

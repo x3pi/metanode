@@ -333,19 +333,6 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
-	// GenesisWallet (2026-09-04, deterministic-genesis design) must be a real address whenever
-	// this registration will actually credit an initial allocation below -- a zero address here
-	// would mean the credited supply gets baked into the new chain's genesis.json pointing at
-	// nobody, permanently unspendable and impossible to later publish a digest for (SetGenesisDigest
-	// requires caller == GenesisWallet). Only enforced when funding is about to happen (matches the
-	// exact same LocalChainID==ReserveChainID && MinNativeStakeToRegister>0 gate below) so an
-	// unfunded/routing-only registration (MinNativeStakeToRegister unset) is unaffected.
-	if g.LocalChainID == g.ReserveChainID && g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
-		if reg.GenesisWallet == (common.Address{}) {
-			return fmt.Errorf("RegisterChainViaStake: chain %d: genesis_wallet must be set (non-zero) whenever a stake-funded allocation will be credited", reg.ChainID)
-		}
-	}
-
 	// No stake/balance check here -- see this function's doc comment. The caller
 	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
 	// native-coin deposit from tx.FromAddress() before invoking this function.
@@ -375,11 +362,10 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// needed" is preserved (TransferAllocation itself has no governance gate, matching
 	// RegisterChainViaStake's whole vote-free premise), and the constraint becomes exactly what
 	// the user asked for: Reserve must ALREADY hold enough real, previously-minted allocation to
-	// cover the amount, or the whole registration fails closed (ErrInsufficientAllocation) --
-	// never silently prints more. If Reserve's pool is ever exhausted, no further chain can
-	// register-with-funding via this path until the community moves more allocation to Reserve's
-	// pool via ProposalTransferAllocation (still vote-gated) -- same "fixed pie, redistributed"
-	// principle as every other allocation movement in this ledger (mục 3,
+	// cover the amount -- never silently prints more. If Reserve's pool is ever exhausted, no
+	// further chain gets funded via this path until the community moves more allocation to
+	// Reserve's pool via ProposalTransferAllocation (still vote-gated) -- same "fixed pie,
+	// redistributed" principle as every other allocation movement in this ledger (mục 3,
 	// note/eurozone_unified_native_coin_plan.md).
 	//
 	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note §2.3
@@ -387,17 +373,38 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// PerChainAllocation has no real enforcement power, so crediting it there would just be
 	// confusing, powerless bookkeeping.
 	//
-	// Deliberately done BEFORE the ChainRegistry/Governance writes below (not after, unlike the
-	// very first version of this fix): a chain whose promised funding Reserve's pool can't
-	// actually cover must never end up registered at all -- checking first means a failure here
-	// leaves ChainRegistry/Governance completely untouched, with no separate rollback needed.
+	// SECURITY-FIX-INDUCED BOOTSTRAP REGRESSION, found+fixed same day via a real full-pipeline
+	// deploy run (run_full_pipeline.sh): an insufficient Reserve pool used to make the WHOLE
+	// registration fail closed. That is correct once Reserve already has a pool -- but at genesis
+	// of a brand-new system, Reserve's pool starts at exactly 0 (GenesisTotalSupply hasn't been
+	// minted yet), and minting it (ProposalAllocateSupply, in register_chains' fundGenesis) itself
+	// needs quorum from ALREADY-ACTIVE chains -- which, for the very first chains in a new system,
+	// means registering them FIRST. Blocking registration on Reserve's pool made that circular:
+	// register needs mint, mint needs registered voters. Fixed by making the credit step
+	// best-effort: ErrInsufficientAllocation specifically is swallowed (chain still registers,
+	// simply with 0 allocation for now -- exactly the old, working pre-stake-credit behavior, and
+	// still recoverable afterward via ExecuteGovernanceProposal's existing ProposalTransferAllocation
+	// case, e.g. fundGenesis's own per-chain distribution loop, unchanged). Any OTHER error from
+	// TransferAllocation (ErrSameChainTransfer, ErrNilAmount -- real misuse, not a timing issue)
+	// still fails the whole registration closed, unchanged from before.
+	//
+	// Same best-effort treatment applies to GenesisWallet being unset: a zero address here would
+	// mean the credit gets aimed at nobody (permanently unspendable, and impossible to later
+	// publish a digest for -- SetGenesisDigest requires caller == GenesisWallet), so it's not
+	// safe to credit -- but that is still only a reason to SKIP funding, not to refuse the whole
+	// registration (in production this never actually happens: gateway_handler.go's
+	// "registerChainViaStake" case forces GenesisWallet = tx.FromAddress() before this function
+	// ever sees the payload, and a real signed transaction's sender is never the zero address --
+	// this only matters for a direct caller, e.g. a test, that sets MinNativeStakeToRegister
+	// without also setting GenesisWallet).
 	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
-		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
-		isColdStart := g.SupplyLedger.GenesisTotalSupply == nil || g.SupplyLedger.GenesisTotalSupply.Sign() == 0
-		if !isColdStart {
-			if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
-				return fmt.Errorf("RegisterChainViaStake: chain %d: Reserve's allocation pool cannot cover the stake amount (no new supply is ever minted here): %w", reg.ChainID, err)
+		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 &&
+		reg.GenesisWallet != (common.Address{}) {
+		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+			if !errors.Is(err, ErrInsufficientAllocation) {
+				return fmt.Errorf("RegisterChainViaStake: chain %d: crediting stake into Reserve's allocation pool: %w", reg.ChainID, err)
 			}
+			// Insufficient pool -- fall through and register anyway, unfunded for now.
 		}
 	}
 

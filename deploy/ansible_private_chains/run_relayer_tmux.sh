@@ -140,6 +140,10 @@ with open('$INVENTORY_YML') as f:
 hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
 root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
 submitter_key = data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', 'd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9')
+# relayer_key (2026-09-04): deliberately NOT defaulted to submitter_key -- see
+# cross_chain_relayer/main.go's devnetDefaultRelayerKeyHex doc comment. Empty here falls through
+# to that same devnet-only default in the Go tool itself.
+relayer_key = data.get('all', {}).get('vars', {}).get('relayer_key', '')
 chains = []
 for h in hosts.values():
     if isinstance(h, dict) and 'chain_id' in h:
@@ -155,6 +159,7 @@ for h in hosts.values():
 out = {
     'root_anchor_rpc': root_rpc,
     'submitter_key': submitter_key,
+    'relayer_key': relayer_key,
     'genesis_supply': '400000000000000000000000000',
     'per_chain_allocation': '100000000000000000000000000',
     'fund_genesis': True,

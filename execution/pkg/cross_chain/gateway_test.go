@@ -967,18 +967,41 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		assert.True(t, engine.SupplyLedger.VerifyInvariant())
 	})
 
-	t.Run("Reserve's pool exhausted: whole registration fails closed, never mints the shortfall", func(t *testing.T) {
+	t.Run("Reserve's pool exhausted: registration still succeeds (bootstrap-safe), just unfunded -- never mints the shortfall", func(t *testing.T) {
+		// Regression test for a real deploy-pipeline break found 2026-09-04 (run_full_pipeline.sh):
+		// at genesis of a brand-new system Reserve's pool starts at 0, and minting it needs quorum
+		// from already-active chains -- for the very first chains, that means registering them
+		// FIRST. An earlier version of this fix made insufficient allocation block the WHOLE
+		// registration, which made that impossible (circular: register needs mint, mint needs
+		// registered voters). Fixed: registration always succeeds; funding is best-effort.
 		engine, _ := setupTestGatewayEngine() // Reserve (102) holds only 5000
 		engine.EnsureGovernance()
 		engine.MinNativeStakeToRegister = big.NewInt(999999) // far more than Reserve actually holds
 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+		reserveBefore := engine.SupplyLedger.GetAllocation(102)
 
-		err := engine.RegisterChainViaStake(newChainReg(104))
-		assert.ErrorIs(t, err, ErrInsufficientAllocation, "must fail closed, not silently mint the gap")
+		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
 		_, exists := engine.ChainRegistry[104]
-		assert.False(t, exists, "a registration whose promised funding can't actually be paid must not be admitted at all")
-		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "a failed registration must leave GenesisTotalSupply completely untouched")
+		assert.True(t, exists, "registration must succeed even when Reserve's pool can't cover the stake yet -- this is the normal bootstrap case, not an error")
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "unfunded for now -- must recover later via ProposalTransferAllocation (e.g. fundGenesis), not via a silent mint")
+		assert.Equal(t, reserveBefore, engine.SupplyLedger.GetAllocation(102), "Reserve's own pool must be completely untouched by a skipped credit")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must never change here")
+	})
+
+	t.Run("GenesisWallet unset: registration still succeeds, just unfunded (same best-effort treatment)", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // Reserve (102) holds 5000, plenty
+		engine.EnsureGovernance()
+		engine.MinNativeStakeToRegister = big.NewInt(777)
+
+		reg := ChainRegistry{ChainID: 104, Epoch: 1, QuorumThreshold: 6667} // GenesisWallet left zero
+		payload, err := json.Marshal(reg)
+		require.NoError(t, err)
+
+		require.NoError(t, engine.RegisterChainViaStake(payload))
+		_, exists := engine.ChainRegistry[104]
+		assert.True(t, exists, "registration must still succeed")
+		assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(104), "must not credit a chain with no wallet to credit")
 	})
 
 	t.Run("non-Reserve chain's local copy: SupplyLedger untouched (no enforcement power there anyway)", func(t *testing.T) {

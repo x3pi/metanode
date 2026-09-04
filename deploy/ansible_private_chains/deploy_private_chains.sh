@@ -273,6 +273,12 @@ with open('$INVENTORY') as f:
 global_vars = data.get('all', {}).get('vars', {}) or {}
 root_rpc = global_vars.get('root_anchor_rpc', 'http://127.0.0.1:10746')
 submitter_key = global_vars.get('root_anchor_submitter_key', '')
+# relayer_key (2026-09-04): the relayer daemon's OWN signing key, deliberately SEPARATE from
+# submitter_key -- see cross_chain_relayer/main.go's devnetDefaultRelayerKeyHex doc comment for
+# why sharing one account between register_chains and the relayer daemon is a real nonce-collision
+# hazard (found live). Override via inventory.yml's relayer_key if you need a specific identity;
+# left empty here falls through to that same devnet-only default in the Go tool itself.
+relayer_key = global_vars.get('relayer_key', '')
 gen_supply = str(global_vars.get('genesis_supply_to_mint', '$GENESIS_SUPPLY'))
 per_chain = str(global_vars.get('per_chain_allocation', '$PER_CHAIN_ALLOCATION'))
 
@@ -349,6 +355,7 @@ for host_key, h in sorted(hosts.items()):
 gateway_register_data = {
     'root_anchor_rpc': root_rpc,
     'submitter_key': submitter_key,
+    'relayer_key': relayer_key,
     'genesis_supply': gen_supply,
     'per_chain_allocation': per_chain,
     'fund_genesis': True,
