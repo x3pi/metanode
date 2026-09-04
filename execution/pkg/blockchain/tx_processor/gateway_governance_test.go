@@ -484,6 +484,49 @@ func TestGatewayHandler_RegisterChainViaStake_NoVoteRequired(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.RegisteredChainCount))
 }
 
+// TestGatewayHandler_RegisterChainViaStake_ForcesGenesisWalletToRealCaller is the regression test
+// for the 2026-09-04 deterministic-genesis design's identity-forcing: whatever genesis_wallet a
+// submitted payload claims must be silently overwritten with tx.FromAddress() -- the address that
+// actually paid the stake -- never trusted from calldata. Otherwise a registrant could name an
+// unrelated, well-known address as the chain's GenesisWallet, making it look like that address
+// requested and funded a chain it never touched.
+func TestGatewayHandler_RegisterChainViaStake_ForcesGenesisWalletToRealCaller(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	minStake := big.NewInt(1000)
+	engine := cross_chain.NewGatewayEngine(102, map[uint64]cross_chain.ChainRegistry{}, nil)
+	engine.MinNativeStakeToRegister = minStake
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	caller := common.HexToAddress("0xCC00CC00CC00CC00CC00CC00CC00CC00CC00CC00")
+	impersonated := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	require.NoError(t, cs.GetAccountStateDB().AddBalance(caller, minStake))
+
+	// Payload claims genesis_wallet = impersonated -- a third party the caller does not control.
+	kp := bls.GenerateKeyPair()
+	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
+	reg := cross_chain.ChainRegistry{
+		ChainID:       104,
+		Committee:     []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()}},
+		QuorumThreshold: 6667,
+		GenesisWallet: impersonated,
+	}
+	payload, err := json.Marshal(reg)
+	require.NoError(t, err)
+	calldata, err := h.abi.Pack("registerChainViaStake", payload)
+	require.NoError(t, err)
+
+	tx := newTx(caller, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	_, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed, "registration itself must still succeed")
+
+	reloaded, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Equal(t, caller, reloaded.ChainRegistry[104].GenesisWallet, "genesis_wallet must be forced to the real caller, never the impersonated address the payload claimed")
+}
+
 // TestGatewayHandler_SetGenesisDigest_UsesRealCallerNotCalldata is the end-to-end regression test
 // proving the "setGenesisDigest" case forces tx.FromAddress() as the caller identity (never
 // something read out of calldata) -- the exact property GatewayEngine.SetGenesisDigest's own doc

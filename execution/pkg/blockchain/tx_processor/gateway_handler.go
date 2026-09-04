@@ -1259,7 +1259,23 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
 		}
 		payload := mustBytes(args[0])
-		if err := engine.RegisterChainViaStake(payload); err != nil {
+		// GenesisWallet (2026-09-04, deterministic-genesis design) is forced to tx.FromAddress()
+		// here, overwriting whatever the submitted payload itself claims -- never trusted from
+		// calldata, same identity-forcing pattern the new "setGenesisDigest" case below uses. A
+		// spoofed GenesisWallet wouldn't let an attacker steal funds (the credited amount is
+		// always engine.MinNativeStakeToRegister regardless of whose address it names), but it
+		// could impersonate/confuse an unrelated well-known address into looking like it
+		// requested and funded a chain it never touched -- cheap to close, so it's closed.
+		var reg cross_chain.ChainRegistry
+		if err := json.Unmarshal(payload, &reg); err != nil {
+			return nil, nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		reg.GenesisWallet = tx.FromAddress()
+		forcedPayload, err := json.Marshal(reg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("re-marshal ChainRegistry with forced genesis_wallet: %w", err)
+		}
+		if err := engine.RegisterChainViaStake(forcedPayload); err != nil {
 			return nil, nil, err
 		}
 		// Balance mutation comes last, after every check that can still fail -- same ordering

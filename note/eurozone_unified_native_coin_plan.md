@@ -240,3 +240,43 @@ hành:
 | Rủi ro chưa xác minh | Nhiều, hầu hết thiết kế mới | Có 1 câu hỏi cụ thể cần điều tra (mục 2.3), phạm vi rõ ràng |
 
 **Khuyến nghị dứt khoát**: đi theo hướng Eurozone này, không phải hướng sổ cái thống nhất.
+
+## 5. Genesis private chain gắn thẳng với Root Anchor — đã triển khai (2026-09-04)
+
+Yêu cầu bổ sung cùng ngày: private chain phải **dùng chung native coin thật với Root Anchor**
+(không tự bịa tiền ở genesis), và khác Root Anchor ở chỗ tổng cung của nó **co dãn** (bơm vào/rút
+ra qua cross-chain), trong khi tổng cung Root Anchor **giữ nguyên bất biến** (không đổi gì ở
+Root Anchor genesis theo đúng yêu cầu, chỉ đổi cơ chế private chain).
+
+**Thiết kế "genesis xác định" (deterministic genesis)** — genesis của 1 private chain giờ được
+**dẫn xuất từ đúng thông tin đã đăng ký công khai trên Root Anchor**, không còn tự bịa:
+
+1. `ChainRegistry` (Go, `pkg/cross_chain/types.go`) có thêm `GenesisWallet` (ví phải giữ toàn bộ
+   số dư ban đầu của chain đó) và `GenesisDigest` (keccak256 của đúng file `genesis.json`, publish
+   sau khi genesis đã sinh — 2 pha, vì digest chỉ tính được SAU khi có file thật).
+   `RegisterChainViaStake` **ép** `GenesisWallet = tx.FromAddress()` (ví thật đã trả cọc), không
+   tin bất kỳ giá trị nào trong payload — chặn mạo danh 1 ví nổi tiếng khác.
+2. `gen_single_chain.py` thêm chế độ opt-in (`--initial-supply-wallet`/`--initial-supply`): khi
+   bật, **đối chiếu lại 2 giá trị này với Root Anchor qua eth_call thật trước khi tin** (dừng cứng
+   nếu lệch), rồi sinh genesis với **duy nhất 1 ví có số dư — đúng bằng số đã xác minh**, mọi ví
+   khác (validator, dev account, relayer devnet) đăng ký = 0 (chỉ để BLS pubkey có mặt, không có
+   tiền). Gas cho hạ tầng (relayer, submitter) xử lý qua `free_fee_addresses` có sẵn, không cần
+   phát tiền free.
+3. `register_chains` thêm 2 hành động mới: `publish-genesis-digest` (người đã đăng ký publish
+   digest thật, đúng 1 lần, gate bằng `GenesisWallet`) và `verify-genesis` (bất kỳ ai tự tính lại
+   digest file cục bộ, đối chiếu với bản Root Anchor đã ghi — khớp mới an toàn chạy node). Bỏ luôn
+   bước gửi `registerChainViaStake` lần 2 lên chính private chain mới (không còn khả thi — chain
+   đó chưa có tiền để trả cọc lần nữa trên chính nó — và cũng không cần nữa, vì `ChainRegistry`
+   của chính nó giờ nằm thẳng trong genesis).
+
+**Kết quả**: tổng cung native coin của 1 private chain tại genesis luôn **chứng minh được** bằng
+đúng số Root Anchor đã cấp phát thật (qua cọc thật, xem mục "Cập nhật 2026-09-04" ở đầu file) —
+không còn khoảng trống "mỗi lần chạy `gen_single_chain.py` là tự in tiền free" đã phát hiện cùng
+ngày. Sau genesis, tổng cung co dãn hoàn toàn tự nhiên qua `Outbound()`/`ClaimMessage()` đã có sẵn
+(đốt khi gửi ra, cộng khi nhận vào) — không cần cơ chế mới. Root Anchor's genesis + `alloc` riêng
+của chính nó **không đổi gì** — đúng phạm vi yêu cầu.
+
+Đã smoke-test: mode cũ (không truyền 2 flag mới) chạy y hệt hành vi trước đây (không hồi quy); mode
+mới verify đúng số thật từ 1 Root Anchor giả lập, sinh genesis đúng 1 ví có số dư = số đã xác minh,
+và fail cứng khi số truyền vào lệch với Root Anchor. `go build`/`go vet`/`go test ./...` toàn bộ
+module Go xanh.
