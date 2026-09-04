@@ -10,6 +10,7 @@ use super::*;
 use crate::{
     block::{BlockAPI, Slot, TestBlock, VerifiedBlock, genesis_blocks, GENESIS_ROUND},
     commit::{CommitAPI, CommitDigest, CommitIndex},
+    leader_scoring::ReputationScores,
     storage::{mem_store::MemStore, WriteBatch, Store},
     test_dag_builder::DagBuilder,
     test_dag_parser::parse_dag,
@@ -1387,4 +1388,39 @@ async fn test_last_finalized_commit() {
         .unwrap()
         .unwrap();
     assert_eq!(stored_rejected_transactions, rejected_transactions);
+}
+
+// Regression test for a 2026-09-04 live-found, 100%-reproducible panic: a node restarting with
+// its DAG sitting exactly at a schedule-update boundary but genuinely lacking enough commits
+// (fewer than commits_per_schedule) hits commit_manager.rs's sparse-DAG SCHEDULE-RECOVERY
+// fallback, which calls into calculate_scoring_subdag_scores()/scoring_subdag_commit_range()
+// while the scoring subdag has NEVER had a single subdag added to it -- ScoringSubdag.commit_range
+// stays None (only ever set inside add_subdags()), and both accessors used to unconditionally
+// .expect() it to be Some, panicking instead of degrading gracefully. This is the exact empty
+// state those two accessors must now tolerate.
+#[tokio::test]
+async fn test_calculate_scoring_subdag_scores_on_genuinely_empty_subdag_does_not_panic() {
+    let (context, _) = Context::new_for_test(4);
+    let context = Arc::new(context);
+    let store = Arc::new(MemStore::new());
+    let dag_state = DagState::new(context.clone(), store.clone());
+
+    // Freshly constructed DagState: is_scoring_subdag_empty() must be true, and
+    // scoring_subdag.commit_range must genuinely be None -- add_subdags() was never called.
+    assert!(dag_state.is_scoring_subdag_empty());
+
+    // Must not panic (this line is the actual regression check -- the pre-fix code paniced with
+    // "CommitRange should be set if calculate_scores is called.").
+    let scores = dag_state.calculate_scoring_subdag_scores();
+    assert_eq!(
+        scores,
+        ReputationScores::new((0..=0).into(), vec![0; context.committee.size()]),
+        "an empty scoring subdag must degrade to an all-zero, current-index-anchored score, not fabricate data"
+    );
+
+    // Must also not panic (the pre-fix code paniced with "commit range should exist for scoring
+    // subdag") and must agree with the CommitRange the score above was anchored at.
+    let range_end = dag_state.scoring_subdag_commit_range();
+    assert_eq!(range_end, 0);
+    assert_eq!(range_end, scores.commit_range.end());
 }
