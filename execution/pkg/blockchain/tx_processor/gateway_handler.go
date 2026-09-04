@@ -1096,15 +1096,13 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 		key := committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)
-		for _, s := range engine.PendingCommitteeAttestations[key] {
-			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
-				return nil, nil, fmt.Errorf("submitCommitteeAttestation: pubkey already submitted a share for this update")
-			}
-		}
-		engine.PendingCommitteeAttestations[key] = append(engine.PendingCommitteeAttestations[key], cross_chain.CommitteeAttestationShare{
+		err = engine.AddPendingCommitteeAttestationShare(key, cross_chain.CommitteeAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w", err)
+		}
 
 	case "submitCommitAttestation":
 		sourceChainID := mustUint64(args[0])
@@ -1138,15 +1136,14 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 		key := commitAttestationKey(sourceChainID, epoch, commitRoot)
-		for _, s := range engine.PendingCommitAttestations[key] {
-			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
-				return nil, nil, fmt.Errorf("submitCommitAttestation: pubkey already submitted a share for this commit root")
-			}
-		}
-		engine.PendingCommitAttestations[key] = append(engine.PendingCommitAttestations[key], cross_chain.CommitAttestationShare{
+		err = engine.AddPendingCommitAttestationShare(key, cross_chain.CommitAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w", err)
+		}
+
 
 	case "committeeUpdate":
 		sourceChainID := mustUint64(args[0])
@@ -1273,7 +1270,7 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
-		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
+		engine.ClearPendingCommitteeAttestations(committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
 	case "registerChainViaStake":
 		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
@@ -1678,7 +1675,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getPendingOutboundCount input: %w", err)
 		}
 		destChainID := mustUint64(args[0])
-		count := len(engine.PendingOutboundMessages[destChainID])
+		count := engine.GetPendingOutboundCount(destChainID)
 		return method.Outputs.Pack(big.NewInt(int64(count)))
 
 	case "getCommitBatch":
@@ -1687,7 +1684,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getCommitBatch input: %w", err)
 		}
 		commitRoot := mustHash(args[0])
-		batch, exists := engine.CommittedBatches[commitRoot]
+		batch, exists := engine.GetCommittedBatch(commitRoot)
 		if !exists {
 			return method.Outputs.Pack(false, uint64(0), []byte{})
 		}
@@ -1766,7 +1763,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		oldEpoch := mustUint64(args[1])
 		payloadHash := mustHash(args[2])
 
-		shares := engine.PendingCommitteeAttestations[committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)]
+		shares := engine.GetPendingCommitteeAttestationShares(committeeAttestationKey(sourceChainID, oldEpoch, payloadHash))
 		pubkeys := make([][]byte, len(shares))
 		signatures := make([][]byte, len(shares))
 		for i, s := range shares {
@@ -1784,7 +1781,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		epoch := mustUint64(args[1])
 		commitRoot := mustHash(args[2])
 
-		shares := engine.PendingCommitAttestations[commitAttestationKey(sourceChainID, epoch, commitRoot)]
+		shares := engine.GetPendingCommitAttestationShares(commitAttestationKey(sourceChainID, epoch, commitRoot))
 		pubkeys := make([][]byte, len(shares))
 		signatures := make([][]byte, len(shares))
 		for i, s := range shares {

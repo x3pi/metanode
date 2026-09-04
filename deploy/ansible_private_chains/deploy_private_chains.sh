@@ -447,6 +447,10 @@ gateway_register_data = {
 with open('$SCRIPT_DIR/gateway_register.json', 'w') as f:
     json.dump(gateway_register_data, f, indent=2)
 print('📄 Đã xuất cấu hình Gateway & Relayer ra: $SCRIPT_DIR/gateway_register.json')
+
+with open('/tmp/private_chains.json', 'w') as f:
+    json.dump(out_simple, f, indent=2)
+print('📄 Đã xuất cấu hình mạng ra: /tmp/private_chains.json')
 "
 
     SUBMITTER_KEY=$(python3 -c "

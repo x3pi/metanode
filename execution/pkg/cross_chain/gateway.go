@@ -859,6 +859,59 @@ func (g *GatewayEngine) Outbound(
 	return msg, nil
 }
 
+// AddPendingCommitteeAttestationShare thread-safely adds a committee attestation share.
+func (g *GatewayEngine) AddPendingCommitteeAttestationShare(key string, share CommitteeAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, s := range g.PendingCommitteeAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingCommitteeAttestations[key] = append(g.PendingCommitteeAttestations[key], share)
+	return nil
+}
+
+// GetPendingCommitteeAttestationShares thread-safely reads committee attestation shares.
+func (g *GatewayEngine) GetPendingCommitteeAttestationShares(key string) []CommitteeAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingCommitteeAttestations[key]
+	res := make([]CommitteeAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
+// ClearPendingCommitteeAttestations thread-safely clears committee attestation shares.
+func (g *GatewayEngine) ClearPendingCommitteeAttestations(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.PendingCommitteeAttestations, key)
+}
+
+// AddPendingCommitAttestationShare thread-safely adds a commit attestation share.
+func (g *GatewayEngine) AddPendingCommitAttestationShare(key string, share CommitAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, s := range g.PendingCommitAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingCommitAttestations[key] = append(g.PendingCommitAttestations[key], share)
+	return nil
+}
+
+// GetPendingCommitAttestationShares thread-safely reads commit attestation shares.
+func (g *GatewayEngine) GetPendingCommitAttestationShares(key string) []CommitAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingCommitAttestations[key]
+	res := make([]CommitAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
 // CommittedOutboundBatch is the message set (and signing epoch) behind one commitRoot ever
 // produced by BatchOutboundCommit — see PendingOutboundMessages/CommittedBatches' doc comments.
 type CommittedOutboundBatch struct {
@@ -895,6 +948,21 @@ func (g *GatewayEngine) BatchOutboundCommit(destChainID uint64, epoch uint64) (c
 	delete(g.PendingOutboundMessages, destChainID)
 
 	return commitRoot, messages, nil
+}
+
+// GetPendingOutboundCount thread-safely reads the length of PendingOutboundMessages for a destChainID.
+func (g *GatewayEngine) GetPendingOutboundCount(destChainID uint64) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.PendingOutboundMessages[destChainID])
+}
+
+// GetCommittedBatch thread-safely reads a CommittedOutboundBatch.
+func (g *GatewayEngine) GetCommittedBatch(commitRoot common.Hash) (CommittedOutboundBatch, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	batch, exists := g.CommittedBatches[commitRoot]
+	return batch, exists
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2) for a commit originating from a
