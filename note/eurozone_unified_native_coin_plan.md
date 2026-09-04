@@ -477,6 +477,31 @@ ngay cả khi `scoring_subdag` HOÀN TOÀN RỖNG (đúng nghĩa đen của "DAG
 nếu rỗng), khiến `.expect()` panic thay vì trả về "0 subdags, chưa có gì để tính điểm". Có ít nhất
 2 điểm `.expect()` giống hệt nhau sẽ panic (`leader_scoring.rs:198` và
 `dag_state/write.rs:660`'s `scoring_subdag_commit_range()`) — sửa 1 chỗ chưa chắc đủ, cần sửa cả
-2. Đây là bug fork-safety-critical, CHƯA SỬA (ngoài phạm vi phiên này, cần cẩn trọng hơn vì đụng
-tới logic BFT/leader-election) — cụm được khôi phục bằng cách chạy lại `run_full_pipeline.sh` từ
-genesis mới (đường phục hồi đã biết chắc chắn hoạt động), không phải bằng cách sửa bug Rust này.
+2. Cụm được khôi phục lần đầu bằng cách chạy lại `run_full_pipeline.sh` từ genesis mới (đường phục
+hồi đã biết chắc chắn hoạt động), không phải bằng cách sửa bug Rust này.
+
+**ĐÃ SỬA (2026-09-04, cùng ngày, sau khi người dùng xác nhận "sửa ngay")**: cả 2 điểm `.expect()`
+được sửa ở tầng wrapper `DagState` (`dag_state/write.rs`) — nơi DUY NHẤT mọi caller thật sự đi qua
+(`update_leader_schedule_v2()` luôn gọi qua wrapper, không bao giờ gọi thẳng
+`ScoringSubdag::calculate_distributed_vote_scores()`, đã kiểm tra từng call site để xác nhận). Khi
+`commit_range` là `None`, cả 2 hàm giờ trả về giá trị suy biến (all-zero scores, neo tại
+`last_commit_index()` hiện tại) thay vì panic — an toàn theo đúng lý luận comment gốc tại
+`commit_manager.rs`: nhánh sparse-DAG fallback CHỦ Ý không bao giờ gọi `schedule_verified()` hay
+gỡ cờ `is_schedule_recovery_pending()`, nên các điểm số suy biến này KHÔNG BAO GIỜ được dùng để ra
+quyết định bầu leader thật — bộ đếm giao dịch của chính node đó vẫn bị chặn đề xuất block cho tới
+khi có dữ liệu phục hồi thật (baseline scores hoặc đủ 300 commit tự nhiên).
+
+Test hồi quy mới (`dag_state/tests.rs`):
+`test_calculate_scoring_subdag_scores_on_genuinely_empty_subdag_does_not_panic` — dựng 1
+`DagState` mới hoàn toàn sạch (đúng điều kiện live đã gặp, không phải giả lập), xác nhận không
+panic + giá trị trả về hợp lý. Đã verify test này THẬT SỰ bắt được bug: dùng `git stash` bỏ riêng
+fix ở `write.rs` → test fail đúng với message panic y hệt log thật đã bắt được
+(`CommitRange should be set if calculate_scores is called.` tại `leader_scoring.rs:198`) → `git
+stash pop` khôi phục fix, test pass lại.
+
+Verify đầy đủ: toàn bộ test suite `consensus-core` (193 test, build cả debug lẫn full workspace)
+pass, 0 regression. Build release đầy đủ (`ansible_deploy.sh --start`, không dùng `--fast` vì đụng
+code Rust) + redeploy cả 4 node Root Anchor thật — xác nhận **cả 8/8 cổng P2P** (19200-19203,
+9100-9103) đều lên (trước đây chỉ có 2/8 của node-0), 0 panic mới trong log, log
+"STARTUP-SYNC Proposals UNLOCKED" xuất hiện trên tất cả các node — cụm hoàn toàn khỏe mạnh sau
+restart, đúng kịch bản trước đây từng crash-loop vĩnh viễn.
