@@ -163,14 +163,15 @@ func (g *GlobalSupplyLedger) SetInitialAllocation(reserveChainID, newChainID uin
 // GrantAllocation increases chainID's custodial ceiling (per_chain_allocation) and the tracked
 // genesis total supply together, keeping sum(per_chain_allocation) <= genesis_total_supply intact.
 // Unlike TransferAllocation (redistributes EXISTING allocation between two already-funded chains),
-// this is the only way new headroom enters the ledger at all: neither BootstrapFoundingChains nor
-// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger (confirmed by
-// direct code reading), and production always constructs the ledger with genesis_total_supply=0
-// and an empty allocation map (gateway_handler.go's loadGatewayEngine) — so without this method,
-// EVERY attestCommit() ceiling check (Scenario 10.7) rejects with "available 0" forever, for every
-// chain, native coin or custom asset alike. Gated by full governance (ProposalAllocateSupply, >=
-// 2/3 active-chain quorum + timelock, mục 11.6) so a captured single chain can never self-grant —
-// same protection level as ProposalRegisterChain/ProposalRegisterAsset.
+// this is the only way new headroom enters the ledger at all: neither the retired
+// BootstrapFoundingChains/ProposalRegisterChain paths nor RegisterChainViaStake's own registration
+// step ever touch SupplyLedger this way (confirmed by direct code reading), and production always
+// constructs the ledger with genesis_total_supply=0 and an empty allocation map
+// (gateway_handler.go's loadGatewayEngine) — so without this method, EVERY attestCommit() ceiling
+// check (Scenario 10.7) rejects with "available 0" forever, for every chain, native coin or custom
+// asset alike. Gated by full governance (ProposalAllocateSupply, >= 2/3 active-chain quorum +
+// timelock, mục 11.6) so a captured single chain can never self-grant — same protection level as
+// ProposalRegisterAsset.
 func (g *GlobalSupplyLedger) GrantAllocation(chainID uint64, amount *big.Int) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrNilAmount
@@ -350,7 +351,13 @@ type AttestedCommit struct {
 type GovernanceProposalKind uint8
 
 const (
-	ProposalRegisterChain    GovernanceProposalKind = 0
+	// Kind 0 was ProposalRegisterChain (vote-gated chain admission) -- removed 2026-09-04.
+	// RegisterChainViaStake (gateway.go) has been the sole registration path since 2026-08-28;
+	// nothing in this codebase's own deploy tooling ever called ProposalRegisterChain again after
+	// that, and the user explicitly asked for it to be removed rather than kept as dead code. Left
+	// unassigned (not reused) so an old on-chain proposal or external caller that still encodes
+	// kind=0 fails closed (unhandled kind, no-op in ExecuteGovernanceProposal's switch) instead of
+	// silently hitting a different, reassigned meaning.
 	ProposalUnregisterChain  GovernanceProposalKind = 1
 	ProposalRegisterAsset    GovernanceProposalKind = 2
 	ProposalUpdateCommittee  GovernanceProposalKind = 3

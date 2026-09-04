@@ -1,5 +1,17 @@
 # Cọc đăng ký (Stake) và Luân chuyển Coin Cross-Chain — Tài liệu Tham chiếu
 
+> **CẬP NHẬT 2026-09-04**: mục 1 dưới đây mô tả **2 đường đăng ký** (A = vote-gated
+> `ProposalRegisterChain`, B = vote-free `RegisterChainViaStake`) — **Đường A đã bị xoá hoàn
+> toàn** (code + `MinRegistrationStake`) theo yêu cầu người dùng, vì không còn tác dụng thật
+> (không có tool/deploy script nào dùng nó nữa sau khi B trở thành đường duy nhất). Mục 1 giữ
+> nguyên làm hồ sơ lịch sử (giải thích ĐÚNG bản chất rủi ro Sybil-vote), nhưng phần
+> "2 đường dùng cọc" không còn đúng hiện trạng: giờ chỉ còn Đường B, và nó **không có** cơ chế
+> tương đương `MinRegistrationStake` để chặn Sybil mua phiếu vote governance — đây chính là rủi
+> ro C6 mà tài liệu này mô tả, **vẫn còn mở**, xem
+> `note/eurozone_unified_native_coin_plan.md` mục 2.6 để biết hiện trạng thật + số liệu live-verify
+> (1 MTN mua 1 phiếu, ~10-20 MTN đủ tự đạt quorum trên devnet hiện tại). Mục 2 trở đi (luân chuyển
+> coin) không bị ảnh hưởng, vẫn đúng hiện trạng.
+
 Viết 2026-08-28, cùng lúc với PR thêm `RegisterChainViaStake` (đăng ký chain không cần vote).
 Mục đích: trả lời dứt điểm 3 câu hỏi — **cọc dùng để làm gì**, **tiền luân chuyển giữa các chain
 như thế nào** (từ lúc chưa có đồng nào tới lúc 1 giao dịch cross-chain thật hoàn tất), và **vì

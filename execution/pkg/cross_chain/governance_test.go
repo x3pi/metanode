@@ -15,7 +15,7 @@ import (
 func TestGovernance_ProposeIsIdempotent_DoesNotResetVotes(t *testing.T) {
 	engine := NewGovernanceEngine([]uint64{101, 102, 103})
 
-	kind := ProposalRegisterChain
+	kind := ProposalUnregisterChain
 	payload := []byte("same-payload")
 	const proposedAt = uint64(1000)
 
@@ -79,7 +79,7 @@ func TestGovernance_FullLifecycleDoD(t *testing.T) {
 	t0 := uint64(1700000000)
 
 	// Step 1: Propose
-	propID, err := engine.Propose(ProposalRegisterChain, []byte{0x10, 0x20, 0x30}, t0)
+	propID, err := engine.Propose(ProposalUnregisterChain, []byte{0x10, 0x20, 0x30}, t0)
 	require.NoError(t, err)
 
 	status, exists := engine.GetStatus(propID)

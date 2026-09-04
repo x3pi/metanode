@@ -436,7 +436,13 @@ func TestRelayer_Scenario10_5_TwoWayHopCountLoopGuard(t *testing.T) {
 	assert.ErrorIs(t, err7, ErrHopCountExceeded)
 }
 
-func TestRelayer_Scenario10_6_OnboardNewChainViaGovernance(t *testing.T) {
+// TestRelayer_Scenario10_6_GovernanceProposeVoteTimelockExecute covers the generic
+// propose/vote/72h-timelock/execute lifecycle these Reserve-side governance mechanics still
+// provide (used today by ProposalTransferAllocation, ProposalUpdateCommittee, etc.) -- kind is a
+// placeholder value here, not asserting anything registration-specific: chain onboarding itself
+// is RegisterChainViaStake's job now (vote-free), not a governance proposal (the vote-gated
+// ProposalRegisterChain kind this test used to exercise was removed 2026-09-04).
+func TestRelayer_Scenario10_6_GovernanceProposeVoteTimelockExecute(t *testing.T) {
 	_, chains := setupTestRelayerNetwork()
 
 	// 4 active chains: 1000, 101, 102, 103 -> Quorum >= 2/3 of 4 chains = 3 chains
@@ -445,7 +451,7 @@ func TestRelayer_Scenario10_6_OnboardNewChainViaGovernance(t *testing.T) {
 	gov := NewGovernanceEngineWithTimelock(activeChains, timelock)
 
 	newChainPayload := []byte(`{"chain_id": 104, "name": "Chain D"}`)
-	propID, err := gov.Propose(ProposalRegisterChain, newChainPayload, 1000)
+	propID, err := gov.Propose(ProposalUnregisterChain, newChainPayload, 1000)
 	require.NoError(t, err)
 
 	// Vote by Chain 1000, 101, 102 (3 votes >= 3)
@@ -465,7 +471,8 @@ func TestRelayer_Scenario10_6_OnboardNewChainViaGovernance(t *testing.T) {
 	_, errExec := gov.Execute(propID, 1070+timelock+1)
 	require.NoError(t, errExec)
 
-	// Register Chain 104 in Reserve registry with 0 initial allocation
+	// Manually register Chain 104 in Reserve registry with 0 initial allocation (real chain
+	// onboarding is RegisterChainViaStake's job, not this generic governance-mechanics test).
 	kp104 := bls.GenerateKeyPair()
 	chains[1000].ChainRegistry[104] = ChainRegistry{
 		ChainID:         104,

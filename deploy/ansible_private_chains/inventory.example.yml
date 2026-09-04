@@ -6,7 +6,7 @@ all:
     ansible_ssh_pass: "password"
     ansible_become_pass: "password"
 
-    # ECDSA private key (hex) của tài khoản submit các giao dịch bootstrapFoundingChains/
+    # ECDSA private key (hex) của tài khoản submit các giao dịch registerChainViaStake/
     # propose/vote/executeProposal lên Root Anchor -- BẮT BUỘC phải có sẵn coin gas thật trên
     # Root Anchor. Bắt buộc phải khai báo, deploy_private_chains.sh sẽ báo lỗi và dừng nếu thiếu.
     root_anchor_submitter_key: "[SUBMITTER_ECDSA_PRIVATE_KEY_HEX]"

@@ -40,7 +40,6 @@ var (
 	ErrOnlyReserveMayMint            = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
 	ErrGenesisAlreadyMinted          = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
 	ErrNonReserveCeilingAttestation  = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
-	ErrInsufficientRegistrationStake = errors.New("ProposalRegisterChain: this chain ID does not yet hold MinRegistrationStake in PerChainAllocation — fund it first via ProposalTransferAllocation from an already-active chain or the Reserve")
 	ErrChainAlreadyRegistered        = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use ProposalUpdateCommittee to change an existing chain's committee")
 )
 
@@ -145,27 +144,6 @@ type GatewayEngine struct {
 	// note/cross_chain_attack_scenario_catalog.md items C7/C8 for the full analysis.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
-	// MinRegistrationStake — C6 mitigation (Sybil chain registration, 2026-08-27, see
-	// note/cross_chain_attack_scenario_catalog.md item C6), gating ONLY
-	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path). Registration
-	// there was previously fully decoupled from SupplyLedger — a new chain could be voted into
-	// ChainRegistry, and therefore gain 1 full governance vote, while holding zero allocation.
-	// When set (>0), ProposalRegisterChain additionally requires
-	// SupplyLedger.PerChainAllocation[reg.ChainID] >= MinRegistrationStake at execution time —
-	// the candidate chain ID must already have been pre-funded via ProposalTransferAllocation
-	// from an existing active chain (or the Reserve) BEFORE the registration proposal can
-	// execute. TransferAllocation/SetInitialAllocation have no ChainRegistry membership check
-	// (confirmed by direct code reading), so pre-funding a not-yet-registered chain ID works
-	// today with no other change needed. Zero/nil (the default, and every pre-2026-08-27 config)
-	// preserves the exact old permissionless-registration behavior for this vote-gated path.
-	// Does NOT gate RegisterChainViaStake (2026-08-28: that vote-free path now runs on a
-	// completely different instrument — a REAL native-coin wallet deposit, checked+burned by
-	// gateway_handler.go against engine.MinNativeStakeToRegister — see RegisterChainViaStake's
-	// own doc comment). Set once from config (config.CrossChain.MinRegistrationStakeWei,
-	// gateway_handler.go's applyMinRegistrationStakeConfig) — never governance-settable, matching
-	// ReserveChainID's own pattern.
-	MinRegistrationStake *big.Int `json:"min_registration_stake,omitempty"`
-
 	// MinNativeStakeToRegister is the real, liquid native-coin (Root Anchor's own base asset —
 	// deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) minimum wallet balance
 	// gateway_handler.go's "registerChainViaStake" case requires tx.FromAddress() to hold before
@@ -182,9 +160,9 @@ type GatewayEngine struct {
 	// debits `from` and credits nowhere — see gateway_handler.go's "registerChainViaStake" case
 	// for why the mint leg is required). Set once from config
 	// (config.CrossChain.MinNativeStakeToRegisterWei, gateway_handler.go's
-	// applyMinNativeStakeToRegisterConfig) — never governance-settable, and, unlike
-	// MinRegistrationStake, REQUIRED (not opt-in): with BootstrapFoundingChains retired,
-	// RegisterChainViaStake is the only vote-free registration path left, so an unconfigured
+	// applyMinNativeStakeToRegisterConfig) — never governance-settable, and REQUIRED (not
+	// opt-in): with BootstrapFoundingChains and the vote-gated ProposalRegisterChain path both
+	// retired, RegisterChainViaStake is the only registration path left, so an unconfigured
 	// minimum here must fail closed rather than silently reopening permissionless Sybil
 	// registration for every chain, founding or not.
 	MinNativeStakeToRegister *big.Int `json:"min_native_stake_to_register,omitempty"`
@@ -284,11 +262,11 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 }
 
 // RegisterChainViaStake admits a new chain into ChainRegistry/Governance.ActiveChains WITHOUT a
-// committee vote -- a deliberate alternative to ExecuteGovernanceProposal's ProposalRegisterChain
-// case, for operators who want registration gated purely by economic stake, not by a
+// committee vote -- registration gated purely by economic stake, not by a
 // propose/vote/timelock/execute round from the currently active set (2026-08-28, user request:
-// "bỏ cơ chế vote rồi mà sao vẫn còn" -- MinRegistrationStake previously only ADDED a stake
-// precondition on top of the existing vote requirement; this is the actual vote-free path).
+// "bỏ cơ chế vote rồi mà sao vẫn còn" -- the old vote-gated ProposalRegisterChain path, plus its
+// MinRegistrationStake precondition on top of that vote, both retired 2026-09-04 once this became
+// the sole registration path -- see this repo's git history for their last form if ever needed).
 //
 // STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version; amount made
 // caller-chosen 2026-09-04, see below): this function performs no wallet-balance check itself --
@@ -332,9 +310,9 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte, amount *big.Int) e
 	if _, exists := g.ChainRegistry[reg.ChainID]; exists {
 		return fmt.Errorf("%w: chain %d", ErrChainAlreadyRegistered, reg.ChainID)
 	}
-	// Same PoP bar as ProposalRegisterChain's non-empty-committee case -- an empty committee is
-	// still allowed here too (routing-metadata-only registration, deferred to a later
-	// ProposalUpdateCommittee), matching the existing pattern.
+	// Same PoP bar ProposalUpdateCommittee already enforces for a non-empty committee -- an empty
+	// committee is still allowed here too (routing-metadata-only registration, deferred to a
+	// later ProposalUpdateCommittee), matching the existing pattern.
 	if len(reg.Committee) > 0 {
 		if err := ValidateCommittee(reg.Committee); err != nil {
 			return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
@@ -504,48 +482,13 @@ func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, curren
 	}
 
 	switch proposal.Kind {
-	case ProposalRegisterChain:
-		var reg ChainRegistry
-		if err := json.Unmarshal(proposal.Payload, &reg); err != nil {
-			return nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
-		}
-		if reg.ChainID == 0 {
-			return nil, fmt.Errorf("invalid chain ID: 0")
-		}
-		// Security fix: a NON-EMPTY committee here was previously accepted with no PoP
-		// verification at all — unlike BootstrapFoundingChains and ProposalUpdateCommittee,
-		// which both require it — letting a proposal register a chain whose "committee" is
-		// unverifiable rogue keys. An EMPTY committee is still allowed (registers routing
-		// metadata only; VerifyQuorumCertAgainstRegistry fails closed with ErrEmptyCommittee
-		// for any quorum cert against it until a real committee is set via
-		// ProposalUpdateCommittee) — this matches an existing real usage pattern
-		// (gateway_governance_test.go's asset-registration test onboards a chain this way)
-		// that a blanket non-empty requirement would have broken.
-		if len(reg.Committee) > 0 {
-			if err := ValidateCommittee(reg.Committee); err != nil {
-				return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
-			}
-		}
-		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
-			return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
-		}
-		// C6 mitigation (opt-in, see MinRegistrationStake's doc comment): require the candidate
-		// chain ID to already hold a minimum pre-funded allocation before it can be admitted.
-		if g.MinRegistrationStake != nil && g.MinRegistrationStake.Sign() > 0 {
-			held := new(big.Int)
-			if g.SupplyLedger != nil {
-				held = g.SupplyLedger.GetAllocation(reg.ChainID)
-			}
-			if held.Cmp(g.MinRegistrationStake) < 0 {
-				return nil, fmt.Errorf("%w: chain %d holds %s, needs >= %s", ErrInsufficientRegistrationStake, reg.ChainID, held.String(), g.MinRegistrationStake.String())
-			}
-		}
-		g.Governance.RegisterActiveChain(reg.ChainID)
-		if g.ChainRegistry == nil {
-			g.ChainRegistry = make(map[uint64]ChainRegistry)
-		}
-		g.ChainRegistry[reg.ChainID] = reg
-
+	// Kind 0 (formerly ProposalRegisterChain, the vote-gated chain admission path) removed
+	// 2026-09-04 -- RegisterChainViaStake has been the sole registration path since 2026-08-28,
+	// and this vote-gated alternative was never actually used by anything in this repo's own
+	// deploy tooling after that. An unhandled kind here (kind=0 included) is a pre-existing,
+	// safe no-op: the proposal itself still executes (g.Governance.Execute() above already
+	// marked it so), just with no GatewayEngine state mutation, exactly like the already-
+	// unhandled ProposalRegisterAsset kind.
 	case ProposalUnregisterChain:
 		var chainID uint64
 		if len(proposal.Payload) == 8 {

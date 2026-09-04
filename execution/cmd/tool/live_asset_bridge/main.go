@@ -15,8 +15,10 @@
 // tool reads/writes across steps. Steps, in order:
 //
 //	deploy          deploy a real token + approve the Gateway
-//	bootstrap       bootstrapFoundingChains with 4 fresh fake committee entries (governance quorum)
-//	register-chain  propose+vote+execute ProposalRegisterChain for the OTHER chain ID, with a
+//	bootstrap       registerChainViaStake 4 fresh fake chains, purely to give
+//	                Governance.ActiveChains members for register-asset's later quorum (chain
+//	                registration itself needs no quorum -- see register-chain below)
+//	register-chain  registerChainViaStake for the OTHER chain ID (vote-free), with a
 //	                fresh committee keypair this tool generates and keeps (so it can later sign
 //	                a real attestCommit on that chain's behalf)
 //	register-asset  propose+vote+execute ProposalRegisterAsset, then registerAsset()
@@ -190,7 +192,7 @@ func proposeVoteExecute(deployerKey string, kind uint8, payload []byte, committe
 
 	voteNow := uint64(time.Now().Unix())
 	// Quorum is ceil(2N/3) of the CURRENT ActiveChains size, which grows every time a prior
-	// ProposalRegisterChain executes (ExecuteGovernanceProposal calls RegisterActiveChain) — not
+	// registerChainViaStake call succeeds (it calls RegisterActiveChain directly, vote-free) — not
 	// just len(committee), the original bootstrap set. Rather than tracking that externally,
 	// cast every committee member's vote unconditionally and tolerate an
 	// "already timelocked"/"already reached quorum" revert on any vote past the real threshold
@@ -375,15 +377,17 @@ func main() {
 		saveState(*statePath, st)
 
 	case "register-chain":
-		if len(st.Committee) == 0 {
-			fmt.Println("state missing committee — run bootstrap first")
-			os.Exit(1)
-		}
+		// Rewritten 2026-09-04: used to propose+vote+execute the now-removed vote-gated
+		// ProposalRegisterChain kind (see this file's own header comment, updated) -- that kind
+		// has been retired, RegisterChainViaStake is the only registration path left. Needs no
+		// committee/quorum at all (that's the whole point), so the earlier "run bootstrap first"
+		// requirement is gone too -- only *deployerKeyHex's own real wallet balance matters here.
 		kp := bls.GenerateKeyPair()
+		popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
 		reg := cross_chain.ChainRegistry{
 			ChainID: *otherChainID,
 			Committee: []cross_chain.ValidatorEntry{
-				{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000},
+				{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()},
 			},
 			Epoch:           1,
 			QuorumThreshold: 6667,
@@ -393,7 +397,33 @@ func main() {
 			fmt.Println("marshal ChainRegistry:", err)
 			os.Exit(1)
 		}
-		proposeVoteExecute(*deployerKeyHex, 0 /* ProposalRegisterChain */, payload, st.Committee, *timelockWait)
+		minStakeCalldata, err := gatewayABI.Pack("getMinNativeStakeToRegister")
+		if err != nil {
+			fmt.Println("pack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		gwAddrForMinStake := p_common.GATEWAY_CONTRACT_ADDRESS
+		minStakeOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddrForMinStake, Data: minStakeCalldata}, nil)
+		if err != nil {
+			fmt.Println("call getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeResults, err := gatewayABI.Unpack("getMinNativeStakeToRegister", minStakeOut)
+		if err != nil {
+			fmt.Println("unpack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeAmount, _ := minStakeResults[0].(*big.Int)
+		if minStakeAmount == nil || minStakeAmount.Sign() <= 0 {
+			fmt.Println("getMinNativeStakeToRegister returned no configured floor -- set cross_chain.min_native_stake_to_register_wei on the target chain first")
+			os.Exit(1)
+		}
+		calldata, err := gatewayABI.Pack("registerChainViaStake", payload, minStakeAmount)
+		if err != nil {
+			fmt.Println("pack registerChainViaStake:", err)
+			os.Exit(1)
+		}
+		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, calldata, nil, 3_000_000, fmt.Sprintf("registerChainViaStake(chain %d)", *otherChainID))
 		if st.RemoteCommitteePrivByChain == nil {
 			st.RemoteCommitteePrivByChain = make(map[string]string)
 		}

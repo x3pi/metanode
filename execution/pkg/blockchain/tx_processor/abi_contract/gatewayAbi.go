@@ -58,15 +58,15 @@ package abi_contract
 // executeContractCallForGateway call sites for the settlement logic.
 //
 // registerChainViaStake() solves the same "chain #1 has no vote path" circular dependency a
-// deleted bootstrapFoundingChains() method (retired 2026-08-28) used to solve with a one-time,
-// coordinator-only batch call: a Root Anchor starts with zero ChainRegistry entries
-// (NewGatewayEngine is always called with an empty registry — see gateway_handler.go's
-// loadGatewayEngine), but GovernanceEngine.Vote requires the voter to already be a ChainRegistry
-// member and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have
-// already passed a vote. registerChainViaStake() is vote-free and per-chain (not a batch), gated
-// instead by a REAL native-coin deposit from the caller's own wallet (gateway_handler.go's
-// "registerChainViaStake" case checks+burns it, see GatewayEngine.MinNativeStakeToRegister's own
-// doc comment) — usable identically for chain #1 and every chain after it, which is what let
+// deleted bootstrapFoundingChains() method (retired 2026-08-28) and a deleted vote-gated
+// ProposalRegisterChain kind (retired 2026-09-04) used to solve, each in its own way: a Root
+// Anchor starts with zero ChainRegistry entries (NewGatewayEngine is always called with an empty
+// registry — see gateway_handler.go's loadGatewayEngine), but GovernanceEngine.Vote requires the
+// voter to already be a ChainRegistry member. registerChainViaStake() is vote-free and per-chain
+// (not a batch), gated instead by a REAL native-coin deposit from the caller's own wallet
+// (gateway_handler.go's "registerChainViaStake" case checks+burns it, see
+// GatewayEngine.MinNativeStakeToRegister's own doc comment) — usable identically for chain #1 and
+// every chain after it, which is what let
 // bootstrapFoundingChains() (and its >= MinFoundingChains batch requirement) be retired entirely.
 const GatewayABI = `[
 	{

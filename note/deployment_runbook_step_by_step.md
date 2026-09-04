@@ -58,8 +58,10 @@ tài liệu kiến trúc). Đây là rào cản công bằng governance, không 
 nhiên — **không có cách nào hợp lệ để bootstrap Root Anchor thật với chỉ 2 chain sáng lập.**
 
 **Tin tốt — ràng buộc này CHỈ áp dụng lúc khởi tạo:** sau khi bootstrap thành công 1 lần (đủ
-≥4 chain), chain thứ 5, 6... gia nhập sau đó qua governance bình thường
-(`ProposalRegisterChain` → vote → executeProposal), **không** cần lặp lại điều kiện ≥4.
+≥4 chain), chain thứ 5, 6... gia nhập sau đó qua `registerChainViaStake()` (đường vote-gated
+`ProposalRegisterChain` được mô tả ở đây đã bị xoá 2026-09-04), **không** cần lặp lại điều kiện
+≥4. [Toàn bộ đoạn ≥4-chain-sáng-lập này cũng đã SUPERSEDED riêng — xem
+`note/eurozone_unified_native_coin_plan.md`.]
 
 Công thức chịu lỗi BFT (áp dụng cho từng chain riêng, kể cả Root Anchor):
 `f = ⌊(n-1)/3⌋` (chi tiết: `note/bft_fault_tolerance_node_count.md`).

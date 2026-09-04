@@ -117,38 +117,22 @@ type CrossChainConfig struct {
 	// value transfer.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
-	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
-	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
-	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). Gates ONLY
-	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path) — see
-	// MinNativeStakeToRegisterWei below for the vote-free RegisterChainViaStake path's own,
-	// unrelated gate. When set (>0), a candidate chain ID must already hold at least this much in
-	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
-	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
-	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
-	// deliberately opt-in, not a default-on rate limit: the right minimum is an operational
-	// policy decision (how much should a new member chain be required to hold?) that depends on
-	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
-	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
-	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
-
 	// MinNativeStakeToRegisterWei — the REQUIRED minimum real, liquid native-coin (Root Anchor's
 	// own base asset — deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) balance
 	// gateway_handler.go's "registerChainViaStake" case requires the caller's own wallet
 	// (tx.FromAddress()) to hold before it will register a new chain, then moves exactly this
 	// amount out of that real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held deposit
 	// (burn-then-mint; 2026-08-28 user request: "dùng tiền từ ví từ tài khoản thật làm điều kiện khởi tạo private
-	// chain ... không phải loại token erc 20 gì cả"). This is the universal, vote-free chain
-	// registration gate — usable identically for chain #1 and every chain after it — that
-	// replaced the retired bootstrapFoundingChains()/MinFoundingChains batch mechanism, so unlike
-	// MinRegistrationStake above this is NOT opt-in: leaving it empty/zero on a real deployment
+	// chain ... không phải loại token erc 20 gì cả"). This is the universal chain registration
+	// gate — usable identically for chain #1 and every chain after it — that replaced the retired
+	// bootstrapFoundingChains()/MinFoundingChains batch mechanism and the retired vote-gated
+	// ProposalRegisterChain path, so it is NOT opt-in: leaving it empty/zero on a real deployment
 	// reopens fully permissionless Sybil chain registration (RegisterChainViaStake's own doc
 	// comment, GatewayEngine.MinNativeStakeToRegister's doc comment). Every node that will process
 	// registerChainViaStake transactions MUST set this to the SAME value — a value that differs
 	// between validators is a Zero-Fork Invariant risk (different nodes would accept/reject the
 	// same registration transaction differently). Parsed as a base-10 decimal string of wei (not
-	// a JSON number) to avoid float64 precision loss for large amounts, same convention as
-	// MinRegistrationStake.
+	// a JSON number) to avoid float64 precision loss for large amounts.
 	MinNativeStakeToRegisterWei string `json:"min_native_stake_to_register_wei,omitempty"`
 }
 

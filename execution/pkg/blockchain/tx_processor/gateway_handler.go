@@ -127,9 +127,6 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
 		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyReserveChainIDConfig(freshEngine)
-		if err := applyMinRegistrationStakeConfig(freshEngine); err != nil {
-			return nil, err
-		}
 		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
 			return nil, err
 		}
@@ -162,9 +159,6 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	applyDevnetGovernanceTimelockOverride(&engine)
 	applyReserveChainIDConfig(&engine)
-	if err := applyMinRegistrationStakeConfig(&engine); err != nil {
-		return nil, err
-	}
 	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
 		return nil, err
 	}
@@ -184,43 +178,17 @@ func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
 	engine.ReserveChainID = config.ConfigApp.CrossChain.ReserveChainID
 }
 
-// applyMinRegistrationStakeConfig is a no-op unless config.ConfigApp.CrossChain
-// .MinRegistrationStake is a non-empty, valid, positive decimal string — see that field's own
-// doc comment (pkg/config/config.go) and GatewayEngine.MinRegistrationStake's for why this is
-// opt-in (C6 mitigation, not a default-on rate limit). An empty string preserves the exact old
-// permissionless-registration behavior. A non-empty but unparseable/non-positive string is a
-// config mistake, not a silent no-op — it fails loudly at startup rather than deploying a chain
-// that believes it configured a stake requirement but actually didn't.
-func applyMinRegistrationStakeConfig(engine *cross_chain.GatewayEngine) error {
-	raw := ""
-	if config.ConfigApp != nil {
-		raw = config.ConfigApp.CrossChain.MinRegistrationStake
-	}
-	if raw == "" {
-		return nil
-	}
-	if engine.MinRegistrationStake != nil && engine.MinRegistrationStake.Sign() > 0 {
-		return nil
-	}
-	amount, ok := new(big.Int).SetString(raw, 10)
-	if !ok || amount.Sign() <= 0 {
-		return fmt.Errorf("cross_chain.min_registration_stake_wei %q is not a valid positive base-10 integer", raw)
-	}
-	engine.MinRegistrationStake = amount
-	return nil
-}
-
 // applyMinNativeStakeToRegisterConfig sets GatewayEngine.MinNativeStakeToRegister once from
 // config.ConfigApp.CrossChain.MinNativeStakeToRegisterWei — see that field's own doc comment
 // (pkg/config/config.go) and GatewayEngine.MinNativeStakeToRegister's own doc comment for why
-// this is REQUIRED (not opt-in, unlike applyMinRegistrationStakeConfig): with
-// BootstrapFoundingChains retired (2026-08-28), gateway_handler.go's "registerChainViaStake" case
-// is the only vote-free chain registration path left, so it must always have a real, configured
-// native-coin minimum to check the caller's wallet against — an unset value there fails closed at
-// the call site, not silently here. This function itself stays a no-op when the raw config string
-// is empty (lets a chain start up at all before an operator has decided the value — the call site
-// is what actually refuses registerChainViaStake transactions until it's set), same "lock in once
-// from the pristine state" pattern as every other config-applied GatewayEngine field.
+// this is REQUIRED, not opt-in: with BootstrapFoundingChains and the old vote-gated
+// ProposalRegisterChain path both retired, gateway_handler.go's "registerChainViaStake" case is
+// the only chain registration path left, so it must always have a real, configured native-coin
+// minimum to check the caller's wallet against — an unset value there fails closed at the call
+// site, not silently here. This function itself stays a no-op when the raw config string is empty
+// (lets a chain start up at all before an operator has decided the value — the call site is what
+// actually refuses registerChainViaStake transactions until it's set), same "lock in once from
+// the pristine state" pattern as every other config-applied GatewayEngine field.
 func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) error {
 	raw := ""
 	if config.ConfigApp != nil {
@@ -1278,14 +1246,14 @@ func (h *GatewayHandler) handleWrite(
 
 	case "registerChainViaStake":
 		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
-		// why this exists: a vote-free alternative to ExecuteGovernanceProposal's
-		// ProposalRegisterChain case, gated by a REAL, liquid native-coin deposit from the
+		// why this exists: registration gated by a REAL, liquid native-coin deposit from the
 		// caller's own wallet -- not PerChainAllocation (a governance-only, non-transferable
 		// ledger entry) and not any ERC-20-style token (2026-08-28 user request: "dùng tiền từ ví
-		// từ tài khoản thật ... không phải loại token erc 20 gì cả"). This is now the ONLY
-		// vote-free registration path (BootstrapFoundingChains was retired the same day -- see
-		// note/cross_chain_stake_and_value_flow.md), so an unconfigured MinNativeStakeToRegister
-		// fails closed here rather than silently falling back to permissionless registration.
+		// từ tài khoản thật ... không phải loại token erc 20 gì cả"). This is now the ONLY chain
+		// registration path (BootstrapFoundingChains and the old vote-gated ProposalRegisterChain
+		// path were both retired -- see note/cross_chain_stake_and_value_flow.md), so an
+		// unconfigured MinNativeStakeToRegister fails closed here rather than silently falling
+		// back to permissionless registration.
 		if engine.MinNativeStakeToRegister == nil || engine.MinNativeStakeToRegister.Sign() <= 0 {
 			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
 		}
@@ -1418,10 +1386,9 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 		// propose() is deliberately permissionless (all_remaining_fixes_plan.md Mục 2: gated
-		// only at vote()/quorum, matching common bond-then-vote governance patterns and needed
-		// for a new chain to self-nominate via ProposalRegisterChain without an existing chain
-		// sponsoring it). Proposals has no TTL/cleanup, so surface its real size as a metric
-		// instead of guessing at a rate-limit design with no production data behind it.
+		// only at vote()/quorum, matching common bond-then-vote governance patterns). Proposals
+		// has no TTL/cleanup, so surface its real size as a metric instead of guessing at a
+		// rate-limit design with no production data behind it.
 		metrics.GovernanceProposalCount.Set(float64(len(engine.Governance.Proposals)))
 		packed, packErr := method.Outputs.Pack(proposalID)
 		if packErr != nil {
@@ -1485,7 +1452,7 @@ func (h *GatewayHandler) handleWrite(
 		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
 			return nil, nil, err
 		}
-		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalRegisterChain
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalUnregisterChain
 		// execution is one possible outcome of this call among several proposal kinds -- setting
 		// this unconditionally after every successful execute is cheap and correct either way
 		// (a no-op change in registry size for any other proposal kind).

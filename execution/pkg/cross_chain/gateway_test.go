@@ -115,21 +115,21 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 }
 
 // TestGateway_ProposalAllocateSupply_UnblocksAttestCommit proves the fix for a real dead end
-// found via live 2-node RPC testing: neither BootstrapFoundingChains nor
-// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger, and
-// production always constructs it with genesis_total_supply=0 and an empty allocation map
-// (gateway_handler.go's loadGatewayEngine) — so a freshly onboarded chain's attestCommit
-// rejects with "available 0" forever, with no prior governance-reachable way to fund it.
-// ProposalAllocateSupply (GrantAllocation) closes that gap through the same propose/vote/
-// timelock/execute path as every other governance action.
+// found via live 2-node RPC testing: neither BootstrapFoundingChains, the retired vote-gated
+// ProposalRegisterChain, nor RegisterChainViaStake's own registration step ever grants
+// allocation this way, and production always constructs SupplyLedger with genesis_total_supply=0
+// and an empty allocation map (gateway_handler.go's loadGatewayEngine) — so a freshly onboarded
+// chain's attestCommit rejects with "available 0" forever, with no prior governance-reachable way
+// to fund it. ProposalAllocateSupply (GrantAllocation) closes that gap through the same propose/
+// vote/timelock/execute path as every other governance action.
 func TestGateway_ProposalAllocateSupply_UnblocksAttestCommit(t *testing.T) {
 	engine, kp := setupTestGatewayEngine()
 	engine.EnsureGovernance()
 	// setupTestGatewayEngine sets engine.ReserveChainID = 102 (engine's own LocalChainID) —
 	// engine plays Reserve for this test.
 
-	// Chain 103: registered but never allocated — the exact state a real ProposalRegisterChain
-	// leaves a brand-new chain in today.
+	// Chain 103: registered but never allocated — the exact state a freshly-registered chain
+	// (via RegisterChainViaStake, with Reserve's own pool exhausted) can be left in today.
 	popSig := PopSign(kp.PrivateKey(), kp.PublicKey())
 	engine.ChainRegistry[103] = ChainRegistry{
 		ChainID:         103,
@@ -787,165 +787,6 @@ func TestGateway_ProposalUpdateCommittee_RejectsSubBftQuorumThreshold(t *testing
 	assert.Equal(t, uint64(6667), reg.QuorumThreshold)
 }
 
-// TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee is the regression test
-// for a real gap found reviewing ProposalUpdateCommittee: unlike BootstrapFoundingChains and
-// ProposalUpdateCommittee (both of which verify PoP for every committee member), the older
-// ProposalRegisterChain case accepted a NON-EMPTY committee wholesale with no PoP check at all
-// -- a rogue-key attack surface identical to the one PoP exists to close everywhere else in this
-// codebase. An EMPTY committee (registering routing metadata only, deferred committee via a
-// later ProposalUpdateCommittee) is a real, pre-existing usage pattern and must still work.
-func TestGateway_ProposalRegisterChain_RejectsUnverifiedNonEmptyCommittee(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	engine.EnsureGovernance()
-
-	kpRogue := bls.GenerateKeyPair()
-	forgedCommittee := []ValidatorEntry{
-		{PubkeyBLS: kpRogue.BytesPublicKey(), Stake: 10000, PopSignature: make([]byte, 96)}, // zeroed/forged PoP
-	}
-
-	newChainReg := ChainRegistry{
-		ChainID:   999,
-		Epoch:     1,
-		Committee: forgedCommittee,
-	}
-	payload, err := json.Marshal(newChainReg)
-	require.NoError(t, err)
-
-	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-	assert.ErrorIs(t, err, ErrPopVerifyFailed)
-
-	_, exists := engine.ChainRegistry[999]
-	assert.False(t, exists, "chain with an unverified committee must not be registered")
-}
-
-// TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate proves the legitimate
-// pattern the fix above must not break: registering routing metadata with no committee yet,
-// verified safe because VerifyQuorumCertAgainstRegistry fails closed (ErrEmptyCommittee) for
-// that chain until a real committee is set via ProposalUpdateCommittee.
-func TestGateway_ProposalRegisterChain_AllowsEmptyCommitteeDeferredToUpdate(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	engine.EnsureGovernance()
-
-	newChainReg := ChainRegistry{
-		ChainID:          104,
-		Epoch:            1,
-		QuorumThreshold:  6667,
-		ArchivalEndpoint: "https://rpc.chain104.test",
-	}
-	payload, err := json.Marshal(newChainReg)
-	require.NoError(t, err)
-
-	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-	require.NoError(t, err)
-
-	reg, exists := engine.ChainRegistry[104]
-	require.True(t, exists)
-	assert.Empty(t, reg.Committee)
-}
-
-// TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold mirrors the UpdateCommittee
-// version above for the registration path.
-func TestGateway_ProposalRegisterChain_RejectsSubBftQuorumThreshold(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	engine.EnsureGovernance()
-
-	newChainReg := ChainRegistry{
-		ChainID:         104,
-		Epoch:           1,
-		QuorumThreshold: 100, // 1% -- far under the 2/3 BFT floor
-	}
-	payload, err := json.Marshal(newChainReg)
-	require.NoError(t, err)
-
-	proposalID, err := engine.Governance.Propose(ProposalRegisterChain, payload, 1000)
-	require.NoError(t, err)
-	_, err = engine.Governance.Vote(proposalID, 101, 1010)
-	require.NoError(t, err)
-
-	_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
-
-	_, exists := engine.ChainRegistry[104]
-	assert.False(t, exists)
-}
-
-// TestGateway_ProposalRegisterChain_MinRegistrationStake is the regression test for the C6
-// mitigation (2026-08-27, see note/cross_chain_attack_scenario_catalog.md item C6): opt-in via
-// GatewayEngine.MinRegistrationStake, a candidate chain ID must already hold at least that much
-// allocation before ProposalRegisterChain can execute for it, closing the previous gap where
-// registration was fully decoupled from SupplyLedger.
-func TestGateway_ProposalRegisterChain_MinRegistrationStake(t *testing.T) {
-	newChainReg := func(chainID uint64) []byte {
-		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
-		payload, err := json.Marshal(reg)
-		require.NoError(t, err)
-		return payload
-	}
-
-	t.Run("unconfigured (zero) preserves old permissionless behavior", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
-		// engine.MinRegistrationStake left nil -- the default on every pre-2026-08-27 config.
-
-		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
-		require.NoError(t, err)
-		_, err = engine.Governance.Vote(proposalID, 101, 1010)
-		require.NoError(t, err)
-
-		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-		require.NoError(t, err)
-		_, exists := engine.ChainRegistry[104]
-		assert.True(t, exists, "unconfigured MinRegistrationStake must not block registration")
-	})
-
-	t.Run("configured, unfunded candidate fails closed", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-
-		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
-		require.NoError(t, err)
-		_, err = engine.Governance.Vote(proposalID, 101, 1010)
-		require.NoError(t, err)
-
-		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-		assert.ErrorIs(t, err, ErrInsufficientRegistrationStake)
-		_, exists := engine.ChainRegistry[104]
-		assert.False(t, exists, "unfunded candidate must not be registered once a stake floor is configured")
-	})
-
-	t.Run("configured, pre-funded candidate succeeds", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine()
-		engine.EnsureGovernance()
-		engine.MinRegistrationStake = big.NewInt(1000)
-
-		// Pre-fund chain 104 (not yet in ChainRegistry) from Reserve (102, holding 5000) via the
-		// same TransferAllocation primitive ProposalTransferAllocation uses -- proving no
-		// ChainRegistry membership is required to pre-fund a genuinely new chain ID.
-		require.NoError(t, engine.SupplyLedger.TransferAllocation(102, 104, big.NewInt(1000)))
-
-		proposalID, err := engine.Governance.Propose(ProposalRegisterChain, newChainReg(104), 1000)
-		require.NoError(t, err)
-		_, err = engine.Governance.Vote(proposalID, 101, 1010)
-		require.NoError(t, err)
-
-		_, err = engine.ExecuteGovernanceProposal(proposalID, 1010+DefaultGovernanceTimelockSeconds+1)
-		require.NoError(t, err)
-		_, exists := engine.ChainRegistry[104]
-		assert.True(t, exists, "candidate holding exactly MinRegistrationStake must be admitted")
-	})
-}
-
 // TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
 // As of 2026-08-28, GatewayEngine.RegisterChainViaStake itself performs NO stake CHECK at all --
 // it has no AccountStateDB access, so it cannot verify a real wallet balance. The real gate (a
@@ -1170,7 +1011,7 @@ func TestGateway_SetGenesisDigest(t *testing.T) {
 		assert.Equal(t, common.Hash{}, engine.ChainRegistry[104].GenesisDigest)
 	})
 
-	t.Run("a chain registered without a GenesisWallet (e.g. via governance ProposalRegisterChain) can never have its digest published by anyone", func(t *testing.T) {
+	t.Run("a chain registered without a GenesisWallet (e.g. a direct/test call to RegisterChainViaStake that doesn't set it) can never have its digest published by anyone", func(t *testing.T) {
 		engine, _ := setupTestGatewayEngine()
 		engine.EnsureGovernance()
 		// Chain 101 comes from setupTestGatewayEngine's fixture, registered with no GenesisWallet.
@@ -1227,8 +1068,8 @@ func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T
 // ProposalUpdateCommittee is a real, working answer: recovery via Root Anchor governance
 // quorum (>=2/3 of OTHER active chains vouching for the stuck chain's claimed new committee,
 // e.g. based on real-world proof the stuck chain's operators published out of band) rather
-// than cryptographic self-continuity -- the same trust model BootstrapFoundingChains and
-// ProposalRegisterChain already use elsewhere in this codebase, not a new risk class.
+// than cryptographic self-continuity -- the same trust model the retired BootstrapFoundingChains
+// used elsewhere in this codebase, not a new risk class.
 func TestGateway_ProposalUpdateCommittee_RecoversChainStuckManyEpochsBehind(t *testing.T) {
 	engine, _ := setupTestGatewayEngine()
 	engine.EnsureGovernance()

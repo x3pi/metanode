@@ -625,7 +625,7 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 		t.Fatalf("registeredAt = %d, want 1234567890", registeredAt)
 	}
 	if genesisWallet != (common.Address{}) {
-		t.Fatalf("genesisWallet = %s, want zero (this fixture registers via ProposalRegisterChain, not RegisterChainViaStake)", genesisWallet.Hex())
+		t.Fatalf("genesisWallet = %s, want zero (this fixture seeds ChainRegistry directly in-test, not via RegisterChainViaStake)", genesisWallet.Hex())
 	}
 	if common.Hash(genesisDigestRaw) != (common.Hash{}) {
 		t.Fatalf("genesisDigest = %s, want zero (not yet published)", common.Hash(genesisDigestRaw).Hex())

@@ -156,7 +156,7 @@ func TestTypes_RoundTripJSON(t *testing.T) {
 	// 9. GovernanceProposal
 	prop := GovernanceProposal{
 		ProposalID:  hash,
-		Kind:        ProposalRegisterChain,
+		Kind:        ProposalUnregisterChain,
 		Payload:     []byte{1, 2, 3},
 		VotesFor:    2,
 		VotedChains: map[uint64]bool{101: true, 102: true},
