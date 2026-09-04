@@ -110,7 +110,7 @@
               export ROOT_RPC="{{ root_anchor_rpc }}"
               export LOCAL_OUT="{{ playbook_dir }}/data/chain_{{ hostvars[item]['chain_id'] }}"
               export TARGET_DIR="{{ hostvars[item]['install_dir'] | default('/opt/metanode/chain-' ~ hostvars[item]['chain_id']) }}"
-              
+              export NODE_SUBMITTER_KEYS='{{ hostvars[item]["node_submitter_keys"] | default([]) | to_json }}'
               SUBMITTER_KEY="{{ hostvars[item]['node_submitter_key'] | default(root_anchor_submitter_key) }}"
               if [ -z "$SUBMITTER_KEY" ]; then
                 echo "❌ ERROR: root_anchor_submitter_key chưa được cấu hình trong inventory.yml"
@@ -178,6 +178,11 @@
               local_out = os.environ.get('LOCAL_OUT', '')
               t_dir = os.environ.get('TARGET_DIR', '')
               num_validators = int(os.environ.get('VALIDATORS', '1'))
+              node_submitter_keys_raw = os.environ.get('NODE_SUBMITTER_KEYS', '[]')
+              try:
+                  node_submitter_keys = json.loads(node_submitter_keys_raw)
+              except Exception:
+                  node_submitter_keys = []
               
               for node_id in range(num_validators):
                   n_dir = f'{t_dir}/node-{node_id}'
@@ -190,7 +195,11 @@
                       c['backup_path'] = f'{n_dir}/data/execution/backup'
                       c['genesis_file_path'] = f'{t_dir}/config/genesis.json'
                       c['rust_config_path'] = f'{n_dir}/config/node.toml'
-                      sub_key = os.environ.get('SUBMITTER_KEY', '')
+                      sub_key = ""
+                      if node_id < len(node_submitter_keys) and node_submitter_keys[node_id]:
+                          sub_key = node_submitter_keys[node_id]
+                      else:
+                          sub_key = os.environ.get('SUBMITTER_KEY', '')
                       if sub_key:
                           if 'cross_chain' not in c:
                               c['cross_chain'] = {}
