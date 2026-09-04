@@ -291,8 +291,13 @@ quyết bằng tách làm 2 pha, không cần sửa `deploy.yml`:
 - **Pha 1** (`ansible-playbook ... --limit localhost`): chỉ chạy Play sinh key + cấu hình cục bộ,
   KHÔNG đụng tới node thật/service.
 - **Đăng ký + sinh lại genesis**: `register_chains --config` đăng ký tất cả chain lên Root Anchor
-  (đúng 1 lần, không còn gửi 2 lần như trước) → với từng chain, đọc lại đúng số đã cấp
-  (`query-alloc-raw`)+ví (`query-genesis-wallet-raw`) → gọi lại `gen_single_chain.py` với
+  **và tiếp tục gửi lại y hệt lên chính từng private chain's RPC như cũ** (ĐÃ THỬ bỏ bước này lúc
+  thiết kế, hiểu nhầm là dư thừa — thực ra đây là bước ĐỒNG BỘ DANH BẠ CHÉO giữa các private chain
+  với nhau, không phải tự đăng ký: thiếu nó thì chain 102 không biết committee của chain 101 trong
+  `ChainRegistry` cục bộ của chính nó, relayer sẽ revert "unknown source chain ID" ngay khi thử
+  relay thật — phát hiện bằng cách chạy `run_full_pipeline.sh` thật, không phải suy luận, xem mục
+  5.2 bên dưới) → với từng chain, đọc lại đúng số đã cấp (`query-alloc-raw`)+ví
+  (`query-genesis-wallet-raw`) → gọi lại `gen_single_chain.py` với
   `--initial-supply-wallet`/`--initial-supply` (key giữ nguyên nhờ fix idempotent bên dưới) →
   `publish-genesis-digest` + `verify-genesis` (fail cứng nếu lệch, KHÔNG đẩy lên node thật khi
   chưa xác minh).
@@ -315,7 +320,46 @@ committee ngẫu nhiên MỚI không khớp gì với Root Anchor. Đã sửa: P
 **Đã kiểm chứng**: `go build`/`go vet`/`go test ./...` xanh (thêm `register_chains/main_test.go` —
 test mới cho `query-alloc-raw`/`query-genesis-wallet-raw`, trước đây pkg này chưa có test nào);
 đọc kỹ logic 2 pha bằng cách trích xuất đúng khối Python nhúng trong bash ra chạy dry-run với
-`subprocess.run` giả lập, xác nhận đúng thứ tự lệnh cho nhiều chain. **Chưa live-test được trên
-cụm ansible đa máy thật** (cần dàn máy thật để test đầu-cuối, không có sẵn trong phiên này) — nên
-coi phần `deploy_private_chains.sh` là "đã rà soát kỹ, sẵn sàng thử nghiệm thật", chưa phải "đã
-chạy thật thành công" như phần Go/gen_single_chain.py.
+`subprocess.run` giả lập, xác nhận đúng thứ tự lệnh cho nhiều chain.
+
+### 5.2 Live-test thật trên cụm m0 (2026-09-04, cùng ngày) — chạy `run_full_pipeline.sh` thật,
+### tìm ra và sửa 2 lỗi thật (không phải giả định)
+
+Người dùng yêu cầu "đảm bảo quá trình này hoạt động không lỗi" → chạy thật `run_full_pipeline.sh`
+(cả 6 bước, không skip) trên cụm thật (Root Anchor 4 node + private chain 101/102), 2 lượt:
+
+**Lượt 1 — phát hiện lỗi #1 (bootstrap ordering)**: Bước 2/6 (`deploy_private_chains.sh
+--reset-all`, KHÔNG bật `--deterministic-genesis` — dùng đường mặc định) fail ngay ở
+`registerChainViaStake(chain 101)`:
+```
+Reserve's allocation pool cannot cover the stake amount: source chain has insufficient
+allocation: chain 991 available 0, requested 1000000000000000000
+```
+Nguyên nhân: bản sửa bảo mật (TransferAllocation thay GrantAllocation, mục "Cập nhật 2026-09-04")
+khiến việc đăng ký FAIL HẲN nếu Reserve chưa có pool — đúng khi Reserve ĐÃ có tiền, nhưng lúc mới
+khởi tạo hệ thống, Reserve luôn = 0 (chưa mint `GenesisTotalSupply`), mà mint đó (`fundGenesis`)
+lại cần quorum từ các chain ĐANG active — mà pipeline cũ đăng ký chain 101/102 TRƯỚC rồi mới dùng
+chính chúng để vote mint. Chặn đăng ký khi Reserve=0 tạo vòng lặp: đăng ký cần mint, mint cần
+người vote đã đăng ký. **Đã sửa** (`d1762c37`): bước cấp tiền giờ "cố gắng tốt nhất" — thiếu pool
+(`ErrInsufficientAllocation`) chỉ bỏ qua bước cấp tiền, KHÔNG chặn đăng ký (đăng ký xong, allocation
+tạm = 0, sẽ được `fundGenesis`'s `ProposalTransferAllocation` cấp bù sau — đúng cơ chế cũ, không
+đổi gì). Chạy lại: cả 2 chain đăng ký thành công, allocation của 101/102 sau đó đến từ đúng đường
+`fundGenesis` vote như trước (bootstrap lần đầu) — không có gì bị in ra từ hư không.
+
+**Lượt 2 — phát hiện lỗi #2 (bỏ nhầm bước đồng bộ danh bạ chéo)**: Bước 2 qua hết, Bước 5/6 (test
+Cross-Chain thật) timeout 60s chờ relayer. `relayer.log` cho thấy nguyên nhân thật:
+```
+attestCommit for chain 101 asset 0 reverted: unknown source chain ID: chain 101
+```
+Nguyên nhân: bản sửa trước đó (`7fb2189d`) đã BỎ bước gửi `registerChainViaStake` lần 2 lên chính
+RPC của từng private chain, với lý do (SAI) là "chỉ để tự đăng ký, dư thừa vì giờ genesis đã có
+sẵn ChainRegistry". Thực tế bước đó dùng để ĐĂNG KÝ CHÉO — cho chain 102 biết committee của chain
+101 (và ngược lại) trong chính `ChainRegistry` cục bộ của chain 102, thứ mà `attestCommit`/
+`attestReserveIssuedCommit` tra cứu tại chỗ đang xử lý, không phải bản ghi trên Root Anchor.
+`GatewayRegistryMonitor` có tồn tại để tự đồng bộ dần việc này, nhưng không đủ nhanh/đủ tin cậy để
+thay thế bước đồng bộ đồng bộ (synchronous) này ngay lúc mới deploy. **Đã khôi phục** bước gửi lần
+2 (không phải revert toàn bộ, giữ nguyên toàn bộ phần `GenesisWallet`/deterministic-genesis khác).
+
+**Bài học chung**: cả 2 lỗi đều là loại "chỉ lộ ra khi chạy thật trên cụm thật", đúng lý do ban đầu
+tại sao user yêu cầu chạy `run_full_pipeline.sh` thay vì chỉ tin code review/unit test. Sau khi sửa
+lỗi #2 (đang chờ chạy lại lượt 3 để xác nhận toàn bộ 6 bước xanh).
