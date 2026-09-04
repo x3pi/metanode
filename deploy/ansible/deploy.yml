@@ -129,10 +129,24 @@
       args:
         executable: /bin/bash
 
+    - name: Sync /tmp/rpc_nodes.json to block_hash_checker config-m-nodes.json
+      ansible.builtin.copy:
+        src: /tmp/rpc_nodes.json
+        dest: "{{ playbook_dir }}/monitors/block_hash_checker/config-m-nodes.json"
+        mode: '0644'
+
+    - name: Ensure Prometheus directory exists
+      ansible.builtin.file:
+        path: "{{ project_root }}/execution/deploy/prometheus"
+        state: directory
+        mode: '0755'
+      when: "ansible_action not in ['stop']"
+
     - name: Generate prometheus.yml dynamically for monitoring
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
+      when: "ansible_action not in ['stop']"
         
     - name: Restart local Prometheus service
       ansible.builtin.shell: systemctl restart prometheus || true
@@ -140,3 +154,4 @@
       args:
         executable: /bin/bash
       ignore_errors: true
+      when: "ansible_action not in ['stop']"
