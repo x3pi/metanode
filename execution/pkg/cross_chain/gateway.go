@@ -338,12 +338,6 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
 	// native-coin deposit from tx.FromAddress() before invoking this function.
 
-	if g.ChainRegistry == nil {
-		g.ChainRegistry = make(map[uint64]ChainRegistry)
-	}
-	g.ChainRegistry[reg.ChainID] = reg
-	g.Governance.RegisterActiveChain(reg.ChainID)
-
 	// Unify "stake to register" and "circulating cross-chain allocation" into one real
 	// instrument (2026-09-04 user request: "dùng số tiền cọc và nạp đấy là số tiền để luân
 	// chuyển" -- use the staked deposit itself as the money that circulates), instead of
@@ -351,28 +345,52 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	// freshly-registered chain has any cross-chain-outbound capacity at all (the old "chain
 	// nghèo mãi mãi" gap, note/eurozone_unified_native_coin_plan.md mục 2.4).
 	//
-	// The caller (gateway_handler.go's "registerChainViaStake" case) verifies+burns this exact
-	// amount from tx.FromAddress()'s real wallet and re-mints it into GATEWAY_CONTRACT_ADDRESS as
-	// a permanent held deposit -- but only AFTER this function returns (see that case's own
-	// comment on ordering: balance mutation must come last). That is still safe to credit here,
-	// ahead of the real deposit move: this GatewayEngine mutation is, like the ChainRegistry
-	// write two lines up, fully in-memory and discardable, only persisted by saveGatewayEngine()
-	// at the very end of handleWrite. If the balance move fails afterward, this SupplyLedger
-	// credit is discarded right along with the registration itself, so the two stay atomic.
+	// SECURITY FIX (2026-09-04, same day): the very first version of this block called
+	// GrantAllocation, which INCREASES GenesisTotalSupply by the credited amount -- a real,
+	// unbounded, repeatable, vote-free mint (found on user request to re-check for exactly this).
+	// The "real deposit" backing that mint (tx.FromAddress()'s balance on Root Anchor, checked
+	// one layer up in gateway_handler.go) is NOT itself provably traceable to GenesisTotalSupply:
+	// Root Anchor's own AccountStateDB balances come from its own genesis.json alloc, which is
+	// independently, arbitrarily set (gen_root_anchor_chain.py) with zero relation to
+	// GenesisTotalSupply. So crediting via GrantAllocation let ANYONE holding ANY Root Anchor
+	// wallet balance -- genesis-arbitrary or not -- mint fresh GenesisTotalSupply once per chain
+	// registered, unlimited times, no vote, no cap. That is strictly worse than
+	// ProposalAllocateSupply's own one-time+Reserve-only mint gate.
 	//
-	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note
-	// §2.3 (and attestCommitInternal's enforceCeiling check), every OTHER chain's local copy of
+	// Fixed by using TransferAllocation instead: it MOVES allocation the Reserve already holds in
+	// its own PerChainAllocation[ReserveChainID] pool (itself bounded by the one-time
+	// ProposalAllocateSupply mint) to the new chain -- GenesisTotalSupply never changes, "no vote
+	// needed" is preserved (TransferAllocation itself has no governance gate, matching
+	// RegisterChainViaStake's whole vote-free premise), and the constraint becomes exactly what
+	// the user asked for: Reserve must ALREADY hold enough real, previously-minted allocation to
+	// cover the amount, or the whole registration fails closed (ErrInsufficientAllocation) --
+	// never silently prints more. If Reserve's pool is ever exhausted, no further chain can
+	// register-with-funding via this path until the community moves more allocation to Reserve's
+	// pool via ProposalTransferAllocation (still vote-gated) -- same "fixed pie, redistributed"
+	// principle as every other allocation movement in this ledger (mục 3,
+	// note/eurozone_unified_native_coin_plan.md).
+	//
+	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note §2.3
+	// (and attestCommitInternal's enforceCeiling check), every OTHER chain's local copy of
 	// PerChainAllocation has no real enforcement power, so crediting it there would just be
-	// confusing, powerless bookkeeping. GrantAllocation grows GenesisTotalSupply by the same
-	// amount, keeping the ledger's sum(PerChainAllocation) <= GenesisTotalSupply invariant
-	// intact -- and unlike ProposalAllocateSupply's vote-only growth of that same total, this
-	// growth is backed by a real, held, non-withdrawable deposit, not a committee's say-so.
+	// confusing, powerless bookkeeping.
+	//
+	// Deliberately done BEFORE the ChainRegistry/Governance writes below (not after, unlike the
+	// very first version of this fix): a chain whose promised funding Reserve's pool can't
+	// actually cover must never end up registered at all -- checking first means a failure here
+	// leaves ChainRegistry/Governance completely untouched, with no separate rollback needed.
 	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
 		g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
-		if err := g.SupplyLedger.GrantAllocation(reg.ChainID, g.MinNativeStakeToRegister); err != nil {
-			return fmt.Errorf("RegisterChainViaStake: chain %d: crediting stake deposit into SupplyLedger: %w", reg.ChainID, err)
+		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, g.MinNativeStakeToRegister); err != nil {
+			return fmt.Errorf("RegisterChainViaStake: chain %d: Reserve's allocation pool cannot cover the stake amount (no new supply is ever minted here): %w", reg.ChainID, err)
 		}
 	}
+
+	if g.ChainRegistry == nil {
+		g.ChainRegistry = make(map[uint64]ChainRegistry)
+	}
+	g.ChainRegistry[reg.ChainID] = reg
+	g.Governance.RegisterActiveChain(reg.ChainID)
 
 	return nil
 }

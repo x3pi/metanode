@@ -932,6 +932,12 @@ func TestGateway_RegisterChainViaStake(t *testing.T) {
 // RegisterChainViaStake's own doc comment, and note/eurozone_unified_native_coin_plan.md mục 2.4)
 // -- a freshly-registered chain must walk away with real cross-chain-outbound capacity equal to
 // its own stake deposit, with zero separate ProposalTransferAllocation/ClaimMessage step needed.
+//
+// Same-day security fix covered here (user explicitly asked to re-check "không được in từ hư
+// không" -- must never print from nothing): the credit MUST be a TRANSFER out of Reserve's own
+// existing PerChainAllocation pool, never a GrantAllocation-style mint -- see the sub-test that
+// asserts GenesisTotalSupply stays byte-for-byte constant, and the one proving an exhausted
+// Reserve pool fails the whole registration closed rather than minting the gap.
 func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) {
 	newChainReg := func(chainID uint64) []byte {
 		reg := ChainRegistry{ChainID: chainID, Epoch: 1, QuorumThreshold: 6667}
@@ -940,19 +946,34 @@ func TestGateway_RegisterChainViaStake_CreditsStakeIntoAllocation(t *testing.T) 
 		return payload
 	}
 
-	t.Run("Reserve's own copy: credits PerChainAllocation and grows GenesisTotalSupply by the stake amount", func(t *testing.T) {
-		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102
+	t.Run("Reserve's own copy: TRANSFERS from Reserve's own pool -- GenesisTotalSupply never changes", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // LocalChainID == ReserveChainID == 102, holding 5000
 		engine.EnsureGovernance()
 		engine.MinNativeStakeToRegister = big.NewInt(777)
 
 		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+		reserveBefore := engine.SupplyLedger.GetAllocation(102)
 
 		require.NoError(t, engine.RegisterChainViaStake(newChainReg(104)))
 
 		assert.Equal(t, big.NewInt(777), engine.SupplyLedger.GetAllocation(104), "new chain must walk away with allocation == its real stake deposit")
-		wantSupply := new(big.Int).Add(supplyBefore, big.NewInt(777))
-		assert.Equal(t, wantSupply, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must grow by exactly the credited amount, keeping the invariant intact")
+		assert.Equal(t, new(big.Int).Sub(reserveBefore, big.NewInt(777)), engine.SupplyLedger.GetAllocation(102), "the credited amount must come OUT of Reserve's own pool, not out of thin air")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "GenesisTotalSupply must NEVER change here -- this is a transfer, not a mint")
 		assert.True(t, engine.SupplyLedger.VerifyInvariant())
+	})
+
+	t.Run("Reserve's pool exhausted: whole registration fails closed, never mints the shortfall", func(t *testing.T) {
+		engine, _ := setupTestGatewayEngine() // Reserve (102) holds only 5000
+		engine.EnsureGovernance()
+		engine.MinNativeStakeToRegister = big.NewInt(999999) // far more than Reserve actually holds
+
+		supplyBefore := new(big.Int).Set(engine.SupplyLedger.GenesisTotalSupply)
+
+		err := engine.RegisterChainViaStake(newChainReg(104))
+		assert.ErrorIs(t, err, ErrInsufficientAllocation, "must fail closed, not silently mint the gap")
+		_, exists := engine.ChainRegistry[104]
+		assert.False(t, exists, "a registration whose promised funding can't actually be paid must not be admitted at all")
+		assert.Equal(t, supplyBefore, engine.SupplyLedger.GenesisTotalSupply, "a failed registration must leave GenesisTotalSupply completely untouched")
 	})
 
 	t.Run("non-Reserve chain's local copy: SupplyLedger untouched (no enforcement power there anyway)", func(t *testing.T) {

@@ -39,14 +39,25 @@ riêng 1 giao dịch mới có allocation lưu thông — được thu gọn ti�
 người đăng ký) giờ ĐƯỢC DÙNG LUÔN làm allocation lưu thông ban đầu của chính chain đó** — không
 còn 2 bước tách rời (đăng ký → chờ treasury cấp riêng).
 
-Đã sửa `GatewayEngine.RegisterChainViaStake` (`pkg/cross_chain/gateway.go`): ngay sau khi đăng ký
-thành công, NẾU đang chạy trên bản sao có hiệu lực thật (`LocalChainID == ReserveChainID`, đúng
-điều kiện enforcement duy nhất theo mục 2.3) VÀ `MinNativeStakeToRegister > 0`, thì cộng thẳng
-đúng số tiền cọc đó vào `SupplyLedger.PerChainAllocation[chainID mới]` (dùng lại `GrantAllocation`
-— cùng hàm `ProposalAllocateSupply` dùng, nên `GenesisTotalSupply` tăng theo đúng, giữ nguyên bất
-biến `sum(PerChainAllocation) <= GenesisTotalSupply`). Khác biệt cốt lõi so với
-`ProposalAllocateSupply`: khoản tăng này có tiền thật đứng sau (tiền đã rời ví thật, khoá vĩnh viễn
-tại `GATEWAY_CONTRACT_ADDRESS`), không phải chỉ dựa vào phiếu vote.
+Đã sửa `GatewayEngine.RegisterChainViaStake` (`pkg/cross_chain/gateway.go`): NẾU đang chạy trên bản
+sao có hiệu lực thật (`LocalChainID == ReserveChainID`, đúng điều kiện enforcement duy nhất theo
+mục 2.3) VÀ `MinNativeStakeToRegister > 0`, thì (TRƯỚC KHI ghi `ChainRegistry`, để fail sạch nếu
+không đủ tiền) CHUYỂN đúng số tiền cọc đó từ `SupplyLedger.PerChainAllocation[ReserveChainID]`
+sang `[chainID mới]`.
+
+**Sửa lỗi bảo mật cùng ngày (do chính bạn yêu cầu rà lại)**: bản đầu tiên dùng `GrantAllocation`
+(cùng hàm `ProposalAllocateSupply` dùng) — hàm đó **TĂNG `GenesisTotalSupply`** mỗi lần gọi. Vì
+tiền cọc trả thật nhưng lấy từ ví của operator TRÊN ROOT ANCHOR, mà số dư ví trên Root Anchor lại
+**không hề truy nguyên được về `GenesisTotalSupply`** (genesis Root Anchor tự bịa alloc riêng,
+độc lập hoàn toàn — xem hội thoại 2026-09-04) → bất kỳ ai có ví trên Root Anchor (kể cả tiền
+genesis tự bịa) đăng ký 1 chain là tự động MINT THÊM `GenesisTotalSupply`, không giới hạn số lần,
+không qua vote — đúng "in tiền từ hư không", còn tệ hơn cả `ProposalAllocateSupply` gốc (cái đó
+còn bị khoá 1 lần + cần vote). **Đã sửa: đổi sang `TransferAllocation(ReserveChainID, chainID mới,
+amount)`** — CHUYỂN từ pool Reserve đã có sẵn (bản thân pool đó bị giới hạn bởi đúng 1 lần mint
+`GenesisTotalSupply` trước đó), không mint thêm. `GenesisTotalSupply` **không bao giờ đổi** ở bước
+này. Không cần vote (đúng yêu cầu) — điều kiện duy nhất là Reserve phải THẬT SỰ CÒN ĐỦ trong pool
+của chính nó; hết pool thì đăng ký-kèm-cấp-tiền thất bại thẳng (`ErrInsufficientAllocation`),
+không đăng ký nửa vời (registry không ghi nếu bước cấp tiền fail), không bao giờ tự tạo thêm.
 
 **Quy trình onboarding chain mới, sau khi gộp (rút từ 3 bước xuống còn thực chất 1 bước cho trường
 hợp thường gặp)**:
