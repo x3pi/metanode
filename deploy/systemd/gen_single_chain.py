@@ -176,6 +176,38 @@ def find_metanode_bin(override=None):
     return None
 
 def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
+    auth_file = os.path.join(keys_dir, "authority_key.json")
+    proto_file = os.path.join(keys_dir, "protocol_key.json")
+    net_file = os.path.join(keys_dir, "network_key.json")
+    eth_file = os.path.join(keys_dir, "eth_key.json")
+    # _gen_meta.json (this script's own bookkeeping, never read by the Rust/Go side) preserves the
+    # pubkey-only base64 values for protocol_key/network_key from the moment they're generated --
+    # rewrite_key_as_base64 below overwrites protocol_key.json/network_key.json in place with a
+    # COMBINED priv+pub blob (the format the running node actually needs at those exact paths), so
+    # the original standalone pubkey is otherwise unrecoverable from disk afterward.
+    meta_file = os.path.join(keys_dir, "_gen_meta.json")
+
+    if all(os.path.exists(p) for p in [auth_file, proto_file, net_file, eth_file, meta_file]):
+        # Idempotent re-run (2026-09-04, deterministic-genesis design): a chain's committee must
+        # stay IDENTICAL between "generate keys -> register on Root Anchor" and "regenerate
+        # genesis.json now that the real initial-supply amount is known" -- calling `metanode
+        # keytool generate` again here would silently mint a BRAND NEW, unregistered committee,
+        # breaking that link. Reuse exactly what's already on disk instead of regenerating.
+        with open(auth_file) as f: auth_data = json.load(f)
+        with open(eth_file) as f: eth_data = json.load(f)
+        with open(meta_file) as f: meta = json.load(f)
+        bls = {
+            "authority_key": auth_data["public_key_base64"],
+            "protocol_key": meta["protocol_key_pubkey_b64"],
+            "network_key": meta["network_key_pubkey_b64"],
+            "authority_key_private": auth_data["private_key_hex"],
+        }
+        eth = {
+            "private_key": eth_data["ETH_PRIVATE_KEY"],
+            "address": eth_data["ETH_ADDRESS"]
+        }
+        return bls, eth
+
     os.makedirs(keys_dir, exist_ok=True)
     result = subprocess.run(
         [metanode_bin, "keytool", "generate", "validator", "--out-dir", keys_dir],
@@ -184,11 +216,6 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     if result.returncode != 0:
         print(red(f"ERROR: metanode keytool failed:\n{result.stderr}"))
         sys.exit(1)
-
-    auth_file = os.path.join(keys_dir, "authority_key.json")
-    proto_file = os.path.join(keys_dir, "protocol_key.json")
-    net_file = os.path.join(keys_dir, "network_key.json")
-    eth_file = os.path.join(keys_dir, "eth_key.json")
 
     for fpath in [auth_file, proto_file, net_file, eth_file]:
         if not os.path.exists(fpath):
@@ -199,6 +226,12 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     with open(proto_file) as f: proto_data = json.load(f)
     with open(net_file) as f: net_data = json.load(f)
     with open(eth_file) as f: eth_data = json.load(f)
+
+    with open(meta_file, "w") as f:
+        json.dump({
+            "protocol_key_pubkey_b64": proto_data["public_key_base64"],
+            "network_key_pubkey_b64": net_data["public_key_base64"],
+        }, f)
 
     def rewrite_key_as_base64(key_data, file_path):
         priv_bytes = bytes.fromhex(key_data["private_key_hex"])

@@ -279,4 +279,43 @@ của chính nó **không đổi gì** — đúng phạm vi yêu cầu.
 Đã smoke-test: mode cũ (không truyền 2 flag mới) chạy y hệt hành vi trước đây (không hồi quy); mode
 mới verify đúng số thật từ 1 Root Anchor giả lập, sinh genesis đúng 1 ví có số dư = số đã xác minh,
 và fail cứng khi số truyền vào lệch với Root Anchor. `go build`/`go vet`/`go test ./...` toàn bộ
-module Go xanh.
+module Go xanh. Đã đóng gói thành script tái dùng được: `deploy/systemd/test_deterministic_genesis.sh`.
+
+### 5.1 `deploy_private_chains.sh` khớp thiết kế mới (2026-09-04, cùng ngày)
+
+Thêm cờ opt-in `--deterministic-genesis` (tự bật `--register`). Vấn đề cốt lõi: pipeline cũ sinh
+genesis TRƯỚC khi đăng ký (ansible chạy `gen_single_chain.py` ngay trong bước `--setup`), ngược thứ
+tự cần thiết cho thiết kế mới (phải biết số tiền thật đã đăng ký TRƯỚC khi sinh genesis). Giải
+quyết bằng tách làm 2 pha, không cần sửa `deploy.yml`:
+
+- **Pha 1** (`ansible-playbook ... --limit localhost`): chỉ chạy Play sinh key + cấu hình cục bộ,
+  KHÔNG đụng tới node thật/service.
+- **Đăng ký + sinh lại genesis**: `register_chains --config` đăng ký tất cả chain lên Root Anchor
+  (đúng 1 lần, không còn gửi 2 lần như trước) → với từng chain, đọc lại đúng số đã cấp
+  (`query-alloc-raw`)+ví (`query-genesis-wallet-raw`) → gọi lại `gen_single_chain.py` với
+  `--initial-supply-wallet`/`--initial-supply` (key giữ nguyên nhờ fix idempotent bên dưới) →
+  `publish-genesis-digest` + `verify-genesis` (fail cứng nếu lệch, KHÔNG đẩy lên node thật khi
+  chưa xác minh).
+- **Pha 2** (ansible-playbook đầy đủ, `deploy_action=setup` — cố ý KHÔNG dùng lại `reset` dù người
+  dùng gọi `--reset-all`, xem comment tại chỗ gọi trong script để biết lý do + đánh đổi đã biết):
+  đẩy genesis đã xác minh lên node thật + khởi động.
+
+**Fix nền tảng bắt buộc phải có trước**: `gen_single_chain.py`'s `generate_validator_keys()` giờ
+**idempotent** — nếu key đã tồn tại (từ Pha 1) thì đọc lại từ đĩa thay vì gọi `metanode keytool
+generate` lần nữa (trước đây luôn sinh key MỚI mỗi lần gọi — gọi 2 lần sẽ ra 2 committee khác nhau,
+phá vỡ liên kết với committee đã đăng ký). Lưu thêm `_gen_meta.json` (metadata riêng của script,
+không phải file node đọc) để khôi phục đúng pubkey gốc của `protocol_key`/`network_key` sau khi
+2 file đó đã bị ghi đè thành định dạng base64-kết-hợp (priv+pub) mà node thật cần.
+
+**Lỗi tự tìm ra và tự sửa trước khi commit** (không phải qua live-test đa máy, mà qua đọc kỹ
+`deploy.yml`): gọi lại ansible-playbook Pha 2 với `deploy_action=reset` (y hệt hành động gốc) sẽ
+khiến Play 1 chạy lại bước `rm -rf $LOCAL_OUT`, xoá sạch genesis vừa đăng ký+xác minh, sinh
+committee ngẫu nhiên MỚI không khớp gì với Root Anchor. Đã sửa: Pha 2 luôn dùng `setup`.
+
+**Đã kiểm chứng**: `go build`/`go vet`/`go test ./...` xanh (thêm `register_chains/main_test.go` —
+test mới cho `query-alloc-raw`/`query-genesis-wallet-raw`, trước đây pkg này chưa có test nào);
+đọc kỹ logic 2 pha bằng cách trích xuất đúng khối Python nhúng trong bash ra chạy dry-run với
+`subprocess.run` giả lập, xác nhận đúng thứ tự lệnh cho nhiều chain. **Chưa live-test được trên
+cụm ansible đa máy thật** (cần dàn máy thật để test đầu-cuối, không có sẵn trong phiên này) — nên
+coi phần `deploy_private_chains.sh` là "đã rà soát kỹ, sẵn sàng thử nghiệm thật", chưa phải "đã
+chạy thật thành công" như phần Go/gen_single_chain.py.
