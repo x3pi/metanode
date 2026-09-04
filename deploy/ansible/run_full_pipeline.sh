@@ -194,7 +194,7 @@ echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${BOLD}🏗️  [BƯỚC 1/6] TRIỂN KHAI PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 cd "${METANODE_DIR}/deploy/ansible"
-./ansible_deploy.sh --reset-all
+./ansible_deploy.sh --reset-all --open-ports
 echo -e "${GREEN}✅ Triển khai Public Chain (Root Anchor) hoàn tất!${NC}\n"
 
 # ==============================================================================

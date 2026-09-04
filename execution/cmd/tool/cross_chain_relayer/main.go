@@ -7,16 +7,103 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/relayer_daemon"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 )
 
+type GatewayConfig struct {
+	RootAnchorRPC string `json:"root_anchor_rpc"`
+	SubmitterKey  string `json:"submitter_key"`
+	Chains        []struct {
+		ChainID uint64 `json:"chain_id"`
+		RPCURL  string `json:"rpc_url"`
+	} `json:"chains"`
+
+	// Legacy format fields
+	RootAnchor string            `json:"root_anchor"`
+	Nodes      map[string]string `json:"nodes"`
+}
+
+func findDefaultConfigFile() string {
+	if env := os.Getenv("GATEWAY_CONFIG"); env != "" {
+		return env
+	}
+
+	// 1. Tìm từ thư mục làm việc hiện tại đi ngược lên
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 6; i++ {
+			c := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(c); err == nil && !stat.IsDir() {
+				return c
+			}
+			cDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(cDirect); err == nil && !stat.IsDir() {
+				return cDirect
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	// 2. Tìm từ vị trí file thực thi binary đi ngược lên
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(execPath)
+		for i := 0; i < 6; i++ {
+			c := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(c); err == nil && !stat.IsDir() {
+				return c
+			}
+			cDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(cDirect); err == nil && !stat.IsDir() {
+				return cDirect
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	// 3. Fallback cho production
+	optPath := "/opt/metanode/deploy/ansible_private_chains/gateway_register.json"
+	if _, err := os.Stat(optPath); err == nil {
+		return optPath
+	}
+
+	if _, err := os.Stat("/tmp/private_chains.json"); err == nil {
+		return "/tmp/private_chains.json"
+	}
+
+	return "deploy/ansible_private_chains/gateway_register.json"
+}
+
+func parseConfigFile(path string) (*GatewayConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg GatewayConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func main() {
+	defaultConfigFile := findDefaultConfigFile()
+
 	var (
 		relayerKeyHex  string
 		rootAnchorRPC  string
@@ -27,20 +114,52 @@ func main() {
 	)
 
 	flag.StringVar(&relayerKeyHex, "key", "", "Relayer ECDSA private key hex (with or without 0x prefix)")
-	flag.StringVar(&rootAnchorRPC, "root-anchor", "http://127.0.0.1:9099", "Root Anchor JSON-RPC endpoint")
+	flag.StringVar(&rootAnchorRPC, "root-anchor", "", "Root Anchor JSON-RPC endpoint")
 	flag.StringVar(&chainRPCsFlag, "chains", "", "Comma-separated chainID=URL mapping (e.g. 101=http://127.0.0.1:8545,202=http://127.0.0.1:8546)")
-	flag.StringVar(&configFileFlag, "config-file", "/tmp/private_chains.json", "Path to json topology file for dynamic chain auto-discovery (default: /tmp/private_chains.json)")
+	flag.StringVar(&configFileFlag, "config-file", defaultConfigFile, "Path to json config / topology file (default: auto-detected gateway_register.json)")
+	flag.StringVar(&configFileFlag, "config", defaultConfigFile, "Alias for -config-file")
 	flag.IntVar(&pollIntervalMs, "poll-interval-ms", 500, "Polling interval in milliseconds")
-	flag.Uint64Var(&reserveChainID, "reserve-chain-id", 0, "Chain ID of the system's Reserve -- MUST be included in -chains. When set, batches whose source is this chain use attestReserveIssuedCommit instead of attestCommit (see DaemonConfig.ReserveChainID's own doc comment), which is what makes a genuine A -> Reserve -> B 2-hop value transfer actually complete on the second (Reserve -> B) leg. Leave 0 to keep the pre-2026-08-28 behavior (every batch uses attestCommit; only [chain] <-> Reserve direct transfers work).")
+	flag.Uint64Var(&reserveChainID, "reserve-chain-id", 0, "Chain ID of the system's Reserve")
 	flag.Parse()
 
-	if relayerKeyHex == "" {
-		fmt.Println("Error: -key (relayer private key hex) is required")
-		flag.Usage()
-		os.Exit(1)
+	chainRPCs := make(map[uint64]string)
+
+	// Đọc cấu hình từ file JSON (gateway_register.json hoặc topology json)
+	if configFileFlag != "" {
+		if cfg, err := parseConfigFile(configFileFlag); err == nil {
+			logger.Info("📖 Đã nạp cấu hình Relayer trực tiếp từ file: %s", configFileFlag)
+			if relayerKeyHex == "" && cfg.SubmitterKey != "" {
+				relayerKeyHex = cfg.SubmitterKey
+			}
+			if rootAnchorRPC == "" {
+				if cfg.RootAnchorRPC != "" {
+					rootAnchorRPC = cfg.RootAnchorRPC
+				} else if cfg.RootAnchor != "" {
+					rootAnchorRPC = cfg.RootAnchor
+				}
+			}
+
+			// Nạp danh sách chains từ mảng chains
+			for _, c := range cfg.Chains {
+				if c.ChainID > 0 && c.RPCURL != "" {
+					chainRPCs[c.ChainID] = c.RPCURL
+				}
+			}
+			// Nạp danh sách chains từ map nodes (legacy format)
+			for cidStr, url := range cfg.Nodes {
+				if id, err := strconv.ParseUint(cidStr, 10, 64); err == nil && url != "" {
+					if _, exists := chainRPCs[id]; !exists {
+						chainRPCs[id] = url
+					}
+				}
+			}
+		}
 	}
 
-	chainRPCs := make(map[uint64]string)
+	if rootAnchorRPC == "" {
+		rootAnchorRPC = "http://127.0.0.1:10746"
+	}
+
 	if chainRPCsFlag != "" {
 		pairs := strings.Split(chainRPCsFlag, ",")
 		for _, pair := range pairs {
@@ -54,36 +173,37 @@ func main() {
 		}
 	}
 
-	// Read initial chains from config file if provided and chains flag had fewer than 2 chains
-	if configFileFlag != "" {
-		if data, err := os.ReadFile(configFileFlag); err == nil {
-			var topo struct {
-				RootAnchor string            `json:"root_anchor"`
-				Nodes      map[string]string `json:"nodes"`
-			}
-			if err := json.Unmarshal(data, &topo); err == nil {
-				for cidStr, url := range topo.Nodes {
-					if id, err := strconv.ParseUint(cidStr, 10, 64); err == nil {
-						if _, exists := chainRPCs[id]; !exists {
-							chainRPCs[id] = url
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if len(chainRPCs) < 2 {
-		fmt.Println("Error: -chains must configure at least 2 chain IDs (need both a source and a destination to relay anything)")
+	if relayerKeyHex == "" {
+		fmt.Println("❌ Error: -key (relayer private key hex) is required or must be present in config file")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	if reserveChainID != 0 {
-		if _, ok := chainRPCs[reserveChainID]; !ok {
-			fmt.Printf("Error: -reserve-chain-id %d is not one of the chain IDs in -chains\n", reserveChainID)
-			os.Exit(1)
+	// Tự động truy vấn ReserveChainID từ Root Anchor nếu chưa set
+	if reserveChainID == 0 && rootAnchorRPC != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		client, err := ethclient.DialContext(ctx, rootAnchorRPC)
+		if err == nil {
+			if onChainID, err := client.ChainID(ctx); err == nil {
+				reserveChainID = onChainID.Uint64()
+				logger.Info("ℹ️ [AUTO RESERVE] Detected Root Anchor ChainID = %d as Reserve Chain", reserveChainID)
+			}
+			client.Close()
 		}
+		cancel()
+	}
+
+	// Đảm bảo Reserve Chain được cấu hình trong danh sách RPC
+	if reserveChainID != 0 && rootAnchorRPC != "" {
+		if _, exists := chainRPCs[reserveChainID]; !exists {
+			chainRPCs[reserveChainID] = rootAnchorRPC
+		}
+	}
+
+	if len(chainRPCs) < 2 {
+		fmt.Println("❌ Error: configure at least 2 chain IDs (need both a source and a destination to relay anything)")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	cfg := relayer_daemon.DaemonConfig{
@@ -102,13 +222,8 @@ func main() {
 	}
 
 	logger.Info("🚀 [CROSS-CHAIN RELAYER] started for relayer address %s", daemon.Address().Hex())
-	logger.Info("Connected to Root Anchor @ %s with %d private chains configured", rootAnchorRPC, len(chainRPCs))
+	logger.Info("Connected to Root Anchor @ %s with %d chains configured (ReserveChainID: %d)", rootAnchorRPC, len(chainRPCs), reserveChainID)
 
-	// Watch every ordered (source, dest) pair among the configured chains -- any of them could
-	// send an outbound() message to any other. Each pair gets its own independent
-	// WatchChainPair loop (real polling: getPendingOutboundCount -> batchOutboundCommit ->
-	// attestCommit -> claimMessage, see RelayerDaemon.WatchChainPair's doc comment), so one
-	// pair's RPC trouble never blocks another pair's relaying.
 	ctx, cancel := context.WithCancel(context.Background())
 	chainIDs := make([]uint64, 0, len(chainRPCs))
 	for id := range chainRPCs {
@@ -126,9 +241,9 @@ func main() {
 	}
 	logger.Info("👀 [CROSS-CHAIN RELAYER] watching %d chain pair(s) for real outbound messages", watchCount)
 
-	// Dynamic Chain Discovery: automatically poll config-file for newly registered chains at runtime
+	// Dynamic Chain Discovery: tự động quét config file theo thời gian thực để cập nhật chain mới
 	if configFileFlag != "" {
-		logger.Info("🔍 [DYNAMIC AUTO-DISCOVERY] Enabled watching config topology at %s", configFileFlag)
+		logger.Info("🔍 [DYNAMIC AUTO-DISCOVERY] Enabled watching config file at %s", configFileFlag)
 		go func() {
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
@@ -137,20 +252,24 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					data, err := os.ReadFile(configFileFlag)
+					cfg, err := parseConfigFile(configFileFlag)
 					if err != nil {
 						continue
 					}
-					var topo struct {
-						RootAnchor string            `json:"root_anchor"`
-						Nodes      map[string]string `json:"nodes"`
+					// Quét mảng chains
+					for _, c := range cfg.Chains {
+						if c.ChainID > 0 && c.RPCURL != "" {
+							if _, exists := daemon.GetChainClient(c.ChainID); !exists {
+								if err := daemon.AddChain(ctx, c.ChainID, c.RPCURL); err != nil {
+									logger.Warn("⚠️ [DYNAMIC DISCOVERY] Failed to add discovered chain %d: %v", c.ChainID, err)
+								}
+							}
+						}
 					}
-					if err := json.Unmarshal(data, &topo); err != nil {
-						continue
-					}
-					for cidStr, url := range topo.Nodes {
+					// Quét map nodes
+					for cidStr, url := range cfg.Nodes {
 						cid, err := strconv.ParseUint(cidStr, 10, 64)
-						if err != nil {
+						if err != nil || url == "" {
 							continue
 						}
 						if _, exists := daemon.GetChainClient(cid); !exists {

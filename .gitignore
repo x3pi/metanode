@@ -549,3 +549,6 @@ deploy/cluster/*
 !deploy/cluster/local_devnet/
 deploy/cluster/local_devnet/*
 !deploy/cluster/local_devnet/*.sh
+execution/cmd/tool/cross_chain_relayer/cross_chain_relayer
+deploy/ansible_private_chains/gateway_register.json
+deploy/private_chain_kit/

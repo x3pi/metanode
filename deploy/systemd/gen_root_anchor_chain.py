@@ -145,13 +145,17 @@ def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
     Anchor (a real registration transaction/process, not a hardcoded genesis
     alloc).
     """
-    from eth_account import Account
     if node_index == 0:
         seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
     else:
         seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
-    address = Account.from_key(priv_hex).address
+    try:
+        from eth_account import Account
+        address = Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        address = eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
     return priv_hex, address
 
 # Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the

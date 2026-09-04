@@ -105,7 +105,7 @@ func NewTxValidatorPool(
 // replaced.
 func (vp *TxValidatorPool) ClearNoncesCache() {
 	vp.noncesCache.Store(&sync.Map{})
-	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed/reverted)")
+	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed)")
 }
 
 // SetEnvironment updates the environment reference

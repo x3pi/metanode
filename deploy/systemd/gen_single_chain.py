@@ -51,13 +51,17 @@ def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
     Anchor (a real registration transaction/process, not a hardcoded genesis
     alloc).
     """
-    from eth_account import Account
     if node_index == 0:
         seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
     else:
         seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
-    address = Account.from_key(priv_hex).address
+    try:
+        from eth_account import Account
+        address = Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        address = eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
     return priv_hex, address
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -159,16 +163,30 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
     same execution/pkg/bls Go library every real cross-chain caller uses)."""
     global _BLS_PUBKEY_BIN_CACHE
     if _BLS_PUBKEY_BIN_CACHE is None:
-        bin_path = REPO_ROOT / "execution" / "bls_pubkey"
-        if not bin_path.exists():
-            print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
-            result = subprocess.run(
-                ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
-                cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
-                sys.exit(1)
+        candidates = [
+            SCRIPT_DIR / "bin" / "bls_pubkey",
+            SCRIPT_DIR / "bls_pubkey",
+            REPO_ROOT / "execution" / "bls_pubkey",
+            REPO_ROOT / "execution" / "cmd" / "tool" / "bls_pubkey" / "bls_pubkey",
+            Path(shutil.which("bls_pubkey") or ""),
+        ]
+        bin_path = None
+        for c in candidates:
+            if c and c.is_file():
+                bin_path = c
+                break
+
+        if bin_path is None:
+            bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+            if not bin_path.exists():
+                print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+                result = subprocess.run(
+                    ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                    cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                    sys.exit(1)
         _BLS_PUBKEY_BIN_CACHE = str(bin_path)
     result = subprocess.run(
         [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
@@ -325,6 +343,31 @@ def main():
     print(f"  Chain ID:              {cyan(args.chain_id)}")
     print(f"  Validators:            {cyan(args.validators)}")
 
+    # Auto-resolve reserve_chain_id from Root Anchor RPC if not explicitly provided
+    if args.reserve_chain_id is None:
+        if args.root_anchor_rpc:
+            detected_id = None
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    args.root_anchor_rpc,
+                    data=b'{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}',
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    rdata = json.loads(resp.read().decode())
+                    if "result" in rdata and isinstance(rdata["result"], str):
+                        detected_id = int(rdata["result"], 16)
+            except Exception:
+                pass
+            args.reserve_chain_id = detected_id if detected_id is not None else 991
+        else:
+            args.reserve_chain_id = args.chain_id
+
+    # Default submitter key to shared devnet key if Root Anchor is configured
+    if not args.root_anchor_submitter_key and args.root_anchor_rpc:
+        args.root_anchor_submitter_key = "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
+
     # 1. Generate keys for validators
     validators_entries = []
     validator_keys_list = []
@@ -432,8 +475,20 @@ def main():
     validity_threshold = fault_tolerance + 1
 
     # Inject all accounts from genesis template (default: genesis.json.example) with deduplication
-    template_path = Path(args.genesis_template) if args.genesis_template else (REPO_ROOT / "deploy" / "systemd" / "genesis.json.example")
-    if not args.no_example_alloc and template_path.exists():
+    template_path = None
+    if args.genesis_template:
+        template_path = Path(args.genesis_template)
+    else:
+        candidates = [
+            SCRIPT_DIR / "genesis.json.example",
+            SCRIPT_DIR / "config" / "genesis.json.example",
+            REPO_ROOT / "deploy" / "systemd" / "genesis.json.example",
+        ]
+        for c in candidates:
+            if c.exists():
+                template_path = c
+                break
+    if not args.no_example_alloc and template_path and template_path.exists():
         try:
             with open(template_path, "r") as ef:
                 example_data = json.load(ef)
@@ -614,7 +669,8 @@ time_based_epoch_change = true
     start_sh = out_dir / "start_single_chain.sh"
     stop_sh  = out_dir / "stop_single_chain.sh"
 
-    simple_chain_bin = REPO_ROOT / "execution" / "cmd" / "simple_chain" / "simple_chain"
+    local_sc = SCRIPT_DIR / "bin" / "simple_chain"
+    simple_chain_bin = local_sc if local_sc.exists() else (REPO_ROOT / "execution" / "cmd" / "simple_chain" / "simple_chain")
     
     start_script_content = f"""#!/usr/bin/env bash
 set -e
@@ -634,7 +690,8 @@ fi
         node_flags = f" --debug --pprof-addr=127.0.0.1:{6060 + node_id}" if args.debug else ""
         start_script_content += f"""
 echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node_id})..."
-(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json{node_flags} > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
+mkdir -p "$DIR/node-{node_id}/logs"
+(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config "$DIR/node-{node_id}/config.json"{node_flags} > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
 """
 
     start_script_content += f"""
@@ -654,13 +711,27 @@ for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
         if kill -0 "$PID" 2>/dev/null; then
             echo "  → Stopping node process PID $PID..."
             kill -15 "$PID" 2>/dev/null || true
-            sleep 0.5
-            kill -9 "$PID" 2>/dev/null || true
+            for i in $(seq 1 10); do
+                if ! kill -0 "$PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.5
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+                kill -9 "$PID" 2>/dev/null || true
+            fi
         fi
         rm -f "$pid_file"
     fi
 done
 
+# Fallback: Kill any simple_chain process running with config inside this directory
+pkill -f "$DIR" 2>/dev/null || true
+"""
+    for node_id in range(args.validators):
+        stop_script_content += f"""fuser -k {args.rpc_port + node_id}/tcp 2>/dev/null || true\n"""
+
+    stop_script_content += f"""
 echo "✅ Single Chain {args.chain_id} stopped."
 """
 
