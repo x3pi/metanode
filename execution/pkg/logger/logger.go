@@ -134,7 +134,7 @@ func SetIdentifier(identifier string) {
 // Khi tắt, logger chỉ ghi vào các output còn lại (ví dụ file).
 func SetConsoleOutputEnabled(enabled bool) {
 	consoleOutputEnabled = enabled
-	setOutputsUnsafe(config.Outputs)
+	setOutputsUnsafe(getOutputsCopy())
 }
 
 // SetFormat thiết lập định dạng log ("text" hoặc "json").
@@ -443,7 +443,15 @@ func startLogWriter() {
 	logQueue = make(chan logJob, logQueueCapacity)
 	go func() {
 		for job := range logQueue {
-			logger.writeToOutputsSplit(job.colored, job.plain)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Bảo vệ node: Tránh panic từ I/O làm crash node
+						fmt.Fprintf(os.Stderr, "⚠️ [LOGGER-PANIC-RECOVERED] %v\n", r)
+					}
+				}()
+				logger.writeToOutputsSplit(job.colored, job.plain)
+			}()
 		}
 	}()
 }
@@ -476,6 +484,9 @@ var writeMu sync.Mutex
 func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 	writeMu.Lock()
 	defer writeMu.Unlock()
+	defer func() {
+		_ = recover()
+	}()
 	outputs := l.Config.Outputs
 	for _, out := range outputs {
 		if out == nil {
@@ -483,10 +494,10 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 		}
 		if out == os.Stdout || out == os.Stderr {
 			// Terminal output → colored (có ANSI codes)
-			out.Write(colored)
+			_, _ = out.Write(colored)
 		} else {
 			// File output → plain (không ANSI codes)
-			out.Write(plain)
+			_, _ = out.Write(plain)
 		}
 	}
 }
@@ -494,10 +505,7 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 // syncFileOutputs force sync file outputs ra disk
 // Gọi sau Error/Fatal để đảm bảo log không mất khi crash
 func syncFileOutputs() {
-	writeMu.Lock()
-	// Copy the outputs slice so we can release the lock before expensive I/O
-	outputsCopy := append([]*os.File(nil), config.Outputs...)
-	writeMu.Unlock()
+	outputsCopy := getOutputsCopy()
 
 	for _, out := range outputsCopy {
 		if out == nil || out == os.Stdout || out == os.Stderr {
@@ -582,8 +590,8 @@ func EnableFileLog(fileName string) (*loggerfile.FileLogger, error) {
 		oldLogger := fileLoggerInstance
 		oldFile := oldLogger.File()
 		fileLoggerInstance = nil
-		oldLogger.Close()
 		removeOutputLocked(oldFile)
+		oldLogger.Close()
 	}
 
 	newFileLogger, err := loggerfile.NewFileLogger(trimmed)
@@ -623,9 +631,11 @@ func CloseFileLog() {
 
 	stopSizeCheckLocked()
 
-	fileLoggerInstance.Close()
-	removeOutputLocked(fileLoggerInstance.File())
+	oldLogger := fileLoggerInstance
+	oldFile := oldLogger.File()
 	fileLoggerInstance = nil
+	removeOutputLocked(oldFile)
+	oldLogger.Close()
 }
 
 func attachFileLoggerOutputLocked() {
@@ -638,8 +648,7 @@ func attachFileLoggerOutputLocked() {
 		return
 	}
 
-	outputs := append([]*os.File(nil), config.Outputs...)
-	outputs = append(outputs, file)
+	outputs := append(getOutputsCopy(), file)
 	setOutputsUnsafe(outputs)
 }
 
@@ -648,8 +657,9 @@ func removeOutputLocked(target *os.File) {
 		return
 	}
 
-	filtered := make([]*os.File, 0, len(config.Outputs))
-	for _, out := range config.Outputs {
+	currentOutputs := getOutputsCopy()
+	filtered := make([]*os.File, 0, len(currentOutputs))
+	for _, out := range currentOutputs {
 		if out == nil || out == target {
 			continue
 		}
@@ -674,7 +684,16 @@ func dedupeOutputs(outputs []*os.File) []*os.File {
 	return deduped
 }
 
+func getOutputsCopy() []*os.File {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	return append([]*os.File(nil), config.Outputs...)
+}
+
 func setOutputsUnsafe(outputs []*os.File) {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	config.Outputs = enforceConsolePreference(dedupeOutputs(outputs))
 	logger.Config.Outputs = config.Outputs
 	syncStdLoggerOutputs()
