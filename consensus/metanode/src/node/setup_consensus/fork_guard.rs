@@ -38,6 +38,26 @@ impl ConsensusNode {
     /// `state_root` as a redundant/explicit check for clearer diagnostics on mismatch. Raw-byte
     /// inequality is still logged (as a WARNING, not a fork) when hashes otherwise match, purely
     /// as a diagnostic breadcrumb — it should no longer be able to halt the process by itself.
+    ///
+    /// ═══ SECOND ROOT CAUSE FOUND + FIXED (2026-09-05, same day) ═══
+    /// `block_hash` itself could STILL legitimately differ between two honest nodes for "the
+    /// same" queried block number, live-reproduced twice on a node recovering from a large
+    /// internal commit replay (`node/recovery.rs::perform_block_recovery_check`). A temporary
+    /// field-level diagnostic (since removed) showed AccountStatesRoot always matched -- the
+    /// actually-executed state was never wrong -- but LastBlockHash/TimeStamp/GlobalExecIndex/
+    /// CommitIndex all differed, with GlobalExecIndex consistently off by the same amount
+    /// (~73) and CommitIndex by another consistent amount (~370). Root cause:
+    /// `perform_block_recovery_check`'s from-storage GEI reconstruction had its own inlined
+    /// copy of `executor.rs::dispatch_commit()`'s "is this commit empty" decision, missing the
+    /// `commit_index > 1` exemption (an epoch's first commit always consumes exactly 1 GEI even
+    /// when empty, live) -- so every epoch whose first commit happened to be empty (common on a
+    /// quiet devnet) made replay under-count GEI by 1, accumulating over many epochs into a
+    /// real, stable divergence. Fixed at the source in `commit_processor::executor::
+    /// commit_is_empty_for_gei` (now the single shared decision both paths call) -- see that
+    /// function's doc comment for the full writeup. This fix only prevents the drift from being
+    /// introduced on FUTURE replays; a node whose on-disk history was already built by a past
+    /// buggy replay stays drifted until it re-syncs from a clean peer (STARTUP-SYNC block-copy),
+    /// not by replaying its own already-wrong local history again.
     pub(crate) async fn runtime_fork_guard(
         client: Arc<ExecutorClient>,
         peers: Vec<String>,

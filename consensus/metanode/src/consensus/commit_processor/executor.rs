@@ -115,6 +115,31 @@ pub(crate) fn extract_committed_tx_data(subdag: &CommittedSubDag) -> Vec<Vec<u8>
     out
 }
 
+/// Whether a commit's transactions are considered "empty" for GEI-consumption purposes, i.e.
+/// whether it fast-skips (consumes 0 GEIs) instead of consuming 1+ GEIs.
+///
+/// EXEMPTION (2026-04-something, FAST PATH comment below): `commit_index == 1` (an epoch's very
+/// first commit) is NEVER fast-skipped, even with zero transactions and no system tx -- it
+/// always consumes exactly 1 GEI. This function is the SINGLE source of truth for that rule,
+/// specifically so `dispatch_commit()` (the live execution path, below) and
+/// `recovery.rs::perform_block_recovery_check()` (the replay-from-storage path, used when
+/// reconstructing GEI history for a node that's catching up) can never silently diverge on it
+/// again. They already had -- found live 2026-09-05: recovery.rs was missing this
+/// `commit_index > 1` exemption entirely, so every epoch whose first commit happened to be
+/// empty made its replay under-count GEI by exactly 1 relative to what live execution actually
+/// assigned. Accumulated over many epochs (common on a quiet/idle devnet), this became a real,
+/// stable GlobalExecIndex/CommitIndex divergence between a node that replayed its own history
+/// through that buggy path and one that didn't -- which fork_guard.rs's LAYER-6 correctly (if
+/// confusingly, since AccountStatesRoot still matched -- the actual executed state was never
+/// wrong) flagged as a "CONFIRMED FORK".
+pub(crate) fn commit_is_empty_for_gei(
+    total_transactions: usize,
+    has_system_tx: bool,
+    commit_index: u32,
+) -> bool {
+    total_transactions == 0 && !has_system_tx && commit_index > 1
+}
+
 pub async fn dispatch_commit(
     subdag: &CommittedSubDag,
     global_exec_index: u64,
@@ -196,7 +221,7 @@ pub async fn dispatch_commit(
     //   - shared_last_global_exec_index → for GEI tracking
     //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
-    if total_transactions == 0 && !has_system_tx && commit_index > 1 {
+    if commit_is_empty_for_gei(total_transactions, has_system_tx, commit_index) {
         DIAG_FAST_SKIP_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         diag_exec_maybe_print();
         tracing::trace!(
@@ -428,4 +453,39 @@ pub async fn dispatch_commit(
     }
 
     Ok(1)
+}
+
+#[cfg(test)]
+mod commit_is_empty_for_gei_tests {
+    use super::commit_is_empty_for_gei;
+
+    // Regression test for the 2026-09-05 GEI-drift bug: recovery.rs::perform_block_recovery_check
+    // used to inline its own copy of this exact decision without the `commit_index > 1`
+    // exemption, silently under-counting GEI by 1 for every epoch whose first commit was empty.
+    // Pins down the real rule dispatch_commit() relies on so the two call sites can never
+    // silently re-diverge on it again.
+
+    #[test]
+    fn epoch_first_commit_never_empty_even_with_zero_txs_and_no_system_tx() {
+        assert!(!commit_is_empty_for_gei(0, false, 1));
+    }
+
+    #[test]
+    fn later_commit_with_zero_txs_and_no_system_tx_is_empty() {
+        assert!(commit_is_empty_for_gei(0, false, 2));
+        assert!(commit_is_empty_for_gei(0, false, 12345));
+    }
+
+    #[test]
+    fn any_commit_with_transactions_is_never_empty() {
+        assert!(!commit_is_empty_for_gei(1, false, 1));
+        assert!(!commit_is_empty_for_gei(1, false, 2));
+        assert!(!commit_is_empty_for_gei(500, false, 2));
+    }
+
+    #[test]
+    fn any_commit_with_a_system_tx_is_never_empty_regardless_of_commit_index() {
+        assert!(!commit_is_empty_for_gei(0, true, 1));
+        assert!(!commit_is_empty_for_gei(0, true, 2));
+    }
 }
