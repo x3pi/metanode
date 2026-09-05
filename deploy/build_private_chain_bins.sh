@@ -191,6 +191,14 @@ fi
 
 TOTAL_TIME=$(( $(date +%s) - START_TOTAL ))
 
+# Tự động đồng bộ sang gói phân phối metanode-suite nếu thư mục tồn tại
+SUITE_DEST_BIN="$REPO_ROOT/../metanode-suite/private-chain-v1/private_chain_kit/bin"
+if [ -d "$SUITE_DEST_BIN" ] && [ "$DEST_BIN" != "$SUITE_DEST_BIN" ]; then
+    echo -e "\n📦 Đang tự động đồng bộ binary sang ${BLUE}metanode-suite/private-chain-v1/private_chain_kit/bin${NC}..."
+    cp -u "$DEST_BIN"/* "$SUITE_DEST_BIN/" 2>/dev/null || cp "$DEST_BIN"/* "$SUITE_DEST_BIN/"
+    echo -e "${GREEN}  ✅ Đã đồng bộ binary mới nhất sang metanode-suite/private-chain-v1/private_chain_kit/bin!${NC}"
+fi
+
 echo -e "\n${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}${GREEN}🎉 HOÀN TẤT BIÊN DỊCH VÀ ĐỒNG BỘ TOÀN BỘ BINARY (${TOTAL_TIME}s)${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
