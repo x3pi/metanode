@@ -1,5 +1,20 @@
 # Root Anchor Cross-Chain Bridge — Production Readiness Plan
 
+> ⚠️ **SUPERSEDED on the governance/registration front (2026-09-05 note)**: this document
+> describes an era where `bootstrapFoundingChains()`, `propose(ProposalRegisterChain, ...)`, and
+> `Governance.ActiveChains` were the live registration/governance mechanism — all three are now
+> **deleted**. As of 2026-08-28, `RegisterChainViaStake` (a real native-coin stake deposit, no
+> vote) became the sole registration path; as of 2026-09-04, the entire `GovernanceEngine`
+> (propose/vote/quorum/timelock/execute) was removed outright and replaced by self-signed certs
+> (`AllocateSupplyWithCert`/`TransferAllocationWithCert`) plus a small fixed `RecoveryCommittee`
+> for third-party actions. `cmd/tool/register_chains` was rewritten to match (see its own
+> up-to-date README) and `cmd/tool/cross_chain_relayer` grew a real automated watch/batch/relay
+> daemon (`pkg/cross_chain/relayer_daemon`), closing this doc's "tooling gap #1/#2/#3" findings
+> below — those are historical, not open work items. Kept as-is below for its still-accurate
+> cryptographic/message-layer analysis (Milestones A-I, the C7/C8 fixes); for current
+> governance/registration architecture see `note/eurozone_unified_native_coin_plan.md`'s "CẬP
+> NHẬT (2026-09-04, phiên sau)" section and `note/cross_chain_attack_scenario_catalog.md`'s C6 row.
+
 Status as of 2026-08-25: Milestones **A through I** are implemented and merged into
 `dev`, plus 3 critical bugs found across 2 review passes are fixed and merged:
 

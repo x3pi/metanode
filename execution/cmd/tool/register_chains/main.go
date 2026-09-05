@@ -21,8 +21,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain/tx_processor/abi_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
@@ -107,15 +107,14 @@ func main() {
 	defaultConfigFile := findDefaultConfigFile()
 
 	var (
-		configFileFlag      string
-		actionFlag          string
-		submitterKeyHex     string
-		rootAnchorRPC       string
-		chainIDsFlag        string
-		fundGenesisFlag     bool
-		genesisSupplyFlag   string
-		perChainAllocFlag   string
-		timelockWaitSeconds int
+		configFileFlag    string
+		actionFlag        string
+		submitterKeyHex   string
+		rootAnchorRPC     string
+		chainIDsFlag      string
+		fundGenesisFlag   bool
+		genesisSupplyFlag string
+		perChainAllocFlag string
 
 		// Transfer alloc flags
 		fromChainFlag uint64
@@ -135,7 +134,6 @@ func main() {
 	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint and distribute genesis supply")
 	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total genesis supply to mint on Root Anchor (base-10 wei)")
 	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred to each founding chain (base-10 wei)")
-	flag.IntVar(&timelockWaitSeconds, "timelock-wait", 12, "Seconds to wait for devnet governance timelock")
 
 	flag.Uint64Var(&fromChainFlag, "from-chain", 101, "Source Chain ID for transfer-alloc (e.g. 101 or 991)")
 	flag.Uint64Var(&toChainFlag, "to-chain", 103, "Destination Chain ID for transfer-alloc")
@@ -168,9 +166,6 @@ func main() {
 		}
 		if fileConfig.FundGenesis != nil {
 			fundGenesisFlag = *fileConfig.FundGenesis
-		}
-		if fileConfig.TimelockWaitSeconds != nil {
-			timelockWaitSeconds = *fileConfig.TimelockWaitSeconds
 		}
 	}
 
@@ -205,7 +200,7 @@ func main() {
 	case "query-registry":
 		handleQueryRegistry(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "transfer-alloc", "transfer-allocation", "allocate-supply":
-		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag)
 	case "publish-genesis-digest":
 		handlePublishGenesisDigest(ctx, privKey, fromAddress, rootAnchorRPC, chainIDsFlag, genesisFileFlag, parsedABI)
 	case "verify-genesis":
@@ -215,7 +210,7 @@ func main() {
 			logger.Error("No gateway register config file found. Please provide --config <gateway_register.json>")
 			os.Exit(1)
 		}
-		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, parsedABI)
 	}
 }
 
@@ -549,7 +544,6 @@ func handleTransferAllocation(
 	fromChain, toChain uint64,
 	amountMTN float64,
 	amountWei string,
-	timelockWaitSeconds int,
 ) {
 	var amountBig *big.Int
 	if amountWei != "" {
@@ -615,13 +609,12 @@ func handleTransferAllocation(
 }
 
 type GatewayConfigFile struct {
-	RootAnchorRPC       string               `json:"root_anchor_rpc,omitempty"`
-	SubmitterKey        string               `json:"submitter_key,omitempty"`
-	GenesisSupply       string               `json:"genesis_supply,omitempty"`
-	PerChainAllocation  string               `json:"per_chain_allocation,omitempty"`
-	FundGenesis         *bool                `json:"fund_genesis,omitempty"`
-	TimelockWaitSeconds *int                 `json:"timelock_wait_seconds,omitempty"`
-	Chains              []ChainConfigEntry   `json:"chains"`
+	RootAnchorRPC      string             `json:"root_anchor_rpc,omitempty"`
+	SubmitterKey       string             `json:"submitter_key,omitempty"`
+	GenesisSupply      string             `json:"genesis_supply,omitempty"`
+	PerChainAllocation string             `json:"per_chain_allocation,omitempty"`
+	FundGenesis        *bool              `json:"fund_genesis,omitempty"`
+	Chains             []ChainConfigEntry `json:"chains"`
 }
 
 type ChainConfigEntry struct {
@@ -668,7 +661,6 @@ func handleRegisterChains(
 	cfg *GatewayConfigFile,
 	fundGenesisFlag bool,
 	genesisSupplyFlag, perChainAllocFlag string,
-	timelockWaitSeconds int,
 	parsedABI abi.ABI,
 ) {
 	logger.Info("Using submitter address: %s", fromAddress.Hex())
@@ -839,7 +831,7 @@ func handleRegisterChains(
 	}
 
 	if fundGenesisFlag {
-		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, parsedABI)
 	}
 }
 
@@ -912,7 +904,6 @@ func fundGenesis(
 	committee []committeeMember,
 	chainIDs []uint64,
 	genesisSupplyFlag, perChainAllocFlag string,
-	timelockWaitSeconds int,
 	parsedABI abi.ABI,
 ) {
 	if genesisSupplyFlag == "" || perChainAllocFlag == "" {
