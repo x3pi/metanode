@@ -685,6 +685,25 @@ func (h *GatewayHandler) handleWrite(
 			Ordered:     mustBool(args[8]),
 		}
 
+		// SECURITY FIX (2026-09-05, found in proactive re-audit): unlike the relay-onward path
+		// in claimMessage (which already rejects an unregistered/self finalDestChainID before
+		// ever calling engine.Outbound -- see that case's own comment a few hundred lines below),
+		// this direct user-initiated entry point had NO such check. A typo'd or never-registered
+		// DestChainID would still pass engine.Outbound's own validation (it has no ChainRegistry
+		// access requirement at all) and go on to really burn/lock Value+Tip+GasFee below, into a
+		// PendingOutboundMessages bucket that no relayer for that chain pair will ever exist to
+		// batch -- the funds would sit Pending forever with no way to ever produce a failure cert
+		// (nothing ever attempts delivery, so nothing ever reverts), making this an unrecoverable
+		// permanent lock of the sender's own funds. Same underlying principle as Finding #1 in
+		// note/cross_chain/security_audit_findings.md ("no permanent lock of funds"), just
+		// self-triggered rather than adversarial. Fail closed before any state mutation happens.
+		if params.DestChainID == engine.LocalChainID {
+			return nil, nil, fmt.Errorf("outbound: destChainId %d is this chain itself -- not a valid cross-chain target", params.DestChainID)
+		}
+		if _, known := engine.GetChainRegistryEntry(params.DestChainID); !known {
+			return nil, nil, fmt.Errorf("outbound: destChainId %d is not a registered chain", params.DestChainID)
+		}
+
 		msg, err := engine.Outbound(tx.FromAddress(), params, tx.Hash())
 		if err != nil {
 			return nil, nil, err

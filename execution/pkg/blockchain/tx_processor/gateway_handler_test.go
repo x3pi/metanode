@@ -86,6 +86,24 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 		t.Fatalf("AddBalance for sender failed: %v", err)
 	}
 
+	// destChainId 102 must be a known registered chain -- outbound() now rejects an unregistered
+	// destination before it ever locks/burns funds (2026-09-05 security fix, see that case's own
+	// comment in gateway_handler.go).
+	seedEngine, err := loadGatewayEngine(cs1)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
+	}
+	seedEngine.ChainRegistry[102] = cross_chain.ChainRegistry{
+		ChainID: 102,
+		Epoch:   1,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+		},
+	}
+	if err := saveGatewayEngine(cs1, seedEngine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
+	}
+
 	calldata, err := h.abi.Pack("outbound",
 		big.NewInt(102),    // destChainId
 		target,             // target
@@ -193,6 +211,69 @@ func mustPackGetMessageStatus(t *testing.T, h *GatewayHandler, messageID common.
 		t.Fatalf("marshal CallData: %v", err)
 	}
 	return dataBytes
+}
+
+// TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain closes Finding #5 in
+// note/cross_chain/security_audit_findings.md ("Permanent Lock of Funds via Unregistered
+// Destination Chain in outbound()", found in the 2026-09-05 proactive re-audit): unlike the
+// relay-onward path in claimMessage (which already validated finalDestChainID before this fix),
+// the direct user-facing outbound() entry point locked/burned real funds into
+// PendingOutboundMessages[destChainID] for ANY destChainID at all -- including one nobody will
+// ever register or relay for, which would leave the funds Pending forever with no way to ever
+// produce a failure cert (nothing ever attempts delivery, so nothing ever reverts). This proves
+// the fix: both an unregistered destChainId and destChainId == the local chain itself are now
+// rejected BEFORE any balance mutation happens.
+func TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	target := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	packOutbound := func(destChainID int64) []byte {
+		calldata, err := h.abi.Pack("outbound",
+			big.NewInt(destChainID), target, []byte{}, big.NewInt(0), big.NewInt(100),
+			big.NewInt(0), big.NewInt(0), uint8(0), false,
+		)
+		if err != nil {
+			t.Fatalf("pack outbound() calldata: %v", err)
+		}
+		return marshalCallData(t, calldata)
+	}
+
+	// Case 1: destChainId 999999 was never registered anywhere on this chain -- must be rejected.
+	tx1 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), packOutbound(999999))
+	rcp1, _, failed1 := h.HandleTransaction(context.Background(), cs, tx1, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed1 {
+		t.Fatalf("expected outbound() to an unregistered destChainId to fail, but it succeeded")
+	}
+	if !strings.Contains(string(rcp1.Return()), "not a registered chain") {
+		t.Fatalf("expected 'not a registered chain' rejection, got: %s", string(rcp1.Return()))
+	}
+
+	// Case 2: destChainId == this chain's own LocalChainID (0 in this test context, since no
+	// engine has been saved/configured yet) -- sending "cross-chain" to yourself is never valid.
+	tx2 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), packOutbound(0))
+	rcp2, _, failed2 := h.HandleTransaction(context.Background(), cs, tx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed2 {
+		t.Fatalf("expected outbound() to the local chain itself to fail, but it succeeded")
+	}
+	if !strings.Contains(string(rcp2.Return()), "is this chain itself") {
+		t.Fatalf("expected 'is this chain itself' rejection, got: %s", string(rcp2.Return()))
+	}
+
+	// Sanity: NEITHER attempt actually moved the sender's real balance.
+	as, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || as == nil || as.Balance().Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected sender balance to remain 1000 (no mutation on a rejected outbound), got %v (err=%v)", as.Balance(), err)
+	}
 }
 
 // TestGatewayHandler_AttestCommitThenClaimMessage exercises the two highest-risk write paths
@@ -1684,7 +1765,18 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 
 	// Register a mock custom asset
 	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
-	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
+	// destChainID must be a known registered chain -- outbound() now rejects an unregistered
+	// destination before it ever locks/burns funds (2026-09-05 security fix, see that case's
+	// own comment in gateway_handler.go).
+	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Epoch:   1,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+			},
+		},
+	}, supplyLedger)
 	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 
 	entry := &cross_chain.AssetEntry{
@@ -1863,6 +1955,24 @@ func TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce(t *tes
 
 	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(10_000)); err != nil {
 		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	// destChainId 102 (used by packOutbound below) must be a known registered chain -- outbound()
+	// now rejects an unregistered destination before it ever locks/burns funds (2026-09-05
+	// security fix, see that case's own comment in gateway_handler.go).
+	seedEngine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
+	}
+	seedEngine.ChainRegistry[102] = cross_chain.ChainRegistry{
+		ChainID: 102,
+		Epoch:   1,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+		},
+	}
+	if err := saveGatewayEngine(cs, seedEngine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
 	}
 
 	packOutbound := func() []byte {

@@ -120,3 +120,49 @@ coin (assetId=0) chút nào.
 Test: `TestGateway_CustomAssetNeverTouchesNativePerChainAllocation` (mới — commit custom-asset với
 giá trị 10^24 vượt xa allocation native nhỏ của chain nguồn, kể cả khi Reserve chưa cấu hình, vẫn
 attest+claim thành công và không đụng tới `PerChainAllocation` của bất kỳ chain nào).
+
+## 5. Permanent Lock of Funds via Unregistered Destination Chain in outbound() — ✅ ĐÃ VÁ (2026-09-05, rà soát chủ động)
+**Location:** `execution/pkg/blockchain/tx_processor/gateway_handler.go` (case `"outbound"`)
+
+**Mô tả:** phát hiện khi rà soát toàn bộ các luồng cross-chain theo yêu cầu người dùng ("đánh giá
+lại tất cả các luồng"). Nhánh relay-onward bên trong `claimMessage` (khi 1 message tiếp tục đi
+tiếp sang chain thứ 3) đã kiểm tra `finalDestChainID` phải khác chính chain hiện tại VÀ phải nằm
+trong `ChainRegistry` trước khi gọi `engine.Outbound(...)`. Nhưng điểm vào trực tiếp do người dùng
+gọi — case `"outbound"` — lại **hoàn toàn không có 2 kiểm tra này**: `engine.Outbound()` tự nó
+không có quyền truy cập `ChainRegistry` nên không thể tự kiểm tra, và handler gọi thẳng nó rồi burn
+thật Value+Tip+GasFee ngay sau đó.
+
+Hậu quả: gửi `outbound()` tới một `destChainId` gõ nhầm hoặc chưa từng được đăng ký sẽ burn thật
+tiền của người gửi, nhét message vào `PendingOutboundMessages[destChainId]` — nơi không ai (không
+relayer nào theo dõi cặp chain đó) sẽ bao giờ đóng gói (`batchOutboundCommit`) hay giao đến đích.
+Message nằm `Pending` vĩnh viễn, không bao giờ có cách tạo ra failure cert (vì không ai từng thử
+thực thi nó để mà revert) → tiền bị khoá vĩnh viễn, không có đường hoàn lại. Cùng nguyên tắc gốc rễ
+với mục 1 ("no permanent lock of funds"), khác ở chỗ đây là tự người gửi kích hoạt (không cần kẻ
+tấn công) chứ không phải khai thác nhắm vào tiền của người khác.
+
+**Đã vá:** thêm đúng 2 kiểm tra mirror với nhánh relay-onward, chạy TRƯỚC mọi burn/lock: từ chối
+nếu `destChainId == LocalChainID` (gửi "cross-chain" về chính mình) hoặc `destChainId` chưa có
+trong `ChainRegistry`. Không đổi hành vi với một destChainId hợp lệ đã đăng ký.
+
+Test: `TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain` (mới — cả 2 trường hợp bị từ
+chối trước khi có bất kỳ thay đổi số dư nào); cập nhật setup ChainRegistry cho 4 test hiện có từng
+ngầm dựa vào việc gửi tới 1 destChainId chưa đăng ký (`TestGatewayHandler_OutboundPersistsAcrossChainStateReload`,
+`TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce`,
+`TestGatewayHandler_CustomAsset_Outbound_ClaimMessage`, `TestGatewayHandler_BatchOutboundCommit_EndToEnd`,
+`TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds`).
+
+---
+
+**Kết luận rà soát toàn diện (2026-09-05, theo yêu cầu "đánh giá lại tất cả các luồng"):** đã đi
+qua toàn bộ danh sách method export của `GatewayEngine`/`AssetRegistryEngine` (attest/claim/refund/
+credit/refundReserve/registerChainViaStake/transferAllocationWithCert/allocateSupplyWithCert/
+declareChainDeadWithCert/unregisterChainWithCert/updateCommitteeWithRecoveryCert/
+claimDeadChainBalance/withdrawRelayerTip/batchOutboundCommit/outbound/setGenesisDigest/
+registerCommitteePop/submitCommitteeAttestation/submitCommitAttestation, cùng toàn bộ dispatch case
+tương ứng trong `gateway_handler.go`) theo 3 tiêu chí: (a) đúng bên ký/đúng cert cho mọi hành động
+ảnh hưởng tới chain khác, (b) idempotent hoặc có cơ chế chống replay khi hành động không tự nhiên
+idempotent, (c) không lẫn đơn vị native/custom-asset. Ngoài finding #5 ở trên, không phát hiện thêm
+lỗ hổng nào — toàn bộ các hàm còn lại đã đúng thiết kế (nhiều hàm có sẵn comment ghi lại các lần vá
+bảo mật trước đó, ví dụ nonce chống replay của `TransferAllocationWithCert`, epoch-phải-tăng của
+`UpdateCommitteeWithRecoveryCert`, merkle-proof-qua-`AccountTreeRoot` đã được chốt bởi chữ ký
+committee cũ của `ClaimDeadChainBalance`).
