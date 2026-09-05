@@ -92,3 +92,31 @@ chối), `TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund` (m�
 phát sinh message hoàn tiền thật, chặn epoch cũ/cert giả/hoàn 2 lần),
 `TestGatewayHandler_CreditAndRefundReserveAllocation` (mới — xuyên qua đúng dispatch ABI thật, đúng
 tầng đã có lỗi wiring ban đầu).
+
+## 4. Native/Custom-Asset Ledger Cross-Contamination — ✅ ĐÃ VÁ (2026-09-05, rà soát chủ động)
+**Location:** `execution/pkg/cross_chain/gateway.go` (`attestCommitInternal`, `ClaimMessage`,
+`Refund`, `CreditReserveAllocation`, `FinalizeFailedAfterExecutionRevert`)
+
+**Mô tả:** phát hiện khi chủ động rà soát các chỗ khác có cùng dạng lỗ hổng với mục 3.
+`SupplyLedger.PerChainAllocation` là sổ cái **native coin**, nhưng `AttestCommit`/`ClaimMessage`/
+`Refund`/`CreditReserveAllocation` trước đây trừ/cộng vào đúng sổ này cho **bất kỳ `assetId` nào**
+— nghĩa là số lượng thô của 1 custom asset (thường tính theo 10^18, không liên quan gì tới lượng
+native coin thật chain đó đang giữ) bị trộn chung vào đúng 1 bộ đếm với native coin.
+
+Hướng nguy hiểm thật sự: `ClaimMessage`'s credit không phân biệt asset → 1 lần claim custom-asset
+hợp lệ (không cần tấn công) có thể **thổi phồng ceiling native coin** của chain nhận lên một con số
+khổng lồ, sau đó chain đó có thể rút native coin thật vượt xa những gì nó thực sự nên được phép —
+"rửa" khối lượng custom-asset bất kỳ thành hạn mức chi tiêu native coin thật. Xác nhận thêm:
+`AssetRegistryEngine.LockAndBridgeAsset`/`ReceiveAndSettleAsset`/`VerifyAssetConservationInvariant`
+— cơ chế bảo toàn cung riêng, đúng đắn, dành cho custom asset — **chưa từng được gọi ở đâu trong
+code production** (chỉ định nghĩa, không ai dùng); bảo toàn thật cho custom asset hiện dựa hoàn
+toàn vào các lệnh gọi `transferFrom()`/`transfer()`/`mint()` thật trên hợp đồng token thật.
+
+**Đã vá:** thêm điều kiện `assetId == 0` (native) trước MỌI thao tác đọc/ghi
+`PerChainAllocation` ở cả 5 vị trí trên — custom asset không chạm vào sổ cái native nữa (tự bảo toàn
+đủ qua hợp đồng token thật, không cần và không nên dùng chung sổ cái này). Không đổi hành vi native
+coin (assetId=0) chút nào.
+
+Test: `TestGateway_CustomAssetNeverTouchesNativePerChainAllocation` (mới — commit custom-asset với
+giá trị 10^24 vượt xa allocation native nhỏ của chain nguồn, kể cả khi Reserve chưa cấu hình, vẫn
+attest+claim thành công và không đụng tới `PerChainAllocation` của bất kỳ chain nào).

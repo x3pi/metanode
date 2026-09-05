@@ -1191,7 +1191,21 @@ func (g *GatewayEngine) attestCommitInternal(
 		return &existing, nil
 	}
 
-	if enforceCeiling && aggregateAmount.Sign() > 0 {
+	// SECURITY FIX (2026-09-05, production-readiness review after the Reserve-inflation finding):
+	// PerChainAllocation is the NATIVE COIN ledger -- it must never be touched for a custom asset
+	// (assetId != 0). Before this fix, EVERY assetId shared the exact same PerChainAllocation
+	// number space: a custom asset's raw token amount (often 10^18-scale, unrelated to how much
+	// real native coin the chain holds) got debited/credited into the SAME counter as native coin.
+	// This was exploitable in the dangerous direction (ClaimMessage's matching credit, see there)
+	// -- a legitimate custom-asset claim could inflate a chain's NATIVE spending ceiling by an
+	// arbitrary amount, letting it later withdraw real native coin far beyond what it should ever
+	// be allowed. Custom assets don't need this ledger at all: their real conservation is already
+	// enforced by the actual ERC20-style transferFrom()/transfer()/mint() calls against the real
+	// token contracts in gateway_handler.go's outbound()/claimMessage() custom-asset branches,
+	// which cannot be forged without controlling the real contract.
+	isNative := assetId.Sign() == 0
+
+	if enforceCeiling && aggregateAmount.Sign() > 0 && isNative {
 		// C8 fix (2026-08-27): only the configured Reserve chain may perform a ceiling-enforced
 		// attestation of a nonzero-value commit. Before this check, GlobalSupplyLedger being
 		// per-chain-LOCAL state meant ANY chain could independently call this same AttestCommit
@@ -1209,7 +1223,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		}
 	}
 
-	if enforceCeiling {
+	if enforceCeiling && isNative {
 		// Check per_chain_allocation ceiling (Scenario 10.7) — only meaningful for a private
 		// chain's own commit (the X -> Reserve leg). Reserve-issued commits skip this entirely.
 		currentAlloc := g.SupplyLedger.GetAllocation(sourceChainID)
@@ -1299,12 +1313,21 @@ func (g *GatewayEngine) ClaimMessage(
 	// 100 transferred -> 200 destroyed). ClaimMessage is the correct place because it is the only
 	// point that knows the message's real, individual DestChainID (a single attested commit can
 	// route to several distinct destinations).
-	if message.Value != nil && message.Value.Sign() > 0 && g.SupplyLedger != nil {
+	if message.Value != nil && message.Value.Sign() > 0 {
 		if message.DestChainID != g.LocalChainID {
 			return MessageStatusPending, fmt.Errorf("%w: message destChainId %d does not match claiming engine's chain %d", ErrInvalidMerkleProof, message.DestChainID, g.LocalChainID)
 		}
-		currentAlloc := g.SupplyLedger.GetAllocation(g.LocalChainID)
-		g.SupplyLedger.PerChainAllocation[g.LocalChainID] = new(big.Int).Add(currentAlloc, message.Value)
+		// SECURITY FIX (2026-09-05): PerChainAllocation is the NATIVE COIN ledger -- crediting it
+		// for a custom asset (AssetID != 0) would let a chain "launder" arbitrary custom-asset
+		// volume (often 10^18-scale, unrelated to real native coin held) into real NATIVE-coin
+		// spending capacity via a later legitimate native outbound()/attestCommit()/claimMessage()
+		// cycle. See attestCommitInternal's identical `isNative` gate for the full writeup --
+		// custom assets are already fully conserved by the real ERC20-style transfer()/mint()
+		// calls in gateway_handler.go, which need no separate ledger-based ceiling at all.
+		if g.SupplyLedger != nil && (message.AssetID == nil || message.AssetID.Sign() == 0) {
+			currentAlloc := g.SupplyLedger.GetAllocation(g.LocalChainID)
+			g.SupplyLedger.PerChainAllocation[g.LocalChainID] = new(big.Int).Add(currentAlloc, message.Value)
+		}
 	}
 
 	// Set execution context for destination target contracts
@@ -1403,7 +1426,10 @@ func (g *GatewayEngine) FinalizeFailedAfterExecutionRevert(
 		g.AttestedCommits[key] = attested
 	}
 
-	if message.Value != nil && message.Value.Sign() > 0 && g.SupplyLedger != nil {
+	// SECURITY FIX (2026-09-05): mirrors ClaimMessage's own isNative gate -- must only reverse a
+	// PerChainAllocation credit that could actually have happened (native only; ClaimMessage never
+	// touches this ledger for a custom asset in the first place after that fix).
+	if message.Value != nil && message.Value.Sign() > 0 && g.SupplyLedger != nil && (message.AssetID == nil || message.AssetID.Sign() == 0) {
 		current := g.SupplyLedger.GetAllocation(g.LocalChainID)
 		reverted := new(big.Int).Sub(current, message.Value)
 		if reverted.Sign() < 0 {
@@ -1461,6 +1487,14 @@ func (g *GatewayEngine) CreditReserveAllocation(
 	if message.Value == nil || message.Value.Sign() <= 0 {
 		// Nothing to credit -- matches ClaimMessage's own "only touch the ledger for real value"
 		// gating, so a zero-value / pure-contract-call message is always a harmless no-op here.
+		return nil
+	}
+	if message.AssetID != nil && message.AssetID.Sign() != 0 {
+		// SECURITY FIX (2026-09-05): PerChainAllocation is the NATIVE COIN ledger -- see
+		// attestCommitInternal's isNative gate for the full writeup (crediting it for a custom
+		// asset would let a chain launder arbitrary custom-asset volume into real native-coin
+		// spending capacity). A custom asset's own conservation is already fully enforced by the
+		// real ERC20-style transfer()/mint() calls in gateway_handler.go -- nothing to credit here.
 		return nil
 	}
 
@@ -1682,8 +1716,14 @@ func (g *GatewayEngine) Refund(
 	// 6. Atomically set status to Refunded
 	g.MessageStatus[message.MessageID] = MessageStatusRefunded
 
-	// 7. Restore allocation in GlobalSupplyLedger
-	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 {
+	// 7. Restore allocation in GlobalSupplyLedger.
+	//
+	// SECURITY FIX (2026-09-05): must mirror attestCommitInternal's isNative gate exactly -- for a
+	// custom asset (AssetID != 0), the source chain's PerChainAllocation was NEVER debited by
+	// AttestCommit in the first place (custom assets don't touch this native-coin ledger at all),
+	// so crediting it here unconditionally would be a pure, ungated mint of native-ceiling
+	// capacity with no matching prior debit to balance it.
+	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 && (message.AssetID == nil || message.AssetID.Sign() == 0) {
 		currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
 		g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}

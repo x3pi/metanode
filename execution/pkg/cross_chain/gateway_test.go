@@ -507,6 +507,69 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 	assert.Equal(t, big.NewInt(0), badEngine.SupplyLedger.GetAllocation(103))
 }
 
+// TestGateway_CustomAssetNeverTouchesNativePerChainAllocation is the regression test for the
+// production-readiness finding: PerChainAllocation is the NATIVE COIN ledger, but AttestCommit/
+// ClaimMessage/Refund/CreditReserveAllocation/RefundReserveAllocation used to debit/credit it for
+// ANY assetId, mixing a custom asset's raw token amount (often 10^18-scale, unrelated to real
+// native coin held) into the same counter as native coin. That was exploitable in the dangerous
+// direction: a legitimate custom-asset claim could inflate a chain's NATIVE spending ceiling far
+// beyond what it should ever hold, later spendable via a real native outbound(). This proves the
+// fix two ways: (1) a custom-asset commit with a value FAR exceeding the source chain's tiny
+// native allocation, and with Reserve unconfigured, still attests successfully (no longer routed
+// through or bounded by the native ceiling/Reserve machinery at all); (2) claiming it does not
+// change either chain's native PerChainAllocation by even one wei.
+func TestGateway_CustomAssetNeverTouchesNativePerChainAllocation(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	engine.ReserveChainID = 0 // deliberately unconfigured -- must not matter for a custom asset
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	target := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	hugeAssetID := big.NewInt(999)
+	hugeValue, ok := new(big.Int).SetString("1000000000000000000000000", 10) // 10^24, vastly more than the 5000 native allocation chain 101 has
+	require.True(t, ok)
+
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0x6666666666666666666666666666666666666666666666666666666666666666"),
+		SourceChainID: 101,
+		DestChainID:   102, // engine's own LocalChainID
+		Sender:        sender,
+		Target:        target,
+		Payload:       target.Bytes(), // 20-byte recipient, as ClaimMessage's custom-asset branch expects
+		AssetID:       hugeAssetID,
+		Value:         hugeValue,
+		Sequence:      1,
+		Tip:           big.NewInt(0),
+		HopCount:      1,
+	}
+
+	commitRoot, layers, _, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex[hugeAssetID.String()])
+
+	sourceAllocBefore := new(big.Int).Set(engine.SupplyLedger.GetAllocation(101))
+	destAllocBefore := new(big.Int).Set(engine.SupplyLedger.GetAllocation(102))
+
+	sig := bls.Sign(kp.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...))
+	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	// Must succeed DESPITE hugeValue >> chain 101's real native allocation, and despite
+	// ReserveChainID being unset -- neither the C8 Reserve gate nor the ceiling check apply to a
+	// non-native asset.
+	_, errAttest := engine.AttestCommit(101, commitRoot, hugeValue, hugeAssetID, aggregateProof, cert)
+	require.NoError(t, errAttest)
+	assert.Zero(t, engine.SupplyLedger.GetAllocation(101).Cmp(sourceAllocBefore), "attesting a custom-asset commit must not touch chain 101's native allocation")
+
+	// ClaimMessage itself (the Go-level status/ledger bookkeeping this test exercises) never
+	// touches AssetRegistry at all -- the real custom-asset transfer()/mint() EVM call is a
+	// separate step gateway_handler.go's claimMessage dispatch case performs afterward, outside
+	// this function's scope.
+	relayer := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	require.NoError(t, errClaim)
+	assert.Zero(t, engine.SupplyLedger.GetAllocation(101).Cmp(sourceAllocBefore), "claiming a custom asset must not touch the source chain's native allocation")
+	assert.Zero(t, engine.SupplyLedger.GetAllocation(102).Cmp(destAllocBefore), "claiming a huge custom-asset amount must NOT inflate the claiming chain's own native allocation")
+}
+
 // TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund is the regression test for the
 // "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding
 // (note/cross_chain/security_audit_findings.md): in a 2-hop A -> Reserve -> B route, AttestCommit
