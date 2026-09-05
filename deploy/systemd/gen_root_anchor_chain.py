@@ -145,13 +145,17 @@ def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
     Anchor (a real registration transaction/process, not a hardcoded genesis
     alloc).
     """
-    from eth_account import Account
     if node_index == 0:
         seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
     else:
         seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
-    address = Account.from_key(priv_hex).address
+    try:
+        from eth_account import Account
+        address = Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        address = eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
     return priv_hex, address
 
 # Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the
@@ -425,14 +429,29 @@ def main():
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
             "block_hash_to_number_db_root_path": "/block_hash_to_number_db_root_path",
             "free_fee_addresses": [
-                "55798165960a62cED34a0d86e36B1758D1303907"
+                "55798165960a62cED34a0d86e36B1758D1303907",
+                # Shared cross-chain RELAYER devnet identity (same address gen_single_chain.py
+                # pre-registers/pre-funds on every private chain -- see that script's own comment
+                # on why: "no BLS public key registered on-chain" broke every relay attempt
+                # without it). Root Anchor never funded this address with real balance the way
+                # private chains do, so the relayer's own attestCommit/claimMessage transactions
+                # TO Root Anchor had no gas -- found 2026-09-04 via a real run_full_pipeline.sh
+                # run: cross_chain_relayer fell back to reusing register_chains' OWN
+                # submitter_key (same account, independently-tracked nonces), causing a real
+                # nonce collision that permanently orphaned a relayer transaction the moment both
+                # tools ran within a few seconds of each other. Fixed at the root by giving the
+                # relayer daemon this dedicated identity instead (see cross_chain_relayer/main.go
+                # and deploy_private_chains.sh's gateway_register.json "relayer_key" field) --
+                # gas-exempt here rather than funded, matching the same principle used for
+                # deterministic-genesis mode's infra addresses (gas is infrastructure plumbing,
+                # not circulating supply).
+                "7d8bfbaba9268b59bab9ef8ff3f314d3f5747366"
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
                 "reserve_chain_id": args.chain_id,
-                # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
-                # full rationale. NEVER set this on a real deployment.
-                "devnet_governance_timelock_seconds_override": 10
+                # devnet_governance_timelock_seconds_override removed 2026-09-04: dead config,
+                # GovernanceEngine (the only thing that ever read it) was deleted the same day.
             },
             "meta_node_rpc_address": f"{ip_address}:{11100 + args.port_offset + node_id}",
             "connection_address": f"0.0.0.0:{14200 + args.port_offset + node_id}",

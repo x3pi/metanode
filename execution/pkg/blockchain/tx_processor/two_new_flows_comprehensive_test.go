@@ -45,7 +45,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -76,7 +76,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -111,7 +111,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -136,7 +136,6 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		require.True(t, exists, "chain 203 must be present in ChainRegistry")
 		assert.Equal(t, uint64(203), reg.ChainID)
 		assert.Equal(t, uint64(6667), reg.QuorumThreshold)
-		assert.Contains(t, reloaded.Governance.ActiveChains, uint64(203), "chain 203 must be admitted into ActiveChains")
 	})
 
 	t.Run("1.4 Rejection of already-registered chain ID", func(t *testing.T) {
@@ -162,7 +161,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
@@ -194,7 +193,7 @@ func TestComprehensive_RegisterChainViaStake_FullLifecycle(t *testing.T) {
 		payload, err := json.Marshal(candidateReg)
 		require.NoError(t, err)
 
-		calldata, err := h.abi.Pack("registerChainViaStake", payload)
+		calldata, err := h.abi.Pack("registerChainViaStake", payload, minStake)
 		require.NoError(t, err)
 
 		caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")

@@ -1,0 +1,9 @@
+---
+# The "Local build and configuration generation" play (deploy.yml) runs on `hosts: localhost`,
+# which is NOT a member of the `metanode_cluster` group -- group_vars/metanode_cluster.yml never
+# applies here (found live 2026-09-04: the RecoveryCommittee override was silently ignored for
+# exactly this reason, even after fixing the group_vars/all.yml precedence issue). host_vars/*
+# outranks all group_vars tiers, so this is the one place guaranteed to apply to the localhost
+# play specifically. Keep this in sync with group_vars/metanode_cluster.yml (which still matters
+# for anything the "Deploy and Setup Metanode Cluster" play, hosts: metanode_cluster, reads).
+recovery_committee_json_override_file: "{{ playbook_dir }}/recovery_committee_public.json"

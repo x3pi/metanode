@@ -48,21 +48,22 @@ func findDefaultRootAnchor() string {
 	return "http://127.0.0.1:10746"
 }
 
-func findDefaultChainsDir() string {
-	if env := os.Getenv("CHAINS_DIR"); env != "" {
+func findDefaultConfigFile() string {
+	if env := os.Getenv("GATEWAY_CONFIG"); env != "" {
 		return env
 	}
-	cwd, err := os.Getwd()
-	if err == nil {
+
+	// 1. Tìm từ thư mục làm việc hiện tại (working directory) đi ngược lên
+	if cwd, err := os.Getwd(); err == nil {
 		dir := cwd
 		for i := 0; i < 6; i++ {
-			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "data")
-			if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
 				return candidate
 			}
-			candidateNested := filepath.Join(dir, "metanode", "deploy", "ansible_private_chains", "data")
-			if stat, err := os.Stat(candidateNested); err == nil && stat.IsDir() {
-				return candidateNested
+			candidateDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(candidateDirect); err == nil && !stat.IsDir() {
+				return candidateDirect
 			}
 			parent := filepath.Dir(dir)
 			if parent == dir {
@@ -71,40 +72,46 @@ func findDefaultChainsDir() string {
 			dir = parent
 		}
 	}
-	if stat, err := os.Stat("/opt/metanode"); err == nil && stat.IsDir() {
-		return "/opt/metanode"
-	}
-	return "deploy/ansible_private_chains/data"
-}
 
-func findDefaultTargetRPCs() string {
-	if data, err := os.ReadFile("/tmp/private_chains.json"); err == nil {
-		var topology struct {
-			Nodes map[string]string `json:"nodes"`
-		}
-		if err := json.Unmarshal(data, &topology); err == nil && len(topology.Nodes) > 0 {
-			var pairs []string
-			for cid, url := range topology.Nodes {
-				pairs = append(pairs, fmt.Sprintf("%s=%s", cid, url))
+	// 2. Tìm từ vị trí file thực thi binary (executable directory) đi ngược lên
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(execPath)
+		for i := 0; i < 6; i++ {
+			candidate := filepath.Join(dir, "deploy", "ansible_private_chains", "gateway_register.json")
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
+				return candidate
 			}
-			return strings.Join(pairs, ",")
+			candidateDirect := filepath.Join(dir, "gateway_register.json")
+			if stat, err := os.Stat(candidateDirect); err == nil && !stat.IsDir() {
+				return candidateDirect
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
 	}
-	return ""
+
+	// 3. Fallback cho production cài đặt tại /opt/metanode
+	optPath := "/opt/metanode/deploy/ansible_private_chains/gateway_register.json"
+	if _, err := os.Stat(optPath); err == nil {
+		return optPath
+	}
+
+	return "deploy/ansible_private_chains/gateway_register.json"
 }
 
 func main() {
 	defaultRootAnchor := findDefaultRootAnchor()
-	defaultChainsDir := findDefaultChainsDir()
-	defaultTargetRPCs := findDefaultTargetRPCs()
+	defaultConfigFile := findDefaultConfigFile()
 
 	var (
+		configFileFlag      string
 		actionFlag          string
 		submitterKeyHex     string
 		rootAnchorRPC       string
-		chainsDir           string
 		chainIDsFlag        string
-		targetRPCsFlag      string
 		fundGenesisFlag     bool
 		genesisSupplyFlag   string
 		perChainAllocFlag   string
@@ -115,14 +122,16 @@ func main() {
 		toChainFlag   uint64
 		amountMTNFlag float64
 		amountWeiFlag string
+
+		// Deterministic-genesis flags (2026-09-04) -- see publish-genesis-digest/verify-genesis
+		genesisFileFlag string
 	)
 
-	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry")
+	flag.StringVar(&configFileFlag, "config", defaultConfigFile, "Path to JSON configuration file (declarative gateway register config)")
+	flag.StringVar(&actionFlag, "action", "register", "Action to perform: register | transfer-alloc | query-alloc | query-registry | publish-genesis-digest | verify-genesis")
 	flag.StringVar(&submitterKeyHex, "key", "0xd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9", "Sender ECDSA private key hex")
 	flag.StringVar(&rootAnchorRPC, "root-anchor", defaultRootAnchor, "Root Anchor JSON-RPC endpoint (auto-detected)")
-	flag.StringVar(&chainsDir, "chains-dir", defaultChainsDir, "Directory containing private chain data (auto-detected)")
-	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs")
-	flag.StringVar(&targetRPCsFlag, "target-rpcs", defaultTargetRPCs, "Comma-separated chainID=rpcURL pairs for cross-chain mesh seeding (auto-detected)")
+	flag.StringVar(&chainIDsFlag, "chains", "101,102,103,104", "Comma-separated list of chain IDs (for query actions)")
 	flag.BoolVar(&fundGenesisFlag, "fund-genesis", false, "After bootstrapping, also mint and distribute genesis supply")
 	flag.StringVar(&genesisSupplyFlag, "genesis-supply", "", "Total genesis supply to mint on Root Anchor (base-10 wei)")
 	flag.StringVar(&perChainAllocFlag, "per-chain-allocation", "", "Amount transferred to each founding chain (base-10 wei)")
@@ -132,7 +141,38 @@ func main() {
 	flag.Uint64Var(&toChainFlag, "to-chain", 103, "Destination Chain ID for transfer-alloc")
 	flag.Float64Var(&amountMTNFlag, "amount-mtn", 20000000, "Amount of MTN tokens to transfer (e.g. 20000000 for 20M MTN)")
 	flag.StringVar(&amountWeiFlag, "amount-wei", "", "Exact amount in base-10 wei for transfer-alloc")
+	flag.StringVar(&genesisFileFlag, "genesis-file", "", "Path to a chain's genesis.json (for publish-genesis-digest / verify-genesis)")
 	flag.Parse()
+
+	var fileConfig *GatewayConfigFile
+	if configFileFlag != "" {
+		cfg, err := loadGatewayConfigFile(configFileFlag)
+		if err != nil {
+			logger.Error("Failed to load config file %s: %v", configFileFlag, err)
+			os.Exit(1)
+		}
+		fileConfig = cfg
+		logger.Info("Loaded configuration directly from file: %s (%d chains configured)", configFileFlag, len(fileConfig.Chains))
+
+		if fileConfig.RootAnchorRPC != "" {
+			rootAnchorRPC = fileConfig.RootAnchorRPC
+		}
+		if fileConfig.SubmitterKey != "" {
+			submitterKeyHex = fileConfig.SubmitterKey
+		}
+		if fileConfig.GenesisSupply != "" {
+			genesisSupplyFlag = fileConfig.GenesisSupply
+		}
+		if fileConfig.PerChainAllocation != "" {
+			perChainAllocFlag = fileConfig.PerChainAllocation
+		}
+		if fileConfig.FundGenesis != nil {
+			fundGenesisFlag = *fileConfig.FundGenesis
+		}
+		if fileConfig.TimelockWaitSeconds != nil {
+			timelockWaitSeconds = *fileConfig.TimelockWaitSeconds
+		}
+	}
 
 	submitterKeyHex = strings.TrimPrefix(submitterKeyHex, "0x")
 	privKey, err := crypto.HexToECDSA(submitterKeyHex)
@@ -152,12 +192,30 @@ func main() {
 	switch strings.ToLower(actionFlag) {
 	case "query-alloc", "query-allocations":
 		handleQueryAllocations(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "query-alloc-raw":
+		// Machine-readable counterpart to query-alloc: prints ONLY the decimal wei amount for
+		// exactly one chain ID to stdout, nothing else -- no banner, no logging -- so scripts
+		// (gen_single_chain.py's deterministic-genesis cross-check) can parse it directly instead
+		// of scraping human-formatted text.
+		handleQueryAllocationRaw(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
+	case "query-genesis-wallet-raw":
+		// Same idea as query-alloc-raw but for ChainRegistry.GenesisWallet -- prints just the
+		// 0x-prefixed address (or the zero address if not yet set/registered), nothing else.
+		handleQueryGenesisWalletRaw(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "query-registry":
 		handleQueryRegistry(ctx, rootAnchorRPC, chainIDsFlag, parsedABI)
 	case "transfer-alloc", "transfer-allocation", "allocate-supply":
-		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+		handleTransferAllocation(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, parsedABI, fromChainFlag, toChainFlag, amountMTNFlag, amountWeiFlag, timelockWaitSeconds)
+	case "publish-genesis-digest":
+		handlePublishGenesisDigest(ctx, privKey, fromAddress, rootAnchorRPC, chainIDsFlag, genesisFileFlag, parsedABI)
+	case "verify-genesis":
+		handleVerifyGenesis(ctx, rootAnchorRPC, chainIDsFlag, genesisFileFlag, parsedABI)
 	default: // "register"
-		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
+		if fileConfig == nil || len(fileConfig.Chains) == 0 {
+			logger.Error("No gateway register config file found. Please provide --config <gateway_register.json>")
+			os.Exit(1)
+		}
+		handleRegisterChains(ctx, privKey, fromAddress, rootAnchorRPC, fileConfig, fundGenesisFlag, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
 	}
 }
 
@@ -213,6 +271,75 @@ func handleQueryAllocations(ctx context.Context, rootAnchorRPC, chainIDsFlag str
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 }
 
+func handleQueryAllocationRaw(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query-alloc-raw requires exactly one chain ID via -chains: %v\n", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect to %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getAllocation", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pack getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "call getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getAllocation", out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpack getAllocation: %v\n", err)
+		os.Exit(1)
+	}
+	alloc, _ := results[0].(*big.Int)
+	if alloc == nil {
+		alloc = big.NewInt(0)
+	}
+	fmt.Println(alloc.String())
+}
+
+func handleQueryGenesisWalletRaw(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query-genesis-wallet-raw requires exactly one chain ID via -chains: %v\n", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect to %s: %v\n", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pack getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "call getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getChainRegistry", out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpack getChainRegistry: %v\n", err)
+		os.Exit(1)
+	}
+	genesisWallet, _ := results[11].(common.Address)
+	fmt.Println(genesisWallet.Hex())
+}
+
 func handleQueryRegistry(ctx context.Context, rootAnchorRPC, chainIDsFlag string, parsedABI abi.ABI) {
 	client, err := ethclient.Dial(rootAnchorRPC)
 	if err != nil {
@@ -260,19 +387,164 @@ func handleQueryRegistry(ctx context.Context, rootAnchorRPC, chainIDsFlag string
 		pubkeys := results[1].([][]byte)
 		epoch := results[4].(uint64)
 		threshold := results[5].(uint64)
+		genesisWallet, _ := results[11].(common.Address)
+		genesisDigestRaw, _ := results[12].([32]byte)
+		genesisDigest := common.Hash(genesisDigestRaw)
 		fmt.Printf("   ├─ Chain %-4d: ✅ Đã đăng ký (Epoch: %d, Committee: %d validator(s), Quorum: %d%%)\n", cid, epoch, len(pubkeys), threshold/100)
 		for i, pk := range pubkeys {
 			fmt.Printf("   │  └─ Val[%d] BLS Pubkey: 0x%s\n", i, common.Bytes2Hex(pk))
 		}
+		if genesisWallet != (common.Address{}) {
+			fmt.Printf("   │  └─ Genesis wallet: %s\n", genesisWallet.Hex())
+			if genesisDigest != (common.Hash{}) {
+				fmt.Printf("   │  └─ Genesis digest: %s (published)\n", genesisDigest.Hex())
+			} else {
+				fmt.Printf("   │  └─ Genesis digest: chưa publish (dùng -action publish-genesis-digest)\n")
+			}
+		}
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════════")
+}
+
+// handlePublishGenesisDigest computes the keccak256 digest of a chain's canonical genesis.json
+// (raw file bytes -- same definition as pkg/cross_chain/ceremony.Digest, kept identical on
+// purpose) and publishes it on Root Anchor via setGenesisDigest(), the second phase of the
+// deterministic-genesis design (see GatewayEngine.SetGenesisDigest's own doc comment). Restricted
+// server-side to the chain's own GenesisWallet -- this simply fails if the signing key here isn't
+// that wallet, so no client-side check is needed to make this safe.
+func handlePublishGenesisDigest(ctx context.Context, privKey *ecdsa.PrivateKey, fromAddress common.Address, rootAnchorRPC, chainIDsFlag, genesisFile string, parsedABI abi.ABI) {
+	if genesisFile == "" {
+		logger.Error("publish-genesis-digest requires -genesis-file <path to genesis.json>")
+		os.Exit(1)
+	}
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		logger.Error("publish-genesis-digest requires exactly one chain ID via -chains: %v", err)
+		os.Exit(1)
+	}
+	raw, err := os.ReadFile(genesisFile)
+	if err != nil {
+		logger.Error("Failed to read genesis file %s: %v", genesisFile, err)
+		os.Exit(1)
+	}
+	digest := crypto.Keccak256Hash(raw)
+	fmt.Printf("📐 Genesis digest cho chain %d (%s): %s\n", chainID, genesisFile, digest.Hex())
+
+	calldata, err := parsedABI.Pack("setGenesisDigest", new(big.Int).SetUint64(chainID), digest)
+	if err != nil {
+		logger.Error("Failed to pack setGenesisDigest: %v", err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		logger.Error("Failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rootAnchorRPC, nil, 200_000, calldata, fmt.Sprintf("setGenesisDigest(chain %d)", chainID)); err != nil {
+		logger.Error("❌ setGenesisDigest(chain %d) failed: %v", chainID, err)
+		os.Exit(1)
+	}
+	fmt.Printf("✅ Đã publish genesis digest cho chain %d: %s\n", chainID, digest.Hex())
+}
+
+// handleVerifyGenesis is the read-only counterpart: fetch the digest Root Anchor has on record for
+// a chain and compare it against a local genesis.json's own recomputed digest -- exactly the same
+// "recompute and compare, fail closed on mismatch" defense
+// pkg/cross_chain/ceremony.VerifyGenesisFile already provides for the founding-chain ceremony
+// path, just checking against an on-chain record instead of a hand-distributed genesis_digest.txt.
+// Exits non-zero on any mismatch or on "not yet published" -- meant to gate node startup /
+// operator trust decisions, so it fails loud rather than warn-and-continue.
+func handleVerifyGenesis(ctx context.Context, rootAnchorRPC, chainIDsFlag, genesisFile string, parsedABI abi.ABI) {
+	if genesisFile == "" {
+		logger.Error("verify-genesis requires -genesis-file <path to genesis.json>")
+		os.Exit(1)
+	}
+	chainID, err := parseSingleChainID(chainIDsFlag)
+	if err != nil {
+		logger.Error("verify-genesis requires exactly one chain ID via -chains: %v", err)
+		os.Exit(1)
+	}
+	raw, err := os.ReadFile(genesisFile)
+	if err != nil {
+		logger.Error("Failed to read genesis file %s: %v", genesisFile, err)
+		os.Exit(1)
+	}
+	localDigest := crypto.Keccak256Hash(raw)
+
+	client, err := ethclient.Dial(rootAnchorRPC)
+	if err != nil {
+		logger.Error("Failed to connect to Root Anchor at %s: %v", rootAnchorRPC, err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
+	if err != nil {
+		logger.Error("Pack getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		logger.Error("Call getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	results, err := parsedABI.Unpack("getChainRegistry", out)
+	if err != nil {
+		logger.Error("Unpack getChainRegistry: %v", err)
+		os.Exit(1)
+	}
+	exists, _ := results[0].(bool)
+	if !exists {
+		fmt.Printf("❌ Chain %d chưa được đăng ký trên Root Anchor -- không có gì để đối chiếu.\n", chainID)
+		os.Exit(1)
+	}
+	remoteDigestRaw, _ := results[12].([32]byte)
+	remoteDigest := common.Hash(remoteDigestRaw)
+
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+	fmt.Printf("🔍 XÁC MINH GENESIS -- chain %d\n", chainID)
+	fmt.Printf("   - File local:              %s\n", genesisFile)
+	fmt.Printf("   - Digest tính lại:         %s\n", localDigest.Hex())
+	fmt.Printf("   - Digest trên Root Anchor: %s\n", remoteDigest.Hex())
+	fmt.Println("═══════════════════════════════════════════════════════════════")
+
+	if remoteDigest == (common.Hash{}) {
+		fmt.Println("⚠️  Chưa có digest nào được publish cho chain này -- KHÔNG THỂ xác minh, đừng coi là an toàn.")
+		os.Exit(1)
+	}
+	if localDigest != remoteDigest {
+		fmt.Println("❌ LỆCH -- genesis.json cục bộ KHÔNG khớp bản đã công bố trên Root Anchor. KHÔNG chạy node với file này.")
+		os.Exit(1)
+	}
+	fmt.Println("✅ KHỚP -- genesis.json cục bộ đúng với bản đã công bố trên Root Anchor.")
+}
+
+// parseSingleChainID reuses the shared -chains flag (comma-separated, for the query actions) but
+// takes only the first entry -- publish-genesis-digest/verify-genesis operate on exactly one chain.
+func parseSingleChainID(chainIDsFlag string) (uint64, error) {
+	for _, p := range strings.Split(chainIDsFlag, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var cid uint64
+		if _, err := fmt.Sscanf(p, "%d", &cid); err != nil {
+			return 0, err
+		}
+		return cid, nil
+	}
+	return 0, fmt.Errorf("no chain ID found in %q", chainIDsFlag)
 }
 
 func handleTransferAllocation(
 	ctx context.Context,
 	privKey *ecdsa.PrivateKey,
 	fromAddress common.Address,
-	rootAnchorRPC, chainsDir string,
+	rootAnchorRPC string,
+	fileConfig *GatewayConfigFile,
 	parsedABI abi.ABI,
 	fromChain, toChain uint64,
 	amountMTN float64,
@@ -299,9 +571,24 @@ func handleTransferAllocation(
 	}
 	defer client.Close()
 
-	committee := loadAllCommitteeMembers(chainsDir)
+	if fileConfig == nil || len(fileConfig.Chains) == 0 {
+		fmt.Printf("❌ Config file required for committee signatures in transfer-alloc. Provide --config <path>\n")
+		os.Exit(1)
+	}
+
+	var committee []committeeMember
+	for _, c := range fileConfig.Chains {
+		for _, v := range c.Validators {
+			if v.BLSPrivateKey != "" {
+				committee = append(committee, committeeMember{
+					ChainID: c.ChainID,
+					PrivHex: v.BLSPrivateKey,
+				})
+			}
+		}
+	}
 	if len(committee) == 0 {
-		fmt.Printf("❌ No committee members found in %s\n", chainsDir)
+		fmt.Printf("❌ No validator BLSPrivateKeys found in config file\n")
 		os.Exit(1)
 	}
 
@@ -315,18 +602,8 @@ func handleTransferAllocation(
 	fmt.Printf("   └─ Submitter:        %s\n", fromAddress.Hex())
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 
-	transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
-		FromChainID: fromChain,
-		ToChainID:   toChain,
-		Amount:      amountBig,
-	})
-	if err != nil {
-		fmt.Printf("❌ Failed to marshal AllocationTransferPayload: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-		6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+	if err := transferAllocationWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+		fromChain, toChain, amountBig, committee,
 		fmt.Sprintf("transfer allocation from chain %d to %d", fromChain, toChain)); err != nil {
 		fmt.Printf("❌ Transfer allocation failed: %v\n", err)
 		os.Exit(1)
@@ -337,11 +614,58 @@ func handleTransferAllocation(
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 }
 
+type GatewayConfigFile struct {
+	RootAnchorRPC       string               `json:"root_anchor_rpc,omitempty"`
+	SubmitterKey        string               `json:"submitter_key,omitempty"`
+	GenesisSupply       string               `json:"genesis_supply,omitempty"`
+	PerChainAllocation  string               `json:"per_chain_allocation,omitempty"`
+	FundGenesis         *bool                `json:"fund_genesis,omitempty"`
+	TimelockWaitSeconds *int                 `json:"timelock_wait_seconds,omitempty"`
+	Chains              []ChainConfigEntry   `json:"chains"`
+}
+
+type ChainConfigEntry struct {
+	ChainID         uint64                 `json:"chain_id"`
+	RPCURL          string                 `json:"rpc_url"`
+	QuorumThreshold uint64                 `json:"quorum_threshold,omitempty"`
+	GatewayContract string                 `json:"gateway_contract,omitempty"`
+	Validators      []ValidatorConfigEntry `json:"validators"`
+	// StakeAmount (2026-09-04, wei as a base-10 decimal string, same convention as GenesisSupply/
+	// PerChainAllocation): how much of the submitter's own real wallet balance to commit as THIS
+	// chain's registerChainViaStake deposit / initial circulating allocation -- see
+	// GatewayEngine.RegisterChainViaStake's doc comment for why this is now caller-chosen rather
+	// than a fixed protocol constant. Empty/unset falls back to the live on-chain
+	// getMinNativeStakeToRegister() floor (handleRegisterChains queries it once, lazily, only if
+	// at least one chain entry needs it) -- the exact old fixed-amount behavior, unchanged for any
+	// existing config that doesn't set this field.
+	StakeAmount string `json:"stake_amount,omitempty"`
+}
+
+type ValidatorConfigEntry struct {
+	Name          string `json:"name,omitempty"`
+	NodeID        int    `json:"node_id,omitempty"`
+	BLSPrivateKey string `json:"bls_private_key"`
+	Stake         uint64 `json:"stake,omitempty"`
+}
+
+func loadGatewayConfigFile(filePath string) (*GatewayConfigFile, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
+	}
+	var cfg GatewayConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config json: %w", err)
+	}
+	return &cfg, nil
+}
+
 func handleRegisterChains(
 	ctx context.Context,
 	privKey *ecdsa.PrivateKey,
 	fromAddress common.Address,
-	rootAnchorRPC, chainsDir, chainIDsFlag, targetRPCsFlag string,
+	rootAnchorRPC string,
+	cfg *GatewayConfigFile,
 	fundGenesisFlag bool,
 	genesisSupplyFlag, perChainAllocFlag string,
 	timelockWaitSeconds int,
@@ -350,71 +674,141 @@ func handleRegisterChains(
 	logger.Info("Using submitter address: %s", fromAddress.Hex())
 
 	var payloads [][]byte
+	var amounts []*big.Int
 	var committee []committeeMember
 	var chainIDs []uint64
-	for _, cidStr := range strings.Split(chainIDsFlag, ",") {
-		cidStr = strings.TrimSpace(cidStr)
-		if cidStr == "" {
-			continue
+	var targetRPCs []string
+
+	// Lazily-fetched fallback for any chain entry that doesn't set its own StakeAmount -- the
+	// live on-chain getMinNativeStakeToRegister() floor, i.e. exactly the old fixed-amount
+	// behavior for any config that doesn't opt into a caller-chosen amount.
+	var floorAmount *big.Int
+	fetchFloorAmount := func() *big.Int {
+		if floorAmount != nil {
+			return floorAmount
 		}
-		var targetChainID uint64
-		if _, err := fmt.Sscanf(cidStr, "%d", &targetChainID); err != nil {
-			logger.Error("Invalid chain ID %q: %v", cidStr, err)
+		client, err := ethclient.Dial(rootAnchorRPC)
+		if err != nil {
+			logger.Error("Failed to connect to %s to query getMinNativeStakeToRegister: %v", rootAnchorRPC, err)
 			os.Exit(1)
 		}
-
-		nodeConfigs, err := loadChainAllNodeConfigs(chainsDir, cidStr)
+		defer client.Close()
+		gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+		calldata, err := parsedABI.Pack("getMinNativeStakeToRegister")
 		if err != nil {
-			logger.Error("Failed to load node config for chain %s: %v", cidStr, err)
+			logger.Error("Failed to pack getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+		if err != nil {
+			logger.Error("Failed to call getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		results, err := parsedABI.Unpack("getMinNativeStakeToRegister", out)
+		if err != nil {
+			logger.Error("Failed to unpack getMinNativeStakeToRegister: %v", err)
+			os.Exit(1)
+		}
+		amt, _ := results[0].(*big.Int)
+		if amt == nil || amt.Sign() <= 0 {
+			logger.Error("getMinNativeStakeToRegister returned %v -- Root Anchor has no configured floor, set stake_amount explicitly in the config for every chain", amt)
+			os.Exit(1)
+		}
+		floorAmount = amt
+		return floorAmount
+	}
+
+	for _, c := range cfg.Chains {
+		if c.ChainID == 0 {
+			logger.Error("Encountered invalid ChainID 0 in config")
 			os.Exit(1)
 		}
 
 		var committeeEntries []cross_chain.ValidatorEntry
-		for _, nCfg := range nodeConfigs {
-			if nCfg.Databases.BLSPrivateKey == "" {
+		for _, v := range c.Validators {
+			if v.BLSPrivateKey == "" {
 				continue
 			}
-			blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(nCfg.Databases.BLSPrivateKey)
+			blsPriv, blsPub, _ := bls.GenerateKeyPairFromSecretKey(v.BLSPrivateKey)
 			popSig := cross_chain.PopSign(blsPriv, blsPub)
+
+			stake := v.Stake
+			if stake == 0 {
+				stake = 1000
+			}
 
 			committeeEntries = append(committeeEntries, cross_chain.ValidatorEntry{
 				PubkeyBLS:    blsPub.Bytes(),
-				Stake:        1000,
+				Stake:        stake,
 				PopSignature: popSig.Bytes(),
 			})
-			committee = append(committee, committeeMember{ChainID: targetChainID, PrivHex: nCfg.Databases.BLSPrivateKey})
+			committee = append(committee, committeeMember{
+				ChainID: c.ChainID,
+				PrivHex: v.BLSPrivateKey,
+			})
 		}
 
 		if len(committeeEntries) == 0 {
-			logger.Error("Chain %s has no valid Databases.BLSPrivateKey configured in any node", cidStr)
+			logger.Error("Chain %d has no valid validators with BLSPrivateKey in config", c.ChainID)
 			os.Exit(1)
+		}
+
+		qThreshold := c.QuorumThreshold
+		if qThreshold == 0 {
+			qThreshold = 6667
+		}
+		gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+		if c.GatewayContract != "" {
+			gwAddr = common.HexToAddress(c.GatewayContract)
 		}
 
 		registry := cross_chain.ChainRegistry{
-			ChainID:         targetChainID,
+			ChainID:         c.ChainID,
 			Epoch:           0,
 			Committee:       committeeEntries,
-			QuorumThreshold: 6667,
-			GatewayContract: p_common.GATEWAY_CONTRACT_ADDRESS,
+			QuorumThreshold: qThreshold,
+			GatewayContract: gwAddr,
+			// GenesisWallet (2026-09-04, deterministic-genesis design): the address that pays
+			// for this registration also becomes the wallet that must hold the chain's initial
+			// native-coin supply in its own genesis.json alloc -- see ChainRegistry.GenesisWallet
+			// and RegisterChainViaStake's own doc comments. gateway_handler.go's
+			// "registerChainViaStake" case forces this to tx.FromAddress() regardless of what
+			// this payload says, so setting it to anything else here would be pointless, not
+			// just wrong -- kept equal to fromAddress for clarity, not as a real security
+			// boundary (the real boundary is enforced server-side).
+			GenesisWallet: fromAddress,
 		}
 		payloadBytes, err := json.Marshal(registry)
 		if err != nil {
-			logger.Error("Failed to marshal registry for chain %s: %v", cidStr, err)
+			logger.Error("Failed to marshal registry for chain %d: %v", c.ChainID, err)
 			os.Exit(1)
 		}
 		payloads = append(payloads, payloadBytes)
-		chainIDs = append(chainIDs, targetChainID)
-		logger.Info("Prepared founding entry for chain %s (%d validators, real BLS pubkeys, real PoP)", cidStr, len(committeeEntries))
+		chainIDs = append(chainIDs, c.ChainID)
+		if c.StakeAmount != "" {
+			amt, ok := new(big.Int).SetString(c.StakeAmount, 10)
+			if !ok || amt.Sign() <= 0 {
+				logger.Error("Chain %d: stake_amount %q is not a valid positive base-10 wei integer", c.ChainID, c.StakeAmount)
+				os.Exit(1)
+			}
+			amounts = append(amounts, amt)
+		} else {
+			amounts = append(amounts, fetchFloorAmount())
+		}
+		if c.RPCURL != "" {
+			targetRPCs = append(targetRPCs, fmt.Sprintf("%d=%s", c.ChainID, c.RPCURL))
+		}
+		logger.Info("Prepared founding entry for chain %d (%d validators, real BLS pubkeys, real PoP)", c.ChainID, len(committeeEntries))
 	}
 
 	if len(payloads) == 0 {
-		logger.Error("No chains to register (-chains was empty)")
+		logger.Error("No valid chains found in config file")
 		os.Exit(1)
 	}
 
 	var registerCalldatas [][]byte
 	for i, payloadBytes := range payloads {
-		calldata, err := parsedABI.Pack("registerChainViaStake", payloadBytes)
+		calldata, err := parsedABI.Pack("registerChainViaStake", payloadBytes, amounts[i])
 		if err != nil {
 			logger.Error("Failed to pack registerChainViaStake call for chain %d: %v", chainIDs[i], err)
 			os.Exit(1)
@@ -424,17 +818,21 @@ func handleRegisterChains(
 
 	registerChains(ctx, privKey, fromAddress, rootAnchorRPC, "Root Anchor", chainIDs, registerCalldatas)
 
-	if targetRPCsFlag != "" {
-		for _, pair := range strings.Split(targetRPCsFlag, ",") {
-			pair = strings.TrimSpace(pair)
-			if pair == "" {
-				continue
-			}
-			parts := strings.SplitN(pair, "=", 2)
-			if len(parts) != 2 {
-				logger.Error("Invalid -target-rpcs entry %q (expected chainID=url)", pair)
-				os.Exit(1)
-			}
+	// REVERTED 2026-09-04 (same day, found via a real run_full_pipeline.sh end-to-end run): a
+	// prior version of this fix removed this second loop, reasoning it was pure self-registration
+	// (redundant once genesis.json ships ChainRegistry directly). That reasoning was wrong -- this
+	// submits the SAME registerChainViaStake payload to EVERY OTHER chain's own RPC too, which is
+	// what makes chain 101's committee known on chain 102's OWN LOCAL ChainRegistry (and vice
+	// versa) -- attestCommit/attestReserveIssuedCommit look up g.ChainRegistry[sourceChainID] on
+	// whichever chain is actually processing the call, not Root Anchor's copy. Without this,
+	// relaying breaks immediately with "unknown source chain ID" the moment any real cross-chain
+	// message is attempted (confirmed live: relayer.log showed exactly that revert, the deploy
+	// pipeline's cross-chain test timed out at 60s). GatewayRegistryMonitor exists to eventually
+	// converge this same state via polling, but is not fast/reliable enough to substitute for this
+	// synchronous step during a fresh deploy.
+	for _, pair := range targetRPCs {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
 			label, rpcURL := "chain "+parts[0], parts[1]
 			registerChains(ctx, privKey, fromAddress, rpcURL, label, chainIDs, registerCalldatas)
 		}
@@ -443,103 +841,6 @@ func handleRegisterChains(
 	if fundGenesisFlag {
 		fundGenesis(ctx, privKey, fromAddress, rootAnchorRPC, committee, chainIDs, genesisSupplyFlag, perChainAllocFlag, timelockWaitSeconds, parsedABI)
 	}
-}
-
-func loadAllCommitteeMembers(chainsDir string) []committeeMember {
-	var committee []committeeMember
-	entries, err := os.ReadDir(chainsDir)
-	if err != nil {
-		return nil
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		var cid uint64
-		if strings.HasPrefix(entry.Name(), "chain_") {
-			_, _ = fmt.Sscanf(entry.Name(), "chain_%d", &cid)
-		} else if strings.HasPrefix(entry.Name(), "chain-") {
-			_, _ = fmt.Sscanf(entry.Name(), "chain-%d", &cid)
-		} else {
-			continue
-		}
-		if cid == 0 {
-			continue
-		}
-		cfgs, err := loadChainAllNodeConfigs(chainsDir, fmt.Sprintf("%d", cid))
-		if err == nil {
-			for _, cfg := range cfgs {
-				if cfg.Databases.BLSPrivateKey != "" {
-					committee = append(committee, committeeMember{
-						ChainID: cid,
-						PrivHex: cfg.Databases.BLSPrivateKey,
-					})
-				}
-			}
-		}
-	}
-	return committee
-}
-
-type chainConfig struct {
-	Databases struct {
-		BLSPrivateKey string
-	}
-}
-
-func loadChainAllNodeConfigs(chainsDir, cidStr string) ([]*chainConfig, error) {
-	var results []*chainConfig
-
-	// 1. Try multi-node directories: chain_XXX/node-* or chain-XXX/node-*
-	dirCandidates := []string{
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr)),
-		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr)),
-		filepath.Join("/opt/metanode", fmt.Sprintf("chain-%s", cidStr)),
-	}
-
-	for _, d := range dirCandidates {
-		entries, err := os.ReadDir(d)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "node-") {
-				continue
-			}
-			cfgPaths := []string{
-				filepath.Join(d, entry.Name(), "config.json"),
-				filepath.Join(d, entry.Name(), "config", "execution.json"),
-			}
-			for _, p := range cfgPaths {
-				if data, err := os.ReadFile(p); err == nil {
-					var app chainConfig
-					if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
-						results = append(results, &app)
-						break
-					}
-				}
-			}
-		}
-		if len(results) > 0 {
-			return results, nil
-		}
-	}
-
-	// 2. Single-node fallback
-	singleCandidates := []string{
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "node-0", "config.json"),
-		filepath.Join(chainsDir, fmt.Sprintf("chain-%s", cidStr), "config", "execution.json"),
-		filepath.Join(chainsDir, fmt.Sprintf("chain_%s", cidStr), "config.json"),
-	}
-	for _, path := range singleCandidates {
-		if data, err := os.ReadFile(path); err == nil {
-			var app chainConfig
-			if err := json.Unmarshal(data, &app); err == nil && app.Databases.BLSPrivateKey != "" {
-				return []*chainConfig{&app}, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("could not find valid config for chain %s in %s", cidStr, chainsDir)
 }
 
 func decodeRevertReason(returnBytes []byte) string {
@@ -649,18 +950,8 @@ func fundGenesis(
 	reserveChainID := rootChainIDBig.Uint64()
 	logger.Info("fundGenesis: Root Anchor's real chain ID (used as ReserveChainID) is %d", reserveChainID)
 
-	mintPayload, err := json.Marshal(cross_chain.AllocationGrantPayload{
-		ChainID: reserveChainID,
-		Amount:  genesisSupply,
-	})
-	if err != nil {
-		logger.Error("fundGenesis: marshal mintPayload: %v", err)
-		os.Exit(1)
-	}
-
-	if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-		5 /* ProposalAllocateSupply */, mintPayload, committee, timelockWaitSeconds,
-		"mint genesis supply"); err != nil {
+	if err := allocateSupplyWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+		reserveChainID, genesisSupply, committee, "mint genesis supply"); err != nil {
 		logger.Info("ℹ️ fundGenesis: mint genesis supply skipped (%v) -- proceeding to distribute.", err)
 	} else {
 		logger.Info("✅ fundGenesis: minted %s to Reserve (chain %d) on Root Anchor", genesisSupply.String(), reserveChainID)
@@ -681,17 +972,8 @@ func fundGenesis(
 			}
 		}
 
-		transferPayload, err := json.Marshal(cross_chain.AllocationTransferPayload{
-			FromChainID: reserveChainID,
-			ToChainID:   cid,
-			Amount:      perChainAlloc,
-		})
-		if err != nil {
-			logger.Error("fundGenesis: marshal transferPayload for chain %d: %v", cid, err)
-			os.Exit(1)
-		}
-		if err := proposeVoteExecute(ctx, client, privKey, fromAddress, rootAnchorRPC,
-			6 /* ProposalTransferAllocation */, transferPayload, committee, timelockWaitSeconds,
+		if err := transferAllocationWithCert(ctx, client, parsedABI, privKey, fromAddress, rootAnchorRPC,
+			reserveChainID, cid, perChainAlloc, committee,
 			fmt.Sprintf("transfer allocation to chain %d", cid)); err != nil {
 			logger.Info("ℹ️ fundGenesis: allocation transfer to chain %d skipped (%v)", cid, err)
 			continue
@@ -700,84 +982,131 @@ func fundGenesis(
 	}
 }
 
-func proposeVoteExecute(
-	ctx context.Context,
-	client *ethclient.Client,
-	privKey *ecdsa.PrivateKey,
-	fromAddress common.Address,
-	rpcURL string,
-	kind uint8,
-	payload []byte,
-	committee []committeeMember,
-	timelockWaitSeconds int,
-	label string,
-) error {
-	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+// fetchChainCommittee queries getChainRegistry for chainID's real on-chain committee (as
+// []cross_chain.ValidatorEntry, in registry order) + epoch -- needed to build a
+// BuildSignerBitmap-aligned QuorumCert for that chain's own self-authorization (2026-09-04,
+// replacing the removed propose/vote/executeProposal governance dance).
+func fetchChainCommittee(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, chainID uint64) ([]cross_chain.ValidatorEntry, uint64, error) {
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	calldata, err := parsedABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
 	if err != nil {
-		return fmt.Errorf("parse GatewayABI: %w", err)
+		return nil, 0, fmt.Errorf("pack getChainRegistry: %w", err)
 	}
-
-	header, err := client.HeaderByNumber(ctx, nil)
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
 	if err != nil {
-		return fmt.Errorf("fetch block header for propose: %w", err)
+		return nil, 0, fmt.Errorf("call getChainRegistry: %w", err)
 	}
-
-	proposeCalldata, err := parsedABI.Pack("propose", kind, payload, header.Time)
+	results, err := parsedABI.Unpack("getChainRegistry", out)
 	if err != nil {
-		return fmt.Errorf("pack propose(kind=%d): %w", kind, err)
+		return nil, 0, fmt.Errorf("unpack getChainRegistry: %w", err)
 	}
-	receipt, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, big.NewInt(100_000_000_000_000_000), 2_000_000,
-		proposeCalldata, fmt.Sprintf("%s: propose", label))
+	exists, _ := results[0].(bool)
+	if !exists {
+		return nil, 0, fmt.Errorf("chain %d is not registered", chainID)
+	}
+	pubkeys, _ := results[1].([][]byte)
+	stakes, _ := results[2].([]uint64)
+	popSigs, _ := results[3].([][]byte)
+	epoch, _ := results[4].(uint64)
+	committee := make([]cross_chain.ValidatorEntry, len(pubkeys))
+	for i := range pubkeys {
+		var stake uint64
+		if i < len(stakes) {
+			stake = stakes[i]
+		}
+		var pop []byte
+		if i < len(popSigs) {
+			pop = popSigs[i]
+		}
+		committee[i] = cross_chain.ValidatorEntry{PubkeyBLS: pubkeys[i], Stake: stake, PopSignature: pop}
+	}
+	return committee, epoch, nil
+}
+
+// signCertForChain builds a real QuorumCert authorizing digest, signed by chainID's own real
+// on-chain committee members whose private keys are present in signers (2026-09-04, replacing
+// the removed propose/vote/executeProposal governance dance -- see
+// cross_chain.GatewayEngine.TransferAllocationWithCert/AllocateSupplyWithCert's own doc comments
+// for why self-authorization by the affected chain's own committee replaced community voting).
+func signCertForChain(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, chainID uint64, digest []byte, signers []committeeMember) (cross_chain.QuorumCert, error) {
+	onChainCommittee, epoch, err := fetchChainCommittee(ctx, client, parsedABI, chainID)
 	if err != nil {
-		return fmt.Errorf("%s: propose: %w", label, err)
+		return cross_chain.QuorumCert{}, err
 	}
-	logger.Info("✅ %s: propose succeeded", label)
-
-	block, err := client.BlockByNumber(ctx, receipt.BlockNumber)
-	if err != nil {
-		return fmt.Errorf("fetch propose block %v: %w", receipt.BlockNumber, err)
-	}
-	proposedAt := block.Time()
-
-	var buf []byte
-	buf = append(buf, kind)
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	proposalID := crypto.Keccak256Hash(buf)
-	logger.Info("%s: computed proposalID=%s (blockTime=%d)", label, proposalID.Hex(), proposedAt)
-
-	voteNow := uint64(time.Now().Unix())
-	for _, m := range committee {
+	var sigs [][]byte
+	var votingPubkeys [][]byte
+	for _, m := range signers {
+		if m.ChainID != chainID {
+			continue
+		}
 		kp := bls.NewKeyPair(common.FromHex(m.PrivHex))
-		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, m.ChainID)
-		sig := bls.Sign(kp.PrivateKey(), voteMsg)
-		voteCalldata, err := parsedABI.Pack("vote", proposalID, new(big.Int).SetUint64(m.ChainID), voteNow, kp.BytesPublicKey(), sig.Bytes())
-		if err != nil {
-			return fmt.Errorf("pack vote(chain=%d): %w", m.ChainID, err)
-		}
-		if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, voteCalldata,
-			fmt.Sprintf("%s: vote(chain=%d)", label, m.ChainID)); err != nil {
-			logger.Info("ℹ️ %s: vote(chain=%d) did not succeed (likely already past quorum/timelock): %v", label, m.ChainID, err)
-		} else {
-			logger.Info("✅ %s: vote(chain=%d) succeeded", label, m.ChainID)
-		}
+		sig := bls.Sign(kp.PrivateKey(), digest)
+		sigs = append(sigs, sig.Bytes())
+		votingPubkeys = append(votingPubkeys, kp.BytesPublicKey())
 	}
+	if len(sigs) == 0 {
+		return cross_chain.QuorumCert{}, fmt.Errorf("no known private key for any of chain %d's real on-chain committee members", chainID)
+	}
+	aggSig := bls.CreateAggregateSign(sigs)
+	bitmap := cross_chain.BuildSignerBitmap(onChainCommittee, votingPubkeys)
+	return cross_chain.QuorumCert{Epoch: epoch, AggregateSignature: aggSig, SignerBitmap: bitmap}, nil
+}
 
-	logger.Info("%s: waiting %ds for devnet timelock before executeProposal...", label, timelockWaitSeconds)
-	time.Sleep(time.Duration(timelockWaitSeconds) * time.Second)
-	execNow := uint64(time.Now().Unix())
-	execCalldata, err := parsedABI.Pack("executeProposal", proposalID, execNow)
+// transferAllocationWithCert moves amount of fromChainID's own allocation to toChainID,
+// authorized by fromChainID's own real on-chain committee self-signing (replaces the old
+// propose/vote/executeProposal(ProposalTransferAllocation) dance, 2026-09-04).
+func transferAllocationWithCert(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, fromChainID, toChainID uint64, amount *big.Int, committee []committeeMember, label string) error {
+	// SECURITY (2026-09-04, found in review): the signed cert must bind to fromChainID's current
+	// nonce -- without it, this exact calldata (public, once submitted) could be replayed to drain
+	// fromChainID's entire allocation. See GatewayEngine.TransferAllocationNonce's own doc comment.
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	nonceCalldata, err := parsedABI.Pack("getTransferAllocationNonce", new(big.Int).SetUint64(fromChainID))
 	if err != nil {
-		return fmt.Errorf("pack executeProposal(kind=%d): %w", kind, err)
+		return fmt.Errorf("%s: pack getTransferAllocationNonce: %w", label, err)
 	}
-	_, err = sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, execCalldata,
-		fmt.Sprintf("%s: executeProposal", label))
+	nonceOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: nonceCalldata}, nil)
 	if err != nil {
-		return fmt.Errorf("%s: executeProposal: %w", label, err)
+		return fmt.Errorf("%s: call getTransferAllocationNonce: %w", label, err)
 	}
-	logger.Info("✅ %s: executeProposal succeeded", label)
+	nonceResults, err := parsedABI.Unpack("getTransferAllocationNonce", nonceOut)
+	if err != nil {
+		return fmt.Errorf("%s: unpack getTransferAllocationNonce: %w", label, err)
+	}
+	nonce, _ := nonceResults[0].(uint64)
+
+	digest := cross_chain.ComputeTransferAllocationMessage(fromChainID, toChainID, amount, nonce)
+	cert, err := signCertForChain(ctx, client, parsedABI, fromChainID, digest, committee)
+	if err != nil {
+		return fmt.Errorf("%s: sign cert: %w", label, err)
+	}
+	calldata, err := parsedABI.Pack("transferAllocationWithCert", new(big.Int).SetUint64(fromChainID), new(big.Int).SetUint64(toChainID), amount, nonce, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
+	if err != nil {
+		return fmt.Errorf("%s: pack transferAllocationWithCert: %w", label, err)
+	}
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, calldata, fmt.Sprintf("%s: transferAllocationWithCert", label)); err != nil {
+		return fmt.Errorf("%s: transferAllocationWithCert: %w", label, err)
+	}
+	logger.Info("✅ %s: transferAllocationWithCert succeeded", label)
+	return nil
+}
+
+// allocateSupplyWithCert mints amount to chainID (must be Reserve, exactly once), authorized by
+// Reserve's own real on-chain committee self-signing (replaces the old propose/vote/
+// executeProposal(ProposalAllocateSupply) dance, 2026-09-04).
+func allocateSupplyWithCert(ctx context.Context, client *ethclient.Client, parsedABI abi.ABI, privKey *ecdsa.PrivateKey, fromAddress common.Address, rpcURL string, chainID uint64, amount *big.Int, committee []committeeMember, label string) error {
+	digest := cross_chain.ComputeAllocateSupplyMessage(chainID, amount)
+	cert, err := signCertForChain(ctx, client, parsedABI, chainID, digest, committee)
+	if err != nil {
+		return fmt.Errorf("%s: sign cert: %w", label, err)
+	}
+	calldata, err := parsedABI.Pack("allocateSupplyWithCert", new(big.Int).SetUint64(chainID), amount, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
+	if err != nil {
+		return fmt.Errorf("%s: pack allocateSupplyWithCert: %w", label, err)
+	}
+	if _, err := sendTxAndWait(ctx, client, privKey, fromAddress, rpcURL, nil, 1_000_000, calldata, fmt.Sprintf("%s: allocateSupplyWithCert", label)); err != nil {
+		return fmt.Errorf("%s: allocateSupplyWithCert: %w", label, err)
+	}
+	logger.Info("✅ %s: allocateSupplyWithCert succeeded", label)
 	return nil
 }
 

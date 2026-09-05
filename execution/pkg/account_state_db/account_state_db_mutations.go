@@ -474,17 +474,33 @@ func (db *AccountStateDB) ExecuteNativeTransfer(
 		return errors.New("sender account state is nil")
 	}
 
-	// SubTotalBalance in-place
-	err = as.SubTotalBalance(totalCost)
-	if err != nil {
-		return fmt.Errorf("SubTotalBalance: %w", err)
-	}
-
-	// Modify other sender fields in-place
+	// Nonce is consumed unconditionally from here on, BEFORE the balance
+	// check -- the caller (native_fast_path.go) has already committed to
+	// including this tx in the block (it builds a real receipt for it
+	// either way, success or failure below). A tx that is genuinely
+	// included in a block -- has a receipt, occupies a block-tx-list slot
+	// -- must consume its nonce even when it fails on SubTotalBalance, or
+	// the account's own nonce bookkeeping contradicts what its own receipts
+	// say happened: a receipt exists for nonce N, yet the account's nonce
+	// never moved past N, so a later tx at N looks like a duplicate while
+	// N+1 can never become "next expected" either. Found live 2026-09-03
+	// via a wallet stuck after a concurrent insufficient-balance burst
+	// (chasing a since-removed "localNonceFloor" mempool cache that made
+	// the resulting stall permanent instead of self-correcting -- see
+	// ClearNoncesCache's doc comment in tx_validator_pool_core.go for that
+	// history); this fix closes the inconsistency at its actual source.
 	as.PlusOneNonce()
 	as.SetLastHash(txHash)
 	as.SetNewDeviceKey(newDeviceKey)
 	db.setDirtyAccountState(as)
+
+	// SubTotalBalance in-place -- may fail (insufficient balance); the
+	// nonce above is already consumed regardless, matching real inclusion
+	// semantics (failed-but-included tx, no balance mutation attempted).
+	err = as.SubTotalBalance(totalCost)
+	if err != nil {
+		return fmt.Errorf("SubTotalBalance: %w", err)
+	}
 
 	// Receiver
 	toAs, err := db.getOrCreateAccountState(to)
@@ -518,16 +534,22 @@ func (db *AccountStateDB) ExecuteNativeTransferLockFree(
 		return errors.New("sender account state is nil")
 	}
 
-	// SubTotalBalance in-place
-	err = as.SubTotalBalance(totalCost)
-	if err != nil {
-		return fmt.Errorf("SubTotalBalance: %w", err)
-	}
-
-	// Add nonce
+	// Nonce consumed unconditionally, BEFORE the balance check -- see
+	// ExecuteNativeTransfer's matching comment above for the full
+	// rationale (a tx included in a block, even with a failed receipt,
+	// must consume its nonce or its own receipt contradicts the account's
+	// own nonce bookkeeping).
 	as.SetNonce(as.Nonce() + 1)
 	if newDeviceKey != (common.Hash{}) {
 		as.SetNewDeviceKey(newDeviceKey)
+	}
+	db.setDirtyAccountState(as)
+
+	// SubTotalBalance in-place -- may fail (insufficient balance); the
+	// nonce above is already consumed regardless.
+	err = as.SubTotalBalance(totalCost)
+	if err != nil {
+		return fmt.Errorf("SubTotalBalance: %w", err)
 	}
 
 	// Get receiver state
@@ -539,12 +561,12 @@ func (db *AccountStateDB) ExecuteNativeTransferLockFree(
 		return errors.New("receiver account state is nil")
 	}
 
-// AddBalance in-place
-asTo.AddBalance(amount)
+	// AddBalance in-place
+	asTo.AddBalance(amount)
 
-// Save to dirty map (thread-safe)
-db.setDirtyAccountState(as)
-db.setDirtyAccountState(asTo)
+	// Save receiver to dirty map (thread-safe) -- sender (as) was already
+	// marked dirty above, right after the nonce bump.
+	db.setDirtyAccountState(asTo)
 
-return nil
+	return nil
 }

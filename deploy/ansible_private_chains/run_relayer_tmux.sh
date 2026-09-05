@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # run_relayer_tmux.sh — Quản lý vòng đời Cross-Chain Relayer (Start/Stop/Restart/Status)
-# Tự động đọc cấu hình từ /tmp/private_chains.json
+# Tự động đọc cấu hình từ gateway_register.json
 # ==============================================================================
 set -e
 
@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EXECUTION_DIR="$REPO_ROOT/execution"
 BIN_PATH="$EXECUTION_DIR/cross_chain_relayer"
-CONFIG_JSON="/tmp/private_chains.json"
+GW_CONFIG_JSON="$SCRIPT_DIR/gateway_register.json"
 SESSION_NAME="relayer"
 LOG_FILE="$SCRIPT_DIR/relayer.log"
 
@@ -128,95 +128,53 @@ if [ "$ACTION" = "logs" ]; then
 fi
 
 # 5. Xử lý lệnh START / RESTART
+GW_CONFIG_JSON="$SCRIPT_DIR/gateway_register.json"
 INVENTORY_YML="$SCRIPT_DIR/inventory.yml"
 
-if [ -f "$INVENTORY_YML" ]; then
-    echo "📖 Đang đọc cấu hình trực tiếp từ $INVENTORY_YML ..."
+if [ ! -f "$GW_CONFIG_JSON" ] && [ -f "$INVENTORY_YML" ]; then
+    echo "⚙️ Đang khởi tạo $GW_CONFIG_JSON từ $INVENTORY_YML ..."
     python3 -c "
 import yaml, json
 with open('$INVENTORY_YML') as f:
     data = yaml.safe_load(f)
 hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
 root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
-out = {
-    'root_anchor': root_rpc,
-    'nodes': {},
-    'tcp_nodes': {},
-    'chain_nodes': {}
-}
+submitter_key = data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', 'd3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9')
+# relayer_key (2026-09-04): deliberately NOT defaulted to submitter_key -- see
+# cross_chain_relayer/main.go's devnetDefaultRelayerKeyHex doc comment. Empty here falls through
+# to that same devnet-only default in the Go tool itself.
+relayer_key = data.get('all', {}).get('vars', {}).get('relayer_key', '')
+chains = []
 for h in hosts.values():
     if isinstance(h, dict) and 'chain_id' in h:
-        cid = str(h['chain_id'])
+        cid = int(h['chain_id'])
         ip = h.get('ansible_host', '127.0.0.1')
         rpc_port = int(h.get('rpc_port', 8546))
-        port_offset = int(h.get('port_offset', 10))
-        num_vals = int(h.get('validators', 1))
-
-        out['nodes'][cid] = f'http://{ip}:{rpc_port}'
-        out['tcp_nodes'][cid] = f'{ip}:{4200 + port_offset}'
-
-        c_rpc_nodes = {}
-        c_tcp_nodes = {}
-        for v in range(num_vals):
-            c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
-            c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + port_offset + v}'
-
-        out['chain_nodes'][cid] = {
-            'validators': num_vals,
+        chains.append({
+            'chain_id': cid,
             'rpc_url': f'http://{ip}:{rpc_port}',
-            'rpc_nodes': c_rpc_nodes,
-            'tcp_nodes': c_tcp_nodes
-        }
-
-with open('$CONFIG_JSON', 'w') as f:
+            'quorum_threshold': 6667,
+            'validators': []
+        })
+out = {
+    'root_anchor_rpc': root_rpc,
+    'submitter_key': submitter_key,
+    'relayer_key': relayer_key,
+    'genesis_supply': '400000000000000000000000000',
+    'per_chain_allocation': '100000000000000000000000000',
+    'fund_genesis': True,
+    'chains': chains
+}
+with open('$GW_CONFIG_JSON', 'w') as f:
     json.dump(out, f, indent=2)
 "
 fi
 
-if [ ! -f "$CONFIG_JSON" ]; then
-    echo "❌ Lỗi: Không tìm thấy file $CONFIG_JSON và $INVENTORY_YML"
+if [ ! -f "$GW_CONFIG_JSON" ]; then
+    echo "❌ Lỗi: Không tìm thấy file $GW_CONFIG_JSON"
     echo "👉 Hãy chạy deploy private chains trước: ./deploy_private_chains.sh --setup"
     exit 1
 fi
-
-echo "📖 Đang trích xuất danh sách nodes từ $CONFIG_JSON ..."
-PARSED_DATA=$(python3 -c "
-import json
-with open('$CONFIG_JSON') as f:
-    d = json.load(f)
-
-root_anchor = d.get('root_anchor', 'http://127.0.0.1:10746')
-nodes = d.get('nodes', {})
-chain_parts = [f'{cid}={url}' for cid, url in sorted(nodes.items())]
-chains_str = ','.join(chain_parts)
-print(f'{root_anchor}|{chains_str}')
-")
-
-ROOT_ANCHOR=$(echo "$PARSED_DATA" | cut -d'|' -f1)
-CHAINS_STR=$(echo "$PARSED_DATA" | cut -d'|' -f2)
-
-if [ -z "$CHAINS_STR" ]; then
-    echo "❌ Lỗi: Không tìm thấy danh sách chains trong $CONFIG_JSON"
-    exit 1
-fi
-
-# Tự động truy vấn Chain ID của Root Anchor để cấu hình Reserve Chain (2-hop Value Routing)
-RESERVE_FLAG=""
-RESERVE_CHAIN_ID_HEX=$(curl -s -X POST "$ROOT_ANCHOR" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', ''))" 2>/dev/null || true)
-if [ -n "$RESERVE_CHAIN_ID_HEX" ]; then
-    RESERVE_CHAIN_ID=$((RESERVE_CHAIN_ID_HEX))
-    if [ "$RESERVE_CHAIN_ID" -gt 0 ]; then
-        if [[ ! ",$CHAINS_STR," =~ ",$RESERVE_CHAIN_ID=" ]]; then
-            CHAINS_STR="$RESERVE_CHAIN_ID=$ROOT_ANCHOR,$CHAINS_STR"
-        fi
-        RESERVE_FLAG="-reserve-chain-id $RESERVE_CHAIN_ID"
-        echo "ℹ️  Tự động nhận diện Reserve Chain ID: $RESERVE_CHAIN_ID từ Root Anchor"
-    fi
-fi
-
-# Key ECDSA mặc định cho Relayer devnet (Wallet 12: 0xF925262a405194Db7fbDFF02f111cDfaa3F8E54F)
-RELAYER_KEY="${RELAYER_KEY:-f5e6ba1cb14367c5264317dcb5f6e13f0d3cb0e3618e0a91f768570ab94b489c}"
-POLL_MS="${POLL_MS:-100}"
 
 echo "🔨 Biên dịch binary cross_chain_relayer..."
 (cd "$EXECUTION_DIR" && go build -o "$BIN_PATH" ./cmd/tool/cross_chain_relayer)
@@ -231,15 +189,12 @@ touch "$LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 echo "🚀 KHỞI CHẠY CROSS-CHAIN RELAYER TRONG TMUX"
 echo "   - Session Name:    $SESSION_NAME"
-echo "   - Root Anchor RPC: $ROOT_ANCHOR"
-echo "   - All Chains:      $CHAINS_STR"
-echo "   - Reserve Flag:    $RESERVE_FLAG"
-echo "   - Poll Interval:   ${POLL_MS}ms"
+echo "   - Config File:     $GW_CONFIG_JSON"
 echo "   - Log File:        $LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 
-# Tạo lệnh chạy ngầm với tee ghi log mới
-CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' -key '$RELAYER_KEY' -root-anchor '$ROOT_ANCHOR' -chains '$CHAINS_STR' -config-file '$CONFIG_JSON' $RESERVE_FLAG -poll-interval-ms '$POLL_MS' 2>&1 | tee '$LOG_FILE'"
+# Tạo lệnh chạy ngầm với tee ghi log mới (sử dụng --config)
+CMD="cd '$EXECUTION_DIR' && '$BIN_PATH' --config '$GW_CONFIG_JSON' 2>&1 | tee '$LOG_FILE'"
 
 # Khởi tạo tmux detached session
 tmux new-session -d -s "$SESSION_NAME" bash -c "$CMD"

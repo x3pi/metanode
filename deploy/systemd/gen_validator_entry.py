@@ -338,13 +338,29 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
         "free_fee_addresses": [
             "55798165960a62cED34a0d86e36B1758D1303907",
             "0000000000000000000000000000000000000001",
-            "Ea004b9aE1F60516210df2fDfcE9342618729d98"
+            "Ea004b9aE1F60516210df2fDfcE9342618729d98",
+            # Shared cross-chain RELAYER devnet identity -- see gen_root_anchor_chain.py's own
+            # comment on this exact same entry for the full 2026-09-04 rationale (real
+            # run_full_pipeline.sh run found register_chains and cross_chain_relayer were sharing
+            # one Ethereum account with independently-tracked nonces, causing a real orphaned
+            # transaction the moment both ran within a few seconds of each other; this is the
+            # OTHER half of that fix -- gen_validator_entry.py, not gen_root_anchor_chain.py, is
+            # what deploy/ansible's ansible_deploy.sh (run_full_pipeline.sh Step 1) actually uses
+            # to generate Root Anchor's real exec_config).
+            "7d8bfbaba9268b59bab9ef8ff3f314d3f5747366"
         ],
         "cross_chain": {
             "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
             "reserve_chain_id": 991,
-            "min_native_stake_to_register_wei": "1000000000000000000",
-            "devnet_governance_timelock_seconds_override": 10
+            "min_native_stake_to_register_wei": "1000000000000000000"
+            # recovery_committee_json/recovery_quorum_threshold (2026-09-04, replacing the
+            # deleted GovernanceEngine's propose/vote/execute gate for
+            # declareChainDeadWithCert/unregisterChainWithCert/updateCommitteeWithRecoveryCert)
+            # are injected AFTER this script runs, by
+            # deploy/ansible/roles/local_build/tasks/main.yml's "Compute and inject
+            # RecoveryCommittee config" task -- not here, because building that value needs every
+            # OTHER node's real BLS authority key too, which this per-node invocation doesn't
+            # have visibility into yet (see that task's own comment for the full rationale).
         },
         "meta_node_rpc_address": f"0.0.0.0:{meta_rpc_port}",
         "connection_address": f"0.0.0.0:{p2p_port}",
@@ -606,6 +622,10 @@ def main():
                     g_data = json.load(gf)
                 
                 if "validators" in g_data:
+                    # If starting fresh from template (genesis.json does not exist yet), clear sample validators
+                    if not os.path.exists(genesis_target):
+                        g_data["validators"] = []
+
                     updated = False
                     for i, v in enumerate(g_data["validators"]):
                         if v.get("hostname") == args.hostname:

@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -10,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -574,8 +572,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unpack getChainRegistry() output: %v", err)
 	}
-	if len(outValues) != 11 {
-		t.Fatalf("expected 11 output values, got %d", len(outValues))
+	if len(outValues) != 13 {
+		t.Fatalf("expected 13 output values, got %d", len(outValues))
 	}
 	exists, _ := outValues[0].(bool)
 	pubkeys, _ := outValues[1].([][]byte)
@@ -588,6 +586,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	accountTreeRootRaw, _ := outValues[8].([32]byte)
 	archivalEndpoint, _ := outValues[9].(string)
 	registeredAt, _ := outValues[10].(uint64)
+	genesisWallet, _ := outValues[11].(common.Address)
+	genesisDigestRaw, _ := outValues[12].([32]byte)
 
 	if !exists {
 		t.Fatal("expected exists=true for a registered chain")
@@ -621,6 +621,12 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	}
 	if registeredAt != 1234567890 {
 		t.Fatalf("registeredAt = %d, want 1234567890", registeredAt)
+	}
+	if genesisWallet != (common.Address{}) {
+		t.Fatalf("genesisWallet = %s, want zero (this fixture seeds ChainRegistry directly in-test, not via RegisterChainViaStake)", genesisWallet.Hex())
+	}
+	if common.Hash(genesisDigestRaw) != (common.Hash{}) {
+		t.Fatalf("genesisDigest = %s, want zero (not yet published)", common.Hash(genesisDigestRaw).Hex())
 	}
 }
 
@@ -1290,7 +1296,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(1_000_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1312,7 +1318,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)); err != nil { // < minStake
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1346,7 +1352,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(15_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1370,170 +1376,9 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 			t.Fatalf("loadGatewayEngine: %v", err)
 		}
 		if _, exists := reloaded.ChainRegistry[203]; !exists {
-			t.Fatalf("chain 203 must be registered after a sufficient real stake deposit")
-		}
-		if !reloaded.Governance.ActiveChains[203] {
-			t.Fatalf("chain 203 must also become a voting member, with no vote ever cast")
+			t.Fatalf("chain 203 must be registered after a sufficient real stake deposit, with no vote ever cast")
 		}
 	})
-}
-
-// computeProposalIDForTest mirrors GovernanceEngine.Propose's exact proposalID derivation
-// (governance.go: keccak256(kind_byte || proposedAt_be64 || payload)) so the test can predict
-// which proposalID a given claimed timestamp WOULD produce, without relying on the handler to
-// tell it — the whole point is to prove the handler no longer echoes back whatever timestamp
-// the caller claims.
-func computeProposalIDForTest(kind uint8, proposedAt uint64, payload []byte) common.Hash {
-	buf := []byte{kind}
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	return crypto.Keccak256Hash(buf)
-}
-
-// TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue is the regression test for
-// the timestamp-trust gap found during live 2-node testing (note/
-// cross_chain_production_readiness_plan.md Phase 0.9): propose()/vote()/executeProposal() used
-// to trust a raw caller-supplied "currentTimestamp"/"proposedAt" ABI argument with nothing to
-// cross-check it against, letting a caller claim an arbitrary future timestamp to make the
-// mandatory 72h timelock appear satisfied immediately. The fix ignores that argument entirely
-// and always uses the real, consensus-agreed block time instead.
-func TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
-	h, err := GetGatewayHandler()
-	if err != nil {
-		t.Fatalf("GetGatewayHandler: %v", err)
-	}
-
-	kp := bls.GenerateKeyPair()
-	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
-	registry := map[uint64]cross_chain.ChainRegistry{
-		101: {
-			ChainID:         101,
-			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: popSig.Bytes()}},
-			Epoch:           1,
-			QuorumThreshold: 6667,
-		},
-	}
-	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
-	if err != nil {
-		t.Fatalf("NewGlobalSupplyLedger: %v", err)
-	}
-	engine := cross_chain.NewGatewayEngine(101, registry, ledger)
-	engine.EnsureGovernance()   // ActiveChains = {101} -> quorum threshold = 1
-	engine.ReserveChainID = 999 // C7 fix: matches this test's payload chain_id below — this test
-	// is about propose/vote/executeProposal timestamp handling, not allocation semantics, so it
-	// just needs its ProposalAllocateSupply payload to target a validly-configured Reserve.
-	if err := saveGatewayEngine(cs, engine); err != nil {
-		t.Fatalf("saveGatewayEngine: %v", err)
-	}
-
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	realProposeBlockTime := uint64(1_000_000)
-	fakeFarFutureTimestamp := uint64(9_999_999_999) // an attacker's claimed timestamp, decades ahead
-
-	kind := uint8(cross_chain.ProposalAllocateSupply)
-	payload := []byte(`{"chain_id":999,"amount":1}`)
-
-	proposeCalldata, err := h.abi.Pack("propose", kind, payload, fakeFarFutureTimestamp)
-	if err != nil {
-		t.Fatalf("pack propose: %v", err)
-	}
-	fee := big.NewInt(100_000_000_000_000_000)
-	proposeTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, fee, marshalCallData(t, proposeCalldata))
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, proposeTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realProposeBlockTime); failed {
-		t.Fatalf("expected propose to succeed")
-	}
-
-	// The proposalID a real caller would derive using the ATTACKER's claimed timestamp must
-	// NOT exist — proving the handler never fed that value into Propose().
-	fakeProposalID := computeProposalIDForTest(kind, fakeFarFutureTimestamp, payload)
-	fakeCalldata, err := h.abi.Pack("getProposal", fakeProposalID)
-	if err != nil {
-		t.Fatalf("pack getProposal (fake): %v", err)
-	}
-	fakeOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, fakeCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (fake) query: %v", err)
-	}
-	fakeValues, err := h.abi.Unpack("getProposal", fakeOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (fake): %v", err)
-	}
-	if exists, _ := fakeValues[0].(bool); exists {
-		t.Fatalf("proposal keyed on the attacker's claimed timestamp must not exist")
-	}
-
-	// The proposal actually keyed on the REAL block time must exist, and report proposedAt ==
-	// the real block time, not the attacker's claim.
-	realProposalID := computeProposalIDForTest(kind, realProposeBlockTime, payload)
-	realCalldata, err := h.abi.Pack("getProposal", realProposalID)
-	if err != nil {
-		t.Fatalf("pack getProposal (real): %v", err)
-	}
-	realOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (real) query: %v", err)
-	}
-	realValues, err := h.abi.Unpack("getProposal", realOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (real): %v", err)
-	}
-	if exists, _ := realValues[0].(bool); !exists {
-		t.Fatalf("proposal keyed on the real block time must exist")
-	}
-	if proposedAt, _ := realValues[4].(uint64); proposedAt != realProposeBlockTime {
-		t.Fatalf("proposedAt = %d, want real block time %d (not the attacker's claim %d)", proposedAt, realProposeBlockTime, fakeFarFutureTimestamp)
-	}
-
-	// Vote, again claiming the fake far-future timestamp. A single vote reaches quorum
-	// (threshold=1), transitioning straight to Timelocked.
-	voteMsg := cross_chain.ComputeGovernanceVoteMessage(realProposalID, uint64(101))
-	voteSig := bls.Sign(kp.PrivateKey(), voteMsg)
-	voteCalldata, err := h.abi.Pack("vote", realProposalID, new(big.Int).SetUint64(101), fakeFarFutureTimestamp, kp.BytesPublicKey(), voteSig.Bytes())
-	if err != nil {
-		t.Fatalf("pack vote: %v", err)
-	}
-	realVoteBlockTime := realProposeBlockTime + 10
-	voteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, voteCalldata))
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, voteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime); failed {
-		t.Fatalf("expected vote to succeed")
-	}
-
-	// effectiveAt must be derived from the REAL vote block time, not the attacker's claim.
-	postVoteOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (post-vote) query: %v", err)
-	}
-	postVoteValues, err := h.abi.Unpack("getProposal", postVoteOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (post-vote): %v", err)
-	}
-	wantEffectiveAt := realVoteBlockTime + cross_chain.DefaultGovernanceTimelockSeconds
-	if effectiveAt, _ := postVoteValues[5].(uint64); effectiveAt != wantEffectiveAt {
-		t.Fatalf("effectiveAt = %d, want %d (real vote time + 72h) — NOT derived from the attacker's claimed timestamp %d", effectiveAt, wantEffectiveAt, fakeFarFutureTimestamp)
-	}
-
-	// Attacker attempts executeProposal claiming the far-future timestamp — the REAL block
-	// time attached to this transaction is still nowhere near the 72h timelock, so this MUST
-	// still fail even though the calldata claims otherwise.
-	executeCalldata, err := h.abi.Pack("executeProposal", realProposalID, fakeFarFutureTimestamp)
-	if err != nil {
-		t.Fatalf("pack executeProposal: %v", err)
-	}
-	earlyExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, executeCalldata))
-	_, _, earlyFailed := h.HandleTransaction(context.Background(), cs, earlyExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime+100)
-	if !earlyFailed {
-		t.Fatalf("expected executeProposal to fail — the attacker's claimed timestamp must not bypass the real 72h timelock")
-	}
-
-	// Once the REAL block time genuinely passes the timelock, execution succeeds.
-	lateExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 3, big.NewInt(0), marshalCallData(t, executeCalldata))
-	realExecuteBlockTime := wantEffectiveAt + 1
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, lateExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realExecuteBlockTime); failed {
-		t.Fatalf("expected executeProposal to succeed once the real block time genuinely passes the timelock")
-	}
 }
 
 func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
@@ -1553,7 +1398,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 	// Register a mock custom asset
 	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
 	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
-	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry, nil)
+	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 
 	entry := &cross_chain.AssetEntry{
 		AssetID:           assetID,

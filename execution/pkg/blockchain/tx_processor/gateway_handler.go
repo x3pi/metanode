@@ -125,12 +125,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 			return nil, fmt.Errorf("bootstrap empty GlobalSupplyLedger: %w", err)
 		}
 		freshEngine := cross_chain.NewGatewayEngine(localChainID, map[uint64]cross_chain.ChainRegistry{}, emptyLedger)
-		applyDevnetGovernanceTimelockOverride(freshEngine)
 		applyReserveChainIDConfig(freshEngine)
-		if err := applyMinRegistrationStakeConfig(freshEngine); err != nil {
+		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
 			return nil, err
 		}
-		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
+		if err := applyRecoveryCommitteeConfig(freshEngine); err != nil {
 			return nil, err
 		}
 		return freshEngine, nil
@@ -160,12 +159,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
 	}
-	applyDevnetGovernanceTimelockOverride(&engine)
 	applyReserveChainIDConfig(&engine)
-	if err := applyMinRegistrationStakeConfig(&engine); err != nil {
+	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
 		return nil, err
 	}
-	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
+	if err := applyRecoveryCommitteeConfig(&engine); err != nil {
 		return nil, err
 	}
 	return &engine, nil
@@ -184,43 +182,17 @@ func applyReserveChainIDConfig(engine *cross_chain.GatewayEngine) {
 	engine.ReserveChainID = config.ConfigApp.CrossChain.ReserveChainID
 }
 
-// applyMinRegistrationStakeConfig is a no-op unless config.ConfigApp.CrossChain
-// .MinRegistrationStake is a non-empty, valid, positive decimal string — see that field's own
-// doc comment (pkg/config/config.go) and GatewayEngine.MinRegistrationStake's for why this is
-// opt-in (C6 mitigation, not a default-on rate limit). An empty string preserves the exact old
-// permissionless-registration behavior. A non-empty but unparseable/non-positive string is a
-// config mistake, not a silent no-op — it fails loudly at startup rather than deploying a chain
-// that believes it configured a stake requirement but actually didn't.
-func applyMinRegistrationStakeConfig(engine *cross_chain.GatewayEngine) error {
-	raw := ""
-	if config.ConfigApp != nil {
-		raw = config.ConfigApp.CrossChain.MinRegistrationStake
-	}
-	if raw == "" {
-		return nil
-	}
-	if engine.MinRegistrationStake != nil && engine.MinRegistrationStake.Sign() > 0 {
-		return nil
-	}
-	amount, ok := new(big.Int).SetString(raw, 10)
-	if !ok || amount.Sign() <= 0 {
-		return fmt.Errorf("cross_chain.min_registration_stake_wei %q is not a valid positive base-10 integer", raw)
-	}
-	engine.MinRegistrationStake = amount
-	return nil
-}
-
 // applyMinNativeStakeToRegisterConfig sets GatewayEngine.MinNativeStakeToRegister once from
 // config.ConfigApp.CrossChain.MinNativeStakeToRegisterWei — see that field's own doc comment
 // (pkg/config/config.go) and GatewayEngine.MinNativeStakeToRegister's own doc comment for why
-// this is REQUIRED (not opt-in, unlike applyMinRegistrationStakeConfig): with
-// BootstrapFoundingChains retired (2026-08-28), gateway_handler.go's "registerChainViaStake" case
-// is the only vote-free chain registration path left, so it must always have a real, configured
-// native-coin minimum to check the caller's wallet against — an unset value there fails closed at
-// the call site, not silently here. This function itself stays a no-op when the raw config string
-// is empty (lets a chain start up at all before an operator has decided the value — the call site
-// is what actually refuses registerChainViaStake transactions until it's set), same "lock in once
-// from the pristine state" pattern as every other config-applied GatewayEngine field.
+// this is REQUIRED, not opt-in: with BootstrapFoundingChains and the old vote-gated
+// ProposalRegisterChain path both retired, gateway_handler.go's "registerChainViaStake" case is
+// the only chain registration path left, so it must always have a real, configured native-coin
+// minimum to check the caller's wallet against — an unset value there fails closed at the call
+// site, not silently here. This function itself stays a no-op when the raw config string is empty
+// (lets a chain start up at all before an operator has decided the value — the call site is what
+// actually refuses registerChainViaStake transactions until it's set), same "lock in once from
+// the pristine state" pattern as every other config-applied GatewayEngine field.
 func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) error {
 	raw := ""
 	if config.ConfigApp != nil {
@@ -240,15 +212,41 @@ func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) erro
 	return nil
 }
 
-// applyDevnetGovernanceTimelockOverride is a no-op unless config.ConfigApp explicitly sets
-// CrossChain.DevnetGovernanceTimelockSecondsOverride — see that field's own doc comment
-// (pkg/config/config.go) for why this exists and why it never affects a real production
-// config.
-func applyDevnetGovernanceTimelockOverride(engine *cross_chain.GatewayEngine) {
+// applyRecoveryCommitteeConfig sets GatewayEngine.RecoveryCommittee/RecoveryQuorumThreshold once
+// from config.ConfigApp.CrossChain.RecoveryCommitteeJSON/RecoveryQuorumThreshold — see
+// GatewayEngine.RecoveryCommittee's own doc comment for the full rationale (2026-09-04, replacing
+// GovernanceEngine.ActiveChains as the authorizer for DeclareChainDeadWithCert/
+// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). A no-op when the raw config string is
+// empty (lets a chain start up before an operator has decided its RecoveryCommittee — the 3 call
+// sites above fail closed on an empty committee via VerifyQuorumCertAgainstRegistry's own
+// ErrEmptyCommittee check, not silently here) or already set (lock-in-once, same pattern as every
+// other config-applied GatewayEngine field). A non-empty but unparseable JSON string is a config
+// mistake, not a silent no-op — fails loudly at startup.
+func applyRecoveryCommitteeConfig(engine *cross_chain.GatewayEngine) error {
 	if config.ConfigApp == nil {
-		return
+		return nil
 	}
-	engine.ApplyGovernanceTimelockOverride(config.ConfigApp.CrossChain.DevnetGovernanceTimelockSecondsOverride)
+	if len(engine.RecoveryCommittee) > 0 {
+		return nil
+	}
+	raw := config.ConfigApp.CrossChain.RecoveryCommitteeJSON
+	if raw == "" {
+		return nil
+	}
+	var committee []cross_chain.ValidatorEntry
+	if err := json.Unmarshal([]byte(raw), &committee); err != nil {
+		return fmt.Errorf("cross_chain.recovery_committee_json is not valid JSON: %w", err)
+	}
+	if err := cross_chain.ValidateCommittee(committee); err != nil {
+		return fmt.Errorf("cross_chain.recovery_committee_json: %w", err)
+	}
+	threshold := config.ConfigApp.CrossChain.RecoveryQuorumThreshold
+	if err := cross_chain.ValidateQuorumThreshold(threshold); err != nil {
+		return fmt.Errorf("cross_chain.recovery_quorum_threshold: %w", err)
+	}
+	engine.RecoveryCommittee = committee
+	engine.RecoveryQuorumThreshold = threshold
+	return nil
 }
 
 // allZero reports whether data is exactly common.Hash{}.Bytes() — SmartContractDB.StorageValue
@@ -512,10 +510,11 @@ func (h *GatewayHandler) HandleTransaction(
 	}
 
 	switch method.Name {
-	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "refund",
+	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "creditReserveAllocation", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
-		"registerChainViaStake", "batchOutboundCommit",
-		"propose", "vote", "executeProposal", "registerAsset",
+		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
+		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
+		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
@@ -789,7 +788,7 @@ func (h *GatewayHandler) handleWrite(
 				if finalDestChainID == engine.LocalChainID {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is this chain itself -- not a valid relay target", finalDestChainID)
 				}
-				if _, known := engine.ChainRegistry[finalDestChainID]; !known {
+				if _, known := engine.GetChainRegistryEntry(finalDestChainID); !known {
 					return nil, nil, fmt.Errorf("claimMessage relay: finalDestChainID %d is not a registered chain", finalDestChainID)
 				}
 				relayValue := big.NewInt(0)
@@ -921,6 +920,37 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
+	case "creditReserveAllocation":
+		// Destination-side counterpart of AttestCommit's source-side debit -- see
+		// GatewayEngine.CreditReserveAllocation's doc comment for the full root-cause writeup
+		// (2026-09-04 finding: ClaimMessage's own PerChainAllocation credit lands on the CLAIMING
+		// chain's local ledger copy, which is non-authoritative for any chain other than Reserve
+		// itself). Same calldata shape as claimMessage, submitted by the relayer against Reserve's
+		// own node right after that same message's claimMessage succeeds on its real destination.
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustUint64(args[3]),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
+		}
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[13]).Uint64(),
+			Siblings:  mustHashSlice(args[14]),
+		}
+		commitRoot := mustHash(args[15])
+		if err := engine.CreditReserveAllocation(msg, proof, commitRoot); err != nil {
+			return nil, nil, err
+		}
+
 	case "refund":
 		msg := cross_chain.CrossChainMessage{
 			MessageID:     mustHash(args[0]),
@@ -1030,7 +1060,7 @@ func (h *GatewayHandler) handleWrite(
 		if valid, popErr := cross_chain.PopVerify(pubkeyBls, popSig); popErr != nil || !valid {
 			return nil, nil, fmt.Errorf("registerCommitteePop: %w", cross_chain.ErrPopVerifyFailed)
 		}
-		engine.RegisteredPops[hex.EncodeToString(pubkeyBls)] = popSig
+		engine.SetRegisteredPop(hex.EncodeToString(pubkeyBls), popSig)
 
 	case "submitCommitteeAttestation":
 		sourceChainID := mustUint64(args[0])
@@ -1039,7 +1069,7 @@ func (h *GatewayHandler) handleWrite(
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1066,15 +1096,13 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 		key := committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)
-		for _, s := range engine.PendingCommitteeAttestations[key] {
-			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
-				return nil, nil, fmt.Errorf("submitCommitteeAttestation: pubkey already submitted a share for this update")
-			}
-		}
-		engine.PendingCommitteeAttestations[key] = append(engine.PendingCommitteeAttestations[key], cross_chain.CommitteeAttestationShare{
+		err = engine.AddPendingCommitteeAttestationShare(key, cross_chain.CommitteeAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: %w", err)
+		}
 
 	case "submitCommitAttestation":
 		sourceChainID := mustUint64(args[0])
@@ -1083,7 +1111,7 @@ func (h *GatewayHandler) handleWrite(
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("submitCommitAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1108,15 +1136,14 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 		key := commitAttestationKey(sourceChainID, epoch, commitRoot)
-		for _, s := range engine.PendingCommitAttestations[key] {
-			if bytes.Equal(s.SignerPubkeyBLS, signerPubkeyBls) {
-				return nil, nil, fmt.Errorf("submitCommitAttestation: pubkey already submitted a share for this commit root")
-			}
-		}
-		engine.PendingCommitAttestations[key] = append(engine.PendingCommitAttestations[key], cross_chain.CommitAttestationShare{
+		err = engine.AddPendingCommitAttestationShare(key, cross_chain.CommitAttestationShare{
 			SignerPubkeyBLS: signerPubkeyBls,
 			Signature:       signature,
 		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: %w", err)
+		}
+
 
 	case "committeeUpdate":
 		sourceChainID := mustUint64(args[0])
@@ -1142,7 +1169,7 @@ func (h *GatewayHandler) handleWrite(
 			// submitting the final tx could fabricate a "valid-looking" PoP for a rogue key
 			// they don't actually hold the matching secret for is exactly what PoP exists to
 			// prevent, so it must come from the durable, separately-verified registry.
-			registered := engine.RegisteredPops[hex.EncodeToString(newCommitteePubkeys[i])]
+			registered := engine.GetRegisteredPop(hex.EncodeToString(newCommitteePubkeys[i]))
 			if len(registered) == 0 || !bytes.Equal(registered, newCommitteePopSignatures[i]) {
 				return nil, nil, fmt.Errorf("committeeUpdate: pubkey %x has no matching registered PoP (call registerCommitteePop first)", newCommitteePubkeys[i])
 			}
@@ -1161,7 +1188,7 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("committeeUpdate: payloadHash %s does not match recomputed digest %s", payloadHash.Hex(), expectedDigest.Hex())
 		}
 
-		registry, exists := engine.ChainRegistry[sourceChainID]
+		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
 			return nil, nil, fmt.Errorf("committeeUpdate: %w: chain %d", cross_chain.ErrUnknownSourceChain, sourceChainID)
 		}
@@ -1242,24 +1269,49 @@ func (h *GatewayHandler) handleWrite(
 		if err := cross_chain.ApplyCommitteeUpdate(adapter, update, true); err != nil {
 			return nil, nil, err
 		}
-		engine.ChainRegistry[sourceChainID] = *adapter[sourceChainID]
-		delete(engine.PendingCommitteeAttestations, committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
+		engine.SetChainRegistryEntry(sourceChainID, *adapter[sourceChainID])
+		engine.ClearPendingCommitteeAttestations(committeeAttestationKey(sourceChainID, registry.Epoch, payloadHash))
 
 	case "registerChainViaStake":
 		// See GatewayEngine.RegisterChainViaStake's doc comment (pkg/cross_chain/gateway.go) for
-		// why this exists: a vote-free alternative to ExecuteGovernanceProposal's
-		// ProposalRegisterChain case, gated by a REAL, liquid native-coin deposit from the
+		// why this exists: registration gated by a REAL, liquid native-coin deposit from the
 		// caller's own wallet -- not PerChainAllocation (a governance-only, non-transferable
 		// ledger entry) and not any ERC-20-style token (2026-08-28 user request: "dùng tiền từ ví
-		// từ tài khoản thật ... không phải loại token erc 20 gì cả"). This is now the ONLY
-		// vote-free registration path (BootstrapFoundingChains was retired the same day -- see
-		// note/cross_chain_stake_and_value_flow.md), so an unconfigured MinNativeStakeToRegister
-		// fails closed here rather than silently falling back to permissionless registration.
+		// từ tài khoản thật ... không phải loại token erc 20 gì cả"). This is now the ONLY chain
+		// registration path (BootstrapFoundingChains and the old vote-gated ProposalRegisterChain
+		// path were both retired -- see note/cross_chain_stake_and_value_flow.md), so an
+		// unconfigured MinNativeStakeToRegister fails closed here rather than silently falling
+		// back to permissionless registration.
 		if engine.MinNativeStakeToRegister == nil || engine.MinNativeStakeToRegister.Sign() <= 0 {
 			return nil, nil, fmt.Errorf("registerChainViaStake requires cross_chain.min_native_stake_to_register_wei to be configured (>0)")
 		}
 		payload := mustBytes(args[0])
-		if err := engine.RegisterChainViaStake(payload); err != nil {
+		// amount (2026-09-04, user request: "người gửi tự chọn số tiền, >= mức sàn"): the caller
+		// now picks how much of their own real wallet balance becomes this chain's initial
+		// circulating allocation -- MinNativeStakeToRegister is enforced only as the FLOOR (still
+		// the anti-Sybil-spam bound), not the fixed amount, inside RegisterChainViaStake itself.
+		// This is what actually gets burned from the caller's wallet below, not a protocol
+		// constant, so a caller who wants a bigger initial allocation for their chain pays for it
+		// with a bigger real deposit.
+		amount := mustBigInt(args[1])
+		// GenesisWallet (2026-09-04, deterministic-genesis design) is forced to tx.FromAddress()
+		// here, overwriting whatever the submitted payload itself claims -- never trusted from
+		// calldata, same identity-forcing pattern the new "setGenesisDigest" case below uses. A
+		// spoofed GenesisWallet wouldn't let an attacker steal funds (the credited amount is
+		// always the real `amount` burned from tx.FromAddress() below, regardless of whose
+		// address the payload names), but it could impersonate/confuse an unrelated well-known
+		// address into looking like it requested and funded a chain it never touched -- cheap to
+		// close, so it's closed.
+		var reg cross_chain.ChainRegistry
+		if err := json.Unmarshal(payload, &reg); err != nil {
+			return nil, nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
+		}
+		reg.GenesisWallet = tx.FromAddress()
+		forcedPayload, err := json.Marshal(reg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("re-marshal ChainRegistry with forced genesis_wallet: %w", err)
+		}
+		if err := engine.RegisterChainViaStake(forcedPayload, amount); err != nil {
 			return nil, nil, err
 		}
 		// Balance mutation comes last, after every check that can still fail -- same ordering
@@ -1278,15 +1330,27 @@ func (h *GatewayHandler) handleWrite(
 		// ignores `to` entirely (see mvm_linker.cpp's processNativeMintBurn) -- so the mint leg is
 		// what actually makes this a real, held deposit rather than a fee that vanishes from
 		// total supply.
-		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
-			logger.Error("❌ [GATEWAY] registerChainViaStake native stake deposit failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, amount, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake native stake deposit failed (caller=%s, amount=%s): %v", tx.FromAddress().Hex(), amount.String(), err)
 			return nil, nil, fmt.Errorf("registerChainViaStake native stake deposit failed: %w", err)
 		}
-		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, engine.MinNativeStakeToRegister, tx.FromAddress(), tx.ToAddress()); err != nil {
-			logger.Error("❌ [GATEWAY] registerChainViaStake stake re-mint into GATEWAY_CONTRACT_ADDRESS failed (caller=%s, required=%s): %v", tx.FromAddress().Hex(), engine.MinNativeStakeToRegister.String(), err)
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, amount, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] registerChainViaStake stake re-mint into GATEWAY_CONTRACT_ADDRESS failed (caller=%s, amount=%s): %v", tx.FromAddress().Hex(), amount.String(), err)
 			return nil, nil, fmt.Errorf("registerChainViaStake stake deposit re-mint failed: %w", err)
 		}
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
+
+	case "setGenesisDigest":
+		// See GatewayEngine.SetGenesisDigest's own doc comment for the full 2-phase
+		// register-then-publish-digest rationale. tx.FromAddress() is passed as the caller (not
+		// trusted from calldata) so the GenesisWallet-only restriction is enforced against who
+		// ACTUALLY signed this transaction, the same pattern every other caller-identity check in
+		// this file uses.
+		targetChainID := mustUint64(args[0])
+		digest := mustHash(args[1])
+		if err := engine.SetGenesisDigest(targetChainID, digest, tx.FromAddress()); err != nil {
+			return nil, nil, err
+		}
 
 	case "batchOutboundCommit":
 		destChainID := mustUint64(args[0])
@@ -1322,116 +1386,98 @@ func (h *GatewayHandler) handleWrite(
 			logger.Warn("⚠️ [GATEWAY] CommitFinalizedCallback is NIL for chain=%d, commitRoot=%s", engine.LocalChainID, commitRoot.Hex())
 		}
 
-	case "propose":
-		// Anti-spam: Require a fee (e.g. 0.1 native token) to propose
-		fee := tx.Amount()
-		requiredFee := big.NewInt(100_000_000_000_000_000) // 0.1 native token
-		if fee == nil || fee.Cmp(requiredFee) < 0 {
-			return nil, nil, fmt.Errorf("propose requires a fee of at least 0.1 native tokens to prevent spam (got %v)", fee)
+	case "transferAllocationWithCert":
+		// 2026-09-04: replaces the old propose/vote/72h-timelock/executeProposal dance for
+		// ProposalTransferAllocation with a single call, authorized by fromChainId's OWN
+		// committee self-signing (no third-party vote needed or trusted) -- see
+		// GatewayEngine.TransferAllocationWithCert's own doc comment for the full rationale.
+		fromChainID := mustUint64(args[0])
+		toChainID := mustUint64(args[1])
+		amount := mustBigInt(args[2])
+		nonce := mustUint64(args[3])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[4]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[5])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[6])),
 		}
-
-		engine.EnsureGovernance()
-		kind := cross_chain.GovernanceProposalKind(mustUint8(args[0]))
-		payload := mustBytes(args[1])
-		// Security fix: args[2] (the ABI's declared "proposedAt") is a raw caller-supplied
-		// value with nothing to cross-check it against — GovernanceEngine.Propose/Vote/Execute
-		// were written as pure functions that trust whatever timestamp they're given, never
-		// meant to be fed directly from unauthenticated calldata. A caller naming a future
-		// timestamp here (and an equally fake future one at vote/executeProposal time) can walk
-		// EffectiveAt arbitrarily far ahead and immediately satisfy it, bypassing the mandatory
-		// 72h timelock outright — the same trust class of bug already fixed for voterChainID
-		// above. Fail-closed like every other consensus-relevant value in this file: ignore the
-		// caller's claim and always use the real, consensus-agreed block time instead. The ABI
-		// parameter itself is left in place (removing it would be an ABI-breaking change with no
-		// safety benefit); its value is simply never trusted.
-		proposedAt := blockTime
-		proposalID, err := engine.Governance.Propose(kind, payload, proposedAt)
-		if err != nil {
+		if err := engine.TransferAllocationWithCert(fromChainID, toChainID, amount, nonce, cert); err != nil {
 			return nil, nil, err
 		}
-		// propose() is deliberately permissionless (all_remaining_fixes_plan.md Mục 2: gated
-		// only at vote()/quorum, matching common bond-then-vote governance patterns and needed
-		// for a new chain to self-nominate via ProposalRegisterChain without an existing chain
-		// sponsoring it). Proposals has no TTL/cleanup, so surface its real size as a metric
-		// instead of guessing at a rate-limit design with no production data behind it.
-		metrics.GovernanceProposalCount.Set(float64(len(engine.Governance.Proposals)))
-		packed, packErr := method.Outputs.Pack(proposalID)
-		if packErr != nil {
-			return nil, nil, packErr
-		}
-		returnData = packed
 
-	case "vote":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		voterChainID := mustUint64(args[1])
-		// Security fix: see the matching comment on "propose" above — args[2] is untrusted
-		// caller-supplied input; always use the real block time instead.
-		currentTimestamp := blockTime
-		signerPubkeyBls := mustBytes(args[3])
-		signature := mustBytes(args[4])
-
-		// Security fix: GovernanceEngine.Vote itself trusts whatever voterChainID its caller
-		// passes — it was never meant to be called from an unauthenticated public entry point.
-		// Require proof that the caller actually speaks for voterChainID: a valid BLS signature
-		// from a member of that chain's CURRENT committee (per Root Anchor's own ChainRegistry)
-		// over this specific (proposalId, voterChainId) pair. Without this, any caller could cast
-		// any registered chain's single governance vote just by naming its ID.
-		voterRegistry, exists := engine.ChainRegistry[voterChainID]
-		if !exists {
-			return nil, nil, fmt.Errorf("vote: %w: chain %d", cross_chain.ErrUnknownSourceChain, voterChainID)
+	case "allocateSupplyWithCert":
+		// 2026-09-04: replaces ProposalAllocateSupply's governance-vote gate -- authorized by
+		// Reserve's OWN committee self-signing the one-time genesis mint to itself.
+		chainID := mustUint64(args[0])
+		amount := mustBigInt(args[1])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[2]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
 		}
-		isMember := false
-		for _, v := range voterRegistry.Committee {
-			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
-				isMember = true
-				break
-			}
-		}
-		if !isMember {
-			return nil, nil, fmt.Errorf("vote: signer is not a member of chain %d's current committee", voterChainID)
-		}
-		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, voterChainID)
-		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
-		sig := mt_common.SignFromBytes(signature)
-		if !bls.VerifySign(pubKey, sig, voteMsg) {
-			return nil, nil, cross_chain.ErrInvalidBLSSignature
-		}
-
-		status, err := engine.Governance.Vote(proposalID, voterChainID, currentTimestamp)
-		if err != nil {
+		if err := engine.AllocateSupplyWithCert(chainID, amount, cert); err != nil {
 			return nil, nil, err
 		}
-		packed, packErr := method.Outputs.Pack(uint8(status))
-		if packErr != nil {
-			return nil, nil, packErr
-		}
-		returnData = packed
 
-	case "executeProposal":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		// Security fix: see the matching comment on "propose" above — args[1] is untrusted
-		// caller-supplied input; always use the real block time instead.
-		currentTimestamp := blockTime
-		if _, err := engine.ExecuteGovernanceProposal(proposalID, currentTimestamp); err != nil {
+	case "declareChainDeadWithCert":
+		// 2026-09-04: replaces ProposalDeclareChainDead's governance-vote gate -- authorized by
+		// RecoveryCommittee (a fixed, config-set, non-Sybil-able set; the target chain being
+		// declared dead cannot, by definition, self-authorize this).
+		chainID := mustUint64(args[0])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.DeclareChainDeadWithCert(chainID, cert); err != nil {
 			return nil, nil, err
 		}
-		// C6 observability (note/cross_chain_attack_scenario_catalog.md): a ProposalRegisterChain
-		// execution is one possible outcome of this call among several proposal kinds -- setting
-		// this unconditionally after every successful execute is cheap and correct either way
-		// (a no-op change in registry size for any other proposal kind).
+
+	case "unregisterChainWithCert":
+		// 2026-09-04: replaces ProposalUnregisterChain's governance-vote gate -- same
+		// RecoveryCommittee rationale as declareChainDeadWithCert above.
+		chainID := mustUint64(args[0])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.UnregisterChainWithCert(chainID, cert); err != nil {
+			return nil, nil, err
+		}
+		// C6 observability (note/cross_chain_attack_scenario_catalog.md): keep RegisteredChainCount
+		// accurate after a real registry-size change.
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
 
-	case "registerAsset":
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		totalSupply := mustBigInt(args[1])
-		proposal := engine.Governance.GetProposal(proposalID)
-		if proposal == nil {
-			return nil, nil, cross_chain.ErrProposalNotFound
+	case "updateCommitteeWithRecoveryCert":
+		// 2026-09-04: replaces ProposalUpdateCommittee's governance-vote gate -- authorized by
+		// RecoveryCommittee, for the case where a chain's OWN current committee is unreachable
+		// (ApplyCommitteeUpdate above still handles the normal self-attested successor case).
+		payload := mustBytes(args[0])
+		var update cross_chain.UpdateCommitteePayload
+		if err := json.Unmarshal(payload, &update); err != nil {
+			return nil, nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
 		}
-		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(proposal, totalSupply); err != nil {
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[1]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+		}
+		if err := engine.UpdateCommitteeWithRecoveryCert(update, cert); err != nil {
+			return nil, nil, err
+		}
+
+	case "registerAssetWithCert":
+		// 2026-09-04: replaces ProposalRegisterAsset's governance-vote gate -- authorized by the
+		// asset's own HomeChainID self-signing (see AssetRegistryEngine's own doc comment).
+		engine.EnsureAssetRegistry()
+		payload := mustBytes(args[0])
+		totalSupply := mustBigInt(args[1])
+		cert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[2]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
+		}
+		if _, err := engine.AssetRegistry.RegisterAssetOnRootAnchor(payload, totalSupply, cert); err != nil {
 			return nil, nil, err
 		}
 
@@ -1629,7 +1675,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getPendingOutboundCount input: %w", err)
 		}
 		destChainID := mustUint64(args[0])
-		count := len(engine.PendingOutboundMessages[destChainID])
+		count := engine.GetPendingOutboundCount(destChainID)
 		return method.Outputs.Pack(big.NewInt(int64(count)))
 
 	case "getCommitBatch":
@@ -1638,7 +1684,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getCommitBatch input: %w", err)
 		}
 		commitRoot := mustHash(args[0])
-		batch, exists := engine.CommittedBatches[commitRoot]
+		batch, exists := engine.GetCommittedBatch(commitRoot)
 		if !exists {
 			return method.Outputs.Pack(false, uint64(0), []byte{})
 		}
@@ -1665,16 +1711,14 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		chainID := mustUint64(args[0])
 
-		// engine is a fresh, single-goroutine local deserialization from loadGatewayEngine()
-		// above (see its doc comment) — not a value shared across concurrent callers, so no
-		// locking is needed to read its ChainRegistry map here.
-		registry, exists := engine.ChainRegistry[chainID]
+		registry, exists := engine.GetChainRegistryEntry(chainID)
 
 		if !exists {
 			return method.Outputs.Pack(
 				false,
 				[][]byte{}, []uint64{}, [][]byte{},
 				uint64(0), uint64(0), common.Address{}, [32]byte{}, [32]byte{}, "", uint64(0),
+				common.Address{}, [32]byte{},
 			)
 		}
 
@@ -1692,6 +1736,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			pubkeys, stakes, popSignatures,
 			registry.Epoch, registry.QuorumThreshold, registry.GatewayContract,
 			[32]byte(registry.StateRoot), [32]byte(registry.AccountTreeRoot), registry.ArchivalEndpoint, registry.RegisteredAt,
+			registry.GenesisWallet, [32]byte(registry.GenesisDigest),
 		)
 
 	case "getRegisteredPop":
@@ -1700,7 +1745,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("unpack getRegisteredPop input: %w", err)
 		}
 		pubkeyBls := mustBytes(args[0])
-		pop := engine.RegisteredPops[hex.EncodeToString(pubkeyBls)]
+		pop := engine.GetRegisteredPop(hex.EncodeToString(pubkeyBls))
 		if pop == nil {
 			pop = []byte{}
 		}
@@ -1715,7 +1760,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		oldEpoch := mustUint64(args[1])
 		payloadHash := mustHash(args[2])
 
-		shares := engine.PendingCommitteeAttestations[committeeAttestationKey(sourceChainID, oldEpoch, payloadHash)]
+		shares := engine.GetPendingCommitteeAttestationShares(committeeAttestationKey(sourceChainID, oldEpoch, payloadHash))
 		pubkeys := make([][]byte, len(shares))
 		signatures := make([][]byte, len(shares))
 		for i, s := range shares {
@@ -1733,7 +1778,7 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		epoch := mustUint64(args[1])
 		commitRoot := mustHash(args[2])
 
-		shares := engine.PendingCommitAttestations[commitAttestationKey(sourceChainID, epoch, commitRoot)]
+		shares := engine.GetPendingCommitAttestationShares(commitAttestationKey(sourceChainID, epoch, commitRoot))
 		pubkeys := make([][]byte, len(shares))
 		signatures := make([][]byte, len(shares))
 		for i, s := range shares {
@@ -1742,26 +1787,12 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
-	case "getProposal":
-		args, err := method.Inputs.Unpack(argData)
-		if err != nil {
-			return nil, fmt.Errorf("unpack getProposal input: %w", err)
-		}
-		engine.EnsureGovernance()
-		proposalID := mustHash(args[0])
-		proposal := engine.Governance.GetProposal(proposalID)
-		status, exists := engine.Governance.GetStatus(proposalID)
-		if !exists || proposal == nil {
-			return method.Outputs.Pack(false, uint8(0), []byte{}, uint64(0), uint64(0), uint64(0), false, uint8(0))
-		}
-		return method.Outputs.Pack(true, uint8(proposal.Kind), proposal.Payload, proposal.VotesFor, proposal.ProposedAt, proposal.EffectiveAt, proposal.Executed, uint8(status))
-
 	case "getAsset":
 		args, err := method.Inputs.Unpack(argData)
 		if err != nil {
 			return nil, fmt.Errorf("unpack getAsset input: %w", err)
 		}
-		engine.EnsureGovernance()
+		engine.EnsureAssetRegistry()
 		assetID := mustBigInt(args[0])
 		entry, err := engine.AssetRegistry.GetAsset(assetID)
 		if err != nil || entry == nil {
@@ -1783,6 +1814,30 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			alloc = big.NewInt(0)
 		}
 		return method.Outputs.Pack(alloc)
+
+	case "getTransferAllocationNonce":
+		// Lets tooling (register_chains, live_asset_bridge) fetch the exact nonce a real
+		// TransferAllocationWithCert cert must be signed against -- see
+		// GatewayEngine.TransferAllocationNonce's own doc comment for why this exists (replay
+		// protection for the self-signed transfer-allocation path).
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getTransferAllocationNonce input: %w", err)
+		}
+		targetChainID := mustUint64(args[0])
+		return method.Outputs.Pack(engine.GetTransferAllocationNonce(targetChainID))
+
+	case "getMinNativeStakeToRegister":
+		// Lets tooling (gen_single_chain.py's genesis builder, register_chains) fetch the current
+		// stake requirement instead of hardcoding/duplicating it -- see ChainRegistry.GenesisWallet
+		// and RegisterChainViaStake's doc comments for why this matters for the deterministic-
+		// genesis design (2026-09-04): every validator's genesis.json alloc amount must agree
+		// exactly, and that amount IS this value.
+		minStake := engine.MinNativeStakeToRegister
+		if minStake == nil {
+			minStake = big.NewInt(0)
+		}
+		return method.Outputs.Pack(minStake)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

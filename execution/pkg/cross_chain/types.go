@@ -21,6 +21,12 @@ var (
 	ErrSameChainTransfer = errors.New("source and destination chain IDs must be distinct")
 	// ErrNilAmount occurs when an operation receives a nil or negative amount.
 	ErrNilAmount = errors.New("allocation amount cannot be nil or negative")
+	// ErrGenesisDigestAlreadySet occurs when SetGenesisDigest is called for a chain that already
+	// has a non-zero GenesisDigest recorded -- settable exactly once, see ChainRegistry.GenesisDigest.
+	ErrGenesisDigestAlreadySet = errors.New("genesis digest already published for this chain")
+	// ErrNotGenesisWallet occurs when SetGenesisDigest's caller does not match the chain's
+	// recorded GenesisWallet (the address that actually paid the registration stake).
+	ErrNotGenesisWallet = errors.New("caller is not this chain's recorded genesis wallet")
 )
 
 // ValidatorEntry represents a committee validator with BLS pubkey and Proof-of-Possession signature.
@@ -61,6 +67,31 @@ type ChainRegistry struct {
 	AccountTreeRoot  common.Hash      `json:"account_tree_root"`
 	ArchivalEndpoint string           `json:"archival_endpoint"`
 	RegisteredAt     uint64           `json:"registered_at"`
+
+	// GenesisWallet and GenesisDigest (2026-09-04) support the stake-funded onboarding flow's
+	// deterministic-genesis design: a chain registered via RegisterChainViaStake bakes its
+	// initial allocation directly into its OWN genesis.json (no live post-registration bridge
+	// transfer needed) rather than starting at 0 and waiting for a separate ClaimMessage. See
+	// RegisterChainViaStake and SetGenesisDigest's own doc comments for the full mechanism.
+	//
+	// GenesisWallet is the address that must hold the chain's initial native-coin supply in its
+	// own genesis.json alloc -- forced to equal the caller that actually paid the stake
+	// (gateway_handler.go's "registerChainViaStake" case passes tx.FromAddress(), overwriting
+	// whatever the submitted payload claimed), never operator-suppliable, so it can't be spoofed
+	// to point at an unrelated wallet.
+	GenesisWallet common.Address `json:"genesis_wallet,omitempty"`
+
+	// GenesisDigest is keccak256 of the chain's canonical genesis.json bytes (same primitive as
+	// pkg/cross_chain/ceremony.Digest -- kept identical on purpose so the two verification paths
+	// share one well-tested definition of "digest"), published via SetGenesisDigest AFTER the
+	// registrant has actually built genesis.json for every validator (chicken-and-egg: the
+	// digest can only be computed once the file exists, so it can't be part of the original
+	// registration payload). Zero means "not yet published" -- any observer bootstrapping a node
+	// for this chain should treat an unpublished digest as "cannot verify yet", not "verified
+	// empty". Settable exactly once (ErrGenesisDigestAlreadySet on a second attempt) and only by
+	// GenesisWallet, so a would-be attacker can't front-run the real registrant with a wrong
+	// digest that later locks out the honest genesis file.
+	GenesisDigest common.Hash `json:"genesis_digest,omitempty"`
 }
 
 // GlobalSupplyLedger is the active issuer and custodial ceiling ledger on Root Anchor (Section 2.1 & 2.3).
@@ -132,14 +163,16 @@ func (g *GlobalSupplyLedger) SetInitialAllocation(reserveChainID, newChainID uin
 // GrantAllocation increases chainID's custodial ceiling (per_chain_allocation) and the tracked
 // genesis total supply together, keeping sum(per_chain_allocation) <= genesis_total_supply intact.
 // Unlike TransferAllocation (redistributes EXISTING allocation between two already-funded chains),
-// this is the only way new headroom enters the ledger at all: neither BootstrapFoundingChains nor
-// ExecuteGovernanceProposal's ProposalRegisterChain case ever touches SupplyLedger (confirmed by
-// direct code reading), and production always constructs the ledger with genesis_total_supply=0
-// and an empty allocation map (gateway_handler.go's loadGatewayEngine) — so without this method,
-// EVERY attestCommit() ceiling check (Scenario 10.7) rejects with "available 0" forever, for every
-// chain, native coin or custom asset alike. Gated by full governance (ProposalAllocateSupply, >=
-// 2/3 active-chain quorum + timelock, mục 11.6) so a captured single chain can never self-grant —
-// same protection level as ProposalRegisterChain/ProposalRegisterAsset.
+// this is the only way new headroom enters the ledger at all: neither the retired
+// BootstrapFoundingChains/ProposalRegisterChain paths nor RegisterChainViaStake's own registration
+// step ever touch SupplyLedger this way (confirmed by direct code reading), and production always
+// constructs the ledger with genesis_total_supply=0 and an empty allocation map
+// (gateway_handler.go's loadGatewayEngine) — so without this method, EVERY attestCommit() ceiling
+// check (Scenario 10.7) rejects with "available 0" forever, for every chain, native coin or custom
+// asset alike. Callers are cert-gated (2026-09-04): AllocateSupplyWithCert requires the Reserve
+// chain's own committee to self-sign a one-time genesis mint, and RegisterAssetOnRootAnchor
+// requires the new asset's HomeChainID committee to self-sign its registration — so a captured
+// single OTHER chain can never self-grant an allocation it doesn't own.
 func (g *GlobalSupplyLedger) GrantAllocation(chainID uint64, amount *big.Int) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return ErrNilAmount
@@ -315,43 +348,15 @@ type AttestedCommit struct {
 	ClaimedAmount *big.Int    `json:"claimed_amount"`
 }
 
-// GovernanceProposalKind represents governance action types on Root Anchor (Section 11.6 & 1.3 #3).
-type GovernanceProposalKind uint8
-
-const (
-	ProposalRegisterChain    GovernanceProposalKind = 0
-	ProposalUnregisterChain  GovernanceProposalKind = 1
-	ProposalRegisterAsset    GovernanceProposalKind = 2
-	ProposalUpdateCommittee  GovernanceProposalKind = 3
-	ProposalDeclareChainDead GovernanceProposalKind = 4
-	ProposalAllocateSupply   GovernanceProposalKind = 5
-	// ProposalTransferAllocation moves already-minted allocation from one chain to another via
-	// GlobalSupplyLedger.TransferAllocation (added 2026-08-27, C7 fix) -- the safe, repeatable,
-	// non-inflationary way for a chain to grow its allocation after genesis, now that
-	// ProposalAllocateSupply is a one-time Reserve-only mint. Typically FromChainID is Reserve
-	// onboarding a newly-registered chain, but any chain with spare allocation may transfer to
-	// any other registered chain -- TransferAllocation itself enforces the sender actually has
-	// the amount, so this can never inflate supply, only redistribute what already exists.
-	ProposalTransferAllocation GovernanceProposalKind = 6
-)
-
-// AllocationGrantPayload is the JSON payload for ProposalAllocateSupply proposals. ChainID must
-// equal the chain's own configured ReserveChainID (enforced in ExecuteGovernanceProposal) --
-// this proposal kind only ever mints the one-time genesis supply, never grants an arbitrary
-// chain allocation out of thin air. Use ProposalTransferAllocation for that instead.
-type AllocationGrantPayload struct {
-	ChainID uint64   `json:"chain_id"`
-	Amount  *big.Int `json:"amount"`
-}
-
-// AllocationTransferPayload is the JSON payload for ProposalTransferAllocation proposals.
-type AllocationTransferPayload struct {
-	FromChainID uint64   `json:"from_chain_id"`
-	ToChainID   uint64   `json:"to_chain_id"`
-	Amount      *big.Int `json:"amount"`
-}
-
-// UpdateCommitteePayload is the JSON payload for ProposalUpdateCommittee proposals.
+// UpdateCommitteePayload is the JSON payload for UpdateCommitteeWithRecoveryCert (RecoveryCommittee-
+// authorized committee replacement -- see gateway.go). Was formerly also used by the deleted
+// GovernanceEngine's ProposalUpdateCommittee proposal kind; that whole propose/vote/execute
+// machinery (GovernanceProposalKind, GovernanceProposal, AllocationGrantPayload,
+// AllocationTransferPayload and the numbered Proposal* kinds) was removed 2026-09-04 in favor of
+// per-action cert-based self-authorization / RecoveryCommittee-authorization (see gateway.go's
+// AllocateSupplyWithCert/TransferAllocationWithCert/DeclareChainDeadWithCert/
+// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). This struct is the only piece of that
+// old payload family still live.
 type UpdateCommitteePayload struct {
 	ChainID         uint64           `json:"chain_id"`
 	SourceChainID   uint64           `json:"source_chain_id,omitempty"`
@@ -360,18 +365,6 @@ type UpdateCommitteePayload struct {
 	QuorumThreshold uint64           `json:"quorum_threshold,omitempty"`
 	StateRoot       common.Hash      `json:"state_root,omitempty"`
 	AccountTreeRoot common.Hash      `json:"account_tree_root,omitempty"`
-}
-
-// GovernanceProposal tracks on-chain voting across active chains (Section 11.6 & 1.3 #3).
-type GovernanceProposal struct {
-	ProposalID  common.Hash            `json:"proposal_id"`
-	Kind        GovernanceProposalKind `json:"kind"`
-	Payload     []byte                 `json:"payload"`
-	VotesFor    uint64                 `json:"votes_for"`
-	VotedChains map[uint64]bool        `json:"voted_chains"`
-	ProposedAt  uint64                 `json:"proposed_at"`
-	EffectiveAt uint64                 `json:"effective_at"`
-	Executed    bool                   `json:"executed"`
 }
 
 // AccountLeaf represents account state snapshot for Chain-Death Recovery (Section 11.6 & 5.2.2).

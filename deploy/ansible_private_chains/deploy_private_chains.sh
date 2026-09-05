@@ -15,6 +15,7 @@ TARGET_CHAIN="all"
 OPEN_PORTS="false"
 REGISTER=0
 START_RELAYER=0
+DETERMINISTIC_GENESIS=0
 
 for arg in "$@"; do
     case $arg in
@@ -49,6 +50,10 @@ for arg in "$@"; do
         --register)
             REGISTER=1
             ;;
+        --deterministic-genesis)
+            DETERMINISTIC_GENESIS=1
+            REGISTER=1
+            ;;
         --inventory=*)
             INVENTORY="${arg#*=}"
             ;;
@@ -72,6 +77,11 @@ for arg in "$@"; do
             echo ""
             echo "🌉 Gateway:"
             echo "  --register          Đăng ký toàn bộ danh bạ các Private Chains lên Gateway (Root Anchor)"
+            echo "  --deterministic-genesis"
+            echo "                      (2026-09-04) Genesis native-coin của private chain = ĐÚNG số tiền cọc thật"
+            echo "                      đã được Root Anchor cấp khi đăng ký (không còn tự bịa alloc). Tự bật --register."
+            echo "                      Tách deploy thành: sinh key cục bộ -> đăng ký lên Root Anchor -> sinh lại genesis"
+            echo "                      đúng số thật -> publish+verify digest -> MỚI đẩy lên node thật và khởi động."
             echo "  --inventory=F       Đường dẫn file inventory tùy chỉnh (mặc định: inventory.yml)"
             echo ""
             echo "💡 Ví dụ:"
@@ -163,12 +173,32 @@ if target_chain_str != 'all':
 "
 
 # Chạy Ansible Playbook
+# Chế độ --deterministic-genesis (2026-09-04): tách làm 2 lần chạy ansible-playbook thay vì 1,
+# xen giữa là bước đăng ký+sinh lại genesis đúng số thật (khối "Đăng ký Gateway" bên dưới) --
+# KHÔNG được đẩy genesis lên node thật / khởi động node trước khi biết số tiền cọc thật đã đăng
+# ký, nếu không node sẽ chạy với genesis sai (tự bịa số), không thể sửa lại sau khi đã có block 0.
+#   Pha 1 (--limit localhost): chỉ chạy đúng Play "Local build and config generation" trong
+#   deploy.yml (sinh key + file cấu hình cục bộ tại $SCRIPT_DIR/data/chain_<id>/) -- Play "Deploy
+#   and Manage Private Chains across Nodes" nhắm vào group private_chains nên tự động bị bỏ qua
+#   hoàn toàn khi limit=localhost, không cần sửa gì trong deploy.yml.
+#   Pha 2 (sau khi đăng ký+sinh lại genesis xong, full playbook không giới hạn): chạy lại y hệt --
+#   Play 1 tự bỏ qua gen_single_chain.py vì node-0/config.json đã tồn tại (idempotent sẵn), Play 2
+#   mới thật sự copy genesis ĐÃ ĐÚNG lên node và khởi động.
 if [ "$ACTION" != "none" ]; then
-    echo "🚀 Đang thực thi Ansible Playbook ..."
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
-        -e "deploy_action=$ACTION" \
-        -e "target_chain=$TARGET_CHAIN" \
-        -e "open_ports=$OPEN_PORTS"
+    if [ "$DETERMINISTIC_GENESIS" -eq 1 ] && { [ "$ACTION" = "setup" ] || [ "$ACTION" = "reset" ]; }; then
+        echo "🚀 [Pha 1/2 -- deterministic-genesis] Sinh key + cấu hình cục bộ (CHƯA đẩy lên node/khởi động) ..."
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+            -e "deploy_action=$ACTION" \
+            -e "target_chain=$TARGET_CHAIN" \
+            -e "open_ports=$OPEN_PORTS" \
+            --limit localhost
+    else
+        echo "🚀 Đang thực thi Ansible Playbook ..."
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+            -e "deploy_action=$ACTION" \
+            -e "target_chain=$TARGET_CHAIN" \
+            -e "open_ports=$OPEN_PORTS"
+    fi
 fi
 
 # Đăng ký Gateway nếu được yêu cầu
@@ -233,47 +263,194 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_per_chain_allocation'
     fi
     echo ""
 
-    # Xuất file json ngắn gọn chứa IP RPC & TCP của toàn bộ private chains
+    # Xuất file json cấu hình tường minh đăng ký Gateway & cấu hình mạng Relayer
     python3 -c "
-import yaml, json
+import os, yaml, json, glob
+
 with open('$INVENTORY') as f:
     data = yaml.safe_load(f)
-hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {})
-root_rpc = data.get('all', {}).get('vars', {}).get('root_anchor_rpc', 'http://127.0.0.1:10746')
 
-out = {
+global_vars = data.get('all', {}).get('vars', {}) or {}
+root_rpc = global_vars.get('root_anchor_rpc', 'http://127.0.0.1:10746')
+submitter_key = global_vars.get('root_anchor_submitter_key', '')
+# relayer_key (2026-09-04): the relayer daemon's OWN signing key, deliberately SEPARATE from
+# submitter_key -- see cross_chain_relayer/main.go's devnetDefaultRelayerKeyHex doc comment for
+# why sharing one account between register_chains and the relayer daemon is a real nonce-collision
+# hazard (found live). Override via inventory.yml's relayer_key if you need a specific identity;
+# left empty here falls through to that same devnet-only default in the Go tool itself.
+relayer_key = global_vars.get('relayer_key', '')
+gen_supply = str(global_vars.get('genesis_supply_to_mint', '$GENESIS_SUPPLY'))
+per_chain = str(global_vars.get('per_chain_allocation', '$PER_CHAIN_ALLOCATION'))
+
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {}) or {}
+
+chains_config = []
+
+# Root Anchor self-registration (2026-09-04, real bootstrap bug found+fixed via a live
+# run_full_pipeline.sh run -- see note/eurozone_unified_native_coin_plan.md and commit ae42cd63):
+# AllocateSupplyWithCert/TransferAllocationWithCert are both self-sign-only and require
+# ChainRegistry[ReserveChainID] to already exist -- but nothing ever registered the Root Anchor's
+# OWN chain ID into its OWN ChainRegistry, so genesis supply could never be minted on a fresh
+# deployment. Fixed at the gateway.go level (RegisterChainViaStake no longer errors on a same-chain
+# credit), but that fix is only reachable if something actually SUBMITS a registerChainViaStake
+# call for the Root Anchor's own chain ID -- this block does that, using the SAME real BLS
+# authority keys ansible's local_build role already generated for the Root Anchor's own validators
+# (deploy/systemd/node-N_keys/authority_key.json, written locally on this machine before
+# distribution -- see deploy/ansible/roles/local_build/tasks/main.yml). No rpc_url is set for this
+# entry: unlike a private chain, the Root Anchor's own committee never needs to be independently
+# pushed onto ANOTHER chain's local ChainRegistry for this specific goal (TransferAllocationWithCert
+# is a purely-internal Root Anchor ledger operation, no cross-chain message involved) -- setting one
+# here would just submit the exact same registration twice to the exact same RPC.
+root_anchor_chain_id = int(global_vars.get('root_anchor_chain_id', 991))
+# Match against the LIVE genesis's own validators list (source of truth for who is actually
+# running consensus right now) by eth address, rather than blindly globbing every
+# node-*_keys/ directory under deploy/systemd/ -- that directory accumulates stale leftovers
+# from earlier experiments (found live: a 5th 'node-4_keys' dated 2026-08-28 08:40, older than
+# and unrelated to the real 4-validator node-0..3_keys generated later the same day, whose eth
+# address does not appear anywhere in the live genesis's 4 real validators). Registering a
+# phantom extra committee member would misrepresent the real BFT committee and skew the
+# QuorumThreshold math (5 members needing 4-of-5 instead of the real 4 members needing 3-of-4).
+live_genesis_candidates = [
+    os.path.join('/opt/metanode', 'node-0', 'config', 'genesis.json'),
+    os.path.join('$SCRIPT_DIR', '..', 'systemd', 'root_anchor_data', 'node_0', 'genesis.json'),
+]
+live_validator_addresses = set()
+for gp in live_genesis_candidates:
+    if os.path.exists(gp):
+        try:
+            with open(gp) as gf:
+                gd = json.load(gf)
+            for v in gd.get('validators', []):
+                addr = v.get('address', '')
+                if addr:
+                    live_validator_addresses.add(addr.lower())
+            if live_validator_addresses:
+                break
+        except Exception:
+            pass
+
+root_anchor_keys_glob = os.path.join('$SCRIPT_DIR', '..', 'systemd', 'node-*_keys')
+root_anchor_validators = []
+for key_dir in sorted(glob.glob(root_anchor_keys_glob)):
+    summary_path = os.path.join(key_dir, 'keys_summary.json')
+    auth_path = os.path.join(key_dir, 'authority_key.json')
+    if not (os.path.exists(summary_path) and os.path.exists(auth_path)):
+        continue
+    try:
+        with open(summary_path) as sf:
+            eth_addr = json.load(sf).get('eth_address', '').lower()
+        if live_validator_addresses and eth_addr not in live_validator_addresses:
+            continue  # stale/unrelated key dir -- not part of the currently-live committee
+        with open(auth_path) as kf:
+            priv_hex = json.load(kf).get('private_key_hex', '')
+        node_dir = os.path.basename(key_dir)  # e.g. 'node-0_keys'
+        node_id_str = node_dir.replace('node-', '').replace('_keys', '')
+        if priv_hex:
+            root_anchor_validators.append({
+                'name': f'root_anchor_node_{node_id_str}',
+                'node_id': int(node_id_str) if node_id_str.isdigit() else 0,
+                'bls_private_key': priv_hex,
+                'stake': 1000
+            })
+    except Exception:
+        pass
+if live_validator_addresses and len(root_anchor_validators) != len(live_validator_addresses):
+    print(f'⚠️  Root Anchor self-registration: live genesis has {len(live_validator_addresses)} validators but only found local keys for {len(root_anchor_validators)} of them -- committee below will be INCOMPLETE')
+if root_anchor_validators:
+    chains_config.append({
+        'chain_id': root_anchor_chain_id,
+        'rpc_url': '',
+        'quorum_threshold': 6667,
+        'validators': root_anchor_validators
+    })
+    print(f'📄 Root Anchor self-registration: chain {root_anchor_chain_id}, {len(root_anchor_validators)} validators (from local authority_key.json)')
+else:
+    print(f'⚠️  Root Anchor self-registration SKIPPED: no deploy/systemd/node-*_keys/authority_key.json found -- run the Root Anchor deploy step first, or genesis minting will keep failing with \"chain {root_anchor_chain_id} is not registered\"')
+
+out_simple = {
     'root_anchor': root_rpc,
     'nodes': {},
     'tcp_nodes': {},
     'chain_nodes': {}
 }
-for h in hosts.values():
-    if isinstance(h, dict) and 'chain_id' in h:
-        cid = str(h['chain_id'])
-        ip = h.get('ansible_host', '127.0.0.1')
-        rpc_port = int(h.get('rpc_port', 8546))
-        p_offset = int(h.get('port_offset', 10))
-        num_vals = int(h.get('validators', 1))
 
-        out['nodes'][cid] = f'http://{ip}:{rpc_port}'
-        out['tcp_nodes'][cid] = f'{ip}:{4200 + p_offset}'
+for host_key, h in sorted(hosts.items()):
+    if not isinstance(h, dict) or 'chain_id' not in h:
+        continue
+    cid = int(h['chain_id'])
+    cid_str = str(cid)
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc_port = int(h.get('rpc_port', 8546))
+    p_offset = int(h.get('port_offset', 10))
+    num_vals = int(h.get('validators', 1))
 
-        c_rpc_nodes = {}
-        c_tcp_nodes = {}
-        for v in range(num_vals):
-            c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
-            c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + p_offset + v}'
+    out_simple['nodes'][cid_str] = f'http://{ip}:{rpc_port}'
+    out_simple['tcp_nodes'][cid_str] = f'{ip}:{4200 + p_offset}'
 
-        out['chain_nodes'][cid] = {
-            'validators': num_vals,
-            'rpc_url': f'http://{ip}:{rpc_port}',
-            'rpc_nodes': c_rpc_nodes,
-            'tcp_nodes': c_tcp_nodes
-        }
+    c_rpc_nodes = {}
+    c_tcp_nodes = {}
+    validators_list = []
+
+    for v in range(num_vals):
+        c_rpc_nodes[f'm{v}'] = f'http://{ip}:{rpc_port + v}'
+        c_tcp_nodes[f'm{v}'] = f'{ip}:{4200 + p_offset + v}'
+
+        # Đọc validator BLS private key từ thư mục data cục bộ
+        bls_priv = ''
+        cfg_candidates = [
+            os.path.join('$SCRIPT_DIR', 'data', f'chain_{cid}', f'node-{v}', 'config.json'),
+            os.path.join('$SCRIPT_DIR', 'data', f'chain_{cid}', f'node-{v}', 'config', 'execution.json'),
+            os.path.join('/opt/metanode', f'chain-{cid}', f'node-{v}', 'config.json'),
+        ]
+        for cfg_p in cfg_candidates:
+            if os.path.exists(cfg_p):
+                try:
+                    with open(cfg_p) as cf:
+                        cd = json.load(cf)
+                        bls_priv = cd.get('Databases', {}).get('BLSPrivateKey', '')
+                        if bls_priv:
+                            break
+                except Exception:
+                    pass
+
+        validators_list.append({
+            'name': f'node-{v}',
+            'node_id': v,
+            'bls_private_key': bls_priv,
+            'stake': 1000
+        })
+
+    out_simple['chain_nodes'][cid_str] = {
+        'validators': num_vals,
+        'rpc_url': f'http://{ip}:{rpc_port}',
+        'rpc_nodes': c_rpc_nodes,
+        'tcp_nodes': c_tcp_nodes
+    }
+
+    chains_config.append({
+        'chain_id': cid,
+        'rpc_url': f'http://{ip}:{rpc_port}',
+        'quorum_threshold': 6667,
+        'validators': validators_list
+    })
+
+gateway_register_data = {
+    'root_anchor_rpc': root_rpc,
+    'submitter_key': submitter_key,
+    'relayer_key': relayer_key,
+    'genesis_supply': gen_supply,
+    'per_chain_allocation': per_chain,
+    'fund_genesis': True,
+    'chains': chains_config
+}
+
+with open('$SCRIPT_DIR/gateway_register.json', 'w') as f:
+    json.dump(gateway_register_data, f, indent=2)
+print('📄 Đã xuất cấu hình Gateway & Relayer ra: $SCRIPT_DIR/gateway_register.json')
 
 with open('/tmp/private_chains.json', 'w') as f:
-    json.dump(out, f, indent=2)
-print('📄 Đã xuất cấu hình ngắn gọn ra: /tmp/private_chains.json')
+    json.dump(out_simple, f, indent=2)
+print('📄 Đã xuất cấu hình mạng ra: /tmp/private_chains.json')
 "
 
     SUBMITTER_KEY=$(python3 -c "
@@ -289,15 +466,118 @@ print(data.get('all', {}).get('vars', {}).get('root_anchor_submitter_key', ''))
 
     cd "$SCRIPT_DIR/../../execution"
     go build -o register_chains ./cmd/tool/register_chains
-    ./register_chains \
-        --key "$SUBMITTER_KEY" \
-        --root-anchor "$ROOT_ANCHOR_RPC" \
-        --chains "$CHAINS_LIST" \
-        --chains-dir "$SCRIPT_DIR/data" \
-        --target-rpcs "$TARGET_RPCS" \
-        --fund-genesis \
-        --genesis-supply "$GENESIS_SUPPLY" \
-        --per-chain-allocation "$PER_CHAIN_ALLOCATION"
+    ./register_chains --config "$SCRIPT_DIR/gateway_register.json"
+
+    # ─── Deterministic-genesis (2026-09-04): sinh lại genesis đúng số tiền THẬT đã đăng ký ───
+    # Tại đây mỗi chain đã có PerChainAllocation thật trên Root Anchor (RegisterChainViaStake ->
+    # TransferAllocation từ pool Reserve, xem note/eurozone_unified_native_coin_plan.md mục 5) --
+    # đọc lại đúng số đó (không tự bịa), sinh lại genesis.json cục bộ (key giữ nguyên nhờ
+    # gen_single_chain.py đã idempotent), rồi publish+verify digest TRƯỚC KHI Pha 2 (bên dưới) đẩy
+    # nó lên node thật. Dừng cứng (set -e) nếu bất kỳ bước nào lệch -- không đẩy genesis sai lên
+    # node thật.
+    if [ "$DETERMINISTIC_GENESIS" -eq 1 ]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════"
+        echo "🔒 SINH LẠI GENESIS THEO ĐÚNG SỐ TIỀN ĐÃ ĐĂNG KÝ TRÊN ROOT ANCHOR"
+        echo "═══════════════════════════════════════════════════════════════"
+
+        python3 -c "
+import subprocess, sys, yaml
+
+with open('$INVENTORY') as f:
+    data = yaml.safe_load(f)
+hosts = data.get('all', {}).get('children', {}).get('private_chains', {}).get('hosts', {}) or {}
+target = '$TARGET_CHAIN'
+root_rpc = '$ROOT_ANCHOR_RPC'
+submitter_key = '$SUBMITTER_KEY'
+register_chains_bin = '$SCRIPT_DIR/../../execution/register_chains'
+gen_script = '$SCRIPT_DIR/../systemd/gen_single_chain.py'
+
+def run(cmd, capture=False):
+    print('   $ ' + ' '.join(cmd))
+    if capture:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout, file=sys.stderr); print(r.stderr, file=sys.stderr)
+            sys.exit(1)
+        return r.stdout.strip()
+    else:
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            sys.exit(1)
+
+for host_key, h in sorted(hosts.items()):
+    if not isinstance(h, dict) or 'chain_id' not in h:
+        continue
+    cid = h['chain_id']
+    if target != 'all' and str(target) != str(cid):
+        continue
+
+    print(f'\n➡️  Chain {cid} ({host_key}):')
+    amount = run([register_chains_bin, '-action', 'query-alloc-raw', '-root-anchor', root_rpc, '-chains', str(cid)], capture=True)
+    wallet = run([register_chains_bin, '-action', 'query-genesis-wallet-raw', '-root-anchor', root_rpc, '-chains', str(cid)], capture=True)
+    if amount in ('', '0') or wallet.lower() in ('', '0x0000000000000000000000000000000000000000'):
+        print(f'❌ Chain {cid}: chưa có allocation thật trên Root Anchor (amount={amount!r}, wallet={wallet!r}).')
+        print('   Kiểm tra: cross_chain.min_native_stake_to_register_wei đã cấu hình trên Root Anchor chưa,')
+        print('   và ví submitter có đủ số dư thật để trả cọc không (xem log registerChainViaStake ở trên).')
+        sys.exit(1)
+    print(f'   ✅ Root Anchor xác nhận: allocation={amount} wei, genesis_wallet={wallet}')
+
+    ip = h.get('ansible_host', '127.0.0.1')
+    rpc_port = h.get('rpc_port', 8546)
+    port_offset = h.get('port_offset', 0)
+    validators = h.get('validators', 1)
+    submitter = h.get('node_submitter_key', submitter_key)
+    local_out = f'$SCRIPT_DIR/data/chain_{cid}'
+
+    reserve_chain_id_hex = run(['curl', '-s', '-X', 'POST', root_rpc,
+                                 '-H', 'Content-Type: application/json',
+                                 '-d', '{\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\",\"params\":[],\"id\":1}'], capture=True)
+    import json as _json
+    reserve_chain_id = int(_json.loads(reserve_chain_id_hex).get('result', '0x0'), 16)
+
+    run(['python3', gen_script,
+         '--chain-id', str(cid), '--ip', str(ip), '--rpc-port', str(rpc_port),
+         '--port-offset', str(port_offset), '--validators', str(validators),
+         '--root-anchor-rpc', root_rpc, '--root-anchor-submitter-key', submitter,
+         '--reserve-chain-id', str(reserve_chain_id), '--output-dir', local_out,
+         '--dev-keys-file', '$SCRIPT_DIR/private_dev_keys.json',
+         '--initial-supply-wallet', wallet, '--initial-supply', amount])
+
+    genesis_file = f'{local_out}/genesis.json'
+    run([register_chains_bin, '-action', 'publish-genesis-digest', '-root-anchor', root_rpc,
+         '-chains', str(cid), '-genesis-file', genesis_file, '-key', submitter_key])
+    run([register_chains_bin, '-action', 'verify-genesis', '-root-anchor', root_rpc,
+         '-chains', str(cid), '-genesis-file', genesis_file])
+    print(f'   ✅ Chain {cid}: genesis đã xác minh khớp với Root Anchor -- an toàn để đẩy lên node thật.')
+"
+    fi
+fi
+
+# Pha 2 của --deterministic-genesis: giờ mới thật sự đẩy genesis (đã đúng) lên node và khởi động.
+#
+# CỐ Ý dùng deploy_action=setup ở đây, KHÔNG dùng lại $ACTION gốc (dù người dùng gọi --reset-all):
+# Play 1 trong deploy.yml có bước "rm -rf $LOCAL_OUT" khi ansible_action=='reset' -- nếu Pha 2
+# cũng truyền "reset", Play 1 sẽ chạy lại lần nữa (dù đã --limit localhost ở Pha 1, playbook đầy
+# đủ ở Pha 2 KHÔNG giới hạn host nên Play 1 vẫn chạy) và XOÁ SẠCH genesis.json/keys vừa đăng ký +
+# sinh lại đúng số ở trên -- sinh committee MỚI ngẫu nhiên, không khớp với cái vừa đăng ký trên
+# Root Anchor. "setup" không có bước rm -rf này, và vẫn kích hoạt đúng toàn bộ khối "Deploy
+# directories and files" (chạy cho cả setup lẫn reset như nhau) nên vẫn đẩy đủ genesis/config/keys
+# lên node thật và khởi động bình thường.
+#
+# Đánh đổi đã biết: nếu chain này TỪNG deploy trước đó (dữ liệu cũ còn trên node thật) và người
+# dùng gọi --reset-all --deterministic-genesis muốn xoá sạch dữ liệu cũ trên node thật, bước xoá
+# đó sẽ KHÔNG tự động chạy nữa (thuộc "Clean entire installation directory on reset" trong Play 2,
+# chỉ chạy khi ansible_action=='reset'). Trường hợp này cần tự xoá thủ công
+# /opt/metanode/chain-<id> trên node thật trước khi chạy lại, hoặc chạy --reset-all thường (không
+# kèm --deterministic-genesis) 1 lần trước để dọn sạch, rồi mới bật --deterministic-genesis.
+if [ "$DETERMINISTIC_GENESIS" -eq 1 ] && { [ "$ACTION" = "setup" ] || [ "$ACTION" = "reset" ]; }; then
+    echo ""
+    echo "🚀 [Pha 2/2 -- deterministic-genesis] Đẩy genesis đã xác minh lên node thật và khởi động ..."
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+        -e "deploy_action=setup" \
+        -e "target_chain=$TARGET_CHAIN" \
+        -e "open_ports=$OPEN_PORTS"
 fi
 
 echo ""

@@ -89,8 +89,11 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	if err != nil {
 		return nil, false, fmt.Errorf("unpack getChainRegistry output: %w", err)
 	}
-	if len(outValues) != 11 {
-		return nil, false, fmt.Errorf("getChainRegistry: expected 11 output values, got %d", len(outValues))
+	// 2026-09-04: getChainRegistry grew 2 more trailing outputs (genesisWallet, genesisDigest) for
+	// the deterministic-genesis design (see ChainRegistry.GenesisWallet/GenesisDigest's own doc
+	// comments) -- 13, not the original 11.
+	if len(outValues) != 13 {
+		return nil, false, fmt.Errorf("getChainRegistry: expected 13 output values, got %d", len(outValues))
 	}
 
 	exists, _ := outValues[0].(bool)
@@ -108,6 +111,8 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	accountTreeRootRaw, _ := outValues[8].([32]byte)
 	archivalEndpoint, _ := outValues[9].(string)
 	registeredAt, _ := outValues[10].(uint64)
+	genesisWallet, _ := outValues[11].(common.Address)
+	genesisDigestRaw, _ := outValues[12].([32]byte)
 
 	if len(pubkeys) != len(stakes) || len(pubkeys) != len(popSignatures) {
 		return nil, false, fmt.Errorf("getChainRegistry: mismatched committee array lengths (pubkeys=%d stakes=%d popSignatures=%d)",
@@ -132,6 +137,8 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 		AccountTreeRoot:  common.Hash(accountTreeRootRaw),
 		ArchivalEndpoint: archivalEndpoint,
 		RegisteredAt:     registeredAt,
+		GenesisWallet:    genesisWallet,
+		GenesisDigest:    common.Hash(genesisDigestRaw),
 	}
 	return registry, true, nil
 }

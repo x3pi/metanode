@@ -40,8 +40,8 @@ var (
 	ErrOnlyReserveMayMint            = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
 	ErrGenesisAlreadyMinted          = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
 	ErrNonReserveCeilingAttestation  = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
-	ErrInsufficientRegistrationStake = errors.New("ProposalRegisterChain: this chain ID does not yet hold MinRegistrationStake in PerChainAllocation — fund it first via ProposalTransferAllocation from an already-active chain or the Reserve")
-	ErrChainAlreadyRegistered        = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use ProposalUpdateCommittee to change an existing chain's committee")
+	ErrChainAlreadyRegistered        = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
+	ErrInvalidTransferNonce          = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -68,6 +68,26 @@ type CrossChainContext struct {
 type AllocationRejectedListener func(chainID uint64, requested, available *big.Int)
 
 // GatewayEngine implements the native light-client bridge state machine (Section 2.1 & 2.2).
+//
+// Concurrency model (clarified 2026-09-04, after a security re-review of PR #99's "thread-safe
+// gateway attestations" fix): every write/view call in gateway_handler.go obtains its OWN
+// GatewayEngine via loadGatewayEngine(chainState) -- a fresh json.Unmarshal of the single
+// gatewayStateStorageKey storage slot, done single-goroutine, once per transaction (no goroutine
+// is ever spawned anywhere in that call path). Two transactions in the same block therefore never
+// share one GatewayEngine value or its mu -- each gets its own, freshly zero-valued, mutex. The
+// actual cross-transaction consistency guarantee (two transactions racing to read-modify-write
+// the same storage slot) comes entirely from Block-STM's own read/write-set conflict detection at
+// the storage layer, not from mu.
+//
+// mu still exists and is used consistently by every exported mutation/read method on this type
+// (including the ones below wrapping ChainRegistry/RegisteredPops) as defense-in-depth: it costs
+// nothing under the current single-goroutine-per-instance model, and it means this type stays
+// safe to use correctly should a future caller ever hold onto and share one GatewayEngine across
+// goroutines (a test harness, an off-chain monitor, a future caching layer) -- exactly the kind of
+// assumption that is cheap to guarantee now and expensive to retrofit correctly later. Every
+// field read or written outside this file (i.e. from gateway_handler.go) MUST go through an
+// exported accessor below rather than touching a map field directly, so this guarantee actually
+// holds for the whole codebase, not just for calls made from within this file.
 type GatewayEngine struct {
 	mu                         sync.RWMutex
 	LocalChainID               uint64
@@ -75,7 +95,13 @@ type GatewayEngine struct {
 	SupplyLedger               *GlobalSupplyLedger
 	AttestedCommits            map[string]AttestedCommit
 	MessageStatus              map[common.Hash]MessageStatus
-	DeadChains                 map[uint64]bool
+	// ReserveCreditedMessages guards CreditReserveAllocation's write-once semantics, keyed by
+	// MessageID -- see that function's doc comment for why it exists (the destination-side
+	// counterpart of AttestCommit's source-side debit, since ClaimMessage's own credit lands on
+	// the CLAIMING chain's local ledger copy, which is non-authoritative for any chain other than
+	// Reserve itself).
+	ReserveCreditedMessages map[common.Hash]bool
+	DeadChains              map[uint64]bool
 	DeadChainClaimed           map[string]bool
 	ActiveContext              *CrossChainContext
 	LockedTips                 map[common.Hash]*big.Int
@@ -114,10 +140,41 @@ type GatewayEngine struct {
 	// gateway_handler.go. Independent of ChainRegistry membership: anyone may register a PoP for
 	// their own key at any time.
 	RegisteredPops map[string][]byte
-	// Governance manages on-chain multi-chain voting and 72h timelocks (Milestone G).
-	Governance *GovernanceEngine `json:"governance,omitempty"`
 	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
+
+	// RecoveryCommittee + RecoveryQuorumThreshold (2026-09-04, replacing GovernanceEngine's whole
+	// propose/vote/72h-timelock/execute machinery, removed the same day per explicit user
+	// request): a small, FIXED, config-set BLS committee (same ValidatorEntry shape as any
+	// ChainRegistry.Committee, verified with the exact same VerifyQuorumCertAgainstRegistry this
+	// codebase already uses everywhere else -- no new crypto) that authorizes the 3 actions no
+	// affected party can ever self-authorize: DeclareChainDeadWithCert, UnregisterChainWithCert,
+	// and UpdateCommitteeWithRecoveryCert (installing a brand new committee for a chain whose OLD
+	// one is unreachable -- ApplyCommitteeUpdate above still handles the normal case where the
+	// OLD committee signs its own successor; this is only for when that is impossible). Set once
+	// from config (config.CrossChain.RecoveryCommitteeJSON/RecoveryQuorumThreshold,
+	// gateway_handler.go's applyRecoveryCommitteeConfig) — never settable by any on-chain action,
+	// same "lock in once from the pristine state" pattern as ReserveChainID. Deliberately NOT the
+	// same set as the old Governance.ActiveChains: that set grew for free with every
+	// RegisterChainViaStake call (the exact Sybil-vote-buying risk this whole redesign closes,
+	// note/eurozone_unified_native_coin_plan.md mục 2.6) -- RecoveryCommittee has no on-chain
+	// growth path at all, so there is nothing to buy into cheaply.
+	RecoveryCommittee       []ValidatorEntry `json:"recovery_committee,omitempty"`
+	RecoveryQuorumThreshold uint64           `json:"recovery_quorum_threshold,omitempty"`
+
+	// TransferAllocationNonce (2026-09-04 -- found in review immediately after removing
+	// GovernanceEngine, before this ever shipped: TransferAllocationWithCert's self-signed cert
+	// has NO other replay protection at all -- unlike every other cert-authorized action in this
+	// file, moving allocation is NOT naturally idempotent on replay. The old propose/vote/execute
+	// machinery's GovernanceProposal.Executed flag was exactly this guard, silently lost when it
+	// was removed). Tracks, per fromChainID, the next nonce TransferAllocationWithCert will
+	// accept -- the signed digest binds to this exact nonce (ComputeTransferAllocationMessage),
+	// so a captured valid cert authorizing "move X from A to B" can be submitted AT MOST once;
+	// resubmitting the identical calldata a second time fails the nonce check instead of moving
+	// X again. Starts at 0 for every chain (GetAllocation's own zero-value pattern), incremented
+	// by exactly 1 on every successful transfer -- never decremented, never settable except by
+	// TransferAllocationWithCert itself succeeding.
+	TransferAllocationNonce map[uint64]uint64 `json:"transfer_allocation_nonce,omitempty"`
 
 	// ReserveChainID identifies which registered chain is the system's unconditional issuer
 	// ("Reserve", Section 2.3) — the only chain allowed to (a) receive the one-time genesis
@@ -139,27 +196,6 @@ type GatewayEngine struct {
 	// note/cross_chain_attack_scenario_catalog.md items C7/C8 for the full analysis.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
-	// MinRegistrationStake — C6 mitigation (Sybil chain registration, 2026-08-27, see
-	// note/cross_chain_attack_scenario_catalog.md item C6), gating ONLY
-	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path). Registration
-	// there was previously fully decoupled from SupplyLedger — a new chain could be voted into
-	// ChainRegistry, and therefore gain 1 full governance vote, while holding zero allocation.
-	// When set (>0), ProposalRegisterChain additionally requires
-	// SupplyLedger.PerChainAllocation[reg.ChainID] >= MinRegistrationStake at execution time —
-	// the candidate chain ID must already have been pre-funded via ProposalTransferAllocation
-	// from an existing active chain (or the Reserve) BEFORE the registration proposal can
-	// execute. TransferAllocation/SetInitialAllocation have no ChainRegistry membership check
-	// (confirmed by direct code reading), so pre-funding a not-yet-registered chain ID works
-	// today with no other change needed. Zero/nil (the default, and every pre-2026-08-27 config)
-	// preserves the exact old permissionless-registration behavior for this vote-gated path.
-	// Does NOT gate RegisterChainViaStake (2026-08-28: that vote-free path now runs on a
-	// completely different instrument — a REAL native-coin wallet deposit, checked+burned by
-	// gateway_handler.go against engine.MinNativeStakeToRegister — see RegisterChainViaStake's
-	// own doc comment). Set once from config (config.CrossChain.MinRegistrationStakeWei,
-	// gateway_handler.go's applyMinRegistrationStakeConfig) — never governance-settable, matching
-	// ReserveChainID's own pattern.
-	MinRegistrationStake *big.Int `json:"min_registration_stake,omitempty"`
-
 	// MinNativeStakeToRegister is the real, liquid native-coin (Root Anchor's own base asset —
 	// deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) minimum wallet balance
 	// gateway_handler.go's "registerChainViaStake" case requires tx.FromAddress() to hold before
@@ -176,35 +212,13 @@ type GatewayEngine struct {
 	// debits `from` and credits nowhere — see gateway_handler.go's "registerChainViaStake" case
 	// for why the mint leg is required). Set once from config
 	// (config.CrossChain.MinNativeStakeToRegisterWei, gateway_handler.go's
-	// applyMinNativeStakeToRegisterConfig) — never governance-settable, and, unlike
-	// MinRegistrationStake, REQUIRED (not opt-in): with BootstrapFoundingChains retired,
-	// RegisterChainViaStake is the only vote-free registration path left, so an unconfigured
+	// applyMinNativeStakeToRegisterConfig) — never governance-settable, and REQUIRED (not
+	// opt-in): with BootstrapFoundingChains and the vote-gated ProposalRegisterChain path both
+	// retired, RegisterChainViaStake is the only registration path left, so an unconfigured
 	// minimum here must fail closed rather than silently reopening permissionless Sybil
 	// registration for every chain, founding or not.
 	MinNativeStakeToRegister *big.Int `json:"min_native_stake_to_register,omitempty"`
 
-	// GovernanceTimelockSecondsOverride — set only via ApplyGovernanceTimelockOverride(), from
-	// an explicit devnet-only config field (config.CrossChainConfig
-	// .DevnetGovernanceTimelockSecondsOverride). Zero (the value on every real chain's
-	// persisted state) means "use the real 72h DefaultGovernanceTimelockSeconds" — see that
-	// field's own doc comment for why this exists.
-	GovernanceTimelockSecondsOverride uint64 `json:"governance_timelock_seconds_override,omitempty"`
-}
-
-// ApplyGovernanceTimelockOverride is a no-op when seconds==0 (every real production config).
-// When explicitly set (devnet/testing only — see GovernanceTimelockSecondsOverride's own doc
-// comment), it both records the override for future EnsureGovernance() calls and, if a
-// Governance engine already exists (either freshly constructed by NewGatewayEngine or just
-// deserialized), updates its TimelockDelaySeconds directly so the change takes effect
-// immediately rather than only on the next from-scratch construction.
-func (g *GatewayEngine) ApplyGovernanceTimelockOverride(seconds uint64) {
-	if seconds == 0 {
-		return
-	}
-	g.GovernanceTimelockSecondsOverride = seconds
-	if g.Governance != nil {
-		g.Governance.TimelockDelaySeconds = seconds
-	}
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -213,12 +227,7 @@ func NewGatewayEngine(
 	registry map[uint64]ChainRegistry,
 	ledger *GlobalSupplyLedger,
 ) *GatewayEngine {
-	activeChains := make([]uint64, 0, len(registry))
-	for c := range registry {
-		activeChains = append(activeChains, c)
-	}
-	gov := NewGovernanceEngine(activeChains)
-	assetReg := NewAssetRegistryEngine(registry, gov)
+	assetReg := NewAssetRegistryEngine(registry)
 
 	return &GatewayEngine{
 		LocalChainID:                 localChainID,
@@ -226,6 +235,7 @@ func NewGatewayEngine(
 		SupplyLedger:                 ledger,
 		AttestedCommits:              make(map[string]AttestedCommit),
 		MessageStatus:                make(map[common.Hash]MessageStatus),
+		ReserveCreditedMessages:      make(map[common.Hash]bool),
 		DeadChains:                   make(map[uint64]bool),
 		DeadChainClaimed:             make(map[string]bool),
 		LockedTips:                   make(map[common.Hash]*big.Int),
@@ -236,29 +246,20 @@ func NewGatewayEngine(
 		PendingOutboundMessages:      make(map[uint64][]CrossChainMessage),
 		CommittedBatches:             make(map[common.Hash]CommittedOutboundBatch),
 		RegisteredPops:               make(map[string][]byte),
-		Governance:                   gov,
 		AssetRegistry:                assetReg,
 	}
 }
 
-// EnsureGovernance ensures Governance and AssetRegistry engines are initialized after JSON deserialization.
-func (g *GatewayEngine) EnsureGovernance() {
-	if g.Governance == nil {
-		activeChains := make([]uint64, 0, len(g.ChainRegistry))
-		for c := range g.ChainRegistry {
-			activeChains = append(activeChains, c)
-		}
-		if g.GovernanceTimelockSecondsOverride > 0 {
-			g.Governance = NewGovernanceEngineWithTimelock(activeChains, g.GovernanceTimelockSecondsOverride)
-		} else {
-			g.Governance = NewGovernanceEngine(activeChains)
-		}
-	}
+// EnsureAssetRegistry ensures the AssetRegistry engine is initialized after JSON deserialization
+// (renamed from EnsureGovernance 2026-09-04 -- GovernanceEngine itself was removed the same day,
+// see RecoveryCommittee's own doc comment above for why; keeping a function named "EnsureGovernance"
+// that no longer did anything governance-related would just be more of the same confusing leftover
+// this whole cleanup exists to remove).
+func (g *GatewayEngine) EnsureAssetRegistry() {
 	if g.AssetRegistry == nil {
-		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry, g.Governance)
+		g.AssetRegistry = NewAssetRegistryEngine(g.ChainRegistry)
 	} else {
 		g.AssetRegistry.ChainRegistry = g.ChainRegistry
-		g.AssetRegistry.Governance = g.Governance
 	}
 }
 
@@ -277,34 +278,43 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 }
 
 // RegisterChainViaStake admits a new chain into ChainRegistry/Governance.ActiveChains WITHOUT a
-// committee vote -- a deliberate alternative to ExecuteGovernanceProposal's ProposalRegisterChain
-// case, for operators who want registration gated purely by economic stake, not by a
+// committee vote -- registration gated purely by economic stake, not by a
 // propose/vote/timelock/execute round from the currently active set (2026-08-28, user request:
-// "bỏ cơ chế vote rồi mà sao vẫn còn" -- MinRegistrationStake previously only ADDED a stake
-// precondition on top of the existing vote requirement; this is the actual vote-free path).
+// "bỏ cơ chế vote rồi mà sao vẫn còn" -- the old vote-gated ProposalRegisterChain path, plus its
+// MinRegistrationStake precondition on top of that vote, both retired 2026-09-04 once this became
+// the sole registration path -- see this repo's git history for their last form if ever needed).
 //
-// STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version): this
-// function performs NO stake check itself anymore. GatewayEngine has no AccountStateDB access, so
-// it cannot verify a real wallet balance -- and PerChainAllocation (the old basis) turned out to
-// be the wrong instrument entirely: it is a chain-ID-keyed, governance-vote-only ledger entry
-// (moved solely via ProposalTransferAllocation/ProposalAllocateSupply), not something any wallet
-// actually holds or can pay with, which does not match "cọc tiền từ ví thật" (a real, liquid
-// deposit from an actual wallet, in Root Anchor's own native coin -- explicitly NOT an ERC-20-style
-// token) -- the user's explicit design for this path. The real gate now lives one layer up, in
-// gateway_handler.go's "registerChainViaStake" case: it requires engine.MinNativeStakeToRegister
-// to be configured (>0), checks tx.FromAddress()'s REAL native balance via AccountStateDB against
-// it, calls this function, and -- only if that succeeds -- moves the stake out of the caller's
-// real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (burn-then-mint,
-// same balance-mutation-last-after-every-checkable-failure ordering as the "outbound" case's
-// Value/Tip/GasFee lock). This is also why BootstrapFoundingChains was retired the same day (2026-08-28, see
+// STAKE MODEL (rewritten 2026-08-28, superseding the PerChainAllocation-based version; amount made
+// caller-chosen 2026-09-04, see below): this function performs no wallet-balance check itself --
+// GatewayEngine has no AccountStateDB access, so it cannot verify a real wallet balance -- and
+// PerChainAllocation (the old basis) turned out to be the wrong instrument entirely: it is a
+// chain-ID-keyed, governance-vote-only ledger entry (moved solely via
+// ProposalTransferAllocation/ProposalAllocateSupply), not something any wallet actually holds or
+// can pay with, which does not match "cọc tiền từ ví thật" (a real, liquid deposit from an actual
+// wallet, in Root Anchor's own native coin -- explicitly NOT an ERC-20-style token) -- the user's
+// explicit design for this path. The real gate now lives one layer up, in gateway_handler.go's
+// "registerChainViaStake" case: it requires engine.MinNativeStakeToRegister to be configured
+// (>0), calls this function (which itself enforces `amount >= MinNativeStakeToRegister`, below),
+// and -- only if that succeeds -- moves `amount` out of the caller's real wallet into
+// GATEWAY_CONTRACT_ADDRESS as a permanent, held on-chain deposit (burn-then-mint, same balance-
+// mutation-last-after-every-checkable-failure ordering as the "outbound" case's Value/Tip/GasFee
+// lock; an insufficient real balance simply makes that burn call itself fail, which -- because it
+// runs last -- cleanly discards this call's in-memory registration too). This is also why
+// BootstrapFoundingChains was retired the same day (2026-08-28, see
 // note/cross_chain_stake_and_value_flow.md): it processed a BATCH of founding chains from ONE
 // coordinator transaction, with no natural per-chain caller wallet to check a real balance
 // against -- RegisterChainViaStake (already per-chain) is now the universal registration path for
 // every chain, including chain #1, founding or not.
-func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
+//
+// PerChainAllocation as an OUTCOME (2026-09-04, distinct from the above -- that section is about
+// the STAKE CHECK, never PerChainAllocation-based): once the real deposit is verified+burned,
+// this function credits the SAME amount into the new chain's PerChainAllocation on the Reserve's
+// ledger, unifying "stake to register" and "circulating cross-chain allocation" -- see the
+// dedicated comment at the bottom of this function's body for the full rationale.
+func (g *GatewayEngine) RegisterChainViaStake(payload []byte, amount *big.Int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.EnsureGovernance()
+	g.EnsureAssetRegistry()
 
 	var reg ChainRegistry
 	if err := json.Unmarshal(payload, &reg); err != nil {
@@ -316,9 +326,9 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if _, exists := g.ChainRegistry[reg.ChainID]; exists {
 		return fmt.Errorf("%w: chain %d", ErrChainAlreadyRegistered, reg.ChainID)
 	}
-	// Same PoP bar as ProposalRegisterChain's non-empty-committee case -- an empty committee is
-	// still allowed here too (routing-metadata-only registration, deferred to a later
-	// ProposalUpdateCommittee), matching the existing pattern.
+	// Same PoP bar every other committee-update path already enforces for a non-empty committee --
+	// an empty committee is still allowed here too (routing-metadata-only registration, deferred
+	// to a later committee-update call), matching the existing pattern.
 	if len(reg.Committee) > 0 {
 		if err := ValidateCommittee(reg.Committee); err != nil {
 			return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
@@ -327,195 +337,365 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte) error {
 	if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
 		return fmt.Errorf("RegisterChainViaStake: chain %d: %w", reg.ChainID, err)
 	}
+	// Caller-chosen stake amount (2026-09-04, superseding the earlier fixed-MinNativeStakeToRegister-
+	// only version): the registrant picks how much of their own real wallet balance to commit as
+	// this chain's initial circulating allocation, not just a flat protocol minimum -- user request
+	// ("người gửi tự chọn số tiền, >= mức sàn"), matching a genuine chain's real economic size
+	// instead of forcing every chain (a tiny testnet or a large real deployment alike) through the
+	// same fixed fee. MinNativeStakeToRegister stays as the floor -- still the anti-Sybil-spam
+	// bound (see that field's own doc comment) -- just no longer also the ceiling. No stake/balance
+	// check beyond the floor happens here: the caller (gateway_handler.go's "registerChainViaStake"
+	// case) already verified and burns `amount` (not a fixed constant) from tx.FromAddress()'s real
+	// native balance right after this call succeeds.
+	if g.MinNativeStakeToRegister != nil && g.MinNativeStakeToRegister.Sign() > 0 {
+		if amount == nil || amount.Cmp(g.MinNativeStakeToRegister) < 0 {
+			gotStr := "nil"
+			if amount != nil {
+				gotStr = amount.String()
+			}
+			return fmt.Errorf("RegisterChainViaStake: chain %d: amount %s is below the minimum stake %s", reg.ChainID, gotStr, g.MinNativeStakeToRegister.String())
+		}
+	}
 
-	// No stake/balance check here -- see this function's doc comment. The caller
-	// (gateway_handler.go's "registerChainViaStake" case) already verified and burned a real
-	// native-coin deposit from tx.FromAddress() before invoking this function.
+	// Unify "stake to register" and "circulating cross-chain allocation" into one real
+	// instrument (2026-09-04 user request: "dùng số tiền cọc và nạp đấy là số tiền để luân
+	// chuyển" -- use the staked deposit itself as the money that circulates), instead of
+	// requiring a SEPARATE ProposalAllocateSupply/ProposalTransferAllocation step before a
+	// freshly-registered chain has any cross-chain-outbound capacity at all (the old "chain
+	// nghèo mãi mãi" gap, note/eurozone_unified_native_coin_plan.md mục 2.4).
+	//
+	// SECURITY FIX (2026-09-04, same day): the very first version of this block called
+	// GrantAllocation, which INCREASES GenesisTotalSupply by the credited amount -- a real,
+	// unbounded, repeatable, vote-free mint (found on user request to re-check for exactly this).
+	// The "real deposit" backing that mint (tx.FromAddress()'s balance on Root Anchor, checked
+	// one layer up in gateway_handler.go) is NOT itself provably traceable to GenesisTotalSupply:
+	// Root Anchor's own AccountStateDB balances come from its own genesis.json alloc, which is
+	// independently, arbitrarily set (gen_root_anchor_chain.py) with zero relation to
+	// GenesisTotalSupply. So crediting via GrantAllocation let ANYONE holding ANY Root Anchor
+	// wallet balance -- genesis-arbitrary or not -- mint fresh GenesisTotalSupply once per chain
+	// registered, unlimited times, no vote, no cap. That is strictly worse than
+	// ProposalAllocateSupply's own one-time+Reserve-only mint gate.
+	//
+	// Fixed by using TransferAllocation instead: it MOVES allocation the Reserve already holds in
+	// its own PerChainAllocation[ReserveChainID] pool (itself bounded by the one-time
+	// ProposalAllocateSupply mint) to the new chain -- GenesisTotalSupply never changes, "no vote
+	// needed" is preserved (TransferAllocation itself has no governance gate, matching
+	// RegisterChainViaStake's whole vote-free premise), and the constraint becomes exactly what
+	// the user asked for: Reserve must ALREADY hold enough real, previously-minted allocation to
+	// cover the amount -- never silently prints more. If Reserve's pool is ever exhausted, no
+	// further chain gets funded via this path until the community moves more allocation to
+	// Reserve's pool via ProposalTransferAllocation (still vote-gated) -- same "fixed pie,
+	// redistributed" principle as every other allocation movement in this ledger (mục 3,
+	// note/eurozone_unified_native_coin_plan.md).
+	//
+	// Only meaningful on the Reserve's own authoritative copy of SupplyLedger -- per note §2.3
+	// (and attestCommitInternal's enforceCeiling check), every OTHER chain's local copy of
+	// PerChainAllocation has no real enforcement power, so crediting it there would just be
+	// confusing, powerless bookkeeping.
+	//
+	// SECURITY-FIX-INDUCED BOOTSTRAP REGRESSION, found+fixed same day via a real full-pipeline
+	// deploy run (run_full_pipeline.sh): an insufficient Reserve pool used to make the WHOLE
+	// registration fail closed. That is correct once Reserve already has a pool -- but at genesis
+	// of a brand-new system, Reserve's pool starts at exactly 0 (GenesisTotalSupply hasn't been
+	// minted yet), and minting it (ProposalAllocateSupply, in register_chains' fundGenesis) itself
+	// needs quorum from ALREADY-ACTIVE chains -- which, for the very first chains in a new system,
+	// means registering them FIRST. Blocking registration on Reserve's pool made that circular:
+	// register needs mint, mint needs registered voters. Fixed by making the credit step
+	// best-effort: ErrInsufficientAllocation specifically is swallowed (chain still registers,
+	// simply with 0 allocation for now -- exactly the old, working pre-stake-credit behavior, and
+	// still recoverable afterward via ExecuteGovernanceProposal's existing ProposalTransferAllocation
+	// case, e.g. fundGenesis's own per-chain distribution loop, unchanged). Any OTHER error from
+	// TransferAllocation (ErrSameChainTransfer, ErrNilAmount -- real misuse, not a timing issue)
+	// still fails the whole registration closed, unchanged from before.
+	//
+	// Same best-effort treatment applies to GenesisWallet being unset: a zero address here would
+	// mean the credit gets aimed at nobody (permanently unspendable, and impossible to later
+	// publish a digest for -- SetGenesisDigest requires caller == GenesisWallet), so it's not
+	// safe to credit -- but that is still only a reason to SKIP funding, not to refuse the whole
+	// registration (in production this never actually happens: gateway_handler.go's
+	// "registerChainViaStake" case forces GenesisWallet = tx.FromAddress() before this function
+	// ever sees the payload, and a real signed transaction's sender is never the zero address --
+	// this only matters for a direct caller, e.g. a test, that sets MinNativeStakeToRegister
+	// without also setting GenesisWallet).
+	// BOOTSTRAP FIX (2026-09-04, found live via run_full_pipeline.sh): reg.ChainID != g.ReserveChainID
+	// is REQUIRED here. Without it, the Reserve chain registering ITSELF (the only way, pre-this-fix,
+	// for a fresh Root Anchor to ever get a ChainRegistry entry for its own chain ID -- see
+	// AllocateSupplyWithCert/TransferAllocationWithCert's own doc comments: both require
+	// ChainRegistry[ReserveChainID] to already exist, since they're self-sign-only, no third-party
+	// vote) would call TransferAllocation(ReserveChainID, ReserveChainID, amount) -- a same-chain
+	// transfer, which TransferAllocation always rejects with ErrSameChainTransfer (types.go) --
+	// and ErrSameChainTransfer is NOT swallowed below (only ErrInsufficientAllocation is), so the
+	// error would propagate up and fail the WHOLE self-registration closed. That made a fresh Root
+	// Anchor's own chain ID permanently unregistrable in its own ChainRegistry, which permanently
+	// blocked genesis supply minting -- live-reproduced: registerChainViaStake(reg.ChainID=991,
+	// caller on chain 991 itself) always failed until this fix. Self-registration's real deposit
+	// still burns from the caller's wallet (gateway_handler.go's "registerChainViaStake" case,
+	// unconditional on this skip) as the same anti-Sybil stake fee every other chain pays; it's
+	// simply not ALSO credited into a same-chain allocation no-op. The actual genesis supply mint
+	// stays exactly where it already correctly lives -- the separate, one-time, Reserve-only,
+	// self-signed AllocateSupplyWithCert call, run after this self-registration succeeds.
+	if g.LocalChainID == g.ReserveChainID && g.SupplyLedger != nil &&
+		amount != nil && amount.Sign() > 0 &&
+		reg.ChainID != g.ReserveChainID &&
+		reg.GenesisWallet != (common.Address{}) {
+		if err := g.SupplyLedger.TransferAllocation(g.ReserveChainID, reg.ChainID, amount); err != nil {
+			if !errors.Is(err, ErrInsufficientAllocation) {
+				return fmt.Errorf("RegisterChainViaStake: chain %d: crediting stake into Reserve's allocation pool: %w", reg.ChainID, err)
+			}
+			// Insufficient pool -- fall through and register anyway, unfunded for now.
+		}
+	}
 
 	if g.ChainRegistry == nil {
 		g.ChainRegistry = make(map[uint64]ChainRegistry)
 	}
 	g.ChainRegistry[reg.ChainID] = reg
-	g.Governance.RegisterActiveChain(reg.ChainID)
+	// Governance.ActiveChains (a free governance vote for every registered chain) removed
+	// 2026-09-04 along with the whole GovernanceEngine -- see RecoveryCommittee's own doc comment
+	// for why. Registration no longer grants anything beyond ChainRegistry membership itself.
+
 	return nil
 }
 
-// ExecuteGovernanceProposal executes an approved governance proposal after the timelock and
-// mutates GatewayEngine state (ChainRegistry onboarding/offboarding, dead chains, asset registration).
-func (g *GatewayEngine) ExecuteGovernanceProposal(proposalID common.Hash, currentTimestamp uint64) (*GovernanceProposal, error) {
+// SetGenesisDigest publishes the canonical genesis.json digest for a chain registered via
+// RegisterChainViaStake (2026-09-04, deterministic-genesis design) -- a 2-phase flow, not
+// combinable into RegisterChainViaStake itself, because the digest can only be computed AFTER
+// genesis.json actually exists: register first (this is what determines GenesisWallet and, via
+// PerChainAllocation, the exact initial alloc amount every validator's genesis.json must agree
+// on) -- then every validator independently builds genesis.json from that public record and
+// SHOULD arrive at byte-identical output -- then the registrant publishes ONE of those (or an
+// independently recomputed) digest back here, so any future observer can fetch this digest
+// FIRST and verify their own locally-built genesis.json against it before trusting/joining the
+// chain, the same "recompute and compare, fail closed on mismatch" defense
+// pkg/cross_chain/ceremony.VerifyGenesisFile already provides for the founding-chain ceremony
+// path -- this is that same idea, just recorded on-chain instead of in a hand-distributed
+// genesis_digest.txt.
+//
+// Settable exactly once (ErrGenesisDigestAlreadySet on any later call, matching
+// ProposalAllocateSupply's own one-time-only pattern) and only by the chain's own recorded
+// GenesisWallet (ErrNotGenesisWallet otherwise) -- restricting the caller, not leaving this
+// permissionless, specifically closes a front-running race: a permissionless "first digest wins"
+// design would let an attacker publish a WRONG digest before the honest registrant gets to it,
+// silently locking every honest future validator out of ever passing verification while the
+// attacker's own tampered genesis file (built to match their own submitted digest) sails
+// through. Requiring GenesisWallet closes that: only the address that actually paid the real
+// stake (see RegisterChainViaStake's own doc comment on why GenesisWallet can't be spoofed to a
+// third party) can publish, so an attacker without that key cannot front-run at all.
+func (g *GatewayEngine) SetGenesisDigest(chainID uint64, digest common.Hash, caller common.Address) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	g.EnsureGovernance()
-
-	proposal, err := g.Governance.Execute(proposalID, currentTimestamp)
-	if err != nil {
-		return nil, err
+	reg, exists := g.ChainRegistry[chainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, chainID)
+	}
+	if reg.GenesisDigest != (common.Hash{}) {
+		return fmt.Errorf("%w: chain %d", ErrGenesisDigestAlreadySet, chainID)
+	}
+	if reg.GenesisWallet == (common.Address{}) || caller != reg.GenesisWallet {
+		return fmt.Errorf("%w: chain %d", ErrNotGenesisWallet, chainID)
+	}
+	if digest == (common.Hash{}) {
+		return fmt.Errorf("SetGenesisDigest: chain %d: digest must be non-zero", chainID)
 	}
 
-	switch proposal.Kind {
-	case ProposalRegisterChain:
-		var reg ChainRegistry
-		if err := json.Unmarshal(proposal.Payload, &reg); err != nil {
-			return nil, fmt.Errorf("invalid ChainRegistry payload: %w", err)
-		}
-		if reg.ChainID == 0 {
-			return nil, fmt.Errorf("invalid chain ID: 0")
-		}
-		// Security fix: a NON-EMPTY committee here was previously accepted with no PoP
-		// verification at all — unlike BootstrapFoundingChains and ProposalUpdateCommittee,
-		// which both require it — letting a proposal register a chain whose "committee" is
-		// unverifiable rogue keys. An EMPTY committee is still allowed (registers routing
-		// metadata only; VerifyQuorumCertAgainstRegistry fails closed with ErrEmptyCommittee
-		// for any quorum cert against it until a real committee is set via
-		// ProposalUpdateCommittee) — this matches an existing real usage pattern
-		// (gateway_governance_test.go's asset-registration test onboards a chain this way)
-		// that a blanket non-empty requirement would have broken.
-		if len(reg.Committee) > 0 {
-			if err := ValidateCommittee(reg.Committee); err != nil {
-				return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
-			}
-		}
-		if err := ValidateQuorumThreshold(reg.QuorumThreshold); err != nil {
-			return nil, fmt.Errorf("ProposalRegisterChain: chain %d: %w", reg.ChainID, err)
-		}
-		// C6 mitigation (opt-in, see MinRegistrationStake's doc comment): require the candidate
-		// chain ID to already hold a minimum pre-funded allocation before it can be admitted.
-		if g.MinRegistrationStake != nil && g.MinRegistrationStake.Sign() > 0 {
-			held := new(big.Int)
-			if g.SupplyLedger != nil {
-				held = g.SupplyLedger.GetAllocation(reg.ChainID)
-			}
-			if held.Cmp(g.MinRegistrationStake) < 0 {
-				return nil, fmt.Errorf("%w: chain %d holds %s, needs >= %s", ErrInsufficientRegistrationStake, reg.ChainID, held.String(), g.MinRegistrationStake.String())
-			}
-		}
-		g.Governance.RegisterActiveChain(reg.ChainID)
-		if g.ChainRegistry == nil {
-			g.ChainRegistry = make(map[uint64]ChainRegistry)
-		}
-		g.ChainRegistry[reg.ChainID] = reg
+	reg.GenesisDigest = digest
+	g.ChainRegistry[chainID] = reg
+	return nil
+}
 
-	case ProposalUnregisterChain:
-		var chainID uint64
-		if len(proposal.Payload) == 8 {
-			chainID = binary.BigEndian.Uint64(proposal.Payload)
-		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
-			return nil, fmt.Errorf("invalid unregister chain ID payload: %w", err)
-		}
-		g.Governance.UnregisterActiveChain(chainID)
-		delete(g.ChainRegistry, chainID)
+// AllocateSupplyWithCert mints GenesisTotalSupply exactly once, entirely to Reserve, authorized by
+// Reserve's OWN committee self-signing (2026-09-04, replacing ProposalAllocateSupply's governance-
+// vote gate -- see RecoveryCommittee's own doc comment on the GatewayEngine struct for the full
+// removal rationale). Every chain other than Reserve must still earn allocation the safe way:
+// receive a real transfer via outbound()/ClaimMessage, or via TransferAllocationWithCert moving
+// Reserve's own already-minted supply outward -- this function is Reserve's one-time genesis mint
+// only, unchanged in scope from the C7 fix it replaces.
+func (g *GatewayEngine) AllocateSupplyWithCert(chainID uint64, amount *big.Int, cert QuorumCert) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
-	case ProposalDeclareChainDead:
-		var chainID uint64
-		if len(proposal.Payload) == 8 {
-			chainID = binary.BigEndian.Uint64(proposal.Payload)
-		} else if err := json.Unmarshal(proposal.Payload, &chainID); err != nil {
-			return nil, fmt.Errorf("invalid declare dead chain ID payload: %w", err)
-		}
-		if g.DeadChains == nil {
-			g.DeadChains = make(map[uint64]bool)
-		}
-		g.DeadChains[chainID] = true
-
-	case ProposalAllocateSupply:
-		// C7 fix (2026-08-27): this used to accept ANY chainID, repeatably, effectively minting
-		// fresh GenesisTotalSupply via nothing but a governance vote every time -- a real
-		// Sybil-mintable path distinct from ClaimMessage's safe transfer-based auto-credit (see
-		// note/cross_chain_attack_scenario_catalog.md item C7 and
-		// note/eurozone_unified_native_coin_plan.md). Restricted to what the design doc's own
-		// mục 2.1/2.3 actually specifies: genesis_total_supply is minted EXACTLY ONCE, entirely
-		// TO Reserve -- this is now that one-time act, not a repeatable grant to arbitrary
-		// chains. Every chain other than Reserve must earn allocation the safe way: receive a
-		// real transfer via outbound()/ClaimMessage (already-existing, already-tested,
-		// non-inflationary), or via GlobalSupplyLedger.TransferAllocation moving Reserve's own
-		// already-minted supply outward (existing primitive, was never wired to any proposal
-		// kind before this fix -- see ProposalTransferAllocation below).
-		var grant AllocationGrantPayload
-		if err := json.Unmarshal(proposal.Payload, &grant); err != nil {
-			return nil, fmt.Errorf("invalid AllocationGrantPayload: %w", err)
-		}
-		if grant.ChainID == 0 {
-			return nil, fmt.Errorf("invalid chain ID: 0")
-		}
-		if g.SupplyLedger == nil {
-			return nil, fmt.Errorf("ProposalAllocateSupply: SupplyLedger not initialized")
-		}
-		if g.ReserveChainID == 0 {
-			return nil, fmt.Errorf("ProposalAllocateSupply: %w", ErrReserveChainNotConfigured)
-		}
-		if grant.ChainID != g.ReserveChainID {
-			return nil, fmt.Errorf("ProposalAllocateSupply: %w (got chain %d, reserve is %d)", ErrOnlyReserveMayMint, grant.ChainID, g.ReserveChainID)
-		}
-		if g.SupplyLedger.GenesisTotalSupply != nil && g.SupplyLedger.GenesisTotalSupply.Sign() > 0 {
-			return nil, fmt.Errorf("ProposalAllocateSupply: %w", ErrGenesisAlreadyMinted)
-		}
-		if err := g.SupplyLedger.GrantAllocation(grant.ChainID, grant.Amount); err != nil {
-			return nil, fmt.Errorf("ProposalAllocateSupply: %w", err)
-		}
-
-	case ProposalTransferAllocation:
-		// C7 fix (2026-08-27): the safe, repeatable, non-inflationary path for a chain to gain
-		// allocation after genesis -- redistributes already-minted supply (TransferAllocation
-		// itself enforces FromChainID actually has the amount; it can never create new supply,
-		// only move existing supply, so no ceiling/Reserve restriction is needed here the way
-		// ProposalAllocateSupply needed one).
-		var transfer AllocationTransferPayload
-		if err := json.Unmarshal(proposal.Payload, &transfer); err != nil {
-			return nil, fmt.Errorf("invalid AllocationTransferPayload: %w", err)
-		}
-		if transfer.FromChainID == 0 || transfer.ToChainID == 0 {
-			return nil, fmt.Errorf("invalid chain ID: 0")
-		}
-		if g.SupplyLedger == nil {
-			return nil, fmt.Errorf("ProposalTransferAllocation: SupplyLedger not initialized")
-		}
-		if err := g.SupplyLedger.TransferAllocation(transfer.FromChainID, transfer.ToChainID, transfer.Amount); err != nil {
-			return nil, fmt.Errorf("ProposalTransferAllocation: %w", err)
-		}
-
-	case ProposalUpdateCommittee:
-		var update UpdateCommitteePayload
-		if err := json.Unmarshal(proposal.Payload, &update); err != nil {
-			return nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
-		}
-		if update.ChainID == 0 && update.SourceChainID != 0 {
-			update.ChainID = update.SourceChainID
-		}
-		if update.ChainID == 0 {
-			return nil, fmt.Errorf("invalid chain ID: 0")
-		}
-		reg, exists := g.ChainRegistry[update.ChainID]
-		if !exists {
-			return nil, fmt.Errorf("%w: chain %d", ErrUnknownChain, update.ChainID)
-		}
-		if err := ValidateCommittee(update.NewCommittee); err != nil {
-			return nil, fmt.Errorf("ProposalUpdateCommittee: %w", err)
-		}
-		// Security fix: QuorumThreshold was applied with no bounds check — a governance
-		// proposal (even an honestly-intended one with a typo) could set it below the 2/3 BFT
-		// floor, letting a minority of this chain's new committee forge a "valid" QuorumCert
-		// for every future attestCommit()/vote() against it.
-		if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
-			return nil, fmt.Errorf("ProposalUpdateCommittee: chain %d: %w", update.ChainID, err)
-		}
-		reg.Committee = update.NewCommittee
-		if update.NewEpoch > 0 {
-			reg.Epoch = update.NewEpoch
-		}
-		if update.QuorumThreshold > 0 {
-			reg.QuorumThreshold = update.QuorumThreshold
-		}
-		if update.StateRoot != (common.Hash{}) {
-			reg.StateRoot = update.StateRoot
-		}
-		if update.AccountTreeRoot != (common.Hash{}) {
-			reg.AccountTreeRoot = update.AccountTreeRoot
-		}
-		g.ChainRegistry[update.ChainID] = reg
+	if chainID == 0 {
+		return fmt.Errorf("invalid chain ID: 0")
 	}
+	if g.SupplyLedger == nil {
+		return fmt.Errorf("AllocateSupplyWithCert: SupplyLedger not initialized")
+	}
+	if g.ReserveChainID == 0 {
+		return fmt.Errorf("AllocateSupplyWithCert: %w", ErrReserveChainNotConfigured)
+	}
+	if chainID != g.ReserveChainID {
+		return fmt.Errorf("AllocateSupplyWithCert: %w (got chain %d, reserve is %d)", ErrOnlyReserveMayMint, chainID, g.ReserveChainID)
+	}
+	if g.SupplyLedger.GenesisTotalSupply != nil && g.SupplyLedger.GenesisTotalSupply.Sign() > 0 {
+		return fmt.Errorf("AllocateSupplyWithCert: %w", ErrGenesisAlreadyMinted)
+	}
+	reserveRegistry, exists := g.ChainRegistry[g.ReserveChainID]
+	if !exists {
+		return fmt.Errorf("%w: reserve chain %d", ErrUnknownChain, g.ReserveChainID)
+	}
+	if err := VerifyQuorumCertAgainstRegistry(reserveRegistry, cert, ComputeAllocateSupplyMessage(chainID, amount)); err != nil {
+		return fmt.Errorf("AllocateSupplyWithCert: %w", err)
+	}
+	if err := g.SupplyLedger.GrantAllocation(chainID, amount); err != nil {
+		return fmt.Errorf("AllocateSupplyWithCert: %w", err)
+	}
+	return nil
+}
 
-	return proposal, nil
+// TransferAllocationWithCert moves already-minted allocation from fromChainID to toChainID,
+// authorized by fromChainID's OWN committee self-signing that it consents to moving its own
+// money (2026-09-04, replacing ProposalTransferAllocation's governance-vote gate -- no third
+// party's vote is needed or trusted; TransferAllocation itself still enforces fromChainID
+// actually has the amount, so this can never create new supply, only move existing supply).
+//
+// nonce MUST equal fromChainID's current TransferAllocationNonce (SECURITY FIX, found in review
+// immediately after this replaced GovernanceEngine, before ever shipping: the old propose/vote/
+// execute machinery's GovernanceProposal.Executed flag was the ONLY thing stopping the same
+// approved action from running twice -- removing it without a replacement left this specific
+// call replayable, since moving allocation is not naturally idempotent the way every other
+// cert-authorized action in this file is. Without this check, a valid cert -- necessarily public,
+// since it travels in on-chain calldata -- could be resubmitted indefinitely to drain
+// fromChainID's entire allocation in repeated `amount`-sized bites). See
+// GatewayEngine.TransferAllocationNonce's own doc comment.
+func (g *GatewayEngine) TransferAllocationWithCert(fromChainID, toChainID uint64, amount *big.Int, nonce uint64, cert QuorumCert) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if fromChainID == 0 || toChainID == 0 {
+		return fmt.Errorf("invalid chain ID: 0")
+	}
+	if g.SupplyLedger == nil {
+		return fmt.Errorf("TransferAllocationWithCert: SupplyLedger not initialized")
+	}
+	fromRegistry, exists := g.ChainRegistry[fromChainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownChain, fromChainID)
+	}
+	if g.TransferAllocationNonce == nil {
+		g.TransferAllocationNonce = make(map[uint64]uint64)
+	}
+	wantNonce := g.TransferAllocationNonce[fromChainID]
+	if nonce != wantNonce {
+		return fmt.Errorf("TransferAllocationWithCert: chain %d: %w: got nonce %d, want %d", fromChainID, ErrInvalidTransferNonce, nonce, wantNonce)
+	}
+	if err := VerifyQuorumCertAgainstRegistry(fromRegistry, cert, ComputeTransferAllocationMessage(fromChainID, toChainID, amount, nonce)); err != nil {
+		return fmt.Errorf("TransferAllocationWithCert: %w", err)
+	}
+	if err := g.SupplyLedger.TransferAllocation(fromChainID, toChainID, amount); err != nil {
+		return fmt.Errorf("TransferAllocationWithCert: %w", err)
+	}
+	// Bump the nonce only after the transfer itself has genuinely succeeded -- a failed transfer
+	// (e.g. insufficient allocation) must leave the nonce untouched so a corrected retry with the
+	// SAME nonce (and a freshly-signed cert for it) still works.
+	g.TransferAllocationNonce[fromChainID] = wantNonce + 1
+	return nil
+}
+
+// DeclareChainDeadWithCert marks chainID dead (unlocking ClaimDeadChainBalance for its stranded
+// account holders), authorized by RecoveryCommittee -- a fixed, config-set, non-Sybil-able set,
+// used here (instead of the affected chain's own committee) precisely because a chain being
+// declared dead is, by definition, unable to self-authorize anything (2026-09-04, replacing
+// ProposalDeclareChainDead's governance-vote gate -- see RecoveryCommittee's own doc comment).
+func (g *GatewayEngine) DeclareChainDeadWithCert(chainID uint64, cert QuorumCert) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if chainID == 0 {
+		return fmt.Errorf("invalid chain ID: 0")
+	}
+	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
+	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeDeclareChainDeadMessage(chainID)); err != nil {
+		return fmt.Errorf("DeclareChainDeadWithCert: %w", err)
+	}
+	if g.DeadChains == nil {
+		g.DeadChains = make(map[uint64]bool)
+	}
+	g.DeadChains[chainID] = true
+	return nil
+}
+
+// UnregisterChainWithCert removes chainID from ChainRegistry entirely, authorized by
+// RecoveryCommittee -- same non-self-authorizable rationale as DeclareChainDeadWithCert
+// (2026-09-04, replacing ProposalUnregisterChain's governance-vote gate).
+func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if chainID == 0 {
+		return fmt.Errorf("invalid chain ID: 0")
+	}
+	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
+	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeUnregisterChainMessage(chainID)); err != nil {
+		return fmt.Errorf("UnregisterChainWithCert: %w", err)
+	}
+	delete(g.ChainRegistry, chainID)
+	return nil
+}
+
+// UpdateCommitteeWithRecoveryCert installs a brand new committee for chainID, authorized by
+// RecoveryCommittee (2026-09-04, replacing ProposalUpdateCommittee's governance-vote gate). This
+// is deliberately separate from ApplyCommitteeUpdate (epoch_sync.go), which still handles the
+// NORMAL case where a chain's OWN current committee signs its own successor and requires strict
+// sequential epoch progression -- this path exists specifically for when that is impossible (the
+// old committee's keys are lost/unreachable), so it neither requires the old committee's signature
+// nor sequential epoch progression, matching what a real recovery scenario needs.
+func (g *GatewayEngine) UpdateCommitteeWithRecoveryCert(update UpdateCommitteePayload, cert QuorumCert) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if update.ChainID == 0 && update.SourceChainID != 0 {
+		update.ChainID = update.SourceChainID
+	}
+	if update.ChainID == 0 {
+		return fmt.Errorf("invalid chain ID: 0")
+	}
+	reg, exists := g.ChainRegistry[update.ChainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownChain, update.ChainID)
+	}
+	// SECURITY FIX (2026-09-04, found in review): a RecoveryCommittee cert, once signed, is
+	// necessarily public forever (it travels in on-chain calldata) -- without this check, the
+	// EXACT SAME cert could be replayed at any later time to roll this chain's committee back to
+	// the recovered one, even after it has since legitimately progressed through many further
+	// epochs of its own (ApplyCommitteeUpdate, epoch_sync.go) with a completely different,
+	// possibly-rotated-out committee. Recovery must always move the chain FORWARD to a genuinely
+	// new epoch, never sideways or backward -- unlike ApplyCommitteeUpdate this deliberately does
+	// NOT require exact sequential (+1) progression (the whole point of recovery is bridging an
+	// arbitrarily large gap), but it must still be strictly greater than the chain's current one.
+	if update.NewEpoch <= reg.Epoch {
+		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: chain %d: %w: new epoch %d must be greater than current epoch %d", update.ChainID, ErrNonSequentialEpoch, update.NewEpoch, reg.Epoch)
+	}
+	if err := ValidateCommittee(update.NewCommittee); err != nil {
+		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: %w", err)
+	}
+	// Security fix carried over from the removed ProposalUpdateCommittee case: QuorumThreshold
+	// must never be applied with no bounds check — a typo (even an honestly-intended one) could
+	// set it below the 2/3 BFT floor, letting a minority of this chain's new committee forge a
+	// "valid" QuorumCert for every future attestCommit()/vote() against it.
+	if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
+		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: chain %d: %w", update.ChainID, err)
+	}
+	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
+	digest := ComputeRecoveryUpdateCommitteeMessage(update.ChainID, update.NewEpoch, update.NewCommittee, update.QuorumThreshold, update.StateRoot, update.AccountTreeRoot)
+	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, digest); err != nil {
+		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: %w", err)
+	}
+	reg.Committee = update.NewCommittee
+	// Always set, unconditionally -- the guard above already guarantees update.NewEpoch > reg.Epoch
+	// (>= 1), so there is no longer a meaningful "0 means don't change" case to preserve here.
+	reg.Epoch = update.NewEpoch
+	if update.QuorumThreshold > 0 {
+		reg.QuorumThreshold = update.QuorumThreshold
+	}
+	if update.StateRoot != (common.Hash{}) {
+		reg.StateRoot = update.StateRoot
+	}
+	if update.AccountTreeRoot != (common.Hash{}) {
+		reg.AccountTreeRoot = update.AccountTreeRoot
+	}
+	g.ChainRegistry[update.ChainID] = reg
+	return nil
 }
 
 // SetAllocationRejectedListener registers an instant alert listener for overdraw events.
@@ -699,6 +879,59 @@ func (g *GatewayEngine) Outbound(
 	return msg, nil
 }
 
+// AddPendingCommitteeAttestationShare thread-safely adds a committee attestation share.
+func (g *GatewayEngine) AddPendingCommitteeAttestationShare(key string, share CommitteeAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, s := range g.PendingCommitteeAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingCommitteeAttestations[key] = append(g.PendingCommitteeAttestations[key], share)
+	return nil
+}
+
+// GetPendingCommitteeAttestationShares thread-safely reads committee attestation shares.
+func (g *GatewayEngine) GetPendingCommitteeAttestationShares(key string) []CommitteeAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingCommitteeAttestations[key]
+	res := make([]CommitteeAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
+// ClearPendingCommitteeAttestations thread-safely clears committee attestation shares.
+func (g *GatewayEngine) ClearPendingCommitteeAttestations(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.PendingCommitteeAttestations, key)
+}
+
+// AddPendingCommitAttestationShare thread-safely adds a commit attestation share.
+func (g *GatewayEngine) AddPendingCommitAttestationShare(key string, share CommitAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, s := range g.PendingCommitAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingCommitAttestations[key] = append(g.PendingCommitAttestations[key], share)
+	return nil
+}
+
+// GetPendingCommitAttestationShares thread-safely reads commit attestation shares.
+func (g *GatewayEngine) GetPendingCommitAttestationShares(key string) []CommitAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingCommitAttestations[key]
+	res := make([]CommitAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
 // CommittedOutboundBatch is the message set (and signing epoch) behind one commitRoot ever
 // produced by BatchOutboundCommit — see PendingOutboundMessages/CommittedBatches' doc comments.
 type CommittedOutboundBatch struct {
@@ -735,6 +968,61 @@ func (g *GatewayEngine) BatchOutboundCommit(destChainID uint64, epoch uint64) (c
 	delete(g.PendingOutboundMessages, destChainID)
 
 	return commitRoot, messages, nil
+}
+
+// GetPendingOutboundCount thread-safely reads the length of PendingOutboundMessages for a destChainID.
+func (g *GatewayEngine) GetPendingOutboundCount(destChainID uint64) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.PendingOutboundMessages[destChainID])
+}
+
+// GetCommittedBatch thread-safely reads a CommittedOutboundBatch.
+func (g *GatewayEngine) GetCommittedBatch(commitRoot common.Hash) (CommittedOutboundBatch, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	batch, exists := g.CommittedBatches[commitRoot]
+	return batch, exists
+}
+
+// GetChainRegistryEntry thread-safely reads one ChainRegistry entry (2026-09-04 -- completes the
+// PR #99 thread-safety pass, which covered PendingCommitteeAttestations/PendingCommitAttestations/
+// PendingOutboundMessages/CommittedBatches but left ChainRegistry and RegisteredPops -- arguably
+// the most security-sensitive fields on this type, since they gate every cert-authorized write --
+// with direct, unwrapped map access from gateway_handler.go. See GatewayEngine's own doc comment
+// for why this is defense-in-depth rather than a fix for an observed race.
+func (g *GatewayEngine) GetChainRegistryEntry(chainID uint64) (ChainRegistry, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	reg, exists := g.ChainRegistry[chainID]
+	return reg, exists
+}
+
+// SetChainRegistryEntry thread-safely writes one ChainRegistry entry.
+func (g *GatewayEngine) SetChainRegistryEntry(chainID uint64, reg ChainRegistry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ChainRegistry == nil {
+		g.ChainRegistry = make(map[uint64]ChainRegistry)
+	}
+	g.ChainRegistry[chainID] = reg
+}
+
+// GetRegisteredPop thread-safely reads one RegisteredPops entry (nil if never registered).
+func (g *GatewayEngine) GetRegisteredPop(pubkeyHex string) []byte {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.RegisteredPops[pubkeyHex]
+}
+
+// SetRegisteredPop thread-safely writes one RegisteredPops entry.
+func (g *GatewayEngine) SetRegisteredPop(pubkeyHex string, pop []byte) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.RegisteredPops == nil {
+		g.RegisteredPops = make(map[string][]byte)
+	}
+	g.RegisteredPops[pubkeyHex] = pop
 }
 
 // AttestCommit executes Phase 1 of Attest-then-Claim (P2.2) for a commit originating from a
@@ -974,6 +1262,81 @@ func (g *GatewayEngine) ClaimMessage(
 	return execStatus, nil
 }
 
+// CreditReserveAllocation is the missing third leg of a 2-hop A -> Reserve -> B value route
+// (Section 2.3.1 finding, 2026-09-04). ClaimMessage's own PerChainAllocation credit (see its doc
+// comment above) writes to g.LocalChainID's copy of the ledger -- correct when the claiming chain
+// IS Reserve (a private chain sending straight to Reserve), but silently wrong for a private-to-
+// private transfer, where ClaimMessage instead runs on the DESTINATION's own separate
+// GatewayEngine instance/process, crediting a copy of PerChainAllocation nobody else ever reads.
+// Reserve's own authoritative ledger then only ever sees AttestCommit's debit (source chain, step
+// 1) with no matching credit -- proven live: after several transfers totalling V from chain A to
+// chain B via the standard A->Reserve->B relay, Σ PerChainAllocation on Reserve was short by
+// exactly V, even though B's real balance legitimately received it in full. Left unfixed this is a
+// growing self-DoS/stuck-funds risk: chain B's own future outbound AttestCommit calls are ceiling-
+// checked against Reserve's (artificially low) record of B's allocation, not what B actually,
+// legitimately holds.
+//
+// This is the destination-side counterpart of AttestCommit's source-side debit: submitted by the
+// relayer against RESERVE's own node (mirroring ClaimMessage's exact proof-verification, but
+// crediting message.DestChainID instead of g.LocalChainID) right after that same message's
+// ClaimMessage has succeeded on its real destination chain. Idempotent (write-once via
+// ReserveCreditedMessages, keyed by MessageID) so a redundant call from a retry or a second
+// relayer is harmless, matching AttestCommit/ClaimMessage's own write-once guards. Fails closed
+// off Reserve's own node -- callable only where g.LocalChainID == g.ReserveChainID -- since
+// crediting any other chain's local ledger copy here would just recreate the exact same non-
+// authoritative-copy problem this function exists to fix.
+func (g *GatewayEngine) CreditReserveAllocation(
+	message CrossChainMessage,
+	proof MerkleProof,
+	commitRoot common.Hash,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if message.Value == nil || message.Value.Sign() <= 0 {
+		// Nothing to credit -- matches ClaimMessage's own "only touch the ledger for real value"
+		// gating, so a zero-value / pure-contract-call message is always a harmless no-op here.
+		return nil
+	}
+
+	if g.ReserveChainID == 0 {
+		return ErrReserveChainNotConfigured
+	}
+	if g.LocalChainID != g.ReserveChainID {
+		return fmt.Errorf("%w: this chain (%d) is not the configured Reserve (%d)", ErrNonReserveCeilingAttestation, g.LocalChainID, g.ReserveChainID)
+	}
+
+	if g.ReserveCreditedMessages == nil {
+		g.ReserveCreditedMessages = make(map[common.Hash]bool)
+	}
+	if g.ReserveCreditedMessages[message.MessageID] {
+		// Already credited by an earlier call (retry / second relayer) -- idempotent no-op.
+		return nil
+	}
+
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
+	if _, exists := g.AttestedCommits[key]; !exists {
+		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+	}
+
+	leafHash := ComputeMessageLeafHash(message)
+	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
+		return ErrInvalidMerkleProof
+	}
+
+	if g.SupplyLedger != nil {
+		currentAlloc := g.SupplyLedger.GetAllocation(message.DestChainID)
+		g.SupplyLedger.PerChainAllocation[message.DestChainID] = new(big.Int).Add(currentAlloc, message.Value)
+	}
+	g.ReserveCreditedMessages[message.MessageID] = true
+
+	return nil
+}
+
 // VerifyQuorumCertAgainstRegistry validates the BLS signature and threshold stake against a chain's committee.
 func VerifyQuorumCertAgainstRegistry(registry ChainRegistry, cert QuorumCert, digest []byte) error {
 	if len(registry.Committee) == 0 {
@@ -1197,4 +1560,14 @@ func (g *GatewayEngine) GetMessageStatus(messageID common.Hash) MessageStatus {
 		return MessageStatusPending
 	}
 	return status
+}
+
+// GetTransferAllocationNonce returns the next nonce TransferAllocationWithCert will accept from
+// chainID -- callers building a real cert must sign ComputeTransferAllocationMessage with exactly
+// this value (see TransferAllocationWithCert's own doc comment for why the nonce exists).
+func (g *GatewayEngine) GetTransferAllocationNonce(chainID uint64) uint64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	return g.TransferAllocationNonce[chainID]
 }

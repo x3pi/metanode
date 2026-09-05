@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -129,10 +128,12 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Chains 101/102 each need a real committee member to cast a BLS-authenticated governance
-	// vote (Milestone G security fix).
-	kp101 := bls.GenerateKeyPair()
-	kp102 := bls.GenerateKeyPair()
+	// RecoveryCommittee (2026-09-04, replacing the removed propose/vote/72h-timelock/
+	// executeProposal(ProposalDeclareChainDead) governance dance -- see
+	// GatewayEngine.DeclareChainDeadWithCert's own doc comment): a fixed, config-set committee
+	// authorizes declaring a chain dead directly, no vote from unrelated chains needed.
+	recoveryKP := bls.GenerateKeyPair()
+	recoveryPop := cross_chain.PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
 
 	engine, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
@@ -140,10 +141,10 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	engine.SupplyLedger = ledger
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
 		deadChainID: {ChainID: deadChainID, StateRoot: common.HexToHash("0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"), AccountTreeRoot: stateRoot, Epoch: 1},
-		101:         {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
-		102:         {ChainID: 102, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp102.PublicKey().Bytes(), Stake: 100}}},
 	}
-	engine.Governance = cross_chain.NewGovernanceEngineWithTimelock([]uint64{101, 102}, 10)
+	engine.RecoveryCommittee = []cross_chain.ValidatorEntry{
+		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
+	}
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -163,29 +164,13 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	_, _, failed := h.HandleTransaction(context.Background(), cs, newTx(alice.Account, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimAliceCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 50)
 	assert.True(t, failed, "Claiming balance on live chain must revert")
 
-	// Governance: Declare Chain 404 Dead
-	deadPayload, _ := json.Marshal(uint64(deadChainID))
-	proposeDead, _ := h.abi.Pack("propose", uint8(cross_chain.ProposalDeclareChainDead), deadPayload, uint64(100))
-	proposeFee := big.NewInt(100_000_000_000_000_000) // 0.1 MTN anti-spam fee
-	rcp, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, proposeFee, marshalCallData(t, proposeDead)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 100)
-	require.False(t, failed)
-	out, err := h.abi.Unpack("propose", rcp.Return())
+	// Declare Chain 404 Dead, authorized by RecoveryCommittee's real BLS signature (2026-09-04,
+	// replacing the removed propose/vote/72h-timelock/executeProposal governance dance).
+	digest := cross_chain.ComputeDeclareChainDeadMessage(deadChainID)
+	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
+	declareDeadCalldata, err := h.abi.Pack("declareChainDeadWithCert", big.NewInt(deadChainID), uint64(0), sig.Bytes(), []byte{0x01})
 	require.NoError(t, err)
-	propID := common.Hash(out[0].([32]byte))
-
-	// Vote from 101 and 102
-	pub101, sig101 := signGovernanceVote(kp101, propID, 101)
-	vote1, _ := h.abi.Pack("vote", propID, big.NewInt(101), uint64(101), pub101, sig101)
-	_, _, failVote1 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote1)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 101)
-	require.False(t, failVote1)
-	pub102, sig102 := signGovernanceVote(kp102, propID, 102)
-	vote2, _ := h.abi.Pack("vote", propID, big.NewInt(102), uint64(102), pub102, sig102)
-	_, _, failVote2 := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, vote2)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 102)
-	require.False(t, failVote2)
-
-	// Execute proposal at t=120
-	execDead, _ := h.abi.Pack("executeProposal", propID, uint64(120))
-	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, execDead)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
+	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, declareDeadCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
 	require.False(t, failed)
 
 	// Alice claims 1500 -> SUCCESS

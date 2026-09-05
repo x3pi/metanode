@@ -1,25 +1,25 @@
 // live_asset_bridge is a multi-step devnet tool for a full real end-to-end custom-asset
-// bridge verification against 2 real running private-chain nodes, using the devnet governance
-// timelock override (config.CrossChainConfig.DevnetGovernanceTimelockSecondsOverride) instead
-// of exploiting the caller-supplied-timestamp gap in vote()/executeProposal() (a separate, real
-// finding — see note/cross_chain_production_readiness_plan.md — deliberately not used here so
-// this test proves the intended devnet accommodation, not an unrelated bug).
+// bridge verification against 2 real running private-chain nodes.
 //
 // This is what live-verified the full outbound()->attestCommit()->claimMessage() round trip
-// (note/cross_chain_production_readiness_plan.md Phase 0.9) and the ProposalAllocateSupply /
-// GenesisCoordinator fixes — kept as a real tool (not deleted after use) since re-running the
-// same live round trip is the most direct way to re-verify this flow after future changes,
-// e.g. for Phase 2's T2 multi-machine testnet run.
+// (note/cross_chain_production_readiness_plan.md Phase 0.9) and the genesis-supply-allocation
+// fixes — kept as a real tool (not deleted after use) since re-running the same live round trip
+// is the most direct way to re-verify this flow after future changes, e.g. for Phase 2's T2
+// multi-machine testnet run.
 //
 // Run against ONE chain's RPC at a time; -state is a small per-chain JSON scratch file this
 // tool reads/writes across steps. Steps, in order:
 //
 //	deploy          deploy a real token + approve the Gateway
-//	bootstrap       bootstrapFoundingChains with 4 fresh fake committee entries (governance quorum)
-//	register-chain  propose+vote+execute ProposalRegisterChain for the OTHER chain ID, with a
-//	                fresh committee keypair this tool generates and keeps (so it can later sign
-//	                a real attestCommit on that chain's behalf)
-//	register-asset  propose+vote+execute ProposalRegisterAsset, then registerAsset()
+//	bootstrap       registerChainViaStake 4 fresh fake chains (90001-90004) whose committee
+//	                keys this tool generates and keeps in -state as st.Committee, so a later
+//	                step can self-sign a real cert as one of those chains' own committee (e.g.
+//	                run register-asset with -home-chain set to one of these IDs)
+//	register-chain  registerChainViaStake for the OTHER chain ID (vote-free, no quorum needed),
+//	                with a fresh committee keypair this tool generates and keeps (so it can
+//	                later sign a real attestCommit on that chain's behalf)
+//	register-asset  registerAssetWithCert, self-signed by -home-chain's own committee (must be
+//	                a chain ID whose committee key this tool controls, e.g. from bootstrap)
 //	outbound        submit outbound() moving a custom-asset value to the other chain
 //	attest          build a real 1-message commit tree for a given MessageID and call
 //	                attestCommit() on this chain, signed with the "OTHER chain's committee" key
@@ -168,55 +168,73 @@ func sendCalldataSoft(privKeyHex string, to eth_common.Address, calldata []byte,
 // timelock -> executeProposal cycle for the given kind+payload, using the deployer key to pay
 // gas for propose/vote/execute (any funded account may submit these — the actual authority is
 // the BLS-signed votes, not the transaction sender).
-func proposeVoteExecute(deployerKey string, kind uint8, payload []byte, committee []committeeMember, timelockWaitSeconds int) eth_common.Hash {
-	now := uint64(time.Now().Unix())
-	proposeCalldata, err := gatewayABI.Pack("propose", kind, payload, now)
+// fetchChainCommittee / signCertForChain (2026-09-04, replacing the removed propose/vote/
+// executeProposal governance dance -- see cross_chain.GatewayEngine.TransferAllocationWithCert/
+// AllocateSupplyWithCert/AssetRegistryEngine.RegisterAssetOnRootAnchor's own doc comments for why
+// self-authorization by the affected chain's own committee replaced community voting): fetches
+// chainID's real on-chain committee (needed for a BuildSignerBitmap-aligned QuorumCert) and signs
+// digest with whichever of committee's local keys belong to chainID.
+func fetchChainCommittee(chainID uint64) ([]cross_chain.ValidatorEntry, uint64) {
+	calldata, err := gatewayABI.Pack("getChainRegistry", new(big.Int).SetUint64(chainID))
 	if err != nil {
-		fmt.Println("pack propose:", err)
+		fmt.Println("pack getChainRegistry:", err)
 		os.Exit(1)
 	}
-	sendCalldata(deployerKey, p_common.GATEWAY_CONTRACT_ADDRESS, proposeCalldata, big.NewInt(100_000_000_000_000_000), 2_000_000, fmt.Sprintf("propose(kind=%d)", kind))
-
-	var buf []byte
-	buf = append(buf, kind)
-	var tsBytes [8]byte
-	for i := 0; i < 8; i++ {
-		tsBytes[7-i] = byte(now >> (8 * i))
+	gwAddr := p_common.GATEWAY_CONTRACT_ADDRESS
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddr, Data: calldata}, nil)
+	if err != nil {
+		fmt.Println("call getChainRegistry:", err)
+		os.Exit(1)
 	}
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	proposalID := crypto.Keccak256Hash(buf)
-	fmt.Println("computed proposalID:", proposalID.Hex())
-
-	voteNow := uint64(time.Now().Unix())
-	// Quorum is ceil(2N/3) of the CURRENT ActiveChains size, which grows every time a prior
-	// ProposalRegisterChain executes (ExecuteGovernanceProposal calls RegisterActiveChain) — not
-	// just len(committee), the original bootstrap set. Rather than tracking that externally,
-	// cast every committee member's vote unconditionally and tolerate an
-	// "already timelocked"/"already reached quorum" revert on any vote past the real threshold
-	// as an expected outcome, not a failure.
-	for _, m := range committee {
-		kp := bls.NewKeyPair(eth_common.FromHex("0x" + m.PrivHex))
-		voteMsg := cross_chain.ComputeGovernanceVoteMessage(proposalID, m.ChainID)
-		sig := bls.Sign(kp.PrivateKey(), voteMsg)
-		voteCalldata, err := gatewayABI.Pack("vote", proposalID, new(big.Int).SetUint64(m.ChainID), voteNow, kp.BytesPublicKey(), sig.Bytes())
-		if err != nil {
-			fmt.Println("pack vote:", err)
-			os.Exit(1)
+	results, err := gatewayABI.Unpack("getChainRegistry", out)
+	if err != nil {
+		fmt.Println("unpack getChainRegistry:", err)
+		os.Exit(1)
+	}
+	exists, _ := results[0].(bool)
+	if !exists {
+		fmt.Println("chain", chainID, "is not registered")
+		os.Exit(1)
+	}
+	pubkeys, _ := results[1].([][]byte)
+	stakes, _ := results[2].([]uint64)
+	popSigs, _ := results[3].([][]byte)
+	epoch, _ := results[4].(uint64)
+	onChainCommittee := make([]cross_chain.ValidatorEntry, len(pubkeys))
+	for i := range pubkeys {
+		var stake uint64
+		if i < len(stakes) {
+			stake = stakes[i]
 		}
-		sendCalldataSoft(deployerKey, p_common.GATEWAY_CONTRACT_ADDRESS, voteCalldata, nil, 1_000_000, fmt.Sprintf("vote(chain=%d)", m.ChainID), true)
+		var pop []byte
+		if i < len(popSigs) {
+			pop = popSigs[i]
+		}
+		onChainCommittee[i] = cross_chain.ValidatorEntry{PubkeyBLS: pubkeys[i], Stake: stake, PopSignature: pop}
 	}
+	return onChainCommittee, epoch
+}
 
-	fmt.Printf("waiting for devnet timelock (%ds)...\n", timelockWaitSeconds)
-	time.Sleep(time.Duration(timelockWaitSeconds) * time.Second)
-	execNow := uint64(time.Now().Unix())
-	execCalldata, err := gatewayABI.Pack("executeProposal", proposalID, execNow)
-	if err != nil {
-		fmt.Println("pack executeProposal:", err)
+func signCertForChain(chainID uint64, digest []byte, signers []committeeMember) cross_chain.QuorumCert {
+	onChainCommittee, epoch := fetchChainCommittee(chainID)
+	var sigs [][]byte
+	var votingPubkeys [][]byte
+	for _, m := range signers {
+		if m.ChainID != chainID {
+			continue
+		}
+		kp := bls.NewKeyPair(eth_common.FromHex("0x" + m.PrivHex))
+		sig := bls.Sign(kp.PrivateKey(), digest)
+		sigs = append(sigs, sig.Bytes())
+		votingPubkeys = append(votingPubkeys, kp.BytesPublicKey())
+	}
+	if len(sigs) == 0 {
+		fmt.Println("no known private key for any of chain", chainID, "'s real on-chain committee members")
 		os.Exit(1)
 	}
-	sendCalldata(deployerKey, p_common.GATEWAY_CONTRACT_ADDRESS, execCalldata, nil, 1_000_000, fmt.Sprintf("executeProposal(kind=%d)", kind))
-	return proposalID
+	aggSig := bls.CreateAggregateSign(sigs)
+	bitmap := cross_chain.BuildSignerBitmap(onChainCommittee, votingPubkeys)
+	return cross_chain.QuorumCert{Epoch: epoch, AggregateSignature: aggSig, SignerBitmap: bitmap}
 }
 
 func main() {
@@ -237,7 +255,6 @@ func main() {
 	senderAddr := flag.String("sender", "", "original outbound sender address (attest/claim step)")
 	messageID := flag.String("message-id", "", "the outbound tx hash, used as MessageID (attest/claim step)")
 	sequence := flag.Uint64("sequence", 1, "message sequence (attest/claim step)")
-	timelockWait := flag.Int("timelock-wait", 12, "seconds to sleep for the devnet timelock override")
 	flag.Parse()
 
 	var err error
@@ -307,12 +324,42 @@ func main() {
 
 	case "bootstrap":
 		// Registers 4 fresh fake chains via registerChainViaStake (retired bootstrapFoundingChains's
-		// replacement, 2026-08-28 -- see note/cross_chain_stake_and_value_flow.md) purely to give
-		// Governance.ActiveChains some members for "register-chain"'s later propose/vote/execute
-		// quorum -- registerChainViaStake itself needs no quorum at all (that's the whole point of
-		// this path), but each call debits *deployerKeyHex's real wallet by the target chain's
-		// configured MinNativeStakeToRegisterWei, so this step requires that config to be set on
-		// the target chain AND *deployerKeyHex to hold >= 4x that amount in real balance.
+		// replacement, 2026-08-28 -- see note/cross_chain_stake_and_value_flow.md), keeping each
+		// one's generated committee key in st.Committee -- 2026-09-04: this is no longer about
+		// quorum (registerChainViaStake and register-asset's registerAssetWithCert both need no
+		// vote at all now, see this file's header comment), it's simply how this tool gets a chain
+		// ID it fully controls the live on-chain committee key for, so a later step (e.g.
+		// register-asset with -home-chain pointed at one of these 90001-90004 IDs) can produce a
+		// real self-signed cert. Each call debits *deployerKeyHex's real wallet by the target
+		// chain's configured MinNativeStakeToRegisterWei, so this step requires that config to be
+		// set on the target chain AND *deployerKeyHex to hold >= 4x that amount in real balance.
+		// registerChainViaStake now takes a caller-chosen amount (2026-09-04) instead of always
+		// debiting the fixed protocol MinNativeStakeToRegisterWei -- fetch that same live floor
+		// once here and use it as the amount for every bootstrap chain, preserving this tool's
+		// exact old behavior/comment above ("debits ... by the target chain's configured
+		// MinNativeStakeToRegisterWei").
+		minStakeCalldata, err := gatewayABI.Pack("getMinNativeStakeToRegister")
+		if err != nil {
+			fmt.Println("pack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		gwAddrForMinStake := p_common.GATEWAY_CONTRACT_ADDRESS
+		minStakeOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddrForMinStake, Data: minStakeCalldata}, nil)
+		if err != nil {
+			fmt.Println("call getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeResults, err := gatewayABI.Unpack("getMinNativeStakeToRegister", minStakeOut)
+		if err != nil {
+			fmt.Println("unpack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeAmount, _ := minStakeResults[0].(*big.Int)
+		if minStakeAmount == nil || minStakeAmount.Sign() <= 0 {
+			fmt.Println("getMinNativeStakeToRegister returned no configured floor -- set cross_chain.min_native_stake_to_register_wei on the target chain first")
+			os.Exit(1)
+		}
+
 		var committee []committeeMember
 		for i := 0; i < 4; i++ {
 			kp := bls.GenerateKeyPair()
@@ -333,7 +380,7 @@ func main() {
 				fmt.Println("marshal registry:", err)
 				os.Exit(1)
 			}
-			calldata, err := gatewayABI.Pack("registerChainViaStake", payload)
+			calldata, err := gatewayABI.Pack("registerChainViaStake", payload, minStakeAmount)
 			if err != nil {
 				fmt.Println("pack registerChainViaStake:", err)
 				os.Exit(1)
@@ -348,15 +395,17 @@ func main() {
 		saveState(*statePath, st)
 
 	case "register-chain":
-		if len(st.Committee) == 0 {
-			fmt.Println("state missing committee — run bootstrap first")
-			os.Exit(1)
-		}
+		// Rewritten 2026-09-04: used to propose+vote+execute the now-removed vote-gated
+		// ProposalRegisterChain kind (see this file's own header comment, updated) -- that kind
+		// has been retired, RegisterChainViaStake is the only registration path left. Needs no
+		// committee/quorum at all (that's the whole point), so the earlier "run bootstrap first"
+		// requirement is gone too -- only *deployerKeyHex's own real wallet balance matters here.
 		kp := bls.GenerateKeyPair()
+		popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
 		reg := cross_chain.ChainRegistry{
 			ChainID: *otherChainID,
 			Committee: []cross_chain.ValidatorEntry{
-				{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000},
+				{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()},
 			},
 			Epoch:           1,
 			QuorumThreshold: 6667,
@@ -366,7 +415,33 @@ func main() {
 			fmt.Println("marshal ChainRegistry:", err)
 			os.Exit(1)
 		}
-		proposeVoteExecute(*deployerKeyHex, 0 /* ProposalRegisterChain */, payload, st.Committee, *timelockWait)
+		minStakeCalldata, err := gatewayABI.Pack("getMinNativeStakeToRegister")
+		if err != nil {
+			fmt.Println("pack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		gwAddrForMinStake := p_common.GATEWAY_CONTRACT_ADDRESS
+		minStakeOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddrForMinStake, Data: minStakeCalldata}, nil)
+		if err != nil {
+			fmt.Println("call getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeResults, err := gatewayABI.Unpack("getMinNativeStakeToRegister", minStakeOut)
+		if err != nil {
+			fmt.Println("unpack getMinNativeStakeToRegister:", err)
+			os.Exit(1)
+		}
+		minStakeAmount, _ := minStakeResults[0].(*big.Int)
+		if minStakeAmount == nil || minStakeAmount.Sign() <= 0 {
+			fmt.Println("getMinNativeStakeToRegister returned no configured floor -- set cross_chain.min_native_stake_to_register_wei on the target chain first")
+			os.Exit(1)
+		}
+		calldata, err := gatewayABI.Pack("registerChainViaStake", payload, minStakeAmount)
+		if err != nil {
+			fmt.Println("pack registerChainViaStake:", err)
+			os.Exit(1)
+		}
+		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, calldata, nil, 3_000_000, fmt.Sprintf("registerChainViaStake(chain %d)", *otherChainID))
 		if st.RemoteCommitteePrivByChain == nil {
 			st.RemoteCommitteePrivByChain = make(map[string]string)
 		}
@@ -394,15 +469,18 @@ func main() {
 			fmt.Println("marshal AssetEntry:", err)
 			os.Exit(1)
 		}
-		proposalID := proposeVoteExecute(*deployerKeyHex, 2 /* ProposalRegisterAsset */, payload, st.Committee, *timelockWait)
-
 		supplyBig, _ := new(big.Int).SetString(*supply, 10)
-		regCalldata, err := gatewayABI.Pack("registerAsset", proposalID, supplyBig)
+		// 2026-09-04: replaces propose/vote/executeProposal(ProposalRegisterAsset) + a separate
+		// registerAsset() call with a single call, authorized by the asset's own HomeChainID
+		// self-signing (see AssetRegistryEngine.RegisterAssetOnRootAnchor's own doc comment).
+		digest := cross_chain.ComputeRegisterAssetMessage(assetIDBig, *homeChainID, canonical)
+		cert := signCertForChain(*homeChainID, digest, st.Committee)
+		regCalldata, err := gatewayABI.Pack("registerAssetWithCert", payload, supplyBig, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
 		if err != nil {
-			fmt.Println("pack registerAsset:", err)
+			fmt.Println("pack registerAssetWithCert:", err)
 			os.Exit(1)
 		}
-		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, regCalldata, nil, 1_000_000, "registerAsset")
+		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, regCalldata, nil, 1_000_000, "registerAssetWithCert")
 
 	case "allocate-supply":
 		// C7 fix (2026-08-27, note/cross_chain_attack_scenario_catalog.md item C7 /
@@ -423,17 +501,37 @@ func main() {
 			fmt.Println("invalid -value for allocate-supply")
 			os.Exit(1)
 		}
-		transfer := cross_chain.AllocationTransferPayload{
-			FromChainID: *thisChainID,
-			ToChainID:   *otherChainID,
-			Amount:      amountBig,
-		}
-		payload, err := json.Marshal(transfer)
+		// 2026-09-04: replaces propose/vote/executeProposal(ProposalTransferAllocation) with a
+		// single call, authorized by thisChainID's own committee self-signing (see
+		// GatewayEngine.TransferAllocationWithCert's own doc comment). nonce (SECURITY, found in
+		// review) binds the cert to a one-time-use value -- see
+		// GatewayEngine.TransferAllocationNonce's own doc comment for why.
+		nonceCalldata, err := gatewayABI.Pack("getTransferAllocationNonce", new(big.Int).SetUint64(*thisChainID))
 		if err != nil {
-			fmt.Println("marshal AllocationTransferPayload:", err)
+			fmt.Println("pack getTransferAllocationNonce:", err)
 			os.Exit(1)
 		}
-		proposeVoteExecute(*deployerKeyHex, 6 /* ProposalTransferAllocation */, payload, st.Committee, *timelockWait)
+		gwAddrForNonce := p_common.GATEWAY_CONTRACT_ADDRESS
+		nonceOut, err := client.CallContract(ctx, ethereum.CallMsg{To: &gwAddrForNonce, Data: nonceCalldata}, nil)
+		if err != nil {
+			fmt.Println("call getTransferAllocationNonce:", err)
+			os.Exit(1)
+		}
+		nonceResults, err := gatewayABI.Unpack("getTransferAllocationNonce", nonceOut)
+		if err != nil {
+			fmt.Println("unpack getTransferAllocationNonce:", err)
+			os.Exit(1)
+		}
+		nonce, _ := nonceResults[0].(uint64)
+
+		digest := cross_chain.ComputeTransferAllocationMessage(*thisChainID, *otherChainID, amountBig, nonce)
+		cert := signCertForChain(*thisChainID, digest, st.Committee)
+		transferCalldata, err := gatewayABI.Pack("transferAllocationWithCert", new(big.Int).SetUint64(*thisChainID), new(big.Int).SetUint64(*otherChainID), amountBig, nonce, cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap))
+		if err != nil {
+			fmt.Println("pack transferAllocationWithCert:", err)
+			os.Exit(1)
+		}
+		sendCalldata(*deployerKeyHex, p_common.GATEWAY_CONTRACT_ADDRESS, transferCalldata, nil, 1_000_000, "transferAllocationWithCert")
 		fmt.Println("✅ transferred allocation of", amountBig.String(), "from chain", *thisChainID, "to chain", *otherChainID)
 
 	case "query-registry":

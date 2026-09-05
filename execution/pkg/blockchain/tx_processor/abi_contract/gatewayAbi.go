@@ -58,15 +58,17 @@ package abi_contract
 // executeContractCallForGateway call sites for the settlement logic.
 //
 // registerChainViaStake() solves the same "chain #1 has no vote path" circular dependency a
-// deleted bootstrapFoundingChains() method (retired 2026-08-28) used to solve with a one-time,
-// coordinator-only batch call: a Root Anchor starts with zero ChainRegistry entries
-// (NewGatewayEngine is always called with an empty registry — see gateway_handler.go's
-// loadGatewayEngine), but GovernanceEngine.Vote requires the voter to already be a ChainRegistry
-// member and ExecuteGovernanceProposal's ProposalRegisterChain case requires a proposal to have
-// already passed a vote. registerChainViaStake() is vote-free and per-chain (not a batch), gated
-// instead by a REAL native-coin deposit from the caller's own wallet (gateway_handler.go's
-// "registerChainViaStake" case checks+burns it, see GatewayEngine.MinNativeStakeToRegister's own
-// doc comment) — usable identically for chain #1 and every chain after it, which is what let
+// deleted bootstrapFoundingChains() method (retired 2026-08-28) and a deleted vote-gated
+// ProposalRegisterChain kind (retired 2026-09-04, along with the whole GovernanceEngine it and
+// every other proposal kind used to run on — see cross_chain.GatewayEngine.RecoveryCommittee's own
+// doc comment) used to solve, each in its own way: a Root Anchor starts with zero ChainRegistry
+// entries (NewGatewayEngine is always called with an empty registry — see gateway_handler.go's
+// loadGatewayEngine), so nothing can bootstrap the very first chain's own membership.
+// registerChainViaStake() is vote-free and per-chain
+// (not a batch), gated instead by a REAL native-coin deposit from the caller's own wallet
+// (gateway_handler.go's "registerChainViaStake" case checks+burns it, see
+// GatewayEngine.MinNativeStakeToRegister's own doc comment) — usable identically for chain #1 and
+// every chain after it, which is what let
 // bootstrapFoundingChains() (and its >= MinFoundingChains batch requirement) be retired entirely.
 const GatewayABI = `[
 	{
@@ -161,6 +163,30 @@ const GatewayABI = `[
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
 			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}
+		],
+		"name": "creditReserveAllocation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "sequence", "type": "uint256"},
+			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
+			{"internalType": "address", "name": "sender", "type": "address"},
+			{"internalType": "address", "name": "target", "type": "address"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "value", "type": "uint256"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
+			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
 			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
 			{"internalType": "uint64", "name": "failEpoch", "type": "uint64"},
 			{"internalType": "bytes", "name": "failAggregateSignature", "type": "bytes"},
@@ -209,7 +235,9 @@ const GatewayABI = `[
 			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
 			{"internalType": "bytes32", "name": "accountTreeRoot", "type": "bytes32"},
 			{"internalType": "string", "name": "archivalEndpoint", "type": "string"},
-			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"}
+			{"internalType": "uint64", "name": "registeredAt", "type": "uint64"},
+			{"internalType": "address", "name": "genesisWallet", "type": "address"},
+			{"internalType": "bytes32", "name": "genesisDigest", "type": "bytes32"}
 		],
 		"stateMutability": "view",
 		"type": "function"
@@ -219,6 +247,23 @@ const GatewayABI = `[
 		"name": "getAllocation",
 		"outputs": [{"internalType": "uint256", "name": "allocation", "type": "uint256"}],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "getMinNativeStakeToRegister",
+		"outputs": [{"internalType": "uint256", "name": "minStake", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "digest", "type": "bytes32"}
+		],
+		"name": "setGenesisDigest",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{
@@ -360,7 +405,8 @@ const GatewayABI = `[
 	},
 	{
 		"inputs": [
-			{"internalType": "bytes", "name": "payload", "type": "bytes"}
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"}
 		],
 		"name": "registerChainViaStake",
 		"outputs": [],
@@ -369,62 +415,86 @@ const GatewayABI = `[
 	},
 	{
 		"inputs": [
-			{"internalType": "uint8", "name": "kind", "type": "uint8"},
-			{"internalType": "bytes", "name": "payload", "type": "bytes"},
-			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"}
+			{"internalType": "uint256", "name": "fromChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "toChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"},
+			{"internalType": "uint64", "name": "nonce", "type": "uint64"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
 		],
-		"name": "propose",
-		"outputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
-			{"internalType": "uint256", "name": "voterChainId", "type": "uint256"},
-			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"},
-			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
-			{"internalType": "bytes", "name": "signature", "type": "bytes"}
-		],
-		"name": "vote",
-		"outputs": [{"internalType": "uint8", "name": "status", "type": "uint8"}],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
-			{"internalType": "uint64", "name": "currentTimestamp", "type": "uint64"}
-		],
-		"name": "executeProposal",
+		"name": "transferAllocationWithCert",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{
-		"inputs": [
-			{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"},
-			{"internalType": "uint256", "name": "totalSupply", "type": "uint256"}
-		],
-		"name": "registerAsset",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [{"internalType": "bytes32", "name": "proposalId", "type": "bytes32"}],
-		"name": "getProposal",
-		"outputs": [
-			{"internalType": "bool", "name": "exists", "type": "bool"},
-			{"internalType": "uint8", "name": "kind", "type": "uint8"},
-			{"internalType": "bytes", "name": "payload", "type": "bytes"},
-			{"internalType": "uint64", "name": "votesFor", "type": "uint64"},
-			{"internalType": "uint64", "name": "proposedAt", "type": "uint64"},
-			{"internalType": "uint64", "name": "effectiveAt", "type": "uint64"},
-			{"internalType": "bool", "name": "executed", "type": "bool"},
-			{"internalType": "uint8", "name": "status", "type": "uint8"}
-		],
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getTransferAllocationNonce",
+		"outputs": [{"internalType": "uint64", "name": "nonce", "type": "uint64"}],
 		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "allocateSupplyWithCert",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "declareChainDeadWithCert",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "unregisterChainWithCert",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "updateCommitteeWithRecoveryCert",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "totalSupply", "type": "uint256"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "registerAssetWithCert",
+		"outputs": [],
+		"stateMutability": "nonpayable",
 		"type": "function"
 	},
 	{

@@ -92,17 +92,19 @@ type CrossChainConfig struct {
 	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
 	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
 
-	// DevnetGovernanceTimelockSecondsOverride — EXPLICIT OPT-IN devnet/testing accommodation
-	// only: shortens GovernanceEngine's mandatory 72h (DefaultGovernanceTimelockSeconds)
-	// proposal timelock to this many seconds instead. Zero/omitted (the only value any real
-	// production config should ever use) leaves the real 72h timelock completely unchanged —
-	// this field does not exist in any production config and defaults to inert. Exists because
-	// exercising the full propose->vote->timelock->execute->registerAsset governance path on a
-	// real running devnet is otherwise a literal 72-hour wait, which makes it untestable in
-	// practice; see note/cross_chain_production_readiness_plan.md Phase 0.8 for why this was
-	// added and the live verification it unblocked. Never set this on anything but a disposable
-	// local devnet.
-	DevnetGovernanceTimelockSecondsOverride uint64 `json:"devnet_governance_timelock_seconds_override,omitempty"`
+	// RecoveryCommitteeJSON + RecoveryQuorumThreshold (2026-09-04, replacing GovernanceEngine's
+	// whole propose/vote/72h-timelock/execute machinery — see
+	// cross_chain.GatewayEngine.RecoveryCommittee's own doc comment for the full rationale): a
+	// small, FIXED, JSON-encoded BLS committee ([]cross_chain.ValidatorEntry — pubkey_bls/stake/
+	// pop_signature per member) that authorizes the 3 actions no affected chain can ever self-
+	// authorize (declareChainDeadWithCert, unregisterChainWithCert,
+	// updateCommitteeWithRecoveryCert). Empty/omitted leaves those 3 calls failing closed
+	// (VerifyQuorumCertAgainstRegistry's own ErrEmptyCommittee) rather than silently permissive.
+	// RecoveryQuorumThreshold follows the same convention as ChainRegistry.QuorumThreshold: basis
+	// points, 0 meaning "use the real 2/3 BFT default". Set once, never on-chain-settable — same
+	// "lock in from the pristine state" pattern as ReserveChainID.
+	RecoveryCommitteeJSON   string `json:"recovery_committee_json,omitempty"`
+	RecoveryQuorumThreshold uint64 `json:"recovery_quorum_threshold,omitempty"`
 
 	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
 	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
@@ -117,38 +119,22 @@ type CrossChainConfig struct {
 	// value transfer.
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty"`
 
-	// MinRegistrationStake — C6 mitigation (Sybil chain registration via repeated, cost-free
-	// ProposalRegisterChain votes; see note/cross_chain_attack_scenario_catalog.md item C6 and
-	// GatewayEngine.MinRegistrationStake's own doc comment for the full mechanism). Gates ONLY
-	// ExecuteGovernanceProposal's ProposalRegisterChain case (the vote-gated path) — see
-	// MinNativeStakeToRegisterWei below for the vote-free RegisterChainViaStake path's own,
-	// unrelated gate. When set (>0), a candidate chain ID must already hold at least this much in
-	// SupplyLedger.PerChainAllocation (pre-funded via ProposalTransferAllocation from an
-	// existing active chain or the Reserve) before ProposalRegisterChain can execute for it.
-	// Nil/zero (the default) preserves the exact old permissionless-registration behavior —
-	// deliberately opt-in, not a default-on rate limit: the right minimum is an operational
-	// policy decision (how much should a new member chain be required to hold?) that depends on
-	// real deployment economics, not something to guess in code. Parsed as a base-10 decimal
-	// string of wei (not a JSON number) to avoid float64 precision loss for large amounts.
-	MinRegistrationStake string `json:"min_registration_stake_wei,omitempty"`
-
 	// MinNativeStakeToRegisterWei — the REQUIRED minimum real, liquid native-coin (Root Anchor's
 	// own base asset — deliberately NOT an ERC-20-style token, and NOT PerChainAllocation) balance
 	// gateway_handler.go's "registerChainViaStake" case requires the caller's own wallet
 	// (tx.FromAddress()) to hold before it will register a new chain, then moves exactly this
 	// amount out of that real wallet into GATEWAY_CONTRACT_ADDRESS as a permanent, held deposit
 	// (burn-then-mint; 2026-08-28 user request: "dùng tiền từ ví từ tài khoản thật làm điều kiện khởi tạo private
-	// chain ... không phải loại token erc 20 gì cả"). This is the universal, vote-free chain
-	// registration gate — usable identically for chain #1 and every chain after it — that
-	// replaced the retired bootstrapFoundingChains()/MinFoundingChains batch mechanism, so unlike
-	// MinRegistrationStake above this is NOT opt-in: leaving it empty/zero on a real deployment
+	// chain ... không phải loại token erc 20 gì cả"). This is the universal chain registration
+	// gate — usable identically for chain #1 and every chain after it — that replaced the retired
+	// bootstrapFoundingChains()/MinFoundingChains batch mechanism and the retired vote-gated
+	// ProposalRegisterChain path, so it is NOT opt-in: leaving it empty/zero on a real deployment
 	// reopens fully permissionless Sybil chain registration (RegisterChainViaStake's own doc
 	// comment, GatewayEngine.MinNativeStakeToRegister's doc comment). Every node that will process
 	// registerChainViaStake transactions MUST set this to the SAME value — a value that differs
 	// between validators is a Zero-Fork Invariant risk (different nodes would accept/reject the
 	// same registration transaction differently). Parsed as a base-10 decimal string of wei (not
-	// a JSON number) to avoid float64 precision loss for large amounts, same convention as
-	// MinRegistrationStake.
+	// a JSON number) to avoid float64 precision loss for large amounts.
 	MinNativeStakeToRegisterWei string `json:"min_native_stake_to_register_wei,omitempty"`
 }
 

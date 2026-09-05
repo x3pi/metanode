@@ -22,9 +22,39 @@ impl<C: NetworkClient> CommitSyncer<C> {
             };
         }
 
-        // ═══ STATE SYNCING: Deep lag detected ═══
-        if input.lag > 50_000 {
-            return PhaseTransitionDecision::Transition { to: StateSyncing };
+        // ═══ STATE SYNCING: REMOVED (2026-09-04) — real, unrecoverable production deadlock ═══
+        //
+        // This used to unconditionally transition to StateSyncing once `lag > 50_000`, on the
+        // assumption that an external mechanism would deliver a state snapshot from Go and then
+        // restart the node into Initializing (see the phase doc comment in coordination_hub.rs).
+        // That mechanism was never actually built: an exhaustive search of this whole workspace
+        // (consensus/metanode/src/, the Go↔Rust FFI/orchestration layer) found NOT ONE reference
+        // to StateSyncing outside meta-consensus/core itself, and nothing anywhere calls
+        // transition_phase_and_kick(Initializing) to exit it. StateSyncing was consequently a
+        // real, permanent dead end with zero implemented exit path.
+        //
+        // Found live: a 4-node local devnet cluster crashed under ~13h of sustained extreme load
+        // with Go execution ~509,000 commits behind the certified DAG tip (a real, large but
+        // otherwise perfectly recoverable backlog — CatchingUp's own chunked incremental replay
+        // measured at ~190µs/commit for near-empty commits elsewhere in the same log, i.e.
+        // minutes, not hours, of real replay work). On restart, every node's lag exceeded 50_000
+        // and each was unconditionally shunted into StateSyncing, which then blocked all further
+        // local committing ("[PHASE-GUARD] Blocking local committer... Waiting for DAG to fully
+        // catch up") forever, since no peer -- all four having crashed and restarted from the
+        // identical point -- had a fresher snapshot to offer even if the delivery mechanism had
+        // existed. The cluster was left permanently unable to recover on its own.
+        //
+        // Fixed by letting CatchingUp handle lag of any magnitude via its existing chunked,
+        // peer-verified incremental replay (already exercised at 500K+ scale by this same
+        // incident, just previously blocked from running) instead of diverting to a phase with
+        // no exit. A node already sitting in StateSyncing from before this fix (or from any other
+        // future code path that still sets it) is treated identically to CatchingUp below, rather
+        // than falling into the catch-all "managed externally" Hold that made it permanent.
+        if matches!(input.current_phase, StateSyncing) {
+            return Self::determine_phase(&PhaseStateInput {
+                current_phase: CatchingUp,
+                ..input.clone()
+            });
         }
 
         match input.current_phase {

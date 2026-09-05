@@ -111,6 +111,8 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 						common.Hash{}, // AccountTreeRoot
 						"",
 						uint64(0),
+						common.Address{}, // GenesisWallet
+						common.Hash{},    // GenesisDigest
 					)
 					if err != nil {
 						http.Error(w, err.Error(), 500)
@@ -427,6 +429,8 @@ func newRootAnchorAttestationMock(t *testing.T, sourceChainID, epoch uint64, kpV
 					common.Hash{},
 					"",
 					uint64(0),
+					common.Address{},
+					common.Hash{},
 				)
 			} else {
 				packed, packErr = parsedABI.Methods["getCommitAttestationShares"].Outputs.Pack(
@@ -847,6 +851,7 @@ func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
 					true, [][]byte{validatorEntry.PubkeyBLS}, []uint64{validatorEntry.Stake},
 					[][]byte{validatorEntry.PopSignature}, uint64(epoch), uint64(6667),
 					common.Address{}, common.Hash{}, common.Hash{}, "", uint64(0),
+					common.Address{}, common.Hash{},
 				)
 				reply(hexutil.Encode(packed))
 			case "getCommitAttestationShares":

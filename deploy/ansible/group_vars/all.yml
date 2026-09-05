@@ -18,3 +18,17 @@ snapshot_max_snapshots: 1
 snapshot_max_part_size_mb: 600
 epochs_to_keep: 5
 snapshot_server_port: 8604
+
+# RecoveryCommittee (2026-09-04 -- see GatewayEngine.RecoveryCommittee's own doc comment,
+# execution/pkg/cross_chain/gateway.go, and deploy/ansible/roles/local_build/tasks/main.yml's
+# "Ensure independent RecoveryCommittee keys exist" task). Devnet default: this cluster
+# auto-generates its own independent RecoveryCommittee key set (never reuses Root Anchor's own
+# consensus validator keys -- that reuse was a real security finding, fixed 2026-09-04).
+recovery_committee_size: 4
+# For a REAL (non-devnet) deployment, set this to an absolute path to a pre-built, operator-
+# supplied []cross_chain.ValidatorEntry JSON file (pubkey + PopSignature ONLY -- never a private
+# key) instead -- generate RecoveryCommittee's real keys entirely out-of-band (ideally on
+# air-gapped hardware, one member per distinct physical custodian) and never let this repo's
+# tooling see the private key material at all. Leave empty to use the devnet auto-generated
+# default above.
+recovery_committee_json_override_file: ""

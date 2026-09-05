@@ -514,6 +514,8 @@ deploy/ansible_private_chains/*.retry
 execution/cross_chain_relayer
 execution/cmd/tool/register_chains/register_chains
 execution/cmd/tool/live_asset_bridge/live_asset_bridge
+execution/gen_recovery_committee
+execution/cmd/tool/gen_recovery_committee/gen_recovery_committee
 
 # Local testing tools
 execution/cmd/tool/test_cross_chain_tx/
@@ -538,8 +540,17 @@ execution/cmd/tool/tps_benchmark_e2e/tps_report_*.json
 execution/cmd/tool/tps_benchmark_real_transfer/tps_benchmark_real_transfer
 execution/cmd/tool/tps_latency_probe/tps_latency_probe
 execution/cmd/tool/zero_balance_check/
+execution/cmd/tool/fund_tps_bench_accounts/fund_tps_bench_accounts
+execution/cmd/tool/count_onchain_txs/count_onchain_txs
 
-# Generated local devnet cluster (data dirs, keys, logs) — never commit private keys
-deploy/cluster/
-
-deploy/private_chain_kit
+# Generated local devnet cluster (data dirs, keys, logs) — never commit private keys.
+# The orchestration scripts themselves are safe (no secrets) and worth keeping under
+# version control so the load-test recipe stays reproducible on any machine — see
+# deploy/cluster/local_devnet/run_load_test.sh's own doc comment for what it does.
+deploy/cluster/*
+!deploy/cluster/local_devnet/
+deploy/cluster/local_devnet/*
+!deploy/cluster/local_devnet/*.sh
+execution/cmd/tool/cross_chain_relayer/cross_chain_relayer
+deploy/ansible_private_chains/gateway_register.json
+deploy/private_chain_kit/

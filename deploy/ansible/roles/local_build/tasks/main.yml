@@ -43,3 +43,45 @@
 # deploy.yml's "Local build and configuration generation" play (pre_tasks, `set_fact`), which
 # always runs before this role. Nothing further to do here.
 
+# RecoveryCommittee self-config (2026-09-04 -- see GatewayEngine.RecoveryCommittee's own doc
+# comment and note/eurozone_unified_native_coin_plan.md): declareChainDeadWithCert/
+# unregisterChainWithCert/updateCommitteeWithRecoveryCert are RecoveryCommittee-authorized and
+# fail closed (VerifyQuorumCertAgainstRegistry's ErrEmptyCommittee) if this cluster's own
+# cross_chain.recovery_committee_json is left unset -- which it always was until this task, since
+# nothing generated it.
+#
+# SECURITY FIX (2026-09-04, same day, found in a follow-up security re-review): the first version
+# of this task reused the Root Anchor's OWN real consensus validator authority keys as
+# RecoveryCommittee -- convenient for live-verification, but a real, avoidable concentration of
+# power (whoever holds >= quorum of those SAME keys both controls Root Anchor's real BFT consensus
+# AND has full RecoveryCommittee authority over every other registered chain). Fixed by giving
+# RecoveryCommittee its own INDEPENDENT key identity, generated once (idempotent -- reused on every
+# subsequent redeploy, unlike validator keys which regenerate every `Action: setup`; see
+# gen_recovery_committee_keys.py's own doc comment for why RecoveryCommittee must NOT silently
+# rotate) by gen_recovery_committee_keys.py, computed into public ValidatorEntry material (real BLS
+# pubkey derivation + a real Proof-of-Possession signature -- not safe to reimplement in Python) by
+# the Go helper execution/cmd/tool/gen_recovery_committee. A REAL deployment should instead set
+# recovery_committee_json_override_file in inventory.yml to a pre-built, operator-supplied
+# (ideally air-gapped-generated) ValidatorEntry JSON file, bypassing this devnet default entirely
+# -- see gen_recovery_committee_keys.py's own doc comment.
+- name: Build gen_recovery_committee helper
+  ansible.builtin.shell: |
+    cd "{{ deploy_dir }}/../../execution" && go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
+
+- name: Ensure independent RecoveryCommittee keys exist (idempotent -- devnet default only)
+  ansible.builtin.shell: |
+    python3 gen_recovery_committee_keys.py --out-dir "{{ deploy_dir }}/recovery_committee_keys" --metanode-bin "{{ deploy_dir }}/../../target/release/metanode" --count "{{ recovery_committee_size | default(4) }}"
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup' and (recovery_committee_json_override_file is not defined or recovery_committee_json_override_file == '')
+
+- name: Compute and inject RecoveryCommittee config into every node's execution.json
+  ansible.builtin.shell: |
+    python3 inject_recovery_committee.py "{{ deploy_dir }}" "{{ cluster_nodes | length }}" "{{ deploy_dir }}/../../execution/gen_recovery_committee" "{{ deploy_dir }}/recovery_committee_keys" {% if recovery_committee_json_override_file is defined and recovery_committee_json_override_file != '' %}--override-file "{{ recovery_committee_json_override_file }}"{% endif %}
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
+

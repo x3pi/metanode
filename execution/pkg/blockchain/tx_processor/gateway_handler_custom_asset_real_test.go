@@ -242,7 +242,7 @@ func TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds(t *testing.T) {
 
 	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
 	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
-	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry, nil)
+	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 	entry := &cross_chain.AssetEntry{
 		AssetID:           assetID,
 		Active:            true,
@@ -324,7 +324,7 @@ func TestGatewayHandler_CustomAsset_RealTokenMintSucceeds(t *testing.T) {
 			},
 		},
 	}, nil)
-	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry, nil)
+	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 	entry := &cross_chain.AssetEntry{
 		AssetID:           assetID,
 		Active:            true,

@@ -22,6 +22,20 @@ Options:
   --alloc-balance INT  Initial balance in MTN for pre-funded accounts (default: 1000000 MTN)
   --dev-accounts INT   Number of additional pre-funded dev ETH accounts (default: 5)
   --metanode-bin PATH  Path to metanode binary (auto-detected if omitted)
+
+Deterministic-genesis mode (2026-09-04, opt-in -- everything above is unchanged when these are
+omitted): pass BOTH --initial-supply-wallet and --initial-supply to make this run cross-check
+against Root Anchor and produce a genesis whose ENTIRE native-coin supply is exactly the amount
+that chain was credited when it registered via RegisterChainViaStake -- no --alloc-balance, no
+dev-account funding, no genesis.json.example injection, no free money anywhere. Every validator of
+that chain runs this with the SAME two values (shared out-of-band by whoever registered, e.g. via
+`register_chains -action query-alloc-raw`) to produce byte-identical genesis.json files, then
+publishes/verifies its digest via `register_chains -action publish-genesis-digest|verify-genesis`
+-- see note/eurozone_unified_native_coin_plan.md and GatewayEngine.RegisterChainViaStake /
+SetGenesisDigest's own doc comments for the full design.
+
+  --initial-supply-wallet 0x...   Wallet that must hold the chain's entire initial supply.
+  --initial-supply WEI            Exact initial supply, base-10 wei (verified, not trusted).
 """
 
 import json
@@ -51,14 +65,85 @@ def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
     Anchor (a real registration transaction/process, not a hardcoded genesis
     alloc).
     """
-    from eth_account import Account
     if node_index == 0:
         seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
     else:
         seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
-    address = Account.from_key(priv_hex).address
+    try:
+        from eth_account import Account
+        address = Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        address = eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
     return priv_hex, address
+
+def address_from_privkey_hex(priv_hex: str) -> str:
+    """Derive an ETH address from a raw secp256k1 private key hex string -- same eth_account/
+    eth_keys fallback pattern as derive_devnet_submitter_account (kept as a separate small
+    function rather than refactoring that one, to avoid touching an already-working code path)."""
+    priv_hex = priv_hex.strip()
+    if priv_hex.startswith("0x") or priv_hex.startswith("0X"):
+        priv_hex = priv_hex[2:]
+    try:
+        from eth_account import Account
+        return Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        return eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
+
+# Fixed 4-byte ABI selectors for the 2 read-only Gateway views the deterministic-genesis
+# cross-check below needs (getAllocation(uint256), getChainRegistry(uint256)) -- computed once
+# from execution/pkg/blockchain/tx_processor/abi_contract/gatewayAbi.go's ABI and hardcoded here
+# rather than recomputed at runtime, since Python's stdlib has no Keccak256 (hashlib's "sha3_256"
+# is the different NIST-finalized SHA-3, not the Keccak Ethereum actually uses) and pulling in a
+# non-stdlib dependency just for 2 fixed selectors isn't worth it. If gatewayAbi.go's function
+# signatures for these two ever change, these must be recomputed (see scratchpad note in the
+# 2026-09-04 session that first added them, or just run any ABI's Method.ID for the new signature).
+_SELECTOR_GET_ALLOCATION = "5a5804b3"
+_SELECTOR_GET_CHAIN_REGISTRY = "e4dad163"
+GATEWAY_CONTRACT_ADDRESS = "0x0000000000000000000000000000000000001002"
+
+def _eth_call(rpc_url: str, selector: str, chain_id: int, timeout: float = 5.0) -> str:
+    """Raw JSON-RPC eth_call to the Gateway contract, calldata = selector + chainId as a single
+    left-padded uint256 word (the shape every view method touched here happens to share: exactly
+    one uint256 chainId argument). Returns the raw 0x-prefixed hex result string."""
+    import urllib.request
+    data = "0x" + selector + f"{chain_id:064x}"
+    payload = json.dumps({
+        "jsonrpc": "2.0", "method": "eth_call",
+        "params": [{"to": GATEWAY_CONTRACT_ADDRESS, "data": data}, "latest"],
+        "id": 1,
+    }).encode()
+    req = urllib.request.Request(rpc_url, data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        rdata = json.loads(resp.read().decode())
+    if "error" in rdata:
+        raise RuntimeError(f"eth_call to {rpc_url} failed: {rdata['error']}")
+    result = rdata.get("result")
+    if not result or not isinstance(result, str):
+        raise RuntimeError(f"eth_call to {rpc_url} returned no result: {rdata}")
+    return result
+
+def fetch_allocation_from_root_anchor(rpc_url: str, chain_id: int) -> int:
+    """Root Anchor's live SupplyLedger.PerChainAllocation[chain_id], in wei."""
+    result = _eth_call(rpc_url, _SELECTOR_GET_ALLOCATION, chain_id)
+    return int(result, 16)
+
+def fetch_genesis_wallet_from_root_anchor(rpc_url: str, chain_id: int) -> str:
+    """Root Anchor's live ChainRegistry[chain_id].GenesisWallet -- getChainRegistry's ABI-encoded
+    tuple has (bool exists, bytes[] pubkeys, ...) with genesisWallet as its 12th (index 11) word;
+    every dynamic-typed field before it (bytes[]/uint64[]/bytes[]/string) is encoded as a 32-byte
+    OFFSET at its fixed slot, not inline, so genesisWallet's own fixed slot is still exactly word
+    index 11 regardless of how much dynamic data follows -- verified against gateway_handler.go's
+    getChainRegistry Pack() argument order (exists, pubkeys, stakes, popSignatures, epoch,
+    quorumThreshold, gatewayContract, stateRoot, accountTreeRoot, archivalEndpoint, registeredAt,
+    genesisWallet, genesisDigest)."""
+    result = _eth_call(rpc_url, _SELECTOR_GET_CHAIN_REGISTRY, chain_id)
+    hexbody = result[2:] if result.startswith("0x") else result
+    word_11_start = 11 * 64
+    word_11 = hexbody[word_11_start:word_11_start + 64]
+    return "0x" + word_11[-40:]
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 def green(s):  return f"\033[32m{s}\033[0m"
@@ -91,6 +176,38 @@ def find_metanode_bin(override=None):
     return None
 
 def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
+    auth_file = os.path.join(keys_dir, "authority_key.json")
+    proto_file = os.path.join(keys_dir, "protocol_key.json")
+    net_file = os.path.join(keys_dir, "network_key.json")
+    eth_file = os.path.join(keys_dir, "eth_key.json")
+    # _gen_meta.json (this script's own bookkeeping, never read by the Rust/Go side) preserves the
+    # pubkey-only base64 values for protocol_key/network_key from the moment they're generated --
+    # rewrite_key_as_base64 below overwrites protocol_key.json/network_key.json in place with a
+    # COMBINED priv+pub blob (the format the running node actually needs at those exact paths), so
+    # the original standalone pubkey is otherwise unrecoverable from disk afterward.
+    meta_file = os.path.join(keys_dir, "_gen_meta.json")
+
+    if all(os.path.exists(p) for p in [auth_file, proto_file, net_file, eth_file, meta_file]):
+        # Idempotent re-run (2026-09-04, deterministic-genesis design): a chain's committee must
+        # stay IDENTICAL between "generate keys -> register on Root Anchor" and "regenerate
+        # genesis.json now that the real initial-supply amount is known" -- calling `metanode
+        # keytool generate` again here would silently mint a BRAND NEW, unregistered committee,
+        # breaking that link. Reuse exactly what's already on disk instead of regenerating.
+        with open(auth_file) as f: auth_data = json.load(f)
+        with open(eth_file) as f: eth_data = json.load(f)
+        with open(meta_file) as f: meta = json.load(f)
+        bls = {
+            "authority_key": auth_data["public_key_base64"],
+            "protocol_key": meta["protocol_key_pubkey_b64"],
+            "network_key": meta["network_key_pubkey_b64"],
+            "authority_key_private": auth_data["private_key_hex"],
+        }
+        eth = {
+            "private_key": eth_data["ETH_PRIVATE_KEY"],
+            "address": eth_data["ETH_ADDRESS"]
+        }
+        return bls, eth
+
     os.makedirs(keys_dir, exist_ok=True)
     result = subprocess.run(
         [metanode_bin, "keytool", "generate", "validator", "--out-dir", keys_dir],
@@ -99,11 +216,6 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     if result.returncode != 0:
         print(red(f"ERROR: metanode keytool failed:\n{result.stderr}"))
         sys.exit(1)
-
-    auth_file = os.path.join(keys_dir, "authority_key.json")
-    proto_file = os.path.join(keys_dir, "protocol_key.json")
-    net_file = os.path.join(keys_dir, "network_key.json")
-    eth_file = os.path.join(keys_dir, "eth_key.json")
 
     for fpath in [auth_file, proto_file, net_file, eth_file]:
         if not os.path.exists(fpath):
@@ -114,6 +226,12 @@ def generate_validator_keys(metanode_bin: str, keys_dir: str) -> tuple:
     with open(proto_file) as f: proto_data = json.load(f)
     with open(net_file) as f: net_data = json.load(f)
     with open(eth_file) as f: eth_data = json.load(f)
+
+    with open(meta_file, "w") as f:
+        json.dump({
+            "protocol_key_pubkey_b64": proto_data["public_key_base64"],
+            "network_key_pubkey_b64": net_data["public_key_base64"],
+        }, f)
 
     def rewrite_key_as_base64(key_data, file_path):
         priv_bytes = bytes.fromhex(key_data["private_key_hex"])
@@ -159,16 +277,30 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
     same execution/pkg/bls Go library every real cross-chain caller uses)."""
     global _BLS_PUBKEY_BIN_CACHE
     if _BLS_PUBKEY_BIN_CACHE is None:
-        bin_path = REPO_ROOT / "execution" / "bls_pubkey"
-        if not bin_path.exists():
-            print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
-            result = subprocess.run(
-                ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
-                cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
-                sys.exit(1)
+        candidates = [
+            SCRIPT_DIR / "bin" / "bls_pubkey",
+            SCRIPT_DIR / "bls_pubkey",
+            REPO_ROOT / "execution" / "bls_pubkey",
+            REPO_ROOT / "execution" / "cmd" / "tool" / "bls_pubkey" / "bls_pubkey",
+            Path(shutil.which("bls_pubkey") or ""),
+        ]
+        bin_path = None
+        for c in candidates:
+            if c and c.is_file():
+                bin_path = c
+                break
+
+        if bin_path is None:
+            bin_path = REPO_ROOT / "execution" / "bls_pubkey"
+            if not bin_path.exists():
+                print(cyan("🔨 Building bls_pubkey helper (execution/cmd/tool/bls_pubkey)..."))
+                result = subprocess.run(
+                    ["go", "build", "-o", str(bin_path), "./cmd/tool/bls_pubkey"],
+                    cwd=str(REPO_ROOT / "execution"), capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(red(f"ERROR: failed to build bls_pubkey helper:\n{result.stderr}"))
+                    sys.exit(1)
         _BLS_PUBKEY_BIN_CACHE = str(bin_path)
     result = subprocess.run(
         [_BLS_PUBKEY_BIN_CACHE, "-secret", secret_hex],
@@ -305,6 +437,16 @@ def main():
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
     parser.add_argument("--reserve-chain-id", type=int, default=None, help="Chain ID of the system's Reserve chain (default: same as --chain-id)")
     parser.add_argument("--debug", action="store_true", help="Generate nodes with debug logging and a pprof HTTP listener enabled (localhost only). Off by default -- intended for local benchmarking, not production deploys.")
+    # Deterministic-genesis flags (2026-09-04) -- see this file's own module docstring update and
+    # note/eurozone_unified_native_coin_plan.md. When BOTH are set, this run switches from the old
+    # "make up an alloc_balance for every account" model to: genesis native-coin alloc == EXACTLY
+    # the amount this chain was credited when it registered on Root Anchor (RegisterChainViaStake
+    # -> SupplyLedger.PerChainAllocation, see GatewayEngine.RegisterChainViaStake's own doc
+    # comment), assigned to the exact wallet that paid for it. No other account gets a free
+    # balance in this mode -- total genesis supply is provably == what was actually registered,
+    # not whatever an operator happens to type into --alloc-balance.
+    parser.add_argument("--initial-supply-wallet", type=str, default="", help="Deterministic-genesis mode: the wallet address (0x...) that must hold this chain's entire initial native-coin supply -- must equal the address that paid the RegisterChainViaStake stake. Requires --initial-supply and --root-anchor-rpc.")
+    parser.add_argument("--initial-supply", type=str, default="", help="Deterministic-genesis mode: exact initial supply in wei (base-10 string) -- cross-checked against Root Anchor's live SupplyLedger.PerChainAllocation for this chain ID; the run aborts on any mismatch instead of silently using an unverified number.")
     args = parser.parse_args()
 
     print(bold(cyan("\n=== 🌐 Metanode Single Chain Initializer ===")))
@@ -325,12 +467,84 @@ def main():
     print(f"  Chain ID:              {cyan(args.chain_id)}")
     print(f"  Validators:            {cyan(args.validators)}")
 
+    # Auto-resolve reserve_chain_id from Root Anchor RPC if not explicitly provided
+    if args.reserve_chain_id is None:
+        if args.root_anchor_rpc:
+            detected_id = None
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    args.root_anchor_rpc,
+                    data=b'{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}',
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    rdata = json.loads(resp.read().decode())
+                    if "result" in rdata and isinstance(rdata["result"], str):
+                        detected_id = int(rdata["result"], 16)
+            except Exception:
+                pass
+            args.reserve_chain_id = detected_id if detected_id is not None else 991
+        else:
+            args.reserve_chain_id = args.chain_id
+
+    # Default submitter key to shared devnet key if Root Anchor is configured
+    if not args.root_anchor_submitter_key and args.root_anchor_rpc:
+        args.root_anchor_submitter_key = "d3d8157f2571153bcb664233f998a82b9b475fe509f92caf65ca2461bae7f1a9"
+
+    # Deterministic-genesis mode (2026-09-04): cross-check --initial-supply/--initial-supply-wallet
+    # against Root Anchor's OWN live record BEFORE trusting them for anything -- this is what makes
+    # every validator's independently-generated genesis.json byte-identical and provably tied to a
+    # real, already-paid registration, not just "whatever number was typed into this one run". See
+    # note/eurozone_unified_native_coin_plan.md and RegisterChainViaStake's own doc comment.
+    deterministic_genesis = bool(args.initial_supply_wallet) or bool(args.initial_supply)
+    if deterministic_genesis:
+        if not args.initial_supply_wallet or not args.initial_supply:
+            print(red("❌ --initial-supply-wallet and --initial-supply must be given TOGETHER (deterministic-genesis mode requires both)."))
+            sys.exit(1)
+        if not args.root_anchor_rpc:
+            print(red("❌ Deterministic-genesis mode requires --root-anchor-rpc to cross-check the supplied amount/wallet against Root Anchor's own record."))
+            sys.exit(1)
+        try:
+            initial_supply_int = int(args.initial_supply)
+        except ValueError:
+            print(red(f"❌ --initial-supply must be a base-10 wei integer, got: {args.initial_supply}"))
+            sys.exit(1)
+        if initial_supply_int <= 0:
+            print(red("❌ --initial-supply must be > 0."))
+            sys.exit(1)
+
+        verify_rpc = args.root_anchor_rpc.split(",")[0].strip()
+        print(f"\n🔒 Deterministic-genesis mode: đối chiếu lại với Root Anchor ({verify_rpc}) trước khi tin bất kỳ số nào truyền vào ...")
+        try:
+            remote_alloc = fetch_allocation_from_root_anchor(verify_rpc, args.chain_id)
+        except Exception as e:
+            print(red(f"❌ Không đọc được PerChainAllocation từ Root Anchor: {e}"))
+            sys.exit(1)
+        if remote_alloc != initial_supply_int:
+            print(red(f"❌ LỆCH: --initial-supply={initial_supply_int} nhưng Root Anchor ghi nhận chain {args.chain_id} có allocation={remote_alloc}. Dừng lại -- không tự ý dùng số không khớp."))
+            sys.exit(1)
+
+        try:
+            remote_wallet = fetch_genesis_wallet_from_root_anchor(verify_rpc, args.chain_id)
+        except Exception as e:
+            print(red(f"❌ Không đọc được GenesisWallet từ Root Anchor: {e}"))
+            sys.exit(1)
+        if remote_wallet.lower() != args.initial_supply_wallet.lower():
+            print(red(f"❌ LỆCH: --initial-supply-wallet={args.initial_supply_wallet} nhưng Root Anchor ghi nhận GenesisWallet={remote_wallet} cho chain {args.chain_id}. Dừng lại."))
+            sys.exit(1)
+
+        print(green(f"  ✅ Khớp: chain {args.chain_id} có allocation={initial_supply_int} wei, genesis_wallet={remote_wallet} -- đúng như Root Anchor ghi nhận."))
+
     # 1. Generate keys for validators
     validators_entries = []
     validator_keys_list = []
     alloc_list = []
     stake_wei = "1000000000000000000000" # 1000 MTN
-    alloc_wei = str(args.alloc_balance * (10**18))
+    # Deterministic-genesis mode: no account gets a "made up" balance -- total native-coin supply
+    # at genesis must equal EXACTLY the amount verified against Root Anchor above, assigned to
+    # exactly one wallet (--initial-supply-wallet), added as the sole alloc entry further below.
+    alloc_wei = "0" if deterministic_genesis else str(args.alloc_balance * (10**18))
 
     for node_id in range(args.validators):
         node_keys_dir = out_dir / f"node-{node_id}" / "keys"
@@ -432,8 +646,26 @@ def main():
     validity_threshold = fault_tolerance + 1
 
     # Inject all accounts from genesis template (default: genesis.json.example) with deduplication
-    template_path = Path(args.genesis_template) if args.genesis_template else (REPO_ROOT / "deploy" / "systemd" / "genesis.json.example")
-    if not args.no_example_alloc and template_path.exists():
+    template_path = None
+    if args.genesis_template:
+        template_path = Path(args.genesis_template)
+    else:
+        candidates = [
+            SCRIPT_DIR / "genesis.json.example",
+            SCRIPT_DIR / "config" / "genesis.json.example",
+            REPO_ROOT / "deploy" / "systemd" / "genesis.json.example",
+        ]
+        for c in candidates:
+            if c.exists():
+                template_path = c
+                break
+    # Skipped entirely in deterministic-genesis mode: the template's accounts carry their OWN
+    # hardcoded nonzero balances (not the local alloc_wei == "0" this run otherwise uses), which
+    # would silently reintroduce free, unverified money into a genesis whose whole point is that
+    # its total supply is provably == what Root Anchor actually credited.
+    if deterministic_genesis:
+        print(f"  🔒 Deterministic-genesis mode: bỏ qua injection từ {template_path.name if template_path else 'genesis template'} (không được có tiền free ngoài số đã xác minh).")
+    elif not args.no_example_alloc and template_path and template_path.exists():
         try:
             with open(template_path, "r") as ef:
                 example_data = json.load(ef)
@@ -449,6 +681,41 @@ def main():
                     print(f"  💉 Injected {injected_count} accounts from {template_path.name} (Total unique alloc accounts: {len(alloc_list)})")
         except Exception as e:
             print(yellow(f"  ⚠️ Warning: could not merge {template_path} allocs: {e}"))
+
+    if deterministic_genesis:
+        # The ONLY balance in the entire genesis, matching exactly what was verified against Root
+        # Anchor above -- every account created earlier in this run (validators, dev accounts, the
+        # relayer devnet identity) still got REGISTERED (their BLS pubkey entries exist, needed so
+        # e.g. the relayer's committee-attestation identity resolves), just with balance "0".
+        wallet_addr = args.initial_supply_wallet.lower()
+        if wallet_addr in seen_addrs:
+            # The wallet coincides with an already-added account (e.g. a validator or dev
+            # account) -- top up that SAME entry in place rather than appending a duplicate
+            # address (a duplicate would silently double the chain's real total supply the
+            # moment two "alloc" entries share one address, since nothing in this script
+            # deduplicates by summing).
+            for entry in alloc_list:
+                if entry["address"].lower() == wallet_addr:
+                    entry["balance"] = args.initial_supply
+                    break
+        else:
+            alloc_list.append({
+                "address": wallet_addr,
+                "balance": args.initial_supply,
+                "pending_balance": "0",
+                "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+            })
+        actual_total = sum(int(a["balance"]) for a in alloc_list)
+        if actual_total != initial_supply_int:
+            # Must be unreachable given the code above, but this is exactly the invariant the
+            # whole feature exists to guarantee -- verify it directly rather than trust the logic
+            # that's supposed to produce it, same "assert the invariant, don't just hope for it"
+            # pattern GlobalSupplyLedger.VerifyInvariant() uses on the Go side.
+            print(red(f"❌ INTERNAL: tổng alloc thực tế ({actual_total}) khác initial_supply đã xác minh ({initial_supply_int}) -- dừng lại, không ghi genesis sai."))
+            sys.exit(1)
+        print(green(f"  ✅ Tổng cung genesis == {initial_supply_int} wei, đúng bằng đúng 1 ví {wallet_addr} -- không còn tài khoản nào khác có số dư."))
 
     genesis_data = {
         "config": {
@@ -479,6 +746,18 @@ def main():
     except Exception as e:
         print(yellow(f"  ⚠️ Warning: could not export {systemd_genesis_path}: {e}"))
 
+    if deterministic_genesis:
+        # Publishing/verifying the digest needs real Keccak256 -- deliberately NOT reimplemented
+        # in Python here (see the _SELECTOR_* comment above for why); shell out to register_chains,
+        # which already computes it with the exact same primitive the node itself will later use
+        # (crypto.Keccak256Hash, pkg/cross_chain/ceremony.Digest). This only PRINTS the commands --
+        # it does not run them, so this script never needs a signing key of its own.
+        print(f"\n📐 Bước tiếp theo (mỗi validator tự chạy, sau khi genesis.json này giống hệt nhau trên mọi node):")
+        print(f"   1) Người đăng ký (chỉ 1 lần, dùng đúng khoá đã trả cọc) publish digest lên Root Anchor:")
+        print(f"      register_chains -action publish-genesis-digest -root-anchor {args.root_anchor_rpc.split(',')[0].strip()} -chains {args.chain_id} -genesis-file {genesis_path} -key <khoá đã dùng để đăng ký>")
+        print(f"   2) MỌI validator (kể cả người vừa publish) tự xác minh lại trước khi chạy node:")
+        print(f"      register_chains -action verify-genesis -root-anchor {args.root_anchor_rpc.split(',')[0].strip()} -chains {args.chain_id} -genesis-file {genesis_path}")
+
     # 4. Generate per-node runtime configs (config.json & node.toml)
     for node_id in range(args.validators):
         bls, eth = validator_keys_list[node_id]
@@ -507,9 +786,22 @@ def main():
             gateway_bls_key = DEVNET_GATEWAY_BLS_KEY
 
         # Derive dedicated per-node submitter key so multiple validators never collide on Root Anchor nonce/LastHash
-        node_submitter_key, _ = derive_devnet_submitter_account(args.chain_id, node_id)
+        node_submitter_key, node_submitter_addr = derive_devnet_submitter_account(args.chain_id, node_id)
         if args.root_anchor_submitter_key and args.validators == 1:
             node_submitter_key = args.root_anchor_submitter_key
+            node_submitter_addr = address_from_privkey_hex(node_submitter_key)
+
+        free_fee_list = ["55798165960a62cED34a0d86e36B1758D1303907"]
+        if deterministic_genesis:
+            # Infra identities (committee-attestation-worker submitter, cross-chain relayer) still
+            # need to submit real transactions even though this chain's genesis deliberately gives
+            # them zero balance -- free_fee_addresses (gas exemption), not a funded balance, is the
+            # correct mechanism here: it keeps the bridge's own plumbing running without
+            # reintroducing free circulating money that would violate this run's whole point
+            # (total supply == exactly what Root Anchor verified above).
+            _submitter_addr_bare = node_submitter_addr[2:] if node_submitter_addr.lower().startswith("0x") else node_submitter_addr
+            free_fee_list.append(_submitter_addr_bare)
+            free_fee_list.append("7d8bfbaba9268b59bab9ef8ff3f314d3f5747366")  # shared relayer devnet identity
 
         exec_config = {
             "debug": False,
@@ -527,9 +819,7 @@ def main():
             "last_block_save_path": "/last_block.dat",
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
             "block_hash_to_number_db_root_path": "/block_hash_to_number_db_root_path",
-            "free_fee_addresses": [
-                "55798165960a62cED34a0d86e36B1758D1303907"
-            ],
+            "free_fee_addresses": free_fee_list,
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
                 "reserve_chain_id": args.reserve_chain_id if args.reserve_chain_id is not None else args.chain_id,
@@ -545,14 +835,11 @@ def main():
                 "min_native_stake_to_register_wei": "1000000000000000000",
                 "root_anchor_circuit_breaker_max_failures": 5,
                 "root_anchor_circuit_breaker_timeout_seconds": 10,
-                # DEVNET/TESTING ONLY (see config.go's own doc comment on this field) -- shortens
-                # GovernanceEngine's mandatory 72h ProposalAllocateSupply/etc. timelock to 10s so
-                # the full propose->vote->timelock->execute governance path (required to grant any
-                # chain an initial cross-chain spending allocation -- see
-                # TestGateway_ProposalAllocateSupply_UnblocksAttestCommit) is actually exercisable
-                # on a local devnet instead of requiring a literal 72-hour wait. NEVER set this on
-                # a real deployment -- gen_single_chain.py is devnet tooling only.
-                "devnet_governance_timelock_seconds_override": 10
+                # devnet_governance_timelock_seconds_override removed 2026-09-04: dead config,
+                # GovernanceEngine (the only thing that ever read it) was deleted the same day --
+                # granting a chain its initial cross-chain spending allocation is now
+                # AllocateSupplyWithCert/TransferAllocationWithCert (self-sign, no timelock at
+                # all any more) or RecoveryCommittee-authorized, not a 72h governance vote.
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",
@@ -614,7 +901,8 @@ time_based_epoch_change = true
     start_sh = out_dir / "start_single_chain.sh"
     stop_sh  = out_dir / "stop_single_chain.sh"
 
-    simple_chain_bin = REPO_ROOT / "execution" / "cmd" / "simple_chain" / "simple_chain"
+    local_sc = SCRIPT_DIR / "bin" / "simple_chain"
+    simple_chain_bin = local_sc if local_sc.exists() else (REPO_ROOT / "execution" / "cmd" / "simple_chain" / "simple_chain")
     
     start_script_content = f"""#!/usr/bin/env bash
 set -e
@@ -634,7 +922,8 @@ fi
         node_flags = f" --debug --pprof-addr=127.0.0.1:{6060 + node_id}" if args.debug else ""
         start_script_content += f"""
 echo "  → Starting Node-{node_id} (RPC: http://{args.ip}:{args.rpc_port + node_id})..."
-(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config config.json{node_flags} > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
+mkdir -p "$DIR/node-{node_id}/logs"
+(cd "$DIR/node-{node_id}" && "$SIMPLE_CHAIN_BIN" --config "$DIR/node-{node_id}/config.json"{node_flags} > logs/node-{node_id}.log 2>&1 & echo $! > node-{node_id}.pid)
 """
 
     start_script_content += f"""
@@ -654,13 +943,27 @@ for pid_file in "$DIR"/node-*/node-*.pid "$DIR"/node-*/consensus-*.pid; do
         if kill -0 "$PID" 2>/dev/null; then
             echo "  → Stopping node process PID $PID..."
             kill -15 "$PID" 2>/dev/null || true
-            sleep 0.5
-            kill -9 "$PID" 2>/dev/null || true
+            for i in $(seq 1 10); do
+                if ! kill -0 "$PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.5
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+                kill -9 "$PID" 2>/dev/null || true
+            fi
         fi
         rm -f "$pid_file"
     fi
 done
 
+# Fallback: Kill any simple_chain process running with config inside this directory
+pkill -f "$DIR" 2>/dev/null || true
+"""
+    for node_id in range(args.validators):
+        stop_script_content += f"""fuser -k {args.rpc_port + node_id}/tcp 2>/dev/null || true\n"""
+
+    stop_script_content += f"""
 echo "✅ Single Chain {args.chain_id} stopped."
 """
 
