@@ -1106,6 +1106,302 @@ func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
 	assert.Equal(t, 0, n2)
 }
 
+// TestRelayerDaemon_TwoConcurrentInstances_NoDoubleProcessing is the regression test for the
+// permissionless multi-relayer safety claim (2026-09-05 production-readiness review): the design
+// docs and gateway.go's comments assert that two independent RelayerDaemon processes (each its
+// own identity/key, as any real multi-relayer production deployment would run) can race to relay
+// the exact same commit/messages, and the on-chain write-once guards (AttestedCommits,
+// MessageStatus) make the loser's redundant call harmless instead of double-crediting value or
+// crashing. Before this test, that claim was verified only by reading attestCommitInternal's and
+// ClaimMessage's code, never by an actual concurrent-execution test -- this drives it for real:
+// two RelayerDaemon instances with two DIFFERENT relayer keys both call RelayBatch for the same
+// pre-batched commit concurrently against the same shared GatewayEngine.
+func TestRelayerDaemon_TwoConcurrentInstances_NoDoubleProcessing(t *testing.T) {
+	const sourceChainID = 601
+	const destChainID = 602
+	const epoch = uint64(0)
+	const tipPerMessage = int64(7)
+
+	kpVal := bls.GenerateKeyPair()
+	validatorEntry := cross_chain.ValidatorEntry{PubkeyBLS: kpVal.PublicKey().Bytes(), Stake: 1000}
+
+	relayerKeyA, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyAHex := hex.EncodeToString(crypto.FromECDSA(relayerKeyA))
+	relayerKeyB, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyBHex := hex.EncodeToString(crypto.FromECDSA(relayerKeyB))
+
+	sender := common.HexToAddress("0xAAAA3333AAAA3333AAAA3333AAAA3333AAAA3333")
+	target := common.HexToAddress("0xBBBB4444BBBB4444BBBB4444BBBB4444BBBB4444")
+
+	parsedABI, err := abi.JSON(strings.NewReader(abi_contract.GatewayABI))
+	require.NoError(t, err)
+
+	sourceEngine := cross_chain.NewGatewayEngine(sourceChainID, map[uint64]cross_chain.ChainRegistry{}, nil)
+	_, err = sourceEngine.Outbound(sender, cross_chain.OutboundParams{
+		DestChainID: destChainID, Target: target, Payload: []byte{0x01},
+		AssetID: big.NewInt(0), Value: big.NewInt(0), Tip: big.NewInt(tipPerMessage), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xC001"))
+	require.NoError(t, err)
+	_, err = sourceEngine.Outbound(sender, cross_chain.OutboundParams{
+		DestChainID: destChainID, Target: target, Payload: []byte{0x02},
+		AssetID: big.NewInt(0), Value: big.NewInt(0), Tip: big.NewInt(tipPerMessage), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xC002"))
+	require.NoError(t, err)
+
+	// Pre-batch directly against the engine -- equivalent to a real batchOutboundCommit() tx
+	// having already landed on-chain, which is all RelayBatch itself needs as a starting point.
+	commitRoot, messages, err := sourceEngine.BatchOutboundCommit(destChainID, epoch)
+	require.NoError(t, err)
+	require.Len(t, messages, 2)
+
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10_000), map[uint64]*big.Int{sourceChainID: big.NewInt(10_000)})
+	require.NoError(t, err)
+	destEngine := cross_chain.NewGatewayEngine(destChainID, map[uint64]cross_chain.ChainRegistry{
+		sourceChainID: {ChainID: sourceChainID, Committee: []cross_chain.ValidatorEntry{validatorEntry}, Epoch: epoch, QuorumThreshold: 6667},
+	}, ledger)
+
+	type storedReceipt struct {
+		status uint64
+		ret    []byte
+	}
+	var receiptsMu sync.Mutex
+	receipts := make(map[common.Hash]storedReceipt)
+	var destNonce uint64
+	var destNonceMu sync.Mutex
+
+	// --- Root Anchor mock: real BLS signing, same pattern the other daemon tests use ---
+	rootAnchorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(9199)))
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			calldata, _ := hexutil.Decode(callObj["data"].(string))
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			switch method.Name {
+			case "getChainRegistry":
+				packed, _ := method.Outputs.Pack(
+					true, [][]byte{validatorEntry.PubkeyBLS}, []uint64{validatorEntry.Stake},
+					[][]byte{validatorEntry.PopSignature}, uint64(epoch), uint64(6667),
+					common.Address{}, common.Hash{}, common.Hash{}, "", uint64(0),
+					common.Address{}, common.Hash{},
+				)
+				reply(hexutil.Encode(packed))
+			case "getCommitAttestationShares":
+				commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+				sig := bls.Sign(kpVal.PrivateKey(), commitMsg)
+				packed, _ := method.Outputs.Pack([][]byte{validatorEntry.PubkeyBLS}, [][]byte{sig.Bytes()})
+				reply(hexutil.Encode(packed))
+			default:
+				t.Fatalf("unexpected eth_call to root anchor: %s", method.Name)
+			}
+		default:
+			reply("0x0")
+		}
+	}))
+	defer rootAnchorSrv.Close()
+
+	// --- Destination chain mock: drives ONE shared destEngine for real, from both daemons ---
+	destSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(destChainID)))
+		case "eth_gasPrice":
+			reply(hexutil.EncodeBig(big.NewInt(1_000_000_000)))
+		case "eth_getTransactionCount":
+			destNonceMu.Lock()
+			n := destNonce
+			destNonceMu.Unlock()
+			reply(hexutil.EncodeUint64(n))
+		case "eth_call":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			callObj, _ := params[0].(map[string]interface{})
+			calldata, _ := hexutil.Decode(callObj["data"].(string))
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			require.Equal(t, "getMessageStatus", method.Name)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+			status := destEngine.GetMessageStatus(common.Hash(args[0].([32]byte)))
+			packed, _ := method.Outputs.Pack(uint8(status))
+			reply(hexutil.Encode(packed))
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawBytes, _ := hexutil.Decode(params[0].(string))
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			calldata := ethTx.Data()
+			method, mErr := parsedABI.MethodById(calldata[:4])
+			require.NoError(t, mErr)
+			args, uErr := method.Inputs.Unpack(calldata[4:])
+			require.NoError(t, uErr)
+
+			signer := ethtypes.NewEIP155Signer(big.NewInt(destChainID))
+			from, sErr := ethtypes.Sender(signer, &ethTx)
+			require.NoError(t, sErr)
+
+			var status uint64 = 1
+			switch method.Name {
+			case "attestCommit":
+				proof := cross_chain.MerkleProof{
+					LeafIndex: args[4].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[5].([][32]byte)),
+				}
+				cert := cross_chain.QuorumCert{
+					Epoch:              args[6].(uint64),
+					AggregateSignature: args[7].([]byte),
+					SignerBitmap:       args[8].([]byte),
+				}
+				// Idempotent: the second concurrent instance's redundant attestCommit call is
+				// expected to hit AttestedCommits' write-once guard and return the EXISTING
+				// result harmlessly -- must not itself count as a test failure.
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				if attestErr != nil {
+					status = 0
+				}
+			case "claimMessage":
+				msg := cross_chain.CrossChainMessage{
+					MessageID:     common.Hash(args[0].([32]byte)),
+					SourceChainID: args[1].(*big.Int).Uint64(),
+					DestChainID:   args[2].(*big.Int).Uint64(),
+					Sequence:      args[3].(*big.Int).Uint64(),
+					HopCount:      args[4].(uint8),
+					Sender:        args[5].(common.Address),
+					Target:        args[6].(common.Address),
+					AssetID:       args[7].(*big.Int),
+					Value:         args[8].(*big.Int),
+					Payload:       args[9].([]byte),
+					Tip:           args[10].(*big.Int),
+					GasFee:        args[11].(*big.Int),
+					Ordered:       args[12].(bool),
+				}
+				proof := cross_chain.MerkleProof{
+					LeafIndex: args[13].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+				}
+				cr := common.Hash(args[15].([32]byte))
+				// The engine's own g.mu.Lock() inside ClaimMessage is what actually decides the
+				// race -- exactly one of the two concurrent callers should get MessageStatusPending
+				// -> Success and credit `from`'s tip; the other must get ErrAlreadyClaimed
+				// (ClaimMessage's ErrAlreadyClaimed check), never a double-credit.
+				_, claimErr := destEngine.ClaimMessage(msg, proof, cr, from)
+				if claimErr != nil {
+					status = 0
+				}
+			default:
+				t.Fatalf("unexpected write to destination chain: %s", method.Name)
+			}
+
+			receiptsMu.Lock()
+			receipts[ethTx.Hash()] = storedReceipt{status: status}
+			receiptsMu.Unlock()
+			destNonceMu.Lock()
+			destNonce++
+			destNonceMu.Unlock()
+			reply(ethTx.Hash().Hex())
+		case "eth_getTransactionReceipt":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			txHash := common.HexToHash(params[0].(string))
+			receiptsMu.Lock()
+			rcp, exists := receipts[txHash]
+			receiptsMu.Unlock()
+			if !exists {
+				reply(nil)
+				return
+			}
+			reply(map[string]interface{}{"status": hexutil.EncodeUint64(rcp.status), "return": hexutil.Encode(rcp.ret)})
+		default:
+			reply("0x0")
+		}
+	}))
+	defer destSrv.Close()
+
+	newDaemon := func(keyHex string) *RelayerDaemon {
+		cfg := DaemonConfig{
+			RelayerKeyHex:  keyHex,
+			RootAnchorURLs: []string{rootAnchorSrv.URL},
+			ChainRPCURLs: map[uint64]string{
+				destChainID: destSrv.URL,
+			},
+			PollInterval:      5 * time.Millisecond,
+			MaxPollIterations: 40,
+		}
+		d, dErr := NewRelayerDaemon(cfg)
+		require.NoError(t, dErr)
+		return d
+	}
+	daemonA := newDaemon(relayerKeyAHex)
+	daemonB := newDaemon(relayerKeyBHex)
+	defer daemonA.Stop()
+	defer daemonB.Stop()
+	require.NotEqual(t, daemonA.Address(), daemonB.Address(), "the two competing instances must have distinct identities, matching a real multi-relayer deployment")
+
+	// Fire both instances at the SAME pre-batched commit concurrently -- this is the race the
+	// permissionless multi-relayer design claims is safe.
+	var wg sync.WaitGroup
+	errsCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errsCh <- daemonA.RelayBatch(context.Background(), sourceChainID, commitRoot, epoch, messages)
+	}()
+	go func() {
+		defer wg.Done()
+		errsCh <- daemonB.RelayBatch(context.Background(), sourceChainID, commitRoot, epoch, messages)
+	}()
+	wg.Wait()
+	close(errsCh)
+	for relayErr := range errsCh {
+		assert.NoError(t, relayErr, "RelayBatch itself must not surface the loser's harmless already-claimed/already-attested outcome as a hard error")
+	}
+
+	// Both messages must have settled exactly once, at Success -- not stuck Pending, not
+	// double-processed.
+	assert.Equal(t, cross_chain.MessageStatusSuccess, destEngine.GetMessageStatus(common.HexToHash("0xC001")))
+	assert.Equal(t, cross_chain.MessageStatusSuccess, destEngine.GetMessageStatus(common.HexToHash("0xC002")))
+
+	// Economic incentive check: the total tip credited across BOTH relayer identities must equal
+	// exactly what 2 messages' tips are worth, once each -- never double-credited to either racer,
+	// and never lost.
+	destEngine2 := destEngine // just for readability below
+	totalCredited := big.NewInt(0)
+	if b, ok := destEngine2.RelayerBalances[daemonA.Address()]; ok {
+		totalCredited.Add(totalCredited, b)
+	}
+	if b, ok := destEngine2.RelayerBalances[daemonB.Address()]; ok {
+		totalCredited.Add(totalCredited, b)
+	}
+	assert.Equal(t, big.NewInt(tipPerMessage*2), totalCredited, "exactly 2 messages' worth of tip must be credited in total, split between whichever racer actually won each message -- never double-counted")
+}
+
 // TestChooseAttestMethod is the regression test for the 2-hop A -> Reserve -> B value routing
 // wiring (2026-08-28, note/cross_chain_stake_and_value_flow.md): a commit whose source is the
 // configured Reserve must use attestReserveIssuedCommit, everything else (including the

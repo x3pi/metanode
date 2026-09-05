@@ -283,6 +283,47 @@ func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
 	return (*big.Int)(&result), nil
 }
 
+// SuggestGasPrice returns this chain's currently suggested gas price (eth_gasPrice).
+//
+// Added 2026-09-05 during the RelayerDaemon production-readiness review: every transaction
+// RelayerDaemon submitted used a hardcoded `big.NewInt(1_000_000_000)` (1 Gwei) gas price with no
+// fee-market awareness at all -- a real risk of transactions sitting unmined forever on any chain
+// whose real fee market rises above that, or gross overpayment on a quiet chain that would have
+// accepted much less. Callers should treat a failure here as "fall back to a configured default",
+// not as fatal -- fee estimation must never itself block a relay.
+func (c *Client) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var result hexutil.Big
+	err := c.callRPC(ctx, "eth_gasPrice", &result)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return (*big.Int)(&result), nil
+}
+
+// GetBalance returns address's current native-coin balance on this chain (eth_getBalance,
+// "latest"). Added for RelayerDaemon's balance/gas-exhaustion monitoring (production-readiness
+// review, 2026-09-05): a relayer whose balance can no longer cover gas fails silently -- its sends
+// start erroring exactly like any other transient RPC hiccup unless something actively watches the
+// balance itself.
+func (c *Client) GetBalance(ctx context.Context, address common.Address) (*big.Int, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var result hexutil.Big
+	err := c.callRPC(ctx, "eth_getBalance", &result, address.Hex(), "latest")
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return (*big.Int)(&result), nil
+}
+
 // ethCall performs a read-only eth_call against GATEWAY_CONTRACT_ADDRESS with the given calldata,
 // wrapped by the circuit breaker.
 func (c *Client) ethCall(ctx context.Context, calldata []byte) ([]byte, error) {

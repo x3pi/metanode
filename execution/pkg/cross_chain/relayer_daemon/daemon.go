@@ -41,6 +41,37 @@ type DaemonConfig struct {
 	// attestCommit path, matching pre-2026-08-28 behavior exactly (opt-in, not a default-on
 	// behavior change).
 	ReserveChainID uint64 `json:"reserve_chain_id,omitempty" yaml:"reserve_chain_id,omitempty"`
+
+	// --- Gas pricing (2026-09-05 production-readiness review) ---
+	// Every send used to use a hardcoded 1 Gwei gas price with zero fee-market awareness. See
+	// resolveGasPrice's doc comment in gas_price.go for the full rationale and fallback chain.
+
+	// FallbackGasPriceWei is used when a chain's eth_gasPrice RPC call fails or returns a
+	// non-positive value. Defaults to 1_000_000_000 (1 Gwei, the old hardcoded constant) when nil
+	// or non-positive, so leaving this unset reproduces pre-2026-09-05 behavior exactly in the
+	// failure case.
+	FallbackGasPriceWei *big.Int `json:"fallback_gas_price_wei,omitempty" yaml:"fallback_gas_price_wei,omitempty"`
+	// GasPriceBumpPercent inflates the RPC-suggested gas price by this percent (e.g. 110 = +10%)
+	// to reduce the odds of a transaction sitting unmined during a fee spike between suggestion
+	// and broadcast. Values <=100 (including 0/unset) mean no bump.
+	GasPriceBumpPercent uint64 `json:"gas_price_bump_percent,omitempty" yaml:"gas_price_bump_percent,omitempty"`
+	// MaxGasPriceWei caps the gas price this daemon will ever pay, regardless of what the RPC
+	// suggests or how large GasPriceBumpPercent is -- a safety ceiling against a compromised or
+	// buggy RPC endpoint returning an absurd suggestion and draining the relayer's balance on a
+	// single transaction. nil/non-positive means no cap.
+	MaxGasPriceWei *big.Int `json:"max_gas_price_wei,omitempty" yaml:"max_gas_price_wei,omitempty"`
+	// GasPriceCacheTTL controls how long a chain's suggested gas price is reused before an
+	// eth_gasPrice RPC is issued again, so a tight burst of sends to the same chain (e.g.
+	// RelayBatch's several attest/claim calls) doesn't re-query for every single one. Defaults to
+	// 5s when <= 0.
+	GasPriceCacheTTL time.Duration `json:"gas_price_cache_ttl,omitempty" yaml:"gas_price_cache_ttl,omitempty"`
+
+	// --- Watch-loop backoff (2026-09-05 production-readiness review) ---
+
+	// MaxPollBackoff caps the exponential backoff WatchChainPair applies after consecutive
+	// errors polling/relaying a chain pair -- see backoffDuration in metrics.go. Defaults to 30s
+	// when <= 0.
+	MaxPollBackoff time.Duration `json:"max_poll_backoff" yaml:"max_poll_backoff"`
 }
 
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
@@ -63,6 +94,15 @@ type RelayerDaemon struct {
 	chainLocksMu      sync.Mutex
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
+
+	// --- Observability/production-readiness state (2026-09-05 review, see metrics.go) ---
+	startedAt       time.Time
+	gasPriceCache   map[uint64]gasPriceCacheEntry
+	gasPriceCacheMu sync.Mutex
+	healthMu        sync.Mutex
+	pairHealth      map[string]*pairHealth
+	balancesMu      sync.RWMutex
+	balances        map[uint64]*big.Int
 }
 
 // NewRelayerDaemon instantiates a new live RelayerDaemon.
@@ -116,6 +156,10 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		nonces:            make(map[uint64]uint64),
 		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
+		startedAt:         time.Now(),
+		gasPriceCache:     make(map[uint64]gasPriceCacheEntry),
+		pairHealth:        make(map[string]*pairHealth),
+		balances:          make(map[uint64]*big.Int),
 	}, nil
 }
 
@@ -308,7 +352,7 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 	gwAddr := mt_common.GATEWAY_CONTRACT_ADDRESS
 	txData := &ethtypes.LegacyTx{
 		Nonce:    nonce,
-		GasPrice: big.NewInt(1_000_000_000), // 1 Gwei
+		GasPrice: d.resolveGasPrice(ctx, chainID, client),
 		Gas:      gasLimit,
 		To:       &gwAddr,
 		Value:    big.NewInt(0),
@@ -712,6 +756,18 @@ func (d *RelayerDaemon) WatchChainPair(ctx context.Context, sourceChainID, destC
 		d.wg.Done()
 	}()
 	logger.Info("👀 [RELAYER DAEMON] watching chain %d -> chain %d for outbound messages", sourceChainID, destChainID)
+
+	srcLabel := fmt.Sprintf("%d", sourceChainID)
+	dstLabel := fmt.Sprintf("%d", destChainID)
+	basePoll := d.config.PollInterval
+	if basePoll <= 0 {
+		basePoll = 500 * time.Millisecond
+	}
+	maxBackoff := d.config.MaxPollBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 30 * time.Second
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -721,14 +777,25 @@ func (d *RelayerDaemon) WatchChainPair(ctx context.Context, sourceChainID, destC
 		default:
 		}
 
+		wait := basePoll
 		if n, err := d.BatchAndRelay(ctx, sourceChainID, destChainID); err != nil {
-			logger.Warn("⚠️ [RELAYER DAEMON] batch/relay chain %d -> %d failed: %v", sourceChainID, destChainID, err)
-		} else if n > 0 {
-			logger.Info("✅ [RELAYER DAEMON] relayed %d message(s) from chain %d to chain %d", n, sourceChainID, destChainID)
+			consecutive := d.recordPairFailure(pairKey, err)
+			relayWatchErrorsTotal.WithLabelValues(srcLabel, dstLabel).Inc()
+			relayConsecutiveErrors.WithLabelValues(srcLabel, dstLabel).Set(float64(consecutive))
+			wait = backoffDuration(basePoll, maxBackoff, consecutive)
+			logger.Warn("⚠️ [RELAYER DAEMON] batch/relay chain %d -> %d failed (consecutive=%d, next retry in %s): %v", sourceChainID, destChainID, consecutive, wait, err)
+		} else {
+			d.recordPairSuccess(pairKey)
+			relayConsecutiveErrors.WithLabelValues(srcLabel, dstLabel).Set(0)
+			relayLastSuccessTimestamp.WithLabelValues(srcLabel, dstLabel).SetToCurrentTime()
+			if n > 0 {
+				relayMessagesRelayedTotal.WithLabelValues(srcLabel, dstLabel).Add(float64(n))
+				logger.Info("✅ [RELAYER DAEMON] relayed %d message(s) from chain %d to chain %d", n, sourceChainID, destChainID)
+			}
 		}
 
 		select {
-		case <-time.After(d.config.PollInterval):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return
 		case <-d.stopCh:
