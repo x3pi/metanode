@@ -55,6 +55,7 @@ type OutboundParams struct {
 	GasFee      *big.Int       `json:"gas_fee"`
 	HopCount    uint8          `json:"hop_count"`
 	Ordered     bool           `json:"ordered"`
+	OriginalID  *common.Hash   `json:"original_id,omitempty"` // Preserves MessageID across relay hops
 }
 
 // CrossChainContext stores execution context accessible via GetOriginalSender / IsCalledByGateway.
@@ -842,16 +843,38 @@ func (g *GatewayEngine) Outbound(
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	messageID := txHash
+	seqKey := fmt.Sprintf("%d:%d", g.LocalChainID, params.DestChainID)
+	seq := g.ChannelSequence[seqKey] + 1
+	g.ChannelSequence[seqKey] = seq
+
+	var messageID common.Hash
+	if params.OriginalID != nil {
+		// FIX (2026-09-05, note/cross_chain/security_audit_findings.md finding #7 -- "MessageID
+		// not preserved across a relay-onward hop"): the leg-2 message a relay (e.g. Reserve -> B,
+		// see the "claimMessage" relay-onward block in gateway_handler.go) queues via this call
+		// used to always get a BRAND NEW MessageID (txHash of the leg-1 claim transaction), never
+		// linked back to leg 1's own MessageID -- the only ID the ORIGINAL sender on chain A ever
+		// actually saw. Confirmed via a real end-to-end test
+		// (TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve) that this left the
+		// caller-visible chain (Reserve)'s own MessageStatus for the leg-1 ID stuck reporting
+		// Success FOREVER -- even after leg 2 genuinely failed and was refunded under the new,
+		// unlinkable ID -- actively misleading, not just unobservable. Preserving the ID means
+		// Reserve's own resolution of leg 1's ID (a later Refund() call for the SAME ID, once leg
+		// 2 fails) is now the thing anyone tracking the original transfer would see.
+		//
+		// NOTE: this is unrelated to CreditReserveAllocation/RefundReserveAllocation (finding #3/
+		// #6's mirrored success/failure-cert pipeline for the SEPARATE dual-attest 2-hop routing
+		// in relayer_daemon.go's RelayBatch) -- those never touch a relay-onward message like this
+		// one at all; both mechanisms happen to coexist for different 2-hop shapes.
+		messageID = *params.OriginalID
+	} else {
+		messageID = txHash
+	}
 	g.MessageStatus[messageID] = MessageStatusPending
 
 	if params.Tip != nil && params.Tip.Sign() > 0 {
 		g.LockedTips[messageID] = new(big.Int).Set(params.Tip)
 	}
-
-	seqKey := fmt.Sprintf("%d:%d", g.LocalChainID, params.DestChainID)
-	seq := g.ChannelSequence[seqKey] + 1
-	g.ChannelSequence[seqKey] = seq
 
 	val := big.NewInt(0)
 	if params.Value != nil {

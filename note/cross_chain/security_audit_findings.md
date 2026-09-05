@@ -214,3 +214,46 @@ RPC giả lập, chạy toàn bộ vòng batch → attestCommit (Reserve) + atte
 claimMessage thất bại trên B → `processFailedClaim` hoàn Tip/GasFee trên A + gọi
 `refundReserveAllocation` trên Reserve, xác nhận Reserve thật sự sinh ra đúng 1 outbound message mới
 mang đúng `Value` gửi về A).
+
+## 7. MessageID không được bảo tồn qua chặng relay (Reserve -> B) — ✅ ĐÃ VÁ (2026-09-05)
+**Location:** `execution/pkg/cross_chain/gateway.go` (`OutboundParams`, `Outbound`),
+`execution/pkg/blockchain/tx_processor/gateway_handler.go` (case `"claimMessage"`, nhánh relay-onward)
+
+**Mô tả (do người dùng phát hiện + đề xuất giải pháp):** cơ chế relay-onward trong `claimMessage`
+(mục "2-hop A -> Reserve -> B value & CONTRACT_CALL routing", dùng `EncodeRelayPayload`/
+`DecodeRelayPayload`, KHÁC với cơ chế dual-attest ở mục 3/6) — khi chặng 1 (A -> Reserve) được
+claim thành công và Reserve phát hiện marker relay, Reserve tự sinh 1 message chặng 2 (Reserve ->
+B) bằng cách gọi `engine.Outbound()` — nhưng trước đây hàm này luôn tự băm `tx.Hash()` của giao
+dịch claim chặng 1 làm MessageID MỚI, không liên hệ gì tới MessageID gốc mà A đã gửi.
+
+**Đối chiếu claim gốc của người dùng:** mô tả gốc nói `RefundReserveAllocation`/
+`CreditReserveAllocation` "đòi hỏi MessageID cũ" — kiểm chứng trực tiếp trên code cho thấy điều này
+**không chính xác**: 2 hàm đó (xây ở mục 3/6) thuộc về 1 cơ chế 2-hop HOÀN TOÀN KHÁC (dual-attest
+trực tiếp A→B qua `RelayBatch`, không tạo message mới) và chưa từng được gọi cho luồng relay-onward
+này. Tuy nhiên, đào sâu bằng 1 test thật (chạy `git stash` tạm bỏ patch để so sánh trước/sau) xác
+nhận **triệu chứng vẫn có thật, thậm chí nặng hơn mô tả gốc**: vì chặng 2 dùng ID mới không liên hệ
+gì tới ID gốc, `MessageStatus` phía Reserve cho ĐÚNG ID mà người gửi trên A từng thấy bị đóng băng
+vĩnh viễn ở `Success` (do `ClaimMessage` chặng 1 set) — **kể cả khi chặng 2 sau đó THẤT BẠI thật và
+được hoàn tiền** dưới ID mới không ai biết để tra cứu. Đây không chỉ là thiếu quan sát được mà còn
+là báo cáo trạng thái SAI (nói "thành công" trong khi tiền đã bị hoàn ngược, không đến B) dưới đúng
+ID người dùng có trong tay.
+
+**Giải pháp người dùng đề xuất** (giữ nguyên, chỉ sửa lại comment giải thích cho đúng): thêm
+`OriginalID *common.Hash` vào `OutboundParams`; nhánh relay-onward truyền
+`OriginalID = &msg.MessageID` (ID của chặng 1); `Outbound()` tái sử dụng ID này thay vì băm mới nếu
+được cung cấp. Xác nhận không có tác dụng phụ: `ChannelSequence` (theo cặp chain, không liên quan
+MessageID), `LockedTips` (chặng relay luôn Tip=0, không kích hoạt), và không có rủi ro trùng lặp
+(ID gốc là hash giao dịch thật của A, không thể trùng ai khác) — 2 điểm gọi `Outbound()` còn lại
+(case `"outbound"` thật của user, và `RelayerEngine.SubmitOutbound` — xác nhận dead code, không ai
+gọi ngoài chính file định nghĩa nó) không bị ảnh hưởng vì không set `OriginalID`.
+
+**Kiểm chứng bằng test thật (không chỉ đọc code):** viết
+`TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve` (chặng 2 mang cả Value lẫn 1
+lệnh gọi ERC-20 thật cố tình revert do người gửi có số dư token = 0 trên B) — chạy `git stash` tạm
+gỡ patch: test THẤT BẠI đúng như dự đoán, cho thấy `MessageStatus` phía Reserve của ID chặng 1 vẫn
+là `Success` (0x1) dù chặng 2 đã `Refunded`. Áp lại patch: test PASS, `MessageStatus` của ID chặng 1
+trên Reserve phản ánh đúng `Refunded`.
+
+Test: `TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve` (mới, quy trình đầy đủ:
+batchOutboundCommit thật trên Reserve → attestReserveIssuedCommit + claimMessage thất bại thật trên
+B → refund thật trên Reserve dùng đúng ID chặng 1 → xác nhận trạng thái cuối cùng dưới ID gốc).

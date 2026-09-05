@@ -916,6 +916,9 @@ func (h *GatewayHandler) handleWrite(
 					GasFee:      relayGasFee,
 					HopCount:    msg.HopCount + 1,
 					Ordered:     false,
+					// Finding #7 (see Outbound's own doc comment in gateway.go): keep leg 1's
+					// MessageID for leg 2 instead of minting a fresh one from this tx's own hash.
+					OriginalID: &msg.MessageID,
 				}
 				// Sender is the ORIGINAL cross-chain sender (msg.Sender), carried forward
 				// unchanged -- NOT msg.Target. The resulting leg-2 message's own Sender field is
@@ -1255,7 +1258,6 @@ func (h *GatewayHandler) handleWrite(
 				}
 			}
 		}
-
 
 		if event, ok := h.abi.Events["MessageRefunded"]; ok {
 			eventData, packErr := event.Inputs.NonIndexed().Pack(msg.Value)
