@@ -96,6 +96,14 @@ type unrelayedBatch struct {
 	Messages   []cross_chain.CrossChainMessage `json:"messages"`
 }
 
+// pendingRefund is a message known to have finalized as MessageStatusFailed on its destination
+// chain, not yet successfully refunded on its source chain (see RelayerDaemon.pendingRefunds).
+type pendingRefund struct {
+	msg        cross_chain.CrossChainMessage
+	commitRoot common.Hash
+	proof      cross_chain.MerkleProof
+}
+
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
 // aggregates BLS QuorumCerts from Root Anchor, and executes claims on destination chains.
 type RelayerDaemon struct {
@@ -111,12 +119,18 @@ type RelayerDaemon struct {
 	watchedPairs      map[string]bool // key: "srcChainId:destChainId"
 	watchedPairsMu    sync.Mutex
 	unrelayedBatches  map[string]*unrelayedBatch // key: "srcChainId:destChainId"
-	nonces            map[uint64]uint64
-	nonceMu           sync.Mutex
-	chainLocks        map[uint64]*sync.Mutex
-	chainLocksMu      sync.Mutex
-	stopCh            chan struct{}
-	wg                sync.WaitGroup
+	// pendingRefunds tracks messages this daemon observed finalize as MessageStatusFailed on
+	// their destination chain but has not yet successfully refunded on their source chain (mục
+	// 2.4 / 2026-09-05 finding #1 fix) -- e.g. the failure-attestation QuorumCert wasn't at
+	// quorum yet, or the refund() send itself failed transiently. Retried at the start of every
+	// BatchAndRelay tick for that message's own source chain (see retryPendingRefunds).
+	pendingRefunds map[common.Hash]*pendingRefund
+	nonces         map[uint64]uint64
+	nonceMu        sync.Mutex
+	chainLocks     map[uint64]*sync.Mutex
+	chainLocksMu   sync.Mutex
+	stopCh         chan struct{}
+	wg             sync.WaitGroup
 
 	// --- Observability/production-readiness state (2026-09-05 review, see metrics.go) ---
 	startedAt       time.Time
@@ -183,6 +197,7 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
 		unrelayedBatches:  loadUnrelayedBatches(cfg.UnrelayedBatchesPersistPath),
+		pendingRefunds:    make(map[common.Hash]*pendingRefund),
 		nonces:            make(map[uint64]uint64),
 		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
@@ -649,6 +664,27 @@ func (d *RelayerDaemon) RelayBatch(
 		d.mu.Lock()
 		d.processedMessages[msg.MessageID] = true
 		d.mu.Unlock()
+
+		// SECURITY FIX (2026-09-05, finding #1 / mục 2.4): claimMessage's transaction now
+		// SUCCEEDS (receipt.Status == 1) even when the destination payload reverted -- it
+		// finalizes the message as MessageStatusFailed instead of hard-reverting (see
+		// gateway_handler.go's claimMessage case). A successful receipt therefore no longer
+		// implies "value was delivered"; check the message's actual resolved status before
+		// treating this as a normal successful relay.
+		if finalStatus := d.getMessageStatus(ctx, destClient, msg.MessageID); finalStatus == cross_chain.MessageStatusFailed {
+			logger.Info("💥 [RELAYER DAEMON] claimMessage for %s finalized as FAILED on chain %d (destination payload reverted) -- pursuing refund on source chain %d", msg.MessageID.Hex(), destChainID, msg.SourceChainID)
+			if err := d.processFailedClaim(ctx, msg, commitRoot, msgProof); err != nil {
+				logger.Warn("⚠️ [RELAYER DAEMON] refund pursuit for failed message %s did not complete: %v -- queued for retry on chain %d's next watch tick", msg.MessageID.Hex(), err, msg.SourceChainID)
+				d.mu.Lock()
+				if d.pendingRefunds == nil {
+					d.pendingRefunds = make(map[common.Hash]*pendingRefund)
+				}
+				d.pendingRefunds[msg.MessageID] = &pendingRefund{msg: msg, commitRoot: commitRoot, proof: msgProof}
+				d.mu.Unlock()
+			}
+			continue
+		}
+
 		logger.Info("🚀 [RELAYER DAEMON] relayed message %s to chain %d via batch %s", msg.MessageID.Hex(), destChainID, commitRoot.Hex())
 
 		// Destination-side counterpart of step 1's attestCommit debit (2026-09-04 finding, see
@@ -687,6 +723,169 @@ func (d *RelayerDaemon) RelayBatch(
 	return nil
 }
 
+// processFailedClaim pursues mục 2.4's refund path for a message this daemon just observed
+// finalize as MessageStatusFailed on its destination chain (2026-09-05 fix for
+// note/cross_chain/security_audit_findings.md finding #1 "Permanent Lock of Funds / DoS on
+// Payload Revert"): polls Root Anchor for the destination committee's failure-attestation shares
+// (produced by tx_processor.MessageFailureAttestationWorker, running on each destination-chain
+// validator once its own local execution deterministically finalized this same message as
+// Failed), aggregates them into a real QuorumCert once quorum is reached, then submits refund()
+// on the message's SOURCE chain -- completing the loop GatewayEngine.Refund() alone could never
+// complete since nothing before this fix ever produced that cert in production.
+func (d *RelayerDaemon) processFailedClaim(ctx context.Context, msg cross_chain.CrossChainMessage, commitRoot common.Hash, msgProof cross_chain.MerkleProof) error {
+	destRegistry, exists, err := d.rootAnchorClient.GetChainRegistry(ctx, msg.DestChainID)
+	if err != nil {
+		return fmt.Errorf("getChainRegistry for dest chain %d: %w", msg.DestChainID, err)
+	}
+	if !exists || destRegistry == nil {
+		return fmt.Errorf("dest chain %d not registered on Root Anchor", msg.DestChainID)
+	}
+
+	cert, err := d.pollAndAggregateFailureCert(ctx, msg.DestChainID, msg.MessageID, destRegistry.Epoch)
+	if err != nil {
+		return fmt.Errorf("aggregate failure QuorumCert: %w", err)
+	}
+
+	refundCalldata, err := d.abi.Pack("refund",
+		msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
+		new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
+		cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+	)
+	if err != nil {
+		return fmt.Errorf("pack refund: %w", err)
+	}
+
+	receipt, err := d.sendToChainAndWait(ctx, msg.SourceChainID, refundCalldata, 500_000)
+	if err != nil {
+		return fmt.Errorf("send refund tx: %w", err)
+	}
+	if receipt.Status != 1 {
+		return fmt.Errorf("refund tx reverted: %s", DecodeRevertReason(receipt.Return))
+	}
+	logger.Info("💸 [RELAYER DAEMON] refunded message %s to sender %s on source chain %d", msg.MessageID.Hex(), msg.Sender.Hex(), msg.SourceChainID)
+	return nil
+}
+
+// pollAndAggregateFailureCert mirrors pollAndAggregateCommitCert exactly, polling for
+// getMessageFailureAttestationShares instead of getCommitAttestationShares -- see that function's
+// doc comment for the polling/threshold logic, identical here.
+func (d *RelayerDaemon) pollAndAggregateFailureCert(
+	ctx context.Context,
+	destChainID uint64,
+	messageID common.Hash,
+	epoch uint64,
+) (*cross_chain.QuorumCert, error) {
+	reg, exists, err := d.rootAnchorClient.GetChainRegistry(ctx, destChainID)
+	if err != nil {
+		return nil, fmt.Errorf("getChainRegistry from Root Anchor: %w", err)
+	}
+	if !exists || reg == nil {
+		return nil, fmt.Errorf("chain %d is not registered on Root Anchor", destChainID)
+	}
+
+	var totalStake uint64
+	for _, v := range reg.Committee {
+		totalStake += v.Stake
+	}
+	if totalStake == 0 {
+		return nil, fmt.Errorf("committee for chain %d has 0 total stake", destChainID)
+	}
+
+	threshold := (totalStake*2 + 2) / 3
+	if reg.QuorumThreshold > 0 {
+		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
+	}
+
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+
+	for i := 0; i < maxIterations; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-d.stopCh:
+			return nil, fmt.Errorf("relayer daemon stopping")
+		default:
+		}
+
+		pubkeys, sigs, err := d.rootAnchorClient.GetMessageFailureAttestationShares(ctx, destChainID, messageID, epoch)
+		if err == nil && len(pubkeys) > 0 {
+			var accumulatedStake uint64
+			var validPubkeys [][]byte
+			var validSigs [][]byte
+
+			for j := 0; j < len(pubkeys) && j < len(sigs); j++ {
+				pk := pubkeys[j]
+				sigBytes := sigs[j]
+				for _, v := range reg.Committee {
+					if bytes.Equal(v.PubkeyBLS, pk) {
+						accumulatedStake += v.Stake
+						validPubkeys = append(validPubkeys, pk)
+						validSigs = append(validSigs, sigBytes)
+						break
+					}
+				}
+			}
+
+			if accumulatedStake >= threshold && len(validSigs) > 0 {
+				var aggSig []byte
+				if len(validSigs) == 1 {
+					aggSig = validSigs[0]
+				} else {
+					aggSig = bls.CreateAggregateSign(validSigs)
+				}
+				bitmap := cross_chain.BuildSignerBitmap(reg.Committee, validPubkeys)
+				return &cross_chain.QuorumCert{
+					Epoch:              epoch,
+					AggregateSignature: aggSig,
+					SignerBitmap:       bitmap,
+				}, nil
+			}
+		}
+
+		select {
+		case <-time.After(d.config.PollInterval):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-d.stopCh:
+			return nil, fmt.Errorf("relayer daemon stopping")
+		}
+	}
+
+	return nil, fmt.Errorf("quorum not reached for chain %d message %s after %d polls", destChainID, messageID.Hex(), maxIterations)
+}
+
+// retryPendingRefunds retries every message queued in d.pendingRefunds whose SOURCE chain is
+// sourceChainID (refund() is always submitted to the source chain -- this is naturally called
+// once per tick by the exact WatchChainPair(sourceChainID, destChainID) loop that would have
+// otherwise driven that chain's traffic anyway, so no separate watch loop is needed). Best-effort:
+// errors are logged, never returned -- a stuck refund must never block this tick's normal
+// batch/relay work.
+func (d *RelayerDaemon) retryPendingRefunds(ctx context.Context, sourceChainID, destChainID uint64) {
+	d.mu.Lock()
+	var toRetry []*pendingRefund
+	for _, pr := range d.pendingRefunds {
+		if pr.msg.SourceChainID == sourceChainID {
+			toRetry = append(toRetry, pr)
+		}
+	}
+	d.mu.Unlock()
+
+	for _, pr := range toRetry {
+		if err := d.processFailedClaim(ctx, pr.msg, pr.commitRoot, pr.proof); err != nil {
+			logger.Warn("⚠️ [RELAYER DAEMON] retry refund for %s still not complete: %v", pr.msg.MessageID.Hex(), err)
+			continue
+		}
+		d.mu.Lock()
+		delete(d.pendingRefunds, pr.msg.MessageID)
+		d.mu.Unlock()
+	}
+}
+
 // BatchAndRelay is the single unit of work a watch loop performs for one (sourceChainID,
 // destChainID) pair: if there are real pending outbound() messages queued on sourceChainID for
 // destChainID, submit a real batchOutboundCommit() there, then immediately relay the resulting
@@ -694,6 +893,11 @@ func (d *RelayerDaemon) RelayBatch(
 // error case, just nothing to do this tick.
 func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destChainID uint64) (int, error) {
 	pairKey := fmt.Sprintf("%d:%d", sourceChainID, destChainID)
+
+	// Retry any messages known to have finalized as Failed on destChainID but not yet
+	// successfully refunded on sourceChainID (mục 2.4 / 2026-09-05 finding #1 fix) -- best-effort,
+	// errors are logged but never block this tick's normal batch/relay work below.
+	d.retryPendingRefunds(ctx, sourceChainID, destChainID)
 
 	// Check if there is an unrelayed batch from a previous attempt (e.g. destination was restarting)
 	d.mu.Lock()

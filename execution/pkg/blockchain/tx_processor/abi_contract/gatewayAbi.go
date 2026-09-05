@@ -339,6 +339,33 @@ const GatewayABI = `[
 	},
 	{
 		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "submitMessageFailureAttestation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"}
+		],
+		"name": "getMessageFailureAttestationShares",
+		"outputs": [
+			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
+			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
 			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
 			{"internalType": "uint64", "name": "newEpoch", "type": "uint64"},
 			{"internalType": "bytes[]", "name": "newCommitteePubkeys", "type": "bytes[]"},

@@ -131,6 +131,13 @@ type BlockProcessor struct {
 	// a Go-side EVM transaction, not a Rust-side epoch boundary).
 	commitAttestationWorker *tx_processor.CommitAttestationWorker
 
+	// messageFailureAttestationWorker (2026-09-05 fix for security_audit_findings.md finding #1,
+	// same enable condition as commitAttestationWorker above) — its OnMessageFailed is wired
+	// synchronously into tx_processor.MessageFailedCallback, invoked directly from
+	// gateway_handler.go's claimMessage/verifyAndExecute cases whenever this node finalizes a
+	// message as Failed (mục 2.4 point 2's missing failure-attestation production pipeline).
+	messageFailureAttestationWorker *tx_processor.MessageFailureAttestationWorker
+
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
 
@@ -724,6 +731,26 @@ func NewBlockProcessor(
 				)
 				go bp.commitAttestationWorker.Run(context.Background())
 				tx_processor.CommitFinalizedCallback = bp.commitAttestationWorker.OnCommitFinalized
+
+				// MESSAGE FAILURE ATTESTATION WORKER (2026-09-05 fix for
+				// security_audit_findings.md finding #1 / mục 2.4 point 2): real
+				// multi-validator BLS quorum-cert production for messages this chain
+				// finalizes as Failed (a destination-side CONTRACT_CALL/custom-asset payload
+				// genuinely reverted) -- without a real cert here, GatewayEngine.Refund() was
+				// unreachable in production (only ever exercised by a unit test signing
+				// directly with a validator's private key), permanently locking the
+				// sender's funds. Same trigger pattern as commitAttestationWorker above: no
+				// separate watch/poll loop needed, every validator that processes the same
+				// claimMessage/verifyAndExecute transaction invokes this identically.
+				bp.messageFailureAttestationWorker = tx_processor.NewMessageFailureAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.messageFailureAttestationWorker.Run(context.Background())
+				tx_processor.MessageFailedCallback = bp.messageFailureAttestationWorker.OnMessageFailed
 			} else {
 				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
 			}

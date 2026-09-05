@@ -66,6 +66,35 @@ var (
 // still works and still records the batch, it just has no local validator to auto-sign it.
 var CommitFinalizedCallback func(sourceChainID, epoch uint64, commitRoot common.Hash)
 
+// MessageFailedCallback, if set, is invoked synchronously by the claimMessage/verifyAndExecute
+// cases whenever THIS node just finalized a message as MessageStatusFailed (FinalizeFailedAfter
+// ExecutionRevert succeeded) -- wires into MessageFailureAttestationWorker.OnMessageFailed
+// (2026-09-05 fix for security_audit_findings.md finding #1 / mục 2.4 point 2), the SAME wiring
+// pattern as CommitFinalizedCallback above. nil (the default) means this node isn't running a
+// MessageFailureAttestationWorker -- the message still correctly finalizes as Failed either way,
+// it just has no local validator auto-signing a failure attestation share for it.
+var MessageFailedCallback func(sourceChainID, destChainID uint64, messageID common.Hash, epoch uint64)
+
+// fireMessageFailedCallback invokes MessageFailedCallback (if set) with the destination chain's
+// own current registered epoch -- the epoch a failure-attestation share must be signed under
+// (mirrors submitCommitAttestation/AttestCommit's own epoch-alignment check, see
+// submitMessageFailureAttestation's doc comment). Missing/unregistered self-entry logs a warning
+// and skips firing rather than guessing an epoch, matching CommitFinalizedCallback's own
+// nil-callback tolerance (a message still correctly finalizes as Failed either way; this only
+// affects whether a local validator auto-signs a share for it).
+func fireMessageFailedCallback(engine *cross_chain.GatewayEngine, msg cross_chain.CrossChainMessage) {
+	if MessageFailedCallback == nil {
+		return
+	}
+	registry, ok := engine.GetChainRegistryEntry(engine.LocalChainID)
+	if !ok {
+		logger.Warn("⚠️ [GATEWAY] MessageFailedCallback skipped for %s: chain %d has no own ChainRegistry entry to read its current epoch from", msg.MessageID.Hex(), engine.LocalChainID)
+		return
+	}
+	logger.Info("📢 [GATEWAY] MessageFailedCallback firing for message=%s, sourceChain=%d, destChain=%d, epoch=%d", msg.MessageID.Hex(), msg.SourceChainID, engine.LocalChainID, registry.Epoch)
+	MessageFailedCallback(msg.SourceChainID, engine.LocalChainID, msg.MessageID, registry.Epoch)
+}
+
 // GetGatewayHandler returns the singleton GatewayHandler, parsing the ABI on first use.
 func GetGatewayHandler() (*GatewayHandler, error) {
 	var err error
@@ -155,6 +184,10 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	if engine.PendingCommitAttestations == nil {
 		engine.PendingCommitAttestations = make(map[string][]cross_chain.CommitAttestationShare)
+	}
+	// 2026-09-05 field (finding #1 fix): nil after unmarshaling a blob written before it existed.
+	if engine.PendingMessageFailureAttestations == nil {
+		engine.PendingMessageFailureAttestations = make(map[string][]cross_chain.CommitAttestationShare)
 	}
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
@@ -473,26 +506,40 @@ func executeContractCallForGateway(
 // economics simplification, not a security one. Only used for the pure/native-message payload
 // branch (Task 1.3); the custom-asset transfer()/mint() calls use fixed, non-attacker-controlled
 // callData and are intentionally NOT gas-capped here.
+//
+// Returns (executionReverted, err): err is non-nil ONLY for a genuine precondition/infra failure
+// (missing GasFee, or the unused-gas refund mint itself failing) that the caller must still
+// hard-revert the whole claimMessage transaction for -- a business-logic revert of the TARGET
+// contract's own code is reported as executionReverted=true with err == nil (2026-09-05 fix,
+// finding #1 / mục 2.4 point 1: the caller must finalize the message as Failed in that case, not
+// revert the transaction, since every validator's execution deterministically observes the exact
+// same revert and must agree on it). The unused-portion gas refund happens here regardless of
+// which outcome occurs -- real gas genuinely spent by a reverted call is still genuinely burned
+// (mục 2.6.5: no free execution), but whatever the cap didn't need is refunded either way.
 func settleGasCappedContractCall(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64, msgSender common.Address, target common.Address, payload []byte, gasFee *big.Int,
-) error {
+) (executionReverted bool, err error) {
 	if gasFee == nil || gasFee.Sign() <= 0 {
-		return fmt.Errorf("CONTRACT_CALL requires a locked gasFee (mục 2.6.5): got %v", gasFee)
+		return false, fmt.Errorf("CONTRACT_CALL requires a locked gasFee (mục 2.6.5): got %v", gasFee)
 	}
 	gasCap := new(big.Int).Div(gasFee, big.NewInt(mt_common.MINIMUM_BASE_FEE)).Uint64()
-	gasUsed, err := executeContractCallForGateway(ctx, chainState, tx, blockTime, msgSender, target, payload, big.NewInt(0), gasCap)
-	if err != nil {
-		return err
-	}
+	gasUsed, execErr := executeContractCallForGateway(ctx, chainState, tx, blockTime, msgSender, target, payload, big.NewInt(0), gasCap)
+
 	spent := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), big.NewInt(mt_common.MINIMUM_BASE_FEE))
 	unused := new(big.Int).Sub(gasFee, spent)
 	if unused.Sign() > 0 {
-		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, unused, tx.FromAddress(), msgSender); err != nil {
-			return fmt.Errorf("refund unused gasFee: %w", err)
+		if refundErr := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, unused, tx.FromAddress(), msgSender); refundErr != nil {
+			if execErr != nil {
+				return true, fmt.Errorf("refund unused gasFee after revert: %w (original revert: %v)", refundErr, execErr)
+			}
+			return false, fmt.Errorf("refund unused gasFee: %w", refundErr)
 		}
 	}
-	return nil
+	if execErr != nil {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (h *GatewayHandler) HandleTransaction(
@@ -515,7 +562,7 @@ func (h *GatewayHandler) HandleTransaction(
 		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
 		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
 		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
-		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip":
+		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -831,6 +878,25 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
+		// payloadReverted tracks whether the message's destination-side execution genuinely
+		// reverted at the BUSINESS-LOGIC level (target contract code, or the custom-asset vault/
+		// wrapped-token contract) as opposed to an infra/malformed-message error.
+		//
+		// SECURITY FIX (2026-09-05, note/cross_chain/security_audit_findings.md finding #1
+		// "Permanent Lock of Funds / DoS on Payload Revert" + mục 2.4 point 1 of
+		// note/cross_chain_root_anchor_architecture.md): before this fix, EITHER revert case below
+		// returned a Go error, which reverted this ENTIRE claimMessage transaction --
+		// engine.ClaimMessage()'s in-memory Success finalization (a few lines above) was then
+		// simply never persisted (saveGatewayEngine is only reached at the very end of
+		// handleWrite), so the message silently stayed Pending forever with NO trace that
+		// execution was ever even attempted. mục 2.4 point 1 requires the opposite: B MUST
+		// finalize the message as FAILED (a real, observable, deterministic outcome every
+		// validator's execution agrees on) rather than discard the attempt -- only a FAILED
+		// finalization can ever produce the failure QuorumCert mục 2.4 point 2 requires before A
+		// is allowed to refund the sender. See FinalizeFailedAfterExecutionRevert's doc comment
+		// for how the provisional Success side-effects (ceiling, tip) are reversed.
+		payloadReverted := false
+
 		// Task 1.3: Contract Call (only for Native or Pure messages)
 		if relayedOnward {
 			// Relayed onward above -- no contract-call/gas-fee settlement applies here, the
@@ -838,11 +904,16 @@ func (h *GatewayHandler) handleWrite(
 			// just queued) is where any of that would happen, for that hop's own Payload/GasFee.
 		} else if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
-			if err := settleGasCappedContractCall(
+			reverted, execErr := settleGasCappedContractCall(
 				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
-			); err != nil {
-				return nil, nil, fmt.Errorf("claimMessage payload execution failed: %v", err)
+			)
+			if execErr != nil {
+				// A genuine infra/precondition failure (e.g. missing locked GasFee, or the gas
+				// refund mint itself failing) -- NOT a business-logic revert of the target's own
+				// code -- must still hard-revert exactly as before this fix.
+				return nil, nil, fmt.Errorf("claimMessage payload execution failed: %v", execErr)
 			}
+			payloadReverted = reverted
 		} else if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
 			// No real CONTRACT_CALL happened (no code at Target, empty Payload, or this is a
 			// custom-asset message) -- nothing to spend the locked gas budget on, refund it in
@@ -856,6 +927,10 @@ func (h *GatewayHandler) handleWrite(
 			// Value already re-queued for the onward hop above -- do NOT also credit Target's
 			// real balance here, that would double-spend the same Value (once as a queued
 			// outbound message, once as a direct real-balance credit).
+		} else if payloadReverted {
+			// The CONTRACT_CALL above reverted -- do NOT credit msg.Value to Target, it was never
+			// actually delivered. The finalize-Failed step below is what correctly resolves this
+			// message instead of crediting it here.
 		} else if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
 			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
 			if msg.Value != nil && msg.Value.Sign() > 0 {
@@ -902,12 +977,26 @@ func (h *GatewayHandler) handleWrite(
 				// vault-unlock branch would try to move the RELAYER's own token balance
 				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
 				// and any real access-controlled mint() would reject a non-Gateway caller.
-				if _, err := executeContractCallForGateway(
+				if _, execErr := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
-				); err != nil {
-					return nil, nil, fmt.Errorf("claim custom asset execution failed: %w", err)
+				); execErr != nil {
+					// SECURITY FIX (2026-09-05, finding #1): a business-logic revert of the
+					// vault/wrapped-token contract's own transfer()/mint() (e.g. paused,
+					// insufficient vault balance) must finalize this message as Failed, exactly
+					// like the native CONTRACT_CALL branch above -- not hard-revert the whole
+					// claimMessage transaction.
+					payloadReverted = true
 				}
 			}
+		}
+
+		if payloadReverted {
+			if err := engine.FinalizeFailedAfterExecutionRevert(msg, commitRoot, tx.FromAddress()); err != nil {
+				return nil, nil, fmt.Errorf("claimMessage finalize failed: %w", err)
+			}
+			status = cross_chain.MessageStatusFailed
+			logger.Info("💥 [GATEWAY] claimMessage %s finalized as FAILED (destination payload reverted) -- refund on source chain now possible once a failure QuorumCert is aggregated", msg.MessageID.Hex())
+			fireMessageFailedCallback(engine, msg)
 		}
 
 		if event, ok := h.abi.Events["MessageStatusChanged"]; ok {
@@ -987,6 +1076,22 @@ func (h *GatewayHandler) handleWrite(
 		if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
 			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
 				return nil, nil, fmt.Errorf("refund gasFee restoration failed: %v", err)
+			}
+		}
+
+		// SECURITY FIX (2026-09-05, note/cross_chain/security_audit_findings.md finding #2 --
+		// "Total Supply Deflation via Unrefunded Tip"): outbound() burns Value + Tip + GasFee
+		// TOGETHER from the sender's real balance in one call (see the "outbound" case above), but
+		// this refund path used to restore only Value and GasFee -- Tip was silently destroyed on
+		// every refunded message, a real Conservation-of-Balance violation (confirmed: outbound()
+		// really burns Tip from the sender's on-chain balance; nothing else ever credits it back
+		// when the message never gets claimed, since no relayer ever collected a tip for a message
+		// that was never successfully claimed). Restored to the ORIGINAL sender (msg.Sender), not
+		// any relayer -- mirrors GasFee's restoration exactly, for the same reason (the tip was a
+		// payment for successful delivery, which never happened).
+		if msg.Tip != nil && msg.Tip.Sign() > 0 {
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Tip, tx.FromAddress(), msg.Sender); err != nil {
+				return nil, nil, fmt.Errorf("refund tip restoration failed: %v", err)
 			}
 		}
 
@@ -1144,6 +1249,52 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, fmt.Errorf("submitCommitAttestation: %w", err)
 		}
 
+	case "submitMessageFailureAttestation":
+		// mục 2.4 point 2 / 2026-09-05 finding #1 fix ("Permanent Lock of Funds / DoS on Payload
+		// Revert"): the missing production pipeline for the failure-confirmation cert Refund()
+		// already verified but nothing could ever produce -- mirrors submitCommitAttestation
+		// exactly, just for a message-failure digest instead of a commit-root digest, and the
+		// signer must be a member of destChainId's committee (that chain's own validators are the
+		// only ones whose local execution deterministically observed the exact revert -- see
+		// FinalizeFailedAfterExecutionRevert / MessageFailedCallback, which is what makes a real
+		// validator willing to sign this in the first place, never called speculatively).
+		destChainID := mustUint64(args[0])
+		messageID := mustHash(args[1])
+		epoch := mustUint64(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		registry, exists := engine.GetChainRegistryEntry(destChainID)
+		if !exists {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, destChainID)
+		}
+		if epoch != registry.Epoch {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: %w: expected %d, got %d", cross_chain.ErrEpochMismatch, registry.Epoch, epoch)
+		}
+		isMember := false
+		for _, v := range registry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: signer is not a member of chain %d's current committee", destChainID)
+		}
+		failureDigest := cross_chain.ComputeMessageFailureAttestMessage(messageID, destChainID)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, failureDigest) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		failureKey := messageFailureAttestationKey(destChainID, messageID, epoch)
+		if err := engine.AddPendingMessageFailureAttestationShare(failureKey, cross_chain.CommitAttestationShare{
+			SignerPubkeyBLS: signerPubkeyBls,
+			Signature:       signature,
+		}); err != nil {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: %w", err)
+		}
 
 	case "committeeUpdate":
 		sourceChainID := mustUint64(args[0])
@@ -1517,13 +1668,22 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+		// SECURITY FIX (2026-09-05, finding #1 / mục 2.4 point 1) -- see the identical, more fully
+		// commented fix in the "claimMessage" case above for the full rationale. VerifyAndExecute
+		// is "the simple path" (mục 2.7) that folds AttestCommit+ClaimMessage into one call but
+		// shares the exact same "engine already finalized Success in-memory before payload
+		// execution is even attempted" structure, so it needs the identical treatment.
+		payloadReverted := false
+
 		// Task 1.3: Contract Call (only for Native or Pure messages)
 		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
-			if err := settleGasCappedContractCall(
+			reverted, execErr := settleGasCappedContractCall(
 				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
-			); err != nil {
-				return nil, nil, fmt.Errorf("verifyAndExecute payload execution failed: %v", err)
+			)
+			if execErr != nil {
+				return nil, nil, fmt.Errorf("verifyAndExecute payload execution failed: %v", execErr)
 			}
+			payloadReverted = reverted
 		} else if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
 			// No real CONTRACT_CALL happened -- refund the locked gas budget in full.
 			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
@@ -1531,7 +1691,9 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
-		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+		if payloadReverted {
+			// The CONTRACT_CALL above reverted -- do NOT credit msg.Value to Target.
+		} else if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
 			// Task 1.1: Real Native Mint / Credit to recipient (msg.Target)
 			if msg.Value != nil && msg.Value.Sign() > 0 {
 				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Target); err != nil {
@@ -1574,12 +1736,23 @@ func (h *GatewayHandler) handleWrite(
 				// sites in this file): msg.sender must be the Gateway itself, not
 				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 				// full reasoning.
-				if _, err := executeContractCallForGateway(
+				if _, execErr := executeContractCallForGateway(
 					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
-				); err != nil {
-					return nil, nil, fmt.Errorf("verifyAndExecute custom asset execution failed: %w", err)
+				); execErr != nil {
+					// SECURITY FIX (2026-09-05, finding #1): finalize Failed instead of
+					// hard-reverting -- see the identical claimMessage custom-asset handling.
+					payloadReverted = true
 				}
 			}
+		}
+
+		if payloadReverted {
+			if err := engine.FinalizeFailedAfterExecutionRevert(msg, commitRoot, tx.FromAddress()); err != nil {
+				return nil, nil, fmt.Errorf("verifyAndExecute finalize failed: %w", err)
+			}
+			status = cross_chain.MessageStatusFailed
+			logger.Info("💥 [GATEWAY] verifyAndExecute %s finalized as FAILED (destination payload reverted) -- refund on source chain now possible once a failure QuorumCert is aggregated", msg.MessageID.Hex())
+			fireMessageFailedCallback(engine, msg)
 		}
 
 		// Pack failure is intentionally non-fatal here (unlike an ordinary early-return
@@ -1787,6 +1960,26 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
+	case "getMessageFailureAttestationShares":
+		// mục 2.4 point 2 / 2026-09-05 finding #1 fix -- mirrors getCommitAttestationShares
+		// exactly, for the failure-confirmation cert instead of the success-confirmation cert.
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getMessageFailureAttestationShares input: %w", err)
+		}
+		destChainID := mustUint64(args[0])
+		messageID := mustHash(args[1])
+		epoch := mustUint64(args[2])
+
+		shares := engine.GetPendingMessageFailureAttestationShares(messageFailureAttestationKey(destChainID, messageID, epoch))
+		pubkeys := make([][]byte, len(shares))
+		signatures := make([][]byte, len(shares))
+		for i, s := range shares {
+			pubkeys[i] = s.SignerPubkeyBLS
+			signatures[i] = s.Signature
+		}
+		return method.Outputs.Pack(pubkeys, signatures)
+
 	case "getAsset":
 		args, err := method.Inputs.Unpack(argData)
 		if err != nil {
@@ -1854,6 +2047,13 @@ func committeeAttestationKey(sourceChainID, epoch uint64, payloadHash common.Has
 // GatewayEngine.PendingCommitAttestations is keyed by this string (Milestone F).
 func commitAttestationKey(sourceChainID, epoch uint64, commitRoot common.Hash) string {
 	return fmt.Sprintf("%d:%d:%s", sourceChainID, epoch, commitRoot.Hex())
+}
+
+// messageFailureAttestationKey identifies one in-progress message-failure share collection —
+// GatewayEngine.PendingMessageFailureAttestations is keyed by this string (mục 2.4 point 2,
+// 2026-09-05 fix for finding #1).
+func messageFailureAttestationKey(destChainID uint64, messageID common.Hash, epoch uint64) string {
+	return fmt.Sprintf("%d:%s:%d", destChainID, messageID.Hex(), epoch)
 }
 
 // --- ABI arg conversion helpers ---

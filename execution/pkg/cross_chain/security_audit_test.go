@@ -1,6 +1,7 @@
 package cross_chain
 
 import (
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -568,4 +569,73 @@ func TestAudit_OnlyReserveMayAttestNonzeroValueCommit(t *testing.T) {
 	attested, errOk := engine.AttestCommit(101, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
 	require.NoError(t, errOk)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AUDIT TEST 11: FinalizeFailedAfterExecutionRevert correctly reverses ClaimMessage's provisional
+// Success side-effects (2026-09-05 fix, security_audit_findings.md finding #1 / mục 2.4 point 1).
+// ClaimMessage decides Success purely from proof/cert verification, BEFORE the caller
+// (gateway_handler.go) ever attempts the real destination payload execution -- when that execution
+// later reverts for a genuine business-logic reason, the message must finalize as Failed with its
+// provisional ceiling/tip credits reversed, not silently stay a phantom Success nor permanently
+// consume ceiling capacity for a delivery that never happened.
+// ──────────────────────────────────────────────────────────────────────────────
+func TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCredits(t *testing.T) {
+	engine, _, ledger, kp := setupSecurityAuditEnvironment()
+
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	relayer := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	txHash := common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+
+	params := OutboundParams{
+		DestChainID: 102,
+		Target:      target,
+		Payload:     []byte("finalize-failed-audit"),
+		Value:       big.NewInt(200),
+		Tip:         big.NewInt(7),
+		HopCount:    1,
+	}
+	msg, err := engine.Outbound(sender, params, txHash)
+	require.NoError(t, err)
+
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{*msg})
+	require.NoError(t, errTree)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0xFF}}
+	_, err = engine.AttestCommit(msg.SourceChainID, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	require.NoError(t, err)
+
+	allocBefore := new(big.Int).Set(ledger.GetAllocation(102))
+
+	status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+	require.NoError(t, err)
+	assert.Equal(t, MessageStatusSuccess, status)
+	assert.Equal(t, big.NewInt(7), engine.RelayerBalances[relayer], "tip must be provisionally credited by ClaimMessage")
+	assert.True(t, ledger.GetAllocation(102).Cmp(allocBefore) > 0, "ceiling allocation must be provisionally credited by ClaimMessage")
+
+	key := fmt.Sprintf("%d:%s:0", msg.SourceChainID, commitRoot.Hex())
+	attestedBefore := engine.AttestedCommits[key]
+	assert.Equal(t, big.NewInt(200), attestedBefore.ClaimedAmount, "ClaimedAmount must be provisionally incremented by ClaimMessage")
+
+	// Now simulate the destination payload execution reverting -- finalize Failed instead of the
+	// hard-revert-the-whole-transaction behavior this fix replaces.
+	require.NoError(t, engine.FinalizeFailedAfterExecutionRevert(*msg, commitRoot, relayer))
+
+	assert.Equal(t, MessageStatusFailed, engine.GetMessageStatus(msg.MessageID), "message must be terminally Failed")
+	assert.Zero(t, engine.RelayerBalances[relayer].Sign(), "tip credit must be reversed -- no reward for a delivery that never happened")
+	assert.Zero(t, ledger.GetAllocation(102).Cmp(allocBefore), "ceiling allocation credit must be fully reversed")
+	attestedAfter := engine.AttestedCommits[key]
+	assert.Zero(t, attestedAfter.ClaimedAmount.Sign(), "ClaimedAmount must be reversed back to 0 -- a failed message must not permanently shrink the commit's ceiling for other messages sharing it")
+
+	// Terminal: neither a second finalize call nor a retry claim may be silently reapplied.
+	errSecondFinalize := engine.FinalizeFailedAfterExecutionRevert(*msg, commitRoot, relayer)
+	assert.Error(t, errSecondFinalize, "must reject finalizing an already-Failed message a second time")
+
+	_, errRetryClaim := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+	assert.ErrorIs(t, errRetryClaim, ErrAlreadyClaimed, "a Failed message must be terminal -- no retry claim allowed")
 }

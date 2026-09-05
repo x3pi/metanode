@@ -21,27 +21,27 @@ const (
 )
 
 var (
-	ErrHopCountExceeded              = errors.New("hop count exceeds maximum limit of 6")
-	ErrUnknownSourceChain            = errors.New("unknown source chain ID")
-	ErrEpochMismatch                 = errors.New("epoch mismatch for source chain")
-	ErrAllocationExceeded            = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
-	ErrQuorumNotReached              = errors.New("BFT quorum stake threshold not reached")
-	ErrCommitNotAttested             = errors.New("commit root has not been attested by source chain")
-	ErrInvalidMerkleProof            = errors.New("invalid Merkle proof")
-	ErrAlreadyClaimed                = errors.New("message has already been claimed or processed (idempotent guard)")
-	ErrInvalidRefundState            = errors.New("cannot refund message: message is not in Pending status")
-	ErrInvalidRefundProof            = errors.New("invalid failed execution proof for refund")
-	ErrChainNotDead                  = errors.New("target chain has not been declared dead")
-	ErrDeadChainAlreadyClaimed       = errors.New("account balance on dead chain has already been claimed")
-	ErrNoActiveContext               = errors.New("no active cross-chain execution context")
-	ErrNotCalledByGateway            = errors.New("caller is not authorized by GatewayPrecompile")
-	ErrInvalidBLSSignature           = errors.New("BLS Quorum Certificate signature is invalid or empty")
-	ErrReserveChainNotConfigured     = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
-	ErrOnlyReserveMayMint            = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
-	ErrGenesisAlreadyMinted          = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
-	ErrNonReserveCeilingAttestation  = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
-	ErrChainAlreadyRegistered        = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
-	ErrInvalidTransferNonce          = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
+	ErrHopCountExceeded             = errors.New("hop count exceeds maximum limit of 6")
+	ErrUnknownSourceChain           = errors.New("unknown source chain ID")
+	ErrEpochMismatch                = errors.New("epoch mismatch for source chain")
+	ErrAllocationExceeded           = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrQuorumNotReached             = errors.New("BFT quorum stake threshold not reached")
+	ErrCommitNotAttested            = errors.New("commit root has not been attested by source chain")
+	ErrInvalidMerkleProof           = errors.New("invalid Merkle proof")
+	ErrAlreadyClaimed               = errors.New("message has already been claimed or processed (idempotent guard)")
+	ErrInvalidRefundState           = errors.New("cannot refund message: message is not in Pending status")
+	ErrInvalidRefundProof           = errors.New("invalid failed execution proof for refund")
+	ErrChainNotDead                 = errors.New("target chain has not been declared dead")
+	ErrDeadChainAlreadyClaimed      = errors.New("account balance on dead chain has already been claimed")
+	ErrNoActiveContext              = errors.New("no active cross-chain execution context")
+	ErrNotCalledByGateway           = errors.New("caller is not authorized by GatewayPrecompile")
+	ErrInvalidBLSSignature          = errors.New("BLS Quorum Certificate signature is invalid or empty")
+	ErrReserveChainNotConfigured    = errors.New("this chain's ReserveChainID is not configured — cannot mint genesis supply or attest a non-Reserve chain's ceiling-enforced commit")
+	ErrOnlyReserveMayMint           = errors.New("ProposalAllocateSupply may only grant allocation to this chain's own configured ReserveChainID")
+	ErrGenesisAlreadyMinted         = errors.New("genesis total supply has already been minted once — ProposalAllocateSupply is a one-time genesis operation, not a repeatable mint")
+	ErrNonReserveCeilingAttestation = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
+	ErrChainAlreadyRegistered       = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
+	ErrInvalidTransferNonce         = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -89,19 +89,19 @@ type AllocationRejectedListener func(chainID uint64, requested, available *big.I
 // exported accessor below rather than touching a map field directly, so this guarantee actually
 // holds for the whole codebase, not just for calls made from within this file.
 type GatewayEngine struct {
-	mu                         sync.RWMutex
-	LocalChainID               uint64
-	ChainRegistry              map[uint64]ChainRegistry
-	SupplyLedger               *GlobalSupplyLedger
-	AttestedCommits            map[string]AttestedCommit
-	MessageStatus              map[common.Hash]MessageStatus
+	mu              sync.RWMutex
+	LocalChainID    uint64
+	ChainRegistry   map[uint64]ChainRegistry
+	SupplyLedger    *GlobalSupplyLedger
+	AttestedCommits map[string]AttestedCommit
+	MessageStatus   map[common.Hash]MessageStatus
 	// ReserveCreditedMessages guards CreditReserveAllocation's write-once semantics, keyed by
 	// MessageID -- see that function's doc comment for why it exists (the destination-side
 	// counterpart of AttestCommit's source-side debit, since ClaimMessage's own credit lands on
 	// the CLAIMING chain's local ledger copy, which is non-authoritative for any chain other than
 	// Reserve itself).
-	ReserveCreditedMessages map[common.Hash]bool
-	DeadChains              map[uint64]bool
+	ReserveCreditedMessages    map[common.Hash]bool
+	DeadChains                 map[uint64]bool
 	DeadChainClaimed           map[string]bool
 	ActiveContext              *CrossChainContext
 	LockedTips                 map[common.Hash]*big.Int
@@ -116,6 +116,13 @@ type GatewayEngine struct {
 	// PendingCommitAttestations collects individual BLS signature shares for a pending
 	// commit root attestation, keyed by "sourceChainId:epoch:commitRootHex" (Milestone F).
 	PendingCommitAttestations map[string][]CommitAttestationShare
+	// PendingMessageFailureAttestations collects individual BLS signature shares attesting that a
+	// specific message permanently FAILED on its destination chain (mục 2.4 point 2, 2026-09-05
+	// fix for security_audit_findings.md finding #1), keyed by "destChainId:messageIdHex:epoch".
+	// Mirrors PendingCommitAttestations exactly, just for the failure-confirmation cert Refund()
+	// verifies instead of the success-confirmation cert AttestCommit() verifies. Cleared once the
+	// corresponding refund() succeeds (see ClearPendingMessageFailureAttestations).
+	PendingMessageFailureAttestations map[string][]CommitAttestationShare
 
 	// PendingOutboundMessages queues real outbound() messages (their sender already validated
 	// and their Value/Tip/GasFee already burned/locked) not yet batched into a commit root for
@@ -218,7 +225,6 @@ type GatewayEngine struct {
 	// minimum here must fail closed rather than silently reopening permissionless Sybil
 	// registration for every chain, founding or not.
 	MinNativeStakeToRegister *big.Int `json:"min_native_stake_to_register,omitempty"`
-
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -230,23 +236,24 @@ func NewGatewayEngine(
 	assetReg := NewAssetRegistryEngine(registry)
 
 	return &GatewayEngine{
-		LocalChainID:                 localChainID,
-		ChainRegistry:                registry,
-		SupplyLedger:                 ledger,
-		AttestedCommits:              make(map[string]AttestedCommit),
-		MessageStatus:                make(map[common.Hash]MessageStatus),
-		ReserveCreditedMessages:      make(map[common.Hash]bool),
-		DeadChains:                   make(map[uint64]bool),
-		DeadChainClaimed:             make(map[string]bool),
-		LockedTips:                   make(map[common.Hash]*big.Int),
-		ChannelSequence:              make(map[string]uint64),
-		RelayerBalances:              make(map[common.Address]*big.Int),
-		PendingCommitteeAttestations: make(map[string][]CommitteeAttestationShare),
-		PendingCommitAttestations:    make(map[string][]CommitAttestationShare),
-		PendingOutboundMessages:      make(map[uint64][]CrossChainMessage),
-		CommittedBatches:             make(map[common.Hash]CommittedOutboundBatch),
-		RegisteredPops:               make(map[string][]byte),
-		AssetRegistry:                assetReg,
+		LocalChainID:                      localChainID,
+		ChainRegistry:                     registry,
+		SupplyLedger:                      ledger,
+		AttestedCommits:                   make(map[string]AttestedCommit),
+		MessageStatus:                     make(map[common.Hash]MessageStatus),
+		ReserveCreditedMessages:           make(map[common.Hash]bool),
+		DeadChains:                        make(map[uint64]bool),
+		DeadChainClaimed:                  make(map[string]bool),
+		LockedTips:                        make(map[common.Hash]*big.Int),
+		ChannelSequence:                   make(map[string]uint64),
+		RelayerBalances:                   make(map[common.Address]*big.Int),
+		PendingCommitteeAttestations:      make(map[string][]CommitteeAttestationShare),
+		PendingCommitAttestations:         make(map[string][]CommitAttestationShare),
+		PendingMessageFailureAttestations: make(map[string][]CommitAttestationShare),
+		PendingOutboundMessages:           make(map[uint64][]CrossChainMessage),
+		CommittedBatches:                  make(map[common.Hash]CommittedOutboundBatch),
+		RegisteredPops:                    make(map[string][]byte),
+		AssetRegistry:                     assetReg,
 	}
 }
 
@@ -932,6 +939,35 @@ func (g *GatewayEngine) GetPendingCommitAttestationShares(key string) []CommitAt
 	return res
 }
 
+// AddPendingMessageFailureAttestationShare thread-safely adds a message-failure attestation share
+// (mục 2.4 point 2, 2026-09-05 fix for finding #1) -- mirrors AddPendingCommitAttestationShare
+// exactly, just for the failure-confirmation cert instead of the success-confirmation cert.
+func (g *GatewayEngine) AddPendingMessageFailureAttestationShare(key string, share CommitAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.PendingMessageFailureAttestations == nil {
+		g.PendingMessageFailureAttestations = make(map[string][]CommitAttestationShare)
+	}
+	for _, s := range g.PendingMessageFailureAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingMessageFailureAttestations[key] = append(g.PendingMessageFailureAttestations[key], share)
+	return nil
+}
+
+// GetPendingMessageFailureAttestationShares thread-safely reads message-failure attestation
+// shares.
+func (g *GatewayEngine) GetPendingMessageFailureAttestationShares(key string) []CommitAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingMessageFailureAttestations[key]
+	res := make([]CommitAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
 // CommittedOutboundBatch is the message set (and signing epoch) behind one commitRoot ever
 // produced by BatchOutboundCommit — see PendingOutboundMessages/CommittedBatches' doc comments.
 type CommittedOutboundBatch struct {
@@ -1262,6 +1298,98 @@ func (g *GatewayEngine) ClaimMessage(
 	return execStatus, nil
 }
 
+// FinalizeFailedAfterExecutionRevert reverses ClaimMessage's (or VerifyAndExecute's) provisional
+// Success side-effects and marks the message permanently Failed instead -- called by
+// gateway_handler.go when ClaimMessage's own verification already succeeded (proof/commit/ceiling
+// all valid, hence execStatus := MessageStatusSuccess was already written) but the message's
+// actual destination-side payload execution AFTERWARD reverted for a genuine business-logic reason
+// (a CONTRACT_CALL target's own code, or a custom-asset vault/wrapped-token contract's transfer()/
+// mint()).
+//
+// SECURITY FIX (2026-09-05, note/cross_chain/security_audit_findings.md finding #1 "Permanent Lock
+// of Funds / DoS on Payload Revert"): ClaimMessage decides Success purely from proof/cert
+// verification, structurally BEFORE the caller (gateway_handler.go) ever attempts the real payload
+// execution -- it has no way to know in advance whether that execution will revert. Before this
+// fix, a reverting payload made the caller return a hard Go error, reverting the WHOLE transaction
+// and discarding ClaimMessage's in-memory Success write entirely (never persisted via
+// saveGatewayEngine) -- the message silently stayed Pending forever, and per mục 2.4 point 1 of
+// note/cross_chain_root_anchor_architecture.md, B is instead REQUIRED to finalize FAILED (a real,
+// deterministic, every-validator-agrees outcome), since only a FAILED finalization can ever
+// produce the failure QuorumCert mục 2.4 point 2 requires before the source chain may refund the
+// sender (see the "submitMessageFailureAttestation"/"getMessageFailureAttestationShares" dispatch
+// pair and RelayerDaemon's failure-watch loop, which build and submit exactly that cert from this
+// finalization).
+//
+// Preconditions (deliberately narrow -- this is not a general-purpose "undo any claim" API, only
+// ever safe to call synchronously, in the same transaction, immediately after the ClaimMessage/
+// VerifyAndExecute call that just set this exact message to Success):
+//   - message.MessageID's status must currently be MessageStatusSuccess (i.e. ClaimMessage/
+//     VerifyAndExecute must have just run for this exact message in this same call).
+//
+// Reverses exactly the 3 provisional mutations ClaimMessage made: the commit's ClaimedAmount
+// (so a permanently-failed message does not permanently shrink the commit's ceiling for other,
+// unrelated messages sharing it), this chain's PerChainAllocation credit (the value was never
+// actually delivered), and the relayer's Tip credit (no reward for a delivery that did not
+// happen) -- then sets the terminal MessageStatusFailed.
+func (g *GatewayEngine) FinalizeFailedAfterExecutionRevert(
+	message CrossChainMessage, commitRoot common.Hash, relayer common.Address,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.MessageStatus[message.MessageID] != MessageStatusSuccess {
+		return fmt.Errorf("FinalizeFailedAfterExecutionRevert: message %s is not in the just-claimed Success state (got %d) -- must only be called immediately after ClaimMessage/VerifyAndExecute set it for this exact message", message.MessageID.Hex(), g.MessageStatus[message.MessageID])
+	}
+
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
+	attested, exists := g.AttestedCommits[key]
+	if !exists {
+		for chainID := range g.ChainRegistry {
+			k := fmt.Sprintf("%d:%s:%s", chainID, commitRoot.Hex(), assetIdStr)
+			if a, ok := g.AttestedCommits[k]; ok {
+				attested = a
+				exists = true
+				key = k
+				break
+			}
+		}
+	}
+	if exists && message.Value != nil && message.Value.Sign() > 0 && attested.ClaimedAmount != nil {
+		reverted := new(big.Int).Sub(attested.ClaimedAmount, message.Value)
+		if reverted.Sign() < 0 {
+			reverted = big.NewInt(0)
+		}
+		attested.ClaimedAmount = reverted
+		g.AttestedCommits[key] = attested
+	}
+
+	if message.Value != nil && message.Value.Sign() > 0 && g.SupplyLedger != nil {
+		current := g.SupplyLedger.GetAllocation(g.LocalChainID)
+		reverted := new(big.Int).Sub(current, message.Value)
+		if reverted.Sign() < 0 {
+			reverted = big.NewInt(0)
+		}
+		g.SupplyLedger.PerChainAllocation[g.LocalChainID] = reverted
+	}
+
+	if message.Tip != nil && message.Tip.Sign() > 0 {
+		if currBal, ok := g.RelayerBalances[relayer]; ok && currBal != nil {
+			reverted := new(big.Int).Sub(currBal, message.Tip)
+			if reverted.Sign() < 0 {
+				reverted = big.NewInt(0)
+			}
+			g.RelayerBalances[relayer] = reverted
+		}
+	}
+
+	g.MessageStatus[message.MessageID] = MessageStatusFailed
+	return nil
+}
+
 // CreditReserveAllocation is the missing third leg of a 2-hop A -> Reserve -> B value route
 // (Section 2.3.1 finding, 2026-09-04). ClaimMessage's own PerChainAllocation credit (see its doc
 // comment above) writes to g.LocalChainID's copy of the ledger -- correct when the claiming chain
@@ -1425,19 +1553,41 @@ func (g *GatewayEngine) Refund(
 		return fmt.Errorf("%w: message %s current status is %d", ErrInvalidRefundState, message.MessageID.Hex(), status)
 	}
 
-	// 3. Verify message was part of an attested commit on this source chain
-	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), message.AssetID.String())
-	_, exists = g.AttestedCommits[key]
-	if !exists {
-		for _, v := range g.AttestedCommits {
-			if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
-				exists = true
-				break
+	// 3. Verify commitRoot is a real commit this chain's own BatchOutboundCommit produced.
+	//
+	// FIX (2026-09-05, found while wiring RelayerDaemon's real end-to-end refund flow for
+	// security_audit_findings.md finding #1): this used to check ONLY g.AttestedCommits (the map
+	// attestCommit() populates) -- but nothing in the real production RelayerDaemon flow EVER
+	// calls attestCommit() against the SOURCE chain's own engine (attestCommit only ever targets
+	// the destination/claiming chain, or Reserve in the 2-hop route -- see RelayBatch). That made
+	// this precondition unsatisfiable by the real daemon flow: Refund() would have stayed
+	// unreachable in production even after the failure-cert pipeline above was built, because it
+	// could never get past this line. The old check only ever passed in unit tests that
+	// coincidentally also called AttestCommit against the very same single-engine test harness
+	// being used to simulate both "source" and "destination" at once.
+	//
+	// g.CommittedBatches is the correct, always-available proof instead: it is populated
+	// directly and deterministically by THIS chain's own BatchOutboundCommit() the moment the
+	// commit is built, with no external attestation needed or possible -- a chain trivially
+	// knows its own real batches by construction. Kept as an OR with the original
+	// AttestedCommits-based check (never removed) so this stays purely additive: any caller that
+	// happens to have attested this exact commit on the source chain too (as existing tests do)
+	// keeps working unchanged.
+	_, hasCommittedBatch := g.CommittedBatches[commitRoot]
+	if !hasCommittedBatch {
+		key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), message.AssetID.String())
+		_, exists = g.AttestedCommits[key]
+		if !exists {
+			for _, v := range g.AttestedCommits {
+				if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
+					exists = true
+					break
+				}
 			}
 		}
-	}
-	if !exists {
-		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+		if !exists {
+			return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+		}
 	}
 
 	// 4. Verify message Merkle proof against commitRoot

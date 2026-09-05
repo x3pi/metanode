@@ -214,6 +214,32 @@ func (c *Client) GetCommitAttestationShares(ctx context.Context, sourceChainID, 
 	return pubkeys, signatures, nil
 }
 
+// GetMessageFailureAttestationShares reads the currently-collected BLS attestation shares for a
+// message finalized as Failed on its destination chain (mục 2.4 point 2, 2026-09-05 fix for
+// note/cross_chain/security_audit_findings.md finding #1) -- mirrors GetCommitAttestationShares
+// exactly, for the failure-confirmation cert GatewayEngine.Refund() verifies instead of the
+// success-confirmation cert AttestCommit() verifies.
+func (c *Client) GetMessageFailureAttestationShares(ctx context.Context, destChainID uint64, messageID common.Hash, epoch uint64) (pubkeys [][]byte, signatures [][]byte, err error) {
+	calldata, err := c.abi.Pack("getMessageFailureAttestationShares", new(big.Int).SetUint64(destChainID), messageID, epoch)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack getMessageFailureAttestationShares: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, nil, err
+	}
+	outValues, err := c.abi.Unpack("getMessageFailureAttestationShares", result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack getMessageFailureAttestationShares output: %w", err)
+	}
+	if len(outValues) != 2 {
+		return nil, nil, fmt.Errorf("getMessageFailureAttestationShares: expected 2 output values, got %d", len(outValues))
+	}
+	pubkeys, _ = outValues[0].([][]byte)
+	signatures, _ = outValues[1].([][]byte)
+	return pubkeys, signatures, nil
+}
+
 // SubmitTransaction sends a pre-signed raw transaction to Root Anchor via eth_sendRawTransaction.
 // Deliberately generic — it does not know or care what the transaction does. This is the
 // transport Milestone C's CommitteeUpdate submission will use; building that payload and deciding
