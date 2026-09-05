@@ -1201,54 +1201,61 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 
-		// Task 1.1: Real Native Refund Credit back to original sender (msg.Sender) on source chain
-		if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
-			if msg.Value != nil && msg.Value.Sign() > 0 {
-				if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Sender); err != nil {
-					return nil, nil, fmt.Errorf("refund native balance restoration failed: %v", err)
+		// SECURITY FIX (2026-09-05, Total Supply Deflation fix): 2-hop messages have their Value
+		// refunded via an Outbound message emitted by Reserve. The Source chain MUST NOT mint
+		// the Value here (that would double-mint), but it DOES mint Tip and GasFee above.
+		is2Hop := engine.ReserveChainID != 0 && engine.LocalChainID != engine.ReserveChainID && msg.DestChainID != engine.ReserveChainID
+		if !is2Hop {
+			// Task 1.1: Real Native Refund Credit back to original sender (msg.Sender) on source chain
+			if msg.AssetID == nil || msg.AssetID.Sign() == 0 {
+				if msg.Value != nil && msg.Value.Sign() > 0 {
+					if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Value, tx.FromAddress(), msg.Sender); err != nil {
+						return nil, nil, fmt.Errorf("refund native balance restoration failed: %v", err)
+					}
 				}
-			}
-		} else {
-			// Task 1.2: Custom Asset Refund
-			if msg.Value != nil && msg.Value.Sign() > 0 {
-				asset, err := engine.AssetRegistry.GetAsset(msg.AssetID)
-				if err != nil {
-					return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
-				}
+			} else {
+				// Task 1.2: Custom Asset Refund
+				if msg.Value != nil && msg.Value.Sign() > 0 {
+					asset, err := engine.AssetRegistry.GetAsset(msg.AssetID)
+					if err != nil {
+						return nil, nil, fmt.Errorf("failed to get asset info: %w", err)
+					}
 
-				sourceContract := asset.CanonicalContract
-				if engine.LocalChainID != asset.HomeChainID {
-					sourceContract = asset.WrappedContracts[engine.LocalChainID]
-				}
+					sourceContract := asset.CanonicalContract
+					if engine.LocalChainID != asset.HomeChainID {
+						sourceContract = asset.WrappedContracts[engine.LocalChainID]
+					}
 
-				var callData []byte
-				if engine.LocalChainID == asset.HomeChainID {
-					// Unlock from vault back to sender: transfer(sender, value)
-					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
-					callData = make([]byte, 4+32+32)
-					copy(callData[0:4], transferID)
-					copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
-					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
-				} else {
-					// Mint wrapped token back to sender (if failed outbound): mint(sender, value)
-					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
-					callData = make([]byte, 4+32+32)
-					copy(callData[0:4], mintID)
-					copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
-					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
-				}
+					var callData []byte
+					if engine.LocalChainID == asset.HomeChainID {
+						// Unlock from vault back to sender: transfer(sender, value)
+						transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+						callData = make([]byte, 4+32+32)
+						copy(callData[0:4], transferID)
+						copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
+						copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+					} else {
+						// Mint wrapped token back to sender (if failed outbound): mint(sender, value)
+						mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+						callData = make([]byte, 4+32+32)
+						copy(callData[0:4], mintID)
+						copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
+						copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
+					}
 
-				// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
-				// sites in this file): msg.sender must be the Gateway itself, not
-				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
-				// full reasoning.
-				if _, err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
-				); err != nil {
-					return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
+					// EXPERIMENTAL FIX (2026-08-25, same finding as the other 3 custom-asset call
+					// sites in this file): msg.sender must be the Gateway itself, not
+					// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
+					// full reasoning.
+					if _, err := executeContractCallForGateway(
+						ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+					); err != nil {
+						return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
+					}
 				}
 			}
 		}
+
 
 		if event, ok := h.abi.Events["MessageRefunded"]; ok {
 			eventData, packErr := event.Inputs.NonIndexed().Pack(msg.Value)

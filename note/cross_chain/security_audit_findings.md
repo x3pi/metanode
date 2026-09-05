@@ -166,3 +166,51 @@ lỗ hổng nào — toàn bộ các hàm còn lại đã đúng thiết kế (n
 bảo mật trước đó, ví dụ nonce chống replay của `TransferAllocationWithCert`, epoch-phải-tăng của
 `UpdateCommitteeWithRecoveryCert`, merkle-proof-qua-`AccountTreeRoot` đã được chốt bởi chữ ký
 committee cũ của `ClaimDeadChainBalance`).
+
+## 6. Total Supply Deflation via Blocked 2-Hop Refund (Value never restored) — ✅ ĐÃ VÁ (2026-09-05)
+**Location:** `execution/pkg/cross_chain/gateway.go` (`Refund`), `execution/pkg/blockchain/tx_processor/gateway_handler.go` (case `"refund"`), `execution/pkg/cross_chain/relayer_daemon/daemon.go` (`processFailedClaim`)
+
+**Mô tả (do người dùng đề xuất giải pháp, yêu cầu kiểm tra + xử lý triệt để):** trước bản vá này,
+`Refund()` **cấm hoàn toàn** việc gọi trực tiếp trên chain nguồn (A) đối với message 2-hop
+(`DestChainID != ReserveChainID`), bắt buộc phải đi qua `RefundReserveAllocation` trên Reserve.
+Hậu quả: message gốc kẹt vĩnh viễn ở `Pending` trên A, và vì `Refund()` trả lỗi ngay từ đầu, ngay cả
+Tip + GasFee (vốn chỉ là burn cục bộ trên A, không liên quan gì tới Reserve) cũng không bao giờ được
+hoàn — một dạng Total Supply Deflation.
+
+**Giải pháp người dùng đề xuất** (đã kiểm chứng đúng qua code, áp dụng gần như nguyên vẹn):
+1. Mở lại `Refund()` cho message 2-hop: vẫn xác thực `destFailureCert`, đánh dấu
+   `MessageStatusRefunded` trên A, hoàn Tip + GasFee như bình thường.
+2. Nhưng **bỏ qua** bước cộng lại `PerChainAllocation` (gateway.go) và bỏ qua việc mint lại `Value`
+   (gateway_handler.go) khi là 2-hop — vì `Value` chưa từng bị trừ trên sổ cái CỤC BỘ của A (bước
+   trừ ceiling thật luôn xảy ra trên RESERVE, qua `attestCommit`, xem `chooseAttestMethod`/
+   `AttestCommit`'s C8 gate) — mint lại ở đây sẽ là mint khống lần 2 khi Reserve cũng hoàn `Value`.
+   `Value` cốt lõi tiếp tục được hoàn qua 1 outbound message mới do Reserve tự phát sinh.
+
+**Đào sâu hơn khi vá — 1 lỗ hổng riêng phát hiện thêm khi kiểm tra "Reserve tự phát sinh outbound
+message mới" có thật sự xảy ra không:** grep xác nhận `RefundReserveAllocation` (hàm ĐÃ tồn tại từ
+fix #3) **chưa từng được gọi ở bất kỳ đâu trong `relayer_daemon/daemon.go`** — `processFailedClaim`
+(hàm orchestration thật duy nhất xử lý message Failed) chỉ gọi `refund()` trên chain nguồn, không hề
+biết tới `refundReserveAllocation`. Nghĩa là: nếu chỉ áp dụng đúng y nguyên giải pháp người dùng đề
+xuất (2 phần ở gateway.go/gateway_handler.go) mà không nối dây thêm phần daemon, kết quả sẽ **tệ hơn
+cả lỗi gốc** — message bị đánh dấu `Refunded` (coi như đã xong) nhưng `Value` không bao giờ thực sự
+được hoàn ở đâu cả, mất tiền vĩnh viễn thay vì chỉ kẹt `Pending`.
+
+**Đã vá bổ sung:** `processFailedClaim` (daemon.go) giờ, sau khi `refund()` thành công trên A, tính
+`is2Hop` (đúng công thức với `attestCommitInternal`/gateway_handler.go's "refund" case) và nếu true,
+gọi thêm `refundReserveAllocation()` trên Reserve (dùng lại đúng `destFailureCert` đã gộp) — hàm này
+đảo ngược credit đã cấp cho B trên Reserve (nếu có, phòng thủ thêm — về lý thuyết không thể có vì
+`CreditReserveAllocation` từ fix #3 đã yêu cầu success cert thật) và phát sinh 1 message outbound
+Value-only mới từ Reserve về A, message này sau đó chảy qua đúng pipeline attest/claim bình thường
+để mint thật `Value` cho user trên A. Thêm kiểm tra trạng thái trước khi gọi lại `refund()`/
+`refundReserveAllocation()` (idempotent re-entry) để một lần retry sau lỗi mạng tạm thời không bị
+`refund()` revert (đã Refunded từ lần trước) che mất việc `refundReserveAllocation()` vẫn cần chạy.
+
+Test: `TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee` (mới — real ABI dispatch,
+real ví thật: xác nhận Tip+GasFee được hoàn, `Value` KHÔNG được mint lại cục bộ khi là 2-hop; đối
+chứng với `TestGatewayHandler_Refund_RestoresTip` vốn cố tình đặt `LocalChainID == ReserveChainID`
+để rơi vào nhánh không phải 2-hop và xác nhận `Value` VẪN được hoàn ở đó), và
+`TestRelayerDaemon_ClaimMessageFails_PursuesRefund_TwoHop` (mới — dựng thật 3 chain A/Reserve/B qua
+RPC giả lập, chạy toàn bộ vòng batch → attestCommit (Reserve) + attestReserveIssuedCommit (B) →
+claimMessage thất bại trên B → `processFailedClaim` hoàn Tip/GasFee trên A + gọi
+`refundReserveAllocation` trên Reserve, xác nhận Reserve thật sự sinh ra đúng 1 outbound message mới
+mang đúng `Value` gửi về A).

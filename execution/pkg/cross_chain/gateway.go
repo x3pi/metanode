@@ -1639,14 +1639,6 @@ func (g *GatewayEngine) Refund(
 		return fmt.Errorf("refund must be processed on source chain %d, got local chain %d", message.SourceChainID, g.LocalChainID)
 	}
 
-	// SECURITY FIX: 2-hop messages (A -> Reserve -> B) CANNOT bypass Reserve during Refund.
-	// If they did, DestChain's allocation on Reserve would remain artificially inflated, allowing
-	// cross-chain ledger inflation. Instead, the relayer MUST route the failure cert through Reserve
-	// via RefundReserveAllocation, which will naturally emit a cross-chain refund message back here.
-	if g.ReserveChainID != 0 && g.LocalChainID != g.ReserveChainID && message.DestChainID != g.ReserveChainID {
-		return fmt.Errorf("direct refund disabled for 2-hop messages: must route failure cert through Reserve chain")
-	}
-
 	// 2. Message status must be Pending (never resolved before)
 	status, exists := g.MessageStatus[message.MessageID]
 	if !exists {
@@ -1723,9 +1715,16 @@ func (g *GatewayEngine) Refund(
 	// AttestCommit in the first place (custom assets don't touch this native-coin ledger at all),
 	// so crediting it here unconditionally would be a pure, ungated mint of native-ceiling
 	// capacity with no matching prior debit to balance it.
-	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 && (message.AssetID == nil || message.AssetID.Sign() == 0) {
-		currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
-		g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
+	//
+	// SECURITY FIX (2026-09-05, Total Supply Deflation fix): 2-hop messages DO NOT restore
+	// allocation here. Reserve handles the PerChainAllocation decrement and emits an Outbound
+	// message to refund the Value. The local Source chain MUST NOT mint Value again.
+	is2Hop := g.ReserveChainID != 0 && g.LocalChainID != g.ReserveChainID && message.DestChainID != g.ReserveChainID
+	if !is2Hop {
+		if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 && (message.AssetID == nil || message.AssetID.Sign() == 0) {
+			currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
+			g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
+		}
 	}
 
 	return nil

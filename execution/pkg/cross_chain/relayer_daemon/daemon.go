@@ -763,7 +763,68 @@ func (d *RelayerDaemon) processFailedClaim(ctx context.Context, msg cross_chain.
 		return fmt.Errorf("aggregate failure QuorumCert: %w", err)
 	}
 
-	refundCalldata, err := d.abi.Pack("refund",
+	// Idempotent re-entry: a previous tick may already have refunded the source-chain side (Tip +
+	// GasFee, and Value too for a non-2-hop message -- see the is2Hop check below) before failing
+	// on the Reserve-side step that follows (Reserve temporarily unreachable, transient send
+	// error, ...). Check status FIRST so a retry never re-submits refund() against an
+	// already-Refunded message -- that transaction would revert (Refund()'s own "status must be
+	// Pending" guard), which would look exactly like this whole attempt failed and mask the fact
+	// that only the Reserve-side step below still needs to run.
+	alreadyRefundedOnSource := false
+	if sourceClient, ok := d.GetChainClient(msg.SourceChainID); ok {
+		alreadyRefundedOnSource = d.getMessageStatus(ctx, sourceClient, msg.MessageID) == cross_chain.MessageStatusRefunded
+	}
+
+	if !alreadyRefundedOnSource {
+		refundCalldata, err := d.abi.Pack("refund",
+			msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
+			new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
+			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+			new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
+			cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
+		)
+		if err != nil {
+			return fmt.Errorf("pack refund: %w", err)
+		}
+
+		receipt, err := d.sendToChainAndWait(ctx, msg.SourceChainID, refundCalldata, 500_000)
+		if err != nil {
+			return fmt.Errorf("send refund tx: %w", err)
+		}
+		if receipt.Status != 1 {
+			return fmt.Errorf("refund tx reverted: %s", DecodeRevertReason(receipt.Return))
+		}
+		logger.Info("💸 [RELAYER DAEMON] refunded message %s to sender %s on source chain %d", msg.MessageID.Hex(), msg.Sender.Hex(), msg.SourceChainID)
+	}
+
+	// CORRECTNESS FIX (2026-09-05, "Total Supply Deflation" follow-up to finding #2 -- see
+	// note/cross_chain/security_audit_findings.md): for a 2-hop message (both SourceChainID and
+	// DestChainID are real private chains, neither IS Reserve), refund() above deliberately does
+	// NOT restore Value -- see the is2Hop comment on Refund()/the "refund" dispatch case in
+	// gateway.go/gateway_handler.go. Value was debited from sourceChainID's allocation on
+	// RESERVE's OWN ledger (attestCommit for a native-value commit can only ever be submitted to
+	// Reserve -- see chooseAttestMethod/RelayBatch above), never touched on sourceChainID's own
+	// node, so only Reserve's own refundReserveAllocation() can restore it: it reverses any credit
+	// already made to destChainID (defensive -- CreditReserveAllocation's own success-cert
+	// requirement should already make this a no-op for a genuinely FAILED message) and emits a
+	// fresh Reserve->source outbound message carrying Value, which then flows through the exact
+	// same attest/claim/creditReserveAllocation pipeline as any other transfer -- see
+	// GatewayEngine.RefundReserveAllocation's own doc comment. Before this fix, NOTHING in
+	// production ever called refundReserveAllocation at all (confirmed by grep) -- once refund()
+	// above marked a 2-hop message Refunded on the source chain, its Value was gone for good.
+	is2Hop := d.config.ReserveChainID != 0 && msg.SourceChainID != d.config.ReserveChainID && msg.DestChainID != d.config.ReserveChainID
+	if !is2Hop {
+		return nil
+	}
+
+	if reserveClient, ok := d.GetChainClient(d.config.ReserveChainID); ok {
+		if d.getMessageStatus(ctx, reserveClient, msg.MessageID) == cross_chain.MessageStatusRefunded {
+			// Already processed by an earlier tick / a different relayer -- idempotent no-op.
+			return nil
+		}
+	}
+
+	refundReserveCalldata, err := d.abi.Pack("refundReserveAllocation",
 		msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
 		new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
@@ -771,17 +832,16 @@ func (d *RelayerDaemon) processFailedClaim(ctx context.Context, msg cross_chain.
 		cert.Epoch, []byte(cert.AggregateSignature), []byte(cert.SignerBitmap),
 	)
 	if err != nil {
-		return fmt.Errorf("pack refund: %w", err)
+		return fmt.Errorf("pack refundReserveAllocation: %w", err)
 	}
-
-	receipt, err := d.sendToChainAndWait(ctx, msg.SourceChainID, refundCalldata, 500_000)
+	reserveReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, refundReserveCalldata, 500_000)
 	if err != nil {
-		return fmt.Errorf("send refund tx: %w", err)
+		return fmt.Errorf("send refundReserveAllocation tx: %w", err)
 	}
-	if receipt.Status != 1 {
-		return fmt.Errorf("refund tx reverted: %s", DecodeRevertReason(receipt.Return))
+	if reserveReceipt.Status != 1 {
+		return fmt.Errorf("refundReserveAllocation tx reverted: %s", DecodeRevertReason(reserveReceipt.Return))
 	}
-	logger.Info("💸 [RELAYER DAEMON] refunded message %s to sender %s on source chain %d", msg.MessageID.Hex(), msg.Sender.Hex(), msg.SourceChainID)
+	logger.Info("💰 [RELAYER DAEMON] refundReserveAllocation for message %s reversed the Reserve-side allocation and queued a fresh Value refund from reserve chain %d back to source chain %d", msg.MessageID.Hex(), d.config.ReserveChainID, msg.SourceChainID)
 	return nil
 }
 

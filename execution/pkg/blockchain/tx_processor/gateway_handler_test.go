@@ -720,6 +720,132 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 	assert.Equal(t, big.NewInt(500), asAfterRefund.Balance(), "expected sender balance fully restored to 500 (Value AND Tip both refunded)")
 }
 
+// TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee is the regression test for the
+// "Total Supply Deflation" follow-up fix (2026-09-05, note/cross_chain/security_audit_findings.md
+// finding #6): for a 2-hop message (SourceChainID and DestChainID are both real private chains,
+// neither IS the configured Reserve), refund() must restore Tip and GasFee locally (both were
+// burned as a pure local wallet debit in outbound(), unrelated to any cross-chain ledger) but must
+// NOT mint Value again here -- Value was debited from the source's allocation on RESERVE's own
+// ledger (never touched locally), and is instead restored via a separate Reserve->source outbound
+// message that RelayerDaemon's refundReserveAllocation() call generates (see daemon.go's
+// processFailedClaim). Minting Value here too, on top of that, would be a real double-mint /
+// Total Supply Inflation bug -- the exact opposite failure mode from the one this fix closes.
+// Contrast with TestGatewayHandler_Refund_RestoresTip, which deliberately sets
+// LocalChainID == ReserveChainID (so is2Hop is false there) and asserts Value IS restored --
+// together the two tests pin both sides of the is2Hop branch.
+func TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	const sourceChainID = 201 // A -- this test's LocalChainID
+	const reserveChainID = 202
+	const destChainID = 203 // B -- real final destination, distinct from Reserve
+
+	kpB := bls.GenerateKeyPair()
+	popB := cross_chain.PopSign(kpB.PrivateKey(), kpB.PublicKey())
+
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.LocalChainID = sourceChainID
+	engine.ReserveChainID = reserveChainID
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kpB.BytesPublicKey(), Stake: 1000, PopSignature: popB.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{sourceChainID: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine.SupplyLedger = ledger
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	target := common.HexToAddress("0x6666666666666666666666666666666666666666")
+
+	// Seed sender with 500; outbound burns Value=100 + Tip=15 + GasFee=5 = 120 total.
+	require.NoError(t, cs.GetAccountStateDB().AddBalance(sender, big.NewInt(500)))
+
+	const valueAmount, tipAmount, gasFeeAmount = 100, 15, 5
+	outboundCalldata, err := h.abi.Pack("outbound",
+		big.NewInt(destChainID), target, []byte{}, big.NewInt(0),
+		big.NewInt(valueAmount), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
+	)
+	require.NoError(t, err)
+	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
+	messageID := outboundTx.Hash()
+	rcpOut, _, failedOut := h.HandleTransaction(context.Background(), cs, outboundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedOut, "outbound() transaction failed: %+v", rcpOut)
+
+	// Balance after burn: 500 - (100 + 15 + 5) = 380.
+	asAfterOutbound, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.Equal(t, big.NewInt(380), asAfterOutbound.Balance())
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     messageID,
+		SourceChainID: sourceChainID,
+		DestChainID:   destChainID,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(valueAmount),
+		Payload:       []byte{},
+		Tip:           big.NewInt(tipAmount),
+		GasFee:        big.NewInt(gasFeeAmount),
+		Ordered:       false,
+	}
+
+	// Real batchOutboundCommit() -- populates CommittedBatches locally, which is all refund()'s
+	// own commit-attestation check needs on the source chain (no attestCommit()/ChainRegistry
+	// entry for sourceChainID itself required -- see Refund()'s own doc comment).
+	batchCalldata, err := h.abi.Pack("batchOutboundCommit", big.NewInt(destChainID))
+	require.NoError(t, err)
+	batchTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, batchCalldata))
+	rcpBatch, _, failedBatch := h.HandleTransaction(context.Background(), cs, batchTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedBatch, "batchOutboundCommit() transaction failed: %+v", rcpBatch)
+	batchOut, err := h.abi.Unpack("batchOutboundCommit", rcpBatch.Return())
+	require.NoError(t, err)
+	commitRoot := common.Hash(batchOut[0].([32]byte))
+
+	_, layers, _, _, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	proof := cross_chain.GetMerkleProof(layers, 0)
+
+	failDigest := cross_chain.ComputeMessageFailureAttestMessage(messageID, destChainID)
+	failSig := bls.Sign(kpB.PrivateKey(), failDigest)
+
+	refundCalldata, err := h.abi.Pack("refund",
+		messageID, big.NewInt(sourceChainID), big.NewInt(destChainID), big.NewInt(1), uint8(1), sender, target,
+		big.NewInt(0), big.NewInt(valueAmount), []byte{}, big.NewInt(tipAmount), big.NewInt(gasFeeAmount), false,
+		big.NewInt(int64(proof.LeafIndex)), proof.Siblings, commitRoot,
+		uint64(1), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedRefund, "refund() transaction failed: %+v", rcpRefund)
+
+	// The defining assertion: 380 + 15 (Tip) + 5 (GasFee) = 400 -- Value is deliberately NOT
+	// restored here (400, not 500). Restoring it too would be a real double-mint once Reserve's
+	// own refundReserveAllocation-generated message later also delivers Value to this same
+	// sender.
+	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(400), asAfterRefund.Balance(), "expected sender balance 400 (Tip+GasFee restored, Value deliberately withheld for a 2-hop message)")
+
+	reloaded, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Equal(t, cross_chain.MessageStatusRefunded, reloaded.GetMessageStatus(messageID))
+}
+
 // TestGatewayHandler_CreditAndRefundReserveAllocation is the real-ABI-dispatch regression test for
 // the "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding
 // (note/cross_chain/security_audit_findings.md): exercises creditReserveAllocation's new
