@@ -90,13 +90,10 @@ cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
 3. Copy binary `simple_chain` và `metanode` vào `/opt/metanode/chain-XXX`.
 4. Thiết lập systemd service `/etc/systemd/system/metanode-private-XXX.service`.
 5. Bật service và mở tường lửa cho các cổng RPC, Peer, Consensus.
-6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor (bootstrapFoundingChains).
-7. Tự động mint genesis supply 1 lần trên Reserve (Root Anchor) và chia cho 4 founding chain
-   (`ProposalAllocateSupply` + `ProposalTransferAllocation`, qua `register_chains -fund-genesis`)
-   — **bắt buộc phải có bước này** thì Bước 5 (kiểm tra chuyển tiền cross-chain thật) mới chạy
-   được, vì mỗi chain khởi tạo xong đều có `PerChainAllocation = 0` cho tới khi được cấp thật qua
-   đúng luồng governance này (xem `note/cross_chain_attack_scenario_catalog.md` mục C7/C8 — sửa
-   2026-08-28, PR #84 review). Số lượng mint mặc định là giá trị devnet
+6. Tự động nộp transaction đăng ký từng chuỗi lên Gateway của Root Anchor kèm cọc Native Coin thật (`registerChainViaStake`).
+7. Tự động chuyển cọc thành hạn mức lưu thông ban đầu (`PerChainAllocation`) cho từng chain, đồng thời xác thực mã băm genesis (`setGenesisDigest` & `verify-genesis` - cập nhật 2026-09-04).
+8. Tự động mint genesis supply 1 lần trên Reserve (Root Anchor) và phân phối allocation cho các chain founding
+   (`ProposalAllocateSupply` + `ProposalTransferAllocation`, qua `register_chains -fund-genesis`). Số lượng mint mặc định là giá trị devnet
    (`root_anchor_genesis_supply`/`root_anchor_per_chain_allocation` trong `inventory.yml`, có thể
    chỉnh) — **không dùng mặc định này cho triển khai thật**, số thật phải qua ceremony quyết định.
 
@@ -158,9 +155,9 @@ go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 
 ## 🔐 4. Cơ Chế Xác Thực & Quản Lý Khóa (Lưu ý cho Dev & AI)
 
-### 1. `BootstrapFoundingChains` & Xác thực Proof-of-Possession (`PopVerify`):
-* **Nguyên lý:** Khi khởi tạo hoặc re-deploy/reset các Private Chain, hàm `BootstrapFoundingChains` trên Gateway Precompile (`0x1002`) cho phép nạp/cập nhật lại danh sách committee sáng lập của các chain vào `ChainRegistry`.
-* **Bảo mật tuyệt đối:** Mọi validator entry bắt buộc phải đính kèm chữ ký Proof-of-Possession (`PopSignature`) hợp lệ và được kiểm tra nghiêm ngặt qua hàm `PopVerify(v.PubkeyBLS, v.PopSignature)`. Không có bất kỳ node hay validator nào có thể mạo danh hoặc nạp key giả vào Root Anchor.
+### 1. `registerChainViaStake` & Xác thực Proof-of-Possession (`PopVerify`):
+* **Nguyên lý:** Khi khởi tạo hoặc đăng ký các Private Chain, hàm `registerChainViaStake` trên Gateway Precompile (`0x1002`) yêu cầu nộp cọc Native Coin thật (`MinNativeStakeToRegister`), đồng thời nạp danh sách uỷ ban của chain vào `ChainRegistry` và đồng bộ chéo sang các Private Chain khác. Cọc này tự động trở thành hạn mức lưu thông ban đầu của chain.
+* **Bảo mật tuyệt đối:** Mọi validator entry bắt buộc phải đính kèm chữ ký Proof-of-Possession (`PopSignature`) hợp lệ và được kiểm tra nghiêm ngặt qua hàm `PopVerify(v.PubkeyBLS, v.PopSignature)`. Không có bất kỳ node hay validator nào có thể mạo danh hoặc nạp key giả vào Root Anchor. Mọi file genesis được kiểm tra đối chiếu mã băm on-chain qua `setGenesisDigest` và `verify-genesis`.
 
 ### 2. Phân biệt & Trích xuất Khóa của Validator:
 * **Khóa ETH (`eth_key.json` - secp256k1):** Dùng để định danh địa chỉ EVM (`address`), nộp gas fee và ký giao dịch thông thường.
