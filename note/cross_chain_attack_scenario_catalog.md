@@ -86,19 +86,29 @@ tổng quan (xem `note/security_assessment_status_report.md` cho bức tranh t�
 ngay, không phải suy luận** — đây là tầng được kiểm chứng kỹ nhất trong toàn hệ thống.
 
 **3 rủi ro MỚI được phát hiện trong chính phiên thảo luận này, chưa từng nằm trong bất kỳ
-audit/checklist nào trước đó — ĐÃ VÁ ngày 2026-08-27**:
+audit/checklist nào trước đó — cả 3 đều ĐÃ ĐÓNG** (C7/C8 ngày 2026-08-27; C6 ngày 2026-09-04,
+phiên sau, xem cập nhật bên dưới):
 - **C7** — `ProposalAllocateSupply` từng là đường "in tiền qua vote" thật. Đã vá: chỉ còn mint
   1 lần duy nhất cho chính Reserve; chain khác nhận allocation qua `ProposalTransferAllocation`
   mới (chuyển tiền đã tồn tại, không bao giờ tạo tiền mới).
 - **C8** — không chain nào thật sự bắt buộc đi qua Reserve khi attest giá trị. Đã vá: thêm
   `ReserveChainID` on-chain, chặn cứng chỉ Reserve mới được ceiling-check attest giá trị >0.
-- **C6** — Sybil đăng ký chain dần dần chiếm đa số governance phi-tiền-tệ. Vá tạm thời
-  (2026-08-27, lần 2, field opt-in `MinRegistrationStake` gắn vào `ProposalRegisterChain`) đã bị
-  XOÁ cùng với `ProposalRegisterChain` (2026-09-04, đường vote-gated không còn ai dùng) —
-  **status thật hiện tại là CHƯA VÁ**, xem dòng C6 trong bảng phía trên (đã cập nhật) và
-  `note/eurozone_unified_native_coin_plan.md` mục 2.6.
+- **C6** — Sybil đăng ký chain dần dần chiếm đa số governance phi-tiền-tệ. Bản vá tạm thời đầu
+  tiên (2026-08-27, lần 2, field opt-in `MinRegistrationStake` gắn vào `ProposalRegisterChain`)
+  đúng là đã bị XOÁ cùng với `ProposalRegisterChain` (2026-09-04, đường vote-gated không còn ai
+  dùng) — **nhưng KHÔNG phải vì rủi ro bị bỏ ngỏ**: cùng ngày, toàn bộ `GovernanceEngine`
+  (propose/vote/quorum/timelock/execute) bị xoá hẳn theo quyết định trực tiếp của người dùng
+  ("bỏ hoàn toàn vote này... không có ai thao túng vote cả") — không còn phiếu governance nào
+  để Sybil mua nữa, nên vá-tạm-thời cũ trở thành thừa, không phải bị bỏ dở. Xem dòng C6 trong
+  bảng phía trên (đã cập nhật, ✅) và `note/eurozone_unified_native_coin_plan.md` mục "CẬP NHẬT
+  (2026-09-04, phiên sau)" ở đầu file để biết thiết kế thay thế đầy đủ
+  (`AllocateSupplyWithCert`/`TransferAllocationWithCert`/`RecoveryCommittee`).
 
-C7/C8 đều có test hồi quy thật (xem test tham chiếu ở từng dòng phía trên); C6 hiện không.
+C6/C7/C8 giờ đều đã đóng; C7/C8 có test hồi quy thật (xem test tham chiếu ở từng dòng phía
+trên), C6 được đóng bằng xoá hẳn nguồn rủi ro (không còn cơ chế vote để viết test hồi quy
+chống-lại) — xác nhận qua đọc lại toàn bộ `gateway.go`/`gateway_handler.go`, không còn tham
+chiếu `GovernanceEngine`/`ActiveChains` nào ngoài comment lịch sử (2026-09-05, phiên rà soát
+production-readiness).
 
 **D6 cũng đã xử lý** (2026-08-27): gỡ bỏ hẳn `pkg/devicekey/DeviceKey.go` (bot token Telegram
 hardcode + cơ chế device-activation đọc khoá SSH thật, hẹn hết hạn cứng 2026-10-01), thống nhất

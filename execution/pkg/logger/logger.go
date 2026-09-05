@@ -133,7 +133,19 @@ func SetIdentifier(identifier string) {
 // SetConsoleOutputEnabled bật/tắt việc log ra stdout.
 // Khi tắt, logger chỉ ghi vào các output còn lại (ví dụ file).
 func SetConsoleOutputEnabled(enabled bool) {
+	// FIX (2026-09-05, found by TestConcurrentOutputsMutationDoesNotRace while reviewing
+	// PR #101): consoleOutputEnabled used to be a plain bool written here with no
+	// synchronization at all, while enforceConsolePreference() reads it from inside
+	// setOutputsUnsafe()'s writeMu-protected section -- a genuine, still-live data race
+	// (concurrent SetConsoleOutputEnabled calls could even race with each other on the
+	// write itself) that PR #101's own writeMu fix for config.Outputs did not cover,
+	// caught live by `go test -race`. Writing it under the SAME writeMu that
+	// enforceConsolePreference reads it under (sequential, non-nested with the
+	// setOutputsUnsafe call below -- writeMu is not reentrant) closes this the same way
+	// every other config.Outputs mutation in this file already does.
+	writeMu.Lock()
 	consoleOutputEnabled = enabled
+	writeMu.Unlock()
 	setOutputsUnsafe(getOutputsCopy())
 }
 
@@ -429,9 +441,10 @@ func buildLogLine(color string, prefix string, message interface{}, a []interfac
 const logQueueCapacity = 65536
 
 var (
-	logQueue     chan logJob
-	logQueueOnce sync.Once
-	droppedLogs  atomic.Uint64
+	logQueue        chan logJob
+	logQueueOnce    sync.Once
+	droppedLogs     atomic.Uint64
+	recoveredPanics atomic.Uint64
 )
 
 type logJob struct {
@@ -447,6 +460,7 @@ func startLogWriter() {
 				defer func() {
 					if r := recover(); r != nil {
 						// Bảo vệ node: Tránh panic từ I/O làm crash node
+						recoveredPanics.Add(1)
 						fmt.Fprintf(os.Stderr, "⚠️ [LOGGER-PANIC-RECOVERED] %v\n", r)
 					}
 				}()
@@ -476,6 +490,16 @@ func DroppedLogCount() uint64 {
 	return droppedLogs.Load()
 }
 
+// RecoveredPanicCount returns how many times writeToOutputsSplit's panic-recovery guard
+// has fired (see its own doc comment). Always 0 in the overwhelming common case -- a
+// nonzero value means an I/O panic was caught and safely dropped instead of crashing the
+// process, which is by design not fatal, but is worth alerting on: it means something
+// (a race, a closed file descriptor, a malformed *os.File) is still reaching this code
+// path and should be investigated, not silently tolerated forever.
+func RecoveredPanicCount() uint64 {
+	return recoveredPanics.Load()
+}
+
 // writeMu protects concurrent writes to outputs to prevent deadlock
 var writeMu sync.Mutex
 
@@ -485,7 +509,17 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 	writeMu.Lock()
 	defer writeMu.Unlock()
 	defer func() {
-		_ = recover()
+		// Bảo vệ mọi caller (async worker qua startLogWriter, và Error()/Fatal()'s
+		// direct synchronous calls, which have no recover of their own) khỏi crash
+		// nếu I/O panic. Log ra stderr thay vì nuốt im lặng -- một recover() câm
+		// nghĩa là nếu vẫn còn race/edge-case nào đó gây panic, vận hành sẽ không
+		// bao giờ biết (không crash, không log gì cả) cho tới khi hệ quả thật xảy
+		// ra ở nơi khác. Cùng message với startLogWriter's wrapper, nên dù panic
+		// bị bắt ở tầng nào, luôn có đúng 1 dòng cảnh báo xuất hiện.
+		if r := recover(); r != nil {
+			recoveredPanics.Add(1)
+			fmt.Fprintf(os.Stderr, "⚠️ [LOGGER-PANIC-RECOVERED] %v\n", r)
+		}
 	}()
 	outputs := l.Config.Outputs
 	for _, out := range outputs {

@@ -75,6 +75,11 @@ pub struct ExecutorClient {
     /// BACKPRESSURE: Shared handle to update Go lag in SystemTransactionProvider
     /// When set, flush_buffer() will update this value with the computed lag
     pub(crate) go_lag_handle: Option<Arc<AtomicU64>>,
+    /// SMOOTH BACKPRESSURE (2026-09-05): Shared handle to update Go's EMA-smoothed execution
+    /// rate in SystemTransactionProvider. Set by LagMonitor::run() each tick, read by the
+    /// proposer for continuous, proportional rate-matching -- see
+    /// DefaultSystemTransactionProvider::go_rate_millis's own doc comment.
+    pub(crate) go_rate_handle: Option<Arc<AtomicU64>>,
     /// CRITICAL FORK-SAFETY: Explicit block number tracker, passed to Go inside ExecutableBlock
     pub(crate) next_block_number: Arc<tokio::sync::Mutex<u64>>,
     /// CRITICAL FORK-SAFETY: Tracks the last epoch we processed to identify epoch boundaries
@@ -177,6 +182,7 @@ impl ExecutorClient {
             send_cb_open_until: Arc::new(tokio::sync::RwLock::new(None)),
             request_pool,
             go_lag_handle: None, // Set via set_go_lag_handle() after construction
+            go_rate_handle: None, // Set via set_go_rate_handle() after construction
             next_block_number: Arc::new(tokio::sync::Mutex::new(0)),
             last_processed_epoch: Arc::new(tokio::sync::Mutex::new(0)),
             rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -202,6 +208,12 @@ impl ExecutorClient {
     /// Set the Go lag handle for backpressure signaling to SystemTransactionProvider
     pub fn set_go_lag_handle(&mut self, handle: Arc<AtomicU64>) {
         self.go_lag_handle = Some(handle);
+    }
+
+    /// Set the Go rate handle for smooth backpressure signaling to SystemTransactionProvider
+    /// (2026-09-05) -- see go_rate_handle's own doc comment.
+    pub fn set_go_rate_handle(&mut self, handle: Arc<AtomicU64>) {
+        self.go_rate_handle = Some(handle);
     }
 
     /// Get reference to the RPC circuit breaker

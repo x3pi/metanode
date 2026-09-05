@@ -163,7 +163,17 @@ impl ConsensusNode {
                             let local_b = &local_blocks[0];
                             let peer_b = &peer_blocks[0];
         
-                            if local_b.raw_block_bytes != peer_b.raw_block_bytes {
+                            // FALSE-POSITIVE FIX (2026-09-05): gate on `block_hash` (canonical
+                            // BlockHeader.Hash(), execution/pkg/block/block_header.go) rather than
+                            // full raw_block_bytes equality. raw_block_bytes (Block.Marshal()'s
+                            // output) includes CommitIndex, a Rust-local commit/round counter that
+                            // Hash() deliberately excludes -- two honest nodes can commit the same
+                            // GEI/state via different local commit rounds, so raw bytes can differ
+                            // while block_hash/state_root correctly agree. Gating this reset on raw
+                            // bytes meant a benign CommitIndex difference could force a full
+                            // resync-from-genesis on every affected restart -- see the matching,
+                            // more thoroughly documented fix in fork_guard.rs's LAYER-6 check.
+                            if local_b.block_hash != peer_b.block_hash {
                                 let mut warn_msg = format!(
                                     "⚠️ [ANTI-FORK] Block #{} hash MISMATCH between Go and peer! Go has stale/corrupt data.",
                                     local_block
@@ -521,19 +531,26 @@ impl ConsensusNode {
                                 Ok(peer_blocks) if !peer_blocks.is_empty() => {
                                     match barrier_client.get_blocks_range(local_block, local_block).await {
                                         Ok(local_blocks) if !local_blocks.is_empty() => {
+                                            // FALSE-POSITIVE FIX (2026-09-05): same block_hash-based
+                                            // criterion as fork_guard.rs's LAYER-6 check -- see its
+                                            // doc comment. raw_block_bytes includes the Rust-local
+                                            // CommitIndex, which Hash() deliberately excludes, so raw
+                                            // bytes can legitimately differ between honest nodes.
+                                            let local_hash = &local_blocks[0].block_hash;
+                                            let peer_hash = &peer_blocks[0].block_hash;
                                             let local_raw = &local_blocks[0].raw_block_bytes;
                                             let peer_raw = &peer_blocks[0].raw_block_bytes;
-                                            if local_raw == peer_raw {
+                                            if local_hash == peer_hash {
                                                 tracing::info!(
-                                                    "✅ [POST-SYNC-VERIFY] Block #{} verified: local matches peer ({} bytes). \
-                                                     State integrity confirmed.",
-                                                    local_block, local_raw.len()
+                                                    "✅ [POST-SYNC-VERIFY] Block #{} verified: local matches peer (block_hash match, \
+                                                     raw_bytes local={} peer={}). State integrity confirmed.",
+                                                    local_block, local_raw.len(), peer_raw.len()
                                                 );
                                             } else {
                                                 tracing::error!(
-                                                    "🚨 [POST-SYNC-VERIFY] Block #{} MISMATCH! local_bytes={} peer_bytes={}. \
+                                                    "🚨 [POST-SYNC-VERIFY] Block #{} MISMATCH! local_hash=0x{} peer_hash=0x{}. \
                                                      Data corruption detected after sync!",
-                                                    local_block, local_raw.len(), peer_raw.len()
+                                                    local_block, hex::encode(local_hash), hex::encode(peer_hash)
                                                 );
                                                 tracing::warn!("🔄 [RECOVERY] Transient mismatch detected. Resetting local state and restarting STARTUP-SYNC...");
                                                 local_block = 0;

@@ -209,6 +209,7 @@ impl ConsensusNode {
                 Some(config.storage_path.clone()),
             );
             client.set_go_lag_handle(system_transaction_provider.go_lag_handle());
+            client.set_go_rate_handle(system_transaction_provider.go_rate_handle());
             Arc::new(client)
         } else {
             Arc::new(ExecutorClient::new(

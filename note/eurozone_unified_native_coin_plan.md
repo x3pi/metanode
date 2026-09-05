@@ -278,6 +278,15 @@ multisig quyết định. Treasury multisig (mục 2.2, `ProposalTransferAllocat
 khai, tránh tài liệu/tool nói sai cơ chế thật (đúng bài học "PR gì đó" tài liệu bị lag sau code
 đã gặp nhiều lần trong phiên này).
 
+**ĐÃ ĐÓNG (2026-09-05, phiên rà soát production-readiness)** — kiểm tra lại cả 3 file trên trực
+tiếp, không chỉ tin mục này: `dapp_cross_chain_developer_guide.md` đã có đoạn "Cập nhật
+2026-09-04" giải thích đúng `allocateSupplyWithCert`/`transferAllocationWithCert` thay cho
+`GovernanceEngine`; `external_security_audit_scope_p5.md` đã ghi `GovernanceEngine` là phần đã
+xoá và liệt kê `RecoveryCommittee` là trọng tâm audit thay thế; `live_asset_bridge/main.go`'s
+`allocate-supply` case đã gọi thật `transferAllocationWithCert` (comment nhắc
+`ProposalAllocateSupply`/`ProposalTransferAllocation` chỉ để giải thích LỊCH SỬ vì sao đổi cách
+làm, không phải code còn gọi cơ chế cũ). Không còn file nào trong 3 file này nói sai cơ chế thật.
+
 ### 2.6 Sybil đăng ký chain để MUA phiếu vote governance qua stake — PHÁT HIỆN THẬT, CÒN MỞ
 ### (2026-09-04, cùng ngày — khác với rủi ro mục 2.1)
 
