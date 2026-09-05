@@ -73,12 +73,27 @@ type DaemonConfig struct {
 	// errors polling/relaying a chain pair -- see backoffDuration in metrics.go. Defaults to 30s
 	// when <= 0.
 	MaxPollBackoff time.Duration `json:"max_poll_backoff" yaml:"max_poll_backoff"`
+
+	// UnrelayedBatchesPersistPath (2026-09-05 review of PR #102's unrelayedBatches retry
+	// mechanism): PR #102's in-memory-only retry queue closes the "destination chain briefly
+	// restarts while the relayer PROCESS keeps running" gap, but not "the relayer's own process
+	// restarts mid-retry" -- at that point the on-chain PendingOutboundMessages queue has ALREADY
+	// been drained by the batchOutboundCommit() that produced the stuck batch, so a fresh
+	// process's normal BatchAndRelay flow (which only ever looks at getPendingOutboundCount) can
+	// never rediscover it: the batch would silently sit committed-but-unclaimed forever. Setting
+	// this to a writable file path persists unrelayedBatches to disk on every change and reloads
+	// it on startup, closing that gap too. Empty/unset (default) preserves the exact in-memory-only
+	// behavior PR #102 shipped with.
+	UnrelayedBatchesPersistPath string `json:"unrelayed_batches_persist_path,omitempty" yaml:"unrelayed_batches_persist_path,omitempty"`
 }
 
+// unrelayedBatch is a batchOutboundCommit() result not yet fully relayed (see BatchAndRelay).
+// Fields are exported solely so persistence.go can encoding/json round-trip this type to/from
+// disk -- it is otherwise only ever used inside this package.
 type unrelayedBatch struct {
-	commitRoot common.Hash
-	epoch      uint64
-	messages   []cross_chain.CrossChainMessage
+	CommitRoot common.Hash                     `json:"commit_root"`
+	Epoch      uint64                          `json:"epoch"`
+	Messages   []cross_chain.CrossChainMessage `json:"messages"`
 }
 
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
@@ -167,7 +182,7 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		abi:               parsedABI,
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
-		unrelayedBatches:  make(map[string]*unrelayedBatch),
+		unrelayedBatches:  loadUnrelayedBatches(cfg.UnrelayedBatchesPersistPath),
 		nonces:            make(map[uint64]uint64),
 		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
@@ -689,13 +704,15 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 	d.mu.Unlock()
 
 	if pending != nil {
-		if err := d.RelayBatch(ctx, sourceChainID, pending.commitRoot, pending.epoch, pending.messages); err != nil {
-			return len(pending.messages), fmt.Errorf("retry relay batch %s: %w", pending.commitRoot.Hex(), err)
+		if err := d.RelayBatch(ctx, sourceChainID, pending.CommitRoot, pending.Epoch, pending.Messages); err != nil {
+			return len(pending.Messages), fmt.Errorf("retry relay batch %s: %w", pending.CommitRoot.Hex(), err)
 		}
 		d.mu.Lock()
 		delete(d.unrelayedBatches, pairKey)
+		snapshot := d.snapshotUnrelayedBatchesLocked()
 		d.mu.Unlock()
-		return len(pending.messages), nil
+		d.persistUnrelayedBatches(snapshot)
+		return len(pending.Messages), nil
 	}
 
 	sourceClient, exists := d.GetChainClient(sourceChainID)
@@ -760,17 +777,22 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 
 	logger.Info("📦 [RELAYER DAEMON] batched %d outbound message(s) from chain %d to chain %d, commitRoot=%s", messageCount, sourceChainID, destChainID, commitRoot.Hex())
 
-	// Store in unrelayedBatches in case RelayBatch fails (e.g. destination chain is restarting)
+	// Store in unrelayedBatches in case RelayBatch fails (e.g. destination chain is restarting) --
+	// and persist to disk if configured, so a relayer PROCESS restart (not just a destination
+	// chain restart) can still rediscover and retry this batch on the next startup instead of
+	// leaking it forever (see UnrelayedBatchesPersistPath's doc comment).
 	d.mu.Lock()
 	if d.unrelayedBatches == nil {
 		d.unrelayedBatches = make(map[string]*unrelayedBatch)
 	}
 	d.unrelayedBatches[pairKey] = &unrelayedBatch{
-		commitRoot: commitRoot,
-		epoch:      epoch,
-		messages:   messages,
+		CommitRoot: commitRoot,
+		Epoch:      epoch,
+		Messages:   messages,
 	}
+	snapshot := d.snapshotUnrelayedBatchesLocked()
 	d.mu.Unlock()
+	d.persistUnrelayedBatches(snapshot)
 
 	if err := d.RelayBatch(ctx, sourceChainID, commitRoot, epoch, messages); err != nil {
 		return messageCount, fmt.Errorf("relay batch %s: %w", commitRoot.Hex(), err)
@@ -778,7 +800,9 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 
 	d.mu.Lock()
 	delete(d.unrelayedBatches, pairKey)
+	snapshot = d.snapshotUnrelayedBatchesLocked()
 	d.mu.Unlock()
+	d.persistUnrelayedBatches(snapshot)
 
 	return messageCount, nil
 }

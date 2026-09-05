@@ -4,6 +4,11 @@
 > `execution/cmd/tool/cross_chain_relayer/` cho mức độ sẵn sàng production. Tài liệu này vừa là
 > bản đánh giá kiến trúc, vừa là runbook vận hành thực tế (yêu cầu triển khai, chạy nhiều instance,
 > giám sát/cảnh báo, và các giới hạn còn tồn đọng).
+>
+> **Cập nhật cùng ngày**: đã merge PR #102 (fix relayer mất tác dụng khi restart node/chain: circuit
+> breaker khóa 60s, batch dở dang bị bỏ quên, nonce lệch) sau khi review + test-merge thật vào
+> `dev` hiện tại. Review phát hiện + đã tự vá luôn 2 vấn đề tồn đọng của PR đó trước khi merge —
+> xem mục 8.
 
 ---
 
@@ -177,3 +182,45 @@ Sau bản vá 2026-09-05: cả 5 khoảng trống đã xác định đều đã 
 dịch/backoff, 1 tính năng quan sát mới hoàn toàn, 1 công cụ triển khai đa-instance mới hoàn toàn có
 kèm test tự động cho đúng tính chất an toàn mà thiết kế giao thức đã hứa). Còn 2 giới hạn có chủ đích
 để lại (mục 6), không chặn triển khai production ở quy mô hiện tại của dự án.
+
+---
+
+## 8. PR #102 — fix "Relayer mất tác dụng khi restart node/chain" (merge + 2 vá thêm)
+
+Cùng ngày 2026-09-05, review + merge PR #102 (tác giả PearTNhat). RCA của PR: restart 1 chain node
+2-3s khiến watcher loop của Relayer tích đủ lỗi để circuit breaker khóa cứng 60s
+(`root anchor RPC circuit breaker is open`), batch đã gom (`batchOutboundCommit`) nhưng gửi thất
+bại thì bị bỏ quên vĩnh viễn (vòng lặp sau chỉ kiểm tra `getPendingOutboundCount == 0`), và nonce
+cache lệch sau reboot. Đã **test-merge thật** vào `dev` hiện tại trước khi merge chính thức (không
+chỉ tin `mergeable: true` của GitHub) — build + `go test -race` 100% pass trên cây đã merge.
+
+Review phát hiện 2 vấn đề thật, đã tự vá luôn trước khi merge:
+
+1. **`CircuitBreaker.RecordSuccess()` bị đổi hành vi ngoài phạm vi PR**: PR gốc làm mạch HALF_OPEN
+   đóng lại ngay sau **1** request thành công, thay vì cần đủ `MaxRequests` request thành công liên
+   tiếp như thiết kế gốc. Đây là thay đổi cho package `network.CircuitBreaker` dùng chung toàn bộ
+   codebase, không riêng gì Relayer — mà bug thật của Relayer đã được giải quyết trọn vẹn chỉ bằng
+   cờ `Disabled` (bypass hẳn `RecordSuccess()`), nên thay đổi này hoàn toàn không cần thiết cho mục
+   tiêu của PR, trong khi lại làm yếu khả năng phục hồi của **các nơi khác** vẫn bật breaker (vd
+   `GatewayRegistryMonitor`'s Root Anchor client trong `block_processor_core.go`) mà PR không hề
+   test hay nhắc tới. Đã khôi phục lại đúng ngữ nghĩa canary gốc (cần đủ N request thành công liên
+   tiếp) ở cả 2 bản sao của file (`pkg/network` + `cmd/rpc/pkg/network`), viết lại test cho đúng mô
+   hình gọi thật (`CanExecute()` + `RecordSuccess()` theo cặp), thêm
+   `TestCircuitBreaker_HalfOpenSingleFailureReopens` khóa lại hành vi đúng.
+
+2. **`unrelayedBatches` (cơ chế retry batch dở dang của PR) chỉ sống trong RAM**: giải quyết đúng
+   trường hợp "chain đích restart trong khi tiến trình Relayer vẫn sống", nhưng nếu **chính tiến
+   trình Relayer** bị restart giữa lúc có 1 batch dở dang thì mất luôn — vì `PendingOutboundMessages`
+   on-chain đã bị `batchOutboundCommit` rút sạch từ trước, luồng bình thường sau khi khởi động lại
+   sẽ không bao giờ phát hiện lại batch đó nữa (kẹt vĩnh viễn, đúng cái bug gốc PR này muốn giải
+   quyết, chỉ khác nguyên nhân). Đã vá bằng `persistence.go`: field cấu hình mới
+   `UnrelayedBatchesPersistPath` (rỗng/không set = giữ nguyên hành vi RAM-only gốc của PR #102),
+   ghi file JSON atomically (temp file + rename) mỗi khi map thay đổi, nạp lại khi khởi động. Có
+   test end-to-end thật (`TestRelayerDaemon_UnrelayedBatchSurvivesProcessRestart`): daemon A ghi 1
+   batch dở dang xuống đĩa rồi "chết"; daemon B — **không cấu hình RPC chain nguồn** — nạp lại từ
+   đĩa và relay thành công thuần qua đường retry, chứng minh không cần quay lại
+   `getPendingOutboundCount`/`batchOutboundCommit`.
+
+Điểm nhỏ không sửa (không phải bug, chỉ là mô tả PR hơi rộng hơn diff thật): mục "self-healing
+nonce" trong mô tả PR không có diff tương ứng trong `daemon.go` — cơ chế "xóa cache nonce khi lỗi,
+dò lại ở lượt sau" vốn đã có sẵn từ trước PR này, không phải code mới.
