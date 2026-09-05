@@ -350,24 +350,6 @@ func (d *RelayerDaemon) sendToChain(ctx context.Context, chainID uint64, calldat
 		d.nonceMu.Lock()
 		delete(d.nonces, chainID)
 		d.nonceMu.Unlock()
-
-		// If invalid nonce error (e.g. after chain restart or concurrent submission), retry once with fresh pending nonce
-		if strings.Contains(errLower, "invalid nonce") || strings.Contains(errLower, "nonce too low") || strings.Contains(errLower, "nonce too high") {
-			if freshNonce, errNonce := client.GetPendingTransactionCount(ctx, d.relayerAddr); errNonce == nil {
-				txData.Nonce = freshNonce
-				if signedRetryTx, errSign := ethtypes.SignTx(ethtypes.NewTx(txData), signer, d.relayerKey); errSign == nil {
-					if retryBytes, errMarshal := signedRetryTx.MarshalBinary(); errMarshal == nil {
-						if retryHash, errRetry := client.SendRawTransaction(ctx, hexutil.Encode(retryBytes)); errRetry == nil {
-							d.nonceMu.Lock()
-							d.nonces[chainID] = freshNonce + 1
-							d.nonceMu.Unlock()
-							return retryHash, nil
-						}
-					}
-				}
-			}
-		}
-
 		return common.Hash{}, err
 	}
 	return txHash, nil
@@ -940,7 +922,7 @@ func DecodeRevertReason(raw []byte) string {
 	// If printable ASCII, return as string
 	isPrintable := true
 	for _, b := range data {
-		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+		if (b < 32 || b > 126) && b != '\n' && b != '\r' && b != '\t' {
 			isPrintable = false
 			break
 		}
