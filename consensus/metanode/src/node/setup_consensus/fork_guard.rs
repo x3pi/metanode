@@ -177,11 +177,44 @@ impl ConsensusNode {
                                         next_check_block
                                     );
                                     is_terminally_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    // FOUND LIVE (2026-09-05): std::process::exit() calls libc's
+                                    // exit() -- which, unlike _exit()/abort(), runs every
+                                    // atexit()-registered handler and every linked C++ library's
+                                    // static-object destructor (via __cxa_atexit) before actually
+                                    // terminating. This binary statically links several nontrivial
+                                    // C/C++ libraries (Xapian, the custom MVM/EVM linker, NOMT's
+                                    // FFI) -- reproduced live, twice, on two different builds (one
+                                    // with an unrelated unrelated change, one on a clean revert of
+                                    // it, ruling out that change as the cause): this exact log line
+                                    // printed, "Calling std::process::exit(1)" logged immediately
+                                    // after, and the OS process (verified by exact PID + `ps
+                                    // -o lstart`, not a race) kept running for 46+ seconds
+                                    // afterward -- i.e. it hung *inside* exit(), most likely stuck
+                                    // in one of those handlers, never actually terminating. This
+                                    // silently defeats the entire safety mechanism: a node that
+                                    // detects a confirmed fork keeps running (and could keep
+                                    // participating in consensus with state already judged
+                                    // divergent) instead of halting.
+                                    //
+                                    // Fixed by calling abort() instead: it raises SIGABRT directly,
+                                    // skipping atexit()/__cxa_atexit entirely -- verified in
+                                    // isolation (a minimal thread::spawn + tokio::spawn + exit(1)
+                                    // repro terminated correctly in under 1s, so the hang is
+                                    // specific to this binary's real linked libraries, not to the
+                                    // exit()-from-a-tokio-task pattern itself). A clean shutdown
+                                    // doesn't matter here anyway -- state is already judged
+                                    // divergent, so running MORE code (even cleanup code) before
+                                    // dying is undesirable, not just unnecessary. Under systemd,
+                                    // `Restart=on-failure` restarts on an abnormal signal
+                                    // termination exactly the same as on a nonzero exit code, so
+                                    // this doesn't change the "FFI restart loop" recovery story at
+                                    // all -- only makes the halt itself actually happen.
                                     tracing::error!(
-                                        "🛑 [LAYER-6] Calling std::process::exit(1) to halt node. \
+                                        "🛑 [LAYER-6] Calling std::process::abort() to halt node \
+                                         (skips atexit handlers that can hang -- see comment above). \
                                          FFI restart loop will trigger STARTUP-SYNC resync."
                                     );
-                                    std::process::exit(1);
+                                    std::process::abort();
                                 } else {
                                     consecutive_failures = 0;
                                 }
