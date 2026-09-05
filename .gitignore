@@ -541,3 +541,5 @@ execution/cmd/tool/zero_balance_check/
 
 # Generated local devnet cluster (data dirs, keys, logs) — never commit private keys
 deploy/cluster/
+
+deploy/private_chain_kit
