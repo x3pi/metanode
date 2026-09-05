@@ -95,6 +95,33 @@ func fireMessageFailedCallback(engine *cross_chain.GatewayEngine, msg cross_chai
 	MessageFailedCallback(msg.SourceChainID, engine.LocalChainID, msg.MessageID, registry.Epoch)
 }
 
+// MessageSucceededCallback, if set, is invoked synchronously by the claimMessage/verifyAndExecute
+// cases whenever THIS node just settled a message as MessageStatusSuccess with real Value > 0 --
+// mirror image of MessageFailedCallback (2026-09-05 fix for the "Cross-Chain Ledger Inflation via
+// Missing Reserve Refund" finding). Only fired for Value > 0 messages, since those are the only
+// ones CreditReserveAllocation is ever called for -- no point signing a success cert nobody will
+// ever aggregate. nil (the default) means this node isn't running a MessageSuccessAttestationWorker
+// -- the message still correctly settles as Success either way; this only affects whether a local
+// validator auto-signs a share enabling Reserve to credit it.
+var MessageSucceededCallback func(sourceChainID, destChainID uint64, messageID common.Hash, epoch uint64)
+
+// fireMessageSucceededCallback mirrors fireMessageFailedCallback exactly, for the success case.
+func fireMessageSucceededCallback(engine *cross_chain.GatewayEngine, msg cross_chain.CrossChainMessage) {
+	if MessageSucceededCallback == nil {
+		return
+	}
+	if msg.Value == nil || msg.Value.Sign() <= 0 {
+		return
+	}
+	registry, ok := engine.GetChainRegistryEntry(engine.LocalChainID)
+	if !ok {
+		logger.Warn("⚠️ [GATEWAY] MessageSucceededCallback skipped for %s: chain %d has no own ChainRegistry entry to read its current epoch from", msg.MessageID.Hex(), engine.LocalChainID)
+		return
+	}
+	logger.Info("📢 [GATEWAY] MessageSucceededCallback firing for message=%s, sourceChain=%d, destChain=%d, epoch=%d", msg.MessageID.Hex(), msg.SourceChainID, engine.LocalChainID, registry.Epoch)
+	MessageSucceededCallback(msg.SourceChainID, engine.LocalChainID, msg.MessageID, registry.Epoch)
+}
+
 // GetGatewayHandler returns the singleton GatewayHandler, parsing the ABI on first use.
 func GetGatewayHandler() (*GatewayHandler, error) {
 	var err error
@@ -188,6 +215,11 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	// 2026-09-05 field (finding #1 fix): nil after unmarshaling a blob written before it existed.
 	if engine.PendingMessageFailureAttestations == nil {
 		engine.PendingMessageFailureAttestations = make(map[string][]cross_chain.CommitAttestationShare)
+	}
+	// 2026-09-05 field ("Cross-Chain Ledger Inflation via Missing Reserve Refund" fix): nil after
+	// unmarshaling a blob written before it existed.
+	if engine.PendingMessageSuccessAttestations == nil {
+		engine.PendingMessageSuccessAttestations = make(map[string][]cross_chain.CommitAttestationShare)
 	}
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
@@ -562,7 +594,8 @@ func (h *GatewayHandler) HandleTransaction(
 		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
 		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
 		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
-		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation":
+		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation",
+		"refundReserveAllocation", "submitMessageSuccessAttestation":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -997,6 +1030,12 @@ func (h *GatewayHandler) handleWrite(
 			status = cross_chain.MessageStatusFailed
 			logger.Info("💥 [GATEWAY] claimMessage %s finalized as FAILED (destination payload reverted) -- refund on source chain now possible once a failure QuorumCert is aggregated", msg.MessageID.Hex())
 			fireMessageFailedCallback(engine, msg)
+		} else if !relayedOnward {
+			// relayedOnward messages don't actually settle real value HERE (it's forwarded to
+			// finalDestChainID via a brand-new outbound message instead) -- only a message that
+			// genuinely delivers Value on ITS OWN real destChainID should ever let Reserve credit
+			// this chain for holding it.
+			fireMessageSucceededCallback(engine, msg)
 		}
 
 		if event, ok := h.abi.Events["MessageStatusChanged"]; ok {
@@ -1036,7 +1075,55 @@ func (h *GatewayHandler) handleWrite(
 			Siblings:  mustHashSlice(args[14]),
 		}
 		commitRoot := mustHash(args[15])
-		if err := engine.CreditReserveAllocation(msg, proof, commitRoot); err != nil {
+		// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve Refund"):
+		// crediting Reserve's ledger now requires a real success QuorumCert signed by
+		// destChainId's OWN registered committee -- see CreditReserveAllocation's doc comment.
+		successCert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[16]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
+		}
+		if err := engine.CreditReserveAllocation(msg, proof, commitRoot, successCert); err != nil {
+			return nil, nil, err
+		}
+
+	case "refundReserveAllocation":
+		// mục 2.4 / "Cross-Chain Ledger Inflation via Missing Reserve Refund" fix: the Reserve-side
+		// counterpart of Refund() -- reverses CreditReserveAllocation's credit to destChainId (if
+		// it happened) and queues a real outbound refund message back to sourceChainId, using the
+		// SAME failure-cert digest/verification as Refund() itself.
+		msg := cross_chain.CrossChainMessage{
+			MessageID:     mustHash(args[0]),
+			SourceChainID: mustUint64(args[1]),
+			DestChainID:   mustUint64(args[2]),
+			Sequence:      mustUint64(args[3]),
+			HopCount:      mustUint8(args[4]),
+			Sender:        mustAddress(args[5]),
+			Target:        mustAddress(args[6]),
+			AssetID:       mustBigInt(args[7]),
+			Value:         mustBigInt(args[8]),
+			Payload:       mustBytes(args[9]),
+			Tip:           mustBigInt(args[10]),
+			GasFee:        mustBigInt(args[11]),
+			Ordered:       mustBool(args[12]),
+		}
+		proof := cross_chain.MerkleProof{
+			LeafIndex: mustBigInt(args[13]).Uint64(),
+			Siblings:  mustHashSlice(args[14]),
+		}
+		commitRoot := mustHash(args[15])
+
+		// FIX (2026-09-05): this used to skip the epoch field entirely (going straight from
+		// commitRoot to AggregateSignature/SignerBitmap), leaving destFailureCert.Epoch always 0
+		// and silently defeating the epoch-alignment check RefundReserveAllocation now performs --
+		// same 19-arg layout as refund()'s own failure-cert tail.
+		destFailureCert := cross_chain.QuorumCert{
+			Epoch:              mustUint64(args[16]),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
+		}
+
+		if err := engine.RefundReserveAllocation(msg, proof, commitRoot, destFailureCert, tx.Hash()); err != nil {
 			return nil, nil, err
 		}
 
@@ -1294,6 +1381,51 @@ func (h *GatewayHandler) handleWrite(
 			Signature:       signature,
 		}); err != nil {
 			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: %w", err)
+		}
+
+	case "submitMessageSuccessAttestation":
+		// Mirror image of submitMessageFailureAttestation, for the "Cross-Chain Ledger Inflation
+		// via Missing Reserve Refund" fix: CreditReserveAllocation now requires a real success
+		// cert signed by destChainId's own committee before Reserve's ledger can be credited --
+		// this is the production pipeline for validators to produce that cert (see
+		// MessageSucceededCallback's wiring for how a validator decides to sign this, only ever
+		// after its own local claimMessage/verifyAndExecute execution actually succeeded).
+		destChainID := mustUint64(args[0])
+		messageID := mustHash(args[1])
+		epoch := mustUint64(args[2])
+		signerPubkeyBls := mustBytes(args[3])
+		signature := mustBytes(args[4])
+
+		registry, exists := engine.GetChainRegistryEntry(destChainID)
+		if !exists {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: %w: chain %d", cross_chain.ErrUnknownSourceChain, destChainID)
+		}
+		if epoch != registry.Epoch {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: %w: expected %d, got %d", cross_chain.ErrEpochMismatch, registry.Epoch, epoch)
+		}
+		isMember := false
+		for _, v := range registry.Committee {
+			if bytes.Equal(v.PubkeyBLS, signerPubkeyBls) {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: signer is not a member of chain %d's current committee", destChainID)
+		}
+		successDigest := cross_chain.ComputeMessageSuccessAttestMessage(messageID, destChainID)
+		pubKey := mt_common.PubkeyFromBytes(signerPubkeyBls)
+		sig := mt_common.SignFromBytes(signature)
+		if !bls.VerifySign(pubKey, sig, successDigest) {
+			return nil, nil, cross_chain.ErrInvalidBLSSignature
+		}
+
+		successKey := messageSuccessAttestationKey(destChainID, messageID, epoch)
+		if err := engine.AddPendingMessageSuccessAttestationShare(successKey, cross_chain.CommitAttestationShare{
+			SignerPubkeyBLS: signerPubkeyBls,
+			Signature:       signature,
+		}); err != nil {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: %w", err)
 		}
 
 	case "committeeUpdate":
@@ -1753,6 +1885,8 @@ func (h *GatewayHandler) handleWrite(
 			status = cross_chain.MessageStatusFailed
 			logger.Info("💥 [GATEWAY] verifyAndExecute %s finalized as FAILED (destination payload reverted) -- refund on source chain now possible once a failure QuorumCert is aggregated", msg.MessageID.Hex())
 			fireMessageFailedCallback(engine, msg)
+		} else {
+			fireMessageSucceededCallback(engine, msg)
 		}
 
 		// Pack failure is intentionally non-fatal here (unlike an ordinary early-return
@@ -1980,6 +2114,26 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		return method.Outputs.Pack(pubkeys, signatures)
 
+	case "getMessageSuccessAttestationShares":
+		// Mirror image of getMessageFailureAttestationShares, for the "Cross-Chain Ledger
+		// Inflation via Missing Reserve Refund" fix.
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getMessageSuccessAttestationShares input: %w", err)
+		}
+		destChainID := mustUint64(args[0])
+		messageID := mustHash(args[1])
+		epoch := mustUint64(args[2])
+
+		shares := engine.GetPendingMessageSuccessAttestationShares(messageSuccessAttestationKey(destChainID, messageID, epoch))
+		pubkeys := make([][]byte, len(shares))
+		signatures := make([][]byte, len(shares))
+		for i, s := range shares {
+			pubkeys[i] = s.SignerPubkeyBLS
+			signatures[i] = s.Signature
+		}
+		return method.Outputs.Pack(pubkeys, signatures)
+
 	case "getAsset":
 		args, err := method.Inputs.Unpack(argData)
 		if err != nil {
@@ -2053,6 +2207,13 @@ func commitAttestationKey(sourceChainID, epoch uint64, commitRoot common.Hash) s
 // GatewayEngine.PendingMessageFailureAttestations is keyed by this string (mục 2.4 point 2,
 // 2026-09-05 fix for finding #1).
 func messageFailureAttestationKey(destChainID uint64, messageID common.Hash, epoch uint64) string {
+	return fmt.Sprintf("%d:%s:%d", destChainID, messageID.Hex(), epoch)
+}
+
+// messageSuccessAttestationKey identifies one in-progress message-success share collection --
+// mirror image of messageFailureAttestationKey (2026-09-05 fix for the "Cross-Chain Ledger
+// Inflation via Missing Reserve Refund" finding).
+func messageSuccessAttestationKey(destChainID uint64, messageID common.Hash, epoch uint64) string {
 	return fmt.Sprintf("%d:%s:%d", destChainID, messageID.Hex(), epoch)
 }
 

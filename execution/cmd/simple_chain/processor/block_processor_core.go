@@ -138,6 +138,14 @@ type BlockProcessor struct {
 	// message as Failed (mục 2.4 point 2's missing failure-attestation production pipeline).
 	messageFailureAttestationWorker *tx_processor.MessageFailureAttestationWorker
 
+	// messageSuccessAttestationWorker (2026-09-05 fix for the "Cross-Chain Ledger Inflation via
+	// Missing Reserve Refund" finding, same enable condition as the workers above) — its
+	// OnMessageSucceeded is wired synchronously into tx_processor.MessageSucceededCallback,
+	// invoked directly from gateway_handler.go's claimMessage/verifyAndExecute cases whenever
+	// this node settles a message as Success with real Value -- the success-confirmation cert
+	// CreditReserveAllocation now requires before Reserve's ledger may be credited.
+	messageSuccessAttestationWorker *tx_processor.MessageSuccessAttestationWorker
+
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
 
@@ -751,6 +759,23 @@ func NewBlockProcessor(
 				)
 				go bp.messageFailureAttestationWorker.Run(context.Background())
 				tx_processor.MessageFailedCallback = bp.messageFailureAttestationWorker.OnMessageFailed
+
+				// MESSAGE SUCCESS ATTESTATION WORKER (2026-09-05 fix for the "Cross-Chain Ledger
+				// Inflation via Missing Reserve Refund" finding): real multi-validator BLS
+				// quorum-cert production for messages this chain settles as Success -- without a
+				// real cert here, GatewayEngine.CreditReserveAllocation() could be called by
+				// ANYONE regardless of whether the message actually succeeded, inflating
+				// Reserve's ledger for value that never landed anywhere. Same trigger pattern as
+				// the workers above.
+				bp.messageSuccessAttestationWorker = tx_processor.NewMessageSuccessAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.messageSuccessAttestationWorker.Run(context.Background())
+				tx_processor.MessageSucceededCallback = bp.messageSuccessAttestationWorker.OnMessageSucceeded
 			} else {
 				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
 			}

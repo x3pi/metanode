@@ -235,10 +235,10 @@ func TestGatewayHandler_RegisterChainViaStake_ForcesGenesisWalletToRealCaller(t 
 	kp := bls.GenerateKeyPair()
 	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
 	reg := cross_chain.ChainRegistry{
-		ChainID:       104,
-		Committee:     []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()}},
+		ChainID:         104,
+		Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 1000, PopSignature: popSig.Bytes()}},
 		QuorumThreshold: 6667,
-		GenesisWallet: impersonated,
+		GenesisWallet:   impersonated,
 	}
 	payload, err := json.Marshal(reg)
 	require.NoError(t, err)

@@ -391,6 +391,20 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
+	// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve Refund"):
+	// CreditReserveAllocation now requires a real success QuorumCert signed by destChainID's OWN
+	// registered committee -- register chain 103 (the message's DestChainID) with its own
+	// committee key here, distinct from chain 101's (kp), so the success cert below is a genuine
+	// cross-chain BLS attestation, not a same-key coincidence.
+	kp103 := bls.GenerateKeyPair()
+	pop103 := PopSign(kp103.PrivateKey(), kp103.PublicKey())
+	engine.ChainRegistry[103] = ChainRegistry{
+		ChainID:         103,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 10000, PopSignature: pop103.Bytes()}},
+		Epoch:           7,
+		QuorumThreshold: 6667,
+	}
+
 	msg := CrossChainMessage{
 		MessageID:     common.HexToHash("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
 		SourceChainID: 101,
@@ -425,24 +439,55 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 
 	assert.Equal(t, big.NewInt(0), engine.SupplyLedger.GetAllocation(103))
 
+	// Real success cert: chain 103's own committee attesting messageID succeeded on IT.
+	successDigest := ComputeMessageSuccessAttestMessage(msg.MessageID, 103)
+	successSig := bls.Sign(kp103.PrivateKey(), successDigest)
+	successCert := QuorumCert{Epoch: 7, AggregateSignature: successSig.Bytes(), SignerBitmap: []byte{0x01}}
+
 	// Step 3 (this test's actual subject): destination credit, on Reserve -- deliberately called
 	// BEFORE any local claim on chain 103 would happen in the real 2-hop flow, since Reserve does
 	// not depend on or wait for that separate node's own state.
-	errCredit := engine.CreditReserveAllocation(msg, proof, commitRoot)
+	errCredit := engine.CreditReserveAllocation(msg, proof, commitRoot, successCert)
 	require.NoError(t, errCredit)
 	assert.Equal(t, big.NewInt(500), engine.SupplyLedger.GetAllocation(103))
 	// Source side must be untouched by the credit step (only the debit above touches it).
 	assert.Equal(t, preCreditSourceAlloc, engine.SupplyLedger.GetAllocation(101))
 
 	// Idempotent: a second call (retry / second relayer) must NOT double-credit.
-	errCreditAgain := engine.CreditReserveAllocation(msg, proof, commitRoot)
+	errCreditAgain := engine.CreditReserveAllocation(msg, proof, commitRoot, successCert)
 	require.NoError(t, errCreditAgain)
 	assert.Equal(t, big.NewInt(500), engine.SupplyLedger.GetAllocation(103))
+
+	// A FORGED success cert (wrong key) must be rejected, not silently credited -- this is the
+	// exact vulnerability this fix closes: crediting must be impossible without destChainID's
+	// real committee having actually signed off.
+	forgedEngine, kpForged := setupTestGatewayEngine()
+	forgedEngine.ChainRegistry[103] = engine.ChainRegistry[103]
+	forgedMsg := msg
+	forgedMsg.MessageID = common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+	forgedCommitRoot, forgedLayers, forgedAggAmounts, forgedAggIndex, errForgedTree := BuildCommitTree([]CrossChainMessage{forgedMsg})
+	require.NoError(t, errForgedTree)
+	forgedProof := GetMerkleProof(forgedLayers, 0)
+	forgedAggregateProof := GetMerkleProof(forgedLayers, forgedAggIndex["0"])
+	forgedCommitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), forgedCommitRoot.Bytes()...)
+	// forgedEngine is a FRESH setupTestGatewayEngine() call -- its own chain 101 committee key
+	// (kpForged) is a newly-generated keypair, distinct from the outer test's `kp`.
+	forgedSig := bls.Sign(kpForged.PrivateKey(), forgedCommitMsg)
+	_, errForgedAttest := forgedEngine.AttestCommit(101, forgedCommitRoot, forgedAggAmounts["0"], big.NewInt(0), forgedAggregateProof,
+		QuorumCert{Epoch: 5, AggregateSignature: forgedSig.Bytes(), SignerBitmap: []byte{0x0F}})
+	require.NoError(t, errForgedAttest)
+	rogueKey := bls.GenerateKeyPair() // NOT chain 103's registered committee key
+	forgedSuccessDigest := ComputeMessageSuccessAttestMessage(forgedMsg.MessageID, 103)
+	forgedSuccessSig := bls.Sign(rogueKey.PrivateKey(), forgedSuccessDigest)
+	forgedSuccessCert := QuorumCert{Epoch: 7, AggregateSignature: forgedSuccessSig.Bytes(), SignerBitmap: []byte{0x01}}
+	errForgedCredit := forgedEngine.CreditReserveAllocation(forgedMsg, forgedProof, forgedCommitRoot, forgedSuccessCert)
+	assert.Error(t, errForgedCredit, "a success cert not actually signed by destChainID's registered committee must be rejected")
+	assert.Equal(t, big.NewInt(0), forgedEngine.SupplyLedger.GetAllocation(103), "no credit must land without a genuine success cert")
 
 	// Fails closed off Reserve's own node.
 	nonReserveEngine, _ := setupTestGatewayEngine()
 	nonReserveEngine.ReserveChainID = 999 // this engine is chain 102, but Reserve is configured as 999
-	errWrongNode := nonReserveEngine.CreditReserveAllocation(msg, proof, commitRoot)
+	errWrongNode := nonReserveEngine.CreditReserveAllocation(msg, proof, commitRoot, successCert)
 	assert.ErrorIs(t, errWrongNode, ErrNonReserveCeilingAttestation)
 
 	// Invalid Merkle proof must be rejected, not silently credited.
@@ -457,9 +502,105 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 	_, errBadAttest := badEngine.AttestCommit(101, badCommitRoot, badAggAmounts["0"], big.NewInt(0), badAggregateProof, badCert)
 	require.NoError(t, errBadAttest)
 	wrongProof := MerkleProof{LeafIndex: 0, Siblings: []common.Hash{common.HexToHash("0xFF")}}
-	errBadProof := badEngine.CreditReserveAllocation(badMsg, wrongProof, badCommitRoot)
+	errBadProof := badEngine.CreditReserveAllocation(badMsg, wrongProof, badCommitRoot, successCert)
 	assert.ErrorIs(t, errBadProof, ErrInvalidMerkleProof)
 	assert.Equal(t, big.NewInt(0), badEngine.SupplyLedger.GetAllocation(103))
+}
+
+// TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund is the regression test for the
+// "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding
+// (note/cross_chain/security_audit_findings.md): in a 2-hop A -> Reserve -> B route, AttestCommit
+// debits A's Reserve allocation and CreditReserveAllocation credits B's -- but if the message then
+// fails on B and gets refunded on A via Refund(), nothing used to reverse B's Reserve-side credit
+// (permanently inflating B's allocation with no real value ever having landed there) nor generate
+// a real refund message back to A from Reserve's own side. RefundReserveAllocation closes this:
+// called on Reserve with a real failure cert, it reverses any CreditReserveAllocation that already
+// happened and queues a real outbound refund message back to the source chain.
+func TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	sender := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	target := common.HexToAddress("0x4444444444444444444444444444444444444444")
+
+	kp103 := bls.GenerateKeyPair()
+	pop103 := PopSign(kp103.PrivateKey(), kp103.PublicKey())
+	engine.ChainRegistry[103] = ChainRegistry{
+		ChainID:         103,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 10000, PopSignature: pop103.Bytes()}},
+		Epoch:           7,
+		QuorumThreshold: 6667,
+	}
+
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0x5555555555555555555555555555555555555555555555555555555555555555"),
+		SourceChainID: 101,
+		DestChainID:   103,
+		Sender:        sender,
+		Target:        target,
+		Payload:       []byte{},
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(300),
+		Sequence:      1,
+		Tip:           big.NewInt(0),
+		HopCount:      1,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	sig := bls.Sign(kp.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...))
+	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	require.NoError(t, errAttest)
+
+	// Simulate an OPTIMISTIC credit that already happened (e.g. a relayer credited B before a
+	// later Byzantine-committee-equivocation or race surfaced a genuine failure cert too).
+	successDigest := ComputeMessageSuccessAttestMessage(msg.MessageID, 103)
+	successSig := bls.Sign(kp103.PrivateKey(), successDigest)
+	successCert := QuorumCert{Epoch: 7, AggregateSignature: successSig.Bytes(), SignerBitmap: []byte{0x01}}
+	require.NoError(t, engine.CreditReserveAllocation(msg, proof, commitRoot, successCert))
+	require.Equal(t, big.NewInt(300), engine.SupplyLedger.GetAllocation(103))
+
+	// Epoch mismatch must be rejected (FIX: this check was entirely missing before).
+	failDigest := ComputeMessageFailureAttestMessage(msg.MessageID, 103)
+	failSig := bls.Sign(kp103.PrivateKey(), failDigest)
+	staleFailCert := QuorumCert{Epoch: 999, AggregateSignature: failSig.Bytes(), SignerBitmap: []byte{0x01}}
+	errStaleEpoch := engine.RefundReserveAllocation(msg, proof, commitRoot, staleFailCert, common.HexToHash("0xAAAA"))
+	assert.ErrorIs(t, errStaleEpoch, ErrEpochMismatch)
+	assert.Equal(t, big.NewInt(300), engine.SupplyLedger.GetAllocation(103), "a rejected refund attempt must not touch the ledger")
+
+	// A forged failure cert (wrong key) must be rejected.
+	rogueKey := bls.GenerateKeyPair()
+	forgedFailSig := bls.Sign(rogueKey.PrivateKey(), failDigest)
+	forgedFailCert := QuorumCert{Epoch: 7, AggregateSignature: forgedFailSig.Bytes(), SignerBitmap: []byte{0x01}}
+	errForgedFail := engine.RefundReserveAllocation(msg, proof, commitRoot, forgedFailCert, common.HexToHash("0xBBBB"))
+	assert.Error(t, errForgedFail)
+	assert.Equal(t, big.NewInt(300), engine.SupplyLedger.GetAllocation(103))
+
+	// A genuine failure cert must reverse the credit and queue a real refund message to A.
+	genuineFailCert := QuorumCert{Epoch: 7, AggregateSignature: failSig.Bytes(), SignerBitmap: []byte{0x01}}
+	refundTxHash := common.HexToHash("0xCCCC")
+	require.NoError(t, engine.RefundReserveAllocation(msg, proof, commitRoot, genuineFailCert, refundTxHash))
+	assert.Zero(t, engine.SupplyLedger.GetAllocation(103).Sign(), "B's Reserve-side credit must be fully reversed")
+	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msg.MessageID))
+
+	pending := engine.PendingOutboundMessages[101]
+	require.Len(t, pending, 1, "a real refund message back to the source chain must be queued")
+	assert.Equal(t, refundTxHash, pending[0].MessageID)
+	assert.Equal(t, sender, pending[0].Target, "refund must credit the ORIGINAL sender")
+	assert.Equal(t, big.NewInt(300), pending[0].Value)
+	assert.Equal(t, uint64(102), pending[0].SourceChainID, "the refund message originates from Reserve itself (chain 102), standing in for the dead leg")
+
+	// Double-refund must be rejected.
+	errDoubleRefund := engine.RefundReserveAllocation(msg, proof, commitRoot, genuineFailCert, common.HexToHash("0xDDDD"))
+	assert.Error(t, errDoubleRefund)
+
+	// Must fail closed off Reserve's own node.
+	nonReserveEngine, _ := setupTestGatewayEngine()
+	nonReserveEngine.ReserveChainID = 999
+	errWrongNode := nonReserveEngine.RefundReserveAllocation(msg, proof, commitRoot, genuineFailCert, common.HexToHash("0xEEEE"))
+	assert.Error(t, errWrongNode)
 }
 
 func TestGateway_P2_4_RefundPathwayAndSupplyRestoration(t *testing.T) {
@@ -721,8 +862,8 @@ func TestGateway_UpdateCommitteeWithRecoveryCert_Lifecycle(t *testing.T) {
 	}
 
 	payloadObj := UpdateCommitteePayload{
-		ChainID:         101,
-		NewEpoch:        6, // must be > setupTestGatewayEngine's fixture epoch (5) -- see the
+		ChainID:  101,
+		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5) -- see the
 		// epoch-monotonicity SECURITY FIX on UpdateCommitteeWithRecoveryCert (2026-09-04)
 		NewCommittee:    newCommittee,
 		QuorumThreshold: 6700,
@@ -759,8 +900,8 @@ func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsInvalidPoP(t *testing.T)
 	}
 
 	payloadObj := UpdateCommitteePayload{
-		ChainID:      101,
-		NewEpoch:     6, // must be > setupTestGatewayEngine's fixture epoch (5), else the epoch
+		ChainID:  101,
+		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5), else the epoch
 		// check rejects this first -- this test is specifically about PoP rejection
 		NewCommittee: newCommittee,
 	}
@@ -812,8 +953,8 @@ func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsSubBftQuorumThreshold(t 
 
 	// 3334 basis points = 33.34% -- well under the 2/3 BFT floor (6667).
 	payloadObj := UpdateCommitteePayload{
-		ChainID:         101,
-		NewEpoch:        6, // must be > setupTestGatewayEngine's fixture epoch (5) -- this test is
+		ChainID:  101,
+		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5) -- this test is
 		// specifically about QuorumThreshold rejection
 		NewCommittee:    newCommittee,
 		QuorumThreshold: 3334,

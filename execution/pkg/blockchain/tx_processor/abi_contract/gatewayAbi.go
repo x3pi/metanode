@@ -163,9 +163,39 @@ const GatewayABI = `[
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
 			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
-			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint64", "name": "successEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "successAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "successSignerBitmap", "type": "bytes"}
 		],
 		"name": "creditReserveAllocation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "sequence", "type": "uint256"},
+			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
+			{"internalType": "address", "name": "sender", "type": "address"},
+			{"internalType": "address", "name": "target", "type": "address"},
+			{"internalType": "uint256", "name": "assetId", "type": "uint256"},
+			{"internalType": "uint256", "name": "value", "type": "uint256"},
+			{"internalType": "bytes", "name": "payload", "type": "bytes"},
+			{"internalType": "uint256", "name": "tip", "type": "uint256"},
+			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
+			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
+			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
+			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"internalType": "uint64", "name": "failEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "failAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "failSignerBitmap", "type": "bytes"}
+		],
+		"name": "refundReserveAllocation",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
@@ -357,6 +387,33 @@ const GatewayABI = `[
 			{"internalType": "uint64", "name": "epoch", "type": "uint64"}
 		],
 		"name": "getMessageFailureAttestationShares",
+		"outputs": [
+			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
+			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
+			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+		],
+		"name": "submitMessageSuccessAttestation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "destChainId", "type": "uint256"},
+			{"internalType": "bytes32", "name": "messageId", "type": "bytes32"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"}
+		],
+		"name": "getMessageSuccessAttestationShares",
 		"outputs": [
 			{"internalType": "bytes[]", "name": "pubkeys", "type": "bytes[]"},
 			{"internalType": "bytes[]", "name": "signatures", "type": "bytes[]"}

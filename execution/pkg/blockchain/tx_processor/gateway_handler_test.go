@@ -639,6 +639,159 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 	assert.Equal(t, big.NewInt(500), asAfterRefund.Balance(), "expected sender balance fully restored to 500 (Value AND Tip both refunded)")
 }
 
+// TestGatewayHandler_CreditAndRefundReserveAllocation is the real-ABI-dispatch regression test for
+// the "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding
+// (note/cross_chain/security_audit_findings.md): exercises creditReserveAllocation's new
+// success-cert requirement AND refundReserveAllocation end-to-end through h.HandleTransaction --
+// exactly the dispatch layer where the original patch under review had 3 real wiring bugs (no ABI
+// entry for refundReserveAllocation, not in the write-method dispatch list, and a missing epoch
+// field silently shifting every arg after it). A pure Go-level unit test would never have caught
+// any of the three; only exercising the real ABI pack/unpack/dispatch path does.
+func TestGatewayHandler_CreditAndRefundReserveAllocation(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp103 := bls.GenerateKeyPair()
+	pop103 := cross_chain.PopSign(kp103.PrivateKey(), kp103.PublicKey())
+
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.LocalChainID = 102 // this node IS Reserve
+	engine.ReserveChainID = 102
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Committee: []cross_chain.ValidatorEntry{}, Epoch: 1, QuorumThreshold: 6667},
+		103: {
+			ChainID:         103,
+			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 1000, PopSignature: pop103.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 103: big.NewInt(0)})
+	require.NoError(t, err)
+	engine.SupplyLedger = ledger
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	relayer := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	sender := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	target := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0xF001"),
+		SourceChainID: 101,
+		DestChainID:   103,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(400),
+		Payload:       []byte{},
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+	}
+	leafHash := cross_chain.ComputeMessageLeafHash(msg)
+	engine2, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine2.AttestedCommits[fmt.Sprintf("%d:%s:0", msg.SourceChainID, leafHash.Hex())] = cross_chain.AttestedCommit{
+		SourceChainID: 101, CommitRoot: leafHash, AssetID: big.NewInt(0), Epoch: 1,
+		FundedAmount: big.NewInt(400), ClaimedAmount: big.NewInt(0),
+	}
+	require.NoError(t, saveGatewayEngine(cs, engine2))
+
+	successDigest := cross_chain.ComputeMessageSuccessAttestMessage(msg.MessageID, 103)
+	successSig := bls.Sign(kp103.PrivateKey(), successDigest)
+
+	creditCalldata, err := h.abi.Pack("creditReserveAllocation",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash,
+		uint64(1), successSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	creditTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, creditCalldata))
+	rcpCredit, _, failedCredit := h.HandleTransaction(context.Background(), cs, creditTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedCredit {
+		reason := ""
+		if rcpCredit != nil {
+			reason = string(rcpCredit.Return())
+		}
+		t.Fatalf("creditReserveAllocation transaction failed: %q", reason)
+	}
+
+	engineAfterCredit, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(400), engineAfterCredit.SupplyLedger.GetAllocation(103), "real success cert must credit chain 103's Reserve allocation")
+
+	// Now refundReserveAllocation with a genuine failure cert must reverse it and queue a real
+	// refund message back to chain 101.
+	failDigest := cross_chain.ComputeMessageFailureAttestMessage(msg.MessageID, 103)
+	failSig := bls.Sign(kp103.PrivateKey(), failDigest)
+	refundCalldata, err := h.abi.Pack("refundReserveAllocation",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash,
+		uint64(1), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedRefund {
+		reason := ""
+		if rcpRefund != nil {
+			reason = string(rcpRefund.Return())
+		}
+		t.Fatalf("refundReserveAllocation transaction failed: %q", reason)
+	}
+
+	engineAfterRefund, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Zero(t, engineAfterRefund.SupplyLedger.GetAllocation(103).Sign(), "refundReserveAllocation must fully reverse the earlier credit")
+	assert.Equal(t, cross_chain.MessageStatusRefunded, engineAfterRefund.GetMessageStatus(msg.MessageID))
+	pending := engineAfterRefund.PendingOutboundMessages[101]
+	require.Len(t, pending, 1, "a real refund message back to chain 101 must be queued")
+	assert.Equal(t, sender, pending[0].Target)
+	assert.Equal(t, big.NewInt(400), pending[0].Value)
+
+	// A stale-epoch failure cert must be rejected (FIX: the epoch field/check was entirely
+	// missing in the version of this dispatch case under review) -- a FRESH message+attested
+	// commit so this genuinely isolates the epoch check, not an unrelated Merkle-proof or
+	// already-refunded rejection.
+	msg2 := msg
+	msg2.MessageID = common.HexToHash("0xF002")
+	msg2.Sequence = 2
+	leafHash2 := cross_chain.ComputeMessageLeafHash(msg2)
+	engine3, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine3.AttestedCommits[fmt.Sprintf("%d:%s:0", msg2.SourceChainID, leafHash2.Hex())] = cross_chain.AttestedCommit{
+		SourceChainID: 101, CommitRoot: leafHash2, AssetID: big.NewInt(0), Epoch: 1,
+		FundedAmount: big.NewInt(400), ClaimedAmount: big.NewInt(0),
+	}
+	require.NoError(t, saveGatewayEngine(cs, engine3))
+
+	staleFailDigest := cross_chain.ComputeMessageFailureAttestMessage(msg2.MessageID, 103)
+	staleFailSig := bls.Sign(kp103.PrivateKey(), staleFailDigest)
+	staleCalldata, err := h.abi.Pack("refundReserveAllocation",
+		msg2.MessageID, big.NewInt(int64(msg2.SourceChainID)), big.NewInt(int64(msg2.DestChainID)),
+		big.NewInt(int64(msg2.Sequence)), msg2.HopCount, msg2.Sender, msg2.Target,
+		msg2.AssetID, msg2.Value, msg2.Payload, msg2.Tip, msg2.GasFee, msg2.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash2,
+		uint64(999), staleFailSig.Bytes(), []byte{0x01}, // wrong epoch: registry is Epoch 1
+	)
+	require.NoError(t, err)
+	staleTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, staleCalldata))
+	rcpStale, _, failedStale := h.HandleTransaction(context.Background(), cs, staleTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failedStale {
+		t.Fatalf("expected refundReserveAllocation with a stale/wrong epoch to fail, but it succeeded")
+	}
+	if rcpStale != nil && !strings.Contains(string(rcpStale.Return()), "epoch") {
+		t.Fatalf("expected the rejection to specifically be an epoch mismatch, got: %q", string(rcpStale.Return()))
+	}
+}
+
 // TestGatewayHandler_GetChainRegistry covers Milestone B's read side of the Go↔Root Anchor RPC
 // channel: a remote chain reads this chain's ChainRegistry entry over eth_call. Exercises real
 // ABI pack/unpack, not just the Go struct, since execution/pkg/cross_chain/rootanchor's client

@@ -55,3 +55,40 @@ In `outbound`, `Value`, `GasFee`, and `Tip` are collectively burned from the sen
 **Đã vá:** thêm bước hoàn `Tip` về đúng `msg.Sender` trong case `"refund"`, giống hệt cách `GasFee`
 được hoàn. Test mới: `TestGatewayHandler_Refund_RestoresTip` (outbound Tip=15 → attest → refund,
 xác nhận số dư về đúng 100% ban đầu).
+
+## 3. Cross-Chain Ledger Inflation via Missing Reserve Refund — ✅ ĐÃ VÁ (2026-09-05)
+**Location:** `execution/pkg/cross_chain/gateway.go` (`CreditReserveAllocation`, `RefundReserveAllocation`)
+
+**Mô tả (do người dùng phát hiện):** trong luồng 2-hop A -> Reserve -> B, `attestCommit` trừ
+allocation của A trên Reserve, `creditReserveAllocation` cộng allocation cho B trên Reserve. Nếu
+message thất bại trên B và được hoàn qua `Refund()` trên A, không có hàm nào đảo ngược phần credit
+đã cộng cho B trên Reserve — allocation của B bị lạm phát vĩnh viễn, có thể dùng để "in" token thật
+ở chuỗi khác.
+
+**Kiểm chứng:** đúng là lúc phát hiện, code sửa đã có sẵn trong working tree (chưa commit) nhưng
+**chưa chạy được** — thiếu entry ABI cho `refundReserveAllocation`, thiếu trong danh sách dispatch
+write-method, và unpack calldata bỏ sót field `epoch` (làm lệch toàn bộ tham số phía sau, đồng thời
+mất luôn bước so khớp epoch chống replay). Đào sâu hơn phát hiện gốc rễ còn nặng hơn: **`CreditReserveAllocation`
+hoàn toàn không xác minh bằng chứng "message thực sự thành công"** — chỉ cần 1 Merkle proof khớp
+1 commit đã attest (chứng minh message được xếp hàng, không chứng minh đã giao thành công) — nghĩa
+là **bất kỳ ai** (không cần kiểm soát B) gọi được `creditReserveAllocation` đều có thể cộng khống
+allocation cho bất kỳ chain nào.
+
+**Đã vá triệt để (4 phần):**
+1. Sửa 3 lỗi wiring của patch gốc (thêm ABI, thêm vào dispatch list, sửa unpack thiếu `epoch` +
+   thêm bước so khớp epoch còn thiếu trong `RefundReserveAllocation`).
+2. `CreditReserveAllocation` giờ **bắt buộc một QuorumCert thành công thật**, ký bởi đúng committee
+   đã đăng ký của `destChainId` (đối xứng với `failCert` mà `Refund()`/`RefundReserveAllocation`
+   đã yêu cầu) — domain tag mới `MESSAGE_SUCCESS_ATTEST_V1:`.
+3. Pipeline production mới để tạo chứng chỉ thành công: `submitMessageSuccessAttestation`/
+   `getMessageSuccessAttestationShares` (ABI mirror của cặp failure), `MessageSuccessAttestationWorker`
+   mới (mirror `MessageFailureAttestationWorker`), trigger qua `MessageSucceededCallback` — validator
+   của chain đích tự ký ngay khi local execution của chính nó xác nhận Success (Value > 0).
+4. `RelayerDaemon` (daemon.go): trước khi gọi `creditReserveAllocation`, tự động gộp QuorumCert
+   thành công từ Root Anchor (`pollAndAggregateSuccessCert`) rồi mới gửi kèm.
+
+Test: `TestGateway_CreditReserveAllocation_2HopDestCredit` (cập nhật, thêm case cert giả mạo bị từ
+chối), `TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund` (mới — đảo ngược credit,
+phát sinh message hoàn tiền thật, chặn epoch cũ/cert giả/hoàn 2 lần),
+`TestGatewayHandler_CreditAndRefundReserveAllocation` (mới — xuyên qua đúng dispatch ABI thật, đúng
+tầng đã có lỗi wiring ban đầu).

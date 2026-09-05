@@ -123,6 +123,13 @@ type GatewayEngine struct {
 	// verifies instead of the success-confirmation cert AttestCommit() verifies. Cleared once the
 	// corresponding refund() succeeds (see ClearPendingMessageFailureAttestations).
 	PendingMessageFailureAttestations map[string][]CommitAttestationShare
+	// PendingMessageSuccessAttestations collects individual BLS signature shares attesting that a
+	// specific message SUCCEEDED on its destination chain (mirror image of
+	// PendingMessageFailureAttestations, 2026-09-05 fix for the "Cross-Chain Ledger Inflation via
+	// Missing Reserve Refund" finding), keyed by "destChainId:messageIdHex:epoch". Required before
+	// CreditReserveAllocation may credit Reserve's ledger -- closes the gap where anyone could
+	// previously credit Reserve for a message regardless of whether it actually succeeded.
+	PendingMessageSuccessAttestations map[string][]CommitAttestationShare
 
 	// PendingOutboundMessages queues real outbound() messages (their sender already validated
 	// and their Value/Tip/GasFee already burned/locked) not yet batched into a commit root for
@@ -250,6 +257,7 @@ func NewGatewayEngine(
 		PendingCommitteeAttestations:      make(map[string][]CommitteeAttestationShare),
 		PendingCommitAttestations:         make(map[string][]CommitAttestationShare),
 		PendingMessageFailureAttestations: make(map[string][]CommitAttestationShare),
+		PendingMessageSuccessAttestations: make(map[string][]CommitAttestationShare),
 		PendingOutboundMessages:           make(map[uint64][]CrossChainMessage),
 		CommittedBatches:                  make(map[common.Hash]CommittedOutboundBatch),
 		RegisteredPops:                    make(map[string][]byte),
@@ -968,6 +976,34 @@ func (g *GatewayEngine) GetPendingMessageFailureAttestationShares(key string) []
 	return res
 }
 
+// AddPendingMessageSuccessAttestationShare thread-safely adds a message-success attestation share
+// (mirror image of AddPendingMessageFailureAttestationShare, 2026-09-05 fix for the "Cross-Chain
+// Ledger Inflation via Missing Reserve Refund" finding).
+func (g *GatewayEngine) AddPendingMessageSuccessAttestationShare(key string, share CommitAttestationShare) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.PendingMessageSuccessAttestations == nil {
+		g.PendingMessageSuccessAttestations = make(map[string][]CommitAttestationShare)
+	}
+	for _, s := range g.PendingMessageSuccessAttestations[key] {
+		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
+			return fmt.Errorf("pubkey already submitted a share")
+		}
+	}
+	g.PendingMessageSuccessAttestations[key] = append(g.PendingMessageSuccessAttestations[key], share)
+	return nil
+}
+
+// GetPendingMessageSuccessAttestationShares thread-safely reads message-success attestation shares.
+func (g *GatewayEngine) GetPendingMessageSuccessAttestationShares(key string) []CommitAttestationShare {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	shares := g.PendingMessageSuccessAttestations[key]
+	res := make([]CommitAttestationShare, len(shares))
+	copy(res, shares)
+	return res
+}
+
 // CommittedOutboundBatch is the message set (and signing epoch) behind one commitRoot ever
 // produced by BatchOutboundCommit — see PendingOutboundMessages/CommittedBatches' doc comments.
 type CommittedOutboundBatch struct {
@@ -1417,6 +1453,7 @@ func (g *GatewayEngine) CreditReserveAllocation(
 	message CrossChainMessage,
 	proof MerkleProof,
 	commitRoot common.Hash,
+	successCert QuorumCert,
 ) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1441,6 +1478,9 @@ func (g *GatewayEngine) CreditReserveAllocation(
 		// Already credited by an earlier call (retry / second relayer) -- idempotent no-op.
 		return nil
 	}
+	if g.MessageStatus[message.MessageID] == MessageStatusRefunded {
+		return fmt.Errorf("message already refunded on reserve")
+	}
 
 	assetIdStr := "0"
 	if message.AssetID != nil {
@@ -1454,6 +1494,27 @@ func (g *GatewayEngine) CreditReserveAllocation(
 	leafHash := ComputeMessageLeafHash(message)
 	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
 		return ErrInvalidMerkleProof
+	}
+
+	// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve Refund"
+	// finding): the Merkle proof above only proves this message was QUEUED as part of an
+	// already-attested commit -- it says nothing about whether the message actually succeeded on
+	// its real destination. Without a real success attestation, ANY caller (not even destChainID's
+	// own validators) could credit Reserve's ledger for a message that genuinely failed or was
+	// never even attempted, inflating destChainID's allocation with no real value ever having
+	// landed there. Require a real QuorumCert over ComputeMessageSuccessAttestMessage, signed by
+	// destChainID's OWN registered committee -- the mirror image of RefundReserveAllocation's own
+	// failure-cert verification below, closing the credit/refund pair symmetrically.
+	destRegistry, hasDest := g.ChainRegistry[message.DestChainID]
+	if !hasDest {
+		return fmt.Errorf("%w: destination chain %d", ErrUnknownSourceChain, message.DestChainID)
+	}
+	if successCert.Epoch != destRegistry.Epoch {
+		return fmt.Errorf("%w: expected epoch %d, got %d", ErrEpochMismatch, destRegistry.Epoch, successCert.Epoch)
+	}
+	successDigest := ComputeMessageSuccessAttestMessage(message.MessageID, message.DestChainID)
+	if err := VerifyQuorumCertAgainstRegistry(destRegistry, successCert, successDigest); err != nil {
+		return fmt.Errorf("%w: destination success cert verification failed: %v", ErrInvalidRefundProof, err)
 	}
 
 	if g.SupplyLedger != nil {
@@ -1544,6 +1605,14 @@ func (g *GatewayEngine) Refund(
 		return fmt.Errorf("refund must be processed on source chain %d, got local chain %d", message.SourceChainID, g.LocalChainID)
 	}
 
+	// SECURITY FIX: 2-hop messages (A -> Reserve -> B) CANNOT bypass Reserve during Refund.
+	// If they did, DestChain's allocation on Reserve would remain artificially inflated, allowing
+	// cross-chain ledger inflation. Instead, the relayer MUST route the failure cert through Reserve
+	// via RefundReserveAllocation, which will naturally emit a cross-chain refund message back here.
+	if g.ReserveChainID != 0 && g.LocalChainID != g.ReserveChainID && message.DestChainID != g.ReserveChainID {
+		return fmt.Errorf("direct refund disabled for 2-hop messages: must route failure cert through Reserve chain")
+	}
+
 	// 2. Message status must be Pending (never resolved before)
 	status, exists := g.MessageStatus[message.MessageID]
 	if !exists {
@@ -1618,6 +1687,116 @@ func (g *GatewayEngine) Refund(
 		currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
 		g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}
+
+	return nil
+}
+
+// RefundReserveAllocation processes a destination chain failure cert on the Reserve chain.
+// It reverses the CreditReserveAllocation (if any) to decrement the destination chain,
+// and emits a standard cross-chain message back to the source chain to refund the user.
+// This prevents cross-chain ledger inflation where a malicious destination chain could
+// intentionally fail messages to inflate its own allocation on the Reserve chain.
+func (g *GatewayEngine) RefundReserveAllocation(
+	message CrossChainMessage,
+	proof MerkleProof,
+	commitRoot common.Hash,
+	destFailureCert QuorumCert,
+	txHash common.Hash,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.ReserveChainID == 0 || g.LocalChainID != g.ReserveChainID {
+		return fmt.Errorf("RefundReserveAllocation can only be called on the Reserve chain")
+	}
+
+	// 1. Verify message was attested on Reserve
+	assetIdStr := "0"
+	if message.AssetID != nil {
+		assetIdStr = message.AssetID.String()
+	}
+	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
+	if _, exists := g.AttestedCommits[key]; !exists {
+		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+	}
+
+	leafHash := ComputeMessageLeafHash(message)
+	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
+		return ErrInvalidMerkleProof
+	}
+
+	// 2. Prevent double-refund
+	if g.MessageStatus[message.MessageID] == MessageStatusRefunded {
+		return fmt.Errorf("message already refunded on reserve")
+	}
+
+	// 3. Verify destFailureCert from DestChainID
+	registry, exists := g.ChainRegistry[message.DestChainID]
+	if !exists {
+		return fmt.Errorf("unknown destination chain %d", message.DestChainID)
+	}
+	// FIX (2026-09-05): this epoch check was missing entirely -- without it, a failure cert
+	// signed by a PAST committee (e.g. one epoch destChainID has since rotated away from) would
+	// still verify as long as VerifyQuorumCertAgainstRegistry's stake/signature check against the
+	// CURRENT registry happened to pass, matching Refund()'s own identical epoch-alignment check
+	// for the exact same failure-cert digest (mục 5.3, fail-closed epoch alignment).
+	if destFailureCert.Epoch != registry.Epoch {
+		return fmt.Errorf("%w: expected epoch %d, got %d", ErrEpochMismatch, registry.Epoch, destFailureCert.Epoch)
+	}
+
+	digest := ComputeMessageFailureAttestMessage(message.MessageID, message.DestChainID)
+	if err := VerifyQuorumCertAgainstRegistry(registry, destFailureCert, digest[:]); err != nil {
+		return fmt.Errorf("destination failure cert verification failed: %v", err)
+	}
+
+	// 4. Update Reserve Ledger
+	if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 {
+		if g.ReserveCreditedMessages[message.MessageID] {
+			destAlloc := g.SupplyLedger.GetAllocation(message.DestChainID)
+			reverted := new(big.Int).Sub(destAlloc, message.Value)
+			if reverted.Sign() < 0 {
+				reverted = big.NewInt(0)
+			}
+			g.SupplyLedger.PerChainAllocation[message.DestChainID] = reverted
+		}
+	}
+
+	// Mark as refunded to prevent CreditReserveAllocation or double RefundReserveAllocation
+	g.MessageStatus[message.MessageID] = MessageStatusRefunded
+
+	// 5. Emit Outbound message back to SourceChainID to refund the user
+	seqKey := fmt.Sprintf("%d:%d", g.LocalChainID, message.SourceChainID)
+	seq := g.ChannelSequence[seqKey] + 1
+	g.ChannelSequence[seqKey] = seq
+
+	var payload []byte
+	if message.AssetID != nil && message.AssetID.Sign() > 0 {
+		payload = message.Sender.Bytes() // 20 bytes recipient address for custom asset
+	}
+
+	// Use txHash as the MessageID for the new cross-chain refund message
+	refundMsg := CrossChainMessage{
+		MessageID:     txHash,
+		SourceChainID: g.LocalChainID,
+		DestChainID:   message.SourceChainID,
+		Sender:        message.Sender, // doesn't strictly matter
+		Target:        message.Sender, // original sender receives the mint
+		Payload:       payload,
+		AssetID:       message.AssetID,
+		Value:         message.Value,
+		Sequence:      seq,
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+		HopCount:      1,
+		Ordered:       message.Ordered,
+	}
+
+	g.MessageStatus[txHash] = MessageStatusPending
+
+	if g.PendingOutboundMessages == nil {
+		g.PendingOutboundMessages = make(map[uint64][]CrossChainMessage)
+	}
+	g.PendingOutboundMessages[message.SourceChainID] = append(g.PendingOutboundMessages[message.SourceChainID], refundMsg)
 
 	return nil
 }

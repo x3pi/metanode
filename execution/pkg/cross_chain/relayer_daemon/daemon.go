@@ -700,22 +700,39 @@ func (d *RelayerDaemon) RelayBatch(
 		// safe (fails closed, never lets more value out than was ever really allocated) and can be
 		// resolved by re-running this same call later since it is idempotent.
 		if d.config.ReserveChainID != 0 && destChainID != d.config.ReserveChainID && msg.Value != nil && msg.Value.Sign() > 0 {
-			creditCalldata, err := d.abi.Pack("creditReserveAllocation",
-				msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
-				new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
-				msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
-				new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
-			)
-			if err != nil {
-				logger.Warn("⚠️ [RELAYER DAEMON] pack creditReserveAllocation for %s: %v", msg.MessageID.Hex(), err)
+			// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve
+			// Refund" finding): creditReserveAllocation now REQUIRES a real success QuorumCert
+			// signed by destChainID's own registered committee -- see
+			// GatewayEngine.CreditReserveAllocation's doc comment. Before this fix, this call
+			// carried no proof at all that the message actually succeeded; anyone could inflate
+			// Reserve's ledger for destChainID regardless of the real outcome.
+			destRegistry, existsDest, errDestReg := d.rootAnchorClient.GetChainRegistry(ctx, destChainID)
+			if errDestReg != nil || !existsDest || destRegistry == nil {
+				logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s: could not fetch chain %d registry: %v", msg.MessageID.Hex(), destChainID, errDestReg)
+			} else if successCert, errCert := d.pollAndAggregateSuccessCert(ctx, destChainID, msg.MessageID, destRegistry.Epoch); errCert != nil {
+				// Best-effort, fail-closed: Reserve's ledger simply stays un-credited until this
+				// succeeds (safe -- never lets more value out than was ever really allocated),
+				// resolvable by re-running this same call later since it is idempotent.
+				logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s: could not aggregate success cert (will not credit Reserve this tick): %v", msg.MessageID.Hex(), errCert)
 			} else {
-				creditReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, creditCalldata, 3_000_000)
+				creditCalldata, err := d.abi.Pack("creditReserveAllocation",
+					msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
+					new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
+					msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+					new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
+					successCert.Epoch, []byte(successCert.AggregateSignature), []byte(successCert.SignerBitmap),
+				)
 				if err != nil {
-					logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s failed to send: %v", msg.MessageID.Hex(), err)
-				} else if creditReceipt.Status != 1 {
-					logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(creditReceipt.Return))
+					logger.Warn("⚠️ [RELAYER DAEMON] pack creditReserveAllocation for %s: %v", msg.MessageID.Hex(), err)
 				} else {
-					logger.Info("💰 [RELAYER DAEMON] credited chain %d's allocation on Reserve for message %s", destChainID, msg.MessageID.Hex())
+					creditReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, creditCalldata, 3_000_000)
+					if err != nil {
+						logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s failed to send: %v", msg.MessageID.Hex(), err)
+					} else if creditReceipt.Status != 1 {
+						logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(creditReceipt.Return))
+					} else {
+						logger.Info("💰 [RELAYER DAEMON] credited chain %d's allocation on Reserve for message %s", destChainID, msg.MessageID.Hex())
+					}
 				}
 			}
 		}
@@ -813,6 +830,98 @@ func (d *RelayerDaemon) pollAndAggregateFailureCert(
 		}
 
 		pubkeys, sigs, err := d.rootAnchorClient.GetMessageFailureAttestationShares(ctx, destChainID, messageID, epoch)
+		if err == nil && len(pubkeys) > 0 {
+			var accumulatedStake uint64
+			var validPubkeys [][]byte
+			var validSigs [][]byte
+
+			for j := 0; j < len(pubkeys) && j < len(sigs); j++ {
+				pk := pubkeys[j]
+				sigBytes := sigs[j]
+				for _, v := range reg.Committee {
+					if bytes.Equal(v.PubkeyBLS, pk) {
+						accumulatedStake += v.Stake
+						validPubkeys = append(validPubkeys, pk)
+						validSigs = append(validSigs, sigBytes)
+						break
+					}
+				}
+			}
+
+			if accumulatedStake >= threshold && len(validSigs) > 0 {
+				var aggSig []byte
+				if len(validSigs) == 1 {
+					aggSig = validSigs[0]
+				} else {
+					aggSig = bls.CreateAggregateSign(validSigs)
+				}
+				bitmap := cross_chain.BuildSignerBitmap(reg.Committee, validPubkeys)
+				return &cross_chain.QuorumCert{
+					Epoch:              epoch,
+					AggregateSignature: aggSig,
+					SignerBitmap:       bitmap,
+				}, nil
+			}
+		}
+
+		select {
+		case <-time.After(d.config.PollInterval):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-d.stopCh:
+			return nil, fmt.Errorf("relayer daemon stopping")
+		}
+	}
+
+	return nil, fmt.Errorf("quorum not reached for chain %d message %s after %d polls", destChainID, messageID.Hex(), maxIterations)
+}
+
+// pollAndAggregateSuccessCert mirrors pollAndAggregateFailureCert exactly, polling for
+// getMessageSuccessAttestationShares instead -- the mirror-image cert
+// GatewayEngine.CreditReserveAllocation now requires (2026-09-05 fix, "Cross-Chain Ledger
+// Inflation via Missing Reserve Refund" finding).
+func (d *RelayerDaemon) pollAndAggregateSuccessCert(
+	ctx context.Context,
+	destChainID uint64,
+	messageID common.Hash,
+	epoch uint64,
+) (*cross_chain.QuorumCert, error) {
+	reg, exists, err := d.rootAnchorClient.GetChainRegistry(ctx, destChainID)
+	if err != nil {
+		return nil, fmt.Errorf("getChainRegistry from Root Anchor: %w", err)
+	}
+	if !exists || reg == nil {
+		return nil, fmt.Errorf("chain %d is not registered on Root Anchor", destChainID)
+	}
+
+	var totalStake uint64
+	for _, v := range reg.Committee {
+		totalStake += v.Stake
+	}
+	if totalStake == 0 {
+		return nil, fmt.Errorf("committee for chain %d has 0 total stake", destChainID)
+	}
+
+	threshold := (totalStake*2 + 2) / 3
+	if reg.QuorumThreshold > 0 {
+		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
+	}
+
+	maxIterations := d.config.MaxPollIterations
+	if d.config.PollInterval > 0 && time.Duration(maxIterations)*d.config.PollInterval < 20*time.Second {
+		maxIterations = int((20 * time.Second) / d.config.PollInterval)
+	}
+
+	for i := 0; i < maxIterations; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-d.stopCh:
+			return nil, fmt.Errorf("relayer daemon stopping")
+		default:
+		}
+
+		pubkeys, sigs, err := d.rootAnchorClient.GetMessageSuccessAttestationShares(ctx, destChainID, messageID, epoch)
 		if err == nil && len(pubkeys) > 0 {
 			var accumulatedStake uint64
 			var validPubkeys [][]byte
