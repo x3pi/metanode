@@ -1313,6 +1313,19 @@ func (g *GatewayEngine) ClaimMessage(
 		return MessageStatusPending, fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
 	}
 
+	// NOTE (2026-09-05, evaluated + rejected -- see note/cross_chain/security_audit_findings.md
+	// finding #8): a proposed patch folded Tip and GasFee into this hard-cap/PerChainAllocation
+	// accounting too, reasoning that they are "unbacked" native mints. Verified this is a false
+	// positive -- Tip and GasFee are ALREADY cryptographically bound to the per-message Merkle leaf
+	// (CanonicalEncodeMessage includes both fields explicitly, see its own doc comment), so a
+	// relayer can never claim a Tip/GasFee different from what the source chain's real, BLS-attested
+	// commit actually contains; nothing here can be "inflated." Folding them into aggregateAmount
+	// instead broke a real, load-bearing invariant: attestCommitInternal's C8 gate requires
+	// ReserveChainID whenever aggregateAmount > 0, which is supposed to exempt zero-Value "pure"
+	// CONTRACT_CALL messages (mục 2.2(a) of note/cross_chain_root_anchor_architecture.md) from ever
+	// needing Reserve at all -- virtually every real payload message carries a nonzero GasFee, so
+	// this made Reserve mandatory for direct A->B messaging network-wide. Reverted; kept only the
+	// genuinely-correct half of that patch (removing refund()'s double-refund of Tip/GasFee below).
 	// Hard-cap verification: ClaimedAmount + Value <= FundedAmount (Section 2.3.1)
 	if message.Value != nil && message.Value.Sign() > 0 {
 		newClaimed := new(big.Int).Add(attested.ClaimedAmount, message.Value)
@@ -1461,15 +1474,15 @@ func (g *GatewayEngine) FinalizeFailedAfterExecutionRevert(
 		g.SupplyLedger.PerChainAllocation[g.LocalChainID] = reverted
 	}
 
-	if message.Tip != nil && message.Tip.Sign() > 0 {
-		if currBal, ok := g.RelayerBalances[relayer]; ok && currBal != nil {
-			reverted := new(big.Int).Sub(currBal, message.Tip)
-			if reverted.Sign() < 0 {
-				reverted = big.NewInt(0)
-			}
-			g.RelayerBalances[relayer] = reverted
-		}
-	}
+	// SECURITY FIX (2026-09-05, finding #8, "Double Refund of Tip and GasFee on Reverted
+	// Executions"): this used to also claw back the Tip credit from RelayerBalances[relayer] here
+	// (mirroring the Value/PerChainAllocation reversal above). That was wrong on two counts: the
+	// relayer genuinely DID relay this message -- the payload reverting is a destination dApp
+	// business-logic failure, not a relaying failure -- so clawing back their earned Tip griefed
+	// them for doing their job; and refund()'s OLD source-chain logic ALSO separately restored
+	// this same Tip to the sender, so between the two, the Tip was being minted twice over. The
+	// relayer now unconditionally keeps the Tip ClaimMessage already credited them (`relayer` is
+	// kept as a parameter for signature symmetry with ClaimMessage/VerifyAndExecute, unused here).
 
 	g.MessageStatus[message.MessageID] = MessageStatusFailed
 	return nil

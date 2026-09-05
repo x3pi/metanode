@@ -586,14 +586,18 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	_ = rcpDup
 }
 
-// TestGatewayHandler_Refund_RestoresTip is the regression test for the security fix to
-// note/cross_chain/security_audit_findings.md finding #2 ("Total Supply Deflation via Unrefunded
-// Tip", 2026-09-05): outbound() burns Value+Tip+GasFee together from the sender's real balance,
-// but refund() used to restore only Value and GasFee, permanently destroying the Tip on every
-// refunded message. Mirrors TestGatewayHandler_Refund's exact real-ABI-transaction flow but with a
-// nonzero Tip, asserting the sender's balance is restored to the FULL original amount (Value + Tip
-// included), not just Value.
-func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
+// TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee is the regression test for finding #8 in
+// note/cross_chain/security_audit_findings.md ("Double Refund of Tip and GasFee on Reverted
+// Executions", 2026-09-05), which supersedes finding #2's original ("Total Supply Deflation via
+// Unrefunded Tip") fix: a refund() call is only ever reachable with a real failure cert, which is
+// only ever produced after a real claimMessage() already ran on the destination and reverted --
+// by that point Tip was already credited to the relaying validator/relayer and GasFee was already
+// fully settled there (spent + unused-refunded), both unconditionally, regardless of the later
+// revert. Restoring either one again here would mint native coin a second time for something
+// already irrevocably settled on the destination. Mirrors TestGatewayHandler_Refund's exact
+// real-ABI-transaction flow but with nonzero Tip AND GasFee, asserting the sender's balance is
+// restored to Value ONLY -- Tip and GasFee permanently stay wherever they were already settled.
+func TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 
 	h, err := GetGatewayHandler()
@@ -634,12 +638,13 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 	sender := common.HexToAddress("0x8888888888888888888888888888888888888888")
 	target := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
-	// Seed sender with 500; outbound will send Value=100 + Tip=15 + GasFee=0 = burn 115 total.
+	// Seed sender with 500; outbound will send Value=100 + Tip=15 + GasFee=20 = burn 135 total.
 	require.NoError(t, cs.GetAccountStateDB().AddBalance(sender, big.NewInt(500)))
 
 	const tipAmount = 15
+	const gasFeeAmount = 20
 	outboundCalldata, err := h.abi.Pack("outbound",
-		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(tipAmount), big.NewInt(0), uint8(1), false,
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
 	)
 	require.NoError(t, err)
 	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
@@ -653,11 +658,11 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 		t.Fatalf("outbound() transaction failed: %q", reason)
 	}
 
-	// Balance after burn: 500 - (100 Value + 15 Tip) = 385.
+	// Balance after burn: 500 - (100 Value + 15 Tip + 20 GasFee) = 365.
 	asAfterOutbound, err := cs.GetAccountStateDB().AccountState(sender)
 	require.NoError(t, err)
 	require.NotNil(t, asAfterOutbound)
-	assert.Equal(t, big.NewInt(385), asAfterOutbound.Balance(), "expected sender balance 385 after outbound (500 - 100 Value - 15 Tip)")
+	assert.Equal(t, big.NewInt(365), asAfterOutbound.Balance(), "expected sender balance 365 after outbound (500 - 100 Value - 15 Tip - 20 GasFee)")
 
 	msg := cross_chain.CrossChainMessage{
 		MessageID:     messageID,
@@ -671,7 +676,7 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 		Value:         big.NewInt(100),
 		Payload:       []byte{},
 		Tip:           big.NewInt(tipAmount),
-		GasFee:        big.NewInt(0),
+		GasFee:        big.NewInt(gasFeeAmount),
 		Ordered:       false,
 	}
 
@@ -697,7 +702,7 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 
 	refundCalldata, err := h.abi.Pack("refund",
 		messageID, big.NewInt(101), big.NewInt(102), big.NewInt(1), uint8(1), sender, target,
-		big.NewInt(0), big.NewInt(100), []byte{}, big.NewInt(tipAmount), big.NewInt(0), false,
+		big.NewInt(0), big.NewInt(100), []byte{}, big.NewInt(tipAmount), big.NewInt(gasFeeAmount), false,
 		big.NewInt(int64(proof.LeafIndex)), proof.Siblings, commitRoot,
 		uint64(1), failSig.Bytes(), []byte{0x01},
 	)
@@ -712,28 +717,32 @@ func TestGatewayHandler_Refund_RestoresTip(t *testing.T) {
 		t.Fatalf("refund() transaction failed: %q", reason)
 	}
 
-	// Full restoration: 385 + 100 (Value) + 15 (Tip) = 500 -- back to exactly the original
-	// balance, proving the Tip was not left permanently destroyed.
+	// Value-only restoration: 365 + 100 (Value) = 465 -- Tip and GasFee are deliberately NOT
+	// restored (finding #8): both were already, unconditionally settled on the destination chain
+	// the moment claimMessage ran there (which is the only way this failure cert could ever have
+	// been produced in the first place); refunding them again here would double-mint.
 	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
 	require.NoError(t, err)
 	require.NotNil(t, asAfterRefund)
-	assert.Equal(t, big.NewInt(500), asAfterRefund.Balance(), "expected sender balance fully restored to 500 (Value AND Tip both refunded)")
+	assert.Equal(t, big.NewInt(465), asAfterRefund.Balance(), "expected sender balance 465 (Value refunded; Tip and GasFee deliberately withheld -- already settled on destination)")
 }
 
-// TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee is the regression test for the
+// TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally is the regression test for the
 // "Total Supply Deflation" follow-up fix (2026-09-05, note/cross_chain/security_audit_findings.md
-// finding #6): for a 2-hop message (SourceChainID and DestChainID are both real private chains,
-// neither IS the configured Reserve), refund() must restore Tip and GasFee locally (both were
-// burned as a pure local wallet debit in outbound(), unrelated to any cross-chain ledger) but must
-// NOT mint Value again here -- Value was debited from the source's allocation on RESERVE's own
-// ledger (never touched locally), and is instead restored via a separate Reserve->source outbound
-// message that RelayerDaemon's refundReserveAllocation() call generates (see daemon.go's
-// processFailedClaim). Minting Value here too, on top of that, would be a real double-mint /
-// Total Supply Inflation bug -- the exact opposite failure mode from the one this fix closes.
-// Contrast with TestGatewayHandler_Refund_RestoresTip, which deliberately sets
-// LocalChainID == ReserveChainID (so is2Hop is false there) and asserts Value IS restored --
-// together the two tests pin both sides of the is2Hop branch.
-func TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee(t *testing.T) {
+// finding #6) combined with finding #8's later correction: for a 2-hop message (SourceChainID and
+// DestChainID are both real private chains, neither IS the configured Reserve), refund() must NOT
+// mint Value here -- Value was debited from the source's allocation on RESERVE's own ledger (never
+// touched locally), and is instead restored via a separate Reserve->source outbound message that
+// RelayerDaemon's refundReserveAllocation() call generates (see daemon.go's processFailedClaim).
+// Tip and GasFee are ALSO not restored here -- finding #8 established that neither is ever
+// restored on the source chain at all, 2-hop or not, since both are already, unconditionally
+// settled on the destination chain by the time a failure cert can even exist. So for a 2-hop
+// message, refund() restores NOTHING to the sender's local balance directly; Value alone comes
+// back later via Reserve's own outbound message.
+// Contrast with TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee, which deliberately sets
+// LocalChainID == ReserveChainID (so is2Hop is false there) and asserts Value IS restored
+// immediately -- together the two tests pin both sides of the is2Hop branch.
+func TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally(t *testing.T) {
 	cs, _, _, _ := newPersistentTestChainState(t)
 
 	h, err := GetGatewayHandler()
@@ -833,13 +842,13 @@ func TestGatewayHandler_Refund_TwoHop_SkipsValueRestoresTipAndGasFee(t *testing.
 	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
 	require.False(t, failedRefund, "refund() transaction failed: %+v", rcpRefund)
 
-	// The defining assertion: 380 + 15 (Tip) + 5 (GasFee) = 400 -- Value is deliberately NOT
-	// restored here (400, not 500). Restoring it too would be a real double-mint once Reserve's
-	// own refundReserveAllocation-generated message later also delivers Value to this same
-	// sender.
+	// The defining assertion: balance stays at 380 -- untouched. Value is deliberately withheld
+	// here (comes back later via Reserve's own refundReserveAllocation-generated message instead;
+	// minting it here too would be a double-mint), and Tip/GasFee are never restored on the source
+	// chain at all (finding #8) since both are already irrevocably settled on the destination.
 	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
 	require.NoError(t, err)
-	assert.Equal(t, big.NewInt(400), asAfterRefund.Balance(), "expected sender balance 400 (Tip+GasFee restored, Value deliberately withheld for a 2-hop message)")
+	assert.Equal(t, big.NewInt(380), asAfterRefund.Balance(), "expected sender balance unchanged at 380 -- refund() restores nothing locally for a 2-hop message")
 
 	reloaded, err := loadGatewayEngine(cs)
 	require.NoError(t, err)

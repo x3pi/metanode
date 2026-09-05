@@ -627,7 +627,12 @@ func TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCre
 	require.NoError(t, engine.FinalizeFailedAfterExecutionRevert(*msg, commitRoot, relayer))
 
 	assert.Equal(t, MessageStatusFailed, engine.GetMessageStatus(msg.MessageID), "message must be terminally Failed")
-	assert.Zero(t, engine.RelayerBalances[relayer].Sign(), "tip credit must be reversed -- no reward for a delivery that never happened")
+	// SECURITY FIX (2026-09-05, finding #8, "Double Refund of Tip and GasFee on Reverted
+	// Executions"): the relayer's Tip credit is NO LONGER reversed here -- the relayer genuinely
+	// did relay this message (that's why claimMessage ran and reverted at all), so clawing back
+	// their Tip both griefed them and, combined with the OLD refund() path also restoring Tip on
+	// the source chain, caused a real double-refund/inflation bug. The relayer keeps it.
+	assert.Equal(t, big.NewInt(7), engine.RelayerBalances[relayer], "relayer keeps the Tip they earned even though the payload later reverted")
 	assert.Zero(t, ledger.GetAllocation(102).Cmp(allocBefore), "ceiling allocation credit must be fully reversed")
 	attestedAfter := engine.AttestedCommits[key]
 	assert.Zero(t, attestedAfter.ClaimedAmount.Sign(), "ClaimedAmount must be reversed back to 0 -- a failed message must not permanently shrink the commit's ceiling for other messages sharing it")

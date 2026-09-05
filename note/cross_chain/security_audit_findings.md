@@ -257,3 +257,70 @@ trên Reserve phản ánh đúng `Refunded`.
 Test: `TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve` (mới, quy trình đầy đủ:
 batchOutboundCommit thật trên Reserve → attestReserveIssuedCommit + claimMessage thất bại thật trên
 B → refund thật trên Reserve dùng đúng ID chặng 1 → xác nhận trạng thái cuối cùng dưới ID gốc).
+
+## 8. Double Refund of Tip and GasFee on Reverted Executions — ✅ ĐÃ VÁ (2026-09-05)
+**Location:** `execution/pkg/cross_chain/gateway.go` (`FinalizeFailedAfterExecutionRevert`),
+`execution/pkg/blockchain/tx_processor/gateway_handler.go` (case `"refund"`)
+
+**Mô tả (do người dùng phát hiện, kèm patch đề xuất cho 2 lỗ hổng — chỉ mục này được áp dụng, xem
+mục "Đã rà soát và KHÔNG áp dụng" ngay dưới cho lỗ hổng còn lại):** khi `claimMessage` claim thành
+công nhưng payload thực thi thật sự REVERT (business-logic revert của dApp đích) — trạng thái được
+`FinalizeFailedAfterExecutionRevert` chốt thành `Failed` (mục 2.4 điểm 1 / finding #1) — Tip đã được
+`ClaimMessage` cộng vào `RelayerBalances[relayer]` **trước khi** payload được thực thi (không điều
+kiện gì), và GasFee đã được `settleGasCappedContractCall` xử lý xong hoàn toàn (phần dùng cho
+validator + phần dư hoàn lại `msg.Sender`) **ngay cả khi revert** — cả 2 đã được settle vĩnh viễn
+trên chuỗi đích. Nhưng: (a) `FinalizeFailedAfterExecutionRevert` (bản cũ) lại thu hồi ngược Tip khỏi
+`RelayerBalances[relayer]` — tước đoạt phần thưởng hợp lệ của relayer dù họ đã làm đúng việc (chỉ
+dApp đích lỗi logic, không phải lỗi của relayer); (b) `refund()` (bản cũ, thêm bởi chính fix #2 của
+phiên làm việc này) lại hoàn tiếp 100% Tip + GasFee cho `msg.Sender` trên chuỗi nguồn — tức là **in
+tiền lần 2** cho đúng số Tip/GasFee đã settle xong ở chuỗi đích.
+
+**Đã vá:** `FinalizeFailedAfterExecutionRevert` không thu hồi Tip khỏi relayer nữa (relayer giữ
+nguyên phần thưởng đã kiếm được). `refund()` chỉ còn hoàn `Value` (và chỉ khi không phải 2-hop, xem
+mục 6) — bỏ hẳn bước hoàn `Tip`/`GasFee` mà fix #2 từng thêm vào, vì fix #2 đã sai khi lấy đúng logic
+hoàn `GasFee` (vốn đã sai từ trước) làm khuôn mẫu để mirror sang `Tip`.
+
+Test: `TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee` (đổi tên + viết lại từ
+`TestGatewayHandler_Refund_RestoresTip` của fix #2 — giờ xác nhận đúng ngược lại: chỉ `Value` được
+hoàn, `Tip`+`GasFee` bị giữ nguyên không hoàn), `TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally`
+(đổi tên từ `..._SkipsValueRestoresTipAndGasFee` — 2-hop giờ không hoàn gì cục bộ cả), cập nhật
+`TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCredits` (đảo ngược assertion
+Tip).
+
+### Đã rà soát và KHÔNG áp dụng: "Total Supply Inflation via Unbacked Tip and GasFee Minting"
+
+Người dùng cũng đề xuất 1 patch thứ 2 (đã sửa `relayer.go`'s `BuildCommitTree` để cộng thêm
+`Tip`+`GasFee` vào `AggregateAmount`, và `gateway.go`'s `ClaimMessage` để đưa cả 2 vào
+`totalClaimAmount` khi kiểm tra hard-cap `FundedAmount` và cộng vào `PerChainAllocation`), với lý do:
+"Reserve chỉ trừ Value, nhưng destination lại mint cả Tip/GasFee khi relayer rút tiền → in tiền vô
+hạn không qua `PerChainAllocation`."
+
+**Kiểm chứng lại bằng phản chứng cụ thể (không chỉ đọc mô tả):** `Tip`/`GasFee` **đã được** đưa vào
+đúng hash của per-message Merkle leaf từ trước (`CanonicalEncodeMessage`, comment gốc của hàm này
+ghi rõ: "included in the hash so a relayer can't alter the locked cross-chain gas budget in
+transit"). Nghĩa là 1 relayer **không thể** khai khống `Tip`/`GasFee` khi gọi `claimMessage()` —
+mọi giá trị khác với giá trị thật trong message gốc (đã được BLS-sign bởi committee chuỗi nguồn) sẽ
+làm sai lệch `leafHash`, khiến `VerifyMerkleProof` thất bại ngay lập tức. Số `Tip`/`GasFee` được
+mint ở đích luôn **khớp chính xác 1:1** với số đã burn thật ở nguồn — không có "in vô hạn" nào cả.
+`PerChainAllocation` không đếm `Tip`/`GasFee` chỉ khiến ceiling của 1 chain **thấp hơn thực tế nó
+đang nắm giữ** (bảo thủ hơn mức cần thiết khi chain đó tiếp tục gửi giá trị đi tiếp qua Reserve) —
+không phải lỗ hổng khai thác được.
+
+**Áp patch này gây ra 1 regression nghiêm trọng khác, xác nhận bằng test thật:** `AttestCommit`'s
+cổng C8 ("chỉ Reserve mới được attest 1 commit có `aggregateAmount > 0`") kích hoạt bất cứ khi nào
+`aggregateAmount > 0` — trước patch, 1 message "thuần tuý" (`Value = 0`, chỉ gọi contract, theo đúng
+phân loại mục 2.2(a) của `note/cross_chain_root_anchor_architecture.md`, vốn được thiết kế đi thẳng
+A→B không cần qua Reserve) luôn có `aggregateAmount = 0`. Sau patch, VÌ hầu như MỌI message CONTRACT_CALL
+thật đều có `GasFee > 0` (ngân sách gas cho lệnh gọi), `aggregateAmount` giờ luôn > 0 — khiến MỌI
+message thuần tuý cũng bị bắt buộc phải cấu hình Reserve (`ErrReserveChainNotConfigured`) hoặc phải
+attest trên đúng Reserve (`ErrNonReserveCeilingAttestation`) mới attest được — phá vỡ hoàn toàn khả
+năng gửi message trực tiếp A→B mà kiến trúc gốc đã minh định. Phát hiện qua 8 test thật lập tức FAIL
+sau khi áp patch (`TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall`,
+`TestGatewayHandler_VerifyAndExecutePayload_ExecutesRealContractCall`,
+`TestComprehensive_TwoHopContractCall_RealERC20_A_Reserve_B`, và 5 test khác) — tất cả PASS trở lại
+sau khi revert riêng phần patch này.
+
+**Kết luận:** đã revert hoàn toàn phần thay đổi ở `relayer.go`/`ClaimMessage`'s `totalClaimAmount`
+(giữ nguyên `BuildCommitTree`/hard-cap/`PerChainAllocation` credit ở Value-only như trước), chỉ giữ
+lại phần vá double-refund (mục 8 ở trên) — độc lập hoàn toàn với phần này, không phụ thuộc gì vào
+nhau.

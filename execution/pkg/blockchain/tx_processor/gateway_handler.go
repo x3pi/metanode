@@ -1179,34 +1179,26 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
-		// GasFee (mục 2.6.5): the message never executed at all on the destination chain (that's
-		// exactly what this failure cert attests), so the entire locked gas budget is unused --
-		// refund it in full alongside Value, regardless of AssetID (GasFee is always native).
-		if msg.GasFee != nil && msg.GasFee.Sign() > 0 {
-			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.GasFee, tx.FromAddress(), msg.Sender); err != nil {
-				return nil, nil, fmt.Errorf("refund gasFee restoration failed: %v", err)
-			}
-		}
-
-		// SECURITY FIX (2026-09-05, note/cross_chain/security_audit_findings.md finding #2 --
-		// "Total Supply Deflation via Unrefunded Tip"): outbound() burns Value + Tip + GasFee
-		// TOGETHER from the sender's real balance in one call (see the "outbound" case above), but
-		// this refund path used to restore only Value and GasFee -- Tip was silently destroyed on
-		// every refunded message, a real Conservation-of-Balance violation (confirmed: outbound()
-		// really burns Tip from the sender's on-chain balance; nothing else ever credits it back
-		// when the message never gets claimed, since no relayer ever collected a tip for a message
-		// that was never successfully claimed). Restored to the ORIGINAL sender (msg.Sender), not
-		// any relayer -- mirrors GasFee's restoration exactly, for the same reason (the tip was a
-		// payment for successful delivery, which never happened).
-		if msg.Tip != nil && msg.Tip.Sign() > 0 {
-			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, msg.Tip, tx.FromAddress(), msg.Sender); err != nil {
-				return nil, nil, fmt.Errorf("refund tip restoration failed: %v", err)
-			}
-		}
+		// SECURITY FIX (2026-09-05, finding #8 in note/cross_chain/security_audit_findings.md,
+		// "Double Refund of Tip and GasFee on Reverted Executions", supersedes finding #2's
+		// "Total Supply Deflation via Unrefunded Tip" fix below): a failure cert -- required for
+		// refund() to ever reach this point -- can ONLY ever be produced by
+		// FinalizeFailedAfterExecutionRevert, which only runs AFTER a real claimMessage() already
+		// ran on the destination and its payload reverted (see mục 2.4 point 1 / finding #1). By
+		// that point, GasFee was already fully settled there (spent by validators + unused portion
+		// refunded to msg.Sender on the DESTINATION chain, unconditionally, revert or not -- see
+		// settleGasCappedContractCall), and Tip was already credited to the relayer's balance
+		// (ClaimMessage credits it before any payload execution is even attempted). Refunding
+		// either one again here, on the SOURCE chain, mints native coin a second time for value
+		// already irrevocably settled elsewhere -- a real Total Supply Inflation bug (finding #2's
+		// fix, which added this Tip restoration by mirroring GasFee's existing restoration,
+		// inherited the same flaw GasFee already had). Only Value -- the one thing genuinely never
+		// delivered when the payload reverts -- is refunded below.
 
 		// SECURITY FIX (2026-09-05, Total Supply Deflation fix): 2-hop messages have their Value
 		// refunded via an Outbound message emitted by Reserve. The Source chain MUST NOT mint
-		// the Value here (that would double-mint), but it DOES mint Tip and GasFee above.
+		// the Value here (that would double-mint) -- Tip/GasFee are never minted here at all
+		// (either hop count), per the comment above.
 		is2Hop := engine.ReserveChainID != 0 && engine.LocalChainID != engine.ReserveChainID && msg.DestChainID != engine.ReserveChainID
 		if !is2Hop {
 			// Task 1.1: Real Native Refund Credit back to original sender (msg.Sender) on source chain
