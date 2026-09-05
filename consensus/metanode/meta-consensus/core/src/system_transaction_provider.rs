@@ -22,6 +22,12 @@ pub trait SystemTransactionProvider: Send + Sync {
     fn get_go_lag(&self) -> u64 {
         0
     }
+
+    /// Get Go's EMA-smoothed execution rate, in GEI/sec (2026-09-05 -- see
+    /// DefaultSystemTransactionProvider::go_rate_millis's own doc comment).
+    fn get_go_rate(&self) -> f64 {
+        0.0
+    }
 }
 
 /// Default implementation that checks if epoch transition is needed
@@ -47,6 +53,18 @@ pub struct DefaultSystemTransactionProvider {
     /// Maximum lag threshold: EndOfEpoch is suppressed when go_lag >= this value
     #[allow(dead_code)]
     go_lag_threshold: u64,
+    /// SMOOTH BACKPRESSURE (2026-09-05): Go's own recently-observed execution rate (GEI/sec),
+    /// EMA-smoothed by LagMonitor, encoded as a fixed-point integer (rate * 1000, rounded) so it
+    /// can share the same lock-free Arc<AtomicU64> pattern as go_lag. See proposer.rs's own
+    /// go-rate-matching doc comment for why this exists and how it's used -- in short, go_lag
+    /// alone only bounds how FAST the gap between Rust and Go can grow (a threshold-ladder delay,
+    /// capped low on purpose after an earlier, stricter version measured a real 10K->3K TPS
+    /// regression via feedback loop -- see proposer.rs's "June 2026 RELAXED" comment); it says
+    /// nothing about whether the gap is currently growing or shrinking. go_rate lets the proposer
+    /// compare its OWN production rate against Go's actual measured consumption rate and
+    /// throttle continuously/proportionally to keep the two in step, instead of reacting only
+    /// once a large backlog has already accumulated.
+    go_rate_millis: Arc<AtomicU64>,
     /// FIX 7 (May 2026): EndOfEpoch SUPPRESSION flag.
     ///
     /// When a node starts with a stale epoch timestamp (snapshot restore / cold-start),
@@ -172,6 +190,7 @@ impl DefaultSystemTransactionProvider {
             commit_index_buffer,
             go_lag: Arc::new(AtomicU64::new(0)),
             go_lag_threshold: 50,
+            go_rate_millis: Arc::new(AtomicU64::new(0)),
             epoch_change_suppressed: Arc::new(AtomicBool::new(is_stale)),
             healthy_since_ms: Arc::new(AtomicU64::new(0)), // 0 = not yet healthy
         }
@@ -262,6 +281,19 @@ impl DefaultSystemTransactionProvider {
     /// Update the Go lag value (called by CommitProcessor after flush_buffer)
     pub fn set_go_lag(&self, lag: u64) {
         self.go_lag.store(lag, Ordering::Relaxed);
+    }
+
+    /// Get a clone of the go_rate Arc for sharing with LagMonitor (2026-09-05).
+    pub fn go_rate_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.go_rate_millis)
+    }
+
+    /// Update Go's EMA-smoothed execution rate, in GEI/sec (called by LagMonitor).
+    /// Encoded as a fixed-point integer (rate * 1000, rounded, saturating) since AtomicU64 can't
+    /// hold an f64 directly -- see go_rate_millis's own doc comment.
+    pub fn set_go_rate(&self, rate_per_sec: f64) {
+        let millis = (rate_per_sec.max(0.0) * 1000.0).round() as u64;
+        self.go_rate_millis.store(millis, Ordering::Relaxed);
     }
 
     /// Notify that the node has entered Healthy phase.
@@ -459,6 +491,10 @@ impl DefaultSystemTransactionProvider {
 impl SystemTransactionProvider for DefaultSystemTransactionProvider {
     fn get_go_lag(&self) -> u64 {
         self.go_lag.load(Ordering::Relaxed)
+    }
+
+    fn get_go_rate(&self) -> f64 {
+        self.go_rate_millis.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
     fn get_system_transactions(

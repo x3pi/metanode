@@ -97,8 +97,13 @@ impl Core {
 
             // Calculate effective delay (base + adaptive delay if enabled)
             let mut effective_delay = self.context.parameters.min_round_delay;
+            let local_commit_index = self.dag_state.read().last_commit_index();
             if let Some(adaptive_delay_state) = &self.adaptive_delay_state {
-                let local_commit_index = self.dag_state.read().last_commit_index();
+                // Feed the (otherwise-unused) local rate tracker every round so both this
+                // block's own local-vs-quorum adaptive delay AND the go-rate-matching
+                // backpressure below can read a real, continuously up-to-date local_rate().
+                adaptive_delay_state.update_local_commit(local_commit_index);
+
                 let quorum_commit_index = self
                     .context
                     .metrics
@@ -133,45 +138,105 @@ impl Core {
                     .set(adaptive_delay_state.quorum_rate());
             }
 
-            // BACKPRESSURE THROTTLING (June 2026 — RELAXED):
-            // Throttle block proposal rate when Go execution falls behind Rust commits.
+            // SMOOTH BACKPRESSURE (2026-09-05): continuous, proportional rate-matching between
+            // Rust's own commit-production rate and Go's actual, EMA-smoothed execution rate --
+            // replaces the June 2026 threshold-ladder go_lag throttle (history kept below for
+            // context) with something that reacts to whether the gap is CURRENTLY growing or
+            // shrinking, not just to how big it already is.
             //
-            // HISTORY: Previous thresholds (100/200) with max 5000ms throttle created a
-            // feedback loop that degraded TPS from 10K to 3K over 25 sustained runs:
-            //   go_lag grows → throttle adds delay → Consensus Duration spikes →
-            //   wall-clock time increases → TPS drops → more lag
+            // Found live 2026-09-05: a real 4-node cluster crashed under ~13h of sustained
+            // extreme load with Go ~509,000 commits behind Rust. The threshold-ladder mechanism
+            // only bounds how FAST that gap can grow (max +2000ms/round, capped low on purpose
+            // -- see HISTORY below), never how far it can drift in total: with Go's real
+            // sustained throughput durably below Rust's throttled floor, the gap still grew
+            // without bound over long enough runs. (Separately, cold_start.rs's
+            // StateSyncing dead-end that this same incident exposed and fixed the same day is
+            // what guarantees such a backlog is always eventually recoverable regardless; this
+            // mechanism is about not needing that slow recovery path in the first place.)
             //
-            // With pipeline mode (doneChan removed, June 2026):
-            //   - commitChannel buffer=8 → max queued memory ~40MB (safe)
-            //   - authQueue buffer=1000 → structural limit on go_lag
-            //   - Go processes blocks faster (non-blocking commit dispatch)
+            // HISTORY (why this is a continuous formula, not a threshold ladder or a hard stop):
+            // an EARLIER, even stricter threshold-ladder version (100/200 blocks, max 5000ms)
+            // created a real, measured feedback loop that degraded TPS from 10K to 3K over 25
+            // sustained runs (go_lag grows → throttle adds delay → Consensus Duration spikes →
+            // wall-clock time increases → TPS drops → more lag) -- fixed by relaxing the ladder,
+            // not by removing the feedback-loop-prone shape itself. A hard stop (refuse to
+            // propose at all past some threshold) was considered and rejected separately: this
+            // exact codebase already tried that shape for EndOfEpoch backpressure
+            // (system_transaction_provider.rs's own "BACKPRESSURE REMOVED (2026-03-19)" comment)
+            // and found it caused a real, permanent, unrecoverable deadlock (one node halts,
+            // others don't, epoch mismatch rejects all further blocks, and the very re-check
+            // that could exit requires a new commit that can now never arrive).
             //
-            // RELAXED thresholds break the feedback loop while still preventing OOM:
-            //   - Moderate: 500 blocks (was 100) — light throttle, max 500ms
-            //   - Severe: 1000 blocks (was 200) — matches authQueue capacity
+            // Design: two additive terms, both zero when Rust and Go are already keeping pace
+            // and the backlog is within a small comfort zone -- no discrete step anywhere.
+            //   1. Rate term: if Rust is CURRENTLY producing faster than Go's own recent
+            //      measured rate, stretch this round's delay by that same ratio (e.g. 20%
+            //      faster than Go can consume adds 20% to the round interval). Sustained, this
+            //      converges Rust's effective throughput down to match Go's, holding the gap
+            //      steady instead of letting it keep growing.
+            //   2. Backlog term: a much gentler, continuously-scaling nudge proportional to how
+            //      far go_lag already sits above a small comfort buffer, scaled RELATIVE to
+            //      Go's own current rate (not a fixed block count -- a lag equal to ~30s of
+            //      Go's current throughput reaches this term's own cap) so it self-adjusts
+            //      across very different throughput regimes instead of needing re-tuning.
+            //      Lets an existing backlog drain gradually using spare capacity, without ever
+            //      being strong enough on its own to stall proposing.
+            // Both terms are individually capped, and their sum is capped again, so no single
+            // round can ever add more delay than the mechanism it replaces could.
             let go_lag = self
                 .system_transaction_provider
                 .as_ref()
                 .map(|p| p.get_go_lag())
                 .unwrap_or(0);
+            let go_rate = self
+                .system_transaction_provider
+                .as_ref()
+                .map(|p| p.get_go_rate())
+                .unwrap_or(0.0);
+            let rust_rate = self
+                .adaptive_delay_state
+                .as_ref()
+                .map(|s| s.local_rate())
+                .unwrap_or(0.0);
 
-            if go_lag >= 50000 { // Start throttling at moderate_lag_threshold (50000, was 500)
-                let extra_delay = if go_lag >= 100000 { // severe_lag_threshold (100000, was 1000)
-                    // Severe throttling: 500ms base, scaling up to 2000ms max (was 5000ms)
-                    Duration::from_millis(500 + (go_lag.saturating_sub(100000) * 10).min(1500))
-                } else {
-                    // Moderate throttling: scaling up to 500ms (was 1000ms)
-                    Duration::from_millis((go_lag.saturating_sub(50000) * 1).min(500))
-                };
+            const GO_LAG_COMFORT_ZONE: f64 = 2_000.0;
+            const MAX_RATE_TERM_RATIO: f64 = 3.0;
+            const MAX_BACKLOG_TERM_RATIO: f64 = 1.0;
+            const MAX_SMOOTH_BACKPRESSURE_DELAY_MS: u64 = 2000; // same ceiling as the mechanism replaced
+            const MIN_MEANINGFUL_RATE: f64 = 1.0; // below this, rate is too noisy/near-zero to divide by
+            const BACKLOG_DRAIN_WINDOW_SECS: f64 = 30.0;
 
-                effective_delay += extra_delay;
+            let rate_term_ratio = if go_rate > MIN_MEANINGFUL_RATE && rust_rate > go_rate {
+                ((rust_rate - go_rate) / go_rate).min(MAX_RATE_TERM_RATIO)
+            } else {
+                0.0
+            };
+            let backlog_term_ratio = if go_rate > MIN_MEANINGFUL_RATE {
+                (((go_lag as f64) - GO_LAG_COMFORT_ZONE).max(0.0)
+                    / (go_rate * BACKLOG_DRAIN_WINDOW_SECS))
+                    .min(MAX_BACKLOG_TERM_RATIO)
+            } else {
+                0.0
+            };
+            let smooth_extra_delay = Duration::from_millis(
+                ((self.context.parameters.min_round_delay.as_millis() as f64)
+                    * (rate_term_ratio + backlog_term_ratio)) as u64,
+            )
+            .min(Duration::from_millis(MAX_SMOOTH_BACKPRESSURE_DELAY_MS));
+
+            if smooth_extra_delay > Duration::ZERO {
+                effective_delay += smooth_extra_delay;
 
                 // Log periodically (approx. once every 5 seconds) to avoid spamming
                 if self.context.clock.timestamp_utc_ms() % 5000 < 500 {
                     warn!(
-                        "⏳ [BACKPRESSURE] Go is lagging by {} blocks. Adding {}ms throttling delay to block proposal. Effective delay is {}ms.",
+                        "⏳ [BACKPRESSURE] go_lag={} rust_rate={:.1}/s go_rate={:.1}/s rate_term={:.2} backlog_term={:.2} — adding {}ms, effective delay {}ms.",
                         go_lag,
-                        extra_delay.as_millis(),
+                        rust_rate,
+                        go_rate,
+                        rate_term_ratio,
+                        backlog_term_ratio,
+                        smooth_extra_delay.as_millis(),
                         effective_delay.as_millis()
                     );
                 }
