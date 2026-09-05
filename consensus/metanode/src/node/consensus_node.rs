@@ -162,6 +162,7 @@ impl ConsensusNode {
             _commit_consumer_holder: consensus.commit_consumer_holder,
             commit_consumer_monitor: consensus.commit_consumer_monitor,
             epoch_eth_addresses: consensus.epoch_eth_addresses_arc.clone(),
+            epoch_eth_addresses_notify: consensus.epoch_eth_addresses_notify.clone(),
 
             peer_rpc_addresses: config.peer_rpc_addresses.clone(),
             tx_recycler: Some(consensus.tx_recycler),

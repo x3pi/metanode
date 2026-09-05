@@ -342,13 +342,14 @@ pub async fn transition_to_epoch_from_system_tx(
     {
         let mut cache = node.epoch_eth_addresses.write().await;
         cache.insert(new_epoch, eth_addresses);
-        
+
         // Keep only last 2 epochs to prevent unbounded growth
         if cache.len() > 2 {
             let min_keep = new_epoch.saturating_sub(1);
             cache.retain(|&epoch, _| epoch >= min_keep);
         }
     }
+    node.epoch_eth_addresses_notify.notify_waiters();
 
     node.check_and_update_node_mode(&committee, config, true)
         .await?;
