@@ -24,6 +24,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain/rootanchor"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/network"
 )
 
 // DaemonConfig contains live RPC endpoints and credentials for RelayerDaemon.
@@ -74,6 +75,12 @@ type DaemonConfig struct {
 	MaxPollBackoff time.Duration `json:"max_poll_backoff" yaml:"max_poll_backoff"`
 }
 
+type unrelayedBatch struct {
+	commitRoot common.Hash
+	epoch      uint64
+	messages   []cross_chain.CrossChainMessage
+}
+
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
 // aggregates BLS QuorumCerts from Root Anchor, and executes claims on destination chains.
 type RelayerDaemon struct {
@@ -88,6 +95,7 @@ type RelayerDaemon struct {
 	attestedCommits   map[string]bool // key: "destChainId:commitRootHex"
 	watchedPairs      map[string]bool // key: "srcChainId:destChainId"
 	watchedPairsMu    sync.Mutex
+	unrelayedBatches  map[string]*unrelayedBatch // key: "srcChainId:destChainId"
 	nonces            map[uint64]uint64
 	nonceMu           sync.Mutex
 	chainLocks        map[uint64]*sync.Mutex
@@ -130,14 +138,20 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		return nil, fmt.Errorf("parsing GatewayABI: %w", err)
 	}
 
-	raClient, err := rootanchor.NewClient(cfg.RootAnchorURLs, nil)
+	// RelayerDaemon manages its own poll intervals and retries; disable the 60s circuit breaker lockout
+	// so restarts of local nodes or temporary blips do not permanently lock out the relayer.
+	breakerCfg := &network.CircuitBreakerConfig{
+		Disabled: true,
+	}
+
+	raClient, err := rootanchor.NewClient(cfg.RootAnchorURLs, breakerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to Root Anchor: %w", err)
 	}
 
 	chainClients := make(map[uint64]*rootanchor.Client, len(cfg.ChainRPCURLs))
 	for chainID, url := range cfg.ChainRPCURLs {
-		c, err := rootanchor.NewClient([]string{url}, nil)
+		c, err := rootanchor.NewClient([]string{url}, breakerCfg)
 		if err != nil {
 			return nil, fmt.Errorf("connecting to chain %d @ %s: %w", chainID, url, err)
 		}
@@ -153,6 +167,7 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		abi:               parsedABI,
 		processedMessages: make(map[common.Hash]bool),
 		attestedCommits:   make(map[string]bool),
+		unrelayedBatches:  make(map[string]*unrelayedBatch),
 		nonces:            make(map[uint64]uint64),
 		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
@@ -208,7 +223,7 @@ func (d *RelayerDaemon) AddChain(ctx context.Context, chainID uint64, rpcURL str
 		d.mu.Unlock()
 		return nil
 	}
-	c, err := rootanchor.NewClient([]string{rpcURL}, nil)
+	c, err := rootanchor.NewClient([]string{rpcURL}, &network.CircuitBreakerConfig{Disabled: true})
 	if err != nil {
 		d.mu.Unlock()
 		return fmt.Errorf("connecting to chain %d @ %s: %w", chainID, rpcURL, err)
@@ -663,6 +678,26 @@ func (d *RelayerDaemon) RelayBatch(
 // batch (RelayBatch). Returns (0, nil) with no error when there was nothing pending -- not an
 // error case, just nothing to do this tick.
 func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destChainID uint64) (int, error) {
+	pairKey := fmt.Sprintf("%d:%d", sourceChainID, destChainID)
+
+	// Check if there is an unrelayed batch from a previous attempt (e.g. destination was restarting)
+	d.mu.Lock()
+	if d.unrelayedBatches == nil {
+		d.unrelayedBatches = make(map[string]*unrelayedBatch)
+	}
+	pending := d.unrelayedBatches[pairKey]
+	d.mu.Unlock()
+
+	if pending != nil {
+		if err := d.RelayBatch(ctx, sourceChainID, pending.commitRoot, pending.epoch, pending.messages); err != nil {
+			return len(pending.messages), fmt.Errorf("retry relay batch %s: %w", pending.commitRoot.Hex(), err)
+		}
+		d.mu.Lock()
+		delete(d.unrelayedBatches, pairKey)
+		d.mu.Unlock()
+		return len(pending.messages), nil
+	}
+
 	sourceClient, exists := d.GetChainClient(sourceChainID)
 	if !exists {
 		return 0, fmt.Errorf("no RPC client configured for source chain %d", sourceChainID)
@@ -724,9 +759,27 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 	}
 
 	logger.Info("📦 [RELAYER DAEMON] batched %d outbound message(s) from chain %d to chain %d, commitRoot=%s", messageCount, sourceChainID, destChainID, commitRoot.Hex())
+
+	// Store in unrelayedBatches in case RelayBatch fails (e.g. destination chain is restarting)
+	d.mu.Lock()
+	if d.unrelayedBatches == nil {
+		d.unrelayedBatches = make(map[string]*unrelayedBatch)
+	}
+	d.unrelayedBatches[pairKey] = &unrelayedBatch{
+		commitRoot: commitRoot,
+		epoch:      epoch,
+		messages:   messages,
+	}
+	d.mu.Unlock()
+
 	if err := d.RelayBatch(ctx, sourceChainID, commitRoot, epoch, messages); err != nil {
 		return messageCount, fmt.Errorf("relay batch %s: %w", commitRoot.Hex(), err)
 	}
+
+	d.mu.Lock()
+	delete(d.unrelayedBatches, pairKey)
+	d.mu.Unlock()
+
 	return messageCount, nil
 }
 
@@ -936,7 +989,7 @@ func DecodeRevertReason(raw []byte) string {
 	// If printable ASCII, return as string
 	isPrintable := true
 	for _, b := range data {
-		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+		if (b < 32 || b > 126) && b != '\n' && b != '\r' && b != '\t' {
 			isPrintable = false
 			break
 		}

@@ -32,6 +32,7 @@ func (s CircuitBreakerState) String() string {
 // CircuitBreaker thực hiện pattern Circuit Breaker để bảo vệ hệ thống khỏi quá tải
 type CircuitBreaker struct {
 	mu          sync.RWMutex
+	disabled    bool
 	maxFailures int           // Số lỗi tối đa trước khi mở circuit
 	maxRequests int           // Số request tối đa trong trạng thái HALF_OPEN
 	interval    time.Duration // Thời gian chờ trước khi thử HALF_OPEN
@@ -52,6 +53,7 @@ type CircuitBreaker struct {
 
 // CircuitBreakerConfig cấu hình cho Circuit Breaker
 type CircuitBreakerConfig struct {
+	Disabled    bool          // Nếu true, circuit breaker luôn cho phép thực hiện (bỏ qua mở mạch)
 	MaxFailures int           // Mặc định: 10
 	MaxRequests int           // Mặc định: 5
 	Interval    time.Duration // Mặc định: 10s
@@ -61,6 +63,7 @@ type CircuitBreakerConfig struct {
 // DefaultCircuitBreakerConfig trả về cấu hình mặc định
 func DefaultCircuitBreakerConfig() *CircuitBreakerConfig {
 	return &CircuitBreakerConfig{
+		Disabled:    false,
 		MaxFailures: 10,
 		MaxRequests: 5,
 		Interval:    10 * time.Second,
@@ -75,6 +78,7 @@ func NewCircuitBreaker(config *CircuitBreakerConfig) *CircuitBreaker {
 	}
 
 	return &CircuitBreaker{
+		disabled:    config.Disabled,
 		maxFailures: config.MaxFailures,
 		maxRequests: config.MaxRequests,
 		interval:    config.Interval,
@@ -87,6 +91,10 @@ func NewCircuitBreaker(config *CircuitBreakerConfig) *CircuitBreaker {
 func (cb *CircuitBreaker) CanExecute() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+
+	if cb.disabled {
+		return true
+	}
 
 	cb.totalRequests++
 
@@ -119,17 +127,19 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	if cb.disabled {
+		return
+	}
+
 	cb.totalSuccesses++
 	cb.lastSuccessTime = time.Now()
 
 	switch cb.state {
 	case StateHalfOpen:
-		if cb.requests >= cb.maxRequests {
-			cb.state = StateClosed
-			cb.failures = 0
-			cb.requests = 0
-			logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
-		}
+		cb.state = StateClosed
+		cb.failures = 0
+		cb.requests = 0
+		logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
 	case StateClosed:
 		cb.failures = 0 // Reset failure count
 	}
@@ -139,6 +149,10 @@ func (cb *CircuitBreaker) RecordSuccess() {
 func (cb *CircuitBreaker) RecordFailure() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+
+	if cb.disabled {
+		return
+	}
 
 	cb.totalFailures++
 	cb.failures++

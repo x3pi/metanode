@@ -1420,3 +1420,45 @@ func bytes32SliceToHashes(in [][32]byte) []common.Hash {
 	}
 	return out
 }
+
+func TestDecodeRevertReason(t *testing.T) {
+	// 1. Empty data
+	assert.Equal(t, "empty revert data", DecodeRevertReason(nil))
+	assert.Equal(t, "empty revert data", DecodeRevertReason([]byte{}))
+
+	// 2. Standard ABI Error(string): 0x08c379a0 + offset(32) + length + string
+	errString := "insufficient balance"
+	strBytes := []byte(errString)
+	var abiEncoded []byte
+	abiEncoded = append(abiEncoded, []byte{0x08, 0xc3, 0x79, 0xa0}...)
+	var offset [32]byte
+	offset[31] = 0x20
+	abiEncoded = append(abiEncoded, offset[:]...)
+	var length [32]byte
+	length[31] = byte(len(strBytes))
+	abiEncoded = append(abiEncoded, length[:]...)
+	abiEncoded = append(abiEncoded, strBytes...)
+	for len(abiEncoded)%32 != 4 { // pad string to 32-byte word
+		abiEncoded = append(abiEncoded, 0)
+	}
+	assert.Equal(t, errString, DecodeRevertReason(abiEncoded))
+
+	// 3. Hex-encoded string of the ABI error ("0x08c379a0...")
+	hexEncoded := []byte(hexutil.Encode(abiEncoded))
+	assert.Equal(t, errString, DecodeRevertReason(hexEncoded))
+
+	// 4. Panic(uint256): 0x4e487b71 + code
+	var panicBytes []byte
+	panicBytes = append(panicBytes, []byte{0x4e, 0x48, 0x7b, 0x71}...)
+	var panicCode [32]byte
+	panicCode[31] = 0x11 // arithmetic overflow
+	panicBytes = append(panicBytes, panicCode[:]...)
+	assert.Equal(t, "Panic(0x11)", DecodeRevertReason(panicBytes))
+
+	// 5. Printable plain text
+	assert.Equal(t, "simple text error", DecodeRevertReason([]byte("simple text error")))
+
+	// 6. Non-printable arbitrary binary
+	rawBinary := []byte{0xde, 0xad, 0xbe, 0xef}
+	assert.Equal(t, "0xdeadbeef", DecodeRevertReason(rawBinary))
+}
