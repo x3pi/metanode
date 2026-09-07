@@ -240,7 +240,7 @@ if [ "$SKIP_CROSS_CHAIN" = false ]; then
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}🌉 [BƯỚC 5/6] CHẠY FULL BỘ TEST CROSS-CHAIN (RUN_ALL_TESTS.SH)${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    CC_TEST_DIR="${SUITE_DIR}/test-simple/test-rpc/test-blockstm/cross-chain"
+    CC_TEST_DIR="${SUITE_DIR}/test-simple/test-rpc/test-chain/cross-chain"
     if [ -f "${CC_TEST_DIR}/run_all_tests.sh" ]; then
         cd "${CC_TEST_DIR}"
         chmod +x ./run_all_tests.sh
@@ -258,11 +258,11 @@ fi
 # BƯỚC 6: CHẠY TOÀN BỘ BỘ TEST BLOCK-STM
 # ==============================================================================
 if [ "$SKIP_TESTS" = false ]; then
-    CURRENT_STEP="[Bước 6/6] Chạy bộ kiểm thử Block-STM (test-blockstm/run_all_tests.sh)"
+    CURRENT_STEP="[Bước 6/6] Chạy bộ kiểm thử Block-STM (test-chain/run_all_tests.sh)"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}🧪 [BƯỚC 6/6] CHẠY TOÀN BỘ BỘ KIỂM THỬ BLOCK-STM (RUN_ALL_TESTS.SH)${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    cd "${SUITE_DIR}/test-simple/test-rpc/test-blockstm"
+    cd "${SUITE_DIR}/test-simple/test-rpc/test-chain"
     ./run_all_tests.sh
     echo -e "${GREEN}✅ Toàn bộ bài test Block-STM đã hoàn thành!${NC}\n"
 else

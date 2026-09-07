@@ -36,7 +36,7 @@
     - name: Sync cross-chain test-suite dev wallet keys into private_dev_keys.json
       when: "ansible_action in ['setup', 'reset']"
       vars:
-        suite_test_config: "{{ playbook_dir }}/../../../metanode-suite/test-simple/test-rpc/test-blockstm/config.json"
+        suite_test_config: "{{ playbook_dir }}/../../../metanode-suite/configs/config.json"
       block:
         - name: Check for metanode-suite's cross-chain test config
           ansible.builtin.stat:
