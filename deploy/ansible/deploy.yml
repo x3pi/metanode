@@ -125,7 +125,9 @@
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
       ansible.builtin.shell: |
-        python3 "{{ playbook_dir }}/parse_inventory.py" "{{ playbook_dir }}/inventory.yml" json > /tmp/rpc_nodes.json
+        rm -f /tmp/rpc_nodes.json
+        (umask 077 && python3 "{{ playbook_dir }}/parse_inventory.py" "{{ playbook_dir }}/inventory.yml" json > /tmp/rpc_nodes.json)
+        chmod 0600 /tmp/rpc_nodes.json
       args:
         executable: /bin/bash
 
@@ -133,7 +135,7 @@
       ansible.builtin.copy:
         src: /tmp/rpc_nodes.json
         dest: "{{ playbook_dir }}/monitors/block_hash_checker/config-m-nodes.json"
-        mode: '0644'
+        mode: '0600'
 
     - name: Ensure Prometheus directory exists
       ansible.builtin.file:
