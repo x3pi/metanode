@@ -145,7 +145,7 @@ else
     echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất qua API (đợi tối đa 120s)...${NC}"
     for ((attempt=1; attempt<=30; attempt++)); do
         SNAP_JSON=$(curl -sf -m 5 "$SNAP_API" 2>/dev/null || echo "")
-        if [ -n "$SNAP_JSON" ] && [ "$SNAP_JSON" != "[]" ]; then
+        if [ -n "$SNAP_JSON" ] && [ "$SNAP_JSON" != "[]" ] && [ "$SNAP_JSON" != "null" ]; then
             SNAP_NAME=$(echo "$SNAP_JSON" | jq -r 'max_by(.block_number) | .snapshot_name' 2>/dev/null || echo "")
             if [ -n "$SNAP_NAME" ] && [ "$SNAP_NAME" != "null" ]; then
                 break
@@ -355,13 +355,15 @@ else
     echo -e "${YELLOW}    ⚠️ Không tìm thấy log block của Go. Kiểm tra logs: journalctl -u $svc_exec -n 50${NC}"
 fi
 
-echo -e "${CYAN}  [5c] Khởi động Consensus Layer (Rust)...${NC}"
-systemctl start "$svc_cons"
+if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_cons}.service"; then
+    echo -e "${CYAN}  [5c] Khởi động Consensus Layer (Rust)...${NC}"
+    systemctl start "$svc_cons" || true
+fi
 
 # Khởi động lại RPC Proxy nếu có
 if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_rpc}.service"; then
     echo -e "${CYAN}  [5d] Khởi động RPC Proxy...${NC}"
-    systemctl start "$svc_rpc"
+    systemctl start "$svc_rpc" || true
 fi
 
 echo -e "${GREEN}  ✅ Các service đã được khởi động tuần tự${NC}"

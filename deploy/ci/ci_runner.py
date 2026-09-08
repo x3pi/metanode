@@ -329,7 +329,7 @@ def main():
         if args.only and test_id != args.only:
             continue
 
-        if not enabled:
+        if not enabled and not (args.only and test_id == args.only):
             print(f"\n⏭️  [SKIPPED] Bỏ qua bài test: {test_name} (disabled)")
             continue
 
