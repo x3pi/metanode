@@ -30,8 +30,9 @@ all:
         # Kích thước tối đa của mỗi file nén snapshot (MB)
         snapshot_max_part_size_mb: 600
 
-        # Số epoch cũ giữ lại trước khi dọn dẹp state (0 = Archive Node, giữ toàn bộ lịch sử)
-        epochs_to_keep: 0
+        # Số epoch cũ giữ lại trước khi dọn dẹp state (đặt 0 nếu muốn chạy Archive Node,
+        # giữ toàn bộ lịch sử — lưu ý sẽ khiến dung lượng đĩa tăng không giới hạn theo thời gian)
+        epochs_to_keep: 5
 
 
 
@@ -54,8 +55,6 @@ all:
           # Nếu máy triển khai chạy node đó luôn thì để local triển khai nhanh hơn
           # ansible_connection: local
 
-          # username
-          ansible_user: "abc"
           # --- PHƯƠNG THỨC XÁC THỰC SSH (Chọn 1 trong 2 cách dưới đây) ---
           # Cách A (Khuyên dùng cho Production): Xác thực bằng SSH Key (không cần mật khẩu)
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
@@ -73,8 +72,6 @@ all:
           node_ids: [1, 2]
           rpc_nodes: [1, 2]
           # prune_nodes: [1, 2]
-          # username
-          ansible_user: "abc"
           # Cách A: Dùng SSH Key
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
 
