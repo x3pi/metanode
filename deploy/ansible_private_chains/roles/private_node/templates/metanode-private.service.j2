@@ -17,7 +17,7 @@ Restart=always
 RestartSec=3s
 
 # Environment
-Environment="GOTRACEBACK=crash"{% if skip_mempool_sig_verify | default(false) | bool %} "SKIP_MEMPOOL_SIG_VERIFY=true"{% endif %} "NODE_TYPE=validator" "GOMAXPROCS=16"
+Environment="GOTRACEBACK=crash"{% if skip_mempool_sig_verify | default(false) | bool %} "SKIP_MEMPOOL_SIG_VERIFY=true"{% endif %} "META_VERIFY_DEVICE_KEY={{ 'true' if (verify_device_key | default(false) | bool) else 'false' }}" "NODE_TYPE=validator" "GOMAXPROCS=16"
 
 LimitNOFILE=100000
 LimitCORE=infinity

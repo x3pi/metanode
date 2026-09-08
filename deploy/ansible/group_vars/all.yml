@@ -35,3 +35,6 @@ recovery_committee_json_override_file: ""
 
 # Signature & nonce verification in mempool (false = strictly verified, true = bypass for raw benchmark stress-test)
 skip_mempool_sig_verify: false
+
+# Device key verification (false = disabled/default, true = enabled)
+verify_device_key: false

@@ -205,7 +205,13 @@ func (sp *StateProcessor) ProcessGetBlockHeaderByBlockNumber(request network.Req
 
 func (sp *StateProcessor) ProcessGetDeviceKey(request network.Request) (err error) {
 	deviceStorage := sp.storageManager.GetStorageBackupDeviceKey()
-	data, _ := deviceStorage.Get(request.Message().Body())
+	var data []byte
+	if deviceStorage != nil {
+		data, _ = deviceStorage.Get(request.Message().Body())
+	}
+	if len(data) == 0 && sp.storageManager != nil {
+		data, _ = sp.storageManager.GetPendingDeviceKey(common.BytesToHash(request.Message().Body()))
+	}
 	logger.Debug(
 		"Get device key",
 		hex.EncodeToString(request.Message().Body()),
@@ -227,9 +233,19 @@ func (sp *StateProcessor) ProcessGetDeviceKey(request network.Request) (err erro
 
 func (sp *StateProcessor) GetDeviceKey(hash common.Hash) (common.Hash, error) {
 	deviceStorage := sp.storageManager.GetStorageBackupDeviceKey()
+	if deviceStorage == nil {
+		return common.Hash{}, errors.New("device key storage not initialized")
+	}
 	data, err := deviceStorage.Get(hash.Bytes())
-	if err != nil {
-		return common.Hash{}, err
+	if err != nil || len(data) == 0 {
+		if sp.storageManager != nil {
+			if pending, ok := sp.storageManager.GetPendingDeviceKey(hash); ok {
+				return common.BytesToHash(pending), nil
+			}
+		}
+		if err != nil {
+			return common.Hash{}, err
+		}
 	}
 	return common.BytesToHash(data), nil
 }

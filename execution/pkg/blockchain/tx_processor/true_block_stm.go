@@ -592,6 +592,7 @@ func (stm *TrueBlockSTM) execOne(
 					} else {
 						mvccDB.PlusOneNonce(fromAddr)
 						mvccDB.SetLastHash(fromAddr, tx.Hash())
+						commitDeviceKeyIfPending(chainState, tx.Hash())
 						// Commit the mutated account into MVCC wrapper. Write a copy —
 						// fromAccount is the same object cached in mvccDB.localState;
 						// writing the live pointer would let any later mutation of it
@@ -620,6 +621,7 @@ func (stm *TrueBlockSTM) execOne(
 					fromAccount.SetAccountType(acType)
 					mvccDB.PlusOneNonce(fromAddr)
 					mvccDB.SetLastHash(fromAddr, tx.Hash())
+					commitDeviceKeyIfPending(chainState, tx.Hash())
 					// Commit the mutated account into MVCC wrapper (copy — see note above)
 					stm.accountMap.Write(fromAddr, mvcc.Version(txIndex), fromAccount.Copy())
 					mvccDB.WriteSet[fromAddr] = true
@@ -719,6 +721,7 @@ func (stm *TrueBlockSTM) execOne(
 			mvccDB.PlusOneNonce(tx.FromAddress())
 			mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 			mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+			commitDeviceKeyIfPending(chainState, tx.Hash())
 
 			if errSub != nil {
 				// Revert Native Transfer
@@ -898,6 +901,7 @@ func (stm *TrueBlockSTM) execOne(
 				}
 				mvccDB.SetLastHash(tx.FromAddress(), tx.Hash())
 				mvccDB.SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+				commitDeviceKeyIfPending(chainState, tx.Hash())
 
 				// Check again if applying state changes hit an estimate
 				blockingVer = mvccDB.BlockingVersion
@@ -1289,6 +1293,14 @@ func (stm *TrueBlockSTM) flushEventLogs(chainState *blockchain.ChainState, lo, h
 			if logs := exRs.EventLogs(); len(logs) > 0 {
 				baseScDB.AddEventLogs(logs)
 			}
+		}
+	}
+}
+
+func commitDeviceKeyIfPending(chainState *blockchain.ChainState, txHash common.Hash) {
+	if chainState != nil {
+		if sm := chainState.GetStorageManager(); sm != nil {
+			_ = sm.CommitDeviceKey(txHash)
 		}
 	}
 }

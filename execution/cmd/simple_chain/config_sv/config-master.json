@@ -139,5 +139,6 @@
     }
   },
   "nodes": {},
-  "is_rpc_node": true
+  "is_rpc_node": true,
+  "verify_device_key": false
 }

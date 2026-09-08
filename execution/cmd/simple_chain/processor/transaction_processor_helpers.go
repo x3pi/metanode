@@ -215,6 +215,10 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 }
 
 func (tp *TransactionProcessor) backupDeviceKey(s storage.Storage, t types.Transaction, newDeviceKey []byte) error {
+	if s == nil || len(newDeviceKey) == 0 {
+		return nil
+	}
+
 	// Fast-path-only duplicate check: a brand-new tx (the overwhelming majority
 	// of submissions) is never found in the cache/mapping-DB, so falling through
 	// to GetBlockNumberByTxHash's block-history walkback here would burn 25ms+
@@ -259,6 +263,14 @@ func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 	command string,
 	pbMessage proto.Message,
 ) {
+	if tp.env == nil {
+		return
+	}
+	cTypeIndex := mt_common.MapConnectionTypeToIndex(connectionTypeName)
+	if cTypeIndex < 0 || len(tp.env.ConnectionsByType(cTypeIndex)) == 0 {
+		return
+	}
+
 	select {
 	case tp.deviceKeySendPool <- struct{}{}:
 		atomic.AddInt64(&tp.deviceKeyGoroutineCount, 1)
@@ -320,9 +332,19 @@ func (tp *TransactionProcessor) HandleDeviceKeyRequest(r network.Request) error 
 // Retrieves device key from storage by hash
 func (tp *TransactionProcessor) GetDeviceKey(hash common.Hash) (common.Hash, error) {
 	deviceStorage := tp.storageManager.GetStorageBackupDeviceKey()
+	if deviceStorage == nil {
+		return common.Hash{}, errors.New("device key storage not initialized")
+	}
 	data, err := deviceStorage.Get(hash.Bytes())
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get device key: %w", err)
+	if err != nil || len(data) == 0 {
+		if tp.storageManager != nil {
+			if pending, ok := tp.storageManager.GetPendingDeviceKey(hash); ok {
+				return common.BytesToHash(pending), nil
+			}
+		}
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to get device key: %w", err)
+		}
 	}
 	return common.BytesToHash(data), nil
 }
