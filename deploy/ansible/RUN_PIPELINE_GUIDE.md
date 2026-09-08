@@ -57,10 +57,10 @@ flowchart TD
    * Thực thi `metanode-suite/scripts/update-ip/update-ip.sh`.
    * Đồng bộ toàn bộ các file `config.json` của các kịch bản test theo IP/RPC thực tế vừa sinh.
 6. **[Bước 5 - Full Test Cross-Chain]**:
-   * Thực thi `metanode-suite/test-simple/test-rpc/test-blockstm/cross-chain/run_all_tests.sh`.
+   * Thực thi `metanode-suite/test-simple/test-rpc/test-chain/cross-chain/run_all_tests.sh`.
    * Chạy đầy đủ 3 bài test: `01-client-only-transfer`, `02-cross-chain-caro-game`, `03-cross-chain-failure-refund` (mỗi bài lặp lại 3 lần để kiểm tra độ tin cậy).
 7. **[Bước 6 - Full Test Block-STM]**:
-   * Thực thi `metanode-suite/test-simple/test-rpc/test-blockstm/run_all_tests.sh`.
+   * Thực thi `metanode-suite/test-simple/test-rpc/test-chain/run_all_tests.sh`.
    * Kiểm thử song song 32+ kịch bản Block-STM (conflict, stress test, DEX, Xapian...).
 
 ---
@@ -74,9 +74,9 @@ flowchart TD
   ```
 * **Báo cáo kết quả Cross-Chain:**
   ```bash
-  cat /home/abc/nhat/con-chain-v2/metanode-suite/test-simple/test-rpc/test-blockstm/cross-chain/test_report.md
+  cat /home/abc/nhat/con-chain-v2/metanode-suite/test-simple/test-rpc/test-chain/cross-chain/test_report.md
   ```
 * **Log chi tiết các bài test Block-STM:**
   ```bash
-  ls -la /home/abc/nhat/con-chain-v2/metanode-suite/test-simple/test-rpc/test-blockstm/test_logs/
+  ls -la /home/abc/nhat/con-chain-v2/metanode-suite/test-simple/test-rpc/test-chain/test_logs/
   ```

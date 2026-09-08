@@ -313,6 +313,13 @@ pkg/storage/coverage.out
 *.py
 !deploy/systemd/**/*.py
 !deploy/ansible/**/*.py
+!deploy/ci/**/*.py
+!deploy/ci/*.py
+deploy/ci/ci_config.yaml
+!deploy/ci/ci_config.yaml.example
+deploy/ci/.last_tested_commit
+deploy/ci/ci_watcher.pid
+deploy/ci/ci_watcher.log
 deploy/systemd/*_keys/
 deploy/systemd/*.env
 !deploy/systemd/*.env.example

@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-28
+> **Last updated:** 2026-09-07
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -8,7 +8,14 @@
 
 ```
 metanode/
+├── ci.sh                   ← Convenient project-root symlink to deploy/ci/ci_watcher.sh
 ├── deploy/                 ← Deployment configurations and scripts parent folder
+│   ├── ci/                 ← Automated CI/CD Testing Daemon, Git Watcher & Telegram Alerts
+│   │   ├── ci_config.yaml  ← Test matrix configuration (Block-STM, Cross-Chain, Spam, TPS)
+│   │   ├── ci_watcher.sh   ← Remote Git commit listener daemon
+│   │   ├── ci_runner.py    ← Config-driven test runner with pre-actions & timeout control
+│   │   ├── telegram_notify.py ← Telegram notification module
+│   │   └── README.md       ← Comprehensive operations & test guide
 │   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes

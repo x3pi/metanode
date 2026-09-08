@@ -1,0 +1,132 @@
+# ==============================================================================
+# 🌐 METANODE CONTINUOUS INTEGRATION & TEST CONFIGURATION (EXAMPLE TEMPLATE)
+# ==============================================================================
+# 💡 HƯỚNG DẪN SỬ DỤNG:
+# 1. Sao chép file này thành `ci_config.yaml` (file này đã được đưa vào .gitignore):
+#    cp ci_config.yaml.example ci_config.yaml
+# 2. Cập nhật `bot_token` và `chat_id` Telegram của bạn vào `ci_config.yaml`.
+# 3. Bạn có thể dùng biến `{METANODE_DIR}` và `{SUITE_DIR}` trong các câu lệnh.
+# ==============================================================================
+git:
+  # "auto": Tự động phát hiện thư mục gốc metanode dựa theo vị trí script
+  repo_path: "auto"
+  # metanode-suite nằm cùng cấp với thư mục metanode
+  suite_path: "../metanode-suite"
+  branch: "main"                 # Nhánh git cần lắng nghe commit
+  remote: "origin"
+  poll_interval_seconds: 30     # Chu kỳ kiểm tra commit mới (giây)
+
+telegram:
+  enabled: true
+  # Token và Chat ID có thể lấy trực tiếp từ biến môi trường (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+  # hoặc điền trực tiếp vào đây (CẦN BẢO MẬT, KHÔNG COMMIT LÊN REPO CÔNG KHAI)
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID"
+  notify_on_start: true         # Gửi thông báo khi bắt đầu phát hiện commit mới
+  notify_on_each_test: true     # Báo ngay khi xong từng bài test kèm thời gian & tiến độ
+  notify_on_finish: true        # Gửi thông báo tổng kết khi hoàn tất toàn bộ pipeline
+  notify_on_test_fail: true     # Báo ngay khi có một bài test bị lỗi kèm trích xuất log
+
+# ==============================================================================
+# CẤU HÌNH GENESIS & VÍ TPS / SPAM (NGUỒN CẤU HÌNH DUY NHẤT - SINGLE SOURCE OF TRUTH)
+# ==============================================================================
+genesis:
+  # Số lượng ví TPS / Spam tối thiểu bắt buộc phải có trong genesis.json & genesis.json.example
+  required_min_keys: 50000
+
+# Định nghĩa các hành vi quản lý cụm chain (dùng cho pre_action và deploy ban đầu)
+chain_actions:
+  # Lệnh kiểm tra biên dịch (Bỏ qua vì ansible_deploy đã tích hợp sẵn kiểm tra build)
+  build_check_cmd: ""
+  
+  # Lệnh reset Public Chain (Root Anchor - Chain 991): Nạp ví spam vào genesis.json, Xóa DB cũ, tạo Genesis mới, mở ports
+  reset_cmd: "python3 {SUITE_DIR}/test_tps/gen_spam_keys/manage_genesis.py add {METANODE_DIR}/deploy/systemd/genesis.json.example {SUITE_DIR}/test_tps/gen_spam_keys/generated_keys.json {METANODE_DIR}/deploy/systemd/genesis.json && cd {METANODE_DIR}/deploy/ansible && ./ansible_deploy.sh --reset-all --open-ports"
+  
+  # Lệnh deploy toàn bộ Private Chains (101-104) + Khởi động lại Relayer + Cập nhật IP
+  # Lệnh này CHỈ chạy khi bài test cross-chain được bật (enabled: true)
+  deploy_private_cmd: "cd {METANODE_DIR}/deploy/ansible_private_chains && ./deploy_private_chains.sh --reset-all && ./run_relayer_tmux.sh restart && cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+  
+  # Lệnh restart nhanh các service systemd của node mà không xóa dữ liệu
+  restart_cmd: "cd {METANODE_DIR}/deploy/ansible && ./ansible_deploy.sh --restart"
+  
+  # Lệnh cập nhật IP / RPC endpoints cho toàn bộ các file test config
+  update_ip_cmd: "cd {SUITE_DIR}/scripts/update-ip && ./update-ip.sh"
+
+  # Lệnh nạp 50,000 ví TPS (chống trùng lặp), xóa genesis.json cũ và reset Public Chain
+  prepare_tps_cmd: "cd {METANODE_DIR} && ./deploy/ci/prepare_tps_chain.sh"
+
+  # Thời gian chờ (giây) để RPC sẵn sàng sau khi reset hoặc restart
+  wait_rpc_ready_seconds: 5
+
+# ==============================================================================
+# MA TRẬN CÁC BÀI TEST (CHẠY THEO THỨ TỰ TỪ TRÊN XUỐNG DƯỚI)
+# Thư mục `cwd` được tính tương đối từ thư mục `metanode-suite`
+# ==============================================================================
+tests:
+  # ----------------------------------------------------------------------------
+  # 1. BÀI TEST LOGIC CHAIN THƯỜNG (BLOCK-STM 32+ KỊCH BẢN)
+  # ----------------------------------------------------------------------------
+  - id: "blockstm_logic"
+    name: "Block-STM Logic Tests (32+ kịch bản)"
+    enabled: true
+    # Trước khi chạy, reset chain sạch sẽ để dữ liệu các bài test không bị xung đột
+    pre_action: "reset_chain"
+    cwd: "test-simple/test-rpc/test-chain"
+    command: "./run_all_tests.sh --gotest"
+    timeout_seconds: 1800
+    continue_on_failure: false  # Dừng pipeline ngay nếu logic chain cơ bản bị fail
+
+  # ----------------------------------------------------------------------------
+  # 2. BÀI TEST CROSS-CHAIN CORE (TRANSFER, CARO, REFUND)
+  # ----------------------------------------------------------------------------
+  - id: "cross_chain_core"
+    name: "Cross-Chain Relayer & Client Tests"
+    enabled: true
+    # ⭐️ Tự động deploy 4 Private Chains (101-104) & Relayer trước khi chạy bài test này!
+    # Nếu bài test này đặt enabled: false, CI sẽ BỎ QUA hoàn toàn, không tốn thời gian deploy Private Chains.
+    pre_action: "deploy_private"
+    cwd: "test-simple/test-rpc/test-chain/cross-chain"
+    command: "./run_all_tests.sh --gotest"
+    timeout_seconds: 600
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 3. BÀI TEST SPAM / SOAK TEST (SMOKE REGRESSION SCALE)
+  # ----------------------------------------------------------------------------
+  - id: "spam_contract"
+    name: "Spam Contract Multi-RPC Test"
+    enabled: true
+    pre_action: "none"
+    cwd: "test-simple/test-rpc/test-chain/spam-contract"
+    # Gửi 10 rounds với 100 ví dàn trải trên các node RPC
+    command: "go run main.go -config=../config.json -num=10000 -rounds=5 -wait-method=block -multi -xapian"
+    timeout_seconds: 600
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 4. BÀI TEST TPS CAO ĐIỂM (BENCHMARK THROUGHPUT)
+  # ----------------------------------------------------------------------------
+  - id: "tps_blast"
+    name: "TPS Blast Benchmark"
+    enabled: true
+    # Tự động nạp keys vào genesis, reset cụm Public Chain sạch để đo Max TPS tuyệt đối
+    pre_action: "prepare_tps"
+    cwd: "test_tps/tps_blast_cc"
+    command: "./run_tps_test.sh --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
+    timeout_seconds: 900
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 5. BÀI TEST BẬT TẮT NODE LUÂN PHIÊN & RECOVERY CỤM (CHAOS & ZERO-FORK)
+  # ----------------------------------------------------------------------------
+  - id: "node_chaos_restart"
+    name: "Chaos Rolling Restart & Zero-Fork Recovery"
+    enabled: true
+    # pre_action: "none" (mặc định) hoặc "restart_chain" để tự khởi động lại chain trước bài test này
+    # Ngoài ra có thể truyền cờ CI: ./ci.sh run-now --only node_chaos_restart --restart-chain
+    pre_action: "none"
+    cwd: "test-simple/test-rpc/test-chain/restart-recovery"
+    command: "./run_restart_test.sh --count 15"
+    timeout_seconds: 900
+    continue_on_failure: false
+
