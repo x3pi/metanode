@@ -417,6 +417,13 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			fmt.Sscanf(v, "%d", &parsed)
 			ConfigApp.MinGasPrice = parsed
 		}
+		if v := os.Getenv("META_VERIFY_DEVICE_KEY"); v != "" {
+			if v == "true" || v == "1" {
+				ConfigApp.VerifyDeviceKey = true
+			} else if v == "false" || v == "0" {
+				ConfigApp.VerifyDeviceKey = false
+			}
+		}
 
 		if ConfigApp.MVMCacheEnabled == nil {
 			defaultVal := true
