@@ -67,13 +67,33 @@ RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
 # Chain-stall probe transaction key (2026-09-08, see send_stall_probe_tx() below). Same
 # fallback pattern as deploy/systemd/start_relayer_daemon.sh's RELAYER_KEY: env var first, then
-# an inventory.yml override, then a PUBLIC devnet-only key already committed in this repo
-# (deploy/cluster/local_devnet/dev_accounts.json's "Sender (A0)") as a last resort -- safe only
-# because that key never custodies anything of real value. Never rely on the fallback for a real
-# deployment: set PROBE_TX_KEY in the environment, or probe_tx_key in inventory.yml, yourself.
+# an inventory.yml override, then... see below.
+#
+# 2026-09-08 FOLLOW-UP: the original last-resort fallback here (dev_accounts.json's "Sender A0")
+# turned out to have NO BLS public key registered on a real CI cluster's genesis -- every probe
+# attempt failed at submission ("failed to build MetaTx: account ... has no BLS public key
+# registered on-chain"), not at confirmation, so this monitor confidently declared a real stall
+# ("không phải do rảnh") on a cluster that was actually completely healthy and idle. Confirmed by
+# hand: the exact same probe against the exact same node, using metanode-suite's own
+# test-chain/config.json private_keys[0] (a key the CI test suite's own transactions already
+# prove is funded and BLS-registered) confirmed in 813ms. So: prefer that known-working key when
+# the sibling metanode-suite checkout is present (the common case for anyone running the CI
+# tooling this alert is meant to complement) before falling back to the old devnet key, which is
+# kept only as a last resort for a bare local_devnet with no metanode-suite checkout at all.
 PROBE_TX_KEY="${PROBE_TX_KEY:-}"
 if [ -z "$PROBE_TX_KEY" ] && [ -n "$INV_PATH" ]; then
     PROBE_TX_KEY=$(grep -E '^\s*probe_tx_key:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+fi
+PROBE_SUITE_CONFIG="${SCRIPT_DIR}/../../../../metanode-suite/test-simple/test-rpc/test-chain/config.json"
+if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
+    PROBE_TX_KEY=$(python3 -c "
+import json
+try:
+    keys = json.load(open('$PROBE_SUITE_CONFIG')).get('private_keys', [])
+    print(keys[0] if keys else '')
+except Exception:
+    print('')
+" 2>/dev/null)
 fi
 if [ -z "$PROBE_TX_KEY" ]; then
     PROBE_TX_KEY="0x9f61a687fbeac9e11d5cfce0fe2dcec035cb2b21eb9c584d8cf90696ce2fc370"
@@ -112,8 +132,16 @@ is_node_ignored() {
 # node còn sống. Nhiều chain (kể cả chain này) KHÔNG tự tạo block rỗng khi không có giao dịch --
 # block đứng yên vì đang RẢNH, không phải vì bị treo thật. 1 tx thăm dò sẽ được đưa vào block
 # bình thường nếu consensus vẫn khỏe, và ta tránh được cảnh báo giả (2026-09-08, sau khi gặp
-# đúng trường hợp này trên cụm thật: chain rảnh vẫn bị báo NGHIÊM TRỌNG). Trả về 0 nếu tx thăm dò
-# được xác nhận (có receipt), 1 nếu gửi thất bại hoặc thiếu công cụ/khóa.
+# đúng trường hợp này trên cụm thật: chain rảnh vẫn bị báo NGHIÊM TRỌNG).
+#
+# Trả mã thoát PHÂN BIỆT rõ 3 tình huống khác hẳn nhau (2026-09-08 follow-up: từng gộp chung
+# "gửi thất bại" và "gửi được nhưng không xác nhận" làm một -- khiến 1 lần PROBE_TX_KEY sai/thiếu
+# đăng ký BLS bị hiểu nhầm thành "đã thử, không phải do rảnh" dù thực ra tool còn chưa gửi được gì):
+#   0 = tx thăm dò được xác nhận vào block -- chain khỏe, chỉ đang rảnh.
+#   1 = thiếu công cụ/không dựng được binary/không lấy được chain-id -- KHÔNG kết luận được gì.
+#   2 = gửi tx bị RPC từ chối ngay (vd sai khóa, tài khoản chưa đăng ký BLS) -- lỗi cấu hình của
+#       chính probe, KHÔNG phải bằng chứng chain bị treo.
+#   3 = tx được RPC chấp nhận nhưng hết giờ chờ không thấy receipt -- tín hiệu thật đáng ngờ nhất.
 send_stall_probe_tx() {
     local node_url="$1"
     [ -z "$node_url" ] && return 1
@@ -132,7 +160,16 @@ send_stall_probe_tx() {
     [[ "$chain_id_hex" =~ ^0x[0-9a-fA-F]+$ ]] || return 1
     chain_id=$((16#${chain_id_hex#0x}))
 
-    "$PROBE_TOOL_BIN" -node "$node_url" -chain-id "$chain_id" -n 1 -key "$PROBE_TX_KEY" -max-wait 15s 2>&1 | grep -q "latency="
+    local out
+    out=$("$PROBE_TOOL_BIN" -node "$node_url" -chain-id "$chain_id" -n 1 -key "$PROBE_TX_KEY" -max-wait 15s 2>&1)
+    LAST_PROBE_OUTPUT="$out"
+    if echo "$out" | grep -q "latency="; then
+        return 0
+    elif echo "$out" | grep -q "send error:"; then
+        return 2
+    else
+        return 3
+    fi
 }
 # Resolve SSH auth for a node: prefers the SSH key (ansible_ssh_private_key_file, tracked in
 # rpc_nodes.json's "ssh" section). Falls back to reading ansible_ssh_pass ON DEMAND straight
@@ -594,18 +631,42 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                             # giao dịch nên không tạo block mới -- không phải bị treo thật), tx
                             # này sẽ được đưa vào block và ta bỏ qua cảnh báo giả (2026-09-08).
                             confirmed_real_stall=true
+                            probe_status_line="Chưa thử được (không có node nào để gửi)"
                             echo "🔎 [STALL PROBE] Nghi ngờ chain treo tại block #${last_seen_block} (đứng yên ${stall_duration}s) -- thử gửi 1 tx thăm dò tới ${probe_target_url:-<không có node nào>}..."
-                            if [ -n "$probe_target_url" ] && send_stall_probe_tx "$probe_target_url"; then
-                                sleep 3
-                                probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
-                                if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
-                                    last_seen_block=$((16#${probe_hex#0x}))
-                                    last_block_progress_ts=$now_ts
-                                    confirmed_real_stall=false
-                                    echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
-                                fi
-                            else
-                                echo "⚠️ [STALL PROBE] Không gửi được tx thăm dò (thiếu PROBE_TX_KEY/công cụ, hoặc không tới được RPC nào) -- không loại trừ được khả năng rảnh, báo như bình thường."
+                            if [ -n "$probe_target_url" ]; then
+                                LAST_PROBE_OUTPUT=""
+                                send_stall_probe_tx "$probe_target_url"
+                                probe_rc=$?
+                                case "$probe_rc" in
+                                    0)
+                                        sleep 3
+                                        probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+                                        if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
+                                            last_seen_block=$((16#${probe_hex#0x}))
+                                            last_block_progress_ts=$now_ts
+                                            confirmed_real_stall=false
+                                            echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
+                                        else
+                                            probe_status_line="Tx thăm dò báo đã xác nhận nhưng block vẫn chưa nhích -- bất thường, cần xem log."
+                                        fi
+                                        ;;
+                                    2)
+                                        # 2026-09-08: gặp thật trên cụm CI -- PROBE_TX_KEY sai/chưa đăng ký BLS
+                                        # khiến RPC từ chối NGAY LÚC GỬI, không liên quan gì tới chain có treo
+                                        # hay không. Đừng khẳng định "không phải do rảnh" trong tình huống này.
+                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
+                                        probe_status_line="Bị RPC từ chối ngay khi gửi (lỗi cấu hình PROBE_TX_KEY, KHÔNG phải bằng chứng chain treo): ${probe_err_snippet:-không rõ lỗi}"
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                    3)
+                                        probe_status_line="Đã gửi được nhưng hết giờ chờ (15s) không thấy receipt -- tín hiệu treo thật."
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                    *)
+                                        probe_status_line="Không chạy được (thiếu công cụ hoặc không lấy được chain-id) -- không loại trừ được khả năng rảnh."
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                esac
                             fi
 
                             if [ "$confirmed_real_stall" == "true" ]; then
@@ -613,10 +674,14 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                                 is_chain_stalled=true
                                 send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
 ────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
 🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
+   • <b>Node được kiểm tra (tx thăm dò):</b> <code>${probe_target_url:-không có}</code>
    • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
    • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
-   • <b>Đã thử 1 tx thăm dò trước khi báo:</b> không được xác nhận vào block mới -- không phải do rảnh.
+   • <b>Kết quả tx thăm dò:</b> ${probe_status_line}
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
 ────────────────────────"
                             fi
