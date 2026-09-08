@@ -342,7 +342,21 @@ echo -e "${GREEN}  ✅ Hoàn tất ánh xạ và phân quyền dữ liệu${NC}"
 echo -e "${BLUE}[5/7] 🚀 Khởi động các service systemd của Node $NODE_ID...${NC}"
 
 echo -e "${CYAN}  [5a] Khởi động Execution Layer (Go)...${NC}"
-systemctl start "$svc_exec"
+# 2026-09-08: if this node had previously crash-looped enough to trip
+# metanode-execution.service.j2's StartLimitBurst circuit breaker (added same day), systemd
+# refuses ANY start request -- including this one -- with "Start request repeated too quickly"
+# until reset-failed clears it. Under `set -euo pipefail` that would abort this whole restore
+# script right here with no useful message. Same class of bug as the one fixed in
+# roles/systemd_services and roles/restart_services -- reset-failed first (harmless no-op if the
+# unit never failed), then fail loudly with a clear pointer if start still doesn't work instead
+# of silently continuing (unlike svc_cons/svc_rpc below, a failed execution start here means the
+# restore did not actually succeed).
+systemctl reset-failed "$svc_exec" 2>/dev/null || true
+if ! systemctl start "$svc_exec"; then
+    echo -e "${RED}  ❌ Không thể khởi động $svc_exec sau khi restore snapshot.${NC}"
+    echo -e "${YELLOW}     Kiểm tra: journalctl -u $svc_exec -n 80${NC}"
+    exit 1
+fi
 
 echo -e "${CYAN}  [5b] Chờ Go nhận dữ liệu và mở database (10s)...${NC}"
 sleep 10
