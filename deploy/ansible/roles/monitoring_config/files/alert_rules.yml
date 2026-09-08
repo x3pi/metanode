@@ -32,13 +32,23 @@ groups:
         # perfectly flat, i.e. no new block committed. Guarded by `and on(instance) up == 1` so
         # a target that is simply down (already covered by MetanodeTargetDown) does not also
         # fire this alert on its last-known frozen value.
-        expr: changes(master_current_block[3m]) == 0 and on(instance) up == 1
-        for: 1m
+        #
+        # 2026-09-08: originally 3m window / for 1m, but a flat master_current_block is
+        # ambiguous -- this chain does not mint empty blocks, so an idle chain with no pending
+        # txs looks IDENTICAL to a genuinely stuck consensus round from this metric alone (hit
+        # this for real: alerted on a healthy, merely idle chain). monitors/start_monitors.sh's
+        # bash chain-stall detector now sends a real probe transaction before alerting to tell
+        # the two apart (see send_stall_probe_tx() there) -- Prometheus has no equivalent
+        # capability (PromQL can't send transactions), so this rule is intentionally loosened to
+        # act as a slow backstop for "the bash monitor itself is down" rather than a second,
+        # noisier primary detector for the same condition.
+        expr: changes(master_current_block[15m]) == 0 and on(instance) up == 1
+        for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Chain on {{ $labels.instance }} has not produced a new block in 3+ minutes"
-          description: "master_current_block has not changed for {{ $labels.instance }} while the target is still reachable — consensus round is stuck (deadlock, lost quorum, or stall round), not a crashed process. Cross-check with the other validators: if all show the same frozen height, the whole chain is halted."
+          summary: "Chain on {{ $labels.instance }} has not produced a new block in 20+ minutes"
+          description: "master_current_block has not changed for {{ $labels.instance }} while the target is still reachable, for far longer than monitors/start_monitors.sh's own probe-confirmed stall threshold would allow to go unnoticed if that monitor were running — check whether the bash health monitor process is still alive on the monitoring host before assuming this is a genuine stall."
 
       - alert: MetanodeNodeIsolated
         expr: master_peers_connected == 0

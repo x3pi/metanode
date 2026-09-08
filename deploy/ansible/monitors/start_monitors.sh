@@ -65,6 +65,23 @@ export TELEGRAM_BOT_TOKEN
 export TELEGRAM_CHAT_ID
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
+# Chain-stall probe transaction key (2026-09-08, see send_stall_probe_tx() below). Same
+# fallback pattern as deploy/systemd/start_relayer_daemon.sh's RELAYER_KEY: env var first, then
+# an inventory.yml override, then a PUBLIC devnet-only key already committed in this repo
+# (deploy/cluster/local_devnet/dev_accounts.json's "Sender (A0)") as a last resort -- safe only
+# because that key never custodies anything of real value. Never rely on the fallback for a real
+# deployment: set PROBE_TX_KEY in the environment, or probe_tx_key in inventory.yml, yourself.
+PROBE_TX_KEY="${PROBE_TX_KEY:-}"
+if [ -z "$PROBE_TX_KEY" ] && [ -n "$INV_PATH" ]; then
+    PROBE_TX_KEY=$(grep -E '^\s*probe_tx_key:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+fi
+if [ -z "$PROBE_TX_KEY" ]; then
+    PROBE_TX_KEY="0x9f61a687fbeac9e11d5cfce0fe2dcec035cb2b21eb9c584d8cf90696ce2fc370"
+fi
+export PROBE_TX_KEY
+PROBE_TOOL_SRC="${SCRIPT_DIR}/../../../execution/cmd/tool/tps_latency_probe"
+PROBE_TOOL_BIN="${SCRIPT_DIR}/stall_probe_tool"
+
 send_tele() {
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
         return
@@ -89,6 +106,33 @@ is_node_ignored() {
         fi
     done
     return 1
+}
+
+# Trước khi báo "chain stall" (mục BƯỚC 3 dưới), thử gửi 1 giao dịch thăm dò (probe tx) tới 1
+# node còn sống. Nhiều chain (kể cả chain này) KHÔNG tự tạo block rỗng khi không có giao dịch --
+# block đứng yên vì đang RẢNH, không phải vì bị treo thật. 1 tx thăm dò sẽ được đưa vào block
+# bình thường nếu consensus vẫn khỏe, và ta tránh được cảnh báo giả (2026-09-08, sau khi gặp
+# đúng trường hợp này trên cụm thật: chain rảnh vẫn bị báo NGHIÊM TRỌNG). Trả về 0 nếu tx thăm dò
+# được xác nhận (có receipt), 1 nếu gửi thất bại hoặc thiếu công cụ/khóa.
+send_stall_probe_tx() {
+    local node_url="$1"
+    [ -z "$node_url" ] && return 1
+
+    # Build tps_latency_probe đúng 1 lần rồi cache lại binary -- cùng kiểu với cách
+    # block_hash_checker được build bên dưới (LOCAL MONITOR INITIALIZATION).
+    if [ ! -f "$PROBE_TOOL_BIN" ] || [ "${PROBE_TOOL_SRC}/main.go" -nt "$PROBE_TOOL_BIN" ]; then
+        if [ -d "$PROBE_TOOL_SRC" ] && command -v go >/dev/null 2>&1; then
+            (cd "$PROBE_TOOL_SRC" && go build -o "$PROBE_TOOL_BIN" .) 2>/dev/null || true
+        fi
+    fi
+    [ -x "$PROBE_TOOL_BIN" ] || return 1
+
+    local chain_id_hex chain_id
+    chain_id_hex=$(curl -s -m 5 -X POST "$node_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+    [[ "$chain_id_hex" =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+    chain_id=$((16#${chain_id_hex#0x}))
+
+    "$PROBE_TOOL_BIN" -node "$node_url" -chain-id "$chain_id" -n 1 -key "$PROBE_TX_KEY" -max-wait 15s 2>&1 | grep -q "latency="
 }
 # Resolve SSH auth for a node: prefers the SSH key (ansible_ssh_private_key_file, tracked in
 # rpc_nodes.json's "ssh" section). Falls back to reading ansible_ssh_pass ON DEMAND straight
@@ -270,7 +314,13 @@ if [ "${1:-}" == "health" ]; then
     last_block_progress_ts=$(date +%s)
     last_stall_alert_ts=0
     is_chain_stalled=false
-    
+    # 2026-09-08: was a hardcoded 120s -- raised default and made overridable
+    # (CHAIN_STALL_THRESHOLD_SEC in .env or the environment) after a real false alarm on an idle
+    # chain (no pending txs -> no new block -> looked identical to a real stall from block height
+    # alone). The bigger fix for the false-positive itself is send_stall_probe_tx() above, called
+    # right before alerting below; this threshold mainly controls how often that probe fires.
+    STALL_THRESHOLD_SEC="${CHAIN_STALL_THRESHOLD_SEC:-300}"
+
     # Lấy IP local của máy monitor hiện tại
     MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
     if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
@@ -506,6 +556,7 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 
             # ─── BƯỚC 3: PHÁT HIỆN CHUỖI ĐỨNG IM (CHAIN STALL DETECTOR) ───────────────
             curr_max_block=0
+            probe_target_url=""
             while read -r chk_key node_url; do
                 chk_id=${chk_key#m}
                 if is_node_ignored "$chk_key" "$chk_id"; then
@@ -515,6 +566,9 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                 if [[ "$hex_b" =~ ^0x[0-9a-fA-F]+$ ]]; then
                     dec_b=$((16#${hex_b#0x}))
                     if [ "$dec_b" -gt "$curr_max_block" ]; then curr_max_block=$dec_b; fi
+                    # Nhớ lại 1 node còn phản hồi được để dùng làm đích gửi tx thăm dò bên dưới,
+                    # nếu cần -- không cần là node cao nhất, chỉ cần còn sống.
+                    if [ -z "$probe_target_url" ]; then probe_target_url="$node_url"; fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
 
@@ -533,18 +587,39 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                     last_block_progress_ts=$now_ts
                 else
                     stall_duration=$((now_ts - last_block_progress_ts))
-                    # Nếu block không tăng sau 120s (2 phút), cảnh báo lặp lại mỗi 15 phút
-                    if [ "$stall_duration" -ge 120 ]; then
+                    # Nếu block không tăng sau STALL_THRESHOLD_SEC, cảnh báo lặp lại mỗi 15 phút
+                    if [ "$stall_duration" -ge "$STALL_THRESHOLD_SEC" ]; then
                         if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
-                            last_stall_alert_ts=$now_ts
-                            is_chain_stalled=true
-                            send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
+                            # Trước khi báo: thử 1 tx thăm dò. Nếu chain chỉ đang RẢNH (không có
+                            # giao dịch nên không tạo block mới -- không phải bị treo thật), tx
+                            # này sẽ được đưa vào block và ta bỏ qua cảnh báo giả (2026-09-08).
+                            confirmed_real_stall=true
+                            echo "🔎 [STALL PROBE] Nghi ngờ chain treo tại block #${last_seen_block} (đứng yên ${stall_duration}s) -- thử gửi 1 tx thăm dò tới ${probe_target_url:-<không có node nào>}..."
+                            if [ -n "$probe_target_url" ] && send_stall_probe_tx "$probe_target_url"; then
+                                sleep 3
+                                probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+                                if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
+                                    last_seen_block=$((16#${probe_hex#0x}))
+                                    last_block_progress_ts=$now_ts
+                                    confirmed_real_stall=false
+                                    echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
+                                fi
+                            else
+                                echo "⚠️ [STALL PROBE] Không gửi được tx thăm dò (thiếu PROBE_TX_KEY/công cụ, hoặc không tới được RPC nào) -- không loại trừ được khả năng rảnh, báo như bình thường."
+                            fi
+
+                            if [ "$confirmed_real_stall" == "true" ]; then
+                                last_stall_alert_ts=$now_ts
+                                is_chain_stalled=true
+                                send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
 ────────────────────────
 🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
    • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
-   • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: 120s)
+   • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
+   • <b>Đã thử 1 tx thăm dò trước khi báo:</b> không được xác nhận vào block mới -- không phải do rảnh.
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
 ────────────────────────"
+                            fi
                         fi
                     fi
                 fi
