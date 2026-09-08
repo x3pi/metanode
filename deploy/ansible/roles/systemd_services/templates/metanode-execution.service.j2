@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=15s
 
 # Environment
-Environment="GOTRACEBACK=crash"{% if skip_mempool_sig_verify | default(false) | bool %} "SKIP_MEMPOOL_SIG_VERIFY=true"{% endif %}
+Environment="GOTRACEBACK=crash"{% if skip_mempool_sig_verify | default(false) | bool %} "SKIP_MEMPOOL_SIG_VERIFY=true"{% endif %} "META_VERIFY_DEVICE_KEY={{ 'true' if (verify_device_key | default(false) | bool) else 'false' }}"
 # Default to validator, but synconly logic can be injected here based on variables
 {% if item | int in synconly_nodes | default([]) or is_synconly | default(false) %}
 Environment=NODE_TYPE=synconly

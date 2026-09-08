@@ -11,6 +11,7 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -382,16 +383,16 @@ func VerifyTransaction(
 
 	// verify last hash
 
-	// Debug
-	// neu newDeviceKey ma bang voi as.DeviceKey() thi bao loi
-	// if tx.NewDeviceKey() == as.DeviceKey() && as.Nonce() != 0 {
-	// 	return transaction.InvalidNewDeviceKey
-	// }
+	// Verify DeviceKey nếu được bật trong cấu hình
+	if chainState.GetConfig().VerifyDeviceKey {
+		if tx.NewDeviceKey() == as.DeviceKey() && as.Nonce() != 0 {
+			return transaction.InvalidNewDeviceKey
+		}
 
-	// // // verify device key
-	// if !tx.ValidDeviceKey(as) {
-	// 	return transaction.InvalidLastDeviceKey
-	// }
+		if as != nil && as.DeviceKey() != (eth_common.Hash{}) && crypto.Keccak256Hash(tx.LastDeviceKey().Bytes()) != as.DeviceKey() {
+			return transaction.InvalidLastDeviceKey
+		}
+	}
 
 	return nil
 }

@@ -219,6 +219,7 @@ type SimpleChainConfig struct {
 	// Unified Node RPC (Private Gateway) configuration
 	EnablePrivateGateway bool   `json:"enable_private_gateway"` // Nếu true, Node sẽ tự động chặn ETH tx, chạy Speculative Execution và bọc BLS
 	GatewayBLSKey        string `json:"gateway_bls_key"`        // Private Key BLS dùng để ký bảo lãnh cho các giao dịch bị chặn
+	VerifyDeviceKey      bool   `json:"verify_device_key"`      // Bật/tắt kiểm tra DeviceKey khi xác thực giao dịch (mặc định: false)
 
 	// Snapshot configuration
 	SnapshotEnabled         bool   `json:"snapshot_enabled"`                    // Bật/tắt tự động snapshot
@@ -421,7 +422,6 @@ func LoadConfig(configPath string) (*SimpleChainConfig, error) {
 			defaultVal := true
 			ConfigApp.MVMCacheEnabled = &defaultVal
 		}
-
 	})
 	return ConfigApp, err
 }

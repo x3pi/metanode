@@ -48,6 +48,9 @@ func HandleRevertedTransaction(
 	// 5. Cập nhật lastHash và newDeviceKey
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	if sm := chainState.GetStorageManager(); sm != nil {
+		_ = sm.CommitDeviceKey(tx.Hash())
+	}
 	// 6. Consume the sender's nonce. ExecuteNonceOnly's own UpdateStateDB deliberately
 	// SKIPS the sender's own address (vm_processor_state.go's "NONCE-FIX": regular
 	// parallel-EVM transactions already have their nonce bumped beforehand via
@@ -99,6 +102,9 @@ func HandleSuccessTransaction(
 	rcp.UpdateExecuteResult(exRs.ReceiptStatus(), ret, exRs.Exception(), exRs.GasUsed(), eventLogs)
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	if sm := chainState.GetStorageManager(); sm != nil {
+		_ = sm.CommitDeviceKey(tx.Hash())
+	}
 	// Consume the sender's nonce -- see HandleRevertedTransaction's matching comment above
 	// for the full root-cause explanation. Without this, a barrier tx's sender nonce never
 	// advances at all, and a second gateway transaction from the same sender gets stuck as

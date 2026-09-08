@@ -412,7 +412,8 @@ def write_node_configs(bls: dict, eth: dict, args, keys_dir: str):
             "console_output": True,
             "file_output": True
         },
-        "tx_trace_enabled": False
+        "tx_trace_enabled": False,
+        "verify_device_key": False
     }
 
     import os
