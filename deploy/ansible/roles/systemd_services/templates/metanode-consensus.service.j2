@@ -4,6 +4,9 @@ Documentation=https://github.com/x3pi/metanode
 After=network-online.target metanode-execution-{{ item }}.service
 Wants=network-online.target
 Requires=metanode-execution-{{ item }}.service
+# Circuit Breaker: Chống restart-loop vô hạn khi crash thật (ngắt mạch sau 5 lần crash / 300s)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -228,6 +228,12 @@ if [ "${1:-}" == "health" ]; then
     declare -A dead_nodes
     declare -A failure_type
     
+    # Chain Stall Detector tracking
+    last_seen_block=0
+    last_block_progress_ts=$(date +%s)
+    last_stall_alert_ts=0
+    is_chain_stalled=false
+    
     # Lấy IP local của máy monitor hiện tại
     MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
     if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
@@ -438,6 +444,48 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
+
+            # ─── BƯỚC 3: PHÁT HIỆN CHUỖI ĐỨNG IM (CHAIN STALL DETECTOR) ───────────────
+            curr_max_block=0
+            while read -r _ node_url; do
+                hex_b=$(curl -s -m 3 -X POST "$node_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+                if [[ "$hex_b" =~ ^0x[0-9a-fA-F]+$ ]]; then
+                    dec_b=$((16#${hex_b#0x}))
+                    if [ "$dec_b" -gt "$curr_max_block" ]; then curr_max_block=$dec_b; fi
+                fi
+            done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
+
+            now_ts=$(date +%s)
+            if [ "$curr_max_block" -gt 0 ]; then
+                if [ "$curr_max_block" -gt "$last_seen_block" ]; then
+                    if [ "$is_chain_stalled" == "true" ]; then
+                        is_chain_stalled=false
+                        send_tele "✅ <b>[ĐÃ PHỤC HỒI: MẠNG TIẾP TỤC SINH BLOCK]</b> ✅
+────────────────────────
+🎯 <b>Độ cao Block mới nhất:</b> <code>#${curr_max_block}</code>
+📡 <b>Trạng thái:</b> Chuỗi đã thoát khỏi tình trạng treo và tiếp tục tạo block bình thường.
+────────────────────────"
+                    fi
+                    last_seen_block=$curr_max_block
+                    last_block_progress_ts=$now_ts
+                else
+                    stall_duration=$((now_ts - last_block_progress_ts))
+                    # Nếu block không tăng sau 120s (2 phút), cảnh báo lặp lại mỗi 15 phút
+                    if [ "$stall_duration" -ge 120 ]; then
+                        if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
+                            last_stall_alert_ts=$now_ts
+                            is_chain_stalled=true
+                            send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
+────────────────────────
+🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
+   • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
+   • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: 120s)
+   • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
+────────────────────────"
+                        fi
+                    fi
+                fi
+            fi
         fi
         sleep 10
     done
@@ -487,7 +535,7 @@ if [ "${1:-}" == "resources" ]; then
 
                 RAM_LIMIT=95
                 CPU_LIMIT=97
-                DISK_LIMIT=95
+                DISK_LIMIT=85
 
                 if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
                     if [[ "$ram_usage" -ge "$RAM_LIMIT" ]] || [[ "$cpu_usage" -ge "$CPU_LIMIT" ]] || [[ "$disk_usage" -ge "$DISK_LIMIT" ]]; then
