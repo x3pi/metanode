@@ -1,0 +1,79 @@
+# alert_rules.yml — Prometheus alerting rules for the Metanode validator cluster.
+#
+# Referenced by prometheus.yml.j2's `rule_files:` (previously pointed at a file that did not
+# exist anywhere in the repo, so Prometheus never had any alert rules loaded at all — metrics
+# were scraped but nothing ever fired). Paired with the `alerting:` block added to
+# prometheus.yml.j2, which points Prometheus at the local Alertmanager (role: alertmanager),
+# which in turn routes to the same Telegram bot/chat already used by the bash monitors in
+# monitors/start_monitors.sh (see alertmanager.yml.j2) — one Telegram channel, two independent
+# detectors (bash for RPC/process-level checks, this for anything visible only via /metrics).
+#
+# Every threshold below is either a Prometheus-builtin synthetic metric (`up`), a metric this
+# repo's own Go/Rust code registers and is therefore confirmed to exist (see
+# execution/pkg/metrics/metrics.go), or a standard node_exporter metric name. Thresholds for
+# disk/RAM/CPU intentionally match monitors/start_monitors.sh's RAM_LIMIT/CPU_LIMIT/DISK_LIMIT
+# (95/97/85) so the two systems never disagree about what counts as "overloaded". No threshold
+# here is invented/guessed for a metric this repo doesn't already emit.
+
+groups:
+  - name: metanode_availability
+    rules:
+      - alert: MetanodeTargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} (job {{ $labels.job }}) for 1 minute. If job is metanode-go-execution or metanode-rust-consensus, the node itself may be crash-looping — check `systemctl status metanode-execution-<N> metanode-consensus-<N>` on that host."
+
+      - alert: MetanodeChainStalled
+        # changes() works on gauges too: 0 changes over the window means the value has been
+        # perfectly flat, i.e. no new block committed. Guarded by `and on(instance) up == 1` so
+        # a target that is simply down (already covered by MetanodeTargetDown) does not also
+        # fire this alert on its last-known frozen value.
+        expr: changes(master_current_block[3m]) == 0 and on(instance) up == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain on {{ $labels.instance }} has not produced a new block in 3+ minutes"
+          description: "master_current_block has not changed for {{ $labels.instance }} while the target is still reachable — consensus round is stuck (deadlock, lost quorum, or stall round), not a crashed process. Cross-check with the other validators: if all show the same frozen height, the whole chain is halted."
+
+      - alert: MetanodeNodeIsolated
+        expr: master_peers_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} has zero connected peers"
+          description: "master_peers_connected has been 0 for 2+ minutes — this node is cut off from the rest of the cluster (network partition, firewall change, or peer list misconfiguration), even if its own process is healthy."
+
+  - name: metanode_resources
+    rules:
+      - alert: MetanodeDiskFull
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) * 100 >= 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk on {{ $labels.instance }} ({{ $labels.mountpoint }}) is at or above 85%"
+          description: "Matches monitors/start_monitors.sh's DISK_LIMIT. Snapshot/DB growth left unchecked here leads straight to the crash-loop + manual-snapshot-restore scenario — see DEPLOY_GUIDE.md kịch bản 6."
+
+      - alert: MetanodeHighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 >= 95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAM on {{ $labels.instance }} is at or above 95%"
+          description: "Matches monitors/start_monitors.sh's RAM_LIMIT. OOM-GUARD (execution/cmd/simple_chain/main.go) is already forcing GC at this point — this alert exists so a human finds out before OOM-GUARD's relief stops being enough."
+
+      - alert: MetanodeHighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) >= 97
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU on {{ $labels.instance }} is at or above 97%"
+          description: "Matches monitors/start_monitors.sh's CPU_LIMIT. Sustained saturation stalls consensus round advancement — see the GOMAXPROCS co-location note in metanode-execution.service.j2."

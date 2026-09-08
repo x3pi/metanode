@@ -1,0 +1,25 @@
+[Unit]
+Description=Prometheus Alertmanager
+Documentation=https://github.com/x3pi/metanode
+After=network-online.target
+Wants=network-online.target
+# Circuit Breaker: same rationale as metanode-execution.service.j2/metanode-consensus.service.j2
+# (2026-09-08) -- without this a bad config reload or a crash-looping binary restarts forever
+# silently instead of surfacing as a `systemctl is-failed` operators (and future alert rules on
+# alertmanager itself) can see.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+ExecStart=/usr/local/bin/alertmanager \
+    --config.file=/etc/alertmanager/alertmanager.yml \
+    --storage.path=/var/lib/alertmanager \
+    --web.listen-address=:9093
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

@@ -38,3 +38,7 @@ skip_mempool_sig_verify: false
 
 # Device key verification (false = disabled/default, true = enabled)
 verify_device_key: false
+
+# Alertmanager version installed by roles/alertmanager (see its tasks/main.yml for the
+# download URL pattern). Pin explicitly rather than "latest" so a deploy run is reproducible.
+alertmanager_version: "0.27.0"

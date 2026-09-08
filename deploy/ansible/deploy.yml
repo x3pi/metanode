@@ -122,6 +122,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  roles:
+    # Runs before the Prometheus config generation below so Alertmanager is already listening on
+    # :9093 by the time Prometheus (re)starts with the alerting: block that points at it.
+    - { role: alertmanager, become: true, when: "ansible_action not in ['stop']" }
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
       ansible.builtin.shell: |
@@ -149,7 +153,63 @@
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
       when: "ansible_action not in ['stop']"
-        
+
+    - name: Copy alert_rules.yml alongside the generated prometheus.yml (docker-compose path)
+      # execution/docker-compose.monitoring.yml mounts execution/deploy/prometheus/ straight into
+      # the Prometheus container as /etc/prometheus, so this one copy covers that deployment mode
+      # for free. The bare-metal systemd path (this box's actual live setup) is handled
+      # separately below, since its config lives at /etc/prometheus/ on the host, not here.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/roles/monitoring_config/files/alert_rules.yml"
+        dest: "{{ project_root }}/execution/deploy/prometheus/alert_rules.yml"
+      when: "ansible_action not in ['stop']"
+
+    # 2026-09-08: found that a bare-metal `prometheus` systemd service (this box's actual live
+    # setup, e.g. m0) reads its config from /etc/prometheus/prometheus.yml -- a completely
+    # different file from the one generated above, hand-authored once and never wired to this
+    # playbook. "Restart local Prometheus service" below was therefore restarting a Prometheus
+    # that never saw this repo's scrape config, rule_files, or (now) alerting: block at all. Only
+    # touch /etc/prometheus if it already exists (i.e. Prometheus was set up on this host via the
+    # OS/manually) -- never create it, since a host using only the docker-compose stack has no
+    # such directory and should stay that way.
+    - name: Check whether a bare-metal Prometheus config directory exists on this host
+      ansible.builtin.stat:
+        path: /etc/prometheus
+      register: bare_metal_prometheus_dir
+      when: "ansible_action not in ['stop']"
+
+    - name: Sync generated prometheus.yml to the bare-metal Prometheus config
+      ansible.builtin.copy:
+        src: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
+        dest: /etc/prometheus/prometheus.yml
+        remote_src: yes
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      become: true
+      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+
+    - name: Sync alert_rules.yml to the bare-metal Prometheus config
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/roles/monitoring_config/files/alert_rules.yml"
+        dest: /etc/prometheus/alert_rules.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      become: true
+      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+
+    - name: Clear systemd start-limit lockout before restarting Prometheus
+      # Prometheus's own unit file has no StartLimitBurst today, so this is a precaution rather
+      # than a confirmed trap (unlike the metanode-execution/consensus/alertmanager case) -- kept
+      # for the same reason reset-failed was added everywhere else this session: cheap, and a
+      # silent no-op ('Unit ... not loaded') whenever it isn't needed.
+      ansible.builtin.command: systemctl reset-failed prometheus
+      become: true
+      failed_when: false
+      changed_when: false
+      when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
+
     - name: Restart local Prometheus service
       ansible.builtin.shell: systemctl restart prometheus || true
       become: true
