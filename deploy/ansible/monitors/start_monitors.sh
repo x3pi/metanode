@@ -74,6 +74,22 @@ send_tele() {
         -d parse_mode="HTML" \
         --data-urlencode text="$1" >/dev/null 2>&1 || true
 }
+
+# Helper: Kiểm tra node có nằm trong danh sách bỏ qua giám sát (do test tắt bật node hoặc bảo trì)
+is_node_ignored() {
+    local node_key="$1"
+    local node_id="$2"
+    for ign_file in "/tmp/monitors_ignore_nodes" "/tmp/metanode_ignore_nodes" "${SCRIPT_DIR}/ignore_nodes" "/opt/metanode/monitors/ignore_nodes"; do
+        if [ -f "$ign_file" ]; then
+            local content
+            content=$(cat "$ign_file" 2>/dev/null || echo "")
+            if echo "$content" | grep -qwE "(all|${node_id}|${node_key}|m${node_id})"; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
 # Resolve SSH auth for a node: prefers the SSH key (ansible_ssh_private_key_file, tracked in
 # rpc_nodes.json's "ssh" section). Falls back to reading ansible_ssh_pass ON DEMAND straight
 # from inventory.yml -- for the still-supported devnet-only plaintext-password inventories
@@ -126,6 +142,27 @@ scp_remote() {
     fi
 }
 
+
+# ─── ACTION: IGNORE / UNIGNORE NODES FROM MONITORING ────────────────────────
+if [ "${1:-}" == "ignore" ] || [ "${1:-}" == "--ignore" ]; then
+    node_to_ignore="${2:-all}"
+    mkdir -p /tmp
+    echo "$node_to_ignore" >> /tmp/monitors_ignore_nodes
+    echo "✅ Đã thêm '$node_to_ignore' vào danh sách bỏ qua giám sát (/tmp/monitors_ignore_nodes)."
+    exit 0
+fi
+
+if [ "${1:-}" == "unignore" ] || [ "${1:-}" == "--unignore" ]; then
+    node_to_unignore="${2:-}"
+    if [ -z "$node_to_unignore" ] || [ "$node_to_unignore" == "all" ]; then
+        rm -f /tmp/monitors_ignore_nodes 2>/dev/null || true
+        echo "✅ Đã xóa toàn bộ danh sách bỏ qua giám sát."
+    else
+        sed -i "/\b${node_to_unignore}\b/d" /tmp/monitors_ignore_nodes 2>/dev/null || true
+        echo "✅ Đã xóa '$node_to_unignore' khỏi danh sách bỏ qua giám sát."
+    fi
+    exit 0
+fi
 
 # ─── ACTION: STOP LOCAL MONITORS ─────────────────────────────────────────────
 if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
@@ -250,18 +287,27 @@ if [ "${1:-}" == "health" ]; then
         if [ -f "$RPC_JSON_PATH" ]; then
             RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
+                node_id=${node_key#m}
+                # Kiểm tra nếu node nằm trong danh sách bỏ qua (do test tắt bật node hoặc bảo trì)
+                if is_node_ignored "$node_key" "$node_id"; then
+                    continue
+                fi
+
                 if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && { sleep 2; ! curl -s -m 10 "$node_url" >/dev/null 2>&1; }; then
+                    if is_node_ignored "$node_key" "$node_id"; then
+                        continue
+                    fi
+
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
-                        node_id=${node_key#m}
                         resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                         ssh_user="$SSH_USER"
                         
                         crash_time=$(date +%Y%m%d_%H%M%S)
                         crash_dir="${SCRIPT_DIR}/logs_crash/node_${node_id}_crash_${crash_time}"
                         
-                        # ─── BƯỚC 1: PHÂN BIỆT SERVER DOWN vs NODE CRASH ──────────────
+                        # ─── BƯỚC 1: PHÂN BIỆT SERVER DOWN vs REBOOT vs MAINTENANCE vs CRASH ──────────────
                         is_local=false
                         if [ "$ip" == "$MONITOR_IP" ] || [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ]; then
                             is_local=true
@@ -343,17 +389,30 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 <code>ssh $ssh_user@$ip \"last reboot | head -n 5\"</code>"
 
                         else
-                            # TRƯỜNG HỢP C: NODE CRASH (Server vẫn sống nhưng Service Node bị lỗi/sập)
-                            failure_type[$node_key]="NODE_CRASH"
-                            mkdir -p "$crash_dir"
-                            
+                            # Kiểm tra xem service có bị dừng chủ động (inactive/deactivating do test hoặc bảo trì) không
                             exec_status="unknown"
                             cons_status="unknown"
 
                             if [ "$is_local" == "true" ]; then
                                 exec_status=$(systemctl is-active "metanode-execution-$node_id" 2>/dev/null || echo "unknown")
                                 cons_status=$(systemctl is-active "metanode-consensus-$node_id" 2>/dev/null || echo "unknown")
-                                
+                            else
+                                exec_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
+                                cons_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
+                            fi
+
+                            if [ "$exec_status" == "inactive" ] || [ "$exec_status" == "deactivating" ]; then
+                                failure_type[$node_key]="MAINTENANCE"
+                                dead_nodes[$node_key]=2 # 2 = dừng chủ động (không coi là crash và không alert recovery khi bật lại)
+                                echo "ℹ️ Node $node_key ($ip) đang ở trạng thái dừng chủ động ($exec_status). Bỏ qua cảnh báo crash."
+                                continue
+                            fi
+
+                            # TRƯỜNG HỢP C: NODE CRASH (Server vẫn sống nhưng Service Node bị lỗi/sập)
+                            failure_type[$node_key]="NODE_CRASH"
+                            mkdir -p "$crash_dir"
+
+                            if [ "$is_local" == "true" ]; then
                                 # Kéo nhật ký journalctl mới nhất
                                 journalctl -u "metanode-execution-$node_id" -n 500 --no-pager > "$crash_dir/journal_execution.log" 2>/dev/null || true
                                 journalctl -u "metanode-consensus-$node_id" -n 500 --no-pager > "$crash_dir/journal_consensus.log" 2>/dev/null || true
@@ -377,9 +436,6 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                                 fi
                                 cp /opt/metanode/node-$node_id/logs/consensus/*.log "$crash_dir/consensus/" 2>/dev/null || true
                             else
-                                exec_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
-                                cons_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
-                                
                                 # Kéo nhật ký journalctl mới nhất
                                 ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 500 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
                                 ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 500 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
@@ -441,13 +497,20 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
    • <b>IP:</b> <code>${MONITOR_IP}</code>
    • <b>Trạng thái:</b> Đã phản hồi RPC bình thường
 ────────────────────────"
+                    elif [ "${dead_nodes[$node_key]:-0}" == "2" ]; then
+                        # Node tắt chủ động nay bật lại bình thường, reset cờ êm đềm
+                        dead_nodes[$node_key]=0
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
 
             # ─── BƯỚC 3: PHÁT HIỆN CHUỖI ĐỨNG IM (CHAIN STALL DETECTOR) ───────────────
             curr_max_block=0
-            while read -r _ node_url; do
+            while read -r chk_key node_url; do
+                chk_id=${chk_key#m}
+                if is_node_ignored "$chk_key" "$chk_id"; then
+                    continue
+                fi
                 hex_b=$(curl -s -m 3 -X POST "$node_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
                 if [[ "$hex_b" =~ ^0x[0-9a-fA-F]+$ ]]; then
                     dec_b=$((16#${hex_b#0x}))
@@ -512,8 +575,11 @@ if [ "${1:-}" == "resources" ]; then
         if [ -f "$RPC_JSON_PATH" ]; then
             RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
-                ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                 node_id=${node_key#m}
+                if is_node_ignored "$node_key" "$node_id"; then
+                    continue
+                fi
+                ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                 resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
                 ssh_user="$SSH_USER"
                 

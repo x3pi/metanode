@@ -293,10 +293,14 @@ def main():
             print(f"  [DRY-RUN] Sẽ chạy restart_cmd: {chain_actions.get('restart_cmd')}")
         else:
             restart_cmd = interpolate_paths(chain_actions.get("restart_cmd"))
+            update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
             if restart_cmd:
                 r_c, _ = run_shell_cmd(restart_cmd, cwd=repo_path)
                 if r_c != 0:
                     print(f"⚠️ Cảnh báo: Lệnh restart chain trả về mã lỗi {r_c}")
+            if update_ip_cmd:
+                print(f"👉 [CI FLAG] Đồng bộ lại IP/RPC endpoints...")
+                run_shell_cmd(update_ip_cmd, cwd=repo_path)
             wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
             print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
             time.sleep(wait_sec)
@@ -329,7 +333,7 @@ def main():
         if args.only and test_id != args.only:
             continue
 
-        if not enabled:
+        if not enabled and not (args.only and test_id == args.only):
             print(f"\n⏭️  [SKIPPED] Bỏ qua bài test: {test_name} (disabled)")
             continue
 
@@ -378,10 +382,14 @@ def main():
                 time.sleep(wait_sec)
             elif pre_action == "restart_chain":
                 restart_cmd = interpolate_paths(chain_actions.get("restart_cmd"))
+                update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
                 print(f"👉 [PRE-ACTION] Restart nhanh cụm node...")
                 if restart_cmd:
                     run_shell_cmd(restart_cmd, cwd=repo_path)
-                wait_sec = chain_actions.get("wait_rpc_ready_seconds", 3)
+                if update_ip_cmd:
+                    print(f"👉 [PRE-ACTION] Đồng bộ lại IP/RPC endpoints...")
+                    run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
                 time.sleep(wait_sec)
             elif pre_action != "none" and pre_action in chain_actions:
                 custom_cmd = interpolate_paths(chain_actions.get(pre_action))

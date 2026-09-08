@@ -11,12 +11,22 @@ keep_data: true              # true or false
 restore_node: "none"         # 'none' or specific node id (e.g. 2)
 snapshot_url: ""             # e.g., 'http://192.168.1.230:8604'
 
-# Snapshot and Epoch configuration defaults
-epoch_duration_seconds: 600
-snapshot_frequency_blocks: 500
-snapshot_max_snapshots: 1
+# Snapshot and Epoch configuration defaults (matches inventory.yml defaults).
+# 2026-09-08: this used to be 600s/500 blocks/epochs_to_keep=5 -- tightened here to match the
+# faster cadence this repo's own CI recovery tests (snapshot_recovery, node_chaos_restart) need,
+# but note this is also the fallback default for ANY deploy that doesn't override these three in
+# its own inventory.yml, production included. epochs_to_keep=0 in particular means "never prune
+# old epoch state" (archive node) -- combined with epoch_duration_seconds=60 that's 10x more
+# epoch transitions than before, none of them ever cleaned up. Not reverted, since real DB-size
+# growth from this now has a real backstop (MetanodeDiskFull in alert_rules.yml, added the same
+# day) that didn't exist when this tradeoff was last considered -- but if you're pointing this at
+# a long-lived production cluster rather than CI, override epochs_to_keep back to a real number
+# in that cluster's own inventory.yml rather than relying on this fallback.
+epoch_duration_seconds: 60
+snapshot_frequency_blocks: 50
+snapshot_max_snapshots: 2
 snapshot_max_part_size_mb: 600
-epochs_to_keep: 5
+epochs_to_keep: 0
 snapshot_server_port: 8604
 
 # RecoveryCommittee (2026-09-04 -- see GatewayEngine.RecoveryCommittee's own doc comment,

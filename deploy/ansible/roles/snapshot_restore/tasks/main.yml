@@ -6,6 +6,13 @@
     chdir: "{{ remote_deploy_dir }}/cluster"
   when: "(synconly_nodes | default([]) | length > 0) or (is_synconly | default(false))"
 
+- name: Sync latest restore_snapshot_systemd script
+  ansible.builtin.copy:
+    src: "{{ deploy_dir }}/cluster/restore_snapshot_systemd.sh"
+    dest: "{{ remote_deploy_dir }}/cluster/restore_snapshot_systemd.sh"
+    mode: '0755'
+  when: "restore_node is defined and restore_node != ''"
+
 - name: Restore node data from snapshot
   ansible.builtin.shell: |
     bash restore_snapshot_systemd.sh --node {{ item }} --snapshot-url '{{ snapshot_url }}' -y

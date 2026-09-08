@@ -44,6 +44,12 @@
             {%- set _ = parts.append(node.node_id | string ~ '=' ~ node.ip) -%}
           {%- endfor -%}
           {{ parts | join(',') }}
+
+    - name: Set cluster vars from metanode_cluster
+      set_fact:
+        snapshot_frequency_blocks: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_frequency_blocks'] | default(50) }}"
+        epoch_duration_seconds: "{{ hostvars[groups['metanode_cluster'][0]]['epoch_duration_seconds'] | default(60) }}"
+        snapshot_max_snapshots: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_max_snapshots'] | default(2) }}"
   roles:
     - { role: local_build, when: "ansible_action in ['start', 'setup']" }
 
