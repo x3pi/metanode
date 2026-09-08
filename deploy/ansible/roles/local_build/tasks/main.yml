@@ -11,6 +11,24 @@
   register: build_result
   changed_when: build_result.rc == 0
 
+- name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
+  ansible.builtin.shell: |
+    python3 -c '
+    import json, os
+    target = "{{ deploy_dir }}/genesis.json"
+    template = "{{ deploy_dir }}/genesis.json.example"
+    src = target if os.path.exists(target) else template
+    if os.path.exists(src):
+        with open(src, "r") as f:
+            data = json.load(f)
+        data["validators"] = []
+        with open(target, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    '
+  args:
+    chdir: "{{ deploy_dir }}"
+  when: cluster_nodes is defined and ansible_action == 'setup'
 
 - name: Generate Validator Keys
   ansible.builtin.shell: |
