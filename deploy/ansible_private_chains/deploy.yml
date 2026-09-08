@@ -235,6 +235,7 @@
     open_ports_enabled: "{{ open_ports | default(false) | bool }}"
     num_validators: "{{ validators | default(1) | int }}"
     node_list: "{{ range(0, (validators | default(1) | int)) | list }}"
+    skip_mempool_sig_verify: "{{ skip_mempool_sig_verify | default(false) | bool }}"
   tasks:
     - name: Check if host is targeted
       ansible.builtin.set_fact:
