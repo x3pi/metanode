@@ -1234,10 +1234,46 @@ impl ExecutorClient {
             let tx_digests = block.tx_digests();
             if !tx_digests.is_empty() {
                 for digest in &tx_digests {
-                    if let Some(tx) = cache.get(digest) {
-                        all_txs_to_process.push(tx);
-                    } else {
-                        warn!("⚠️ [build_sorted_transactions] Missing transaction for digest {:?} in block {}", digest, block.reference());
+                    match cache.get(digest) {
+                        Some(tx) => all_txs_to_process.push(tx),
+                        None => {
+                            // FORK-SAFETY (2026-09-08): a missing digest here means this
+                            // commit is NOT empty — the digest count is real, it's counted as
+                            // such by both commit_is_empty_for_gei (executor.rs) and
+                            // recovery.rs's own tx counter, specifically so a non-empty commit
+                            // is never misclassified as empty — but the actual transaction
+                            // bytes are gone: TxPayloadCache is in-memory-only and does not
+                            // survive a process restart (see transaction.rs's doc comment on
+                            // TX_PAYLOAD_DIR). This branch used to just warn!() and silently
+                            // drop the transaction, so the block still got built and
+                            // dispatched anyway — with genuinely wrong (empty-where-real)
+                            // content, GEI still consumed as if nothing were wrong. That is
+                            // exactly how a validator silently diverges from the rest of the
+                            // network at one specific GEI: reproduced and confirmed via a real
+                            // chaos-restart test (2026-09-08), where a restarted node
+                            // committed an empty block at a GEI where every other validator
+                            // had a real 10-tx block — identical GEI, different hash/state
+                            // root, only on the node that had just restarted.
+                            //
+                            // Zero-Fork Invariant: never let a node silently build and
+                            // dispatch content it knows is wrong. Both callers of this
+                            // function propagate this Err via `?` into paths that already
+                            // exist and are already correct for exactly this situation — the
+                            // live delivery path (block_delivery.rs's
+                            // BlockDeliveryManager::run) already panics on any Err from here,
+                            // and the startup-replay path (recovery.rs, called from
+                            // setup_consensus/mod.rs) already treats an Err as "defer to
+                            // network sync" rather than proceeding. Returning Err routes this
+                            // into those existing safe failure paths instead of inventing a
+                            // new one.
+                            anyhow::bail!(
+                                "Missing transaction payload for digest {:?} in block {} \
+                                 (commit {}) — TxPayloadCache has no entry (most likely a \
+                                 post-restart cache-miss). Refusing to build a block with a \
+                                 silently-dropped transaction.",
+                                digest, block.reference(), subdag.commit_ref.index
+                            );
+                        }
                     }
                 }
             } else {
