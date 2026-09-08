@@ -122,6 +122,8 @@ def main():
     parser.add_argument("--pull", action="store_true", help="Pull git remote before running")
     parser.add_argument("--skip-build-check", action="store_true", help="Skip build verification")
     parser.add_argument("--skip-pre-action", action="store_true", help="Skip pre-actions (reset/restart chain)")
+    parser.add_argument("--restart-chain", "--restart", action="store_true", help="Restart chain cluster before running tests")
+    parser.add_argument("--reset-chain", "--reset", action="store_true", help="Reset chain cluster before running tests")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
     args = parser.parse_args()
 
@@ -267,9 +269,45 @@ def main():
     run_log_dir = os.path.join(BASE_DIR, "logs", f"run_{run_timestamp}")
     os.makedirs(run_log_dir, exist_ok=True)
 
+    # 4.5. Pre-test Chain Restart or Reset if requested via CLI flags
+    if args.reset_chain:
+        print(f"\n🔄 [CI FLAG --reset-chain] Đang reset toàn bộ cụm Public Chain theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy reset_cmd: {chain_actions.get('reset_cmd')}")
+        else:
+            reset_cmd = interpolate_paths(chain_actions.get("reset_cmd") or chain_actions.get("reset_public_cmd"))
+            update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
+            if reset_cmd:
+                r_c, _ = run_shell_cmd(reset_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"⚠️ Cảnh báo: Lệnh reset chain trả về mã lỗi {r_c}")
+            if update_ip_cmd:
+                print(f"👉 [CI FLAG] Đồng bộ lại IP/RPC endpoints...")
+                run_shell_cmd(update_ip_cmd, cwd=repo_path)
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
+            time.sleep(wait_sec)
+    elif args.restart_chain:
+        print(f"\n🔄 [CI FLAG --restart-chain] Đang khởi động lại (restart) toàn bộ cụm node theo cờ CLI...")
+        if args.dry_run:
+            print(f"  [DRY-RUN] Sẽ chạy restart_cmd: {chain_actions.get('restart_cmd')}")
+        else:
+            restart_cmd = interpolate_paths(chain_actions.get("restart_cmd"))
+            if restart_cmd:
+                r_c, _ = run_shell_cmd(restart_cmd, cwd=repo_path)
+                if r_c != 0:
+                    print(f"⚠️ Cảnh báo: Lệnh restart chain trả về mã lỗi {r_c}")
+            wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
+            print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
+            time.sleep(wait_sec)
+
     # 5. Run Test Matrix
     test_results = []
     has_failure = False
+
+    active_tests = [t for t in tests if t.get("enabled", True) and (not args.only or t.get("id") == args.only)]
+    total_active = len(active_tests)
+    current_step = 0
 
     for test in tests:
         test_id = test.get("id")
@@ -294,6 +332,8 @@ def main():
         if not enabled:
             print(f"\n⏭️  [SKIPPED] Bỏ qua bài test: {test_name} (disabled)")
             continue
+
+        current_step += 1
 
         print(f"\n" + "-" * 70)
         print(f"🧪 BẮT ĐẦU TEST: {test_name} (ID: {test_id})")
@@ -411,6 +451,13 @@ def main():
                 "status": "PASS",
                 "extra": extra_info
             })
+
+            # Gửi thông báo ngay sau khi xong từng bài test
+            if tele_enabled and tele_cfg.get("notify_on_each_test", True) and not args.dry_run:
+                step_msg = telegram_notify.build_test_step_message(
+                    commit_info, branch, test_name, test_dur, current_step, total_active, extra_info, server_ip
+                )
+                telegram_notify.send_telegram_message(tele_token, tele_chat_id, step_msg)
         else:
             has_failure = True
             print(f"❌ THẤT BẠI: {test_name} (Mã lỗi: {exit_code}) sau {telegram_notify.format_duration(test_dur)}")

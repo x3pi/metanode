@@ -214,8 +214,10 @@ case "${1:-status}" in
         echo "  run-now   Kích hoạt chạy test ngay lập tức (không cần đợi commit)"
         echo ""
         echo "Ví dụ chạy test cụ thể:"
-        echo "  $0 run-now --only tps_blast       # Chỉ test bài TPS"
-        echo "  $0 run-now --dry-run             # Xem trước kế hoạch chạy"
+        echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại chain trước khi test"
+        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS"
+        echo "  $0 run-now --restart-chain                           # Restart chain và chạy toàn bộ tests"
+        echo "  $0 run-now --dry-run                                 # Xem trước kế hoạch chạy"
         ;;
     *)
         echo "❌ Lệnh không hợp lệ: $1"

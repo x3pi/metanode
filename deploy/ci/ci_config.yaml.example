@@ -23,6 +23,7 @@ telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
   chat_id: "YOUR_TELEGRAM_CHAT_ID"
   notify_on_start: true         # Gửi thông báo khi bắt đầu phát hiện commit mới
+  notify_on_each_test: true     # Báo ngay khi xong từng bài test kèm thời gian & tiến độ
   notify_on_finish: true        # Gửi thông báo tổng kết khi hoàn tất toàn bộ pipeline
   notify_on_test_fail: true     # Báo ngay khi có một bài test bị lỗi kèm trích xuất log
 
@@ -114,3 +115,18 @@ tests:
     command: "./run_tps_test.sh --no-reset --count 25000 --rounds 1 --load_balance=true --batch=2000 --amount 1"
     timeout_seconds: 900
     continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 5. BÀI TEST BẬT TẮT NODE LUÂN PHIÊN & RECOVERY CỤM (CHAOS & ZERO-FORK)
+  # ----------------------------------------------------------------------------
+  - id: "node_chaos_restart"
+    name: "Chaos Rolling Restart & Zero-Fork Recovery"
+    enabled: true
+    # pre_action: "none" (mặc định) hoặc "restart_chain" để tự khởi động lại chain trước bài test này
+    # Ngoài ra có thể truyền cờ CI: ./ci.sh run-now --only node_chaos_restart --restart-chain
+    pre_action: "none"
+    cwd: "test-simple/test-rpc/test-chain/restart-recovery"
+    command: "./run_restart_test.sh --count 15"
+    timeout_seconds: 900
+    continue_on_failure: false
+

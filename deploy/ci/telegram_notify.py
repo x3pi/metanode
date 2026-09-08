@@ -100,6 +100,18 @@ def build_start_message(commit_info, branch, server_ip):
         f"⏳ <i>Đang thực thi quy trình kiểm thử tự động...</i>"
     )
 
+def build_test_step_message(commit_info, branch, test_name, duration, step_num, total_steps, extra_info, server_ip):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    dur_str = format_duration(duration)
+    short_hash = commit_info.get("hash", "")[:8]
+    extra_line = f"\n   └─ <i>{html.escape(extra_info)}</i>" if extra_info else ""
+
+    return (
+        f"⚡ <b>[TIẾN ĐỘ CI: {step_num}/{total_steps}]</b> <code>{html.escape(branch)}@{short_hash}</code>\n"
+        f"✅ <b>{html.escape(test_name)}</b> ({dur_str}){extra_line}\n"
+        f"🕒 <i>Xong lúc {timestamp} trên {server_ip}</i>"
+    )
+
 def build_finish_success_message(commit_info, branch, total_duration, test_results, server_ip):
     timestamp = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     short_hash = commit_info.get("hash", "")[:8]
