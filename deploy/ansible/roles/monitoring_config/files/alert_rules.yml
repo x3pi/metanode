@@ -49,6 +49,26 @@ groups:
           summary: "{{ $labels.instance }} has zero connected peers"
           description: "master_peers_connected has been 0 for 2+ minutes — this node is cut off from the rest of the cluster (network partition, firewall change, or peer list misconfiguration), even if its own process is healthy."
 
+      - alert: MetanodeBlocksBehindPeer
+        # consensus_blocks_behind_peer (Rust, job metanode-rust-consensus) is
+        # peer_best_block - go_block, recomputed every epoch-monitor poll cycle whether or not
+        # a stall is active (see consensus/metanode/src/node/epoch_monitor/stall_recovery.rs +
+        # metrics.rs). A node that just restarted and is actively catching up (the recovery
+        # loop fetches up to 500 blocks/cycle) should shrink this gap within a few cycles on
+        # its own — see "Phục hồi khi 1 validator lỗi" Tier 1-2 in the incident-readiness plan.
+        # What matters here is a gap that is NOT shrinking. 2000 is a starting threshold, not a
+        # measured one -- this repo's own convention (see RegisteredChainCount's doc comment in
+        # execution/pkg/metrics/metrics.go) is to avoid inventing a precise cap without real
+        # production data, so tune this once real recovery-time numbers exist (the P2 game-day
+        # RTO exercise in the incident-readiness plan is exactly where that data comes from).
+        expr: consensus_blocks_behind_peer > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is 2000+ blocks behind its peers and not catching up"
+          description: "Gap has stayed above 2000 blocks for 5+ minutes -- the automatic stall-recovery fetch (up to 500 blocks/cycle) isn't closing it on its own. Likely Tier 3 (DB issue / can't keep up), not Tier 1-2 (self-healing): check `journalctl -u metanode-execution-<N>` for repeated [STALL RECOVERY] fetch failures before reaching for a snapshot restore."
+
   - name: metanode_resources
     rules:
       - alert: MetanodeDiskFull

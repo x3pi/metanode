@@ -6,6 +6,7 @@
 //! A single monitor that handles epoch transitions for BOTH SyncOnly and Validator nodes.
 //! This replaces the previous fragmented approach of separate monitors.
 
+mod metrics;
 mod stall_recovery;
 mod sync_only_advance;
 mod validator_transition;

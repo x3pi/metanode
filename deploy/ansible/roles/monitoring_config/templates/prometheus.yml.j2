@@ -25,11 +25,19 @@ scrape_configs:
 {% endfor %}
 
   # MetaNode Rust Consensus Metrics
+  # 2026-09-08: was ":9100" -- confirmed against deploy/systemd/gen_validator_entry.py (the
+  # generator local_build actually calls) that 9100+node_id is the P2P consensus port
+  # (`consensus_port`), not metrics. The real Prometheus metrics HTTP server binds
+  # `metrics_port = 9200 + node_id` (see startup.rs's start_prometheus_server_with_registry
+  # call and gen_validator_entry.py's own `sudo ufw allow {metrics_port}/tcp comment
+  # 'Consensus Metrics'` line). This job had been scraping the P2P port and silently getting
+  # `up == 0` for every node the whole time -- worth checking Alertmanager for a backlog of
+  # MetanodeTargetDown{job="metanode-rust-consensus"} once this is deployed.
   - job_name: "metanode-rust-consensus"
     static_configs:
       - targets:
 {% for node in cluster_nodes | sort(attribute='node_id') %}
-        - "{{ node.ip }}:9100" # Node {{ node.node_id }}
+        - "{{ node.ip }}:{{ 9200 + node.node_id }}" # Node {{ node.node_id }}
 {% endfor %}
 
   # Hardware Node Exporter Metrics
