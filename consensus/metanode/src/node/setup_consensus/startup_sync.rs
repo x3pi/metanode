@@ -464,8 +464,11 @@ impl ConsensusNode {
                                                     if let Ok((_, _, _, validators, _, _)) = barrier_client.get_epoch_boundary_data(post_sync_epoch).await {
                                                         if let Ok((_, new_eth_addrs)) = crate::node::committee::build_committee_with_eth_addresses(validators, post_sync_epoch) {
                                                             let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc();
-                                                            let mut map = epoch_eth_addresses_arc.write().await;
-                                                            map.insert(post_sync_epoch, new_eth_addrs);
+                                                            {
+                                                                let mut map = epoch_eth_addresses_arc.write().await;
+                                                                map.insert(post_sync_epoch, new_eth_addrs);
+                                                            }
+                                                            commit_processor.get_epoch_eth_addresses_notify().notify_waiters();
                                                             tracing::info!("🔄 [STARTUP-SYNC] Populated epoch_eth_addresses for epoch {}", post_sync_epoch);
                                                         } else {
                                                             tracing::error!("🚨 [STARTUP-SYNC] Failed to build committee ETH addresses for epoch {}", post_sync_epoch);

@@ -136,10 +136,22 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	switch cb.state {
 	case StateHalfOpen:
-		cb.state = StateClosed
-		cb.failures = 0
-		cb.requests = 0
-		logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
+		// REVIEW FIX (2026-09-05, PR #102): this used to close unconditionally on the FIRST
+		// success while HALF_OPEN. That's an unscoped behavior change to a package shared by
+		// every CircuitBreaker consumer, not just RelayerDaemon -- the daemon's actual bug (a
+		// legitimate short node restart tripping a 60s lockout) is already fully fixed by the
+		// `Disabled` flag PR #102 added, which short-circuits this whole method before it's ever
+		// reached. Restored the original "N consecutive successful trial requests required"
+		// canary semantics for every OTHER consumer that still runs with the breaker enabled
+		// (e.g. GatewayRegistryMonitor's Root Anchor client in block_processor_core.go) --
+		// closing on a single lucky success while still HALF_OPEN would make recovery flap on a
+		// still-flaky endpoint for them, with no relation to the relayer fix this PR was about.
+		if cb.requests >= cb.maxRequests {
+			cb.state = StateClosed
+			cb.failures = 0
+			cb.requests = 0
+			logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
+		}
 	case StateClosed:
 		cb.failures = 0 // Reset failure count
 	}

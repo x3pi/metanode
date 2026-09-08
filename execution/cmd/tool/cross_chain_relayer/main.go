@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -25,7 +27,14 @@ type GatewayConfig struct {
 	// field from SubmitterKey, never falling back to it (see the doc comment on
 	// devnetDefaultRelayerKeyHex below for why that fallback was a real, live bug).
 	RelayerKey string `json:"relayer_key"`
-	Chains     []struct {
+	// MetricsAddr (2026-09-05) lets a per-instance config file pin a distinct metrics/health
+	// port -- needed because running N relayer instances on one host (see
+	// deploy/ansible_private_chains/run_relayer_tmux.sh's multi-instance support) means each
+	// instance's -metrics-addr MUST differ, or the 2nd+ instance's listener simply fails to bind.
+	// Only used when -metrics-addr was NOT explicitly passed on the command line (see main()'s
+	// flag.Visit check) -- an explicit CLI flag always wins over the config file.
+	MetricsAddr string `json:"metrics_addr,omitempty"`
+	Chains      []struct {
 		ChainID uint64 `json:"chain_id"`
 		RPCURL  string `json:"rpc_url"`
 	} `json:"chains"`
@@ -127,12 +136,17 @@ func main() {
 	defaultConfigFile := findDefaultConfigFile()
 
 	var (
-		relayerKeyHex  string
-		rootAnchorRPC  string
-		chainRPCsFlag  string
-		configFileFlag string
-		pollIntervalMs int
-		reserveChainID uint64
+		relayerKeyHex         string
+		rootAnchorRPC         string
+		chainRPCsFlag         string
+		configFileFlag        string
+		pollIntervalMs        int
+		reserveChainID        uint64
+		metricsAddr           string
+		balanceCheckIntervalS int
+		gasPriceBumpPercent   uint64
+		maxGasPriceGwei       uint64
+		maxPollBackoffS       int
 	)
 
 	flag.StringVar(&relayerKeyHex, "key", "", "Relayer ECDSA private key hex (with or without 0x prefix)")
@@ -142,7 +156,20 @@ func main() {
 	flag.StringVar(&configFileFlag, "config", defaultConfigFile, "Alias for -config-file")
 	flag.IntVar(&pollIntervalMs, "poll-interval-ms", 500, "Polling interval in milliseconds")
 	flag.Uint64Var(&reserveChainID, "reserve-chain-id", 0, "Chain ID of the system's Reserve")
+	// Observability + gas pricing flags (2026-09-05 production-readiness pass -- see
+	// note/cross_chain_relayer_production_readiness.md for the full rationale).
+	flag.StringVar(&metricsAddr, "metrics-addr", ":9090", "Address to serve /metrics (Prometheus) and /health on. Empty string disables the server. "+
+		"Running multiple relayer instances on one host REQUIRES a distinct value per instance.")
+	flag.IntVar(&balanceCheckIntervalS, "balance-check-interval-s", 30, "How often (seconds) to refresh the relayer's own wallet balance per chain for the relayer_wallet_balance_wei metric")
+	flag.Uint64Var(&gasPriceBumpPercent, "gas-price-bump-percent", 0, "Inflate each chain's suggested gas price by this percent (e.g. 110 = +10%) to reduce stuck-transaction risk during fee spikes. 0/unset = no bump")
+	flag.Uint64Var(&maxGasPriceGwei, "max-gas-price-gwei", 0, "Hard ceiling (in Gwei) on the gas price this daemon will ever pay, regardless of what a chain's RPC suggests. 0/unset = no cap")
+	flag.IntVar(&maxPollBackoffS, "max-poll-backoff-s", 30, "Ceiling (seconds) for WatchChainPair's exponential backoff after consecutive errors on one chain pair")
 	flag.Parse()
+
+	// Tracks which flags were explicitly passed on the command line, so a config file's
+	// metrics_addr can fill in a default without ever overriding an explicit -metrics-addr.
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
 
 	chainRPCs := make(map[uint64]string)
 
@@ -152,6 +179,9 @@ func main() {
 			logger.Info("📖 Đã nạp cấu hình Relayer trực tiếp từ file: %s", configFileFlag)
 			if relayerKeyHex == "" && cfg.RelayerKey != "" {
 				relayerKeyHex = cfg.RelayerKey
+			}
+			if !explicitFlags["metrics-addr"] && cfg.MetricsAddr != "" {
+				metricsAddr = cfg.MetricsAddr
 			}
 			if rootAnchorRPC == "" {
 				if cfg.RootAnchorRPC != "" {
@@ -227,13 +257,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	var maxGasPriceWei *big.Int
+	if maxGasPriceGwei > 0 {
+		maxGasPriceWei = new(big.Int).Mul(new(big.Int).SetUint64(maxGasPriceGwei), big.NewInt(1_000_000_000))
+	}
+
 	cfg := relayer_daemon.DaemonConfig{
-		RelayerKeyHex:     relayerKeyHex,
-		RootAnchorURLs:    []string{rootAnchorRPC},
-		ChainRPCURLs:      chainRPCs,
-		PollInterval:      time.Duration(pollIntervalMs) * time.Millisecond,
-		MaxPollIterations: 200,
-		ReserveChainID:    reserveChainID,
+		RelayerKeyHex:       relayerKeyHex,
+		RootAnchorURLs:      []string{rootAnchorRPC},
+		ChainRPCURLs:        chainRPCs,
+		PollInterval:        time.Duration(pollIntervalMs) * time.Millisecond,
+		MaxPollIterations:   200,
+		ReserveChainID:      reserveChainID,
+		GasPriceBumpPercent: gasPriceBumpPercent,
+		MaxGasPriceWei:      maxGasPriceWei,
+		MaxPollBackoff:      time.Duration(maxPollBackoffS) * time.Second,
 	}
 
 	daemon, err := relayer_daemon.NewRelayerDaemon(cfg)
@@ -246,6 +284,15 @@ func main() {
 	logger.Info("Connected to Root Anchor @ %s with %d chains configured (ReserveChainID: %d)", rootAnchorRPC, len(chainRPCs), reserveChainID)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	var metricsServer *http.Server
+	if metricsAddr != "" {
+		metricsServer = daemon.StartMetricsServer(metricsAddr)
+	} else {
+		logger.Info("ℹ️ [CROSS-CHAIN RELAYER] metrics/health server disabled (-metrics-addr is empty)")
+	}
+	daemon.StartBalanceMonitor(ctx, time.Duration(balanceCheckIntervalS)*time.Second)
+
 	chainIDs := make([]uint64, 0, len(chainRPCs))
 	for id := range chainRPCs {
 		chainIDs = append(chainIDs, id)
@@ -311,6 +358,10 @@ func main() {
 	logger.Info("🛑 [CROSS-CHAIN RELAYER] received shutdown signal, stopping...")
 	cancel()
 	daemon.Stop()
+	if metricsServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = metricsServer.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 	logger.Info("✅ [CROSS-CHAIN RELAYER] gracefully stopped")
 }
-

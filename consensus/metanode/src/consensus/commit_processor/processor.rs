@@ -63,6 +63,9 @@ pub struct CommitProcessorConfig {
     pub pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
     pub epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
     pub epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    /// Notified on every write to epoch_eth_addresses -- see resolve_leader_address's own doc
+    /// comment (2026-09-05) for why this exists and which write sites are wired to it.
+    pub epoch_eth_addresses_notify: Arc<tokio::sync::Notify>,
     pub tx_recycler: Option<Arc<TxRecycler>>,
     pub committed_transaction_hashes: Option<Arc<dashmap::DashSet<Vec<u8>>>>,
     pub storage_path: Option<std::path::PathBuf>,
@@ -89,6 +92,7 @@ impl Default for CommitProcessorConfig {
             pending_transactions_queue: None,
             epoch_transition_callback: None,
             epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            epoch_eth_addresses_notify: Arc::new(tokio::sync::Notify::new()),
             tx_recycler: None,
             committed_transaction_hashes: None,
             storage_path: None,
@@ -240,6 +244,16 @@ impl CommitProcessor {
         self
     }
 
+    /// Set the sibling Notify for epoch_eth_addresses (2026-09-05). Always call this
+    /// alongside with_epoch_eth_addresses() when threading an EXISTING map in from outside
+    /// (e.g. node.epoch_eth_addresses.clone()) -- otherwise this CommitProcessor keeps its
+    /// own freshly-`Default`-created Notify, which nothing external ever notifies, silently
+    /// falling back to the 200ms poll for every wakeup instead of failing loudly.
+    pub fn with_epoch_eth_addresses_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+        self.config.epoch_eth_addresses_notify = notify;
+        self
+    }
+
     /// Legacy method for backward compatibility - creates HashMap with epoch 0
     #[allow(dead_code)]
     pub fn with_validator_eth_addresses(mut self, eth_addresses: Vec<Vec<u8>>) -> Self {
@@ -255,6 +269,12 @@ impl CommitProcessor {
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>> {
         self.config.epoch_eth_addresses.clone()
+    }
+
+    /// Get a clone of the Arc to epoch_eth_addresses_notify for external writers to notify
+    /// after populating epoch_eth_addresses -- see that field's own doc comment.
+    pub fn get_epoch_eth_addresses_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.config.epoch_eth_addresses_notify.clone()
     }
 
     /// Set TX recycler for confirming committed TXs
@@ -353,8 +373,24 @@ impl CommitProcessor {
     ///
     /// FORK-SAFETY (May 2026): If leader_address is already set (from stored/synced commit),
     /// skip re-resolution to prevent divergence on nodes with corrupted DAG state.
+    ///
+    /// EVENT-DRIVEN WAKEUP (2026-09-05, production-readiness review): the wait loop below used
+    /// to be a pure 200ms `tokio::time::sleep` poll -- functionally safe (no fork/consensus
+    /// risk: this only affects how fast a single field on the LOCAL commit gets resolved, not
+    /// what any node agrees to), but wasteful and adds up to ~200ms of avoidable latency on the
+    /// (rare) cache-miss path. `epoch_eth_addresses_notify` is a sibling `Notify` to
+    /// `epoch_eth_addresses` that most writers (`mode_transition.rs`, `epoch_transition.rs`,
+    /// `startup_sync.rs`, `setup_consensus/mod.rs`'s two write sites) call `.notify_waiters()`
+    /// on right after inserting -- letting this loop wake up immediately in the common case.
+    /// `rust_sync_node/epoch_recovery.rs` writes a SEPARATE, unrelated `epoch_eth_addresses`
+    /// instance (RustSyncNode's own, never fed into a CommitProcessor) and is deliberately NOT
+    /// wired here -- doing so would be a no-op, since this loop never reads that instance. The
+    /// 200ms sleep stays as an unconditional fallback in the `select!` below (not removed) so
+    /// any future writer that forgets to notify still gets picked up within 200ms exactly as
+    /// today -- this is a pure latency improvement for the common case, not a behavior change.
     async fn resolve_leader_address(
         epoch_eth_addresses: &tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>,
+        epoch_eth_addresses_notify: &tokio::sync::Notify,
         subdag: &mut CommittedSubDag,
         epoch: u64,
     ) {
@@ -423,7 +459,10 @@ impl CommitProcessor {
                     epoch, leader_author_index, elapsed.as_secs()
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                _ = epoch_eth_addresses_notify.notified() => {}
+            }
         }
     }
 
@@ -448,6 +487,7 @@ impl CommitProcessor {
             pending_transactions_queue: _,
             epoch_transition_callback,
             epoch_eth_addresses,
+            epoch_eth_addresses_notify,
             tx_recycler,
             committed_transaction_hashes,
             storage_path,
@@ -476,6 +516,7 @@ impl CommitProcessor {
         let epoch_transition_callback = epoch_transition_callback;
         let go_last_commit_index = go_last_commit_index;
         let epoch_eth_addresses = epoch_eth_addresses;
+        let epoch_eth_addresses_notify = epoch_eth_addresses_notify;
         let tx_recycler = tx_recycler;
         let storage_path = storage_path;
         let committed_transaction_hashes = committed_transaction_hashes;
@@ -860,7 +901,7 @@ impl CommitProcessor {
                                 hex::encode(&local_digest[..4]), poll_txs, confirmed.timestamp_ms
                             );
                             let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                            Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
+                            Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut confirmed, current_epoch).await;
                             // WAL: Record PENDING before FFI
                             if let Some(ref mut wal) = commit_wal {
                                 let _ = wal.write_pending(local_idx, exec_gei, current_epoch);
@@ -1076,7 +1117,7 @@ impl CommitProcessor {
                 let pending_commit_index = next_expected_index;
                 let pending_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
 
-                Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
+                Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut pending, current_epoch).await;
 
                 if let Some(ref recycler) = tx_recycler {
                     // Digest-aware extraction (see extract_committed_tx_data's doc
@@ -1529,7 +1570,7 @@ impl CommitProcessor {
                         }
 
                         // Resolve leader ETH address into subdag (immutable after this)
-                        Self::resolve_leader_address(&epoch_eth_addresses, &mut subdag, current_epoch).await;
+                        Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut subdag, current_epoch).await;
 
                         // WAL: Record PENDING before FFI
                         if let Some(ref mut wal) = commit_wal {
@@ -1698,7 +1739,7 @@ impl CommitProcessor {
                                 // Dispatch the CertifiedCommit immediately
                                 let mut certified = subdag;
                                 let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                                Self::resolve_leader_address(&epoch_eth_addresses, &mut certified, current_epoch).await;
+                                Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut certified, current_epoch).await;
                                 // WAL: Record PENDING before FFI
                                 if let Some(ref mut wal) = commit_wal {
                                     let _ = wal.write_pending(commit_index, exec_gei, current_epoch);

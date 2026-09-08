@@ -68,6 +68,37 @@ func ComputeMessageFailureAttestMessage(messageID common.Hash, destChainID uint6
 	return buf
 }
 
+// MessageSuccessAttestDomainTag domain-separates the payload a destination chain committee signs
+// to attest that a specific cross-chain message SUCCEEDED (settled as MessageStatusSuccess) on the
+// destination chain -- the mirror image of MessageFailureAttestDomainTag.
+//
+// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding,
+// note/cross_chain/security_audit_findings.md): CreditReserveAllocation used to credit a
+// destination chain's Reserve allocation on nothing more than a valid Merkle proof that a message
+// was part of an already-attested commit -- that only proves the message was QUEUED for delivery,
+// never that it actually succeeded. Anyone able to submit a transaction (not even destChainID's
+// own validators) could call creditReserveAllocation for a message that genuinely failed (or was
+// never even attempted), inflating that chain's allocation with no real value ever having landed
+// there -- exactly the "print real tokens elsewhere" risk the finding describes, and strictly
+// worse than the finding's own framing (this never required a malicious destination chain at all,
+// just an uncooperative or malicious relayer). CreditReserveAllocation now requires a real
+// QuorumCert over this digest, cryptographically signed by destChainID's OWN registered committee
+// -- the same trust boundary MessageFailureAttestDomainTag/RefundReserveAllocation already rely on
+// for the mirror-image "message failed" case.
+var MessageSuccessAttestDomainTag = []byte("MESSAGE_SUCCESS_ATTEST_V1:")
+
+// ComputeMessageSuccessAttestMessage computes the domain-separated message payload a destination
+// chain committee signs to attest that messageID succeeded on destChainID.
+func ComputeMessageSuccessAttestMessage(messageID common.Hash, destChainID uint64) []byte {
+	var buf []byte
+	buf = append(buf, MessageSuccessAttestDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], destChainID)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, messageID.Bytes()...)
+	return buf
+}
+
 // The 5 domain tags and digest functions below (2026-09-04) replace GovernanceEngine's whole
 // propose/vote/72h-timelock/execute machinery, removed the same day per explicit user request
 // ("bỏ hoàn toàn vote... vì không có ai thao túng vote cả" -- if there is no vote mechanism, there

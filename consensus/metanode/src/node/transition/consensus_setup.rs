@@ -145,6 +145,7 @@ pub(super) async fn setup_validator_consensus(
     .with_quorum_advanced_notify(node.coordination_hub.get_quorum_advanced_notify());
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_epoch_eth_addresses_notify(node.epoch_eth_addresses_notify.clone())
         .with_committee_size(committee.size())
         .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 
@@ -340,6 +341,7 @@ pub(super) async fn setup_synconly_sync(
     });
 
     processor = processor.with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_epoch_eth_addresses_notify(node.epoch_eth_addresses_notify.clone())
         .with_committee_size(committee.size())
         .with_quorum_commit_index(node.coordination_hub.get_quorum_commit_index_ref());
 

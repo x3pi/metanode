@@ -38,6 +38,26 @@ impl ConsensusNode {
     /// `state_root` as a redundant/explicit check for clearer diagnostics on mismatch. Raw-byte
     /// inequality is still logged (as a WARNING, not a fork) when hashes otherwise match, purely
     /// as a diagnostic breadcrumb — it should no longer be able to halt the process by itself.
+    ///
+    /// ═══ SECOND ROOT CAUSE FOUND + FIXED (2026-09-05, same day) ═══
+    /// `block_hash` itself could STILL legitimately differ between two honest nodes for "the
+    /// same" queried block number, live-reproduced twice on a node recovering from a large
+    /// internal commit replay (`node/recovery.rs::perform_block_recovery_check`). A temporary
+    /// field-level diagnostic (since removed) showed AccountStatesRoot always matched -- the
+    /// actually-executed state was never wrong -- but LastBlockHash/TimeStamp/GlobalExecIndex/
+    /// CommitIndex all differed, with GlobalExecIndex consistently off by the same amount
+    /// (~73) and CommitIndex by another consistent amount (~370). Root cause:
+    /// `perform_block_recovery_check`'s from-storage GEI reconstruction had its own inlined
+    /// copy of `executor.rs::dispatch_commit()`'s "is this commit empty" decision, missing the
+    /// `commit_index > 1` exemption (an epoch's first commit always consumes exactly 1 GEI even
+    /// when empty, live) -- so every epoch whose first commit happened to be empty (common on a
+    /// quiet devnet) made replay under-count GEI by 1, accumulating over many epochs into a
+    /// real, stable divergence. Fixed at the source in `commit_processor::executor::
+    /// commit_is_empty_for_gei` (now the single shared decision both paths call) -- see that
+    /// function's doc comment for the full writeup. This fix only prevents the drift from being
+    /// introduced on FUTURE replays; a node whose on-disk history was already built by a past
+    /// buggy replay stays drifted until it re-syncs from a clean peer (STARTUP-SYNC block-copy),
+    /// not by replaying its own already-wrong local history again.
     pub(crate) async fn runtime_fork_guard(
         client: Arc<ExecutorClient>,
         peers: Vec<String>,
@@ -177,11 +197,44 @@ impl ConsensusNode {
                                         next_check_block
                                     );
                                     is_terminally_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    // FOUND LIVE (2026-09-05): std::process::exit() calls libc's
+                                    // exit() -- which, unlike _exit()/abort(), runs every
+                                    // atexit()-registered handler and every linked C++ library's
+                                    // static-object destructor (via __cxa_atexit) before actually
+                                    // terminating. This binary statically links several nontrivial
+                                    // C/C++ libraries (Xapian, the custom MVM/EVM linker, NOMT's
+                                    // FFI) -- reproduced live, twice, on two different builds (one
+                                    // with an unrelated unrelated change, one on a clean revert of
+                                    // it, ruling out that change as the cause): this exact log line
+                                    // printed, "Calling std::process::exit(1)" logged immediately
+                                    // after, and the OS process (verified by exact PID + `ps
+                                    // -o lstart`, not a race) kept running for 46+ seconds
+                                    // afterward -- i.e. it hung *inside* exit(), most likely stuck
+                                    // in one of those handlers, never actually terminating. This
+                                    // silently defeats the entire safety mechanism: a node that
+                                    // detects a confirmed fork keeps running (and could keep
+                                    // participating in consensus with state already judged
+                                    // divergent) instead of halting.
+                                    //
+                                    // Fixed by calling abort() instead: it raises SIGABRT directly,
+                                    // skipping atexit()/__cxa_atexit entirely -- verified in
+                                    // isolation (a minimal thread::spawn + tokio::spawn + exit(1)
+                                    // repro terminated correctly in under 1s, so the hang is
+                                    // specific to this binary's real linked libraries, not to the
+                                    // exit()-from-a-tokio-task pattern itself). A clean shutdown
+                                    // doesn't matter here anyway -- state is already judged
+                                    // divergent, so running MORE code (even cleanup code) before
+                                    // dying is undesirable, not just unnecessary. Under systemd,
+                                    // `Restart=on-failure` restarts on an abnormal signal
+                                    // termination exactly the same as on a nonzero exit code, so
+                                    // this doesn't change the "FFI restart loop" recovery story at
+                                    // all -- only makes the halt itself actually happen.
                                     tracing::error!(
-                                        "🛑 [LAYER-6] Calling std::process::exit(1) to halt node. \
+                                        "🛑 [LAYER-6] Calling std::process::abort() to halt node \
+                                         (skips atexit handlers that can hang -- see comment above). \
                                          FFI restart loop will trigger STARTUP-SYNC resync."
                                     );
-                                    std::process::exit(1);
+                                    std::process::abort();
                                 } else {
                                     consecutive_failures = 0;
                                 }

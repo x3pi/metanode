@@ -475,6 +475,186 @@ func TestComprehensive_TwoHopContractCall_RealERC20_A_Reserve_B(t *testing.T) {
 	assert.True(t, senderAcctB.Balance().Sign() > 0, "unused gas fee must be refunded to sender on Chain B")
 }
 
+// TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve is the regression test for
+// the "MessageID preserved across relay hops" fix (2026-09-05,
+// note/cross_chain/security_audit_findings.md finding #7): before this fix, the relay-onward step
+// inside claimMessage (mechanism 2 -- the EncodeRelayPayload/DecodeRelayPayload 2-hop routing this
+// whole file exercises) minted a BRAND NEW MessageID (tx.Hash() of the leg-1 claimMessage
+// transaction) for the leg-2 message it queues from Reserve to B, instead of preserving leg 1's
+// own MessageID. This test drives leg 2 all the way to a genuine payload revert on B (a real
+// ERC-20-shaped transfer() call from a zero-balance sender) and refunds it on Reserve, then
+// asserts Reserve's OWN bookkeeping for the ORIGINAL leg-1 MessageID (the only ID the sender on
+// chain A ever actually saw) now reflects the refund -- proving the whole 2-hop journey stays
+// traceable end-to-end under one ID, not silently forked into an unlinkable second one the moment
+// it relays through Reserve.
+func TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve(t *testing.T) {
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	chainAID := uint64(101)
+	reserveChainID := uint64(102)
+	chainBID := uint64(103)
+
+	kpA := bls.GenerateKeyPair()
+	kpReserve := bls.GenerateKeyPair()
+	kpB := bls.GenerateKeyPair()
+
+	deployer := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	senderOnA := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	recipientOnB := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	relayer := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	transferValue := big.NewInt(500)
+	gasFeeBudget := big.NewInt(200_000 * mt_common.MINIMUM_BASE_FEE)
+
+	// Step 1: deploy a real token contract on Chain B with ZERO initial supply -- any transfer()
+	// out of senderOnA's (empty) balance is a genuine, real business-logic revert.
+	csB, _, _, _ := newPersistentTestChainState(t)
+	targetContractOnB := deployTestWrappedAsset(t, csB, deployer, big.NewInt(0))
+	engineB := cross_chain.NewGatewayEngine(chainBID, map[uint64]cross_chain.ChainRegistry{
+		reserveChainID: {ChainID: reserveChainID, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kpReserve.BytesPublicKey(), Stake: 1000}}, Epoch: 0, QuorumThreshold: 6667},
+	}, nil)
+	engineB.ReserveChainID = reserveChainID
+	require.NoError(t, saveGatewayEngine(csB, engineB))
+
+	// Step 2: Reserve chain state -- ChainRegistry[chainBID] needs a REAL committee (kpB) this
+	// time (unlike the other tests in this file, which never need to verify a cert FROM B), since
+	// Refund() below verifies B's own failure cert against Reserve's copy of B's registry.
+	csReserve, _, _, _ := newPersistentTestChainState(t)
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(100_000), map[uint64]*big.Int{
+		chainAID:       big.NewInt(50_000),
+		reserveChainID: big.NewInt(50_000),
+	})
+	require.NoError(t, err)
+	engineReserve := cross_chain.NewGatewayEngine(reserveChainID, map[uint64]cross_chain.ChainRegistry{
+		chainAID: {ChainID: chainAID, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kpA.BytesPublicKey(), Stake: 1000}}, Epoch: 1, QuorumThreshold: 6667},
+		chainBID: {ChainID: chainBID, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kpB.BytesPublicKey(), Stake: 1000}}, Epoch: 0, QuorumThreshold: 6667},
+	}, ledger)
+	engineReserve.ReserveChainID = reserveChainID
+	require.NoError(t, saveGatewayEngine(csReserve, engineReserve))
+
+	// Step 3: leg 1 -- Value=500 AND a real ERC-20 transfer() call that WILL revert (senderOnA has
+	// 0 tokens on the freshly-deployed contract).
+	parsedABI := testWrappedAssetABI(t)
+	revertingCalldata, err := parsedABI.Pack("transfer", recipientOnB, big.NewInt(1))
+	require.NoError(t, err)
+
+	leg1Msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0x7777CCCC7777CCCC7777CCCC7777CCCC7777CCCC7777CCCC7777CCCC7777CCCC"),
+		SourceChainID: chainAID,
+		DestChainID:   reserveChainID,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        senderOnA,
+		Target:        targetContractOnB,
+		AssetID:       big.NewInt(0),
+		Value:         transferValue,
+		Payload:       cross_chain.EncodeRelayPayload(chainBID, revertingCalldata),
+		Tip:           big.NewInt(0),
+		GasFee:        gasFeeBudget,
+		Ordered:       false,
+	}
+
+	commitRoot1, messageProof1 := setupAndAttestRelayTestCommit(t, csReserve, h, leg1Msg, kpA)
+	claimCalldata1, err := h.abi.Pack("claimMessage",
+		leg1Msg.MessageID, big.NewInt(int64(leg1Msg.SourceChainID)), big.NewInt(int64(leg1Msg.DestChainID)),
+		big.NewInt(int64(leg1Msg.Sequence)), leg1Msg.HopCount, leg1Msg.Sender, leg1Msg.Target,
+		leg1Msg.AssetID, leg1Msg.Value, leg1Msg.Payload, leg1Msg.Tip, leg1Msg.GasFee, leg1Msg.Ordered,
+		new(big.Int).SetUint64(messageProof1.LeafIndex), hashesToBytes32(messageProof1.Siblings), commitRoot1,
+	)
+	require.NoError(t, err)
+	claimTx1 := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata1))
+	rcp1, _, failed1 := h.HandleTransaction(context.Background(), csReserve, claimTx1, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failed1, "leg 1 claim on Reserve must succeed: %+v", rcp1)
+
+	reloadedReserve, err := loadGatewayEngine(csReserve)
+	require.NoError(t, err)
+	pending := reloadedReserve.PendingOutboundMessages[chainBID]
+	require.Len(t, pending, 1)
+	leg2Msg := pending[0]
+
+	// The defining assertion for the fix itself: leg 2 must carry leg 1's OWN MessageID forward,
+	// not a fresh one derived from the leg-1 claim transaction's own hash.
+	assert.Equal(t, leg1Msg.MessageID, leg2Msg.MessageID, "leg 2 must preserve leg 1's original MessageID across the relay hop")
+
+	// Step 4: real batchOutboundCommit() on Reserve -- this is what populates CommittedBatches,
+	// which Refund() (called on Reserve below) needs for its own commit-attestation check.
+	batchCalldata, err := h.abi.Pack("batchOutboundCommit", big.NewInt(int64(chainBID)))
+	require.NoError(t, err)
+	batchTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, batchCalldata))
+	rcpBatch, _, failedBatch := h.HandleTransaction(context.Background(), csReserve, batchTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedBatch, "batchOutboundCommit on Reserve must succeed: %+v", rcpBatch)
+	batchOut, err := h.abi.Unpack("batchOutboundCommit", rcpBatch.Return())
+	require.NoError(t, err)
+	commitRoot2 := common.Hash(batchOut[0].([32]byte))
+
+	_, layers2, aggAmounts2, aggIndex2, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{leg2Msg})
+	require.NoError(t, err)
+	messageProof2 := cross_chain.GetMerkleProof(layers2, 0)
+	aggregateProof2 := cross_chain.GetMerkleProof(layers2, aggIndex2["0"])
+	commitMsg2 := cross_chain.ComputeCommitRootAttestMessage(commitRoot2)
+	sig2 := bls.Sign(kpReserve.PrivateKey(), commitMsg2)
+
+	attestCalldata2, err := h.abi.Pack("attestReserveIssuedCommit",
+		big.NewInt(int64(reserveChainID)), commitRoot2, aggAmounts2["0"], big.NewInt(0),
+		new(big.Int).SetUint64(aggregateProof2.LeafIndex), hashesToBytes32(aggregateProof2.Siblings),
+		uint64(0), sig2.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	attestTx2 := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, attestCalldata2))
+	_, _, attestFailed2 := h.HandleTransaction(context.Background(), csB, attestTx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, attestFailed2, "leg 2 attestReserveIssuedCommit on Chain B must succeed")
+
+	// Step 5: claim leg 2 on Chain B -- the transfer() call genuinely reverts (0 balance).
+	claimCalldata2, err := h.abi.Pack("claimMessage",
+		leg2Msg.MessageID, big.NewInt(int64(leg2Msg.SourceChainID)), big.NewInt(int64(leg2Msg.DestChainID)),
+		big.NewInt(int64(leg2Msg.Sequence)), leg2Msg.HopCount, leg2Msg.Sender, leg2Msg.Target,
+		leg2Msg.AssetID, leg2Msg.Value, leg2Msg.Payload, leg2Msg.Tip, leg2Msg.GasFee, leg2Msg.Ordered,
+		new(big.Int).SetUint64(messageProof2.LeafIndex), hashesToBytes32(messageProof2.Siblings), commitRoot2,
+	)
+	require.NoError(t, err)
+	claimTx2 := newHighGasTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata2))
+	rcp2, _, failed2 := h.HandleTransaction(context.Background(), csB, claimTx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	// mục 2.4 point 1 / finding #1: the TRANSACTION itself succeeds even though the payload
+	// reverted -- claimMessage finalizes Failed instead of hard-reverting.
+	require.False(t, failed2, "leg 2 claimMessage transaction itself must succeed (finalizes Failed, does not hard-revert): %+v", rcp2)
+
+	statusCalldata, err := h.abi.Pack("getMessageStatus", leg2Msg.MessageID)
+	require.NoError(t, err)
+	statusResult, err := h.HandleOffChainQuery(csB, newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, statusCalldata)))
+	require.NoError(t, err)
+	statusOut, err := h.abi.Unpack("getMessageStatus", statusResult)
+	require.NoError(t, err)
+	require.Equal(t, uint8(cross_chain.MessageStatusFailed), statusOut[0].(uint8), "leg 2 must be finalized Failed on Chain B")
+
+	// Step 6: refund on Reserve, using a real failure cert signed by B's own committee.
+	failDigest := cross_chain.ComputeMessageFailureAttestMessage(leg2Msg.MessageID, chainBID)
+	failSig := bls.Sign(kpB.PrivateKey(), failDigest)
+	refundCalldata, err := h.abi.Pack("refund",
+		leg2Msg.MessageID, big.NewInt(int64(leg2Msg.SourceChainID)), big.NewInt(int64(leg2Msg.DestChainID)),
+		big.NewInt(int64(leg2Msg.Sequence)), leg2Msg.HopCount, leg2Msg.Sender, leg2Msg.Target,
+		leg2Msg.AssetID, leg2Msg.Value, leg2Msg.Payload, leg2Msg.Tip, leg2Msg.GasFee, leg2Msg.Ordered,
+		new(big.Int).SetUint64(messageProof2.LeafIndex), hashesToBytes32(messageProof2.Siblings), commitRoot2,
+		uint64(0), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), csReserve, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedRefund, "refund() on Reserve must succeed once leg 2's own MessageID is used consistently throughout: %+v", rcpRefund)
+
+	// The defining assertion: Reserve's bookkeeping for leg 1's ORIGINAL MessageID -- the only ID
+	// chain A's sender ever actually saw -- now shows Refunded. Before this fix, this would query
+	// a message Reserve never resolved (it stayed on the throwaway tx-hash-derived ID instead),
+	// permanently reading back Pending.
+	finalStatusCalldata, err := h.abi.Pack("getMessageStatus", leg1Msg.MessageID)
+	require.NoError(t, err)
+	finalStatusResult, err := h.HandleOffChainQuery(csReserve, newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, finalStatusCalldata)))
+	require.NoError(t, err)
+	finalStatusOut, err := h.abi.Unpack("getMessageStatus", finalStatusResult)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(cross_chain.MessageStatusRefunded), finalStatusOut[0].(uint8), "Reserve's status for the ORIGINAL leg-1 MessageID must reflect the refund")
+}
+
 func TestComprehensive_TwoHop_SecurityGuards_SelfLoopAndUnregisteredTarget(t *testing.T) {
 	h, err := GetGatewayHandler()
 	require.NoError(t, err)

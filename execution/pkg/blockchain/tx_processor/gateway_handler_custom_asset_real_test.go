@@ -241,7 +241,18 @@ func TestGatewayHandler_CustomAsset_RealTokenTransferSucceeds(t *testing.T) {
 	canonicalToken := deployTestWrappedAsset(t, cs, sender, big.NewInt(1_000_000))
 
 	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
-	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
+	// destChainID must be a known registered chain -- outbound() now rejects an unregistered
+	// destination before it ever locks/burns funds (2026-09-05 security fix, see that case's own
+	// comment in gateway_handler.go).
+	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Epoch:   1,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: make([]byte, 48), Stake: 1000},
+			},
+		},
+	}, supplyLedger)
 	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 	entry := &cross_chain.AssetEntry{
 		AssetID:           assetID,

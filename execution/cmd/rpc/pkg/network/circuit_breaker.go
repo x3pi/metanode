@@ -136,10 +136,17 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	switch cb.state {
 	case StateHalfOpen:
-		cb.state = StateClosed
-		cb.failures = 0
-		cb.requests = 0
-		logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
+		// REVIEW FIX (2026-09-05, PR #102): see pkg/network/circuit_breaker.go's identical fix --
+		// this used to close unconditionally on the first HALF_OPEN success, an unscoped behavior
+		// change unrelated to the relayer bug that PR actually fixed (the `Disabled` flag).
+		// Restored the "N consecutive successful trial requests required" canary for consumers
+		// that keep the breaker enabled.
+		if cb.requests >= cb.maxRequests {
+			cb.state = StateClosed
+			cb.failures = 0
+			cb.requests = 0
+			logger.Info("Circuit Breaker: Chuyển từ HALF_OPEN sang CLOSED")
+		}
 	case StateClosed:
 		cb.failures = 0 // Reset failure count
 	}
