@@ -32,3 +32,6 @@ recovery_committee_size: 4
 # tooling see the private key material at all. Leave empty to use the devnet auto-generated
 # default above.
 recovery_committee_json_override_file: ""
+
+# Signature & nonce verification in mempool (false = strictly verified, true = bypass for raw benchmark stress-test)
+skip_mempool_sig_verify: false
