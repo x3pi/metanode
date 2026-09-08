@@ -8,8 +8,15 @@ all:
     # note/eurozone_unified_native_coin_plan.md mục "live-verify qua run_full_pipeline.sh").
     root_anchor_chain_id: 991
     ansible_user: "name"
-    ansible_ssh_pass: "password"
-    ansible_become_pass: "password"
+
+    # 🔒 XÁC THỰC BẢO MẬT (HARDENING):
+    # Khuyên dùng SSH Key-based auth thay cho mật khẩu (không lưu password plaintext):
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+    # Nếu user cần sudo password, mã hóa bằng Ansible Vault:
+    # ansible_become_pass: !vault | ...
+    # Hoặc cho môi trường lab nội bộ:
+    # ansible_ssh_pass: "password"
+    # ansible_become_pass: "password"
 
     # ECDSA private key (hex) của tài khoản submit các giao dịch registerChainViaStake lên Root
     # Anchor (đã bỏ propose/vote/executeProposal cùng GovernanceEngine 2026-09-04 -- xem

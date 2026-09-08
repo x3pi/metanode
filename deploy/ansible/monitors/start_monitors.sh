@@ -126,9 +126,12 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
 
     # 2. Sinh rpc_nodes.json và copy sang block_hash_checker
     if [ -n "$PARSE_PY" ]; then
-        python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
+        rm -f "$RPC_JSON_PATH" 2>/dev/null || true
+        (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+        chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         if [ -f "$RPC_JSON_PATH" ] && [ -d "$BLOCK_CHECKER_DIR" ]; then
             cp "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
+            chmod 0600 "$BLOCK_CHECKER_DIR/config-m-nodes.json" 2>/dev/null || true
         fi
     fi
 
@@ -182,21 +185,25 @@ if [ "${1:-}" == "health" ]; then
         PARSE_PY=$(get_parse_py)
 
         if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
-            python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
-            AUTH_JSON=$(python3 "$PARSE_PY" "$INV_PATH" auth 2>/dev/null || echo "{}")
-        else
-            AUTH_JSON="{}"
+            (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+            chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
                 if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && { sleep 2; ! curl -s -m 10 "$node_url" >/dev/null 2>&1; }; then
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                         node_id=${node_key#m}
-                        ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
-                        ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
+                        ssh_user=$(echo "$RPC_CONFIG_DATA" | jq -r ".ssh[\"$node_key\"].user // \"abc\"" 2>/dev/null)
+                        ssh_key=$(echo "$RPC_CONFIG_DATA" | jq -r ".ssh[\"$node_key\"].key // empty" 2>/dev/null)
+                        ssh_key="${ssh_key/#\~/$HOME}"
+                        ssh_opts="-o StrictHostKeyChecking=no"
+                        if [ -n "$ssh_key" ] && [ -f "$ssh_key" ]; then
+                            ssh_opts="-i $ssh_key $ssh_opts"
+                        fi
                         
                         crash_time=$(date +%Y%m%d_%H%M%S)
                         crash_dir="${SCRIPT_DIR}/logs_crash/node_${node_id}_crash_${crash_time}"
@@ -216,8 +223,8 @@ if [ "${1:-}" == "health" ]; then
                             uptime_secs=$(cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "999999")
                             if [ "$uptime_secs" -lt 120 ]; then server_rebooted=true; fi
                         else
-                            # Thử SSH nhanh 3s kiểm tra máy chủ còn sống không
-                            ssh_uptime=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "$ssh_user@$ip" "cat /proc/uptime 2>/dev/null | awk '{print int(\$1)}'" 2>/dev/null || echo "FAILED")
+                            # Thử SSH nhanh 3s kiểm tra máy chủ còn sống không (qua SSH Key)
+                            ssh_uptime=$(ssh $ssh_opts -o ConnectTimeout=3 "$ssh_user@$ip" "cat /proc/uptime 2>/dev/null | awk '{print int(\$1)}'" 2>/dev/null || echo "FAILED")
                             if [ "$ssh_uptime" != "FAILED" ] && [[ "$ssh_uptime" =~ ^[0-9]+$ ]]; then
                                 server_alive=true
                                 uptime_secs=$ssh_uptime
@@ -253,8 +260,8 @@ if [ "${1:-}" == "health" ]; then
                                 journalctl -b -1 -e -n 100 --no-pager > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
                                 dmesg -T 2>/dev/null | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50 > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
                             else
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -b -1 -e -n 100 --no-pager" > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "dmesg -T | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50" > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
+                                ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -b -1 -e -n 100 --no-pager" > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
+                                ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "dmesg -T | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50" > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
                             fi
 
                             # Xóa bớt backup cũ
@@ -317,31 +324,31 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                                 fi
                                 cp /opt/metanode/node-$node_id/logs/consensus/*.log "$crash_dir/consensus/" 2>/dev/null || true
                             else
-                                exec_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
-                                cons_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
+                                exec_status=$(ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
+                                cons_status=$(ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
                                 
                                 # Kéo nhật ký journalctl mới nhất
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 500 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 500 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
+                                ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 500 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
+                                ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 500 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
                                 
                                 # Kéo panic dump nếu có
-                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/panic.log" "$crash_dir/" 2>/dev/null || true
+                                scp $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/panic.log" "$crash_dir/" 2>/dev/null || true
                                 
                                 # Kéo thư mục log execution ngày mới nhất
                                 mkdir -p "$crash_dir/execution"
-                                latest_exec_date_dir=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                latest_exec_date_dir=$(ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
                                 if [ -n "$latest_exec_date_dir" ]; then
-                                    sshpass -p "$ssh_pass" scp -r -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
+                                    scp $ssh_opts -r -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
                                 fi
-                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/*.log" "$crash_dir/execution/" 2>/dev/null || true
+                                scp $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/*.log" "$crash_dir/execution/" 2>/dev/null || true
                                 
                                 # Kéo thư mục log consensus ngày mới nhất
                                 mkdir -p "$crash_dir/consensus"
-                                latest_cons_date_dir=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                latest_cons_date_dir=$(ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
                                 if [ -n "$latest_cons_date_dir" ]; then
-                                    sshpass -p "$ssh_pass" scp -r -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
+                                    scp $ssh_opts -r -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
                                 fi
-                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/consensus/*.log" "$crash_dir/consensus/" 2>/dev/null || true
+                                scp $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/consensus/*.log" "$crash_dir/consensus/" 2>/dev/null || true
                             fi
 
                             # Xóa bớt các thư mục backup cũ, chỉ giữ lại 5 bản mới nhất
@@ -361,7 +368,7 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 ────────────────────────
 📦 <b>Đã tự động sao lưu gói Logs mới nhất!</b>
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
-<code>sshpass -p \"$ssh_pass\" scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
+<code>scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                         fi
                     fi
                 else
@@ -403,17 +410,21 @@ if [ "${1:-}" == "resources" ]; then
         PARSE_PY=$(get_parse_py)
 
         if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
-            python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
-            AUTH_JSON=$(python3 "$PARSE_PY" "$INV_PATH" auth 2>/dev/null || echo "{}")
-        else
-            AUTH_JSON="{}"
+            (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+            chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
                 ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
-                ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
-                ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
+                ssh_user=$(echo "$RPC_CONFIG_DATA" | jq -r ".ssh[\"$node_key\"].user // \"abc\"" 2>/dev/null)
+                ssh_key=$(echo "$RPC_CONFIG_DATA" | jq -r ".ssh[\"$node_key\"].key // empty" 2>/dev/null)
+                ssh_key="${ssh_key/#\~/$HOME}"
+                ssh_opts="-o StrictHostKeyChecking=no"
+                if [ -n "$ssh_key" ] && [ -f "$ssh_key" ]; then
+                    ssh_opts="-i $ssh_key $ssh_opts"
+                fi
                 
                 is_local=false
                 if [ "$ip" == "$MONITOR_IP" ] || [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ]; then
@@ -425,7 +436,7 @@ if [ "${1:-}" == "resources" ]; then
                     cpu_usage=$(top -bn1 2>/dev/null | grep 'Cpu(s)' | awk '{print 100 - $8}' | cut -d. -f1)
                     disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | sed 's/%//')
                 else
-                    metrics=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ram=\$(free -m | awk 'NR==2{printf \"%.0f\", \$3*100/\$2 }'); cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print 100 - \$8}' | cut -d. -f1); disk=\$(df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'); echo \"\$ram \$cpu \$disk\"" 2>/dev/null || true)
+                    metrics=$(ssh $ssh_opts -o ConnectTimeout=5 "$ssh_user@$ip" "ram=\$(free -m | awk 'NR==2{printf \"%.0f\", \$3*100/\$2 }'); cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print 100 - \$8}' | cut -d. -f1); disk=\$(df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'); echo \"\$ram \$cpu \$disk\"" 2>/dev/null || true)
                     ram_usage=$(echo "$metrics" | awk '{print $1}')
                     cpu_usage=$(echo "$metrics" | awk '{print $2}')
                     disk_usage=$(echo "$metrics" | awk '{print $3}')
