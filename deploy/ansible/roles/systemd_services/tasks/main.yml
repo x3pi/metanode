@@ -94,6 +94,20 @@
   loop: "{{ active_nodes }}"
   notify: reload systemd
 
+- name: Clear systemd start-limit lockout before starting (StartLimitBurst circuit breaker)
+  # 2026-09-08: metanode-execution.service.j2 now sets StartLimitIntervalSec=300/
+  # StartLimitBurst=5 (crash-loop circuit breaker). Once tripped, systemd refuses
+  # ANY start request -- not just automatic Restart= ones -- for the unit with
+  # "Start request repeated too quickly" until `systemctl reset-failed` clears the
+  # counter. Without this, a node that crash-looped earlier stays down forever
+  # after this exact "state: started" task below, even though it reports success
+  # (verified empirically: reset-failed is required, restart/start alone is not
+  # enough). Harmless no-op ("Unit ... not loaded") on any unit that never failed.
+  ansible.builtin.command: "systemctl reset-failed metanode-execution-{{ item }}"
+  loop: "{{ active_nodes }}"
+  failed_when: false
+  changed_when: false
+
 - name: Enable and start Execution services
   ansible.builtin.systemd:
     name: "metanode-execution-{{ item }}"

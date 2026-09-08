@@ -1,0 +1,62 @@
+{#
+  Alertmanager config for the Metanode validator cluster.
+
+  Telegram credentials are deliberately NOT duplicated as their own inventory vars -- they're
+  read from the same telegram_bot_token/telegram_chat_id already set once under
+  metanode_cluster's group vars (see inventory.example.yml) and already used by
+  monitors/start_monitors.sh, so there is exactly one place to configure the Telegram
+  destination for this whole repo's tooling, not two that can drift out of sync.
+#}
+{% set _cluster_hosts = groups['metanode_cluster'] | default([]) %}
+{% set tg_bot_token = (hostvars[_cluster_hosts[0]].telegram_bot_token | default('')) if _cluster_hosts | length > 0 else '' %}
+{% set tg_chat_id = (hostvars[_cluster_hosts[0]].telegram_chat_id | default('')) if _cluster_hosts | length > 0 else '' %}
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "{{ 'telegram-default' if (tg_bot_token and tg_chat_id) else 'blackhole' }}"
+  group_by: ['alertname', 'instance']
+  group_wait: 15s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: critical
+      receiver: "{{ 'telegram-default' if (tg_bot_token and tg_chat_id) else 'blackhole' }}"
+      repeat_interval: 30m
+
+inhibit_rules:
+  # A node already flagged as down (MetanodeTargetDown) doesn't also need its resource alerts --
+  # a target Prometheus can't scrape can't usefully report disk/RAM/CPU either.
+  - source_match:
+      alertname: 'MetanodeTargetDown'
+    target_match_re:
+      alertname: 'Metanode(DiskFull|HighMemory|HighCPU)'
+    equal: ['instance']
+
+receivers:
+  - name: 'blackhole'
+    # No telegram_bot_token/telegram_chat_id set under metanode_cluster's group vars yet (see
+    # inventory.yml) -- Alertmanager is running and evaluating routes, but has nowhere to send
+    # them until those two vars are filled in and the deploy is re-run. Kept as a real, valid
+    # receiver (rather than leaving `route.receiver` pointing at a name that doesn't exist) so
+    # this config is never broken by default, only silent by default.
+{% if tg_bot_token and tg_chat_id %}
+  - name: 'telegram-default'
+    telegram_configs:
+      - bot_token: '{{ tg_bot_token }}'
+        chat_id: {{ tg_chat_id }}
+        parse_mode: 'HTML'
+        # The double-brace syntax below is Alertmanager's own Go text/template, evaluated by
+        # Alertmanager itself at alert-send time -- NOT Ansible/Jinja2, which only renders this
+        # file once at deploy time. It is wrapped in Jinja2's raw-block tag (opening tag: percent
+        # sign, curly brace, "raw", curly brace, percent sign) so Jinja2 passes it through as
+        # plain text instead of trying, and failing, to parse Go template syntax as its own.
+        message: |-
+          {% raw %}{{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} <b>[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}</b>
+          {{ range .Alerts }}
+          ────────────────────────
+          🎯 <b>{{ .Annotations.summary }}</b>
+          {{ .Annotations.description }}
+          {{ end }}{% endraw %}
+{% endif %}

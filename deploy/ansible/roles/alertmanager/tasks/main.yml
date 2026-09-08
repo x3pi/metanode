@@ -1,0 +1,106 @@
+---
+# Installs and runs Prometheus Alertmanager on the LOCAL (deployer) machine only — this role is
+# invoked from deploy.yml's "Post-deployment actions" play (hosts: localhost), the same play that
+# already generates prometheus.yml and restarts the local `prometheus` systemd service.
+# Alertmanager is the receiving end of the alert_rules.yml rules added alongside it: Prometheus
+# evaluates the rules, Alertmanager (this) turns a firing rule into an actual Telegram message,
+# reusing the same telegram_bot_token/telegram_chat_id already used by monitors/start_monitors.sh
+# so operators get every kind of alert (process-level bash checks AND metric-level Prometheus
+# rules) in one place.
+#
+# Mirrors node_exporter/tasks/main.yml's idempotency pattern: only download+install once, never
+# on every `--start`/`--reset-all` run, so a transient GitHub outage can't fail an unrelated
+# code-update deploy.
+
+- name: Check whether alertmanager binary is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/alertmanager
+  register: alertmanager_bin
+
+- name: Download Alertmanager
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+    dest: "/tmp/alertmanager.tar.gz"
+    mode: '0644'
+    timeout: 60
+  register: result
+  until: result is success
+  retries: 5
+  delay: 5
+  when: not alertmanager_bin.stat.exists
+
+- name: Extract Alertmanager
+  ansible.builtin.unarchive:
+    src: "/tmp/alertmanager.tar.gz"
+    dest: "/tmp/"
+    remote_src: yes
+  when: not alertmanager_bin.stat.exists
+
+- name: Move alertmanager binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager"
+    dest: "/usr/local/bin/alertmanager"
+    mode: '0755'
+    remote_src: yes
+  when: not alertmanager_bin.stat.exists
+
+- name: Move amtool binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/amtool"
+    dest: "/usr/local/bin/amtool"
+    mode: '0755'
+    remote_src: yes
+  when: not alertmanager_bin.stat.exists
+
+- name: Ensure Alertmanager config/data directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: '0755'
+  loop:
+    - /etc/alertmanager
+    - /var/lib/alertmanager
+  # Runs as the same `prometheus` system user Prometheus itself already runs under on this host
+  # (see /etc/prometheus ownership) -- avoids creating a second service account for one more
+  # single-instance, same-box process. If that user doesn't exist yet (fresh host, Prometheus
+  # itself not installed via this repo's tooling), fall back to root so this role doesn't hard
+  # fail the whole deploy over an unrelated Prometheus install being missing.
+  ignore_errors: true
+
+- name: Render Alertmanager config
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /etc/alertmanager/alertmanager.yml
+    owner: prometheus
+    group: prometheus
+    mode: '0640'
+  register: am_config
+
+- name: Create Alertmanager systemd service file
+  ansible.builtin.template:
+    src: alertmanager.service.j2
+    dest: /etc/systemd/system/alertmanager.service
+    mode: '0644'
+  register: am_service
+
+- name: Reload systemd if service file or config changed
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  when: am_service.changed
+
+- name: Clear systemd start-limit lockout before (re)starting Alertmanager
+  # Same class of trap fixed 2026-09-08 in restart_services/systemd_services for the node
+  # services (see that commit) -- alertmanager.service.j2 below also sets StartLimitBurst, so the
+  # same reset-failed step is needed here from day one instead of being discovered the hard way
+  # again later. Harmless no-op on a unit that never failed.
+  ansible.builtin.command: systemctl reset-failed alertmanager
+  failed_when: false
+  changed_when: false
+
+- name: Start and enable Alertmanager, restarting only if config/service changed
+  ansible.builtin.systemd:
+    name: alertmanager
+    state: "{{ 'restarted' if (am_config.changed or am_service.changed) else 'started' }}"
+    enabled: yes
