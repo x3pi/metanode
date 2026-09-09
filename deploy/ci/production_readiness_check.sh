@@ -23,14 +23,19 @@
 #  triển khai thật.
 #
 #  Usage:
-#    ./production_readiness_check.sh [--skip-build] [--reset-rounds N] [--full]
+#    ./production_readiness_check.sh [--skip-build] [--reset-rounds N] [--snapshot-loops N] [--full]
 #
 #    --skip-build        Bỏ qua Tầng 1 (giả định đã build_check.sh sạch từ trước)
 #    --reset-rounds N    Số vòng lặp --reset-all ở Tầng 2 (mặc định: 3)
-#    --full              Chạy toàn bộ ci.sh (bao gồm cả TPS/spam benchmark, tốn
-#                         thời gian hơn nhiều). Mặc định chỉ chạy các bài test
-#                         CORRECTNESS (không phải benchmark hiệu năng):
-#                         blockstm_logic, node_chaos_restart, snapshot_recovery.
+#    --snapshot-loops N  Số vòng lặp riêng cho bài snapshot_recovery ở Tầng 3, ÉP BUỘC bất
+#                         kể ci_config.yaml thật đang cấu hình bao nhiêu vòng (mặc định: 3).
+#                         Xem giải thích ở comment "BOUNDED SNAPSHOT_RECOVERY" bên dưới --
+#                         quan trọng để giữ tầng này NHANH và có thể dự đoán được.
+#    --full              Chạy toàn bộ ci.sh (bao gồm cả TPS/spam benchmark, VÀ dùng đúng
+#                         ci_config.yaml thật không ép loop -- có thể mất nhiều giờ nếu
+#                         config thật đang tinh chỉnh cho soak-test dài hơi). Mặc định chỉ
+#                         chạy các bài test CORRECTNESS: blockstm_logic, node_chaos_restart,
+#                         snapshot_recovery (bounded).
 # ═══════════════════════════════════════════════════════════════════════════
 set -uo pipefail
 
@@ -41,17 +46,68 @@ BUILD_CHECK="$REPO_ROOT/consensus/metanode/scripts/build_check.sh"
 
 SKIP_BUILD=false
 RESET_ROUNDS=3
+SNAPSHOT_LOOPS=3
 FULL_SUITE=false
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --skip-build) SKIP_BUILD=true ;;
         --reset-rounds) RESET_ROUNDS="$2"; shift ;;
+        --snapshot-loops) SNAPSHOT_LOOPS="$2"; shift ;;
         --full) FULL_SUITE=true ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
     shift
 done
+
+# BOUNDED SNAPSHOT_RECOVERY (2026-09-09): `./ci.sh run-now --only snapshot_recovery` executes
+# whatever `command:` this repo's OWN ci_config.yaml (gitignored, per-environment) has
+# configured for that test -- found live that this environment's real config had been tuned to
+# `--loop 100` for an extended overnight soak-test, so a naive `--only snapshot_recovery` call
+# here took ~8 hours instead of the few minutes a pre-deploy gate needs. Generate a throwaway
+# copy of the real config with ONLY that one test's command line overridden to a bounded loop
+# count, so this gate's duration never silently depends on how someone last tuned the
+# environment's own long-running soak-test config.
+run_snapshot_recovery_bounded() {
+    local loops="$1"
+    local real_config="$REPO_ROOT/deploy/ci/ci_config.yaml"
+    if [ ! -f "$real_config" ]; then
+        real_config="$REPO_ROOT/deploy/ci/ci_config.yaml.example"
+    fi
+    local bounded_config
+    bounded_config="$(mktemp /tmp/ci_config_readiness_XXXXXX.yaml)"
+    if ! python3 -c "
+import sys
+import yaml
+
+with open('${real_config}') as f:
+    cfg = yaml.safe_load(f)
+
+found = False
+for t in cfg.get('tests', []):
+    if t.get('id') == 'snapshot_recovery':
+        t['command'] = './run_snapshot_test.sh --loop ${loops} --count 15'
+        t['enabled'] = True
+        found = True
+
+if not found:
+    sys.exit(1)
+
+with open('${bounded_config}', 'w') as f:
+    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+"; then
+        echo "❌ Không tìm thấy bài test 'snapshot_recovery' trong ${real_config}"
+        rm -f "${bounded_config}"
+        return 1
+    fi
+
+    echo "ℹ️  Dùng cấu hình tạm (${bounded_config}) -- ép snapshot_recovery chạy ${loops} vòng"
+    echo "   bất kể ci_config.yaml thật đang cấu hình bao nhiêu vòng."
+    cd "$REPO_ROOT" && ./ci.sh run-now --only snapshot_recovery --config "${bounded_config}"
+    local rc=$?
+    rm -f "${bounded_config}"
+    return $rc
+}
 
 REPORT_LOG="/tmp/production_readiness_$(date +%Y%m%d_%H%M%S).log"
 START_TIME=$(date +%s)
@@ -102,7 +158,7 @@ print_summary() {
 log "═══════════════════════════════════════════════════════════"
 log "🚀 PRODUCTION READINESS CHECK — $(date '+%Y-%m-%d %H:%M:%S')"
 log "   Reset rounds (Tầng 2): $RESET_ROUNDS"
-log "   Bộ test ứng dụng (Tầng 3): $([ "$FULL_SUITE" == true ] && echo 'ĐẦY ĐỦ (bao gồm benchmark)' || echo 'CORRECTNESS (không benchmark)')"
+log "   Bộ test ứng dụng (Tầng 3): $([ "$FULL_SUITE" == true ] && echo 'ĐẦY ĐỦ (bao gồm benchmark, dùng ci_config.yaml thật không ép loop)' || echo "CORRECTNESS (snapshot_recovery ép ${SNAPSHOT_LOOPS} vòng)")"
 log "═══════════════════════════════════════════════════════════"
 
 # ─── TẦNG 1: BUILD ────────────────────────────────────────────────────────
@@ -152,11 +208,21 @@ else
     for test_id in "${CORRECTNESS_TESTS[@]}"; do
         log "\n▶️  Đang chạy bài test: ${test_id}"
         t_sub=$(date +%s)
-        if ./ci.sh run-now --only "$test_id" 2>&1 | tee -a "$REPORT_LOG"; then
-            record_stage "  Tầng 3: ${test_id}" "PASS" "$(( $(date +%s) - t_sub ))"
+        if [ "$test_id" == "snapshot_recovery" ]; then
+            # Bounded, không phụ thuộc ci_config.yaml thật -- xem run_snapshot_recovery_bounded ở trên.
+            if run_snapshot_recovery_bounded "$SNAPSHOT_LOOPS" 2>&1 | tee -a "$REPORT_LOG"; then
+                record_stage "  Tầng 3: ${test_id} (${SNAPSHOT_LOOPS} vòng, ép riêng)" "PASS" "$(( $(date +%s) - t_sub ))"
+            else
+                record_stage "  Tầng 3: ${test_id} (${SNAPSHOT_LOOPS} vòng, ép riêng)" "FAIL" "$(( $(date +%s) - t_sub ))"
+                ANY_FAIL=true
+            fi
         else
-            record_stage "  Tầng 3: ${test_id}" "FAIL" "$(( $(date +%s) - t_sub ))"
-            ANY_FAIL=true
+            if ./ci.sh run-now --only "$test_id" 2>&1 | tee -a "$REPORT_LOG"; then
+                record_stage "  Tầng 3: ${test_id}" "PASS" "$(( $(date +%s) - t_sub ))"
+            else
+                record_stage "  Tầng 3: ${test_id}" "FAIL" "$(( $(date +%s) - t_sub ))"
+                ANY_FAIL=true
+            fi
         fi
     done
     if [ "$ANY_FAIL" == true ]; then
