@@ -10,6 +10,7 @@
     chdir: "{{ deploy_dir }}"
   register: build_result
   changed_when: build_result.rc == 0
+  when: ansible_action != 'gen_keys'
 
 - name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
   ansible.builtin.shell: |
@@ -28,7 +29,7 @@
     '
   args:
     chdir: "{{ deploy_dir }}"
-  when: cluster_nodes is defined and ansible_action == 'setup'
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
 
 - name: Generate Validator Keys
   ansible.builtin.shell: |
@@ -50,7 +51,7 @@
   args:
     chdir: "{{ deploy_dir }}"
   loop: "{{ cluster_nodes }}"
-  when: cluster_nodes is defined and ansible_action == 'setup'
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
 
 # `cluster_nodes`/`peers_map` are already built dynamically from inventory.yml -- see
 # deploy.yml's "Local build and configuration generation" play (pre_tasks, `set_fact`), which
@@ -82,19 +83,20 @@
     cd "{{ deploy_dir }}/../../execution" && go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
   args:
     chdir: "{{ deploy_dir }}"
-  when: cluster_nodes is defined and ansible_action == 'setup'
+    creates: "{{ deploy_dir }}/../../execution/gen_recovery_committee"
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
 
 - name: Ensure independent RecoveryCommittee keys exist (idempotent -- devnet default only)
   ansible.builtin.shell: |
     python3 gen_recovery_committee_keys.py --out-dir "{{ deploy_dir }}/recovery_committee_keys" --metanode-bin "{{ deploy_dir }}/../../target/release/metanode" --count "{{ recovery_committee_size | default(4) }}"
   args:
     chdir: "{{ deploy_dir }}"
-  when: cluster_nodes is defined and ansible_action == 'setup' and (recovery_committee_json_override_file is not defined or recovery_committee_json_override_file == '')
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys'] and (recovery_committee_json_override_file is not defined or recovery_committee_json_override_file == '')
 
 - name: Compute and inject RecoveryCommittee config into every node's execution.json
   ansible.builtin.shell: |
     python3 inject_recovery_committee.py "{{ deploy_dir }}" "{{ cluster_nodes | length }}" "{{ deploy_dir }}/../../execution/gen_recovery_committee" "{{ deploy_dir }}/recovery_committee_keys" {% if recovery_committee_json_override_file is defined and recovery_committee_json_override_file != '' %}--override-file "{{ recovery_committee_json_override_file }}"{% endif %}
   args:
     chdir: "{{ deploy_dir }}"
-  when: cluster_nodes is defined and ansible_action == 'setup'
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
 

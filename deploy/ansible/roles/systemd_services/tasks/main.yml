@@ -116,13 +116,7 @@
     daemon_reload: yes
   loop: "{{ active_nodes }}"
 
-- name: Open firewall ports for node
-  ansible.builtin.shell: |
-    bash open_ports.sh
-  args:
-    chdir: "{{ remote_deploy_dir }}/node-{{ item }}_keys"
-  loop: "{{ active_nodes }}"
-  when: "open_ports | default('false') | bool == true"
+
 
 # - name: Generate and start systemd service for RPC Proxy
 #   ansible.builtin.shell: |

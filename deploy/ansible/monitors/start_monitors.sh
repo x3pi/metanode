@@ -108,9 +108,12 @@ PROBE_TOOL_BIN="${SCRIPT_DIR}/stall_probe_tool"
 # an older deploy still running it. Computed once, included in every alert below. Short hash +
 # "-dirty" suffix if this checkout has uncommitted changes (matches `git describe`-style
 # convention already used by ansible_deploy.sh's own "Commit: <hash>" banner).
-CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-if [ "$CODE_VERSION" != "unknown" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
-    CODE_VERSION="${CODE_VERSION}-dirty"
+CODE_VERSION="N/A"
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "N/A")
+    if [ "$CODE_VERSION" != "N/A" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
+        CODE_VERSION="${CODE_VERSION}-dirty"
+    fi
 fi
 
 send_tele() {
