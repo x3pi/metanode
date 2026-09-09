@@ -54,21 +54,25 @@ cd deploy/ansible
   * `--reset-all`: **Xóa sạch DB cũ** trên mọi node, tạo mới toàn bộ key validator/genesis và khởi động chain từ **Block 0**.
   * `--open-ports`: **Mở cổng tường lửa (UFW)** (P2P consensus, execution, RPC, snapshot) để các node kết nối được với nhau và client gọi được RPC.
 * **Câu lệnh khuyên dùng khi dựng mới hoàn toàn:**
-  ```bash
-  ./ansible_deploy.sh --reset-all --open-ports
-  ```
-  *(💡 Nếu server đã mở port sẵn và chỉ cần reset dữ liệu: `./ansible_deploy.sh --reset-all`)*
+
+```bash
+./ansible_deploy.sh --reset-all --open-ports
+```
+
+*(💡 Nếu server đã mở port sẵn và chỉ cần reset dữ liệu: `./ansible_deploy.sh --reset-all`)*
 
 ---
 
 ### Kịch bản 2: Cập nhật code / Khởi động KHÔNG xóa dữ liệu
 * **Khi nào dùng:** Khi lập trình viên cập nhật tính năng mới hoặc sửa lỗi, cần đưa binary mới lên server mà **KHÔNG làm mất dữ liệu** (giữ nguyên block hiện tại, giữ nguyên DB và keys).
-* **Hành vi:** Build binary mới $\rightarrow$ Tắt service $\rightarrow$ Chép đè binary mới lên server $\rightarrow$ Khởi động lại. Mạng tiếp tục sinh block từ độ cao hiện tại.
+* **Hành vi:** Build binary mới → Tắt service → Chép đè binary mới lên server → Khởi động lại. Mạng tiếp tục sinh block từ độ cao hiện tại.
 * **Câu lệnh:**
-  ```bash
-  ./ansible_deploy.sh --start
-  ```
-  *(Gõ `./ansible_deploy.sh` không truyền tham số cũng tương đương `--start`)*.
+
+```bash
+./ansible_deploy.sh --start
+```
+
+*(Gõ `./ansible_deploy.sh` không truyền tham số cũng tương đương `--start`)*.
 
 ---
 
@@ -76,9 +80,10 @@ cd deploy/ansible
 * **Khi nào dùng:** Cần bảo trì server, di dời hạ tầng hoặc dừng mạng an toàn.
 * **Hành vi:** Gửi tín hiệu `systemctl stop` tới toàn bộ dịch vụ execution và consensus trên tất cả các server.
 * **Câu lệnh:**
-  ```bash
-  ./ansible_deploy.sh --stop
-  ```
+
+```bash
+./ansible_deploy.sh --stop
+```
 
 ---
 
@@ -106,9 +111,10 @@ Khi chỉ muốn can thiệp vào một node cụ thể mà không làm gián đ
 * **Khi nào dùng:** Khi bạn vừa sửa file cấu hình bằng tay trên server hoặc server vừa reboot, cần restart tiến trình ngay mà **không cần mất thời gian build lại code hay copy file**.
 * **Hành vi:** Chỉ chạy lệnh `systemctl restart` các dịch vụ. Thời gian thực thi chỉ mất 1-2 giây.
 * **Câu lệnh:**
-  ```bash
-  ./ansible_deploy.sh --restart
-  ```
+
+```bash
+./ansible_deploy.sh --restart
+```
 
 ---
 
@@ -116,9 +122,11 @@ Khi chỉ muốn can thiệp vào một node cụ thể mà không làm gián đ
 * **Khi nào dùng:** Một node bị hỏng ổ đĩa hoặc bị lệch trạng thái (out-of-sync) quá xa, cần tải snapshot từ một node khác về để nhanh chóng bắt kịp block mới nhất.
 * **⚠️ BẮT BUỘC phải kèm `--only-node <N>`:** `--reset-all` tự nó xóa data của **TẤT CẢ** active nodes (`ACTION=setup, KEEP_DATA=false` áp dụng cho toàn bộ `active_nodes`, không riêng node truyền vào `--restore-node`). Thiếu `--only-node` sẽ xóa sạch dữ liệu của mọi node đang chạy, không chỉ node cần khôi phục.
 * **Câu lệnh:**
-  ```bash
-  ./ansible_deploy.sh --reset-all --only-node 2 --restore-node 2 --snapshot-url http://192.168.1.234:8604
-  ```
+
+```bash
+./ansible_deploy.sh --reset-all --only-node 2 --restore-node 2 --snapshot-url http://192.168.1.234:8604
+```
+
 * **Nguồn snapshot khuyến nghị:** dùng node SyncOnly chuyên trách (không phải validator) nếu cluster có, xem biến `snapshot_url` trong `inventory.yml` — tránh kéo snapshot từ 1 validator khác vì việc đó tạm khóa ghi RocksDB của chính validator đó (`RUST_EXECUTION_LOCK`), ảnh hưởng tới nhịp biểu quyết đúng lúc cluster cần validator đó khỏe nhất.
 
 ---
