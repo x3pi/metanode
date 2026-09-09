@@ -45,6 +45,10 @@ impl ConsensusNode {
         let mut storage = Self::setup_storage(&config).await?;
 
         let coordination_hub = consensus_core::coordination_hub::ConsensusCoordinationHub::new();
+        // Publish for the eth_syncing readiness FFI (see GLOBAL_COORDINATION_HUB's doc comment
+        // in ffi.rs) -- every (re)construction of this hub, including the ffi.rs internal restart
+        // loop, must republish so Go always reads the current instance's phase, not a stale one.
+        crate::ffi::set_global_coordination_hub(coordination_hub.clone());
 
         // Phase 2: Consensus params, commit processor, authority start (defined in setup_consensus.rs)
         let consensus = Self::setup_consensus(&config, &mut storage, &registry, coordination_hub.clone()).await?;

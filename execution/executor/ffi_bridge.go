@@ -28,6 +28,7 @@ void metanode_pause_consensus();
 void metanode_resume_consensus();
 bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
+bool metanode_is_ready_for_transactions();
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -453,6 +454,17 @@ func PauseRustConsensus() {
 // ResumeRustConsensus signals the Rust side to resume its consensus operations (e.g. after snapshot)
 func ResumeRustConsensus() {
 	C.metanode_resume_consensus()
+}
+
+// IsRustConsensusReadyForTransactions reports whether the Rust consensus layer's
+// ConsensusCoordinationHub is currently in a phase that accepts proposals (Healthy, with
+// RecoveryBarrier Ready/Inactive) -- i.e. whether a transaction submitted right now has any
+// chance of actually being proposed by this node, as opposed to sitting in mempool until it
+// times out. Backs the eth_syncing RPC method (see rpc_block.go's MetaAPI.Syncing()). Returns
+// false (not ready) if Rust hasn't published a consensus instance yet at all, e.g. very early in
+// process startup -- see GLOBAL_COORDINATION_HUB's doc comment in ffi.rs.
+func IsRustConsensusReadyForTransactions() bool {
+	return bool(C.metanode_is_ready_for_transactions())
 }
 
 // RestoreRustConsensusFromSnapshot purges local DAG and restores from the snapshot payload

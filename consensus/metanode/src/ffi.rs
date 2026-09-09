@@ -17,6 +17,54 @@ pub static TX_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 // The global channel sender for zero-copy FFI transaction submission
 pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = std::sync::RwLock::new(None);
 
+/// READINESS SIGNAL (2026-09-09): backs the `eth_syncing` RPC method (Go side: MetaAPI.Syncing()
+/// in rpc_state.go, wired via metanode_is_ready_for_transactions() below). Found live during
+/// today's chaos-restart CI test: a node that just restarted answers `eth_blockNumber` (plain RPC
+/// liveness) within seconds, well before ConsensusCoordinationHub reaches a phase that actually
+/// accepts proposals (Healthy + RecoveryBarrier Ready/Inactive -- see
+/// coordination_hub.rs's `should_skip_proposal()`, the existing authoritative check this reuses).
+/// A client/test-script that only checks "does RPC answer" sends a transaction into that window
+/// and gets an unexplained 45s timeout with no diagnostic -- exactly what this exists to prevent.
+///
+/// Set once per consensus (re)start in consensus_node.rs, right where ConsensusCoordinationHub
+/// itself is constructed, via `set_global_coordination_hub` below -- so a restart (whether the
+/// systemd-visible kind or the internal ffi.rs restart loop) always publishes the freshest
+/// instance. Read synchronously from `metanode_is_ready_for_transactions`, an FFI call Go can make
+/// directly on every `eth_syncing` request without an FFI round-trip through the async runtime.
+pub static GLOBAL_COORDINATION_HUB: std::sync::RwLock<Option<consensus_core::coordination_hub::ConsensusCoordinationHub>> = std::sync::RwLock::new(None);
+
+/// Publishes the current node's CoordinationHub for `metanode_is_ready_for_transactions` to read.
+/// Called once per (re)construction -- see GLOBAL_COORDINATION_HUB's doc comment for why every
+/// restart path needs this, not just the very first startup.
+pub fn set_global_coordination_hub(hub: consensus_core::coordination_hub::ConsensusCoordinationHub) {
+    match GLOBAL_COORDINATION_HUB.write() {
+        Ok(mut guard) => *guard = Some(hub),
+        Err(poisoned) => {
+            // A prior panic while holding this lock (extremely unlikely -- the critical section
+            // is a single pointer assignment) would poison it. Recover rather than propagate:
+            // losing readiness-tracking is far preferable to this becoming a new panic source
+            // in a hot restart path.
+            *poisoned.into_inner() = Some(hub);
+        }
+    }
+}
+
+/// FFI entry point for Go's `eth_syncing` handler (MetaAPI.Syncing() in rpc_state.go).
+/// Returns true when this node's consensus layer would actually accept/propose a transaction
+/// right now, false otherwise (still initializing/bootstrapping/catching-up/state-syncing, or no
+/// consensus instance published yet at all -- e.g. very early in process startup).
+#[no_mangle]
+pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match guard.as_ref() {
+        Some(hub) => !hub.should_skip_proposal(),
+        None => false,
+    }
+}
+
 
 // DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
