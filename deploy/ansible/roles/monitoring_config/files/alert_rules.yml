@@ -77,7 +77,7 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.instance }} is 2000+ blocks behind its peers and not catching up"
-          description: "Gap has stayed above 2000 blocks for 5+ minutes -- the automatic stall-recovery fetch (up to 500 blocks/cycle) isn't closing it on its own. Likely Tier 3 (DB issue / can't keep up), not Tier 1-2 (self-healing): check `journalctl -u metanode-execution-<N>` for repeated [STALL RECOVERY] fetch failures before reaching for a snapshot restore."
+          description: "Gap has stayed above 2000 blocks for 5+ minutes -- the automatic stall-recovery fetch (up to 500 blocks/cycle) isn't closing it on its own. Likely Tier 3 (DB issue / can't keep up), not Tier 1-2 (self-healing): check `journalctl -u metanode-execution-<N>` for repeated [STALL RECOVERY] fetch failures. NOTE: this metric compares against peers, so it stays near-zero if the ENTIRE cluster is equally stalled -- if every node's block height is flat too, that's MetanodeChainStalled's job, not this one. If THIS node alone keeps failing to shrink the gap after a few recovery cycles, peer block-replay is not going to finish it: switch to a snapshot restore -- ACTION: on this host run `deploy/systemd/cluster/restore_snapshot_systemd.sh` (or `consensus/metanode/scripts/node/restore_node.sh` for the manual/legacy path) with a recent snapshot from a healthy peer, per `deploy/systemd/docs/restore_snapshot_systemd.md`."
 
   - name: metanode_resources
     rules:
