@@ -4,6 +4,30 @@ Tài liệu hướng dẫn nhanh, ngắn gọn và dễ hiểu về cách sử d
 
 ---
 
+## ✅ 0. TRƯỚC KHI TRIỂN KHAI THẬT: `production_readiness_check.sh`
+
+**Một lệnh duy nhất trả lời "có được deploy lên môi trường thật không":**
+
+```bash
+cd deploy/ci
+./production_readiness_check.sh              # build + 3 vòng reset + bộ test correctness
+./production_readiness_check.sh --reset-rounds 5   # kỹ hơn ở tầng deploy
+./production_readiness_check.sh --full        # + toàn bộ benchmark (TPS/spam), lâu hơn nhiều
+```
+
+Chạy tuần tự 3 tầng, dừng ngay ở tầng đầu tiên fail:
+1. **Build** — Go + Rust + FFI compile sạch (`build_check.sh --all`).
+2. **Deploy stability** — `--reset-all` lặp lại N vòng liên tiếp trên cụm nhiều node/host
+   (`verify_multi_reset_stability.sh`) — bắt các race condition chỉ lộ ra khi lặp lại,
+   không phải lần chạy đầu.
+3. **Ứng dụng** — `blockstm_logic`, `node_chaos_restart`, `snapshot_recovery` (mặc định;
+   `--full` chạy thêm cả benchmark hiệu năng).
+
+Kết thúc in báo cáo PASS/FAIL từng tầng + log chi tiết tại `/tmp/production_readiness_*.log`.
+Chỉ khi cả 3 tầng đều PASS mới nên bấm nút triển khai thật.
+
+---
+
 ## 📌 1. LỆNH CHẠY TEST THỦ CÔNG (`run-now`)
 
 Tất cả các lệnh đều bắt đầu bằng `./ci.sh run-now` từ thư mục gốc `metanode`:
