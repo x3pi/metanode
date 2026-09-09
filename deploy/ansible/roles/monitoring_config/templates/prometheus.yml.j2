@@ -7,7 +7,8 @@ rule_files:
 
 # 2026-09-08: this file previously referenced rule_files above with no such file anywhere in the
 # repo, and no alerting: block at all -- Prometheus scraped everything but could never fire an
-# alert. alert_rules.yml now ships alongside this template (roles/monitoring_config/files/), and
+# alert. alert_rules.yml now ships alongside this template (roles/monitoring_config/templates/,
+# rendered as a Jinja2 template since 2026-09-09 so it can embed the live snapshot_url), and
 # points here at the local Alertmanager (role: alertmanager), which routes to the same Telegram
 # bot/chat already used by monitors/start_monitors.sh.
 alerting:

@@ -114,10 +114,12 @@ Khi chỉ muốn can thiệp vào một node cụ thể mà không làm gián đ
 
 ### Kịch bản 6: Khôi phục 1 Node bị lỗi từ Snapshot
 * **Khi nào dùng:** Một node bị hỏng ổ đĩa hoặc bị lệch trạng thái (out-of-sync) quá xa, cần tải snapshot từ một node khác về để nhanh chóng bắt kịp block mới nhất.
+* **⚠️ BẮT BUỘC phải kèm `--only-node <N>`:** `--reset-all` tự nó xóa data của **TẤT CẢ** active nodes (`ACTION=setup, KEEP_DATA=false` áp dụng cho toàn bộ `active_nodes`, không riêng node truyền vào `--restore-node`). Thiếu `--only-node` sẽ xóa sạch dữ liệu của mọi node đang chạy, không chỉ node cần khôi phục.
 * **Câu lệnh:**
   ```bash
-  ./ansible_deploy.sh --reset-all --restore-node 2 --snapshot-url http://192.168.1.234:8604
+  ./ansible_deploy.sh --reset-all --only-node 2 --restore-node 2 --snapshot-url http://192.168.1.234:8604
   ```
+* **Nguồn snapshot khuyến nghị:** dùng node SyncOnly chuyên trách (không phải validator) nếu cluster có, xem biến `snapshot_url` trong `inventory.yml` — tránh kéo snapshot từ 1 validator khác vì việc đó tạm khóa ghi RocksDB của chính validator đó (`RUST_EXECUTION_LOCK`), ảnh hưởng tới nhịp biểu quyết đúng lúc cluster cần validator đó khỏe nhất.
 
 ---
 

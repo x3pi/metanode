@@ -165,8 +165,8 @@
       # the Prometheus container as /etc/prometheus, so this one copy covers that deployment mode
       # for free. The bare-metal systemd path (this box's actual live setup) is handled
       # separately below, since its config lives at /etc/prometheus/ on the host, not here.
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/roles/monitoring_config/files/alert_rules.yml"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/monitoring_config/templates/alert_rules.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/alert_rules.yml"
       when: "ansible_action not in ['stop']"
 
@@ -196,8 +196,8 @@
       when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Sync alert_rules.yml to the bare-metal Prometheus config
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/roles/monitoring_config/files/alert_rules.yml"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/monitoring_config/templates/alert_rules.yml.j2"
         dest: /etc/prometheus/alert_rules.yml
         owner: prometheus
         group: prometheus
