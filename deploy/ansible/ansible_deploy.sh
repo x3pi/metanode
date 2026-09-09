@@ -79,6 +79,7 @@ KEEP_DATA="true"
 TARGET_NODE="all"
 RESTORE_NODE="none"
 SNAPSHOT_URL=""
+BTRFS_SIZE_VAL=""
 OPEN_PORTS="false"
 BUILD_FAST="false"
 DEBUG_CPP="false"
@@ -107,6 +108,7 @@ while [[ "$#" -gt 0 ]]; do
         --only-node) TARGET_NODE="$2"; shift ;;
         --restore-node) RESTORE_NODE="$2"; shift ;;
         --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
+        --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
         --open-ports) OPEN_PORTS="true" ;;
         --fast) BUILD_FAST="true" ;;
         --debug-cpp) DEBUG_CPP="true" ;;
@@ -123,6 +125,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --only-node N       Only apply actions to node N"
             echo "  --restore-node N    Restore node N from snapshot url"
             echo "  --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)"
+            echo "  --btrfs-size SIZE   Size of BTRFS partition/image (e.g. 50G, 100G, 400G)"
             echo "  --open-ports        Open firewall ports for the nodes"
             echo "  --all-monitors      Run monitors mutually across ALL machines"
             echo "  --fast              Fast build (skip redundant steps)"
@@ -165,6 +168,60 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
     chmod 0600 "/tmp/rpc_nodes.json" 2>/dev/null || true
 fi
 
+# Safety Check: Node tạo snapshot KHÔNG ĐƯỢC PHÉP tự khôi phục chính nó
+#
+# Phải khớp CHÍNH XÁC cách deploy.yml (dòng ~13-15) tự phân loại node snapshot/synconly:
+# một node được coi là snapshot/synconly nếu (a) node_id nằm trong danh sách tường minh
+# snapshot_nodes/synconly_nodes CỦA BẤT KỲ host nào, HOẶC (b) node_id thuộc về 1 host mà
+# host đó khai báo cờ boolean snapshot_enabled/is_synconly (áp dụng cho MỌI node_ids của
+# host đó). Bỏ sót nhánh (b) sẽ khiến guard này im lặng cho qua đúng kịch bản nó phải chặn.
+#
+# Fail-closed: nếu không xác minh được (thiếu pyyaml, inventory lỗi cú pháp...) thì DỪNG
+# hẳn thay vì âm thầm coi như "không phải node snapshot" rồi cho restore tiếp -- guard an
+# toàn dữ liệu không được phép fail-open.
+if [ "$RESTORE_NODE" != "none" ] && [ -f "${INVENTORY}" ]; then
+    SNAP_CHECK_OUTPUT=$(python3 -c "
+import sys
+try:
+    import yaml
+except ImportError as e:
+    print('ERROR: PyYAML chưa được cài đặt (%s)' % e, file=sys.stderr)
+    sys.exit(2)
+try:
+    with open('${INVENTORY}') as f:
+        d = yaml.safe_load(f)
+    hosts = (d.get('all', {}).get('children', {}).get('metanode_cluster', {}).get('hosts', {})) or {}
+    snap_nodes = set()
+    for h, v in hosts.items():
+        if not isinstance(v, dict):
+            continue
+        node_ids = [str(x) for x in v.get('node_ids', [])]
+        snap_nodes.update(str(x) for x in v.get('snapshot_nodes', []))
+        snap_nodes.update(str(x) for x in v.get('synconly_nodes', []))
+        # Cờ boolean per-host áp dụng cho toàn bộ node_ids của host đó (giống deploy.yml)
+        if bool(v.get('snapshot_enabled', False)) or bool(v.get('is_synconly', False)):
+            snap_nodes.update(node_ids)
+    print('true' if str('${RESTORE_NODE}') in snap_nodes else 'false')
+except Exception as e:
+    print('ERROR: %s' % e, file=sys.stderr)
+    sys.exit(2)
+")
+    SNAP_CHECK_RC=$?
+    if [ $SNAP_CHECK_RC -ne 0 ]; then
+        echo -e "\n\033[0;31m❌ [LỖI AN TOÀN] Không thể xác minh Node ${RESTORE_NODE} có phải Node tạo Snapshot hay không!\033[0m"
+        echo -e "\033[0;33m   ${SNAP_CHECK_OUTPUT}\033[0m"
+        echo -e "\033[0;36m   👉 Kiểm tra lại ${INVENTORY} và đảm bảo đã cài PyYAML (pip install pyyaml), rồi chạy lại.\033[0m\n"
+        exit 1
+    fi
+    IS_SNAP_NODE="$SNAP_CHECK_OUTPUT"
+    if [ "$IS_SNAP_NODE" == "true" ]; then
+        echo -e "\n\033[0;31m❌ [LỖI AN TOÀN] Node ${RESTORE_NODE} là Node tạo Snapshot (SyncOnly)!\033[0m"
+        echo -e "\033[0;33m   ⚠️ Node tạo snapshot KHÔNG ĐƯỢC PHÉP tự khôi phục chính nó.\033[0m"
+        echo -e "\033[0;36m   👉 Chỉ được phép khôi phục dữ liệu snapshot trên các Node Validator (vd: 0, 1, 2, 3).\033[0m\n"
+        exit 1
+    fi
+fi
+
 ACTION_LABEL=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
 
 echo -e "\n🚀 Starting Ansible ${ACTION_LABEL} with:"
@@ -175,6 +232,7 @@ echo "   Action:             $ACTION"
 echo "   Target Node:        $TARGET_NODE"
 echo "   Keep Data:          $KEEP_DATA"
 echo "   Restore Node:       $RESTORE_NODE"
+echo "   BTRFS Size:         ${BTRFS_SIZE_VAL:-"(từ inventory.yml)"}"
 echo "   Open Ports:         $OPEN_PORTS"
 echo "   Build Fast:         $BUILD_FAST"
 echo "   Watcher:            $WATCHER_STATUS"
@@ -194,6 +252,7 @@ send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trì
 - Target Node: <code>${TARGET_NODE}</code>
 - Keep Data: <code>${KEEP_DATA}</code>
 - Restore Node: <code>${RESTORE_NODE}</code>
+- BTRFS Size: <code>${BTRFS_SIZE_VAL:-"default"}</code>
 - Open Ports: <code>${OPEN_PORTS}</code>
 - All Monitors: <code>${ALL_MONITORS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
@@ -207,6 +266,9 @@ ${ROLES_OUTPUT}
 EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
+fi
+if [ -n "$BTRFS_SIZE_VAL" ]; then
+    EXTRA_VARS="${EXTRA_VARS} btrfs_size='${BTRFS_SIZE_VAL}'"
 fi
 
 if [ "$ACTION" == "gen_keys" ]; then

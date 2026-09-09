@@ -44,6 +44,30 @@
   loop: "{{ active_nodes }}"
   when: ansible_action == 'setup'
 
+- name: Extract node configuration for snapshot evaluation
+  set_fact:
+    node_configs: >-
+      {%- set configs = {} -%}
+      {%- for nid in active_nodes -%}
+        {%- for node in hostvars['localhost']['cluster_nodes'] -%}
+          {%- if node.node_id | string == nid | string -%}
+            {%- set _ = configs.update({nid | string: node}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ configs }}
+
+- name: Determine if current host requires BTRFS for snapshots
+  set_fact:
+    host_requires_btrfs: >-
+      {%- set needed = false -%}
+      {%- for nid in active_nodes -%}
+        {%- if node_configs[nid | string].snapshot_enabled | default(false) -%}
+          {%- set needed = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ needed }}
+
 - name: Auto-detect BTRFS device path for /opt/metanode
   ansible.builtin.shell: |
     fstype=$(findmnt -n -o FSTYPE /opt/metanode 2>/dev/null || true)
@@ -99,6 +123,158 @@
     get_mime: false
   register: btrfs_disk
 
+- name: Check available disk space before BTRFS initialization
+  ansible.builtin.shell: |
+    python3 - <<'EOF'
+    import sys, shutil, re, subprocess, os
+
+    req_str = "{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}".strip()
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT])?B?$", req_str, re.IGNORECASE)
+    if not m:
+        print(f"INVALID_FORMAT:{req_str}")
+        sys.exit(1)
+
+    val = float(m.group(1))
+    unit = (m.group(2) or "G").upper()
+    req_bytes = int(val * units[unit])
+    req_gb = round(req_bytes / (1024**3), 2)
+
+    # Check LVM free space
+    lvm_bytes = 0
+    has_lvm = False
+    try:
+        res = subprocess.run(["vgs", "--noheadings", "-o", "vg_free", "--units", "b", "--nosuffix", "ubuntu-vg"],
+                             capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            has_lvm = True
+            lvm_bytes = int(float(res.stdout.strip().split()[0]))
+    except Exception:
+        pass
+
+    # Check filesystem free space for loop file
+    target = "/opt"
+    check_dir = target if os.path.exists(target) else "/"
+    stat = shutil.disk_usage(check_dir)
+    free_bytes = stat.free
+    free_gb = round(free_bytes / (1024**3), 2)
+
+    if has_lvm and lvm_bytes >= req_bytes:
+        print(f"OK:LVM:{req_gb}:{round(lvm_bytes / (1024**3), 2)}")
+        sys.exit(0)
+    elif free_bytes >= req_bytes:
+        print(f"OK:LOOP:{req_gb}:{free_gb}")
+        sys.exit(0)
+    else:
+        max_avail = max(lvm_bytes, free_bytes)
+        avail_gb = round(max_avail / (1024**3), 2)
+        print(f"ERR_INSUFFICIENT:{req_gb}:{avail_gb}:{check_dir}")
+        sys.exit(2)
+    EOF
+  args:
+    executable: /bin/bash
+  register: disk_space_check
+  failed_when: false
+  changed_when: false
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Fail if requested BTRFS size format is invalid
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI CẤU HÌNH DUNG LƯỢNG SNAPSHOT]
+      Máy chủ '{{ inventory_hostname }}' ({{ ansible_host | default('') }}) có giá trị 'btrfs_size' không đúng định dạng:
+      '{{ disk_space_check.stdout.split(':')[1] | default(btrfs_size | default('400G')) }}'
+      👉 Định dạng hợp lệ: số + đơn vị K/M/G/T (ví dụ: 100G, 500G, 1T, 2T). Vui lòng sửa lại biến 'btrfs_size' trong inventory.yml.
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+    and disk_space_check.rc == 1
+
+- name: Fail if requested BTRFS size exceeds available disk space
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI CẤU HÌNH DUNG LƯỢNG SNAPSHOT]
+      Máy chủ '{{ inventory_hostname }}' ({{ ansible_host | default('') }}) cần bật tính năng Snapshot,
+      nhưng dung lượng btrfs_size cấu hình là '{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}' ({{ disk_space_check.stdout.split(':')[1] }} GB)
+      VƯỢT QUÁ dung lượng ổ cứng còn trống hiện tại (chỉ còn {{ disk_space_check.stdout.split(':')[2] }} GB)!
+      👉 Hướng dẫn khắc phục:
+         Vui lòng mở file inventory.yml chỉnh lại biến 'btrfs_size' nhỏ hơn (ví dụ: btrfs_size: '{{ (disk_space_check.stdout.split(':')[2] | float * 0.8) | int }}G')
+         hoặc chạy ./ansible_deploy.sh với cờ --btrfs-size {{ (disk_space_check.stdout.split(':')[2] | float * 0.8) | int }}G!
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+    and disk_space_check.rc == 2
+
+- name: Ensure btrfs-progs is installed on snapshot host
+  ansible.builtin.apt:
+    name: btrfs-progs
+    state: present
+    update_cache: false
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Automatically initialize BTRFS partition or sparse loopback image
+  # Mirrors deploy/systemd/cluster/setup-cluster-btrfs.sh's LVM-vs-loopback logic (including its
+  # existing-LV reuse check) so the Ansible-driven path and the manual/systemd path don't drift.
+  # Every fallback branch logs an explicit WARN (to stderr, so it doesn't pollute the stdout this
+  # task's caller parses as the resulting device path) instead of failing/falling back silently.
+  ansible.builtin.shell: |
+    set -e
+    target_size="{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}"
+    btrfs_img="/opt/metanode_cluster_btrfs.img"
+    created_dev=""
+    use_loopback=false
+
+    if sudo vgs ubuntu-vg >/dev/null 2>&1; then
+      if sudo lvs ubuntu-vg/metanode_data >/dev/null 2>&1; then
+        echo "WARN: LV ubuntu-vg/metanode_data already exists, reusing it instead of lvcreate" >&2
+        created_dev="/dev/ubuntu-vg/metanode_data"
+      else
+        lvcreate_err=$(sudo lvcreate -L "$target_size" -n metanode_data ubuntu-vg 2>&1 >/dev/null) || {
+          echo "WARN: lvcreate failed, falling back to loopback file. lvcreate said: ${lvcreate_err}" >&2
+          use_loopback=true
+        }
+        [ "$use_loopback" != true ] && created_dev="/dev/ubuntu-vg/metanode_data"
+      fi
+    else
+      echo "WARN: LVM volume group 'ubuntu-vg' not found, using loopback file" >&2
+      use_loopback=true
+    fi
+
+    if [ "$use_loopback" = true ] || [ -z "$created_dev" ]; then
+      created_dev="$btrfs_img"
+      mkdir -p /opt
+      truncate -s "$target_size" "$btrfs_img"
+    fi
+
+    mkfs.btrfs -f "$created_dev" >&2
+    echo "$created_dev"
+  args:
+    executable: /bin/bash
+  register: auto_btrfs_init
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Update BTRFS facts after auto initialization
+  set_fact:
+    btrfs_device_path: "{{ auto_btrfs_init.stdout.strip() }}"
+    btrfs_disk:
+      stat:
+        exists: true
+  when:
+    - auto_btrfs_init is defined
+    - auto_btrfs_init.stdout is defined
+    - auto_btrfs_init.stdout.strip() != ""
+
 - name: Unmount all existing node data bind mounts before resetting
   ansible.builtin.shell: |
     for d in /opt/metanode/node-*/data; do
@@ -139,18 +315,6 @@
     state: present
   when: btrfs_disk.stat.exists
 
-- name: Extract node configuration for snapshot evaluation
-  set_fact:
-    node_configs: >-
-      {%- set configs = {} -%}
-      {%- for nid in active_nodes -%}
-        {%- for node in hostvars['localhost']['cluster_nodes'] -%}
-          {%- if node.node_id | string == nid | string -%}
-            {%- set _ = configs.update({nid | string: node}) -%}
-          {%- endif -%}
-        {%- endfor -%}
-      {%- endfor -%}
-      {{ configs }}
 
 - name: Validate BTRFS availability for snapshot-enabled nodes
   ansible.builtin.fail:

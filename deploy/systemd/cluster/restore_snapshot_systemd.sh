@@ -84,6 +84,16 @@ if [ ! -d "$INSTALL_DIR" ]; then
     exit 1
 fi
 
+# An toàn: Node tạo snapshot KHÔNG ĐƯỢC PHÉP tự khôi phục chính nó
+if [ -f "$INSTALL_DIR/config/execution.json" ]; then
+    if grep -q '"snapshot_enabled": true' "$INSTALL_DIR/config/execution.json" 2>/dev/null; then
+        echo -e "${RED}❌ LỖI AN TOÀN: Node ${NODE_ID} là Node tạo Snapshot (snapshot_enabled: true)!${NC}"
+        echo -e "${YELLOW}   ⚠️ Node tạo snapshot KHÔNG THỂ tự restore từ chính nó.${NC}"
+        echo -e "${CYAN}   👉 Chỉ được phép khôi phục dữ liệu snapshot trên các Node Validator.${NC}"
+        exit 1
+    fi
+fi
+
 METANODE_USER=$(stat -c '%U' "$INSTALL_DIR" 2>/dev/null || echo "abc")
 
 # ─── Cấu hình URL Tải Snapshot ─────────────────────────────────

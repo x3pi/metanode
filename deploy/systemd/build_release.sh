@@ -128,6 +128,7 @@ cp gen_validator_entry.py "$RELEASE_DIR/"
 # Copy cluster scripts
 cp cluster/systemd-cluster.sh "$RELEASE_DIR/cluster/"
 cp cluster/install-rpc-systemd.sh "$RELEASE_DIR/cluster/"
+cp cluster/setup-cluster-btrfs.sh "$RELEASE_DIR/cluster/"
 cp cluster/restore_snapshot_systemd.sh "$RELEASE_DIR/cluster/"
 cp -r cluster/scripts "$RELEASE_DIR/cluster/" 2>/dev/null || true
 

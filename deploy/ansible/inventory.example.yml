@@ -36,6 +36,9 @@ all:
         # Kích thước tối đa của mỗi file nén snapshot (MB)
         snapshot_max_part_size_mb: 600
 
+        # Dung lượng phân vùng hoặc file ảnh BTRFS cho snapshot (mặc định: 400G; hỗ trợ đơn vị G và T, ví dụ: 100G, 500G, 1T, 2T)
+        btrfs_size: "400G"
+
         # Số epoch cũ giữ lại trước khi dọn dẹp state (đặt 0 nếu muốn chạy Archive Node,
         # giữ toàn bộ lịch sử — lưu ý sẽ khiến dung lượng đĩa tăng không giới hạn theo thời gian)
         epochs_to_keep: 5
