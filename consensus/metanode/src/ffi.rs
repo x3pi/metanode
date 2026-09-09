@@ -497,15 +497,34 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                     info!("Network address: {}", node_config.network_address);
 
                     if restart_count > 0 {
+                        // BACKOFF (2026-09-09): was a flat 10s. Root-caused live (4-node
+                        // cluster, all restarting simultaneously after each hit the
+                        // TxPayloadCache-miss panic added in c915437d) a real
+                        // "IO error: lock hold by current process ... LOCK: No locks
+                        // available" panic (typed_store's macro-generated RocksDBStore::new,
+                        // rocksdb_store.rs:31) on the FIRST 3-4 restart attempts, every time --
+                        // the previous iteration's Tokio runtime (and whatever RocksDB
+                        // background compaction/flush threads it owned) hadn't finished
+                        // releasing the on-disk LOCK file by the time this same OS process
+                        // tried to reopen the same path again. A flat 10s wait was
+                        // consistently NOT enough; it took ~4 attempts (this same 10s+5s
+                        // "FFI RESTART COOLDOWN" pair below, back to back) for the cluster to
+                        // self-clear, which is a real ~60s+ of wasted, guaranteed-to-fail
+                        // retries every single time this path triggers. Growing the wait with
+                        // each consecutive failed attempt (capped, not unbounded) gives the
+                        // still-draining resources more realistic time instead of hammering
+                        // the same conflict on a fixed cadence.
+                        let backoff_secs = (10 * restart_count.min(6)).min(60) as u64;
                         info!(
                             "🔄 [FFI RESTART] Attempt #{} — previous instance crashed. \
-                             Waiting 10s for old connections/tasks to drain...",
-                            restart_count
+                             Waiting {}s for old connections/tasks (and any still-draining \
+                             RocksDB handles) to fully release...",
+                            restart_count, backoff_secs
                         );
                         // Extended delay: old TCP connections (consensus P2P, gRPC) need
                         // TIME_WAIT to expire. 5s was too aggressive — peers still had
                         // open connections to old ports, causing bind/connect failures.
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     }
                     let startup_config = StartupConfig::new(node_config, registry, None);
 

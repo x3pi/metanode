@@ -102,6 +102,17 @@ export PROBE_TX_KEY
 PROBE_TOOL_SRC="${SCRIPT_DIR}/../../../execution/cmd/tool/tps_latency_probe"
 PROBE_TOOL_BIN="${SCRIPT_DIR}/stall_probe_tool"
 
+# Code version this monitor script (and, by extension, whatever's currently deployed alongside
+# it) is running from -- 2026-09-09, requested explicitly after a night of alerts where it was
+# hard to tell from Telegram alone whether an alert was about the code fix already in place or
+# an older deploy still running it. Computed once, included in every alert below. Short hash +
+# "-dirty" suffix if this checkout has uncommitted changes (matches `git describe`-style
+# convention already used by ansible_deploy.sh's own "Commit: <hash>" banner).
+CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+if [ "$CODE_VERSION" != "unknown" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
+    CODE_VERSION="${CODE_VERSION}-dirty"
+fi
+
 send_tele() {
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
         return
@@ -431,6 +442,7 @@ if [ "${1:-}" == "health" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Thảm họa (Disaster)
 ────────────────────────
 ⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS."
@@ -462,6 +474,7 @@ if [ "${1:-}" == "health" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
 ────────────────────────
 ⛔ <b>TOÀN BỘ TIẾN TRÌNH TEST / BENCHMARK ĐÃ BỊ DỪNG!</b>
@@ -560,6 +573,7 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
 ────────────────────────
 📦 <b>Đã tự động sao lưu gói Logs mới nhất!</b>
@@ -582,6 +596,7 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 
 📡 <b>MÁY GHI NHẬN PHỤC HỒI (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Trạng thái:</b> Đã phản hồi RPC bình thường
 ────────────────────────"
                     elif [ "${dead_nodes[$node_key]:-0}" == "2" ]; then
@@ -616,6 +631,10 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                         is_chain_stalled=false
                         send_tele "✅ <b>[ĐÃ PHỤC HỒI: MẠNG TIẾP TỤC SINH BLOCK]</b> ✅
 ────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
 🎯 <b>Độ cao Block mới nhất:</b> <code>#${curr_max_block}</code>
 📡 <b>Trạng thái:</b> Chuỗi đã thoát khỏi tình trạng treo và tiếp tục tạo block bình thường.
 ────────────────────────"
@@ -677,6 +696,7 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>Hostname:</b> <code>$(hostname)</code>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
 🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
    • <b>Node được kiểm tra (tx thăm dò):</b> <code>${probe_target_url:-không có}</code>
    • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
@@ -761,6 +781,7 @@ if [ "${1:-}" == "resources" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Cảnh báo (Warning)
 ────────────────────────"
                         fi
