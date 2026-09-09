@@ -157,6 +157,7 @@ impl ExecutorClient {
         let mut total_after_dedup = 0;
 
         if total_tx_before > 0 {
+            self.ensure_tx_payloads_cached(subdag).await;
             let (txs, sys_txs) = self.build_sorted_transactions(subdag)?;
             all_proto_txs = txs;
             all_system_txs = sys_txs;
@@ -1049,6 +1050,7 @@ impl ExecutorClient {
             );
         }
 
+        self.ensure_tx_payloads_cached(subdag).await;
         let (all_proto_txs, all_system_txs) = self.build_sorted_transactions(subdag)?;
 
         let epoch_data = ExecutableBlock {
@@ -1212,6 +1214,41 @@ impl ExecutorClient {
         }
     }
 
+    /// PEER TX-PAYLOAD RECOVERY (2026-09-09): scans `subdag` for tx digests missing from the
+    /// local TxPayloadCache and, if any are found, asks peers for them (via the tx-fetcher wired
+    /// in coordination_hub.rs — see TxFetcherFn's doc comment there for why this is safe to call
+    /// speculatively on every call, not just after a first failure) before `build_sorted_
+    /// transactions` below gets a chance to run. A hit here means that function's own bail!()
+    /// on a still-missing digest (see its doc comment) simply won't trigger; a miss (no fetcher
+    /// wired yet, no peer had it either — e.g. a full-cluster restart, where every peer lost the
+    /// same in-memory entry at the same time) leaves that unchanged fork-safety net exactly as
+    /// it was before this existed. Always call this before `build_sorted_transactions`, never as
+    /// a substitute for it.
+    async fn ensure_tx_payloads_cached(&self, subdag: &CommittedSubDag) {
+        let missing: Vec<consensus_types::block::TxDigest> = {
+            let cache = consensus_core::get_global_tx_cache().read();
+            subdag
+                .blocks
+                .iter()
+                .flat_map(|block| block.tx_digests())
+                .filter(|digest| cache.get(digest).is_none())
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let Some(fetcher) = crate::ffi::get_global_tx_fetcher() else {
+            return;
+        };
+        debug!(
+            "🔧 [TX-PAYLOAD-RECOVERY] {} tx digest(s) missing from local cache for commit {} \
+             — asking peers before falling back to the existing fork-safety bail.",
+            missing.len(),
+            subdag.commit_ref.index
+        );
+        fetcher(missing, std::time::Duration::from_secs(5)).await;
+    }
+
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///
     /// This extracts the filter → dedup → sort logic from convert_to_protobuf
@@ -1260,12 +1297,27 @@ impl ExecutorClient {
                             // function propagate this Err via `?` into paths that already
                             // exist and are already correct for exactly this situation — the
                             // live delivery path (block_delivery.rs's
-                            // BlockDeliveryManager::run) already panics on any Err from here,
-                            // and the startup-replay path (recovery.rs, called from
-                            // setup_consensus/mod.rs) already treats an Err as "defer to
-                            // network sync" rather than proceeding. Returning Err routes this
-                            // into those existing safe failure paths instead of inventing a
-                            // new one.
+                            // BlockDeliveryManager::run) panics on any Err from here (with an
+                            // outer resilience loop in ffi.rs, since 08780279, that retries
+                            // instead of leaving Rust consensus dead forever), and the
+                            // startup-replay path (recovery.rs) treats an Err as "defer to
+                            // network sync". Returning Err routes this into those existing
+                            // failure paths instead of inventing a new one.
+                            //
+                            // CORRECTION (2026-09-09, same day, confirmed live): "defer to
+                            // network sync" in recovery.rs does NOT actually fetch anything —
+                            // it just skips that one startup fast-path and falls through to
+                            // this same live-delivery bail. If every node in the cluster
+                            // restarted together and all lost the same in-memory cache entry
+                            // at the same time, NOTHING here recovers it, and this becomes a
+                            // real infinite retry loop (confirmed live: 600+ repeats at the
+                            // exact same commit). The actual fix is the peer fetch attempted
+                            // BEFORE this loop even runs — see ensure_tx_payloads_cached's doc
+                            // comment above build_sorted_transactions. That only helps when at
+                            // least one peer didn't lose the same entry (the common case: one
+                            // node restarting while others stay up); a genuine full-cluster-
+                            // simultaneous loss of this exact digest is still unrecoverable by
+                            // design, and this bail is the correct, final answer for it.
                             anyhow::bail!(
                                 "Missing transaction payload for digest {:?} in block {} \
                                  (commit {}) — TxPayloadCache has no entry (most likely a \

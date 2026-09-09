@@ -65,6 +65,19 @@ pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
     }
 }
 
+/// Retrieves the current node's peer tx-fetcher, if one has been wired (see TxFetcherFn's doc
+/// comment in coordination_hub.rs). Used by build_sorted_transactions's callers
+/// (executor_client/block_sending.rs) to attempt recovering a TxPayloadCache miss from peers
+/// before giving up. None before authority_node has started, or for a SyncOnly node that never
+/// wires one -- callers must treat that exactly like "tried and found nothing".
+pub fn get_global_tx_fetcher() -> Option<consensus_core::coordination_hub::TxFetcherFn> {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.as_ref().and_then(|hub| hub.get_tx_fetcher())
+}
+
 
 // DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
