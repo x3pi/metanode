@@ -445,7 +445,12 @@ if [ "${1:-}" == "health" ]; then
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Thảm họa (Disaster)
 ────────────────────────
-⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS."
+⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS.
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ CHO DEV:</b>
+1. Kiểm tra nguồn điện & kết nối mạng của máy chủ <code>${ip}</code>.
+2. Sau khi máy chủ online trở lại, bật lại riêng node <code>${node_key}</code> (giữ nguyên Data):
+<code>./ansible_deploy.sh --start --only-node ${node_id}</code>"
 
                         elif [ "$server_rebooted" == "true" ]; then
                             # TRƯỜNG HỢP B: SERVER VỪA BỊ KHỞI ĐỘNG LẠI (REBOOT) — TEST BỊ DỪNG HẾT
@@ -479,6 +484,10 @@ if [ "${1:-}" == "health" ]; then
 ────────────────────────
 ⛔ <b>TOÀN BỘ TIẾN TRÌNH TEST / BENCHMARK ĐÃ BỊ DỪNG!</b>
 Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel Panic, OOM Killer cạn RAM, Quá tải CPU hoặc Sập nguồn).
+
+👉 <b>HƯỚNG DẪN XỬ LÝ CHO DEV:</b>
+Khởi động lại riêng node <code>${node_key}</code> (giữ nguyên Data):
+<code>./ansible_deploy.sh --start --only-node ${node_id}</code>
 
 🛠 <b>Lệnh kiểm tra nguyên nhân Reboot trực tiếp trên máy ${ip}:</b>
 • Xem log lần boot trước:
@@ -575,6 +584,16 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
    • <b>IP:</b> <code>${MONITOR_IP}</code>
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):</b>
+• <b>Bước 1:</b> Khởi động lại riêng node <code>${node_key}</code> (Giữ nguyên Data):
+  <code>./ansible_deploy.sh --start --only-node ${node_id}</code>
+  <i>(hoặc fast restart: <code>./ansible_deploy.sh --restart --only-node ${node_id}</code>)</i>
+
+• <b>Bước 2:</b> Nếu restart vẫn sập (hỏng DB hoặc tụt quá xa > 5 epoch): Khôi phục từ Snapshot:
+  <code>./ansible_deploy.sh --reset-all --only-node ${node_id} --restore-node ${node_id} --snapshot-url <URL_SNAPSHOT></code>
+  ⚠️ <i>LƯU Ý: Tuyệt đối KHÔNG bỏ cờ <code>--only-node ${node_id}</code>!</i>
+
 ────────────────────────
 📦 <b>Đã tự động sao lưu gói Logs mới nhất!</b>
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
@@ -703,7 +722,11 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
    • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
    • <b>Kết quả tx thăm dò:</b> ${probe_status_line}
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
-────────────────────────"
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):</b>
+Consensus bị kẹt vòng lặp. Chạy Fast Restart toàn cụm trong 2 giây để bầu lại Leader:
+<code>./ansible_deploy.sh --restart</code>
+🟢 <i>An toàn: Giữ nguyên 100% dữ liệu, không tốn thời gian build lại.</i>"
                             fi
                         fi
                     fi

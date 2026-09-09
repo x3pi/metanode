@@ -194,6 +194,7 @@ func logAnomaly(anomalyType string, blockNum uint64, detail string) {
 
 	alertContent := fmt.Sprintf("🚨 *CẢNH BÁO ANOMALY: %s*\n• *Block:* #%d\n• *Chi tiết:* %s", anomalyType, blockNum, detail)
 	if anomalyType == "NODE_LAGGING" {
+		alertContent += "\n👉 *Gợi ý:* Nếu node bị tụt lại quá xa (> 5 epochs) không đuổi kịp, khôi phục từ snapshot:\n`./ansible_deploy.sh --reset-all --only-node <ID> --restore-node <ID> --snapshot-url <URL>`"
 		// Chỉ gửi cảnh báo tới Telegram, KHÔNG dừng test và polling
 		sendTelegramAlertDirect(alertContent, false)
 	} else {
@@ -2472,6 +2473,13 @@ func triggerStopFlagForFirstMismatch(client *http.Client, nodes []nodeInfo, bloc
 			sb.WriteString(comparison)
 		}
 	}
+
+	sb.WriteString("\n────────────────────────\n")
+	sb.WriteString("👉 *HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):*\n")
+	sb.WriteString("• Nếu chỉ 1 node bị lệch hash do hỏng DB hoặc out-of-sync > 5 epochs, khôi phục node đó từ Snapshot:\n")
+	sb.WriteString("  `./ansible_deploy.sh --reset-all --only-node <ID> --restore-node <ID> --snapshot-url <URL>`\n")
+	sb.WriteString("  *(⚠️ Bắt buộc phải có cờ `--only-node <ID>` để bảo vệ dữ liệu các node khác)*\n")
+	sb.WriteString("• Tuyệt đối KHÔNG chạy `--reset-all` toàn cụm để tránh làm mất dữ liệu cả mạng.\n")
 
 	triggerStopFlag(sb.String())
 	return sb.String()

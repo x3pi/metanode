@@ -225,14 +225,14 @@ if [ $ansible_exit -eq 0 ]; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" 2>/dev/null || true
     fi
 
-    # Read and pretty-print /tmp/rpc_nodes.json
-    RPC_CONFIG=""
+    # Read and format Node RPC IPs from /tmp/rpc_nodes.json (chỉ lấy IP/URL, bỏ qua JSON/SSH keys)
+    RPC_NODES_LIST=""
     if [ -f "/tmp/rpc_nodes.json" ]; then
-        RPC_CONFIG=$(jq . /tmp/rpc_nodes.json 2>/dev/null || cat /tmp/rpc_nodes.json)
+        RPC_NODES_LIST=$(jq -r '.nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
     fi
 
-    echo -e "\n⚙️ Cấu hình kết nối client:"
-    echo "$RPC_CONFIG"
+    echo -e "\n⚙️ Danh sách Node RPC (IP & Port):"
+    echo "$RPC_NODES_LIST"
 
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
@@ -245,9 +245,9 @@ if [ $ansible_exit -eq 0 ]; then
 ${ROLES_OUTPUT}
 </pre>
 
-⚙️ <b>Cấu hình kết nối client:</b>
+⚙️ <b>Danh sách Node RPC:</b>
 <pre>
-${RPC_CONFIG}
+${RPC_NODES_LIST}
 </pre>
 
 🔍 <b>Lệnh lấy log hữu ích:</b>

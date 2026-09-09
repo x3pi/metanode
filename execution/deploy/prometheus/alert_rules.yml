@@ -1,0 +1,128 @@
+# alert_rules.yml — Prometheus alerting rules for the Metanode validator cluster.
+#
+# Referenced by prometheus.yml.j2's `rule_files:` (previously pointed at a file that did not
+# exist anywhere in the repo, so Prometheus never had any alert rules loaded at all — metrics
+# were scraped but nothing ever fired). Paired with the `alerting:` block added to
+# prometheus.yml.j2, which points Prometheus at the local Alertmanager (role: alertmanager),
+# which in turn routes to the same Telegram bot/chat already used by the bash monitors in
+# monitors/start_monitors.sh (see alertmanager.yml.j2) — one Telegram channel, two independent
+# detectors (bash for RPC/process-level checks, this for anything visible only via /metrics).
+#
+# Every threshold below is either a Prometheus-builtin synthetic metric (`up`), a metric this
+# repo's own Go/Rust code registers and is therefore confirmed to exist (see
+# execution/pkg/metrics/metrics.go), or a standard node_exporter metric name. Thresholds for
+# disk/RAM/CPU intentionally match monitors/start_monitors.sh's RAM_LIMIT/CPU_LIMIT/DISK_LIMIT
+# (95/97/85) so the two systems never disagree about what counts as "overloaded". No threshold
+# here is invented/guessed for a metric this repo doesn't already emit.
+#
+# 2026-09-09 (a): every description below was rewritten to a consistent shape -- what it means,
+# one concrete first ACTION, and where to read more (deploy/ansible/DEPLOY_GUIDE.md's "Kịch bản"
+# sections, which are the only in-repo, always-current operational runbook; nothing here points
+# at the private Claude Artifact incident-readiness doc from earlier in this project's history,
+# since ops reading a Telegram alert can't necessarily open that link).
+#
+# 2026-09-09 (b): became a real Jinja2 template (.j2, rendered by Ansible's `template` module)
+# instead of a plain copied file, purely so MetanodeBlocksBehindPeer's description below can
+# embed the cluster's actual live snapshot_url instead of telling ops to go look it up. Every
+# double-curly-brace expression in this file EXCEPT that one is Prometheus/Alertmanager's own
+# Go-template syntax (`.CommonLabels`, `$labels.instance`, etc.), evaluated by Alertmanager
+# itself at alert-send time — NOT Ansible/Jinja2, which only renders this file once at deploy
+# time. Those are wrapped in Jinja2's raw-block tag so Jinja2 passes them through as plain text
+# instead of trying, and failing, to parse Go template syntax as its own (same reasoning as
+# alertmanager.yml.j2's message template). Keep it that way if you add more alerts here: any
+# bare double-curly-brace referencing `$labels` must stay inside a raw block, and the literal
+# raw-block tag text must never appear inside a plain comment/prose sentence either — Jinja2
+# matches it there too and silently breaks the render.
+
+groups:
+  - name: metanode_availability
+    rules:
+
+      - alert: MetanodeTargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} (job {{ $labels.job }}) for 1 minute -- the process is either not running or its metrics port is unreachable. ACTION: SSH to that host and run `systemctl status metanode-execution-<N> metanode-consensus-<N>` (N = node id, see the port in {{ $labels.instance }}: RPC 10746+N, metrics 9200+N). If it's crash-looping, `journalctl -u metanode-execution-<N> -n 100 --no-pager` shows why. If the fix is just \"start it again\" (config was edited by hand, or the box rebooted), `./ansible_deploy.sh --restart --only-node <N>` (deploy/ansible/DEPLOY_GUIDE.md Kịch bản 4.3/5) is a 1-2s systemctl restart, no rebuild. TRA CỨU: DEPLOY_GUIDE.md mục 4 (Kiểm Tra Trạng Thái) for the full command set."
+
+      - alert: MetanodeChainStalled
+        # changes() works on gauges too: 0 changes over the window means the value has been
+        # perfectly flat, i.e. no new block committed. Guarded by `and on(instance) up == 1` so
+        # a target that is simply down (already covered by MetanodeTargetDown) does not also
+        # fire this alert on its last-known frozen value.
+        #
+        # 2026-09-08: originally 3m window / for 1m, but a flat master_current_block is
+        # ambiguous -- this chain does not mint empty blocks, so an idle chain with no pending
+        # txs looks IDENTICAL to a genuinely stuck consensus round from this metric alone (hit
+        # this for real: alerted on a healthy, merely idle chain). monitors/start_monitors.sh's
+        # bash chain-stall detector now sends a real probe transaction before alerting to tell
+        # the two apart (see send_stall_probe_tx() there) -- Prometheus has no equivalent
+        # capability (PromQL can't send transactions), so this rule is intentionally loosened to
+        # act as a slow backstop for "the bash monitor itself is down" rather than a second,
+        # noisier primary detector for the same condition.
+        expr: changes(master_current_block[15m]) == 0 and on(instance) up == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain on {{ $labels.instance }} has not produced a new block in 20+ minutes"
+          description: "master_current_block has not changed for {{ $labels.instance }} for 20+ minutes while the target is still reachable -- monitors/start_monitors.sh's own bash probe (which sends a real transaction to tell \"idle, no pending txs\" apart from \"genuinely stuck\") should have already caught and alerted on this far sooner if it were running; this rule firing at all usually means that bash monitor process died. ACTION: first check `ps aux | grep start_monitors` / `systemctl status` for it on the monitoring host and restart it (deploy/ansible/monitors/start_monitors.sh, or re-run `./ansible_deploy.sh` which restarts it automatically -- DEPLOY_GUIDE.md mục 4.4). If the bash monitor IS alive and still reports a stall, check `journalctl -u metanode-consensus-<N> -n 100` on {{ $labels.instance }} for repeated DIGEST-GATE/PERMANENT-GAP-RECOVERY warnings -- if EVERY node's block height is equally flat (not just this one vs its peers), that rules out MetanodeBlocksBehindPeer's scenario below and points at a cluster-wide consensus stall, not one bad node."
+
+      - alert: MetanodeNodeIsolated
+        expr: master_peers_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} has zero connected peers"
+          description: "master_peers_connected has been 0 for 2+ minutes — this node is cut off from the rest of the cluster (network partition, firewall change, or peer list misconfiguration), even if its own process is healthy. ACTION: from {{ $labels.instance }}, `curl` or `nc -zv` each peer's P2P port (9100+node_id, see gen_validator_entry.py) to isolate host-level connectivity vs firewall vs a stale peer list; compare `peers_map` in this node's generated config against the current `inventory.yml`. TRA CỨU: DEPLOY_GUIDE.md mục 2 (Thiết Lập Cấu Hình) for how the peer list is derived from inventory.yml."
+
+      - alert: MetanodeBlocksBehindPeer
+        # consensus_blocks_behind_peer (Rust, job metanode-rust-consensus) is
+        # peer_best_block - go_block, recomputed every epoch-monitor poll cycle whether or not
+        # a stall is active (see consensus/metanode/src/node/epoch_monitor/stall_recovery.rs +
+        # metrics.rs). A node that just restarted and is actively catching up (the recovery
+        # loop fetches up to 500 blocks/cycle) should shrink this gap within a few cycles on
+        # its own. What matters here is a gap that is NOT shrinking. 2000 is a starting
+        # threshold, not a measured one -- this repo's own convention (see RegisteredChainCount's
+        # doc comment in execution/pkg/metrics/metrics.go) is to avoid inventing a precise cap
+        # without real production data, so tune this once real recovery-time numbers exist.
+        expr: consensus_blocks_behind_peer > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is 2000+ blocks behind its peers and not catching up"
+          description: "Gap has stayed above 2000 blocks for 5+ minutes -- the automatic stall-recovery fetch (up to 500 blocks/cycle) isn't closing it on its own. Likely a DB/state issue on this one node, not simple lag -- first check `journalctl -u metanode-execution-<N> -n 200` on it for repeated [STALL RECOVERY] fetch failures (N = the port in the instance label minus 9200). NOTE: this metric compares against peers, so it reads near-zero if the ENTIRE cluster is equally stalled -- if every node's block height is flat, that's MetanodeChainStalled's job, not this one. If THIS node alone keeps failing to shrink the gap after a few recovery cycles, peer block-replay is not going to finish it: switch to a snapshot restore. ACTION (deploy/ansible/DEPLOY_GUIDE.md Kịch bản 6 -- N is this node's id): `./ansible_deploy.sh --reset-all --only-node <N> --restore-node <N> --snapshot-url '(chưa cấu hình snapshot_url trong inventory.yml -- xem deploy/systemd/docs/restore_snapshot_systemd.md)'`. `--only-node <N>` is NOT optional here -- `--reset-all` without it wipes every active node's data, not just this one. The URL above is this cluster's live configured snapshot source (a dedicated SyncOnly node when one exists, not a validator -- pulling a snapshot mid-vote from a validator locks its RocksDB writes via RUST_EXECUTION_LOCK right when it needs to keep voting)."
+
+
+  - name: metanode_resources
+    rules:
+      - alert: MetanodeDiskFull
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) * 100 >= 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk on {{ $labels.instance }} ({{ $labels.mountpoint }}) is at or above 85%"
+          description: "Matches monitors/start_monitors.sh's DISK_LIMIT. Snapshot/DB growth left unchecked here leads straight to the crash-loop + manual-snapshot-restore scenario. ACTION: check `du -sh /opt/metanode/node-*/data` and `/mnt/metanode_snapshots` first -- if it's old snapshots piling up, `snapshot_max_snapshots` in inventory.yml (default 2) already caps retention per node, so a large snapshot dir usually means that setting was raised or RotateSnapshots() failed (check execution logs for '📸 [SNAPSHOT]' errors); if it's the execution DB itself, `prune_nodes`/`epochs_to_keep` in inventory.yml can trim old epoch history on a specific node (comment right above `node_ids` in inventory.yml). TRA CỨU: DEPLOY_GUIDE.md Kịch bản 6 nếu disk đầy đến mức node cần khôi phục lại từ đầu."
+
+      - alert: MetanodeHighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 >= 95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAM on {{ $labels.instance }} is at or above 95%"
+          description: "Matches monitors/start_monitors.sh's RAM_LIMIT. OOM-GUARD (execution/cmd/simple_chain/main.go) is already forcing GC at this point — this alert exists so a human finds out before OOM-GUARD's relief stops being enough. ACTION: `journalctl -u metanode-execution-<N> | grep -i 'OOM-GUARD\\|force.*gc'` to confirm it's actively kicking in and not yet losing the race; if multiple node processes are co-located on this host (see GOMAXPROCS note in metanode-execution.service.j2), that's the usual cause -- check `ps aux --sort=-%mem | head` to see which node's process is the actual driver before assuming it's a leak."
+
+      - alert: MetanodeHighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) >= 97
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU on {{ $labels.instance }} is at or above 97%"
+          description: "Matches monitors/start_monitors.sh's CPU_LIMIT. Sustained saturation stalls consensus round advancement -- indistinguishable from a real stall to peers if it goes on long enough, so treat this as an early warning for MetanodeChainStalled/MetanodeBlocksBehindPeer on this same host. ACTION: `top`/`htop` to see whether it's one node process or all co-located ones together; if co-located, GOMAXPROCS is likely oversubscribed across them -- see the co-location note in deploy/ansible/roles/systemd_services/templates/metanode-execution.service.j2 for how to fair-share it per node instead of each one defaulting to all cores."
