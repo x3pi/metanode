@@ -340,6 +340,29 @@
   when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
   ignore_errors: true
 
+- name: Ensure the entire snapshot source subtree is owned by metanode, not just its top dir
+  # The task above only chowns /mnt/metanode_snapshots/node-N itself (also ignore_errors, so a
+  # transient failure there silently leaves even that top dir un-chowned). Content further down
+  # the subtree -- created by root-context steps (mkfs.btrfs's root-owned volume root, or a
+  # previous run's own root-owned leftovers, since btrfs COW snapshots/reflinks can carry an
+  # old owner forward) -- stays root:root and is invisible to a top-level, non-recursive chown.
+  # The service runs as user "metanode" (see systemd unit), so anything it needs to open/create
+  # under here (e.g. execution/backup/consensus/backup_db/LOCK) must actually be writable by
+  # that user, all the way down -- not just at the mount point. Reproduced live: a fresh
+  # --reset-all left execution/backup/consensus/backup_db root-owned while its metanode-owned
+  # parent "backup" dir looked fine, and PebbleDB failed to open the LOCK file with "permission
+  # denied" on next start, crash-looping the snapshot node. Recursive and idempotent -- safe to
+  # run on every deploy regardless of whether this run actually needed it.
+  ansible.builtin.file:
+    path: "/mnt/metanode_snapshots/node-{{ item }}"
+    state: directory
+    recurse: yes
+    owner: metanode
+    group: metanode
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
+  ignore_errors: true
+
 - name: Create execution snapshot target directories
   ansible.builtin.file:
     path: "{{ metanode_install_dir }}/node-{{ item }}/data"
