@@ -238,14 +238,23 @@ cd deploy/ansible
 
 Sau khi thực hiện bất kỳ kịch bản nào, người mới có thể kiểm tra xem mạng đã hoạt động ổn định và các node đã bắt kịp nhau hay chưa:
 
-### Cách 1: Chạy công cụ kiểm tra độ cao & hash thời gian thực (Khuyên dùng):
+### Cách 1: Kiểm tra service và xem log trực tiếp trên máy node
+
+```bash
+sudo systemctl status metanode-execution-<N> --no-pager
+sudo journalctl -u metanode-execution-<N> -f
+```
+
+Thay `<N>` bằng ID node. Lệnh đầu cho biết service có đang chạy hoặc crash-loop hay không; lệnh thứ hai theo dõi log trực tiếp. Nhấn `Ctrl+C` để thoát chế độ theo dõi log.
+
+### Cách 2: Chạy công cụ kiểm tra độ cao & hash thời gian thực (Khuyên dùng):
 ```bash
 cd monitors/block_hash_checker
 go run main.go --watch --interval 5s --config config-m-nodes.json --no-stop-flag
 ```
 *Quan sát bảng `Heights: m0=185 m1=185 m2=185...` tăng đều và không còn chữ `ERR` là hệ thống đã hoàn toàn khỏe mạnh.*
 
-### Cách 2: Kiểm tra cổng RPC sinh Block qua curl:
+### Cách 3: Kiểm tra cổng RPC sinh Block qua curl:
 ```bash
 curl -s -X POST http://<IP_NODE_RPC>:10746 \
   -H "Content-Type: application/json" \
@@ -253,7 +262,7 @@ curl -s -X POST http://<IP_NODE_RPC>:10746 \
 ```
 *Nếu giá trị `result` (block hex) liên tục tăng theo thời gian là mạng đang hoạt động ổn định.*
 
-### Cách 3: Hệ thống giám sát cảnh báo Telegram ngầm:
+### Cách 4: Hệ thống giám sát cảnh báo Telegram ngầm:
 > 💡 **Tự động:** Khi bạn chạy `./ansible_deploy.sh` (dù là `--start` hay `--restart`), script đã **tự động khởi động hệ thống monitor ngầm** sau khi hoàn tất. Bạn **không cần phải gõ lệnh tay**.
 
 Chỉ cần chạy thủ công nếu muốn bật lại monitor riêng lẻ:

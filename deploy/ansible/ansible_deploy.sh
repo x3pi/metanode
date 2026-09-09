@@ -88,7 +88,7 @@ DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    if [[ "$GIT_BRANCH" != "unknown" ]] && [[ "$GIT_COMMIT" != "unknown" ]]; then
+    if [[ "$GIT_BRANCH" != "unknown" ]] || [[ "$GIT_COMMIT" != "unknown" ]]; then
         if [[ ! "$DEPLOY_SOURCE" =~ "Branch:" ]] && [[ ! "$DEPLOY_SOURCE" =~ "$GIT_BRANCH" ]]; then
             DEPLOY_SOURCE="$DEPLOY_SOURCE (Branch: $GIT_BRANCH | Commit: $GIT_COMMIT)"
         fi
@@ -297,7 +297,7 @@ ${RPC_NODES_LIST}
 ${TCP_NODES_LIST}
 </pre>
 
-💡 <b>Xem log nhanh:</b> <code>./fetch_node_logs.sh [node_id]</code> (hoặc xem chi tiết trong DEPLOY_GUIDE.md)"
+💡 <b>Xem log nhanh:</b> <code>./fetch_node_logs.sh</code> (thêm <code>--rpc</code> nếu cần log RPC; xem DEPLOY_GUIDE.md)"
 else
     send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>

@@ -12,6 +12,20 @@
   changed_when: build_result.rc == 0
   when: ansible_action != 'gen_keys'
 
+- name: Build metanode keytool binary for local key generation
+  ansible.builtin.command:
+    argv:
+      - cargo
+      - build
+      - --release
+      - -p
+      - metanode
+      - --bin
+      - metanode
+  args:
+    chdir: "{{ deploy_dir }}/../.."
+  when: ansible_action == 'gen_keys'
+
 - name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
   ansible.builtin.shell: |
     python3 -c '
@@ -99,4 +113,3 @@
   args:
     chdir: "{{ deploy_dir }}"
   when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
-

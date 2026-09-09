@@ -32,7 +32,7 @@ cd /home/abc/nhat/con-chain-v2/metanode
 ./ci.sh run-now --only cross_chain_gateway
 
 # 5. Chạy bộ Unit Test & E2E cơ bản:
-./ci.sh run-now --only unit_and_e2e_tests
+./ci.sh run-now --only snapshot_recovery
 ```
 
 ---

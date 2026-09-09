@@ -118,7 +118,7 @@
       when: active_nodes | length > 0 and ansible_action in ['start', 'setup']
       ignore_errors: true
   roles:
-    - { role: stop_services, when: "active_nodes | length > 0 and ansible_action not in ['restart', 'open_ports']" }
+    - { role: stop_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup', 'stop']" }
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
@@ -126,26 +126,39 @@
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: restart_services, when: "active_nodes | length > 0 and ansible_action == 'restart'" }
   tasks:
-    - name: Open firewall ports for nodes (UFW)
-      ansible.builtin.shell: |
-        # Execution ports
-        ufw allow {{ 10746 + (item | int) }}/tcp comment 'Execution RPC node-{{ item }}'
-        ufw allow {{ 9000 + (item | int) }}/tcp comment 'Execution P2P node-{{ item }}'
-        ufw allow {{ 9200 + (item | int) }}/tcp comment 'Meta RPC node-{{ item }}'
-        # Consensus ports
-        ufw allow {{ 6200 + (item | int) }}/tcp comment 'Consensus P2P node-{{ item }}'
-        ufw allow {{ 6250 + (item | int) }}/tcp comment 'Consensus Peer RPC node-{{ item }}'
-        ufw allow {{ 9100 + (item | int) }}/tcp comment 'Consensus Metrics node-{{ item }}'
-        # Snapshot server port
-        ufw allow {{ 8600 + (item | int) }}/tcp comment 'Snapshot Server node-{{ item }}'
-        # Also run open_ports.sh if present in remote keys dir
-        if [ -f "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh" ]; then
-          bash "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
-        fi
-        ufw reload
+    - name: Check generated firewall scripts for nodes
+      ansible.builtin.stat:
+        path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
       loop: "{{ target_active_nodes }}"
+      register: generated_firewall_scripts
       when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
       tags: ["open_ports"]
+
+    - name: Fail when a generated firewall script is missing
+      ansible.builtin.fail:
+        msg: >-
+          Missing generated firewall configuration for node {{ item.item }} at
+          {{ remote_deploy_dir }}/node-{{ item.item }}_keys/open_ports.sh. Run setup to
+          generate and deploy the node configuration
+          before opening ports.
+      loop: "{{ generated_firewall_scripts.results | default([]) }}"
+      when:
+        - "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
+        - not item.stat.exists
+      tags: ["open_ports"]
+
+    - name: Open firewall ports from generated node configuration
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
+      loop: "{{ target_active_nodes }}"
+      when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
+      notify: Reload UFW
+      tags: ["open_ports"]
+  handlers:
+    - name: Reload UFW
+      ansible.builtin.command: ufw reload
 
 - name: Post-deployment actions
   hosts: localhost
