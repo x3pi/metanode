@@ -56,7 +56,7 @@
 
 - name: Check if targeted node processes are running
   ansible.builtin.shell: |
-    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || false
+    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || pgrep -f "metanode.*{{ item }}" || false
   loop: "{{ active_nodes }}"
   register: node_process_check
   failed_when: false
@@ -79,6 +79,22 @@
   ansible.builtin.shell: |
     pkill -9 -f "node-{{ item }}/bin" || true
     pkill -9 -f "node-{{ item }}/config" || true
+    pkill -9 -f "metanode-consensus-{{ item }}" || true
+    pkill -9 -f "metanode-execution-{{ item }}" || true
   loop: "{{ active_nodes }}"
   failed_when: false
+
+- name: Final verification that targeted node processes are completely killed
+  ansible.builtin.shell: |
+    if pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config"; then
+      echo "STILL_RUNNING"
+      pkill -9 -f "node-{{ item }}/bin" || true
+      pkill -9 -f "node-{{ item }}/config" || true
+    else
+      echo "CLEAN"
+    fi
+  loop: "{{ active_nodes }}"
+  changed_when: false
+  failed_when: false
+
 

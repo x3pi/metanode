@@ -37,6 +37,32 @@ def get_server_ip():
         except Exception:
             return "127.0.0.1"
 
+def get_current_branch(repo_path):
+    """Detect current checked-out git branch."""
+    try:
+        branch = subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            cwd=repo_path,
+            text=True,
+            stderr=subprocess.DEVNULL
+        ).strip()
+        if branch:
+            return branch
+    except Exception:
+        pass
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path,
+            text=True,
+            stderr=subprocess.DEVNULL
+        ).strip()
+        if branch and branch != "HEAD":
+            return branch
+    except Exception:
+        pass
+    return None
+
 def get_git_info(repo_path):
     """Extract current git commit info."""
     try:
@@ -124,6 +150,7 @@ def main():
     parser.add_argument("--skip-pre-action", action="store_true", help="Skip pre-actions (reset/restart chain)")
     parser.add_argument("--restart-chain", "--restart", action="store_true", help="Restart chain cluster before running tests")
     parser.add_argument("--reset-chain", "--reset", action="store_true", help="Reset chain cluster before running tests")
+    parser.add_argument("-b", "--branch", help="Git branch to test (defaults to local checked-out branch if config is 'auto' or not set)")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
     args = parser.parse_args()
 
@@ -164,7 +191,28 @@ def main():
             return text
         return text.replace("{METANODE_DIR}", repo_path).replace("{SUITE_DIR}", suite_path)
 
-    branch = git_cfg.get("branch", "main")
+    # Determine branch to use:
+    # Priority 1: CLI flag (-b / --branch)
+    # Priority 2: Auto-detect current local checked-out branch if config is "auto" or empty
+    # Priority 3: Branch specified in ci_config.yaml
+    # Priority 4: Default fallback "main"
+    raw_config_branch = git_cfg.get("branch", "auto")
+    local_branch = get_current_branch(repo_path)
+
+    if args.branch:
+        branch = args.branch
+        branch_source = f"cờ dòng lệnh --branch '{args.branch}'"
+    elif not raw_config_branch or raw_config_branch == "auto":
+        if local_branch:
+            branch = local_branch
+            branch_source = f"tự động nhận diện từ Local Git ({local_branch})"
+        else:
+            branch = "main"
+            branch_source = "mặc định fallback (main)"
+    else:
+        branch = raw_config_branch
+        branch_source = f"file cấu hình ci_config.yaml ({raw_config_branch})"
+
     remote = git_cfg.get("remote", "origin")
 
     tele_cfg = config.get("telegram", {})
@@ -193,10 +241,12 @@ def main():
     commit_info = get_git_info(repo_path)
     print("=" * 70)
     print(f"🚀 METANODE CI RUNNER")
-    print(f"📍 Repo:   {repo_path} ({branch} @ {commit_info['hash'][:8]})")
-    print(f"👤 Author: {commit_info['author']}")
-    print(f"💬 Commit: {commit_info['message']}")
-    print(f"🖥  Server: {server_ip}")
+    print(f"📍 Kho mã nguồn : {repo_path}")
+    print(f"🌿 Nhánh kiểm thử: {branch} [{branch_source}]")
+    print(f"📌 Commit SHA   : {commit_info['hash'][:8]}")
+    print(f"👤 Người thực hiện: {commit_info['author']}")
+    print(f"💬 Thông điệp   : {commit_info['message']}")
+    print(f"🖥  Máy chủ      : {server_ip}")
     print("=" * 70)
 
     # Send Telegram start notification

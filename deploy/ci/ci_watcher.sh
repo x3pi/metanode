@@ -53,8 +53,25 @@ if [ -z "$REPO_PATH" ] || [ "$REPO_PATH" = "auto" ] || [ "$REPO_PATH" = "." ]; t
 elif [[ "$REPO_PATH" != /* ]]; then
     REPO_PATH="$(cd "${DEFAULT_REPO_PATH}/${REPO_PATH}" 2>/dev/null && pwd || echo "${DEFAULT_REPO_PATH}")"
 fi
+get_local_git_branch() {
+    local b
+    b=$(git -C "$REPO_PATH" branch --show-current 2>/dev/null || echo "")
+    if [ -n "$b" ]; then
+        echo "$b"
+        return
+    fi
+    b=$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [ -n "$b" ] && [ "$b" != "HEAD" ]; then
+        echo "$b"
+        return
+    fi
+    echo "main"
+}
+
 BRANCH="$(get_config_val 'git.branch')"
-BRANCH="${BRANCH:-"main"}"
+if [ -z "$BRANCH" ] || [ "$BRANCH" = "auto" ]; then
+    BRANCH="$(get_local_git_branch)"
+fi
 REMOTE="$(get_config_val 'git.remote')"
 REMOTE="${REMOTE:-"origin"}"
 INTERVAL="$(get_config_val 'git.poll_interval_seconds')"
@@ -71,17 +88,42 @@ is_running() {
 }
 
 cmd_start() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --branch|-b)
+                BRANCH="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
     if is_running; then
         echo "⚠️  Watcher daemon đang chạy với PID: $(cat "$PID_FILE")"
         echo "📜 Xem log: $0 logs"
         exit 0
     fi
 
+    # Nếu chưa có mốc commit trước đó, ghi nhận commit hiện tại trên remote làm mốc khởi đầu (không chạy test commit đang đứng)
+    if [ ! -f "$LAST_COMMIT_FILE" ]; then
+        local current_sha
+        current_sha=$(git ls-remote "$REMOTE" "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')
+        if [ -z "$current_sha" ]; then
+            current_sha=$(git -C "$REPO_PATH" rev-parse HEAD 2>/dev/null || echo "")
+        fi
+        if [ -n "$current_sha" ]; then
+            echo "$current_sha" > "$LAST_COMMIT_FILE"
+            echo "📌 Thiết lập mốc commit ban đầu: ${current_sha:0:8} (Sẽ chỉ kích hoạt khi có commit MỚI hơn commit này)"
+        fi
+    fi
+
     echo "🚀 Đang khởi động Metanode CI Watcher Daemon..."
     echo "📍 Giám sát: ${REMOTE}/${BRANCH} tại ${REPO_PATH}"
     echo "⏰ Chu kỳ polling: ${INTERVAL}s"
     
-    nohup "$0" __internal_loop > "$LOG_FILE" 2>&1 &
+    nohup "$0" __internal_loop "$BRANCH" > "$LOG_FILE" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$PID_FILE"
     echo "✅ Watcher đã chạy ngầm thành công! (PID: ${new_pid})"
@@ -138,12 +180,13 @@ cmd_run_now() {
 }
 
 __internal_loop() {
-    echo "👀 [$(date '+%Y-%m-%d %H:%M:%S')] CI Watcher Daemon đã bắt đầu theo dõi: ${REMOTE}/${BRANCH}"
+    local target_branch="${1:-$BRANCH}"
+    echo "👀 [$(date '+%Y-%m-%d %H:%M:%S')] CI Watcher Daemon đã bắt đầu theo dõi: ${REMOTE}/${target_branch}"
     cd "$REPO_PATH" || exit 1
 
     while true; do
         # Sử dụng git ls-remote để kiểm tra commit mới nhất trên remote server mà KHÔNG cần đụng chạm working tree
-        REMOTE_HASH=$(git ls-remote "$REMOTE" "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')
+        REMOTE_HASH=$(git ls-remote "$REMOTE" "refs/heads/$target_branch" 2>/dev/null | awk '{print $1}')
         
         if [ -n "$REMOTE_HASH" ]; then
             LAST_HASH=""
@@ -153,14 +196,14 @@ __internal_loop() {
 
             # Nếu commit trên remote khác với commit đã test trước đó
             if [ "$REMOTE_HASH" != "$LAST_HASH" ]; then
-                echo -e "\n🔔 [$(date '+%Y-%m-%d %H:%M:%S')] PHÁT HIỆN COMMIT MỚI TRÊN ${REMOTE}/${BRANCH}!"
+                echo -e "\n🔔 [$(date '+%Y-%m-%d %H:%M:%S')] PHÁT HIỆN COMMIT MỚI TRÊN ${REMOTE}/${target_branch}!"
                 echo "   👉 Commit cũ: ${LAST_HASH:-"(Chưa có)"}"
                 echo "   👉 Commit mới: ${REMOTE_HASH}"
                 echo "🚀 Bắt đầu khởi chạy toàn bộ Test Pipeline..."
 
                 cd "$SCRIPT_DIR"
-                # Chạy CI Runner với cờ --pull để tự động lấy code mới nhất về
-                python3 "${SCRIPT_DIR}/ci_runner.py" --pull
+                # Chạy CI Runner với cờ --pull và --branch để tự động lấy code mới nhất về đúng nhánh
+                python3 "${SCRIPT_DIR}/ci_runner.py" --pull --branch "$target_branch"
                 RUNNER_EXIT=$?
 
                 # Ghi nhận hash đã test để không bị lặp lại
@@ -179,15 +222,17 @@ __internal_loop() {
 
 case "${1:-status}" in
     start)
-        cmd_start
+        shift
+        cmd_start "$@"
         ;;
     stop)
         cmd_stop
         ;;
     restart)
+        shift
         cmd_stop
         sleep 1
-        cmd_start
+        cmd_start "$@"
         ;;
     status)
         cmd_status
@@ -200,23 +245,28 @@ case "${1:-status}" in
         cmd_run_now "$@"
         ;;
     __internal_loop)
-        __internal_loop
+        shift
+        __internal_loop "$@"
         ;;
     -h|--help|help)
         echo "Cách sử dụng: $0 {start|stop|restart|status|logs|run-now [flags]}"
         echo ""
         echo "Lệnh:"
-        echo "  start     Khởi động watcher daemon ngầm"
+        echo "  start     Khởi động watcher daemon ngầm (tùy chọn: --branch <nhánh>)"
         echo "  stop      Dừng watcher daemon"
         echo "  restart   Khởi động lại watcher daemon"
         echo "  status    Xem trạng thái hoạt động và commit đã test gần nhất"
         echo "  logs      Xem file log realtime của watcher"
         echo "  run-now   Kích hoạt chạy test ngay lập tức (không cần đợi commit)"
         echo ""
+        echo "Tùy chọn nhánh Git:"
+        echo "  -b, --branch <nhánh>   Chỉ định nhánh cần test (mặc định: tự nhận diện nhánh local hiện tại)"
+        echo ""
         echo "Ví dụ chạy test cụ thể:"
+        echo "  $0 run-now                                           # Tự động nhận diện và test nhánh Git local hiện tại"
+        echo "  $0 run-now --branch dev                              # Test nhánh dev"
+        echo "  $0 run-now -b dev --only tps_blast                   # Chỉ định nhánh dev và test bài TPS"
         echo "  $0 run-now --only node_chaos_restart --restart-chain  # Khởi động lại chain trước khi test"
-        echo "  $0 run-now --only tps_blast                          # Chỉ test bài TPS"
-        echo "  $0 run-now --restart-chain                           # Restart chain và chạy toàn bộ tests"
         echo "  $0 run-now --dry-run                                 # Xem trước kế hoạch chạy"
         ;;
     *)

@@ -12,7 +12,8 @@ git:
   repo_path: "auto"
   # metanode-suite nằm cùng cấp với thư mục metanode
   suite_path: "../metanode-suite"
-  branch: "main"                 # Nhánh git cần lắng nghe commit
+  # "auto": Tự động lấy nhánh Git local hiện tại đang đứng (hoặc điền tên nhánh cố định: main, dev,...)
+  branch: "auto"
   remote: "origin"
   poll_interval_seconds: 30     # Chu kỳ kiểm tra commit mới (giây)
 
