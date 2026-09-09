@@ -631,10 +631,8 @@ impl CommitProcessor {
         // skip is never communicated to this loop's independent expectation.
         //
         // Fix: track actual dispatch progress (next_expected_index changing), not message
-        // arrival. Once truly stuck for a sustained period AND the out-of-order buffer is fully
-        // saturated (strong evidence the missing commit is gone for good, not just delayed --
-        // MAX_PENDING_COMMITS real, already-certified CommittedSubDags have arrived without ever
-        // producing the one this loop wants), adopt the LOWEST index actually held in
+        // arrival. Once truly stuck for a sustained period AND the out-of-order buffer holds at
+        // least a handful of real candidates to jump to, adopt the LOWEST index actually held in
         // pending_commits as the new next_expected_index instead of waiting forever.
         //
         // Why this is safe where the earlier "gap > 20" heuristic wasn't: that fix jumped based
@@ -653,10 +651,29 @@ impl CommitProcessor {
         // and this loop's expectation share state directly -- that remains the more principled
         // long-term fix; this is the bounded, evidence-gated stopgap that unblocks a cluster
         // without reopening the exact divergence risk the removed heuristic caused.
+        //
+        // CORRECTION (2026-09-09, same day): the first version of this gated on
+        // `pending_commits.len() >= MAX_PENDING_COMMITS` (i.e. the buffer completely full,
+        // 50,000 entries) as the "strong evidence" signal, reasoning from the one incident seen
+        // so far where the buffer really had filled to capacity. That reasoning doesn't hold in
+        // general -- it assumes commits arrive fast enough to reach 50,000 within
+        // RECOVERY_STUCK_TIMEOUT_SECS, which depends entirely on the DAG's round rate at the
+        // time. Confirmed live the same day: a second, independent occurrence of this exact gap
+        // (different trigger -- two co-located validators on one physical host restarting
+        // together) sat stuck for 15+ minutes with the buffer only ~3,300 deep, so the original
+        // 50,000 gate never fired and the cluster stayed wedged with the fix compiled in but
+        // silently never eligible to run. The real evidence that matters is the TIME threshold
+        // below (RECOVERY_STUCK_TIMEOUT_SECS, unchanged) -- 15 minutes of zero dispatch progress
+        // is already strong, sustained evidence on its own. The buffer-size check only needs to
+        // rule out acting on a single still-in-flight reorder, not prove exhaustion of a
+        // specific capacity.
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
         const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
-        const RECOVERY_STUCK_MIN_BUFFERED: usize = MAX_PENDING_COMMITS; // buffer fully saturated
+        // At least this many real, already-certified future commits must be buffered before
+        // trusting the lowest one as a jump target -- rules out acting on a single stray
+        // out-of-order arrival, not a capacity/exhaustion signal (see CORRECTION above).
+        const RECOVERY_STUCK_MIN_BUFFERED: usize = 10;
 
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
