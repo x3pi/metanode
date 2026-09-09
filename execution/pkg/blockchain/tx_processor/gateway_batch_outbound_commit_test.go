@@ -39,7 +39,18 @@ func TestGatewayHandler_BatchOutboundCommit_EndToEnd(t *testing.T) {
 	const destChainID = 402
 
 	// --- Give the source chain its own real LocalChainID (defaults to 0 otherwise) ---
-	sourceEngine := cross_chain.NewGatewayEngine(sourceChainID, map[uint64]cross_chain.ChainRegistry{}, nil)
+	// destChainID must be a known registered chain on the SOURCE too -- outbound() now rejects an
+	// unregistered destination before it ever locks/burns funds (2026-09-05 security fix, see
+	// that case's own comment in gateway_handler.go).
+	sourceEngine := cross_chain.NewGatewayEngine(sourceChainID, map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Epoch:   1,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+			},
+		},
+	}, nil)
 	require.NoError(t, saveGatewayEngine(csSource, sourceEngine))
 
 	// --- Set up chain 402's local view of chain 401's committee (needed for attestCommit there) ---

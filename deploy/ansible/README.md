@@ -1,5 +1,9 @@
 # Hệ Thống Triển Khai Metanode (Ansible Edition)
 
+> 📖 **Cẩm Nang Triển Khai Nhanh & Tình Huống Vận Hành:** Xem file [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md).
+> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md).
+> 🚀 **Script Tự Động Hóa 1 Lệnh (Full Pipeline):** Xem [RUN_PIPELINE_GUIDE.md](RUN_PIPELINE_GUIDE.md) để chạy trọn gói từ Deploy Public/Private Chains đến Full Test Cross-Chain & Block-STM với `./run_full_pipeline.sh` (hoặc `./run_pipeline.sh` tại root).
+
 Tài liệu này bao gồm 2 phần:
 - **Phần 1:** Cẩm nang lệnh chạy siêu tốc & Giải thích chi tiết trình tự xử lý của từng lệnh.
 - **Phần 2:** Giải thích chuyên sâu về kiến trúc 8 Roles của Ansible.
@@ -11,6 +15,12 @@ Tài liệu này bao gồm 2 phần:
 Bạn **KHÔNG CẦN** phải gõ lệnh `ansible-playbook` dài dòng nữa. Hãy sử dụng file script bọc ngoài `ansible_deploy.sh` nằm trong thư mục `ansible/`.
 
 > **Lưu ý:** Mọi cấu hình về IP, tài khoản SSH, mật khẩu đều được tự động lấy từ file `inventory.yml`. Bạn chỉ cần sửa file đó 1 lần duy nhất!
+> 
+> 🔒 **Chuẩn Bảo Mật (Credentials Hardening):**
+> - **Khuyên dùng cho Production:** Thiết lập xác thực SSH Key (`ssh-copy-id abc@<node-ip>`) và khai báo `ansible_ssh_private_key_file: "~/.ssh/id_ed25519"` trong `inventory.yml`. Cấp quyền `NOPASSWD: ALL` cho deployment user để loại bỏ hoàn toàn việc lưu mật khẩu.
+> - **Mã hóa mật khẩu sudo:** Nếu server yêu cầu mật khẩu sudo, mã hóa bằng Ansible Vault:
+>   `ansible-vault encrypt_string 'mat_khau' --name 'ansible_become_pass'`
+>   thay vì lưu mật khẩu thô (plaintext) trong file cấu hình.
 
 ### 📌 Tổng hợp các Cờ (Flags) và Giá trị Mặc định
 

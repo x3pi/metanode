@@ -6,3 +6,4 @@ logs
 *.log
 *.retry
 .last_deployed_commit
+register_chains

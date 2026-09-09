@@ -9,19 +9,15 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/command"
-	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	p_network "github.com/meta-node-blockchain/meta-node/pkg/network"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
-	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
@@ -214,51 +210,20 @@ func (v *TxVirtualExecutor) sendTransactionResult(conn network.Connection, txHas
 	conn.SendMessage(respMsg)
 }
 
-func (tp *TransactionProcessor) backupDeviceKey(s storage.Storage, t types.Transaction, newDeviceKey []byte) error {
-	// Fast-path-only duplicate check: a brand-new tx (the overwhelming majority
-	// of submissions) is never found in the cache/mapping-DB, so falling through
-	// to GetBlockNumberByTxHash's block-history walkback here would burn 25ms+
-	// per submission for no benefit — see project_tx_dup_check_walkback_bottleneck
-	// memory. The walkback's crash-recovery guarantee isn't needed for rejecting
-	// duplicates of a submission that hasn't been processed yet.
-	_, ok := blockchain.GetBlockChainInstance().GetBlockNumberByTxHashFast(t.Hash())
-	if ok {
-		return fmt.Errorf("transaction already exists")
-	}
-
-	err := s.Put(t.Hash().Bytes(), newDeviceKey)
-	if err != nil {
-		return fmt.Errorf("backupDeviceKey failed: %v", err)
-	}
-
-	putRequest := &pb.StoragePutRequest{
-		Key:   t.Hash().Bytes(),
-		Value: newDeviceKey,
-	}
-
-	dbOperationRequest := &pb.DatabaseOperationRequest{
-		OperationType: pb.OperationType_PUT,
-		RequestId:     uuid.NewString(),
-		Payload: &pb.DatabaseOperationRequest_PutRequest{
-			PutRequest: putRequest,
-		},
-	}
-
-	// Gửi đến master connections với worker pool (không đồng bộ)
-	tp.sendDeviceKeyWithPool(mt_common.MASTER_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
-
-	// Gửi đến child node connections với worker pool (không đồng bộ)
-	tp.sendDeviceKeyWithPool(mt_common.CHILD_NODE_CONNECTION_TYPE, command.RemoteDeviceKeyDB, dbOperationRequest)
-
-	return nil
-}
-
 // sendDeviceKeyWithPool gửi device key không đồng bộ sử dụng worker pool và timeout
 func (tp *TransactionProcessor) sendDeviceKeyWithPool(
 	connectionTypeName string,
 	command string,
 	pbMessage proto.Message,
 ) {
+	if tp.env == nil {
+		return
+	}
+	cTypeIndex := mt_common.MapConnectionTypeToIndex(connectionTypeName)
+	if cTypeIndex < 0 || len(tp.env.ConnectionsByType(cTypeIndex)) == 0 {
+		return
+	}
+
 	select {
 	case tp.deviceKeySendPool <- struct{}{}:
 		atomic.AddInt64(&tp.deviceKeyGoroutineCount, 1)
@@ -320,9 +285,19 @@ func (tp *TransactionProcessor) HandleDeviceKeyRequest(r network.Request) error 
 // Retrieves device key from storage by hash
 func (tp *TransactionProcessor) GetDeviceKey(hash common.Hash) (common.Hash, error) {
 	deviceStorage := tp.storageManager.GetStorageBackupDeviceKey()
+	if deviceStorage == nil {
+		return common.Hash{}, errors.New("device key storage not initialized")
+	}
 	data, err := deviceStorage.Get(hash.Bytes())
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get device key: %w", err)
+	if err != nil || len(data) == 0 {
+		if tp.storageManager != nil {
+			if pending, ok := tp.storageManager.GetPendingDeviceKey(hash); ok {
+				return common.BytesToHash(pending), nil
+			}
+		}
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to get device key: %w", err)
+		}
 	}
 	return common.BytesToHash(data), nil
 }

@@ -131,6 +131,21 @@ type BlockProcessor struct {
 	// a Go-side EVM transaction, not a Rust-side epoch boundary).
 	commitAttestationWorker *tx_processor.CommitAttestationWorker
 
+	// messageFailureAttestationWorker (2026-09-05 fix for security_audit_findings.md finding #1,
+	// same enable condition as commitAttestationWorker above) — its OnMessageFailed is wired
+	// synchronously into tx_processor.MessageFailedCallback, invoked directly from
+	// gateway_handler.go's claimMessage/verifyAndExecute cases whenever this node finalizes a
+	// message as Failed (mục 2.4 point 2's missing failure-attestation production pipeline).
+	messageFailureAttestationWorker *tx_processor.MessageFailureAttestationWorker
+
+	// messageSuccessAttestationWorker (2026-09-05 fix for the "Cross-Chain Ledger Inflation via
+	// Missing Reserve Refund" finding, same enable condition as the workers above) — its
+	// OnMessageSucceeded is wired synchronously into tx_processor.MessageSucceededCallback,
+	// invoked directly from gateway_handler.go's claimMessage/verifyAndExecute cases whenever
+	// this node settles a message as Success with real Value -- the success-confirmation cert
+	// CreditReserveAllocation now requires before Reserve's ledger may be credited.
+	messageSuccessAttestationWorker *tx_processor.MessageSuccessAttestationWorker
+
 	commitChannel  chan CommitJob
 	lastBlockMutex sync.Mutex
 
@@ -303,8 +318,12 @@ func (bp *BlockProcessor) ResumeExecution() {
 // and waits briefly for workers to release Xapian/EVM locks.
 func (bp *BlockProcessor) CancelSpeculativeExecution(geis ...uint64) {
 	if bp.speculativeExecutor != nil {
-		bp.speculativeExecutor.CancelInFlight(geis...)
-		bp.speculativeExecutor.WaitForInFlight(200 * time.Millisecond)
+		if len(geis) == 0 {
+			bp.speculativeExecutor.AbortAllSpeculative()
+		} else {
+			bp.speculativeExecutor.CancelInFlight(geis...)
+			bp.speculativeExecutor.WaitForInFlight(200 * time.Millisecond)
+		}
 	}
 }
 
@@ -720,6 +739,43 @@ func NewBlockProcessor(
 				)
 				go bp.commitAttestationWorker.Run(context.Background())
 				tx_processor.CommitFinalizedCallback = bp.commitAttestationWorker.OnCommitFinalized
+
+				// MESSAGE FAILURE ATTESTATION WORKER (2026-09-05 fix for
+				// security_audit_findings.md finding #1 / mục 2.4 point 2): real
+				// multi-validator BLS quorum-cert production for messages this chain
+				// finalizes as Failed (a destination-side CONTRACT_CALL/custom-asset payload
+				// genuinely reverted) -- without a real cert here, GatewayEngine.Refund() was
+				// unreachable in production (only ever exercised by a unit test signing
+				// directly with a validator's private key), permanently locking the
+				// sender's funds. Same trigger pattern as commitAttestationWorker above: no
+				// separate watch/poll loop needed, every validator that processes the same
+				// claimMessage/verifyAndExecute transaction invokes this identically.
+				bp.messageFailureAttestationWorker = tx_processor.NewMessageFailureAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.messageFailureAttestationWorker.Run(context.Background())
+				tx_processor.MessageFailedCallback = bp.messageFailureAttestationWorker.OnMessageFailed
+
+				// MESSAGE SUCCESS ATTESTATION WORKER (2026-09-05 fix for the "Cross-Chain Ledger
+				// Inflation via Missing Reserve Refund" finding): real multi-validator BLS
+				// quorum-cert production for messages this chain settles as Success -- without a
+				// real cert here, GatewayEngine.CreditReserveAllocation() could be called by
+				// ANYONE regardless of whether the message actually succeeded, inflating
+				// Reserve's ledger for value that never landed anywhere. Same trigger pattern as
+				// the workers above.
+				bp.messageSuccessAttestationWorker = tx_processor.NewMessageSuccessAttestationWorker(
+					bp.chainState,
+					rootAnchorClient,
+					common.HexToAddress(cfg.Address),
+					cfg.Databases.BLSPrivateKey,
+					cfg.CrossChain.RootAnchorSubmitterPrivateKeyHex,
+				)
+				go bp.messageSuccessAttestationWorker.Run(context.Background())
+				tx_processor.MessageSucceededCallback = bp.messageSuccessAttestationWorker.OnMessageSucceeded
 			} else {
 				logger.Info("ℹ️ [COMMITTEE ATTESTATION] RootAnchorSubmitterPrivateKeyHex not configured, worker disabled")
 			}

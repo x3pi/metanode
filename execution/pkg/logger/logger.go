@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -132,8 +133,20 @@ func SetIdentifier(identifier string) {
 // SetConsoleOutputEnabled bật/tắt việc log ra stdout.
 // Khi tắt, logger chỉ ghi vào các output còn lại (ví dụ file).
 func SetConsoleOutputEnabled(enabled bool) {
+	// FIX (2026-09-05, found by TestConcurrentOutputsMutationDoesNotRace while reviewing
+	// PR #101): consoleOutputEnabled used to be a plain bool written here with no
+	// synchronization at all, while enforceConsolePreference() reads it from inside
+	// setOutputsUnsafe()'s writeMu-protected section -- a genuine, still-live data race
+	// (concurrent SetConsoleOutputEnabled calls could even race with each other on the
+	// write itself) that PR #101's own writeMu fix for config.Outputs did not cover,
+	// caught live by `go test -race`. Writing it under the SAME writeMu that
+	// enforceConsolePreference reads it under (sequential, non-nested with the
+	// setOutputsUnsafe call below -- writeMu is not reentrant) closes this the same way
+	// every other config.Outputs mutation in this file already does.
+	writeMu.Lock()
 	consoleOutputEnabled = enabled
-	setOutputsUnsafe(config.Outputs)
+	writeMu.Unlock()
+	setOutputsUnsafe(getOutputsCopy())
 }
 
 // SetFormat thiết lập định dạng log ("text" hoặc "json").
@@ -147,7 +160,7 @@ func DebugP(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Purple, "DEBUG_P", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Trace(message interface{}, a ...interface{}) {
@@ -155,7 +168,7 @@ func Trace(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Blue, "TRACE", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Debug(message interface{}, a ...interface{}) {
@@ -163,7 +176,7 @@ func Debug(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Cyan, "DEBUG", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Info(message interface{}, a ...interface{}) {
@@ -171,7 +184,7 @@ func Info(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Green, "INFO", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Warn(message interface{}, a ...interface{}) {
@@ -179,7 +192,7 @@ func Warn(message interface{}, a ...interface{}) {
 		return
 	}
 	colored, plain := getLogBuffers(Yellow, "WARN", message, a)
-	logger.writeToOutputsSplit(colored, plain)
+	enqueueLog(colored, plain)
 }
 
 func Error(message interface{}, a ...interface{}) {
@@ -192,8 +205,27 @@ func Error(message interface{}, a ...interface{}) {
 	}
 	colored, _ := getLogBuffers(Red, "ERROR", message, a)
 	logger.writeToOutputsSplit(colored, plain)
-	// Force sync to disk — đảm bảo Error logs không bị mất khi crash
-	syncFileOutputs()
+	// NOTE (2026-09-02): syncFileOutputs() — a real fsync(2), not just a
+	// write() — used to run on every single Error() call. write() already
+	// hands the bytes to the kernel's page cache, which is enough to survive
+	// THIS PROCESS crashing or panicking (the actual concern the comment
+	// here used to describe); fsync only additionally protects against a
+	// full power-loss/OS crash at exactly that instant, a much rarer risk
+	// not worth paying for on every call.
+	//
+	// Found live: Rust calls this exact function via CGo (ffi.rs's
+	// GoLogWriter -> cgo_log_message, case 3) directly from its own OS
+	// threads (Tokio workers), synchronously — so a slow fsync here doesn't
+	// just block a Go goroutine, it blocks a Rust consensus worker thread
+	// too. Under the same real-transaction-load conditions that caused the
+	// Info/Debug/Warn mutex pileup fixed above, this synchronous fsync-per-
+	// Error call reproduced the identical pattern one level up: reproduced
+	// a multi-minute full consensus stall (all 112 tokio-runtime-worker
+	// threads and the dag-state-actor thread sleeping, zero new blocks)
+	// under a 1,000,000-tx real-transfer burst, with every relevant Go
+	// goroutine blocked on this same writeMu. Fatal() below still syncs —
+	// it runs once, immediately before os.Exit(), where the durability
+	// guarantee actually matters and the cost is paid exactly once.
 }
 
 // Fatal logs a fatal error message and terminates the program with os.Exit(1).
@@ -372,6 +404,102 @@ func buildLogLine(color string, prefix string, message interface{}, a []interfac
 	return buffer.Bytes()
 }
 
+// ============================================================================
+// Async log queue — root-cause fix (2026-09-02)
+//
+// writeToOutputsSplit used to be called SYNCHRONOUSLY, under writeMu, by every
+// caller of DebugP/Trace/Debug/Info/Warn — meaning every one of those log
+// calls blocked the calling goroutine for the full duration of a real disk
+// (or stdout) write while holding a single PROCESS-WIDE mutex. Found live via
+// pprof under real (non-reverting, actually state-mutating) transaction load
+// at high concurrency (3000 concurrent eth_sendRawTransaction connections):
+// every request handler calls logger.Info at least once on its hot path
+// (e.g. rpc_transaction.go's per-tx "TX executed speculatively" line), so
+// once real disk I/O contention (from genuine NOMT/state-trie commits
+// competing for the same disk) made even one log write slow, every other
+// concurrent request-handling goroutine piled up waiting on writeMu behind
+// it. Captured one goroutine profile that went from 764 to 6703 goroutines
+// in a single second, 2955 of them blocked exactly in
+// writeToOutputsSplit->sync.Mutex.Lock; heap ballooned past the configured
+// go_mem_limit_gb (8GB) to 11GB+ and the process was killed shortly after
+// (Go's fatal out-of-memory exit, code 2). Never manifested under the
+// zero-value/reverting transactions used earlier in this session's
+// benchmarking, since those do almost no real disk I/O and so never made the
+// log write slow enough to matter.
+//
+// Fix: DebugP/Trace/Debug/Info/Warn (the high-frequency, hot-path levels) now
+// enqueue onto a bounded channel drained by a single dedicated writer
+// goroutine, so a slow disk write only ever blocks that one goroutine, never
+// the caller. If the queue is ever fully backed up (sustained I/O far slower
+// than log volume), enqueueLog drops the line rather than block — losing a
+// diagnostic log line is an acceptable trade, taking down the whole node
+// under real transaction load is not. Error/Fatal are deliberately left
+// exactly as before (direct, synchronous writeToOutputsSplit + syncFileOutputs)
+// since they're rare, not part of any per-transaction hot path, and existing
+// callers rely on Fatal/Error's log being durably on disk before the process
+// can exit.
+const logQueueCapacity = 65536
+
+var (
+	logQueue        chan logJob
+	logQueueOnce    sync.Once
+	droppedLogs     atomic.Uint64
+	recoveredPanics atomic.Uint64
+)
+
+type logJob struct {
+	colored []byte
+	plain   []byte
+}
+
+func startLogWriter() {
+	logQueue = make(chan logJob, logQueueCapacity)
+	go func() {
+		for job := range logQueue {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Bảo vệ node: Tránh panic từ I/O làm crash node
+						recoveredPanics.Add(1)
+						fmt.Fprintf(os.Stderr, "⚠️ [LOGGER-PANIC-RECOVERED] %v\n", r)
+					}
+				}()
+				logger.writeToOutputsSplit(job.colored, job.plain)
+			}()
+		}
+	}()
+}
+
+// enqueueLog hands a formatted log line to the async writer goroutine.
+// Never blocks the caller: if the queue is full, the line is dropped and
+// counted (see DroppedLogCount) instead of applying backpressure to whatever
+// hot path called Info/Debug/Warn/Trace/DebugP.
+func enqueueLog(colored, plain []byte) {
+	logQueueOnce.Do(startLogWriter)
+	select {
+	case logQueue <- logJob{colored: colored, plain: plain}:
+	default:
+		droppedLogs.Add(1)
+	}
+}
+
+// DroppedLogCount returns how many log lines have been discarded because the
+// async log queue was full (sustained log-write I/O slower than log volume).
+// Exposed for diagnostics/metrics; 0 in the overwhelming common case.
+func DroppedLogCount() uint64 {
+	return droppedLogs.Load()
+}
+
+// RecoveredPanicCount returns how many times writeToOutputsSplit's panic-recovery guard
+// has fired (see its own doc comment). Always 0 in the overwhelming common case -- a
+// nonzero value means an I/O panic was caught and safely dropped instead of crashing the
+// process, which is by design not fatal, but is worth alerting on: it means something
+// (a race, a closed file descriptor, a malformed *os.File) is still reaching this code
+// path and should be investigated, not silently tolerated forever.
+func RecoveredPanicCount() uint64 {
+	return recoveredPanics.Load()
+}
+
 // writeMu protects concurrent writes to outputs to prevent deadlock
 var writeMu sync.Mutex
 
@@ -380,6 +508,19 @@ var writeMu sync.Mutex
 func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 	writeMu.Lock()
 	defer writeMu.Unlock()
+	defer func() {
+		// Bảo vệ mọi caller (async worker qua startLogWriter, và Error()/Fatal()'s
+		// direct synchronous calls, which have no recover of their own) khỏi crash
+		// nếu I/O panic. Log ra stderr thay vì nuốt im lặng -- một recover() câm
+		// nghĩa là nếu vẫn còn race/edge-case nào đó gây panic, vận hành sẽ không
+		// bao giờ biết (không crash, không log gì cả) cho tới khi hệ quả thật xảy
+		// ra ở nơi khác. Cùng message với startLogWriter's wrapper, nên dù panic
+		// bị bắt ở tầng nào, luôn có đúng 1 dòng cảnh báo xuất hiện.
+		if r := recover(); r != nil {
+			recoveredPanics.Add(1)
+			fmt.Fprintf(os.Stderr, "⚠️ [LOGGER-PANIC-RECOVERED] %v\n", r)
+		}
+	}()
 	outputs := l.Config.Outputs
 	for _, out := range outputs {
 		if out == nil {
@@ -387,10 +528,10 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 		}
 		if out == os.Stdout || out == os.Stderr {
 			// Terminal output → colored (có ANSI codes)
-			out.Write(colored)
+			_, _ = out.Write(colored)
 		} else {
 			// File output → plain (không ANSI codes)
-			out.Write(plain)
+			_, _ = out.Write(plain)
 		}
 	}
 }
@@ -398,10 +539,7 @@ func (l *Logger) writeToOutputsSplit(colored []byte, plain []byte) {
 // syncFileOutputs force sync file outputs ra disk
 // Gọi sau Error/Fatal để đảm bảo log không mất khi crash
 func syncFileOutputs() {
-	writeMu.Lock()
-	// Copy the outputs slice so we can release the lock before expensive I/O
-	outputsCopy := append([]*os.File(nil), config.Outputs...)
-	writeMu.Unlock()
+	outputsCopy := getOutputsCopy()
 
 	for _, out := range outputsCopy {
 		if out == nil || out == os.Stdout || out == os.Stderr {
@@ -486,8 +624,8 @@ func EnableFileLog(fileName string) (*loggerfile.FileLogger, error) {
 		oldLogger := fileLoggerInstance
 		oldFile := oldLogger.File()
 		fileLoggerInstance = nil
-		oldLogger.Close()
 		removeOutputLocked(oldFile)
+		oldLogger.Close()
 	}
 
 	newFileLogger, err := loggerfile.NewFileLogger(trimmed)
@@ -527,9 +665,11 @@ func CloseFileLog() {
 
 	stopSizeCheckLocked()
 
-	fileLoggerInstance.Close()
-	removeOutputLocked(fileLoggerInstance.File())
+	oldLogger := fileLoggerInstance
+	oldFile := oldLogger.File()
 	fileLoggerInstance = nil
+	removeOutputLocked(oldFile)
+	oldLogger.Close()
 }
 
 func attachFileLoggerOutputLocked() {
@@ -542,8 +682,7 @@ func attachFileLoggerOutputLocked() {
 		return
 	}
 
-	outputs := append([]*os.File(nil), config.Outputs...)
-	outputs = append(outputs, file)
+	outputs := append(getOutputsCopy(), file)
 	setOutputsUnsafe(outputs)
 }
 
@@ -552,8 +691,9 @@ func removeOutputLocked(target *os.File) {
 		return
 	}
 
-	filtered := make([]*os.File, 0, len(config.Outputs))
-	for _, out := range config.Outputs {
+	currentOutputs := getOutputsCopy()
+	filtered := make([]*os.File, 0, len(currentOutputs))
+	for _, out := range currentOutputs {
 		if out == nil || out == target {
 			continue
 		}
@@ -578,7 +718,16 @@ func dedupeOutputs(outputs []*os.File) []*os.File {
 	return deduped
 }
 
+func getOutputsCopy() []*os.File {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	return append([]*os.File(nil), config.Outputs...)
+}
+
 func setOutputsUnsafe(outputs []*os.File) {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	config.Outputs = enforceConsolePreference(dedupeOutputs(outputs))
 	logger.Config.Outputs = config.Outputs
 	syncStdLoggerOutputs()

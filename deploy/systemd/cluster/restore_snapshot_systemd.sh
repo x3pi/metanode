@@ -145,7 +145,7 @@ else
     echo -e "${BLUE}🔍 Tự động tìm snapshot mới nhất qua API (đợi tối đa 120s)...${NC}"
     for ((attempt=1; attempt<=30; attempt++)); do
         SNAP_JSON=$(curl -sf -m 5 "$SNAP_API" 2>/dev/null || echo "")
-        if [ -n "$SNAP_JSON" ] && [ "$SNAP_JSON" != "[]" ]; then
+        if [ -n "$SNAP_JSON" ] && [ "$SNAP_JSON" != "[]" ] && [ "$SNAP_JSON" != "null" ]; then
             SNAP_NAME=$(echo "$SNAP_JSON" | jq -r 'max_by(.block_number) | .snapshot_name' 2>/dev/null || echo "")
             if [ -n "$SNAP_NAME" ] && [ "$SNAP_NAME" != "null" ]; then
                 break
@@ -342,7 +342,21 @@ echo -e "${GREEN}  ✅ Hoàn tất ánh xạ và phân quyền dữ liệu${NC}"
 echo -e "${BLUE}[5/7] 🚀 Khởi động các service systemd của Node $NODE_ID...${NC}"
 
 echo -e "${CYAN}  [5a] Khởi động Execution Layer (Go)...${NC}"
-systemctl start "$svc_exec"
+# 2026-09-08: if this node had previously crash-looped enough to trip
+# metanode-execution.service.j2's StartLimitBurst circuit breaker (added same day), systemd
+# refuses ANY start request -- including this one -- with "Start request repeated too quickly"
+# until reset-failed clears it. Under `set -euo pipefail` that would abort this whole restore
+# script right here with no useful message. Same class of bug as the one fixed in
+# roles/systemd_services and roles/restart_services -- reset-failed first (harmless no-op if the
+# unit never failed), then fail loudly with a clear pointer if start still doesn't work instead
+# of silently continuing (unlike svc_cons/svc_rpc below, a failed execution start here means the
+# restore did not actually succeed).
+systemctl reset-failed "$svc_exec" 2>/dev/null || true
+if ! systemctl start "$svc_exec"; then
+    echo -e "${RED}  ❌ Không thể khởi động $svc_exec sau khi restore snapshot.${NC}"
+    echo -e "${YELLOW}     Kiểm tra: journalctl -u $svc_exec -n 80${NC}"
+    exit 1
+fi
 
 echo -e "${CYAN}  [5b] Chờ Go nhận dữ liệu và mở database (10s)...${NC}"
 sleep 10
@@ -355,13 +369,15 @@ else
     echo -e "${YELLOW}    ⚠️ Không tìm thấy log block của Go. Kiểm tra logs: journalctl -u $svc_exec -n 50${NC}"
 fi
 
-echo -e "${CYAN}  [5c] Khởi động Consensus Layer (Rust)...${NC}"
-systemctl start "$svc_cons"
+if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_cons}.service"; then
+    echo -e "${CYAN}  [5c] Khởi động Consensus Layer (Rust)...${NC}"
+    systemctl start "$svc_cons" || true
+fi
 
 # Khởi động lại RPC Proxy nếu có
 if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_rpc}.service"; then
     echo -e "${CYAN}  [5d] Khởi động RPC Proxy...${NC}"
-    systemctl start "$svc_rpc"
+    systemctl start "$svc_rpc" || true
 fi
 
 echo -e "${GREEN}  ✅ Các service đã được khởi động tuần tự${NC}"

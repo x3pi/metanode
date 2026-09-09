@@ -157,7 +157,7 @@ func (v *TxVirtualExecutor) executeTransactionOffChainWithState(
 		// Offchain transactions are read-only and ephemeral; individual cleanup is safely handled by
 		// `mvm.ClearMVMApi(mvmId)`. Process-wide state cache invalidation is managed solely by on-chain block processing.
 	}()
-	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
+	// logger.Debug("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
 
@@ -341,7 +341,7 @@ func (v *TxVirtualExecutor) ExecuteTransactionOffChain(
 		// Offchain transactions are read-only and ephemeral; individual cleanup is safely handled by
 		// `mvm.ClearMVMApi(mvmId)`. Process-wide state cache invalidation is managed solely by on-chain block processing.
 	}()
-	logger.Info("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
+	// logger.Debug("Off-chain execution for transaction %s with MVM ID %s", executeTransaction.Hash().Hex(), mvmId.Hex())
 	mvmOffChain.SetRelatedAddresses(executeTransaction.RelatedAddresses())
 	var mvmResult *mvm.MVMExecuteResult
 

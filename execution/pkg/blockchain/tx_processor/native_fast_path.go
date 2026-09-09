@@ -335,10 +335,10 @@ func processNativeTransfersFastPath(
 		}
 	}
 
-	// Apply total gas fee to leader (coinbase)
-	if totalBlockGasFee.Sign() > 0 && leaderAddr != (common.Address{}) {
-		globalAccountDB.AddPendingBalance(leaderAddr, totalBlockGasFee)
-	}
+	// Apply total gas fee to leader (coinbase), split between validator commission and
+	// delegators' pro-rata share -- see RewardBlockLeader's doc comment for why this happens
+	// per block rather than batched at epoch boundary.
+	RewardBlockLeader(chainState, leaderAddr, totalBlockGasFee, globalAccountDB.AddPendingBalance)
 
 	// Record Block-STM metrics (1 round, 0 conflicts for fast-path)
 	metrics.BlockStmRounds.Observe(1.0)

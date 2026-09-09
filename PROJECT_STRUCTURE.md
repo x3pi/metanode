@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-08-27
+> **Last updated:** 2026-09-07
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -8,7 +8,14 @@
 
 ```
 metanode/
+├── ci.sh                   ← Convenient project-root symlink to deploy/ci/ci_watcher.sh
 ├── deploy/                 ← Deployment configurations and scripts parent folder
+│   ├── ci/                 ← Automated CI/CD Testing Daemon, Git Watcher & Telegram Alerts
+│   │   ├── ci_config.yaml  ← Test matrix configuration (Block-STM, Cross-Chain, Spam, TPS)
+│   │   ├── ci_watcher.sh   ← Remote Git commit listener daemon
+│   │   ├── ci_runner.py    ← Config-driven test runner with pre-actions & timeout control
+│   │   ├── telegram_notify.py ← Telegram notification module
+│   │   └── README.md       ← Comprehensive operations & test guide
 │   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
@@ -27,7 +34,8 @@ metanode/
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
 ├── scripts/            ← Operational scripts
-└── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+├── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
+└── OPERATIONS_GUIDE.md  ← Complete End-to-End deployment & Day-2 Operations Runbook
 ```
 
 ### Layer Interaction
@@ -220,7 +228,7 @@ metanode/
 | `snapshot/` | State snapshot/restore | 🟡 MED — large I/O |
 | `mvm/` | Meta VM execution | 🔴 HIGH — deterministic |
 | `pruning/` | State pruning manager | 🟡 MED — async background |
-| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine, GovernanceEngine, AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
+| `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine (self-signed + RecoveryCommittee-authorized cert model, GovernanceEngine propose/vote/execute removed 2026-09-04), AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
 | `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 
 ---

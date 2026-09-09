@@ -74,6 +74,17 @@ impl LagMonitor {
             .unwrap_or(0);
         let mut last_check_time = tokio::time::Instant::now();
         let mut currently_lagging = false;
+        // SMOOTH BACKPRESSURE (2026-09-05): EMA-smoothed Go execution rate, shared with the
+        // proposer for continuous rate-matching -- see go_rate_handle's own doc comment. alpha
+        // = 0.3 on a 5s tick gives an effective averaging window of a few tens of seconds,
+        // damping the noise a single instantaneous 5s sample would otherwise have (e.g. one
+        // slow tick during a GC pause reading as a full stop) without lagging real, sustained
+        // rate changes by more than ~30-60s -- deliberately similar in spirit to
+        // CommitRateTracker's existing 10s sliding window (adaptive_delay.rs), just implemented
+        // as an EMA here since lag_monitor.rs lives outside consensus-core and can't reuse that
+        // crate-private struct directly.
+        let mut smoothed_go_rate: f64 = 0.0;
+        const GO_RATE_EMA_ALPHA: f64 = 0.3;
 
         info!(
             "🛡️ [LAG-MONITOR] Started with moderate_threshold={}, severe_threshold={}",
@@ -117,6 +128,14 @@ impl LagMonitor {
             } else {
                 0.0
             };
+
+            // Update the smoothed rate and publish it for the proposer's rate-matching
+            // backpressure (2026-09-05) -- see go_rate_handle's own doc comment.
+            smoothed_go_rate = GO_RATE_EMA_ALPHA * go_rate + (1.0 - GO_RATE_EMA_ALPHA) * smoothed_go_rate;
+            if let Some(ref handle) = self.executor_client.go_rate_handle {
+                let millis = (smoothed_go_rate.max(0.0) * 1000.0).round() as u64;
+                handle.store(millis, std::sync::atomic::Ordering::Relaxed);
+            }
 
             // Only analyze if the chain is actually moving (rust_gei > 0)
             if rust_gei > 0 {

@@ -177,7 +177,41 @@ pub struct ConsensusCoordinationHub {
     /// ZERO-TIMEOUT (May 2026): Notifier for when quorum index might have advanced.
     /// This allows CommitProcessor to wake up instantly when new peer votes arrive.
     quorum_advanced_notify: Arc<RwLock<Option<Arc<tokio::sync::Notify>>>>,
+
+    /// PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment.
+    tx_fetcher: Arc<RwLock<Option<TxFetcherFn>>>,
 }
+
+/// Attempts to fetch the given transaction digests' raw bytes from reachable peers and insert
+/// whatever is found into the global TxPayloadCache (get_global_tx_cache() in transaction.rs),
+/// keyed by the digest RECOMPUTED from each returned payload's own content -- not by the
+/// requested digest a peer claims it corresponds to. That's what makes this safe to call
+/// speculatively/best-effort: a peer returning wrong, missing, or no data can only ever leave the
+/// cache still missing the digest actually needed (a lookup miss, same as before this ran), never
+/// insert wrong content under the right key, since content-addressing means the key is derived
+/// from what's actually cached, not asserted by the sender. Wired in authority_node/mod.rs (where
+/// a NetworkClient and the committee are already in scope) via set_tx_fetcher; callers get it
+/// through get_tx_fetcher() and simply await it, then re-check the cache -- no result to inspect,
+/// the cache itself is the output.
+///
+/// Existence: this reuses the exact fetch_transactions()/TransactionFetcher RPC already built and
+/// in production use for peer BLOCK verification (authority_service/handlers.rs's
+/// handle_send_block, MissingTransactions branch) -- this is the same mechanism, just also
+/// reachable from this node's OWN commit-dispatch path (executor_client/block_sending.rs's
+/// build_sorted_transactions), which had no such recourse before and could only bail() when its
+/// local TxPayloadCache missed an entry (e.g. evicted by a restart -- see transaction.rs's
+/// TX_PAYLOAD_DIR doc comment on why that cache is in-memory-only). Confirmed live (2026-09-09,
+/// full 4-node cluster restart) that when ALL nodes restart together, this specific recovery path
+/// cannot help (every peer lost the same in-memory entry at the same time) -- it exists for the
+/// more common case where only some nodes restart, so at least one peer's cache still has it.
+pub type TxFetcherFn = Arc<
+    dyn Fn(
+            Vec<consensus_types::block::TxDigest>,
+            std::time::Duration,
+        ) -> futures::future::BoxFuture<'static, ()>
+        + Send
+        + Sync,
+>;
 
 impl ConsensusCoordinationHub {
     pub fn new() -> Self {
@@ -198,6 +232,7 @@ impl ConsensusCoordinationHub {
             digest_data_checker: Arc::new(RwLock::new(None)),
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
+            tx_fetcher: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -306,6 +341,23 @@ impl ConsensusCoordinationHub {
     /// CommitProcessor uses this to verify unattested local commits.
     pub fn get_peer_commit_attestation(&self) -> Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>> {
         let guard = self.peer_commit_attestation.read();
+        guard.clone()
+    }
+
+    /// PEER TX-PAYLOAD RECOVERY (2026-09-09): set the tx-fetcher callback. See TxFetcherFn's doc
+    /// comment for what it does and why it's safe to call speculatively. Called from
+    /// authority_node once a NetworkClient and the committee are available.
+    pub fn set_tx_fetcher(&self, fetcher: TxFetcherFn) {
+        let mut guard = self.tx_fetcher.write();
+        *guard = Some(fetcher);
+    }
+
+    /// PEER TX-PAYLOAD RECOVERY (2026-09-09): get a clone of the tx-fetcher callback, if wired.
+    /// None before authority_node has started (e.g. very early in process startup) or for a
+    /// SyncOnly node that never wires one -- callers must handle that by simply not attempting
+    /// recovery, exactly as if the fetch had been tried and found nothing.
+    pub fn get_tx_fetcher(&self) -> Option<TxFetcherFn> {
+        let guard = self.tx_fetcher.read();
         guard.clone()
     }
 
@@ -601,6 +653,7 @@ impl ConsensusCoordinationHub {
             digest_data_checker: Arc::new(RwLock::new(None)),
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
+            tx_fetcher: Arc::new(RwLock::new(None)),
         }
     }
 

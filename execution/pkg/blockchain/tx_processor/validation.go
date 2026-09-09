@@ -11,6 +11,7 @@ import (
 	"os"
 
 	eth_common "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	e_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -382,16 +383,16 @@ func VerifyTransaction(
 
 	// verify last hash
 
-	// Debug
-	// neu newDeviceKey ma bang voi as.DeviceKey() thi bao loi
-	// if tx.NewDeviceKey() == as.DeviceKey() && as.Nonce() != 0 {
-	// 	return transaction.InvalidNewDeviceKey
-	// }
+	// Verify DeviceKey nếu được bật trong cấu hình
+	if chainState.GetConfig().VerifyDeviceKey {
+		if tx.NewDeviceKey() == as.DeviceKey() && as.Nonce() != 0 {
+			return transaction.InvalidNewDeviceKey
+		}
 
-	// // // verify device key
-	// if !tx.ValidDeviceKey(as) {
-	// 	return transaction.InvalidLastDeviceKey
-	// }
+		if as != nil && as.DeviceKey() != (eth_common.Hash{}) && crypto.Keccak256Hash(tx.LastDeviceKey().Bytes()) != as.DeviceKey() {
+			return transaction.InvalidLastDeviceKey
+		}
+	}
 
 	return nil
 }
@@ -422,6 +423,10 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 
 		as, err := accountDB.AccountStateReadOnly(tx.FromAddress())
 		if err != nil || as == nil || len(as.PublicKeyBls()) == 0 {
+			// fallback to ECDSA pre-verification if BLS key is missing
+			if tx.ValidEthSign() {
+				StoreVerifiedSignature(txHash)
+			}
 			return
 		}
 
@@ -431,6 +436,9 @@ func PreVerifySignatures(txs []types.Transaction, chainState *blockchain.ChainSt
 			tx.Sign(),
 		)
 		if request.Valid() {
+			StoreVerifiedSignature(txHash)
+		} else if tx.ValidEthSign() {
+			// Fallback just in case a registered BLS account sent an EVM tx
 			StoreVerifiedSignature(txHash)
 		}
 	}

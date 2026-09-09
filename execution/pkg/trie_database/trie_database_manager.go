@@ -3,6 +3,7 @@ package trie_database
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 
@@ -240,14 +241,30 @@ func (manager *TrieDatabaseManager) IntermediateRoot() error {
 	// that touch multiple contract tables.
 	if len(jobs) > 0 {
 		var wg sync.WaitGroup
-		for i := range jobs {
+		numWorkers := runtime.NumCPU()
+		if numWorkers > 32 {
+			numWorkers = 32
+		}
+		if len(jobs) < numWorkers {
+			numWorkers = len(jobs)
+		}
+
+		jobCh := make(chan int, len(jobs))
+		for i := 0; i < len(jobs); i++ {
+			jobCh <- i
+		}
+		close(jobCh)
+
+		for w := 0; w < numWorkers; w++ {
 			wg.Add(1)
-			go func(jobIdx int) {
+			go func() {
 				defer wg.Done()
-				root, err := jobs[jobIdx].trieDB.IntermediateRoot()
-				jobs[jobIdx].root = root
-				jobs[jobIdx].err = err
-			}(i)
+				for jobIdx := range jobCh {
+					root, err := jobs[jobIdx].trieDB.IntermediateRoot()
+					jobs[jobIdx].root = root
+					jobs[jobIdx].err = err
+				}
+			}()
 		}
 		wg.Wait()
 

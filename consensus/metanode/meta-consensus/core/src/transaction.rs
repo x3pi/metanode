@@ -86,8 +86,52 @@ impl TxPayloadCache {
 
 pub(crate) static GLOBAL_TX_CACHE: OnceLock<RwLock<TxPayloadCache>> = OnceLock::new();
 
+/// CONFIRMED ROOT CAUSE (2026-09-02/03 investigation) OF SILENT TX LOSS AT
+/// EXTREME BURST SCALE: capacity here was hardcoded at 500_000, and
+/// `TxPayloadCache::insert()` evicts the OLDEST entry by pure insertion
+/// order whenever the cache is full -- with zero regard for whether that
+/// entry's transaction has actually reached a dispatched (sent-to-Go)
+/// block yet. Under an injection burst larger than capacity (e.g.
+/// 1,000,000 txs in ~22s, ~44,700 tx/s), transactions submitted early in
+/// the burst got evicted before consensus could propose+commit+dispatch
+/// their containing block, permanently and silently dropping them --
+/// surfacing only as a "Missing transaction for digest" warn! in
+/// build_sorted_transactions (block_sending.rs). Live counters confirmed
+/// the mechanism exactly: at 1,000,000 offered, ~509,000 confirmed
+/// on-chain in the same run, matching the ~500,000 capacity almost
+/// precisely, and Rust's own "dispatched to Go" counters showed ~972,000
+/// succeeding at the dispatch step -- i.e. the loss was specifically
+/// cache eviction between submission and dispatch, not a consensus or
+/// execution failure.
+///
+/// Fix: raise capacity 10x (500_000 -> 5_000_000), comfortably exceeding
+/// every burst size tested so far (up to 4,000,000 txs) with headroom.
+/// Memory cost is small (Transaction bodies are typically ~100-300 bytes;
+/// 5,000,000 entries costs roughly 1-2 GB resident) and acceptable on
+/// this box. Overridable via METANODE_TX_CACHE_CAPACITY for further
+/// tuning without a rebuild.
+///
+/// This is a capacity increase, not an eviction-policy fix -- an
+/// arbitrarily large enough burst could in principle still outrun any
+/// fixed capacity. A more robust fix (only ever evict entries already
+/// consumed/dispatched, instead of blind insertion-order FIFO) was
+/// considered but deferred: this same cache is also read by
+/// multi-validator code paths (block_verifier, synchronizer,
+/// authority_service peer-block handling) that may need to re-read a
+/// transaction body after the local dispatch path has already read it,
+/// so removing entries eagerly on first read risks breaking peer
+/// verification/sync correctness in a multi-validator deployment --
+/// not proven safe under current single-validator-only test coverage.
+fn tx_payload_cache_capacity() -> usize {
+    std::env::var("METANODE_TX_CACHE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5_000_000)
+}
+
 pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
-    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(500_000)))
+    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(tx_payload_cache_capacity())))
 }
 
 /// The maximum number of transactions pending to the queue to be pulled for block proposal
@@ -123,6 +167,10 @@ pub(crate) struct TransactionConsumer {
     max_num_transactions_in_block: u64,
     pending_transactions: Option<TransactionsGuard>,
     block_status_subscribers: Arc<Mutex<BTreeMap<BlockRef, Vec<oneshot::Sender<BlockStatus>>>>>,
+    /// See Context::oldest_pending_tx_at_ms's doc comment. Kept here (rather than reaching
+    /// through some other handle) so `next()` can clear it in the same place it already
+    /// determines "queue is now fully empty".
+    context: Arc<Context>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -179,14 +227,44 @@ impl TransactionConsumer {
             max_num_transactions_in_block,
             pending_transactions: None,
             block_status_subscribers: Arc::new(Mutex::new(BTreeMap::new())),
+            context,
         }
     }
 
-    // Checks if there are enough pending transactions to skip the aggregation delay.
-    // E.g., if there are already 25k pending or multiple FFI batches queued.
+    // Checks if there are enough pending transactions to skip the aggregation delay
+    // (MIN_PROPOSAL_AGGREGATION_DELAY in core.rs). Threshold is the block's own
+    // max_num_transactions_in_block: once a full block's worth is already waiting,
+    // there is no aggregation benefit left to wait for, so proposing immediately is
+    // strictly better than idling out the rest of the floor.
+    //
+    // Previously hardcoded to 45_000 (and, before that per a stale comment, "25k") —
+    // a value disconnected from the actual block capacity and, since
+    // max_num_transactions_in_block defaults to far less than 45_000, one this could
+    // never reach in practice. That silently defeated this bypass under any real
+    // sustained load, forcing every proposal to eat the full aggregation floor
+    // regardless of how much was already pending (measured: a rock-steady ~100-110ms
+    // per block even with a large backlog and sub-block capacity of Go execution
+    // capacity to spare).
     pub(crate) fn has_sufficient_transactions(&self) -> bool {
         let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
-        pending_len >= 45000
+        pending_len as u64 >= self.max_num_transactions_in_block
+    }
+
+    // How long (ms) the oldest currently-unproposed transaction has been waiting, or 0 if the
+    // queue is empty. See Context::oldest_pending_tx_at_ms's doc comment for the full mechanism
+    // (stamped by TransactionClient::submit_no_wait, cleared here in next() once fully drained).
+    // Used by proposer.rs to bound worst-case latency: a batch that's still young can keep
+    // aggregating (good for throughput), but once the oldest entry has waited too long, propose
+    // now regardless of how full the batch is.
+    pub(crate) fn oldest_pending_wait_ms(&self) -> u64 {
+        let stamped_at = self
+            .context
+            .oldest_pending_tx_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if stamped_at == 0 {
+            return 0;
+        }
+        self.context.clock.timestamp_utc_ms().saturating_sub(stamped_at)
     }
 
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
@@ -319,6 +397,17 @@ impl TransactionConsumer {
             }
         }
         drop(handle_txs);
+
+        // LATENCY: the loop above only stops once pending_transactions is Some (a remainder
+        // exists) or the channel is genuinely empty (the `else { break; }` case) -- so reaching
+        // here with pending_transactions still None means nothing is left waiting anywhere.
+        // Clear the shared timestamp so a future arrival stamps a fresh wait, not this drained
+        // batch's already-served one. See Context::oldest_pending_tx_at_ms's doc comment.
+        if self.pending_transactions.is_none() {
+            self.context
+                .oldest_pending_tx_at_ms
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
 
         if transactions.len() > 0 || recv_count > 0 {
             tracing::error!("🔥 [DEBUG] transaction_consumer.next() returning {} txs. recv_count: {}, limit_reached: {:?}", transactions.len(), recv_count, limit_reached);
@@ -551,6 +640,19 @@ impl TransactionClient {
             transactions: txs,
             included_in_block_ack: included_in_block_ack_send,
         };
+        // LATENCY: stamp the arrival time of the oldest pending tx, but only if the queue was
+        // previously empty (0) -- an already-nonzero value means something older is still
+        // waiting, and that older arrival time is what should govern the aggregation-delay
+        // bypass in proposer.rs, not this (later) submission. See Context::
+        // oldest_pending_tx_at_ms's own doc comment for the full mechanism.
+        let now_ms = self.context.clock.timestamp_utc_ms();
+        let _ = self.context.oldest_pending_tx_at_ms.compare_exchange(
+            0,
+            now_ms,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         self.sender
             .send(t)
             .await

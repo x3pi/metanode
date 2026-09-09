@@ -89,8 +89,11 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	if err != nil {
 		return nil, false, fmt.Errorf("unpack getChainRegistry output: %w", err)
 	}
-	if len(outValues) != 11 {
-		return nil, false, fmt.Errorf("getChainRegistry: expected 11 output values, got %d", len(outValues))
+	// 2026-09-04: getChainRegistry grew 2 more trailing outputs (genesisWallet, genesisDigest) for
+	// the deterministic-genesis design (see ChainRegistry.GenesisWallet/GenesisDigest's own doc
+	// comments) -- 13, not the original 11.
+	if len(outValues) != 13 {
+		return nil, false, fmt.Errorf("getChainRegistry: expected 13 output values, got %d", len(outValues))
 	}
 
 	exists, _ := outValues[0].(bool)
@@ -108,6 +111,8 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 	accountTreeRootRaw, _ := outValues[8].([32]byte)
 	archivalEndpoint, _ := outValues[9].(string)
 	registeredAt, _ := outValues[10].(uint64)
+	genesisWallet, _ := outValues[11].(common.Address)
+	genesisDigestRaw, _ := outValues[12].([32]byte)
 
 	if len(pubkeys) != len(stakes) || len(pubkeys) != len(popSignatures) {
 		return nil, false, fmt.Errorf("getChainRegistry: mismatched committee array lengths (pubkeys=%d stakes=%d popSignatures=%d)",
@@ -132,6 +137,8 @@ func (c *Client) GetChainRegistry(ctx context.Context, chainID uint64) (*cross_c
 		AccountTreeRoot:  common.Hash(accountTreeRootRaw),
 		ArchivalEndpoint: archivalEndpoint,
 		RegisteredAt:     registeredAt,
+		GenesisWallet:    genesisWallet,
+		GenesisDigest:    common.Hash(genesisDigestRaw),
 	}
 	return registry, true, nil
 }
@@ -207,6 +214,58 @@ func (c *Client) GetCommitAttestationShares(ctx context.Context, sourceChainID, 
 	return pubkeys, signatures, nil
 }
 
+// GetMessageFailureAttestationShares reads the currently-collected BLS attestation shares for a
+// message finalized as Failed on its destination chain (mục 2.4 point 2, 2026-09-05 fix for
+// note/cross_chain/security_audit_findings.md finding #1) -- mirrors GetCommitAttestationShares
+// exactly, for the failure-confirmation cert GatewayEngine.Refund() verifies instead of the
+// success-confirmation cert AttestCommit() verifies.
+func (c *Client) GetMessageFailureAttestationShares(ctx context.Context, destChainID uint64, messageID common.Hash, epoch uint64) (pubkeys [][]byte, signatures [][]byte, err error) {
+	calldata, err := c.abi.Pack("getMessageFailureAttestationShares", new(big.Int).SetUint64(destChainID), messageID, epoch)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack getMessageFailureAttestationShares: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, nil, err
+	}
+	outValues, err := c.abi.Unpack("getMessageFailureAttestationShares", result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack getMessageFailureAttestationShares output: %w", err)
+	}
+	if len(outValues) != 2 {
+		return nil, nil, fmt.Errorf("getMessageFailureAttestationShares: expected 2 output values, got %d", len(outValues))
+	}
+	pubkeys, _ = outValues[0].([][]byte)
+	signatures, _ = outValues[1].([][]byte)
+	return pubkeys, signatures, nil
+}
+
+// GetMessageSuccessAttestationShares reads the currently-collected BLS attestation shares for a
+// message that succeeded on its destination chain (mirror image of
+// GetMessageFailureAttestationShares, 2026-09-05 fix for the "Cross-Chain Ledger Inflation via
+// Missing Reserve Refund" finding) -- the success-confirmation cert
+// GatewayEngine.CreditReserveAllocation() requires before crediting Reserve's ledger.
+func (c *Client) GetMessageSuccessAttestationShares(ctx context.Context, destChainID uint64, messageID common.Hash, epoch uint64) (pubkeys [][]byte, signatures [][]byte, err error) {
+	calldata, err := c.abi.Pack("getMessageSuccessAttestationShares", new(big.Int).SetUint64(destChainID), messageID, epoch)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack getMessageSuccessAttestationShares: %w", err)
+	}
+	result, err := c.ethCall(ctx, calldata)
+	if err != nil {
+		return nil, nil, err
+	}
+	outValues, err := c.abi.Unpack("getMessageSuccessAttestationShares", result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack getMessageSuccessAttestationShares output: %w", err)
+	}
+	if len(outValues) != 2 {
+		return nil, nil, fmt.Errorf("getMessageSuccessAttestationShares: expected 2 output values, got %d", len(outValues))
+	}
+	pubkeys, _ = outValues[0].([][]byte)
+	signatures, _ = outValues[1].([][]byte)
+	return pubkeys, signatures, nil
+}
+
 // SubmitTransaction sends a pre-signed raw transaction to Root Anchor via eth_sendRawTransaction.
 // Deliberately generic — it does not know or care what the transaction does. This is the
 // transport Milestone C's CommitteeUpdate submission will use; building that payload and deciding
@@ -268,6 +327,47 @@ func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
 	}
 	var result hexutil.Big
 	err := c.callRPC(ctx, "eth_chainId", &result)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return (*big.Int)(&result), nil
+}
+
+// SuggestGasPrice returns this chain's currently suggested gas price (eth_gasPrice).
+//
+// Added 2026-09-05 during the RelayerDaemon production-readiness review: every transaction
+// RelayerDaemon submitted used a hardcoded `big.NewInt(1_000_000_000)` (1 Gwei) gas price with no
+// fee-market awareness at all -- a real risk of transactions sitting unmined forever on any chain
+// whose real fee market rises above that, or gross overpayment on a quiet chain that would have
+// accepted much less. Callers should treat a failure here as "fall back to a configured default",
+// not as fatal -- fee estimation must never itself block a relay.
+func (c *Client) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var result hexutil.Big
+	err := c.callRPC(ctx, "eth_gasPrice", &result)
+	if err != nil {
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	return (*big.Int)(&result), nil
+}
+
+// GetBalance returns address's current native-coin balance on this chain (eth_getBalance,
+// "latest"). Added for RelayerDaemon's balance/gas-exhaustion monitoring (production-readiness
+// review, 2026-09-05): a relayer whose balance can no longer cover gas fails silently -- its sends
+// start erroring exactly like any other transient RPC hiccup unless something actively watches the
+// balance itself.
+func (c *Client) GetBalance(ctx context.Context, address common.Address) (*big.Int, error) {
+	if !c.breaker.CanExecute() {
+		return nil, ErrCircuitOpen
+	}
+	var result hexutil.Big
+	err := c.callRPC(ctx, "eth_getBalance", &result, address.Hex(), "latest")
 	if err != nil {
 		c.breaker.RecordFailure()
 		return nil, err

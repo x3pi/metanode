@@ -8,10 +8,40 @@
 //! from execution engine backpressure and IO overhead.
 
 use crate::node::executor_client::ExecutorClient;
-use consensus_core::CommittedSubDag;
+use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
+
+// TEMPORARY DIAGNOSTIC (2026-09-03): counts commits actually reaching this
+// "STATION 4" delivery loop and calling send_committed_subdag, split by
+// outcome. Fourth counter set in the same investigation (see executor.rs's
+// DIAG_* for the third, GEI GUARD / FAST-SKIP -- both still pending
+// results as of this addition). eprintln! bypasses tracing for the same
+// reason as the others. Remove once settled.
+static DIAG_DELIVERY_OK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_DELIVERY_OK_TXS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIAG_DELIVERY_LAST_PRINT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn diag_delivery_maybe_print() {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_DELIVERY_LAST_PRINT_SECS.load(Ordering::Relaxed);
+    if now >= last + 2
+        && DIAG_DELIVERY_LAST_PRINT_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG block_delivery] ok_commits={} ok_txs={}",
+            DIAG_DELIVERY_OK.load(Ordering::Relaxed),
+            DIAG_DELIVERY_OK_TXS.load(Ordering::Relaxed)
+        );
+    }
+}
 
 /// A sanitized commit that has been verified, has the proper GEI assigned,
 /// and has the leader address resolved.
@@ -77,6 +107,13 @@ impl BlockDeliveryManager {
 
             match result {
                 Ok(geis_consumed) => {
+                    let tx_count: usize = msg.subdag.blocks.iter().map(|b| {
+                        let d = b.tx_digests();
+                        if !d.is_empty() { d.len() } else { b.transactions().len() }
+                    }).sum();
+                    DIAG_DELIVERY_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    DIAG_DELIVERY_OK_TXS.fetch_add(tx_count as u64, std::sync::atomic::Ordering::Relaxed);
+                    diag_delivery_maybe_print();
                     debug!(
                         "✅ [TX-FLOW-TRACE] ▶ PHASE 3.3→3.4 DONE: send_committed_subdag completed | \
                          commit_index={}, gei={}, geis_consumed={}",

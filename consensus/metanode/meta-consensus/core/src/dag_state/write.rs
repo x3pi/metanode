@@ -14,7 +14,7 @@ use consensus_types::block::{BlockRef, Round, TransactionIndex};
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{CommitAPI as _, CommitIndex, CommitInfo, CommitRef, CommitVote, TrustedCommit},
+    commit::{CommitAPI as _, CommitIndex, CommitInfo, CommitRange, CommitRef, CommitVote, TrustedCommit},
     dag_state::{dag_state_impl::DagState, types::BlockInfo},
     leader_scoring::ReputationScores,
     storage::WriteBatch,
@@ -649,15 +649,45 @@ impl DagState {
         self.scoring_subdag.is_empty()
     }
 
+    /// SCHEDULE-RECOVERY EMPTY-SUBDAG GUARD (2026-09-04): `ScoringSubdag.commit_range` is only
+    /// ever set inside `add_subdags()`, so it stays `None` until at least one committed subdag
+    /// has actually been scored. `commit_manager.rs`'s sparse-DAG SCHEDULE-RECOVERY fallback
+    /// (see its own doc comment: "DAG lacks 300 commits at schedule update boundary") calls
+    /// `update_leader_schedule_v2()` -> here specifically for the case where the DAG has
+    /// genuinely NOT accumulated enough commits yet, which can mean zero -- `commit_range` being
+    /// `None` was always a real, reachable state at this call site, not just a theoretical one:
+    /// found live 2026-09-04 as a 100%-reproducible panic
+    /// (`ScoringSubdag::calculate_distributed_vote_scores`'s `.expect()`, dormant since the
+    /// May-2026 "fork-safe subdag scoring for schedule recovery" commit) whenever a node restarts
+    /// with its DAG sitting exactly at a schedule-update boundary with fewer than
+    /// `commits_per_schedule` commits available. Falls back to a degenerate, all-zero
+    /// ReputationScores anchored at the current `last_commit_index` instead of panicking --
+    /// exactly matching what an empty `self.votes`/`self.leaders` would already have produced
+    /// for `scores_per_authority` in the non-empty path (`distributed_votes_scores()` returns
+    /// zeros for authorities with no votes), so this only supplies the missing `CommitRange`,
+    /// not fabricated score data. Safe: per commit_manager.rs's own comment at this call site,
+    /// these scores are provably never used to make a real leader-election decision here --
+    /// `is_schedule_recovery_pending()` stays true afterward (this fallback deliberately never
+    /// calls `schedule_verified()`/clears the flag), which keeps this node's own committer
+    /// permanently blocked from proposing with them until real recovery data arrives.
     pub fn calculate_scoring_subdag_scores(&self) -> ReputationScores {
+        if self.scoring_subdag.commit_range.is_none() {
+            let idx = self.last_commit_index();
+            return ReputationScores::new(
+                CommitRange::new(idx..=idx),
+                vec![0; self.context.committee.size()],
+            );
+        }
         self.scoring_subdag.calculate_distributed_vote_scores()
     }
 
+    /// See `calculate_scoring_subdag_scores`'s doc comment above -- same empty-`commit_range`
+    /// guard, same fallback anchor (`last_commit_index`), for the same reachable sparse-DAG
+    /// SCHEDULE-RECOVERY call site.
     pub fn scoring_subdag_commit_range(&self) -> CommitIndex {
-        self.scoring_subdag
-            .commit_range
-            .as_ref()
-            .expect("commit range should exist for scoring subdag")
-            .end()
+        match self.scoring_subdag.commit_range.as_ref() {
+            Some(range) => range.end(),
+            None => self.last_commit_index(),
+        }
     }
 }

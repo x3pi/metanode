@@ -22,11 +22,13 @@ typedef struct {
 } GoCallbacks;
 
 void metanode_register_callbacks(GoCallbacks callbacks);
+void metanode_init_rocksdb(const char* data_dir);
 void metanode_start_consensus(const char* config_path, const char* data_dir);
 void metanode_pause_consensus();
 void metanode_resume_consensus();
 bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
+bool metanode_is_ready_for_transactions();
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -51,6 +53,7 @@ static inline void register_callbacks_to_rust() {
 import "C"
 import (
 	"fmt"
+	"os"
 	"time"
 	"unsafe"
 
@@ -59,6 +62,16 @@ import (
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"google.golang.org/protobuf/proto"
 )
+
+// ffiTraceEnabled gates the [FFI-TRACE] diagnostics added while profiling the
+// Rust<->Go block-delivery round trip. They're logger.Warn (so they'd show at
+// any configured log level, unlike Debug/Info) and fire on every block, so
+// they stay opt-in via METANODE_FFI_TRACE=true rather than always-on —
+// otherwise every production node would pay the log volume forever for a
+// diagnostic only needed when actively chasing a perf regression again. See
+// the same-named flag's use in cmd/simple_chain/processor/speculative_executor.go
+// and consensus/metanode/src/node/executor_client/block_sending.rs.
+var ffiTraceEnabled = os.Getenv("METANODE_FFI_TRACE") == "true"
 
 // Global reference for our handlers since CGo callbacks are global.
 var defaultRequestHandler *RequestHandler
@@ -127,7 +140,11 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	defer C.free(unsafe.Pointer(cConfigPath))
 	defer C.free(unsafe.Pointer(cDataDir))
 
-	logger.Info("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+	fmt.Println("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+
+	// Call the new C++ static initialization function on the main thread safely
+	C.metanode_init_rocksdb(cDataDir)
+
 	C.metanode_start_consensus(cConfigPath, cDataDir)
 
 	return nil
@@ -141,6 +158,17 @@ func GetAuthoritativeBlockQueue() <-chan *AuthoritativeBlockRequest {
 
 //export cgo_execute_block
 func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8_t, outLen *C.size_t) (ret C.bool) {
+	// [FFI-TRACE] Wall-clock (UnixNano) checkpoints for attributing the Rust<->Go
+	// round trip. Rust logs its own [FFI-TRACE] line for the same gei on the same
+	// OS clock (CGo links both into one process), so after a run the two can be
+	// joined by gei to see exactly where each block's time went: CGo entry ->
+	// unmarshal -> queued for speculative execution -> response received -> serialized.
+	// Only timestamped when ffiTraceEnabled, to skip the (cheap but nonzero,
+	// and pointless when nothing reads it) clock reads on the hot path.
+	var tEntry int64
+	if ffiTraceEnabled {
+		tEntry = time.Now().UnixNano()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("[FFI Bridge] ⚠️ PANIC recovered in cgo_execute_block: %v", r)
@@ -177,6 +205,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 
 	logger.Debug("[FFI Bridge] Received block from Rust: block_height=%d, authoritative=%v",
 		subDag.GetBlockNumber(), subDag.GetIsAuthoritativeGei())
+	var tAfterUnmarshal int64
+	if ffiTraceEnabled {
+		tAfterUnmarshal = time.Now().UnixNano()
+	}
 
 	if defaultAuthoritativeBlockQueue != nil {
 		responseCh := make(chan *pb.ExecuteBlockResponse, 1)
@@ -189,6 +221,10 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		// If queue is full, Go is severely behind — drop block.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
+			var tQueued int64
+			if ffiTraceEnabled {
+				tQueued = time.Now().UnixNano()
+			}
 			// Wait for speculative executor to finish and return actual authoritative response.
 			//
 			// BOUNDED WAIT (Aug 2026): previously this was an unbounded `<-req.ResponseCh`
@@ -206,7 +242,19 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 			// permanent hang requiring a manual restart.
 			select {
 			case response := <-req.ResponseCh:
-				serializeAndSetResponse(response, outPayload, outLen)
+				if ffiTraceEnabled {
+					tRespRecv := time.Now().UnixNano()
+					serializeAndSetResponse(response, outPayload, outLen)
+					tSerialized := time.Now().UnixNano()
+					logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
+						subDag.GetGlobalExecIndex(),
+						tAfterUnmarshal-tEntry,
+						tRespRecv-tQueued,
+						tSerialized-tRespRecv,
+						tSerialized-tEntry)
+				} else {
+					serializeAndSetResponse(response, outPayload, outLen)
+				}
 				return C.bool(true)
 			case <-time.After(executeBlockResponseTimeout):
 				logger.Error("[FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
@@ -406,6 +454,17 @@ func PauseRustConsensus() {
 // ResumeRustConsensus signals the Rust side to resume its consensus operations (e.g. after snapshot)
 func ResumeRustConsensus() {
 	C.metanode_resume_consensus()
+}
+
+// IsRustConsensusReadyForTransactions reports whether the Rust consensus layer's
+// ConsensusCoordinationHub is currently in a phase that accepts proposals (Healthy, with
+// RecoveryBarrier Ready/Inactive) -- i.e. whether a transaction submitted right now has any
+// chance of actually being proposed by this node, as opposed to sitting in mempool until it
+// times out. Backs the eth_syncing RPC method (see rpc_block.go's MetaAPI.Syncing()). Returns
+// false (not ready) if Rust hasn't published a consensus instance yet at all, e.g. very early in
+// process startup -- see GLOBAL_COORDINATION_HUB's doc comment in ffi.rs.
+func IsRustConsensusReadyForTransactions() bool {
+	return bool(C.metanode_is_ready_for_transactions())
 }
 
 // RestoreRustConsensusFromSnapshot purges local DAG and restores from the snapshot payload

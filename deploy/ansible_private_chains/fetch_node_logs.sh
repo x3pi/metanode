@@ -125,19 +125,25 @@ for name, h in hosts.items():
     JOURNAL_FILE="$CHAIN_OUT_DIR/systemd_${SERVICE_NAME}.log"
 
     if [ "$conn" == "local" ] || [ "$host_ip" == "127.0.0.1" ] || [ "$host_ip" == "localhost" ]; then
-        # 1. Kéo thư mục logs/
-        LOCAL_LOGS_DIR="$inst_dir/logs"
-        if [ -d "$LOCAL_LOGS_DIR" ]; then
-            cp -r "$LOCAL_LOGS_DIR" "$CHAIN_OUT_DIR/"
-            echo "   ✅ Đã sao chép thư mục file logs: $LOCAL_LOGS_DIR"
-        else
-            echo "   ℹ️  Không tìm thấy thư mục file logs tại: $LOCAL_LOGS_DIR"
-        fi
+        # 1. Kéo toàn bộ file logs (cả logs/ chung và node-*/logs)
+        shopt -s nullglob
+        for ldir in "$inst_dir"/logs "$inst_dir"/node-*/logs; do
+            if [ -d "$ldir" ]; then
+                rel_name=$(echo "$ldir" | sed "s|^$inst_dir/||")
+                target_sub="$CHAIN_OUT_DIR/$rel_name"
+                mkdir -p "$(dirname "$target_sub")"
+                cp -r "$ldir" "$target_sub"
+                echo "   ✅ Đã sao chép thư mục file logs: $ldir"
+            fi
+        done
 
-        # 2. Lấy log từ systemd journal
+        # 2. Lấy log từ systemd journal (cho tất cả nodes)
         if command -v journalctl &>/dev/null; then
-            journalctl -u "$SERVICE_NAME" --no-pager -n "$LINE_COUNT" > "$JOURNAL_FILE" 2>/dev/null || true
-            echo "   ✅ Đã xuất systemd journal ($LINE_COUNT dòng) ra: $JOURNAL_FILE"
+            for unit in $(systemctl list-unit-files "metanode-private-${chain_id}*.service" --no-legend 2>/dev/null | awk '{print $1}'); do
+                j_out="$CHAIN_OUT_DIR/systemd_${unit}.log"
+                journalctl -u "$unit" --no-pager -n "$LINE_COUNT" > "$j_out" 2>/dev/null || true
+                echo "   ✅ Đã xuất systemd journal ($LINE_COUNT dòng) ra: $j_out"
+            done
         fi
     else
         # Kết nối Remote SSH
@@ -154,25 +160,22 @@ for name, h in hosts.items():
             SCP_CMD="sshpass -p '$password' $SCP_CMD"
         fi
 
-        # 1. Kéo thư mục logs/ từ xa
-        eval $SCP_CMD "${user}@${host_ip}:${inst_dir}/logs" "$CHAIN_OUT_DIR/" </dev/null 2>/dev/null && \
-            echo "   ✅ Đã tải thư mục logs từ ${host_ip}:${inst_dir}/logs" || \
-            echo "   ⚠️  Không thể scp logs từ ${host_ip}:${inst_dir}/logs"
+        # 1. Kéo thư mục logs từ xa
+        eval $SCP_CMD "${user}@${host_ip}:${inst_dir}/logs" "$CHAIN_OUT_DIR/" </dev/null 2>/dev/null || true
+        eval $SCP_CMD "${user}@${host_ip}:${inst_dir}/node-*" "$CHAIN_OUT_DIR/" </dev/null 2>/dev/null || true
 
-        # 2. Lấy systemd journal qua ssh (tự động dùng sudo với become_pass nếu cần)
-        if [ -n "$become_pass" ]; then
-            REMOTE_JOURNAL_CMD="echo '$become_pass' | sudo -S journalctl -u $SERVICE_NAME --no-pager -n $LINE_COUNT 2>/dev/null || journalctl -u $SERVICE_NAME --no-pager -n $LINE_COUNT 2>/dev/null"
-        else
-            REMOTE_JOURNAL_CMD="journalctl -u $SERVICE_NAME --no-pager -n $LINE_COUNT 2>/dev/null"
-        fi
-
-        eval $SSH_CMD "${user}@${host_ip}" "\"$REMOTE_JOURNAL_CMD\"" </dev/null > "$JOURNAL_FILE" 2>/dev/null && \
-            echo "   ✅ Đã lấy systemd journal ($LINE_COUNT dòng) từ ${host_ip}" || \
-            echo "   ⚠️  Không thể lấy journalctl từ ${host_ip}"
+        # 2. Lấy log systemd journal từ xa
+        REMOTE_UNITS=$(eval $SSH_CMD "${user}@${host_ip}" "systemctl list-unit-files 'metanode-private-${chain_id}*.service' --no-legend 2>/dev/null | awk '{print \$1}'" </dev/null 2>/dev/null || echo "$SERVICE_NAME")
+        for unit in $REMOTE_UNITS; do
+            j_out="$CHAIN_OUT_DIR/systemd_${unit}.log"
+            eval $SSH_CMD "${user}@${host_ip}" "journalctl -u '$unit' --no-pager -n $LINE_COUNT" </dev/null > "$j_out" 2>/dev/null || true
+            echo "   ✅ Đã xuất remote systemd journal ra: $j_out"
+        done
     fi
 done
 
-echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}🎉 HOÀN TẤT KÉO LOGS!${NC}"
 echo -e "📂 Toàn bộ logs đã được lưu tại:"
 echo -e "👉 ${YELLOW}$OUTPUT_DIR${NC}"

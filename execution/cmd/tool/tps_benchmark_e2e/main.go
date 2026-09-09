@@ -33,17 +33,17 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	p_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -85,8 +85,17 @@ type RoundResult struct {
 	SettleTimeMs int64      `json:"settle_time_ms"`
 	InjectTPS    float64    `json:"inject_tps"`
 	SettleTPS    float64    `json:"settle_tps"`
-	SendErrors   int64      `json:"send_errors"`
-	BlockStats   BlockStats `json:"block_stats"`
+	// EndToEndTPS is the number that actually answers "how many tx/s did this
+	// round sustain" — txs_confirmed / (inject_time + settle_time), i.e. wall
+	// clock from the first tx sent to the last one confirmed on-chain.
+	// SettleTPS on its own is NOT that: it only covers the post-injection
+	// drain phase, so quoting it alone overstates throughput by ignoring the
+	// injection-phase wall time entirely (confirmed independently: many txs
+	// land on-chain *during* injection, but that concurrency doesn't shrink
+	// the round's actual start-to-finish duration one bit).
+	EndToEndTPS float64    `json:"end_to_end_tps"`
+	SendErrors  int64      `json:"send_errors"`
+	BlockStats  BlockStats `json:"block_stats"`
 }
 
 type ForkCheckResult struct {
@@ -110,7 +119,14 @@ type BenchReport struct {
 	AvgTPS    float64          `json:"avg_settle_tps"`
 	MaxTPS    float64          `json:"max_settle_tps"`
 	MinTPS    float64          `json:"min_settle_tps"`
-	Timestamp string           `json:"timestamp"`
+	// *EndToEndTPS is the real headline number (see RoundResult.EndToEndTPS) —
+	// *TPS above (settle-only) is kept for backward compat with existing
+	// tooling/dashboards that already parse this JSON, not because it's the
+	// more meaningful figure.
+	AvgEndToEndTPS float64 `json:"avg_end_to_end_tps"`
+	MaxEndToEndTPS float64 `json:"max_end_to_end_tps"`
+	MinEndToEndTPS float64 `json:"min_end_to_end_tps"`
+	Timestamp      string  `json:"timestamp"`
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -149,44 +165,81 @@ func generateAccounts(n int) []TestAccount {
 // Transaction Building
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// buildTransactions signs numTxs transactions. This is CPU-bound (ECDSA key
+// derivation + signing per tx) and was found to be the single largest hidden
+// cost in this tool's own "end-to-end" wall-clock measurement: profiled at
+// 2026-09-02 via pidstat, a plain sequential loop pinned ONE core at ~105%
+// CPU for ~17s while signing 200k txs on a 104-core machine — a huge, silent
+// chunk of real wall-clock time that isn't even counted in injectTime (which
+// only times sendTransactions), let alone reported anywhere in the tool's
+// own throughput numbers. Since each index maps to an independent account
+// (generateAccounts(cfg.NumTxs) — 1 account per tx, see caller), every
+// worker's slice of indices is fully independent: no shared mutable state,
+// each writes only to its own pre-allocated slot, so this parallelizes with
+// zero coordination overhead across all available cores.
 func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64) [][]byte {
-	txPayloads := make([][]byte, 0, numTxs)
 	amount := big.NewInt(0)
-	relBytes := make([][]byte, 1)
-	relBytes[0] = common.Hex2Bytes("1F0ECA432E1B18b140814beF0ce1Ba2b09DE44c5")
+	signer := types.LatestSignerForChainID(big.NewInt(int64(chainID)))
+	gasPrice := big.NewInt(1000000)
 
-	for i := 0; i < numTxs; i++ {
-		acc := accounts[i%len(accounts)]
-		ecdsaKey, _ := crypto.ToECDSA(acc.PrivateKey)
-		fromAddr := crypto.PubkeyToAddress(ecdsaKey.PublicKey)
-		destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
+	payloads := make([][]byte, numTxs)
 
-		nonce := acc.Nonce + uint64(i/len(accounts))
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 32 {
+		numWorkers = 32
+	}
+	if numWorkers > numTxs {
+		numWorkers = numTxs
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 
-		tx := transaction.NewTransaction(
-			fromAddr,
-			destAddr,
-			amount,
-			10000000,
-			1000000,
-			0,
-			nil,
-			relBytes,
-			common.Hash{},
-			common.Hash{},
-			nonce,
-			chainID,
-		)
-
-		var pKey p_common.PrivateKey
-		copy(pKey[:], acc.PrivateKey)
-		tx.SetSign(pKey)
-
-		bTx, err := tx.Marshal()
-		if err != nil {
-			continue
+	chunk := (numTxs + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunk
+		end := start + chunk
+		if start >= numTxs {
+			break
 		}
-		txPayloads = append(txPayloads, bTx)
+		if end > numTxs {
+			end = numTxs
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				acc := accounts[i%len(accounts)]
+				ecdsaKey, err := crypto.ToECDSA(acc.PrivateKey)
+				if err != nil {
+					continue
+				}
+				destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
+				nonce := acc.Nonce + uint64(i/len(accounts))
+
+				tx := types.NewTransaction(nonce, destAddr, amount, 10000000, gasPrice, nil)
+				signedTx, err := types.SignTx(tx, signer, ecdsaKey)
+				if err != nil {
+					continue
+				}
+				bTx, err := signedTx.MarshalBinary()
+				if err != nil {
+					continue
+				}
+				payloads[i] = bTx
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
+	// Compact out any nil slots left by per-tx sign/marshal errors above,
+	// preserving the original "skip and continue" behavior.
+	txPayloads := payloads[:0]
+	for _, p := range payloads {
+		if p != nil {
+			txPayloads = append(txPayloads, p)
+		}
 	}
 	return txPayloads
 }
@@ -225,6 +278,9 @@ func sendTransactions(nodes []string, payloads [][]byte, workers int, quiet bool
 					_, err := client.SendRawTransaction(payload)
 					if err != nil {
 						atomic.AddInt64(&errors, 1)
+						if atomic.LoadInt64(&errors) == 1 {
+							fmt.Printf("\nFirst RPC Error: %v\n", err)
+						}
 					} else {
 						atomic.AddInt64(&sent, 1)
 					}
@@ -256,6 +312,17 @@ func sendTransactions(nodes []string, payloads [][]byte, workers int, quiet bool
 func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Duration, expectedTxs int, quiet bool) (BlockStats, time.Duration) {
 	pollInterval := 2 * time.Second
 	processStart := time.Now()
+	// lastProgressTime tracks when we last actually saw new txs land in a block.
+	// The loop below keeps polling for a fixed 12s of confirmed idleness after
+	// that before it's willing to declare settlement done (requiredEmptyStreak),
+	// which is necessary to be sure nothing is still trickling in — but that 12s
+	// is detection overhead, not settling work, and reporting settle_tps against
+	// a duration that includes it silently understates real throughput more and
+	// more as expectedTxs shrinks (12s fixed against, say, a 2s real settling
+	// window for a small run swamps the number, while barely denting it for a
+	// large one) — making runs of different sizes look artificially different in
+	// settle_tps even when the chain's real per-tx cost didn't change at all.
+	lastProgressTime := processStart
 
 	emptyBlockStreak := 0
 	rpcErrorStreak := 0
@@ -328,6 +395,7 @@ func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Dur
 			}
 		} else {
 			emptyBlockStreak = 0
+			lastProgressTime = time.Now()
 		}
 	}
 
@@ -337,7 +405,7 @@ func waitForSettlement(rpcClient *RPCClient, startBlock uint64, maxWait time.Dur
 		stats.AvgTxPerBlock = float64(totalTxsInBlocks) / float64(stats.TotalBlocks)
 	}
 
-	return stats, time.Since(processStart)
+	return stats, lastProgressTime.Sub(processStart)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -452,10 +520,11 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 	quiet := cfg.JSONOutput
 
-	accounts := generateAccounts(cfg.NumAccounts)
+	// Pre-generate accounts (1 per transaction to avoid nonce ordering issues in concurrent injection)
 	if !quiet {
-		fmt.Printf("🔑 Generated %d test accounts\n", len(accounts))
+		fmt.Printf("⏳ Generating %d test accounts...\n", cfg.NumTxs)
 	}
+	accounts := generateAccounts(cfg.NumTxs)
 
 	// Use first node for polling
 	rpcClient := NewRPCClient(cfg.Nodes[0])
@@ -524,6 +593,15 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 		globalEndBlock = stats.EndBlock
 
+		// True end-to-end: wall clock from the first tx sent to the last one
+		// confirmed on-chain, i.e. the full round, not just the post-injection
+		// drain tail that settleTPS alone covers.
+		endToEndSecs := injectTime.Seconds() + settleTime.Seconds()
+		endToEndTPS := float64(0)
+		if endToEndSecs > 0 {
+			endToEndTPS = float64(stats.TotalTxBlocks) / endToEndSecs
+		}
+
 		result := RoundResult{
 			Round:        round,
 			TxsSent:      int(sent),
@@ -532,6 +610,7 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 			SettleTimeMs: settleTime.Milliseconds(),
 			InjectTPS:    injectTPS,
 			SettleTPS:    settleTPS,
+			EndToEndTPS:  endToEndTPS,
 			SendErrors:   sendErrors,
 			BlockStats:   stats,
 		}
@@ -543,10 +622,16 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 		if settleTPS < report.MinTPS {
 			report.MinTPS = settleTPS
 		}
+		if endToEndTPS > report.MaxEndToEndTPS {
+			report.MaxEndToEndTPS = endToEndTPS
+		}
+		if report.MinEndToEndTPS == 0 || endToEndTPS < report.MinEndToEndTPS {
+			report.MinEndToEndTPS = endToEndTPS
+		}
 
 		if !quiet {
-			fmt.Printf("  📊 Round %d: %d TXs confirmed | %.0f inject TPS | %.0f settle TPS\n",
-				round, stats.TotalTxBlocks, injectTPS, settleTPS)
+			fmt.Printf("  📊 Round %d: %d TXs confirmed | %.0f inject TPS | %.0f settle TPS | %.0f end-to-end TPS\n",
+				round, stats.TotalTxBlocks, injectTPS, settleTPS, endToEndTPS)
 		}
 
 		// Cooldown between rounds
@@ -560,11 +645,14 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 
 	// Compute average
 	totalTPS := 0.0
+	totalEndToEndTPS := 0.0
 	for _, r := range report.Rounds {
 		totalTPS += r.SettleTPS
+		totalEndToEndTPS += r.EndToEndTPS
 	}
 	if len(report.Rounds) > 0 {
 		report.AvgTPS = totalTPS / float64(len(report.Rounds))
+		report.AvgEndToEndTPS = totalEndToEndTPS / float64(len(report.Rounds))
 	}
 
 	// Fork check across all nodes
@@ -593,6 +681,8 @@ func printReport(report BenchReport) {
 		fmt.Printf("║   TXs: %d sent → %d confirmed                       \n", r.TxsSent, r.TxsConfirmed)
 		fmt.Printf("║   Inject: %.0f tx/s (%dms) | Settle: %.0f tx/s (%dms)\n",
 			r.InjectTPS, r.InjectTimeMs, r.SettleTPS, r.SettleTimeMs)
+		fmt.Printf("║   End-to-end (submit→confirmed, full round): %.0f tx/s (%dms)\n",
+			r.EndToEndTPS, r.InjectTimeMs+r.SettleTimeMs)
 		fmt.Printf("║   Blocks: %d (empty: %d, max: %d tx/blk, avg: %.1f)\n",
 			r.BlockStats.TotalBlocks, r.BlockStats.EmptyBlocks,
 			r.BlockStats.MaxTxInBlock, r.BlockStats.AvgTxPerBlock)
@@ -602,8 +692,10 @@ func printReport(report BenchReport) {
 	}
 
 	fmt.Println("╠═══════════════════════════════════════════════════════════╣")
-	fmt.Printf("║ Average TPS: %.0f  |  Max: %.0f  |  Min: %.0f\n",
+	fmt.Printf("║ Settle-only TPS:   Average: %.0f  |  Max: %.0f  |  Min: %.0f\n",
 		report.AvgTPS, report.MaxTPS, report.MinTPS)
+	fmt.Printf("║ End-to-end TPS:    Average: %.0f  |  Max: %.0f  |  Min: %.0f\n",
+		report.AvgEndToEndTPS, report.MaxEndToEndTPS, report.MinEndToEndTPS)
 
 	if report.ForkCheck != nil {
 		fmt.Println("╠═══════════════════════════════════════════════════════════╣")

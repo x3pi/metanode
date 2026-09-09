@@ -183,6 +183,12 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		}
 	}
 
+	if cs.storageManager != nil {
+		for _, txHash := range blk.Transactions() {
+			_ = cs.storageManager.CommitDeviceKey(txHash)
+		}
+	}
+
 	// ─── 6. Update storage block counter (always) ────────────────────────
 	// This is updated LAST among the mappings/counter block metadata to ensure that
 	// if a concurrent reader detects the height has advanced, all the underlying mapping entries

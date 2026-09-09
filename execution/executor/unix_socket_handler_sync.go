@@ -125,14 +125,6 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// FAST PREEMPTION (Aug 2026): Cancel any in-flight speculative execution
-	// workers immediately so they abort Block-STM and release Xapian/EVM locks.
-	// ═══════════════════════════════════════════════════════════════════════════
-	if rh.cancelSpeculativeCallback != nil {
-		rh.cancelSpeculativeCallback()
-	}
-
-	// ═══════════════════════════════════════════════════════════════════════════
 	// PIPELINE SYNC: Always wait for commitWorker to flush pending block commits.
 	// This ensures that before block sync processes and writes blocks to PebbleDB/NOMT,
 	// all prior consensus block executions have been fully committed to disk,
@@ -157,6 +149,16 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			logger.Info("🔓 [SYNC-GATE] Releasing ExecutionMutex lock after block synchronization")
 			rh.unlockExecutionCallback()
 		}()
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// FAST PREEMPTION (Aug 2026): Cancel and abort ALL speculative executions
+	// while holding ExecutionMutex.Lock().
+	// This guarantees no new speculative workers can start, and all existing in-flight
+	// and finished sessions are aborted, ensuring NOMT activeCount is 0 before sync writes.
+	// ═══════════════════════════════════════════════════════════════════════════
+	if rh.cancelSpeculativeCallback != nil {
+		rh.cancelSpeculativeCallback()
 	}
 
 	if blockCount == 0 {

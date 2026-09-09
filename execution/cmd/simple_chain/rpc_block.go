@@ -13,6 +13,7 @@ import (
 	eth_types "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
+	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
@@ -361,6 +362,39 @@ func (api *MetaAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx
 
 func (api *MetaAPI) BlockNumber() string {
 	return hexutil.EncodeUint64(storage.GetLastBlockNumber())
+}
+
+// ConsensusReady implements a custom eth_consensusReady RPC method. Unlike eth_blockNumber
+// (which only proves the HTTP/RPC server itself is up), this reflects whether the node's Rust
+// consensus layer would actually accept/propose a transaction submitted right now.
+//
+// Found live during a chaos-restart CI test (2026-09-09): a node that just restarted answers
+// eth_blockNumber within seconds, well before its ConsensusCoordinationHub reaches a phase that
+// accepts proposals (Healthy + RecoveryBarrier Ready/Inactive). A client that only checks "RPC
+// answers" before sending a transaction hits an unexplained ~45s timeout during that window, with
+// no signal telling it why. Callers (this repo's own test tooling included -- see
+// metanode-suite/test-simple/test-rpc/test-chain/restart-recovery/run_restart_test.sh) should
+// poll this and wait for `ready: true` before sending, instead of treating "RPC answers" as
+// "ready".
+//
+// NOT named Syncing/exposed as the standard eth_syncing: MetaAPI already has a `Syncing(ctx)`
+// method (rpc_subscription.go) implementing the eth_subscribe("syncing") pub-sub topic -- Go
+// doesn't allow two methods of the same name on one receiver regardless of differing signatures,
+// and that method's fixed `(*rpc.Subscription, error)` return type can't be repurposed to also
+// carry a plain boolean/object for a non-subscription HTTP call. A custom name was the
+// non-breaking option; renaming the existing method to free up "Syncing" was not, since it would
+// change the eth_subscribe topic name for any existing subscriber.
+func (api *MetaAPI) ConsensusReady() map[string]interface{} {
+	ready := executor.IsRustConsensusReadyForTransactions()
+	current := storage.GetLastBlockNumber()
+	result := map[string]interface{}{
+		"ready":       ready,
+		"blockNumber": hexutil.EncodeUint64(current),
+	}
+	if !ready {
+		result["note"] = "Rust consensus layer is not yet in a phase that accepts proposals (still initializing/bootstrapping/catching-up/state-syncing/aligning) -- a transaction sent now may sit unconfirmed until this reports ready: true."
+	}
+	return result
 }
 
 // GetTransactionByBlockNumberAndIndex returns the transaction for the given block number and index.

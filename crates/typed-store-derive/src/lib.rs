@@ -478,11 +478,56 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                         // Safe to call unwrap because we will have at least one field_name entry in the struct
                         let rwopt_cfs: std::collections::HashMap<String, typed_store::rocks::ReadWriteOptions> = opt_cfs.iter().map(|q| (q.0.as_str().to_string(), q.1.rw_options.clone())).collect();
                         let opt_cfs: Vec<_> = opt_cfs.iter().map(|q| (q.0.as_str(), q.1.options.clone())).collect();
-                        let db = match as_secondary_with_path.clone() {
-                            Some(p) => typed_store::rocks::open_cf_opts_secondary(path, Some(&p), global_db_options_override, metric_conf, &opt_cfs),
-                            _ => typed_store::rocks::open_cf_opts(path, global_db_options_override, metric_conf, &opt_cfs)
+                        // TRANSIENT-LOCK-RETRY (2026-09-09): root-caused live on a real 4-node
+                        // cluster -- a previous process-local RocksDB handle for this exact path
+                        // that just panicked-and-unwound (or a just-torn-down async runtime
+                        // whose background compaction/flush threads hadn't finished closing yet)
+                        // can leave the on-disk LOCK file held by THIS SAME OS process for a
+                        // data-dependent, unpredictable amount of time -- observed up to ~60s
+                        // after a long busy period. This used to be a bare .expect() below,
+                        // panicking on the very first attempt no matter how close the previous
+                        // handle was to releasing it. Retrying the open itself, right here, is
+                        // both faster in the common case (no fixed wait when the previous handle
+                        // was already gone) and more correct in the slow case (keeps trying
+                        // instead of a caller guessing a fixed timeout) than pushing this
+                        // decision up to every caller of open_tables_impl. Bounded at 60 attempts
+                        // / ~30s so a genuine, non-transient open failure (missing directory,
+                        // real corruption, permissions, a DIFFERENT process actually using the
+                        // DB) still fails promptly -- only the exact "lock hold by current
+                        // process" / "No locks available" message retries at all; every other
+                        // error still fails on the first attempt, unchanged from before.
+                        let open_once = || match as_secondary_with_path.clone() {
+                            Some(p) => typed_store::rocks::open_cf_opts_secondary(path, Some(&p), global_db_options_override.clone(), metric_conf.clone(), &opt_cfs),
+                            _ => typed_store::rocks::open_cf_opts(path, global_db_options_override.clone(), metric_conf.clone(), &opt_cfs)
                         };
-                        db.map(|d| (d, rwopt_cfs))
+                        let mut db_result = open_once();
+                        let mut retry_attempt: u32 = 0;
+                        while let Err(ref e) = db_result {
+                            let msg = e.to_string();
+                            let is_transient_same_process_lock = msg.contains("lock hold by current process") || msg.contains("No locks available");
+                            if !is_transient_same_process_lock || retry_attempt >= 60 {
+                                break;
+                            }
+                            retry_attempt += 1;
+                            if retry_attempt == 1 {
+                                ::tracing::warn!(
+                                    "RocksDB open at {:?} hit a transient same-process lock conflict \
+                                     (most likely a previous local handle for this path hasn't \
+                                     finished releasing it yet). Retrying every 500ms (up to 30s) \
+                                     instead of failing immediately.",
+                                    path
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            db_result = open_once();
+                        }
+                        if retry_attempt > 0 && db_result.is_ok() {
+                            ::tracing::info!(
+                                "RocksDB open at {:?} succeeded after {} retr{}.",
+                                path, retry_attempt, if retry_attempt == 1 { "y" } else { "ies" }
+                            );
+                        }
+                        db_result.map(|d| (d, rwopt_cfs))
                     }.expect(&format!("Cannot open DB at {:?}", path));
                     let deprecated_tables = vec![#(stringify!(#deprecated_cfs),)*];
                     let (

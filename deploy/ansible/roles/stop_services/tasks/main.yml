@@ -5,20 +5,22 @@
     pkill -9 -f 'block_hash_checker' || true
   failed_when: false
   changed_when: false
+  when: target_node | default('all') == 'all'
 
 - name: Find all metanode services
   ansible.builtin.shell: "systemctl list-unit-files | grep -E '^metanode-.*\\.service' | awk '{print $1}'"
   register: all_metanode_services
   changed_when: false
   failed_when: false
+  when: target_node | default('all') == 'all'
 
 - name: Stop and disable all metanode services to prevent rogue nodes
   ansible.builtin.systemd:
     name: "{{ item }}"
     state: stopped
     enabled: no
-  loop: "{{ all_metanode_services.stdout_lines }}"
-  when: all_metanode_services.stdout_lines | length > 0
+  loop: "{{ all_metanode_services.stdout_lines | default([]) }}"
+  when: (target_node | default('all') == 'all') and (all_metanode_services.stdout_lines is defined and all_metanode_services.stdout_lines | length > 0)
   failed_when: false
 
 - name: Check if metanode or simple_chain processes are still running
@@ -26,6 +28,7 @@
   register: process_check
   failed_when: false
   changed_when: false
+  when: target_node | default('all') == 'all'
 
 - name: Stop and disable targeted metanode execution services
   ansible.builtin.systemd:

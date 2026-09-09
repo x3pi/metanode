@@ -17,6 +17,67 @@ pub static TX_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 // The global channel sender for zero-copy FFI transaction submission
 pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>> = std::sync::RwLock::new(None);
 
+/// READINESS SIGNAL (2026-09-09): backs the `eth_syncing` RPC method (Go side: MetaAPI.Syncing()
+/// in rpc_state.go, wired via metanode_is_ready_for_transactions() below). Found live during
+/// today's chaos-restart CI test: a node that just restarted answers `eth_blockNumber` (plain RPC
+/// liveness) within seconds, well before ConsensusCoordinationHub reaches a phase that actually
+/// accepts proposals (Healthy + RecoveryBarrier Ready/Inactive -- see
+/// coordination_hub.rs's `should_skip_proposal()`, the existing authoritative check this reuses).
+/// A client/test-script that only checks "does RPC answer" sends a transaction into that window
+/// and gets an unexplained 45s timeout with no diagnostic -- exactly what this exists to prevent.
+///
+/// Set once per consensus (re)start in consensus_node.rs, right where ConsensusCoordinationHub
+/// itself is constructed, via `set_global_coordination_hub` below -- so a restart (whether the
+/// systemd-visible kind or the internal ffi.rs restart loop) always publishes the freshest
+/// instance. Read synchronously from `metanode_is_ready_for_transactions`, an FFI call Go can make
+/// directly on every `eth_syncing` request without an FFI round-trip through the async runtime.
+pub static GLOBAL_COORDINATION_HUB: std::sync::RwLock<Option<consensus_core::coordination_hub::ConsensusCoordinationHub>> = std::sync::RwLock::new(None);
+
+/// Publishes the current node's CoordinationHub for `metanode_is_ready_for_transactions` to read.
+/// Called once per (re)construction -- see GLOBAL_COORDINATION_HUB's doc comment for why every
+/// restart path needs this, not just the very first startup.
+pub fn set_global_coordination_hub(hub: consensus_core::coordination_hub::ConsensusCoordinationHub) {
+    match GLOBAL_COORDINATION_HUB.write() {
+        Ok(mut guard) => *guard = Some(hub),
+        Err(poisoned) => {
+            // A prior panic while holding this lock (extremely unlikely -- the critical section
+            // is a single pointer assignment) would poison it. Recover rather than propagate:
+            // losing readiness-tracking is far preferable to this becoming a new panic source
+            // in a hot restart path.
+            *poisoned.into_inner() = Some(hub);
+        }
+    }
+}
+
+/// FFI entry point for Go's `eth_syncing` handler (MetaAPI.Syncing() in rpc_state.go).
+/// Returns true when this node's consensus layer would actually accept/propose a transaction
+/// right now, false otherwise (still initializing/bootstrapping/catching-up/state-syncing, or no
+/// consensus instance published yet at all -- e.g. very early in process startup).
+#[no_mangle]
+pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match guard.as_ref() {
+        Some(hub) => !hub.should_skip_proposal(),
+        None => false,
+    }
+}
+
+/// Retrieves the current node's peer tx-fetcher, if one has been wired (see TxFetcherFn's doc
+/// comment in coordination_hub.rs). Used by build_sorted_transactions's callers
+/// (executor_client/block_sending.rs) to attempt recovering a TxPayloadCache miss from peers
+/// before giving up. None before authority_node has started, or for a SyncOnly node that never
+/// wires one -- callers must treat that exactly like "tried and found nothing".
+pub fn get_global_tx_fetcher() -> Option<consensus_core::coordination_hub::TxFetcherFn> {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.as_ref().and_then(|hub| hub.get_tx_fetcher())
+}
+
 
 // DIAGNOSTIC (May 2026): FFI TX submission metrics for stall diagnosis
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -186,6 +247,20 @@ pub fn get_ffi_tx_queue_depth() -> usize {
         }
     }
     0
+}
+
+/// Initialize RocksDB C++ static variables safely.
+/// This should be called from Go's main thread on startup.
+#[no_mangle]
+pub extern "C" fn metanode_init_rocksdb(data_dir: *const std::os::raw::c_char) {
+    if data_dir.is_null() { return; }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(data_dir) };
+    if let Ok(dir) = c_str.to_str() {
+        let path = format!("{}/rocksdb_dummy_init", dir);
+        let _ = std::panic::catch_unwind(|| {
+            let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new(&path);
+        });
+    }
 }
 
 pub fn setup_ffi_transaction_channel(sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
@@ -406,6 +481,35 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
 
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 
+        // OUTER RESILIENCE LOOP (2026-09-09): found live while verifying the
+        // PERMANENT-GAP-RECOVERY amnesty fix on a real 4-node cluster restart.
+        //
+        // The catch_unwind below only ever ran ONCE. Its handler (see the bottom of this
+        // loop body) just eprintln!'d and returned -- it did not retry. That is fine ONLY for
+        // panics that originate from inside the async `loop` further down AND are already
+        // turned into a `Result::Err` that loop explicitly matches on (NodeConfig::load,
+        // InitializedNode::initialize, run_main_loop) -- those three sites already have their
+        // own restart_count/backoff and `continue`. But a raw, UNCAUGHT panic anywhere else in
+        // the entire initialize()/run_main_loop() call graph -- for example the typed-store-
+        // derive retry loop's own `.expect("Cannot open DB at {:?}")` once it exhausts its 60
+        // attempts (see typed-store-derive/src/lib.rs), which is exactly what was observed
+        // live here -- unwinds straight past all of that inner handling and is caught only by
+        // this OUTER catch_unwind, which used to just log and give up. Confirmed live: node-0
+        // sat with Rust consensus permanently dead (Go kept running, RPC kept answering reads,
+        // block height frozen) for 4+ minutes with zero further restart attempts, while
+        // systemd saw one continuous, never-crashed OS process the whole time -- so nothing
+        // external ever notices either. This is the same class of gap as the FFI-internal
+        // restart loop already being invisible to systemd (see the backoff comment inside the
+        // loop below), just one level further out: ANY panic anywhere in this whole subsystem
+        // used to be a one-way trip to a silent, permanent, human-restart-required outage --
+        // precisely the scenario a full-cluster restart needs to NOT be true.
+        //
+        // Fix: move the retry loop out here too, with the same growing backoff. A panic now
+        // rebuilds a fresh Tokio runtime (cheap, and already what every iteration of the inner
+        // loop implicitly relies on via "fresh Registry each loop") and tries again, instead of
+        // ending the process's Rust consensus life for good.
+        let mut outer_restart_count: u32 = 0;
+        loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Build the Tokio multi-threaded runtime.
             //
@@ -483,17 +587,35 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                     info!("Network address: {}", node_config.network_address);
 
                     if restart_count > 0 {
+                        // BACKOFF (2026-09-09): was a flat 10s. Root-caused live (4-node
+                        // cluster, all restarting simultaneously after each hit the
+                        // TxPayloadCache-miss panic added in c915437d) a real
+                        // "IO error: lock hold by current process ... LOCK: No locks
+                        // available" panic (typed_store's macro-generated RocksDBStore::new,
+                        // rocksdb_store.rs:31) on the FIRST 3-4 restart attempts, every time --
+                        // the previous iteration's Tokio runtime (and whatever RocksDB
+                        // background compaction/flush threads it owned) hadn't finished
+                        // releasing the on-disk LOCK file by the time this same OS process
+                        // tried to reopen the same path again. A flat 10s wait was
+                        // consistently NOT enough; it took ~4 attempts (this same 10s+5s
+                        // "FFI RESTART COOLDOWN" pair below, back to back) for the cluster to
+                        // self-clear, which is a real ~60s+ of wasted, guaranteed-to-fail
+                        // retries every single time this path triggers. Growing the wait with
+                        // each consecutive failed attempt (capped, not unbounded) gives the
+                        // still-draining resources more realistic time instead of hammering
+                        // the same conflict on a fixed cadence.
+                        let backoff_secs = (10 * restart_count.min(6)).min(60) as u64;
                         info!(
                             "🔄 [FFI RESTART] Attempt #{} — previous instance crashed. \
-                             Waiting 10s for old connections/tasks to drain...",
-                            restart_count
+                             Waiting {}s for old connections/tasks (and any still-draining \
+                             RocksDB handles) to fully release...",
+                            restart_count, backoff_secs
                         );
                         // Extended delay: old TCP connections (consensus P2P, gRPC) need
                         // TIME_WAIT to expire. 5s was too aggressive — peers still had
                         // open connections to old ports, causing bind/connect failures.
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     }
-
                     let startup_config = StartupConfig::new(node_config, registry, None);
 
                     let initialized_node = match InitializedNode::initialize(startup_config).await {
@@ -523,9 +645,39 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             });
         }));
 
-        if let Err(e) = result {
-            eprintln!("🚨 [RUST FFI] Consensus engine panicked: {:?}", e);
-            // DO NOT re-panic — that would abort() the Go process
+        match result {
+            Ok(()) => {
+                // The async `loop` above has no `break` in it (every path either `continue`s
+                // or falls through to loop again after a restart_count bump), so reaching here
+                // without a panic is not expected in practice. Break rather than tight-looping
+                // forever with no backoff if it ever does happen.
+                eprintln!(
+                    "🚨 [RUST FFI] Consensus engine's inner loop exited without panicking \
+                     (unexpected -- it has no break). Not restarting again to avoid a tight \
+                     loop; this OS thread is now idle."
+                );
+                break;
+            }
+            Err(e) => {
+                outer_restart_count += 1;
+                // Same growing-backoff shape as the inner loop's own FFI RESTART backoff (see
+                // its comment) -- reusing the reasoning: a flat/short wait was consistently not
+                // enough for a same-process RocksDB LOCK file (and whatever else was mid-
+                // teardown) to actually finish releasing before the next attempt.
+                let backoff_secs = (10 * outer_restart_count.min(6)).min(60) as u64;
+                eprintln!(
+                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}): {:?}. \
+                     Rebuilding the Tokio runtime and retrying in {}s instead of leaving Rust \
+                     consensus permanently dead for the rest of this process's life.",
+                    outer_restart_count, e, backoff_secs
+                );
+                // DO NOT re-panic — that would abort() the Go process.
+                // Blocking sleep is fine here: the Tokio runtime that panicked has already been
+                // torn down (catch_unwind unwound out of it), so this OS thread has nothing
+                // else to service right now.
+                std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+            }
+        }
         }
     });
     }));

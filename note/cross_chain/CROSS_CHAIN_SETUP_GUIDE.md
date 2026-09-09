@@ -90,12 +90,16 @@ cd ~/nhat/consensus-chain/metanode/deploy/ansible_private_chains
 3. Copy binary `simple_chain` và `metanode` vào `/opt/metanode/chain-XXX`.
 4. Thiết lập systemd service `/etc/systemd/system/metanode-private-XXX.service`.
 5. Bật service và mở tường lửa cho các cổng RPC, Peer, Consensus.
-6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor (bootstrapFoundingChains).
+6. Tự động nộp transaction đăng ký cả 4 chuỗi lên Gateway của Root Anchor (`registerChainViaStake`
+   — `bootstrapFoundingChains()` đã bị xoá 2026-08-28, không còn dùng nữa).
 7. Tự động mint genesis supply 1 lần trên Reserve (Root Anchor) và chia cho 4 founding chain
-   (`ProposalAllocateSupply` + `ProposalTransferAllocation`, qua `register_chains -fund-genesis`)
+   (`allocateSupplyWithCert` + `transferAllocationWithCert`, tự-ký bởi uỷ ban BLS thật của Reserve
+   — không qua vote, qua `register_chains -fund-genesis`; `ProposalAllocateSupply`/
+   `ProposalTransferAllocation` cùng toàn bộ `GovernanceEngine` propose/vote/timelock/execute đã
+   bị xoá 2026-09-04, xem `note/eurozone_unified_native_coin_plan.md`)
    — **bắt buộc phải có bước này** thì Bước 5 (kiểm tra chuyển tiền cross-chain thật) mới chạy
    được, vì mỗi chain khởi tạo xong đều có `PerChainAllocation = 0` cho tới khi được cấp thật qua
-   đúng luồng governance này (xem `note/cross_chain_attack_scenario_catalog.md` mục C7/C8 — sửa
+   đúng luồng này (xem `note/cross_chain_attack_scenario_catalog.md` mục C7/C8 — sửa
    2026-08-28, PR #84 review). Số lượng mint mặc định là giá trị devnet
    (`root_anchor_genesis_supply`/`root_anchor_per_chain_allocation` trong `inventory.yml`, có thể
    chỉnh) — **không dùng mặc định này cho triển khai thật**, số thật phải qua ceremony quyết định.
@@ -166,4 +170,49 @@ go run . -rpcA "http://<IP_CHAIN_101>:8546" -rpcB "http://<IP_CHAIN_102>:8546"
 * **Khóa ETH (`eth_key.json` - secp256k1):** Dùng để định danh địa chỉ EVM (`address`), nộp gas fee và ký giao dịch thông thường.
 * **Khóa BLS (`Databases.BLSPrivateKey` / `authority_key` - BLS12-381):** Dùng để ký các phần chữ ký xác thực khối và attestation cross-chain (`commitRoot` / `committeeUpdate`).
 * **Cơ chế Fallback trích xuất BLS Public Key:** `CommitAttestationWorker` và `CommitteeAttestationWorker` luôn ưu tiên dẫn xuất trực tiếp BLS Public Key (48 bytes G1) từ `Databases.BLSPrivateKey` trong file cấu hình `execution.json`. Nếu không cấu hình mới tìm trong `AccountStateDB` (tránh lỗi rỗng tại Genesis khi trạng thái tài khoản chưa được nạp thông tin BLS vào state trie).
+
+---
+
+## 🆕 5. Hướng Dẫn Đăng Ký Chain Mới & Quản Trị Hạn Mức
+
+Tất cả các tác vụ quản trị Gateway Contract (`0x1002`) đã được hợp nhất vào công cụ duy nhất: [`register_chains`](file:///home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains/README.md).
+
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains
+go build -o register_chains .
+```
+
+### Bước 1: Khởi động node cho Chain Mới (nếu dùng Ansible)
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible_private_chains
+./deploy_private_chains.sh --setup --chain=103 --open-ports
+```
+
+### Bước 2: Đăng ký danh bạ & Khóa BLS (`register`)
+Tool tự động đọc khóa BLS, tạo bằng chứng PoP và đăng ký danh bạ chéo lên Root Anchor và toàn bộ các Private Chains:
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/execution/cmd/tool/register_chains
+./register_chains -chains "101,102,103"
+```
+
+### Bước 3: Cấp hạn mức tiền cọc cho Chain Mới (`transfer-alloc`)
+Nếu Chain Mới cần xuất tiền liên chuỗi (Value Transfer), trích chuyển hạn mức từ một chain đang dư (VD: Chain 101) sang Chain Mới:
+```bash
+./register_chains -action transfer-alloc -from-chain 101 -to-chain 103 -amount-mtn 10000000
+```
+
+### Bước 4: Tra cứu kiểm tra (`query-alloc` & `query-registry`)
+```bash
+# Kiểm tra hạn mức của các chain:
+./register_chains -action query-alloc -chains "991,101,102,103"
+
+# Kiểm tra danh bạ và validator keys:
+./register_chains -action query-registry -chains "101,102,103"
+```
+
+### Bước 5: Khởi động lại Relayer
+```bash
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible_private_chains
+./run_relayer_tmux.sh restart
+```
 

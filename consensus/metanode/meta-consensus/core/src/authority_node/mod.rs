@@ -27,7 +27,7 @@ use crate::{
     leader_timeout::{LeaderTimeoutTask, LeaderTimeoutTaskHandle},
     legacy_store::LegacyEpochStoreManager,
     metrics::initialise_metrics,
-    network::{tonic_network::TonicManager, NetworkManager},
+    network::{tonic_network::TonicManager, NetworkClient, NetworkManager},
     proposed_block_handler::ProposedBlockHandler,
     round_prober::{RoundProber, RoundProberHandle},
     round_tracker::PeerRoundTracker,
@@ -557,6 +557,58 @@ where
                     PeerAttestResult::Insufficient
                 }
             });
+        }
+
+        // PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment in
+        // coordination_hub.rs. Fans a fetch out to every other committee member in parallel and
+        // merges whatever comes back into the global TxPayloadCache -- safe to do speculatively
+        // since the cache key is recomputed from each payload's own content, not asserted by the
+        // peer (a wrong/missing answer just leaves the digest still missing, never inserts wrong
+        // content under the right key).
+        {
+            let network_client_for_fetch = network_client.clone();
+            let own_index = context.own_index;
+            let peers: Vec<AuthorityIndex> = context
+                .committee
+                .authorities()
+                .map(|(i, _)| i)
+                .filter(|&i| i != own_index)
+                .collect();
+            coordination_hub.set_tx_fetcher(Arc::new(move |digests, timeout| {
+                let network_client = network_client_for_fetch.clone();
+                let peers = peers.clone();
+                Box::pin(async move {
+                    if digests.is_empty() || peers.is_empty() {
+                        return;
+                    }
+                    let fetches = peers.into_iter().map(|peer| {
+                        let network_client = network_client.clone();
+                        let digests = digests.clone();
+                        async move { network_client.fetch_transactions(peer, digests, timeout).await }
+                    });
+                    let results = futures::future::join_all(fetches).await;
+                    let mut inserted = 0usize;
+                    {
+                        let mut cache = crate::transaction::get_global_tx_cache().write();
+                        for result in results {
+                            if let Ok(txs_bytes) = result {
+                                for tx_bytes in txs_bytes {
+                                    let tx = crate::block::Transaction::new(tx_bytes.to_vec());
+                                    cache.insert(tx.digest(), tx);
+                                    inserted += 1;
+                                }
+                            }
+                        }
+                    }
+                    if inserted > 0 {
+                        tracing::info!(
+                            "🔧 [TX-PAYLOAD-RECOVERY] Fetched {} transaction payload(s) from \
+                             peers to fill local TxPayloadCache gap(s) (e.g. after a restart).",
+                            inserted
+                        );
+                    }
+                })
+            }));
         }
 
         let synchronizer = Synchronizer::start(

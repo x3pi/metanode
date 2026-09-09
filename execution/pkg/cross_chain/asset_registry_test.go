@@ -6,9 +6,9 @@ import (
 	"math/big"
 	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,11 +17,18 @@ import (
 // P6 — ASSET REGISTRY & MULTI-ASSET CROSS-CHAIN PROTOCOL TEST SUITE (P6 DoD)
 // ══════════════════════════════════════════════════════════════════════════════
 
-func setupTestAssetRegistry() (*AssetRegistryEngine, *GovernanceEngine, map[uint64]ChainRegistry) {
+// setupTestAssetRegistry builds an AssetRegistryEngine with a real BLS committee on chain 101
+// (home chain for every asset registered in this file's tests), needed for
+// RegisterAssetOnRootAnchor's self-authorization QuorumCert (2026-09-04, replacing the old
+// governance-vote gate -- see AssetRegistryEngine's own doc comment).
+func setupTestAssetRegistry() (*AssetRegistryEngine, *bls.KeyPair, map[uint64]ChainRegistry) {
+	kp101 := bls.GenerateKeyPair()
+	pop101 := PopSign(kp101.PrivateKey(), kp101.PublicKey())
+
 	chainRegistry := make(map[uint64]ChainRegistry)
 	activeChains := []uint64{101, 102, 103, 104}
 	for _, cid := range activeChains {
-		chainRegistry[cid] = ChainRegistry{
+		reg := ChainRegistry{
 			ChainID:          cid,
 			Epoch:            1,
 			QuorumThreshold:  6667,
@@ -30,18 +37,31 @@ func setupTestAssetRegistry() (*AssetRegistryEngine, *GovernanceEngine, map[uint
 			ArchivalEndpoint: "http://archive.metanode.test",
 			RegisteredAt:     1000,
 		}
+		if cid == 101 {
+			reg.Committee = []ValidatorEntry{
+				{PubkeyBLS: kp101.BytesPublicKey(), Stake: 10000, PopSignature: pop101.Bytes()},
+			}
+		}
+		chainRegistry[cid] = reg
 	}
 
-	gov := NewGovernanceEngineWithTimelock(activeChains, 72*3600)
-	engine := NewAssetRegistryEngine(chainRegistry, gov)
-	return engine, gov, chainRegistry
+	engine := NewAssetRegistryEngine(chainRegistry)
+	return engine, kp101, chainRegistry
+}
+
+// signRegisterAssetCert builds a real QuorumCert for entry, signed by kp101 (chain 101's own
+// committee) -- the self-authorization RegisterAssetOnRootAnchor now requires.
+func signRegisterAssetCert(kp101 *bls.KeyPair, entry AssetEntry) QuorumCert {
+	digest := ComputeRegisterAssetMessage(entry.AssetID, entry.HomeChainID, entry.CanonicalContract)
+	sig := bls.Sign(kp101.PrivateKey(), digest)
+	return QuorumCert{Epoch: 1, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// TEST P6.1: AssetEntry Registration & Governance Security (DoD)
+// TEST P6.1: AssetEntry Registration & Self-Authorization Security (DoD)
 // ──────────────────────────────────────────────────────────────────────────────
-func TestP6_1_AssetRegistrationAndGovernanceSecurity(t *testing.T) {
-	engine, gov, _ := setupTestAssetRegistry()
+func TestP6_1_AssetRegistrationAndSelfAuthorizationSecurity(t *testing.T) {
+	engine, kp101, _ := setupTestAssetRegistry()
 
 	assetID := big.NewInt(888)
 	canonicalContract := common.HexToAddress("0x1111222233334444555566667777888899990000")
@@ -59,57 +79,36 @@ func TestP6_1_AssetRegistrationAndGovernanceSecurity(t *testing.T) {
 	}
 	payloadBytes, _ := json.Marshal(assetPayload)
 
-	// Step 1: Unauthorized registration without Governance -> MUST FAIL
-	unauthProposal := &GovernanceProposal{
-		Kind:     ProposalRegisterAsset,
-		Payload:  payloadBytes,
-		Executed: false, // Not approved / not executed
-	}
-	_, errUnauth := engine.RegisterAssetOnRootAnchor(unauthProposal, big.NewInt(1_000_000))
-	assert.ErrorIs(t, errUnauth, ErrUnauthorizedRegistration, "Direct unapproved asset registration must be blocked")
+	// Step 1: Registration with an empty/invalid cert -> MUST FAIL (2026-09-04: replaces the old
+	// "unapproved governance proposal" rejection -- same intent, different mechanism).
+	_, errUnauth := engine.RegisterAssetOnRootAnchor(payloadBytes, big.NewInt(1_000_000), QuorumCert{})
+	assert.ErrorIs(t, errUnauth, ErrUnauthorizedRegistration, "registration with no real cert must be blocked")
 
-	// Step 2: Propose on Governance
-	now := uint64(time.Now().Unix())
-	propID, err := gov.Propose(ProposalRegisterAsset, payloadBytes, now)
-	require.NoError(t, err)
+	// Step 2: Registration with a cert forged by someone who is NOT a member of chain 101's real
+	// committee -> MUST FAIL.
+	rogueKP := bls.GenerateKeyPair()
+	forgedDigest := ComputeRegisterAssetMessage(assetID, 101, canonicalContract)
+	forgedSig := bls.Sign(rogueKP.PrivateKey(), forgedDigest)
+	forgedCert := QuorumCert{Epoch: 1, AggregateSignature: forgedSig.Bytes(), SignerBitmap: []byte{0x01}}
+	_, errForged := engine.RegisterAssetOnRootAnchor(payloadBytes, big.NewInt(1_000_000), forgedCert)
+	assert.Error(t, errForged, "a cert not actually signed by chain 101's own committee must be rejected")
 
-	// Step 3: Vote (Need >= 3 of 4 active chains for 2/3 quorum)
-	_, err = gov.Vote(propID, 101, now)
-	require.NoError(t, err)
-	_, err = gov.Vote(propID, 102, now)
-	require.NoError(t, err)
-	status, err := gov.Vote(propID, 103, now)
-	require.NoError(t, err)
-	assert.Equal(t, ProposalStatusTimelocked, status)
-
-	// Step 4: Execute before 72h timelock -> MUST FAIL
-	_, errEarly := gov.Execute(propID, now+3600)
-	assert.ErrorIs(t, errEarly, ErrTimelockNotExpired)
-
-	// Step 5: Execute after 72h timelock -> MUST SUCCEED
-	executedProp, err := gov.Execute(propID, now+72*3600+1)
-	require.NoError(t, err)
-	require.True(t, executedProp.Executed)
-
-	// Step 6: Register asset on Root Anchor
-	registeredEntry, err := engine.RegisterAssetOnRootAnchor(executedProp, big.NewInt(1_000_000))
+	// Step 3: Registration with a real cert from chain 101's own committee -> MUST SUCCEED.
+	cert := signRegisterAssetCert(kp101, assetPayload)
+	registeredEntry, err := engine.RegisterAssetOnRootAnchor(payloadBytes, big.NewInt(1_000_000), cert)
 	require.NoError(t, err)
 	assert.Equal(t, assetID, registeredEntry.AssetID)
 	assert.True(t, registeredEntry.Active)
 
-	// Step 7: Fraud attempt - Chain 104 tries to claim an unowned home chain -> BLOCKED
+	// Step 4: Fraud attempt - claiming an unowned/unregistered home chain -> BLOCKED (fails on
+	// the home-chain-exists check before cert verification is even reached).
 	fraudPayload := AssetEntry{
 		AssetID:           big.NewInt(999),
 		HomeChainID:       999, // Unregistered chain
 		CanonicalContract: canonicalContract,
 	}
 	fraudBytes, _ := json.Marshal(fraudPayload)
-	fraudProp := &GovernanceProposal{
-		Kind:     ProposalRegisterAsset,
-		Payload:  fraudBytes,
-		Executed: true,
-	}
-	_, errFraud := engine.RegisterAssetOnRootAnchor(fraudProp, big.NewInt(500_000))
+	_, errFraud := engine.RegisterAssetOnRootAnchor(fraudBytes, big.NewInt(500_000), QuorumCert{})
 	assert.ErrorIs(t, errFraud, ErrInvalidHomeChain, "Registration claiming unregistered home chain must be rejected")
 }
 
@@ -117,7 +116,7 @@ func TestP6_1_AssetRegistrationAndGovernanceSecurity(t *testing.T) {
 // TEST P6.2: Multi-Asset Lock & Mint Lifecycle & Exact Conservation (DoD)
 // ──────────────────────────────────────────────────────────────────────────────
 func TestP6_2_MultiAssetLockMintLifecycleAndExactConservation(t *testing.T) {
-	engine, _, _ := setupTestAssetRegistry()
+	engine, kp101, _ := setupTestAssetRegistry()
 
 	assetID := big.NewInt(777)
 	totalSupply := big.NewInt(1_000_000)
@@ -132,12 +131,8 @@ func TestP6_2_MultiAssetLockMintLifecycleAndExactConservation(t *testing.T) {
 		},
 	}
 	entryBytes, _ := json.Marshal(entry)
-	prop := &GovernanceProposal{
-		Kind:     ProposalRegisterAsset,
-		Payload:  entryBytes,
-		Executed: true,
-	}
-	_, err := engine.RegisterAssetOnRootAnchor(prop, totalSupply)
+	cert := signRegisterAssetCert(kp101, entry)
+	_, err := engine.RegisterAssetOnRootAnchor(entryBytes, totalSupply, cert)
 	require.NoError(t, err)
 
 	userA := common.HexToAddress("0xAAAA1111AAAA1111AAAA1111AAAA1111AAAA1111")
@@ -201,7 +196,7 @@ func TestP6_2_MultiAssetLockMintLifecycleAndExactConservation(t *testing.T) {
 // TEST P6.3: Fuzz Testing Asset Conservation Invariant Under 500 Random Swaps
 // ──────────────────────────────────────────────────────────────────────────────
 func TestP6_3_FuzzAssetConservationInvariant(t *testing.T) {
-	engine, _, _ := setupTestAssetRegistry()
+	engine, kp101, _ := setupTestAssetRegistry()
 
 	assetID := big.NewInt(555)
 	totalSupply := big.NewInt(10_000_000)
@@ -217,12 +212,8 @@ func TestP6_3_FuzzAssetConservationInvariant(t *testing.T) {
 		},
 	}
 	entryBytes, _ := json.Marshal(entry)
-	prop := &GovernanceProposal{
-		Kind:     ProposalRegisterAsset,
-		Payload:  entryBytes,
-		Executed: true,
-	}
-	_, err := engine.RegisterAssetOnRootAnchor(prop, totalSupply)
+	cert := signRegisterAssetCert(kp101, entry)
+	_, err := engine.RegisterAssetOnRootAnchor(entryBytes, totalSupply, cert)
 	require.NoError(t, err)
 
 	chains := []uint64{101, 102, 103, 104}

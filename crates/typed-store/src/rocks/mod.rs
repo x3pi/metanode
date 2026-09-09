@@ -486,7 +486,10 @@ fn rocks_cf_from_db<'a>(
     }
 }
 
-#[derive(Debug, Default)]
+// Clone added 2026-09-09: needed by typed-store-derive's open_tables_impl to retry
+// open_cf_opts/open_cf_opts_secondary (both take this by value) on a transient same-process
+// lock conflict without consuming the caller's only copy on the first attempt.
+#[derive(Debug, Default, Clone)]
 pub struct MetricConf {
     pub db_name: String,
     pub read_sample_interval: SamplingInterval,

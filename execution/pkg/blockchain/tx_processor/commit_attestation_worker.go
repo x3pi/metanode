@@ -122,10 +122,11 @@ func (w *CommitAttestationWorker) handleCommit(ctx context.Context, sig commitSi
 		return
 	}
 
-	if err := w.submitMyShare(ctx, sig.sourceChainID, sig.epoch, sig.commitRoot); err != nil {
+	txHash, err := w.submitMyShare(ctx, sig.sourceChainID, sig.epoch, sig.commitRoot)
+	if err != nil {
 		logger.Warn("⚠️ [COMMIT ATTESTATION] could not submit share for commit %s: %v", sig.commitRoot.Hex(), err)
 	} else {
-		logger.Info("✅ [COMMIT ATTESTATION] successfully submitted share for commit %s to Root Anchor!", sig.commitRoot.Hex())
+		logger.Info("✅ [COMMIT ATTESTATION] successfully submitted share (tx=%s) for commit %s to Root Anchor!", txHash.Hex(), sig.commitRoot.Hex())
 	}
 
 	_, _ = w.PollAndAggregate(ctx, sig.sourceChainID, sig.epoch, sig.commitRoot)
@@ -133,29 +134,29 @@ func (w *CommitAttestationWorker) handleCommit(ctx context.Context, sig commitSi
 
 // SubmitMyShare signs the commit root with this validator's BLS key and submits the share to Root Anchor.
 func (w *CommitAttestationWorker) SubmitMyShare(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash) error {
-	return w.submitMyShare(ctx, sourceChainID, epoch, commitRoot)
+	_, err := w.submitMyShare(ctx, sourceChainID, epoch, commitRoot)
+	return err
 }
 
-func (w *CommitAttestationWorker) submitMyShare(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash) error {
+func (w *CommitAttestationWorker) submitMyShare(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash) (common.Hash, error) {
 	privKey, pubKey, err := w.blsKeyPair()
 	if err != nil {
-		return err
+		return common.Hash{}, err
 	}
 	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
 	sig := bls.Sign(privKey, commitMsg)
 
 	h, err := GetGatewayHandler()
 	if err != nil {
-		return err
+		return common.Hash{}, err
 	}
 	calldata, err := h.abi.Pack("submitCommitAttestation",
 		new(big.Int).SetUint64(sourceChainID), epoch, commitRoot, pubKey.Bytes(), sig.Bytes(),
 	)
 	if err != nil {
-		return fmt.Errorf("pack submitCommitAttestation: %w", err)
+		return common.Hash{}, fmt.Errorf("pack submitCommitAttestation: %w", err)
 	}
-	_, err = w.signAndSubmit(ctx, calldata)
-	return err
+	return w.signAndSubmit(ctx, calldata)
 }
 
 // PollAndAggregate polls Root Anchor for signature shares until the current committee's quorum
@@ -263,10 +264,6 @@ func (w *CommitAttestationWorker) signAndSubmit(ctx context.Context, calldata []
 	}
 	fromAddress := crypto.PubkeyToAddress(*privateKey.Public().(*ecdsa.PublicKey))
 
-	nonce, err := w.client.GetTransactionCount(ctx, fromAddress)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("fetch nonce: %w", err)
-	}
 	chainID, err := w.client.ChainID(ctx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("fetch chain id: %w", err)
@@ -275,14 +272,41 @@ func (w *CommitAttestationWorker) signAndSubmit(ctx context.Context, calldata []
 	const gasLimit = uint64(500_000)
 	gasPrice := big.NewInt(20_000_000_000)
 
-	tx := ethtypes.NewTransaction(nonce, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), gasLimit, gasPrice, calldata)
-	signedTx, err := ethtypes.SignTx(tx, ethtypes.NewEIP155Signer(chainID), privateKey)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("sign transaction: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		select {
+		case <-ctx.Done():
+			return common.Hash{}, ctx.Err()
+		default:
+		}
+
+		if attempt > 0 {
+			// Backoff with jitter to resolve mempool nonce race between concurrent validator nodes
+			jitterMs := 300 + (time.Now().UnixNano() % 400)
+			time.Sleep(time.Duration(jitterMs*int64(attempt)) * time.Millisecond)
+		}
+
+		nonce, err := w.client.GetPendingTransactionCount(ctx, fromAddress)
+		if err != nil {
+			lastErr = fmt.Errorf("fetch pending nonce: %w", err)
+			continue
+		}
+
+		tx := ethtypes.NewTransaction(nonce, mt_common.GATEWAY_CONTRACT_ADDRESS, big.NewInt(0), gasLimit, gasPrice, calldata)
+		signedTx, err := ethtypes.SignTx(tx, ethtypes.NewEIP155Signer(chainID), privateKey)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("sign transaction: %w", err)
+		}
+		rawTxBytes, err := signedTx.MarshalBinary()
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("marshal signed transaction: %w", err)
+		}
+		hash, err := w.client.SubmitTransaction(ctx, rawTxBytes)
+		if err == nil {
+			return hash, nil
+		}
+		lastErr = err
+		logger.Warn("⚠️ [COMMIT ATTESTATION] submit share attempt %d failed: %v (will retry with fresh nonce)", attempt+1, err)
 	}
-	rawTxBytes, err := signedTx.MarshalBinary()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("marshal signed transaction: %w", err)
-	}
-	return w.client.SubmitTransaction(ctx, rawTxBytes)
+	return common.Hash{}, lastErr
 }

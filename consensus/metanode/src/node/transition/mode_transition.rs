@@ -107,13 +107,14 @@ pub async fn transition_mode_only(
     {
         let mut cache = node.epoch_eth_addresses.write().await;
         cache.insert(epoch, eth_addresses);
-        
+
         // Keep only last 2 epochs to prevent unbounded growth
         if cache.len() > 2 {
             let min_keep = epoch.saturating_sub(1);
             cache.retain(|&e, _| e >= min_keep);
         }
     }
+    node.epoch_eth_addresses_notify.notify_waiters();
 
     info!(
         "✅ [MODE TRANSITION] Got UNIFIED committee+timestamp from Go: epoch={}, timestamp={} ms",
@@ -293,6 +294,7 @@ pub async fn transition_mode_only(
     processor = processor
         .with_storage_path(node.storage_path.clone())
         .with_epoch_eth_addresses(node.epoch_eth_addresses.clone())
+        .with_epoch_eth_addresses_notify(node.epoch_eth_addresses_notify.clone())
         .with_committed_transaction_hashes(node.committed_transaction_hashes.clone());
 
     if let Some(ref tx_recycler) = node.tx_recycler {

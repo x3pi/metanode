@@ -4,9 +4,9 @@ import (
 	"crypto/rand"
 	"math/big"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/bls"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,31 +63,21 @@ func TestP8_1_CompleteChainDeathRecoveryLifecycle(t *testing.T) {
 	}
 
 	// 2. Simulate Chain 101 Permanent Death (Liveness Failure)
-	// Execute Governance Proposal: DeclareDead(101)
-	activeChains := []uint64{101, 102, 103, 991} // 4 active founding chains
-	govEngine := NewGovernanceEngineWithTimelock(activeChains, 72*3600)
+	// Declare Dead(101), authorized by RecoveryCommittee (2026-09-04, replacing the old
+	// propose/vote/72h-timelock/executeProposal governance dance -- see
+	// GatewayEngine.DeclareChainDeadWithCert's own doc comment).
+	recoveryKP := bls.GenerateKeyPair()
+	recoveryPop := PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
+	gateway.RecoveryCommittee = []ValidatorEntry{
+		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
+	}
 
-	proposalPayload := []byte{101}
-	now := uint64(time.Now().Unix())
+	digest := ComputeDeclareChainDeadMessage(deadChainID)
+	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
+	cert := QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
 
-	proposalID, err := govEngine.Propose(ProposalDeclareChainDead, proposalPayload, now)
-	require.NoError(t, err)
-
-	// 3 out of 4 chains vote FOR (3/4 = 75% >= 66.7% Quorum)
-	st1, _ := govEngine.Vote(proposalID, 102, now+10)
-	st2, _ := govEngine.Vote(proposalID, 103, now+20)
-	st3, _ := govEngine.Vote(proposalID, 991, now+30)
-	assert.Equal(t, ProposalStatusActive, st1)
-	assert.Equal(t, ProposalStatusActive, st2)
-	assert.Equal(t, ProposalStatusTimelocked, st3, "Reached >= 2/3 threshold -> Timelocked status")
-
-	// Timelock passes (+72h) -> Execute Declare Dead
-	_, errExec := govEngine.Execute(proposalID, now+30+72*3600+1)
+	errExec := gateway.DeclareChainDeadWithCert(deadChainID, cert)
 	require.NoError(t, errExec)
-	assert.Equal(t, ProposalStatusExecuted, govEngine.ProposalStatus[proposalID])
-
-	// Transition Gateway state
-	gateway.DeadChains[deadChainID] = true
 	assert.True(t, gateway.DeadChains[deadChainID])
 
 	// 3. Alice & Bob submit proofs and Claim their funds

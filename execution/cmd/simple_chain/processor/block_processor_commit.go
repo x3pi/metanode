@@ -96,9 +96,6 @@ func (bp *BlockProcessor) commitWorker() {
 		if _, err := bp.chainState.CommitBlockState(job.Block, blockchain.WithPersistToDB(), blockchain.WithSaveTxMapping(), blockchain.WithCommitMappings()); err != nil {
 			logger.Error("commitWorker: CommitBlockState failed for block #%d: %v", blockNum, err)
 		} else {
-			if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
-				bp.transactionProcessor.ClearNoncesCache()
-			}
 			// Flush NOMT payloads asynchronously now that the block is safely written to block database (PebbleDB)
 			if job.AccountNomtPayload != nil {
 				if payload, ok := job.AccountNomtPayload.(interface{ CommitAsync() }); ok {
@@ -109,6 +106,39 @@ func (bp *BlockProcessor) commitWorker() {
 				if payload, ok := job.StakeNomtPayload.(interface{ CommitAsync() }); ok {
 					payload.CommitAsync()
 				}
+			}
+			// NOTE (investigated at length 2026-09-02, measuring sustained
+			// real-transfer throughput): ClearNoncesCache() wipes noncesCache
+			// to empty on every commit, forcing the next mempool tick to
+			// re-fetch expected nonces from AccountStateReadOnly. That read
+			// hits the NOMT account-state trie, which the CommitAsync() calls
+			// above only *trigger* -- they don't wait for the underlying
+			// write to land -- so a re-fetch racing a commit still in flight
+			// can read the trie before this block's nonce changes were
+			// applied to it, caching a STALE (pre-this-block) expected
+			// nonce. This is a real, narrow race, traced live via
+			// METANODE_TX_TRACE, but every fix attempted for it this session
+			// made things WORSE, not better (see ProcessTransactionsInPoolSub's
+			// matching comment for the full history: reordering this clear
+			// after CommitAsync() narrowed but didn't close the window;
+			// removing the clear regressed a 1M-tx live test to ~50%
+			// confirmed; layering a never-cleared "floor" on top of that
+			// regressed further, because the true source of the bad
+			// cache-advance turned out to be a *different* bug entirely --
+			// ProcessTransactionsInPoolSub optimistically advancing nonces
+			// for validated transactions the caller then truncates and
+			// re-queues, not this clear). Left as a known, bounded
+			// limitation: the "future" transactions this race strands
+			// self-correct via FutureTxTimeout's requeue-and-retry path
+			// within, at worst, one more commit cycle, rather than being
+			// stuck forever. Do not remove or further narrow this call
+			// without also fixing the truncation-vs-cache-advance ordering
+			// bug described there; on its own this clear is what keeps
+			// noncesCache honest for the common case, including for
+			// multi-validator clusters where a committed block can contain
+			// transactions this node's own mempool never validated.
+			if bp.transactionProcessor != nil && bp.transactionProcessor.TxValidatorPool != nil {
+				bp.transactionProcessor.ClearNoncesCache()
 			}
 
 			// Remove from pending store now that it is fully committed

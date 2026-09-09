@@ -78,6 +78,9 @@ func ExecuteNonceAndFinalize(
 	}
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	if sm := chainState.GetStorageManager(); sm != nil {
+		_ = sm.CommitDeviceKey(tx.Hash())
+	}
 	return exRs, nil
 }
 
@@ -161,5 +164,8 @@ func HandleSuccessTxWithExRs(
 	)
 	chainState.GetAccountStateDB().SetLastHash(tx.FromAddress(), tx.Hash())
 	chainState.GetAccountStateDB().SetNewDeviceKey(tx.FromAddress(), tx.NewDeviceKey())
+	if sm := chainState.GetStorageManager(); sm != nil {
+		_ = sm.CommitDeviceKey(tx.Hash())
+	}
 	return rcp, exRsFromCaller, false
 }

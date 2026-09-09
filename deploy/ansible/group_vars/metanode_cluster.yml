@@ -1,0 +1,16 @@
+---
+# Overrides for the metanode_cluster group specifically. Ansible variable precedence puts
+# "group_vars/<named-group>.yml" ABOVE "group_vars/all.yml" (found live 2026-09-04: an override
+# set as inline `vars:` inside inventory.yml's metanode_cluster block was silently shadowed by
+# group_vars/all.yml's empty default -- inline inventory group vars rank BELOW playbook
+# group_vars/all in ansible's precedence order, the opposite of what's intuitive). This file is
+# the correct place for any override that must actually win over all.yml's devnet defaults.
+
+# RecoveryCommittee (2026-09-04) -- see GatewayEngine.RecoveryCommittee's own doc comment and
+# gen_recovery_committee_keys.py's. Points at real, independent (not Root Anchor's own consensus
+# keys) public committee material -- see that file's own doc comment for the honest limitation
+# (generated on this machine, not genuinely air-gapped hardware; real production custody requires
+# an operator physically moving deploy/systemd/recovery_committee_keys/'s private material off
+# this machine). recovery_committee_public.json itself holds ONLY public material (pubkey +
+# PopSignature, no private key) and is safe to commit.
+recovery_committee_json_override_file: "{{ playbook_dir }}/recovery_committee_public.json"

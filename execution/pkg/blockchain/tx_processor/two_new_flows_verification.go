@@ -143,7 +143,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			// Even a well-funded real wallet must not help -- unconfigured fails closed regardless.
@@ -190,7 +190,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			_ = cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)) // 5,000 < 10,000 minStake
@@ -236,7 +236,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			_ = cs.GetAccountStateDB().AddBalance(caller, minStake) // exactly minStake
@@ -253,15 +253,14 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 					res.Details = fmt.Sprintf("Failed to reload GatewayEngine: %v", err)
 				} else {
 					reg, exists := reloaded.ChainRegistry[203]
-					isMember := reloaded.Governance.ActiveChains[203]
 					gatewayAs, asErr := cs.GetAccountStateDB().AccountState(mt_common.GATEWAY_CONTRACT_ADDRESS)
 					depositLocked := asErr == nil && gatewayAs != nil && gatewayAs.Balance().Cmp(minStake) == 0
-					if exists && reg.ChainID == 203 && isMember && depositLocked {
+					if exists && reg.ChainID == 203 && depositLocked {
 						res.Passed = true
-						res.Details = "Chain 203 registered into ChainRegistry & ActiveChains directly without vote; real deposit locked into GATEWAY_CONTRACT_ADDRESS"
+						res.Details = "Chain 203 registered into ChainRegistry directly without vote (GovernanceEngine/ActiveChains removed 2026-09-04); real deposit locked into GATEWAY_CONTRACT_ADDRESS"
 					} else {
 						res.Passed = false
-						res.Details = fmt.Sprintf("State mismatch: exists=%v, isMember=%v, depositLocked=%v", exists, isMember, depositLocked)
+						res.Details = fmt.Sprintf("State mismatch: exists=%v, depositLocked=%v", exists, depositLocked)
 					}
 				}
 			}
@@ -298,7 +297,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				QuorumThreshold: 6667,
 			}
 			payload, _ := json.Marshal(candidateReg)
-			calldata, _ := h.abi.Pack("registerChainViaStake", payload)
+			calldata, _ := h.abi.Pack("registerChainViaStake", payload, minStake)
 
 			caller := common.HexToAddress("0xAAAA0000AAAA0000AAAA0000AAAA0000AAAA0000")
 			// Fund the caller well past minStake so a failure here is isolated to the PoP check,

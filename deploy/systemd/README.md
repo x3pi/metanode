@@ -21,7 +21,7 @@ pip3 install web3 eth-account eth-keys --break-system-packages   # 1 lần
 
 bash setup_root_anchor.sh --clean          # 4-validator Root Anchor (chain 9099)
 bash setup_4_private_chains.sh --clean     # chain 101/102/103/104
-bash register_private_chains_t2.sh         # đăng ký chéo qua bootstrapFoundingChains()
+bash register_private_chains_t2.sh         # đăng ký chéo qua registerChainViaStake()
 bash start_relayer_daemon.sh               # RelayerDaemon tự động attest/claim
 ```
 
@@ -34,7 +34,7 @@ Dừng: `bash stop.sh` (dừng cả private chains + root anchor cũ trên máy 
 | `setup_root_anchor.sh` | Dựng cụm 4-validator Root Anchor thật | Luồng hiện tại, dùng đầu tiên |
 | `setup_4_private_chains.sh` | Dựng 4 private chain (101-104) | Luồng hiện tại |
 | `setup_2_private_chains.sh` | Dựng 2 private chain (101-102) | Biến thể nhẹ hơn cho smoke test nhanh, không dùng Root Anchor/cross-chain — không phải luồng chính |
-| `register_private_chains_t2.sh` | Đăng ký chéo 4 chain qua `bootstrapFoundingChains()` | **Dùng bản `.sh` này** |
+| `register_private_chains_t2.sh` | Đăng ký chéo 4 chain qua `registerChainViaStake()` | **Dùng bản `.sh` này** |
 | ~~`register_private_chains_t2.py`~~ | ~~Bản Python cũ, dùng `propose()`~~ | **Đã xoá (2026-08-27)** — lỗi thời từ trước khi `.sh` được sửa đúng; `propose()` không bao giờ thành công trên registry rỗng. Xem git history nếu cần tham khảo lại. |
 | `start_relayer_daemon.sh` | Chạy `cross_chain_relayer` (RelayerDaemon) | Đọc khoá từ `RELAYER_KEY` env/`-key`, KHÔNG dùng khoá devnet mặc định cho vai trò thật |
 | `gen_root_anchor_chain.py` | Sinh genesis + config N-node cho Root Anchor | Có kiểm tra port-collision tự động (xem comment `peer_rpc_port` trong file) |

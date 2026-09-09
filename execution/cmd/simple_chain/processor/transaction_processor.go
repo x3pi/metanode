@@ -386,15 +386,9 @@ func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
 			connAddr.Hex()[:10])
 	}
 
-	if tp.storageManager.GetStorageBackupDeviceKey() == nil {
-		logger.Error("❌ [DEBUG TX-DK] backupDeviceKeyStorage is nil!")
-		return fmt.Errorf("error: backupDeviceKeyStorage not set")
-	}
-
-	err = tp.backupDeviceKey(tp.storageManager.GetStorageBackupDeviceKey(), tx, transactionWithDeviceKey.DeviceKey)
-	if err != nil {
-		logger.Error("❌ [DEBUG TX-DK] backupDeviceKey failed: %v", err)
-		return fmt.Errorf("error: backupDeviceKeyStorage not set: %v", err)
+	// Lưu tạm device key vào RAM (pending) — chỉ lưu vào LevelDB khi setLastHash thành công
+	if len(transactionWithDeviceKey.DeviceKey) > 0 && tp.storageManager != nil {
+		tp.storageManager.SavePendingDeviceKey(tx.Hash(), transactionWithDeviceKey.DeviceKey)
 	}
 
 	// Enqueue to async worker pool — non-blocking
@@ -416,20 +410,8 @@ func (tp *TransactionProcessor) ProcessTransactionOnChainWithDeviceKey(
 	tx types.Transaction,
 	rawNewDeviceKey []byte,
 ) error {
-	// log
-	transactionWithDeviceKey := &pb.TransactionWithDeviceKey{
-		Transaction: tx.Proto().(*pb.Transaction),
-		DeviceKey:   rawNewDeviceKey,
-	}
-
-	tx.FromProto(transactionWithDeviceKey.Transaction)
-	if tp.storageManager.GetStorageBackupDeviceKey() == nil {
-		return fmt.Errorf("error: backupDeviceKeyStorage not set")
-	}
-
-	err := tp.backupDeviceKey(tp.storageManager.GetStorageBackupDeviceKey(), tx, transactionWithDeviceKey.DeviceKey)
-	if err != nil {
-		return fmt.Errorf("error: backupDeviceKeyStorage not set: %v", err)
+	if len(rawNewDeviceKey) > 0 && tp.storageManager != nil {
+		tp.storageManager.SavePendingDeviceKey(tx.Hash(), rawNewDeviceKey)
 	}
 
 	output, err := tp.ProcessTransactionFromRpc(tx)
@@ -446,19 +428,17 @@ func (tp *TransactionProcessor) ProcessTransactionFromRpcWithDeviceKey(
 ) ([]byte, error) {
 	tx := &transaction.Transaction{}
 	tx.FromProto(transactionWithDeviceKey.Transaction)
-	if tp.storageManager.GetStorageBackupDeviceKey() == nil {
-		return nil, fmt.Errorf("error: backupDeviceKeyStorage not set")
+
+	if len(transactionWithDeviceKey.DeviceKey) > 0 && tp.storageManager != nil {
+		tp.storageManager.SavePendingDeviceKey(tx.Hash(), transactionWithDeviceKey.DeviceKey)
 	}
-	err := tp.backupDeviceKey(tp.storageManager.GetStorageBackupDeviceKey(), tx, transactionWithDeviceKey.DeviceKey)
-	if err != nil {
-		return nil, fmt.Errorf("error: backupDeviceKeyStorage not set: %v", err)
-	}
+
 	output, err := tp.ProcessTransactionFromRpc(tx)
 	if err != nil {
 		return output, fmt.Errorf("error: %v", err)
 	}
 
-	return nil, nil
+	return output, nil
 }
 
 func (tp *TransactionProcessor) ProcessTransactionsFromClient(request network.Request) error {
@@ -577,8 +557,6 @@ func (tp *TransactionProcessor) processTransactionFromClient(
 	}
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "INJECTION_RECEIVED", fmt.Sprintf("Received from connection: %s", conn.RemoteAddrSafe()))
-
-
 
 	tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "MEMPOOL_ADD_START", "Adding transaction to mempool")
 	code, err := tp.AddTransactionToPool(tx)

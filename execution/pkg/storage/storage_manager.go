@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -93,14 +94,18 @@ type StorageManager struct {
 
 	miningService *mining.MiningService
 
+	pendingDeviceKeys sync.Map // txHash (common.Hash) -> rawDeviceKey ([]byte)
+
 	mu sync.RWMutex
 }
 
 // Khởi tạo StorageManager
 func NewStorageManager() *StorageManager {
-	return &StorageManager{
+	sm := &StorageManager{
 		storages: make(map[StorageType]Storage),
 	}
+	sm.startPendingDeviceKeyCleaner()
+	return sm
 }
 
 // InitSharedDatabase initializes a single database instance and creates PrefixStorage wrappers for all domains
@@ -233,6 +238,94 @@ func (sm *StorageManager) AddStorageBackupDeviceKey(storage Storage) error {
 
 func (sm *StorageManager) GetStorageBackupDeviceKey() Storage {
 	return sm.GetStorage(STORAGE_BACKUP_DEVICE_KEY)
+}
+
+type pendingDeviceKeyEntry struct {
+	key       []byte
+	createdAt time.Time
+}
+
+// SavePendingDeviceKey lưu tạm device key trong RAM khi nhận giao dịch vào mempool
+func (sm *StorageManager) SavePendingDeviceKey(hash common.Hash, key []byte) {
+	if sm == nil || len(key) == 0 {
+		return
+	}
+	sm.pendingDeviceKeys.Store(hash, pendingDeviceKeyEntry{
+		key:       key,
+		createdAt: time.Now(),
+	})
+}
+
+// GetPendingDeviceKey lấy device key đang chờ từ RAM
+func (sm *StorageManager) GetPendingDeviceKey(hash common.Hash) ([]byte, bool) {
+	if sm == nil {
+		return nil, false
+	}
+	if val, ok := sm.pendingDeviceKeys.Load(hash); ok {
+		if entry, ok := val.(pendingDeviceKeyEntry); ok {
+			return entry.key, true
+		}
+	}
+	return nil, false
+}
+
+// CommitDeviceKey lưu device key từ RAM vào LevelDB khi setLastHash thành công
+func (sm *StorageManager) CommitDeviceKey(hash common.Hash) error {
+	if sm == nil {
+		return nil
+	}
+	val, ok := sm.pendingDeviceKeys.LoadAndDelete(hash)
+	if !ok {
+		return nil
+	}
+	entry, ok := val.(pendingDeviceKeyEntry)
+	if !ok || len(entry.key) == 0 {
+		return nil
+	}
+	storage := sm.GetStorageBackupDeviceKey()
+	if storage == nil {
+		return errors.New("backup device key storage not available")
+	}
+	return storage.Put(hash.Bytes(), entry.key)
+}
+
+// DiscardPendingDeviceKey xóa device key khỏi RAM nếu giao dịch bị hủy/lỗi
+func (sm *StorageManager) DiscardPendingDeviceKey(hash common.Hash) {
+	if sm == nil {
+		return
+	}
+	sm.pendingDeviceKeys.Delete(hash)
+}
+
+// CleanupExpiredPendingDeviceKeys dọn dẹp các entry quá hạn không được commit khỏi RAM
+func (sm *StorageManager) CleanupExpiredPendingDeviceKeys(maxAge time.Duration) int {
+	if sm == nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	cleaned := 0
+	sm.pendingDeviceKeys.Range(func(k, v any) bool {
+		if entry, ok := v.(pendingDeviceKeyEntry); ok {
+			if entry.createdAt.Before(cutoff) {
+				sm.pendingDeviceKeys.Delete(k)
+				cleaned++
+			}
+		}
+		return true
+	})
+	return cleaned
+}
+
+// startPendingDeviceKeyCleaner chạy goroutine định kỳ dọn dẹp các pendingDeviceKey bị bỏ rơi (quá 15 phút)
+func (sm *StorageManager) startPendingDeviceKeyCleaner() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			sm.CleanupExpiredPendingDeviceKeys(15 * time.Minute)
+		}
+	}()
 }
 
 func (sm *StorageManager) AddStorageReceipt(storage Storage) error {

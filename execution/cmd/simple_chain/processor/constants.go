@@ -87,6 +87,18 @@ const (
 
 	// LowWatermark is the transaction-pool size at which normal flow resumes.
 	LowWatermark = 100000
+
+	// mempoolEvictBatchSize is how many lowest-fee transactions get removed
+	// per EvictLowestGasPrice call once the pool hits MaxMempoolSize. Each
+	// call is a full scan+sort of the entire pool (see transaction_pool.go),
+	// so it must be run infrequently relative to inflow — evicting only 100
+	// at a time under a sustained heavy-load burst meant a fresh full-pool
+	// scan on effectively every subsequent transaction, since 100 evicted
+	// was immediately backfilled by new arrivals (found 2026-09-02; see the
+	// call site's comment for the full incident). 5000 (2.5% of
+	// MaxMempoolSize) buys enough headroom that eviction has to run far less
+	// often under the same inflow rate.
+	mempoolEvictBatchSize = 5000
 )
 
 // ─── Network & Retry ────────────────────────────────────────────────────────

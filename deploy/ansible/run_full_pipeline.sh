@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  🌐 METANODE FULL PIPELINE AUTOMATION SCRIPT                                  ║
+# ║                                                                              ║
+# ║  Automates: Git Pull (Optional) -> Deploy Public Chain (Root Anchor)         ║
+# ║             -> Deploy Private Chains -> Restart Relayer -> Update IPs        ║
+# ║             -> Cross-Chain Client Test -> Run All BlockSTM Tests             ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+set -e
+
+# Màu sắc hiển thị
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Resolve absolute path even when run via symlink
+REAL_SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${REAL_SCRIPT_PATH}")" && pwd)"
+METANODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SUITE_DIR="$(cd "${METANODE_DIR}/../metanode-suite" 2>/dev/null && pwd || echo "${METANODE_DIR}/metanode-suite")"
+
+# Nạp file .env cho Telegram
+load_env_file() {
+    local env_file="$1"
+    if [ -f "$env_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "$line" ]]; then
+                continue
+            fi
+            if [[ "$line" =~ = ]]; then
+                local key=$(echo "${line%%=*}" | xargs)
+                local val=$(echo "${line#*=}" | xargs)
+                val="${val%\"}"
+                val="${val#\"}"
+                val="${val%\'}"
+                val="${val#\'}"
+                export "$key"="$val"
+            fi
+        done < "$env_file"
+    fi
+}
+
+load_env_file "${SCRIPT_DIR}/.env"
+load_env_file "${SCRIPT_DIR}/../.env"
+load_env_file "${SUITE_DIR}/scripts/.env"
+
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+
+send_telegram_notification() {
+    local message="$1"
+    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${message}" \
+            -d "parse_mode=HTML" > /dev/null 2>&1 || true
+    fi
+}
+
+CURRENT_STEP="Khởi tạo Pipeline"
+PIPELINE_START_TIME=$(date +%s)
+
+on_pipeline_error() {
+    local exit_code=$1
+    local line_no=$2
+    local server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+    local timestamp=$(date '+%H:%M:%S %d/%m/%Y')
+
+    echo -e "\n${RED}🚨 [LỖI PIPELINE KHẨN CẤP] Bước '${CURRENT_STEP}' thất bại tại dòng ${line_no} với mã lỗi ${exit_code}!${NC}"
+
+    local msg="🚨 <b>[METANODE FULL PIPELINE THẤT BẠI]</b>
+
+🌐 <b>Server:</b> <code>${server_ip}</code>
+⏰ <b>Thời gian:</b> <code>${timestamp}</code>
+📍 <b>Giai đoạn bị lỗi:</b> <code>${CURRENT_STEP}</code>
+⚠️ <b>Mã lỗi:</b> <code>${exit_code}</code> (Dòng: ${line_no})
+
+👉 <i>Vui lòng kiểm tra terminal hoặc file log liên quan để xử lý.</i>"
+    send_telegram_notification "$msg"
+}
+
+trap 'on_pipeline_error $? $LINENO' ERR
+
+DO_PULL=false
+GIT_BRANCH="dev"
+SKIP_TESTS=false
+SKIP_CROSS_CHAIN=false
+
+print_banner() {
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${MAGENTA}🚀 METANODE AUTOMATED FULL DEPLOYMENT & TEST PIPELINE${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "📁 ${BOLD}Metanode Directory:${NC}      ${METANODE_DIR}"
+    echo -e "📁 ${BOLD}Metanode Suite Directory:${NC} ${SUITE_DIR}"
+    echo -e "🌿 ${BOLD}Git Pull Option:${NC}          $( [ "$DO_PULL" = true ] && echo -e "${GREEN}Enabled (Branch: ${GIT_BRANCH})${NC}" || echo -e "${YELLOW}Disabled (Using local workspace)${NC}" )"
+    echo -e "🧪 ${BOLD}Run BlockSTM Tests:${NC}       $( [ "$SKIP_TESTS" = true ] && echo -e "${YELLOW}Skipped${NC}" || echo -e "${GREEN}Enabled (run_all_tests.sh)${NC}" )"
+    echo -e "🌉 ${BOLD}Run Cross-Chain Test:${NC}     $( [ "$SKIP_CROSS_CHAIN" = true ] && echo -e "${YELLOW}Skipped${NC}" || echo -e "${GREEN}Enabled (cross-chain/run_all_tests.sh)${NC}" )"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}\n"
+}
+
+usage() {
+    echo -e "${BOLD}Cách sử dụng:${NC} $0 [OPTIONS]"
+    echo ""
+    echo -e "${BOLD}Tùy chọn Git (Git Options):${NC}"
+    echo -e "  ${CYAN}-p, --pull${NC}                  Kéo mã nguồn mới nhất từ remote Git trước khi chạy"
+    echo -e "  ${CYAN}-b, --branch <name>${NC}         Chỉ định nhánh git để pull (mặc định: ${YELLOW}dev${NC})"
+    echo ""
+    echo -e "${BOLD}Tùy chọn kiểm thử (Test Options):${NC}"
+    echo -e "  ${CYAN}--skip-tests${NC}                Bỏ qua bước chạy bộ kiểm thử Block-STM (run_all_tests.sh)"
+    echo -e "  ${CYAN}--skip-cross-chain${NC}          Bỏ qua bước kiểm thử chuyển tiền Cross-Chain"
+    echo ""
+    echo -e "${BOLD}Trợ giúp (Help):${NC}"
+    echo -e "  ${CYAN}-h, --help${NC}                  Hiển thị menu hướng dẫn này"
+    echo ""
+    echo -e "${BOLD}Ví dụ thực thi:${NC}"
+    echo -e "  ${GREEN}$0${NC}                                    # Chạy toàn bộ pipeline từ code hiện tại trên máy"
+    echo -e "  ${GREEN}$0 --pull${NC}                             # Pull từ origin/dev về rồi deploy & chạy toàn bộ test"
+    echo -e "  ${GREEN}$0 --pull --branch=cross-chain-registry${NC} # Pull từ origin/cross-chain-registry về rồi chạy"
+    echo -e "  ${GREEN}$0 --skip-tests${NC}                       # Deploy toàn bộ, bật relayer & test cross-chain (bỏ qua BlockSTM)"
+    exit 0
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p|--pull)
+            DO_PULL=true
+            shift
+            ;;
+        -b|--branch)
+            GIT_BRANCH="$2"
+            DO_PULL=true
+            shift 2
+            ;;
+        --branch=*)
+            GIT_BRANCH="${1#*=}"
+            DO_PULL=true
+            shift
+            ;;
+        --skip-tests)
+            SKIP_TESTS=true
+            shift
+            ;;
+        --skip-cross-chain)
+            SKIP_CROSS_CHAIN=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo -e "${RED}❌ Tùy chọn không hợp lệ: $1${NC}"
+            usage
+            ;;
+    esac
+done
+
+print_banner
+
+# ==============================================================================
+# BƯỚC 0: PULL CODE TỪ GIT NẾU CÓ OPTION --pull
+# ==============================================================================
+if [ "$DO_PULL" = true ]; then
+    CURRENT_STEP="[Bước 0/6] Pull code mới nhất từ Git"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}📥 [BƯỚC 0/6] PULL CODE MỚI NHẤT TỪ GIT (Nhánh: ${GIT_BRANCH})${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    echo -e "🔄 Đang cập nhật repository Metanode (${METANODE_DIR})..."
+    cd "${METANODE_DIR}"
+    git checkout "${GIT_BRANCH}" || git checkout -b "${GIT_BRANCH}" "origin/${GIT_BRANCH}" || true
+    git pull origin "${GIT_BRANCH}"
+    echo -e "${GREEN}✅ Đã cập nhật Metanode thành công! Commit hiện tại: $(git rev-parse --short HEAD)${NC}\n"
+
+    if [ -d "${SUITE_DIR}/.git" ]; then
+        echo -e "🔄 Đang cập nhật repository Metanode Suite (${SUITE_DIR})..."
+        cd "${SUITE_DIR}"
+        git pull || true
+        echo -e "${GREEN}✅ Đã cập nhật Metanode Suite thành công!${NC}\n"
+    fi
+fi
+
+# ==============================================================================
+# BƯỚC 1: DEPLOY PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)
+# ==============================================================================
+CURRENT_STEP="[Bước 1/6] Triển khai Public Chain (Root Anchor - Chain 991)"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}🏗️  [BƯỚC 1/6] TRIỂN KHAI PUBLIC CHAIN CLUSTER (ROOT ANCHOR - CHAIN 991)${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+cd "${METANODE_DIR}/deploy/ansible"
+./ansible_deploy.sh --reset-all --open-ports
+echo -e "${GREEN}✅ Triển khai Public Chain (Root Anchor) hoàn tất!${NC}\n"
+
+# ==============================================================================
+# BƯỚC 2: DEPLOY 4 PRIVATE CHAINS (101, 102, 103, 104) & BOOTSTRAP GATEWAY
+# ==============================================================================
+CURRENT_STEP="[Bước 2/6] Triển khai Private Chains & Bootstrap Gateway"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}🌐 [BƯỚC 2/6] TRIỂN KHAI PRIVATE CHAINS & ĐĂNG KÝ DANH BẠ GATEWAY${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+cd "${METANODE_DIR}/deploy/ansible_private_chains"
+./deploy_private_chains.sh --reset-all
+echo -e "${GREEN}✅ Triển khai Private Chains & cấp hạn mức Genesis thành công!${NC}\n"
+
+# ==============================================================================
+# BƯỚC 3: KHỞI ĐỘNG LẠI CROSS-CHAIN RELAYER DAEMON
+# ==============================================================================
+CURRENT_STEP="[Bước 3/6] Khởi động lại Cross-Chain Relayer Daemon"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}🔄 [BƯỚC 3/6] KHỞI ĐỘNG LẠI CROSS-CHAIN RELAYER DAEMON TRONG TMUX${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+cd "${METANODE_DIR}/deploy/ansible_private_chains"
+./run_relayer_tmux.sh restart
+echo -e "⏳ Đợi 3 giây để Relayer kết nối WebSocket và sẵn sàng..."
+sleep 3
+echo -e "${GREEN}✅ Relayer Daemon đã hoạt động ổn định!${NC}\n"
+
+# ==============================================================================
+# BƯỚC 4: CẬP NHẬT CẤU HÌNH IP / RPC ENDPOINTS TRONG METANODE-SUITE
+# ==============================================================================
+CURRENT_STEP="[Bước 4/6] Cập nhật IP & RPC Endpoints (Update-IP)"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}⚙️  [BƯỚC 4/6] CẬP NHẬT IP & RPC ENDPOINTS CHO BỘ TEST (UPDATE-IP)${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+cd "${SUITE_DIR}/scripts/update-ip"
+./update-ip.sh
+echo -e "${GREEN}✅ Đã đồng bộ toàn bộ file cấu hình test!${NC}\n"
+
+# ==============================================================================
+# BƯỚC 5: CHẠY FULL BỘ TEST CROSS-CHAIN (CROSS-CHAIN RUN_ALL_TESTS.SH)
+# ==============================================================================
+if [ "$SKIP_CROSS_CHAIN" = false ]; then
+    CURRENT_STEP="[Bước 5/6] Chạy bộ test Cross-Chain (cross-chain/run_all_tests.sh)"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🌉 [BƯỚC 5/6] CHẠY FULL BỘ TEST CROSS-CHAIN (RUN_ALL_TESTS.SH)${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    CC_TEST_DIR="${SUITE_DIR}/test-simple/test-rpc/test-chain/cross-chain"
+    if [ -f "${CC_TEST_DIR}/run_all_tests.sh" ]; then
+        cd "${CC_TEST_DIR}"
+        chmod +x ./run_all_tests.sh
+        ./run_all_tests.sh
+    else
+        cd "${CC_TEST_DIR}/01-client-only-transfer"
+        go run main.go
+    fi
+    echo -e "${GREEN}✅ Toàn bộ bộ kiểm thử Cross-Chain đã hoàn tất xuất sắc!${NC}\n"
+else
+    echo -e "${YELLOW}⏭️  Bỏ qua Bước 5: Test Cross-Chain (--skip-cross-chain)${NC}\n"
+fi
+
+# ==============================================================================
+# BƯỚC 6: CHẠY TOÀN BỘ BỘ TEST BLOCK-STM
+# ==============================================================================
+if [ "$SKIP_TESTS" = false ]; then
+    CURRENT_STEP="[Bước 6/6] Chạy bộ kiểm thử Block-STM (test-chain/run_all_tests.sh)"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🧪 [BƯỚC 6/6] CHẠY TOÀN BỘ BỘ KIỂM THỬ BLOCK-STM (RUN_ALL_TESTS.SH)${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    cd "${SUITE_DIR}/test-simple/test-rpc/test-chain"
+    ./run_all_tests.sh
+    echo -e "${GREEN}✅ Toàn bộ bài test Block-STM đã hoàn thành!${NC}\n"
+else
+    echo -e "${YELLOW}⏭️  Bỏ qua Bước 6: Test Block-STM (--skip-tests)${NC}\n"
+fi
+
+echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}${GREEN}🎉🎉🎉 CHÚC MỪNG! TOÀN BỘ QUY TRÌNH TRIỂN KHAI VÀ KIỂM THỬ ĐÃ THÀNH CÔNG RỰC RỠ!${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════${NC}"
+
+# ==============================================================================
+# THÔNG BÁO TELEGRAM KHI TOÀN BỘ PIPELINE THÀNH CÔNG (đối xứng với
+# on_pipeline_error ở trên -- trước đây chỉ báo khi lỗi, không báo khi thành
+# công, nên không phân biệt được "đang chạy" với "đã xong tốt" từ xa)
+# ==============================================================================
+PIPELINE_END_TIME=$(date +%s)
+PIPELINE_ELAPSED=$((PIPELINE_END_TIME - PIPELINE_START_TIME))
+PIPELINE_ELAPSED_FMT="$((PIPELINE_ELAPSED / 60))m $((PIPELINE_ELAPSED % 60))s"
+SUCCESS_SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+SUCCESS_TIMESTAMP=$(date '+%H:%M:%S %d/%m/%Y')
+SUCCESS_MSG="✅ <b>[METANODE FULL PIPELINE THÀNH CÔNG]</b>
+
+🌐 <b>Server:</b> <code>${SUCCESS_SERVER_IP}</code>
+⏰ <b>Hoàn tất lúc:</b> <code>${SUCCESS_TIMESTAMP}</code>
+⏱️ <b>Tổng thời gian chạy:</b> <code>${PIPELINE_ELAPSED_FMT}</code>
+🌿 <b>Nhánh:</b> <code>${GIT_BRANCH}</code>
+🧪 <b>Test Block-STM:</b> <code>$( [ "$SKIP_TESTS" = true ] && echo "Bỏ qua" || echo "Đã chạy" )</code>
+🌉 <b>Test Cross-Chain:</b> <code>$( [ "$SKIP_CROSS_CHAIN" = true ] && echo "Bỏ qua" || echo "Đã chạy" )</code>
+
+🎉 <i>Cả 6 bước (Root Anchor, Private Chains, Relayer, Update-IP, Cross-Chain, Block-STM) đã hoàn tất không lỗi.</i>"
+send_telegram_notification "$SUCCESS_MSG"

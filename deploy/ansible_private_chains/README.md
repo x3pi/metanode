@@ -1,5 +1,7 @@
 # 🌐 Metanode Private Chains — Ansible Deployment Guide
 
+> 📘 **Tài liệu Hướng dẫn Vận hành Toàn diện:** Xem file [OPERATIONS_GUIDE.md](../../OPERATIONS_GUIDE.md) để nắm toàn bộ quy trình 4 bước chuẩn kết nối Root Anchor, Private Chains, Relayer Daemon và bộ kiểm thử E2E.
+
 Thư mục này cung cấp hệ thống tự động hóa **Ansible độc lập 100%** dành riêng cho việc triển khai, cấu hình và quản lý **Private Chains** trên nhiều máy chủ khác nhau (hoặc trên cùng 1 máy chủ phát triển).
 
 Toàn bộ các Private Chains được triển khai chuẩn hóa tại `/opt/metanode/chain-XXX` và chạy dưới quyền user hệ thống `metanode:metanode` (giống y hệt kiến trúc triển khai của Public Chain trong `deploy/ansible`).
@@ -77,13 +79,19 @@ Khi chạy với cờ `--open-ports`, script sẽ tự động tạo rule `ufw a
 ---
 
 ### 🔍 5. Xem Log & Quản Lý Systemd Trực Tiếp:
+Mỗi validator node của một chain chạy trên unit riêng, đặt tên
+`metanode-private-<chain_id>-node-<node_index>.service` (node_index bắt đầu từ 0).
+
 ```bash
-# Xem log realtime của Chain 101:
-journalctl -u metanode-private-101.service -f
+# Xem log realtime của node 0 thuộc Chain 101:
+journalctl -u metanode-private-101-node-0.service -f
 
 # Quản lý service trực tiếp qua systemctl:
-sudo systemctl status metanode-private-101.service
-sudo systemctl restart metanode-private-101.service
-sudo systemctl stop metanode-private-101.service
+sudo systemctl status metanode-private-101-node-0.service
+sudo systemctl restart metanode-private-101-node-0.service
+sudo systemctl stop metanode-private-101-node-0.service
+
+# Liệt kê tất cả unit của Chain 101 (nhiều node):
+systemctl list-units 'metanode-private-101-node-*.service'
 ```
 

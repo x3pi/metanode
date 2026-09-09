@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 import re
 import subprocess
 import json
@@ -22,6 +23,7 @@ def parse_inventory(file_path):
         return f"Error reading inventory: {e}"
 
     local_ips = get_local_ips()
+    default_user = os.environ.get('USER', 'abc')
     
     # Try parsing via PyYAML if available
     try:
@@ -42,8 +44,8 @@ def parse_inventory(file_path):
             node_map = {}
             is_synconly_map = {}
             is_rpc_map = {}
-            user_map = {}
-            pass_map = {}
+            ssh_user_map = {}
+            ssh_key_map = {}
             host_owner_map = {}
 
             for host_key, hvars in hosts.items():
@@ -54,8 +56,8 @@ def parse_inventory(file_path):
                 node_ids = hvars.get('node_ids', [])
                 synconly_nodes = hvars.get('synconly_nodes', [])
                 rpc_nodes = hvars.get('rpc_nodes', [])
-                ansible_user = hvars.get('ansible_user', global_vars.get('ansible_user', 'your_user'))
-                ansible_ssh_pass = hvars.get('ansible_ssh_pass', global_vars.get('ansible_ssh_pass', 'your_password'))
+                ansible_user = hvars.get('ansible_user', global_vars.get('ansible_user', default_user))
+                ansible_key = hvars.get('ansible_ssh_private_key_file', global_vars.get('ansible_ssh_private_key_file', ''))
 
                 # VALIDATION 1: Check if ansible_connection: local is on a non-local IP
                 if ansible_conn == 'local' and ip not in local_ips:
@@ -80,11 +82,11 @@ def parse_inventory(file_path):
                     node_map[nid] = ip
                     is_synconly_map[nid] = (nid in synconly_nodes)
                     is_rpc_map[nid] = (nid in rpc_nodes)
-                    user_map[nid] = ansible_user
-                    pass_map[nid] = ansible_ssh_pass
+                    ssh_user_map[nid] = ansible_user
+                    ssh_key_map[nid] = ansible_key
                     host_owner_map[nid] = host_key
 
-            return node_map, is_synconly_map, is_rpc_map, user_map, pass_map
+            return node_map, is_synconly_map, is_rpc_map, ssh_user_map, ssh_key_map
     except ImportError:
         pass
 
@@ -98,8 +100,8 @@ def parse_inventory(file_path):
     node_map = {}
     is_synconly_map = {}
     is_rpc_map = {}
-    user_map = {}
-    pass_map = {}
+    ssh_user_map = {}
+    ssh_key_map = {}
     host_owner_map = {}
 
     for entry in entries:
@@ -113,8 +115,8 @@ def parse_inventory(file_path):
         node_ids = []
         synconly_nodes = []
         rpc_nodes = []
-        ansible_user = "your_user"
-        ansible_ssh_pass = "your_password"
+        ansible_user = default_user
+        ansible_key = ""
 
         for line in lines[1:]:
             line = line.strip()
@@ -134,10 +136,11 @@ def parse_inventory(file_path):
                 match = re.search(r'\[(.*?)\]', line)
                 if match:
                     rpc_nodes = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
+
             elif line.startswith('ansible_user:'):
                 ansible_user = line.split(':', 1)[1].strip().strip('"').strip("'")
-            elif line.startswith('ansible_ssh_pass:'):
-                ansible_ssh_pass = line.split(':', 1)[1].strip().strip('"').strip("'")
+            elif line.startswith('ansible_ssh_private_key_file:'):
+                ansible_key = line.split(':', 1)[1].strip().strip('"').strip("'")
         
         if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
             ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ip)
@@ -166,11 +169,11 @@ def parse_inventory(file_path):
             node_map[nid] = ip
             is_synconly_map[nid] = (nid in synconly_nodes)
             is_rpc_map[nid] = (nid in rpc_nodes)
-            user_map[nid] = ansible_user
-            pass_map[nid] = ansible_ssh_pass
+            ssh_user_map[nid] = ansible_user
+            ssh_key_map[nid] = ansible_key
             host_owner_map[nid] = host_key
             
-    return node_map, is_synconly_map, is_rpc_map, user_map, pass_map
+    return node_map, is_synconly_map, is_rpc_map, ssh_user_map, ssh_key_map
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
@@ -185,13 +188,14 @@ if __name__ == '__main__':
         print(result, file=sys.stderr)
         sys.exit(1)
         
-    node_map, is_synconly_map, is_rpc_map, user_map, pass_map = result
+    node_map, is_synconly_map, is_rpc_map, ssh_user_map, ssh_key_map = result
         
     if target == 'json':
         out = {
             "nodes": {},
             "roles": {},
-            "tcp_nodes": {}
+            "tcp_nodes": {},
+            "ssh": {}
         }
         for nid, ip in node_map.items():
             key = f"m{nid}"
@@ -201,18 +205,13 @@ if __name__ == '__main__':
             out["nodes"][key] = url
             out["roles"][key] = "synconly" if is_sync else "validator"
             out["tcp_nodes"][key] = tcp
+            out["ssh"][key] = {
+                "user": ssh_user_map.get(nid, "abc"),
+                "key": ssh_key_map.get(nid, "")
+            }
         print(json.dumps(out, indent=2))
         sys.exit(0)
-        
-    if target == 'auth':
-        out = {"users": {}, "passes": {}}
-        for nid, ip in node_map.items():
-            key = f"m{nid}"
-            out["users"][key] = user_map.get(nid, "your_user")
-            out["passes"][key] = pass_map.get(nid, "your_password")
-        print(json.dumps(out))
-        sys.exit(0)
-        
+
     if target == 'roles':
         out = []
         for nid in sorted(node_map.keys()):

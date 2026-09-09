@@ -115,9 +115,10 @@ def derive_min_pk_pubkey(secret_hex: str) -> str:
         sys.exit(1)
     return result.stdout.strip()
 
-def derive_devnet_submitter_account(chain_id: int):
+def derive_devnet_submitter_account(chain_id: int, node_index: int = 0):
     """Deterministically derive a devnet-only secp256k1 keypair for the
-    CommitAttestationWorker "submitter" account of a given private chain ID.
+    CommitAttestationWorker "submitter" account of a given private chain ID and
+    node index.
 
     Root Anchor's genesis is generated BEFORE the private chains it will later
     register (gen_root_anchor_chain.py runs first in setup_root_anchor.sh, then
@@ -129,22 +130,32 @@ def derive_devnet_submitter_account(chain_id: int):
     needs a registered BLS pubkey" gate documented next to gateway_bls_key
     below), permanently blocking Milestone F's real BLS-share submission.
 
-    Fix: derive the key deterministically from the chain ID alone (sha256 of a
-    fixed seed string), so BOTH this script (at Root Anchor genesis time) and
-    setup_4_private_chains.sh (at private-chain genesis time) can independently
-    compute the *same* keypair for a given chain ID with zero data-passing
-    between the two scripts, and pre-register its address here with the same
-    shared devnet BLS pubkey already used for the "known dev account" below.
+    Fix: derive the key deterministically from (chain ID, node index), so BOTH
+    this script (at Root Anchor genesis time) and setup_4_private_chains.sh (at
+    private-chain genesis time) can independently compute the *same* keypair
+    for a given chain ID/node with zero data-passing between the two scripts,
+    and pre-register its address here with the same shared devnet BLS pubkey
+    already used for the "known dev account" below. node_index distinguishes
+    each validator node of a multi-validator private chain so they don't all
+    submit attestations from the same account/nonce sequence.
 
     DEVNET ONLY. This key is derivable by anyone who reads this source file --
     never use it to hold real value. Production deployments must generate a
-    real, secret, per-chain submitter key and register it on Root Anchor
-    (a real registration transaction/process, not a hardcoded genesis alloc).
+    real, secret, per-chain, per-node submitter key and register it on Root
+    Anchor (a real registration transaction/process, not a hardcoded genesis
+    alloc).
     """
-    from eth_account import Account
-    seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    if node_index == 0:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}".encode()
+    else:
+        seed = f"metanode-devnet-submitter-chain-{chain_id}-node-{node_index}".encode()
     priv_hex = hashlib.sha256(seed).hexdigest()
-    address = Account.from_key(priv_hex).address
+    try:
+        from eth_account import Account
+        address = Account.from_key(priv_hex).address
+    except ImportError:
+        import eth_keys
+        address = eth_keys.keys.PrivateKey(bytes.fromhex(priv_hex)).public_key.to_checksum_address()
     return priv_hex, address
 
 # Devnet-only fallback -- see note/security_variables_reference.md mục 3.1. Kept as the
@@ -182,6 +193,7 @@ def main():
     parser.add_argument("--port-offset", type=int, default=0, help="Port offset")
     parser.add_argument("--gateway-bls-key", type=str, default=None, help="Explicit BLS secret (hex) for gateway_bls_key (Private Gateway signing). Default: shared devnet-only key -- pass this or --random-gateway-bls-key for any real deployment.")
     parser.add_argument("--random-gateway-bls-key", action="store_true", help="Generate a fresh, independent gateway_bls_key per node instead of the shared devnet default. Recommended for any real deployment; does nothing to existing devnet/smoke-test flows unless passed explicitly.")
+    parser.add_argument("--max-nodes-per-founding-chain", type=int, default=10, help="Number of devnet submitter accounts (node index 0..N-1) to pre-register in Root Anchor's genesis for EACH founding chain (default: 10). This script has no visibility into how many validator nodes a founding private chain actually runs -- if a founding chain has more validators than this, the extra nodes' CommitAttestationWorker will silently hit the same 'no BLS public key registered' rejection this flag exists to prevent. Raise it to at least that chain's validator count.")
     args = parser.parse_args()
 
     ip_address = "127.0.0.1"
@@ -337,16 +349,17 @@ def main():
     # txs to Root Anchor from this account, and Root Anchor rejects txs from
     # any account with no BLS pubkey registered on its own chain).
     for founding_chain_id in founding_chains:
-        _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id)
-        alloc_list.append({
-            "address": submitter_address,
-            "balance": "1000000000000000000000000",
-            "pending_balance": "0",
-            "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
-        })
-        print(f"  🔑 Pre-registered devnet submitter account for chain {founding_chain_id}: {submitter_address}")
+        for node_idx in range(args.max_nodes_per_founding_chain):
+            _submitter_priv, submitter_address = derive_devnet_submitter_account(founding_chain_id, node_idx)
+            alloc_list.append({
+                "address": submitter_address,
+                "balance": "1000000000000000000000000",
+                "pending_balance": "0",
+                "last_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "device_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "publicKeyBls": "0x86d5de6f7c9c13cc0d959a553cc0e4853ba5faae45a28da9bddc8ef8e104eb5d3dece8dfaa24f11b4243ec27537e3184"
+            })
+            print(f"  🔑 Pre-registered devnet submitter account for chain {founding_chain_id} node {node_idx}: {submitter_address}")
 
     genesis_data = {
         "config": {
@@ -416,14 +429,29 @@ def main():
             "transaction_block_number_last_hash_path": "/transaction_block_number_last_hash",
             "block_hash_to_number_db_root_path": "/block_hash_to_number_db_root_path",
             "free_fee_addresses": [
-                "55798165960a62cED34a0d86e36B1758D1303907"
+                "55798165960a62cED34a0d86e36B1758D1303907",
+                # Shared cross-chain RELAYER devnet identity (same address gen_single_chain.py
+                # pre-registers/pre-funds on every private chain -- see that script's own comment
+                # on why: "no BLS public key registered on-chain" broke every relay attempt
+                # without it). Root Anchor never funded this address with real balance the way
+                # private chains do, so the relayer's own attestCommit/claimMessage transactions
+                # TO Root Anchor had no gas -- found 2026-09-04 via a real run_full_pipeline.sh
+                # run: cross_chain_relayer fell back to reusing register_chains' OWN
+                # submitter_key (same account, independently-tracked nonces), causing a real
+                # nonce collision that permanently orphaned a relayer transaction the moment both
+                # tools ran within a few seconds of each other. Fixed at the root by giving the
+                # relayer daemon this dedicated identity instead (see cross_chain_relayer/main.go
+                # and deploy_private_chains.sh's gateway_register.json "relayer_key" field) --
+                # gas-exempt here rather than funded, matching the same principle used for
+                # deterministic-genesis mode's infra addresses (gas is infrastructure plumbing,
+                # not circulating supply).
+                "7d8bfbaba9268b59bab9ef8ff3f314d3f5747366"
             ],
             "cross_chain": {
                 "config_contract": "0x4c1c27b3147820915431554F2B2383175FAAd198",
                 "reserve_chain_id": args.chain_id,
-                # DEVNET/TESTING ONLY -- see the matching field in gen_single_chain.py for the
-                # full rationale. NEVER set this on a real deployment.
-                "devnet_governance_timelock_seconds_override": 10
+                # devnet_governance_timelock_seconds_override removed 2026-09-04: dead config,
+                # GovernanceEngine (the only thing that ever read it) was deleted the same day.
             },
             "meta_node_rpc_address": f"{ip_address}:{11100 + args.port_offset + node_id}",
             "connection_address": f"0.0.0.0:{14200 + args.port_offset + node_id}",

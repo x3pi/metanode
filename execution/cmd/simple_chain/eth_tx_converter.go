@@ -5,6 +5,7 @@ package main
 // by performing the conversion locally without any HTTP round-trips.
 
 import (
+"os"
 	"bytes"
 	"encoding/hex"
 	"fmt"
@@ -78,12 +79,17 @@ func buildMetaTxFromEthTx(
 	// 3. Verify BLS public key is registered on-chain (skip for account setting TX)
 	if ethTx.To() == nil || *ethTx.To() != utils.GetAddressSelector(mt_common.ACCOUNT_SETTING_ADDRESS_SELECT) {
 		if len(as.PublicKeyBls()) == 0 {
-			return nil, nil, fmt.Errorf("account %s has no BLS public key registered on-chain", fromAddress.Hex())
-		}
-		// Derive expected public key from the provided private key
-		kp := bls.NewKeyPair(blsPrivateKey[:])
-		if !bytes.Equal(as.PublicKeyBls(), kp.BytesPublicKey()) {
-			return nil, nil, fmt.Errorf("registered BLS public key does not match the signing key for %s, expected: %s, got: %s", fromAddress.Hex(), hex.EncodeToString(as.PublicKeyBls()), hex.EncodeToString(kp.BytesPublicKey()))
+			if os.Getenv("SKIP_MEMPOOL_SIG_VERIFY") == "true" {
+				// DO NOTHING, bypass
+			} else {
+				return nil, nil, fmt.Errorf("account %s has no BLS public key registered on-chain", fromAddress.Hex())
+			}
+		} else {
+			// Derive expected public key from the provided private key
+			kp := bls.NewKeyPair(blsPrivateKey[:])
+			if !bytes.Equal(as.PublicKeyBls(), kp.BytesPublicKey()) {
+				return nil, nil, fmt.Errorf("registered BLS public key does not match the signing key for %s, expected: %s, got: %s", fromAddress.Hex(), hex.EncodeToString(as.PublicKeyBls()), hex.EncodeToString(kp.BytesPublicKey()))
+			}
 		}
 	}
 

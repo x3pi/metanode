@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -22,6 +23,12 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
+
+// ffiTraceEnabled gates the [FFI-TRACE] diagnostics added while profiling the
+// Rust<->Go block-delivery round trip (see executor/ffi_bridge.go's
+// same-named flag for the full rationale: opt-in via METANODE_FFI_TRACE=true,
+// off by default since these are logger.Warn firing on every block).
+var ffiTraceEnabled = os.Getenv("METANODE_FFI_TRACE") == "true"
 
 // SpeculativeResult holds the result of a speculative EVM execution
 type SpeculativeResult struct {
@@ -87,6 +94,7 @@ func NewSpeculativeExecutor(bp *BlockProcessor) *SpeculativeExecutor {
 // and this returns immediately.
 func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock, lastBlockHeader types.BlockHeader, authRespCh chan<- *pb.ExecuteBlockResponse) {
 	gei := epochData.GetGlobalExecIndex()
+	tDispatch := time.Now().UnixNano() // [FFI-TRACE] dequeued from authQueue by processRustEpochData
 
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &inFlightSession{respCh: authRespCh, cancel: cancel}
@@ -179,6 +187,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 	se.concurrencySem <- struct{}{} // Acquire concurrency slot
 	se.activeWorkers.Add(1)
 	go func() {
+		tGoroutineStart := time.Now().UnixNano() // [FFI-TRACE] past the semaphore + goroutine-scheduling delay
 		defer func() {
 			se.activeWorkers.Add(-1)
 			<-se.concurrencySem // Release concurrency slot
@@ -249,7 +258,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		// We no longer skip empty blocks. They will be executed and created to ensure 100% fork-safety and sequential block progression.
 
 		// 5. Clone chainState
+		tBeforeClone := time.Now().UnixNano()
 		csCopy, err := se.bp.chainState.CloneSpeculative(lastBlockHeader)
+		tAfterClone := time.Now().UnixNano()
 		if err != nil {
 			logger.Error("❌ [SPECULATIVE] Failed to clone ChainState for GEI=%d: %v", gei, err)
 			session.mu.Lock()
@@ -288,7 +299,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 				Tx:    tx,
 			})
 		}
+		tBeforeGroup := time.Now().UnixNano()
 		groupedGroups := grouptxns.GroupTransactionsDeterministic(items, csCopy.HasCode)
+		tAfterGroup := time.Now().UnixNano()
 
 		// (Wait for preload removed)
 
@@ -297,6 +310,10 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		accumulatedResults, execErr := tx_processor.ProcessTransactions(ctx, csCopy, groupedGroups, false, true, blockTimeSec, leaderAddr, blockNum, true)
 		execDuration := time.Since(startTime)
 		pipeline.GlobalBlockTraceStore.AddConsensusAndExecTime(blockNum, len(accumulatedResults.Transactions), 0, execDuration.Microseconds())
+		if ffiTraceEnabled {
+			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_SPEC goroutine_sched_ns=%d prepare_tx_ns=%d clone_ns=%d group_ns=%d exec_ns=%d",
+				gei, tGoroutineStart-tDispatch, tBeforeClone-tGoroutineStart, tAfterClone-tBeforeClone, tAfterGroup-tBeforeGroup, execDuration.Nanoseconds())
+		}
 
 		if ctx.Err() != nil {
 			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) execution was cancelled (aborted by Sync/Consensus). Discarding state.", gei, blockNum)
@@ -377,6 +394,9 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		}
 
 		se.activeSessions.Store(gei, res)
+		if ffiTraceEnabled {
+			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_PUSHED_TO_COMMITTER t_ns=%d", gei, time.Now().UnixNano())
+		}
 		se.resultChan <- res
 	}()
 }
@@ -423,6 +443,41 @@ func (se *SpeculativeExecutor) WaitForInFlight(timeout time.Duration) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// AbortAllSpeculative forcefully cancels all in-flight speculative execution workers
+// and aborts all completed speculative sessions currently waiting in activeSessions.
+// It closes and aborts all cloned NOMT sessions immediately, resetting NOMT activeCount to 0
+// and sending rescue responses to unblock any waiting Rust FFI channels.
+func (se *SpeculativeExecutor) AbortAllSpeculative() {
+	// 1. Cancel in-flight EVM worker contexts and wait for them to exit
+	se.CancelInFlight()
+	se.WaitForInFlight(200 * time.Millisecond)
+
+	// 2. Discard and abort all FinishedSessions in activeSessions
+	se.activeSessions.Range(func(key, value interface{}) bool {
+		gei := key.(uint64)
+		if res, ok := value.(*SpeculativeResult); ok && res != nil {
+			if res.ClonedState != nil {
+				res.ClonedState.CloseSpeculative()
+			}
+			if res.AuthRespCh != nil {
+				select {
+				case res.AuthRespCh <- &pb.ExecuteBlockResponse{
+					Success:      true, // Treat as success so Rust proceeds
+					ActualGei:    res.GEI,
+					BlockNumber:  res.BlockNum,
+					GeisConsumed: 0,
+				}:
+					logger.Info("✅ [AbortAllSpeculative] Sent rescue response for GEI=%d", res.GEI)
+				default:
+				}
+			}
+		}
+		se.activeSessions.Delete(gei)
+		se.inFlight.Delete(gei)
+		return true
+	})
 }
 
 // CleanGEI cleans speculative results older than or equal to a target GEI.
@@ -557,6 +612,9 @@ func (bp *BlockProcessor) StartCommitterLoop() {
 
 // commitSpeculativeResult commits a single speculative execution result
 func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLogger *loggerfile.FileLogger) (commitErr error) {
+	if ffiTraceEnabled {
+		logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DEQUEUED t_ns=%d", res.GEI, time.Now().UnixNano())
+	}
 	// Check if already committed by P2P Sync
 	lastGEI := storage.GetLastGlobalExecIndex()
 	if res.GEI <= lastGEI {
@@ -580,6 +638,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 
 	// Defer sending authoritative execution response back to Rust
 	defer func() {
+		if ffiTraceEnabled {
+			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_COMMIT_DONE t_ns=%d", res.GEI, time.Now().UnixNano())
+		}
 		if res.AuthRespCh != nil {
 			if commitErr != nil {
 				res.AuthRespCh <- &pb.ExecuteBlockResponse{
@@ -609,6 +670,9 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	var hasConflict bool
 	if lastBlock == nil {
 		hasConflict = false // Genesis
+	} else if res.ClonedState == nil && len(res.Txs) > 0 {
+		logger.Warn("⚠️ [COMMITTER] Speculative ClonedState is nil for GEI=%d (aborted/closed by Sync). Re-executing sequentially.", res.GEI)
+		hasConflict = true
 	} else if res.ClonedState == nil {
 		hasConflict = false // Empty block, no speculative state, no conflict
 	} else {
@@ -676,7 +740,7 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 		bp.chainState.SetAccountStateDB(csCopy.GetAccountStateDB())
 		bp.chainState.SetSmartContractDB(csCopy.GetSmartContractDB())
 		bp.chainState.SetStakeStateDB(csCopy.GetStakeStateDB())
-	} else if len(res.Txs) > 0 {
+	} else if len(res.Txs) > 0 && res.ClonedState != nil {
 		// Không conflict -> Sử dụng speculative results và database đã thực thi sẵn
 		accumulatedResults = res.ProcessResult
 

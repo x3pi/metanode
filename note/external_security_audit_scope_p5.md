@@ -12,9 +12,15 @@ những gì 2 review nội bộ (nhiều đợt, tổng ~10 bug tìm+sửa) đã
 
 **Trong phạm vi — bề mặt tấn công thật, custody giá trị thật:**
 - `execution/pkg/cross_chain/` toàn bộ: `gateway.go` (attestCommit/claimMessage/outbound/
-  refund/verifyAndExecute/claimDeadChainBalance/governance), `types.go`
-  (`GlobalSupplyLedger`), `governance.go`, `asset_registry.go`, `relayer.go`,
-  `chain_death_recovery` (nếu có file riêng), `rootanchor/`.
+  refund/verifyAndExecute/claimDeadChainBalance/registerChainViaStake/
+  allocateSupplyWithCert/transferAllocationWithCert/declareChainDeadWithCert/
+  unregisterChainWithCert/updateCommitteeWithRecoveryCert), `types.go`
+  (`GlobalSupplyLedger`), `epoch_sync.go` (domain-separated digest functions cho từng hàm
+  cert-authorized ở trên), `asset_registry.go`, `relayer.go`, `chain_death_recovery` (nếu có
+  file riêng), `rootanchor/`. (`governance.go` — toàn bộ `GovernanceEngine`
+  propose/vote/timelock/execute — đã bị xoá hẳn 2026-09-04, không còn tồn tại trong repo;
+  thay bằng mô hình tự-ký/RecoveryCommittee ở trên, xem
+  `note/eurozone_unified_native_coin_plan.md`.)
 - `execution/pkg/blockchain/tx_processor/gateway_handler.go` — lớp ABI-dispatch, ranh giới
   tin cậy thật giữa calldata bên ngoài và các hàm `GatewayEngine` phía trên (đây là nơi 2/10
   bug của đợt review 2026-08-25 nằm: `msg.sender` sai khi gọi EVM nội bộ, và
@@ -25,8 +31,17 @@ những gì 2 review nội bộ (nhiều đợt, tổng ~10 bug tìm+sửa) đã
 - Merkle proof construction/verify (`BuildCommitTree`, `VerifyMerkleProof`,
   `AggregateValueLeaf`) — đặc biệt điểm rủi ro #20 mục 2.3.1 kiến trúc doc (aggregateAmount tự
   khai phải được ràng buộc mật mã vào commit, không phải số caller tự nói).
-- `deploy/systemd/runbook_root_anchor_genesis_ceremony.md` + cơ chế
-  `bootstrapFoundingChains`/`GenesisCoordinator` — quy trình con người + code cùng lúc.
+- `deploy/systemd/runbook_root_anchor_genesis_ceremony.md` — vẫn còn dùng, nhưng chỉ cho
+  genesis CONSENSUS (Rust); `bootstrapFoundingChains`/`GenesisCoordinator` (cơ chế
+  ChainRegistry-bootstrap cũ mà tài liệu ceremony này từng dẫn tới) đã bị xoá hẳn 2026-08-28 —
+  đăng ký ChainRegistry giờ chỉ còn `registerChainViaStake`, xem file trên.
+- `deploy/systemd/gen_recovery_committee_keys.py` + `inject_recovery_committee.py` +
+  `deploy/ansible/roles/local_build/tasks/main.yml` — quy trình sinh/tiêm `RecoveryCommittee`
+  (2026-09-04, thay cho `GovernanceEngine`). Trọng tâm audit: khoá RecoveryCommittee KHÔNG
+  được trùng với khoá consensus/validator của bất kỳ chain nào (tập trung quyền lực — phát
+  hiện + vá cùng ngày, xem `note/eurozone_unified_native_coin_plan.md`), và đường
+  `recovery_committee_json_override_file` cho production thật không để lộ private key qua
+  tooling này.
 
 **Ngoài phạm vi cho đợt P5 này** (đã audit/hardening riêng, không phải trọng tâm mới):
 - EVM/MVM core (SSTORE/CREATE2/SELFDESTRUCT/EIP-4844/7702...) — xem

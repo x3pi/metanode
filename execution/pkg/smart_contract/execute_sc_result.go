@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
@@ -247,10 +248,15 @@ func (r *ExecuteSCResult) Proto() protoreflect.ProtoMessage {
 	)
 	for k, v := range r.mapStorageChange {
 		datas := make([]*pb.StorageData, 0, len(v))
-		for k2, v2 := range v {
+		keys := make([]string, 0, len(v))
+		for k2 := range v {
+			keys = append(keys, k2)
+		}
+		sort.Strings(keys)
+		for _, k2 := range keys {
 			datas = append(datas, &pb.StorageData{
 				Key:   []byte(k2),
-				Value: v2,
+				Value: v[k2],
 			})
 		}
 		mapStorageChange[k] = &pb.StorageDatas{

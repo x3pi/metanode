@@ -209,6 +209,7 @@ impl ConsensusNode {
                 Some(config.storage_path.clone()),
             );
             client.set_go_lag_handle(system_transaction_provider.go_lag_handle());
+            client.set_go_rate_handle(system_transaction_provider.go_rate_handle());
             Arc::new(client)
         } else {
             Arc::new(ExecutorClient::new(
@@ -253,12 +254,14 @@ impl ConsensusNode {
         let is_terminally_failed = Arc::new(AtomicBool::new(false));
 
         let epoch_eth_addresses_arc = commit_processor.get_epoch_eth_addresses_arc().clone();
+        let epoch_eth_addresses_notify = commit_processor.get_epoch_eth_addresses_notify().clone();
 
         Self::crosscheck_epoch_and_resolve_committee(
             config,
             storage,
             &executor_client_for_proc,
             &epoch_eth_addresses_arc,
+            &epoch_eth_addresses_notify,
         ).await?;
 
         coordination_hub.set_startup_go_sync_completed(true);
@@ -409,6 +412,7 @@ impl ConsensusNode {
             tx_recycler,
             is_terminally_failed,
             epoch_eth_addresses_arc,
+            epoch_eth_addresses_notify,
             commit_consumer_monitor,
         })
     }
@@ -735,6 +739,7 @@ impl ConsensusNode {
         storage: &mut StorageSetup,
         executor_client_for_proc: &ExecutorClient,
         epoch_eth_addresses_arc: &Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+        epoch_eth_addresses_notify: &tokio::sync::Notify,
     ) -> Result<()> {
         if !config.peer_rpc_addresses.is_empty() && storage.current_epoch > 0 {
             let mut peer_epoch_counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
@@ -849,6 +854,8 @@ impl ConsensusNode {
                                             let mut map = epoch_eth_addresses_arc.write().await;
                                             map.insert(go_epoch, new_eth_addrs);
                                             tracing::info!("🔍 [LEAK TRACKING] epoch_eth_addresses hiện đang cache: {} epochs", map.len());
+                                            drop(map);
+                                            epoch_eth_addresses_notify.notify_waiters();
                                             storage.epoch_timestamp_ms = timestamp_ms;
                                             storage.epoch_base_exec_index = boundary_gei;
                                             tracing::info!(
@@ -1001,6 +1008,7 @@ impl ConsensusNode {
                             map.insert(storage.current_epoch, new_eth_addrs);
                             tracing::info!("🔍 [LEAK TRACKING] epoch_eth_addresses hiện đang cache: {} epochs", map.len());
                         }
+                        epoch_eth_addresses_notify.notify_waiters();
                     } else {
                         tracing::error!("🚨 [STARTUP] Committee for epoch {} has 0 authorities! Gracefully degrading to SyncOnly mode.", storage.current_epoch);
                         storage.is_in_committee = false;

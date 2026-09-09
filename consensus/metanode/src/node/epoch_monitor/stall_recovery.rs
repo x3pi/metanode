@@ -22,6 +22,13 @@ pub(super) async fn recover_from_block_stall(
     fast_cycles_remaining: &mut u32,
     fast_cycles_max: u32,
 ) -> Result<()> {
+    // Expose the raw gap every cycle, regardless of stall state — see metrics.rs's doc comment
+    // for why (Tier 2 "self-healing, few blocks behind" vs Tier 3 "stuck, needs a human" is
+    // otherwise invisible to anything outside this process's own logs).
+    super::metrics::EpochMonitorMetrics::get()
+        .blocks_behind_peer
+        .set(peer_best_block.saturating_sub(go_block) as f64);
+
     // Check if Go blocks are stalled: not advancing AND peers are ahead
     if peer_best_block > go_block + STALL_MIN_GAP {
         if go_block == *stall_last_go_block && go_block > 0 {

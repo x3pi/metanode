@@ -22,8 +22,8 @@ var (
 
 // MinSafeQuorumThresholdBasisPoints is the minimum QuorumThreshold (out of 10000 basis points)
 // this codebase will ever accept for a ChainRegistry entry — 6667 basis points = 2/3, the same
-// BFT safety floor used everywhere else in this project (root_anchor.go's BftQuorumThreshold,
-// GovernanceEngine.QuorumThreshold's ceil(2N/3)). VerifyQuorumCertAgainstRegistry (gateway.go)
+// BFT safety floor used everywhere else in this project (root_anchor.go's BftQuorumThreshold).
+// VerifyQuorumCertAgainstRegistry (gateway.go)
 // treats registry.QuorumThreshold as the fraction of a committee's TOTAL STAKE required to sign
 // before a QuorumCert verifies — a value below 2/3 would let a cert verify without Byzantine
 // fault tolerance, i.e. a minority (even a single low-stake signer) could forge a "valid" quorum

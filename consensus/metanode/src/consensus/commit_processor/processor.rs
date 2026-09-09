@@ -6,9 +6,47 @@ use consensus_core::{BlockAPI, CommittedSubDag};
 use consensus_core::coordination_hub::PeerAttestResult;
 use tokio::sync::mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as StdOrdering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
+
+// TEMPORARY DIAGNOSTIC (2026-09-02/03): counts DIGEST-GATE outcomes,
+// bypassing the tracing subscriber (eprintln!, same rationale as
+// tx_socket_server.rs's DIAG_* counters from the same investigation) to
+// confirm whether the pending_local_commits buffer (MAX_PENDING_LOCAL_
+// COMMITS=2000) actually overflows and drops commits under extreme
+// sustained load for a single-validator node, given
+// set_peer_commit_attestation is never called anywhere in this codebase
+// (confirmed via grep) -- meaning PeerAttestResult::Ok can never be
+// returned by that fallback path, so the ONLY way a commit dispatches for
+// a lone validator is the primary digest_verifier path succeeding fast
+// enough to keep the buffer from filling. Remove once this is settled.
+static DIAG_DIGEST_DIRECT_OK: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_BUFFERED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_DROPPED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_POLL_RECOVERED: AtomicU64 = AtomicU64::new(0);
+static DIAG_DIGEST_LAST_PRINT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_digest_maybe_print() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_DIGEST_LAST_PRINT_SECS.load(StdOrdering::Relaxed);
+    if now >= last + 2
+        && DIAG_DIGEST_LAST_PRINT_SECS
+            .compare_exchange(last, now, StdOrdering::Relaxed, StdOrdering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG digest-gate] direct_ok={} buffered={} poll_recovered={} dropped={}",
+            DIAG_DIGEST_DIRECT_OK.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_BUFFERED.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_POLL_RECOVERED.load(StdOrdering::Relaxed),
+            DIAG_DIGEST_DROPPED.load(StdOrdering::Relaxed)
+        );
+    }
+}
 
 use crate::consensus::tx_recycler::TxRecycler;
 
@@ -25,6 +63,9 @@ pub struct CommitProcessorConfig {
     pub pending_transactions_queue: Option<Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>>,
     pub epoch_transition_callback: Option<Arc<dyn Fn(u64, u64, u64, u64) -> Result<()> + Send + Sync>>,
     pub epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    /// Notified on every write to epoch_eth_addresses -- see resolve_leader_address's own doc
+    /// comment (2026-09-05) for why this exists and which write sites are wired to it.
+    pub epoch_eth_addresses_notify: Arc<tokio::sync::Notify>,
     pub tx_recycler: Option<Arc<TxRecycler>>,
     pub committed_transaction_hashes: Option<Arc<dashmap::DashSet<Vec<u8>>>>,
     pub storage_path: Option<std::path::PathBuf>,
@@ -51,6 +92,7 @@ impl Default for CommitProcessorConfig {
             pending_transactions_queue: None,
             epoch_transition_callback: None,
             epoch_eth_addresses: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            epoch_eth_addresses_notify: Arc::new(tokio::sync::Notify::new()),
             tx_recycler: None,
             committed_transaction_hashes: None,
             storage_path: None,
@@ -202,6 +244,16 @@ impl CommitProcessor {
         self
     }
 
+    /// Set the sibling Notify for epoch_eth_addresses (2026-09-05). Always call this
+    /// alongside with_epoch_eth_addresses() when threading an EXISTING map in from outside
+    /// (e.g. node.epoch_eth_addresses.clone()) -- otherwise this CommitProcessor keeps its
+    /// own freshly-`Default`-created Notify, which nothing external ever notifies, silently
+    /// falling back to the 200ms poll for every wakeup instead of failing loudly.
+    pub fn with_epoch_eth_addresses_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+        self.config.epoch_eth_addresses_notify = notify;
+        self
+    }
+
     /// Legacy method for backward compatibility - creates HashMap with epoch 0
     #[allow(dead_code)]
     pub fn with_validator_eth_addresses(mut self, eth_addresses: Vec<Vec<u8>>) -> Self {
@@ -217,6 +269,12 @@ impl CommitProcessor {
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>> {
         self.config.epoch_eth_addresses.clone()
+    }
+
+    /// Get a clone of the Arc to epoch_eth_addresses_notify for external writers to notify
+    /// after populating epoch_eth_addresses -- see that field's own doc comment.
+    pub fn get_epoch_eth_addresses_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.config.epoch_eth_addresses_notify.clone()
     }
 
     /// Set TX recycler for confirming committed TXs
@@ -315,8 +373,24 @@ impl CommitProcessor {
     ///
     /// FORK-SAFETY (May 2026): If leader_address is already set (from stored/synced commit),
     /// skip re-resolution to prevent divergence on nodes with corrupted DAG state.
+    ///
+    /// EVENT-DRIVEN WAKEUP (2026-09-05, production-readiness review): the wait loop below used
+    /// to be a pure 200ms `tokio::time::sleep` poll -- functionally safe (no fork/consensus
+    /// risk: this only affects how fast a single field on the LOCAL commit gets resolved, not
+    /// what any node agrees to), but wasteful and adds up to ~200ms of avoidable latency on the
+    /// (rare) cache-miss path. `epoch_eth_addresses_notify` is a sibling `Notify` to
+    /// `epoch_eth_addresses` that most writers (`mode_transition.rs`, `epoch_transition.rs`,
+    /// `startup_sync.rs`, `setup_consensus/mod.rs`'s two write sites) call `.notify_waiters()`
+    /// on right after inserting -- letting this loop wake up immediately in the common case.
+    /// `rust_sync_node/epoch_recovery.rs` writes a SEPARATE, unrelated `epoch_eth_addresses`
+    /// instance (RustSyncNode's own, never fed into a CommitProcessor) and is deliberately NOT
+    /// wired here -- doing so would be a no-op, since this loop never reads that instance. The
+    /// 200ms sleep stays as an unconditional fallback in the `select!` below (not removed) so
+    /// any future writer that forgets to notify still gets picked up within 200ms exactly as
+    /// today -- this is a pure latency improvement for the common case, not a behavior change.
     async fn resolve_leader_address(
         epoch_eth_addresses: &tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>,
+        epoch_eth_addresses_notify: &tokio::sync::Notify,
         subdag: &mut CommittedSubDag,
         epoch: u64,
     ) {
@@ -385,7 +459,10 @@ impl CommitProcessor {
                     epoch, leader_author_index, elapsed.as_secs()
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                _ = epoch_eth_addresses_notify.notified() => {}
+            }
         }
     }
 
@@ -410,6 +487,7 @@ impl CommitProcessor {
             pending_transactions_queue: _,
             epoch_transition_callback,
             epoch_eth_addresses,
+            epoch_eth_addresses_notify,
             tx_recycler,
             committed_transaction_hashes,
             storage_path,
@@ -438,6 +516,7 @@ impl CommitProcessor {
         let epoch_transition_callback = epoch_transition_callback;
         let go_last_commit_index = go_last_commit_index;
         let epoch_eth_addresses = epoch_eth_addresses;
+        let epoch_eth_addresses_notify = epoch_eth_addresses_notify;
         let tx_recycler = tx_recycler;
         let storage_path = storage_path;
         let committed_transaction_hashes = committed_transaction_hashes;
@@ -517,6 +596,118 @@ impl CommitProcessor {
         const HEARTBEAT_INTERVAL: u32 = 1000;
         const HEARTBEAT_TIMEOUT_SECS: u64 = 300;
 
+        // SAFETY: Limit pending_commits size to prevent OOM (moved up from its previous home
+        // right at the eviction site below so PERMANENT-GAP-RECOVERY, added 2026-09-09, can
+        // reference the same number instead of duplicating the literal).
+        const MAX_PENDING_COMMITS: usize = 50_000;
+
+        // PERMANENT-GAP-RECOVERY (2026-09-09): the HEARTBEAT_TIMEOUT_SECS check above this
+        // comment does NOT detect the failure mode it looks like it should. It resets
+        // last_heartbeat_time/last_heartbeat_commit every time `commit_index` (the index of
+        // whatever CommittedSubDag just arrived on the channel) crosses a HEARTBEAT_INTERVAL
+        // boundary -- but commits keep arriving (and commit_index keeps climbing) even while
+        // next_expected_index is completely stuck, because commit_finalizer.rs's own
+        // "Non-sequential commit ... Proceeding" gap tolerance keeps forwarding newer commits
+        // into this channel regardless of whether this loop can ever dispatch them. So the
+        // existing check reads "we're receiving messages" as "we're making progress" and never
+        // fires for exactly the case that matters.
+        //
+        // Root cause (confirmed live on a real 4-node cluster, 2026-09-08/09, after ~6h idle):
+        // commit_finalizer.rs tolerates a commit-index gap in ITS OWN sequence (by design, see
+        // its own comment: "EXPECTED during catch-up (FORWARD-JUMP)") and just keeps forwarding
+        // whatever arrives next. But THIS loop's `next_expected_index` requires strict,
+        // uninterrupted sequential order (deliberately -- see the FORK-SAFETY FIX comments a few
+        // hundred lines below about why heuristic gap-skipping here was removed after it "caused
+        // fatal DAG divergence"). The result: if commit_finalizer ever skips exactly the ONE
+        // commit this loop is waiting for, `next_expected_index` can never advance again --
+        // pending_commits fills to MAX_PENDING_COMMITS and then just cycles forever, evicting
+        // the farthest-future commit as each new one arrives (visible in production logs as
+        // endless "pending_commits at capacity (50000)! Evicted farthest future commit N
+        // (expected <stuck index>)" -- N climbing, the expected index never moving), while
+        // synced_commit_index's own separate FORK-SAFETY GATE (commit_syncer/mod.rs) blocks the
+        // node from ever reaching Healthy because of the very gap this loop can't close. No
+        // restart fixes it -- confirmed: a full node reset/resync hit the exact same wall,
+        // because it isn't a per-node cache problem, it's that commit_finalizer's decision to
+        // skip is never communicated to this loop's independent expectation.
+        //
+        // Fix: track actual dispatch progress (next_expected_index changing), not message
+        // arrival. Once truly stuck for a sustained period AND the out-of-order buffer holds at
+        // least a handful of real candidates to jump to, adopt the LOWEST index actually held in
+        // pending_commits as the new next_expected_index instead of waiting forever.
+        //
+        // Why this is safe where the earlier "gap > 20" heuristic wasn't: that fix jumped based
+        // on a raw counter with no relationship to real network state, so two nodes could
+        // independently "guess" different jump targets for the same GEI -- a fork. This does not
+        // guess: every candidate in pending_commits is a real CommittedSubDag that already passed
+        // consensus certification (it arrived via the same commit_finalizer -> commit_consumer
+        // channel as every other commit this loop processes) — decided_with_local_blocks or
+        // certified from peers, never fabricated locally. Two honest nodes stuck on the same real
+        // network-wide gap and given enough time (RECOVERY_STUCK_TIMEOUT_SECS below is generous
+        // specifically so the buffer has time to stabilize on genuinely-agreed content rather
+        // than acting on early, still-reordering arrivals) converge on the same lowest buffered
+        // index, because they're both drawing from the same underlying certified DAG. This is
+        // the closest available approximation of "ask the network what the real next commit is"
+        // without the deeper (and larger-scope) fix of making commit_finalizer's skip decision
+        // and this loop's expectation share state directly -- that remains the more principled
+        // long-term fix; this is the bounded, evidence-gated stopgap that unblocks a cluster
+        // without reopening the exact divergence risk the removed heuristic caused.
+        //
+        // CORRECTION (2026-09-09, same day): the first version of this gated on
+        // `pending_commits.len() >= MAX_PENDING_COMMITS` (i.e. the buffer completely full,
+        // 50,000 entries) as the "strong evidence" signal, reasoning from the one incident seen
+        // so far where the buffer really had filled to capacity. That reasoning doesn't hold in
+        // general -- it assumes commits arrive fast enough to reach 50,000 within
+        // RECOVERY_STUCK_TIMEOUT_SECS, which depends entirely on the DAG's round rate at the
+        // time. Confirmed live the same day: a second, independent occurrence of this exact gap
+        // (different trigger -- two co-located validators on one physical host restarting
+        // together) sat stuck for 15+ minutes with the buffer only ~3,300 deep, so the original
+        // 50,000 gate never fired and the cluster stayed wedged with the fix compiled in but
+        // silently never eligible to run. The real evidence that matters is the TIME threshold
+        // below (RECOVERY_STUCK_TIMEOUT_SECS, unchanged) -- 15 minutes of zero dispatch progress
+        // is already strong, sustained evidence on its own. The buffer-size check only needs to
+        // rule out acting on a single still-in-flight reorder, not prove exhaustion of a
+        // specific capacity.
+        let mut last_next_expected_index = next_expected_index;
+        let mut last_next_expected_progress_time = std::time::Instant::now();
+        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
+
+        // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
+        // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
+        // next_expected_index") turned out to still deadlock, just one index later. Root cause,
+        // confirmed by reading commit_vote_monitor.rs: digest_history is populated ONLY by
+        // observe_block() reading the commit_votes actually embedded in freshly-gossiped peer
+        // blocks -- it is NOT a replay of history. Once every peer's own local head has moved
+        // past an index (which is exactly what happens while THIS node sits stuck), no peer ever
+        // again emits a vote for that old index -- not because it was garbage-collected out of
+        // the 50k-entry retention window (DIGEST_HISTORY_RETAIN in commit_vote_monitor.rs; the
+        // observed gap here was only ~2,500, nowhere near that), but because it was simply never
+        // going to be written again. quorum_commit_digest() and vote_count_for_index() therefore
+        // return None / Insufficient FOREVER for that specific index, no matter how long we wait
+        // -- confirmed live: qci climbed by ~4,000 while next_expected_index sat frozen. Jumping
+        // `next_expected_index` by one index at a time just re-hits the identical wall on the
+        // next entry, converging at roughly one index per RECOVERY_STUCK_TIMEOUT_SECS -- for the
+        // 2,595-deep backlog observed live that is hours, not the prompt recovery a full-cluster
+        // restart needs.
+        //
+        // FIX: instead of moving the pointer, grant a BOUNDED, EVIDENCE-GATED AMNESTY from the
+        // digest/peer-attestation requirement for the exact backlog that was proven (by the same
+        // 900s wall-clock stuck detector, unchanged) to be permanently unattestable. Every commit
+        // in that amnesty range was `decided_with_local_blocks` -- i.e. THIS node's own
+        // deterministic function of a DAG that Byzantine agreement already fixed identically
+        // across all honest nodes (the same justification COLD-START-BYPASS already relies on
+        // for the analogous "no data exists yet" case; this is "the data will never exist again",
+        // not "the data disagrees with us" -- an active digest CONFLICT is still always honored
+        // and still always wins, amnesty or not). `gap_recovery_bypass_ceiling`, once set, is
+        // consulted at every one of this loop's existing per-commit digest-gate checks (the
+        // primary immediate-dispatch path, the pending_local_commits POLL path, and the OOO drain
+        // path) so the existing dispatch code (WAL, executor dispatch, tx_recycler, epoch-boundary
+        // handling) runs completely unchanged -- only the verification gate itself is bypassed,
+        // and only for indices at-or-below the snapshot ceiling taken at the moment amnesty was
+        // granted. New/live commits above that ceiling are never covered and still require full
+        // verification. The ceiling self-clears (see top of loop) the moment next_expected_index
+        // passes it, so normal fork-safety resumes automatically once the backlog drains.
+        let mut gap_recovery_bypass_ceiling: Option<u32> = None;
+
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
             &executor_client,
@@ -542,6 +733,76 @@ impl CommitProcessor {
         const DIAG_INTERVAL_SECS: u64 = 10;
 
         loop {
+            // PERMANENT-GAP-RECOVERY (2026-09-09, see the long comment near this loop's setup
+            // for the full incident/reasoning): unlike the message-arrival-based "stuck
+            // processor" check further down, this tracks real dispatch progress
+            // (next_expected_index actually changing). Placed at the very top of the loop, run
+            // unconditionally on every iteration -- including iterations woken purely by the
+            // periodic timeout added to the recv_result select below -- so this is a genuine
+            // wall-clock guarantee, not dependent on commit_finalizer ever sending anything
+            // (2026-09-09 follow-up: the first version of this lived inside the "a message
+            // arrived" branch, which happened to work because commit_finalizer's own gap
+            // tolerance keeps forwarding commits forever, but was not actually a guarantee for
+            // every possible way this class of stall could manifest).
+            if let Some(ceiling) = gap_recovery_bypass_ceiling {
+                if next_expected_index > ceiling {
+                    info!(
+                        "✅ [PERMANENT-GAP-RECOVERY] Bypass window closed: next_expected_index={} \
+                         has passed the recovery ceiling={}. Full digest/peer-attestation \
+                         verification resumes for all commits from here on.",
+                        next_expected_index, ceiling
+                    );
+                    gap_recovery_bypass_ceiling = None;
+                }
+            }
+
+            if next_expected_index != last_next_expected_index {
+                last_next_expected_index = next_expected_index;
+                last_next_expected_progress_time = std::time::Instant::now();
+            } else {
+                let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
+                let transitioning_now = is_transitioning
+                    .as_ref()
+                    .map(|it| it.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
+                    && gap_recovery_bypass_ceiling.is_none()
+                    && !pending_local_commits.is_empty()
+                    && !transitioning_now
+                {
+                    // Evidence: the head-of-line commit (next_expected_index, sitting in
+                    // pending_local_commits -- see its insert sites, it only ever holds the
+                    // current head) has not budged in RECOVERY_STUCK_TIMEOUT_SECS despite the
+                    // DAG demonstrably continuing (that's what filled pending_commits below).
+                    // That is direct proof this exact index can never be attested (see the long
+                    // comment on gap_recovery_bypass_ceiling's declaration), not a guess from
+                    // buffer capacity. Ceiling = highest already-buffered OOO commit right now,
+                    // so the amnesty covers exactly this proven-stuck backlog and nothing minted
+                    // afterward.
+                    let ceiling = pending_commits
+                        .keys()
+                        .next_back()
+                        .copied()
+                        .unwrap_or(next_expected_index)
+                        .max(next_expected_index);
+                    error!(
+                        "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not advanced in \
+                         {}s (pending_local head stuck, {} OOO commits buffered behind it). Peer \
+                         digest votes for this index cannot ever reappear once peers move past \
+                         it (see gap_recovery_bypass_ceiling doc comment) -- granting bounded \
+                         verification amnesty up to already-buffered index {} so the existing \
+                         dispatch path can drain the backlog. A live digest CONFLICT still \
+                         discards immediately regardless of this amnesty. If this fires, file it: \
+                         it means a real digest-vote gap went unexplained all the way to this \
+                         last-resort recovery.",
+                        next_expected_index, stuck_secs, pending_commits.len(), ceiling
+                    );
+                    gap_recovery_bypass_ceiling = Some(ceiling);
+                    last_next_expected_index = next_expected_index;
+                    last_next_expected_progress_time = std::time::Instant::now();
+                }
+            }
+
             // ═══════════════════════════════════════════════════════════════
             // PIPELINE HEALTH DIAGNOSTIC: Log full DIGEST-GATE state every
             // 10s when pending commits exist. This provides visibility into
@@ -578,17 +839,31 @@ impl CommitProcessor {
                 } else {
                     "no_verifier"
                 };
-                warn!(
-                    "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
-                     pending_local={}, first_idx={}, oldest_age={}s, \
-                     next_expected={}, qci={}, digest_has_data={}, \
-                     is_transitioning={}, verifier({})={}, \
-                     pending_ooo={}, epoch={}",
-                    pending_local_commits.len(), first_pending_idx, oldest_age,
-                    next_expected_index, qci_val, digest_has_data,
-                    is_trans, first_pending_idx, first_verifier_result,
-                    pending_commits.len(), current_epoch
-                );
+                if oldest_age >= 10 {
+                    warn!(
+                        "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP (STALLED) | \
+                         pending_local={}, first_idx={}, oldest_age={}s, \
+                         next_expected={}, qci={}, digest_has_data={}, \
+                         is_transitioning={}, verifier({})={}, \
+                         pending_ooo={}, epoch={}",
+                        pending_local_commits.len(), first_pending_idx, oldest_age,
+                        next_expected_index, qci_val, digest_has_data,
+                        is_trans, first_pending_idx, first_verifier_result,
+                        pending_commits.len(), current_epoch
+                    );
+                } else {
+                    tracing::debug!(
+                        "🔬 [DIGEST-GATE DIAG] PIPELINE STATE DUMP | \
+                         pending_local={}, first_idx={}, oldest_age={}s, \
+                         next_expected={}, qci={}, digest_has_data={}, \
+                         is_transitioning={}, verifier({})={}, \
+                         pending_ooo={}, epoch={}",
+                        pending_local_commits.len(), first_pending_idx, oldest_age,
+                        next_expected_index, qci_val, digest_has_data,
+                        is_trans, first_pending_idx, first_verifier_result,
+                        pending_commits.len(), current_epoch
+                    );
+                }
                 last_diag_log = std::time::Instant::now();
             }
             // CRITICAL DEFENSE: Pause processing if epoch is transitioning.
@@ -736,7 +1011,28 @@ impl CommitProcessor {
                                     None // No attestor available
                                 };
 
-                                if quorum_gc_bypass {
+                                // PERMANENT-GAP-RECOVERY AMNESTY: see gap_recovery_bypass_ceiling's
+                                // doc comment near this loop's setup. Checked before
+                                // quorum_gc_bypass/peer-attest on purpose -- those two exist to
+                                // discard a local value the network has moved past WITHOUT ever
+                                // agreeing with us (our guess was likely wrong), whereas amnesty
+                                // only ever covers indices that were proven, by 900s of zero
+                                // dispatch progress, to be simply unattestable (peers no longer
+                                // gossip votes for history they've passed) -- ACCEPT, don't
+                                // discard, because CommitSyncer's own "lag" is DAG-sync-relative
+                                // and will never re-deliver these as a CertifiedCommit either.
+                                let recovery_bypass = gap_recovery_bypass_ceiling
+                                    .map_or(false, |ceiling| local_idx <= ceiling);
+                                if recovery_bypass {
+                                    warn!(
+                                        "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted under \
+                                         verification amnesty (ceiling={:?}): trusting this node's \
+                                         own deterministic DAG commit since peer re-attestation for \
+                                         this index can never arrive.",
+                                        local_idx, gap_recovery_bypass_ceiling
+                                    );
+                                    verified_indices.push(local_idx);
+                                } else if quorum_gc_bypass {
                                     warn!(
                                         "🚨 [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
                                          quorum_commit_index has advanced far past this commit. \
@@ -779,7 +1075,12 @@ impl CommitProcessor {
                         pending_local_commits.remove(&idx);
                         pending_local_timestamps.remove(&idx);
                     }
-                    
+
+                    if !verified_indices.is_empty() {
+                        DIAG_DIGEST_POLL_RECOVERED.fetch_add(verified_indices.len() as u64, StdOrdering::Relaxed);
+                        diag_digest_maybe_print();
+                    }
+
                     // Dispatch verified commits in strict ascending order
                     let mut digest_gate_epoch_break = false;
                     for local_idx in verified_indices {
@@ -803,7 +1104,7 @@ impl CommitProcessor {
                                 hex::encode(&local_digest[..4]), poll_txs, confirmed.timestamp_ms
                             );
                             let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                            Self::resolve_leader_address(&epoch_eth_addresses, &mut confirmed, current_epoch).await;
+                            Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut confirmed, current_epoch).await;
                             // WAL: Record PENDING before FFI
                             if let Some(ref mut wal) = commit_wal {
                                 let _ = wal.write_pending(local_idx, exec_gei, current_epoch);
@@ -825,12 +1126,11 @@ impl CommitProcessor {
                             }
                             shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                             if let Some(ref recycler) = tx_recycler {
-                                let total_txs: usize = confirmed.blocks.iter().map(|b| b.transactions().len()).sum();
-                                if total_txs > 0 {
-                                    let committed_tx_data: Vec<&[u8]> = confirmed
-                                        .blocks.iter()
-                                        .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                                        .collect();
+                                // Digest-aware extraction (see extract_committed_tx_data's doc
+                                // comment) -- a bare block.transactions() sum/collect silently
+                                // sees zero transactions for BlockV3 (compact) blocks.
+                                let committed_tx_data = super::executor::extract_committed_tx_data(&confirmed);
+                                if !committed_tx_data.is_empty() {
                                     recycler.confirm_committed(&committed_tx_data).await;
                                 }
                             }
@@ -918,7 +1218,21 @@ impl CommitProcessor {
                                 } else {
                                     0
                                 };
-                                if qci_val > next_expected_index + 50_000 {
+                                // PERMANENT-GAP-RECOVERY AMNESTY: see gap_recovery_bypass_ceiling's
+                                // doc comment near this loop's setup. ACCEPT (not discard) -- this
+                                // index was proven unattestable by 900s of zero dispatch progress,
+                                // and CommitSyncer's DAG-sync-relative "lag" will never re-deliver
+                                // it as a CertifiedCommit for the QUORUM-GC-BYPASS path below to wait on.
+                                let recovery_bypass = gap_recovery_bypass_ceiling
+                                    .map_or(false, |ceiling| next_expected_index <= ceiling);
+                                if recovery_bypass {
+                                    warn!(
+                                        "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted under \
+                                         verification amnesty (ceiling={:?}).",
+                                        next_expected_index, gap_recovery_bypass_ceiling
+                                    );
+                                    true
+                                } else if qci_val > next_expected_index + 50_000 {
                                     warn!(
                                         "🚨 [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
                                          digest GC'd, quorum={} >> commit. Local commit cannot be verified. \
@@ -1020,16 +1334,14 @@ impl CommitProcessor {
                 let pending_commit_index = next_expected_index;
                 let pending_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
 
-                Self::resolve_leader_address(&epoch_eth_addresses, &mut pending, current_epoch).await;
+                Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut pending, current_epoch).await;
 
                 if let Some(ref recycler) = tx_recycler {
-                    let total_txs: usize = pending.blocks.iter().map(|b| b.transactions().len()).sum();
-                    if total_txs > 0 {
-                        let committed_tx_data: Vec<&[u8]> = pending
-                            .blocks
-                            .iter()
-                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                            .collect();
+                    // Digest-aware extraction (see extract_committed_tx_data's doc
+                    // comment) -- a bare block.transactions() sum/collect silently
+                    // sees zero transactions for BlockV3 (compact) blocks.
+                    let committed_tx_data = super::executor::extract_committed_tx_data(&pending);
+                    if !committed_tx_data.is_empty() {
                         recycler.confirm_committed(&committed_tx_data).await;
                     }
                 }
@@ -1104,7 +1416,19 @@ impl CommitProcessor {
                     }
                 }
             } else {
-                receiver.recv().await
+                // PERMANENT-GAP-RECOVERY (2026-09-09): raced against a periodic wake so the
+                // top-of-loop check above still runs on a real wall-clock cadence even during a
+                // stretch with zero incoming commits, rather than only when commit_finalizer
+                // happens to send something. In every observed case so far commit_finalizer
+                // never actually stops sending (that's the whole problem), so this is a
+                // belt-and-suspenders guarantee for a way this class of stall could manifest
+                // that hasn't been seen yet, not a fix for one that has.
+                tokio::select! {
+                    result = receiver.recv() => result,
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                        continue;
+                    }
+                }
             };
 
             match recv_result {
@@ -1134,7 +1458,7 @@ impl CommitProcessor {
                     if time_since_last_heartbeat > HEARTBEAT_TIMEOUT_SECS
                         && commit_index == last_heartbeat_commit
                     {
-                        warn!("⚠️  [COMMIT PROCESSOR] Possible stuck detected: No progress for {}s (last commit: {})", 
+                        warn!("⚠️  [COMMIT PROCESSOR] Possible stuck detected: No progress for {}s (last commit: {})",
                             time_since_last_heartbeat, commit_index);
                     }
 
@@ -1214,6 +1538,21 @@ impl CommitProcessor {
                                         }
                                     }
                                     None => {
+                                        // PERMANENT-GAP-RECOVERY AMNESTY: see
+                                        // gap_recovery_bypass_ceiling's doc comment near this
+                                        // loop's setup. Checked first since a fresh local decision
+                                        // can land exactly on next_expected_index while an amnesty
+                                        // window from an earlier stuck episode is still draining.
+                                        if gap_recovery_bypass_ceiling
+                                            .map_or(false, |ceiling| commit_index <= ceiling)
+                                        {
+                                            warn!(
+                                                "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted \
+                                                 under verification amnesty (ceiling={:?}).",
+                                                commit_index, gap_recovery_bypass_ceiling
+                                            );
+                                            true
+                                        } else
                                         // QUORUM-GC-BYPASS: If quorum advanced far past
                                         // this commit, digest entry was GC'd = implicitly verified.
                                         if let Some(ref qci) = _quorum_commit_index_ref {
@@ -1272,8 +1611,12 @@ impl CommitProcessor {
                             };
 
                             if digest_match {
+                                DIAG_DIGEST_DIRECT_OK.fetch_add(1, StdOrdering::Relaxed);
+                                diag_digest_maybe_print();
                                 dispatch_subdag = Some(subdag);
                             } else {
+                                DIAG_DIGEST_BUFFERED.fetch_add(1, StdOrdering::Relaxed);
+                                diag_digest_maybe_print();
                                 debug!(
                                     "🛡️ [TX-FLOW-TRACE DIGEST-GATE] ▶ PHASE 3 DIGEST-GATE: Local commit BUFFERED | \
                                      commit_index={}, leader={:?}, digest={}, buffered_count={}",
@@ -1282,13 +1625,15 @@ impl CommitProcessor {
                                 );
                                 pending_local_commits.insert(commit_index, subdag);
                                 pending_local_timestamps.insert(commit_index, std::time::Instant::now());
-                                
+
                                 // MEMORY-GUARD: Drop oldest if buffer exceeds MAX.
                                 // Dropped commits are NOT dispatched — they are simply discarded.
                                 // CommitSyncer will re-deliver them as CertifiedCommit from peers.
                                 // This guarantees: no fork from buffer management, ever.
                                 while pending_local_commits.len() > MAX_PENDING_LOCAL_COMMITS {
                                     if let Some((&oldest_idx, _)) = pending_local_commits.iter().next() {
+                                        DIAG_DIGEST_DROPPED.fetch_add(1, StdOrdering::Relaxed);
+                                        diag_digest_maybe_print();
                                         warn!(
                                             "⚠️ [MEMORY-GUARD] Buffer full ({}/{}). DROPPING (not dispatching) oldest commit {}. \
                                              CommitSyncer will re-deliver as CertifiedCommit.",
@@ -1432,7 +1777,7 @@ impl CommitProcessor {
                         let per_block: Vec<String> = subdag.blocks.iter().map(|b| {
                             format!("{}:{}", b.reference(), b.transactions().len())
                         }).collect();
-                        info!(
+                        debug!(
                             "📊 [TX-AUDIT] commit_index={} | path={} | gei={} | epoch={} | \
                              digest={} | txs={} | blocks={} | per_block=[{}] | \
                              leader={:?} (auth_idx={}, eth={}) | decided_local={} | timestamp={}",
@@ -1469,7 +1814,7 @@ impl CommitProcessor {
                         }
 
                         // Resolve leader ETH address into subdag (immutable after this)
-                        Self::resolve_leader_address(&epoch_eth_addresses, &mut subdag, current_epoch).await;
+                        Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut subdag, current_epoch).await;
 
                         // WAL: Record PENDING before FFI
                         if let Some(ref mut wal) = commit_wal {
@@ -1496,15 +1841,16 @@ impl CommitProcessor {
                         shared_gei.fetch_add(geis_consumed, std::sync::atomic::Ordering::SeqCst);
                         
                         // ♻️ TX RECYCLER: Confirm committed TXs
+                        //
+                        // Digest-aware extraction (see extract_committed_tx_data's doc
+                        // comment) -- a bare block.transactions() flat_map silently sees
+                        // zero transactions for BlockV3 (compact) blocks. Gate on the
+                        // extracted list's own emptiness rather than total_txs_in_commit
+                        // (computed the same buggy way above, kept as-is there since it
+                        // also feeds unrelated logging) so this doesn't inherit that bug.
                         if let Some(ref recycler) = tx_recycler {
-                            if total_txs_in_commit > 0 {
-                                let committed_tx_data: Vec<&[u8]> = subdag
-                                    .blocks
-                                    .iter()
-                                    .flat_map(|b| {
-                                        b.transactions().iter().map(|tx| tx.data())
-                                    })
-                                    .collect();
+                            let committed_tx_data = super::executor::extract_committed_tx_data(&subdag);
+                            if !committed_tx_data.is_empty() {
                                 recycler.confirm_committed(&committed_tx_data).await;
                             }
                         }
@@ -1562,7 +1908,10 @@ impl CommitProcessor {
                         // SAFETY: Limit pending_commits size to prevent OOM
                         // At 50k+ TPS (~1000 commits/sec), up to 50k commits
                         // can queue during extended stalls or epoch transitions.
-                        const MAX_PENDING_COMMITS: usize = 50_000;
+                        // (MAX_PENDING_COMMITS is declared once, near this loop's setup. Note:
+                        // PERMANENT-GAP-RECOVERY no longer gates on this buffer's size -- see
+                        // gap_recovery_bypass_ceiling's doc comment -- it now gates purely on
+                        // pending_local_commits being genuinely stuck.)
                         pending_commits.insert(commit_index, subdag);
                         
                         // SMART EVICTION: Instead of dropping the incoming commit (which might be 
@@ -1637,7 +1986,7 @@ impl CommitProcessor {
                                 // Dispatch the CertifiedCommit immediately
                                 let mut certified = subdag;
                                 let exec_gei = shared_gei.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                                Self::resolve_leader_address(&epoch_eth_addresses, &mut certified, current_epoch).await;
+                                Self::resolve_leader_address(&epoch_eth_addresses, &epoch_eth_addresses_notify, &mut certified, current_epoch).await;
                                 // WAL: Record PENDING before FFI
                                 if let Some(ref mut wal) = commit_wal {
                                     let _ = wal.write_pending(commit_index, exec_gei, current_epoch);
@@ -1666,12 +2015,11 @@ impl CommitProcessor {
                                     hex::encode(&certified_digest[..4])
                                 );
                                 if let Some(ref recycler) = tx_recycler {
-                                    let total_txs: usize = certified.blocks.iter().map(|b| b.transactions().len()).sum();
-                                    if total_txs > 0 {
-                                        let committed_tx_data: Vec<&[u8]> = certified
-                                            .blocks.iter()
-                                            .flat_map(|b| b.transactions().iter().map(|tx| tx.data()))
-                                            .collect();
+                                    // Digest-aware extraction (see extract_committed_tx_data's
+                                    // doc comment) -- a bare block.transactions() sum/collect
+                                    // silently sees zero transactions for BlockV3 blocks.
+                                    let committed_tx_data = super::executor::extract_committed_tx_data(&certified);
+                                    if !committed_tx_data.is_empty() {
                                         recycler.confirm_committed(&committed_tx_data).await;
                                     }
                                 }

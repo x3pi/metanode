@@ -65,6 +65,54 @@ export TELEGRAM_BOT_TOKEN
 export TELEGRAM_CHAT_ID
 RPC_JSON_PATH="/tmp/rpc_nodes.json"
 
+# Chain-stall probe transaction key (2026-09-08, see send_stall_probe_tx() below). Same
+# fallback pattern as deploy/systemd/start_relayer_daemon.sh's RELAYER_KEY: env var first, then
+# an inventory.yml override, then... see below.
+#
+# 2026-09-08 FOLLOW-UP: the original last-resort fallback here (dev_accounts.json's "Sender A0")
+# turned out to have NO BLS public key registered on a real CI cluster's genesis -- every probe
+# attempt failed at submission ("failed to build MetaTx: account ... has no BLS public key
+# registered on-chain"), not at confirmation, so this monitor confidently declared a real stall
+# ("không phải do rảnh") on a cluster that was actually completely healthy and idle. Confirmed by
+# hand: the exact same probe against the exact same node, using metanode-suite's own
+# test-chain/config.json private_keys[0] (a key the CI test suite's own transactions already
+# prove is funded and BLS-registered) confirmed in 813ms. So: prefer that known-working key when
+# the sibling metanode-suite checkout is present (the common case for anyone running the CI
+# tooling this alert is meant to complement) before falling back to the old devnet key, which is
+# kept only as a last resort for a bare local_devnet with no metanode-suite checkout at all.
+PROBE_TX_KEY="${PROBE_TX_KEY:-}"
+if [ -z "$PROBE_TX_KEY" ] && [ -n "$INV_PATH" ]; then
+    PROBE_TX_KEY=$(grep -E '^\s*probe_tx_key:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+fi
+PROBE_SUITE_CONFIG="${SCRIPT_DIR}/../../../../metanode-suite/test-simple/test-rpc/test-chain/config.json"
+if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
+    PROBE_TX_KEY=$(python3 -c "
+import json
+try:
+    keys = json.load(open('$PROBE_SUITE_CONFIG')).get('private_keys', [])
+    print(keys[0] if keys else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+fi
+if [ -z "$PROBE_TX_KEY" ]; then
+    PROBE_TX_KEY="0x9f61a687fbeac9e11d5cfce0fe2dcec035cb2b21eb9c584d8cf90696ce2fc370"
+fi
+export PROBE_TX_KEY
+PROBE_TOOL_SRC="${SCRIPT_DIR}/../../../execution/cmd/tool/tps_latency_probe"
+PROBE_TOOL_BIN="${SCRIPT_DIR}/stall_probe_tool"
+
+# Code version this monitor script (and, by extension, whatever's currently deployed alongside
+# it) is running from -- 2026-09-09, requested explicitly after a night of alerts where it was
+# hard to tell from Telegram alone whether an alert was about the code fix already in place or
+# an older deploy still running it. Computed once, included in every alert below. Short hash +
+# "-dirty" suffix if this checkout has uncommitted changes (matches `git describe`-style
+# convention already used by ansible_deploy.sh's own "Commit: <hash>" banner).
+CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+if [ "$CODE_VERSION" != "unknown" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
+    CODE_VERSION="${CODE_VERSION}-dirty"
+fi
+
 send_tele() {
     if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
         return
@@ -74,6 +122,139 @@ send_tele() {
         -d parse_mode="HTML" \
         --data-urlencode text="$1" >/dev/null 2>&1 || true
 }
+
+# Helper: Kiểm tra node có nằm trong danh sách bỏ qua giám sát (do test tắt bật node hoặc bảo trì)
+is_node_ignored() {
+    local node_key="$1"
+    local node_id="$2"
+    for ign_file in "/tmp/monitors_ignore_nodes" "/tmp/metanode_ignore_nodes" "${SCRIPT_DIR}/ignore_nodes" "/opt/metanode/monitors/ignore_nodes"; do
+        if [ -f "$ign_file" ]; then
+            local content
+            content=$(cat "$ign_file" 2>/dev/null || echo "")
+            if echo "$content" | grep -qwE "(all|${node_id}|${node_key}|m${node_id})"; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Trước khi báo "chain stall" (mục BƯỚC 3 dưới), thử gửi 1 giao dịch thăm dò (probe tx) tới 1
+# node còn sống. Nhiều chain (kể cả chain này) KHÔNG tự tạo block rỗng khi không có giao dịch --
+# block đứng yên vì đang RẢNH, không phải vì bị treo thật. 1 tx thăm dò sẽ được đưa vào block
+# bình thường nếu consensus vẫn khỏe, và ta tránh được cảnh báo giả (2026-09-08, sau khi gặp
+# đúng trường hợp này trên cụm thật: chain rảnh vẫn bị báo NGHIÊM TRỌNG).
+#
+# Trả mã thoát PHÂN BIỆT rõ 3 tình huống khác hẳn nhau (2026-09-08 follow-up: từng gộp chung
+# "gửi thất bại" và "gửi được nhưng không xác nhận" làm một -- khiến 1 lần PROBE_TX_KEY sai/thiếu
+# đăng ký BLS bị hiểu nhầm thành "đã thử, không phải do rảnh" dù thực ra tool còn chưa gửi được gì):
+#   0 = tx thăm dò được xác nhận vào block -- chain khỏe, chỉ đang rảnh.
+#   1 = thiếu công cụ/không dựng được binary/không lấy được chain-id -- KHÔNG kết luận được gì.
+#   2 = gửi tx bị RPC từ chối ngay (vd sai khóa, tài khoản chưa đăng ký BLS) -- lỗi cấu hình của
+#       chính probe, KHÔNG phải bằng chứng chain bị treo.
+#   3 = tx được RPC chấp nhận nhưng hết giờ chờ không thấy receipt -- tín hiệu thật đáng ngờ nhất.
+send_stall_probe_tx() {
+    local node_url="$1"
+    [ -z "$node_url" ] && return 1
+
+    # Build tps_latency_probe đúng 1 lần rồi cache lại binary -- cùng kiểu với cách
+    # block_hash_checker được build bên dưới (LOCAL MONITOR INITIALIZATION).
+    if [ ! -f "$PROBE_TOOL_BIN" ] || [ "${PROBE_TOOL_SRC}/main.go" -nt "$PROBE_TOOL_BIN" ]; then
+        if [ -d "$PROBE_TOOL_SRC" ] && command -v go >/dev/null 2>&1; then
+            (cd "$PROBE_TOOL_SRC" && go build -o "$PROBE_TOOL_BIN" .) 2>/dev/null || true
+        fi
+    fi
+    [ -x "$PROBE_TOOL_BIN" ] || return 1
+
+    local chain_id_hex chain_id
+    chain_id_hex=$(curl -s -m 5 -X POST "$node_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+    [[ "$chain_id_hex" =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+    chain_id=$((16#${chain_id_hex#0x}))
+
+    local out
+    out=$("$PROBE_TOOL_BIN" -node "$node_url" -chain-id "$chain_id" -n 1 -key "$PROBE_TX_KEY" -max-wait 15s 2>&1)
+    LAST_PROBE_OUTPUT="$out"
+    if echo "$out" | grep -q "latency="; then
+        return 0
+    elif echo "$out" | grep -q "send error:"; then
+        return 2
+    else
+        return 3
+    fi
+}
+# Resolve SSH auth for a node: prefers the SSH key (ansible_ssh_private_key_file, tracked in
+# rpc_nodes.json's "ssh" section). Falls back to reading ansible_ssh_pass ON DEMAND straight
+# from inventory.yml -- for the still-supported devnet-only plaintext-password inventories
+# (see inventory.example.yml "Cách 2") -- for use with sshpass. The password is held only in
+# the SSH_PASS shell variable for the immediate ssh_remote/scp_remote call below; it is never
+# written into rpc_nodes.json/config-m-nodes.json (that was the actual issue #105 fix: those
+# files are copied to every cluster node and world-readable-by-default on shared /tmp).
+resolve_ssh_auth() {
+    local node_key="$1" node_id="$2" rpc_data="$3"
+    SSH_USER=$(echo "$rpc_data" | jq -r ".ssh[\"$node_key\"].user // \"abc\"" 2>/dev/null)
+    local key
+    key=$(echo "$rpc_data" | jq -r ".ssh[\"$node_key\"].key // empty" 2>/dev/null)
+    key="${key/#\~/$HOME}"
+    SSH_OPTS="-o StrictHostKeyChecking=no"
+    SSH_PASS=""
+    if [ -n "$key" ] && [ -f "$key" ]; then
+        SSH_OPTS="-i $key $SSH_OPTS"
+    elif [ -n "$INV_PATH" ] && command -v sshpass >/dev/null 2>&1; then
+        SSH_PASS=$(python3 -c "
+import yaml
+try:
+    with open('$INV_PATH') as f:
+        d = yaml.safe_load(f) or {}
+    mc = d.get('all', {}).get('children', {}).get('metanode_cluster', {})
+    hosts = mc.get('hosts', {}) or d.get('all', {}).get('hosts', {}) or {}
+    gv = mc.get('vars', {}) or d.get('all', {}).get('vars', {}) or {}
+    for h in hosts.values():
+        if isinstance(h, dict) and $node_id in (h.get('node_ids') or []):
+            print(h.get('ansible_ssh_pass', gv.get('ansible_ssh_pass', '')))
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+}
+
+ssh_remote() {
+    if [ -n "$SSH_PASS" ]; then
+        sshpass -p "$SSH_PASS" ssh $SSH_OPTS "$@"
+    else
+        ssh $SSH_OPTS "$@"
+    fi
+}
+
+scp_remote() {
+    if [ -n "$SSH_PASS" ]; then
+        sshpass -p "$SSH_PASS" scp $SSH_OPTS "$@"
+    else
+        scp $SSH_OPTS "$@"
+    fi
+}
+
+
+# ─── ACTION: IGNORE / UNIGNORE NODES FROM MONITORING ────────────────────────
+if [ "${1:-}" == "ignore" ] || [ "${1:-}" == "--ignore" ]; then
+    node_to_ignore="${2:-all}"
+    mkdir -p /tmp
+    echo "$node_to_ignore" >> /tmp/monitors_ignore_nodes
+    echo "✅ Đã thêm '$node_to_ignore' vào danh sách bỏ qua giám sát (/tmp/monitors_ignore_nodes)."
+    exit 0
+fi
+
+if [ "${1:-}" == "unignore" ] || [ "${1:-}" == "--unignore" ]; then
+    node_to_unignore="${2:-}"
+    if [ -z "$node_to_unignore" ] || [ "$node_to_unignore" == "all" ]; then
+        rm -f /tmp/monitors_ignore_nodes 2>/dev/null || true
+        echo "✅ Đã xóa toàn bộ danh sách bỏ qua giám sát."
+    else
+        sed -i "/\b${node_to_unignore}\b/d" /tmp/monitors_ignore_nodes 2>/dev/null || true
+        echo "✅ Đã xóa '$node_to_unignore' khỏi danh sách bỏ qua giám sát."
+    fi
+    exit 0
+fi
 
 # ─── ACTION: STOP LOCAL MONITORS ─────────────────────────────────────────────
 if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
@@ -126,9 +307,12 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
 
     # 2. Sinh rpc_nodes.json và copy sang block_hash_checker
     if [ -n "$PARSE_PY" ]; then
-        python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
+        rm -f "$RPC_JSON_PATH" 2>/dev/null || true
+        (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+        chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         if [ -f "$RPC_JSON_PATH" ] && [ -d "$BLOCK_CHECKER_DIR" ]; then
             cp "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
+            chmod 0600 "$BLOCK_CHECKER_DIR/config-m-nodes.json" 2>/dev/null || true
         fi
     fi
 
@@ -173,6 +357,18 @@ if [ "${1:-}" == "health" ]; then
     declare -A dead_nodes
     declare -A failure_type
     
+    # Chain Stall Detector tracking
+    last_seen_block=0
+    last_block_progress_ts=$(date +%s)
+    last_stall_alert_ts=0
+    is_chain_stalled=false
+    # 2026-09-08: was a hardcoded 120s -- raised default and made overridable
+    # (CHAIN_STALL_THRESHOLD_SEC in .env or the environment) after a real false alarm on an idle
+    # chain (no pending txs -> no new block -> looked identical to a real stall from block height
+    # alone). The bigger fix for the false-positive itself is send_stall_probe_tx() above, called
+    # right before alerting below; this threshold mainly controls how often that probe fires.
+    STALL_THRESHOLD_SEC="${CHAIN_STALL_THRESHOLD_SEC:-300}"
+
     # Lấy IP local của máy monitor hiện tại
     MONITOR_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
     if [ -z "$MONITOR_IP" ]; then MONITOR_IP=$(hostname -I | awk '{print $1}'); fi
@@ -182,26 +378,34 @@ if [ "${1:-}" == "health" ]; then
         PARSE_PY=$(get_parse_py)
 
         if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
-            python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
-            AUTH_JSON=$(python3 "$PARSE_PY" "$INV_PATH" auth 2>/dev/null || echo "{}")
-        else
-            AUTH_JSON="{}"
+            (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+            chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
+                node_id=${node_key#m}
+                # Kiểm tra nếu node nằm trong danh sách bỏ qua (do test tắt bật node hoặc bảo trì)
+                if is_node_ignored "$node_key" "$node_id"; then
+                    continue
+                fi
+
                 if ! curl -s -m 10 "$node_url" >/dev/null 2>&1 && { sleep 2; ! curl -s -m 10 "$node_url" >/dev/null 2>&1; }; then
+                    if is_node_ignored "$node_key" "$node_id"; then
+                        continue
+                    fi
+
                     if [ "${dead_nodes[$node_key]:-0}" == "0" ]; then
                         dead_nodes[$node_key]=1
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
-                        node_id=${node_key#m}
-                        ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
-                        ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
+                        resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
+                        ssh_user="$SSH_USER"
                         
                         crash_time=$(date +%Y%m%d_%H%M%S)
                         crash_dir="${SCRIPT_DIR}/logs_crash/node_${node_id}_crash_${crash_time}"
                         
-                        # ─── BƯỚC 1: PHÂN BIỆT SERVER DOWN vs NODE CRASH ──────────────
+                        # ─── BƯỚC 1: PHÂN BIỆT SERVER DOWN vs REBOOT vs MAINTENANCE vs CRASH ──────────────
                         is_local=false
                         if [ "$ip" == "$MONITOR_IP" ] || [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ]; then
                             is_local=true
@@ -216,8 +420,8 @@ if [ "${1:-}" == "health" ]; then
                             uptime_secs=$(cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "999999")
                             if [ "$uptime_secs" -lt 120 ]; then server_rebooted=true; fi
                         else
-                            # Thử SSH nhanh 3s kiểm tra máy chủ còn sống không
-                            ssh_uptime=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "$ssh_user@$ip" "cat /proc/uptime 2>/dev/null | awk '{print int(\$1)}'" 2>/dev/null || echo "FAILED")
+                            # Thử SSH nhanh 3s kiểm tra máy chủ còn sống không (qua SSH Key)
+                            ssh_uptime=$(ssh_remote -o ConnectTimeout=3 "$ssh_user@$ip" "cat /proc/uptime 2>/dev/null | awk '{print int(\$1)}'" 2>/dev/null || echo "FAILED")
                             if [ "$ssh_uptime" != "FAILED" ] && [[ "$ssh_uptime" =~ ^[0-9]+$ ]]; then
                                 server_alive=true
                                 uptime_secs=$ssh_uptime
@@ -238,6 +442,7 @@ if [ "${1:-}" == "health" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Thảm họa (Disaster)
 ────────────────────────
 ⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS."
@@ -253,8 +458,8 @@ if [ "${1:-}" == "health" ]; then
                                 journalctl -b -1 -e -n 100 --no-pager > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
                                 dmesg -T 2>/dev/null | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50 > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
                             else
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -b -1 -e -n 100 --no-pager" > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "dmesg -T | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50" > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
+                                ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -b -1 -e -n 100 --no-pager" > "$reboot_dir/journal_previous_boot.log" 2>/dev/null || true
+                                ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "dmesg -T | grep -iE 'oom|panic|killed|segfault|error' | tail -n 50" > "$reboot_dir/dmesg_errors.log" 2>/dev/null || true
                             fi
 
                             # Xóa bớt backup cũ
@@ -269,6 +474,7 @@ if [ "${1:-}" == "health" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
 ────────────────────────
 ⛔ <b>TOÀN BỘ TIẾN TRÌNH TEST / BENCHMARK ĐÃ BỊ DỪNG!</b>
@@ -283,53 +489,75 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 <code>ssh $ssh_user@$ip \"last reboot | head -n 5\"</code>"
 
                         else
-                            # TRƯỜNG HỢP C: NODE CRASH (Server vẫn sống nhưng Service Node bị lỗi/sập)
-                            failure_type[$node_key]="NODE_CRASH"
-                            mkdir -p "$crash_dir"
-                            
+                            # Kiểm tra xem service có bị dừng chủ động (inactive/deactivating do test hoặc bảo trì) không
                             exec_status="unknown"
                             cons_status="unknown"
 
                             if [ "$is_local" == "true" ]; then
                                 exec_status=$(systemctl is-active "metanode-execution-$node_id" 2>/dev/null || echo "unknown")
                                 cons_status=$(systemctl is-active "metanode-consensus-$node_id" 2>/dev/null || echo "unknown")
-                                
+                            else
+                                exec_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
+                                cons_status=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
+                            fi
+
+                            if [ "$exec_status" == "inactive" ] || [ "$exec_status" == "deactivating" ]; then
+                                failure_type[$node_key]="MAINTENANCE"
+                                dead_nodes[$node_key]=2 # 2 = dừng chủ động (không coi là crash và không alert recovery khi bật lại)
+                                echo "ℹ️ Node $node_key ($ip) đang ở trạng thái dừng chủ động ($exec_status). Bỏ qua cảnh báo crash."
+                                continue
+                            fi
+
+                            # TRƯỜNG HỢP C: NODE CRASH (Server vẫn sống nhưng Service Node bị lỗi/sập)
+                            failure_type[$node_key]="NODE_CRASH"
+                            mkdir -p "$crash_dir"
+
+                            if [ "$is_local" == "true" ]; then
                                 # Kéo nhật ký journalctl mới nhất
-                                journalctl -u "metanode-execution-$node_id" -n 200 --no-pager > "$crash_dir/journal_execution.log" 2>/dev/null || true
-                                journalctl -u "metanode-consensus-$node_id" -n 200 --no-pager > "$crash_dir/journal_consensus.log" 2>/dev/null || true
+                                journalctl -u "metanode-execution-$node_id" -n 500 --no-pager > "$crash_dir/journal_execution.log" 2>/dev/null || true
+                                journalctl -u "metanode-consensus-$node_id" -n 500 --no-pager > "$crash_dir/journal_consensus.log" 2>/dev/null || true
                                 
                                 # Kéo panic dump nếu có
                                 cp /opt/metanode/node-$node_id/logs/execution/panic.log "$crash_dir/" 2>/dev/null || true
                                 
-                                # Kéo file log execution mới nhất (chỉ lấy 1 file mới nhất trong thư mục ngày)
-                                latest_exec=$(ls -t /opt/metanode/node-$node_id/logs/execution/*/*.log /opt/metanode/node-$node_id/logs/execution/*.log 2>/dev/null | head -n 1 || true)
-                                if [ -n "$latest_exec" ]; then cp "$latest_exec" "$crash_dir/" 2>/dev/null || true; fi
+                                # Kéo thư mục log execution ngày mới nhất (chứa execution.log, App.log, IntermediateRoot.log...)
+                                mkdir -p "$crash_dir/execution"
+                                latest_exec_date_dir=$(ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1 || true)
+                                if [ -n "$latest_exec_date_dir" ]; then
+                                    cp -r "$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
+                                fi
+                                cp /opt/metanode/node-$node_id/logs/execution/*.log "$crash_dir/execution/" 2>/dev/null || true
                                 
-                                # Kéo file log consensus mới nhất
-                                latest_cons=$(ls -t /opt/metanode/node-$node_id/logs/consensus/*/*.log /opt/metanode/node-$node_id/logs/consensus/*.log 2>/dev/null | head -n 1 || true)
-                                if [ -n "$latest_cons" ]; then cp "$latest_cons" "$crash_dir/" 2>/dev/null || true; fi
+                                # Kéo thư mục log consensus ngày mới nhất
+                                mkdir -p "$crash_dir/consensus"
+                                latest_cons_date_dir=$(ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1 || true)
+                                if [ -n "$latest_cons_date_dir" ]; then
+                                    cp -r "$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
+                                fi
+                                cp /opt/metanode/node-$node_id/logs/consensus/*.log "$crash_dir/consensus/" 2>/dev/null || true
                             else
-                                exec_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-execution-$node_id 2>/dev/null || echo 'unknown'")
-                                cons_status=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "systemctl is-active metanode-consensus-$node_id 2>/dev/null || echo 'unknown'")
-                                
                                 # Kéo nhật ký journalctl mới nhất
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 200 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
-                                sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 200 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
+                                ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-execution-$node_id -n 500 --no-pager" > "$crash_dir/journal_execution.log" 2>/dev/null || true
+                                ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "journalctl -u metanode-consensus-$node_id -n 500 --no-pager" > "$crash_dir/journal_consensus.log" 2>/dev/null || true
                                 
                                 # Kéo panic dump nếu có
-                                sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/panic.log" "$crash_dir/" 2>/dev/null || true
+                                scp_remote -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/panic.log" "$crash_dir/" 2>/dev/null || true
                                 
-                                # Kéo file log execution mới nhất
-                                latest_exec=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -t /opt/metanode/node-$node_id/logs/execution/*/*.log /opt/metanode/node-$node_id/logs/execution/*.log 2>/dev/null | head -n 1" 2>/dev/null || true)
-                                if [ -n "$latest_exec" ]; then
-                                    sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec" "$crash_dir/" 2>/dev/null || true
+                                # Kéo thư mục log execution ngày mới nhất
+                                mkdir -p "$crash_dir/execution"
+                                latest_exec_date_dir=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/execution/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                if [ -n "$latest_exec_date_dir" ]; then
+                                    scp_remote -r -o ConnectTimeout=5 "$ssh_user@$ip:$latest_exec_date_dir" "$crash_dir/execution/" 2>/dev/null || true
                                 fi
+                                scp_remote -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/execution/*.log" "$crash_dir/execution/" 2>/dev/null || true
                                 
-                                # Kéo file log consensus mới nhất
-                                latest_cons=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ls -t /opt/metanode/node-$node_id/logs/consensus/*/*.log /opt/metanode/node-$node_id/logs/consensus/*.log 2>/dev/null | head -n 1" 2>/dev/null || true)
-                                if [ -n "$latest_cons" ]; then
-                                    sshpass -p "$ssh_pass" scp -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons" "$crash_dir/" 2>/dev/null || true
+                                # Kéo thư mục log consensus ngày mới nhất
+                                mkdir -p "$crash_dir/consensus"
+                                latest_cons_date_dir=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "ls -dt /opt/metanode/node-$node_id/logs/consensus/20* 2>/dev/null | head -n 1" 2>/dev/null || true)
+                                if [ -n "$latest_cons_date_dir" ]; then
+                                    scp_remote -r -o ConnectTimeout=5 "$ssh_user@$ip:$latest_cons_date_dir" "$crash_dir/consensus/" 2>/dev/null || true
                                 fi
+                                scp_remote -o ConnectTimeout=5 "$ssh_user@$ip:/opt/metanode/node-$node_id/logs/consensus/*.log" "$crash_dir/consensus/" 2>/dev/null || true
                             fi
 
                             # Xóa bớt các thư mục backup cũ, chỉ giữ lại 5 bản mới nhất
@@ -345,11 +573,12 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
 ────────────────────────
 📦 <b>Đã tự động sao lưu gói Logs mới nhất!</b>
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
-<code>sshpass -p \"$ssh_pass\" scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
+<code>scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                         fi
                     fi
                 else
@@ -367,11 +596,119 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
 
 📡 <b>MÁY GHI NHẬN PHỤC HỒI (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Trạng thái:</b> Đã phản hồi RPC bình thường
 ────────────────────────"
+                    elif [ "${dead_nodes[$node_key]:-0}" == "2" ]; then
+                        # Node tắt chủ động nay bật lại bình thường, reset cờ êm đềm
+                        dead_nodes[$node_key]=0
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
+
+            # ─── BƯỚC 3: PHÁT HIỆN CHUỖI ĐỨNG IM (CHAIN STALL DETECTOR) ───────────────
+            curr_max_block=0
+            probe_target_url=""
+            while read -r chk_key node_url; do
+                chk_id=${chk_key#m}
+                if is_node_ignored "$chk_key" "$chk_id"; then
+                    continue
+                fi
+                hex_b=$(curl -s -m 3 -X POST "$node_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+                if [[ "$hex_b" =~ ^0x[0-9a-fA-F]+$ ]]; then
+                    dec_b=$((16#${hex_b#0x}))
+                    if [ "$dec_b" -gt "$curr_max_block" ]; then curr_max_block=$dec_b; fi
+                    # Nhớ lại 1 node còn phản hồi được để dùng làm đích gửi tx thăm dò bên dưới,
+                    # nếu cần -- không cần là node cao nhất, chỉ cần còn sống.
+                    if [ -z "$probe_target_url" ]; then probe_target_url="$node_url"; fi
+                fi
+            done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
+
+            now_ts=$(date +%s)
+            if [ "$curr_max_block" -gt 0 ]; then
+                if [ "$curr_max_block" -gt "$last_seen_block" ]; then
+                    if [ "$is_chain_stalled" == "true" ]; then
+                        is_chain_stalled=false
+                        send_tele "✅ <b>[ĐÃ PHỤC HỒI: MẠNG TIẾP TỤC SINH BLOCK]</b> ✅
+────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+🎯 <b>Độ cao Block mới nhất:</b> <code>#${curr_max_block}</code>
+📡 <b>Trạng thái:</b> Chuỗi đã thoát khỏi tình trạng treo và tiếp tục tạo block bình thường.
+────────────────────────"
+                    fi
+                    last_seen_block=$curr_max_block
+                    last_block_progress_ts=$now_ts
+                else
+                    stall_duration=$((now_ts - last_block_progress_ts))
+                    # Nếu block không tăng sau STALL_THRESHOLD_SEC, cảnh báo lặp lại mỗi 15 phút
+                    if [ "$stall_duration" -ge "$STALL_THRESHOLD_SEC" ]; then
+                        if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
+                            # Trước khi báo: thử 1 tx thăm dò. Nếu chain chỉ đang RẢNH (không có
+                            # giao dịch nên không tạo block mới -- không phải bị treo thật), tx
+                            # này sẽ được đưa vào block và ta bỏ qua cảnh báo giả (2026-09-08).
+                            confirmed_real_stall=true
+                            probe_status_line="Chưa thử được (không có node nào để gửi)"
+                            echo "🔎 [STALL PROBE] Nghi ngờ chain treo tại block #${last_seen_block} (đứng yên ${stall_duration}s) -- thử gửi 1 tx thăm dò tới ${probe_target_url:-<không có node nào>}..."
+                            if [ -n "$probe_target_url" ]; then
+                                LAST_PROBE_OUTPUT=""
+                                send_stall_probe_tx "$probe_target_url"
+                                probe_rc=$?
+                                case "$probe_rc" in
+                                    0)
+                                        sleep 3
+                                        probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
+                                        if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
+                                            last_seen_block=$((16#${probe_hex#0x}))
+                                            last_block_progress_ts=$now_ts
+                                            confirmed_real_stall=false
+                                            echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
+                                        else
+                                            probe_status_line="Tx thăm dò báo đã xác nhận nhưng block vẫn chưa nhích -- bất thường, cần xem log."
+                                        fi
+                                        ;;
+                                    2)
+                                        # 2026-09-08: gặp thật trên cụm CI -- PROBE_TX_KEY sai/chưa đăng ký BLS
+                                        # khiến RPC từ chối NGAY LÚC GỬI, không liên quan gì tới chain có treo
+                                        # hay không. Đừng khẳng định "không phải do rảnh" trong tình huống này.
+                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
+                                        probe_status_line="Bị RPC từ chối ngay khi gửi (lỗi cấu hình PROBE_TX_KEY, KHÔNG phải bằng chứng chain treo): ${probe_err_snippet:-không rõ lỗi}"
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                    3)
+                                        probe_status_line="Đã gửi được nhưng hết giờ chờ (15s) không thấy receipt -- tín hiệu treo thật."
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                    *)
+                                        probe_status_line="Không chạy được (thiếu công cụ hoặc không lấy được chain-id) -- không loại trừ được khả năng rảnh."
+                                        echo "⚠️ [STALL PROBE] $probe_status_line"
+                                        ;;
+                                esac
+                            fi
+
+                            if [ "$confirmed_real_stall" == "true" ]; then
+                                last_stall_alert_ts=$now_ts
+                                is_chain_stalled=true
+                                send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
+────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
+   • <b>Node được kiểm tra (tx thăm dò):</b> <code>${probe_target_url:-không có}</code>
+   • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
+   • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
+   • <b>Kết quả tx thăm dò:</b> ${probe_status_line}
+   • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
+────────────────────────"
+                            fi
+                        fi
+                    fi
+                fi
+            fi
         fi
         sleep 10
     done
@@ -391,17 +728,20 @@ if [ "${1:-}" == "resources" ]; then
         PARSE_PY=$(get_parse_py)
 
         if [ -n "$PARSE_PY" ] && [ -n "$INV_PATH" ]; then
-            python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true
-            AUTH_JSON=$(python3 "$PARSE_PY" "$INV_PATH" auth 2>/dev/null || echo "{}")
-        else
-            AUTH_JSON="{}"
+            (umask 077 && python3 "$PARSE_PY" "$INV_PATH" json > "$RPC_JSON_PATH" 2>/dev/null || true)
+            chmod 0600 "$RPC_JSON_PATH" 2>/dev/null || true
         fi
         
         if [ -f "$RPC_JSON_PATH" ]; then
+            RPC_CONFIG_DATA=$(cat "$RPC_JSON_PATH" 2>/dev/null || echo "{}")
             while read -r node_key node_url; do
+                node_id=${node_key#m}
+                if is_node_ignored "$node_key" "$node_id"; then
+                    continue
+                fi
                 ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
-                ssh_user=$(echo "$AUTH_JSON" | jq -r ".users[\"$node_key\"] // \"your_user\"" 2>/dev/null)
-                ssh_pass=$(echo "$AUTH_JSON" | jq -r ".passes[\"$node_key\"] // \"your_password\"" 2>/dev/null)
+                resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
+                ssh_user="$SSH_USER"
                 
                 is_local=false
                 if [ "$ip" == "$MONITOR_IP" ] || [ "$ip" == "127.0.0.1" ] || [ "$ip" == "localhost" ]; then
@@ -413,7 +753,7 @@ if [ "${1:-}" == "resources" ]; then
                     cpu_usage=$(top -bn1 2>/dev/null | grep 'Cpu(s)' | awk '{print 100 - $8}' | cut -d. -f1)
                     disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | sed 's/%//')
                 else
-                    metrics=$(sshpass -p "$ssh_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ssh_user@$ip" "ram=\$(free -m | awk 'NR==2{printf \"%.0f\", \$3*100/\$2 }'); cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print 100 - \$8}' | cut -d. -f1); disk=\$(df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'); echo \"\$ram \$cpu \$disk\"" 2>/dev/null || true)
+                    metrics=$(ssh_remote -o ConnectTimeout=5 "$ssh_user@$ip" "ram=\$(free -m | awk 'NR==2{printf \"%.0f\", \$3*100/\$2 }'); cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print 100 - \$8}' | cut -d. -f1); disk=\$(df -h / | awk 'NR==2 {print \$5}' | sed 's/%//'); echo \"\$ram \$cpu \$disk\"" 2>/dev/null || true)
                     ram_usage=$(echo "$metrics" | awk '{print $1}')
                     cpu_usage=$(echo "$metrics" | awk '{print $2}')
                     disk_usage=$(echo "$metrics" | awk '{print $3}')
@@ -421,7 +761,7 @@ if [ "${1:-}" == "resources" ]; then
 
                 RAM_LIMIT=95
                 CPU_LIMIT=97
-                DISK_LIMIT=95
+                DISK_LIMIT=85
 
                 if [[ -n "$ram_usage" ]] && [[ -n "$cpu_usage" ]] && [[ -n "$disk_usage" ]]; then
                     if [[ "$ram_usage" -ge "$RAM_LIMIT" ]] || [[ "$cpu_usage" -ge "$CPU_LIMIT" ]] || [[ "$disk_usage" -ge "$DISK_LIMIT" ]]; then
@@ -441,6 +781,7 @@ if [ "${1:-}" == "resources" ]; then
 
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Cảnh báo (Warning)
 ────────────────────────"
                         fi
@@ -483,10 +824,13 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
 
     if [ -s "$RPC_JSON_PATH" ]; then
         cp -f "$RPC_JSON_PATH" "$BLOCK_CHECKER_DIR/config-m-nodes.json"
+        if [ -d "/opt/metanode/monitors/block_hash_checker" ]; then
+            cp -f "$RPC_JSON_PATH" "/opt/metanode/monitors/block_hash_checker/config-m-nodes.json" 2>/dev/null || true
+        fi
     fi
     cd "$BLOCK_CHECKER_DIR" || exit 1
     
-    if [ ! -f "block_hash_checker" ] && command -v go >/dev/null 2>&1; then
+    if { [ ! -f "block_hash_checker" ] || [ "main.go" -nt "block_hash_checker" ]; } && command -v go >/dev/null 2>&1; then
         go build -o block_hash_checker main.go || true
     fi
     

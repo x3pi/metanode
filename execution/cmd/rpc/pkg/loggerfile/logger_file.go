@@ -43,6 +43,14 @@ func resolveLogRoot(root string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve log root %q: %w", root, err)
 	}
+
+	globalAbs, err := filepath.Abs(filepath.Clean(globalLogDir))
+	if err == nil && globalAbs != "" {
+		if err := ensureWithinRoot(globalAbs, absRoot); err != nil {
+			return "", fmt.Errorf("security violation: requested root %q escapes global log dir %q", root, globalLogDir)
+		}
+	}
+
 	return absRoot, nil
 }
 

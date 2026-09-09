@@ -21,6 +21,29 @@ use super::proto::{ExecutableBlock, TransactionExe};
 use super::ExecutorClient;
 use super::{GO_VERIFICATION_INTERVAL, MAX_BUFFER_SIZE};
 
+/// Wall-clock timestamp in nanoseconds since the Unix epoch. Used only for
+/// [FFI-TRACE] diagnostics: Rust and Go share the same OS clock (CGo links
+/// them into one process), so these timestamps can be directly correlated
+/// with the `time.Now().UnixNano()` timestamps Go logs on its side of the
+/// same FFI call, keyed by `gei`, to attribute the Rust<->Go round trip.
+fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Gates the [FFI-TRACE] diagnostics (see `now_ns` above) behind
+/// `METANODE_FFI_TRACE=true`. They're `warn!`, which — like Go's
+/// `logger.Warn` counterpart these are paired with — shows at any configured
+/// log level and fires on every block, so they stay opt-in rather than an
+/// always-on log-volume cost every production node would pay forever for a
+/// diagnostic only needed when actively chasing a perf regression again.
+fn ffi_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("METANODE_FFI_TRACE").as_deref() == Ok("true"))
+}
+
 /// Maximum transactions per Go block.
 /// When a DAG commit exceeds this threshold, Rust splits it into multiple
 /// ExecutableBlock payloads with incrementing global_exec_index values.
@@ -134,6 +157,7 @@ impl ExecutorClient {
         let mut total_after_dedup = 0;
 
         if total_tx_before > 0 {
+            self.ensure_tx_payloads_cached(subdag).await;
             let (txs, sys_txs) = self.build_sorted_transactions(subdag)?;
             all_proto_txs = txs;
             all_system_txs = sys_txs;
@@ -691,10 +715,18 @@ impl ExecutorClient {
                         idx, data.len()
                     );
                     let ffi_start = std::time::Instant::now();
+                    let sched_start_ns = now_ns();
                     let data_clone = data.clone();
-                    
+
+                    // [PERF-TRACE] Split the FFI round trip into its 3 real components so a
+                    // slow block can be attributed correctly instead of lumped into one
+                    // "FFI execute_block" number:
+                    //   1. sched_ns   — clone() + waiting for a spawn_blocking thread pool slot
+                    //   2. cgo_ns     — time actually inside the CGo call (== all of Go's work)
+                    //   3. decode_ns  — time to resolve the .await + protobuf-decode the response
                     let (success, response) = {
                         let ffi_res = tokio::task::spawn_blocking(move || {
+                            let thread_enter_ns = now_ns();
                             let mut out_payload: *mut u8 = std::ptr::null_mut();
                             let mut out_len = 0usize;
                             let success = c_fn(
@@ -703,14 +735,27 @@ impl ExecutorClient {
                                 &mut out_payload,
                                 &mut out_len,
                             );
-                            (success, out_payload as usize, out_len)
+                            let thread_exit_ns = now_ns();
+                            (success, out_payload as usize, out_len, thread_enter_ns, thread_exit_ns)
                         })
                         .await
-                        .unwrap_or((false, 0usize, 0));
+                        .unwrap_or((false, 0usize, 0, 0, 0));
 
                         let success = ffi_res.0;
                         let out_payload = ffi_res.1 as *mut u8;
                         let out_len = ffi_res.2;
+                        let thread_enter_ns = ffi_res.3;
+                        let thread_exit_ns = ffi_res.4;
+                        if ffi_trace_enabled() {
+                            let await_done_ns = now_ns();
+                            tracing::warn!(
+                                "⏱️ [FFI-TRACE] gei={} stage=RUST sched_ns={} cgo_ns={} decode_ns={}",
+                                idx,
+                                thread_enter_ns.saturating_sub(sched_start_ns),
+                                thread_exit_ns.saturating_sub(thread_enter_ns),
+                                await_done_ns.saturating_sub(thread_exit_ns),
+                            );
+                        }
 
                         let response = if !out_payload.is_null() && out_len > 0 {
                             let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
@@ -1005,6 +1050,7 @@ impl ExecutorClient {
             );
         }
 
+        self.ensure_tx_payloads_cached(subdag).await;
         let (all_proto_txs, all_system_txs) = self.build_sorted_transactions(subdag)?;
 
         let epoch_data = ExecutableBlock {
@@ -1168,6 +1214,41 @@ impl ExecutorClient {
         }
     }
 
+    /// PEER TX-PAYLOAD RECOVERY (2026-09-09): scans `subdag` for tx digests missing from the
+    /// local TxPayloadCache and, if any are found, asks peers for them (via the tx-fetcher wired
+    /// in coordination_hub.rs — see TxFetcherFn's doc comment there for why this is safe to call
+    /// speculatively on every call, not just after a first failure) before `build_sorted_
+    /// transactions` below gets a chance to run. A hit here means that function's own bail!()
+    /// on a still-missing digest (see its doc comment) simply won't trigger; a miss (no fetcher
+    /// wired yet, no peer had it either — e.g. a full-cluster restart, where every peer lost the
+    /// same in-memory entry at the same time) leaves that unchanged fork-safety net exactly as
+    /// it was before this existed. Always call this before `build_sorted_transactions`, never as
+    /// a substitute for it.
+    async fn ensure_tx_payloads_cached(&self, subdag: &CommittedSubDag) {
+        let missing: Vec<consensus_types::block::TxDigest> = {
+            let cache = consensus_core::get_global_tx_cache().read();
+            subdag
+                .blocks
+                .iter()
+                .flat_map(|block| block.tx_digests())
+                .filter(|digest| cache.get(digest).is_none())
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let Some(fetcher) = crate::ffi::get_global_tx_fetcher() else {
+            return;
+        };
+        debug!(
+            "🔧 [TX-PAYLOAD-RECOVERY] {} tx digest(s) missing from local cache for commit {} \
+             — asking peers before falling back to the existing fork-safety bail.",
+            missing.len(),
+            subdag.commit_ref.index
+        );
+        fetcher(missing, std::time::Duration::from_secs(5)).await;
+    }
+
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///
     /// This extracts the filter → dedup → sort logic from convert_to_protobuf
@@ -1190,10 +1271,61 @@ impl ExecutorClient {
             let tx_digests = block.tx_digests();
             if !tx_digests.is_empty() {
                 for digest in &tx_digests {
-                    if let Some(tx) = cache.get(digest) {
-                        all_txs_to_process.push(tx);
-                    } else {
-                        warn!("⚠️ [build_sorted_transactions] Missing transaction for digest {:?} in block {}", digest, block.reference());
+                    match cache.get(digest) {
+                        Some(tx) => all_txs_to_process.push(tx),
+                        None => {
+                            // FORK-SAFETY (2026-09-08): a missing digest here means this
+                            // commit is NOT empty — the digest count is real, it's counted as
+                            // such by both commit_is_empty_for_gei (executor.rs) and
+                            // recovery.rs's own tx counter, specifically so a non-empty commit
+                            // is never misclassified as empty — but the actual transaction
+                            // bytes are gone: TxPayloadCache is in-memory-only and does not
+                            // survive a process restart (see transaction.rs's doc comment on
+                            // TX_PAYLOAD_DIR). This branch used to just warn!() and silently
+                            // drop the transaction, so the block still got built and
+                            // dispatched anyway — with genuinely wrong (empty-where-real)
+                            // content, GEI still consumed as if nothing were wrong. That is
+                            // exactly how a validator silently diverges from the rest of the
+                            // network at one specific GEI: reproduced and confirmed via a real
+                            // chaos-restart test (2026-09-08), where a restarted node
+                            // committed an empty block at a GEI where every other validator
+                            // had a real 10-tx block — identical GEI, different hash/state
+                            // root, only on the node that had just restarted.
+                            //
+                            // Zero-Fork Invariant: never let a node silently build and
+                            // dispatch content it knows is wrong. Both callers of this
+                            // function propagate this Err via `?` into paths that already
+                            // exist and are already correct for exactly this situation — the
+                            // live delivery path (block_delivery.rs's
+                            // BlockDeliveryManager::run) panics on any Err from here (with an
+                            // outer resilience loop in ffi.rs, since 08780279, that retries
+                            // instead of leaving Rust consensus dead forever), and the
+                            // startup-replay path (recovery.rs) treats an Err as "defer to
+                            // network sync". Returning Err routes this into those existing
+                            // failure paths instead of inventing a new one.
+                            //
+                            // CORRECTION (2026-09-09, same day, confirmed live): "defer to
+                            // network sync" in recovery.rs does NOT actually fetch anything —
+                            // it just skips that one startup fast-path and falls through to
+                            // this same live-delivery bail. If every node in the cluster
+                            // restarted together and all lost the same in-memory cache entry
+                            // at the same time, NOTHING here recovers it, and this becomes a
+                            // real infinite retry loop (confirmed live: 600+ repeats at the
+                            // exact same commit). The actual fix is the peer fetch attempted
+                            // BEFORE this loop even runs — see ensure_tx_payloads_cached's doc
+                            // comment above build_sorted_transactions. That only helps when at
+                            // least one peer didn't lose the same entry (the common case: one
+                            // node restarting while others stay up); a genuine full-cluster-
+                            // simultaneous loss of this exact digest is still unrecoverable by
+                            // design, and this bail is the correct, final answer for it.
+                            anyhow::bail!(
+                                "Missing transaction payload for digest {:?} in block {} \
+                                 (commit {}) — TxPayloadCache has no entry (most likely a \
+                                 post-restart cache-miss). Refusing to build a block with a \
+                                 silently-dropped transaction.",
+                                digest, block.reference(), subdag.commit_ref.index
+                            );
+                        }
                     }
                 }
             } else {

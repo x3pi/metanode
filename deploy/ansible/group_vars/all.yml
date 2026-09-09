@@ -11,10 +11,44 @@ keep_data: true              # true or false
 restore_node: "none"         # 'none' or specific node id (e.g. 2)
 snapshot_url: ""             # e.g., 'http://192.168.1.230:8604'
 
-# Snapshot and Epoch configuration defaults
-epoch_duration_seconds: 600
-snapshot_frequency_blocks: 500
-snapshot_max_snapshots: 1
+# Snapshot and Epoch configuration defaults (matches inventory.yml defaults).
+# 2026-09-08: this used to be 600s/500 blocks/epochs_to_keep=5 -- tightened here to match the
+# faster cadence this repo's own CI recovery tests (snapshot_recovery, node_chaos_restart) need,
+# but note this is also the fallback default for ANY deploy that doesn't override these three in
+# its own inventory.yml, production included. epochs_to_keep=0 in particular means "never prune
+# old epoch state" (archive node) -- combined with epoch_duration_seconds=60 that's 10x more
+# epoch transitions than before, none of them ever cleaned up. Not reverted, since real DB-size
+# growth from this now has a real backstop (MetanodeDiskFull in alert_rules.yml, added the same
+# day) that didn't exist when this tradeoff was last considered -- but if you're pointing this at
+# a long-lived production cluster rather than CI, override epochs_to_keep back to a real number
+# in that cluster's own inventory.yml rather than relying on this fallback.
+epoch_duration_seconds: 60
+snapshot_frequency_blocks: 50
+snapshot_max_snapshots: 2
 snapshot_max_part_size_mb: 600
-epochs_to_keep: 5
+epochs_to_keep: 0
 snapshot_server_port: 8604
+
+# RecoveryCommittee (2026-09-04 -- see GatewayEngine.RecoveryCommittee's own doc comment,
+# execution/pkg/cross_chain/gateway.go, and deploy/ansible/roles/local_build/tasks/main.yml's
+# "Ensure independent RecoveryCommittee keys exist" task). Devnet default: this cluster
+# auto-generates its own independent RecoveryCommittee key set (never reuses Root Anchor's own
+# consensus validator keys -- that reuse was a real security finding, fixed 2026-09-04).
+recovery_committee_size: 4
+# For a REAL (non-devnet) deployment, set this to an absolute path to a pre-built, operator-
+# supplied []cross_chain.ValidatorEntry JSON file (pubkey + PopSignature ONLY -- never a private
+# key) instead -- generate RecoveryCommittee's real keys entirely out-of-band (ideally on
+# air-gapped hardware, one member per distinct physical custodian) and never let this repo's
+# tooling see the private key material at all. Leave empty to use the devnet auto-generated
+# default above.
+recovery_committee_json_override_file: ""
+
+# Signature & nonce verification in mempool (false = strictly verified, true = bypass for raw benchmark stress-test)
+skip_mempool_sig_verify: false
+
+# Device key verification (false = disabled/default, true = enabled)
+verify_device_key: false
+
+# Alertmanager version installed by roles/alertmanager (see its tasks/main.yml for the
+# download URL pattern). Pin explicitly rather than "latest" so a deploy run is reproducible.
+alertmanager_version: "0.27.0"

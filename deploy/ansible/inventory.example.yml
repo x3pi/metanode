@@ -1,41 +1,86 @@
-# Ví dụ cấu hình cho nhiều máy (Mỗi máy 1 mật khẩu riêng biệt)
+# ==============================================================================
+# METANODE CLUSTER INVENTORY TEMPLATE (inventory.example.yml)
+# Copy file này thành inventory.yml và điều chỉnh các giá trị phù hợp với cụm node:
+#   cp inventory.example.yml inventory.yml
+# ==============================================================================
+
 all:
   children:
     metanode_cluster:
       vars:
-        ansible_user: "abc"
+        # ----------------------------------------------------------------------
+        # 1. CẤU HÌNH THÔNG BÁO TELEGRAM (Tùy chọn)
+        # ----------------------------------------------------------------------
+        # Điền Token Bot và Chat ID nhóm để nhận thông báo tự động khi deploy/crash
         telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN_HERE"
         telegram_chat_id: "YOUR_TELEGRAM_CHAT_ID_HERE"
-      hosts:
-        192.168.1.230_validator:
-          node_ids: [4]
-          is_synconly: true
-          ansible_host: 192.168.1.230
-          ansible_ssh_pass: "MẬT_KHẨU_MÁY_230"
-          ansible_become_pass: "MẬT_KHẨU_MÁY_230"
-        
-        192.168.1.231_validator:
-          node_ids: [3]
-          ansible_host: 192.168.1.231
-          ansible_ssh_pass: "MẬT_KHẨU_MÁY_231"
-          ansible_become_pass: "MẬT_KHẨU_MÁY_231"
 
-# ---------------------------------------------------------
-# Ví dụ cấu hình chạy TẤT CẢ trên 1 máy tính (Máy Local)
-# ---------------------------------------------------------
-# hosts:
-#   192.168.1.234_sync:
-#     node_ids: [4]
-#     synconly_nodes: [4]
-#     rpc_nodes: [4]
-#     ansible_connection: local # <- Chạy trực tiếp trên máy đang gõ lệnh deploy
-#     ansible_host: 192.168.1.234
-#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
-#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"
-#
-#   192.168.1.234_validator:
-#     node_ids: [0,1,2,3]
-#     ansible_connection: local # <- Bỏ dòng này nếu muốn dùng SSH thay vì cài trực tiếp
-#     ansible_host: 192.168.1.234
-#     ansible_ssh_pass: "MẬT_KHẨU_MÁY_234"
-#     ansible_become_pass: "MẬT_KHẨU_MÁY_234"
+        # [TÙY CHỌN] Khóa riêng (hex) của 1 tài khoản CÓ SỐ DƯ, dùng để monitors/start_monitors.sh
+        # gửi 1 giao dịch thăm dò trước khi báo "chain stall" -- phân biệt chain đang rảnh (không
+        # có giao dịch nên không tạo block mới) với chain bị treo thật. Không đặt thì dùng khóa
+        # devnet công khai có sẵn trong repo (chỉ an toàn cho devnet/lab nội bộ).
+        # probe_tx_key: "0xYOUR_FUNDED_DEV_ACCOUNT_PRIVATE_KEY_HERE"
+
+        # ----------------------------------------------------------------------
+        # 2. CẤU HÌNH CONSENSUS & SNAPSHOT TOÀN CỤM
+        # ----------------------------------------------------------------------
+        # Thời gian 1 epoch (giây). Sau mỗi epoch consensus chuyển vòng validator
+        epoch_duration_seconds: 600
+
+        # Tần suất đóng gói snapshot (ví dụ: cứ mỗi 500 block tạo 1 bản snapshot)
+        snapshot_frequency_blocks: 500
+
+        # Số lượng bản snapshot tối đa lưu trữ trên đĩa (tránh đầy dung lượng)
+        snapshot_max_snapshots: 2
+
+        # Kích thước tối đa của mỗi file nén snapshot (MB)
+        snapshot_max_part_size_mb: 600
+
+        # Số epoch cũ giữ lại trước khi dọn dẹp state (đặt 0 nếu muốn chạy Archive Node,
+        # giữ toàn bộ lịch sử — lưu ý sẽ khiến dung lượng đĩa tăng không giới hạn theo thời gian)
+        epochs_to_keep: 5
+
+
+
+      hosts:
+        # ======================================================================
+        # MÁY CHỦ 1 (Ví dụ: Máy Master / RPC Node)
+        # ======================================================================
+        server_1:
+          ansible_host: 192.168.1.234
+          ansible_user: "abc"
+          # [BẮT BUỘC] Danh sách Node ID chạy trên máy này (ví dụ: chạy Node 0 và Node 3)
+          node_ids: [0, 3]
+
+          # [TÙY CHỌN] Các node mở cổng RPC (HTTP 10746, 10747...) cho client/dapp kết nối
+          rpc_nodes: [0, 3]
+
+          # [TÙY CHỌN] Các node áp dụng xóa bớt state cũ (prune) theo epochs_to_keep
+          # prune_nodes: [0, 3]
+
+          # Nếu máy triển khai chạy node đó luôn thì để local triển khai nhanh hơn
+          # ansible_connection: local
+
+          # --- PHƯƠNG THỨC XÁC THỰC SSH (Chọn 1 trong 2 cách dưới đây) ---
+          # Cách A (Khuyên dùng cho Production): Xác thực bằng SSH Key (không cần mật khẩu)
+          ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+
+          # Cách B (Dùng cho Lab / Devnet nội bộ): Xác thực bằng mật khẩu trực tiếp
+          # ansible_ssh_pass: "mat_khau_ssh"
+          # ansible_become_pass: "mat_khau_sudo"
+
+        # ======================================================================
+        # MÁY CHỦ 2
+        # ======================================================================
+        server_2:
+          ansible_host: 192.168.1.230
+          ansible_user: "abc"
+          node_ids: [1, 2]
+          rpc_nodes: [1, 2]
+          # prune_nodes: [1, 2]
+          # Cách A: Dùng SSH Key
+          ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+
+          # Cách B: Dùng Mật khẩu
+          # ansible_ssh_pass: "mat_khau_ssh"
+          # ansible_become_pass: "mat_khau_sudo"

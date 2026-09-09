@@ -179,6 +179,13 @@ pub struct ConsensusNode {
     /// RS-1: RwLock for concurrent read access during commit processing
     pub(crate) epoch_eth_addresses:
         Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    /// Notified every time epoch_eth_addresses is written to (2026-09-05, low-priority
+    /// production-readiness cleanup): lets CommitProcessor's leader-address wait loop
+    /// (resolve_leader_address, commit_processor/processor.rs) wake up immediately on a
+    /// real write instead of only via its 200ms poll fallback, which stays in place
+    /// unchanged for any writer this Arc doesn't reach (see that loop's own doc comment
+    /// for which write sites are, and aren't, wired to this notify).
+    pub(crate) epoch_eth_addresses_notify: Arc<tokio::sync::Notify>,
 
     /// Peer RPC addresses for cross-node block fetching during epoch transitions
     pub(crate) peer_rpc_addresses: Vec<String>,
@@ -245,5 +252,8 @@ pub(crate) struct ConsensusSetup {
     pub(crate) tx_recycler: Arc<crate::consensus::tx_recycler::TxRecycler>,
     /// Shared epoch_eth_addresses cache between CommitProcessor and ConsensusNode
     pub(crate) epoch_eth_addresses_arc: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    /// Sibling Notify for epoch_eth_addresses_arc -- see ConsensusNode::epoch_eth_addresses_notify's
+    /// own doc comment.
+    pub(crate) epoch_eth_addresses_notify: Arc<tokio::sync::Notify>,
 }
 

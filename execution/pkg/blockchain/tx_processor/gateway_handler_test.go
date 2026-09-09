@@ -2,7 +2,6 @@ package tx_processor
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -10,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
 	"github.com/meta-node-blockchain/meta-node/pkg/bls"
@@ -86,6 +84,24 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 	// Task 1.1: Seed initial real balance for sender (1000)
 	if err := cs1.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
 		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	// destChainId 102 must be a known registered chain -- outbound() now rejects an unregistered
+	// destination before it ever locks/burns funds (2026-09-05 security fix, see that case's own
+	// comment in gateway_handler.go).
+	seedEngine, err := loadGatewayEngine(cs1)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
+	}
+	seedEngine.ChainRegistry[102] = cross_chain.ChainRegistry{
+		ChainID: 102,
+		Epoch:   1,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+		},
+	}
+	if err := saveGatewayEngine(cs1, seedEngine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
 	}
 
 	calldata, err := h.abi.Pack("outbound",
@@ -195,6 +211,69 @@ func mustPackGetMessageStatus(t *testing.T, h *GatewayHandler, messageID common.
 		t.Fatalf("marshal CallData: %v", err)
 	}
 	return dataBytes
+}
+
+// TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain closes Finding #5 in
+// note/cross_chain/security_audit_findings.md ("Permanent Lock of Funds via Unregistered
+// Destination Chain in outbound()", found in the 2026-09-05 proactive re-audit): unlike the
+// relay-onward path in claimMessage (which already validated finalDestChainID before this fix),
+// the direct user-facing outbound() entry point locked/burned real funds into
+// PendingOutboundMessages[destChainID] for ANY destChainID at all -- including one nobody will
+// ever register or relay for, which would leave the funds Pending forever with no way to ever
+// produce a failure cert (nothing ever attempts delivery, so nothing ever reverts). This proves
+// the fix: both an unregistered destChainId and destChainId == the local chain itself are now
+// rejected BEFORE any balance mutation happens.
+func TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	target := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	packOutbound := func(destChainID int64) []byte {
+		calldata, err := h.abi.Pack("outbound",
+			big.NewInt(destChainID), target, []byte{}, big.NewInt(0), big.NewInt(100),
+			big.NewInt(0), big.NewInt(0), uint8(0), false,
+		)
+		if err != nil {
+			t.Fatalf("pack outbound() calldata: %v", err)
+		}
+		return marshalCallData(t, calldata)
+	}
+
+	// Case 1: destChainId 999999 was never registered anywhere on this chain -- must be rejected.
+	tx1 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), packOutbound(999999))
+	rcp1, _, failed1 := h.HandleTransaction(context.Background(), cs, tx1, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed1 {
+		t.Fatalf("expected outbound() to an unregistered destChainId to fail, but it succeeded")
+	}
+	if !strings.Contains(string(rcp1.Return()), "not a registered chain") {
+		t.Fatalf("expected 'not a registered chain' rejection, got: %s", string(rcp1.Return()))
+	}
+
+	// Case 2: destChainId == this chain's own LocalChainID (0 in this test context, since no
+	// engine has been saved/configured yet) -- sending "cross-chain" to yourself is never valid.
+	tx2 := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), packOutbound(0))
+	rcp2, _, failed2 := h.HandleTransaction(context.Background(), cs, tx2, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed2 {
+		t.Fatalf("expected outbound() to the local chain itself to fail, but it succeeded")
+	}
+	if !strings.Contains(string(rcp2.Return()), "is this chain itself") {
+		t.Fatalf("expected 'is this chain itself' rejection, got: %s", string(rcp2.Return()))
+	}
+
+	// Sanity: NEITHER attempt actually moved the sender's real balance.
+	as, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || as == nil || as.Balance().Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected sender balance to remain 1000 (no mutation on a rejected outbound), got %v (err=%v)", as.Balance(), err)
+	}
 }
 
 // TestGatewayHandler_AttestCommitThenClaimMessage exercises the two highest-risk write paths
@@ -507,6 +586,428 @@ func TestGatewayHandler_Refund(t *testing.T) {
 	_ = rcpDup
 }
 
+// TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee is the regression test for finding #8 in
+// note/cross_chain/security_audit_findings.md ("Double Refund of Tip and GasFee on Reverted
+// Executions", 2026-09-05), which supersedes finding #2's original ("Total Supply Deflation via
+// Unrefunded Tip") fix: a refund() call is only ever reachable with a real failure cert, which is
+// only ever produced after a real claimMessage() already ran on the destination and reverted --
+// by that point Tip was already credited to the relaying validator/relayer and GasFee was already
+// fully settled there (spent + unused-refunded), both unconditionally, regardless of the later
+// revert. Restoring either one again here would mint native coin a second time for something
+// already irrevocably settled on the destination. Mirrors TestGatewayHandler_Refund's exact
+// real-ABI-transaction flow but with nonzero Tip AND GasFee, asserting the sender's balance is
+// restored to Value ONLY -- Tip and GasFee permanently stay wherever they were already settled.
+func TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp101 := bls.GenerateKeyPair()
+	kp102 := bls.GenerateKeyPair()
+	pop101 := cross_chain.PopSign(kp101.PrivateKey(), kp101.PublicKey())
+	pop102 := cross_chain.PopSign(kp102.PrivateKey(), kp102.PublicKey())
+
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.LocalChainID = 101
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		101: {
+			ChainID: 101,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kp101.BytesPublicKey(), Stake: 1000, PopSignature: pop101.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+		102: {
+			ChainID: 102,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kp102.BytesPublicKey(), Stake: 1000, PopSignature: pop102.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 102: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine.SupplyLedger = ledger
+	engine.ReserveChainID = 101
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	target := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// Seed sender with 500; outbound will send Value=100 + Tip=15 + GasFee=20 = burn 135 total.
+	require.NoError(t, cs.GetAccountStateDB().AddBalance(sender, big.NewInt(500)))
+
+	const tipAmount = 15
+	const gasFeeAmount = 20
+	outboundCalldata, err := h.abi.Pack("outbound",
+		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
+	)
+	require.NoError(t, err)
+	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
+	messageID := outboundTx.Hash()
+	rcpOut, _, failedOut := h.HandleTransaction(context.Background(), cs, outboundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedOut {
+		reason := ""
+		if rcpOut != nil {
+			reason = string(rcpOut.Return())
+		}
+		t.Fatalf("outbound() transaction failed: %q", reason)
+	}
+
+	// Balance after burn: 500 - (100 Value + 15 Tip + 20 GasFee) = 365.
+	asAfterOutbound, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.NotNil(t, asAfterOutbound)
+	assert.Equal(t, big.NewInt(365), asAfterOutbound.Balance(), "expected sender balance 365 after outbound (500 - 100 Value - 15 Tip - 20 GasFee)")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     messageID,
+		SourceChainID: 101,
+		DestChainID:   102,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(100),
+		Payload:       []byte{},
+		Tip:           big.NewInt(tipAmount),
+		GasFee:        big.NewInt(gasFeeAmount),
+		Ordered:       false,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	proof := cross_chain.GetMerkleProof(layers, 0)
+	aggregateProof := cross_chain.GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := cross_chain.ComputeCommitRootAttestMessage(commitRoot)
+	sig101 := bls.Sign(kp101.PrivateKey(), commitMsg)
+	attestCalldata, err := h.abi.Pack("attestCommit",
+		big.NewInt(101), commitRoot, aggAmounts["0"], big.NewInt(0),
+		big.NewInt(int64(aggregateProof.LeafIndex)), aggregateProof.Siblings,
+		uint64(1), sig101.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	attestTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, attestCalldata))
+	_, _, failAttest := h.HandleTransaction(context.Background(), cs, attestTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failAttest, "attestCommit transaction failed")
+
+	failMsg := cross_chain.ComputeMessageFailureAttestMessage(messageID, 102)
+	failSig := bls.Sign(kp102.PrivateKey(), failMsg)
+
+	refundCalldata, err := h.abi.Pack("refund",
+		messageID, big.NewInt(101), big.NewInt(102), big.NewInt(1), uint8(1), sender, target,
+		big.NewInt(0), big.NewInt(100), []byte{}, big.NewInt(tipAmount), big.NewInt(gasFeeAmount), false,
+		big.NewInt(int64(proof.LeafIndex)), proof.Siblings, commitRoot,
+		uint64(1), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedRefund {
+		reason := ""
+		if rcpRefund != nil {
+			reason = string(rcpRefund.Return())
+		}
+		t.Fatalf("refund() transaction failed: %q", reason)
+	}
+
+	// Value-only restoration: 365 + 100 (Value) = 465 -- Tip and GasFee are deliberately NOT
+	// restored (finding #8): both were already, unconditionally settled on the destination chain
+	// the moment claimMessage ran there (which is the only way this failure cert could ever have
+	// been produced in the first place); refunding them again here would double-mint.
+	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.NotNil(t, asAfterRefund)
+	assert.Equal(t, big.NewInt(465), asAfterRefund.Balance(), "expected sender balance 465 (Value refunded; Tip and GasFee deliberately withheld -- already settled on destination)")
+}
+
+// TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally is the regression test for the
+// "Total Supply Deflation" follow-up fix (2026-09-05, note/cross_chain/security_audit_findings.md
+// finding #6) combined with finding #8's later correction: for a 2-hop message (SourceChainID and
+// DestChainID are both real private chains, neither IS the configured Reserve), refund() must NOT
+// mint Value here -- Value was debited from the source's allocation on RESERVE's own ledger (never
+// touched locally), and is instead restored via a separate Reserve->source outbound message that
+// RelayerDaemon's refundReserveAllocation() call generates (see daemon.go's processFailedClaim).
+// Tip and GasFee are ALSO not restored here -- finding #8 established that neither is ever
+// restored on the source chain at all, 2-hop or not, since both are already, unconditionally
+// settled on the destination chain by the time a failure cert can even exist. So for a 2-hop
+// message, refund() restores NOTHING to the sender's local balance directly; Value alone comes
+// back later via Reserve's own outbound message.
+// Contrast with TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee, which deliberately sets
+// LocalChainID == ReserveChainID (so is2Hop is false there) and asserts Value IS restored
+// immediately -- together the two tests pin both sides of the is2Hop branch.
+func TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	const sourceChainID = 201 // A -- this test's LocalChainID
+	const reserveChainID = 202
+	const destChainID = 203 // B -- real final destination, distinct from Reserve
+
+	kpB := bls.GenerateKeyPair()
+	popB := cross_chain.PopSign(kpB.PrivateKey(), kpB.PublicKey())
+
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.LocalChainID = sourceChainID
+	engine.ReserveChainID = reserveChainID
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: kpB.BytesPublicKey(), Stake: 1000, PopSignature: popB.Bytes()},
+			},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{sourceChainID: big.NewInt(5000)})
+	require.NoError(t, err)
+	engine.SupplyLedger = ledger
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	sender := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	target := common.HexToAddress("0x6666666666666666666666666666666666666666")
+
+	// Seed sender with 500; outbound burns Value=100 + Tip=15 + GasFee=5 = 120 total.
+	require.NoError(t, cs.GetAccountStateDB().AddBalance(sender, big.NewInt(500)))
+
+	const valueAmount, tipAmount, gasFeeAmount = 100, 15, 5
+	outboundCalldata, err := h.abi.Pack("outbound",
+		big.NewInt(destChainID), target, []byte{}, big.NewInt(0),
+		big.NewInt(valueAmount), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
+	)
+	require.NoError(t, err)
+	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
+	messageID := outboundTx.Hash()
+	rcpOut, _, failedOut := h.HandleTransaction(context.Background(), cs, outboundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedOut, "outbound() transaction failed: %+v", rcpOut)
+
+	// Balance after burn: 500 - (100 + 15 + 5) = 380.
+	asAfterOutbound, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	require.Equal(t, big.NewInt(380), asAfterOutbound.Balance())
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     messageID,
+		SourceChainID: sourceChainID,
+		DestChainID:   destChainID,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(valueAmount),
+		Payload:       []byte{},
+		Tip:           big.NewInt(tipAmount),
+		GasFee:        big.NewInt(gasFeeAmount),
+		Ordered:       false,
+	}
+
+	// Real batchOutboundCommit() -- populates CommittedBatches locally, which is all refund()'s
+	// own commit-attestation check needs on the source chain (no attestCommit()/ChainRegistry
+	// entry for sourceChainID itself required -- see Refund()'s own doc comment).
+	batchCalldata, err := h.abi.Pack("batchOutboundCommit", big.NewInt(destChainID))
+	require.NoError(t, err)
+	batchTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, batchCalldata))
+	rcpBatch, _, failedBatch := h.HandleTransaction(context.Background(), cs, batchTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedBatch, "batchOutboundCommit() transaction failed: %+v", rcpBatch)
+	batchOut, err := h.abi.Unpack("batchOutboundCommit", rcpBatch.Return())
+	require.NoError(t, err)
+	commitRoot := common.Hash(batchOut[0].([32]byte))
+
+	_, layers, _, _, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{msg})
+	require.NoError(t, err)
+	proof := cross_chain.GetMerkleProof(layers, 0)
+
+	failDigest := cross_chain.ComputeMessageFailureAttestMessage(messageID, destChainID)
+	failSig := bls.Sign(kpB.PrivateKey(), failDigest)
+
+	refundCalldata, err := h.abi.Pack("refund",
+		messageID, big.NewInt(sourceChainID), big.NewInt(destChainID), big.NewInt(1), uint8(1), sender, target,
+		big.NewInt(0), big.NewInt(valueAmount), []byte{}, big.NewInt(tipAmount), big.NewInt(gasFeeAmount), false,
+		big.NewInt(int64(proof.LeafIndex)), proof.Siblings, commitRoot,
+		uint64(1), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	require.False(t, failedRefund, "refund() transaction failed: %+v", rcpRefund)
+
+	// The defining assertion: balance stays at 380 -- untouched. Value is deliberately withheld
+	// here (comes back later via Reserve's own refundReserveAllocation-generated message instead;
+	// minting it here too would be a double-mint), and Tip/GasFee are never restored on the source
+	// chain at all (finding #8) since both are already irrevocably settled on the destination.
+	asAfterRefund, err := cs.GetAccountStateDB().AccountState(sender)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(380), asAfterRefund.Balance(), "expected sender balance unchanged at 380 -- refund() restores nothing locally for a 2-hop message")
+
+	reloaded, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Equal(t, cross_chain.MessageStatusRefunded, reloaded.GetMessageStatus(messageID))
+}
+
+// TestGatewayHandler_CreditAndRefundReserveAllocation is the real-ABI-dispatch regression test for
+// the "Cross-Chain Ledger Inflation via Missing Reserve Refund" finding
+// (note/cross_chain/security_audit_findings.md): exercises creditReserveAllocation's new
+// success-cert requirement AND refundReserveAllocation end-to-end through h.HandleTransaction --
+// exactly the dispatch layer where the original patch under review had 3 real wiring bugs (no ABI
+// entry for refundReserveAllocation, not in the write-method dispatch list, and a missing epoch
+// field silently shifting every arg after it). A pure Go-level unit test would never have caught
+// any of the three; only exercising the real ABI pack/unpack/dispatch path does.
+func TestGatewayHandler_CreditAndRefundReserveAllocation(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	require.NoError(t, err)
+
+	kp103 := bls.GenerateKeyPair()
+	pop103 := cross_chain.PopSign(kp103.PrivateKey(), kp103.PublicKey())
+
+	engine, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine.LocalChainID = 102 // this node IS Reserve
+	engine.ReserveChainID = 102
+	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
+		101: {ChainID: 101, Committee: []cross_chain.ValidatorEntry{}, Epoch: 1, QuorumThreshold: 6667},
+		103: {
+			ChainID:         103,
+			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 1000, PopSignature: pop103.Bytes()}},
+			Epoch:           1,
+			QuorumThreshold: 6667,
+		},
+	}
+	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(10000), map[uint64]*big.Int{101: big.NewInt(5000), 103: big.NewInt(0)})
+	require.NoError(t, err)
+	engine.SupplyLedger = ledger
+	require.NoError(t, saveGatewayEngine(cs, engine))
+
+	relayer := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	sender := common.HexToAddress("0x8888888888888888888888888888888888888888")
+	target := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0xF001"),
+		SourceChainID: 101,
+		DestChainID:   103,
+		Sequence:      1,
+		HopCount:      1,
+		Sender:        sender,
+		Target:        target,
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(400),
+		Payload:       []byte{},
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+	}
+	leafHash := cross_chain.ComputeMessageLeafHash(msg)
+	engine2, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine2.AttestedCommits[fmt.Sprintf("%d:%s:0", msg.SourceChainID, leafHash.Hex())] = cross_chain.AttestedCommit{
+		SourceChainID: 101, CommitRoot: leafHash, AssetID: big.NewInt(0), Epoch: 1,
+		FundedAmount: big.NewInt(400), ClaimedAmount: big.NewInt(0),
+	}
+	require.NoError(t, saveGatewayEngine(cs, engine2))
+
+	successDigest := cross_chain.ComputeMessageSuccessAttestMessage(msg.MessageID, 103)
+	successSig := bls.Sign(kp103.PrivateKey(), successDigest)
+
+	creditCalldata, err := h.abi.Pack("creditReserveAllocation",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash,
+		uint64(1), successSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	creditTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, creditCalldata))
+	rcpCredit, _, failedCredit := h.HandleTransaction(context.Background(), cs, creditTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedCredit {
+		reason := ""
+		if rcpCredit != nil {
+			reason = string(rcpCredit.Return())
+		}
+		t.Fatalf("creditReserveAllocation transaction failed: %q", reason)
+	}
+
+	engineAfterCredit, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewInt(400), engineAfterCredit.SupplyLedger.GetAllocation(103), "real success cert must credit chain 103's Reserve allocation")
+
+	// Now refundReserveAllocation with a genuine failure cert must reverse it and queue a real
+	// refund message back to chain 101.
+	failDigest := cross_chain.ComputeMessageFailureAttestMessage(msg.MessageID, 103)
+	failSig := bls.Sign(kp103.PrivateKey(), failDigest)
+	refundCalldata, err := h.abi.Pack("refundReserveAllocation",
+		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
+		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
+		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash,
+		uint64(1), failSig.Bytes(), []byte{0x01},
+	)
+	require.NoError(t, err)
+	refundTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, refundCalldata))
+	rcpRefund, _, failedRefund := h.HandleTransaction(context.Background(), cs, refundTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if failedRefund {
+		reason := ""
+		if rcpRefund != nil {
+			reason = string(rcpRefund.Return())
+		}
+		t.Fatalf("refundReserveAllocation transaction failed: %q", reason)
+	}
+
+	engineAfterRefund, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	assert.Zero(t, engineAfterRefund.SupplyLedger.GetAllocation(103).Sign(), "refundReserveAllocation must fully reverse the earlier credit")
+	assert.Equal(t, cross_chain.MessageStatusRefunded, engineAfterRefund.GetMessageStatus(msg.MessageID))
+	pending := engineAfterRefund.PendingOutboundMessages[101]
+	require.Len(t, pending, 1, "a real refund message back to chain 101 must be queued")
+	assert.Equal(t, sender, pending[0].Target)
+	assert.Equal(t, big.NewInt(400), pending[0].Value)
+
+	// A stale-epoch failure cert must be rejected (FIX: the epoch field/check was entirely
+	// missing in the version of this dispatch case under review) -- a FRESH message+attested
+	// commit so this genuinely isolates the epoch check, not an unrelated Merkle-proof or
+	// already-refunded rejection.
+	msg2 := msg
+	msg2.MessageID = common.HexToHash("0xF002")
+	msg2.Sequence = 2
+	leafHash2 := cross_chain.ComputeMessageLeafHash(msg2)
+	engine3, err := loadGatewayEngine(cs)
+	require.NoError(t, err)
+	engine3.AttestedCommits[fmt.Sprintf("%d:%s:0", msg2.SourceChainID, leafHash2.Hex())] = cross_chain.AttestedCommit{
+		SourceChainID: 101, CommitRoot: leafHash2, AssetID: big.NewInt(0), Epoch: 1,
+		FundedAmount: big.NewInt(400), ClaimedAmount: big.NewInt(0),
+	}
+	require.NoError(t, saveGatewayEngine(cs, engine3))
+
+	staleFailDigest := cross_chain.ComputeMessageFailureAttestMessage(msg2.MessageID, 103)
+	staleFailSig := bls.Sign(kp103.PrivateKey(), staleFailDigest)
+	staleCalldata, err := h.abi.Pack("refundReserveAllocation",
+		msg2.MessageID, big.NewInt(int64(msg2.SourceChainID)), big.NewInt(int64(msg2.DestChainID)),
+		big.NewInt(int64(msg2.Sequence)), msg2.HopCount, msg2.Sender, msg2.Target,
+		msg2.AssetID, msg2.Value, msg2.Payload, msg2.Tip, msg2.GasFee, msg2.Ordered,
+		big.NewInt(0), [][32]byte{}, leafHash2,
+		uint64(999), staleFailSig.Bytes(), []byte{0x01}, // wrong epoch: registry is Epoch 1
+	)
+	require.NoError(t, err)
+	staleTx := newTx(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, staleCalldata))
+	rcpStale, _, failedStale := h.HandleTransaction(context.Background(), cs, staleTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failedStale {
+		t.Fatalf("expected refundReserveAllocation with a stale/wrong epoch to fail, but it succeeded")
+	}
+	if rcpStale != nil && !strings.Contains(string(rcpStale.Return()), "epoch") {
+		t.Fatalf("expected the rejection to specifically be an epoch mismatch, got: %q", string(rcpStale.Return()))
+	}
+}
+
 // TestGatewayHandler_GetChainRegistry covers Milestone B's read side of the Go↔Root Anchor RPC
 // channel: a remote chain reads this chain's ChainRegistry entry over eth_call. Exercises real
 // ABI pack/unpack, not just the Go struct, since execution/pkg/cross_chain/rootanchor's client
@@ -574,8 +1075,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unpack getChainRegistry() output: %v", err)
 	}
-	if len(outValues) != 11 {
-		t.Fatalf("expected 11 output values, got %d", len(outValues))
+	if len(outValues) != 13 {
+		t.Fatalf("expected 13 output values, got %d", len(outValues))
 	}
 	exists, _ := outValues[0].(bool)
 	pubkeys, _ := outValues[1].([][]byte)
@@ -588,6 +1089,8 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	accountTreeRootRaw, _ := outValues[8].([32]byte)
 	archivalEndpoint, _ := outValues[9].(string)
 	registeredAt, _ := outValues[10].(uint64)
+	genesisWallet, _ := outValues[11].(common.Address)
+	genesisDigestRaw, _ := outValues[12].([32]byte)
 
 	if !exists {
 		t.Fatal("expected exists=true for a registered chain")
@@ -621,6 +1124,12 @@ func TestGatewayHandler_GetChainRegistry(t *testing.T) {
 	}
 	if registeredAt != 1234567890 {
 		t.Fatalf("registeredAt = %d, want 1234567890", registeredAt)
+	}
+	if genesisWallet != (common.Address{}) {
+		t.Fatalf("genesisWallet = %s, want zero (this fixture seeds ChainRegistry directly in-test, not via RegisterChainViaStake)", genesisWallet.Hex())
+	}
+	if common.Hash(genesisDigestRaw) != (common.Hash{}) {
+		t.Fatalf("genesisDigest = %s, want zero (not yet published)", common.Hash(genesisDigestRaw).Hex())
 	}
 }
 
@@ -1290,7 +1799,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(1_000_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 201), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1312,7 +1821,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(5_000)); err != nil { // < minStake
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 202), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1346,7 +1855,7 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 		if err := cs.GetAccountStateDB().AddBalance(caller, big.NewInt(15_000)); err != nil {
 			t.Fatalf("AddBalance: %v", err)
 		}
-		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203))
+		calldata, err := h.abi.Pack("registerChainViaStake", makeFoundingChainPayload(t, 203), minStake)
 		if err != nil {
 			t.Fatalf("pack registerChainViaStake: %v", err)
 		}
@@ -1370,170 +1879,9 @@ func TestGatewayHandler_RegisterChainViaStake_RequiresRealNativeStakeDeposit(t *
 			t.Fatalf("loadGatewayEngine: %v", err)
 		}
 		if _, exists := reloaded.ChainRegistry[203]; !exists {
-			t.Fatalf("chain 203 must be registered after a sufficient real stake deposit")
-		}
-		if !reloaded.Governance.ActiveChains[203] {
-			t.Fatalf("chain 203 must also become a voting member, with no vote ever cast")
+			t.Fatalf("chain 203 must be registered after a sufficient real stake deposit, with no vote ever cast")
 		}
 	})
-}
-
-// computeProposalIDForTest mirrors GovernanceEngine.Propose's exact proposalID derivation
-// (governance.go: keccak256(kind_byte || proposedAt_be64 || payload)) so the test can predict
-// which proposalID a given claimed timestamp WOULD produce, without relying on the handler to
-// tell it — the whole point is to prove the handler no longer echoes back whatever timestamp
-// the caller claims.
-func computeProposalIDForTest(kind uint8, proposedAt uint64, payload []byte) common.Hash {
-	buf := []byte{kind}
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], proposedAt)
-	buf = append(buf, tsBytes[:]...)
-	buf = append(buf, payload...)
-	return crypto.Keccak256Hash(buf)
-}
-
-// TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue is the regression test for
-// the timestamp-trust gap found during live 2-node testing (note/
-// cross_chain_production_readiness_plan.md Phase 0.9): propose()/vote()/executeProposal() used
-// to trust a raw caller-supplied "currentTimestamp"/"proposedAt" ABI argument with nothing to
-// cross-check it against, letting a caller claim an arbitrary future timestamp to make the
-// mandatory 72h timelock appear satisfied immediately. The fix ignores that argument entirely
-// and always uses the real, consensus-agreed block time instead.
-func TestGatewayHandler_GovernanceTimestamps_IgnoreCallerSuppliedValue(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
-	h, err := GetGatewayHandler()
-	if err != nil {
-		t.Fatalf("GetGatewayHandler: %v", err)
-	}
-
-	kp := bls.GenerateKeyPair()
-	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
-	registry := map[uint64]cross_chain.ChainRegistry{
-		101: {
-			ChainID:         101,
-			Committee:       []cross_chain.ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: popSig.Bytes()}},
-			Epoch:           1,
-			QuorumThreshold: 6667,
-		},
-	}
-	ledger, err := cross_chain.NewGlobalSupplyLedger(big.NewInt(0), map[uint64]*big.Int{})
-	if err != nil {
-		t.Fatalf("NewGlobalSupplyLedger: %v", err)
-	}
-	engine := cross_chain.NewGatewayEngine(101, registry, ledger)
-	engine.EnsureGovernance()   // ActiveChains = {101} -> quorum threshold = 1
-	engine.ReserveChainID = 999 // C7 fix: matches this test's payload chain_id below — this test
-	// is about propose/vote/executeProposal timestamp handling, not allocation semantics, so it
-	// just needs its ProposalAllocateSupply payload to target a validly-configured Reserve.
-	if err := saveGatewayEngine(cs, engine); err != nil {
-		t.Fatalf("saveGatewayEngine: %v", err)
-	}
-
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	realProposeBlockTime := uint64(1_000_000)
-	fakeFarFutureTimestamp := uint64(9_999_999_999) // an attacker's claimed timestamp, decades ahead
-
-	kind := uint8(cross_chain.ProposalAllocateSupply)
-	payload := []byte(`{"chain_id":999,"amount":1}`)
-
-	proposeCalldata, err := h.abi.Pack("propose", kind, payload, fakeFarFutureTimestamp)
-	if err != nil {
-		t.Fatalf("pack propose: %v", err)
-	}
-	fee := big.NewInt(100_000_000_000_000_000)
-	proposeTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, fee, marshalCallData(t, proposeCalldata))
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, proposeTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realProposeBlockTime); failed {
-		t.Fatalf("expected propose to succeed")
-	}
-
-	// The proposalID a real caller would derive using the ATTACKER's claimed timestamp must
-	// NOT exist — proving the handler never fed that value into Propose().
-	fakeProposalID := computeProposalIDForTest(kind, fakeFarFutureTimestamp, payload)
-	fakeCalldata, err := h.abi.Pack("getProposal", fakeProposalID)
-	if err != nil {
-		t.Fatalf("pack getProposal (fake): %v", err)
-	}
-	fakeOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, fakeCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (fake) query: %v", err)
-	}
-	fakeValues, err := h.abi.Unpack("getProposal", fakeOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (fake): %v", err)
-	}
-	if exists, _ := fakeValues[0].(bool); exists {
-		t.Fatalf("proposal keyed on the attacker's claimed timestamp must not exist")
-	}
-
-	// The proposal actually keyed on the REAL block time must exist, and report proposedAt ==
-	// the real block time, not the attacker's claim.
-	realProposalID := computeProposalIDForTest(kind, realProposeBlockTime, payload)
-	realCalldata, err := h.abi.Pack("getProposal", realProposalID)
-	if err != nil {
-		t.Fatalf("pack getProposal (real): %v", err)
-	}
-	realOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (real) query: %v", err)
-	}
-	realValues, err := h.abi.Unpack("getProposal", realOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (real): %v", err)
-	}
-	if exists, _ := realValues[0].(bool); !exists {
-		t.Fatalf("proposal keyed on the real block time must exist")
-	}
-	if proposedAt, _ := realValues[4].(uint64); proposedAt != realProposeBlockTime {
-		t.Fatalf("proposedAt = %d, want real block time %d (not the attacker's claim %d)", proposedAt, realProposeBlockTime, fakeFarFutureTimestamp)
-	}
-
-	// Vote, again claiming the fake far-future timestamp. A single vote reaches quorum
-	// (threshold=1), transitioning straight to Timelocked.
-	voteMsg := cross_chain.ComputeGovernanceVoteMessage(realProposalID, uint64(101))
-	voteSig := bls.Sign(kp.PrivateKey(), voteMsg)
-	voteCalldata, err := h.abi.Pack("vote", realProposalID, new(big.Int).SetUint64(101), fakeFarFutureTimestamp, kp.BytesPublicKey(), voteSig.Bytes())
-	if err != nil {
-		t.Fatalf("pack vote: %v", err)
-	}
-	realVoteBlockTime := realProposeBlockTime + 10
-	voteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, voteCalldata))
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, voteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime); failed {
-		t.Fatalf("expected vote to succeed")
-	}
-
-	// effectiveAt must be derived from the REAL vote block time, not the attacker's claim.
-	postVoteOut, err := h.HandleOffChainQuery(cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, realCalldata)))
-	if err != nil {
-		t.Fatalf("getProposal (post-vote) query: %v", err)
-	}
-	postVoteValues, err := h.abi.Unpack("getProposal", postVoteOut)
-	if err != nil {
-		t.Fatalf("unpack getProposal (post-vote): %v", err)
-	}
-	wantEffectiveAt := realVoteBlockTime + cross_chain.DefaultGovernanceTimelockSeconds
-	if effectiveAt, _ := postVoteValues[5].(uint64); effectiveAt != wantEffectiveAt {
-		t.Fatalf("effectiveAt = %d, want %d (real vote time + 72h) — NOT derived from the attacker's claimed timestamp %d", effectiveAt, wantEffectiveAt, fakeFarFutureTimestamp)
-	}
-
-	// Attacker attempts executeProposal claiming the far-future timestamp — the REAL block
-	// time attached to this transaction is still nowhere near the 72h timelock, so this MUST
-	// still fail even though the calldata claims otherwise.
-	executeCalldata, err := h.abi.Pack("executeProposal", realProposalID, fakeFarFutureTimestamp)
-	if err != nil {
-		t.Fatalf("pack executeProposal: %v", err)
-	}
-	earlyExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 2, big.NewInt(0), marshalCallData(t, executeCalldata))
-	_, _, earlyFailed := h.HandleTransaction(context.Background(), cs, earlyExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realVoteBlockTime+100)
-	if !earlyFailed {
-		t.Fatalf("expected executeProposal to fail — the attacker's claimed timestamp must not bypass the real 72h timelock")
-	}
-
-	// Once the REAL block time genuinely passes the timelock, execution succeeds.
-	lateExecuteTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 3, big.NewInt(0), marshalCallData(t, executeCalldata))
-	realExecuteBlockTime := wantEffectiveAt + 1
-	if _, _, failed := h.HandleTransaction(context.Background(), cs, lateExecuteTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, realExecuteBlockTime); failed {
-		t.Fatalf("expected executeProposal to succeed once the real block time genuinely passes the timelock")
-	}
 }
 
 func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
@@ -1552,8 +1900,19 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 
 	// Register a mock custom asset
 	supplyLedger, _ := cross_chain.NewGlobalSupplyLedger(big.NewInt(1000), nil)
-	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{}, supplyLedger)
-	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry, nil)
+	// destChainID must be a known registered chain -- outbound() now rejects an unregistered
+	// destination before it ever locks/burns funds (2026-09-05 security fix, see that case's
+	// own comment in gateway_handler.go).
+	engine := cross_chain.NewGatewayEngine(homeChainID, map[uint64]cross_chain.ChainRegistry{
+		destChainID: {
+			ChainID: destChainID,
+			Epoch:   1,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+			},
+		},
+	}, supplyLedger)
+	engine.AssetRegistry = cross_chain.NewAssetRegistryEngine(engine.ChainRegistry)
 
 	entry := &cross_chain.AssetEntry{
 		AssetID:           assetID,
@@ -1647,14 +2006,25 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 		t.Fatalf("pack claimMessage: %v", err)
 	}
 
+	// SECURITY FIX (2026-09-05, finding #1 / mục 2.4 point 1): a business-logic revert of the
+	// custom-asset vault/wrapped-token contract's own mint()/transfer() (here: the SHA256
+	// precompile doesn't implement mint() at all) must now finalize the message as
+	// MessageStatusFailed instead of hard-reverting the whole claimMessage transaction -- see
+	// FinalizeFailedAfterExecutionRevert's doc comment. Before this fix, the transaction reverted
+	// outright and the message silently stayed Pending forever with no trace of the attempt.
 	claimTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimCalldata))
-	rcpClaim, _, failedClaim := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	_, _, failedClaim := h.HandleTransaction(context.Background(), cs, claimTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
 
-	if !failedClaim {
-		t.Fatalf("expected claimMessage custom asset to fail due to missing contract, but it succeeded")
+	if failedClaim {
+		t.Fatalf("expected claimMessage to finalize as Failed (not hard-revert) when the destination contract call reverts")
 	}
-	if !strings.Contains(string(rcpClaim.Return()), "claim custom asset execution failed") {
-		t.Fatalf("expected EVM mint call to fail, got: %s", string(rcpClaim.Return()))
+
+	engineAfterClaim, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine after claim failed: %v", err)
+	}
+	if status := engineAfterClaim.GetMessageStatus(msg.MessageID); status != cross_chain.MessageStatusFailed {
+		t.Fatalf("expected message status Failed after reverted custom-asset execution, got %d", status)
 	}
 }
 
@@ -1720,6 +2090,24 @@ func TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce(t *tes
 
 	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(10_000)); err != nil {
 		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	// destChainId 102 (used by packOutbound below) must be a known registered chain -- outbound()
+	// now rejects an unregistered destination before it ever locks/burns funds (2026-09-05
+	// security fix, see that case's own comment in gateway_handler.go).
+	seedEngine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed) failed: %v", err)
+	}
+	seedEngine.ChainRegistry[102] = cross_chain.ChainRegistry{
+		ChainID: 102,
+		Epoch:   1,
+		Committee: []cross_chain.ValidatorEntry{
+			{PubkeyBLS: bls.GenerateKeyPair().BytesPublicKey(), Stake: 1000},
+		},
+	}
+	if err := saveGatewayEngine(cs, seedEngine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed) failed: %v", err)
 	}
 
 	packOutbound := func() []byte {

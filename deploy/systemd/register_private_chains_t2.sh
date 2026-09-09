@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "🚀 Đăng ký 4 Private Chains lên Root Anchor Gateway (bootstrapFoundingChains thật)..."
+echo "🚀 Đăng ký 4 Private Chains lên Root Anchor Gateway (registerChainViaStake thật)..."
 
 cd "$DIR/../../execution"
 echo "🔨 Building register_chains from cmd/tool/register_chains ..."

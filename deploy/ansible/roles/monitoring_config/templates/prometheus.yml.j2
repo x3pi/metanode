@@ -5,6 +5,17 @@ global:
 rule_files:
   - "alert_rules.yml"
 
+# 2026-09-08: this file previously referenced rule_files above with no such file anywhere in the
+# repo, and no alerting: block at all -- Prometheus scraped everything but could never fire an
+# alert. alert_rules.yml now ships alongside this template (roles/monitoring_config/templates/,
+# rendered as a Jinja2 template since 2026-09-09 so it can embed the live snapshot_url), and
+# points here at the local Alertmanager (role: alertmanager), which routes to the same Telegram
+# bot/chat already used by monitors/start_monitors.sh.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["localhost:9093"]
+
 scrape_configs:
   # MetaNode Go Execution Engine Metrics
   - job_name: "metanode-go-execution"
@@ -15,11 +26,19 @@ scrape_configs:
 {% endfor %}
 
   # MetaNode Rust Consensus Metrics
+  # 2026-09-08: was ":9100" -- confirmed against deploy/systemd/gen_validator_entry.py (the
+  # generator local_build actually calls) that 9100+node_id is the P2P consensus port
+  # (`consensus_port`), not metrics. The real Prometheus metrics HTTP server binds
+  # `metrics_port = 9200 + node_id` (see startup.rs's start_prometheus_server_with_registry
+  # call and gen_validator_entry.py's own `sudo ufw allow {metrics_port}/tcp comment
+  # 'Consensus Metrics'` line). This job had been scraping the P2P port and silently getting
+  # `up == 0` for every node the whole time -- worth checking Alertmanager for a backlog of
+  # MetanodeTargetDown{job="metanode-rust-consensus"} once this is deployed.
   - job_name: "metanode-rust-consensus"
     static_configs:
       - targets:
 {% for node in cluster_nodes | sort(attribute='node_id') %}
-        - "{{ node.ip }}:9100" # Node {{ node.node_id }}
+        - "{{ node.ip }}:{{ 9200 + node.node_id }}" # Node {{ node.node_id }}
 {% endfor %}
 
   # Hardware Node Exporter Metrics

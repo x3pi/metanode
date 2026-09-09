@@ -13,6 +13,8 @@
 
 use sha3::{Digest, Keccak256};
 use dashmap::DashMap;
+use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +23,34 @@ use tracing::{info, warn};
 /// How long to wait before recycling unconfirmed TXs
 const RECYCLE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Maximum number of pending TXs to track (memory safety)
-const MAX_PENDING_TXS: usize = 100_000;
+/// Maximum number of pending TXs to track (memory safety).
+///
+/// CONFIRMED CONTRIBUTOR (2026-09-03) to residual tx loss at extreme burst
+/// scale, found via the periodic `[TX RECYCLER] Confirmed N TXs ... (M still
+/// pending)` log: under a >100k-in-flight burst (e.g. 1,000,000 txs
+/// submitted over ~90s -- far more than 100_000 can drain through commit in
+/// that time under contention), `pending.len()` sat pinned at essentially
+/// exactly 100_000 for extended stretches, meaning `track_submitted()`'s
+/// oldest-entry eviction (see below) was firing continuously. Once evicted
+/// from `pending`, a TX has zero recycler safety net: if its proposed DAG
+/// block is later garbage-collected (a normal, expected DAG event, not a
+/// bug) rather than committed, nothing re-submits it and it is lost for
+/// good. The "evict oldest" heuristic assumes the oldest entry has "had the
+/// most time to confirm" and is therefore safe to stop tracking -- true
+/// under normal load, but false under sustained backlog where confirmation
+/// itself is slow across the board, not just for old entries.
+///
+/// Raised 50x (100_000 -> 5,000,000) to match the same headroom given to
+/// the sibling capacity fix in `meta-consensus/core/src/transaction.rs`
+/// (TxPayloadCache, also found and fixed this session): comfortably exceeds
+/// every burst size tested so far. Memory cost is a `PendingTx` (raw tx
+/// bytes, typically ~100-300B, plus a timestamp and small counter) per
+/// entry, roughly the same order of magnitude as TxPayloadCache's cost at
+/// the same capacity -- acceptable on this box. Not proven to fully close
+/// the residual gap (a >5,000,000-in-flight backlog would still hit this
+/// same limit) but removes it as a bottleneck at every scale exercised so
+/// far.
+const MAX_PENDING_TXS: usize = 5_000_000;
 
 /// A pending TX waiting to be confirmed
 struct PendingTx {
@@ -38,19 +66,53 @@ struct PendingTx {
 pub struct TxRecycler {
     /// TXs submitted but not yet confirmed: tx_hash -> PendingTx
     pending: DashMap<[u8; 32], PendingTx>,
+    /// Insertion order of `pending`'s keys, oldest-first, used to pick a real
+    /// eviction victim when at MAX_PENDING_TXS capacity (see track_submitted).
+    /// A hash can linger here after its PendingTx was already removed via
+    /// confirm_committed/eviction — insertion_order is only ever consulted to
+    /// find *a* victim, and stale entries (no longer in `pending`) are just
+    /// skipped, so this never causes a double-remove or a wrong eviction.
+    insertion_order: Mutex<VecDeque<[u8; 32]>>,
     /// Stats
     total_submitted: AtomicU64,
     total_confirmed: AtomicU64,
     total_recycled: AtomicU64,
+    /// Count of TXs permanently given up on: recycled 3 times and still
+    /// unconfirmed after another RECYCLE_TIMEOUT. Added 2026-09-03 while
+    /// tracing the residual tx-loss gap left after the TxPayloadCache
+    /// capacity fix -- this is the actual permanent-loss event this
+    /// recycler can produce (distinct from a mere `pending`-tracking
+    /// eviction, which only removes the safety net, not the tx itself).
+    total_expired: AtomicU64,
+    /// Count of insertion_order-driven evictions in track_submitted() (i.e.
+    /// `pending` was at MAX_PENDING_TXS capacity). Each of these is a TX
+    /// that lost its recycler safety net early -- not itself a loss, but
+    /// the leading indicator for one (see MAX_PENDING_TXS doc comment).
+    total_capacity_evicted: AtomicU64,
+    /// Capacity for `pending`. Always MAX_PENDING_TXS in production; tests
+    /// override it via `new_with_max_pending` so capacity-boundary tests
+    /// don't have to actually insert millions of entries to exercise
+    /// eviction (they used to, cheaply, when MAX_PENDING_TXS was 100_000 --
+    /// raising it to 5_000_000 for the 2026-09-03 capacity fix made that
+    /// prohibitively slow without this).
+    max_pending: usize,
 }
 
 impl TxRecycler {
     pub fn new() -> Self {
+        Self::new_with_max_pending(MAX_PENDING_TXS)
+    }
+
+    fn new_with_max_pending(max_pending: usize) -> Self {
         Self {
             pending: DashMap::new(),
+            insertion_order: Mutex::new(VecDeque::new()),
             total_submitted: AtomicU64::new(0),
             total_confirmed: AtomicU64::new(0),
             total_recycled: AtomicU64::new(0),
+            total_expired: AtomicU64::new(0),
+            total_capacity_evicted: AtomicU64::new(0),
+            max_pending,
         }
     }
 
@@ -62,6 +124,7 @@ impl TxRecycler {
         let count = self.pending.len();
         self.pending.clear();
         self.pending.shrink_to_fit();
+        self.insertion_order.lock().clear();
         if count > 0 {
             info!(
                 "🧹 [TX RECYCLER] Epoch transition: cleared {} pending TXs to prevent memory leak",
@@ -82,6 +145,7 @@ impl TxRecycler {
         let txs: Vec<Vec<u8>> = self.pending.iter().map(|ptx| ptx.data.clone()).collect();
         self.pending.clear();
         self.pending.shrink_to_fit();
+        self.insertion_order.lock().clear();
         if count > 0 {
             info!(
                 "♻️ [TX RECYCLER] Epoch transition: drained {} pending TXs for migration to new epoch",
@@ -108,15 +172,48 @@ impl TxRecycler {
                 hashes.push(Self::hash_tx(tx_data));
             }
 
+            // Opportunistically trim confirmed/evicted hashes off the front of
+            // insertion_order, bounded to this chunk's size so the queue can't
+            // grow unbounded over a long-running node's lifetime just because
+            // real eviction (below) only runs while genuinely at capacity.
+            // Confirmed hashes vastly outnumber evicted ones in normal operation,
+            // so this keeps pace with insertions without ever doing unbounded work.
+            {
+                let mut order = self.insertion_order.lock();
+                for _ in 0..chunk.len() {
+                    match order.front() {
+                        Some(h) if !self.pending.contains_key(h) => {
+                            order.pop_front();
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
             for (tx_data, hash) in chunk.iter().zip(hashes.into_iter()) {
             // Don't overwrite if already pending (might be a re-submission)
             if !self.pending.contains_key(&hash) {
-                // Memory safety: evict pseudo-random element if too many.
-                if self.pending.len() >= MAX_PENDING_TXS {
-                    // In DashMap, we can just grab an arbitrary key to evict
-                    let key_to_remove = self.pending.iter().next().map(|r| *r.key());
-                    if let Some(k) = key_to_remove {
-                        self.pending.remove(&k);
+                // Memory safety: evict the OLDEST unconfirmed entry if at capacity.
+                //
+                // Previously this evicted an arbitrary (DashMap-iteration-order) entry,
+                // which under a sustained burst that pushes `pending` to MAX_PENDING_TXS
+                // could evict a tx that had *just* been submitted and was in no way stale
+                // yet — silently dropping this recycler's only safety net for it moments
+                // before it might have actually needed recycling (a real, confirmed
+                // 500k-tx-scale reproduction of unconfirmed txs never getting resubmitted
+                // traced back partly to this). Evicting oldest-first means whatever gets
+                // dropped has had the most time to either confirm (and no longer be in
+                // `pending` at all) or get recycled already, so it's the entry this map
+                // can least-badly afford to lose track of.
+                if self.pending.len() >= self.max_pending {
+                    let mut order = self.insertion_order.lock();
+                    while let Some(oldest) = order.pop_front() {
+                        // Skip hashes already removed (confirmed or previously evicted) —
+                        // they're stale queue entries, not real eviction candidates.
+                        if self.pending.remove(&oldest).is_some() {
+                            self.total_capacity_evicted.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
                     }
                 }
 
@@ -128,6 +225,8 @@ impl TxRecycler {
                         recycle_count: 0,
                     },
                 );
+                self.insertion_order.lock().push_back(hash);
+                self.total_submitted.fetch_add(1, Ordering::Relaxed);
             }
 
             }
@@ -138,9 +237,17 @@ impl TxRecycler {
     /// Mark TXs as confirmed (committed). Called by commit_processor when processing sub-DAGs.
     /// `committed_tx_data` is the raw TX bytes from committed blocks.
     pub async fn confirm_committed<T: AsRef<[u8]> + Sync>(&self, committed_tx_data: &[T]) {
-        // Pre-compute hashes in chunks and yield to minimize Mutex lock duration
-        // and prevent blocking the Tokio async executor.
-        let before = self.pending.len();
+        // Count actual successful removals directly rather than a
+        // before/after `pending.len()` delta. The delta approach underflowed
+        // (wrapping to u64::MAX, confirmed live via the
+        // "Confirmed 18446744073709551615 TXs" log line under load) whenever
+        // concurrent `track_submitted()` insertions grew `pending` during
+        // this loop's `yield_now().await` points faster than this loop
+        // removed from it -- entirely possible under sustained high-rate
+        // submission, since both run concurrently on separate tasks against
+        // the same DashMap. Counting removals directly is correct regardless
+        // of what else concurrently happens to `pending`'s size.
+        let mut removed = 0u64;
 
         for chunk in committed_tx_data.chunks(1000) {
             let mut hashes = Vec::with_capacity(chunk.len());
@@ -151,11 +258,11 @@ impl TxRecycler {
             for hash in hashes {
                 if self.pending.remove(&hash).is_some() {
                     self.total_confirmed.fetch_add(1, Ordering::Relaxed);
+                    removed += 1;
                 }
             }
             tokio::task::yield_now().await;
         }
-        let removed = before - self.pending.len();
 
         if removed > 0 {
             info!(
@@ -195,6 +302,7 @@ impl TxRecycler {
         self.pending.retain(|_, ptx| {
             if ptx.recycle_count >= 3 && now.duration_since(ptx.submitted_at) > RECYCLE_TIMEOUT {
                 expired_count += 1;
+                self.total_expired.fetch_add(1, Ordering::Relaxed);
                 false
             } else {
                 true
@@ -219,6 +327,19 @@ impl TxRecycler {
         let confirmed = self.total_confirmed.load(Ordering::Relaxed);
         let recycled = self.total_recycled.load(Ordering::Relaxed);
         (self.pending.len(), submitted, confirmed, recycled)
+    }
+
+    /// Extended stats added 2026-09-03 alongside the MAX_PENDING_TXS capacity
+    /// fix: (expired, capacity_evicted). `expired` is the count of TXs
+    /// permanently given up on (real, unrecoverable loss from this
+    /// recycler's perspective); `capacity_evicted` is how many TXs lost
+    /// their tracking early due to `pending` being at capacity (a leading
+    /// indicator, not itself a loss unless that TX's block later gets GC'd).
+    pub async fn extended_stats(&self) -> (u64, u64) {
+        (
+            self.total_expired.load(Ordering::Relaxed),
+            self.total_capacity_evicted.load(Ordering::Relaxed),
+        )
     }
 
     /// Load pending TXs from disk on startup
@@ -303,6 +424,43 @@ impl TxRecycler {
     }
 }
 
+/// Bound how long a single stale-TX resubmission attempt may block the
+/// recycler's background loop. See the CONFIRMED ROOT CAUSE comment at this
+/// function's call site in `start_recycler_background` for the full
+/// incident this fixes: without this bound, one stuck
+/// `transaction_client.submit()` call permanently froze the entire
+/// background loop (collect_stale, save_to_disk, and stats logging all
+/// stopped from that point on), silently disabling GC-recovery for the
+/// rest of the node's lifetime.
+const RESUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Attempts to resubmit one stale (previously-submitted, still-unconfirmed)
+/// transaction, bounded by RESUBMIT_TIMEOUT so a single hung attempt can
+/// never block the caller (the recycler's periodic background loop, or a
+/// test) forever.
+async fn resubmit_one_stale_tx(
+    transaction_client: &(dyn crate::node::tx_submitter::TransactionSubmitter + Send + Sync),
+    tx: Vec<u8>,
+) {
+    match tokio::time::timeout(RESUBMIT_TIMEOUT, transaction_client.submit(vec![tx])).await {
+        Ok(Ok((block_ref, _indices, _))) => {
+            info!(
+                "♻️ [TX RECYCLER] Successfully recycled stale TX into block {:?}",
+                block_ref
+            );
+        }
+        Ok(Err(e)) => {
+            warn!("♻️ [TX RECYCLER] Failed to re-submit stale TX: {}", e);
+        }
+        Err(_) => {
+            warn!(
+                "♻️ [TX RECYCLER] Re-submit of stale TX timed out after {:?} -- will retry on next sweep instead of blocking this loop indefinitely.",
+                RESUBMIT_TIMEOUT
+            );
+        }
+    }
+}
+
 /// Start background recycler task that periodically re-submits stale TXs
 pub async fn start_recycler_background(
     recycler: Arc<TxRecycler>,
@@ -327,22 +485,41 @@ pub async fn start_recycler_background(
         // Collect stale TXs
         let stale_txs = recycler.collect_stale().await;
 
+        // CONFIRMED ROOT CAUSE (2026-09-03) of a large fraction of the
+        // residual tx-loss investigation: `transaction_client.submit()`
+        // waits for the tx to actually be picked up into a proposed block
+        // (see TransactionClient::submit in meta-consensus/core -- it awaits
+        // submit_no_wait's outer oneshot), with no timeout of its own. Under
+        // heavy sustained load this can legitimately take a while, but was
+        // observed live to occasionally never resolve at all -- and because
+        // this `for` loop processes `stale_txs` sequentially with a plain
+        // `.await`, one stuck resubmission permanently froze this entire
+        // background loop for the rest of the node's lifetime: no further
+        // ticks, no further collect_stale(), no further save_to_disk(), no
+        // further stats logging. Confirmed via the on-disk
+        // tx_recycler_pending.dat's mtime staying frozen at the exact
+        // moment of the last successful loop iteration, 4+ minutes into an
+        // otherwise-healthy, still-block-producing node. Since this is the
+        // ONLY mechanism that ever resubmits a tx whose proposed block was
+        // genuinely garbage-collected, this silently disabled that recovery
+        // path for the remainder of every run after the first hang -- for
+        // however many real GC events happened after that point, none had
+        // a chance of recovery. Matches every symptom observed across this
+        // investigation: recycled=0 and expired=0 in every run regardless
+        // of how large the residual on-chain gap was, and the gap growing
+        // with load/duration (more time = more chances for a real GC event
+        // after the loop had already frozen).
+        //
+        // Fix: bound each attempt with the same timeout pattern already
+        // proven for exactly this class of bug in executor_client's FFI
+        // call (see test_rpc_timeout_pattern_does_not_hang_on_stuck_blocking_call).
+        // A single slow-but-working resubmission just logs and moves on;
+        // it will be picked up again on the next collect_stale() pass if it
+        // still hasn't confirmed. Extracted into resubmit_one_stale_tx so
+        // this can be exercised directly by a unit test with a mock
+        // submitter that hangs forever.
         for tx in stale_txs {
-            let single_tx_vec = vec![tx];
-            match transaction_client.submit(single_tx_vec).await {
-                Ok((block_ref, _indices, _)) => {
-                    info!(
-                        "♻️ [TX RECYCLER] Successfully recycled stale TX into block {:?}",
-                        block_ref
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "♻️ [TX RECYCLER] Failed to re-submit stale TX: {}",
-                        e
-                    );
-                }
-            }
+            resubmit_one_stale_tx(&*transaction_client, tx).await;
         }
 
         // Persist state to disk periodically (every 5s)
@@ -351,16 +528,200 @@ pub async fn start_recycler_background(
             last_save = Instant::now();
         }
 
-        // Log stats periodically (every 60s)
+        // Log stats periodically (every 60s). Unconditional print (no longer
+        // gated on pending>0||recycled>0): a submitted/confirmed gap that
+        // closes to pending=0 is itself a meaningful data point (e.g. for
+        // tracing whether every submitted TX was ever tracked at all), and
+        // the old gate silently stopped this log the moment pending drained
+        // to 0, making it impossible to get a reliable final reading after
+        // a clean run.
         if last_stats_log.elapsed() > Duration::from_secs(60) {
             let (pending, submitted, confirmed, recycled) = recycler.stats().await;
-            if pending > 0 || recycled > 0 {
-                info!(
-                    "♻️ [TX RECYCLER STATS] pending={}, submitted={}, confirmed={}, recycled={}",
-                    pending, submitted, confirmed, recycled
-                );
-            }
+            let (expired, capacity_evicted) = recycler.extended_stats().await;
+            info!(
+                "♻️ [TX RECYCLER STATS] pending={}, submitted={}, confirmed={}, recycled={}, expired={}, capacity_evicted={}",
+                pending, submitted, confirmed, recycled, expired, capacity_evicted
+            );
             last_stats_log = Instant::now();
         }
+
+        // TEMPORARY DIAGNOSTIC (2026-09-03): eprintln! bypasses tracing (same
+        // rationale as the DIAG_* counters elsewhere added this session) and
+        // fires every 5s tick unconditionally, so it's visible even during a
+        // short benchmark run rather than only on the 60s-gated info! above.
+        // Directly answers whether MAX_PENDING_TXS capacity pressure and/or
+        // real permanent expiry are occurring during a given burst. Remove
+        // once the residual tx-loss investigation concludes.
+        {
+            let (pending, submitted, confirmed, recycled) = recycler.stats().await;
+            let (expired, capacity_evicted) = recycler.extended_stats().await;
+            eprintln!(
+                "[DIAG tx_recycler] pending={} submitted={} confirmed={} recycled={} expired={} capacity_evicted={}",
+                pending, submitted, confirmed, recycled, expired, capacity_evicted
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Distinct dummy tx payloads so each gets a distinct hash.
+    fn dummy_tx(i: u64) -> Vec<u8> {
+        i.to_le_bytes().to_vec()
+    }
+
+    /// Mock TransactionSubmitter whose `submit()` future never resolves,
+    /// simulating the CONFIRMED live incident (see resubmit_one_stale_tx's
+    /// doc comment / the CONFIRMED ROOT CAUSE comment in
+    /// start_recycler_background) where a real submit() call hung
+    /// indefinitely and froze the entire recycler background loop.
+    struct HangingSubmitter;
+
+    #[async_trait::async_trait]
+    impl crate::node::tx_submitter::TransactionSubmitter for HangingSubmitter {
+        async fn submit(
+            &self,
+            _transactions: Vec<Vec<u8>>,
+        ) -> anyhow::Result<(
+            consensus_types::block::BlockRef,
+            Vec<consensus_types::block::TransactionIndex>,
+            tokio::sync::oneshot::Receiver<consensus_core::BlockStatus>,
+        )> {
+            std::future::pending().await
+        }
+
+        async fn submit_no_wait(
+            &self,
+            _transactions: Vec<Vec<u8>>,
+        ) -> anyhow::Result<
+            tokio::sync::oneshot::Receiver<(
+                consensus_types::block::BlockRef,
+                Vec<consensus_types::block::TransactionIndex>,
+                tokio::sync::oneshot::Receiver<consensus_core::BlockStatus>,
+            )>,
+        > {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn resubmit_one_stale_tx_does_not_hang_on_stuck_submit() {
+        // Regression test for the CONFIRMED live incident: a real
+        // transaction_client.submit() call that never resolved used to
+        // freeze the entire recycler background loop forever -- proven live
+        // via tx_recycler_pending.dat's mtime staying frozen 4+ minutes into
+        // an otherwise-healthy, still-block-producing node. This function
+        // must always return within its own internal timeout, regardless of
+        // how long the underlying submit() call takes.
+        let submitter = HangingSubmitter;
+        let start = std::time::Instant::now();
+
+        // Outer safety-net timeout: if THIS fires, resubmit_one_stale_tx's
+        // own internal timeout failed to bound the call -- fail loudly
+        // rather than hang the whole test suite.
+        tokio::time::timeout(
+            RESUBMIT_TIMEOUT + Duration::from_secs(5),
+            resubmit_one_stale_tx(&submitter, dummy_tx(1)),
+        )
+        .await
+        .expect("resubmit_one_stale_tx must never hang past its own internal timeout");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= RESUBMIT_TIMEOUT,
+            "should have waited out the internal timeout, not returned instantly: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < RESUBMIT_TIMEOUT + Duration::from_secs(5),
+            "should return promptly once its own internal timeout fires, not hang further: {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_committed_removes_pending() {
+        let recycler = TxRecycler::new();
+        let txs: Vec<Vec<u8>> = (0..10).map(dummy_tx).collect();
+        recycler.track_submitted(&txs).await;
+        assert_eq!(recycler.stats().await.0, 10);
+
+        recycler.confirm_committed(&txs[..5]).await;
+        assert_eq!(recycler.stats().await.0, 5, "only the confirmed half should be removed");
+
+        recycler.confirm_committed(&txs[5..]).await;
+        assert_eq!(recycler.stats().await.0, 0);
+    }
+
+    /// The eviction victim at capacity must be the oldest still-pending entry,
+    /// not an arbitrary one — this is the exact bug traced to real tx loss at
+    /// 500k-tx-scale load (see the comment in track_submitted). Uses a small
+    /// override of MAX_PENDING_TXS-equivalent behavior by exercising the same
+    /// code path at the real constant size, since the eviction threshold is a
+    /// module-level const, not configurable per-instance.
+    #[tokio::test]
+    async fn eviction_at_capacity_picks_oldest_not_arbitrary() {
+        // Small override capacity: this test exercises the eviction *logic*
+        // (which entry gets picked), not the production MAX_PENDING_TXS
+        // magnitude — inserting millions of entries here would just make the
+        // test slow without adding coverage.
+        const TEST_CAPACITY: usize = 1000;
+        let recycler = TxRecycler::new_with_max_pending(TEST_CAPACITY);
+
+        // Fill to exactly capacity.
+        let txs: Vec<Vec<u8>> = (0..TEST_CAPACITY as u64).map(dummy_tx).collect();
+        recycler.track_submitted(&txs).await;
+        assert_eq!(recycler.stats().await.0, TEST_CAPACITY);
+
+        // One more push must evict exactly one victim to stay at capacity.
+        let newcomer = dummy_tx(TEST_CAPACITY as u64);
+        recycler.track_submitted(std::slice::from_ref(&newcomer)).await;
+        assert_eq!(recycler.stats().await.0, TEST_CAPACITY, "capacity must be preserved");
+
+        // The victim must be the very first tx ever inserted (oldest), not some
+        // arbitrary one — everything else, especially the newcomer and the most
+        // recently-inserted originals, must still be tracked.
+        let oldest_hash = TxRecycler::hash_tx(&txs[0]);
+        assert!(
+            !recycler.pending.contains_key(&oldest_hash),
+            "oldest entry should have been evicted"
+        );
+        let newcomer_hash = TxRecycler::hash_tx(&newcomer);
+        assert!(recycler.pending.contains_key(&newcomer_hash), "newcomer must be tracked");
+        let second_oldest_hash = TxRecycler::hash_tx(&txs[1]);
+        assert!(
+            recycler.pending.contains_key(&second_oldest_hash),
+            "only the single oldest entry should be evicted, not others"
+        );
+        let newest_original_hash = TxRecycler::hash_tx(&txs[txs.len() - 1]);
+        assert!(
+            recycler.pending.contains_key(&newest_original_hash),
+            "most recently inserted original tx must survive eviction"
+        );
+    }
+
+    /// insertion_order must not grow without bound just from normal confirm
+    /// traffic — it should get opportunistically trimmed as confirmed hashes
+    /// reach the front, well before eviction ever needs to run.
+    #[tokio::test]
+    async fn insertion_order_does_not_leak_on_steady_confirm_churn() {
+        let recycler = TxRecycler::new();
+
+        for round in 0..20u64 {
+            let txs: Vec<Vec<u8>> = (0..500).map(|i| dummy_tx(round * 500 + i)).collect();
+            recycler.track_submitted(&txs).await;
+            recycler.confirm_committed(&txs).await;
+        }
+
+        assert_eq!(recycler.stats().await.0, 0, "everything was confirmed, nothing should remain pending");
+        // Bounded, not proportional to the 10,000 total insertions made above —
+        // opportunistic trimming in track_submitted keeps pace with confirms.
+        assert!(
+            recycler.insertion_order.lock().len() < 1000,
+            "insertion_order should have been trimmed as confirms happened, got {} entries",
+            recycler.insertion_order.lock().len()
+        );
     }
 }
