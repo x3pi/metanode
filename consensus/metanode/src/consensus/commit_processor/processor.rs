@@ -683,6 +683,47 @@ impl CommitProcessor {
         const DIAG_INTERVAL_SECS: u64 = 10;
 
         loop {
+            // PERMANENT-GAP-RECOVERY (2026-09-09, see the long comment near this loop's setup
+            // for the full incident/reasoning): unlike the message-arrival-based "stuck
+            // processor" check further down, this tracks real dispatch progress
+            // (next_expected_index actually changing). Placed at the very top of the loop, run
+            // unconditionally on every iteration -- including iterations woken purely by the
+            // periodic timeout added to the recv_result select below -- so this is a genuine
+            // wall-clock guarantee, not dependent on commit_finalizer ever sending anything
+            // (2026-09-09 follow-up: the first version of this lived inside the "a message
+            // arrived" branch, which happened to work because commit_finalizer's own gap
+            // tolerance keeps forwarding commits forever, but was not actually a guarantee for
+            // every possible way this class of stall could manifest).
+            if next_expected_index != last_next_expected_index {
+                last_next_expected_index = next_expected_index;
+                last_next_expected_progress_time = std::time::Instant::now();
+            } else {
+                let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
+                if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
+                    && pending_commits.len() >= RECOVERY_STUCK_MIN_BUFFERED
+                {
+                    if let Some((&lowest_buffered, _)) = pending_commits.iter().next() {
+                        error!(
+                            "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not \
+                             advanced in {}s and pending_commits is fully saturated ({} \
+                             buffered, oldest available={}). commit_finalizer almost certainly \
+                             skipped this exact index during its own gap tolerance and it will \
+                             never arrive. Adopting {} as the new next_expected_index -- see \
+                             PERMANENT-GAP-RECOVERY comment near this loop's setup for why this \
+                             is bounded/evidence-gated rather than the heuristic jump removed \
+                             after it caused fork divergence. If this fires, file it: it means a \
+                             real DAG gap went unexplained all the way to this last-resort \
+                             recovery.",
+                            next_expected_index, stuck_secs, pending_commits.len(),
+                            lowest_buffered, lowest_buffered
+                        );
+                        next_expected_index = lowest_buffered;
+                        last_next_expected_index = next_expected_index;
+                        last_next_expected_progress_time = std::time::Instant::now();
+                    }
+                }
+            }
+
             // ═══════════════════════════════════════════════════════════════
             // PIPELINE HEALTH DIAGNOSTIC: Log full DIGEST-GATE state every
             // 10s when pending commits exist. This provides visibility into
@@ -1261,7 +1302,19 @@ impl CommitProcessor {
                     }
                 }
             } else {
-                receiver.recv().await
+                // PERMANENT-GAP-RECOVERY (2026-09-09): raced against a periodic wake so the
+                // top-of-loop check above still runs on a real wall-clock cadence even during a
+                // stretch with zero incoming commits, rather than only when commit_finalizer
+                // happens to send something. In every observed case so far commit_finalizer
+                // never actually stops sending (that's the whole problem), so this is a
+                // belt-and-suspenders guarantee for a way this class of stall could manifest
+                // that hasn't been seen yet, not a fix for one that has.
+                tokio::select! {
+                    result = receiver.recv() => result,
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                        continue;
+                    }
+                }
             };
 
             match recv_result {
@@ -1293,42 +1346,6 @@ impl CommitProcessor {
                     {
                         warn!("⚠️  [COMMIT PROCESSOR] Possible stuck detected: No progress for {}s (last commit: {})",
                             time_since_last_heartbeat, commit_index);
-                    }
-
-                    // PERMANENT-GAP-RECOVERY (2026-09-09, see the long comment near this loop's
-                    // setup for the full incident/reasoning): unlike the check just above, this
-                    // one tracks real dispatch progress (next_expected_index actually changing),
-                    // not message arrival, so it still fires when commit_finalizer.rs's own gap
-                    // tolerance keeps feeding this loop newer commits forever while the one
-                    // index it's actually waiting for never comes.
-                    if next_expected_index != last_next_expected_index {
-                        last_next_expected_index = next_expected_index;
-                        last_next_expected_progress_time = std::time::Instant::now();
-                    } else {
-                        let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
-                        if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
-                            && pending_commits.len() >= RECOVERY_STUCK_MIN_BUFFERED
-                        {
-                            if let Some((&lowest_buffered, _)) = pending_commits.iter().next() {
-                                error!(
-                                    "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not \
-                                     advanced in {}s and pending_commits is fully saturated ({} \
-                                     buffered, oldest available={}). commit_finalizer almost \
-                                     certainly skipped this exact index during its own gap \
-                                     tolerance and it will never arrive. Adopting {} as the new \
-                                     next_expected_index -- see PERMANENT-GAP-RECOVERY comment \
-                                     near this loop's setup for why this is bounded/evidence-gated \
-                                     rather than the heuristic jump removed after it caused fork \
-                                     divergence. If this fires, file it: it means a real DAG gap \
-                                     went unexplained all the way to this last-resort recovery.",
-                                    next_expected_index, stuck_secs, pending_commits.len(),
-                                    lowest_buffered, lowest_buffered
-                                );
-                                next_expected_index = lowest_buffered;
-                                last_next_expected_index = next_expected_index;
-                                last_next_expected_progress_time = std::time::Instant::now();
-                            }
-                        }
                     }
 
                     trace!(
