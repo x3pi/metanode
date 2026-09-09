@@ -64,8 +64,8 @@ send_telegram_notification() {
     if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
         curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=${message}" \
-            -d "parse_mode=HTML" > /dev/null 2>&1 || true
+            -d "parse_mode=HTML" \
+            --data-urlencode "text=${message}" > /dev/null 2>&1 || true
     fi
 }
 
@@ -73,7 +73,8 @@ INVENTORY="${SCRIPT_DIR}/inventory.yml"
 PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
 
 # Defaults
-ACTION="start"
+ACTION=""
+EXPLICIT_ACTION="false"
 KEEP_DATA="true"
 TARGET_NODE="all"
 RESTORE_NODE="none"
@@ -97,11 +98,12 @@ fi
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --start) ACTION="start"; KEEP_DATA="true" ;;
-        --restart) ACTION="restart"; KEEP_DATA="true" ;;
-        --reset-all) ACTION="setup"; KEEP_DATA="false" ;;
-        --stop) ACTION="stop" ;;
+        --start) ACTION="start"; KEEP_DATA="true"; EXPLICIT_ACTION="true" ;;
+        --restart) ACTION="restart"; KEEP_DATA="true"; EXPLICIT_ACTION="true" ;;
+        --reset-all) ACTION="setup"; KEEP_DATA="false"; EXPLICIT_ACTION="true" ;;
+        --stop) ACTION="stop"; EXPLICIT_ACTION="true" ;;
         --clean) KEEP_DATA="false" ;;
+        --gen-keys) ACTION="gen_keys"; EXPLICIT_ACTION="true" ;;
         --only-node) TARGET_NODE="$2"; shift ;;
         --restore-node) RESTORE_NODE="$2"; shift ;;
         --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
@@ -115,6 +117,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --start             Start nodes (re-distribute binaries)"
             echo "  --restart           Fast restart systemd services"
             echo "  --reset-all         Fresh setup (gen keys, clears data)"
+            echo "  --gen-keys          Only generate keys & genesis locally (does not touch servers)"
             echo "  --stop              Stop nodes and monitors"
             echo "  --clean             Clear data before starting nodes"
             echo "  --only-node N       Only apply actions to node N"
@@ -130,6 +133,15 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+# Resolve default action if not explicitly specified
+if [ "$EXPLICIT_ACTION" == "false" ]; then
+    if [ "$OPEN_PORTS" == "true" ]; then
+        ACTION="open_ports"
+    else
+        ACTION="start"
+    fi
+fi
 
 # Detect Deployer Server IP dynamically
 DEPLOY_IP=$(hostname -I | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.)' | head -n 1)
@@ -197,20 +209,45 @@ if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
 
-echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
-if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
-    bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop-all >/dev/null 2>&1 || true
+if [ "$ACTION" == "gen_keys" ]; then
+    echo -e "\n🔑 [GEN-KEYS] Bắt đầu sinh bộ Key & Genesis mẫu cục bộ (Không đụng tới server)..."
+    cd "$SCRIPT_DIR"
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "ansible_action=gen_keys ansible_build_fast=true ansible_debug_cpp=${DEBUG_CPP}" --tags gen_keys
+    exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+        echo -e "\n=========================================================="
+        echo -e "✅ ĐÃ TẠO XONG KEYS & GENESIS MẪU CỤC BỘ!"
+        echo -e "=========================================================="
+        echo -e "📁 Vị trí lưu trữ:"
+        echo -e "   • Thư mục keys từng node: deploy/systemd/node-X_keys/"
+        echo -e "   • File Genesis chung:      deploy/systemd/genesis.json"
+        echo -e "\n✏️ BƯỚC TIẾP THEO (NẾU MUỐN SỬA):"
+        echo -e "   1. Vào deploy/systemd/node-X_keys thay file key của bạn."
+        echo -e "   2. Mở deploy/systemd/genesis.json chỉnh chainId, ví nhận tiền (alloc)..."
+        echo -e "\n🚀 KHI ĐÃ SẴN SÀNG KHỞI ĐỘNG CHUỖI TỪ BLOCK 0 VỚI BỘ KEY NÀY:"
+        echo -e "   ./ansible_deploy.sh --start --clean --open-ports"
+        echo -e "   (⚠️ Không dùng --reset-all để tránh bị đúc đè lại key)"
+        echo -e "==========================================================\n"
+    fi
+    exit $exit_code
 fi
-pkill -9 -f "start_monitors.sh" || true
-pkill -9 -f "block_hash_checker" || true
-pkill -9 -f "go run main.go.*--no-stop-flag" || true
 
-if [ "$KEEP_DATA" == "false" ]; then
-    echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
-    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/ghost_blocks.log"
-    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/block_checker_daemon.log"
-    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
-    rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/"*.csv
+if [ "$ACTION" != "open_ports" ]; then
+    echo -e "\n⏸ Tạm dừng Health Monitor trên toàn bộ cụm trong quá trình Deploy để tránh cảnh báo sai..."
+    if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
+        bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop-all >/dev/null 2>&1 || true
+    fi
+    pkill -9 -f "start_monitors.sh" || true
+    pkill -9 -f "block_hash_checker" || true
+    pkill -9 -f "go run main.go.*--no-stop-flag" || true
+
+    if [ "$KEEP_DATA" == "false" ]; then
+        echo -e "🧹 Dọn dẹp cache và log cũ của Monitors do dữ liệu Node bị xoá..."
+        rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/ghost_blocks.log"
+        rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/block_checker_daemon.log"
+        rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
+        rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/"*.csv
+    fi
 fi
 
 cd "$SCRIPT_DIR"
@@ -225,14 +262,19 @@ if [ $ansible_exit -eq 0 ]; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" 2>/dev/null || true
     fi
 
-    # Read and pretty-print /tmp/rpc_nodes.json
-    RPC_CONFIG=""
+    # Read and format Node RPC IPs and TCP Nodes from /tmp/rpc_nodes.json
+    RPC_NODES_LIST=""
+    TCP_NODES_LIST=""
     if [ -f "/tmp/rpc_nodes.json" ]; then
-        RPC_CONFIG=$(jq . /tmp/rpc_nodes.json 2>/dev/null || cat /tmp/rpc_nodes.json)
+        RPC_NODES_LIST=$(jq -r '.nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
+        TCP_NODES_LIST=$(jq -r '.tcp_nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
     fi
 
-    echo -e "\n⚙️ Cấu hình kết nối client:"
-    echo "$RPC_CONFIG"
+    echo -e "\n⚙️ Danh sách Node RPC (IP & Port):"
+    echo "$RPC_NODES_LIST"
+
+    echo -e "\n🌐 Danh sách Node TCP (Consensus P2P):"
+    echo "$TCP_NODES_LIST"
 
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
@@ -245,22 +287,17 @@ if [ $ansible_exit -eq 0 ]; then
 ${ROLES_OUTPUT}
 </pre>
 
-⚙️ <b>Cấu hình kết nối client:</b>
+⚙️ <b>Danh sách Node RPC:</b>
 <pre>
-${RPC_CONFIG}
+${RPC_NODES_LIST}
 </pre>
 
-🔍 <b>Lệnh lấy log hữu ích:</b>
-• <b>Tại từng máy node (thay X bằng ID node, ví dụ 0, 1, 2, 3):</b>
-  - <b>Consensus logs:</b>
-    <code>sudo journalctl -u metanode-consensus-X.service -n 100 --no-pager</code>
-  - <b>Execution logs:</b>
-    <code>tail -n 100 /opt/metanode/node-X/logs/execution/*/execution.log</code>
-• <b>Từ xa tại máy Master (chạy từ thư mục ansible):</b>
-  - <b>Consensus logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"sudo journalctl -u 'metanode-consensus-*' -n 100 --no-pager\"</code>
-  - <b>Execution logs:</b>
-    <code>ansible all -i inventory.yml -m shell -a \"tail -n 100 /opt/metanode/node-*/logs/execution/*/execution.log\"</code>"
+🌐 <b>Danh sách Node TCP (Consensus P2P):</b>
+<pre>
+${TCP_NODES_LIST}
+</pre>
+
+💡 <b>Xem log nhanh:</b> <code>./fetch_node_logs.sh</code> (thêm <code>--rpc</code> nếu cần log RPC; xem DEPLOY_GUIDE.md)"
 else
     send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
@@ -280,18 +317,20 @@ else
 fi
 
 MONITOR_SCRIPT="${SCRIPT_DIR}/monitors/start_monitors.sh"
-if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
-    if [ "$ALL_MONITORS" == "true" ]; then
-        echo -e "\n▶️ Bật Giám Sát Chéo Đa Máy (Mutual Cross-Monitors) trên TẤT CẢ các máy..."
-        bash "$MONITOR_SCRIPT" --all-hosts
-    else
-        echo -e "\n▶️ Bật lại Health Monitor cục bộ sau khi Deploy xong..."
-        bash "$MONITOR_SCRIPT"
-    fi
-elif [ "$ACTION" == "stop" ]; then
-    echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
-    if [ "$ALL_MONITORS" == "true" ]; then
-        ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true" >/dev/null 2>&1 || true
+if [ "$ACTION" != "open_ports" ]; then
+    if [ -f "$MONITOR_SCRIPT" ] && [ "$ACTION" != "stop" ]; then
+        if [ "$ALL_MONITORS" == "true" ]; then
+            echo -e "\n▶️ Bật Giám Sát Chéo Đa Máy (Mutual Cross-Monitors) trên TẤT CẢ các máy..."
+            bash "$MONITOR_SCRIPT" --all-hosts
+        else
+            echo -e "\n▶️ Bật lại Health Monitor cục bộ sau khi Deploy xong..."
+            bash "$MONITOR_SCRIPT"
+        fi
+    elif [ "$ACTION" == "stop" ]; then
+        echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
+        if [ "$ALL_MONITORS" == "true" ]; then
+            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true" >/dev/null 2>&1 || true
+        fi
     fi
 fi
 

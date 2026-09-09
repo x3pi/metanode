@@ -50,14 +50,16 @@
         snapshot_frequency_blocks: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_frequency_blocks'] | default(50) }}"
         epoch_duration_seconds: "{{ hostvars[groups['metanode_cluster'][0]]['epoch_duration_seconds'] | default(60) }}"
         snapshot_max_snapshots: "{{ hostvars[groups['metanode_cluster'][0]]['snapshot_max_snapshots'] | default(2) }}"
+  tags: ["local_build", "gen_keys"]
   roles:
-    - { role: local_build, when: "ansible_action in ['start', 'setup']" }
+    - { role: local_build, when: "ansible_action in ['start', 'setup', 'gen_keys']", tags: ["local_build", "gen_keys"] }
 
 - name: Deploy and Setup Metanode Cluster
   hosts: metanode_cluster
   become: yes
   any_errors_fatal: true
   gather_facts: true
+  tags: ["cluster_deploy", "open_ports"]
   pre_tasks:
     - name: Ensure monitoring tools (sshpass, jq) are installed
       ansible.builtin.apt:
@@ -116,22 +118,57 @@
       when: active_nodes | length > 0 and ansible_action in ['start', 'setup']
       ignore_errors: true
   roles:
-    - { role: stop_services, when: "active_nodes | length > 0 and ansible_action != 'restart'" }
+    - { role: stop_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup', 'stop']" }
     - { role: clean_data, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and keep_data | bool == false" }
     - { role: node_setup, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: snapshot_restore, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup'] and restore_node != 'none'" }
     - { role: node_exporter, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: systemd_services, when: "active_nodes | length > 0 and ansible_action in ['start', 'setup']" }
     - { role: restart_services, when: "active_nodes | length > 0 and ansible_action == 'restart'" }
+  tasks:
+    - name: Check generated firewall scripts for nodes
+      ansible.builtin.stat:
+        path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
+      loop: "{{ target_active_nodes }}"
+      register: generated_firewall_scripts
+      when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
+      tags: ["open_ports"]
+
+    - name: Fail when a generated firewall script is missing
+      ansible.builtin.fail:
+        msg: >-
+          Missing generated firewall configuration for node {{ item.item }} at
+          {{ remote_deploy_dir }}/node-{{ item.item }}_keys/open_ports.sh. Run setup to
+          generate and deploy the node configuration
+          before opening ports.
+      loop: "{{ generated_firewall_scripts.results | default([]) }}"
+      when:
+        - "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
+        - not item.stat.exists
+      tags: ["open_ports"]
+
+    - name: Open firewall ports from generated node configuration
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
+      loop: "{{ target_active_nodes }}"
+      when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
+      notify: Reload UFW
+      tags: ["open_ports"]
+  handlers:
+    - name: Reload UFW
+      ansible.builtin.command: ufw reload
 
 - name: Post-deployment actions
   hosts: localhost
   connection: local
   gather_facts: false
+  tags: ["post_deploy"]
   roles:
     # Runs before the Prometheus config generation below so Alertmanager is already listening on
     # :9093 by the time Prometheus (re)starts with the alerting: block that points at it.
-    - { role: alertmanager, become: true, when: "ansible_action not in ['stop']" }
+    - { role: alertmanager, become: true, when: "ansible_action not in ['stop', 'open_ports']" }
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
       ansible.builtin.shell: |
@@ -140,25 +177,27 @@
         chmod 0600 /tmp/rpc_nodes.json
       args:
         executable: /bin/bash
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     - name: Sync /tmp/rpc_nodes.json to block_hash_checker config-m-nodes.json
       ansible.builtin.copy:
         src: /tmp/rpc_nodes.json
         dest: "{{ playbook_dir }}/monitors/block_hash_checker/config-m-nodes.json"
         mode: '0600'
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     - name: Ensure Prometheus directory exists
       ansible.builtin.file:
         path: "{{ project_root }}/execution/deploy/prometheus"
         state: directory
         mode: '0755'
-      when: "ansible_action not in ['stop']"
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     - name: Generate prometheus.yml dynamically for monitoring
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/prometheus.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/prometheus.yml"
-      when: "ansible_action not in ['stop']"
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     - name: Copy alert_rules.yml alongside the generated prometheus.yml (docker-compose path)
       # execution/docker-compose.monitoring.yml mounts execution/deploy/prometheus/ straight into
@@ -168,7 +207,7 @@
       ansible.builtin.template:
         src: "{{ playbook_dir }}/roles/monitoring_config/templates/alert_rules.yml.j2"
         dest: "{{ project_root }}/execution/deploy/prometheus/alert_rules.yml"
-      when: "ansible_action not in ['stop']"
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     # 2026-09-08: found that a bare-metal `prometheus` systemd service (this box's actual live
     # setup, e.g. m0) reads its config from /etc/prometheus/prometheus.yml -- a completely
@@ -182,7 +221,7 @@
       ansible.builtin.stat:
         path: /etc/prometheus
       register: bare_metal_prometheus_dir
-      when: "ansible_action not in ['stop']"
+      when: "ansible_action not in ['stop', 'open_ports']"
 
     - name: Sync generated prometheus.yml to the bare-metal Prometheus config
       ansible.builtin.copy:
@@ -222,4 +261,4 @@
       args:
         executable: /bin/bash
       ignore_errors: true
-      when: "ansible_action not in ['stop']"
+      when: "ansible_action not in ['stop', 'open_ports']"

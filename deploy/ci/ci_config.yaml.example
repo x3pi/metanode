@@ -134,13 +134,13 @@ tests:
   # 6. BÀI TEST TẠO SNAPSHOT & KHÔI PHỤC NODE BẰNG ANSIBLE (ZERO-FORK RECOVERY)
   # ----------------------------------------------------------------------------
   - id: "snapshot_recovery"
-    name: "Snapshot Generation & Node State Recovery"
+    name: "Snapshot Generation & Node State Recovery (3 Rounds)"
     enabled: false
     # Yêu cầu: Chain cần chạy lại khi vào bài test snapshot
     pre_action: "reset_chain"
     cwd: "test-simple/test-rpc/test-chain/snapshot-recovery"
-    command: "./run_snapshot_test.sh --count 15"
-    timeout_seconds: 1200
+    command: "./run_snapshot_test.sh --loop 3 --count 15"
+    timeout_seconds: 2400
     continue_on_failure: false
 
 
