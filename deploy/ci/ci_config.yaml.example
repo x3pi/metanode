@@ -135,12 +135,32 @@ tests:
   # ----------------------------------------------------------------------------
   - id: "snapshot_recovery"
     name: "Snapshot Generation & Node State Recovery (3 Rounds)"
-    enabled: false
+    # 2026-09-09: bật lại trong pipeline thường trực. Trước đó tắt (enabled: false) khiến cả
+    # chuỗi 4 bug thật (race condition khi stop_services, snapshot trigger bỏ lỡ ngưỡng, mount
+    # đè /opt/metanode, chown không đệ quy) chỉ bị phát hiện khi có người chạy tay
+    # `--only snapshot_recovery` -- không phải qua CI tự động theo mỗi commit.
+    enabled: true
     # Yêu cầu: Chain cần chạy lại khi vào bài test snapshot
     pre_action: "reset_chain"
     cwd: "test-simple/test-rpc/test-chain/snapshot-recovery"
     command: "./run_snapshot_test.sh --loop 3 --count 15"
     timeout_seconds: 2400
+    continue_on_failure: false
+
+  # ----------------------------------------------------------------------------
+  # 7. BÀI TEST ỔN ĐỊNH RESET LẶP LẠI TRÊN HOST NHIỀU NODE (RACE CONDITION REGRESSION)
+  # ----------------------------------------------------------------------------
+  - id: "verify_multi_reset_stability"
+    name: "Multi-Node-Per-Host Reset Stability (5 Rounds)"
+    # Tắt mặc định trong pipeline thường trực (5 vòng --reset-all liên tiếp có thể tốn
+    # 25-50 phút) -- bài test hạ tầng/deploy-script chuyên biệt, chạy tay khi đụng tới
+    # deploy/ansible/roles/{stop_services,node_setup,snapshot_restore,clean_data}/ hoặc định
+    # kỳ (nightly), không cần chạy trên mọi commit như các bài test logic ứng dụng khác.
+    enabled: false
+    pre_action: "none"
+    cwd: "{METANODE_DIR}/deploy/ci"
+    command: "./verify_multi_reset_stability.sh 5 180"
+    timeout_seconds: 3000
     continue_on_failure: false
 
 
