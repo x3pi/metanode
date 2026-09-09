@@ -43,10 +43,11 @@
 ### 1.2. Trên các máy chủ Node từ xa (Remote Target Servers):
 * Hệ điều hành Ubuntu 20.04 / 22.04 / 24.04 LTS tiêu chuẩn.
 * Tài khoản SSH có quyền `sudo` (dùng SSH Key hoặc mật khẩu được cấu hình trong `inventory.yml`).
-* *(Tùy chọn)* Nếu máy chủ chạy Node có bật tính năng snapshot (`snapshot_enabled: true`), cài thêm công cụ BTRFS:
+* Nếu Node có bật tính năng snapshot (`snapshot_enabled: true`), chỉ cần cài công cụ BTRFS:
   ```bash
   sudo apt install -y btrfs-progs
   ```
+  *(Dung lượng BTRFS bạn tự cấu hình trong `inventory.yml` qua biến `btrfs_size` hoặc cờ CLI `--btrfs-size`, hỗ trợ đơn vị `G` và `T` như `100G`, `500G`, `1T`, `2T`... Ansible sẽ tự động kiểm tra dung lượng ổ đĩa khả dụng trước khi tạo; nếu cấu hình vượt quá bộ nhớ ổ cứng thực tế của server thì hệ thống sẽ tự động báo lỗi và dừng lại).*
 
 ---
 
@@ -59,7 +60,7 @@ cd deploy/ansible
 cp inventory.example.yml inventory.yml
 ```
 
-> 💡 **Lưu ý:** Toàn bộ ý nghĩa của từng trường cấu hình (`node_ids`, `rpc_nodes`, `prune_nodes`, `epochs_to_keep`, cách dùng SSH Key vs Password...) đã được **chú thích chi tiết trong file [`inventory.example.yml`](./inventory.example.yml)**. Bạn chỉ cần mở file `inventory.yml` lên và chỉnh sửa lại IP, tài khoản theo đúng cụm server của mình.
+> 💡 **Lưu ý:** Toàn bộ ý nghĩa của từng trường cấu hình (`node_ids`, `rpc_nodes`, `snapshot_frequency_blocks`, `btrfs_size`, `prune_nodes`, `epochs_to_keep`, cách dùng SSH Key vs Password...) đã được **chú thích chi tiết trong file [`inventory.example.yml`](./inventory.example.yml)**. Bạn chỉ cần mở file `inventory.yml` lên và chỉnh sửa lại IP, tài khoản, dung lượng `btrfs_size` (mặc định `400G`) theo đúng cụm server của mình.
 
 ---
 

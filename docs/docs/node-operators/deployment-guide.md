@@ -28,12 +28,15 @@ Chạy script cấu hình phân vùng BTRFS duy nhất 1 lần trước khi cài
 
 ```bash
 cd deploy/
+# Chạy mặc định 400GB:
 sudo bash setup-cluster-btrfs.sh
+# Hoặc chỉ định dung lượng mong muốn (ví dụ 100GB, 200GB, 50GB...):
+sudo bash setup-cluster-btrfs.sh 100G
 ```
 
 **Cách thức hoạt động của script:**
-- Kiểm tra nếu máy có LVM (`ubuntu-vg`), nó sẽ tạo một Logical Volume 400GB chuẩn BTRFS.
-- Nếu không có LVM, nó sẽ tạo file ảnh ảo (Sparse File) 400GB làm loop device tại `/opt/metanode_cluster_btrfs.img` và định dạng BTRFS.
+- Kiểm tra nếu máy có LVM (`ubuntu-vg`), nó sẽ tạo một Logical Volume với dung lượng chỉ định (mặc định 400GB) chuẩn BTRFS.
+- Nếu không có LVM, nó sẽ tạo file ảnh ảo (Sparse File) với dung lượng chỉ định làm loop device tại `/opt/metanode_cluster_btrfs.img` và định dạng BTRFS. File Sparse chỉ chiếm dung lượng đĩa thực tế khi phát sinh dữ liệu ghi.
 - Gắn (mount) phân vùng vào `/opt/metanode`.
 - Cấu hình mount tự động khi khởi động lại hệ thống trong `/etc/fstab`.
 
