@@ -393,3 +393,67 @@
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists and not node_configs[item | string].snapshot_enabled
   changed_when: false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SMOKE TESTS (2026-09-09): both regression tests for real bugs found live on this
+# exact host class (multiple co-located nodes + BTRFS snapshot nodes). They run
+# BEFORE systemd_services starts any process, so a bad deploy fails loud and fast
+# here instead of surfacing 10+ minutes later as a crash-loop or a snapshot that
+# silently never gets served.
+# ═══════════════════════════════════════════════════════════════════════════
+
+- name: "SMOKE TEST: check whether /opt/metanode itself got mounted"
+  # deploy/systemd/cluster/setup-cluster-btrfs.sh (the standalone manual/systemd deploy
+  # script) intentionally mounts BTRFS onto the whole metanode_install_dir -- correct for
+  # that flow, but wrong here: this Ansible role's own architecture mounts BTRFS only at
+  # /mnt/metanode_snapshots plus per-node bind mounts (see tasks above), leaving
+  # metanode_install_dir itself as a plain directory shared by ALL nodes. If anything
+  # mounts something directly onto it, every node's already-deployed bin/config/keys gets
+  # shadowed by whatever that mount's root contains. Reproduced live: node binaries became
+  # "No such file or directory" immediately after a stray call to that script ran mid-play.
+  ansible.builtin.shell: mountpoint -q "{{ metanode_install_dir }}" && echo MOUNTED || echo OK
+  register: opt_metanode_mount_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail if metanode_install_dir itself is mounted (shadows every node's files)
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI MOUNT] '{{ metanode_install_dir }}' (thư mục cha chứa TẤT CẢ các node) đang là
+      một mount point riêng -- điều này che khuất bin/config/keys của mọi node bên dưới.
+      👉 Chỉ '/mnt/metanode_snapshots' và các bind-mount riêng từng node
+      ('{{ metanode_install_dir }}/node-N/data') mới được phép mount. Kiểm tra lại xem có
+      script nào (vd deploy/systemd/cluster/setup-cluster-btrfs.sh) vừa mount đè lên
+      '{{ metanode_install_dir }}' không, rồi `umount` nó trước khi deploy tiếp.
+  when: opt_metanode_mount_check.stdout | trim == 'MOUNTED'
+
+- name: "SMOKE TEST: check every active node's data dir for files not owned by metanode"
+  # The service runs as user "metanode" (see the systemd unit), so anything it needs to
+  # open/create must be writable by that user all the way down its directory tree -- not
+  # just at the top. Root-context steps (mkfs.btrfs's root-owned volume root, a btrfs COW
+  # snapshot/reflink carrying an old owner forward, a non-recursive chown further up)
+  # leave stragglers invisible to anything less than a full recursive scan. Reproduced
+  # live: a snapshot node ran fine for 30+ minutes, then on its next restart PebbleDB
+  # failed to open execution/backup/consensus/backup_db/LOCK with "permission denied" --
+  # that one subdirectory was root-owned despite its parent looking fine.
+  ansible.builtin.shell: |
+    find "{{ metanode_install_dir }}/node-{{ item }}/data" -not -user metanode 2>/dev/null | head -5
+  loop: "{{ active_nodes }}"
+  register: ownership_smoke_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail deploy if any node's data directory has files not owned by metanode
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI QUYỀN SỞ HỮU] Node {{ item.item }}: tìm thấy file/thư mục KHÔNG thuộc sở hữu
+      user 'metanode' dưới {{ metanode_install_dir }}/node-{{ item.item }}/data -- service
+      chạy bằng user 'metanode' sẽ không mở/ghi được các file này khi khởi động.
+      Ví dụ: {{ item.stdout_lines | join(', ') }}
+      👉 Nguyên nhân thường gặp: một bước chạy với quyền root (mkfs.btrfs, script khác) tạo
+      ra các file/thư mục này mà không chown lại đệ quy. Kiểm tra lại các bước
+      BTRFS/bind-mount phía trên trong role này.
+  loop: "{{ ownership_smoke_check.results }}"
+  loop_control:
+    label: "node-{{ item.item }}"
+  when: item.stdout | trim != ''
