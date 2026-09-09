@@ -181,6 +181,19 @@
     and not btrfs_disk.stat.exists
     and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
 
+- name: Fail if requested BTRFS size format is invalid
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI CẤU HÌNH DUNG LƯỢNG SNAPSHOT]
+      Máy chủ '{{ inventory_hostname }}' ({{ ansible_host | default('') }}) có giá trị 'btrfs_size' không đúng định dạng:
+      '{{ disk_space_check.stdout.split(':')[1] | default(btrfs_size | default('400G')) }}'
+      👉 Định dạng hợp lệ: số + đơn vị K/M/G/T (ví dụ: 100G, 500G, 1T, 2T). Vui lòng sửa lại biến 'btrfs_size' trong inventory.yml.
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+    and disk_space_check.rc == 1
+
 - name: Fail if requested BTRFS size exceeds available disk space
   ansible.builtin.fail:
     msg: |
@@ -208,25 +221,40 @@
     and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
 
 - name: Automatically initialize BTRFS partition or sparse loopback image
+  # Mirrors deploy/systemd/cluster/setup-cluster-btrfs.sh's LVM-vs-loopback logic (including its
+  # existing-LV reuse check) so the Ansible-driven path and the manual/systemd path don't drift.
+  # Every fallback branch logs an explicit WARN (to stderr, so it doesn't pollute the stdout this
+  # task's caller parses as the resulting device path) instead of failing/falling back silently.
   ansible.builtin.shell: |
     set -e
     target_size="{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}"
     btrfs_img="/opt/metanode_cluster_btrfs.img"
     created_dev=""
+    use_loopback=false
 
     if sudo vgs ubuntu-vg >/dev/null 2>&1; then
-      if sudo lvcreate -L "$target_size" -n metanode_data ubuntu-vg >/dev/null 2>&1; then
+      if sudo lvs ubuntu-vg/metanode_data >/dev/null 2>&1; then
+        echo "WARN: LV ubuntu-vg/metanode_data already exists, reusing it instead of lvcreate" >&2
         created_dev="/dev/ubuntu-vg/metanode_data"
+      else
+        lvcreate_err=$(sudo lvcreate -L "$target_size" -n metanode_data ubuntu-vg 2>&1 >/dev/null) || {
+          echo "WARN: lvcreate failed, falling back to loopback file. lvcreate said: ${lvcreate_err}" >&2
+          use_loopback=true
+        }
+        [ "$use_loopback" != true ] && created_dev="/dev/ubuntu-vg/metanode_data"
       fi
+    else
+      echo "WARN: LVM volume group 'ubuntu-vg' not found, using loopback file" >&2
+      use_loopback=true
     fi
 
-    if [ -z "$created_dev" ]; then
+    if [ "$use_loopback" = true ] || [ -z "$created_dev" ]; then
       created_dev="$btrfs_img"
       mkdir -p /opt
       truncate -s "$target_size" "$btrfs_img"
     fi
 
-    mkfs.btrfs -f "$created_dev"
+    mkfs.btrfs -f "$created_dev" >&2
     echo "$created_dev"
   args:
     executable: /bin/bash

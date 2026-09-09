@@ -169,25 +169,51 @@ if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
 fi
 
 # Safety Check: Node tạo snapshot KHÔNG ĐƯỢC PHÉP tự khôi phục chính nó
+#
+# Phải khớp CHÍNH XÁC cách deploy.yml (dòng ~13-15) tự phân loại node snapshot/synconly:
+# một node được coi là snapshot/synconly nếu (a) node_id nằm trong danh sách tường minh
+# snapshot_nodes/synconly_nodes CỦA BẤT KỲ host nào, HOẶC (b) node_id thuộc về 1 host mà
+# host đó khai báo cờ boolean snapshot_enabled/is_synconly (áp dụng cho MỌI node_ids của
+# host đó). Bỏ sót nhánh (b) sẽ khiến guard này im lặng cho qua đúng kịch bản nó phải chặn.
+#
+# Fail-closed: nếu không xác minh được (thiếu pyyaml, inventory lỗi cú pháp...) thì DỪNG
+# hẳn thay vì âm thầm coi như "không phải node snapshot" rồi cho restore tiếp -- guard an
+# toàn dữ liệu không được phép fail-open.
 if [ "$RESTORE_NODE" != "none" ] && [ -f "${INVENTORY}" ]; then
-    IS_SNAP_NODE=$(python3 -c "
-import yaml
+    SNAP_CHECK_OUTPUT=$(python3 -c "
+import sys
+try:
+    import yaml
+except ImportError as e:
+    print('ERROR: PyYAML chưa được cài đặt (%s)' % e, file=sys.stderr)
+    sys.exit(2)
 try:
     with open('${INVENTORY}') as f:
         d = yaml.safe_load(f)
-    hosts = d.get('all', {}).get('children', {}).get('metanode_cluster', {}).get('hosts', {})
-    snap_nodes = []
+    hosts = (d.get('all', {}).get('children', {}).get('metanode_cluster', {}).get('hosts', {})) or {}
+    snap_nodes = set()
     for h, v in hosts.items():
-        if isinstance(v, dict):
-            snap_nodes.extend([str(x) for x in v.get('snapshot_nodes', [])])
-            snap_nodes.extend([str(x) for x in v.get('synconly_nodes', [])])
-    if str('${RESTORE_NODE}') in snap_nodes:
-        print('true')
-    else:
-        print('false')
-except Exception:
-    print('false')
-" 2>/dev/null || echo "false")
+        if not isinstance(v, dict):
+            continue
+        node_ids = [str(x) for x in v.get('node_ids', [])]
+        snap_nodes.update(str(x) for x in v.get('snapshot_nodes', []))
+        snap_nodes.update(str(x) for x in v.get('synconly_nodes', []))
+        # Cờ boolean per-host áp dụng cho toàn bộ node_ids của host đó (giống deploy.yml)
+        if bool(v.get('snapshot_enabled', False)) or bool(v.get('is_synconly', False)):
+            snap_nodes.update(node_ids)
+    print('true' if str('${RESTORE_NODE}') in snap_nodes else 'false')
+except Exception as e:
+    print('ERROR: %s' % e, file=sys.stderr)
+    sys.exit(2)
+")
+    SNAP_CHECK_RC=$?
+    if [ $SNAP_CHECK_RC -ne 0 ]; then
+        echo -e "\n\033[0;31m❌ [LỖI AN TOÀN] Không thể xác minh Node ${RESTORE_NODE} có phải Node tạo Snapshot hay không!\033[0m"
+        echo -e "\033[0;33m   ${SNAP_CHECK_OUTPUT}\033[0m"
+        echo -e "\033[0;36m   👉 Kiểm tra lại ${INVENTORY} và đảm bảo đã cài PyYAML (pip install pyyaml), rồi chạy lại.\033[0m\n"
+        exit 1
+    fi
+    IS_SNAP_NODE="$SNAP_CHECK_OUTPUT"
     if [ "$IS_SNAP_NODE" == "true" ]; then
         echo -e "\n\033[0;31m❌ [LỖI AN TOÀN] Node ${RESTORE_NODE} là Node tạo Snapshot (SyncOnly)!\033[0m"
         echo -e "\033[0;33m   ⚠️ Node tạo snapshot KHÔNG ĐƯỢC PHÉP tự khôi phục chính nó.\033[0m"
