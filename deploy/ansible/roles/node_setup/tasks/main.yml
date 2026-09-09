@@ -276,13 +276,24 @@
     - auto_btrfs_init.stdout.strip() != ""
 
 - name: Unmount all existing node data bind mounts before resetting
+  # Scoped to active_nodes (the nodes THIS run is actually touching), never a blind glob over
+  # every node-*/data on the host. A glob here unmounts bind mounts for nodes not even part of
+  # this run -- e.g. a targeted `--restore-node 1` (active_nodes=[1]) used to unmount node-4's
+  # bind mount too, purely because it matched the glob pattern, while node-4's own process kept
+  # running untouched. That process's already-open file handles kept working, but any fresh
+  # path lookup (like its snapshot HTTP server re-scanning its snapshot directory) started
+  # resolving through the now-uncovered, empty underlying dir instead -- reproduced live: a
+  # snapshot node that had just created real snapshot files stopped being able to find/serve
+  # them, immediately after an unrelated node's --restore-node run touched the same host.
   ansible.builtin.shell: |
-    for d in /opt/metanode/node-*/data; do
+    for nid in {{ active_nodes | join(' ') }}; do
+      d="{{ metanode_install_dir }}/node-${nid}/data"
       if mountpoint -q "$d"; then
         umount "$d" || umount -l "$d" || true
       fi
     done
   changed_when: false
+  when: active_nodes | length > 0
 
 - name: Unmount /opt/metanode if it is mounted to BTRFS disk
   ansible.builtin.shell: |
