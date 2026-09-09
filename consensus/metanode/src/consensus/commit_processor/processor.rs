@@ -670,10 +670,43 @@ impl CommitProcessor {
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
         const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
-        // At least this many real, already-certified future commits must be buffered before
-        // trusting the lowest one as a jump target -- rules out acting on a single stray
-        // out-of-order arrival, not a capacity/exhaustion signal (see CORRECTION above).
-        const RECOVERY_STUCK_MIN_BUFFERED: usize = 10;
+
+        // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
+        // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
+        // next_expected_index") turned out to still deadlock, just one index later. Root cause,
+        // confirmed by reading commit_vote_monitor.rs: digest_history is populated ONLY by
+        // observe_block() reading the commit_votes actually embedded in freshly-gossiped peer
+        // blocks -- it is NOT a replay of history. Once every peer's own local head has moved
+        // past an index (which is exactly what happens while THIS node sits stuck), no peer ever
+        // again emits a vote for that old index -- not because it was garbage-collected out of
+        // the 50k-entry retention window (DIGEST_HISTORY_RETAIN in commit_vote_monitor.rs; the
+        // observed gap here was only ~2,500, nowhere near that), but because it was simply never
+        // going to be written again. quorum_commit_digest() and vote_count_for_index() therefore
+        // return None / Insufficient FOREVER for that specific index, no matter how long we wait
+        // -- confirmed live: qci climbed by ~4,000 while next_expected_index sat frozen. Jumping
+        // `next_expected_index` by one index at a time just re-hits the identical wall on the
+        // next entry, converging at roughly one index per RECOVERY_STUCK_TIMEOUT_SECS -- for the
+        // 2,595-deep backlog observed live that is hours, not the prompt recovery a full-cluster
+        // restart needs.
+        //
+        // FIX: instead of moving the pointer, grant a BOUNDED, EVIDENCE-GATED AMNESTY from the
+        // digest/peer-attestation requirement for the exact backlog that was proven (by the same
+        // 900s wall-clock stuck detector, unchanged) to be permanently unattestable. Every commit
+        // in that amnesty range was `decided_with_local_blocks` -- i.e. THIS node's own
+        // deterministic function of a DAG that Byzantine agreement already fixed identically
+        // across all honest nodes (the same justification COLD-START-BYPASS already relies on
+        // for the analogous "no data exists yet" case; this is "the data will never exist again",
+        // not "the data disagrees with us" -- an active digest CONFLICT is still always honored
+        // and still always wins, amnesty or not). `gap_recovery_bypass_ceiling`, once set, is
+        // consulted at every one of this loop's existing per-commit digest-gate checks (the
+        // primary immediate-dispatch path, the pending_local_commits POLL path, and the OOO drain
+        // path) so the existing dispatch code (WAL, executor dispatch, tx_recycler, epoch-boundary
+        // handling) runs completely unchanged -- only the verification gate itself is bypassed,
+        // and only for indices at-or-below the snapshot ceiling taken at the moment amnesty was
+        // granted. New/live commits above that ceiling are never covered and still require full
+        // verification. The ceiling self-clears (see top of loop) the moment next_expected_index
+        // passes it, so normal fork-safety resumes automatically once the backlog drains.
+        let mut gap_recovery_bypass_ceiling: Option<u32> = None;
 
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
@@ -711,33 +744,62 @@ impl CommitProcessor {
             // arrived" branch, which happened to work because commit_finalizer's own gap
             // tolerance keeps forwarding commits forever, but was not actually a guarantee for
             // every possible way this class of stall could manifest).
+            if let Some(ceiling) = gap_recovery_bypass_ceiling {
+                if next_expected_index > ceiling {
+                    info!(
+                        "✅ [PERMANENT-GAP-RECOVERY] Bypass window closed: next_expected_index={} \
+                         has passed the recovery ceiling={}. Full digest/peer-attestation \
+                         verification resumes for all commits from here on.",
+                        next_expected_index, ceiling
+                    );
+                    gap_recovery_bypass_ceiling = None;
+                }
+            }
+
             if next_expected_index != last_next_expected_index {
                 last_next_expected_index = next_expected_index;
                 last_next_expected_progress_time = std::time::Instant::now();
             } else {
                 let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
+                let transitioning_now = is_transitioning
+                    .as_ref()
+                    .map(|it| it.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
                 if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
-                    && pending_commits.len() >= RECOVERY_STUCK_MIN_BUFFERED
+                    && gap_recovery_bypass_ceiling.is_none()
+                    && !pending_local_commits.is_empty()
+                    && !transitioning_now
                 {
-                    if let Some((&lowest_buffered, _)) = pending_commits.iter().next() {
-                        error!(
-                            "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not \
-                             advanced in {}s and pending_commits is fully saturated ({} \
-                             buffered, oldest available={}). commit_finalizer almost certainly \
-                             skipped this exact index during its own gap tolerance and it will \
-                             never arrive. Adopting {} as the new next_expected_index -- see \
-                             PERMANENT-GAP-RECOVERY comment near this loop's setup for why this \
-                             is bounded/evidence-gated rather than the heuristic jump removed \
-                             after it caused fork divergence. If this fires, file it: it means a \
-                             real DAG gap went unexplained all the way to this last-resort \
-                             recovery.",
-                            next_expected_index, stuck_secs, pending_commits.len(),
-                            lowest_buffered, lowest_buffered
-                        );
-                        next_expected_index = lowest_buffered;
-                        last_next_expected_index = next_expected_index;
-                        last_next_expected_progress_time = std::time::Instant::now();
-                    }
+                    // Evidence: the head-of-line commit (next_expected_index, sitting in
+                    // pending_local_commits -- see its insert sites, it only ever holds the
+                    // current head) has not budged in RECOVERY_STUCK_TIMEOUT_SECS despite the
+                    // DAG demonstrably continuing (that's what filled pending_commits below).
+                    // That is direct proof this exact index can never be attested (see the long
+                    // comment on gap_recovery_bypass_ceiling's declaration), not a guess from
+                    // buffer capacity. Ceiling = highest already-buffered OOO commit right now,
+                    // so the amnesty covers exactly this proven-stuck backlog and nothing minted
+                    // afterward.
+                    let ceiling = pending_commits
+                        .keys()
+                        .next_back()
+                        .copied()
+                        .unwrap_or(next_expected_index)
+                        .max(next_expected_index);
+                    error!(
+                        "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not advanced in \
+                         {}s (pending_local head stuck, {} OOO commits buffered behind it). Peer \
+                         digest votes for this index cannot ever reappear once peers move past \
+                         it (see gap_recovery_bypass_ceiling doc comment) -- granting bounded \
+                         verification amnesty up to already-buffered index {} so the existing \
+                         dispatch path can drain the backlog. A live digest CONFLICT still \
+                         discards immediately regardless of this amnesty. If this fires, file it: \
+                         it means a real digest-vote gap went unexplained all the way to this \
+                         last-resort recovery.",
+                        next_expected_index, stuck_secs, pending_commits.len(), ceiling
+                    );
+                    gap_recovery_bypass_ceiling = Some(ceiling);
+                    last_next_expected_index = next_expected_index;
+                    last_next_expected_progress_time = std::time::Instant::now();
                 }
             }
 
@@ -949,7 +1011,28 @@ impl CommitProcessor {
                                     None // No attestor available
                                 };
 
-                                if quorum_gc_bypass {
+                                // PERMANENT-GAP-RECOVERY AMNESTY: see gap_recovery_bypass_ceiling's
+                                // doc comment near this loop's setup. Checked before
+                                // quorum_gc_bypass/peer-attest on purpose -- those two exist to
+                                // discard a local value the network has moved past WITHOUT ever
+                                // agreeing with us (our guess was likely wrong), whereas amnesty
+                                // only ever covers indices that were proven, by 900s of zero
+                                // dispatch progress, to be simply unattestable (peers no longer
+                                // gossip votes for history they've passed) -- ACCEPT, don't
+                                // discard, because CommitSyncer's own "lag" is DAG-sync-relative
+                                // and will never re-deliver these as a CertifiedCommit either.
+                                let recovery_bypass = gap_recovery_bypass_ceiling
+                                    .map_or(false, |ceiling| local_idx <= ceiling);
+                                if recovery_bypass {
+                                    warn!(
+                                        "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted under \
+                                         verification amnesty (ceiling={:?}): trusting this node's \
+                                         own deterministic DAG commit since peer re-attestation for \
+                                         this index can never arrive.",
+                                        local_idx, gap_recovery_bypass_ceiling
+                                    );
+                                    verified_indices.push(local_idx);
+                                } else if quorum_gc_bypass {
                                     warn!(
                                         "🚨 [DIGEST-GATE POLL] Commit {} QUORUM-GC-BYPASS: \
                                          quorum_commit_index has advanced far past this commit. \
@@ -1135,7 +1218,21 @@ impl CommitProcessor {
                                 } else {
                                     0
                                 };
-                                if qci_val > next_expected_index + 50_000 {
+                                // PERMANENT-GAP-RECOVERY AMNESTY: see gap_recovery_bypass_ceiling's
+                                // doc comment near this loop's setup. ACCEPT (not discard) -- this
+                                // index was proven unattestable by 900s of zero dispatch progress,
+                                // and CommitSyncer's DAG-sync-relative "lag" will never re-deliver
+                                // it as a CertifiedCommit for the QUORUM-GC-BYPASS path below to wait on.
+                                let recovery_bypass = gap_recovery_bypass_ceiling
+                                    .map_or(false, |ceiling| next_expected_index <= ceiling);
+                                if recovery_bypass {
+                                    warn!(
+                                        "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted under \
+                                         verification amnesty (ceiling={:?}).",
+                                        next_expected_index, gap_recovery_bypass_ceiling
+                                    );
+                                    true
+                                } else if qci_val > next_expected_index + 50_000 {
                                     warn!(
                                         "🚨 [DIGEST-GATE-OOO] Commit {} QUORUM-GC-BYPASS: \
                                          digest GC'd, quorum={} >> commit. Local commit cannot be verified. \
@@ -1441,6 +1538,21 @@ impl CommitProcessor {
                                         }
                                     }
                                     None => {
+                                        // PERMANENT-GAP-RECOVERY AMNESTY: see
+                                        // gap_recovery_bypass_ceiling's doc comment near this
+                                        // loop's setup. Checked first since a fresh local decision
+                                        // can land exactly on next_expected_index while an amnesty
+                                        // window from an earlier stuck episode is still draining.
+                                        if gap_recovery_bypass_ceiling
+                                            .map_or(false, |ceiling| commit_index <= ceiling)
+                                        {
+                                            warn!(
+                                                "🚨🔧 [PERMANENT-GAP-RECOVERY] Commit {} accepted \
+                                                 under verification amnesty (ceiling={:?}).",
+                                                commit_index, gap_recovery_bypass_ceiling
+                                            );
+                                            true
+                                        } else
                                         // QUORUM-GC-BYPASS: If quorum advanced far past
                                         // this commit, digest entry was GC'd = implicitly verified.
                                         if let Some(ref qci) = _quorum_commit_index_ref {
@@ -1796,8 +1908,10 @@ impl CommitProcessor {
                         // SAFETY: Limit pending_commits size to prevent OOM
                         // At 50k+ TPS (~1000 commits/sec), up to 50k commits
                         // can queue during extended stalls or epoch transitions.
-                        // (MAX_PENDING_COMMITS is now declared once, near this loop's setup, so
-                        // PERMANENT-GAP-RECOVERY's saturation check uses the same number.)
+                        // (MAX_PENDING_COMMITS is declared once, near this loop's setup. Note:
+                        // PERMANENT-GAP-RECOVERY no longer gates on this buffer's size -- see
+                        // gap_recovery_bypass_ceiling's doc comment -- it now gates purely on
+                        // pending_local_commits being genuinely stuck.)
                         pending_commits.insert(commit_index, subdag);
                         
                         // SMART EVICTION: Instead of dropping the incoming commit (which might be 
