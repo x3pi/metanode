@@ -233,9 +233,11 @@ func (stm *TrueBlockSTM) Process(
 		}
 	}
 
-	// Reward Leader
+	// Reward Leader: split between validator commission and delegators' pro-rata share --
+	// see RewardBlockLeader's doc comment for why this happens per block rather than batched
+	// at epoch boundary.
 	if totalGasFee.Cmp(big.NewInt(0)) > 0 {
-		chainState.GetAccountStateDB().AddBalance(leaderAddr, totalGasFee)
+		RewardBlockLeader(chainState, leaderAddr, totalGasFee, chainState.GetAccountStateDB().AddBalance)
 	}
 
 	logger.Info("✅ [BLOCK-STM] Hoàn tất Commit 100%% Deterministic, TotalGasFee: %v, Leader: %v", totalGasFee, leaderAddr.Hex())
