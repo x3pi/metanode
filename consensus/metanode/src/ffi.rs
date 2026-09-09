@@ -420,6 +420,35 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
 
         info!("Starting MetaNode Consensus Engine (FFI Thread)...");
 
+        // OUTER RESILIENCE LOOP (2026-09-09): found live while verifying the
+        // PERMANENT-GAP-RECOVERY amnesty fix on a real 4-node cluster restart.
+        //
+        // The catch_unwind below only ever ran ONCE. Its handler (see the bottom of this
+        // loop body) just eprintln!'d and returned -- it did not retry. That is fine ONLY for
+        // panics that originate from inside the async `loop` further down AND are already
+        // turned into a `Result::Err` that loop explicitly matches on (NodeConfig::load,
+        // InitializedNode::initialize, run_main_loop) -- those three sites already have their
+        // own restart_count/backoff and `continue`. But a raw, UNCAUGHT panic anywhere else in
+        // the entire initialize()/run_main_loop() call graph -- for example the typed-store-
+        // derive retry loop's own `.expect("Cannot open DB at {:?}")` once it exhausts its 60
+        // attempts (see typed-store-derive/src/lib.rs), which is exactly what was observed
+        // live here -- unwinds straight past all of that inner handling and is caught only by
+        // this OUTER catch_unwind, which used to just log and give up. Confirmed live: node-0
+        // sat with Rust consensus permanently dead (Go kept running, RPC kept answering reads,
+        // block height frozen) for 4+ minutes with zero further restart attempts, while
+        // systemd saw one continuous, never-crashed OS process the whole time -- so nothing
+        // external ever notices either. This is the same class of gap as the FFI-internal
+        // restart loop already being invisible to systemd (see the backoff comment inside the
+        // loop below), just one level further out: ANY panic anywhere in this whole subsystem
+        // used to be a one-way trip to a silent, permanent, human-restart-required outage --
+        // precisely the scenario a full-cluster restart needs to NOT be true.
+        //
+        // Fix: move the retry loop out here too, with the same growing backoff. A panic now
+        // rebuilds a fresh Tokio runtime (cheap, and already what every iteration of the inner
+        // loop implicitly relies on via "fresh Registry each loop") and tries again, instead of
+        // ending the process's Rust consensus life for good.
+        let mut outer_restart_count: u32 = 0;
+        loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Build the Tokio multi-threaded runtime.
             //
@@ -555,9 +584,39 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             });
         }));
 
-        if let Err(e) = result {
-            eprintln!("🚨 [RUST FFI] Consensus engine panicked: {:?}", e);
-            // DO NOT re-panic — that would abort() the Go process
+        match result {
+            Ok(()) => {
+                // The async `loop` above has no `break` in it (every path either `continue`s
+                // or falls through to loop again after a restart_count bump), so reaching here
+                // without a panic is not expected in practice. Break rather than tight-looping
+                // forever with no backoff if it ever does happen.
+                eprintln!(
+                    "🚨 [RUST FFI] Consensus engine's inner loop exited without panicking \
+                     (unexpected -- it has no break). Not restarting again to avoid a tight \
+                     loop; this OS thread is now idle."
+                );
+                break;
+            }
+            Err(e) => {
+                outer_restart_count += 1;
+                // Same growing-backoff shape as the inner loop's own FFI RESTART backoff (see
+                // its comment) -- reusing the reasoning: a flat/short wait was consistently not
+                // enough for a same-process RocksDB LOCK file (and whatever else was mid-
+                // teardown) to actually finish releasing before the next attempt.
+                let backoff_secs = (10 * outer_restart_count.min(6)).min(60) as u64;
+                eprintln!(
+                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}): {:?}. \
+                     Rebuilding the Tokio runtime and retrying in {}s instead of leaving Rust \
+                     consensus permanently dead for the rest of this process's life.",
+                    outer_restart_count, e, backoff_secs
+                );
+                // DO NOT re-panic — that would abort() the Go process.
+                // Blocking sleep is fine here: the Tokio runtime that panicked has already been
+                // torn down (catch_unwind unwound out of it), so this OS thread has nothing
+                // else to service right now.
+                std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+            }
+        }
         }
     });
     }));
