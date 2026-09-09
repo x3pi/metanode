@@ -596,6 +596,68 @@ impl CommitProcessor {
         const HEARTBEAT_INTERVAL: u32 = 1000;
         const HEARTBEAT_TIMEOUT_SECS: u64 = 300;
 
+        // SAFETY: Limit pending_commits size to prevent OOM (moved up from its previous home
+        // right at the eviction site below so PERMANENT-GAP-RECOVERY, added 2026-09-09, can
+        // reference the same number instead of duplicating the literal).
+        const MAX_PENDING_COMMITS: usize = 50_000;
+
+        // PERMANENT-GAP-RECOVERY (2026-09-09): the HEARTBEAT_TIMEOUT_SECS check above this
+        // comment does NOT detect the failure mode it looks like it should. It resets
+        // last_heartbeat_time/last_heartbeat_commit every time `commit_index` (the index of
+        // whatever CommittedSubDag just arrived on the channel) crosses a HEARTBEAT_INTERVAL
+        // boundary -- but commits keep arriving (and commit_index keeps climbing) even while
+        // next_expected_index is completely stuck, because commit_finalizer.rs's own
+        // "Non-sequential commit ... Proceeding" gap tolerance keeps forwarding newer commits
+        // into this channel regardless of whether this loop can ever dispatch them. So the
+        // existing check reads "we're receiving messages" as "we're making progress" and never
+        // fires for exactly the case that matters.
+        //
+        // Root cause (confirmed live on a real 4-node cluster, 2026-09-08/09, after ~6h idle):
+        // commit_finalizer.rs tolerates a commit-index gap in ITS OWN sequence (by design, see
+        // its own comment: "EXPECTED during catch-up (FORWARD-JUMP)") and just keeps forwarding
+        // whatever arrives next. But THIS loop's `next_expected_index` requires strict,
+        // uninterrupted sequential order (deliberately -- see the FORK-SAFETY FIX comments a few
+        // hundred lines below about why heuristic gap-skipping here was removed after it "caused
+        // fatal DAG divergence"). The result: if commit_finalizer ever skips exactly the ONE
+        // commit this loop is waiting for, `next_expected_index` can never advance again --
+        // pending_commits fills to MAX_PENDING_COMMITS and then just cycles forever, evicting
+        // the farthest-future commit as each new one arrives (visible in production logs as
+        // endless "pending_commits at capacity (50000)! Evicted farthest future commit N
+        // (expected <stuck index>)" -- N climbing, the expected index never moving), while
+        // synced_commit_index's own separate FORK-SAFETY GATE (commit_syncer/mod.rs) blocks the
+        // node from ever reaching Healthy because of the very gap this loop can't close. No
+        // restart fixes it -- confirmed: a full node reset/resync hit the exact same wall,
+        // because it isn't a per-node cache problem, it's that commit_finalizer's decision to
+        // skip is never communicated to this loop's independent expectation.
+        //
+        // Fix: track actual dispatch progress (next_expected_index changing), not message
+        // arrival. Once truly stuck for a sustained period AND the out-of-order buffer is fully
+        // saturated (strong evidence the missing commit is gone for good, not just delayed --
+        // MAX_PENDING_COMMITS real, already-certified CommittedSubDags have arrived without ever
+        // producing the one this loop wants), adopt the LOWEST index actually held in
+        // pending_commits as the new next_expected_index instead of waiting forever.
+        //
+        // Why this is safe where the earlier "gap > 20" heuristic wasn't: that fix jumped based
+        // on a raw counter with no relationship to real network state, so two nodes could
+        // independently "guess" different jump targets for the same GEI -- a fork. This does not
+        // guess: every candidate in pending_commits is a real CommittedSubDag that already passed
+        // consensus certification (it arrived via the same commit_finalizer -> commit_consumer
+        // channel as every other commit this loop processes) — decided_with_local_blocks or
+        // certified from peers, never fabricated locally. Two honest nodes stuck on the same real
+        // network-wide gap and given enough time (RECOVERY_STUCK_TIMEOUT_SECS below is generous
+        // specifically so the buffer has time to stabilize on genuinely-agreed content rather
+        // than acting on early, still-reordering arrivals) converge on the same lowest buffered
+        // index, because they're both drawing from the same underlying certified DAG. This is
+        // the closest available approximation of "ask the network what the real next commit is"
+        // without the deeper (and larger-scope) fix of making commit_finalizer's skip decision
+        // and this loop's expectation share state directly -- that remains the more principled
+        // long-term fix; this is the bounded, evidence-gated stopgap that unblocks a cluster
+        // without reopening the exact divergence risk the removed heuristic caused.
+        let mut last_next_expected_index = next_expected_index;
+        let mut last_next_expected_progress_time = std::time::Instant::now();
+        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
+        const RECOVERY_STUCK_MIN_BUFFERED: usize = MAX_PENDING_COMMITS; // buffer fully saturated
+
         // Spawn LagMonitor if configured
         if let (Some(client), Some(shared_gei), Some(sender)) = (
             &executor_client,
@@ -1229,8 +1291,44 @@ impl CommitProcessor {
                     if time_since_last_heartbeat > HEARTBEAT_TIMEOUT_SECS
                         && commit_index == last_heartbeat_commit
                     {
-                        warn!("⚠️  [COMMIT PROCESSOR] Possible stuck detected: No progress for {}s (last commit: {})", 
+                        warn!("⚠️  [COMMIT PROCESSOR] Possible stuck detected: No progress for {}s (last commit: {})",
                             time_since_last_heartbeat, commit_index);
+                    }
+
+                    // PERMANENT-GAP-RECOVERY (2026-09-09, see the long comment near this loop's
+                    // setup for the full incident/reasoning): unlike the check just above, this
+                    // one tracks real dispatch progress (next_expected_index actually changing),
+                    // not message arrival, so it still fires when commit_finalizer.rs's own gap
+                    // tolerance keeps feeding this loop newer commits forever while the one
+                    // index it's actually waiting for never comes.
+                    if next_expected_index != last_next_expected_index {
+                        last_next_expected_index = next_expected_index;
+                        last_next_expected_progress_time = std::time::Instant::now();
+                    } else {
+                        let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
+                        if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
+                            && pending_commits.len() >= RECOVERY_STUCK_MIN_BUFFERED
+                        {
+                            if let Some((&lowest_buffered, _)) = pending_commits.iter().next() {
+                                error!(
+                                    "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not \
+                                     advanced in {}s and pending_commits is fully saturated ({} \
+                                     buffered, oldest available={}). commit_finalizer almost \
+                                     certainly skipped this exact index during its own gap \
+                                     tolerance and it will never arrive. Adopting {} as the new \
+                                     next_expected_index -- see PERMANENT-GAP-RECOVERY comment \
+                                     near this loop's setup for why this is bounded/evidence-gated \
+                                     rather than the heuristic jump removed after it caused fork \
+                                     divergence. If this fires, file it: it means a real DAG gap \
+                                     went unexplained all the way to this last-resort recovery.",
+                                    next_expected_index, stuck_secs, pending_commits.len(),
+                                    lowest_buffered, lowest_buffered
+                                );
+                                next_expected_index = lowest_buffered;
+                                last_next_expected_index = next_expected_index;
+                                last_next_expected_progress_time = std::time::Instant::now();
+                            }
+                        }
                     }
 
                     trace!(
@@ -1664,7 +1762,8 @@ impl CommitProcessor {
                         // SAFETY: Limit pending_commits size to prevent OOM
                         // At 50k+ TPS (~1000 commits/sec), up to 50k commits
                         // can queue during extended stalls or epoch transitions.
-                        const MAX_PENDING_COMMITS: usize = 50_000;
+                        // (MAX_PENDING_COMMITS is now declared once, near this loop's setup, so
+                        // PERMANENT-GAP-RECOVERY's saturation check uses the same number.)
                         pending_commits.insert(commit_index, subdag);
                         
                         // SMART EVICTION: Instead of dropping the incoming commit (which might be 
