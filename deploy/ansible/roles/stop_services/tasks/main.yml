@@ -70,15 +70,41 @@
   when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
   failed_when: false
 
-- name: Wait 10 seconds for graceful database flush
-  ansible.builtin.pause:
-    seconds: 10
-  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
-
-- name: Force kill any stubborn targeted node processes (SIGKILL)
+- name: Wait for targeted node processes to actually exit after SIGTERM
+  # DATA-DRIVEN, not a fixed sleep: polls whether the process is really gone every 1s
+  # instead of guessing how long a graceful DB flush takes. A fixed "sleep 10" here raced
+  # with slower flushes (e.g. multiple co-located nodes competing for disk I/O on the same
+  # host, or a heavier genesis) -- the still-alive process got SIGKILLed mid-flush right as
+  # clean_data/node_setup recreated a "fresh" data dir, and its last in-flight writes landed
+  # in that fresh dir, resurrecting stale block data straight through a supposedly clean
+  # --reset-all (observed live: a node reporting block #97 immediately after reset, tripping
+  # the NOMT-vs-header integrity check). Bounded at 90s to match the systemd unit's own
+  # TimeoutStopSec=90, so this is never LESS patient than systemd already promises to be --
+  # it just stops waiting the moment the process is confirmed gone instead of always waiting
+  # the full window (or, worse, less than a slow flush actually needs).
   ansible.builtin.shell: |
-    pkill -9 -f "node-{{ item }}/bin" || true
-    pkill -9 -f "node-{{ item }}/config" || true
+    for i in $(seq 1 90); do
+      if ! pgrep -f "node-{{ item }}/bin" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/config" >/dev/null 2>&1; then
+        echo "node-{{ item }} exited after ${i}s"
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "node-{{ item }} still running after 90s -- forcing"
+    exit 1
+  args:
+    executable: /bin/bash
   loop: "{{ active_nodes }}"
+  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
+  register: graceful_exit_wait
+  failed_when: false
+  changed_when: false
+
+- name: Force kill only node processes that failed to exit gracefully (SIGKILL, last resort)
+  ansible.builtin.shell: |
+    pkill -9 -f "node-{{ item.item }}/bin" || true
+    pkill -9 -f "node-{{ item.item }}/config" || true
+  loop: "{{ graceful_exit_wait.results | default([]) }}"
+  when: item.rc is defined and item.rc != 0
   failed_when: false
 
