@@ -83,14 +83,18 @@
   # it just stops waiting the moment the process is confirmed gone instead of always waiting
   # the full window (or, worse, less than a slow flush actually needs).
   ansible.builtin.shell: |
+    mkdir -p /var/log/metanode 2>/dev/null || true
+    logline_prefix="$(date -Iseconds) node-{{ item }}"
     for i in $(seq 1 90); do
       if ! pgrep -f "node-{{ item }}/bin" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/config" >/dev/null 2>&1; then
         echo "node-{{ item }} exited after ${i}s"
+        echo "${logline_prefix} exited_after_seconds=${i} forced=no" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
         exit 0
       fi
       sleep 1
     done
     echo "node-{{ item }} still running after 90s -- forcing"
+    echo "${logline_prefix} exited_after_seconds=90+ forced=yes" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
     exit 1
   args:
     executable: /bin/bash
@@ -107,4 +111,18 @@
   loop: "{{ graceful_exit_wait.results | default([]) }}"
   when: item.rc is defined and item.rc != 0
   failed_when: false
+
+- name: WARN if any node needed SIGKILL after the 90s graceful-shutdown window
+  # Not a failure (SIGKILL as a last resort IS the safety net working as designed), but a
+  # node needing the full 90s + force-kill on every deploy is itself a regression signal --
+  # either the graceful-shutdown path is getting slower (heavier state, I/O contention from
+  # co-located nodes) or something is preventing it from responding to SIGTERM at all. Grep
+  # /var/log/metanode/shutdown_times.log (one line per node per deploy, every run -- not just
+  # the forced ones) on any host to track this trend over time; wire an alert off
+  # "forced=yes" there if this starts happening routinely instead of only occasionally.
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ [SHUTDOWN-TIMING] {{ (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list) }}
+      không thoát graceful trong 90s, phải SIGKILL. Xem /var/log/metanode/shutdown_times.log để theo dõi xu hướng.
+  when: (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0
 
