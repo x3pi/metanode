@@ -225,18 +225,22 @@ def main():
 
     server_ip = get_server_ip()
 
-    # 2. Git Pull if requested
-    if args.pull:
-        print(f"\n📥 [GIT PULL] Đang kéo mã nguồn mới nhất từ {remote}/{branch}...")
+    # 2. Git Checkout & Pull
+    # Tự động checkout và kéo code mới nhất về khi:
+    # - Người dùng chỉ định cờ -b / --branch (vì mục đích là muốn test nhánh đó)
+    # - HOẶC người dùng truyền cờ --pull tường minh
+    should_sync_git = bool(args.branch) or args.pull
+    if should_sync_git:
+        print(f"\n📥 [GIT SYNC] Đang chuyển sang nhánh '{branch}' và kéo mã nguồn mới nhất từ {remote}/{branch}...")
         if not args.dry_run:
             # Khôi phục genesis.json.example về trạng thái sạch của git trước khi pull để tránh merge conflict
             run_shell_cmd("git checkout -- deploy/systemd/genesis.json.example 2>/dev/null || true", cwd=repo_path)
-            pull_res, _ = run_shell_cmd(f"git checkout {branch} && git pull {remote} {branch}", cwd=repo_path)
+            pull_res, pull_out = run_shell_cmd(f"git checkout {branch} && git pull {remote} {branch}", cwd=repo_path)
             if pull_res != 0:
-                print("❌ Git pull thất bại!")
+                print(f"❌ Git checkout/pull thất bại cho nhánh '{branch}'!")
+                print(pull_out)
                 sys.exit(pull_res)
-            if os.path.isdir(os.path.join(suite_path, ".git")):
-                run_shell_cmd("git pull", cwd=suite_path)
+            print(f"✅ Đã đồng bộ mã nguồn mới nhất của nhánh '{branch}' thành công!\n")
 
     commit_info = get_git_info(repo_path)
     print("=" * 70)

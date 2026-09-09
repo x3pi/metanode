@@ -20,20 +20,19 @@ Hệ thống **tự động nhận diện nhánh Git local bạn đang đứng**
 ```
 
 ### 🔹 1.2 Chỉ định nhánh Git kiểm thử (`--branch` hoặc `-b`)
-Khi bạn muốn test một nhánh cụ thể mà không cần sửa file `ci_config.yaml`:
+Khi bạn truyền cờ `-b <nhánh>`, hệ thống sẽ **TỰ ĐỘNG `git checkout <nhánh>` VÀ TỰ ĐỘNG `git pull origin <nhánh>`** để kéo mã nguồn mới nhất từ remote về máy trước khi test (bạn không cần phải checkout hay pull thủ công):
 ```bash
-# Chỉ định test nhánh dev:
+# Tự động checkout sang dev, pull code mới nhất và chạy test:
 ./ci.sh run-now --branch dev
 
-# Dùng cờ viết tắt -b:
-./ci.sh run-now -b dev --only tps_blast
+# Dùng cờ ngắn gọn -b kết hợp bài test cụ thể:
+./ci.sh run-now -b dev --only node_chaos_restart
 ```
 
-### 🔹 1.3 Kéo mã nguồn mới nhất trước khi chạy (`--pull`)
-Tự động checkout đúng nhánh và chạy `git pull origin <branch>` trước khi test:
+### 🔹 1.3 Kéo mã nguồn mới nhất cho nhánh local hiện tại (`--pull`)
+Khi bạn đang đứng ở nhánh local (không dùng cờ `-b`) nhưng muốn kéo code mới nhất từ remote về trước khi test:
 ```bash
 ./ci.sh run-now --pull
-./ci.sh run-now -b dev --pull
 ```
 
 ### 🔹 1.4 Chạy MỘT bài test cụ thể (`--only <test_id>`)
@@ -62,14 +61,11 @@ Chỉ chạy duy nhất bài test bạn cần kiểm tra:
 Bạn có thể kết hợp bất kỳ bài test nào với cờ `--branch` (hoặc `-b`):
 
 ```bash
-# 🎯 Chạy bài test Chaos Restart trên nhánh dev:
+# 🎯 Chạy bài test Chaos Restart trên nhánh dev (Tự động checkout dev & pull code mới nhất):
 ./ci.sh run-now --only node_chaos_restart --branch dev
 
 # Dùng cờ ngắn gọn -b tương đương:
 ./ci.sh run-now --only node_chaos_restart -b dev
-
-# 📥 Kéo code mới nhất của nhánh dev từ Git remote về rồi mới test:
-./ci.sh run-now --only node_chaos_restart -b dev --pull
 
 # 🔄 Khởi động lại cụm node và test Chaos Restart trên nhánh dev:
 ./ci.sh run-now --only node_chaos_restart -b dev --restart
