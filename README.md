@@ -13,6 +13,15 @@ Metanode is a hybrid Go/Rust blockchain platform: a **Rust BFT/DAG consensus eng
 
 For the full module-by-module breakdown, see [`PROJECT_STRUCTURE.md`](./PROJECT_STRUCTURE.md) — it is the source of truth for the architecture and is kept up to date on every structural change.
 
+## Highlights
+
+- **Zero-Fork by design.** A commit is only ever dispatched once a data-driven 2f+1 peer quorum has attested to the same digest; if that evidence isn't there yet, the node stays *pending* rather than guess — no timeouts, heuristics, or "probably fine" shortcuts are allowed to pick a side. See the Zero-Fork Invariant in [`AGENTS.md`](./AGENTS.md).
+- **Parallel transaction execution (Block-STM).** Transactions are grouped and executed in parallel instead of one-by-one, and this path is exercised continuously by the CI test matrix (`deploy/ci/ci_config.yaml`) alongside dedicated cross-chain, spam and TPS scenarios.
+- **Modern EVM compatibility.** Full EVM semantics plus newer Ethereum upgrades — EIP-4844 blob transactions and EIP-7702 set-code transactions — in addition to the native `mtn_*` RPC surface.
+- **Native cross-chain interoperability.** A public Root Anchor chain coordinates independent private chains through a cross-chain gateway/relayer, with gas-lock/refund accounting and cert-based (Sybil-resistant) governance instead of an open, votable committee.
+- **TEE-aware execution path.** The Meta VM (`execution/pkg/mvm/`) integrates a TrustZone-based secure execution boundary for confidential smart-contract computation.
+- **Built for real deployment, not just a demo.** Ansible/systemd deployment tooling, Prometheus metrics, alerting, and a full day-2 operations runbook ([`OPERATIONS_GUIDE.md`](./OPERATIONS_GUIDE.md)) ship alongside the code, not as an afterthought.
+
 ## Repository layout
 
 | Path | What it is |
