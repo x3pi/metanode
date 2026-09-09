@@ -1,10 +1,17 @@
 ---
-- name: Setup BTRFS filesystem for synconly node
-  ansible.builtin.shell: |
-    bash setup-cluster-btrfs.sh {{ btrfs_size | default('400G') }}
-  args:
-    chdir: "{{ remote_deploy_dir }}/cluster"
-  when: "(synconly_nodes | default([]) | length > 0) or (is_synconly | default(false))"
+# NOTE: BTRFS setup for this host is already handled earlier in the same play by
+# node_setup's own tasks (mount to /mnt/metanode_snapshots + per-node bind mounts, gated
+# on each node's snapshot_enabled flag). This role used to ALSO run
+# deploy/systemd/cluster/setup-cluster-btrfs.sh here, which is the manual/systemd deploy
+# path's script -- it mounts the BTRFS volume straight onto the shared /opt/metanode
+# directory (by design for that standalone flow, see docs/docs/node-operators/
+# deployment-guide.md), not just the snapshot node's own subtree. Calling it a second time
+# here, mid-Ansible-play, shadowed EVERY node's already-deployed bin/config/keys under
+# /opt/metanode/node-N/ with the BTRFS volume's contents (which only had the snapshot
+# node's data) -- reproduced live: node binaries became unreadable ("No such file or
+# directory") immediately after this task ran, and the snapshot HTTP server's own configured
+# paths started resolving through the wrong mount, so it could never find/serve a snapshot.
+# Removed: redundant with node_setup and actively broke the cluster when it ran.
 
 - name: Sync latest restore_snapshot_systemd script
   ansible.builtin.copy:
