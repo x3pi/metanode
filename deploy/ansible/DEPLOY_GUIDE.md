@@ -125,7 +125,10 @@ cd deploy/ansible
 
 ### Kịch bản 5: Cập nhật code mới cho toàn mạng (KHÔNG xóa data)
 * **Khi nào dùng:** Khi lập trình viên cập nhật tính năng mới hoặc sửa lỗi trong source code Git, cần đưa binary mới lên toàn bộ server mà **giữ nguyên toàn bộ dữ liệu** (không reset block, không đổi genesis/keys).
-* **Hành vi:** Build binary mới $ightarrow$ Tắt service $ightarrow$ Chép binary mới $ightarrow$ Khởi động lại.
+* **Hành vi:** Build binary mới $
+ightarrow$ Tắt service $
+ightarrow$ Chép binary mới $
+ightarrow$ Khởi động lại.
 * **Câu lệnh:**
   ```bash
   ./ansible_deploy.sh --start
