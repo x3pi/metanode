@@ -86,9 +86,18 @@ DEBUG_CPP="false"
 ALL_MONITORS="false"
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
-if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-    GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# BUG FIX (2026-09-10): must query the metanode repo (SCRIPT_DIR), not the caller's cwd.
+# When invoked by an absolute path from a DIFFERENT repo (e.g. metanode-suite's
+# run_restart_test.sh calling "${ANSIBLE_DIR}/ansible_deploy.sh" without cd-ing into
+# metanode first), a bare `git rev-parse` here inherited the caller's cwd and reported
+# THAT repo's branch/commit instead -- e.g. logged "Branch: master | Commit: 33e70d4"
+# (metanode-suite's own state) during every node_chaos_restart rolling-restart step,
+# even though the metanode repo actually deploying the binaries was correctly on dev.
+# Purely a misleading log/Telegram label, never a wrong-branch deploy -- but confusing
+# enough during a live incident investigation to fix outright with `git -C`.
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_BRANCH=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    GIT_COMMIT=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
     if [[ "$GIT_BRANCH" != "unknown" ]] || [[ "$GIT_COMMIT" != "unknown" ]]; then
         if [[ ! "$DEPLOY_SOURCE" =~ "Branch:" ]] && [[ ! "$DEPLOY_SOURCE" =~ "$GIT_BRANCH" ]]; then
             DEPLOY_SOURCE="$DEPLOY_SOURCE (Branch: $GIT_BRANCH | Commit: $GIT_COMMIT)"
