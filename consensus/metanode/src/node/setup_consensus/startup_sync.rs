@@ -42,12 +42,47 @@ impl ConsensusNode {
                                 executor_client_for_proc.clone(),
                                 shared_last_global_exec_index.clone(),
                             );
+                            // BIND-CONFIRM (2026-09-10): same fix as startup.rs's "full" server
+                            // call site -- see PeerRpcServer::ready_tx's doc comment. This early
+                            // server exists specifically to unblock peers querying THIS node
+                            // during startup-sync, so a silent bind failure here defeats its own
+                            // purpose without anyone noticing.
+                            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                            let peer_server = peer_server.with_ready_signal(ready_tx);
                             tracing::info!("📡 [PEER RPC] Starting EARLY server on 0.0.0.0:{} to prevent STARTUP-SYNC deadlock", peer_port);
                             early_peer_server_handle = Some(tokio::spawn(async move {
                                 if let Err(e) = peer_server.start().await {
                                     tracing::error!("Early Peer RPC server error: {}", e);
                                 }
                             }));
+                            match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
+                                Ok(Ok(Ok(()))) => {
+                                    tracing::info!("📡 [PEER RPC] EARLY server confirmed bound on 0.0.0.0:{}", peer_port);
+                                }
+                                Ok(Ok(Err(e))) => {
+                                    tracing::error!(
+                                        "🚨 [PEER RPC] EARLY server FAILED to bind 0.0.0.0:{}: {}. \
+                                         Peers cannot query this node during startup-sync until the \
+                                         'full' server (startup.rs) takes over -- STARTUP-SYNC may \
+                                         deadlock against peers waiting on this node.",
+                                        peer_port, e
+                                    );
+                                }
+                                Ok(Err(_)) => {
+                                    tracing::error!(
+                                        "🚨 [PEER RPC] EARLY server task for port {} ended before \
+                                         confirming bind (likely panicked). Treating as failed.",
+                                        peer_port
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "⏳ [PEER RPC] EARLY server for port {} did not confirm bind \
+                                         within 10s. Continuing without waiting further.",
+                                        peer_port
+                                    );
+                                }
+                            }
                         }
                     }
         

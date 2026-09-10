@@ -660,16 +660,55 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             }
             Err(e) => {
                 outer_restart_count += 1;
+
+                // GIVE-UP-AND-LET-SYSTEMD-RESTART (2026-09-10): found live, same cluster, same
+                // day, verifying the DIGEST-GATE/PERMANENT-GAP-RECOVERY work above -- node-0 hit
+                // the exact RocksDB "lock hold by current process" panic this loop already knows
+                // about, but this time the SAME-PROCESS in-place recovery (rebuild Tokio runtime,
+                // retry) never worked at all: 6 outer attempts, ~6+ minutes, growing backoff
+                // maxed out at 60s each -- zero progress. Only an actual `systemctl restart`
+                // (killing the whole OS process, not just this Tokio runtime) fixed it. Root
+                // cause not fully confirmed (plausible: a raw OS thread from an earlier attempt,
+                // outside Tokio's own tracked pool, stuck holding the on-disk LOCK file forever,
+                // which rebuilding the runtime here has no way to reach or terminate) -- but the
+                // empirical fix is unambiguous: rebuilding-in-place has a real, observed ceiling
+                // past which it never recovers, while a real process restart reliably does.
+                //
+                // Fix: past a bounded number of in-place attempts, stop trying to self-heal
+                // inside this process and exit cleanly instead, letting systemd's own
+                // `Restart=on-failure` (RestartSec=15s, see metanode-execution.service.j2) do a
+                // real process restart -- which this session confirmed actually works, unlike
+                // continuing to loop here. `std::process::exit`, not a panic/abort: a controlled,
+                // intentional exit, not an uncontrolled unwind through Go's side of this same OS
+                // process. If the SAME problem recurs across multiple real restarts in a row,
+                // systemd's own circuit breaker (StartLimitBurst=5 / StartLimitIntervalSec=300)
+                // takes over and leaves the unit stopped rather than restart-looping forever --
+                // at that point this needs a human, which is the correct outcome for a problem
+                // that survives an actual process restart, not something this loop should keep
+                // guessing at indefinitely.
+                const MAX_IN_PROCESS_RESTARTS: u32 = 3;
+                if outer_restart_count >= MAX_IN_PROCESS_RESTARTS {
+                    eprintln!(
+                        "🚨🚨🚨 [RUST FFI] Consensus engine panicked {} times in this process \
+                         with zero progress (latest: {:?}). Giving up on in-process recovery -- \
+                         exiting so systemd restarts the whole process fresh (Restart=on-failure, \
+                         15s). If this keeps recurring across real restarts, systemd's own \
+                         StartLimitBurst will stop the unit and this needs an operator.",
+                        outer_restart_count, e
+                    );
+                    std::process::exit(1);
+                }
+
                 // Same growing-backoff shape as the inner loop's own FFI RESTART backoff (see
                 // its comment) -- reusing the reasoning: a flat/short wait was consistently not
                 // enough for a same-process RocksDB LOCK file (and whatever else was mid-
                 // teardown) to actually finish releasing before the next attempt.
                 let backoff_secs = (10 * outer_restart_count.min(6)).min(60) as u64;
                 eprintln!(
-                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}): {:?}. \
+                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}/{}): {:?}. \
                      Rebuilding the Tokio runtime and retrying in {}s instead of leaving Rust \
                      consensus permanently dead for the rest of this process's life.",
-                    outer_restart_count, e, backoff_secs
+                    outer_restart_count, MAX_IN_PROCESS_RESTARTS, e, backoff_secs
                 );
                 // DO NOT re-panic — that would abort() the Go process.
                 // Blocking sleep is fine here: the Tokio runtime that panicked has already been

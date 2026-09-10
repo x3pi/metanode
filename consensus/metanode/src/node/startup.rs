@@ -226,15 +226,53 @@ impl InitializedNode {
                     // Inject dynamic node reference instead of static transaction submitter
                     peer_server = peer_server.with_node(node.clone());
                     info!("📡 [PEER RPC] Node reference injected for dynamic transaction routing");
+                    // BIND-CONFIRM (2026-09-10): wait for the real bind outcome (see
+                    // PeerRpcServer::ready_tx's own doc comment) instead of logging "started"
+                    // right after tokio::spawn returns, which proves nothing about whether the
+                    // spawned task has even run yet. Bounded at 10s -- generously above the
+                    // spawned task's own worst-case bind budget (20 retries * 250ms = 5s) so a
+                    // real, non-transient failure is reported promptly rather than silently.
+                    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                    peer_server = peer_server.with_ready_signal(ready_tx);
                     peer_rpc_server_handle = Some(tokio::spawn(async move {
                         if let Err(e) = peer_server.start().await {
                             error!("Peer RPC server error: {}", e);
                         }
                     }));
-                    info!(
-                        "📡 [PEER RPC] Server started on 0.0.0.0:{} for WAN sync",
-                        peer_port
-                    );
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
+                        Ok(Ok(Ok(()))) => {
+                            info!(
+                                "📡 [PEER RPC] Server started on 0.0.0.0:{} for WAN sync",
+                                peer_port
+                            );
+                        }
+                        Ok(Ok(Err(e))) => {
+                            error!(
+                                "🚨 [PEER RPC] Server FAILED to bind 0.0.0.0:{} for WAN sync: {}. \
+                                 This node cannot serve or fetch peer data (BLOCK-FETCH, ANTI-FORK, \
+                                 PERMANENT-GAP-RECOVERY cross-checks) until this is resolved -- it \
+                                 will keep running degraded, silently, unless an operator notices.",
+                                peer_port, e
+                            );
+                        }
+                        Ok(Err(_)) => {
+                            error!(
+                                "🚨 [PEER RPC] Server task for port {} ended before confirming bind \
+                                 (sender dropped without sending -- likely panicked). Treating as \
+                                 failed.",
+                                peer_port
+                            );
+                        }
+                        Err(_) => {
+                            error!(
+                                "🚨 [PEER RPC] Server for port {} did not confirm bind within 10s \
+                                 (worse than its own 5s retry budget -- the spawned task may not \
+                                 have been scheduled yet under heavy load). Continuing, but WAN sync \
+                                 may not be available yet.",
+                                peer_port
+                            );
+                        }
+                    }
                 } else {
                     warn!("⚠️ [PEER RPC] No executor client available, skipping peer RPC server");
                 }
