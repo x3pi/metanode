@@ -669,6 +669,11 @@ impl CommitProcessor {
         // specific capacity.
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
+        // PHUONG AN A: tracks whether the CONSENSUS-HALT alert has already been logged for the
+        // CURRENT stall episode, so it fires once (not every loop iteration) but can fire again
+        // for a genuinely new/later stall once next_expected_index has actually moved past the
+        // previous one. See the halt-alert call site's own doc comment for the full reasoning.
+        let mut halt_alert_sent_for_current_stall = false;
         const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
 
         // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
@@ -759,6 +764,11 @@ impl CommitProcessor {
             if next_expected_index != last_next_expected_index {
                 last_next_expected_index = next_expected_index;
                 last_next_expected_progress_time = std::time::Instant::now();
+                // Real progress past the stuck index proves this specific stall episode is
+                // over (via a genuine CertifiedCommit/digest-vote resurgence, or an operator's
+                // manual recovery) -- allow the halt-alert to fire again for any later, distinct
+                // stall rather than staying permanently suppressed for the rest of this process.
+                halt_alert_sent_for_current_stall = false;
             } else {
                 let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
                 let transitioning_now = is_transitioning
@@ -767,39 +777,65 @@ impl CommitProcessor {
                     .unwrap_or(false);
                 if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
                     && gap_recovery_bypass_ceiling.is_none()
+                    && !halt_alert_sent_for_current_stall
                     && !pending_local_commits.is_empty()
                     && !transitioning_now
                 {
-                    // Evidence: the head-of-line commit (next_expected_index, sitting in
-                    // pending_local_commits -- see its insert sites, it only ever holds the
-                    // current head) has not budged in RECOVERY_STUCK_TIMEOUT_SECS despite the
-                    // DAG demonstrably continuing (that's what filled pending_commits below).
-                    // That is direct proof this exact index can never be attested (see the long
-                    // comment on gap_recovery_bypass_ceiling's declaration), not a guess from
-                    // buffer capacity. Ceiling = highest already-buffered OOO commit right now,
-                    // so the amnesty covers exactly this proven-stuck backlog and nothing minted
-                    // afterward.
-                    let ceiling = pending_commits
+                    // PHUONG AN A (2026-09-10): this used to grant a bounded verification
+                    // amnesty here (trust the local decided_with_local_blocks value once no peer
+                    // has re-confirmed it for RECOVERY_STUCK_TIMEOUT_SECS) -- gap_recovery_bypass_
+                    // ceiling is DELIBERATELY never set anymore; every downstream read of it
+                    // (DIGEST-GATE POLL, several call sites below) is UNCHANGED and simply always
+                    // sees None now, so this node never dispatches an unattested local value.
+                    //
+                    // Why: that amnesty was reproduced live, same day, to cause a REAL confirmed
+                    // fork (LAYER-6 fork_guard caught node-3's Block #500 hash/state_root
+                    // permanently diverging from its peers, 38 minutes after an amnesty granted
+                    // at 121s -- see note/consensus_local_dag_trust_gap_design_2026-09.md for the
+                    // full writeup). Researched how Sui itself (this crate's own upstream --
+                    // consensus-core is literally Mysten Labs' code) handles the equivalent
+                    // situation in production: their own documented "Sui Mainnet Network Stall
+                    // Resolution" (2026-03) states plainly that validators "halted rather than
+                    // proceed unilaterally" and "no validator trusted its own unconfirmed decision
+                    // locally" -- recovery was a human-verified fix, not silent self-trust. This
+                    // is that same choice, applied here: on proven-permanent staleness, HALT
+                    // dispatch on this index and loudly alert an operator, instead of guessing.
+                    //
+                    // This does NOT abort() or exit the process (unlike LAYER-6's response to a
+                    // CONFIRMED fork, which already happened) -- nothing has been proven wrong
+                    // yet, only proven unattestable so far, and the node staying up (RPC still
+                    // answering reads, still eligible to receive a genuine CertifiedCommit or a
+                    // digest-vote resurgence from CommitSyncer/gossip) keeps every honest recovery
+                    // path open. Recovery from here is an operator decision (verify what's
+                    // actually going on, then e.g. --restore-node from a known-good snapshot, or a
+                    // coordinated cluster restart) -- not something this loop should keep guessing
+                    // at automatically. See note/deploy_hardening_and_incident_drills_2026-09.md
+                    // for the 2 root causes (RocksDB panic-loop, peer_rpc handover race) already
+                    // fixed the same day specifically to make reaching this state during an
+                    // ordinary single-node restart rare.
+                    let backlog_size = pending_commits
                         .keys()
                         .next_back()
                         .copied()
                         .unwrap_or(next_expected_index)
-                        .max(next_expected_index);
+                        .max(next_expected_index)
+                        .saturating_sub(next_expected_index);
                     error!(
-                        "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not advanced in \
-                         {}s (pending_local head stuck, {} OOO commits buffered behind it). Peer \
-                         digest votes for this index cannot ever reappear once peers move past \
-                         it (see gap_recovery_bypass_ceiling doc comment) -- granting bounded \
-                         verification amnesty up to already-buffered index {} so the existing \
-                         dispatch path can drain the backlog. A live digest CONFLICT still \
-                         discards immediately regardless of this amnesty. If this fires, file it: \
-                         it means a real digest-vote gap went unexplained all the way to this \
-                         last-resort recovery.",
-                        next_expected_index, stuck_secs, pending_commits.len(), ceiling
+                        "🛑🚨 [CONSENSUS-HALT-SUSPECTED-DIVERGENCE] next_expected_index={} has not \
+                         advanced in {}s (pending_local head stuck, {} OOO commits buffered behind \
+                         it, {} commits behind the DAG's own quorum-confirmed tip). Peer digest \
+                         votes for this index cannot ever reappear once peers move past it (see \
+                         gap_recovery_bypass_ceiling's doc comment for why). Per Phuong an A \
+                         (2026-09-10), this node is now PAUSING dispatch on this index rather than \
+                         trusting its own unconfirmed local decision -- it will keep running \
+                         (RPC/reads still answer) and keep listening for a genuine CertifiedCommit \
+                         or digest-vote resurgence, but will NOT make further progress past this \
+                         point without one. THIS NEEDS AN OPERATOR: verify what happened, then \
+                         choose --restore-node from a known-good snapshot or a coordinated \
+                         cluster restart. See note/consensus_local_dag_trust_gap_design_2026-09.md.",
+                        next_expected_index, stuck_secs, pending_commits.len(), backlog_size
                     );
-                    gap_recovery_bypass_ceiling = Some(ceiling);
-                    last_next_expected_index = next_expected_index;
-                    last_next_expected_progress_time = std::time::Instant::now();
+                    halt_alert_sent_for_current_stall = true;
                 }
             }
 

@@ -1,15 +1,24 @@
 # Thiết kế: đóng lỗ hổng "tin dữ liệu DAG cục bộ không có bằng chứng mật mã"
 
-**Trạng thái: CHỈ LÀ THIẾT KẾ, CHƯA CODE, CHƯA SẴN SÀNG TRIỂN KHAI.** Tài
-liệu này phân tích kỹ nguyên nhân gốc thật sự của sự cố fork ngày
+**Trạng thái (CẬP NHẬT 2026-09-10): user đã chọn Phương án A rõ ràng** ("Phương
+án A, ưu tiên sửa 2 bug gốc trước và cần tạo cảnh bảo rõ ràng cho operater vào
+telegram nhé"). 2 bug gốc (mục 7 tài liệu incident chính) đã fix, test, deploy,
+verify trực tiếp trên cụm thật, và push thẳng `dev` (`d5cbbdc9`) — xong trước,
+đúng thứ tự user yêu cầu. Phần lõi của Phương án A (halt + log marker rõ ràng
+thay vì tự "ân xá" không bằng chứng, cộng cảnh báo Telegram qua Health Monitor
+có sẵn — KHÔNG qua tích hợp Telegram của tầng deploy/CI, theo đúng yêu cầu rõ
+ràng của user) **đã code xong, compile sạch, test xanh (193 consensus-core +
+185 metanode, 0 fail), nhưng CHƯA commit/deploy lên cụm thật** — xem mục 7 mới
+bên dưới để biết chi tiết trạng thái implementation và các việc còn lại trước
+khi coi là sẵn sàng merge `dev`. Phương án B (mục 5) được giữ lại làm phương án
+dự phòng đã ghi chép đầy đủ, không triển khai.
+
+Tài liệu này phân tích kỹ nguyên nhân gốc thật sự của sự cố fork ngày
 2026-09-10 (xem `note/deploy_hardening_and_incident_drills_2026-09.md` mục
 7 để biết bối cảnh sự cố gốc), đối chiếu với cách hệ thống Sui thật (gốc
 mà codebase này fork từ đó) đã xử lý đúng loại sự cố này trong sản xuất
 thật (mục 4.5), và đề xuất **2 phương án kiến trúc thay thế** — không phải
-chỉnh 1 hằng số thời gian. Còn ít nhất 1 quyết định sản phẩm/vận hành (chọn
-giữa Phương án A/B, mục 6 việc #0) và nhiều việc kỹ thuật cần xác nhận
-(mục 6) TRƯỚC KHI ai đó code. Không triển khai gì từ tài liệu này cho tới
-khi được review và đồng ý rõ ràng.
+chỉnh 1 hằng số thời gian.
 
 ---
 
@@ -420,3 +429,78 @@ lại y hệt lỗi đó.
    chính" của Lớp 2 mới** — đây là thuộc tính AN TOÀN QUAN TRỌNG NHẤT của
    thiết kế (không deadlock), cần người khác xác nhận độc lập, không chỉ
    dựa vào 1 lượt tự-rà-soát.
+
+---
+
+## 7. Phương án A — trạng thái implementation thật (2026-09-10)
+
+Sau khi user chọn Phương án A rõ ràng, đây là những gì ĐÃ code (trên nhánh
+`feat/phuong-an-a-halt-not-guess`, KHÔNG merge `dev` cho tới khi có sign-off
+riêng, đúng cách làm việc suốt phiên này với vùng code an toàn-quan-trọng này):
+
+### 7.1. Thay đổi thật trong `commit_processor/processor.rs`
+
+Xóa bỏ hoàn toàn đường cấp "ân xá" (`gap_recovery_bypass_ceiling = Some(ceiling)`)
+— biến này và MỌI điểm đọc nó ở vòng lặp DIGEST-GATE POLL được giữ nguyên
+không đổi 1 dòng nào (để giảm diện thay đổi/rủi ro tối đa), nhưng giờ luôn
+chỉ thấy `None` vì không còn nơi nào gán `Some(...)` nữa — tức là bị vô hiệu
+hóa hoàn toàn về mặt hành vi mà không cần sửa/hiểu lại toàn bộ vòng lặp đó.
+
+Thay vào chỗ đó: khi `next_expected_index` đứng yên quá
+`RECOVERY_STUCK_TIMEOUT_SECS` (900s, KHÔNG đổi hằng số này nữa — bài học
+từ vụ fork thật khi thử rút xuống 120s) mà vẫn còn commit cục bộ đang chờ
+(`pending_local_commits` không rỗng), thay vì tự tin dùng dữ liệu đó, hệ
+thống chỉ ghi 1 dòng `error!()` cấp cao, dễ grep, đúng 1 lần cho mỗi lần
+"đứng yên" liên tục (cờ `halt_alert_sent_for_current_stall`, tự reset khi
+`next_expected_index` thật sự tiến lên) với marker cố định
+`[CONSENSUS-HALT-SUSPECTED-DIVERGENCE]` — **không tự gọi mạng, không tự gọi
+Telegram trong code an toàn-quan-trọng này** — theo đúng nguyên tắc tách
+biệt: tầng Rust chỉ có trách nhiệm dừng lại + để lại bằng chứng rõ ràng,
+tầng giám sát bên ngoài (bash, đã có sẵn, đã chạy, đã test) có trách nhiệm
+phát hiện + cảnh báo người.
+
+Hệ quả: node KHÔNG dispatch commit thêm nữa khi rơi vào tình huống này (đúng
+tinh thần Phương án A / Sui thật — mục 4.5) — nhưng cũng KHÔNG tự crash/
+panic/abort (RPC, service vẫn "sống" để operator còn kiểm tra/so sánh được
+với peer trước khi quyết định phục hồi thế nào), và KHÔNG có vòng lặp chờ/
+khóa nào mới được thêm vào (không đổi flow điều khiển hiện có ngoài việc
+không gán `Some(...)` nữa) — nên không có rủi ro deadlock/race mới so với
+code hiện tại.
+
+### 7.2. Cảnh báo Telegram — qua Health Monitor có sẵn, không qua tầng deploy/CI
+
+Theo đúng 2 lần làm rõ của user ("Không telegram trong deploy tích hợp ấy"
++ chọn "Dùng lại đúng bot/chat đã có trong inventory.yml"): thêm 1 kiểm tra
+mới trong `deploy/ansible/monitors/start_monitors.sh`, WORKER 1 HEALTH
+MONITOR — trong đúng nhánh node "còn sống" (RPC vẫn phản hồi, không phải
+crash/down), quét 200KB cuối của `logs/execution/<ngày mới nhất>/execution.log`
+(local đọc file trực tiếp, remote qua `ssh_remote` — đúng 2 cách truy cập
+log per-node đã có sẵn trong script này) tìm marker
+`CONSENSUS-HALT-SUSPECTED-DIVERGENCE`. Nếu thấy và chưa từng cảnh báo cho
+lần "đứng yên" này (`consensus_halt_alerted[$node_key]`, chỉ reset khi
+`dead_nodes[]` ghi nhận 1 lần crash/restart thật sự — KHÔNG tự "phục hồi"
+chỉ vì dòng log trôi khỏi cửa sổ 200KB, vì thiếu bằng chứng không phải là
+bằng chứng đã hết treo), gọi `send_tele()` — **dùng đúng `TELEGRAM_BOT_TOKEN`/
+`TELEGRAM_CHAT_ID` đọc từ `inventory.yml` mà Health Monitor đã dùng cho mọi
+cảnh báo khác** (SERVER_DOWN/REBOOT/NODE_CRASH) — với nội dung định dạng
+HTML khác biệt rõ ràng (tiêu đề "CONSENSUS TỰ DỪNG — NGHI NGỜ PHÂN NHÁNH",
+nhấn mạnh RPC vẫn sống nên KHÔNG PHẢI crash, và runbook: xác minh block
+hash với peer TRƯỚC KHI quyết định restart hay restore-snapshot) — không
+lẫn với các cảnh báo CI/deploy thường ngày khác cùng bot.
+
+### 7.3. Việc còn lại trước khi coi là sẵn sàng (chưa xong tại thời điểm viết)
+
+- [ ] Commit thay đổi `processor.rs` + `start_monitors.sh` + cập nhật 2 file
+  note này trên nhánh `feat/phuong-an-a-halt-not-guess`.
+- [ ] `cargo test -p consensus-core` + `-p metanode` sau khi commit (đã chạy
+  xanh trước khi viết mục này: 193 + 185 pass, 0 fail) — nhắc lại 1 lần nữa
+  sau build release trước khi deploy thật.
+- [ ] Build + deploy nhánh này lên cụm thật (234/230), xác nhận: (a) hoạt
+  động bình thường không bị ảnh hưởng khi KHÔNG rơi vào tình huống stuck,
+  (b) cố gắng xác nhận marker log + cảnh báo Telegram thật sự bắn ra đúng
+  khi tái hiện lại tình huống "đứng yên" (khó ép xảy ra 100% theo ý muốn,
+  nhưng `node_chaos_restart` từng tái hiện được tình huống gốc tương đối
+  ổn định — ưu tiên thử lại kịch bản đó).
+- [ ] **KHÔNG merge `dev`** cho tới khi có xác nhận thêm từ user sau khi xem
+  kết quả deploy/verify thật — đúng cách làm đã thống nhất suốt phiên này
+  cho vùng code đã từng gây fork thật 1 lần.

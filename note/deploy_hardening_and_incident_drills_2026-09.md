@@ -151,8 +151,10 @@ vào, đừng coi là luôn đúng.**
    lệch từ trước khi ân xá chạy) vẫn CHƯA tìm ra — đây mới là điều kiện tiên
    quyết thật để xem xét lại vấn đề này trong tương lai, không phải "chọn 1
    con số khác".
-7. **2 bug MỚI phát hiện trong lúc kiểm chứng bug #10 (2026-09-10, chưa điều
-   tra sâu, độ ưu tiên cao vì đều liên quan tính sẵn sàng của cụm):**
+7. ✅ **2 bug MỚI phát hiện trong lúc kiểm chứng bug #10 (2026-09-10) — ĐÃ
+   SỬA, ĐÃ TEST (193+185 test PASS), ĐÃ DEPLOY + KIỂM CHỨNG TRỰC TIẾP trên
+   cụm thật, ĐÃ PUSH `dev` (`d5cbbdc9`)** — theo đúng thứ tự ưu tiên user yêu
+   cầu khi chọn Phương án A ("ưu tiên sửa 2 bug gốc trước"):
    - **RocksDB panic-loop không bao giờ tự phục hồi**: node-0 panic tại
      `consensus/metanode/meta-consensus/core/src/storage/rocksdb_store.rs:31`
      khi mở lại `consensus_db` (lock bị giữ bởi chính tiến trình cũ chưa giải
