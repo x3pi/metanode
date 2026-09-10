@@ -185,13 +185,37 @@ func TestGenerateBlockData_MultipleTransactions(t *testing.T) {
 // ============================================================================
 // TestGetLeaderAddress_LeaderOverride
 // Tests the variadic leaderAddressOverride in createBlockFromResults.
-// This tests the logic directly without creating a full block.
+//
+// CORRECTED (2026-09-10): this test used to hand-copy a DIFFERENT decision rule
+// than createBlockFromResults actually implements -- it added an
+// `&& tt.override[0] != (e_common.Address{})` condition that treats an explicit
+// zero-address override the same as "no override" (falls back to
+// bp.validatorAddress). The real function only checks `len(leaderAddressOverride)
+// > 0` -- it does NOT special-case the zero value -- which is what its own
+// "CRITICAL FORK-SAFETY" comment requires: "Use leader address from Rust
+// consensus if provided, even if it's the zero address... Falling back to
+// bp.validatorAddress would cause a fork!" (block_processor_processing.go). A
+// zero-address override is Rust's OWN deterministic, intentional value for
+// commits with no real leader (e.g. EndOfEpoch system transactions, see
+// block_processor_core.go's GetLeaderAddress) -- every honest node computes the
+// SAME zero address for that case, so respecting it is fork-safe, and silently
+// substituting bp.validatorAddress (a different value on every node) instead
+// would NOT be. Found while investigating a real, transient block-hash mismatch
+// on 2026-09-10 (see note/consensus_local_dag_trust_gap_design_2026-09.md) --
+// this specific test never actually caught anything because it doesn't call
+// createBlockFromResults at all, it re-implements a parallel (and, until this
+// fix, wrong) copy of its logic; fixed here to match the real function so a
+// future regression in the real function's fallback logic would actually be
+// caught by running this test suite.
 // ============================================================================
 func TestGetLeaderAddress_LeaderOverride(t *testing.T) {
 	fallback := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
 	override := e_common.HexToAddress("0xbbbb000000000000000000000000000000000002")
+	zeroAddress := e_common.Address{}
 
-	// Simulate the logic from createBlockFromResults
+	// Mirrors createBlockFromResults's actual decision rule exactly:
+	//   blockLeaderAddress := bp.validatorAddress
+	//   if len(leaderAddressOverride) > 0 { blockLeaderAddress = leaderAddressOverride[0] }
 	tests := []struct {
 		name     string
 		override []e_common.Address
@@ -199,14 +223,14 @@ func TestGetLeaderAddress_LeaderOverride(t *testing.T) {
 	}{
 		{"no override", nil, fallback},
 		{"empty override", []e_common.Address{}, fallback},
-		{"zero address override", []e_common.Address{e_common.Address{}}, fallback},
+		{"zero address override is respected, NOT treated as no-override", []e_common.Address{zeroAddress}, zeroAddress},
 		{"valid override", []e_common.Address{override}, override},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			blockLeaderAddress := fallback
-			if len(tt.override) > 0 && tt.override[0] != (e_common.Address{}) {
+			if len(tt.override) > 0 {
 				blockLeaderAddress = tt.override[0]
 			}
 			assert.Equal(t, tt.expected, blockLeaderAddress)

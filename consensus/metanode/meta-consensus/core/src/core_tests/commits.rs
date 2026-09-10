@@ -134,10 +134,31 @@ async fn test_commit_and_notify_for_block_status() {
     // Flush the DAG state to storage.
     dag_state.write().flush();
 
-    let last_commit = store
-        .read_last_commit()
-        .unwrap()
-        .expect("last commit should be set");
+    // FLAKY TEST FIX (2026-09-10): Core::new() -> recover() -> try_commit()
+    // synchronously decides the commit, but persisting it to `store` happens via
+    // CommitObserver::handle_commit() -> commit_finalizer_handle.send(..), which
+    // is consumed by a `tokio::spawn`-ed CommitFinalizer task (commit_finalizer/
+    // mod.rs) -- a genuinely separate, asynchronously-scheduled task, not
+    // something `Core::new()` waits on. This test used to read `store` right
+    // after construction with zero yield points, racing the CommitFinalizer
+    // task's own scheduling -- confirmed flaky standalone (~40-60% failure rate
+    // over 15 isolated runs, independent of --test-threads and of any other
+    // test's state) before this fix, found while investigating an unrelated
+    // live-cluster issue. Poll with a real yield (tokio::time::sleep) instead of
+    // asserting immediately, so the CommitFinalizer task actually gets a chance
+    // to run; this only adds latency when the task hasn't finished yet, it does
+    // not weaken what's being asserted.
+    let last_commit = {
+        let mut found = None;
+        for _ in 0..200 {
+            if let Some(commit) = store.read_last_commit().unwrap() {
+                found = Some(commit);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        found.expect("last commit should be set (waited up to 2s for CommitFinalizer)")
+    };
 
     assert_eq!(last_commit.index(), 5);
 

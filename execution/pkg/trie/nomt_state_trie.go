@@ -1556,17 +1556,38 @@ func (n *NomtStateTrie) Commit(collectLeaf bool) (e_common.Hash, *node.NodeSet, 
 	return newRootHash, nil, nil, nil
 }
 
+// Close shuts down this trie's pending work.
+//
+// BUG FOUND LIVE (2026-09-10, see note/consensus_local_dag_trust_gap_design_2026-09.md
+// mục 9): this used to Abort() n.pendingFinishedSession unconditionally, discarding it
+// instead of persisting it. Commit() computes and returns a block's new root
+// SYNCHRONOUSLY (that's what ends up in the block header), but only stages the actual
+// disk write in n.pendingFinishedSession -- the real FFI CommitPayload only happens
+// lazily, drained by the NEXT block's Commit() call (see getOrCreateSession()'s
+// "NOMT-SYNC-DRAIN" step) or by an explicit n.CommitPayload() call. For the LAST block
+// processed before any shutdown, there is no "next block" to trigger that drain.
+// WaitForPersistence()'s WaitCommitPayload() doesn't help either -- it only waits on
+// commitWg for commits already handed to an async goroutine, and a never-drained
+// pendingFinishedSession was never handed off in the first place. Net effect: the very
+// last block's real NOMT persistence could be silently thrown away on every shutdown
+// (clean or not), while its header (already written via a separate, synchronous path)
+// still claims the root as if it had been committed -- producing exactly the
+// "NOMT account_state root MISMATCH ... state is corrupted" startup-integrity failure
+// this was found investigating. Fix: drain (persist) it via the same CommitPayload()
+// method every other call site in this codebase already uses for this, instead of
+// discarding it. Called before taking sessionMu -- CommitPayload() takes it internally
+// (sync.Mutex is not reentrant) and does its own slow FFI work without holding it.
 func (n *NomtStateTrie) Close() {
+	if err := n.CommitPayload(); err != nil {
+		logger.Error("🚨 [NomtStateTrie] Close: failed to drain pendingFinishedSession before close (namespace=%s): %v -- data since the last successful commit may be lost", string(n.namespace), err)
+	}
+
 	n.sessionMu.Lock()
 	defer n.sessionMu.Unlock()
 
 	if n.activeSession != nil {
 		n.activeSession.Abort()
 		n.activeSession = nil
-	}
-	if n.pendingFinishedSession != nil {
-		n.pendingFinishedSession.Abort()
-		n.pendingFinishedSession = nil
 	}
 	n.pendingChangelog = nil
 	n.pendingCommittingMap = nil
