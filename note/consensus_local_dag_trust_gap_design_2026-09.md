@@ -817,6 +817,26 @@ tải cao, cần 1 bài test riêng có tạo giao dịch thật liên tục tro
 bản vá chỉ ngăn KHÔNG TÁI DIỄN trong tương lai, không phục hồi được commit đã
 mất. node-0 vẫn cần quyết định riêng: resync từ peer, hay restore snapshot.
 
+### 9.7. ✅ Test lại LẦN 2, dưới TẢI THẬT — đóng đúng lỗ hổng đã ghi ở mục 9.5
+
+User xác nhận đang trong giai đoạn test, dữ liệu không quan trọng, có thể xoá
+làm lại — nên đã `ansible_deploy.sh --reset-all --open-ports` (genesis mới
+sạch, cả 4 node khỏe, có bản vá NOMT), rồi tạo TẢI GIAO DỊCH THẬT LIÊN TỤC
+bằng `stall_probe_tool` (1 tài khoản đã cấp vốn sẵn trong genesis, gửi tuần
+tự đúng nonce, ~500 tx, mỗi tx đợi xác nhận trước khi gửi tiếp) trong lúc
+restart node-1 lặp lại **8 lần liên tục** — lần này block height THẬT SỰ
+đang tăng liên tục trong lúc restart (0xb → 0x1a), đúng sát kịch bản sự cố
+gốc của node-0 (đang xử lý liên tục, không rảnh).
+
+**Kết quả: 8/8 lần restart dưới tải thật đều PASS integrity check sạch, 0
+lần lệch NOMT-vs-header.** Cộng dồn với 17 lần test trước (chain rảnh) =
+**25/25 lần restart, 0 lỗi**. Hạn chế đã ghi ở mục 9.5 (chưa test dưới tải
+thật) coi như đã được lấp — bản vá đứng vững dưới cả điều kiện gần với sự cố
+gốc nhất mà phiên này tạo được.
+
+Cụm cuối phiên: 4/4 node khỏe, cùng chiều cao (chênh lệch 1 block do độ trễ
+lan truyền bình thường), đồng thuận đúng.
+
 ### 9.6. ✅ node-0 đã phục hồi (resync từ peer, không đụng genesis/3 node kia)
 
 Trước khi chạy `ansible_deploy.sh --reset-all --only-node 0` (theo đúng gợi ý
