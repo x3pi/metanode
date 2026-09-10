@@ -336,6 +336,7 @@ impl ConsensusNode {
                             as Arc<dyn SystemTransactionProvider>),
                         None,
                         coordination_hub.clone(),
+                        Some(epoch_eth_addresses_arc.clone()),
                     )
                     .await,
                 ),

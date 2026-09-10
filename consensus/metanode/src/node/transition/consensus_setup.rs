@@ -199,6 +199,7 @@ pub(super) async fn setup_validator_consensus(
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()),
             node.coordination_hub.clone(),
+            Some(node.epoch_eth_addresses.clone()),
         )
         .await,
     );

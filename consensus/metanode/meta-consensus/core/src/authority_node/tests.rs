@@ -64,6 +64,7 @@ use super::*;
             None,
             None, // legacy_store_manager
             crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
+            None, // epoch_eth_addresses
         )
         .await;
 
@@ -451,6 +452,7 @@ use super::*;
             None,
             None, // legacy_store_manager
             crate::coordination_hub::ConsensusCoordinationHub::new_for_testing(),
+            None, // epoch_eth_addresses
         )
         .await;
 

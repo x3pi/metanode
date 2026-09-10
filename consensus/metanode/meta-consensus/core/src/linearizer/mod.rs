@@ -67,6 +67,15 @@ pub struct Linearizer {
     /// FORK PREVENTION: We only commit when ALL blocks for a round are present.
     /// This list is processed first on each handle_commit call.
     deferred_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)>,
+    /// FORK-SAFETY (2026-09-10): optional app-layer map of epoch -> (authority index ->
+    /// ETH address), used to embed a real, consensus-agreed leader_address directly into
+    /// a freshly-created Commit (see try_collect_sub_dag_and_commit below) instead of
+    /// leaving every node to independently re-resolve it later from its own local cache
+    /// state -- see note/consensus_local_dag_trust_gap_design_2026-09.md mục 8/8.5 for the
+    /// real, live divergence this closes (two nodes computed a different leader_address
+    /// for the identical commit). None in tests/benches that don't set it (via
+    /// set_epoch_eth_addresses) -- behaves exactly as before in that case.
+    epoch_eth_addresses: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
 }
 
 impl Linearizer {
@@ -81,7 +90,19 @@ impl Linearizer {
             dag_state_writer,
             epoch_base_index: 0,
             deferred_leaders: Vec::new(),
+            epoch_eth_addresses: None,
         }
+    }
+
+    /// Set the shared epoch_eth_addresses map used to embed leader_address into freshly
+    /// created Commits. Optional -- if never called, Linearizer behaves exactly as before
+    /// (leader_address left empty, resolved later downstream by CommitProcessor as
+    /// today). See the field's own doc comment.
+    pub fn set_epoch_eth_addresses(
+        &mut self,
+        epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    ) {
+        self.epoch_eth_addresses = Some(epoch_eth_addresses);
     }
 
     /// Set the epoch base index for global_exec_index calculation.
@@ -238,18 +259,52 @@ impl Linearizer {
         } else {
             let commit_index = last_commit_index + 1;
             let global_exec_index = self.epoch_base_index + commit_index as u64;
+            let commit_blocks = to_commit
+                .iter()
+                .map(|block| block.reference())
+                .collect::<Vec<_>>();
 
-            let commit = Commit::new(
-                commit_index,
-                last_commit_digest,
-                timestamp_ms,
-                leader_block.reference(),
-                to_commit
-                    .iter()
-                    .map(|block| block.reference())
-                    .collect::<Vec<_>>(),
-                global_exec_index,
-            );
+            // FORK-SAFETY (2026-09-10): best-effort, NON-BLOCKING embed of the real
+            // leader_address into the digested Commit itself, so it becomes part of
+            // what quorum votes/DIGEST-GATE already cover instead of something every
+            // node independently re-resolves later from its own local cache. Uses
+            // try_read() deliberately -- this is the hot commit-creation path, so it
+            // must never block waiting on a lock. On any miss (no map set, this
+            // epoch not cached yet, index out of bounds, or a lock contention race)
+            // this just falls through to the exact same Commit::new(...) as before;
+            // CommitProcessor::resolve_leader_address (with its own, now-bounded-or-
+            // indefinite retry, see mục 8.5b) remains the safety net for that case,
+            // unchanged. See note/consensus_local_dag_trust_gap_design_2026-09.md
+            // mục 8.5 for the full design rationale.
+            let embedded_leader_address: Option<Vec<u8>> = self.epoch_eth_addresses.as_ref().and_then(|map| {
+                let guard = map.try_read().ok()?;
+                let epoch = self.context.committee.epoch();
+                let addrs = guard.get(&epoch)?;
+                let idx = leader_block.reference().author.value();
+                let addr = addrs.get(idx)?;
+                (addr.len() == 20).then(|| addr.clone())
+            });
+
+            let commit = if let Some(leader_address) = embedded_leader_address {
+                Commit::new_with_leader_address(
+                    commit_index,
+                    last_commit_digest,
+                    timestamp_ms,
+                    leader_block.reference(),
+                    commit_blocks,
+                    global_exec_index,
+                    leader_address,
+                )
+            } else {
+                Commit::new(
+                    commit_index,
+                    last_commit_digest,
+                    timestamp_ms,
+                    leader_block.reference(),
+                    commit_blocks,
+                    global_exec_index,
+                )
+            };
             let serialized = commit
                 .serialize()
                 .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
