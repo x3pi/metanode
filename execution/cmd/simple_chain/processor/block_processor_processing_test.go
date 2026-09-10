@@ -186,54 +186,54 @@ func TestGenerateBlockData_MultipleTransactions(t *testing.T) {
 // TestGetLeaderAddress_LeaderOverride
 // Tests the variadic leaderAddressOverride in createBlockFromResults.
 //
-// CORRECTED (2026-09-10): this test used to hand-copy a DIFFERENT decision rule
-// than createBlockFromResults actually implements -- it added an
-// `&& tt.override[0] != (e_common.Address{})` condition that treats an explicit
-// zero-address override the same as "no override" (falls back to
-// bp.validatorAddress). The real function only checks `len(leaderAddressOverride)
-// > 0` -- it does NOT special-case the zero value -- which is what its own
-// "CRITICAL FORK-SAFETY" comment requires: "Use leader address from Rust
-// consensus if provided, even if it's the zero address... Falling back to
-// bp.validatorAddress would cause a fork!" (block_processor_processing.go). A
-// zero-address override is Rust's OWN deterministic, intentional value for
-// commits with no real leader (e.g. EndOfEpoch system transactions, see
-// block_processor_core.go's GetLeaderAddress) -- every honest node computes the
-// SAME zero address for that case, so respecting it is fork-safe, and silently
-// substituting bp.validatorAddress (a different value on every node) instead
-// would NOT be. Found while investigating a real, transient block-hash mismatch
-// on 2026-09-10 (see note/consensus_local_dag_trust_gap_design_2026-09.md) --
-// this specific test never actually caught anything because it doesn't call
-// createBlockFromResults at all, it re-implements a parallel (and, until this
-// fix, wrong) copy of its logic; fixed here to match the real function so a
-// future regression in the real function's fallback logic would actually be
-// caught by running this test suite.
+// UPDATED AGAIN (2026-09-10, same day): createBlockFromResults no longer has a
+// bp.validatorAddress fallback at all -- omitting the override now panics
+// immediately instead of silently substituting this node's own address (which
+// differs per node and would fork the cluster). That dead-but-dangerous
+// fallback was found live during the leader_address investigation (see
+// note/consensus_local_dag_trust_gap_design_2026-09.md mục 8) -- unreachable
+// by any real call site at the time, but a landmine for the next one. Removed
+// entirely rather than left "safe for now": Go must never compute a leader
+// address locally, only ever use what Rust consensus decided (even the
+// deterministic zero address for commits with no real leader, e.g.
+// EndOfEpoch). This test mirrors that trivial rule (len must be exactly 1) --
+// still not calling the real function directly (it has heavy BlockProcessor
+// dependencies), but the rule itself is now simple enough that a mirror is low
+// risk to drift from it.
 // ============================================================================
 func TestGetLeaderAddress_LeaderOverride(t *testing.T) {
-	fallback := e_common.HexToAddress("0xaaaa000000000000000000000000000000000001")
 	override := e_common.HexToAddress("0xbbbb000000000000000000000000000000000002")
 	zeroAddress := e_common.Address{}
 
 	// Mirrors createBlockFromResults's actual decision rule exactly:
-	//   blockLeaderAddress := bp.validatorAddress
-	//   if len(leaderAddressOverride) > 0 { blockLeaderAddress = leaderAddressOverride[0] }
+	//   if len(leaderAddressOverride) != 1 { panic(...) }
+	//   blockLeaderAddress := leaderAddressOverride[0]
 	tests := []struct {
-		name     string
-		override []e_common.Address
-		expected e_common.Address
+		name      string
+		override  []e_common.Address
+		wantPanic bool
+		expected  e_common.Address
 	}{
-		{"no override", nil, fallback},
-		{"empty override", []e_common.Address{}, fallback},
-		{"zero address override is respected, NOT treated as no-override", []e_common.Address{zeroAddress}, zeroAddress},
-		{"valid override", []e_common.Address{override}, override},
+		{"no override panics", nil, true, e_common.Address{}},
+		{"empty override panics", []e_common.Address{}, true, e_common.Address{}},
+		{"more than one override panics", []e_common.Address{override, zeroAddress}, true, e_common.Address{}},
+		{"zero address override is respected, NOT rejected", []e_common.Address{zeroAddress}, false, zeroAddress},
+		{"valid override", []e_common.Address{override}, false, override},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			blockLeaderAddress := fallback
-			if len(tt.override) > 0 {
-				blockLeaderAddress = tt.override[0]
+			decide := func() e_common.Address {
+				if len(tt.override) != 1 {
+					panic("createBlockFromResults: leaderAddressOverride must be exactly 1 value")
+				}
+				return tt.override[0]
 			}
-			assert.Equal(t, tt.expected, blockLeaderAddress)
+			if tt.wantPanic {
+				assert.Panics(t, func() { decide() })
+				return
+			}
+			assert.Equal(t, tt.expected, decide())
 		})
 	}
 }
