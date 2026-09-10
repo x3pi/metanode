@@ -587,6 +587,25 @@ kiện này. Không có bước chạy `node_chaos_restart` thật, lặp nhiề
 cụm thật để tìm ra fork này, việc merge bản vá "đã test kỹ, có vẻ đúng" vào
 `dev` gần như chắc chắn sẽ xảy ra.
 
+### 📐 Thiết kế hướng sửa kiến trúc thật sự (2026-09-10, sau khi rút bản vá
+120s) — xem file riêng
+
+Đã đào sâu code thật (không suy đoán) để trả lời câu hỏi "vì sao chờ lâu
+hơn chỉ giảm xác suất fork chứ không đảm bảo an toàn, vậy giải pháp triệt
+để là gì". Tìm ra nguyên nhân gốc có khả năng cao nhất: khi 1 node đọc lại
+dữ liệu DAG cũ từ đĩa (RocksDB) — điều CHẮC CHẮN xảy ra ngay sau khi restart
+vì cache RAM rỗng — hệ thống **không xác minh lại chữ ký**, chỉ so khớp
+digest tự tham chiếu (`storage/rocksdb_store.rs::read_blocks()`). Nếu dữ
+liệu trên đĩa từng bị ghi sai bởi 1 bug/crash khác (đúng kịch bản node-0/
+node-3 gặp phải hôm đó), dữ liệu sai này được dùng làm input cho
+`decided_with_local_blocks` mà không ai xác minh lại — đây là lỗ hổng thật
+sự, không phải vấn đề thời gian chờ.
+
+Thiết kế đầy đủ (kèm trích code, chuỗi nhân quả, 2 lớp đề xuất sửa, và danh
+sách việc cần làm TRƯỚC KHI code): xem file riêng
+`note/consensus_local_dag_trust_gap_design_2026-09.md` — **chỉ là thiết
+kế, chưa code, chưa triển khai gì**.
+
 ### Khuyến nghị thật sự cho bước tiếp theo
 
 1. **Không nên tin "PASS 1 lần" hay "FAIL 1 lần" của `node_chaos_restart` là
