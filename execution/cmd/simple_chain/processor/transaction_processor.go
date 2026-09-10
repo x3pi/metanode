@@ -365,6 +365,9 @@ func (tp *TransactionProcessor) ProcessTransactionFromClientWithDeviceKey(
 	if err != nil {
 		return err
 	}
+	if transactionWithDeviceKey.Transaction == nil {
+		return fmt.Errorf("missing transaction in TransactionWithDeviceKey")
+	}
 
 	tx := &transaction.Transaction{}
 	tx.FromProto(transactionWithDeviceKey.Transaction)
