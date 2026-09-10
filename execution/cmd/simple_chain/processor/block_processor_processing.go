@@ -145,8 +145,13 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Phase 2: Create Block Data
 	phase2Start := time.Now()
-	// CRITICAL FORK-SAFETY: Keep commitTimestampMs (from Rust) directly for BlockHeader
-	timestampMs := commitTimestampMs // 0 if commitTimestampMs is 0 (fallback to time.Now())
+	// CRITICAL FORK-SAFETY: Keep commitTimestampMs (from Rust) directly for BlockHeader.
+	// Stale comment removed 2026-09-10: this used to say "0 -> falls back to time.Now()",
+	// but GenerateBlockData/GenerateBlockDataReadOnly (block_processor_utils.go) both
+	// panic on timestampMs==0 instead -- a genuine per-node time.Now() fallback here
+	// would be exactly the same class of bug as the leader_address one fixed the same
+	// day (Go computing something node-local instead of using what Rust decided).
+	timestampMs := commitTimestampMs
 
 	// CRITICAL FORK-SAFETY: leaderAddressOverride is REQUIRED (checked above) -- use exactly what
 	// Rust consensus decided, even if that's the deterministic zero address for commits with no
