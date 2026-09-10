@@ -644,6 +644,64 @@ test kỹ, nhánh riêng, review trước khi merge — không rush ngay sau khi
 tìm ra, đặc biệt khi cùng ngày đã có 1 lần fork thật từ 1 thay đổi vội ở khu
 vực liền kề.
 
+### 8.5b. ✅ Đã làm bước NHỎ, AN TOÀN trước (nhánh
+    `fix/leader-address-retry-out-of-bounds`, commit `6e9b9acf`) — CHƯA phải
+    hướng sửa gốc ở mục 8.5
+
+Thay vì làm ngay bản redesign lớn ở mục 8.5 (đụng `meta-consensus/core` dùng
+chung, 6+ call site kể cả test), làm 1 bước tăng dần, an toàn hơn, NẰM HOÀN
+TOÀN trong file `processor.rs` (tầng app, đang sửa đổi tích cực sẵn):
+2 nhánh "OUT OF BOUNDS"/"Invalid address length" trong `resolve_leader_address`
+trước đây `return` NGAY ở lần quan sát ĐẦU TIÊN — khác hẳn nhánh "epoch chưa
+có trong cache" ngay bên cạnh, vốn ĐÃ chờ vô thời hạn (mẫu hình đã được coi
+là an toàn). Sửa: cho 2 nhánh kia CŨNG chờ có giới hạn (30s) trước khi mới
+bỏ cuộc — thu hẹp đáng kể khung thời gian có thể xảy ra lệch (không loại bỏ
+hoàn toàn về mặt lý thuyết, vì đây vẫn là tự tính lại RIÊNG LẺ mỗi node, chỉ
+là ít có khả năng xảy ra hơn nhiều). Cố tình dùng cửa sổ CÓ GIỚI HẠN (không
+vô thời hạn như nhánh "chưa cache") vì 1 cache entry SAI thật thì có thể
+không bao giờ tự sửa đúng — chờ vô hạn ở đây có thể tạo ra rủi ro treo MỚI
+cho toàn bộ pipeline dispatch, điều tuyệt đối không được phép.
+
+`cargo test` (193 + 185) xanh. Hướng sửa gốc thật ở mục 8.5 (nhúng
+`leader_address` vào `Commit` lúc tạo) **vẫn để đó, chưa làm**, cần quy trình
+riêng như đã ghi.
+
+**User yêu cầu thêm** (đúng nguyên văn): "check lại kỹ đừng để xung đột các
+trường giữa go và rust nhé rust quyết định thì go chỉ cần tuần theo thôi
+tránh tính toán độc lập dễ dẫn tới fork". Đã rà soát thêm ở tầng Go
+(`block_processor_processing.go` và các file liên quan):
+- `blockLeaderAddress` fallback `bp.validatorAddress`: ĐÃ đóng HẲN (không chỉ
+  "hiện không ai gọi tới" như mục 8.4 ghi trước đó) — hàm giờ BẮT BUỘC đúng 1
+  giá trị override, panic ngay nếu thiếu, thay vì âm thầm tự đoán.
+  (commit `b59745e6`)
+- `timestampMs`: comment cũ nói "0 → fallback time.Now()" nhưng code thật đã
+  panic từ trước (test `ZeroTimestampPanic` xác nhận) — comment sai, đã sửa
+  cho đúng thực tế, không phải lỗ hổng thật. (commit `af4d4bbb`)
+- GEI (`is_authoritative_gei`/`gei_authority.go`): Go TỰ tính GEI bằng bộ đếm
+  tăng dần — đây LÀ Go tính độc lập, NHƯNG an toàn vì bản chất khác hẳn
+  leader_address: tăng theo ĐÚNG THỨ TỰ commit mà mọi node đã đồng thuận
+  nhận được giống nhau (không phải "đoán" 1 thông tin cần tra cứu như định
+  danh validator) — chính tài liệu trong file này còn ghi rõ đây là bản sửa
+  CHỦ ĐÍCH để thay thế cách tính GEI cũ của RUST (nguồn gốc fork trước đó).
+  Không sửa, không phải vi phạm nguyên tắc.
+- `accountRoot`/`stakeStatesRoot`: đến từ `processResults` — Go tự thực thi
+  (đúng vai trò execution engine), an toàn vì là hàm thuần từ (state cũ +
+  danh sách tx đã được Rust sắp thứ tự) — mọi node thực thi ĐÚNG cùng đầu
+  vào nên ra cùng kết quả, khác bản chất "đoán 1 identity".
+
+**Test lại trực tiếp sau khi sửa** (nhánh `fix/leader-address-retry-out-of-bounds`):
+`go build`/`go test ./...` sạch (trừ 1 lỗi flake CÓ SẴN, KHÔNG liên quan —
+`executor` package's snapshot-manager periodic-trigger tests, xác nhận qua
+chạy lại nhiều lần, không đụng file nào trong lần sửa này). Deploy lên cụm
+thật, 6 vòng restart node-1 liên tục — cụm luôn khỏe, đồng bộ lại đúng. Cố
+tạo tải giao dịch thật để stress-test đúng field `miner` lần này nhưng công
+cụ test (`stall_probe_tool`) bị lỗi nonce 2 lần liên tiếp (giới hạn của công
+cụ tạm dùng, không phải lỗi chain) — không ép được tải bền vững như lần test
+NOMT. Verify được: sau các vòng restart, `hash`/`miner`/`stateRoot` khớp
+TUYỆT ĐỐI ở cả 4 node cho block mới nhất — không có bằng chứng regression,
+nhưng cũng chưa "bắt tận tay" được chính race gốc (vốn hiếm, cần đúng kịch
+bản forward-jump catch-up mới lộ ra, như 2 lần trước đã xảy ra tự nhiên).
+
 ### 8.6. Đánh giá mức độ nghiêm trọng
 
 - **Không phải fork vĩnh viễn**: `stateRoot`/`stakeStatesRoot` của TẤT CẢ 4

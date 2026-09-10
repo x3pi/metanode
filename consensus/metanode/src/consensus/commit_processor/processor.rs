@@ -466,6 +466,27 @@ impl CommitProcessor {
         let resolve_start = std::time::Instant::now();
         let mut logged_warning = false;
 
+        // OUT-OF-BOUNDS / INVALID-LEN RETRY WINDOW (2026-09-10): found live -- see
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8. These 2 branches
+        // used to `return` immediately on the first observation, permanently leaving
+        // this commit's leader_address empty on THIS node even though the cache entry
+        // for `epoch` could still be transiently incomplete/stale right after a
+        // forward-jump catch-up (the exact condition that produced a real, live
+        // block-hash mismatch: one node resolved a real address, others gave up
+        // instantly and got the deterministic-empty fallback instead). Unlike the
+        // "epoch not in the map at all" case above (which already retries forever,
+        // proven safe), a genuinely wrong/stale cache entry might never self-correct,
+        // so this window is BOUNDED, not indefinite -- retry for
+        // OUT_OF_BOUNDS_RETRY_SECS, then fall back to today's existing, already-safe
+        // behavior (leave it empty; Go's GetLeaderAddress() deterministically uses the
+        // zero address for that, identically on every node) rather than
+        // risking a genuine new hang. This does not eliminate the underlying race
+        // (see mục 8.5's proposed real fix -- embedding leader_address in the digested
+        // Commit at creation time -- deliberately deferred, touches shared
+        // meta-consensus/core) but meaningfully narrows the window where it can bite,
+        // entirely within this already-metanode-specific file.
+        const OUT_OF_BOUNDS_RETRY_SECS: u64 = 30;
+
         loop {
             {
                 let addrs_guard = epoch_eth_addresses.read().await;
@@ -483,23 +504,33 @@ impl CommitProcessor {
                             }
                             subdag.leader_address = addr.clone();
                             return;
+                        } else if resolve_start.elapsed().as_secs() < OUT_OF_BOUNDS_RETRY_SECS {
+                            DIAG_LEADER_INVALID_LEN.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
+                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={}) -- retrying, may be a transient stale cache entry", epoch, leader_author_index, addr.len());
                         } else {
                             DIAG_LEADER_INVALID_LEN.fetch_add(1, StdOrdering::Relaxed);
                             diag_leader_maybe_print();
-                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={})", epoch, leader_author_index, addr.len());
+                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={}) after {}s of retrying -- giving up, leaving leader_address empty (Go will use the deterministic zero-address fallback)", epoch, leader_author_index, addr.len(), OUT_OF_BOUNDS_RETRY_SECS);
                             return;
                         }
+                    } else if resolve_start.elapsed().as_secs() < OUT_OF_BOUNDS_RETRY_SECS {
+                        DIAG_LEADER_OUT_OF_BOUNDS.fetch_add(1, StdOrdering::Relaxed);
+                        diag_leader_maybe_print();
+                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={}) -- retrying, may be a transient stale cache entry", epoch, leader_author_index, addrs.len());
                     } else {
                         DIAG_LEADER_OUT_OF_BOUNDS.fetch_add(1, StdOrdering::Relaxed);
                         diag_leader_maybe_print();
-                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={})", epoch, leader_author_index, addrs.len());
+                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={}) after {}s of retrying -- giving up, leaving leader_address empty (Go will use the deterministic zero-address fallback)", epoch, leader_author_index, addrs.len(), OUT_OF_BOUNDS_RETRY_SECS);
                         return;
                     }
                 }
             }
 
-            // Timeout check REMOVED (Fork-Safety Fix)
-            // We wait indefinitely for epoch_eth_addresses.
+            // Timeout check REMOVED for the "epoch not cached at all" case (Fork-Safety
+            // Fix) -- we wait indefinitely for that one, per the "zero fork" policy. The
+            // out-of-bounds/invalid-len cases above have their own bounded window instead
+            // (see OUT_OF_BOUNDS_RETRY_SECS comment above).
             // Thà pending (chờ) chứ TUYỆT ĐỐI không fork.
             let elapsed = resolve_start.elapsed();
 
