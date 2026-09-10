@@ -26,6 +26,28 @@ Chạy tuần tự 3 tầng, dừng ngay ở tầng đầu tiên fail:
 Kết thúc in báo cáo PASS/FAIL từng tầng + log chi tiết tại `/tmp/production_readiness_*.log`.
 Chỉ khi cả 3 tầng đều PASS mới nên bấm nút triển khai thật.
 
+### Dùng riêng lẻ từng phần
+
+- **Chỉ kiểm tra deploy có ổn định qua nhiều lần reset không** (không chạy
+  test ứng dụng):
+  ```bash
+  cd deploy/ci
+  ./verify_multi_reset_stability.sh 5   # 5 vòng --reset-all liên tiếp
+  ```
+- **Diễn tập sự cố vận hành thật** (cảnh báo có tới người trực không, node
+  hỏng thật có tự phục hồi qua P2P không, đĩa đầy/mất mạng có đúng runbook
+  không) — 4 kịch bản KHÔNG nằm trong test ứng dụng thông thường:
+  ```bash
+  cd deploy/ci/incident_drills
+  cat README.md   # đọc trước: nguyên tắc an toàn + thứ tự khuyến nghị
+  ./drill_telegram_alert.sh   # an toàn, chạy được ngay
+  # 3 drill còn lại xâm lấn thật (ghi disk, xoá data node, chặn mạng) --
+  # mặc định dry-run, cần thêm --confirm và cửa sổ bảo trì để chạy thật
+  ```
+
+📄 Bối cảnh đầy đủ (bug đã fix, trạng thái cụm, việc còn mở) của lần hardening
+gần nhất: xem `note/deploy_hardening_and_incident_drills_2026-09.md`.
+
 ---
 
 ## 📌 1. LỆNH CHẠY TEST THỦ CÔNG (`run-now`)
