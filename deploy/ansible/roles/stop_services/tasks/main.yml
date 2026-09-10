@@ -54,9 +54,24 @@
   loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
   failed_when: false
 
+# SELF-MATCH BUG (2026-09-10): every pgrep/pkill -f pattern below uses the bracket trick
+# ("/[b]in" instead of "/bin") -- the classic `ps aux | grep '[s]shd'` idiom. Found live: the
+# literal pattern "node-N/bin" written in THIS SAME task's own shell script text also matches
+# via `-f` against the invoking bash process's own command line (ansible embeds the script
+# source verbatim into what `ps`/pgrep sees), so `pgrep -f "node-{{ item }}/bin"` ALWAYS
+# reported "still running" regardless of whether the real service had already exited --
+# confirmed via /var/log/metanode/shutdown_times.log showing 100% "forced=yes" across 125
+# consecutive deploys, while journalctl showed systemd had already cleanly stopped the unit
+# 20+ seconds before the wait loop gave up and declared a timeout. Not a correctness bug (the
+# real process was in fact already gone, so the subsequent SIGKILL was a harmless no-op), but
+# a silent 90-second waste on every single node stop -- the "DATA-DRIVEN, not a fixed sleep"
+# fix from commit 43aaa300 was itself unknowingly behaving like a fixed 90s sleep the whole
+# time. A regex character class like [b] matches the literal character 'b' against a REAL
+# process's cmdline, but does NOT match the literal three characters "[b]" appearing in this
+# script's own embedded source, breaking the self-match.
 - name: Check if targeted node processes are running
   ansible.builtin.shell: |
-    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || false
+    pgrep -f "node-{{ item }}/[b]in" || pgrep -f "node-{{ item }}/[c]onfig" || false
   loop: "{{ active_nodes }}"
   register: node_process_check
   failed_when: false
@@ -64,8 +79,8 @@
 
 - name: Send SIGTERM to targeted node processes for graceful shutdown
   ansible.builtin.shell: |
-    pkill -15 -f "node-{{ item }}/bin" || true
-    pkill -15 -f "node-{{ item }}/config" || true
+    pkill -15 -f "node-{{ item }}/[b]in" || true
+    pkill -15 -f "node-{{ item }}/[c]onfig" || true
   loop: "{{ active_nodes }}"
   when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
   failed_when: false
@@ -86,7 +101,7 @@
     mkdir -p /var/log/metanode 2>/dev/null || true
     logline_prefix="$(date -Iseconds) node-{{ item }}"
     for i in $(seq 1 90); do
-      if ! pgrep -f "node-{{ item }}/bin" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/config" >/dev/null 2>&1; then
+      if ! pgrep -f "node-{{ item }}/[b]in" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/[c]onfig" >/dev/null 2>&1; then
         echo "node-{{ item }} exited after ${i}s"
         echo "${logline_prefix} exited_after_seconds=${i} forced=no" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
         exit 0
@@ -106,8 +121,8 @@
 
 - name: Force kill only node processes that failed to exit gracefully (SIGKILL, last resort)
   ansible.builtin.shell: |
-    pkill -9 -f "node-{{ item.item }}/bin" || true
-    pkill -9 -f "node-{{ item.item }}/config" || true
+    pkill -9 -f "node-{{ item.item }}/[b]in" || true
+    pkill -9 -f "node-{{ item.item }}/[c]onfig" || true
   loop: "{{ graceful_exit_wait.results | default([]) }}"
   when: item.rc is defined and item.rc != 0
   failed_when: false
