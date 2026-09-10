@@ -762,3 +762,57 @@ execution.log):
   câu hỏi RIÊNG, SÂU hơn, thuộc tầng Go/NOMT — KHÔNG cùng phạm vi với mục 1-8
   (leader_address, Phương án A) — nên điều tra như 1 việc độc lập, không rush
   chung với các việc đang mở khác trong tài liệu này.
+
+### 9.5. ✅ Đã tìm ra nguyên nhân gốc THẬT (đọc code, không suy đoán) và ĐÃ SỬA
+   (commit `e30a0239`)
+
+`NomtStateTrie.Commit()` (`execution/pkg/trie/nomt_state_trie.go`) tính và
+TRẢ VỀ root mới của 1 block NGAY LẬP TỨC (đồng bộ) — giá trị này đi thẳng vào
+header block (ghi LevelDB riêng, đồng bộ) — nhưng chỉ LƯU TẠM việc ghi
+xuống đĩa thật sự vào `n.pendingFinishedSession`, KHÔNG ghi ngay. Việc ghi
+thật (`CommitPayload`) được hoãn lại, chỉ chạy khi: (a) block TIẾP THEO gọi
+`Commit()` (cơ chế "NOMT-SYNC-DRAIN" có sẵn, tối ưu hiệu năng hợp lý — chồng
+lấp ghi đĩa chậm của block N với việc CPU xử lý block N+1), hoặc (b) gọi tay
+`CommitPayload()`.
+
+**Lỗ hổng**: BLOCK CUỐI CÙNG trước bất kỳ lần shutdown nào không có "block
+tiếp theo" để tự kích hoạt việc ghi hoãn đó. `WaitForPersistence()` (hàm MỌI
+đường shutdown thật đều gọi) có sẵn bước `WaitCommitPayload()` nhưng hàm đó
+CHỈ chờ những commit ĐÃ được giao cho goroutine ghi bất đồng bộ — 1 session
+CHƯA TỪNG được giao (vì chưa có block tiếp theo kích hoạt) thì
+`WaitCommitPayload()` không hề biết tới. Sau đó, đường shutdown thật
+(`nomt_ffi.Handle.Close()`, gọi qua `CloseNomtDB()` — đã xác nhận qua
+`globalNomtHandles` đúng là kiểu `*nomt_ffi.Handle`, không phải wrapper Go
+`*NomtStateTrie`) **`.Abort()` tất cả session đang chờ "để giải phóng bộ nhớ
+an toàn"** — âm thầm VỨT BỎ đúng phần ghi đĩa thật của block cuối cùng, trên
+MỌI lần shutdown (kể cả shutdown sạch), bất cứ khi nào thời điểm dừng rơi
+đúng vào khoảng trống đó — trong khi header (đã ghi trước đó) vẫn khẳng định
+root như thể đã commit xong.
+
+**Bản sửa**: trong `WaitForPersistence()`, gọi `trie.CommitPayload()` (hàm
+CÓ SẴN, đã dùng ở 13+ nơi khác trong codebase cho đúng mục đích "xả session
+đang chờ", an toàn khi gọi dù không có gì đang chờ) để XẢ (ghi thật) bất cứ
+gì còn treo, TRƯỚC KHI gọi `WaitCommitPayload()` như cũ — cho cả
+AccountStateDB lẫn StakeStateDB. Đây chính là nửa còn thiếu của đúng cơ chế
+mà comment gốc của hàm này đã từng cảnh báo (nguyên văn: "otherwise the
+snapshot captures an incomplete NOMT state, causing a StateRoot mismatch!")
+— nghĩa là lỗ hổng này VỐN ĐÃ ảnh hưởng cả đường SNAPSHOT, không chỉ shutdown,
+chỉ là chưa ai nối trọn vẹn.
+
+**Đã test**: `go build ./...` sạch, `go test ./...` (toàn bộ execution
+module) xanh, không có test nào fail. **Đã verify TRỰC TIẾP trên cụm thật**:
+build + deploy bản sửa lên cả 4 node, sau đó chạy **17 vòng restart liên tục**
+trên node 1/2/3 (`systemctl restart` lặp lại, mỗi lần đợi RPC sống lại rồi
+kiểm tra log CHECK 4/5) — **TẤT CẢ 17/17 lần đều PASS integrity check sạch,
+0 lần NOMT-vs-header lệch**. Hạn chế của bài test này: chain lúc test khá
+rảnh (thử gửi thêm giao dịch qua `stall_probe_tool` nhưng bị lệch nonce cục
+bộ ở phía tool, không phải lỗi chain, nên chưa tạo được tải liên tục thật khi
+restart) — nghĩa là chưa ép được đúng kịch bản "vừa xử lý xong 1 block, restart
+ngay tắp lự" ở tần suất cao như lúc node-0 gặp sự cố gốc (28 phút CPU liên
+tục, hàng triệu commit). Cơ chế sửa vẫn đúng về mặt logic (dùng lại hàm đã
+được kiểm chứng qua 13+ nơi khác), nhưng nếu muốn có bằng chứng THẬT SỰ dưới
+tải cao, cần 1 bài test riêng có tạo giao dịch thật liên tục trong lúc restart.
+
+**CHƯA sửa được**: dữ liệu ĐÃ MẤT của node-0 (từ TRƯỚC khi có bản vá này) —
+bản vá chỉ ngăn KHÔNG TÁI DIỄN trong tương lai, không phục hồi được commit đã
+mất. node-0 vẫn cần quyết định riêng: resync từ peer, hay restore snapshot.
