@@ -794,11 +794,25 @@ async fn test_core_compress_proposal_references() {
     core_fixture.dag_state.write().flush();
 
     // Check commits have been persisted to store
-    let last_commit = core_fixture
-        .store
-        .read_last_commit()
-        .unwrap()
-        .expect("last commit should be set");
+    //
+    // FLAKY TEST FIX (2026-09-10): same root cause as
+    // core_tests::commits::test_commit_and_notify_for_block_status -- commit
+    // persistence to `store` happens via a `tokio::spawn`-ed CommitFinalizer
+    // task (commit_finalizer/mod.rs), not synchronously within Core's
+    // constructor/recover(), so reading `store` immediately with no yield
+    // point races that task's own scheduling. See that test's comment for the
+    // full mechanism; confirmed flaky standalone before this fix.
+    let last_commit = {
+        let mut found = None;
+        for _ in 0..200 {
+            if let Some(commit) = core_fixture.store.read_last_commit().unwrap() {
+                found = Some(commit);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        found.expect("last commit should be set (waited up to 2s for CommitFinalizer)")
+    };
     // There are 8 leader rounds with rounds completed up to and including
     // round 10. However because there were no blocks produced for authority 3
     // 2 leader rounds will be skipped.
