@@ -663,13 +663,38 @@ impl CommitProcessor {
         // together) sat stuck for 15+ minutes with the buffer only ~3,300 deep, so the original
         // 50,000 gate never fired and the cluster stayed wedged with the fix compiled in but
         // silently never eligible to run. The real evidence that matters is the TIME threshold
-        // below (RECOVERY_STUCK_TIMEOUT_SECS, unchanged) -- 15 minutes of zero dispatch progress
-        // is already strong, sustained evidence on its own. The buffer-size check only needs to
+        // below (RECOVERY_STUCK_TIMEOUT_SECS -- originally 900s/15min, tuned down to 120s on
+        // 2026-09-10, see that constant's own comment) -- sustained zero dispatch progress
+        // is already strong evidence on its own. The buffer-size check only needs to
         // rule out acting on a single still-in-flight reorder, not prove exhaustion of a
         // specific capacity.
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
-        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
+        // TUNED DOWN (2026-09-10): was 900s (15 min). Reproduced live, repeatedly, on a real
+        // 4-node cluster (192.168.1.234/230) via `ci.sh run-now --only node_chaos_restart`:
+        // this exact gap (co-located validators restarting -- see the "two co-located
+        // validators" note two comments up) with digest_verifier permanently returning None
+        // for the stuck index (digest_has_data=true, so not cold-start; the network simply
+        // never gossips a vote for that specific old index again once peers move past it --
+        // see gap_recovery_bypass_ceiling's own doc comment for why that's safe to amnesty).
+        // Two live incidents, both confirmed via the [DIGEST-GATE DIAG] pipeline dump this
+        // loop already emits every 10s: `oldest_age` for the stuck head-of-line commit was
+        // already in the 65-155s range with pending_ooo backlog climbing into the
+        // hundreds/thousands, well before any realistic risk of catching a still-in-flight
+        // reorder (gossip round-trips are low-single-digit seconds on this cluster, not
+        // minutes) -- 900s just means the operator-facing symptom (zero tx confirmed) runs
+        // for 13-15 minutes before the existing, already-proven-safe amnesty logic below
+        // even gets a chance to fire, which is longer than node_chaos_restart's own patience
+        // (~13-14 min) -- the test gives up and reports FAIL before ever seeing the recovery
+        // that was already coming. NOT changing the amnesty's own safety argument (still only
+        // ever trusts a `decided_with_local_blocks` value, still always defers to a live
+        // digest CONFLICT) -- only how long we wait before trusting evidence that already
+        // clearly indicates "this index will never be re-attested", per the argument in
+        // gap_recovery_bypass_ceiling's doc comment. 120s keeps a wide (order-of-magnitude)
+        // safety margin above observed reorder timescales while resolving well inside every
+        // downstream consumer's own patience window (this test, and operators watching for a
+        // stalled chain). Revisit only with fresh live evidence, not a static guess.
+        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 120;
 
         // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
         // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
@@ -691,7 +716,8 @@ impl CommitProcessor {
         //
         // FIX: instead of moving the pointer, grant a BOUNDED, EVIDENCE-GATED AMNESTY from the
         // digest/peer-attestation requirement for the exact backlog that was proven (by the same
-        // 900s wall-clock stuck detector, unchanged) to be permanently unattestable. Every commit
+        // wall-clock stuck detector above, RECOVERY_STUCK_TIMEOUT_SECS) to be permanently
+        // unattestable. Every commit
         // in that amnesty range was `decided_with_local_blocks` -- i.e. THIS node's own
         // deterministic function of a DAG that Byzantine agreement already fixed identically
         // across all honest nodes (the same justification COLD-START-BYPASS already relies on
@@ -1016,8 +1042,9 @@ impl CommitProcessor {
                                 // quorum_gc_bypass/peer-attest on purpose -- those two exist to
                                 // discard a local value the network has moved past WITHOUT ever
                                 // agreeing with us (our guess was likely wrong), whereas amnesty
-                                // only ever covers indices that were proven, by 900s of zero
-                                // dispatch progress, to be simply unattestable (peers no longer
+                                // only ever covers indices that were proven, by
+                                // RECOVERY_STUCK_TIMEOUT_SECS of zero dispatch progress, to be
+                                // simply unattestable (peers no longer
                                 // gossip votes for history they've passed) -- ACCEPT, don't
                                 // discard, because CommitSyncer's own "lag" is DAG-sync-relative
                                 // and will never re-deliver these as a CertifiedCommit either.
@@ -1220,7 +1247,7 @@ impl CommitProcessor {
                                 };
                                 // PERMANENT-GAP-RECOVERY AMNESTY: see gap_recovery_bypass_ceiling's
                                 // doc comment near this loop's setup. ACCEPT (not discard) -- this
-                                // index was proven unattestable by 900s of zero dispatch progress,
+                                // index was proven unattestable by RECOVERY_STUCK_TIMEOUT_SECS of zero dispatch progress,
                                 // and CommitSyncer's DAG-sync-relative "lag" will never re-deliver
                                 // it as a CertifiedCommit for the QUORUM-GC-BYPASS path below to wait on.
                                 let recovery_bypass = gap_recovery_bypass_ceiling
