@@ -81,7 +81,13 @@ fn diag_leader_maybe_print() {
             .compare_exchange(last, now, StdOrdering::Relaxed, StdOrdering::Relaxed)
             .is_ok()
     {
-        eprintln!(
+        // info! (not eprintln!) -- confirmed live that eprintln!'s raw fd-2 write races
+        // the tracing-subscriber's own GoLogWriter callback path (both ultimately land in
+        // the same execution.log, via two uncoordinated writers) and gets its output
+        // spliced apart by a concurrent tracing line mid-write, losing the actual numbers.
+        // info! goes through the same, already-reliable path every other log line in this
+        // file uses.
+        info!(
             "[DIAG leader-addr] preembedded={} resolved_ok={} waiting_iters={} out_of_bounds={} invalid_len={}",
             DIAG_LEADER_PREEMBEDDED.load(StdOrdering::Relaxed),
             DIAG_LEADER_RESOLVED_OK.load(StdOrdering::Relaxed),
