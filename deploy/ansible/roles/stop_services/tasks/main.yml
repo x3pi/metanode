@@ -1,8 +1,8 @@
 ---
 - name: Stop any running monitoring processes on the node
   ansible.builtin.shell: |
-    pkill -9 -f 'start_monitors.sh' || true
-    pkill -9 -f 'block_hash_checker' || true
+    pkill -9 -f '[s]tart_monitors.sh' || true
+    pkill -9 -f '[b]lock_hash_checker' || true
   failed_when: false
   changed_when: false
   when: target_node | default('all') == 'all'
@@ -54,9 +54,12 @@
   loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
   failed_when: false
 
+# Bracket the first character in every process pattern. The regex still matches
+# the real process path, but cannot match the shell command containing the regex.
+# Literal patterns made the wait shell detect itself and made pkill kill its shell.
 - name: Check if targeted node processes are running
   ansible.builtin.shell: |
-    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || false
+    pgrep -f "[n]ode-{{ item }}/bin" || pgrep -f "[n]ode-{{ item }}/config" || false
   loop: "{{ active_nodes }}"
   register: node_process_check
   failed_when: false
@@ -64,8 +67,8 @@
 
 - name: Send SIGTERM to targeted node processes for graceful shutdown
   ansible.builtin.shell: |
-    pkill -15 -f "node-{{ item }}/bin" || true
-    pkill -15 -f "node-{{ item }}/config" || true
+    pkill -15 -f "[n]ode-{{ item }}/bin" || true
+    pkill -15 -f "[n]ode-{{ item }}/config" || true
   loop: "{{ active_nodes }}"
   when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
   failed_when: false
@@ -86,7 +89,7 @@
     mkdir -p /var/log/metanode 2>/dev/null || true
     logline_prefix="$(date -Iseconds) node-{{ item }}"
     for i in $(seq 1 90); do
-      if ! pgrep -f "node-{{ item }}/bin" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/config" >/dev/null 2>&1; then
+      if ! pgrep -f "[n]ode-{{ item }}/bin" >/dev/null 2>&1 && ! pgrep -f "[n]ode-{{ item }}/config" >/dev/null 2>&1; then
         echo "node-{{ item }} exited after ${i}s"
         echo "${logline_prefix} exited_after_seconds=${i} forced=no" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
         exit 0
@@ -106,8 +109,8 @@
 
 - name: Force kill only node processes that failed to exit gracefully (SIGKILL, last resort)
   ansible.builtin.shell: |
-    pkill -9 -f "node-{{ item.item }}/bin" || true
-    pkill -9 -f "node-{{ item.item }}/config" || true
+    pkill -9 -f "[n]ode-{{ item.item }}/bin" || true
+    pkill -9 -f "[n]ode-{{ item.item }}/config" || true
   loop: "{{ graceful_exit_wait.results | default([]) }}"
   when: item.rc is defined and item.rc != 0
   failed_when: false
