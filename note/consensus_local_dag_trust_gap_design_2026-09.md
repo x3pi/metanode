@@ -644,6 +644,28 @@ test kỹ, nhánh riêng, review trước khi merge — không rush ngay sau khi
 tìm ra, đặc biệt khi cùng ngày đã có 1 lần fork thật từ 1 thay đổi vội ở khu
 vực liền kề.
 
+### 8.5b. ✅ Đã làm bước NHỎ, AN TOÀN trước (nhánh
+    `fix/leader-address-retry-out-of-bounds`, commit `6e9b9acf`) — CHƯA phải
+    hướng sửa gốc ở mục 8.5
+
+Thay vì làm ngay bản redesign lớn ở mục 8.5 (đụng `meta-consensus/core` dùng
+chung, 6+ call site kể cả test), làm 1 bước tăng dần, an toàn hơn, NẰM HOÀN
+TOÀN trong file `processor.rs` (tầng app, đang sửa đổi tích cực sẵn):
+2 nhánh "OUT OF BOUNDS"/"Invalid address length" trong `resolve_leader_address`
+trước đây `return` NGAY ở lần quan sát ĐẦU TIÊN — khác hẳn nhánh "epoch chưa
+có trong cache" ngay bên cạnh, vốn ĐÃ chờ vô thời hạn (mẫu hình đã được coi
+là an toàn). Sửa: cho 2 nhánh kia CŨNG chờ có giới hạn (30s) trước khi mới
+bỏ cuộc — thu hẹp đáng kể khung thời gian có thể xảy ra lệch (không loại bỏ
+hoàn toàn về mặt lý thuyết, vì đây vẫn là tự tính lại RIÊNG LẺ mỗi node, chỉ
+là ít có khả năng xảy ra hơn nhiều). Cố tình dùng cửa sổ CÓ GIỚI HẠN (không
+vô thời hạn như nhánh "chưa cache") vì 1 cache entry SAI thật thì có thể
+không bao giờ tự sửa đúng — chờ vô hạn ở đây có thể tạo ra rủi ro treo MỚI
+cho toàn bộ pipeline dispatch, điều tuyệt đối không được phép.
+
+`cargo test` (193 + 185) xanh. Hướng sửa gốc thật ở mục 8.5 (nhúng
+`leader_address` vào `Commit` lúc tạo) **vẫn để đó, chưa làm**, cần quy trình
+riêng như đã ghi.
+
 ### 8.6. Đánh giá mức độ nghiêm trọng
 
 - **Không phải fork vĩnh viễn**: `stateRoot`/`stakeStatesRoot` của TẤT CẢ 4
