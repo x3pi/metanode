@@ -28,12 +28,15 @@
 ## 1. Yêu Cầu Chuẩn Bị (Prerequisites)
 
 ### 1.1. Trên máy tính điều khiển (Deployer Machine):
-* **Công cụ vận hành Ansible:**
+* **Công cụ vận hành Ansible (Bắt buộc):**
   ```bash
   sudo apt update && sudo apt install -y ansible sshpass jq python3-yaml curl
   ```
-* **Môi trường Build source code (Nếu máy deploy tự compile binary Go/Rust/C++):**
-  - **Go:** `go version` $\ge$ 1.22
+* **Bộ Binary đã có sẵn (Khuyên dùng - Nhanh nhất):**
+  - Chỉ cần thư mục `deploy/bin/` chứa các file nhị phân (`metanode`, `simple_chain`...).
+  - **KHÔNG CẦN** cài đặt Go, Rust hay C++ compilers!
+* **Môi trường Build source code (Chỉ cần nếu muốn tự biên dịch lại từ đầu):**
+  - **Go:** `go version >= 1.22`
   - **Rust & Cargo:** `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
   - **Bộ biên dịch C++ & Thư viện (cho EVM & NOMT FFI):**
     ```bash
@@ -60,7 +63,43 @@ cd deploy/ansible
 cp inventory.example.yml inventory.yml
 ```
 
-> 💡 **Lưu ý:** Toàn bộ ý nghĩa của từng trường cấu hình (`node_ids`, `rpc_nodes`, `snapshot_frequency_blocks`, `btrfs_size`, `prune_nodes`, `epochs_to_keep`, cách dùng SSH Key vs Password...) đã được **chú thích chi tiết trong file [`inventory.example.yml`](./inventory.example.yml)**. Bạn chỉ cần mở file `inventory.yml` lên và chỉnh sửa lại IP, tài khoản, dung lượng `btrfs_size` (mặc định `400G`) theo đúng cụm server của mình.
+### 2.1. Cấu hình Phương thức xác thực SSH (SSH Key vs Mật khẩu)
+
+Trong thực tế, bạn có thể lựa chọn 1 trong 2 phương thức xác thực:
+
+#### Cách 1: Sử dụng SSH Key (Khuyên dùng cho Production & Môi trường thực tế)
+Dùng SSH Key an toàn hơn rất nhiều, tốc độ kết nối nhanh hơn và không sợ lộ mật khẩu trong file cấu hình.
+
+1. **Tạo SSH Key trên máy điều khiển (nếu chưa có):**
+   ```bash
+   ssh-keygen -t ed25519 -C "deployer@metanode" -f ~/.ssh/id_ed25519 -N ""
+   ```
+2. **Copy Public Key sang các máy chủ đích (Remote Servers):**
+   ```bash
+   # Cú pháp: ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<IP_SERVER>
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub abc@192.168.1.223
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub abc@192.168.1.231
+   ```
+3. **Khai báo trong `inventory.yml`:**
+   ```yaml
+   server_1:
+     ansible_host: 192.168.1.223
+     ansible_user: "abc"
+     ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+     ansible_become_pass: "mat_khau_sudo"   # Mật khẩu sudo để phân quyền root
+   ```
+
+#### Cách 2: Sử dụng Mật khẩu trực tiếp (Dùng cho Lab / Devnet nội bộ)
+Nếu không muốn thiết lập SSH Key, bạn điền trực tiếp mật khẩu:
+```yaml
+server_1:
+  ansible_host: 192.168.1.223
+  ansible_user: "abc"
+  ansible_ssh_pass: "mat_khau_ssh"
+  ansible_become_pass: "mat_khau_sudo"
+```
+
+> 💡 **Lưu ý:** Toàn bộ ý nghĩa của từng trường cấu hình (`node_ids`, `rpc_nodes`, `snapshot_frequency_blocks`, `btrfs_size`, `prune_nodes`, `epochs_to_keep`...) đã được **chú thích chi tiết trong file [`inventory.example.yml`](./inventory.example.yml)**. Bạn chỉ cần mở file `inventory.yml` lên và chỉnh sửa lại IP, tài khoản, dung lượng `btrfs_size` (mặc định `400G`) theo đúng cụm server của mình.
 
 ---
 
@@ -76,9 +115,10 @@ cp inventory.example.yml inventory.yml
 ##### 1.1. Sinh tự động toàn bộ cụm theo `inventory.yml` (Khuyên dùng - Nhanh nhất):
 ```bash
 cd deploy/ansible
-./ansible_deploy.sh --gen-keys
+# Dùng binary có sẵn trong deploy/bin (siêu tốc, không cần build Rust):
+./ansible_deploy.sh --gen-keys --prebuilt-bin
 ```
-*👉 Lệnh này tự tạo đủ bộ key cho toàn bộ nodes trong `deploy/systemd/node-X_keys/` và file `deploy/systemd/genesis.json`.*
+*👉 Lệnh này dùng file `deploy/bin/metanode` có sẵn để tạo đủ bộ key cho toàn bộ nodes trong `deploy/systemd/node-X_keys/` và file `deploy/systemd/genesis.json`.*
 
 ##### 1.2. (Tùy chọn) Thay Thế Key Cho 1 Node Bất Kỳ:
 Nếu muốn đổi bộ key của riêng 1 Node (ví dụ Node 2), dùng tool có sẵn để vừa tạo key mới vừa tự động cập nhật vào `genesis.json`:
@@ -88,7 +128,8 @@ python3 gen_validator_entry.py \
   --hostname node-2 \
   --node-id 2 \
   --ip <IP_NODE_2> \
-  --keys-dir ./node-2_keys
+  --keys-dir ./node-2_keys \
+  --metanode-bin ../bin/metanode
 ```
 *👉 Script sẽ tự sinh mới 4 file key vào `node-2_keys/` và tự động cập nhật thông tin Node 2 vào file `genesis.json` (không cần sửa file JSON hay chạm vào Ansible).*
 
@@ -104,15 +145,15 @@ Mở file `deploy/systemd/genesis.json` nếu muốn chỉnh sửa:
 #### Bước 3: Triển khai lên server, mở cổng tường lửa và khởi chạy chuỗi từ Block 0:
 ```bash
 cd deploy/ansible
-./ansible_deploy.sh --start --clean --open-ports
+./ansible_deploy.sh --start --clean --open-ports --prebuilt-bin
 ```
-*👉 Cờ `--open-ports` sẽ tự động mở thông suốt toàn bộ cổng firewall UFW trên các server từ xa; kết hợp với `--start --clean` sẽ xóa sạch database cũ và khởi chạy toàn cụm mạng từ Genesis Block 0!*
+*👉 Cờ `--prebuilt-bin` sẽ lấy thẳng các binary từ `deploy/bin/` đóng gói đẩy lên server (chỉ 1-2 giây, bỏ qua build code); cờ `--open-ports` mở toàn bộ firewall UFW; `--clean` xóa sạch DB cũ để chạy từ Genesis Block 0!*
 *(⚠️ **Tuyệt đối không dùng `--reset-all`** sau khi đã sửa key, vì `--reset-all` sẽ tự động sinh đè mất key bạn vừa tạo).*
 *(💡 Nếu server đã từng mở port trước đó hoặc chỉ muốn mở firewall riêng biệt mà không chạy node: gõ `./ansible_deploy.sh --open-ports`).*
 
 ##### 🔍 Sau khi chạy lệnh trên, Ansible sẽ tự động thực hiện trên các server từ xa:
 1. **Dọn sạch Database cũ (`--clean`):** Xóa toàn bộ dữ liệu blockchain và log cũ tại `/opt/metanode/node-X/data` và `logs` để chuỗi sẵn sàng đồng thuận từ Genesis Block 0.
-2. **Đẩy bộ Binary Release:** Tải các binary thực thi (`simple_chain`, `metanode`) lên server.
+2. **Đẩy bộ Binary Release:** Lấy file thực thi (`simple_chain`, `metanode`) có sẵn từ `deploy/bin/` đóng gói và tải lên server.
 3. **Mở cổng tường lửa (`--open-ports`):** Tự động cấu hình rule UFW cho các cổng P2P Consensus (620x), Execution (900x), RPC (1074x), Snapshot (860x).
 4. **Tạo cấu trúc thư mục node chuẩn tại `/opt/metanode/node-X/`:**
    ```text
@@ -189,6 +230,23 @@ cd deploy/ansible
   ./ansible_deploy.sh --start
   # Mẹo: Thêm --fast để build nhanh bỏ qua các bước kiểm tra thừa:
   ./ansible_deploy.sh --start --fast
+  ```
+
+---
+
+### Kịch bản 5.1: Triển khai từ File Binary có sẵn (KHÔNG cần build code)
+* **Khi nào dùng:** Khi bạn đã chạy `./deploy/build_private_chain_bins.sh` để sinh binary, hoặc được người khác gửi cho thư mục chứa file binary (`metanode`, `simple_chain`...). Máy deploy không cần cài Go, Rust hay C++.
+* **Hành vi:** Bỏ qua khâu biên dịch mã nguồn → Đóng gói trực tiếp binary vào release package → Chép lên các server → Khởi động node.
+* **Câu lệnh:**
+  ```bash
+  # Tự động lấy file từ deploy/bin/
+  ./ansible_deploy.sh --start --prebuilt-bin
+
+  # Hoặc chỉ định thư mục chứa binary tùy ý:
+  ./ansible_deploy.sh --start --prebuilt-bin /path/to/bin
+
+  # Kết hợp reset cài mới từ Block 0 với binary có sẵn:
+  ./ansible_deploy.sh --reset-all --prebuilt-bin
   ```
 
 ---

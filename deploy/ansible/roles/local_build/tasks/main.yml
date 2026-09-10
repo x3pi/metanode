@@ -1,7 +1,9 @@
 ---
 - name: Build Standalone Release Package
   ansible.builtin.shell: |
-    {% if ansible_build_fast | default(false) | bool %}
+    {% if ansible_use_prebuilt | default(false) | bool %}
+    bash build_release.sh --prebuilt-dir "{{ ansible_prebuilt_bin_dir }}"
+    {% elif ansible_build_fast | default(false) | bool %}
     bash build_release.sh --fast {% if ansible_debug_cpp | default(false) | bool %}--debug-cpp{% endif %}
     {% else %}
     bash build_release.sh {% if ansible_debug_cpp | default(false) | bool %}--debug-cpp{% endif %}
@@ -24,7 +26,7 @@
       - metanode
   args:
     chdir: "{{ deploy_dir }}/../.."
-  when: ansible_action == 'gen_keys'
+  when: ansible_action == 'gen_keys' and not (ansible_use_prebuilt | default(false) | bool)
 
 - name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
   ansible.builtin.shell: |
@@ -61,7 +63,7 @@
       --epochs-to-keep "{{ item.epochs_to_keep | default(0) }}" \
       --keys-dir "{{ deploy_dir }}/node-{{ item.node_id }}_keys" \
       --output "{{ deploy_dir }}/node-{{ item.node_id }}_keys/node-{{ item.node_id }}_genesis.json" \
-      --metanode-bin "{{ deploy_dir }}/../../target/release/metanode"
+      --metanode-bin "{% if ansible_use_prebuilt | default(false) | bool and ansible_prebuilt_bin_dir | default('') != '' %}{{ ansible_prebuilt_bin_dir }}/metanode{% else %}{{ deploy_dir }}/../../target/release/metanode{% endif %}"
   args:
     chdir: "{{ deploy_dir }}"
   loop: "{{ cluster_nodes }}"
@@ -92,24 +94,31 @@
 # recovery_committee_json_override_file in inventory.yml to a pre-built, operator-supplied
 # (ideally air-gapped-generated) ValidatorEntry JSON file, bypassing this devnet default entirely
 # -- see gen_recovery_committee_keys.py's own doc comment.
+- name: Check for existing gen_recovery_committee helper
+  ansible.builtin.stat:
+    path: "{{ (ansible_prebuilt_bin_dir + '/gen_recovery_committee') if (ansible_use_prebuilt | default(false) | bool and ansible_prebuilt_bin_dir | default('') != '') else (deploy_dir + '/../../execution/gen_recovery_committee') }}"
+  register: recovery_committee_helper_stat
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+
 - name: Build gen_recovery_committee helper
   ansible.builtin.shell: |
     cd "{{ deploy_dir }}/../../execution" && go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
   args:
     chdir: "{{ deploy_dir }}"
     creates: "{{ deploy_dir }}/../../execution/gen_recovery_committee"
-  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys'] and not (recovery_committee_helper_stat.stat.exists | default(false))
 
 - name: Ensure independent RecoveryCommittee keys exist (idempotent -- devnet default only)
   ansible.builtin.shell: |
-    python3 gen_recovery_committee_keys.py --out-dir "{{ deploy_dir }}/recovery_committee_keys" --metanode-bin "{{ deploy_dir }}/../../target/release/metanode" --count "{{ recovery_committee_size | default(4) }}"
+    python3 gen_recovery_committee_keys.py --out-dir "{{ deploy_dir }}/recovery_committee_keys" --metanode-bin "{% if ansible_use_prebuilt | default(false) | bool and ansible_prebuilt_bin_dir | default('') != '' %}{{ ansible_prebuilt_bin_dir }}/metanode{% else %}{{ deploy_dir }}/../../target/release/metanode{% endif %}" --count "{{ recovery_committee_size | default(4) }}"
   args:
     chdir: "{{ deploy_dir }}"
   when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys'] and (recovery_committee_json_override_file is not defined or recovery_committee_json_override_file == '')
 
 - name: Compute and inject RecoveryCommittee config into every node's execution.json
   ansible.builtin.shell: |
-    python3 inject_recovery_committee.py "{{ deploy_dir }}" "{{ cluster_nodes | length }}" "{{ deploy_dir }}/../../execution/gen_recovery_committee" "{{ deploy_dir }}/recovery_committee_keys" {% if recovery_committee_json_override_file is defined and recovery_committee_json_override_file != '' %}--override-file "{{ recovery_committee_json_override_file }}"{% endif %}
+    helper_bin="{% if recovery_committee_helper_stat.stat.exists | default(false) %}{{ recovery_committee_helper_stat.stat.path }}{% else %}{{ deploy_dir }}/../../execution/gen_recovery_committee{% endif %}"
+    python3 inject_recovery_committee.py "{{ deploy_dir }}" "{{ cluster_nodes | length }}" "$helper_bin" "{{ deploy_dir }}/recovery_committee_keys" {% if recovery_committee_json_override_file is defined and recovery_committee_json_override_file != '' %}--override-file "{{ recovery_committee_json_override_file }}"{% endif %}
   args:
     chdir: "{{ deploy_dir }}"
   when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']

@@ -9,6 +9,11 @@
         rm -rf "$TARGET_PATH"
       fi
     fi
+    SNAP_DIR="/mnt/metanode_snapshots/node-{{ item[0] }}"
+    if [ -d "$SNAP_DIR" ]; then
+      rm -rf "$SNAP_DIR"/* "$SNAP_DIR"/.[!.]* 2>/dev/null || true
+      rmdir "$SNAP_DIR" 2>/dev/null || true
+    fi
   become: yes
   loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
   failed_when: false

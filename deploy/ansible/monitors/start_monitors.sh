@@ -56,8 +56,8 @@ INV_PATH=$(get_inv_path)
 PARSE_PY=$(get_parse_py)
 
 if [ -n "$INV_PATH" ]; then
-    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
-    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
     if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
     if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
 fi
@@ -288,6 +288,18 @@ fi
 if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--multi" ]; then
     echo "🌐 Đang khởi động chế độ Giám Sát Chéo Đa Máy (Mutual Cross-Monitoring)..."
     
+    # Priority for --all-hosts: monitors/inventory.yml (${SCRIPT_DIR}/inventory.yml)
+    if [ -f "${SCRIPT_DIR}/inventory.yml" ]; then
+        INV_PATH="${SCRIPT_DIR}/inventory.yml"
+    fi
+
+    if [ -n "$INV_PATH" ]; then
+        BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
+        if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
+    fi
+    
     if [ -z "$INV_PATH" ] || ! command -v ansible >/dev/null 2>&1; then
         echo -e "⚠️ Không tìm thấy Ansible hoặc inventory.yml. Chuyển về chế độ giám sát cục bộ."
         exec /bin/bash "${SCRIPT_DIR}/start_monitors.sh"
@@ -319,11 +331,9 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
         fi
     fi
 
-    # 3. Chuẩn bị file copy sang các node (luôn luôn sync file mới nhất từ root, không để file cũ bị lệch IP)
-    if [ -f "$INV_PATH" ]; then
-        if [ "$(readlink -f "$INV_PATH" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/inventory.yml" 2>/dev/null)" ]; then
-            cp -f "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
-        fi
+    # 3. Chuẩn bị file copy sang các node (không ghi đè monitors/inventory.yml nếu đã có sẵn)
+    if [ ! -f "${SCRIPT_DIR}/inventory.yml" ] && [ -f "$INV_PATH" ]; then
+        cp -f "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
     fi
     if [ -f "$PARSE_PY" ]; then
         if [ "$(readlink -f "$PARSE_PY" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/parse_inventory.py" 2>/dev/null)" ]; then

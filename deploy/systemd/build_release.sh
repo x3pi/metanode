@@ -27,11 +27,13 @@ TARBALL_NAME="metanode-deploy.tar.gz"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 BUILD_FAST=false
+PREBUILT_DIR=""
 export ENABLE_DEBUG_CPP=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --fast) BUILD_FAST=true ;;
         --debug-cpp) export ENABLE_DEBUG_CPP=true ;;
+        --prebuilt-dir|--bin-dir) PREBUILT_DIR="$2"; shift ;;
         *) log_err "Unknown parameter: $1" ;;
     esac
     shift
@@ -46,9 +48,11 @@ if [ "$BUILD_FAST" = true ]; then
 fi
 
 log_step "Checking Dependencies"
-command -v go &>/dev/null || log_err "Go compiler is not installed."
-command -v cargo &>/dev/null || log_err "Rust (cargo) is not installed."
 command -v tar &>/dev/null || log_err "tar command is missing."
+if [ -z "$PREBUILT_DIR" ]; then
+    command -v go &>/dev/null || log_err "Go compiler is not installed."
+    command -v cargo &>/dev/null || log_err "Rust (cargo) is not installed."
+fi
 log_ok "Dependencies met."
 
 log_step "Cleaning old builds"
@@ -58,37 +62,59 @@ mkdir -p "$RELEASE_DIR/bin"
 mkdir -p "$RELEASE_DIR/configs"
 mkdir -p "$RELEASE_DIR/cluster"
 
-# ─── 1. Build Rust (Consensus & FFI) ──────────────────────────────────────────
-log_step "Building Rust Consensus Engine & FFI"
-cd "$PROJECT_ROOT"
-# Build the FFI library first so Go execution engine can link against it
-cargo build $CARGO_FLAGS -p mtn-nomt-ffi
+if [ -n "$PREBUILT_DIR" ]; then
+    if [ -d "$PREBUILT_DIR" ]; then
+        PREBUILT_DIR="$(cd "$PREBUILT_DIR" && pwd)"
+    fi
+    log_step "Packaging Pre-built Binaries from $PREBUILT_DIR"
+    [ -f "$PREBUILT_DIR/metanode" ] || log_err "Pre-built binary missing: $PREBUILT_DIR/metanode"
+    [ -f "$PREBUILT_DIR/simple_chain" ] || log_err "Pre-built binary missing: $PREBUILT_DIR/simple_chain"
 
-cd "$PROJECT_ROOT/consensus/metanode"
-# Build the consensus engine
-cargo build $CARGO_FLAGS
+    cp "$PREBUILT_DIR/metanode" "$RELEASE_DIR/bin/"
+    cp "$PREBUILT_DIR/simple_chain" "$RELEASE_DIR/bin/"
+    chmod +x "$RELEASE_DIR/bin/metanode" "$RELEASE_DIR/bin/simple_chain"
 
-# FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
-mkdir -p "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR"
-cp -p "$PROJECT_ROOT/target/$TARGET_DIR/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR/libmetanode.a" 2>/dev/null || true
+    for tool in cross_chain_relayer register_chains bls_pubkey gen_recovery_committee; do
+        if [ -f "$PREBUILT_DIR/$tool" ]; then
+            cp "$PREBUILT_DIR/$tool" "$RELEASE_DIR/bin/"
+            chmod +x "$RELEASE_DIR/bin/$tool"
+            log_ok "Copied tool: $tool"
+        fi
+    done
+    log_ok "All pre-built binaries packaged into release."
+else
+    # ─── 1. Build Rust (Consensus & FFI) ──────────────────────────────────────────
+    log_step "Building Rust Consensus Engine & FFI"
+    cd "$PROJECT_ROOT"
+    # Build the FFI library first so Go execution engine can link against it
+    cargo build $CARGO_FLAGS -p mtn-nomt-ffi
 
-cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$RELEASE_DIR/bin/"
-log_ok "Metanode binary copied to release."
+    cd "$PROJECT_ROOT/consensus/metanode"
+    # Build the consensus engine
+    cargo build $CARGO_FLAGS
 
-# ─── 1.5. Build EVM Linker (C++) ─────────────────────────────────────────────
-log_step "Building EVM Linker (C++)"
-cd "$PROJECT_ROOT/execution/pkg/mvm"
-bash build.sh
-log_ok "EVM Linker built successfully."
+    # FIX WORKSPACE TARGET: Cargo places the build output in the workspace root target, but Go expects it in consensus/metanode/target
+    mkdir -p "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR"
+    cp -p "$PROJECT_ROOT/target/$TARGET_DIR/libmetanode.a" "$PROJECT_ROOT/consensus/metanode/target/$TARGET_DIR/libmetanode.a" 2>/dev/null || true
 
-# ─── 2. Build Go (Execution) ────────────────────────────────────────────────
-log_step "Building Go Execution Engine"
-cd "$PROJECT_ROOT/execution/cmd/simple_chain"
+    cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$RELEASE_DIR/bin/"
+    log_ok "Metanode binary copied to release."
 
-go clean -cache
-go build -a -o simple_chain .
-cp simple_chain "$RELEASE_DIR/bin/"
-log_ok "simple_chain binary copied to release."
+    # ─── 1.5. Build EVM Linker (C++) ─────────────────────────────────────────────
+    log_step "Building EVM Linker (C++)"
+    cd "$PROJECT_ROOT/execution/pkg/mvm"
+    bash build.sh
+    log_ok "EVM Linker built successfully."
+
+    # ─── 2. Build Go (Execution) ────────────────────────────────────────────────
+    log_step "Building Go Execution Engine"
+    cd "$PROJECT_ROOT/execution/cmd/simple_chain"
+
+    go clean -cache
+    go build -a -o simple_chain .
+    cp simple_chain "$RELEASE_DIR/bin/"
+    log_ok "simple_chain binary copied to release."
+fi
 
 # # ─── 3. Build RPC Client (Go) ───────────────────────────────────────────────
 # log_step "Building Go RPC Proxy Client"
