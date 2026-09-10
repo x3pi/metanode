@@ -112,13 +112,18 @@ with open('${bounded_config}', 'w') as f:
 REPORT_LOG="/tmp/production_readiness_$(date +%Y%m%d_%H%M%S).log"
 START_TIME=$(date +%s)
 
-STAGE_RESULTS=()   # "TÊN TẦNG:PASS/FAIL:thời gian"
+STAGE_RESULTS=()   # each entry: "NAME<US>STATUS<US>DURATIONs", <US>=$'\x1f' (never appears
+                    # in normal text, unlike ':' which stage names themselves contain --
+                    # e.g. "Tầng 1: Build" -- a ':'-delimited split silently mis-parsed every
+                    # stage as FAIL regardless of its real status, found live on the very first
+                    # real run of this script)
+US=$'\x1f'
 
 log() { echo -e "$1" | tee -a "$REPORT_LOG"; }
 
 record_stage() {
     local name="$1" status="$2" duration="$3"
-    STAGE_RESULTS+=("${name}:${status}:${duration}s")
+    STAGE_RESULTS+=("${name}${US}${status}${US}${duration}s")
 }
 
 stage_banner() {
@@ -140,10 +145,10 @@ print_summary() {
     log "📊 TÓM TẮT PRODUCTION READINESS CHECK"
     log "═══════════════════════════════════════════════════════════"
     for r in "${STAGE_RESULTS[@]}"; do
-        local name="${r%%:*}"
-        local rest="${r#*:}"
-        local status="${rest%%:*}"
-        local dur="${rest#*:}"
+        local name="${r%%$US*}"
+        local rest="${r#*$US}"
+        local status="${rest%%$US*}"
+        local dur="${rest#*$US}"
         if [ "$status" == "PASS" ]; then
             log "   ✅ ${name} — PASS (${dur})"
         else
