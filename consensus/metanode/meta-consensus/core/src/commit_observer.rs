@@ -111,6 +111,18 @@ impl CommitObserver {
         observer
     }
 
+    /// Set the shared epoch_eth_addresses map, forwarded to the internal Linearizer.
+    /// Optional -- see Linearizer::set_epoch_eth_addresses's own doc comment. Must be
+    /// called before this CommitObserver starts producing commits to take effect for
+    /// them (authority_node/mod.rs calls it immediately after `new`, before this is
+    /// handed off to Core).
+    pub(crate) fn set_epoch_eth_addresses(
+        &mut self,
+        epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    ) {
+        self.commit_interpreter.set_epoch_eth_addresses(epoch_eth_addresses);
+    }
+
     /// Creates and returns a list of committed subdags containing committed blocks, from a sequence
     /// of selected leader blocks, and whether they come from local committer or commit sync remotely.
     ///

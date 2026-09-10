@@ -717,6 +717,65 @@ bản forward-jump catch-up mới lộ ra, như 2 lần trước đã xảy ra t
   người có domain knowledge về phần thưởng/kinh tế xác nhận đây có phải hành
   vi đúng ý định hay không.
 
+### 8.7. ✅ ĐÃ LÀM hướng sửa GỐC THẬT (mục 8.5) — nhánh
+    `fix/embed-leader-address-in-commit`, commit `47b90c88`
+
+Theo yêu cầu "tiến hành fix luôn" của user: đã nhúng `leader_address` thẳng
+vào `Commit` NGAY LÚC TẠO (dùng lại `Commit::new_with_leader_address` — có
+sẵn nhưng chưa từng được gọi), thay vì để mỗi node tự tra cứu lại rời rạc
+sau đó. Loại bỏ HẲN race ở tầng kiến trúc, không chỉ thu hẹp như mục 8.5b.
+
+**Thiết kế** (ưu tiên giảm tối đa diện ảnh hưởng lên `meta-consensus/core`
+dùng chung, đúng bài học từ vụ fork thật cùng ngày):
+- `Linearizer`/`CommitObserver`: thêm field optional + hàm SETTER
+  (`set_epoch_eth_addresses`), KHÔNG đổi chữ ký `new()` — 0 trong ~16 nơi gọi
+  `Linearizer::new`/`CommitObserver::new` (kể cả test/bench) cần sửa.
+- Tại đúng chỗ tạo `Commit::new(...)` trong `try_collect_sub_dag_and_commit`:
+  tra cứu KHÔNG CHẶN (`try_read()`, không bao giờ chờ khoá vì đây là đường
+  nóng tạo commit) `committee.epoch()` + author index của leader; có thì
+  dùng `Commit::new_with_leader_address(...)`, không có thì rơi về ĐÚNG hành
+  vi cũ (`resolve_leader_address` ở tầng downstream vẫn là lưới an toàn,
+  không đổi).
+- Chỉ 5 nơi THẬT cần sửa để nối dây `epoch_eth_addresses` xuống tới điểm gọi
+  setter (`authority_node/mod.rs`, ngay sau khi tạo `CommitObserver`, trước
+  khi nó bị bọc vào `Core`/`CoreThread` — cơ hội DUY NHẤT còn với tới được):
+  `ConsensusAuthority::start`/`AuthorityNode::start` thêm đúng 1 tham số MỚI
+  (`Option<...>`, `None` giữ nguyên hành vi cũ) → 2 nơi gọi trong test
+  (truyền `None`) + 3 nơi gọi thật ở tầng app metanode (truyền
+  `node.epoch_eth_addresses.clone()` — ĐÚNG Arc mà `CommitProcessor` đã và
+  đang dùng cho việc y hệt này).
+
+**Test mới** (`linearizer/tests.rs`): 2 test — (1) đặt địa chỉ RIÊNG cho
+từng authority index (không phải 1 giá trị cố định — bắt được cả lỗi kiểu
+"luôn lấy sai index 0"), dựng DAG 10 vòng 4 authority, xác nhận MỖI subdag
+trả về đúng địa chỉ của authority THẬT SỰ làm leader vòng đó; (2) không gọi
+`set_epoch_eth_addresses` — xác nhận `leader_address` vẫn rỗng y hệt hành vi
+cũ (tương thích ngược, không phá bất kỳ caller nào chưa opt-in).
+
+**Test:** `cargo build`/`cargo test` sạch cả 2 crate (`consensus-core`
+195/195 — 193 cũ + 2 mới, `metanode` 185/185).
+
+**Verify trực tiếp trên cụm thật:** deploy lên cả 4 node, 5 vòng restart
+node-1 liên tục — cụm luôn khỏe, `hash`/`miner`/`stateRoot` khớp TUYỆT ĐỐI cả
+4 node. Quan trọng nhất: đọc trực tiếp bộ đếm chẩn đoán `DIAG_LEADER_*` (mục
+8.3, đã sửa lỗi log vỡ chữ ở mục 8.5b) trên node thật sau deploy:
+
+```
+[DIAG leader-addr] preembedded=39 resolved_ok=76944 waiting_iters=0 out_of_bounds=0 invalid_len=0
+```
+
+`resolved_ok=76944` là lịch sử CŨ (tạo từ TRƯỚC khi có bản vá, tất nhiên vẫn
+rỗng, phải tra cứu lại theo đường cũ khi replay — đúng như kỳ vọng, dữ liệu
+cũ không thể "hồi tố"). `preembedded=39` là các commit MỚI, tạo SAU khi bản
+vá đã chạy — đi thẳng qua đường nhanh, không cần tra cứu gì nữa — **bằng
+chứng trực tiếp, không suy đoán, rằng cơ chế nhúng đang hoạt động đúng trên
+cụm thật**. `out_of_bounds=0`, `invalid_len=0` — chưa gặp lại đúng race gốc
+lần nữa (dù đây là race hiếm, không phải bằng chứng tuyệt đối, nhưng cùng
+với bằng chứng preembedded ở trên là đủ tự tin).
+
+**Kết luận:** mục 8 (leader_address non-determinism) coi như ĐÃ ĐÓNG ở cấp độ
+kiến trúc. `Commit::new_with_leader_address` không còn là dead code.
+
 ---
 
 ## 9. 🔴 SỰ CỐ THẬT THỨ 2 (2026-09-10, trong lúc đang deploy build chẩn đoán

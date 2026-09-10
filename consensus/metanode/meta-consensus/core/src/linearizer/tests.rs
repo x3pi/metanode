@@ -80,6 +80,110 @@ use super::*;
         }
     }
 
+    // FORK-SAFETY (2026-09-10): covers the new embed-leader-address-at-creation path
+    // added to try_collect_sub_dag_and_commit -- see
+    // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. Two cases:
+    // 1. set_epoch_eth_addresses() was called with a map that covers this commit's
+    //    epoch/author index -> every produced subdag's leader_address must be the
+    //    resolved address for whichever authority actually led that commit (not a
+    //    hardcoded single value -- the DAG can, and here does, have different leaders
+    //    across rounds).
+    // 2. set_epoch_eth_addresses() was never called (the default, matching every
+    //    caller before this fix) -- leader_address must stay empty, exactly as before,
+    //    so CommitProcessor::resolve_leader_address's existing downstream resolution
+    //    is untouched for anyone who doesn't opt in.
+    #[rstest]
+    #[tokio::test]
+    async fn test_handle_commit_embeds_leader_address_when_map_set() {
+        let num_authorities = 4;
+        let (context, _keys) = Context::new_for_test(num_authorities);
+        let epoch = context.committee.epoch();
+        let context = Arc::new(context);
+
+        let dag_state = Arc::new(RwLock::new(DagState::new(
+            context.clone(),
+            Arc::new(MemStore::new()),
+        )));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+
+        // One distinct, deterministic 20-byte address per authority index, so the test
+        // can tell "the right one was picked for whichever authority actually led this
+        // round" apart from "some hardcoded value that happens to match by accident".
+        let addr_for = |idx: usize| -> Vec<u8> {
+            let mut a = vec![0u8; 20];
+            a[19] = idx as u8 + 1;
+            a
+        };
+        let addrs: Vec<Vec<u8>> = (0..num_authorities).map(addr_for).collect();
+        let mut map = std::collections::HashMap::new();
+        map.insert(epoch, addrs.clone());
+        linearizer.set_epoch_eth_addresses(Arc::new(tokio::sync::RwLock::new(map)));
+
+        let num_rounds: u32 = 10;
+        let mut dag_builder = DagBuilder::new(context.clone());
+        dag_builder
+            .layers(1..=num_rounds)
+            .build()
+            .persist_layers(dag_state.clone());
+
+        let leaders = dag_builder
+            .leader_blocks(1..=num_rounds)
+            .into_iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
+
+        let commits = linearizer.handle_commit(leaders.clone(), None);
+        assert!(!commits.is_empty(), "test setup should produce at least one commit");
+        for subdag in commits.iter() {
+            let expected = addr_for(subdag.leader.author.value());
+            assert_eq!(
+                subdag.leader_address, expected,
+                "leader_address must be the embedded, resolved address for the authority that actually led this commit (author index {}), not empty or some other authority's address",
+                subdag.leader.author.value()
+            );
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_handle_commit_leader_address_stays_empty_without_map() {
+        let num_authorities = 4;
+        let (context, _keys) = Context::new_for_test(num_authorities);
+        let context = Arc::new(context);
+
+        let dag_state = Arc::new(RwLock::new(DagState::new(
+            context.clone(),
+            Arc::new(MemStore::new()),
+        )));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        // Deliberately do NOT call set_epoch_eth_addresses -- must behave exactly as
+        // every pre-existing caller (production and test) already relies on.
+        let mut linearizer = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+
+        let num_rounds: u32 = 10;
+        let mut dag_builder = DagBuilder::new(context.clone());
+        dag_builder
+            .layers(1..=num_rounds)
+            .build()
+            .persist_layers(dag_state.clone());
+
+        let leaders = dag_builder
+            .leader_blocks(1..=num_rounds)
+            .into_iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
+
+        let commits = linearizer.handle_commit(leaders.clone(), None);
+        assert!(!commits.is_empty(), "test setup should produce at least one commit");
+        for subdag in commits.iter() {
+            assert!(
+                subdag.leader_address.is_empty(),
+                "leader_address must stay empty when set_epoch_eth_addresses was never called (backward compat)"
+            );
+        }
+    }
+
     #[rstest]
     #[tokio::test]
     async fn test_handle_already_committed() {

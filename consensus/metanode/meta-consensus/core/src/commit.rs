@@ -87,7 +87,10 @@ impl Commit {
     /// Create a new commit with embedded leader address.
     /// FORK-SAFETY (May 2026): leader_address is consensus-agreed and must not
     /// be recalculated locally. Same immutability pattern as global_exec_index.
-    #[allow(dead_code)]
+    /// Used by linearizer/mod.rs (2026-09-10) to embed a real, resolved leader
+    /// address at commit-creation time when available -- see that call site's
+    /// own doc comment and note/consensus_local_dag_trust_gap_design_2026-09.md
+    /// mục 8.5.
     pub(crate) fn new_with_leader_address(
         index: CommitIndex,
         previous_digest: CommitDigest,
