@@ -504,3 +504,157 @@ lẫn với các cảnh báo CI/deploy thường ngày khác cùng bot.
 - [ ] **KHÔNG merge `dev`** cho tới khi có xác nhận thêm từ user sau khi xem
   kết quả deploy/verify thật — đúng cách làm đã thống nhất suốt phiên này
   cho vùng code đã từng gây fork thật 1 lần.
+
+---
+
+## 8. 🔴 PHÁT HIỆN MỚI, RIÊNG BIỆT (2026-09-10, trong lúc verify Phương án A
+   trên cụm thật): `leader_address` không nhất quán giữa đường LIVE và đường
+   CATCH-UP SYNC — gây lệch hash block tạm thời, tự sửa được, nhưng là lỗ
+   hổng thật, KHÁC với lỗ hổng gốc ở mục 1-7
+
+### 8.1. Triệu chứng quan sát trực tiếp trên cụm thật
+
+Trong lúc verify Phương án A (xem `note/deploy_hardening_and_incident_drills_2026-09.md`
+để biết bối cảnh đầy đủ: 3 node bị halt đúng theo thiết kế, được restart theo
+đúng runbook), user báo cáo 🔴 CRITICAL: block #339 lệch hash giữa node-0 (m0)
+và node 1/2/3 (m1-m3) trong vài chục giây:
+
+```
+m0: hash: 0x2d3ab1...ba37, miner: 0x4a61f5...4979 (= địa chỉ validator node-0)
+m1/m2/m3: hash: 0xb60a5c...142b, miner: 0x000...000 (địa chỉ rỗng)
+```
+
+Mọi trường KHÁC (transactions, tx order) đều khớp. Vài phút sau, TẤT CẢ 4 node
+tự hội tụ về CÙNG 1 phiên bản (`0xb60a5c...`, miner rỗng) — xác nhận qua
+`eth_getBlockByNumber` trực tiếp trên cả 4 RPC, KHÔNG phải suy đoán. Không có
+`fork_guard`/LAYER-6 abort nào xảy ra.
+
+### 8.2. Đã loại trừ (điều tra qua code thật, không suy đoán)
+
+- **KHÔNG phải panic/crash-loop**: panic `typed-store/src/metrics.rs:70` xuất
+  hiện đúng 1 lần/mỗi lần khởi động tiến trình trên cả 4 node — vô hại, không
+  liên quan, tự phục hồi ngay ("no reactor running" lúc Tokio runtime chưa kịp
+  sẵn sàng cho 1 thread phụ).
+- **KHÔNG phải Phương án A gây ra** — cơ chế mới ở mục 1-7 chỉ liên quan
+  `next_expected_index` có tiến hay không, không đụng tới field `leader_address`.
+- **KHÔNG phải bug ở tầng Go `block_processor_processing.go`'s fallback
+  `bp.validatorAddress`** — đã đọc kỹ: comment của hàm này tự mâu thuẫn với
+  chính nó ("Falling back to bp.validatorAddress would cause a fork!" nhưng
+  code lại lấy `bp.validatorAddress` làm giá trị mặc định) — NHƯNG đã rà soát
+  toàn bộ 5 call site thật (`speculative_executor.go` x2,
+  `block_processor_sync.go` x3): **cả 5 đều LUÔN truyền 1 override tường
+  minh**, nên nhánh mặc định (`bp.validatorAddress`) hiện tại KHÔNG THỂ chạm
+  tới được trong production — không phải nguyên nhân của sự cố này (dù vẫn là
+  1 "quả mìn" nguy hiểm nên dọn, xem mục 8.4). Phát hiện phụ: file test
+  `block_processor_processing_test.go`'s `TestGetLeaderAddress_LeaderOverride`
+  KHÔNG hề gọi hàm thật — nó tự chép lại 1 bản logic riêng, và bản chép đó
+  SAI khác với code thật (thêm điều kiện loại trừ địa chỉ rỗng mà code thật
+  không có) — nên test này xanh (PASS) không chứng minh được gì về hàm thật.
+  Đã sửa (mục 8.4).
+- Cả `speculative_executor.go` (đường LIVE) và `block_processor_sync.go`
+  (đường CATCH-UP SYNC) đều gọi ĐÚNG 1 helper an toàn, dùng chung:
+  `bp.GetLeaderAddress(leaderAddress []byte, leaderAuthorIndex uint32)`
+  (`block_processor_core.go`) — hàm này xử lý input giống hệt nhau ở cả 2 nơi
+  (20 byte hợp lệ → dùng thẳng; khác 20 byte → fallback về địa chỉ 0 tất định,
+  KHÔNG bao giờ tự đoán). Vậy 2 đường Go này tự nó **nhất quán và an toàn** —
+  bằng chứng cho thấy input mà mỗi đường NHẬN ĐƯỢC từ Rust khác nhau, không
+  phải cách Go xử lý input khác nhau.
+
+### 8.3. Nguyên nhân gốc thật (đã xác nhận qua code, còn 1 mắt xích cuối chưa
+   chốt 100% — xem "còn mở" bên dưới)
+
+Rust gửi `leader_address` KHÔNG NHẤT QUÁN cho CÙNG 1 commit, tùy theo node
+nhận biết commit đó qua đường nào:
+
+- **`Commit::new_with_leader_address(...)`** (constructor CÓ tham số
+  leader_address, `meta-consensus/core/src/commit.rs:91`) **không được gọi ở
+  bất kỳ đâu trong toàn bộ codebase** (`grep -rn "new_with_leader_address"`
+  chỉ khớp đúng định nghĩa của nó) — mọi commit được tạo qua
+  `Commit::new(...)` (bare, không có leader_address).
+- `linearizer/mod.rs`'s hàm tạo commit local (dòng ~242) dùng đúng
+  `Commit::new(...)` bare này khi tạo commit MỚI (branch `final_commit ==
+  None`) — nghĩa là field `leader_address` bên trong `Commit`/`TrustedCommit`
+  (phần được SERIALIZE, HASH, và GỬI CHO PEER qua `commit_syncer`) LUÔN RỖNG
+  tại thời điểm tạo, bất kể node nào tạo.
+- Cơ chế BÙ ĐẮP thật sự nằm ở `CommitProcessor::resolve_leader_address`
+  (`commit_processor/processor.rs:391`, 4 call site) — tra `leader_author_index`
+  trong `epoch_eth_addresses` (map ETH-address theo epoch, tầng app `metanode`,
+  KHÔNG có ở tầng `meta-consensus/core`) để gán `subdag.leader_address` — đây
+  là field trên `CommittedSubDag` (struct KHÁC, tồn tại NGẮN HẠN, chỉ dùng cho
+  lần dispatch NÀY, KHÔNG được serialize/lưu lại/gửi cho peer).
+- Hệ quả: **`leader_address` không phải 1 phần của dữ liệu được đồng thuận
+  (không nằm trong digest mà DIGEST-GATE so khớp) — nó được từng node tự tính
+  lại, riêng lẻ, mỗi lần xử lý commit đó**, dựa trên trạng thái cache cục bộ
+  (`epoch_eth_addresses`) của CHÍNH NODE ĐÓ tại đúng thời điểm xử lý. 2 node
+  trung thực, xử lý ĐÚNG 1 commit ở 2 THỜI ĐIỂM khác nhau (node-0: xử lý live,
+  ngay khi vừa quyết định; node 1/2/3: xử lý qua `commit_syncer` fetch lại
+  hàng loạt commit lịch sử trong lúc catch-up dồn dập sau restart) hoàn toàn
+  có thể cho ra 2 kết quả resolve khác nhau — ĐẶC BIỆT nếu `epoch_eth_addresses`
+  của node đang catch-up chưa kịp có/đúng epoch tương ứng tại đúng lúc đó.
+
+**Còn mở (chưa xác nhận 100%, cần điều tra có kiểm soát thay vì đoán tiếp)**:
+lẽ ra nếu `resolve_leader_address` bị gọi và thất bại (nhánh "Committee index
+OUT OF BOUNDS"/"Invalid address length"), phải thấy log `warn!`/`error!` có
+tiền tố `[LEADER]` — nhưng `grep "\[LEADER\]"` trên CẢ 4 NODE, TOÀN BỘ lịch sử
+log, cho ra 0 dòng. `RUST_LOG` mặc định là `info` (xác nhận qua
+`ffi.rs`/`EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())`)
+nên `warn!`/`info!` (không phải `trace!`) đáng lẽ phải hiện. Có 2 khả năng
+chưa phân biệt được dứt khoát: (a) `resolve_leader_address` LUÔN chỉ chạm
+nhánh nhanh-im-lặng (dòng 400, `trace!`, bị lọc) vì `subdag.leader_address`
+đã có sẵn 20 byte từ 1 nguồn khác chưa lần ra (mâu thuẫn với việc
+`new_with_leader_address` là dead code — cần điều tra thêm xem `certified_commit`
+lấy từ đâu ra 20 byte nếu có), hoặc (b) đường dispatch CHO COMMIT CATCH-UP
+không hề đi qua 1 trong 4 call site của `resolve_leader_address` trong
+`processor.rs` — bỏ qua bước resolve hoàn toàn, gửi thẳng field rỗng cho Go.
+Cần thêm log tạm thời có kiểm soát (không phải đoán qua log có sẵn) để chốt
+dứt điểm trước khi sửa Rust.
+
+### 8.4. Đã sửa ngay (rủi ro thấp, không đụng consensus-core)
+
+- `execution/cmd/simple_chain/processor/block_processor_processing_test.go`:
+  sửa `TestGetLeaderAddress_LeaderOverride` để gọi ĐÚNG logic thật của
+  `createBlockFromResults` (chỉ check `len(override) > 0`, không check giá trị
+  0 — khớp với comment "CRITICAL FORK-SAFETY" ngay phía trên hàm thật) thay vì
+  1 bản chép tay đã lệch. Test đã chạy PASS lại sau khi sửa.
+
+### 8.5. Đề xuất hướng sửa gốc thật sự (CHƯA LÀM — cần quyết định riêng,
+   giống mục 6 việc #0 ở trên, KHÔNG phải quyết định kỹ thuật thuần túy vì
+   chạm `meta-consensus/core` dùng chung, rủi ro cao)
+
+**Hướng đúng**: làm cho `leader_address` trở thành 1 phần dữ liệu ĐƯỢC ĐỒNG
+THUẬN (embed vào `Commit` lúc TẠO, qua `Commit::new_with_leader_address(...)`
+đã có sẵn nhưng chưa dùng), thay vì để mỗi node tự tính lại rời rạc sau khi
+digest đã chốt. Cách làm: tại `linearizer/mod.rs` dòng ~242 (nơi tạo commit
+mới), tra `leader_author_index` → ETH address NGAY LÚC TẠO COMMIT (cần thread
+`epoch_eth_addresses` xuống tới `Linearizer`, hiện chỉ có ở tầng app
+`metanode`, không có ở tầng `meta-consensus/core` — đây là điểm cần thiết kế
+cẩn thận, ranh giới 2 tầng). Một khi `leader_address` nằm TRONG `Commit` được
+serialize+digest, `resolve_leader_address`'s nhánh "đã có sẵn 20 byte, bỏ qua"
+(dòng 400) trở thành đường ĐI THƯỜNG, còn tra-cứu-theo-index chỉ còn là lưới
+an toàn cho dữ liệu cũ (tương thích ngược) — loại bỏ hoàn toàn khả năng 2 node
+tính ra 2 giá trị khác nhau cho CÙNG 1 commit.
+
+**KHÔNG làm ngay** trong phiên này: đây là thay đổi ở `meta-consensus/core`
+dùng chung (còn cơ bản/rủi ro cao hơn cả `commit_processor/processor.rs` mà
+Phương án A vừa sửa), và mắt xích cuối ở mục 8.3 vẫn còn 1 phần chưa chốt
+100%. Cần: (1) chốt dứt điểm mắt xích còn mở bằng log có kiểm soát, (2) thiết
+kế lại ranh giới `epoch_eth_addresses` giữa `meta-consensus/core` và tầng app,
+(3) áp dụng ĐÚNG quy trình đã thống nhất cho vùng code này: code cẩn thận,
+test kỹ, nhánh riêng, review trước khi merge — không rush ngay sau khi vừa
+tìm ra, đặc biệt khi cùng ngày đã có 1 lần fork thật từ 1 thay đổi vội ở khu
+vực liền kề.
+
+### 8.6. Đánh giá mức độ nghiêm trọng
+
+- **Không phải fork vĩnh viễn**: `stateRoot`/`stakeStatesRoot` của TẤT CẢ 4
+  node đã hội tụ khớp nhau hoàn toàn ở block #339 và các block sau đó — đã
+  verify trực tiếp, không suy đoán.
+- **Nhưng LÀ 1 lỗ hổng thật**: có 1 khoảng thời gian ngắn (quan sát được: vài
+  chục giây tới vài phút) nơi các node trả lời RPC KHÁC NHAU cho CÙNG 1 số
+  block — 1 client bên ngoài đọc đúng lúc đó có thể thấy dữ liệu KHÔNG NHẤT
+  QUÁN giữa các node (dù cuối cùng cùng hội tụ đúng). Ngoài ra: nếu field
+  `miner` có ý nghĩa kinh tế thật (chia thưởng gas-fee cho validator — xem
+  commit `808fe371`), 1 block có `miner` rỗng thay vì địa chỉ thật nghĩa là
+  validator đáng lẽ được thưởng cho block đó KHÔNG được ghi nhận đúng — cần
+  người có domain knowledge về phần thưởng/kinh tế xác nhận đây có phải hành
+  vi đúng ý định hay không.

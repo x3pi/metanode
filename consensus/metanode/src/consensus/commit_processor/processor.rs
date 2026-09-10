@@ -674,7 +674,23 @@ impl CommitProcessor {
         // for a genuinely new/later stall once next_expected_index has actually moved past the
         // previous one. See the halt-alert call site's own doc comment for the full reasoning.
         let mut halt_alert_sent_for_current_stall = false;
-        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
+        // 15 min of zero dispatch progress. Overridable via
+        // METANODE_TESTING_RECOVERY_STUCK_TIMEOUT_SECS -- ONLY for staging/CI verification
+        // (e.g. driving `node_chaos_restart` through this exact branch in minutes instead of
+        // 15+), never meant to be set in a real deployment. Unlike before Phuong an A, shortening
+        // this number carries NO fork risk any more: the old code path this timeout used to gate
+        // was "trust unverified on-disk data" (unsafe to rush -- that's exactly what caused the
+        // 2026-09-10 fork when it was hardcoded down to 120s), but the ONLY thing this timeout
+        // gates now is "log a halt marker and stop dispatching" (safe at any value -- the worst a
+        // too-short value can do is halt sooner / more eagerly, never trust anything unverified).
+        // Parsed once per call to this loop, not the hot path.
+        let recovery_stuck_timeout_secs: u64 = std::env::var("METANODE_TESTING_RECOVERY_STUCK_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(900);
+        #[allow(non_snake_case)]
+        let RECOVERY_STUCK_TIMEOUT_SECS: u64 = recovery_stuck_timeout_secs;
 
         // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
         // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
