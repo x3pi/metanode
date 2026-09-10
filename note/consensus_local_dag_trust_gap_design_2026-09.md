@@ -1,11 +1,15 @@
 # Thiết kế: đóng lỗ hổng "tin dữ liệu DAG cục bộ không có bằng chứng mật mã"
 
-**Trạng thái: CHỈ LÀ THIẾT KẾ, CHƯA CODE.** Tài liệu này phân tích kỹ nguyên
-nhân gốc thật sự của sự cố fork ngày 2026-09-10 (xem
-`note/deploy_hardening_and_incident_drills_2026-09.md` mục 7 để biết bối
-cảnh sự cố gốc) và đề xuất hướng sửa kiến trúc — **không phải chỉnh 1 hằng
-số thời gian**. Không triển khai gì từ tài liệu này cho tới khi được review
-và đồng ý rõ ràng.
+**Trạng thái: CHỈ LÀ THIẾT KẾ, CHƯA CODE, CHƯA SẴN SÀNG TRIỂN KHAI.** Tài
+liệu này phân tích kỹ nguyên nhân gốc thật sự của sự cố fork ngày
+2026-09-10 (xem `note/deploy_hardening_and_incident_drills_2026-09.md` mục
+7 để biết bối cảnh sự cố gốc), đối chiếu với cách hệ thống Sui thật (gốc
+mà codebase này fork từ đó) đã xử lý đúng loại sự cố này trong sản xuất
+thật (mục 4.5), và đề xuất **2 phương án kiến trúc thay thế** — không phải
+chỉnh 1 hằng số thời gian. Còn ít nhất 1 quyết định sản phẩm/vận hành (chọn
+giữa Phương án A/B, mục 6 việc #0) và nhiều việc kỹ thuật cần xác nhận
+(mục 6) TRƯỚC KHI ai đó code. Không triển khai gì từ tài liệu này cho tới
+khi được review và đồng ý rõ ràng.
 
 ---
 
@@ -154,7 +158,116 @@ phải một chứng minh toán học.
 
 ---
 
-## 5. Đề xuất kiến trúc (2 lớp, độc lập, bổ trợ nhau)
+## 4.5. 🌍 Đối chiếu với thực tế: Sui thật (hệ thống gốc mà codebase này
+fork từ đó) đã gặp gần như đúng sự cố này — và xử lý HOÀN TOÀN KHÁC
+
+Đã tra cứu (2026-09-10, sau khi user yêu cầu kiểm tra xem blockchain thực
+tế có giải pháp hay hơn không). Toàn bộ `consensus-core` trong repo này ghi
+`Copyright (c) Mysten Labs, Inc.` — đây là fork/derivative thật của
+`consensus-core` dùng trong Sui mainnet (giao thức Mysticeti). Tra được 1
+sự cố CÓ THẬT, đã công bố chính thức: **"Sui Mainnet Network Stall
+Resolution"** (tháng 3/2026,
+[blog.sui.io](https://www.sui.io/blog/sui-mainnet-network-stall-resolution)).
+
+**Tóm tắt sự cố thật của Sui:** 1 bug logic trong xử lý commit (edge-case
+liên quan garbage collection) khiến các validator tính ra kết quả đồng
+thuận KHÁC NHAU từ cùng đầu vào — về bản chất là cùng 1 lớp vấn đề với sự
+cố của chúng ta (dữ liệu/tính toán cục bộ lệch khỏi những gì mạng thật sự
+đồng thuận).
+
+**Cách Sui thật xử lý — đối lập hoàn toàn với cơ chế "ân xá" trong codebase
+này:**
+- *"they halted rather than proceed unilaterally"* — validator **DỪNG
+  LẠI**, không tự ý tiến tới khi không đạt quorum (>1/3 stake ký digest
+  khác nhau → không thể certification).
+- Câu trích dẫn quan trọng nhất: **"Critically, no validator trusted its
+  own unconfirmed decision locally."**
+- Cơ chế "quarantine" (khu vực tạm giữ effect chưa finalize) chặn TUYỆT ĐỐI
+  việc hoàn tất cho tới khi đạt chứng thực (certification) bằng quorum
+  stake thật — không có đường "tự tin sau khi chờ đủ lâu" ở bất kỳ đâu
+  trong kiến trúc gốc.
+- Phục hồi: kỹ sư tìm nguyên nhân gốc → viết bản vá → **validator của
+  Mysten Labs tự kiểm thử, xác nhận đúng** → validator khác nâng cấp binary
+  đã vá, "replay consensus AN TOÀN", nối lại ký khi quorum khôi phục. Đây
+  là quy trình CÓ NGƯỜI, CÓ KIỂM CHỨNG, không phải tự động hoá âm thầm.
+
+**Ý nghĩa cho thiết kế:** cơ chế `PERMANENT-GAP-RECOVERY` (ân xá theo thời
+gian) trong file `commit_processor/processor.rs` **là 1 bổ sung riêng của
+MetaNode, KHÔNG tồn tại trong triết lý an toàn của hệ thống Sui gốc** mà nó
+kế thừa phần lõi consensus-core. Điều này gợi ý mạnh mẽ: thay vì cố làm cho
+cơ chế "ân xá" AN TOÀN HƠN (Lớp 1/Lớp 2 ở mục 5), có thể hướng đúng đắn hơn
+— đã được CHỨNG MINH BẰNG SẢN XUẤT THẬT — là:
+
+1. **Hạn chế/loại bỏ khả năng "tự tin dữ liệu cục bộ chưa xác nhận"** thay
+   vì cố bọc thêm lớp bảo vệ cho nó. Khi thực sự bí (không có bằng chứng
+   nào cho thấy mạng còn đồng thuận chỉ số này), hành vi AN TOÀN là **dừng
+   node đó lại + báo động rõ ràng cho operator** (chấp nhận mất khả dụng
+   cục bộ tại 1 node, giống Sui thật chấp nhận mất khả dụng TOÀN MẠNG khi
+   cần) — không phải âm thầm đoán và tiếp tục chạy.
+2. **Ưu tiên sửa 2 bug gốc đã tìm thấy trong cùng phiên điều tra** (crash-
+   loop RocksDB không tự hồi phục — mục 7 tài liệu incident chính; lỗi bàn
+   giao peer_rpc sau restart dồn dập) — rất có khả năng tình huống "kẹt
+   thật, không thể xác nhận được" vốn dĩ CỰC HIẾM trong vận hành bình
+   thường (Sui thật cũng cần 1 bug hiếm, edge-case GC, mới gây ra sự cố
+   tương tự) — sửa đúng 2 bug gốc có thể loại bỏ phần lớn nhu cầu phải có
+   "ân xá" tự động ngay từ đầu, thay vì tốn công làm cho việc đoán mò trở
+   nên "an toàn hơn".
+
+**Tham khảo thêm 1 mẫu thiết kế production khác, cùng họ BFT** (tra cứu
+song song): kiến trúc `SafetyRules` của DiemBFT/HotStuff — thay vì cố bảo
+vệ TOÀN BỘ dữ liệu DAG cục bộ, hệ thống này chỉ lưu bền vững (đồng bộ,
+fsync ngay khi cập nhật) **1 lượng cực nhỏ dữ liệu "an toàn-quan-trọng"**
+(vd: round cao nhất đã bỏ phiếu) — đủ để KHÔNG BAO GIỜ tự mâu thuẫn
+(equivocate) dù mất điện/crash bất cứ lúc nào — còn lại TOÀN BỘ dữ liệu DAG
+khác được coi là "cache", có thể mất/hỏng sau crash và **luôn được phép
+re-fetch lại từ peer mà không có rủi ro an toàn nào**, vì bản thân nó không
+phải thứ quyết định an toàn. Đối chiếu với codebase này: `next_expected_index`/
+`gap_recovery_bypass_ceiling` hiện đang suy luận dựa trên TOÀN BỘ kho DAG
+cục bộ (mục 2.4) thay vì dựa trên 1 "điểm neo an toàn" hẹp, tối giản kiểu
+`SafetyRules` — đây là 1 hướng thiết kế thay thế đáng cân nhắc song song
+với mục 5, có thể còn triệt để hơn nhưng cũng là thay đổi kiến trúc lớn
+hơn nhiều.
+
+---
+
+## 5. Hai phương án — trình bày cả hai, chưa chốt 1 phương án duy nhất
+
+### Phương án A — Bỏ khả năng "tự tin dữ liệu cục bộ chưa xác nhận", theo
+đúng mô hình Sui thật đã dùng trong sản xuất (khuyến nghị xem xét trước)
+
+Cụ thể: khi `gap_recovery_bypass_ceiling` sắp được set (tức là hệ thống
+sắp sửa "ân xá" 1 commit chưa xác nhận được), THAY VÌ cấp ân xá và tiếp tục
+dispatch, node:
+1. Log lỗi nghiêm trọng, đầy đủ bối cảnh (index bị kẹt, đã kẹt bao lâu,
+   bao nhiêu commit đang chờ phía sau) — dùng đúng mức độ chi tiết mà
+   `PERMANENT-GAP-RECOVERY` hiện tại đã ghi log.
+2. Chuyển sang trạng thái "chờ can thiệp" tương đương `is_terminally_failed`
+   mà `LAYER-6 fork_guard` đã dùng khi phát hiện fork — **không** tự
+   `abort()` ngay (khác LAYER-6 — ở đây chưa CHẮC CHẮN có gì sai, chỉ là
+   CHƯA XÁC NHẬN được, nên dừng dispatch nhưng vẫn giữ node sống để dễ chẩn
+   đoán/can thiệp, không cần khởi động lại).
+3. Gửi cảnh báo operator thật (Telegram, đã có sẵn hạ tầng cảnh báo trong
+   `deploy/ci/incident_drills/drill_telegram_alert.sh` và hệ thống alert
+   hiện có) — không chỉ ghi log im lặng.
+4. Việc "gỡ kẹt" trở thành 1 hành động CÓ KIỂM SOÁT (vận hành thủ công gọi
+   `--restore-node`/`--reset-all` cho đúng node đó, hoặc 1 công cụ tự động
+   riêng chạy NGOÀI đường găng chính, có thể re-sync xác minh chữ ký thật
+   từ peer trước khi cho node tham gia lại) — không phải tự động âm thầm
+   trong vòng lặp dispatch.
+
+**Đánh đổi:** chấp nhận 1 node có thể "đứng yên" lâu hơn (mất khả dụng cục
+bộ) thay vì tự đoán — đúng triết lý Sui thật đã áp dụng thành công trong sự
+cố sản xuất thật của họ. Nếu bug gốc (crash-loop RocksDB, peer_rpc handover)
+được sửa trước, tình huống thực sự cần dùng tới đường này sẽ RẤT HIẾM.
+
+**Việc cần làm thêm nếu chọn hướng này:** xác nhận việc 1 node "đứng yên
+chờ can thiệp" không tự nó kéo cả cụm xuống dưới ngưỡng quorum một cách
+không cần thiết — cần review kỹ có bao nhiêu node có thể rơi vào trạng thái
+này cùng lúc trong kịch bản xấu nhất, và liệu ngưỡng BFT (2f+1) còn đứng
+vững hay không khi đó.
+
+### Phương án B — Làm an toàn hơn cơ chế "ân xá" hiện có (2 lớp, phương án
+dự phòng nếu vẫn cần khả năng tự động hồi phục mà không có operator)
 
 **⚠️ CẬP NHẬT (sau khi user yêu cầu xem xét kỹ rủi ro deadlock/race —
 2026-09-10, cùng ngày):** bản thiết kế Lớp 2 ban đầu (bên dưới, đã sửa) có
@@ -269,6 +382,14 @@ lại y hệt lỗi đó.
 
 ## 6. Việc cần làm TRƯỚC KHI code bất cứ gì ở mục 5
 
+0. **[MỚI, quan trọng nhất] Chọn giữa Phương án A và B ở mục 5** — đây là
+   quyết định SẢN PHẨM/VẬN HÀNH (đánh đổi giữa "an toàn tuyệt đối, chấp
+   nhận mất khả dụng cục bộ nhiều hơn" theo đúng mô hình Sui thật, và "vẫn
+   giữ khả năng tự hồi phục không cần người can thiệp, nhưng phức tạp hơn
+   và còn 1 chút rủi ro dù đã giảm nhiều") — không phải quyết định kỹ
+   thuật thuần túy, cần người có thẩm quyền quyết định (không nên để 1 mình
+   AI tự chọn). Nếu chọn Phương án A: xác nhận thêm câu hỏi ở cuối mục đó
+   (nhiều node cùng "đứng yên" có kéo cả cụm dưới ngưỡng quorum không).
 1. **Dựng lại chính xác cách dữ liệu trên đĩa của node-3 bị sai** (nếu còn
    truy được — dữ liệu gốc của sự cố đã bị xóa khi `--reset-all` sau đó, xem
    mục "Đã xử lý" trong tài liệu incident chính; cần 1 lần tái hiện MỚI, có
