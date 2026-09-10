@@ -156,8 +156,20 @@ phải một chứng minh toán học.
 
 ## 5. Đề xuất kiến trúc (2 lớp, độc lập, bổ trợ nhau)
 
+**⚠️ CẬP NHẬT (sau khi user yêu cầu xem xét kỹ rủi ro deadlock/race —
+2026-09-10, cùng ngày):** bản thiết kế Lớp 2 ban đầu (bên dưới, đã sửa) có
+lỗi thật: "bắt buộc chờ xác nhận từ peer mới được quyết định cục bộ" không
+có giới hạn thời gian và không có đường thoát khi TẤT CẢ peer cũng đang
+trong tình trạng tương tự (vd toàn cụm cùng restart) — đúng loại
+**self-locking cycle** mà chính file `commit_syncer/mod.rs` đã ghi nhận
+từng gặp thật ("a self-locking cycle that, once entered..., never recovers
+on its own. Reproduced directly: a single-validator devnet stuck >1
+minute"). Đã tìm thấy 1 mẫu ĐÚNG ĐẮN có sẵn trong chính codebase cho đúng
+tình huống này — xem mục 5.3 — và sửa lại Lớp 2 theo đúng mẫu đó.
+
 ### Lớp 1 — Xác minh lại chữ ký khi tin dữ liệu đọc từ đĩa cho quyết định an
-toàn-quan-trọng (ưu tiên cao, phạm vi hẹp)
+toàn-quan-trọng (ưu tiên cao, phạm vi hẹp, ĐÃ XÁC NHẬN không có rủi ro
+deadlock/race)
 
 **Không** xác minh lại MỌI lần đọc đĩa (quá tốn kém, phá vỡ lý do thiết kế
 cache RAM ngay từ đầu). Chỉ xác minh lại chữ ký cho đúng những block nằm
@@ -165,6 +177,15 @@ trong chuỗi nhân quả dẫn tới 1 quyết định **"ân xá"** (`gap_reco
 — đây vốn đã là đường XỬ LÝ HIẾM, có sẵn ngân sách thời gian/CPU (bài test
 thật cho thấy vài phút tới hàng chục phút mới xảy ra 1 lần), nên trả thêm
 chi phí xác minh chữ ký ở đúng thời điểm này là hoàn toàn chấp nhận được.
+
+**Vì sao không có rủi ro deadlock/race (đã kiểm tra code thật):**
+`block.verify_signature(&context)` chỉ cần khóa công khai từ
+`context.committee` — `Context` là **immutable theo từng epoch**
+(`context.rs`, field `committee: Committee` không bọc `RwLock`/`Mutex`;
+chuyển epoch tạo hẳn `Context` mới, không sửa đè cái cũ) — đây là tính toán
+CPU thuần túy, không khóa (lock), không I/O mạng, không phụ thuộc bất kỳ
+tiến trình/thread nào khác. Không có đường nào dẫn tới deadlock hay race
+condition ở lớp này.
 
 Việc cần làm (mức thiết kế, chưa code):
 - Thêm 1 hàm mới, ví dụ `verify_causal_chain_signatures(commit_index) ->
@@ -177,22 +198,62 @@ Việc cần làm (mức thiết kế, chưa code):
   vòng lặp DIGEST-GATE POLL (`commit_processor/processor.rs`).
 - Nếu xác minh THẤT BẠI: KHÔNG cấp ân xá cho chỉ số đó — log lỗi nghiêm
   trọng (đây là bằng chứng dữ liệu cục bộ đã hỏng thật, cần cảnh báo
-  operator ngay, không chỉ âm thầm bỏ qua), và áp dụng lớp 2 dưới đây.
+  operator ngay, không chỉ âm thầm bỏ qua). **Không** tự ý xóa/reset dữ liệu
+  cục bộ ở đây (đó là quyết định vận hành, không phải quyết định tự động) —
+  chỉ từ chối ân xá và tiếp tục chờ đường xác minh bình thường + Lớp 2.
 
-### Lớp 2 — Coi "vừa khởi động lại sau khi dừng không sạch" là điều kiện
-kích hoạt bắt buộc phải re-sync từ peer, không được tự quyết định cục bộ
+### 5.3. Mẫu ĐÚNG ĐẮN đã có sẵn trong codebase — dùng làm khuôn mẫu cho Lớp 2
 
-Mở rộng khái niệm hiện có `COLD-START-BYPASS`/`startup_sync_active` (đã
-dùng cho node hoàn toàn mới) sang thêm 1 trường hợp: **node vừa phục hồi
-sau 1 lần dừng KHÔNG SẠCH** (process bị SIGKILL/panic/crash, không phải
-`systemctl stop` bình thường qua SIGTERM). Cách phát hiện: ghi 1 "cờ bẩn"
-(dirty flag) xuống đĩa NGAY KHI khởi động, xóa cờ đó CHỈ KHI dừng sạch qua
-đường tắt bình thường (SIGTERM handler) — giống hệt filesystem journal
-dùng "dirty bit". Nếu khởi động lên mà thấy cờ vẫn còn (nghĩa là lần trước
-dừng không qua đường sạch), coi node đó như `is_catching_up()=true` bắt
-buộc, chặn hoàn toàn `decided_with_local_blocks`/amnesty cho tới khi hoàn
-tất 1 vòng re-sync xác minh chữ ký thật với ít nhất 1 peer — đúng tinh thần
-`COLD-START-BYPASS` đã có, chỉ mở rộng điều kiện kích hoạt.
+`node/setup_consensus/startup_sync.rs`, cơ chế "ANTI-FORK" lúc khởi động:
+so `block_hash`/`state_root` của block cục bộ với peer, **giới hạn 10 lần
+thử × 3 giây = tối đa 30 giây**; nếu hết giới hạn mà vẫn chưa xác nhận
+được (vd peer cũng đang restart) thì **KHÔNG chặn cứng** — log rõ ràng rồi
+chủ động "DEFERRING to POST-GATE-VERIFY" và tiếp tục chạy, giao phó việc
+bắt lỗi cho 1 lớp kiểm tra ĐỘC LẬP, chạy SAU, không nằm trên đường găng
+(critical path). Đây chính là triết lý thật sự của toàn bộ hệ thống Zero-
+Fork Invariant, thể hiện rõ nhất qua `LAYER-6 fork_guard`: **không phải
+"không bao giờ để tính sai xảy ra"**, mà là **"phát hiện đủ nhanh + tự
+dừng sạch trước khi cái sai kịp lan ra ngoài"**. `LAYER-6` chạy như 1
+observer độc lập (kiểm tra định kỳ mỗi 10 block, không chặn luồng chính),
+và khi phát hiện sai thì `abort()` — 1 node tự dừng KHÔNG làm hỏng phần
+còn lại của mạng (BFT không phụ thuộc vào đầu ra của riêng 1 node), nên
+đây là hành vi an toàn thật sự, không phải một sự thỏa hiệp.
+
+### Lớp 2 (ĐÃ SỬA) — Kiểm tra chéo NHANH, KHÔNG CHẶN LUỒNG, riêng cho các
+commit vừa được ân xá — theo đúng mẫu 5.3, không phải "chặn trước"
+
+~~(Bản cũ: coi "vừa khởi động lại sau khi dừng không sạch" là điều kiện bắt
+buộc phải re-sync từ peer TRƯỚC KHI được quyết định cục bộ — ĐÃ LOẠI BỎ vì
+rủi ro tự khóa khi toàn cụm cùng restart, xem cảnh báo đầu mục 5.)~~
+
+Thiết kế thay thế: khi 1 commit được dispatch dưới "ân xá" (dù đã qua Lớp 1
+— Lớp 1 chỉ bắt được corruption ở tầng CHỮ KÝ block, không bắt được mọi
+dạng lỗi khác có thể xảy ra), đăng ký nó vào 1 hàng đợi kiểm tra chéo
+NGẮN HẠN, xử lý bởi 1 task nền độc lập (giống hệt cách `LAYER-6` đã chạy
+độc lập với luồng chính):
+- Trong vòng ví dụ 60 giây SAU KHI dispatch (không phải trước — không chặn
+  gì cả), chủ động hỏi ít nhất 1 peer "bạn có commit_index này chưa, digest
+  của bạn là gì".
+- Nếu peer xác nhận KHỚP → xóa khỏi hàng đợi, không làm gì thêm.
+- Nếu peer xác nhận SAI (mismatch) → kích hoạt đúng đường xử lý `LAYER-6`
+  đã có (log nghiêm trọng, tự `abort()` sạch) — CÀNG SỚM CÀNG TỐT so với
+  hiện tại (tới 38 phút mới bắt được nhờ chu kỳ "mỗi 10 block" chung chung,
+  không ưu tiên riêng các commit đến từ đường ân xá — vốn là đường RỦI RO
+  CAO hơn hẳn đường bình thường).
+- Nếu KHÔNG peer nào trả lời trong 60 giây (peer cũng đang restart, mạng
+  gián đoạn...) → **KHÔNG chặn, KHÔNG coi là lỗi** — ghi log mức WARN
+  "chưa xác minh chéo được", tiếp tục theo dõi ở lần kiểm tra định kỳ tiếp
+  theo (tận dụng lại đúng chu kỳ "mỗi 10 block" của `LAYER-6` sẵn có làm
+  lưới an toàn cuối cùng) — **không có bất kỳ đường nào trong thiết kế này
+  chặn luồng dispatch chính**, nên không thể tự khóa dù TẤT CẢ peer cùng
+  im lặng cùng lúc.
+
+**Vì sao thiết kế này không có rủi ro deadlock:** khác bản cũ, Lớp 2 mới
+KHÔNG NẰM TRÊN đường găng — nó là 1 task quan sát chạy song song, không có
+ai chờ nó, không ai bị nó chặn. Trường hợp xấu nhất (không peer nào phản
+hồi) chỉ dẫn tới "chưa xác minh chéo được nhanh, phải chờ chu kỳ định kỳ
+bắt sau" — giống hệt mức độ an toàn/rủi ro hệ thống ĐANG CÓ hôm nay (chỉ
+nhanh hơn trong trường hợp tốt, không tệ hơn trong trường hợp xấu nhất).
 
 ### (Không ưu tiên ngay) Củng cố đường `CommitSyncer` fetch `CertifiedCommit`
 làm cơ chế phục hồi CHÍNH
@@ -216,10 +277,25 @@ lại y hệt lỗi đó.
 2. Đo chi phí thật của việc xác minh chữ ký lại cho 1 chuỗi nhân quả (có
    thể vài trăm tới vài nghìn block) — xác nhận không tạo ra 1 nút thắt cổ
    chai MỚI ở đúng con đường vốn đã hiếm/khẩn cấp này.
-3. Thiết kế chi tiết cơ chế "dirty flag" ở Lớp 2 sao cho **chính bản thân
-   flag đó không trở thành 1 điểm kẹt/fork mới** (vd: flag bị mất/hỏng
-   cũng phải fail-safe về phía "coi như bẩn", không phải "coi như sạch").
-4. Review bởi người có domain knowledge sâu về `consensus-core`
+3. ~~Thiết kế chi tiết cơ chế "dirty flag"~~ — **đã bỏ hướng này** sau khi
+   xem xét kỹ rủi ro deadlock (mục 5, cập nhật) — Lớp 2 giờ dùng mô hình
+   observer bất đồng bộ (mục 5.3/Lớp 2 mới), không cần "dirty flag" nữa.
+4. **[MỚI] Xác nhận task nền (background task) của Lớp 2 mới không tự nó
+   trở thành 1 nguồn rò rỉ tài nguyên** nếu chạy liên tục qua nhiều epoch/
+   nhiều giờ (hàng đợi kiểm tra chéo phải có giới hạn kích thước + tự dọn
+   dẹp mục quá hạn, giống cách `pending_local_commits`/`DIGEST_HISTORY_RETAIN`
+   đã giới hạn kích thước ở những nơi khác trong cùng file) — đây không phải
+   rủi ro deadlock/fork, nhưng là rủi ro vận hành cần tính tới trước khi
+   code.
+5. **[MỚI] Xác nhận việc gọi peer để kiểm tra chéo (Lớp 2 mới) dùng đúng
+   cơ chế mạng đã có** (`peer_rpc`/`CommitSyncer` fetch) — KHÔNG tự mở thêm
+   1 đường kết nối mạng mới — để không lặp lại đúng lớp bug peer_rpc
+   "early→full server handover" đã phát hiện hôm nay (mục 7 tài liệu
+   incident chính) ở 1 chỗ mới.
+6. Review bởi người có domain knowledge sâu về `consensus-core`
    (Mysticeti/Sui gốc) — đây là thay đổi chạm vào đúng ranh giới tin cậy
    (trust boundary) cốt lõi của toàn bộ hệ thống BFT, rủi ro cao nếu làm
-   sai theo 1 hướng khác.
+   sai theo 1 hướng khác. **Đặc biệt xin review kỹ phần "không chặn luồng
+   chính" của Lớp 2 mới** — đây là thuộc tính AN TOÀN QUAN TRỌNG NHẤT của
+   thiết kế (không deadlock), cần người khác xác nhận độc lập, không chỉ
+   dựa vào 1 lượt tự-rà-soát.
