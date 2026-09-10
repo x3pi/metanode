@@ -816,3 +816,22 @@ tải cao, cần 1 bài test riêng có tạo giao dịch thật liên tục tro
 **CHƯA sửa được**: dữ liệu ĐÃ MẤT của node-0 (từ TRƯỚC khi có bản vá này) —
 bản vá chỉ ngăn KHÔNG TÁI DIỄN trong tương lai, không phục hồi được commit đã
 mất. node-0 vẫn cần quyết định riêng: resync từ peer, hay restore snapshot.
+
+### 9.6. ✅ node-0 đã phục hồi (resync từ peer, không đụng genesis/3 node kia)
+
+Trước khi chạy `ansible_deploy.sh --reset-all --only-node 0` (theo đúng gợi ý
+trong log lỗi của chính node), kiểm tra kỹ code thì phát hiện 1 rủi ro thật
+nghiêm trọng: bước tạo genesis/keys trong role `local_build` **không hề lọc
+theo `target_node`** — nghĩa là `--reset-all` (dù có `--only-node`) sẽ **tạo
+lại genesis cho TOÀN CỤM**, có nguy cơ làm hỏng luôn node 1/2/3 đang khỏe.
+**KHÔNG dùng lệnh đó.**
+
+Thay vào đó: xác nhận `config/genesis.json` + `keys/` của node-0 nằm TÁCH
+BIỆT khỏi `data/` (nơi chứa state hỏng) — chỉ **đổi tên (không xoá)**
+`/opt/metanode/node-0/data` → `data.corrupted-backup-20260910` (có thể khôi
+phục lại nếu cần), khởi động lại service. Node-0 tự resync từ genesis, bắt
+kịp cả cụm (block #362, hash/stateRoot khớp node-2/node-3) chỉ trong vài
+giây, qua đúng cơ chế catch-up sync đã có sẵn (cùng cơ chế node 1/2/3 dùng cả
+phiên nay) — không đụng gì tới genesis, keys, hay 3 node còn lại.
+
+**Cụm hiện tại: 4/4 node khỏe, đồng thuận đúng.**
