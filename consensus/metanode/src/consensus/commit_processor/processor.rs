@@ -48,6 +48,50 @@ fn diag_digest_maybe_print() {
     }
 }
 
+// TEMPORARY DIAGNOSTIC (2026-09-10): counts resolve_leader_address() outcomes,
+// same eprintln!-bypasses-tracing-subscriber rationale as the DIGEST-GATE
+// diagnostic above. Added while investigating a real, transient block-hash
+// mismatch (block #339, leader_address 0x4a61f5...4979 vs empty/zero) found
+// live during Phuong an A verification -- see
+// note/consensus_local_dag_trust_gap_design_2026-09.md mục 8. The open
+// question: `Commit::new_with_leader_address` is never called anywhere in the
+// codebase (confirmed by grep), so every Commit's OWN leader_address should be
+// empty at creation -- yet grepping this cluster's entire log history for
+// "[LEADER]" (resolve_leader_address's own warn!/info! lines, which should NOT
+// be filtered at the default RUST_LOG=info) found ZERO occurrences on any
+// node, which would only make sense if PREEMBEDDED (fast path, subdag.
+// leader_address already 20 bytes, logged at trace! -- filtered by default)
+// fires 100% of the time. These counters settle that empirically instead of
+// guessing further from existing logs. Remove once this is settled.
+static DIAG_LEADER_PREEMBEDDED: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_RESOLVED_OK: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_WAITING_ITERS: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_OUT_OF_BOUNDS: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_INVALID_LEN: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_LAST_PRINT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_leader_maybe_print() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_LEADER_LAST_PRINT_SECS.load(StdOrdering::Relaxed);
+    if now >= last + 5
+        && DIAG_LEADER_LAST_PRINT_SECS
+            .compare_exchange(last, now, StdOrdering::Relaxed, StdOrdering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[DIAG leader-addr] preembedded={} resolved_ok={} waiting_iters={} out_of_bounds={} invalid_len={}",
+            DIAG_LEADER_PREEMBEDDED.load(StdOrdering::Relaxed),
+            DIAG_LEADER_RESOLVED_OK.load(StdOrdering::Relaxed),
+            DIAG_LEADER_WAITING_ITERS.load(StdOrdering::Relaxed),
+            DIAG_LEADER_OUT_OF_BOUNDS.load(StdOrdering::Relaxed),
+            DIAG_LEADER_INVALID_LEN.load(StdOrdering::Relaxed)
+        );
+    }
+}
+
 use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
@@ -398,6 +442,8 @@ impl CommitProcessor {
         // trust it and skip local resolution. This ensures recovering nodes use the
         // same address as the original producing node.
         if subdag.leader_address.len() == 20 {
+            DIAG_LEADER_PREEMBEDDED.fetch_add(1, StdOrdering::Relaxed);
+            diag_leader_maybe_print();
             trace!(
                 "✅ [LEADER] Using pre-embedded leader_address from commit (commit={}, epoch={}, addr=0x{})",
                 subdag.commit_ref.index, epoch, hex::encode(&subdag.leader_address)
@@ -421,6 +467,8 @@ impl CommitProcessor {
                     if leader_author_index < addrs.len() {
                         let addr = &addrs[leader_author_index];
                         if addr.len() == 20 {
+                            DIAG_LEADER_RESOLVED_OK.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
                             if logged_warning {
                                 info!(
                                     "✅ [LEADER] epoch_eth_addresses resolved after {}ms (epoch={}, index={})",
@@ -430,10 +478,14 @@ impl CommitProcessor {
                             subdag.leader_address = addr.clone();
                             return;
                         } else {
+                            DIAG_LEADER_INVALID_LEN.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
                             warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={})", epoch, leader_author_index, addr.len());
                             return;
                         }
                     } else {
+                        DIAG_LEADER_OUT_OF_BOUNDS.fetch_add(1, StdOrdering::Relaxed);
+                        diag_leader_maybe_print();
                         warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={})", epoch, leader_author_index, addrs.len());
                         return;
                     }
@@ -459,6 +511,8 @@ impl CommitProcessor {
                     epoch, leader_author_index, elapsed.as_secs()
                 );
             }
+            DIAG_LEADER_WAITING_ITERS.fetch_add(1, StdOrdering::Relaxed);
+            diag_leader_maybe_print();
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                 _ = epoch_eth_addresses_notify.notified() => {}
