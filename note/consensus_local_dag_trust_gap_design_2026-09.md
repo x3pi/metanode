@@ -658,3 +658,107 @@ vực liền kề.
   validator đáng lẽ được thưởng cho block đó KHÔNG được ghi nhận đúng — cần
   người có domain knowledge về phần thưởng/kinh tế xác nhận đây có phải hành
   vi đúng ý định hay không.
+
+---
+
+## 9. 🔴 SỰ CỐ THẬT THỨ 2 (2026-09-10, trong lúc đang deploy build chẩn đoán
+   cho mục 8): node-0 tự chặn khởi động vì "NOMT root MISMATCH" — HOÀN TOÀN
+   KHÁC, KHÔNG LIÊN QUAN tới mục 7-8, nhưng đủ nghiêm trọng để ghi lại đầy đủ,
+   kể cả 1 lần tôi SUÝT sửa sai
+
+### 9.1. Triệu chứng
+
+Redeploy build chẩn đoán (mục 8.3, chỉ thêm counter, KHÔNG đổi logic) lên cả
+4 node → node-0 (không phải 1/2/3) từ chối khởi động, lặp lại đúng 3 lần rồi
+dừng hẳn (circuit breaker `StartLimitBurst=5` hoạt động đúng, không crash-loop
+vô hạn):
+
+```
+🚨 [INTEGRITY] NOMT account_state root MISMATCH: header=0x71b031408fe4fa25...,
+   NOMT=0x0959d5af96915538... — state is corrupted
+🛑 Exiting with code 78 (EX_CONFIG) — restore from snapshot to fix.
+```
+
+node 1/2/3 khởi động lại hoàn toàn bình thường CÙNG lúc, CÙNG build — xác
+nhận đây KHÔNG phải do thay đổi Rust của tôi (chỉ thêm counter, không đổi
+control flow) và KHÔNG phải lỗi hệ thống của cả cụm.
+
+### 9.2. Tôi đã SUÝT sửa sai — ghi lại để không ai lặp lại
+
+Đọc code Go (`app_blockchain.go`) thấy có sẵn 1 cơ chế "catch-up bypass":
+khi NOMT root không khớp header và không tìm được block khớp nào trong
+LevelDB (cả tìm lùi lẫn tìm tới), code này KHÔNG coi là lỗi — nó gọi
+`ChainState.SetFutureNomtRoot(...)` và log "Preserving NOMT state... registering
+future unaligned root for catch-up bypass", ngụ ý sẽ tự khớp lại sau. Tôi đã
+VIẾT 1 bản sửa cho `startup_integrity_check.go` để CHECK 4 công nhận
+`futureNomtRoot` này là ngoại lệ hợp lệ (giống hệt cách nó đã công nhận
+`isSnapshotRecovery`), tức là cho phép node-0 khởi động dù mismatch.
+
+**Trước khi build/deploy bản sửa đó, kiểm tra thêm 1 bước (đúng tinh thần
+"test kỹ" user yêu cầu) thì phát hiện**: `ChainState.GetFutureNomtRoot()`
+**không được gọi ở BẤT KỲ ĐÂU khác trong toàn bộ codebase** (`grep -rn
+"GetFutureNomtRoot"` chỉ khớp định nghĩa + đúng đoạn sửa của tôi). Nghĩa là
+cờ "catch-up bypass" này được ĐẶT nhưng KHÔNG BAO GIỜ ĐƯỢC ĐỌC LẠI bởi bất kỳ
+logic catch-up/execution thật nào — lời hứa "sẽ tự khớp lại khi có block mới"
+trong comment KHÔNG hề được nối dây tới bất cứ thứ gì thật sự kiểm tra hay xoá
+cờ đó. Nếu tôi merge bản sửa, node-0 sẽ khởi động lại với state có khả năng
+THẬT SỰ sai, và KHÔNG có bất kỳ cơ chế nào trong hệ thống sẽ phát hiện hay bắt
+lại sai lầm đó sau này — chính xác kiểu lỗi mà toàn bộ mục 1-8 của tài liệu
+này đang cảnh báo (tin 1 "cờ tạm hoãn" chưa được xác minh thật). **Đã revert
+ngay (`git checkout --`) trước khi build/deploy, không commit.**
+
+Kết luận: `startup_integrity_check.go` đang làm ĐÚNG — chặn khởi động là hành
+vi AN TOÀN, không phải bug cần "nới lỏng". Vấn đề thật nằm ở CHỖ KHÁC (mục
+9.3).
+
+### 9.3. Nguyên nhân gốc thật (chưa chốt hoàn toàn — cần điều tra sâu về NOMT,
+   ngoài phạm vi phiên này)
+
+Truy log qua `journalctl` (KHÔNG có trong `execution.log` — phát hiện phụ:
+các dòng log CHECK 1-5/`[STARTUP] NOMT Root MISMATCH` chỉ xuất hiện qua
+`journalctl -u metanode-execution-N`, không hề nằm trong file `execution.log`
+dù cùng 1 tiến trình — đáng chú ý cho lần điều tra sau, đừng chỉ grep
+execution.log):
+
+- `11:25:33`: process CŨ của node-0 dừng — log cho thấy chuỗi shutdown đầy đủ,
+  "Clean shutdown sentinel written", systemd xác nhận "Deactivated successfully"
+  (không phải SIGKILL).
+- `11:26:35`: process MỚI khởi động lần 1, ĐỌC ĐƯỢC sentinel ("✅ Clean shutdown
+  detected — skipping expensive integrity checks") — nhưng **VẪN exit code 78
+  giống hệt** các lần sau. Xác nhận: CHECK 4 (so khớp NOMT-vs-header) chạy
+  KHÔNG ĐIỀU KIỆN, không phụ thuộc "clean shutdown" (cờ đó chỉ giảm ĐỘ SÂU của
+  CHECK 2 — dò block chain — từ 100 xuống 10 block, không tắt CHECK 4). Sentinel
+  bị dùng 1 lần rồi tự xoá (đúng thiết kế), nên các lần khởi động SAU đó (2, 3)
+  hiển nhiên báo "No clean shutdown indicator" — không phải bằng chứng của 1
+  lần crash thật khác, chỉ là hệ quả của lần đầu đã tiêu thụ sentinel.
+- Tìm ngược từ block #360 xuống tới genesis, và tìm xuôi #361-#460, trong
+  LevelDB đều KHÔNG có block nào có header khớp với NOMT root hiện tại
+  (0x0959d5af...) — root này chưa từng khớp với bất kỳ block cụ thể nào trong
+  toàn bộ lịch sử LƯU TRỮ của chính node-0.
+- **Điều này xảy ra SAU 1 lần shutdown sạch (không SIGKILL)** — nghĩa là: hoặc
+  (a) NOMT (cây trie ghi đè theo trang, page cache 4GB) có 1 khoảng không đồng
+  bộ thật giữa việc flush cây trie và việc ghi header block, ngay cả khi chuỗi
+  shutdown báo "hoàn tất" thành công, hoặc (b) có 1 lỗi tính header
+  `AccountStatesRoot` không khớp với root NOMT thực tế lưu, độc lập với việc
+  shutdown sạch hay không.
+- node-0 đã chạy liên tục ~28 phút CPU time, khối lượng ghi rất lớn (hàng
+  triệu commit) trước lần restart này — khác biệt lớn nhất so với node 1/2/3
+  (vừa được tôi restart cách đây không lâu, ít "tích luỹ" hơn) — có thể là
+  yếu tố liên quan (tải ghi lớn/lâu dài) nhưng CHƯA xác nhận là nguyên nhân
+  thật, chỉ là tương quan quan sát được.
+
+### 9.4. Hiện trạng & khuyến nghị
+
+- Cụm vẫn khỏe: 3/4 node (đúng ngưỡng chịu lỗi BFT f=1 cho n=4) đồng thuận
+  bình thường. node-0 đã tự dừng AN TOÀN (`systemctl status` = `failed`,
+  KHÔNG crash-loop, không tốn tài nguyên) sau đúng 3 lần thử — không phải sự
+  cố khẩn cấp cho vận hành cụm ngay bây giờ.
+- **CHƯA đụng dữ liệu node-0** — không reset, không xoá, đúng nguyên tắc đã
+  thống nhất suốt phiên này.
+- Node-0 tự đề xuất 2 hướng phục hồi AN TOÀN, KHÔNG PHÁ DỮ LIỆU 3 node còn
+  lại: restore từ snapshot, hoặc resync từ peer — cần quyết định cụ thể + xác
+  nhận từ user trước khi thực hiện (không tự ý làm).
+- Nguyên nhân gốc thật của việc NOMT root lệch header sau shutdown sạch là 1
+  câu hỏi RIÊNG, SÂU hơn, thuộc tầng Go/NOMT — KHÔNG cùng phạm vi với mục 1-8
+  (leader_address, Phương án A) — nên điều tra như 1 việc độc lập, không rush
+  chung với các việc đang mở khác trong tài liệu này.
