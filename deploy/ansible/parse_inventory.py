@@ -194,6 +194,8 @@ if __name__ == '__main__':
         out = {
             "nodes": {},
             "roles": {},
+            "state_history_nodes": {},
+            "rpc_nodes": {},
             "tcp_nodes": {},
             "ssh": {}
         }
@@ -202,8 +204,12 @@ if __name__ == '__main__':
             url = f"http://{ip}:{10746 + nid}"
             tcp = f"{ip}:{6200 + nid}"
             is_sync = is_synconly_map.get(nid, False)
+            is_rpc = is_rpc_map.get(nid, False)
             out["nodes"][key] = url
             out["roles"][key] = "synconly" if is_sync else "validator"
+            if is_rpc:
+                out["state_history_nodes"][key] = url
+                out["rpc_nodes"][key] = url
             out["tcp_nodes"][key] = tcp
             out["ssh"][key] = {
                 "user": ssh_user_map.get(nid, "abc"),
