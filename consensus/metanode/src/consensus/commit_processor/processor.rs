@@ -663,20 +663,49 @@ impl CommitProcessor {
         // together) sat stuck for 15+ minutes with the buffer only ~3,300 deep, so the original
         // 50,000 gate never fired and the cluster stayed wedged with the fix compiled in but
         // silently never eligible to run. The real evidence that matters is the TIME threshold
-        // below (RECOVERY_STUCK_TIMEOUT_SECS -- originally 900s/15min, tuned down to 120s on
-        // 2026-09-10, see that constant's own comment) -- sustained zero dispatch progress
-        // is already strong evidence on its own. The buffer-size check only needs to
+        // below (RECOVERY_STUCK_TIMEOUT_SECS, still 900s -- a same-day 2026-09-10 attempt to
+        // shorten it to 120s was reverted after it was confirmed live to cause a real fork; see
+        // that constant's own comment) -- sustained zero dispatch progress is already strong
+        // evidence on its own. The buffer-size check only needs to
         // rule out acting on a single still-in-flight reorder, not prove exhaustion of a
         // specific capacity.
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
-        // TUNED DOWN (2026-09-10): was 900s (15 min). Reproduced live, repeatedly, on a real
-        // 4-node cluster (192.168.1.234/230) via `ci.sh run-now --only node_chaos_restart`:
-        // this exact gap (co-located validators restarting -- see the "two co-located
-        // validators" note two comments up) with digest_verifier permanently returning None
-        // for the stuck index (digest_has_data=true, so not cold-start; the network simply
-        // never gossips a vote for that specific old index again once peers move past it --
-        // see gap_recovery_bypass_ceiling's own doc comment for why that's safe to amnesty).
+        // ⚠️ REVERTED (2026-09-10, same day): a change on this line to 120s was tried, deployed
+        // live to the 4-node cluster (192.168.1.234/230), and CONFIRMED TO CAUSE A REAL FORK --
+        // do not repeat this without first understanding and fixing the root cause below.
+        //
+        // What happened: node-3's own [PERMANENT-GAP-RECOVERY] fired at 08:04:08, granting
+        // amnesty to commit 856 after it sat stuck for exactly 121s (i.e. barely past the tried
+        // 120s threshold). 38 minutes later, this codebase's own LAST-RESORT, independent safety
+        // net -- LAYER-6 fork_guard (setup_consensus/fork_guard.rs), periodic runtime
+        // block-hash/state-root cross-check against peers -- caught it: node-3's local Block #500
+        // hash/state_root PERMANENTLY MISMATCHED its peers' (3/3 re-verifications failed), and
+        // correctly called std::process::abort() per the Zero-Fork Invariant rather than let a
+        // diverged node keep running. The amnestied value was, in fact, wrong.
+        //
+        // Why this breaks the safety argument gap_recovery_bypass_ceiling's own doc comment
+        // makes ("every commit in the amnesty range was decided_with_local_blocks -- a
+        // deterministic function of a DAG that Byzantine agreement already fixed identically
+        // across all honest nodes, so it cannot actually be wrong, only unattestable"): that
+        // argument assumes the LOCAL DAG STATE feeding decided_with_local_blocks is itself
+        // uncorrupted and consistent with the honest majority at the moment amnesty is granted.
+        // This 4-node cluster was NOT in that condition on 2026-09-10 -- the same session had
+        // already hit multiple other live instabilities in a short window (a RocksDB-open panic
+        // loop on node-0 stuck retrying forever on a stale lock, a peer_rpc "early->full server
+        // handover" that intermittently failed to rebind after rapid repeated restarts, and
+        // node crashes/restarts triggered by an aggressive manual test sequence) -- any of which
+        // could plausibly have left node-3's own local DAG already subtly diverged BEFORE this
+        // amnesty ever ran, which the amnesty's own reasoning has no way to detect (it only asks
+        // "have peers stopped voting for this index", never "is my own local DAG still correct").
+        // 900s stayed safe for the same reason a longer window naturally makes it far more likely
+        // ANY of these transient instabilities has fully resolved and a genuine cross-check
+        // opportunity (a live digest CONFLICT, which this loop DOES still always honor) has had
+        // time to surface before amnesty is trusted -- shortening the window just narrows that
+        // safety margin, it does not add a new check. Root cause (why the local DAG diverged in
+        // the first place, on this specific run) was NOT found before this revert -- that is the
+        // real prerequisite for ever safely revisiting this constant, not a shorter guess.
+        // See note/deploy_hardening_and_incident_drills_2026-09.md for the full incident writeup.
         // Two live incidents, both confirmed via the [DIGEST-GATE DIAG] pipeline dump this
         // loop already emits every 10s: `oldest_age` for the stuck head-of-line commit was
         // already in the 65-155s range with pending_ooo backlog climbing into the
@@ -694,7 +723,7 @@ impl CommitProcessor {
         // safety margin above observed reorder timescales while resolving well inside every
         // downstream consumer's own patience window (this test, and operators watching for a
         // stalled chain). Revisit only with fresh live evidence, not a static guess.
-        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 120;
+        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // REVERTED to original -- see warning comment above
 
         // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
         // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
