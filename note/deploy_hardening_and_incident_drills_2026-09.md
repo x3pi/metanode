@@ -426,6 +426,67 @@ mà không mô hình hoá đầy đủ bài toán đồng thuận sẽ RỦI RO 
 chẩn đoán, cụm đã dọn sạch về đúng `origin/dev`, không có thay đổi code nào
 được đẩy lên từ lượt đào sâu này.
 
+### Đào sâu lần 3 (2026-09-10, cùng ngày, ngay sau khi user yêu cầu "chạy đi"
+để đo tần suất thật) — **BẮT ĐƯỢC CƠ CHẾ CHÍNH XÁC, live, trên cụm thật**
+
+Chạy `./ci.sh run-now --only node_chaos_restart` lặp lại (script
+`/tmp/repeat_chaos_test.sh` trên `234`, 8 vòng). Kết quả khác hẳn 3 lần tái
+hiện thủ công trước đó: **dùng đúng cơ chế thật (`ansible_deploy.sh
+--stop`/`--restart` qua `run_restart_test.sh`, KHÔNG phải `systemctl stop`
+tôi tự gõ tay) thì lỗi tái hiện NGAY LẬP TỨC** — vòng 1 FAIL sau 836s, vòng 2
+FAIL sau 722s (2/2 FAIL tính tới lúc ghi tài liệu này). Điều này đảo ngược
+lại 1 phần kết luận "có thể là race hiếm" ở lần đào sâu 2 — **đây là lỗi tái
+hiện được RẤT ỔN ĐỊNH qua đúng cơ chế test thật**, chỉ là cách tôi tự tái
+hiện tay bằng `systemctl stop` trực tiếp (bỏ qua ansible) không kích hoạt
+đúng điều kiện.
+
+**Cơ chế chính xác, đọc trực tiếp từ dòng log chẩn đoán đã có sẵn trong code**
+(`[DIGEST-GATE DIAG] PIPELINE STATE DUMP (STALLED)`, in mỗi 10s khi có
+pending_local, xem `commit_processor/processor.rs`) — bắt được live ở
+`/opt/metanode/node-0/logs/execution/2026-09-10/execution.log`:
+
+```
+pending_local=1, first_idx=64066, oldest_age=155s, next_expected=64066,
+qci=64835, digest_has_data=true, verifier(64066)=None, pending_ooo=770 (tăng dần)
+```
+
+- Tầng DAG-consensus (`qci` = quorum_commit_index) **vẫn chạy tốt, tăng đều**
+  (~5 commit/giây trong lúc quan sát) — KHÔNG hề treo.
+- Nhưng `next_expected_index` của riêng node này **kẹt cứng đúng 1 chỉ số
+  cụ thể** — không bao giờ nhận đủ phiếu xác thực digest (`verifier(...)=None`)
+  từ peer cho ĐÚNG chỉ số đó, dù `digest_has_data=true` (không phải cold-start).
+- Hàng trăm commit MỚI HƠN đã xếp hàng chờ phía sau (`pending_ooo`, tăng dần
+  theo thời gian) — không được phép vượt lên vì code bắt buộc dispatch đúng
+  thứ tự tăng dần tuyệt đối (chủ đích, chống fork).
+- **Quan sát trực tiếp 1 lần "bung" thật**: WAL (`commit_ffi_wal.log`) đứng
+  yên ở commit_index=60550 từ 06:54:51, rồi đột ngột nhảy lên 64065 lúc
+  06:57 (≈725s sau, KHÔNG PHẢI 900s — nên không phải do ngưỡng
+  `RECOVERY_STUCK_TIMEOUT_SECS` mà do 1 đường khác, có thể là
+  `CommitSyncer` lấy được `CertifiedCommit` từ peer) — **rồi kẹt lại NGAY LẬP
+  TỨC ở index tiếp theo (64066)**.
+
+**Kết luận về hành vi thật:** hệ thống không "treo cứng vĩnh viễn" theo
+nghĩa đen — nó tiến theo kiểu "giật cục": thỉnh thoảng bung 1 mẻ backlog CŨ
+(toàn rỗng, không giao dịch) rồi kẹt lại ngay ở chỉ số kế tiếp. Từ góc nhìn
+RPC bên ngoài, block height vẫn đứng yên mãi vì mọi mẻ "bung" đều toàn commit
+rỗng lịch sử, còn giao dịch THẬT gửi vào (nằm ở phần đầu DAG, mới hơn) không
+bao giờ bắt kịp vì luôn nằm sau hàng rào `next_expected_index` đang bò rất
+chậm. **Đây là hiện tượng "hàng rào luôn tụt lại phía sau" (perpetual
+one-index-behind), nhiều khả năng do độ trễ lan truyền phiếu digest
+(gossip) giữa các validator không bắt kịp tốc độ node vừa restart tự quyết
+định (`decided_with_local_blocks`) các commit cục bộ của chính nó** — khớp
+với gợi ý trong chính comment code cũ về "hai validator cùng host restart
+cùng lúc" (ở đây là node-0 và node-3, cùng nằm trên `234`).
+
+**CHƯA xác nhận được** nguyên nhân gốc RẤT sâu — vì sao phiếu digest của
+peer luôn "trễ" đúng 1 bước so với node vừa restart, thay vì bắt kịp bình
+thường như hàng nghìn lần deploy trước đó trong phiên làm việc này (100 vòng
+snapshot_recovery PASS sạch, không hề gặp hiện tượng này — snapshot_recovery
+KHÔNG có bước rolling-restart-rồi-gửi-tx-ngay-trong-cửa-sổ-hẹp giống
+`node_chaos_restart`). Cần người có chuyên môn sâu về gossip/vote-propagation
+trong `consensus-core` (ngoài phạm vi đọc code tĩnh, cần công cụ theo dõi
+gossip theo thời gian thực giữa nhiều node cùng lúc, không chỉ 1 node).
+
 ### Khuyến nghị thật sự cho bước tiếp theo
 
 1. **Không nên tin "PASS 1 lần" hay "FAIL 1 lần" của `node_chaos_restart` là
