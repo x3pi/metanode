@@ -141,26 +141,48 @@ vào, đừng coi là luôn đúng.**
    1 node lỗi mà vẫn tiếp tục sản xuất block", giả định này hiện SAI (mục 7).
 5. Điều tra thêm `wait_rpc_ready_seconds` (sleep cố định 5s trong
    `deploy/ci/ci_runner.py`) — vẫn chưa xác nhận, độ ưu tiên thấp hơn bug #10.
-6. **Bug #10 — bước điều tra tiếp theo cụ thể** (xem mục 7 "Đào sâu tiếp"):
-   thêm `eprintln!` chẩn đoán (đúng pattern `DIAG_*` sẵn có trong
-   `commit_processor/processor.rs`/`executor.rs`) vào
-   `linearizer/mod.rs::try_collect_sub_dag_and_commit` và
-   `base_committer.rs::enough_leader_blame`/`enough_leader_support`, build
-   lại, deploy 1 node, tái hiện (`systemctl stop metanode-execution-1` trên
-   `230`, đợi >60s, xem block height + file `eprintln` mới) để bắt tận tay
-   nhánh nào đang khiến MỌI round (không chỉ round của leader chết) đều commit
-   rỗng. Ứng viên sửa rõ ràng nhất đã tìm thấy: gỡ
-   `is_reputation_swaps_disabled = true` (hard-code) trong
-   `leader_schedule.rs::elect_leader()`, thay bằng đọc
-   `context.reputation_swaps_disabled_for_epoch` (field đã có sẵn nhưng chưa
-   từng được đọc ở đâu) — nhưng ĐỪNG sửa vội trước khi xác nhận bằng
-   `eprintln!` thật, vì đây mới là "góp phần xác nhận", chưa chắc là nguyên
-   nhân DUY NHẤT (xem lý do trong mục 7).
-7. **Bug quan sát phụ — cầu nối log Rust→Go đã ngừng hoạt động trên thực tế**
+6. ~~Bug #10 — thử vá `RECOVERY_STUCK_TIMEOUT_SECS` 900s→120s~~ ✅ Đã thử,
+   đã build, đã deploy, đã kiểm chứng qua `node_chaos_restart` thật — **XÁC
+   NHẬN GÂY FORK THẬT** (block #500 mismatch, `LAYER-6 fork_guard` tự
+   abort()). Đã revert về 900s, nhánh `fix/permanent-gap-recovery-timeout`
+   giữ lại làm bằng chứng "kết quả âm tính" đã ghi chép đầy đủ — **KHÔNG
+   merge, không thử lại đúng thay đổi này**. Xem mục 7 phần cuối để biết
+   chi tiết đầy đủ + nguyên nhân gốc thật sự (vì sao DAG cục bộ của node-3
+   lệch từ trước khi ân xá chạy) vẫn CHƯA tìm ra — đây mới là điều kiện tiên
+   quyết thật để xem xét lại vấn đề này trong tương lai, không phải "chọn 1
+   con số khác".
+7. **2 bug MỚI phát hiện trong lúc kiểm chứng bug #10 (2026-09-10, chưa điều
+   tra sâu, độ ưu tiên cao vì đều liên quan tính sẵn sàng của cụm):**
+   - **RocksDB panic-loop không bao giờ tự phục hồi**: node-0 panic tại
+     `consensus/metanode/meta-consensus/core/src/storage/rocksdb_store.rs:31`
+     khi mở lại `consensus_db` (lock bị giữ bởi chính tiến trình cũ chưa giải
+     phóng sạch), cơ chế "outer resilience loop" (`ffi.rs`, rebuild Tokio
+     runtime + thử lại) lặp lại đúng lỗi này **6+ lần liên tiếp, mỗi lần
+     cách nhau 60s, không bao giờ tự khỏi** — chỉ khỏi khi `systemctl
+     restart` thật (giải phóng toàn bộ OS-level file handle). Cần điều tra:
+     vì sao RocksDB lock không được giải phóng khi thread panic trong lần
+     thử trước.
+   - **peer_rpc "early→full server" bàn giao cổng thất bại sau restart dồn
+     dập**: cổng `peer_rpc_port` (19200+N, dùng cho "WAN sync"/BLOCK-FETCH
+     giữa các validator) không lắng nghe ở CẢ 4 validator sau 1 chuỗi
+     restart thủ công nhiều lần liên tiếp trong thời gian ngắn (dù log tự
+     báo "Started" — log này không đáng tin, không xác nhận bind thật sự
+     thành công) — tự khỏi sau khi cụm được khởi động lại 1 lần "sạch"
+     (không phải chuỗi restart dồn dập). Nghi ngờ: code tại
+     `network/peer_rpc/server.rs` (đã có lịch sử fix tương tự từ
+     2026-08-25) có 1 race case MỚI chưa được bao phủ khi restart xảy ra
+     dồn dập/liên tục. **Chưa xác nhận đây là bug thật hay chỉ do cách thao
+     tác thủ công bất thường của tôi hôm nay** — cần tái hiện có kiểm soát,
+     không xóa dữ liệu, để kết luận chắc chắn.
+8. **Bug quan sát phụ — cầu nối log Rust→Go đã ngừng hoạt động trên thực tế**
    (mục 7, phần cuối): banner khởi động `CommitProcessor` (in vô điều kiện
    mỗi lần start) không xuất hiện trong journalctl từ 02:07:46 UTC trở đi dù
    node đã restart nhiều lần sau đó — cần điều tra riêng, độc lập với bug #10,
-   trước khi tin tưởng bất kỳ log Rust nào trong vận hành thật.
+   trước khi tin tưởng bất kỳ log Rust nào trong vận hành thật. (Lưu ý: đã
+   xác nhận sau đó rằng log Rust thật ra nằm ở
+   `logs/execution/<ngày>/execution.log`, không phải journalctl — xem mục 7
+   "Đào sâu lần 2" — nhưng dấu hiệu banner-không-xuất-hiện ban đầu vẫn cần
+   đối chiếu lại với đúng file này để không bỏ sót.)
 
 ---
 
@@ -486,6 +508,84 @@ KHÔNG có bước rolling-restart-rồi-gửi-tx-ngay-trong-cửa-sổ-hẹp gi
 `node_chaos_restart`). Cần người có chuyên môn sâu về gossip/vote-propagation
 trong `consensus-core` (ngoài phạm vi đọc code tĩnh, cần công cụ theo dõi
 gossip theo thời gian thực giữa nhiều node cùng lúc, không chỉ 1 node).
+
+### 🔴 KẾT QUẢ CUỐI: bản vá đã bị RÚT LẠI sau khi xác nhận gây FORK THẬT trên
+cụm thật (2026-09-10, cùng ngày)
+
+Sau khi được yêu cầu "code + test kỹ + đưa lên nhánh riêng để review", đã
+làm đúng quy trình cẩn thận: viết bản vá tối giản (giảm
+`RECOVERY_STUCK_TIMEOUT_SECS` từ 900s xuống 120s), chạy `cargo test` toàn bộ
+2 crate liên quan (193 + 185 test PASS, 0 lỗi), đưa lên nhánh riêng
+`fix/permanent-gap-recovery-timeout` (KHÔNG merge `dev`), rồi build+deploy
+thật lên cụm `234`/`230` để kiểm chứng bằng `node_chaos_restart` thật.
+
+**Kết quả kiểm chứng ban đầu có vẻ khả quan:** tỷ lệ giao dịch xác nhận
+trong lúc 1 node bị tắt tăng từ 0% (luôn luôn, trước khi vá) lên 66-93%
+(sau khi vá) — đúng như kỳ vọng lý thuyết. Vòng lặp 1/5 hoàn tất trọn vẹn
+(trước đây pipeline luôn dừng cứng ngay khi có 1 CHẶNG fail 0%).
+
+**Nhưng ở vòng lặp 2/5, hệ thống tự phát hiện và báo FORK THẬT:**
+
+```
+08:04:08 [PERMANENT-GAP-RECOVERY] next_expected_index=856 kẹt 121 giây
+         (vượt ngưỡng mới 120s trong gang tấc) → cấp "ân xá", tin tưởng
+         giá trị cục bộ cho commit 856-857...
+...
+08:42:35 [LAYER-6 fork_guard] Block #500 KHÔNG KHỚP!
+         local_hash ≠ peer_hash, local_root ≠ peer_root
+08:42:50 [LAYER-6] CONFIRMED FORK sau 3/3 lần xác minh lại đều fail
+         → tự gọi std::process::abort() để dừng ngay (đúng thiết kế
+         Zero-Fork Invariant — chặn trước khi lan truyền trạng thái sai)
+```
+
+Giá trị được "ân xá" tin tưởng ở phút 08:04 **THẬT SỰ SAI** — khác với giá
+trị mà các node khác đã đồng thuận, và chỉ được phát hiện 38 phút sau bởi
+lớp bảo vệ CUỐI CÙNG, độc lập (`LAYER-6 fork_guard`, tự kiểm tra định kỳ
+block hash/state root với peer). Nếu lớp này không tồn tại, node-3 đã âm
+thầm chạy tiếp với trạng thái sai.
+
+**Vì sao lập luận an toàn ban đầu bị sai trong thực tế:** cơ chế
+"ân xá" dựa trên lý luận "giá trị cục bộ là hàm xác định của 1 DAG mà toàn
+mạng đã đồng thuận từ trước, nên KHÔNG THỂ sai, chỉ có thể không xác minh
+lại được". Lập luận này ngầm giả định **DAG cục bộ của chính node đó vẫn
+đúng/nguyên vẹn tại thời điểm cấp ân xá** — giả định này KHÔNG đúng trên cụm
+này tại thời điểm đó, vì cùng phiên làm việc đã gặp liên tiếp nhiều bất ổn
+khác trước đó (panic-loop RocksDB ở node-0, lỗi bàn giao peer_rpc
+early→full server sau chuỗi restart dồn dập, crash/restart do thao tác test
+thủ công tần suất cao) — bất kỳ cái nào trong số đó đều có thể đã khiến DAG
+cục bộ của node-3 lệch từ TRƯỚC KHI cơ chế ân xá chạy, mà bản thân cơ chế
+ân xá không có cách nào phát hiện ra điều đó (nó chỉ hỏi "peer đã ngừng bỏ
+phiếu cho chỉ số này chưa", không bao giờ hỏi "DAG cục bộ của chính tôi có
+còn đúng không"). Ngưỡng 900s an toàn hơn đơn giản vì cửa sổ dài hơn tự
+nhiên làm tăng khả năng MỌI bất ổn tạm thời nói trên đã kịp giải quyết
+xong, và có cơ hội để 1 xung đột digest thật (vẫn LUÔN được tôn trọng bởi
+đúng đoạn code này) kịp xuất hiện trước khi ân xá được tin tưởng — rút ngắn
+cửa sổ không thêm 1 lớp kiểm tra nào mới, chỉ thu hẹp biên an toàn sẵn có.
+
+**Đã xử lý:**
+1. Dừng ngay bài test đang chạy.
+2. Revert `RECOVERY_STUCK_TIMEOUT_SECS` về 900s trên nhánh
+   `fix/permanent-gap-recovery-timeout` (giữ lại nhánh, KHÔNG xóa — làm bằng
+   chứng "kết quả âm tính" đã được ghi chép đầy đủ), kèm comment cảnh báo
+   rất dài giải thích toàn bộ sự việc để không ai vô tình thử lại đúng thay
+   đổi này mà chưa tìm ra nguyên nhân gốc thật sự (vì sao DAG cục bộ của
+   node-3 lệch từ đầu — CHƯA tìm ra, đây mới là điều kiện tiên quyết thật
+   sự để có thể xem xét lại ngưỡng này trong tương lai).
+3. Build lại + deploy lại đúng code `dev` sạch (không có bản vá) lên toàn bộ
+   cụm `234`/`230`, `--reset-all` để xóa sạch dữ liệu đã bị fork.
+4. `cargo test` xác nhận lại vẫn PASS 100% sau khi revert (không có gì bị
+   hỏng do việc revert).
+
+**Bài học lớn nhất của toàn bộ phiên làm việc này:** một bản vá có lý luận
+an toàn NGHE HỢP LÝ, biên dịch sạch, qua hết unit test, cải thiện RÕ RỆT
+metric quan sát được (0%→66-93%) — **vẫn có thể gây fork thật** nếu tiền đề
+của lý luận đó (ở đây: "DAG cục bộ luôn đúng") không được xác minh độc lập
+trong đúng điều kiện triển khai thực tế. Việc user chủ động yêu cầu "xem xét
+cẩn thận, cần giải pháp an toàn cho production" — thay vì chấp nhận ngay đề
+xuất ban đầu — là bước ngăn chặn quan trọng nhất trong toàn bộ chuỗi sự
+kiện này. Không có bước chạy `node_chaos_restart` thật, lặp nhiều vòng, trên
+cụm thật để tìm ra fork này, việc merge bản vá "đã test kỹ, có vẻ đúng" vào
+`dev` gần như chắc chắn sẽ xảy ra.
 
 ### Khuyến nghị thật sự cho bước tiếp theo
 
