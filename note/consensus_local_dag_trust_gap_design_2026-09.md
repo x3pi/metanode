@@ -972,3 +972,117 @@ giây, qua đúng cơ chế catch-up sync đã có sẵn (cùng cơ chế node 1
 phiên nay) — không đụng gì tới genesis, keys, hay 3 node còn lại.
 
 **Cụm hiện tại: 4/4 node khỏe, đồng thuận đúng.**
+
+## 10. 🔴 SỰ CỐ THẬT THỨ 3 (2026-09-10/11, phát hiện khi deploy `dev` mới nhất lên cụm thật của đồng nghiệp và re-run `node_chaos_restart`)
+
+### 10.1. Triệu chứng
+
+Deploy `8e9c1814` (đã gộp cả 3 fix ở mục 7-9) lên cụm thật 5-node của "nhat"
+(192.168.1.234/230) rồi chạy `node_chaos_restart` — chặng đầu (restart node
+0) PASS sạch, nhưng chặng 2 (restart node 1) thì **toàn bộ cụm ngừng tạo
+block mới vĩnh viễn**: `eth_blockNumber` đứng im ở #120 hơn 20 phút không tự
+phục hồi, kể cả các node **chưa hề bị restart trong bài test này** (node-3).
+RPC vẫn trả lời bình thường, service vẫn "active" — không phải crash.
+
+**Rollback về commit cũ (`d5cbbdc9`, trước cả 3 fix hôm nay) cũng KHÔNG hết
+treo** — cùng hiện tượng lặp lại y hệt dưới code cũ, với dữ liệu được giữ
+nguyên (`Keep Data: true`). Điều này loại trừ hoàn toàn khả năng đây là do 3
+fix hôm nay gây ra — bug đã có sẵn từ trước, chỉ là hôm nay mới tạo đúng điều
+kiện để lộ ra.
+
+### 10.2. Nguyên nhân gốc — xác nhận bằng log thật, không suy đoán
+
+Tái hiện được y hệt trên cụm test cục bộ (232) của chính phiên này. Dump
+goroutine Go xác nhận `commitWorker`/`processRustEpochData`
+(`block_processor_commit.go`/`block_processor_network.go`) đứng im từ lúc
+process khởi động, trong khi log Rust của cùng node cho thấy DAG/commit-
+syncer vẫn tiến triển bình thường (`vote.index`, `CommitRange` vẫn tăng) —
+chỉ riêng cầu nối Rust→Go bị đứt.
+
+Log gốc tìm được (`node-2`, xuất hiện lặp đi lặp lại đúng 1 commit):
+```
+🚨 [FATAL] DeliveryManager closed response channel without replying.
+🚨 [FATAL] Failed to send commit to DeliveryManager: channel closed
+Execution failure during block delivery. Cannot recover. Error: Missing
+transaction payload for digest ... — TxPayloadCache has no entry (most
+likely a post-restart cache-miss). Refusing to build a block with a
+silently-dropped transaction.
+```
+
+Chuỗi nguyên nhân đầy đủ:
+
+1. `TxPayloadCache` (`consensus_core::get_global_tx_cache()`) chỉ lưu RAM,
+   mất sạch khi process restart (đã có comment giải thích rõ trong code từ
+   một fix ngày 2026-09-08, sau một sự cố fork thật khi xử lý này còn silent-
+   drop giao dịch thay vì bail).
+2. Có sẵn cơ chế "hỏi peer trước khi bó tay"
+   (`ensure_tx_payloads_cached` → `coordination_hub`'s `TxFetcherFn`, được
+   wire đúng trong `authority_node/mod.rs` — **đã xác nhận trực tiếp bằng
+   diag logging thêm tạm thời (`TX-PAYLOAD-RECOVERY-DIAG`) là cơ chế này CÓ
+   chạy, CÓ gọi peer, nhưng genuinely không peer nào còn giữ payload này**
+   (`1/1 digest(s) still missing` sau mỗi lần thử). Không phải bug ở khâu
+   này — đúng như doc comment của `TxFetcherFn` đã cảnh báo trước: "nếu cả
+   cụm restart cùng lúc, mất luôn ở mọi peer, cơ chế này không cứu được".
+3. Lỗi ở bước 1 lan tới `BlockDeliveryManager::run()` (`block_delivery.rs`),
+   nơi cũ `panic!()` ngay khi gặp Err bất kỳ.
+4. Task này được `tokio::spawn` riêng (không nằm trong call-stack chính) nên
+   panic của nó **không hề bị bắt** bởi outer resilience loop đã thêm ở
+   commit `08780279` (chính commit đó mô tả một triệu chứng gần như y hệt:
+   "Rust consensus im lặng vĩnh viễn, Go vẫn chạy, RPC vẫn trả lời, zero
+   further restart attempts" — nhưng cơ chế sửa ở đó chỉ bọc call-stack
+   chính, không bọc được task nền này).
+
+Kết quả: node "sống" nhưng pipeline chuyển giao commit Rust→Go chết vĩnh
+viễn, không có gì giám sát hay tự phục hồi — đúng y hệt hiện tượng quan sát
+được trên cả 2 cụm.
+
+### 10.3. Vì sao dễ xảy ra đúng lúc deploy code mới
+
+Kịch bản kích hoạt phổ biến nhất: **restart toàn cụm cùng lúc** (chính là
+những gì `ansible_deploy.sh --start` không có `--only-node` làm — thao tác
+deploy code mới thường quy!). Nếu đúng lúc đó có 1 giao dịch đang "bay" giữa
+các node (đã được DAG order nhưng chưa kịp lan truyền payload đầy đủ tới mọi
+nơi), restart đồng loạt xóa sạch cache ở MỌI node cùng lúc → không còn ai
+giữ payload đó → treo vĩnh viễn, không do lỗi code mới nào cả.
+
+### 10.4. Fix (nhánh `fix/block-delivery-halt-not-panic-on-tx-payload-loss`)
+
+**Không sửa bước 1-2** (bail + peer-recovery đã đúng, đã xác nhận hoạt động
+đúng thiết kế). Chỉ sửa bước 3: `BlockDeliveryManager::run()` không còn
+`panic!()` nữa mà gọi `deliver_with_halt_retry()` — log một marker riêng,
+dễ grep (`🛑🚨 [CONSENSUS-HALT-TX-PAYLOAD-LOST]`, khác với
+`CONSENSUS-HALT-SUSPECTED-DIVERGENCE` của mục 8 vì đây là mất dữ liệu ĐÃ XÁC
+NHẬN chứ không phải nghi ngờ phân nhánh — runbook xử lý khác hẳn), rồi retry
+gọi lại `send_committed_subdag` (bao gồm cả bước peer-recovery) mỗi 10s, vô
+thời hạn, thay vì chết hẳn — đúng tinh thần "thà pending chứ tuyệt đối không
+fork" đã áp dụng ở mục 8. Nếu một peer từng tạm thời mất payload sau đó lấy
+lại được (trường hợp phổ biến: chỉ 1 node restart, các node khác vẫn sống),
+node sẽ **tự phục hồi** và log `CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED`.
+
+Mở rộng `start_monitors.sh` (Health Monitor) để gửi cảnh báo Telegram riêng
+cho marker mới này, kèm runbook riêng (không khuyên "kiểm tra fork trước khi
+restart" như mục 8's marker, vì ở đây không có nghi ngờ fork — mọi node đều
+đồng ý dữ liệu đã mất thật) và tự gửi thông báo "đã phục hồi" khi thấy dòng
+RECOVERED.
+
+### 10.5. Xác minh live
+
+- Tái hiện được lỗi gốc trên cụm test 232 (cùng đúng commit/digest bị kẹt).
+- Deploy bản vá lên cụm 232 đang kẹt sẵn: panic cũ (`Execution failure
+  during block delivery`) ngừng xuất hiện hoàn toàn (dừng ở đúng 33 lần từ
+  trước khi vá, không tăng thêm), thay vào đó marker halt mới xuất hiện đều
+  đặn mỗi ~2 phút, **process không hề crash, RPC vẫn sống bình thường suốt**
+  — đúng như thiết kế.
+- `--reset-all` để lấy baseline sạch, chạy lại tải giao dịch thật liên tục
+  qua 6 lần restart xen kẽ node-0/node-1 — cụm khỏe mạnh xuyên suốt, block
+  height tăng đều, 4/4 node đồng bộ, không crash, không kẹt lần nào (đợt
+  test này không tình cờ tái hiện đúng race mất-payload — vốn dĩ có tính
+  xác suất theo thời điểm restart — nhưng hành vi bình thường không hề bị
+  ảnh hưởng bởi bản vá).
+- `cargo test -p metanode --release`: 185/185. `cargo test -p consensus-core
+  --release`: 195/195 (không đụng crate này, chạy lại để chắc chắn không có
+  tác dụng phụ).
+
+**Chưa merge vào `dev`, chưa đụng lại máy 234** (cụm của nhat) — theo đúng
+nguyên tắc "không tự ý quyết định trên môi trường của người khác", chờ sau
+khi merge `dev` xong và có xác nhận từ user mới quay lại xử lý.
