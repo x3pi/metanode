@@ -109,6 +109,18 @@ pub struct DagState {
 
     // Stores reputation scores fetched during a cold-start baseline reset
     pub(crate) baseline_reputation_scores: Option<Vec<(AuthorityIndex, u64)>>,
+
+    // Tail of a chain linking successive `flush()` calls' RocksDB writes together, so they
+    // land on disk in the exact order flush() was called -- see the doc comment inside
+    // `flush()` (dag_state/write.rs) for why this is REQUIRED for correctness, not just perf:
+    // without it, two flushes with pending commits issued close together by different
+    // unsynchronized callers (CoreThread's un-awaited proposal flush, commit_finalizer,
+    // commit_syncer, ...) could land on RocksDB out of commit-index order via ordinary
+    // spawn_blocking thread-pool scheduling, and a crash in between leaves a genuine
+    // permanent gap in the persisted `commits` table -- which is exactly what trips
+    // commit_observer.rs's "Gap in scanned commits" replay assert and crash-loops the node
+    // on every subsequent restart (the gap is real and on-disk, so it never self-heals).
+    pub(crate) pending_write_chain: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl DagState {
@@ -285,6 +297,7 @@ impl DagState {
             evicted_rounds: vec![0; num_authorities],
             fallback_last_commit_timestamp_ms: last_commit_timestamp_ms,
             baseline_reputation_scores: None,
+            pending_write_chain: None,
         };
 
         for (authority_index, _) in context.committee.authorities() {

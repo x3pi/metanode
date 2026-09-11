@@ -590,13 +590,32 @@ impl DagState {
             pending_finalized_commits,
         );
 
+        // Chain this write behind the previous flush()'s write, so RocksDB writes land in
+        // exactly flush()-call order across every caller (CoreThread's un-awaited proposal
+        // flush, commit_finalizer, commit_syncer, ...) even though each still gets its own
+        // short-lived spawn_blocking task exactly as before. Without this, two flushes with
+        // pending commits issued close together could complete out of order via ordinary
+        // thread-pool scheduling, and a crash in between would leave a genuine on-disk gap
+        // in the `commits` table -- see the doc comment on `pending_write_chain` in
+        // dag_state_impl.rs for the full story. `self.pending_write_chain.replace(..)` both
+        // hands this flush its predecessor to wait on and records itself as the new tail;
+        // both happen synchronously here, still under this DagState's write-lock, so the
+        // chain's link order always matches flush() call order.
+        let (tx_chain, rx_chain) = tokio::sync::oneshot::channel();
+        let prev_chain = self.pending_write_chain.replace(rx_chain);
         tokio::task::spawn_blocking(move || {
+            if let Some(prev_chain) = prev_chain {
+                // Ignore a closed sender: the predecessor's write already completed (or
+                // panicked, in which case the whole process is going down anyway).
+                let _ = prev_chain.blocking_recv();
+            }
             store
                 .write(write_batch)
                 .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
             context.metrics.node_metrics.dag_state_store_write_count.inc();
             // Notify waiters that flush is complete
             let _ = tx_flush.send(());
+            let _ = tx_chain.send(());
         });
 
         // Clean up old cached data. After flushing, all cached blocks are guaranteed to be persisted.
