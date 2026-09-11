@@ -171,7 +171,20 @@
   roles:
     # Runs before the Prometheus config generation below so Alertmanager is already listening on
     # :9093 by the time Prometheus (re)starts with the alerting: block that points at it.
-    - { role: alertmanager, become: true, when: "ansible_action not in ['stop', 'open_ports']" }
+    #
+    # ignore_errors (2026-09-11): this role needs `become: true` (root) on localhost, which on a
+    # dev/test machine without passwordless sudo configured fails immediately with "sudo: a
+    # password is required" -- a known, pre-existing, unrelated environment quirk (see
+    # [[reference_metanode_distributed_cluster]] memory). Before this fix, that single failure
+    # made ansible-playbook return non-zero for the ENTIRE run, which ansible_deploy.sh then
+    # reported as "❌ Quá trình Ansible ... thất bại với mã lỗi 2!" even when every actual node
+    # (execution/consensus services) had already deployed successfully -- a misleading, scary
+    # false alarm that looked identical to a real node-deploy failure. Alertmanager is
+    # monitoring/alerting infrastructure, not part of node operation itself, so its failure
+    # should never block or misreport the status of the actual deploy. A real environment where
+    # this becomes needed should configure passwordless sudo for this play instead of relying on
+    # this being silently skipped.
+    - { role: alertmanager, become: true, when: "ansible_action not in ['stop', 'open_ports']", ignore_errors: true }
   tasks:
     - name: Generate /tmp/rpc_nodes.json for testing tools
       ansible.builtin.shell: |
@@ -235,6 +248,16 @@
         group: prometheus
         mode: '0644'
       become: true
+      # ignore_errors (2026-09-11): same class of fix, same reason, as the alertmanager role's
+      # own ignore_errors above -- this and the 2 tasks below all `become: true` (root) on
+      # localhost, which fails outright with "sudo: a password is required" on a dev/test
+      # machine without passwordless sudo configured. Prometheus/Alertmanager config sync is
+      # monitoring infrastructure, not part of node operation -- its failure must never make
+      # ansible_deploy.sh report the whole deploy as "❌ thất bại" when the actual nodes
+      # (execution/consensus services) deployed fine. A real environment needing this synced
+      # should configure passwordless sudo for this play instead of relying on this being
+      # silently skipped.
+      ignore_errors: true
       when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Sync alert_rules.yml to the bare-metal Prometheus config
@@ -245,6 +268,7 @@
         group: prometheus
         mode: '0644'
       become: true
+      ignore_errors: true
       when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Clear systemd start-limit lockout before restarting Prometheus
@@ -256,6 +280,7 @@
       become: true
       failed_when: false
       changed_when: false
+      ignore_errors: true
       when: "ansible_action not in ['stop'] and bare_metal_prometheus_dir.stat.exists | default(false)"
 
     - name: Restart local Prometheus service
