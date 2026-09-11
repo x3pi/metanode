@@ -147,6 +147,11 @@ impl PayloadLossAggregator {
         self.aggregator.reached_threshold(committee)
     }
 
+    /// Total stake of unique authorities that have attested so far.
+    pub fn attested_stake(&self) -> u64 {
+        self.aggregator.stake()
+    }
+
     /// Once quorum is reached, this is the portable certificate: the exact claim plus every
     /// verified attestation that contributed to it. Any node can re-verify this from scratch
     /// (re-check every signature, re-sum stake against its own view of the committee) without
@@ -199,6 +204,57 @@ impl PayloadLossCertificate {
         }
         Ok(())
     }
+}
+
+/// GLOBAL CERTIFIED-SKIP LIST (2026-09-11): digests this node has a valid quorum certificate
+/// for, safe to treat as permanently absent. Checked by build_sorted_transactions
+/// (executor_client/block_sending.rs) before it would otherwise bail on a missing digest.
+/// Same "process-wide, in-memory, OnceLock<RwLock<...>>" shape as transaction.rs's
+/// GLOBAL_TX_CACHE, deliberately kept separate from it (this is a much rarer, much more
+/// consequential kind of entry -- co-locating them risked an ordinary cache eviction/clear
+/// accidentally touching a certified skip decision).
+static GLOBAL_CERTIFIED_SKIPS: std::sync::OnceLock<
+    parking_lot::RwLock<std::collections::HashMap<TxDigest, PayloadLossCertificate>>,
+> = std::sync::OnceLock::new();
+
+fn global_certified_skips(
+) -> &'static parking_lot::RwLock<std::collections::HashMap<TxDigest, PayloadLossCertificate>> {
+    GLOBAL_CERTIFIED_SKIPS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Records a certificate as authorizing a skip for its claim's digest. The caller (the
+/// operator-triggered FFI entry point, or a node that received this certificate from a peer
+/// rather than collecting it itself) MUST have already called `certificate.verify(committee)`
+/// successfully -- this function does not re-verify, it only stores.
+pub fn record_certified_skip(certificate: PayloadLossCertificate) {
+    let digest = certificate.claim.tx_digest;
+    global_certified_skips().write().insert(digest, certificate);
+}
+
+/// Returns the recorded certificate for this digest, if any -- used by
+/// build_sorted_transactions to decide whether a missing digest is a certified, safe-to-skip
+/// loss rather than an ordinary fork-safety bail.
+pub fn get_certified_skip(digest: &TxDigest) -> Option<PayloadLossCertificate> {
+    global_certified_skips().read().get(digest).cloned()
+}
+
+/// Outcome of running the operator-triggered collector (`PayloadLossCollectorFn`,
+/// coordination_hub.rs) for one `PayloadLossClaim`. See that type's doc comment for the full
+/// flow this is the result of.
+#[derive(Debug)]
+pub enum PayloadLossCollectionResult {
+    /// The payload was found (locally or from a peer) and has been inserted into the global
+    /// TxPayloadCache -- ordinary recovery, no skip needed. The stuck delivery retry loop
+    /// (block_delivery.rs) will pick it up on its next attempt.
+    Recovered,
+    /// Quorum of the committee confirmed (with valid signatures) that nobody has this
+    /// payload. Safe to apply -- see block_sending.rs's skip-list wiring.
+    Certified(PayloadLossCertificate),
+    /// Neither of the above yet (not enough peers responded, or responded but not with
+    /// enough stake) -- caller should report this plainly to the operator, not retry
+    /// automatically (an automatic retry loop here would defeat the "operator-initiated"
+    /// design point -- mục 11.2 point 6).
+    Insufficient { attested_missing_stake: u64, quorum_needed: u64 },
 }
 
 #[cfg(test)]
