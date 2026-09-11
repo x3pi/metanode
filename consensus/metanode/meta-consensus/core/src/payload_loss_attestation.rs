@@ -365,6 +365,43 @@ mod tests {
         assert!(agg.add(mismatched, &committee).is_err());
     }
 
+    #[test]
+    fn certified_skip_is_scoped_to_the_exact_commit_and_digest() {
+        // Regression test for a real bug caught before this ever ran live: the skip-list was
+        // initially keyed by tx_digest alone. Since a content-addressed digest can in
+        // principle legitimately recur across different commits (two structurally identical
+        // transactions submitted at different times hash the same), that would let a
+        // certificate authorizing a skip in commit A incorrectly also authorize skipping an
+        // unrelated occurrence of the same digest in commit B. Keying by the full
+        // PayloadLossClaim (commit_index + tx_digest) fixes this -- assert it stays fixed.
+        let digest = TxDigest([3u8; consensus_config::DIGEST_LENGTH]);
+        let claim_commit_5 = PayloadLossClaim { commit_index: 5, tx_digest: digest };
+        let certificate = PayloadLossCertificate {
+            claim: claim_commit_5.clone(),
+            attestations: vec![],
+        };
+        record_certified_skip(certificate);
+
+        assert!(
+            get_certified_skip(&claim_commit_5).is_some(),
+            "lookup for the exact recorded claim must hit"
+        );
+        let same_digest_different_commit =
+            PayloadLossClaim { commit_index: 6, tx_digest: digest };
+        assert!(
+            get_certified_skip(&same_digest_different_commit).is_none(),
+            "a certificate for commit 5 must NOT authorize skipping the same digest in commit 6"
+        );
+        let different_digest_same_commit = PayloadLossClaim {
+            commit_index: 5,
+            tx_digest: TxDigest([4u8; consensus_config::DIGEST_LENGTH]),
+        };
+        assert!(
+            get_certified_skip(&different_digest_same_commit).is_none(),
+            "a certificate for one digest must NOT authorize skipping a different digest"
+        );
+    }
+
     #[tokio::test]
     async fn certificate_verify_rejects_duplicate_authority_padding() {
         // A byzantine sender cannot inflate stake by repeating the same authority's

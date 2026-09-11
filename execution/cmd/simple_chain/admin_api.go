@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor"
+	"github.com/meta-node-blockchain/meta-node/executor"
 	mt_filters "github.com/meta-node-blockchain/meta-node/pkg/filters"
 	"github.com/meta-node-blockchain/meta-node/pkg/snapshot"
 )
@@ -21,6 +22,25 @@ func (api *AdminApi) LoginAPI(ctx context.Context, password string) (string, err
 		return "", errInvalidCredentials
 	}
 	return "Login successful", nil
+}
+
+// AttestPayloadLoss is the operator-facing RPC wrapper (admin_attestPayloadLoss) for the new
+// Quorum-Certified Payload-Loss Attestation mechanism (2026-09-11) -- see the doc comment on
+// consensus/metanode/src/ffi.rs's metanode_attest_payload_loss and mục 11 of
+// note/consensus_local_dag_trust_gap_design_2026-09.md. NOT called automatically from anywhere
+// -- an operator invokes this manually only after CONSENSUS-HALT-TX-PAYLOAD-LOST
+// (block_delivery.rs mục 10) has been showing for this exact commit for a genuinely long time.
+// txDigestHex: exactly 2*DIGEST_LENGTH hex characters, no "0x" prefix (see the halt log line
+// itself for the exact digest -- e.g. "digest 6UToZqfJJ1D3c/GMz65Ivd..." there is base64, this
+// wants hex; convert before calling).
+// Returns the raw status from the Rust side: 0 = quorum-certified skip applied, 1 = recovered
+// (no skip needed), 2 = insufficient stake attested so far, -1 = could not run. Full detail is
+// always in the node's own logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
+func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, commitIndex uint32, txDigestHex string) (int32, error) {
+	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
+		return -1, errInvalidCredentials
+	}
+	return executor.AttestPayloadLoss(commitIndex, txDigestHex), nil
 }
 
 func (api *AdminApi) SetState(ctx context.Context, password string, state processor.State) (processor.State, error) {
