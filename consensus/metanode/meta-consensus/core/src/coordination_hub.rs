@@ -41,6 +41,7 @@ pub enum PeerAttestResult {
 
 use std::sync::Arc;
 use parking_lot::RwLock;
+use consensus_config::Committee;
 use crate::recovery_barrier::RecoveryBarrier;
 
 /// Represents the global operational phase of the node.
@@ -180,6 +181,14 @@ pub struct ConsensusCoordinationHub {
 
     /// PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment.
     tx_fetcher: Arc<RwLock<Option<TxFetcherFn>>>,
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): see PayloadLossCollectorFn's doc
+    /// comment.
+    payload_loss_collector: Arc<RwLock<Option<PayloadLossCollectorFn>>>,
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): a copy of the current committee, so
+    /// the operator-triggered FFI entry point (metanode_attest_payload_loss, ffi.rs) can
+    /// independently re-verify a returned PayloadLossCertificate before recording it, without
+    /// needing its own separate plumbing to reach the committee.
+    committee_for_payload_loss: Arc<RwLock<Option<Committee>>>,
 }
 
 /// Attempts to fetch the given transaction digests' raw bytes from reachable peers and insert
@@ -213,6 +222,33 @@ pub type TxFetcherFn = Arc<
         + Sync,
 >;
 
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): the operator-triggered collector. Given
+/// one exact `(commit_index, tx_digest)` this node is stuck on (per
+/// CONSENSUS-HALT-TX-PAYLOAD-LOST, see block_delivery.rs mục 10), fans out
+/// `NetworkClient::attest_payload_loss` to every other committee member (and checks this
+/// node's own cache too), and either:
+///   - finds the payload somewhere (including locally) and inserts it into the global
+///     TxPayloadCache -- ordinary recovery, same effect as the existing TxFetcherFn;
+///   - or collects enough signed attestations to reach quorum, producing a
+///     `PayloadLossCertificate` (crate::payload_loss_attestation) that this node (and any
+///     other node it's given to) can independently re-verify and then safely treat this exact
+///     transaction as permanently absent.
+/// Deliberately NOT called from anywhere automatically -- wired in authority_node/mod.rs (same
+/// place as TxFetcherFn) but only ever invoked by an explicit operator action (see ffi.rs's
+/// metanode_attest_payload_loss), per mục 11.2 point 6's design: an automatic trigger risks
+/// treating a transient network partition as confirmed permanent loss. See
+/// note/consensus_local_dag_trust_gap_design_2026-09.md mục 11 for the full design.
+pub type PayloadLossCollectorFn = Arc<
+    dyn Fn(
+            crate::payload_loss_attestation::PayloadLossClaim,
+            std::time::Duration,
+        ) -> futures::future::BoxFuture<
+            'static,
+            crate::payload_loss_attestation::PayloadLossCollectionResult,
+        > + Send
+        + Sync,
+>;
+
 impl ConsensusCoordinationHub {
     pub fn new() -> Self {
         Self {
@@ -233,6 +269,8 @@ impl ConsensusCoordinationHub {
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
             tx_fetcher: Arc::new(RwLock::new(None)),
+            payload_loss_collector: Arc::new(RwLock::new(None)),
+            committee_for_payload_loss: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -358,6 +396,33 @@ impl ConsensusCoordinationHub {
     /// recovery, exactly as if the fetch had been tried and found nothing.
     pub fn get_tx_fetcher(&self) -> Option<TxFetcherFn> {
         let guard = self.tx_fetcher.read();
+        guard.clone()
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): set the collector callback. See
+    /// PayloadLossCollectorFn's doc comment.
+    pub fn set_payload_loss_collector(&self, collector: PayloadLossCollectorFn) {
+        let mut guard = self.payload_loss_collector.write();
+        *guard = Some(collector);
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): get a clone of the collector callback,
+    /// if wired. None before authority_node has started, or for a SyncOnly node that never
+    /// wires one.
+    pub fn get_payload_loss_collector(&self) -> Option<PayloadLossCollectorFn> {
+        let guard = self.payload_loss_collector.read();
+        guard.clone()
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): publish the current committee for
+    /// metanode_attest_payload_loss (ffi.rs) to independently re-verify a certificate against.
+    pub fn set_committee_for_payload_loss(&self, committee: Committee) {
+        let mut guard = self.committee_for_payload_loss.write();
+        *guard = Some(committee);
+    }
+
+    pub fn get_committee_for_payload_loss(&self) -> Option<Committee> {
+        let guard = self.committee_for_payload_loss.read();
         guard.clone()
     }
 
@@ -654,6 +719,8 @@ impl ConsensusCoordinationHub {
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
             tx_fetcher: Arc::new(RwLock::new(None)),
+            payload_loss_collector: Arc::new(RwLock::new(None)),
+            committee_for_payload_loss: Arc::new(RwLock::new(None)),
         }
     }
 

@@ -158,6 +158,30 @@ impl ExecutorClient {
 
         if total_tx_before > 0 {
             self.ensure_tx_payloads_cached(subdag).await;
+            // PEER-BLOCK RECOVERY (2026-09-11): if ordinary peer-cache recovery above still
+            // left digests missing, try adopting a peer's already-built whole block for this
+            // exact commit BEFORE falling through to build_sorted_transactions's bail -- see
+            // that method's doc comment for the full rationale (this is the real fix for a
+            // real fork the quorum-certified-skip mechanism's first version caused live).
+            // Only applicable to the common, non-fragmented case (global_exec_index maps 1:1
+            // to this commit) -- fragmented commits (rare, only very large commits) fall
+            // through to the ordinary bail/retry path unchanged, same as before this existed.
+            if !Self::all_tx_payloads_cached(subdag)
+                && total_tx_before <= MAX_TXS_PER_GO_BLOCK
+                && self
+                    .try_recover_via_peer_executable_block(
+                        subdag,
+                        global_exec_index,
+                        epoch,
+                        subdag.commit_ref.index,
+                    )
+                    .await
+            {
+                if global_exec_index > 0 {
+                    self.sent_indices.lock().await.insert(global_exec_index);
+                }
+                return Ok(expected_fragments);
+            }
             let (txs, sys_txs) = self.build_sorted_transactions(subdag)?;
             all_proto_txs = txs;
             all_system_txs = sys_txs;
@@ -1271,6 +1295,147 @@ impl ExecutorClient {
         );
     }
 
+    /// Returns true if every digest this subdag's blocks reference is currently in the local
+    /// TxPayloadCache (i.e. `build_sorted_transactions` would not hit a missing-payload bail).
+    fn all_tx_payloads_cached(subdag: &CommittedSubDag) -> bool {
+        let cache = consensus_core::get_global_tx_cache().read();
+        subdag
+            .blocks
+            .iter()
+            .flat_map(|block| block.tx_digests())
+            .all(|digest| cache.get(&digest).is_some())
+    }
+
+    /// PEER-BLOCK RECOVERY (2026-09-11, real fix for a real fork): the true, general answer to
+    /// "what if the raw transaction bytes aren't in ANY peer's ephemeral TxPayloadCache anymore
+    /// (e.g. they already applied it long ago and it aged out of RAM)" -- reuses ALREADY-LIVE,
+    /// ALREADY-PROVEN production infrastructure (network::peer_rpc's executable-block sync,
+    /// currently used by SyncOnly nodes catching up -- see rust_sync_node/sync_loop.rs) instead
+    /// of inventing new persistent storage.
+    ///
+    /// WHY THIS WORKS: every node ALREADY durably persists the exact, byte-for-byte
+    /// ExecutableBlock protobuf it sends to Go for every commit it successfully delivers (see
+    /// block_store.rs's doc comment -- "storage_path/executable_blocks/{gei}.bin", written
+    /// right after a successful send, by every validator, unconditionally, with no pruning
+    /// found in this codebase as of 2026-09-11 -- effectively an unbounded recovery window,
+    /// unlike the ephemeral TxPayloadCache this bail path already fell back on before). A peer
+    /// that already applied this exact commit still has this file on disk even if its RAM
+    /// TxPayloadCache entry for the underlying tx has since been evicted by later traffic --
+    /// EXACTLY the case that caused the real fork this fix follows (mục 11's first version
+    /// treated that peer's honest "not in my RAM cache" as "nobody ever had this," which was
+    /// false). Fetching and adopting the WHOLE already-built block (not just the missing raw tx
+    /// bytes) is also strictly safer than reconstructing locally: it's guaranteed byte-identical
+    /// to what the rest of the network already has, since it never gets re-derived at all.
+    ///
+    /// Tried AFTER `ensure_tx_payloads_cached`'s ordinary peer-cache recovery and BEFORE ever
+    /// falling through to `build_sorted_transactions`'s bail (which leads to the
+    /// halt-and-retry-forever path, and eventually the operator-only, quorum-certified skip --
+    /// see block_delivery.rs / payload_loss_attestation.rs). This step being tried first should
+    /// make that last-resort mechanism rarely if ever actually necessary in practice: it only
+    /// remains needed for the genuinely-lost-from-every-peer's-disk-too case.
+    ///
+    /// Returns true if this exact commit was successfully recovered and delivered directly to
+    /// Go this way (caller should treat delivery as complete, skip `build_sorted_transactions`
+    /// entirely) -- false if no peer had it (or none were reachable), in which case the caller
+    /// falls through to the existing bail/retry path unchanged.
+    async fn try_recover_via_peer_executable_block(
+        &self,
+        subdag: &CommittedSubDag,
+        global_exec_index: u64,
+        epoch: u64,
+        commit_index: u32,
+    ) -> bool {
+        if Self::all_tx_payloads_cached(subdag) {
+            // Ordinary peer-cache recovery (ensure_tx_payloads_cached) already resolved
+            // everything -- nothing for this step to do.
+            return true;
+        }
+        let peers = crate::ffi::get_global_peer_rpc_addresses();
+        if peers.is_empty() {
+            return false;
+        }
+        let fetched = match crate::network::peer_rpc::fetch_executable_blocks_from_peer(
+            &peers,
+            global_exec_index,
+            global_exec_index,
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(e) => {
+                debug!(
+                    "🔧 [PEER-BLOCK-RECOVERY] fetch_executable_blocks_from_peer failed for GEI={}: {}",
+                    global_exec_index, e
+                );
+                return false;
+            }
+        };
+        let Some((_, data)) = fetched.into_iter().find(|(gei, _)| *gei == global_exec_index) else {
+            return false;
+        };
+        // CORRECTNESS (2026-09-11): decode the peer's block to learn ITS block_number/epoch
+        // before forwarding it as-is -- these bytes came from a DIFFERENT node's own local
+        // next_block_number/last_processed_epoch counters, not this node's. Forwarding the
+        // bytes unchanged (correct -- content must stay byte-identical to what the rest of the
+        // network has) without ALSO advancing this node's own counters to match would leave
+        // them silently stale, causing the NEXT block this node builds normally to reuse or
+        // gap a block_number. `ExecutableBlock` is a plain prost::Message, decodable here with
+        // zero new dependencies.
+        let peer_block_number = match <ExecutableBlock as prost::Message>::decode(data.as_slice()) {
+            Ok(decoded) => decoded.block_number,
+            Err(e) => {
+                warn!(
+                    "⚠️ [PEER-BLOCK-RECOVERY] Fetched peer block for GEI={} but failed to decode \
+                     it to learn its block_number: {}. Refusing to adopt it blind.",
+                    global_exec_index, e
+                );
+                return false;
+            }
+        };
+        info!(
+            "🔧 [PEER-BLOCK-RECOVERY] Found peer's already-built ExecutableBlock for GEI={} \
+             (commit={}, block_number={}, {} bytes) -- adopting it directly instead of \
+             rebuilding locally.",
+            global_exec_index, commit_index, peer_block_number, data.len()
+        );
+        match self
+            .send_block_data(&data, global_exec_index, epoch, commit_index)
+            .await
+        {
+            Ok(()) => {
+                // Sync this node's own block_number/epoch counters to match what was actually
+                // just delivered (see this function's doc comment on why this is necessary) --
+                // never regress them if, for some reason, they're already ahead.
+                {
+                    let mut next_bn = self.next_block_number.lock().await;
+                    if peer_block_number + 1 > *next_bn {
+                        *next_bn = peer_block_number + 1;
+                    }
+                }
+                {
+                    let mut last_ep = self.last_processed_epoch.lock().await;
+                    if epoch > *last_ep {
+                        *last_ep = epoch;
+                    }
+                }
+                info!(
+                    "✅ [PEER-BLOCK-RECOVERY] Successfully delivered peer-recovered block for \
+                     GEI={} (commit={}, block_number={}) to Go -- local counters synced.",
+                    global_exec_index, commit_index, peer_block_number
+                );
+                true
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ [PEER-BLOCK-RECOVERY] Fetched peer block for GEI={} but send_block_data \
+                     failed: {}. Falling through to the ordinary bail/retry path.",
+                    global_exec_index, e
+                );
+                false
+            }
+        }
+    }
+
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
     ///
     /// This extracts the filter → dedup → sort logic from convert_to_protobuf
@@ -1296,6 +1461,34 @@ impl ExecutorClient {
                     match cache.get(digest) {
                         Some(tx) => all_txs_to_process.push(tx),
                         None => {
+                            // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): before falling
+                            // through to the fork-safety bail below, check whether a quorum
+                            // certificate already authorizes skipping this EXACT
+                            // (commit_index, digest) pair (mục 11 of
+                            // note/consensus_local_dag_trust_gap_design_2026-09.md). If so,
+                            // simply don't push anything for this digest -- deterministic on
+                            // every node holding the same certificate (every honest node
+                            // reaches or receives and independently re-verifies the identical
+                            // certificate, so every node computes the identical resulting
+                            // all_txs_to_process, hence identical downstream fragment/GEI math
+                            // and block hash; see build.rs/coordination_hub.rs for how the
+                            // certificate itself is only ever recorded via an operator-
+                            // triggered, quorum-verified action, never silently/automatically).
+                            let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+                                commit_index: subdag.commit_ref.index,
+                                tx_digest: *digest,
+                            };
+                            if let Some(certificate) =
+                                consensus_core::payload_loss_attestation::get_certified_skip(&claim)
+                            {
+                                tracing::error!(
+                                    "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost \
+                                     transaction digest {:?} in commit {} per quorum certificate \
+                                     ({} attesting signatures) -- treating as absent, NOT as an error.",
+                                    digest, subdag.commit_ref.index, certificate.attestations.len()
+                                );
+                                continue;
+                            }
                             // FORK-SAFETY (2026-09-08): a missing digest here means this
                             // commit is NOT empty — the digest count is real, it's counted as
                             // such by both commit_is_empty_for_gei (executor.rs) and

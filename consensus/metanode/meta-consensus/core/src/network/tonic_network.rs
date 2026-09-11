@@ -422,6 +422,35 @@ impl NetworkClient for TonicClient {
         })?;
         Ok(response.into_inner().transactions)
     }
+
+    async fn attest_payload_loss(
+        &self,
+        peer: AuthorityIndex,
+        commit_index: crate::commit::CommitIndex,
+        tx_digest: consensus_types::block::TxDigest,
+        timeout: Duration,
+    ) -> ConsensusResult<crate::network::AttestPayloadLossOutcome> {
+        let mut client = self.get_client(peer, timeout).await?;
+        let mut request = Request::new(AttestPayloadLossRequest {
+            commit_index,
+            tx_digest: tx_digest.0.to_vec(),
+        });
+        request.set_timeout(timeout);
+        let response = client.attest_payload_loss(request).await.map_err(|e| {
+            ConsensusError::NetworkRequest(format!("attest_payload_loss failed: {e:?}"))
+        })?;
+        let response = response.into_inner();
+        if !response.payload.is_empty() {
+            return Ok(crate::network::AttestPayloadLossOutcome::Payload(
+                response.payload,
+            ));
+        }
+        let attestation: crate::payload_loss_attestation::PayloadLossAttestation =
+            bcs::from_bytes(&response.attestation).map_err(ConsensusError::SerializationFailure)?;
+        Ok(crate::network::AttestPayloadLossOutcome::Attestation(
+            attestation,
+        ))
+    }
 }
 
 // Tonic channel wrapped with layers - using plain TCP
@@ -901,6 +930,48 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
         Ok(Response::new(FetchTransactionsResponse {
             transactions,
         }))
+    }
+
+    async fn attest_payload_loss(
+        &self,
+        request: Request<AttestPayloadLossRequest>,
+    ) -> Result<Response<AttestPayloadLossResponse>, tonic::Status> {
+        let peer_index = request
+            .extensions()
+            .get::<PeerInfo>()
+            .map(|p| p.authority_index)
+            .unwrap_or_else(|| {
+                trace!("⚠️ [PEERINFO] PeerInfo missing, using dummy index 0");
+                AuthorityIndex::new_for_test(0)
+            });
+        let request_inner = request.into_inner();
+        if request_inner.tx_digest.len() != consensus_config::DIGEST_LENGTH {
+            return Err(tonic::Status::invalid_argument("invalid digest length"));
+        }
+        let mut arr = [0u8; consensus_config::DIGEST_LENGTH];
+        arr.copy_from_slice(&request_inner.tx_digest);
+        let tx_digest = consensus_types::block::TxDigest(arr);
+        let outcome = self
+            .service
+            .handle_attest_payload_loss(peer_index, request_inner.commit_index, tx_digest)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+        match outcome {
+            crate::network::AttestPayloadLossOutcome::Payload(payload) => {
+                Ok(Response::new(AttestPayloadLossResponse {
+                    payload,
+                    attestation: Bytes::new(),
+                }))
+            }
+            crate::network::AttestPayloadLossOutcome::Attestation(attestation) => {
+                let attestation_bytes = bcs::to_bytes(&attestation)
+                    .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+                Ok(Response::new(AttestPayloadLossResponse {
+                    payload: Bytes::new(),
+                    attestation: Bytes::from(attestation_bytes),
+                }))
+            }
+        }
     }
 }
 
@@ -1492,6 +1563,29 @@ pub(crate) struct FetchTransactionsRequest {
 pub(crate) struct FetchTransactionsResponse {
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub transactions: Vec<Bytes>,
+}
+
+// Added 2026-09-11 -- see payload_loss_attestation.rs and mục 11 of
+// note/consensus_local_dag_trust_gap_design_2026-09.md.
+#[derive(Clone, prost::Message)]
+pub(crate) struct AttestPayloadLossRequest {
+    #[prost(uint32, tag = "1")]
+    pub commit_index: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub tx_digest: Vec<u8>,
+}
+
+/// Exactly one of `payload`/`attestation` is non-empty. If the responding peer has the
+/// transaction, `payload` is its raw bytes (letting a caller unblock immediately, exactly as
+/// the existing `fetch_transactions` does) -- it does NOT need to be treated as an
+/// attestation. If it doesn't, `attestation` is the BCS-serialized, signed
+/// `PayloadLossAttestation` confirming this peer also doesn't have it.
+#[derive(Clone, prost::Message)]
+pub(crate) struct AttestPayloadLossResponse {
+    #[prost(bytes = "bytes", tag = "1")]
+    pub payload: Bytes,
+    #[prost(bytes = "bytes", tag = "2")]
+    pub attestation: Bytes,
 }
 
 fn chunk_blocks(blocks: Vec<Bytes>, chunk_limit: usize) -> Vec<Vec<Bytes>> {

@@ -1,0 +1,521 @@
+// Copyright (c) MetaNode Team
+// SPDX-License-Identifier: Apache-2.0
+
+//! Quorum-Certified Payload-Loss Attestation (2026-09-11)
+//!
+//! See note/consensus_local_dag_trust_gap_design_2026-09.md mục 11 for the full design
+//! writeup and rationale -- this module implements the core, self-contained piece: the
+//! signed attestation message, its signing/verification, and quorum aggregation into a
+//! `PayloadLossCertificate`. The network RPC to actually gossip these between peers, and
+//! the wiring into `block_sending.rs`'s skip path, are separate, later increments -- this
+//! module is deliberately usable and testable in isolation first.
+//!
+//! CONTEXT (why this exists): mục 10 fixed `BlockDeliveryManager` to halt-and-retry forever
+//! (instead of panicking) when a commit's transaction payload is confirmed missing from a
+//! node's local `TxPayloadCache` and from every peer it could individually reach. That is
+//! safe but can never self-resolve if the payload is genuinely gone from *every* node in the
+//! committee at once (e.g. a simultaneous full-cluster power loss, not just a routine
+//! restart) -- since the transaction was never applied to any node's state before delivery
+//! failed, skipping it is logically safe (nothing to fork over), but only if the decision to
+//! skip is itself established via quorum agreement, not one node's unilateral local
+//! conclusion (a node that is merely partitioned from the network, not genuinely missing the
+//! data, must never be outvoted by nodes that skip without it). This mirrors Sui's own real
+//! "Network Stall Resolution" precedent already cited in mục 4.5: halt, and only proceed
+//! after a verified (here: quorum-certified) decision -- never a silent, unilateral guess.
+//!
+//! DELIBERATELY NOT wired to any automatic trigger yet (see mục 11.2 point 6): collecting
+//! attestations must be operator-initiated after `CONSENSUS-HALT-TX-PAYLOAD-LOST` (mục 10)
+//! has been showing for a genuinely long time, not something that fires on its own after a
+//! short timeout -- an automatic trigger risks treating a transient network partition as
+//! confirmed permanent loss.
+
+use consensus_config::{AuthorityIndex, Committee, ProtocolKeyPair, ProtocolKeySignature, ProtocolPublicKey};
+use consensus_types::block::TxDigest;
+use serde::{Deserialize, Serialize};
+use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
+
+use crate::{
+    commit::CommitIndex,
+    error::{ConsensusError, ConsensusResult},
+    stake_aggregator::{QuorumThreshold, StakeAggregator},
+};
+
+/// The claim one authority is signing: "for this exact (commit_index, tx_digest), I have
+/// checked my own TxPayloadCache and queried every peer I could reach, and none of us --
+/// including me -- has this transaction's payload." Kept minimal and specific (bound to one
+/// exact commit+digest pair) so a signature can never be replayed against a different claim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct PayloadLossClaim {
+    pub commit_index: CommitIndex,
+    pub tx_digest: TxDigest,
+}
+
+/// One authority's signed attestation of a `PayloadLossClaim`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PayloadLossAttestation {
+    pub claim: PayloadLossClaim,
+    pub authority: AuthorityIndex,
+    /// Serialized `ProtocolKeySignature` over `to_intent_message(claim)`.
+    pub signature: Vec<u8>,
+}
+
+fn to_intent_message(claim: &PayloadLossClaim) -> IntentMessage<PayloadLossClaim> {
+    IntentMessage::new(
+        Intent::consensus_app(IntentScope::PayloadLossAttestation),
+        claim.clone(),
+    )
+}
+
+impl PayloadLossAttestation {
+    /// Signs a `PayloadLossClaim` as the given authority. The caller is responsible for
+    /// having actually verified the claim is true locally (checked its own cache and queried
+    /// reachable peers) before calling this -- signing is not itself a truth check.
+    pub fn sign(
+        claim: PayloadLossClaim,
+        authority: AuthorityIndex,
+        keypair: &ProtocolKeyPair,
+    ) -> ConsensusResult<Self> {
+        let message = bcs::to_bytes(&to_intent_message(&claim))
+            .map_err(ConsensusError::SerializationFailure)?;
+        let signature = keypair.sign(&message);
+        Ok(Self {
+            claim,
+            authority,
+            signature: signature.to_bytes().to_vec(),
+        })
+    }
+
+    /// Verifies this attestation's signature was produced by `pubkey` over its own claim.
+    /// Does NOT verify the claim is actually true -- only that the named authority really
+    /// signed it (the authority's own honesty about having checked is a trust assumption, the
+    /// same one the rest of BFT consensus already makes about honest-majority behavior).
+    pub fn verify(&self, pubkey: &ProtocolPublicKey) -> ConsensusResult<()> {
+        let message = bcs::to_bytes(&to_intent_message(&self.claim))
+            .map_err(ConsensusError::SerializationFailure)?;
+        let sig = ProtocolKeySignature::from_bytes(&self.signature)
+            .map_err(ConsensusError::MalformedSignature)?;
+        pubkey
+            .verify(&message, &sig)
+            .map_err(ConsensusError::SignatureVerificationFailure)
+    }
+}
+
+/// Collects `PayloadLossAttestation`s for one exact `PayloadLossClaim` and reports whether
+/// 2f+1 stake has confirmed it -- once true, every honest node that independently reaches (or
+/// receives and verifies) the same conclusion is safe to treat the transaction as permanently
+/// absent and skip it identically, per mục 11.2's fork-safety argument.
+pub struct PayloadLossAggregator {
+    claim: PayloadLossClaim,
+    aggregator: StakeAggregator<QuorumThreshold>,
+    attestations: Vec<PayloadLossAttestation>,
+}
+
+impl PayloadLossAggregator {
+    pub fn new(claim: PayloadLossClaim) -> Self {
+        Self {
+            claim,
+            aggregator: StakeAggregator::new(),
+            attestations: Vec::new(),
+        }
+    }
+
+    /// Verifies and adds one attestation. Rejects (returns Err, does not count) an
+    /// attestation for a different claim or with an invalid signature -- a byzantine peer
+    /// cannot contribute stake toward quorum without a genuinely valid signature over the
+    /// exact claim this aggregator is collecting for.
+    pub fn add(
+        &mut self,
+        attestation: PayloadLossAttestation,
+        committee: &Committee,
+    ) -> ConsensusResult<bool> {
+        if attestation.claim != self.claim {
+            return Err(ConsensusError::InvalidPayloadLossAttestation(format!(
+                "attestation claim {:?} does not match aggregator claim {:?}",
+                attestation.claim, self.claim
+            )));
+        }
+        let pubkey = committee.authority(attestation.authority).protocol_key.clone();
+        attestation.verify(&pubkey)?;
+        let reached = self
+            .aggregator
+            .add_unique(attestation.authority, committee);
+        self.attestations.push(attestation);
+        Ok(reached && self.aggregator.reached_threshold(committee))
+    }
+
+    pub fn reached_quorum(&self, committee: &Committee) -> bool {
+        self.aggregator.reached_threshold(committee)
+    }
+
+    /// Total stake of unique authorities that have attested so far.
+    pub fn attested_stake(&self) -> u64 {
+        self.aggregator.stake()
+    }
+
+    /// Once quorum is reached, this is the portable certificate: the exact claim plus every
+    /// verified attestation that contributed to it. Any node can re-verify this from scratch
+    /// (re-check every signature, re-sum stake against its own view of the committee) without
+    /// trusting whoever sent it -- see `PayloadLossCertificate::verify`.
+    pub fn into_certificate(self, committee: &Committee) -> Option<PayloadLossCertificate> {
+        if !self.reached_quorum(committee) {
+            return None;
+        }
+        Some(PayloadLossCertificate {
+            claim: self.claim,
+            attestations: self.attestations,
+        })
+    }
+}
+
+/// A quorum-certified, self-verifying claim that a transaction's payload is permanently
+/// unrecoverable. Safe to broadcast and trust once `verify()` passes -- the receiving node
+/// does not need to have collected the attestations itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PayloadLossCertificate {
+    pub claim: PayloadLossClaim,
+    pub attestations: Vec<PayloadLossAttestation>,
+}
+
+impl PayloadLossCertificate {
+    /// Re-verifies every attestation's signature and re-sums stake against `committee`,
+    /// independent of whatever aggregator (if any) originally produced this certificate.
+    /// Deduplicates by authority (a byzantine sender padding the list with repeats of the
+    /// same authority must not inflate the stake sum).
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for attestation in &self.attestations {
+            if attestation.claim != self.claim {
+                return Err(ConsensusError::InvalidPayloadLossAttestation(format!(
+                    "certificate contains an attestation for a different claim: {:?} != {:?}",
+                    attestation.claim, self.claim
+                )));
+            }
+            let pubkey = committee.authority(attestation.authority).protocol_key.clone();
+            attestation.verify(&pubkey)?;
+            aggregator.add_unique(attestation.authority, committee);
+        }
+        if !aggregator.reached_threshold(committee) {
+            return Err(ConsensusError::InvalidPayloadLossAttestation(format!(
+                "certificate for claim {:?} has only {} stake, below quorum threshold {}",
+                self.claim,
+                aggregator.stake(),
+                aggregator.threshold(committee)
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// STUCK-CLAIMS REGISTRY (2026-09-11, CRITICAL FORK-SAFETY FIX): tracks claims THIS node is
+/// currently, actively unable to deliver -- i.e. `deliver_with_halt_retry` (block_delivery.rs)
+/// is presently looping on them right now, not merely "at some point in the past this digest
+/// wasn't in my cache."
+///
+/// WHY THIS EXISTS -- a real fork was reproduced live (2026-09-11) by the FIRST version of this
+/// feature, which had `handle_attest_payload_loss` answer solely from `get_global_tx_cache()`
+/// (transaction.rs): a peer that had ALREADY received, executed, and permanently committed a
+/// transaction to its own chain -- then had that transaction's entry age out of the cache later
+/// (an ordinary, expected LRU eviction, same one every other cache-miss codepath in this file
+/// already treats as normal) -- would TRUTHFULLY answer "no, I don't have it" to a cache check,
+/// even though the transaction was very much real and applied on its chain. Three of four nodes
+/// answered exactly this way in the reproduction; the resulting "quorum" wrongly certified the
+/// transaction as permanently lost everywhere, and the operator's skip forked the 4th node off
+/// from the other 3 (different stateRoot, different block hash) at the exact block the
+/// transaction was skipped on. A cache-presence check answers "do I have the bytes sitting in
+/// RAM right now" -- a fundamentally different, much weaker question than the one that's
+/// actually safe to build a quorum on: "has this transaction's effect already landed in MY committed
+/// chain, under any circumstances." No amount of retrying/expanding the cache check alone can
+/// close this gap (persisting TxPayloadCache to disk was tried and reverted for a real perf
+/// regression -- see TX_PAYLOAD_DIR's doc comment -- and even an unbounded RAM cache doesn't
+/// prove non-execution, only non-presence).
+///
+/// THE FIX: reframe what a valid "missing" attestation means. A peer that has ALREADY moved
+/// past this commit (successfully delivered it, with or without this tx) is NOT in the same
+/// epistemic position as the stuck requester and must never attest "missing" -- it already
+/// resolved this commit one way or another. A peer that hasn't reached this commit yet also
+/// can't say anything meaningful. The ONLY peers safe to count toward quorum are ones ALSO
+/// presently, actively retrying delivery of this EXACT (commit_index, tx_digest) right now --
+/// i.e. in the identical stuck position as the requester. If every honest node in the committee
+/// is simultaneously stuck on the same claim (the true full-cluster-loss scenario this feature
+/// targets), all of them qualify and quorum is reached correctly, SAFELY: none of them could
+/// possibly have applied the transaction, because none of them has been able to move past this
+/// commit at all. A peer NOT in this registry for the claim returns neither a payload nor a
+/// signed attestation (see `handle_attest_payload_loss`) -- an abstention, which the existing
+/// AttestPayloadLossResponse/tonic_network.rs wire format already represents for free (empty
+/// `payload` AND empty `attestation` -- the client's `bcs::from_bytes` on empty bytes already
+/// fails, which the collector closure in authority_node/mod.rs already silently drops via `if
+/// let Ok(...) = result`, so this needed zero changes to the network/client code, only to what
+/// the server decides to sign).
+static STUCK_CLAIMS: std::sync::OnceLock<parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>>> =
+    std::sync::OnceLock::new();
+
+fn stuck_claims() -> &'static parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>> {
+    STUCK_CLAIMS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashSet::new()))
+}
+
+/// Called by `deliver_with_halt_retry` (block_delivery.rs) the moment delivery of a commit
+/// first fails due to a missing payload -- marks this node as a valid, honest "missing"
+/// attestor for this exact claim for as long as it remains stuck.
+pub fn mark_stuck(claim: PayloadLossClaim) {
+    stuck_claims().write().insert(claim);
+}
+
+/// Called by `deliver_with_halt_retry` the moment delivery of a commit finally succeeds (via
+/// ordinary peer recovery, a certified skip, or the payload simply reappearing) -- this node is
+/// no longer stuck on this claim and must stop being counted as an attestor for it.
+pub fn unmark_stuck(claim: &PayloadLossClaim) {
+    stuck_claims().write().remove(claim);
+}
+
+/// Whether THIS node is currently, actively stuck on this exact claim right now. The only
+/// condition under which `handle_attest_payload_loss` may honestly sign a "missing" attestation
+/// -- see this section's doc comment for why a cache-miss alone is not enough.
+pub fn is_currently_stuck(claim: &PayloadLossClaim) -> bool {
+    stuck_claims().read().contains(claim)
+}
+
+/// GLOBAL CERTIFIED-SKIP LIST (2026-09-11): digests this node has a valid quorum certificate
+/// for, safe to treat as permanently absent. Checked by build_sorted_transactions
+/// (executor_client/block_sending.rs) before it would otherwise bail on a missing digest.
+/// Same "process-wide, in-memory, OnceLock<RwLock<...>>" shape as transaction.rs's
+/// GLOBAL_TX_CACHE, deliberately kept separate from it (this is a much rarer, much more
+/// consequential kind of entry -- co-locating them risked an ordinary cache eviction/clear
+/// accidentally touching a certified skip decision).
+// Keyed by the FULL (commit_index, tx_digest) claim, not just the digest: a content-addressed
+// digest is deterministic from a transaction's bytes, so in principle the exact same digest
+// could legitimately appear referenced by two different commits (e.g. two structurally
+// identical transactions submitted at different times). A certificate only ever authorizes
+// skipping ONE specific commit's reference to that digest -- keying by digest alone would let
+// a certificate for commit A incorrectly also authorize skipping an unrelated occurrence of
+// the same digest in commit B.
+static GLOBAL_CERTIFIED_SKIPS: std::sync::OnceLock<
+    parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>>,
+> = std::sync::OnceLock::new();
+
+fn global_certified_skips(
+) -> &'static parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>> {
+    GLOBAL_CERTIFIED_SKIPS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Records a certificate as authorizing a skip for its exact claim. The caller (the
+/// operator-triggered FFI entry point, or a node that received this certificate from a peer
+/// rather than collecting it itself) MUST have already called `certificate.verify(committee)`
+/// successfully -- this function does not re-verify, it only stores.
+pub fn record_certified_skip(certificate: PayloadLossCertificate) {
+    let claim = certificate.claim.clone();
+    global_certified_skips().write().insert(claim, certificate);
+}
+
+/// Returns the recorded certificate for this exact (commit_index, tx_digest) claim, if any --
+/// used by build_sorted_transactions to decide whether a missing digest is a certified,
+/// safe-to-skip loss rather than an ordinary fork-safety bail.
+pub fn get_certified_skip(claim: &PayloadLossClaim) -> Option<PayloadLossCertificate> {
+    global_certified_skips().read().get(claim).cloned()
+}
+
+/// Outcome of running the operator-triggered collector (`PayloadLossCollectorFn`,
+/// coordination_hub.rs) for one `PayloadLossClaim`. See that type's doc comment for the full
+/// flow this is the result of.
+#[derive(Debug)]
+pub enum PayloadLossCollectionResult {
+    /// The payload was found (locally or from a peer) and has been inserted into the global
+    /// TxPayloadCache -- ordinary recovery, no skip needed. The stuck delivery retry loop
+    /// (block_delivery.rs) will pick it up on its next attempt.
+    Recovered,
+    /// Quorum of the committee confirmed (with valid signatures) that nobody has this
+    /// payload. Safe to apply -- see block_sending.rs's skip-list wiring.
+    Certified(PayloadLossCertificate),
+    /// Neither of the above yet (not enough peers responded, or responded but not with
+    /// enough stake) -- caller should report this plainly to the operator, not retry
+    /// automatically (an automatic retry loop here would defeat the "operator-initiated"
+    /// design point -- mục 11.2 point 6).
+    Insufficient { attested_missing_stake: u64, quorum_needed: u64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_claim() -> PayloadLossClaim {
+        PayloadLossClaim {
+            commit_index: 42,
+            tx_digest: TxDigest([7u8; consensus_config::DIGEST_LENGTH]),
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_and_verify_roundtrip() {
+        let (context, key_pairs) = crate::context::Context::new_for_test(4);
+        let committee = &context.committee;
+        let (authority, (network_keypair, protocol_keypair)) =
+            (AuthorityIndex::new_for_test(0), key_pairs[0].clone());
+        let _ = network_keypair;
+        let attestation =
+            PayloadLossAttestation::sign(test_claim(), authority, &protocol_keypair).unwrap();
+        let pubkey = committee.authority(authority).protocol_key.clone();
+        assert!(attestation.verify(&pubkey).is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_wrong_signer_pubkey() {
+        let (context, key_pairs) = crate::context::Context::new_for_test(4);
+        let committee = &context.committee;
+        let attestation = PayloadLossAttestation::sign(
+            test_claim(),
+            AuthorityIndex::new_for_test(0),
+            &key_pairs[0].1,
+        )
+        .unwrap();
+        // Verify against authority 1's pubkey instead of authority 0's -- must fail.
+        let wrong_pubkey = committee
+            .authority(AuthorityIndex::new_for_test(1))
+            .protocol_key
+            .clone();
+        assert!(attestation.verify(&wrong_pubkey).is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregator_reaches_quorum_only_after_enough_stake() {
+        let (context, key_pairs) = crate::context::Context::new_for_test(4);
+        let committee = context.committee.clone();
+        let claim = test_claim();
+        let mut agg = PayloadLossAggregator::new(claim.clone());
+
+        // 4 equal-stake authorities, quorum = 2f+1 = 3 of 4 -- one attestation must not be
+        // enough.
+        let att0 = PayloadLossAttestation::sign(
+            claim.clone(),
+            AuthorityIndex::new_for_test(0),
+            &key_pairs[0].1,
+        )
+        .unwrap();
+        let reached = agg.add(att0, &committee).unwrap();
+        assert!(!reached, "1 of 4 must not reach quorum");
+        assert!(!agg.reached_quorum(&committee));
+
+        let att1 = PayloadLossAttestation::sign(
+            claim.clone(),
+            AuthorityIndex::new_for_test(1),
+            &key_pairs[1].1,
+        )
+        .unwrap();
+        let reached = agg.add(att1, &committee).unwrap();
+        assert!(!reached, "2 of 4 must not reach quorum");
+
+        let att2 = PayloadLossAttestation::sign(
+            claim.clone(),
+            AuthorityIndex::new_for_test(2),
+            &key_pairs[2].1,
+        )
+        .unwrap();
+        let reached = agg.add(att2, &committee).unwrap();
+        assert!(reached, "3 of 4 must reach quorum (2f+1 with f=1)");
+        assert!(agg.reached_quorum(&committee));
+
+        let cert = agg.into_certificate(&committee).unwrap();
+        assert!(cert.verify(&committee).is_ok());
+    }
+
+    #[tokio::test]
+    async fn aggregator_rejects_attestation_for_a_different_claim() {
+        let (context, key_pairs) = crate::context::Context::new_for_test(4);
+        let committee = context.committee.clone();
+        let mut agg = PayloadLossAggregator::new(test_claim());
+
+        let mut other_claim = test_claim();
+        other_claim.commit_index += 1;
+        let mismatched = PayloadLossAttestation::sign(
+            other_claim,
+            AuthorityIndex::new_for_test(0),
+            &key_pairs[0].1,
+        )
+        .unwrap();
+        assert!(agg.add(mismatched, &committee).is_err());
+    }
+
+    #[test]
+    fn certified_skip_is_scoped_to_the_exact_commit_and_digest() {
+        // Regression test for a real bug caught before this ever ran live: the skip-list was
+        // initially keyed by tx_digest alone. Since a content-addressed digest can in
+        // principle legitimately recur across different commits (two structurally identical
+        // transactions submitted at different times hash the same), that would let a
+        // certificate authorizing a skip in commit A incorrectly also authorize skipping an
+        // unrelated occurrence of the same digest in commit B. Keying by the full
+        // PayloadLossClaim (commit_index + tx_digest) fixes this -- assert it stays fixed.
+        let digest = TxDigest([3u8; consensus_config::DIGEST_LENGTH]);
+        let claim_commit_5 = PayloadLossClaim { commit_index: 5, tx_digest: digest };
+        let certificate = PayloadLossCertificate {
+            claim: claim_commit_5.clone(),
+            attestations: vec![],
+        };
+        record_certified_skip(certificate);
+
+        assert!(
+            get_certified_skip(&claim_commit_5).is_some(),
+            "lookup for the exact recorded claim must hit"
+        );
+        let same_digest_different_commit =
+            PayloadLossClaim { commit_index: 6, tx_digest: digest };
+        assert!(
+            get_certified_skip(&same_digest_different_commit).is_none(),
+            "a certificate for commit 5 must NOT authorize skipping the same digest in commit 6"
+        );
+        let different_digest_same_commit = PayloadLossClaim {
+            commit_index: 5,
+            tx_digest: TxDigest([4u8; consensus_config::DIGEST_LENGTH]),
+        };
+        assert!(
+            get_certified_skip(&different_digest_same_commit).is_none(),
+            "a certificate for one digest must NOT authorize skipping a different digest"
+        );
+    }
+
+    #[test]
+    fn stuck_registry_starts_clear_and_reflects_mark_unmark() {
+        // Fork-safety regression test (2026-09-11): a real fork was reproduced live because
+        // "cache doesn't have it" alone was treated as grounds to attest "missing". The fix is
+        // this registry -- only a claim explicitly marked (by deliver_with_halt_retry actually
+        // failing to deliver it) counts as stuck. Uses a byte pattern ([88u8; ...], commit 8888)
+        // distinct from every other test in this file/module to avoid cross-test interference
+        // via the shared process-wide STUCK_CLAIMS static.
+        let claim = PayloadLossClaim {
+            commit_index: 8888,
+            tx_digest: TxDigest([88u8; consensus_config::DIGEST_LENGTH]),
+        };
+        assert!(
+            !is_currently_stuck(&claim),
+            "a claim nobody has marked must not be considered stuck"
+        );
+        mark_stuck(claim.clone());
+        assert!(
+            is_currently_stuck(&claim),
+            "a claim just marked must be considered stuck"
+        );
+        unmark_stuck(&claim);
+        assert!(
+            !is_currently_stuck(&claim),
+            "a claim that was unmarked (delivery succeeded) must no longer be considered stuck"
+        );
+    }
+
+    #[tokio::test]
+    async fn certificate_verify_rejects_duplicate_authority_padding() {
+        // A byzantine sender cannot inflate stake by repeating the same authority's
+        // attestation multiple times in the attestations list.
+        let (context, key_pairs) = crate::context::Context::new_for_test(4);
+        let committee = context.committee.clone();
+        let claim = test_claim();
+        let att0 = PayloadLossAttestation::sign(
+            claim.clone(),
+            AuthorityIndex::new_for_test(0),
+            &key_pairs[0].1,
+        )
+        .unwrap();
+        let cert = PayloadLossCertificate {
+            claim,
+            attestations: vec![att0.clone(), att0.clone(), att0],
+        };
+        // Only 1 unique authority's stake, well below quorum for a 4-node committee.
+        assert!(cert.verify(&committee).is_err());
+    }
+}

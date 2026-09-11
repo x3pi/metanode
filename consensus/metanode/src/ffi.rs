@@ -49,6 +49,44 @@ pub fn set_global_coordination_hub(hub: consensus_core::coordination_hub::Consen
     }
 }
 
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): a Handle to the running consensus Tokio
+/// runtime, so a plain synchronous FFI call from Go's own thread (no ambient tokio context of
+/// its own) can `Handle::block_on` an async task on it -- see `metanode_attest_payload_loss`.
+/// Re-stashed on every (re)build of the runtime (same rationale as GLOBAL_COORDINATION_HUB's
+/// doc comment) so this never points at a stale, already-shut-down runtime after a restart.
+pub static GLOBAL_TOKIO_HANDLE: std::sync::RwLock<Option<tokio::runtime::Handle>> =
+    std::sync::RwLock::new(None);
+
+pub fn set_global_tokio_handle(handle: tokio::runtime::Handle) {
+    match GLOBAL_TOKIO_HANDLE.write() {
+        Ok(mut guard) => *guard = Some(handle),
+        Err(poisoned) => *poisoned.into_inner() = Some(handle),
+    }
+}
+
+/// PEER-BLOCK RECOVERY (2026-09-11): this node's configured `peer_rpc_addresses` (the
+/// lightweight custom HTTP peer-RPC protocol used by network::peer_rpc -- a different,
+/// separate transport from the tonic/gRPC NetworkClient used for DAG-level peer calls like
+/// fetch_transactions/attest_payload_loss), stashed once at startup so
+/// executor_client/block_sending.rs's payload-loss recovery path can reach
+/// network::peer_rpc::fetch_executable_blocks_from_peer without needing this threaded through
+/// every one of ExecutorClient::new's ~16 call sites. Source of truth is still
+/// NodeConfig::peer_rpc_addresses (config.rs) -- this is just a process-wide read-only copy of
+/// it, set once where that config is first in scope (setup_storage.rs), not re-derived.
+pub static GLOBAL_PEER_RPC_ADDRESSES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Idempotent: only the first call actually sets it (matches the "static config for the
+/// process's lifetime" nature of peer_rpc_addresses -- unlike GLOBAL_COORDINATION_HUB/
+/// GLOBAL_TOKIO_HANDLE, this never needs to change across an epoch transition or internal FFI
+/// restart, so a plain OnceLock -- not a RwLock<Option<...>> -- is the right, simpler fit).
+pub fn set_global_peer_rpc_addresses(addresses: Vec<String>) {
+    let _ = GLOBAL_PEER_RPC_ADDRESSES.set(addresses);
+}
+
+pub fn get_global_peer_rpc_addresses() -> Vec<String> {
+    GLOBAL_PEER_RPC_ADDRESSES.get().cloned().unwrap_or_default()
+}
+
 /// FFI entry point for Go's `eth_syncing` handler (MetaAPI.Syncing() in rpc_state.go).
 /// Returns true when this node's consensus layer would actually accept/propose a transaction
 /// right now, false otherwise (still initializing/bootstrapping/catching-up/state-syncing, or no
@@ -237,6 +275,150 @@ pub fn get_go_state_root() -> String {
         }
     }
     String::new()
+}
+
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): operator-triggered entry point. NOT called
+/// automatically from anywhere -- an operator invokes this (via whatever thin CLI/admin wrapper
+/// calls into this FFI boundary) only after `CONSENSUS-HALT-TX-PAYLOAD-LOST` (block_delivery.rs
+/// mục 10) has been showing for this exact commit for a genuinely long time, per mục 11.2
+/// point 6 of note/consensus_local_dag_trust_gap_design_2026-09.md -- never on a short
+/// automatic timeout, since that risks treating a transient network partition as confirmed
+/// permanent loss.
+///
+/// `tx_digest_hex` must be exactly `2 * DIGEST_LENGTH` hex characters (no `0x` prefix).
+/// Returns:
+///   0 = quorum-certified as permanently lost; the certified-skip list has been updated, and
+///       the stuck delivery retry loop (block_delivery.rs) will pick this up and proceed on
+///       its next attempt (within ~10s) without needing anything else from the operator.
+///   1 = recovered instead -- a peer (or this node itself) actually still had the payload; it
+///       has been inserted into the local TxPayloadCache, no skip was needed or applied.
+///   2 = insufficient stake attested so far to reach quorum -- see the log line this prints
+///       for exactly how much stake responded "confirmed missing" vs. how much is needed; the
+///       operator may re-run this later once more peers are reachable, or investigate why they
+///       aren't.
+///  -1 = could not run at all (bad input, or this node's consensus isn't up yet -- e.g. no
+///       committee/network client wired, same precondition TxFetcherFn already documents).
+#[no_mangle]
+pub extern "C" fn metanode_attest_payload_loss(
+    commit_index: u32,
+    tx_digest_hex: *const std::os::raw::c_char,
+) -> i32 {
+    if tx_digest_hex.is_null() {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] metanode_attest_payload_loss: null tx_digest_hex");
+        return -1;
+    }
+    let hex_str = match unsafe { std::ffi::CStr::from_ptr(tx_digest_hex) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            error!("🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex is not valid UTF-8");
+            return -1;
+        }
+    };
+    let digest_bytes = match hex::decode(hex_str) {
+        Ok(b) if b.len() == consensus_config::DIGEST_LENGTH => b,
+        Ok(b) => {
+            error!(
+                "🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex has {} bytes, expected {}",
+                b.len(), consensus_config::DIGEST_LENGTH
+            );
+            return -1;
+        }
+        Err(e) => {
+            error!("🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex is not valid hex: {}", e);
+            return -1;
+        }
+    };
+    let mut digest_arr = [0u8; consensus_config::DIGEST_LENGTH];
+    digest_arr.copy_from_slice(&digest_bytes);
+    let tx_digest = consensus_types::block::TxDigest(digest_arr);
+
+    let collector = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().and_then(|hub| hub.get_payload_loss_collector())
+    };
+    let Some(collector) = collector else {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] No payload-loss collector wired yet -- consensus may not be \
+             fully started. Try again shortly."
+        );
+        return -1;
+    };
+    let committee = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .as_ref()
+            .and_then(|hub| hub.get_committee_for_payload_loss())
+    };
+    let Some(committee) = committee else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No committee available yet -- consensus may not be fully started.");
+        return -1;
+    };
+
+    let handle = {
+        let guard = match GLOBAL_TOKIO_HANDLE.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No tokio runtime handle available yet.");
+        return -1;
+    };
+
+    let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+        commit_index,
+        tx_digest,
+    };
+    info!(
+        "🔎 [PAYLOAD-LOSS-SKIP] Operator-triggered attestation collection starting for \
+         commit_index={} tx_digest=0x{}...",
+        commit_index, hex_str
+    );
+    let result = handle.block_on(collector(claim.clone(), std::time::Duration::from_secs(10)));
+    use consensus_core::payload_loss_attestation::PayloadLossCollectionResult;
+    match result {
+        PayloadLossCollectionResult::Recovered => {
+            info!(
+                "✅ [PAYLOAD-LOSS-SKIP] Recovered -- a peer (or this node) actually had the \
+                 payload for commit_index={} tx_digest=0x{}, no skip needed.",
+                commit_index, hex_str
+            );
+            1
+        }
+        PayloadLossCollectionResult::Certified(certificate) => {
+            if let Err(e) = certificate.verify(&committee) {
+                error!(
+                    "🛑 [PAYLOAD-LOSS-SKIP] BUG: collector returned a certificate that fails its \
+                     own re-verification: {}. NOT applying it.",
+                    e
+                );
+                return -1;
+            }
+            consensus_core::payload_loss_attestation::record_certified_skip(certificate);
+            info!(
+                "🛑✅ [PAYLOAD-LOSS-SKIP-CERTIFIED] Quorum-certified permanent loss for \
+                 commit_index={} tx_digest=0x{} -- recorded. The stuck delivery retry loop will \
+                 pick this up and skip this transaction within ~10s.",
+                commit_index, hex_str
+            );
+            0
+        }
+        PayloadLossCollectionResult::Insufficient { attested_missing_stake, quorum_needed } => {
+            error!(
+                "⏳ [PAYLOAD-LOSS-SKIP] Not enough stake attested yet for commit_index={} \
+                 tx_digest=0x{}: {} of {} needed. Re-run later once more peers are reachable.",
+                commit_index, hex_str, attested_missing_stake, quorum_needed
+            );
+            2
+        }
+    }
 }
 
 /// Returns the current number of items in the FFI TX queue.
@@ -551,6 +733,12 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                     return;
                 }
             };
+            // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): stash a Handle to this runtime
+            // so metanode_attest_payload_loss (a plain sync FFI call from Go's own thread, no
+            // ambient tokio context of its own) can `Handle::block_on` the async collector.
+            // Re-stashed on every (re)build of this runtime, same rationale as
+            // set_global_coordination_hub's doc comment.
+            crate::ffi::set_global_tokio_handle(rt.handle().clone());
 
             rt.block_on(async {
                 let mut restart_count = 0u32;
