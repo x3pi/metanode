@@ -1458,37 +1458,89 @@ impl ExecutorClient {
             let tx_digests = block.tx_digests();
             if !tx_digests.is_empty() {
                 for digest in &tx_digests {
+                    // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): checked BEFORE the cache
+                    // lookup, not only in the cache-miss arm -- moved here 2026-09-11 after a
+                    // real fork-safety gap was spotted in review: once a quorum has certified a
+                    // digest permanently lost for this exact commit, EVERY honest node must
+                    // exclude it from the block, INCLUDING a node that happens to still have the
+                    // payload cached (e.g. the exact "slow node" case that made peer stake look
+                    // unresponsive during collection, mục 13's own fork -- that node's cache
+                    // entry does not un-happen the certificate; the rest of the network already
+                    // computes the block without this transaction, so this node including it
+                    // anyway would be a fork of its own, one certified-skip application at a
+                    // time). Checking only in the `None` arm silently missed exactly this case.
+                    // Deterministic on every node holding the same certificate (every honest node
+                    // reaches or receives and independently re-verifies the identical
+                    // certificate, so every node computes the identical resulting
+                    // all_txs_to_process, hence identical downstream fragment/GEI math and block
+                    // hash; see build.rs/coordination_hub.rs for how the certificate itself is
+                    // only ever recorded via an operator-triggered, quorum-verified action, never
+                    // silently/automatically).
+                    let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+                        commit_index: subdag.commit_ref.index,
+                        tx_digest: *digest,
+                    };
+                    if let Some(certificate) =
+                        consensus_core::payload_loss_attestation::get_certified_skip(&claim)
+                    {
+                        // RESUBMIT-DON'T-DISCARD (2026-09-11, per user request): a certified skip
+                        // means "excluded from THIS specific commit" -- it must stay excluded
+                        // here no matter what (every honest node has to compute the identical
+                        // block, see the doc comment above), but it does NOT mean "this
+                        // transaction must never execute". If this node happens to still hold the
+                        // payload (e.g. it was one of the slower-to-lose-it peers whose absence
+                        // from attestation collection was what let the certificate reach quorum
+                        // in the first place -- mục 13's own incident), feed it back through the
+                        // SAME resubmission path tx_recycler.rs already uses for ordinary
+                        // stale/requeued transactions (`resubmit_one_stale_tx`), via the global
+                        // TransactionClientProxy handle (ffi.rs) so it gets a fresh, ordinary
+                        // shot at inclusion in a LATER commit instead of vanishing silently.
+                        // Fire-and-forget on a background task: this function is not async, and
+                        // resubmission succeeding or failing must never affect (block, delay, or
+                        // fail) dispatch of THIS commit either way -- worst case, exactly today's
+                        // behavior (transaction is simply gone).
+                        if let Some(tx) = cache.get(digest) {
+                            let tx_data = tx.data().to_vec();
+                            let digest_for_log = *digest;
+                            let commit_for_log = subdag.commit_ref.index;
+                            if let Some(client) = crate::ffi::get_global_tx_resubmit_client() {
+                                tokio::spawn(async move {
+                                    use crate::node::tx_submitter::TransactionSubmitter;
+                                    match client.submit(vec![tx_data]).await {
+                                        Ok((block_ref, _, _)) => tracing::info!(
+                                            "♻️ [PAYLOAD-LOSS-RESUBMIT] Digest {:?} (excluded from \
+                                             commit {} by a certified skip, still held locally) \
+                                             resubmitted -- now targeting block {:?}.",
+                                            digest_for_log, commit_for_log, block_ref
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "♻️ [PAYLOAD-LOSS-RESUBMIT] Digest {:?} (excluded from \
+                                             commit {}) resubmission failed, transaction is lost: \
+                                             {}",
+                                            digest_for_log, commit_for_log, e
+                                        ),
+                                    }
+                                });
+                            } else {
+                                tracing::warn!(
+                                    "♻️ [PAYLOAD-LOSS-RESUBMIT] Digest {:?} (excluded from commit \
+                                     {}) still held locally but no TransactionClientProxy is \
+                                     wired yet -- cannot resubmit, transaction is lost.",
+                                    digest, commit_for_log
+                                );
+                            }
+                        }
+                        tracing::error!(
+                            "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost \
+                             transaction digest {:?} in commit {} per quorum certificate \
+                             ({} attesting signatures) -- treating as absent, NOT as an error.",
+                            digest, subdag.commit_ref.index, certificate.attestations.len()
+                        );
+                        continue;
+                    }
                     match cache.get(digest) {
                         Some(tx) => all_txs_to_process.push(tx),
                         None => {
-                            // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): before falling
-                            // through to the fork-safety bail below, check whether a quorum
-                            // certificate already authorizes skipping this EXACT
-                            // (commit_index, digest) pair (mục 11 of
-                            // note/consensus_local_dag_trust_gap_design_2026-09.md). If so,
-                            // simply don't push anything for this digest -- deterministic on
-                            // every node holding the same certificate (every honest node
-                            // reaches or receives and independently re-verifies the identical
-                            // certificate, so every node computes the identical resulting
-                            // all_txs_to_process, hence identical downstream fragment/GEI math
-                            // and block hash; see build.rs/coordination_hub.rs for how the
-                            // certificate itself is only ever recorded via an operator-
-                            // triggered, quorum-verified action, never silently/automatically).
-                            let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
-                                commit_index: subdag.commit_ref.index,
-                                tx_digest: *digest,
-                            };
-                            if let Some(certificate) =
-                                consensus_core::payload_loss_attestation::get_certified_skip(&claim)
-                            {
-                                tracing::error!(
-                                    "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost \
-                                     transaction digest {:?} in commit {} per quorum certificate \
-                                     ({} attesting signatures) -- treating as absent, NOT as an error.",
-                                    digest, subdag.commit_ref.index, certificate.attestations.len()
-                                );
-                                continue;
-                            }
                             // FORK-SAFETY (2026-09-08): a missing digest here means this
                             // commit is NOT empty — the digest count is real, it's counted as
                             // such by both commit_is_empty_for_gei (executor.rs) and

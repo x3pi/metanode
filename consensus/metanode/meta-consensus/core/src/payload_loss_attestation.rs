@@ -274,6 +274,24 @@ pub fn is_currently_stuck(claim: &PayloadLossClaim) -> bool {
     stuck_claims().read().contains(claim)
 }
 
+/// All claims THIS node is currently, actively stuck on for one specific commit -- i.e. every
+/// digest `deliver_with_halt_retry` (block_delivery.rs) has found missing so far for that
+/// commit's subdag. A single commit's subdag can reference blocks from several different
+/// authors, each with its own transactions, so more than one digest can legitimately be missing
+/// at once (reproduced live 2026-09-11: a commit whose subdag spanned 2 authors' blocks had 8
+/// distinct missing digests). Added specifically so an operator (or `admin_attestPayloadLoss`'s
+/// caller) never has to hunt digests out of log lines one at a time and re-run the FFI call
+/// per-digest -- see `metanode_attest_payload_loss_for_commit` in ffi.rs, which uses this to
+/// discover and certify every one of them in a single admin action.
+pub fn stuck_claims_for_commit(commit_index: CommitIndex) -> Vec<PayloadLossClaim> {
+    stuck_claims()
+        .read()
+        .iter()
+        .filter(|c| c.commit_index == commit_index)
+        .cloned()
+        .collect()
+}
+
 /// GLOBAL CERTIFIED-SKIP LIST (2026-09-11): digests this node has a valid quorum certificate
 /// for, safe to treat as permanently absent. Checked by build_sorted_transactions
 /// (executor_client/block_sending.rs) before it would otherwise bail on a missing digest.

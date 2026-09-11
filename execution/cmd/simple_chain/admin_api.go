@@ -43,6 +43,24 @@ func (api *AdminApi) AttestPayloadLoss(ctx context.Context, password string, com
 	return executor.AttestPayloadLoss(commitIndex, txDigestHex), nil
 }
 
+// AttestPayloadLossForCommit is the operator-facing RPC wrapper (admin_attestPayloadLossForCommit)
+// for the whole-commit convenience form of AttestPayloadLoss above (see
+// consensus/metanode/src/ffi.rs's metanode_attest_payload_loss_for_commit, 2026-09-11) -- attests
+// every digest this node is currently stuck on for commitIndex in one call, instead of requiring
+// one AttestPayloadLoss call per digest (a single halted commit can have several missing digests
+// at once -- reproduced live with 8 on one commit). Prefer this over AttestPayloadLoss whenever
+// you don't already know there's exactly one missing digest.
+// Returns: 0 = every claim resolved, 1 = nothing was stuck for this commit on this node right
+// now, 2 = at least one claim still needs more attested stake (others were still resolved), -1 =
+// could not run, or at least one claim hit a hard error. Full detail is always in the node's own
+// logs (grep for PAYLOAD-LOSS-SKIP), never only in this return value.
+func (api *AdminApi) AttestPayloadLossForCommit(ctx context.Context, password string, commitIndex uint32) (int32, error) {
+	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
+		return -1, errInvalidCredentials
+	}
+	return executor.AttestPayloadLossForCommit(commitIndex), nil
+}
+
 func (api *AdminApi) SetState(ctx context.Context, password string, state processor.State) (processor.State, error) {
 
 	if subtle.ConstantTimeCompare([]byte(password), []byte(api.App.config.Securepassword)) != 1 {
