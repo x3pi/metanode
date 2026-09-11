@@ -1296,6 +1296,34 @@ impl ExecutorClient {
                     match cache.get(digest) {
                         Some(tx) => all_txs_to_process.push(tx),
                         None => {
+                            // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): before falling
+                            // through to the fork-safety bail below, check whether a quorum
+                            // certificate already authorizes skipping this EXACT
+                            // (commit_index, digest) pair (mục 11 of
+                            // note/consensus_local_dag_trust_gap_design_2026-09.md). If so,
+                            // simply don't push anything for this digest -- deterministic on
+                            // every node holding the same certificate (every honest node
+                            // reaches or receives and independently re-verifies the identical
+                            // certificate, so every node computes the identical resulting
+                            // all_txs_to_process, hence identical downstream fragment/GEI math
+                            // and block hash; see build.rs/coordination_hub.rs for how the
+                            // certificate itself is only ever recorded via an operator-
+                            // triggered, quorum-verified action, never silently/automatically).
+                            let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+                                commit_index: subdag.commit_ref.index,
+                                tx_digest: *digest,
+                            };
+                            if let Some(certificate) =
+                                consensus_core::payload_loss_attestation::get_certified_skip(&claim)
+                            {
+                                tracing::error!(
+                                    "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost \
+                                     transaction digest {:?} in commit {} per quorum certificate \
+                                     ({} attesting signatures) -- treating as absent, NOT as an error.",
+                                    digest, subdag.commit_ref.index, certificate.attestations.len()
+                                );
+                                continue;
+                            }
                             // FORK-SAFETY (2026-09-08): a missing digest here means this
                             // commit is NOT empty — the digest count is real, it's counted as
                             // such by both commit_is_empty_for_gei (executor.rs) and

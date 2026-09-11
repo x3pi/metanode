@@ -213,29 +213,36 @@ impl PayloadLossCertificate {
 /// GLOBAL_TX_CACHE, deliberately kept separate from it (this is a much rarer, much more
 /// consequential kind of entry -- co-locating them risked an ordinary cache eviction/clear
 /// accidentally touching a certified skip decision).
+// Keyed by the FULL (commit_index, tx_digest) claim, not just the digest: a content-addressed
+// digest is deterministic from a transaction's bytes, so in principle the exact same digest
+// could legitimately appear referenced by two different commits (e.g. two structurally
+// identical transactions submitted at different times). A certificate only ever authorizes
+// skipping ONE specific commit's reference to that digest -- keying by digest alone would let
+// a certificate for commit A incorrectly also authorize skipping an unrelated occurrence of
+// the same digest in commit B.
 static GLOBAL_CERTIFIED_SKIPS: std::sync::OnceLock<
-    parking_lot::RwLock<std::collections::HashMap<TxDigest, PayloadLossCertificate>>,
+    parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>>,
 > = std::sync::OnceLock::new();
 
 fn global_certified_skips(
-) -> &'static parking_lot::RwLock<std::collections::HashMap<TxDigest, PayloadLossCertificate>> {
+) -> &'static parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>> {
     GLOBAL_CERTIFIED_SKIPS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Records a certificate as authorizing a skip for its claim's digest. The caller (the
+/// Records a certificate as authorizing a skip for its exact claim. The caller (the
 /// operator-triggered FFI entry point, or a node that received this certificate from a peer
 /// rather than collecting it itself) MUST have already called `certificate.verify(committee)`
 /// successfully -- this function does not re-verify, it only stores.
 pub fn record_certified_skip(certificate: PayloadLossCertificate) {
-    let digest = certificate.claim.tx_digest;
-    global_certified_skips().write().insert(digest, certificate);
+    let claim = certificate.claim.clone();
+    global_certified_skips().write().insert(claim, certificate);
 }
 
-/// Returns the recorded certificate for this digest, if any -- used by
-/// build_sorted_transactions to decide whether a missing digest is a certified, safe-to-skip
-/// loss rather than an ordinary fork-safety bail.
-pub fn get_certified_skip(digest: &TxDigest) -> Option<PayloadLossCertificate> {
-    global_certified_skips().read().get(digest).cloned()
+/// Returns the recorded certificate for this exact (commit_index, tx_digest) claim, if any --
+/// used by build_sorted_transactions to decide whether a missing digest is a certified,
+/// safe-to-skip loss rather than an ordinary fork-safety bail.
+pub fn get_certified_skip(claim: &PayloadLossClaim) -> Option<PayloadLossCertificate> {
+    global_certified_skips().read().get(claim).cloned()
 }
 
 /// Outcome of running the operator-triggered collector (`PayloadLossCollectorFn`,
