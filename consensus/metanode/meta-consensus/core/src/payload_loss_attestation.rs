@@ -206,6 +206,74 @@ impl PayloadLossCertificate {
     }
 }
 
+/// STUCK-CLAIMS REGISTRY (2026-09-11, CRITICAL FORK-SAFETY FIX): tracks claims THIS node is
+/// currently, actively unable to deliver -- i.e. `deliver_with_halt_retry` (block_delivery.rs)
+/// is presently looping on them right now, not merely "at some point in the past this digest
+/// wasn't in my cache."
+///
+/// WHY THIS EXISTS -- a real fork was reproduced live (2026-09-11) by the FIRST version of this
+/// feature, which had `handle_attest_payload_loss` answer solely from `get_global_tx_cache()`
+/// (transaction.rs): a peer that had ALREADY received, executed, and permanently committed a
+/// transaction to its own chain -- then had that transaction's entry age out of the cache later
+/// (an ordinary, expected LRU eviction, same one every other cache-miss codepath in this file
+/// already treats as normal) -- would TRUTHFULLY answer "no, I don't have it" to a cache check,
+/// even though the transaction was very much real and applied on its chain. Three of four nodes
+/// answered exactly this way in the reproduction; the resulting "quorum" wrongly certified the
+/// transaction as permanently lost everywhere, and the operator's skip forked the 4th node off
+/// from the other 3 (different stateRoot, different block hash) at the exact block the
+/// transaction was skipped on. A cache-presence check answers "do I have the bytes sitting in
+/// RAM right now" -- a fundamentally different, much weaker question than the one that's
+/// actually safe to build a quorum on: "has this transaction's effect already landed in MY committed
+/// chain, under any circumstances." No amount of retrying/expanding the cache check alone can
+/// close this gap (persisting TxPayloadCache to disk was tried and reverted for a real perf
+/// regression -- see TX_PAYLOAD_DIR's doc comment -- and even an unbounded RAM cache doesn't
+/// prove non-execution, only non-presence).
+///
+/// THE FIX: reframe what a valid "missing" attestation means. A peer that has ALREADY moved
+/// past this commit (successfully delivered it, with or without this tx) is NOT in the same
+/// epistemic position as the stuck requester and must never attest "missing" -- it already
+/// resolved this commit one way or another. A peer that hasn't reached this commit yet also
+/// can't say anything meaningful. The ONLY peers safe to count toward quorum are ones ALSO
+/// presently, actively retrying delivery of this EXACT (commit_index, tx_digest) right now --
+/// i.e. in the identical stuck position as the requester. If every honest node in the committee
+/// is simultaneously stuck on the same claim (the true full-cluster-loss scenario this feature
+/// targets), all of them qualify and quorum is reached correctly, SAFELY: none of them could
+/// possibly have applied the transaction, because none of them has been able to move past this
+/// commit at all. A peer NOT in this registry for the claim returns neither a payload nor a
+/// signed attestation (see `handle_attest_payload_loss`) -- an abstention, which the existing
+/// AttestPayloadLossResponse/tonic_network.rs wire format already represents for free (empty
+/// `payload` AND empty `attestation` -- the client's `bcs::from_bytes` on empty bytes already
+/// fails, which the collector closure in authority_node/mod.rs already silently drops via `if
+/// let Ok(...) = result`, so this needed zero changes to the network/client code, only to what
+/// the server decides to sign).
+static STUCK_CLAIMS: std::sync::OnceLock<parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>>> =
+    std::sync::OnceLock::new();
+
+fn stuck_claims() -> &'static parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>> {
+    STUCK_CLAIMS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashSet::new()))
+}
+
+/// Called by `deliver_with_halt_retry` (block_delivery.rs) the moment delivery of a commit
+/// first fails due to a missing payload -- marks this node as a valid, honest "missing"
+/// attestor for this exact claim for as long as it remains stuck.
+pub fn mark_stuck(claim: PayloadLossClaim) {
+    stuck_claims().write().insert(claim);
+}
+
+/// Called by `deliver_with_halt_retry` the moment delivery of a commit finally succeeds (via
+/// ordinary peer recovery, a certified skip, or the payload simply reappearing) -- this node is
+/// no longer stuck on this claim and must stop being counted as an attestor for it.
+pub fn unmark_stuck(claim: &PayloadLossClaim) {
+    stuck_claims().write().remove(claim);
+}
+
+/// Whether THIS node is currently, actively stuck on this exact claim right now. The only
+/// condition under which `handle_attest_payload_loss` may honestly sign a "missing" attestation
+/// -- see this section's doc comment for why a cache-miss alone is not enough.
+pub fn is_currently_stuck(claim: &PayloadLossClaim) -> bool {
+    stuck_claims().read().contains(claim)
+}
+
 /// GLOBAL CERTIFIED-SKIP LIST (2026-09-11): digests this node has a valid quorum certificate
 /// for, safe to treat as permanently absent. Checked by build_sorted_transactions
 /// (executor_client/block_sending.rs) before it would otherwise bail on a missing digest.
@@ -399,6 +467,34 @@ mod tests {
         assert!(
             get_certified_skip(&different_digest_same_commit).is_none(),
             "a certificate for one digest must NOT authorize skipping a different digest"
+        );
+    }
+
+    #[test]
+    fn stuck_registry_starts_clear_and_reflects_mark_unmark() {
+        // Fork-safety regression test (2026-09-11): a real fork was reproduced live because
+        // "cache doesn't have it" alone was treated as grounds to attest "missing". The fix is
+        // this registry -- only a claim explicitly marked (by deliver_with_halt_retry actually
+        // failing to deliver it) counts as stuck. Uses a byte pattern ([88u8; ...], commit 8888)
+        // distinct from every other test in this file/module to avoid cross-test interference
+        // via the shared process-wide STUCK_CLAIMS static.
+        let claim = PayloadLossClaim {
+            commit_index: 8888,
+            tx_digest: TxDigest([88u8; consensus_config::DIGEST_LENGTH]),
+        };
+        assert!(
+            !is_currently_stuck(&claim),
+            "a claim nobody has marked must not be considered stuck"
+        );
+        mark_stuck(claim.clone());
+        assert!(
+            is_currently_stuck(&claim),
+            "a claim just marked must be considered stuck"
+        );
+        unmark_stuck(&claim);
+        assert!(
+            !is_currently_stuck(&claim),
+            "a claim that was unmarked (delivery succeeded) must no longer be considered stuck"
         );
     }
 

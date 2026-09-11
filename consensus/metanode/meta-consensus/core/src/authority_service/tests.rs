@@ -357,9 +357,28 @@ async fn test_handle_attest_payload_loss() {
     let commit_index: crate::commit::CommitIndex = 7;
     let missing_digest =
         consensus_types::block::TxDigest([9u8; consensus_config::DIGEST_LENGTH]);
+    let claim = crate::payload_loss_attestation::PayloadLossClaim {
+        commit_index,
+        tx_digest: missing_digest,
+    };
 
-    // GIVEN this node genuinely doesn't have the payload -- WHEN a peer asks THEN it gets
-    // back a validly-signed attestation confirming so, not the (nonexistent) payload.
+    // FORK-SAFETY (2026-09-11): a cache-miss ALONE must NOT be enough to get a signed
+    // "missing" attestation -- this is the exact gap a real live fork was reproduced through
+    // (see payload_loss_attestation.rs's STUCK_CLAIMS doc comment). GIVEN this node has never
+    // marked itself as actively stuck on this claim -- WHEN a peer asks THEN it must abstain
+    // (Err), not sign anything.
+    let result = service
+        .handle_attest_payload_loss(peer, commit_index, missing_digest)
+        .await;
+    assert!(
+        result.is_err(),
+        "must abstain (Err), not sign a 'missing' attestation, when not actually stuck on this claim"
+    );
+
+    // GIVEN this node IS now actively, presently stuck on this exact claim (the only honest
+    // basis for a 'missing' attestation) -- WHEN a peer asks THEN it gets back a validly-signed
+    // attestation confirming so.
+    crate::payload_loss_attestation::mark_stuck(claim.clone());
     let outcome = service
         .handle_attest_payload_loss(peer, commit_index, missing_digest)
         .await
@@ -380,6 +399,18 @@ async fn test_handle_attest_payload_loss() {
             panic!("expected an attestation, got a payload for a digest never inserted into the cache");
         }
     }
+
+    // GIVEN this node is no longer stuck (delivery succeeded, or an operator resolved it) --
+    // WHEN a peer asks again THEN it must go back to abstaining, not keep vouching for a
+    // now-stale claim.
+    crate::payload_loss_attestation::unmark_stuck(&claim);
+    let result = service
+        .handle_attest_payload_loss(peer, commit_index, missing_digest)
+        .await;
+    assert!(
+        result.is_err(),
+        "must abstain again once no longer marked stuck"
+    );
 
     // GIVEN the payload IS actually present locally -- WHEN a peer asks THEN it gets the
     // real payload back directly, not an attestation (this also helps ordinary recovery,

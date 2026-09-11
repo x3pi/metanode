@@ -1014,6 +1014,16 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             commit_index,
             tx_digest,
         };
+        // FORK-SAFETY (2026-09-11): a cache-miss ALONE is not sufficient grounds to attest
+        // "missing" -- see payload_loss_attestation.rs's STUCK_CLAIMS doc comment for the real
+        // fork this exact gap caused live. Only sign if THIS node is itself, right now, also
+        // actively stuck retrying delivery of this EXACT claim (i.e. in the identical
+        // epistemic position as the requester) -- a node that already delivered this commit
+        // (with or without this tx) or hasn't reached it yet has no honest basis to say
+        // "missing" and must abstain instead.
+        if !crate::payload_loss_attestation::is_currently_stuck(&claim) {
+            return Err(ConsensusError::PayloadLossAbstain);
+        }
         let attestation = crate::payload_loss_attestation::PayloadLossAttestation::sign(
             claim,
             self.context.own_index,

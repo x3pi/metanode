@@ -93,6 +93,15 @@ pub enum ConsensusError {
     #[error("Invalid payload-loss attestation/certificate: {0}")]
     InvalidPayloadLossAttestation(String),
 
+    // Added 2026-09-11 (fork-safety fix, see payload_loss_attestation.rs's STUCK_CLAIMS doc
+    // comment) -- deliberately NOT a real error: a legitimate abstention from a peer that is
+    // neither holding the payload nor currently, actively stuck on this exact claim, so it has
+    // no honest basis to attest either way. Propagating this as an Err all the way to the
+    // caller (authority_node/mod.rs's collector, which already treats any Err as "doesn't
+    // count toward quorum") is what makes it an abstention rather than a false "missing" vote.
+    #[error("Peer is not stuck on this claim, cannot honestly attest either way (abstaining)")]
+    PayloadLossAbstain,
+
     #[error("Synchronizer for fetching blocks directly from {0} is saturated")]
     SynchronizerSaturated(AuthorityIndex),
 

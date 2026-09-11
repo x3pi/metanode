@@ -64,6 +64,29 @@ pub fn set_global_tokio_handle(handle: tokio::runtime::Handle) {
     }
 }
 
+/// PEER-BLOCK RECOVERY (2026-09-11): this node's configured `peer_rpc_addresses` (the
+/// lightweight custom HTTP peer-RPC protocol used by network::peer_rpc -- a different,
+/// separate transport from the tonic/gRPC NetworkClient used for DAG-level peer calls like
+/// fetch_transactions/attest_payload_loss), stashed once at startup so
+/// executor_client/block_sending.rs's payload-loss recovery path can reach
+/// network::peer_rpc::fetch_executable_blocks_from_peer without needing this threaded through
+/// every one of ExecutorClient::new's ~16 call sites. Source of truth is still
+/// NodeConfig::peer_rpc_addresses (config.rs) -- this is just a process-wide read-only copy of
+/// it, set once where that config is first in scope (setup_storage.rs), not re-derived.
+pub static GLOBAL_PEER_RPC_ADDRESSES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Idempotent: only the first call actually sets it (matches the "static config for the
+/// process's lifetime" nature of peer_rpc_addresses -- unlike GLOBAL_COORDINATION_HUB/
+/// GLOBAL_TOKIO_HANDLE, this never needs to change across an epoch transition or internal FFI
+/// restart, so a plain OnceLock -- not a RwLock<Option<...>> -- is the right, simpler fit).
+pub fn set_global_peer_rpc_addresses(addresses: Vec<String>) {
+    let _ = GLOBAL_PEER_RPC_ADDRESSES.set(addresses);
+}
+
+pub fn get_global_peer_rpc_addresses() -> Vec<String> {
+    GLOBAL_PEER_RPC_ADDRESSES.get().cloned().unwrap_or_default()
+}
+
 /// FFI entry point for Go's `eth_syncing` handler (MetaAPI.Syncing() in rpc_state.go).
 /// Returns true when this node's consensus layer would actually accept/propose a transaction
 /// right now, false otherwise (still initializing/bootstrapping/catching-up/state-syncing, or no
