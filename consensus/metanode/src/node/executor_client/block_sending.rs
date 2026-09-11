@@ -1237,16 +1237,38 @@ impl ExecutorClient {
         if missing.is_empty() {
             return;
         }
+        // DIAG (2026-09-11, temporary): the recovery mechanism below was never observed
+        // firing in production despite hitting the fork-safety bail thousands of times
+        // live -- info!() (not filtered at the default "info" level, unlike the debug!()
+        // this replaces) to settle whether get_global_tx_fetcher() is actually None here,
+        // or Some but the fetch itself silently fails to populate the cache. Remove once
+        // settled -- see note/consensus_local_dag_trust_gap_design_2026-09.md mục 10.
         let Some(fetcher) = crate::ffi::get_global_tx_fetcher() else {
+            info!(
+                "🔧 [TX-PAYLOAD-RECOVERY-DIAG] {} tx digest(s) missing for commit {} but \
+                 get_global_tx_fetcher() returned None -- cannot even attempt peer recovery.",
+                missing.len(),
+                subdag.commit_ref.index
+            );
             return;
         };
-        debug!(
-            "🔧 [TX-PAYLOAD-RECOVERY] {} tx digest(s) missing from local cache for commit {} \
+        info!(
+            "🔧 [TX-PAYLOAD-RECOVERY-DIAG] {} tx digest(s) missing from local cache for commit {} \
              — asking peers before falling back to the existing fork-safety bail.",
             missing.len(),
             subdag.commit_ref.index
         );
-        fetcher(missing, std::time::Duration::from_secs(5)).await;
+        fetcher(missing.clone(), std::time::Duration::from_secs(5)).await;
+        let still_missing = {
+            let cache = consensus_core::get_global_tx_cache().read();
+            missing.iter().filter(|d| cache.get(d).is_none()).count()
+        };
+        info!(
+            "🔧 [TX-PAYLOAD-RECOVERY-DIAG] after peer fetch for commit {}: {}/{} digest(s) still missing.",
+            subdag.commit_ref.index,
+            still_missing,
+            missing.len()
+        );
     }
 
     /// Build sorted, deduplicated TransactionExe list from a CommittedSubDag.
