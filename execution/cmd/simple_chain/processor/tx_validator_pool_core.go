@@ -108,6 +108,89 @@ func (vp *TxValidatorPool) ClearNoncesCache() {
 	logger.Debug("🧹 [POOL] Expected nonces cache cleared (block committed)")
 }
 
+// AdvanceNoncesCacheForForwarded updates the shared per-address expected-nonce cache to
+// reflect transactions the caller has CONFIRMED were actually forwarded on to Rust (i.e.
+// already past any truncation/backpressure re-queue decision), so that address's very next
+// pool tick sees its own just-forwarded progress immediately instead of waiting for a full
+// commit-and-DB-refetch round trip.
+//
+// ROOT-CAUSE FIX (2026-09-11) for the two related, previously-abandoned bugs described in
+// ProcessTransactionsInPoolSub's long comment above the `nonceMap[from]++` line and in
+// ClearNoncesCache's call site (block_processor_commit.go): that 2026-09-02 investigation's
+// own same-day attempt at this exact idea regressed a live 1M-tx test to ~50% confirmed
+// because it advanced the cache from ProcessTransactionsInPoolSub's LOCAL, PRE-truncation
+// nonceMap — crediting transactions TxBatchForwarder.StartForwardingLoop could still slice
+// off (targetBlockSize) and re-queue into the pool moments later, so the NEXT tick saw them
+// as "past" (already accounted for) and dropped them permanently (CLASSIFY-PAST-DROP).
+//
+// This version is safe against that exact failure because it is called from the FORWARDER,
+// per FFI batch, ONLY with the transactions in THAT batch, and ONLY after
+// executor.SubmitTransactionBatch has reported success for it — i.e. strictly after both the
+// truncation decision AND the actual hand-off are already resolved, so there is nothing left
+// for a later tick to re-queue out from under it. Never regresses a cache entry (compares
+// against the current value first), and any residual staleness this can't reach (an address
+// with no tx in this tick's batch) is still bounded to at most one commit cycle by
+// ClearNoncesCache's existing full wipe on every commit — this function only closes the gap
+// for the common case that round trip was paying for, it does not replace it.
+func (vp *TxValidatorPool) AdvanceNoncesCacheForForwarded(txs []types.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+
+	cacheVal := vp.noncesCache.Load()
+	var cache *sync.Map
+	if cacheVal != nil {
+		cache = cacheVal.(*sync.Map)
+	} else {
+		cache = &sync.Map{}
+		vp.noncesCache.Store(cache)
+	}
+
+	// A batch is not guaranteed sorted by (address, nonce) — StartForwardingLoop slices
+	// targetBlockSize/maxTransactionsPerBatch off the already-sorted validTxs list, so
+	// within one such slice ordering per address is preserved, but take the max defensively
+	// rather than assume it.
+	highestForwardedNonce := make(map[common.Address]uint64, len(txs))
+	for _, tx := range txs {
+		addr := tx.FromAddress()
+		nonce := tx.GetNonce()
+		if cur, ok := highestForwardedNonce[addr]; !ok || nonce > cur {
+			highestForwardedNonce[addr] = nonce
+		}
+	}
+
+	for addr, maxNonce := range highestForwardedNonce {
+		nextExpected := maxNonce + 1
+		if existing, ok := cache.Load(addr); ok {
+			if existingNonce, ok2 := existing.(uint64); ok2 && nextExpected <= existingNonce {
+				continue // already at least this fresh -- never regress
+			}
+		}
+		cache.Store(addr, nextExpected)
+	}
+}
+
+// addressesSuspectedStaleCache is the pure decision logic behind
+// ProcessTransactionsInPoolSub's forced-refresh of suspiciously-stuck addresses (see
+// StaleFutureCacheThreshold's doc comment for the bug this closes) -- pulled out as its own
+// function purely so it's directly unit-testable without needing a live AccountStateDB/trie.
+// Returns every address with at least one transaction that has been continuously recorded in
+// futureTxTimeMap for longer than threshold as of now.
+func addressesSuspectedStaleCache(
+	txs []types.Transaction,
+	futureTxTimeMap map[common.Hash]time.Time,
+	threshold time.Duration,
+	now time.Time,
+) map[common.Address]struct{} {
+	suspect := make(map[common.Address]struct{})
+	for _, tx := range txs {
+		if insertTime, exists := futureTxTimeMap[tx.Hash()]; exists && now.Sub(insertTime) > threshold {
+			suspect[tx.FromAddress()] = struct{}{}
+		}
+	}
+	return suspect
+}
+
 // SetEnvironment updates the environment reference
 func (vp *TxValidatorPool) SetEnvironment(env ITransactionProcessorEnvironment) {
 	vp.env = env
@@ -802,16 +885,28 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 				vp.noncesCache.Store(cache)
 			}
 
+			// Addresses with a transaction that has been sitting classified "future" for
+			// longer than StaleFutureCacheThreshold are suspected to be victims of the
+			// noncesCache staleness race (see that constant's doc comment) -- force them
+			// through the cache-miss/DB-refetch path below instead of trusting whatever is
+			// currently cached, so they get a fresh, authoritative answer THIS tick rather
+			// than waiting on an unrelated future commit to clear the whole cache.
+			suspectStaleAddrs := addressesSuspectedStaleCache(allTxs, vp.futureTxTimeMap, StaleFutureCacheThreshold, time.Now())
+
 			// First, resolve nonces using the cache
 			var missingAddrs []common.Address
 			for _, addr := range preloadAddrs {
-				if val, ok := cache.Load(addr); ok {
-					nonceMap[addr] = val.(uint64)
-					transaction_pool.TraceTx("CACHE-HIT", addr, val.(uint64), fmt.Sprintf("cachePtr=%p", cache))
+				if _, suspectStale := suspectStaleAddrs[addr]; !suspectStale {
+					if val, ok := cache.Load(addr); ok {
+						nonceMap[addr] = val.(uint64)
+						transaction_pool.TraceTx("CACHE-HIT", addr, val.(uint64), fmt.Sprintf("cachePtr=%p", cache))
+						continue
+					}
 				} else {
-					missingAddrs = append(missingAddrs, addr)
-					transaction_pool.TraceTx("CACHE-MISS", addr, 0, fmt.Sprintf("cachePtr=%p", cache))
+					transaction_pool.TraceTx("CACHE-SUSPECT-STALE", addr, 0, "future tx stuck past StaleFutureCacheThreshold, forcing fresh DB read")
 				}
+				missingAddrs = append(missingAddrs, addr)
+				transaction_pool.TraceTx("CACHE-MISS", addr, 0, fmt.Sprintf("cachePtr=%p", cache))
 			}
 
 			// If there are cache misses, fetch nonces from DB in parallel
@@ -946,13 +1041,22 @@ func (vp *TxValidatorPool) ProcessTransactionsInPoolSub(setEmptyBlock bool, maxD
 		// ever advance, never regress) made this specific failure mode
 		// worse, not better, since a floor wrongly advanced this way can
 		// never self-correct via a fresh DB read the way noncesCache can.
-		// Root cause of the ORIGINAL staleness this was chasing is real, but
+		// Root cause of the ORIGINAL staleness this was chasing is real, and
 		// any fix needs to key off what the caller actually forwards
 		// (post-truncation), not what this function locally validated
-		// before truncation is even decided -- left as a known, bounded
-		// limitation (self-heals via the future-tx requeue path, typically
-		// within one extra tick) rather than risk a third attempt in the
-		// same investigation.
+		// before truncation is even decided.
+		//
+		// FIXED (2026-09-11), third attempt: `nonceMap` here is left exactly as
+		// before (local-only, per-tick, drives nothing but THIS tick's own
+		// contiguous-nonce classification) -- no cache write happens in this
+		// function anymore, so the truncation-requeue failure mode above cannot
+		// recur here. The cache-advance instead lives in
+		// `TxValidatorPool.AdvanceNoncesCacheForForwarded`, called by
+		// `TxBatchForwarder.StartForwardingLoop` per FFI batch, strictly after
+		// both the truncation decision AND `executor.SubmitTransactionBatch`
+		// have already succeeded for that exact batch -- i.e. only for
+		// transactions with nothing left that could re-queue them. See that
+		// function's doc comment for the full reasoning.
 
 		// Re-add future transactions back to the pool
 		if len(futureTxs) > 0 {

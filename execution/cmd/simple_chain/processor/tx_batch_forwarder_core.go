@@ -236,7 +236,24 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 				// doc comment in tx_validator_pool_core.go for why: it
 				// could permanently strand a sender if the batch didn't
 				// fully land on-chain, which turned out to be a worse
-				// failure mode than the narrow race it was meant to close.)
+				// failure mode than the narrow race it was meant to close.
+				//
+				// RE-ADDED 2026-09-11, deliberately NOT the same mechanism:
+				// AdvanceNoncesCacheForForwarded writes into the SAME
+				// noncesCache that ClearNoncesCache() already wipes wholesale
+				// on every commit -- unlike the removed "floor" (a separate,
+				// never-cleared value), a crash/restart before this batch
+				// actually lands wipes noncesCache too (it's in-memory,
+				// non-persistent), and even short of that, the very next
+				// commit from ANY source self-corrects it via a fresh DB
+				// read exactly like any other cache entry. The only residual
+				// cost if this batch never lands is the same bounded,
+				// self-healing staleness window every other cache-miss
+				// already accepts -- not a permanent stranding. This is
+				// safe specifically BECAUSE it targets what this earlier
+				// attempt got wrong (see this file's own history above),
+				// not because the underlying risk is zero.)
+				bf.transactionProcessor.AdvanceNoncesCacheForForwarded(batchTxs)
 				for _, tx := range batchTxs {
 					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "FORWARDED_TO_RUST", "Transaction batch forwarded to Rust consensus engine via FFI")
 					if entry, ok := bf.transactionProcessor.env.GetTxHashConnEntry(tx.Hash()); ok {
