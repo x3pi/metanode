@@ -624,16 +624,60 @@ func (cs *ChainState) SetStakeStateDB(stakeDB *stake_state_db.StakeStateDB) {
 
 // CloneSpeculative creates a speculative, thread-safe copy of ChainState
 // sharing the same databases configuration but with cloned/copied trie structures.
+//
+// CRASH FIX (found live via a restart-mid-block-production repro on
+// 2026-09-11 -- see project_fork_guard_layer6_saga memory / note doc mục 12):
+// this used to unconditionally construct clonedAccDB/clonedStakeDB and always
+// return a nil error, even when the source ChainState's accountStateDB or
+// stakeStateDB was itself nil (a real, observed race: a speculative-execution
+// goroutine spawned before a restart's shutdown sequence begins can still be
+// mid-flight calling CloneSpeculative while cs's underlying storage/trie is
+// being torn down/reinitialized). NewAccountStateDB/NewStakeStateDB both
+// silently return a nil *XxxStateDB on a nil trie or nil storage.Storage
+// (logging an Error, never surfacing it as a Go `error`) -- the caller here
+// had no way to tell a successful clone from a broken one, so a broken
+// (nil-fielded) clonedCS was returned as if valid. Its only symptom was a nil
+// pointer dereference 100+ lines downstream, inside
+// StakeStateDB.SetTrieCommitBlock (tx_processor.go), the first place a method
+// is actually called on the nil *StakeStateDB receiver -- a `panic: runtime
+// error: invalid memory address or nil pointer dereference` /
+// `SIGSEGV`/SIGABRT that killed the whole node, reproduced live twice (once
+// on the real 234/230 cluster, mis-diagnosed at first as a Rust panic/fork
+// issue; then reproduced deterministically on demand on local 232 by
+// restarting a node every ~12s under continuous tx load).
+//
+// Fixed at the actual point of failure: surface it as a real error here (the
+// caller, speculative_executor.go, already had a correct `if err != nil`
+// bail-out path -- it just never got a non-nil error to act on) instead of
+// only guarding the one crash site that happened to be hit first.
 func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, error) {
 	// 1. Copy AccountStateDB
 	accDB := cs.GetAccountStateDB()
+	if accDB == nil || accDB.Trie() == nil {
+		return nil, errors.New("CloneSpeculative: source AccountStateDB or its trie is nil (storage likely torn down concurrently, e.g. during shutdown)")
+	}
 	clonedAccTrie := accDB.Trie().Copy()
+	if clonedAccTrie == nil {
+		return nil, errors.New("CloneSpeculative: AccountStateDB trie.Copy() returned nil")
+	}
 	clonedAccDB := account_state_db.NewAccountStateDB(clonedAccTrie, cs.storageManager.GetStorageAccount())
+	if clonedAccDB == nil {
+		return nil, errors.New("CloneSpeculative: NewAccountStateDB returned nil (nil storage -- see logged error above)")
+	}
 
 	// 2. Copy StakeStateDB
 	stakeDB := cs.GetStakeStateDB()
+	if stakeDB == nil || stakeDB.Trie() == nil {
+		return nil, errors.New("CloneSpeculative: source StakeStateDB or its trie is nil (storage likely torn down concurrently, e.g. during shutdown)")
+	}
 	clonedStakeTrie := stakeDB.Trie().Copy()
+	if clonedStakeTrie == nil {
+		return nil, errors.New("CloneSpeculative: StakeStateDB trie.Copy() returned nil")
+	}
 	clonedStakeDB := stake_state_db.NewStakeStateDB(clonedStakeTrie, cs.storageManager.GetStorageStake())
+	if clonedStakeDB == nil {
+		return nil, errors.New("CloneSpeculative: NewStakeStateDB returned nil (nil storage -- see logged error above)")
+	}
 
 	// 3. Copy SmartContractDB
 	clonedScDB := smart_contract_db.NewSmartContractDB(
