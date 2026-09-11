@@ -141,6 +141,17 @@ fn build_tonic_services(out_dir: &Path) {
                 .codec_path(codec_path)
                 .build(),
         )
+        .method(
+            // Added 2026-09-11 -- see payload_loss_attestation.rs and mục 11 of
+            // note/consensus_local_dag_trust_gap_design_2026-09.md.
+            tonic_build::manual::Method::builder()
+                .name("attest_payload_loss")
+                .route_name("AttestPayloadLoss")
+                .input_type("crate::network::tonic_network::AttestPayloadLossRequest")
+                .output_type("crate::network::tonic_network::AttestPayloadLossResponse")
+                .codec_path(codec_path)
+                .build(),
+        )
         .build();
 
     tonic_build::manual::Builder::new()

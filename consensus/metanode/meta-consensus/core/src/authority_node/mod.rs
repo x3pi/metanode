@@ -458,6 +458,14 @@ where
         let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
         info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
 
+        // Cloned (ProtocolKeyPair explicitly implements Clone) before the original moves into
+        // Core below -- AuthorityService needs its own copy to sign PayloadLossAttestations
+        // when a peer asks whether this node has a transaction payload (mục 11 of
+        // note/consensus_local_dag_trust_gap_design_2026-09.md, 2026-09-11). Same class of use
+        // as Core's own block-signing, not a new exposure surface: AuthorityService already
+        // handles every peer network request and already holds comparably sensitive state.
+        let protocol_keypair_for_authority_service = protocol_keypair.clone();
+
         let core = Core::new(
             context.clone(),
             leader_schedule,
@@ -696,6 +704,7 @@ where
             legacy_store_manager, // Pass initialized manager
             epoch_base_index,     // CRITICAL: Pass epoch_base for cold-start fallback
             network_client.clone(),
+            protocol_keypair_for_authority_service,
         ));
 
         let subscriber = {

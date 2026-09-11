@@ -996,5 +996,32 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         }
         Ok(transactions)
     }
+
+    async fn handle_attest_payload_loss(
+        &self,
+        _peer: AuthorityIndex,
+        commit_index: crate::commit::CommitIndex,
+        tx_digest: consensus_types::block::TxDigest,
+    ) -> ConsensusResult<crate::network::AttestPayloadLossOutcome> {
+        let found = crate::transaction::get_global_tx_cache()
+            .read()
+            .get(&tx_digest)
+            .map(|tx| tx.into_data());
+        if let Some(payload) = found {
+            return Ok(crate::network::AttestPayloadLossOutcome::Payload(payload));
+        }
+        let claim = crate::payload_loss_attestation::PayloadLossClaim {
+            commit_index,
+            tx_digest,
+        };
+        let attestation = crate::payload_loss_attestation::PayloadLossAttestation::sign(
+            claim,
+            self.context.own_index,
+            &self.protocol_keypair,
+        )?;
+        Ok(crate::network::AttestPayloadLossOutcome::Attestation(
+            attestation,
+        ))
+    }
 }
 

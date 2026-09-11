@@ -184,7 +184,7 @@ impl NetworkClient for FakeNetworkClient {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_handle_send_block() {
-    let (context, _keys) = Context::new_for_test(4);
+    let (context, test_keys) = Context::new_for_test(4);
     let context = Arc::new(context);
     let block_verifier = Arc::new(crate::block_verifier::NoopBlockVerifier {});
     let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
@@ -226,8 +226,9 @@ async fn test_handle_send_block() {
         store,
         None,
         None, // legacy_store_manager
-        0,    // epoch_base_index (tests start at epoch 0)
+         0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
+        test_keys[0].1.clone(),
     ));
 
     // Test delaying blocks with time drift.
@@ -301,13 +302,114 @@ async fn test_handle_send_block() {
         .unwrap_err();
 }
 
+// Added 2026-09-11 -- see payload_loss_attestation.rs and mục 11 of
+// note/consensus_local_dag_trust_gap_design_2026-09.md.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_handle_attest_payload_loss() {
+    let (context, test_keys) = Context::new_for_test(4);
+    let context = Arc::new(context);
+    let block_verifier = Arc::new(crate::block_verifier::NoopBlockVerifier {});
+    let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+    let core_dispatcher = Arc::new(FakeCoreThreadDispatcher::new());
+    let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
+    let network_client = Arc::new(FakeNetworkClient::default());
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let store = Arc::new(MemStore::new());
+    let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let transaction_certifier = TransactionCertifier::new(
+        context.clone(),
+        block_verifier.clone(),
+        dag_state.clone(),
+        blocks_sender,
+    );
+    let synchronizer = Synchronizer::start(
+        network_client.clone(),
+        context.clone(),
+        core_dispatcher.clone(),
+        commit_vote_monitor.clone(),
+        block_verifier.clone(),
+        transaction_certifier.clone(),
+        dag_state.clone(),
+        false,
+    );
+    let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
+    let service = Arc::new(AuthorityService::new(
+        context.clone(),
+        block_verifier,
+        commit_vote_monitor,
+        round_tracker,
+        synchronizer,
+        core_dispatcher.clone(),
+        rx_block_broadcast,
+        transaction_certifier,
+        dag_state,
+        store,
+        None,
+        None, // legacy_store_manager
+        0,    // epoch_base_index (tests start at epoch 0)
+        network_client.clone(),
+        test_keys[0].1.clone(),
+    ));
+    let _ = dag_state_writer;
+
+    let peer = context.committee.to_authority_index(1).unwrap();
+    let commit_index: crate::commit::CommitIndex = 7;
+    let missing_digest =
+        consensus_types::block::TxDigest([9u8; consensus_config::DIGEST_LENGTH]);
+
+    // GIVEN this node genuinely doesn't have the payload -- WHEN a peer asks THEN it gets
+    // back a validly-signed attestation confirming so, not the (nonexistent) payload.
+    let outcome = service
+        .handle_attest_payload_loss(peer, commit_index, missing_digest)
+        .await
+        .unwrap();
+    match outcome {
+        crate::network::AttestPayloadLossOutcome::Attestation(attestation) => {
+            assert_eq!(attestation.claim.commit_index, commit_index);
+            assert_eq!(attestation.claim.tx_digest, missing_digest);
+            assert_eq!(attestation.authority, context.own_index);
+            let pubkey = context
+                .committee
+                .authority(context.own_index)
+                .protocol_key
+                .clone();
+            assert!(attestation.verify(&pubkey).is_ok());
+        }
+        crate::network::AttestPayloadLossOutcome::Payload(_) => {
+            panic!("expected an attestation, got a payload for a digest never inserted into the cache");
+        }
+    }
+
+    // GIVEN the payload IS actually present locally -- WHEN a peer asks THEN it gets the
+    // real payload back directly, not an attestation (this also helps ordinary recovery,
+    // same intent as the existing fetch_transactions RPC).
+    let present_digest = consensus_types::block::TxDigest([5u8; consensus_config::DIGEST_LENGTH]);
+    let tx_bytes = Bytes::from_static(b"hello world");
+    crate::transaction::get_global_tx_cache()
+        .write()
+        .insert(present_digest, crate::block::Transaction::new(tx_bytes.to_vec()));
+    let outcome = service
+        .handle_attest_payload_loss(peer, commit_index, present_digest)
+        .await
+        .unwrap();
+    match outcome {
+        crate::network::AttestPayloadLossOutcome::Payload(payload) => {
+            assert_eq!(payload, tx_bytes);
+        }
+        crate::network::AttestPayloadLossOutcome::Attestation(_) => {
+            panic!("expected the actual payload since it IS present in the cache");
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_handle_fetch_blocks() {
     // GIVEN
     // Use NUM_AUTHORITIES and NUM_ROUNDS higher than max_blocks_per_sync to test limits.
     const NUM_AUTHORITIES: usize = 40;
     const NUM_ROUNDS: usize = 40;
-    let (context, _keys) = Context::new_for_test(NUM_AUTHORITIES);
+    let (context, test_keys) = Context::new_for_test(NUM_AUTHORITIES);
     let context = Arc::new(context);
     let block_verifier = Arc::new(crate::block_verifier::NoopBlockVerifier {});
     let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
@@ -349,8 +451,9 @@ async fn test_handle_fetch_blocks() {
         store,
         None,
         None, // legacy_store_manager
-        0,    // epoch_base_index (tests start at epoch 0)
+         0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
+        test_keys[0].1.clone(),
     ));
 
     // GIVEN: 40 rounds of blocks in the dag state.
@@ -479,7 +582,7 @@ async fn test_handle_fetch_blocks() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_handle_fetch_latest_blocks() {
     // GIVEN
-    let (context, _keys) = Context::new_for_test(4);
+    let (context, test_keys) = Context::new_for_test(4);
     let context = Arc::new(context);
     let block_verifier = Arc::new(crate::block_verifier::NoopBlockVerifier {});
     let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
@@ -521,8 +624,9 @@ async fn test_handle_fetch_latest_blocks() {
         store,
         None,
         None, // legacy_store_manager
-        0,    // epoch_base_index (tests start at epoch 0)
+         0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
+        test_keys[0].1.clone(),
     ));
 
     // Create some blocks for a few authorities. Create some equivocations as well and store in dag state.
