@@ -50,9 +50,15 @@ load_telegram_config() {
     local chat_id=""
 
     # 1. First priority: Read directly from target YAML (inventory.yml or monitors/inventory.yml)
+    # BUG FIX: under `set -euo pipefail`, a `grep` that matches nothing (the normal case for
+    # any cluster without Telegram configured, e.g. a local dev cluster) exits 1, which
+    # pipefail propagates through `| head | awk | sed` and kills the WHOLE script right here
+    # with zero output -- reproduced live testing this on local 232's inventory.yml (no
+    # telegram_bot_token line). `|| true` on each grep keeps a genuine no-match a normal,
+    # silent "not configured" case instead of a fatal, unexplained script exit.
     if [ -f "$target_yml" ]; then
-        token=$(grep -E '^\s*telegram_bot_token:' "$target_yml" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
-        chat_id=$(grep -E '^\s*telegram_chat_id:' "$target_yml" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        token=$(grep -E '^\s*telegram_bot_token:' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        chat_id=$(grep -E '^\s*telegram_chat_id:' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
     fi
 
     # 2. Fallback to .env if not found in YAML
@@ -355,10 +361,15 @@ if [ -n "$BTRFS_SIZE_VAL" ]; then
     EXTRA_VARS="${EXTRA_VARS} btrfs_size='${BTRFS_SIZE_VAL}'"
 fi
 
-# Detect become password from inventory for localhost become tasks
-INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+# Detect become password from inventory for localhost become tasks.
+# SECURITY: pass it via the ANSIBLE_BECOME_PASS env var, NOT `-e ansible_become_pass=...`
+# on the ansible-playbook command line -- `-e` extra-vars are visible in plaintext to any
+# local user via `ps aux`/`/proc/<pid>/cmdline` for the whole run. The env var achieves the
+# same effect (ansible-playbook reads it automatically) without that exposure. Exported here
+# so it's in scope for every ansible-playbook invocation below (gen_keys included).
+INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
 if [ -n "$INVENTORY_BECOME_PASS" ]; then
-    EXTRA_VARS="${EXTRA_VARS} ansible_become_pass='${INVENTORY_BECOME_PASS}'"
+    export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
 fi
 
 if [ "$ACTION" == "gen_keys" ]; then
