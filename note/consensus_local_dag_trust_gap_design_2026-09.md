@@ -1086,3 +1086,86 @@ RECOVERED.
 **Chưa merge vào `dev`, chưa đụng lại máy 234** (cụm của nhat) — theo đúng
 nguyên tắc "không tự ý quyết định trên môi trường của người khác", chờ sau
 khi merge `dev` xong và có xác nhận từ user mới quay lại xử lý.
+
+## 11. 🟡 THIẾT KẾ MỚI (2026-09-11, theo yêu cầu user): Quorum-Certified Skip cho tx-payload mất vĩnh viễn TOÀN CỤM
+
+### 11.1. Vấn đề mục 10's fix CHƯA giải quyết được
+
+`deliver_with_halt_retry` (mục 10) retry vô thời hạn khi payload mất — an
+toàn (không fork) nhưng nếu **mất thật ở MỌI node cùng lúc** (kịch bản thực
+tế: mất điện cả cụm, không chỉ deploy code), cụm **treo vĩnh viễn**, không
+có cách tự phục hồi nào khác ngoài `--reset-all` (mất sạch dữ liệu).
+
+User hỏi đúng trọng tâm: giao dịch đó **chưa từng được áp dụng vào state**
+(build block thất bại trước khi apply) — nên về logic, nếu THẬT SỰ không ai
+còn giữ, bỏ qua nó là an toàn (không có gì để so sánh/fork, vì chưa ai áp
+dụng gì cả). Vấn đề chỉ là: làm sao BIẾT CHẮC "không ai còn giữ" mà không
+tự đoán một mình (rủi ro: 1 node khác chỉ tạm mất kết nối, không phải mất
+dữ liệu thật — nếu tự ý bỏ qua rồi node đó nối lại, 2 bên có state khác
+nhau thật).
+
+Đối chiếu với Sui thật (đã dẫn trong mục 4.5): "Network Stall Resolution"
+(2026-03) — Sui **cũng không tự động bỏ qua**, mà "halted rather than
+proceed unilaterally", phục hồi qua xác minh CÓ CON NGƯỜI, không tự đoán.
+
+### 11.2. Thiết kế: Quorum-Certified Payload-Loss Attestation
+
+Nguyên tắc: quyết định "bỏ qua giao dịch X" phải **tự nó đi qua một vòng
+đồng thuận nhỏ** (thu thập đủ 2f+1 stake xác nhận), để MỌI node honest đi
+đến đúng 1 kết luận giống hệt nhau — an toàn structurally, không phải vì tin
+tưởng 1 node tự phán đoán.
+
+**Các thành phần:**
+
+1. **`PayloadLossAttestation`** — thông điệp mới, ký bằng `protocol_keypair`
+   sẵn có (tái dùng đúng pattern `compute_block_signature`/`IntentMessage`
+   trong `block.rs`, thêm 1 `IntentScope` mới để domain-separate, không đụng
+   chữ ký hiện có). Nội dung: `{ commit_index, tx_digest, authority_index }`
+   — nghĩa là "tôi (authority N) xác nhận: đã tự kiểm tra cache CỤC BỘ +
+   hỏi hết các peer tôi liên lạc được, không ai (kể cả tôi) còn giữ payload
+   của digest này cho commit này."
+
+2. **RPC mới** (mở rộng `authority_service`, cùng tầng với `fetch_transactions`
+   sẵn có): `attest_payload_loss(commit_index, tx_digest) -> AttestationOrPayload`
+   — nếu node được hỏi CÓ payload, trả về payload luôn (giúp cả trường hợp
+   phục hồi bình thường nhanh hơn); nếu KHÔNG có, trả về `PayloadLossAttestation`
+   đã ký.
+
+3. **Thu thập quorum** — tái dùng `StakeAggregator<QuorumThreshold>`
+   (`stake_aggregator.rs`, cơ chế CÓ SẴN, đang dùng cho fastpath transaction
+   certification trong `transaction_certifier.rs` — không viết lại từ đầu).
+   Khi đủ 2f+1 stake cùng ký xác nhận "mất", node gộp thành 1
+   **QuorumCertificate** (danh sách chữ ký + stake đã đạt ngưỡng).
+
+4. **Lan truyền chứng thực** — QuorumCertificate được broadcast cho mọi
+   node khác; bất kỳ node nào NHẬN được (tự verify chữ ký, không cần tự thu
+   thập lại) đều có thể tin và áp dụng — giống hệt cách `CertifiedBlock` đã
+   lan truyền trong hệ thống hiện tại.
+
+5. **Áp dụng an toàn (fork-safety cốt lõi)** — mọi node có QuorumCertificate
+   hợp lệ cho đúng `(commit_index, tx_digest)` sẽ loại bỏ CHÍNH XÁC giao
+   dịch đó khỏi `build_sorted_transactions`'s danh sách theo CÙNG một quy
+   tắc xác định (deterministic) → mọi node tính ra CÙNG 1 danh sách giao
+   dịch còn lại → CÙNG 1 block, CÙNG 1 hash. Không có gì để đoán.
+
+6. **Kích hoạt: CÓ CON NGƯỜI, không tự động** (v1, đúng tiền lệ Sui) — cơ
+   chế thu thập attestation CHỈ bắt đầu khi operator chủ động gọi (CLI/FFI
+   admin command), SAU KHI đã xác nhận qua alert `CONSENSUS-HALT-TX-PAYLOAD-LOST`
+   (mục 10) rằng đây là tình trạng kẹt lâu dài thật, không phải thoáng qua.
+   Không tự động trigger sau vài phút — tránh đúng rủi ro "quá vội kết luận
+   mất thật trong khi chỉ là mất kết nối tạm thời".
+
+### 11.3. Blast radius & kế hoạch test
+
+Đụng `meta-consensus/core` (rủi ro cao nhất, như mọi lần trong tài liệu
+này) — cần: unit test cho `StakeAggregator` reuse, unit test ký/verify
+attestation, test tích hợp mô phỏng "toàn cụm mất payload cùng lúc" trên
+cụm 232 (tái hiện lại đúng kịch bản mục 10 nhưng KHÔNG có node nào còn giữ
+payload — hiện tại kịch bản test đã có sẵn cách tái hiện), xác nhận: (a)
+quorum thu đúng, (b) sau khi certified, mọi node ra cùng 1 block/hash, (c)
+KHÔNG certified nếu chưa đủ quorum (một số node chưa trả lời) — cụm vẫn
+đúng đắn chờ tiếp, không tự ý đoán non.
+
+**Trạng thái: THIẾT KẾ, CHƯA IMPLEMENT.** Việc lớn, cần làm cẩn thận qua
+nhiều bước, không vội trong 1 lần — implement + test từng phần một, đúng
+tinh thần đã áp dụng suốt các mục 7-10.

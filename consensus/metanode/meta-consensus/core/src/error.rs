@@ -88,6 +88,11 @@ pub enum ConsensusError {
     #[error("Failed to verify the block's signature: {0}")]
     SignatureVerificationFailure(FastCryptoError),
 
+    // Added 2026-09-11 for payload_loss_attestation.rs (mục 11 of
+    // note/consensus_local_dag_trust_gap_design_2026-09.md) -- purely additive.
+    #[error("Invalid payload-loss attestation/certificate: {0}")]
+    InvalidPayloadLossAttestation(String),
+
     #[error("Synchronizer for fetching blocks directly from {0} is saturated")]
     SynchronizerSaturated(AuthorityIndex),
 

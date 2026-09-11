@@ -68,6 +68,12 @@ pub enum IntentScope {
     BridgeEventUnused = 7, // for bridge purposes but it's currently not included in messages.
     ConsensusBlock = 8,    // Used for consensus authority signature on block's digest.
     DiscoveryPeers = 9,    // Used for reporting peer addresses in discovery.
+    // Used for an authority's signed attestation that a specific commit's transaction
+    // payload is confirmed missing from its own TxPayloadCache and from every peer it could
+    // reach -- see note/consensus_local_dag_trust_gap_design_2026-09.md mục 11
+    // (2026-09-11). Purely additive: appended at the end so every existing variant keeps
+    // its original discriminant.
+    PayloadLossAttestation = 10,
 }
 
 impl TryFrom<u8> for IntentScope {
