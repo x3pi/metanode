@@ -163,6 +163,29 @@ pub trait NetworkClient: Send + Sync + Sized + 'static {
     ) -> ConsensusResult<Vec<Bytes>> {
         unimplemented!("fetch_transactions not implemented for this client")
     }
+
+    /// Asks a peer whether it has a transaction's payload; if not, asks it to sign an
+    /// attestation confirming so. See payload_loss_attestation.rs and mục 11 of
+    /// note/consensus_local_dag_trust_gap_design_2026-09.md (2026-09-11).
+    async fn attest_payload_loss(
+        &self,
+        _peer: AuthorityIndex,
+        _commit_index: crate::commit::CommitIndex,
+        _tx_digest: consensus_types::block::TxDigest,
+        _timeout: Duration,
+    ) -> ConsensusResult<AttestPayloadLossOutcome> {
+        unimplemented!("attest_payload_loss not implemented for this client")
+    }
+}
+
+/// Result of asking one peer about a possibly-missing transaction payload -- see
+/// `NetworkClient::attest_payload_loss`.
+#[derive(Debug, Clone)]
+pub enum AttestPayloadLossOutcome {
+    /// The peer had it -- here are the raw bytes. Not an attestation; use directly.
+    Payload(Bytes),
+    /// The peer confirmed (with a signature) that it doesn't have it either.
+    Attestation(crate::payload_loss_attestation::PayloadLossAttestation),
 }
 
 #[async_trait]
@@ -278,6 +301,17 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
         _digests: Vec<consensus_types::block::TxDigest>,
     ) -> ConsensusResult<Vec<Bytes>> {
         unimplemented!("handle_fetch_transactions not implemented for this service")
+    }
+
+    /// Handles a peer's request for a transaction payload, or (if this node doesn't have it
+    /// either) a signed attestation confirming so. See `NetworkClient::attest_payload_loss`.
+    async fn handle_attest_payload_loss(
+        &self,
+        _peer: AuthorityIndex,
+        _commit_index: crate::commit::CommitIndex,
+        _tx_digest: consensus_types::block::TxDigest,
+    ) -> ConsensusResult<AttestPayloadLossOutcome> {
+        unimplemented!("handle_attest_payload_loss not implemented for this service")
     }
 }
 

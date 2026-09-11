@@ -22,6 +22,12 @@ impl ConsensusNode {
     pub(crate) async fn setup_storage(config: &NodeConfig) -> Result<StorageSetup> {
         info!("🚀 [STARTUP] Loading latest block, epoch and committee from Go state...");
 
+        // PEER-BLOCK RECOVERY (2026-09-11): stash peer_rpc_addresses globally, once, as early
+        // as config is available -- see GLOBAL_PEER_RPC_ADDRESSES's doc comment in ffi.rs for
+        // why (block_sending.rs's payload-loss recovery path needs this without threading a
+        // new param through every ExecutorClient::new call site).
+        crate::ffi::set_global_peer_rpc_addresses(config.peer_rpc_addresses.clone());
+
         let executor_client = Arc::new(ExecutorClient::new(
             true,
             false,

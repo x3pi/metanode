@@ -135,6 +135,14 @@ impl BlockDeliveryManager {
     async fn deliver_with_halt_retry(&self, msg: &ValidatedCommit) -> u64 {
         let commit_index = msg.subdag.commit_ref.index;
         let mut attempt: u32 = 0;
+        // STUCK-CLAIMS REGISTRY (2026-09-11): computed once, outside the loop, since the set of
+        // digests this commit's blocks reference never changes across retries -- see
+        // payload_loss_attestation.rs's STUCK_CLAIMS doc comment for why marking/unmarking THIS
+        // node as "actively, presently stuck" (not merely "cache-missed once") is the fork-safety
+        // fix for a real fork this feature's first version caused live. Only computed if delivery
+        // actually fails at least once (see the Err arm below) -- the overwhelmingly common case
+        // (success on the first attempt) never touches this at all.
+        let mut marked_claims: Vec<consensus_core::payload_loss_attestation::PayloadLossClaim> = Vec::new();
         loop {
             let start_delivery = std::time::Instant::now();
             let result = self
@@ -159,6 +167,12 @@ impl BlockDeliveryManager {
                         );
                     }
                     if attempt > 0 {
+                        // STUCK-CLAIMS REGISTRY: delivery finally succeeded (ordinary peer
+                        // recovery, or an operator's certified skip) -- this node is no longer a
+                        // valid "missing" attestor for any of these claims.
+                        for claim in marked_claims.drain(..) {
+                            consensus_core::payload_loss_attestation::unmark_stuck(&claim);
+                        }
                         error!(
                             "✅ [CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED] Commit {} (GEI={}) delivered \
                              successfully after {} failed attempt(s) -- resuming normal dispatch.",
@@ -169,6 +183,35 @@ impl BlockDeliveryManager {
                 }
                 Err(e) => {
                     attempt += 1;
+                    // STUCK-CLAIMS REGISTRY (2026-09-11): mark every digest this commit's blocks
+                    // reference that this node's cache still doesn't have, as "actively stuck"
+                    // -- see payload_loss_attestation.rs's STUCK_CLAIMS doc comment. Recomputed
+                    // every retry (cheap, read-only) since peer recovery could have filled in
+                    // SOME but not all digests since the last attempt; only genuinely-still-
+                    // missing ones stay marked. Not every Err here is necessarily a missing-
+                    // payload bail (send_committed_subdag has other Err paths, e.g. the LAYER-1
+                    // leader_address length check) -- marking a claim that isn't actually about
+                    // THIS digest is harmless (it just never gets asked about), so this
+                    // deliberately doesn't try to parse `e` to distinguish the two.
+                    let missing_now: Vec<_> = {
+                        let cache = consensus_core::get_global_tx_cache().read();
+                        msg.subdag
+                            .blocks
+                            .iter()
+                            .flat_map(|b| b.tx_digests())
+                            .filter(|d| cache.get(d).is_none())
+                            .collect()
+                    };
+                    for digest in missing_now {
+                        let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+                            commit_index,
+                            tx_digest: digest,
+                        };
+                        consensus_core::payload_loss_attestation::mark_stuck(claim.clone());
+                        if !marked_claims.contains(&claim) {
+                            marked_claims.push(claim);
+                        }
+                    }
                     // Re-alert on the 1st attempt, then every ~2min (12 * 10s), so a live tail
                     // of the last 200KB (start_monitors.sh's halt-check window) always has a
                     // recent occurrence without spamming the log every 10s forever.

@@ -63,6 +63,10 @@ pub(crate) struct AuthorityService<C: CoreThreadDispatcher> {
     #[allow(dead_code)]
     recently_verified_blocks: Arc<RwLock<BTreeSet<BlockRef>>>,
     tx_fetcher: Arc<dyn crate::network::TransactionFetcher>,
+    /// Used only to sign `PayloadLossAttestation`s when a peer asks this node whether it has
+    /// a transaction payload and it genuinely doesn't -- see mục 11 of
+    /// note/consensus_local_dag_trust_gap_design_2026-09.md (2026-09-11).
+    protocol_keypair: consensus_config::ProtocolKeyPair,
 }
 
 impl<C: CoreThreadDispatcher> AuthorityService<C> {
@@ -82,6 +86,7 @@ impl<C: CoreThreadDispatcher> AuthorityService<C> {
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         epoch_base_index: u64,
         tx_fetcher: Arc<dyn crate::network::TransactionFetcher>,
+        protocol_keypair: consensus_config::ProtocolKeyPair,
     ) -> Self {
         let subscription_counter = Arc::new(SubscriptionCounter::new(context.clone()));
         Self {
@@ -101,6 +106,7 @@ impl<C: CoreThreadDispatcher> AuthorityService<C> {
             epoch_base_index,
             recently_verified_blocks: Arc::new(RwLock::new(BTreeSet::new())),
             tx_fetcher,
+            protocol_keypair,
         }
     }
 

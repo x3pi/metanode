@@ -32,6 +32,7 @@ mod leader_timeout;
 mod legacy_store;
 mod linearizer;
 mod metrics;
+pub mod payload_loss_attestation;
 pub mod network; // Made public for SyncOnlyNode
 mod proposed_block_handler;
 pub mod recovery_barrier;

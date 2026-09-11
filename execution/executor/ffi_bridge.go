@@ -29,6 +29,7 @@ void metanode_resume_consensus();
 bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
 bool metanode_is_ready_for_transactions();
+int32_t metanode_attest_payload_loss(uint32_t commit_index, const char* tx_digest_hex);
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -465,6 +466,21 @@ func ResumeRustConsensus() {
 // process startup -- see GLOBAL_COORDINATION_HUB's doc comment in ffi.rs.
 func IsRustConsensusReadyForTransactions() bool {
 	return bool(C.metanode_is_ready_for_transactions())
+}
+
+// AttestPayloadLoss is the Go-side wrapper for the operator-triggered
+// metanode_attest_payload_loss FFI entry point (see its doc comment in consensus/metanode/src
+// /ffi.rs and mục 11 of note/consensus_local_dag_trust_gap_design_2026-09.md, 2026-09-11).
+// NOT called automatically from anywhere in this codebase -- see whatever admin/debug RPC
+// method wires this in for the operator-facing side of that guarantee.
+// txDigestHex must be exactly 2*DIGEST_LENGTH hex characters, no "0x" prefix.
+// Returns: 0 = quorum-certified skip applied, 1 = recovered from a peer/locally (no skip
+// needed), 2 = insufficient stake attested so far, -1 = could not run (see Rust-side logs for
+// the specific reason in every case -- this integer alone is not the full story).
+func AttestPayloadLoss(commitIndex uint32, txDigestHex string) int32 {
+	cDigest := C.CString(txDigestHex)
+	defer C.free(unsafe.Pointer(cDigest))
+	return int32(C.metanode_attest_payload_loss(C.uint32_t(commitIndex), cDigest))
 }
 
 // RestoreRustConsensusFromSnapshot purges local DAG and restores from the snapshot payload

@@ -458,6 +458,14 @@ where
         let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
         info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
 
+        // Cloned (ProtocolKeyPair explicitly implements Clone) before the original moves into
+        // Core below -- AuthorityService needs its own copy to sign PayloadLossAttestations
+        // when a peer asks whether this node has a transaction payload (mục 11 of
+        // note/consensus_local_dag_trust_gap_design_2026-09.md, 2026-09-11). Same class of use
+        // as Core's own block-signing, not a new exposure surface: AuthorityService already
+        // handles every peer network request and already holds comparably sensitive state.
+        let protocol_keypair_for_authority_service = protocol_keypair.clone();
+
         let core = Core::new(
             context.clone(),
             leader_schedule,
@@ -631,6 +639,100 @@ where
             }));
         }
 
+        // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): see PayloadLossCollectorFn's doc
+        // comment in coordination_hub.rs and mục 11 of
+        // note/consensus_local_dag_trust_gap_design_2026-09.md. Only ever invoked by an
+        // explicit operator action (ffi.rs's metanode_attest_payload_loss) -- wiring it here
+        // just makes it available, it does not run itself.
+        coordination_hub.set_committee_for_payload_loss(context.committee.clone());
+        {
+            let network_client_for_collector = network_client.clone();
+            let committee_for_collector = context.committee.clone();
+            let own_index = context.own_index;
+            let own_keypair = protocol_keypair_for_authority_service.clone();
+            coordination_hub.set_payload_loss_collector(Arc::new(move |claim, timeout| {
+                let network_client = network_client_for_collector.clone();
+                let committee = committee_for_collector.clone();
+                let own_keypair = own_keypair.clone();
+                Box::pin(async move {
+                    use crate::payload_loss_attestation::{
+                        PayloadLossAggregator, PayloadLossAttestation, PayloadLossCollectionResult,
+                    };
+                    use crate::network::AttestPayloadLossOutcome;
+
+                    // Own cache first -- if we somehow already have it (e.g. it arrived via
+                    // gossip in between the halt and the operator running this), this is a
+                    // no-op recovery, no need to query anyone.
+                    if crate::transaction::get_global_tx_cache()
+                        .read()
+                        .get(&claim.tx_digest)
+                        .is_some()
+                    {
+                        return PayloadLossCollectionResult::Recovered;
+                    }
+
+                    let peers: Vec<AuthorityIndex> = committee
+                        .authorities()
+                        .map(|(i, _)| i)
+                        .filter(|&i| i != own_index)
+                        .collect();
+                    let queries = peers.into_iter().map(|peer| {
+                        let network_client = network_client.clone();
+                        let claim = claim.clone();
+                        async move {
+                            network_client
+                                .attest_payload_loss(peer, claim.commit_index, claim.tx_digest, timeout)
+                                .await
+                        }
+                    });
+                    let results = futures::future::join_all(queries).await;
+
+                    // A payload from ANY peer wins immediately -- ordinary recovery.
+                    for result in &results {
+                        if let Ok(AttestPayloadLossOutcome::Payload(payload)) = result {
+                            let tx = crate::block::Transaction::new(payload.to_vec());
+                            crate::transaction::get_global_tx_cache()
+                                .write()
+                                .insert(tx.digest(), tx);
+                            return PayloadLossCollectionResult::Recovered;
+                        }
+                    }
+
+                    // Otherwise aggregate attestations -- including our own, since the whole
+                    // reason this collector is running is that WE don't have it either.
+                    let mut aggregator = PayloadLossAggregator::new(claim.clone());
+                    if let Ok(own_attestation) =
+                        PayloadLossAttestation::sign(claim.clone(), own_index, &own_keypair)
+                    {
+                        let _ = aggregator.add(own_attestation, &committee);
+                    }
+                    for result in results {
+                        if let Ok(AttestPayloadLossOutcome::Attestation(attestation)) = result {
+                            // A malformed/mismatched/badly-signed attestation from a byzantine
+                            // or buggy peer is simply not counted -- Err here is not fatal to
+                            // the collection as a whole.
+                            let _ = aggregator.add(attestation, &committee);
+                        }
+                    }
+
+                    if aggregator.reached_quorum(&committee) {
+                        match aggregator.into_certificate(&committee) {
+                            Some(certificate) => PayloadLossCollectionResult::Certified(certificate),
+                            None => PayloadLossCollectionResult::Insufficient {
+                                attested_missing_stake: 0,
+                                quorum_needed: committee.quorum_threshold(),
+                            },
+                        }
+                    } else {
+                        PayloadLossCollectionResult::Insufficient {
+                            attested_missing_stake: aggregator.attested_stake(),
+                            quorum_needed: committee.quorum_threshold(),
+                        }
+                    }
+                })
+            }));
+        }
+
         let synchronizer = Synchronizer::start(
             network_client.clone(),
             context.clone(),
@@ -696,6 +798,7 @@ where
             legacy_store_manager, // Pass initialized manager
             epoch_base_index,     // CRITICAL: Pass epoch_base for cold-start fallback
             network_client.clone(),
+            protocol_keypair_for_authority_service,
         ));
 
         let subscriber = {
