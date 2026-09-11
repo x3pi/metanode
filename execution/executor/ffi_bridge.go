@@ -30,6 +30,7 @@ bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
 bool metanode_is_ready_for_transactions();
 int32_t metanode_attest_payload_loss(uint32_t commit_index, const char* tx_digest_hex);
+int32_t metanode_attest_payload_loss_for_commit(uint32_t commit_index);
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -481,6 +482,24 @@ func AttestPayloadLoss(commitIndex uint32, txDigestHex string) int32 {
 	cDigest := C.CString(txDigestHex)
 	defer C.free(unsafe.Pointer(cDigest))
 	return int32(C.metanode_attest_payload_loss(C.uint32_t(commitIndex), cDigest))
+}
+
+// AttestPayloadLossForCommit is the Go-side wrapper for
+// metanode_attest_payload_loss_for_commit (see its doc comment in consensus/metanode/src/ffi.rs,
+// 2026-09-11) -- the whole-commit convenience form of AttestPayloadLoss above. A single halted
+// commit's subdag can reference blocks from several different authors, each with its own
+// transactions, so more than one digest can be missing at once for the very same commit
+// (reproduced live: 8 distinct missing digests on one commit). Rather than the operator grepping
+// CONSENSUS-HALT-TX-PAYLOAD-LOST's log line for one digest at a time and calling AttestPayloadLoss
+// per digest, re-running whenever the retry loop still doesn't resume, this discovers every
+// digest this node is currently, actively stuck on for commitIndex (via the same STUCK_CLAIMS
+// registry the halt/retry loop already maintains) and attests all of them in one call.
+// Returns: 0 = every claim resolved, 1 = nothing was stuck for this commit on this node right
+// now, 2 = at least one claim still needs more attested stake (the rest were still resolved and
+// recorded -- re-run later), -1 = could not run at all, or at least one claim hit a hard error
+// (see Rust-side logs either way -- this integer alone is not the full story).
+func AttestPayloadLossForCommit(commitIndex uint32) int32 {
+	return int32(C.metanode_attest_payload_loss_for_commit(C.uint32_t(commitIndex)))
 }
 
 // RestoreRustConsensusFromSnapshot purges local DAG and restores from the snapshot payload
