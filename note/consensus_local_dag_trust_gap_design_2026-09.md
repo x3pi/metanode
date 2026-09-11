@@ -1169,3 +1169,43 @@ KHÔNG certified nếu chưa đủ quorum (một số node chưa trả lời) �
 **Trạng thái: THIẾT KẾ, CHƯA IMPLEMENT.** Việc lớn, cần làm cẩn thận qua
 nhiều bước, không vội trong 1 lần — implement + test từng phần một, đúng
 tinh thần đã áp dụng suốt các mục 7-10.
+
+### 11.4. CẬP NHẬT (2026-09-11, cuối ngày): đã implement, đã tìm thấy 2 lỗ hổng fork thật, đã vá cả 2
+
+Đã implement đầy đủ (6 increment), merge vào `dev` (`899acf35`), và xác
+minh sống trên cả cụm local 232 lẫn cụm thật 234/230 qua CI chính thức —
+chi tiết đầy đủ trong memory `project_payload_loss_live_test_status.md` và
+`project_consensus_halt_not_guess_phuong_an_a.md` mục 12-13, không lặp lại
+ở đây. Tóm tắt 2 điểm quan trọng nhất cho ai đọc thiết kế này sau:
+
+**Lỗ hổng #1 (tìm thấy TRƯỚC KHI merge, qua test sống)**: bản đầu tiên chỉ
+kiểm tra `TxPayloadCache` (RAM, có LRU-evict) để quyết định "mất" — một node
+đã THỰC SỰ thực thi+commit giao dịch, rồi cache bị evict sau đó, sẽ
+"trung thực nhưng sai" xác nhận "mất". Tái hiện fork thật. Vá bằng 2 phần:
+(a) registry `STUCK_CLAIMS` — chỉ node ĐANG THỰC SỰ kẹt lại đúng claim này
+mới được ký "mất"; (b) cơ chế phục hồi thật — tái dùng hạ tầng
+`ExecutableBlock` đã lưu sẵn trên đĩa của peer + RPC sync đã có sẵn cho
+SyncOnly node, tự động lấy nguyên khối đã build từ peer trước khi bao giờ
+cần đến quorum-skip.
+
+**Lỗ hổng #2 (tìm thấy SAU KHI merge, dùng thật lần đầu trên local 232)**:
+mục 11.3.c ở trên đã tiên đoán đúng nguyên tắc cần có ("KHÔNG certified nếu
+chưa đủ quorum — một số node chưa trả lời — cụm vẫn đúng đắn chờ tiếp,
+không tự ý đoán non") nhưng bản implement ban đầu KHÔNG tuân theo đúng
+nguyên tắc này: 1 peer bị timeout khi hỏi (do đang gặp sự cố khác, không
+phải do nó thực sự "abstain") bị âm thầm loại khỏi phép tính quorum, y hệt
+cách xử lý 1 chữ ký sai hỏng — trong khi 2 trường hợp khác hẳn nhau (peer
+KHÔNG trả lời = chưa biết gì, không phải "đã trả lời và không có ý kiến").
+Tái hiện fork thật lần 2 y hệt kịch bản 11.3.c cảnh báo trước. Vá bằng 2
+phần: (a) thử lại rộng rãi (5 lần, cách nhau 10s) trước khi coi 1 peer là
+"không liên lạc được"; (b) chỉ sau khi hết thử, mới cho phép tiếp tục theo
+đa số NẾU tổng stake của các peer vẫn im lặng không vượt quá ngưỡng chịu
+lỗi f có sẵn của committee (`total_stake - quorum_threshold`) — giữ đúng
+khả năng chịu lỗi BFT bình thường của cả hệ thống thay vì đòi hỏi TẤT CẢ
+peer luôn phải trả lời (bản vá đầu tiên định làm vậy, bị user chỉ ra đúng
+là sẽ phá vỡ khả năng chịu lỗi của cả blockchain, sửa lại ngay).
+
+Vá lỗ hổng #2: branch `fix/payload-loss-attestation-unresponsive-peer-fork`
+(commit `eb562482`), **CHƯA merge vào `dev`**, đã xác minh sống fork-free
+qua 3 kịch bản trên local 232 (bình thường / 1 peer ngừng-rồi-thử-lại-thành-công /
+1 peer ngừng-và-vẫn-tiếp-tục-đúng-theo-đa-số).
