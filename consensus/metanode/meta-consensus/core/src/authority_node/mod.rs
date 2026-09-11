@@ -676,19 +676,64 @@ where
                         .map(|(i, _)| i)
                         .filter(|&i| i != own_index)
                         .collect();
+
+                    // FORK FIX (found live 2026-09-11, via a local-232 chaos repro -- see
+                    // project_consensus_halt_not_guess_phuong_an_a mục 13 for the full incident):
+                    // a peer that failed to answer at all within one `timeout` window (network
+                    // hiccup, or -- as reproduced -- the peer itself being transiently degraded by
+                    // an unrelated issue) used to be silently dropped from consideration, exactly
+                    // like an `Err` from a malformed attestation. The difference matters: a
+                    // malformed/abstaining response is a peer that DID answer and had nothing
+                    // useful to add, safe to ignore. A peer that never answered at all is
+                    // genuinely unknown -- it might actually hold the payload (as reproduced: the
+                    // 4th validator was mid-recovery from an unrelated stall, timed out on the
+                    // first query, and DID have the transaction all along) -- and a quorum reached
+                    // only among the others then certifies a skip that peer disagrees with,
+                    // forking it the instant it comes back and executes the real transaction
+                    // anyway.
+                    //
+                    // The fix has two parts, matched to why a real 3f+1 BFT system tolerates f
+                    // faults in the first place -- an initial reviewer correctly pointed out that
+                    // simply requiring every peer to answer, forever, would quietly trade away the
+                    // committee's whole fault-tolerance property for this one feature (a single
+                    // permanently-dead validator would brick it):
+                    //   1. RETRY generously per peer (not a single short shot) before ever treating
+                    //      it as unreachable -- this is what actually would have caught the
+                    //      reproduced case, since that validator was genuinely alive and answered
+                    //      correctly once given a little more time.
+                    //   2. Only AFTER exhausting retries, fall back to proper stake-weighted BFT
+                    //      reasoning: proceeding without a peer is safe exactly when the STAKE of
+                    //      every still-unresponsive peer, combined, does not exceed the
+                    //      committee's own fault tolerance (`total_stake - quorum_threshold`) --
+                    //      the same bound the whole consensus protocol already relies on to
+                    //      tolerate f faulty/offline authorities. More unresponsive stake than
+                    //      that means the safety margin is gone and this must refuse, not guess.
+                    const PER_PEER_ATTEMPTS: u32 = 5;
                     let queries = peers.into_iter().map(|peer| {
                         let network_client = network_client.clone();
                         let claim = claim.clone();
                         async move {
-                            network_client
+                            let mut last = network_client
                                 .attest_payload_loss(peer, claim.commit_index, claim.tx_digest, timeout)
-                                .await
+                                .await;
+                            for _ in 1..PER_PEER_ATTEMPTS {
+                                let is_definitive = matches!(last, Ok(_))
+                                    || matches!(last, Err(crate::error::ConsensusError::PayloadLossAbstain));
+                                if is_definitive {
+                                    break;
+                                }
+                                tokio::time::sleep(timeout).await;
+                                last = network_client
+                                    .attest_payload_loss(peer, claim.commit_index, claim.tx_digest, timeout)
+                                    .await;
+                            }
+                            (peer, last)
                         }
                     });
                     let results = futures::future::join_all(queries).await;
 
                     // A payload from ANY peer wins immediately -- ordinary recovery.
-                    for result in &results {
+                    for (_, result) in &results {
                         if let Ok(AttestPayloadLossOutcome::Payload(payload)) = result {
                             let tx = crate::block::Transaction::new(payload.to_vec());
                             crate::transaction::get_global_tx_cache()
@@ -698,6 +743,15 @@ where
                         }
                     }
 
+                    let unresponsive_stake: consensus_config::Stake = results
+                        .iter()
+                        .filter(|(_, r)| {
+                            !matches!(r, Ok(_) | Err(crate::error::ConsensusError::PayloadLossAbstain))
+                        })
+                        .map(|(peer, _)| committee.stake(*peer))
+                        .sum();
+                    let fault_tolerance = committee.total_stake() - committee.quorum_threshold();
+
                     // Otherwise aggregate attestations -- including our own, since the whole
                     // reason this collector is running is that WE don't have it either.
                     let mut aggregator = PayloadLossAggregator::new(claim.clone());
@@ -706,13 +760,30 @@ where
                     {
                         let _ = aggregator.add(own_attestation, &committee);
                     }
-                    for result in results {
+                    for (_, result) in results {
                         if let Ok(AttestPayloadLossOutcome::Attestation(attestation)) = result {
                             // A malformed/mismatched/badly-signed attestation from a byzantine
                             // or buggy peer is simply not counted -- Err here is not fatal to
                             // the collection as a whole.
                             let _ = aggregator.add(attestation, &committee);
                         }
+                    }
+
+                    if unresponsive_stake > fault_tolerance {
+                        tracing::warn!(
+                            "⏳ [PAYLOAD-LOSS-SKIP] Peer(s) totalling {} stake never answered \
+                             commit_index={} tx_digest={:?} even after {} attempts each -- this \
+                             exceeds the committee's own fault-tolerance bound ({} stake), so \
+                             proceeding without them is no longer safe (one of them might hold \
+                             the payload). Refusing to certify ({} attested-missing stake \
+                             collected so far). Retry once more peers are reachable.",
+                            unresponsive_stake, claim.commit_index, claim.tx_digest,
+                            PER_PEER_ATTEMPTS, fault_tolerance, aggregator.attested_stake()
+                        );
+                        return PayloadLossCollectionResult::Insufficient {
+                            attested_missing_stake: aggregator.attested_stake(),
+                            quorum_needed: committee.quorum_threshold(),
+                        };
                     }
 
                     if aggregator.reached_quorum(&committee) {
