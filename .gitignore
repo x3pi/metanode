@@ -480,6 +480,9 @@ deploy/ansible/monitors/inventory.yml
 **/inventory.yml
 !**/inventory.example.yml
 !**/inventory.sample.yml
+**/config-local.json
+!**/config-local.example.json
+**/test_rpc
 deploy/ansible/monitors/block_hash_checker/config-m-nodes.json
 deploy/ansible/monitors/parse_inventory.py
 
@@ -561,5 +564,8 @@ deploy/cluster/local_devnet/*
 execution/cmd/tool/cross_chain_relayer/cross_chain_relayer
 deploy/ansible_private_chains/gateway_register.json
 deploy/private_chain_kit/
+deploy/bin/
+deploy/*.zip
+deploy/metanode-deploy-*.zip
 execution/deploy/private_chain_kit/bin/cross_chain_relayer
 deploy/ansible/monitors/stall_probe_tool

@@ -26,6 +26,15 @@
     mode: '0755'
     extra_opts: ['--strip-components=1']
 
+- name: Check if local node key directory exists
+  delegate_to: localhost
+  ansible.builtin.stat:
+    path: "{{ deploy_dir }}/node-{{ item }}_keys"
+  loop: "{{ active_nodes }}"
+  register: local_keys_to_copy
+  become: no
+  when: ansible_action in ['start', 'setup']
+
 - name: Copy keys for each node to remote
   # mode/directory_mode tightened from 0755 (found 2026-08-27 during a config-security
   # review): this directory holds raw private keys (execution.json's private_key, BLS
@@ -35,14 +44,24 @@
   # root via `become: yes`, which ignores these permission bits entirely, so 0600/0700
   # changes nothing about whether the deploy itself still works.
   ansible.builtin.copy:
-    src: "{{ deploy_dir }}/node-{{ item }}_keys/"
-    dest: "{{ remote_deploy_dir }}/node-{{ item }}_keys/"
+    src: "{{ deploy_dir }}/node-{{ item.item }}_keys/"
+    dest: "{{ remote_deploy_dir }}/node-{{ item.item }}_keys/"
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
     mode: '0600'
     directory_mode: '0700'
+  loop: "{{ local_keys_to_copy.results | default([]) }}"
+  when:
+    - ansible_action in ['start', 'setup']
+    - item.stat is defined and item.stat.exists
+
+- name: Ensure open_ports.sh is executable
+  ansible.builtin.file:
+    path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
+    mode: '0755'
   loop: "{{ active_nodes }}"
-  when: ansible_action == 'setup'
+  when: ansible_action in ['start', 'setup']
+  failed_when: false
 
 - name: Extract node configuration for snapshot evaluation
   set_fact:
@@ -60,13 +79,13 @@
 - name: Determine if current host requires BTRFS for snapshots
   set_fact:
     host_requires_btrfs: >-
-      {%- set needed = false -%}
+      {%- set ns = namespace(needed=false) -%}
       {%- for nid in active_nodes -%}
         {%- if node_configs[nid | string].snapshot_enabled | default(false) -%}
-          {%- set needed = true -%}
+          {%- set ns.needed = true -%}
         {%- endif -%}
       {%- endfor -%}
-      {{ needed }}
+      {{ ns.needed }}
 
 - name: Auto-detect BTRFS device path for /opt/metanode
   ansible.builtin.shell: |
@@ -331,10 +350,10 @@
   ansible.builtin.fail:
     msg: |
       [CẢNH BÁO / LỖI DEPLOY] Node {{ item }} được cấu hình snapshot (snapshot_enabled: true),
-      nhưng không tìm thấy phân vùng hoặc file BTRFS (btrfs_device_path: '{{ btrfs_device_path | default("") }}')
-      và thư mục cài đặt {{ metanode_install_dir }} (fs_type: '{{ fs_type.stdout | default("unknown") }}') không nằm trên hệ thống tệp BTRFS/XFS.
+      nhưng không tìm thấy phân vùng hoặc file loop BTRFS để gắn kết riêng cho node này (btrfs_device_path: '{{ btrfs_device_path | default("") }}').
+      Thư mục cài đặt gốc {{ metanode_install_dir }} đang dùng định dạng '{{ fs_type.stdout | default("unknown") }}' (không hỗ trợ CoW snapshot trực tiếp).
       Node sẽ bị crash khi runtime nếu tiếp tục.
-      Hướng dẫn khắc phục: Vui lòng cấu hình phân vùng BTRFS (hoặc tạo file loop /opt/metanode_cluster_btrfs.img) trước khi deploy, hoặc tắt snapshot.
+      Hướng dẫn khắc phục: Vui lòng kiểm tra lại việc tạo file loop BTRFS (/opt/metanode_cluster_btrfs.img) hoặc tắt snapshot cho Node {{ item }}.
   loop: "{{ active_nodes }}"
   when: >
     node_configs[item | string].snapshot_enabled

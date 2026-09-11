@@ -41,23 +41,33 @@ load_env_file() {
     fi
 }
 
-# Auto load configuration from different possible locations
-load_env_file "${SCRIPT_DIR}/.env"
-load_env_file "${SCRIPT_DIR}/../.env"
-
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
-TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-""}"
 
-if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo -e "\033[0;31m❌ [ERROR] TELEGRAM_BOT_TOKEN is not set! Telegram notifications will not be sent.\033[0m"
-    echo -e "   To enable notifications, please create a \`.env\` file in one of these locations:"
-    echo -e "     📍 \033[0;36m${SCRIPT_DIR}/.env\033[0m"
-    echo -e "     📍 \033[0;36m$(realpath "${SCRIPT_DIR}/..")/.env\033[0m"
-    echo -e "   With the following structure:"
-    echo -e "     \033[0;33mTELEGRAM_BOT_TOKEN=your_bot_token_here\033[0m"
-    echo -e "     \033[0;33mTELEGRAM_CHAT_ID=your_chat_id_here\033[0m"
-    echo -e "   Or export them directly to your environment.\n"
-fi
+load_telegram_config() {
+    local target_yml="$1"
+    local token=""
+    local chat_id=""
+
+    # 1. First priority: Read directly from target YAML (inventory.yml or monitors/inventory.yml)
+    if [ -f "$target_yml" ]; then
+        token=$(grep -E '^\s*telegram_bot_token:' "$target_yml" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        chat_id=$(grep -E '^\s*telegram_chat_id:' "$target_yml" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+    fi
+
+    # 2. Fallback to .env if not found in YAML
+    if [ -z "$token" ]; then
+        load_env_file "${SCRIPT_DIR}/.env"
+        load_env_file "${SCRIPT_DIR}/../.env"
+        [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && token="$TELEGRAM_BOT_TOKEN"
+        [ -n "${TELEGRAM_CHAT_ID:-}" ] && chat_id="$TELEGRAM_CHAT_ID"
+    fi
+
+    [ -n "$token" ] && TELEGRAM_BOT_TOKEN="$token"
+    [ -n "$chat_id" ] && TELEGRAM_CHAT_ID="$chat_id"
+    export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
+    export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+}
 
 send_telegram_notification() {
     local message="$1"
@@ -84,6 +94,8 @@ OPEN_PORTS="false"
 BUILD_FAST="false"
 DEBUG_CPP="false"
 ALL_MONITORS="false"
+USE_PREBUILT="false"
+PREBUILT_BIN_DIR=""
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 # BUG FIX (2026-09-10): must query the metanode repo (SCRIPT_DIR), not the caller's cwd.
@@ -122,6 +134,21 @@ while [[ "$#" -gt 0 ]]; do
         --fast) BUILD_FAST="true" ;;
         --debug-cpp) DEBUG_CPP="true" ;;
         --all-monitors|--monitor-all) ALL_MONITORS="true" ;;
+        --bin-dir)
+            USE_PREBUILT="true"
+            PREBUILT_BIN_DIR="$2"
+            shift
+            ;;
+        --prebuilt-bin|--use-prebuilt)
+            USE_PREBUILT="true"
+            if [[ "$#" -gt 1 && ! "$2" =~ ^-- ]]; then
+                PREBUILT_BIN_DIR="$2"
+                shift
+            fi
+            ;;
+        --skip-build)
+            USE_PREBUILT="true"
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -139,12 +166,79 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --all-monitors      Run monitors mutually across ALL machines"
             echo "  --fast              Fast build (skip redundant steps)"
             echo "  --debug-cpp         Enable debug mode for C++ MVM linker"
+            echo "  --skip-build        Sử dụng binary có sẵn, bỏ qua toàn bộ bước build code"
+            echo "  --prebuilt-bin [D]  Sử dụng binary có sẵn từ thư mục D (Mặc định: deploy/bin)"
+            echo "  --bin-dir D         Chỉ định thư mục chứa file binary có sẵn"
             exit 0
             ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
 done
+
+# Resolve Telegram configuration from YAML:
+# If --all-monitors flag is active, read from monitors/inventory.yml.
+# Otherwise read from standard inventory.yml.
+if [ "$ALL_MONITORS" == "true" ]; then
+    TG_CONFIG_YML="${SCRIPT_DIR}/monitors/inventory.yml"
+else
+    TG_CONFIG_YML="${SCRIPT_DIR}/inventory.yml"
+fi
+load_telegram_config "$TG_CONFIG_YML"
+
+if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+    echo -e "\033[0;33m⚠️ [CẢNH BÁO] Không tìm thấy telegram_bot_token trong ${TG_CONFIG_YML} (hoặc .env). Thông báo Telegram sẽ bị tắt.\033[0m\n"
+fi
+
+# Resolve prebuilt binary path if enabled
+if [ "$USE_PREBUILT" == "true" ]; then
+    if [ -z "$PREBUILT_BIN_DIR" ]; then
+        CANDIDATES=(
+            "${SCRIPT_DIR}/../bin"
+            "${SCRIPT_DIR}/../private_chain_kit/bin"
+            "${SCRIPT_DIR}/../../metanode-deploy/bin"
+            "${SCRIPT_DIR}/../../../metanode-suite/private-chain-v1/private_chain_kit/bin"
+        )
+        for cand in "${CANDIDATES[@]}"; do
+            if [ -f "$cand/metanode" ] && [ -f "$cand/simple_chain" ]; then
+                PREBUILT_BIN_DIR="$cand"
+                break
+            fi
+        done
+        if [ -z "$PREBUILT_BIN_DIR" ]; then
+            PREBUILT_BIN_DIR="${SCRIPT_DIR}/../bin"
+        fi
+    fi
+
+    if [ -d "$PREBUILT_BIN_DIR" ]; then
+        PREBUILT_BIN_DIR="$(cd "$PREBUILT_BIN_DIR" && pwd)"
+    fi
+
+    MISSING_BINS=()
+    if [ ! -f "${PREBUILT_BIN_DIR}/metanode" ]; then
+        MISSING_BINS+=("metanode")
+    fi
+    if [ ! -f "${PREBUILT_BIN_DIR}/simple_chain" ]; then
+        MISSING_BINS+=("simple_chain")
+    fi
+
+    if [ ${#MISSING_BINS[@]} -gt 0 ]; then
+        echo -e "\n\033[0;31m❌ [LỖI PREBUILT BINARY] Không tìm thấy file nhị phân (${MISSING_BINS[*]}) tại:\033[0m"
+        echo -e "   \033[0;33m${PREBUILT_BIN_DIR}\033[0m"
+        echo -e "\033[0;36m   👉 Hãy chạy script build trước để tạo các file nhị phân:\033[0m"
+        echo -e "      \033[1;32m./deploy/build_private_chain_bins.sh\033[0m"
+        echo -e "\033[0;36m   👉 Hoặc chỉ định đường dẫn chứa file binary đã có sẵn:\033[0m"
+        echo -e "      \033[1;32m./ansible_deploy.sh --prebuilt-bin /duong/dan/chua/bin\033[0m\n"
+        exit 1
+    fi
+
+    chmod +x "${PREBUILT_BIN_DIR}/metanode" "${PREBUILT_BIN_DIR}/simple_chain" 2>/dev/null || true
+    for tool in cross_chain_relayer register_chains bls_pubkey gen_recovery_committee; do
+        if [ -f "${PREBUILT_BIN_DIR}/${tool}" ]; then
+            chmod +x "${PREBUILT_BIN_DIR}/${tool}" 2>/dev/null || true
+        fi
+    done
+fi
 
 # Resolve default action if not explicitly specified
 if [ "$EXPLICIT_ACTION" == "false" ]; then
@@ -171,9 +265,15 @@ fi
 # Resolve Target Node IPs dynamically from inventory.yml
 TARGET_NODES_IPS=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
-    TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE" || echo "")
+    if ! TARGET_NODES_IPS=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "$TARGET_NODE"); then
+        echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Cấu hình ${INVENTORY} không hợp lệ! Vui lòng sửa cấu hình theo thông báo trên trước khi tiếp tục.\033[0m\n"
+        exit 1
+    fi
     rm -f "/tmp/rpc_nodes.json" 2>/dev/null || true
-    (umask 077 && python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" json > "/tmp/rpc_nodes.json" 2>/dev/null || true)
+    if ! (umask 077 && python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" json > "/tmp/rpc_nodes.json"); then
+        echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Không thể xuất thông tin RPC từ ${INVENTORY}!\033[0m\n"
+        exit 1
+    fi
     chmod 0600 "/tmp/rpc_nodes.json" 2>/dev/null || true
 fi
 
@@ -214,11 +314,15 @@ echo "   Restore Node:       $RESTORE_NODE"
 echo "   BTRFS Size:         ${BTRFS_SIZE_VAL:-"(từ inventory.yml)"}"
 echo "   Open Ports:         $OPEN_PORTS"
 echo "   Build Fast:         $BUILD_FAST"
+echo "   Prebuilt Bin:       ${USE_PREBUILT}${PREBUILT_BIN_DIR:+ (Dir: $PREBUILT_BIN_DIR)}"
 echo "   Watcher:            $WATCHER_STATUS"
 
 ROLES_OUTPUT=""
 if [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
-    ROLES_OUTPUT=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "roles" || true)
+    if ! ROLES_OUTPUT=$(python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "roles"); then
+        echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Không thể đọc vai trò các node từ ${INVENTORY}!\033[0m\n"
+        exit 1
+    fi
     echo -e "\n📋 Node Roles:"
     echo "$ROLES_OUTPUT"
 fi
@@ -231,6 +335,7 @@ send_telegram_notification "🚀 <b>[${ACTION_LABEL}]</b> Bắt đầu quá trì
 - Target Node: <code>${TARGET_NODE}</code>
 - Keep Data: <code>${KEEP_DATA}</code>
 - Restore Node: <code>${RESTORE_NODE}</code>
+- Prebuilt Bin: <code>${USE_PREBUILT}${PREBUILT_BIN_DIR:+ (Dir: ${PREBUILT_BIN_DIR})}</code>
 - BTRFS Size: <code>${BTRFS_SIZE_VAL:-"default"}</code>
 - Open Ports: <code>${OPEN_PORTS}</code>
 - All Monitors: <code>${ALL_MONITORS}</code>
@@ -242,7 +347,7 @@ ${ROLES_OUTPUT}
 </pre>"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP}"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}'"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
@@ -250,10 +355,16 @@ if [ -n "$BTRFS_SIZE_VAL" ]; then
     EXTRA_VARS="${EXTRA_VARS} btrfs_size='${BTRFS_SIZE_VAL}'"
 fi
 
+# Detect become password from inventory for localhost become tasks
+INVENTORY_BECOME_PASS=$(grep -E '^\s*ansible_become_pass:' "$INVENTORY" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+if [ -n "$INVENTORY_BECOME_PASS" ]; then
+    EXTRA_VARS="${EXTRA_VARS} ansible_become_pass='${INVENTORY_BECOME_PASS}'"
+fi
+
 if [ "$ACTION" == "gen_keys" ]; then
     echo -e "\n🔑 [GEN-KEYS] Bắt đầu sinh bộ Key & Genesis mẫu cục bộ (Không đụng tới server)..."
     cd "$SCRIPT_DIR"
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "ansible_action=gen_keys ansible_build_fast=true ansible_debug_cpp=${DEBUG_CPP}" --tags gen_keys
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" --tags gen_keys
     exit_code=$?
     if [ $exit_code -eq 0 ]; then
         echo -e "\n=========================================================="

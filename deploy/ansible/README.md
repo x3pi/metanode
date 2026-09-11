@@ -40,6 +40,8 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--debug-cpp` | `false` | Ép trình biên dịch C++ (EVM Linker) build ở chế độ Debug (`-O0 -g`) thay vì Release (`-O3`). Dùng khi cần `gdb` dò lỗi CGO. |
 | `--restart` | N/A | Chỉ `systemctl restart` các service (RPC/Execution/Consensus) đang có sẵn — **không** build lại code, không copy lại file, không đụng data/keys. Nhanh nhất trong mọi cờ, dùng khi chỉ cần khởi động lại tiến trình (vd: sau khi đổi biến môi trường thủ công trên server). |
 | `--fast` | `false` | Truyền `--fast` xuống `build_release.sh` ở bước `local_build` — build Rust ở chế độ **debug** (`cargo build` không kèm `--release`) thay vì release, biên dịch nhanh hơn nhiều nhưng binary chạy chậm hơn đáng kể. **Chỉ dùng để lặp lại nhanh khi test, không dùng cho node production thật.** |
+| `--prebuilt-bin [DIR]` / `--skip-build` | `false` | **Chạy từ Binary có sẵn (Bỏ qua build code):** Không cần cài Go, Rust hay biên dịch lại. Lấy trực tiếp file nhị phân (`metanode`, `simple_chain`...) đã build từ `deploy/build_private_chain_bins.sh` (mặc định tại `deploy/bin/` hoặc thư mục tùy chọn `DIR`). Tiết kiệm thời gian và rất phù hợp khi gửi binary cho người khác vận hành. |
+| `--bin-dir DIR` | N/A | Chỉ định rõ thư mục chứa các file binary có sẵn để deploy. |
 
 ---
 
@@ -70,6 +72,27 @@ Nếu bạn chỉ thay đổi mã nguồn hoặc chỉnh sửa service mà muố
 4. ⏭️ *(BỎ QUA Clean Data - Giữ nguyên Database và cấu hình cũ)*
 5. **Copy:** Chỉ chép đè file chạy (Binary) mới lên Server. Các file Keys không thay đổi.
 6. **Start Nodes:** Bật các ứng dụng lên lại. Mạng lưới sẽ chạy phiên bản code mới nhất trên nền dữ liệu Blockchain cũ.
+
+---
+
+### 2.1. Khởi động / Triển khai nhanh từ Binary có sẵn (KHÔNG CẦN BUILD CODE)
+Nếu bạn đã có sẵn file nhị phân (sinh ra từ `deploy/build_private_chain_bins.sh` hoặc được người khác gửi file nhị phân) và máy deploy không có sẵn môi trường Rust / Go / C++:
+```bash
+# Cách 1: Tự động dùng binary trong deploy/bin/
+./ansible_deploy.sh --start --prebuilt-bin
+
+# Cách 2: Chỉ định thư mục chứa binary tùy ý
+./ansible_deploy.sh --start --prebuilt-bin /path/to/bin_directory
+# hoặc:
+./ansible_deploy.sh --start --bin-dir /path/to/bin_directory
+
+# Cách 3: Kết hợp cài mới hoàn toàn từ Block 0 mà không cần build code
+./ansible_deploy.sh --reset-all --prebuilt-bin
+```
+**Ưu điểm:**
+- ⚡ **Siêu tốc:** Bỏ qua toàn bộ thời gian biên dịch Rust/C++/Go (từ 5-10 phút xuống chỉ còn 1-2 giây đóng gói).
+- 📦 **Độc lập:** Người vận hành máy deploy không cần cài đặt Go, Cargo (Rust), C++ EVM compilers.
+- 🎯 **Nhất quán:** Đảm bảo binary chạy trên cụm server đúng 100% bản đã kiểm thử và đóng gói.
 
 ---
 

@@ -99,9 +99,12 @@
       set_fact:
         active_nodes: >-
           {%- set nodes = [] -%}
-          {%- for res in (local_node_keys_stat.results if ansible_action == 'setup' else remote_node_keys_stat.results) -%}
-            {%- if res.stat is defined and res.stat.exists -%}
-              {%- set _ = nodes.append(res.item) -%}
+          {%- for idx in range(target_active_nodes | length) -%}
+            {%- set nid = target_active_nodes[idx] -%}
+            {%- set l_stat = local_node_keys_stat.results[idx].stat | default({}) -%}
+            {%- set r_stat = remote_node_keys_stat.results[idx].stat | default({}) -%}
+            {%- if (l_stat.exists | default(false)) or (r_stat.exists | default(false)) -%}
+              {%- set _ = nodes.append(nid) -%}
             {%- endif -%}
           {%- endfor -%}
           {{ nodes }}
@@ -129,7 +132,7 @@
     - name: Check generated firewall scripts for nodes
       ansible.builtin.stat:
         path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
-      loop: "{{ target_active_nodes }}"
+      loop: "{{ active_nodes }}"
       register: generated_firewall_scripts
       when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
       tags: ["open_ports"]
@@ -152,7 +155,7 @@
         argv:
           - bash
           - "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
-      loop: "{{ target_active_nodes }}"
+      loop: "{{ active_nodes }}"
       when: "ansible_action == 'open_ports' or (open_ports | default('false') | bool == true)"
       notify: Reload UFW
       tags: ["open_ports"]
