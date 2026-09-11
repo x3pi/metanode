@@ -360,6 +360,7 @@ pub async fn transition_mode_only(
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()), // Pass legacy store manager to avoid RocksDB lock conflicts
             node.coordination_hub.clone(),
+            Some(node.epoch_eth_addresses.clone()),
         )
         .await,
     );

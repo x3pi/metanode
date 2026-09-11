@@ -369,7 +369,23 @@ if [ "${1:-}" == "health" ]; then
     echo "Starting health monitor loop with Smart Crash/Server-Down Detection..."
     declare -A dead_nodes
     declare -A failure_type
-    
+    # Phuong an A (2026-09-10): consensus engine tu dung dispatch (khong tu doan tiep khi
+    # khong xac nhan duoc voi da so validator, xem processor.rs +
+    # note/consensus_local_dag_trust_gap_design_2026-09.md) thay vi crash hay treo im lang --
+    # RPC/service van "song" binh thuong nen dead_nodes[] khong bat duoc tinh huong nay, can
+    # theo doi rieng. "1" = da alert va CHUA thay bang chung node duoc restart that su (chi
+    # reset khi dead_nodes[] ghi nhan mot lan crash/restart that -- xem 2 diem reset ben duoi)
+    # -- co chu y KHONG tu "recover" khi dong log chi don gian troi khoi cua so tail, vi thieu
+    # bang chung khong phai la bang chung da het treo.
+    declare -A consensus_halt_alerted
+    # Same idea, separate marker/flag (2026-09-11): CONFIRMED permanent tx-payload loss
+    # (block_delivery.rs) rather than SUSPECTED divergence (processor.rs) -- different
+    # cause, different runbook, so tracked and alerted independently. Unlike
+    # consensus_halt_alerted, this one CAN self-clear without a crash/restart (the retry
+    # loop keeps running and may succeed on its own once a peer regains the payload) --
+    # see the CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED check below.
+    declare -A tx_payload_lost_alerted
+
     # Chain Stall Detector tracking
     last_seen_block=0
     last_block_progress_ts=$(date +%s)
@@ -614,8 +630,134 @@ Khởi động lại riêng node <code>${node_key}</code> (giữ nguyên Data):
                         fi
                     fi
                 else
+                    # ─── KIỂM TRA THÊM: CONSENSUS TỰ DỪNG (Phuong an A) dù node vẫn trả lời RPC ──
+                    # Khác 3 tình huống ở trên (server down / reboot / node crash): ở đây RPC vẫn
+                    # sống, service vẫn "active" -- consensus engine CHỦ ĐỘNG dừng dispatch vì
+                    # không xác nhận được với đa số validator khác trong thời gian dài, thay vì tự
+                    # đoán tiếp (xem processor.rs, note/consensus_local_dag_trust_gap_design_2026-09.md).
+                    # Quét cửa sổ cuối (200KB) của execution.log trong thư mục NGÀY MỚI NHẤT
+                    # (Go logger tự rotate theo ngày + kích thước -- xem execution/pkg/logger,
+                    # cùng quy ước glob "logs/execution/*/execution.log" mà ansible_deploy.sh và
+                    # phần kéo log crash phía trên đã dùng; Rust log [RUST] đi qua cùng logger
+                    # này, KHÔNG PHẢI file phẳng logs/execution/execution.log).
+                    ip_for_halt_check=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                    is_local_for_halt_check=false
+                    if [ "$ip_for_halt_check" == "$MONITOR_IP" ] || [ "$ip_for_halt_check" == "127.0.0.1" ] || [ "$ip_for_halt_check" == "localhost" ]; then
+                        is_local_for_halt_check=true
+                    fi
+                    halt_log_line=""
+                    if [ "$is_local_for_halt_check" == "true" ]; then
+                        latest_exec_date_dir_for_halt=$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1 || true)
+                        if [ -n "$latest_exec_date_dir_for_halt" ]; then
+                            halt_log_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-SUSPECTED-DIVERGENCE" | tail -n 1 || true)
+                        fi
+                    else
+                        resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
+                        halt_log_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-SUSPECTED-DIVERGENCE' | tail -n 1" 2>/dev/null || true)
+                    fi
+                    if [ -n "$halt_log_line" ] && [ "${consensus_halt_alerted[$node_key]:-0}" == "0" ]; then
+                        consensus_halt_alerted[$node_key]=1
+                        send_tele "🛑🚨 <b>[NGHIÊM TRỌNG: CONSENSUS TỰ DỪNG — NGHI NGỜ PHÂN NHÁNH (FORK)]</b> 🛑🚨
+────────────────────────
+🎯 <b>NODE:</b>
+   • <b>IP:</b> <code>${ip_for_halt_check}</code>
+   • <b>Node:</b> <code>${node_key}</code> (${node_url})
+   • <b>RPC:</b> vẫn phản hồi bình thường — <u>ĐÂY KHÔNG PHẢI node crash/down</u>
+
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+   • <b>Mức độ:</b> NGHIÊM TRỌNG NHẤT — không tự phục hồi, cần Operator can thiệp
+────────────────────────
+⚠️ Consensus engine đã <b>CHỦ ĐỘNG DỪNG</b> dispatch commit vì không thể xác nhận với đa số
+validator khác trong thời gian dài (xem PERMANENT-GAP-RECOVERY / Phương án A). Đây là hành
+vi AN TOÀN CÓ CHỦ ĐÍCH (giống Sui mainnet: dừng lại thay vì tự đoán tiếp khi không chắc chắn)
+— KHÔNG PHẢI bug crash, và <u>KHÔNG được tự ý bỏ qua hoặc restart hàng loạt</u> vì có thể che
+giấu một phân nhánh (fork) thật đang tồn tại trên đĩa.
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV/OPERATOR) — đọc kỹ trước khi làm gì:</b>
+1. <b>KHÔNG restart node này ngay.</b> Trước tiên xác minh block hash/state root của node này
+   khớp với ít nhất 2 validator khác đang khỏe (block_hash_checker hoặc so sánh
+   <code>eth_getBlockByNumber</code> thủ công).
+2. Nếu KHỚP với đa số: có thể an toàn restart để node tự đồng bộ lại:
+   <code>./ansible_deploy.sh --restart --only-node ${node_id}</code>
+3. Nếu LỆCH với đa số (nghi ngờ fork thật): PHẢI khôi phục từ snapshot đã biết tốt, KHÔNG chỉ
+   restart suông:
+   <code>./ansible_deploy.sh --reset-all --only-node ${node_id} --restore-node ${node_id} --snapshot-url <URL_SNAPSHOT></code>
+4. Chi tiết thiết kế & nguyên nhân gốc: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code>
+────────────────────────
+📜 <b>Dòng log gốc:</b>
+<code>${halt_log_line}</code>"
+                    fi
+
+                    # ─── KIỂM TRA THÊM: MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH (2026-09-11) ──
+                    # KHÁC với "nghi ngờ phân nhánh" ở trên: đây là một node đã THỬ hỏi các
+                    # peer khác để khôi phục payload một giao dịch bị thiếu (TxPayloadCache
+                    # chỉ lưu RAM, mất khi restart) và KHÔNG peer nào còn giữ nó -- thường xảy
+                    # ra khi CẢ CỤM restart cùng lúc (vd: deploy code mới toàn cụm) đúng lúc có
+                    # giao dịch đang "bay" giữa các node. KHÔNG phải nghi ngờ fork (mọi node
+                    # đều đồng ý dữ liệu đã mất), nên hướng xử lý khác hẳn -- xem block_delivery.rs.
+                    tx_lost_log_line=""
+                    tx_lost_recovered_line=""
+                    if [ "$is_local_for_halt_check" == "true" ]; then
+                        if [ -n "$latest_exec_date_dir_for_halt" ]; then
+                            tx_lost_log_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-TX-PAYLOAD-LOST\]" | tail -n 1 || true)
+                            tx_lost_recovered_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED" | tail -n 1 || true)
+                        fi
+                    else
+                        tx_lost_log_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-TX-PAYLOAD-LOST\]' | tail -n 1" 2>/dev/null || true)
+                        tx_lost_recovered_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED' | tail -n 1" 2>/dev/null || true)
+                    fi
+                    if [ -n "$tx_lost_log_line" ] && [ "${tx_payload_lost_alerted[$node_key]:-0}" == "0" ]; then
+                        tx_payload_lost_alerted[$node_key]=1
+                        send_tele "🛑🚨 <b>[NGHIÊM TRỌNG: MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH]</b> 🛑🚨
+────────────────────────
+🎯 <b>NODE:</b>
+   • <b>IP:</b> <code>${ip_for_halt_check}</code>
+   • <b>Node:</b> <code>${node_key}</code> (${node_url})
+   • <b>RPC:</b> vẫn phản hồi bình thường — <u>ĐÂY KHÔNG PHẢI node crash/down</u>
+
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+   • <b>Mức độ:</b> NGHIÊM TRỌNG — không tự phục hồi bằng restart, cần Operator can thiệp
+────────────────────────
+⚠️ Node này đã thử hỏi các peer khác để khôi phục payload một giao dịch bị thiếu khỏi
+TxPayloadCache (cache RAM, mất khi restart) NHƯNG không peer nào còn giữ nó. Node đang
+<b>DỪNG DISPATCH</b> ở đúng commit này để tránh fork (không được phép âm thầm bỏ qua giao
+dịch), và sẽ tự thử lại mỗi 10s — <b>KHÁC với "nghi ngờ phân nhánh": đây KHÔNG phải nghi
+ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ:</b>
+1. <b>Restart đơn lẻ node này KHÔNG giúp ích</b> nếu dữ liệu đã mất trên toàn cụm (nguyên
+   nhân thường là deploy code mới cho CẢ cụm cùng lúc, đúng lúc có giao dịch đang xử lý dở).
+2. Nếu một validator khác KHÔNG bị mất payload này vẫn còn sống (vd. chỉ 1 node restart,
+   các node khác vẫn chạy liên tục): node này sẽ TỰ PHỤC HỒI khi peer đó phản hồi lại, không
+   cần can thiệp gì thêm — sẽ có thông báo riêng khi phục hồi xong.
+3. Nếu KHÔNG node nào còn payload: cần liên hệ đội dev để xác định giao dịch nào bị ảnh
+   hưởng và quyết định hướng xử lý thủ công (không có cách tự động an toàn để bỏ qua).
+4. Chi tiết: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code> mục 10.
+────────────────────────
+📜 <b>Dòng log gốc:</b>
+<code>${tx_lost_log_line}</code>"
+                    elif [ -n "$tx_lost_recovered_line" ] && [ "${tx_payload_lost_alerted[$node_key]:-0}" == "1" ]; then
+                        tx_payload_lost_alerted[$node_key]=0
+                        send_tele "✅ <b>[ĐÃ PHỤC HỒI: PAYLOAD GIAO DỊCH ĐÃ KHÔI PHỤC ĐƯỢC]</b> ✅
+────────────────────────
+🎯 <b>NODE:</b> <code>${node_key}</code> (${ip_for_halt_check})
+   • <b>Trạng thái:</b> Đã lấy được payload từ peer, dispatch bình thường trở lại.
+📜 <b>Dòng log gốc:</b>
+<code>${tx_lost_recovered_line}</code>"
+                    fi
+
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then
                         dead_nodes[$node_key]=0
+                        # Node vua trai qua mot lan crash/restart that su -- neu truoc do co
+                        # alert CONSENSUS-HALT, process cu da bi thay the boi mot lan khoi dong
+                        # moi (co the da duoc Operator xu ly theo runbook o tren), nen cho phep
+                        # canh bao lai neu tinh trang lap lai o lan chay moi nay.
+                        consensus_halt_alerted[$node_key]=0
+                        tx_payload_lost_alerted[$node_key]=0
                         prev_type=${failure_type[$node_key]:-"NODE_CRASH"}
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                         
@@ -634,6 +776,8 @@ Khởi động lại riêng node <code>${node_key}</code> (giữ nguyên Data):
                     elif [ "${dead_nodes[$node_key]:-0}" == "2" ]; then
                         # Node tắt chủ động nay bật lại bình thường, reset cờ êm đềm
                         dead_nodes[$node_key]=0
+                        consensus_halt_alerted[$node_key]=0
+                        tx_payload_lost_alerted[$node_key]=0
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)

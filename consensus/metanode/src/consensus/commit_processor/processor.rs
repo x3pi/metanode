@@ -48,6 +48,56 @@ fn diag_digest_maybe_print() {
     }
 }
 
+// TEMPORARY DIAGNOSTIC (2026-09-10): counts resolve_leader_address() outcomes,
+// same eprintln!-bypasses-tracing-subscriber rationale as the DIGEST-GATE
+// diagnostic above. Added while investigating a real, transient block-hash
+// mismatch (block #339, leader_address 0x4a61f5...4979 vs empty/zero) found
+// live during Phuong an A verification -- see
+// note/consensus_local_dag_trust_gap_design_2026-09.md mục 8. The open
+// question: `Commit::new_with_leader_address` is never called anywhere in the
+// codebase (confirmed by grep), so every Commit's OWN leader_address should be
+// empty at creation -- yet grepping this cluster's entire log history for
+// "[LEADER]" (resolve_leader_address's own warn!/info! lines, which should NOT
+// be filtered at the default RUST_LOG=info) found ZERO occurrences on any
+// node, which would only make sense if PREEMBEDDED (fast path, subdag.
+// leader_address already 20 bytes, logged at trace! -- filtered by default)
+// fires 100% of the time. These counters settle that empirically instead of
+// guessing further from existing logs. Remove once this is settled.
+static DIAG_LEADER_PREEMBEDDED: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_RESOLVED_OK: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_WAITING_ITERS: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_OUT_OF_BOUNDS: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_INVALID_LEN: AtomicU64 = AtomicU64::new(0);
+static DIAG_LEADER_LAST_PRINT_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_leader_maybe_print() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = DIAG_LEADER_LAST_PRINT_SECS.load(StdOrdering::Relaxed);
+    if now >= last + 5
+        && DIAG_LEADER_LAST_PRINT_SECS
+            .compare_exchange(last, now, StdOrdering::Relaxed, StdOrdering::Relaxed)
+            .is_ok()
+    {
+        // info! (not eprintln!) -- confirmed live that eprintln!'s raw fd-2 write races
+        // the tracing-subscriber's own GoLogWriter callback path (both ultimately land in
+        // the same execution.log, via two uncoordinated writers) and gets its output
+        // spliced apart by a concurrent tracing line mid-write, losing the actual numbers.
+        // info! goes through the same, already-reliable path every other log line in this
+        // file uses.
+        info!(
+            "[DIAG leader-addr] preembedded={} resolved_ok={} waiting_iters={} out_of_bounds={} invalid_len={}",
+            DIAG_LEADER_PREEMBEDDED.load(StdOrdering::Relaxed),
+            DIAG_LEADER_RESOLVED_OK.load(StdOrdering::Relaxed),
+            DIAG_LEADER_WAITING_ITERS.load(StdOrdering::Relaxed),
+            DIAG_LEADER_OUT_OF_BOUNDS.load(StdOrdering::Relaxed),
+            DIAG_LEADER_INVALID_LEN.load(StdOrdering::Relaxed)
+        );
+    }
+}
+
 use crate::consensus::tx_recycler::TxRecycler;
 
 use crate::node::executor_client::ExecutorClient;
@@ -398,6 +448,8 @@ impl CommitProcessor {
         // trust it and skip local resolution. This ensures recovering nodes use the
         // same address as the original producing node.
         if subdag.leader_address.len() == 20 {
+            DIAG_LEADER_PREEMBEDDED.fetch_add(1, StdOrdering::Relaxed);
+            diag_leader_maybe_print();
             trace!(
                 "✅ [LEADER] Using pre-embedded leader_address from commit (commit={}, epoch={}, addr=0x{})",
                 subdag.commit_ref.index, epoch, hex::encode(&subdag.leader_address)
@@ -414,6 +466,27 @@ impl CommitProcessor {
         let resolve_start = std::time::Instant::now();
         let mut logged_warning = false;
 
+        // OUT-OF-BOUNDS / INVALID-LEN RETRY WINDOW (2026-09-10): found live -- see
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8. These 2 branches
+        // used to `return` immediately on the first observation, permanently leaving
+        // this commit's leader_address empty on THIS node even though the cache entry
+        // for `epoch` could still be transiently incomplete/stale right after a
+        // forward-jump catch-up (the exact condition that produced a real, live
+        // block-hash mismatch: one node resolved a real address, others gave up
+        // instantly and got the deterministic-empty fallback instead). Unlike the
+        // "epoch not in the map at all" case above (which already retries forever,
+        // proven safe), a genuinely wrong/stale cache entry might never self-correct,
+        // so this window is BOUNDED, not indefinite -- retry for
+        // OUT_OF_BOUNDS_RETRY_SECS, then fall back to today's existing, already-safe
+        // behavior (leave it empty; Go's GetLeaderAddress() deterministically uses the
+        // zero address for that, identically on every node) rather than
+        // risking a genuine new hang. This does not eliminate the underlying race
+        // (see mục 8.5's proposed real fix -- embedding leader_address in the digested
+        // Commit at creation time -- deliberately deferred, touches shared
+        // meta-consensus/core) but meaningfully narrows the window where it can bite,
+        // entirely within this already-metanode-specific file.
+        const OUT_OF_BOUNDS_RETRY_SECS: u64 = 30;
+
         loop {
             {
                 let addrs_guard = epoch_eth_addresses.read().await;
@@ -421,6 +494,8 @@ impl CommitProcessor {
                     if leader_author_index < addrs.len() {
                         let addr = &addrs[leader_author_index];
                         if addr.len() == 20 {
+                            DIAG_LEADER_RESOLVED_OK.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
                             if logged_warning {
                                 info!(
                                     "✅ [LEADER] epoch_eth_addresses resolved after {}ms (epoch={}, index={})",
@@ -429,19 +504,33 @@ impl CommitProcessor {
                             }
                             subdag.leader_address = addr.clone();
                             return;
+                        } else if resolve_start.elapsed().as_secs() < OUT_OF_BOUNDS_RETRY_SECS {
+                            DIAG_LEADER_INVALID_LEN.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
+                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={}) -- retrying, may be a transient stale cache entry", epoch, leader_author_index, addr.len());
                         } else {
-                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={})", epoch, leader_author_index, addr.len());
+                            DIAG_LEADER_INVALID_LEN.fetch_add(1, StdOrdering::Relaxed);
+                            diag_leader_maybe_print();
+                            warn!("⚠️ [LEADER] Invalid address length for epoch={}, index={} (len={}) after {}s of retrying -- giving up, leaving leader_address empty (Go will use the deterministic zero-address fallback)", epoch, leader_author_index, addr.len(), OUT_OF_BOUNDS_RETRY_SECS);
                             return;
                         }
+                    } else if resolve_start.elapsed().as_secs() < OUT_OF_BOUNDS_RETRY_SECS {
+                        DIAG_LEADER_OUT_OF_BOUNDS.fetch_add(1, StdOrdering::Relaxed);
+                        diag_leader_maybe_print();
+                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={}) -- retrying, may be a transient stale cache entry", epoch, leader_author_index, addrs.len());
                     } else {
-                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={})", epoch, leader_author_index, addrs.len());
+                        DIAG_LEADER_OUT_OF_BOUNDS.fetch_add(1, StdOrdering::Relaxed);
+                        diag_leader_maybe_print();
+                        warn!("🚨 [LEADER] Committee index OUT OF BOUNDS! (epoch={}, index={}, committee_size={}) after {}s of retrying -- giving up, leaving leader_address empty (Go will use the deterministic zero-address fallback)", epoch, leader_author_index, addrs.len(), OUT_OF_BOUNDS_RETRY_SECS);
                         return;
                     }
                 }
             }
 
-            // Timeout check REMOVED (Fork-Safety Fix)
-            // We wait indefinitely for epoch_eth_addresses.
+            // Timeout check REMOVED for the "epoch not cached at all" case (Fork-Safety
+            // Fix) -- we wait indefinitely for that one, per the "zero fork" policy. The
+            // out-of-bounds/invalid-len cases above have their own bounded window instead
+            // (see OUT_OF_BOUNDS_RETRY_SECS comment above).
             // Thà pending (chờ) chứ TUYỆT ĐỐI không fork.
             let elapsed = resolve_start.elapsed();
 
@@ -459,6 +548,8 @@ impl CommitProcessor {
                     epoch, leader_author_index, elapsed.as_secs()
                 );
             }
+            DIAG_LEADER_WAITING_ITERS.fetch_add(1, StdOrdering::Relaxed);
+            diag_leader_maybe_print();
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                 _ = epoch_eth_addresses_notify.notified() => {}
@@ -669,7 +760,28 @@ impl CommitProcessor {
         // specific capacity.
         let mut last_next_expected_index = next_expected_index;
         let mut last_next_expected_progress_time = std::time::Instant::now();
-        const RECOVERY_STUCK_TIMEOUT_SECS: u64 = 900; // 15 min of zero dispatch progress
+        // PHUONG AN A: tracks whether the CONSENSUS-HALT alert has already been logged for the
+        // CURRENT stall episode, so it fires once (not every loop iteration) but can fire again
+        // for a genuinely new/later stall once next_expected_index has actually moved past the
+        // previous one. See the halt-alert call site's own doc comment for the full reasoning.
+        let mut halt_alert_sent_for_current_stall = false;
+        // 15 min of zero dispatch progress. Overridable via
+        // METANODE_TESTING_RECOVERY_STUCK_TIMEOUT_SECS -- ONLY for staging/CI verification
+        // (e.g. driving `node_chaos_restart` through this exact branch in minutes instead of
+        // 15+), never meant to be set in a real deployment. Unlike before Phuong an A, shortening
+        // this number carries NO fork risk any more: the old code path this timeout used to gate
+        // was "trust unverified on-disk data" (unsafe to rush -- that's exactly what caused the
+        // 2026-09-10 fork when it was hardcoded down to 120s), but the ONLY thing this timeout
+        // gates now is "log a halt marker and stop dispatching" (safe at any value -- the worst a
+        // too-short value can do is halt sooner / more eagerly, never trust anything unverified).
+        // Parsed once per call to this loop, not the hot path.
+        let recovery_stuck_timeout_secs: u64 = std::env::var("METANODE_TESTING_RECOVERY_STUCK_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(900);
+        #[allow(non_snake_case)]
+        let RECOVERY_STUCK_TIMEOUT_SECS: u64 = recovery_stuck_timeout_secs;
 
         // SECOND CORRECTION (2026-09-09, same day, live incident #3 -- full 4-node cluster
         // restart): the jump-based recovery above ("adopt the lowest buffered index as the new
@@ -759,6 +871,11 @@ impl CommitProcessor {
             if next_expected_index != last_next_expected_index {
                 last_next_expected_index = next_expected_index;
                 last_next_expected_progress_time = std::time::Instant::now();
+                // Real progress past the stuck index proves this specific stall episode is
+                // over (via a genuine CertifiedCommit/digest-vote resurgence, or an operator's
+                // manual recovery) -- allow the halt-alert to fire again for any later, distinct
+                // stall rather than staying permanently suppressed for the rest of this process.
+                halt_alert_sent_for_current_stall = false;
             } else {
                 let stuck_secs = last_next_expected_progress_time.elapsed().as_secs();
                 let transitioning_now = is_transitioning
@@ -767,39 +884,65 @@ impl CommitProcessor {
                     .unwrap_or(false);
                 if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
                     && gap_recovery_bypass_ceiling.is_none()
+                    && !halt_alert_sent_for_current_stall
                     && !pending_local_commits.is_empty()
                     && !transitioning_now
                 {
-                    // Evidence: the head-of-line commit (next_expected_index, sitting in
-                    // pending_local_commits -- see its insert sites, it only ever holds the
-                    // current head) has not budged in RECOVERY_STUCK_TIMEOUT_SECS despite the
-                    // DAG demonstrably continuing (that's what filled pending_commits below).
-                    // That is direct proof this exact index can never be attested (see the long
-                    // comment on gap_recovery_bypass_ceiling's declaration), not a guess from
-                    // buffer capacity. Ceiling = highest already-buffered OOO commit right now,
-                    // so the amnesty covers exactly this proven-stuck backlog and nothing minted
-                    // afterward.
-                    let ceiling = pending_commits
+                    // PHUONG AN A (2026-09-10): this used to grant a bounded verification
+                    // amnesty here (trust the local decided_with_local_blocks value once no peer
+                    // has re-confirmed it for RECOVERY_STUCK_TIMEOUT_SECS) -- gap_recovery_bypass_
+                    // ceiling is DELIBERATELY never set anymore; every downstream read of it
+                    // (DIGEST-GATE POLL, several call sites below) is UNCHANGED and simply always
+                    // sees None now, so this node never dispatches an unattested local value.
+                    //
+                    // Why: that amnesty was reproduced live, same day, to cause a REAL confirmed
+                    // fork (LAYER-6 fork_guard caught node-3's Block #500 hash/state_root
+                    // permanently diverging from its peers, 38 minutes after an amnesty granted
+                    // at 121s -- see note/consensus_local_dag_trust_gap_design_2026-09.md for the
+                    // full writeup). Researched how Sui itself (this crate's own upstream --
+                    // consensus-core is literally Mysten Labs' code) handles the equivalent
+                    // situation in production: their own documented "Sui Mainnet Network Stall
+                    // Resolution" (2026-03) states plainly that validators "halted rather than
+                    // proceed unilaterally" and "no validator trusted its own unconfirmed decision
+                    // locally" -- recovery was a human-verified fix, not silent self-trust. This
+                    // is that same choice, applied here: on proven-permanent staleness, HALT
+                    // dispatch on this index and loudly alert an operator, instead of guessing.
+                    //
+                    // This does NOT abort() or exit the process (unlike LAYER-6's response to a
+                    // CONFIRMED fork, which already happened) -- nothing has been proven wrong
+                    // yet, only proven unattestable so far, and the node staying up (RPC still
+                    // answering reads, still eligible to receive a genuine CertifiedCommit or a
+                    // digest-vote resurgence from CommitSyncer/gossip) keeps every honest recovery
+                    // path open. Recovery from here is an operator decision (verify what's
+                    // actually going on, then e.g. --restore-node from a known-good snapshot, or a
+                    // coordinated cluster restart) -- not something this loop should keep guessing
+                    // at automatically. See note/deploy_hardening_and_incident_drills_2026-09.md
+                    // for the 2 root causes (RocksDB panic-loop, peer_rpc handover race) already
+                    // fixed the same day specifically to make reaching this state during an
+                    // ordinary single-node restart rare.
+                    let backlog_size = pending_commits
                         .keys()
                         .next_back()
                         .copied()
                         .unwrap_or(next_expected_index)
-                        .max(next_expected_index);
+                        .max(next_expected_index)
+                        .saturating_sub(next_expected_index);
                     error!(
-                        "🚨🔧 [PERMANENT-GAP-RECOVERY] next_expected_index={} has not advanced in \
-                         {}s (pending_local head stuck, {} OOO commits buffered behind it). Peer \
-                         digest votes for this index cannot ever reappear once peers move past \
-                         it (see gap_recovery_bypass_ceiling doc comment) -- granting bounded \
-                         verification amnesty up to already-buffered index {} so the existing \
-                         dispatch path can drain the backlog. A live digest CONFLICT still \
-                         discards immediately regardless of this amnesty. If this fires, file it: \
-                         it means a real digest-vote gap went unexplained all the way to this \
-                         last-resort recovery.",
-                        next_expected_index, stuck_secs, pending_commits.len(), ceiling
+                        "🛑🚨 [CONSENSUS-HALT-SUSPECTED-DIVERGENCE] next_expected_index={} has not \
+                         advanced in {}s (pending_local head stuck, {} OOO commits buffered behind \
+                         it, {} commits behind the DAG's own quorum-confirmed tip). Peer digest \
+                         votes for this index cannot ever reappear once peers move past it (see \
+                         gap_recovery_bypass_ceiling's doc comment for why). Per Phuong an A \
+                         (2026-09-10), this node is now PAUSING dispatch on this index rather than \
+                         trusting its own unconfirmed local decision -- it will keep running \
+                         (RPC/reads still answer) and keep listening for a genuine CertifiedCommit \
+                         or digest-vote resurgence, but will NOT make further progress past this \
+                         point without one. THIS NEEDS AN OPERATOR: verify what happened, then \
+                         choose --restore-node from a known-good snapshot or a coordinated \
+                         cluster restart. See note/consensus_local_dag_trust_gap_design_2026-09.md.",
+                        next_expected_index, stuck_secs, pending_commits.len(), backlog_size
                     );
-                    gap_recovery_bypass_ceiling = Some(ceiling);
-                    last_next_expected_index = next_expected_index;
-                    last_next_expected_progress_time = std::time::Instant::now();
+                    halt_alert_sent_for_current_stall = true;
                 }
             }
 

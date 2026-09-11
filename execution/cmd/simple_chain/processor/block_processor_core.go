@@ -1060,6 +1060,25 @@ func (bp *BlockProcessor) WaitForPersistence() {
 			logger.Info("⏳ [PERSIST] WaitForPersistence: waiting for NOMT async commits to finish...")
 			if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
 				if trie, ok := accDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					// BUG FOUND LIVE (2026-09-10, see
+					// note/consensus_local_dag_trust_gap_design_2026-09.md mục 9): Commit()
+					// computes and returns a block's new root SYNCHRONOUSLY (that becomes
+					// the block header), but only STAGES the real FFI persistence as a
+					// pending finished session -- normally drained lazily by the NEXT
+					// block's Commit() call. For the very last block before a shutdown,
+					// there is no next block to trigger that drain. WaitCommitPayload()
+					// alone doesn't cover this: it only waits for commits already handed
+					// to an async goroutine, and a session that was never drained was
+					// never handed off in the first place -- so nomt_ffi.Handle.Close()
+					// (called later, during CloseNomtDB()) unconditionally aborted it,
+					// silently losing the last block's real NOMT persistence while its
+					// header (already written via a separate path) still claimed the
+					// root as committed. CommitPayload() drains (persists) whatever is
+					// still pending before we wait for anything already in flight.
+					if err := trie.CommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] AccountStateDB CommitPayload (drain) failed: %v", err)
+						panic(fmt.Sprintf("FATAL: AccountStateDB pending commit drain failed: %v", err))
+					}
 					if err := trie.WaitCommitPayload(); err != nil {
 						logger.Error("🚨 [PERSIST] AccountStateDB WaitCommitPayload failed: %v", err)
 						panic(fmt.Sprintf("FATAL: AccountStateDB async commit failed: %v", err))
@@ -1068,6 +1087,11 @@ func (bp *BlockProcessor) WaitForPersistence() {
 			}
 			if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
 				if trie, ok := stakeDB.Trie().(*mt_trie.NomtStateTrie); ok {
+					// Same fix as AccountStateDB above -- see the comment there.
+					if err := trie.CommitPayload(); err != nil {
+						logger.Error("🚨 [PERSIST] StakeStateDB CommitPayload (drain) failed: %v", err)
+						panic(fmt.Sprintf("FATAL: StakeStateDB pending commit drain failed: %v", err))
+					}
 					if err := trie.WaitCommitPayload(); err != nil {
 						logger.Error("🚨 [PERSIST] StakeStateDB WaitCommitPayload failed: %v", err)
 						panic(fmt.Sprintf("FATAL: StakeStateDB async commit failed: %v", err))

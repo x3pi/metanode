@@ -36,9 +36,25 @@ import (
 // createBlockFromResults creates a block from processing results
 // CRITICAL FORK-SAFETY: commitTimestampMs should come from Rust consensus to ensure all nodes
 // produce identical block hashes. Pass 0 for backward compatibility (will use time.Now()).
-// CRITICAL FORK-SAFETY: leaderAddressOverride (optional, variadic) allows passing leader address
-// from Rust consensus. If not provided, falls back to bp.validatorAddress (for local processing).
+// CRITICAL FORK-SAFETY: leaderAddressOverride (variadic, but REQUIRED -- exactly one entry) must
+// be the leader address Rust consensus decided, even if that's the deterministic zero address for
+// commits with no real leader (e.g. EndOfEpoch). Go MUST NEVER calculate this locally: every
+// honest node runs the SAME leader-resolution logic on the SAME consensus-agreed data, but
+// bp.validatorAddress is THIS node's own identity -- different per node -- so using it as a
+// fallback would make different nodes compute different block hashes for the identical commit
+// (found live, 2026-09-10, block #339: one node used its own address, others got the correct
+// deterministic zero -- see note/consensus_local_dag_trust_gap_design_2026-09.md mục 8).
+// 2026-09-10: this used to silently default to bp.validatorAddress when the override was
+// omitted -- that branch had no real caller (every real call site already passes one), but a
+// silent, reachable-only-by-mistake fork trigger is not something this codebase should keep
+// around just because nothing happens to hit it today. Now a caller that forgets to pass one
+// gets a loud, immediate panic instead of a hash that might quietly diverge from every other
+// node's.
 func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.ProcessResult, currentBlockNumber uint64, epoch uint64, isStateChanging bool, batchID string, commitTimestampMs uint64, globalExecIndex uint64, commitIndex uint32, leaderAddressOverride ...common.Address) *block.Block {
+	if len(leaderAddressOverride) != 1 {
+		panic(fmt.Sprintf("🚨 [FORK-SAFETY] createBlockFromResults called for block #%d with %d leaderAddressOverride values (must be exactly 1, decided by Rust consensus) -- refusing to guess a node-local leader address, that would risk a fork",
+			currentBlockNumber, len(leaderAddressOverride)))
+	}
 	// LAYER-8: DB Write Lock — serialize all block writes
 	bp.blockWriteMutex.Lock()
 	defer bp.blockWriteMutex.Unlock()
@@ -129,16 +145,19 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	// Phase 2: Create Block Data
 	phase2Start := time.Now()
-	// CRITICAL FORK-SAFETY: Keep commitTimestampMs (from Rust) directly for BlockHeader
-	timestampMs := commitTimestampMs // 0 if commitTimestampMs is 0 (fallback to time.Now())
+	// CRITICAL FORK-SAFETY: Keep commitTimestampMs (from Rust) directly for BlockHeader.
+	// Stale comment removed 2026-09-10: this used to say "0 -> falls back to time.Now()",
+	// but GenerateBlockData/GenerateBlockDataReadOnly (block_processor_utils.go) both
+	// panic on timestampMs==0 instead -- a genuine per-node time.Now() fallback here
+	// would be exactly the same class of bug as the leader_address one fixed the same
+	// day (Go computing something node-local instead of using what Rust decided).
+	timestampMs := commitTimestampMs
 
-	// CRITICAL FORK-SAFETY: Use leader address from Rust consensus if provided, even if it's the zero address.
-	// The zero address is used intentionally as a deterministic fallback for system transactions (EndOfEpoch)
-	// which do not have a Rust leader. Falling back to bp.validatorAddress would cause a fork!
-	blockLeaderAddress := bp.validatorAddress
-	if len(leaderAddressOverride) > 0 {
-		blockLeaderAddress = leaderAddressOverride[0]
-	}
+	// CRITICAL FORK-SAFETY: leaderAddressOverride is REQUIRED (checked above) -- use exactly what
+	// Rust consensus decided, even if that's the deterministic zero address for commits with no
+	// real leader (e.g. EndOfEpoch system transactions). Never bp.validatorAddress (this node's
+	// own identity, different on every node) -- see the doc comment on this function.
+	blockLeaderAddress := leaderAddressOverride[0]
 
 	var bl *block.Block
 	if isStateChanging {

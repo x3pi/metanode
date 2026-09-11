@@ -73,6 +73,9 @@ impl ConsensusAuthority {
         // Legacy store manager from ConsensusNode, to avoid re-opening locked RocksDB files
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+        // FORK-SAFETY (2026-09-10): see AuthorityNode::start's own doc comment on this
+        // same parameter. Optional -- pass None to preserve the exact previous behavior.
+        epoch_eth_addresses: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
     ) -> Self {
         match network_type {
             NetworkType::Tonic => {
@@ -93,6 +96,7 @@ impl ConsensusAuthority {
                     system_transaction_provider,
                     legacy_store_manager,
                     coordination_hub,
+                    epoch_eth_addresses,
                 )
                 .await;
                 Self::WithTonic(Some(authority))
@@ -232,6 +236,13 @@ where
         // during epoch transitions. If None, no legacy stores will be available.
         existing_legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+        // FORK-SAFETY (2026-09-10): app-layer map of epoch -> (authority index -> ETH
+        // address), forwarded to CommitObserver/Linearizer to embed a real leader_address
+        // into freshly-created commits. See that call site's own comment and
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. Optional --
+        // None preserves the exact previous behavior (leader_address resolved later,
+        // downstream, per node).
+        epoch_eth_addresses: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
     ) -> Self {
         assert!(
             committee.is_valid_index(own_index),
@@ -422,7 +433,7 @@ where
         ));
 
         let commit_consumer_monitor = commit_consumer.monitor();
-        let commit_observer = CommitObserver::new(
+        let mut commit_observer = CommitObserver::new(
             context.clone(),
             commit_consumer,
             dag_state.clone(),
@@ -432,6 +443,15 @@ where
             epoch_base_index,
         )
         .await;
+        // FORK-SAFETY (2026-09-10): wire the app-layer epoch_eth_addresses map through so
+        // freshly-created commits get a real, embedded leader_address instead of every
+        // node independently re-resolving one later. See CommitObserver/Linearizer's own
+        // set_epoch_eth_addresses doc comments and
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. No-op when the
+        // caller doesn't set one (e.g. tests/benches).
+        if let Some(epoch_eth_addresses) = epoch_eth_addresses.clone() {
+            commit_observer.set_epoch_eth_addresses(epoch_eth_addresses);
+        }
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 

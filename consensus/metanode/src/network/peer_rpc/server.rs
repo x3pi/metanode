@@ -65,6 +65,18 @@ pub struct PeerRpcServer {
     node: Option<Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
     /// Shared index to get the last global execution index
     shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
+    /// BIND-CONFIRM (2026-09-10): optional one-shot signal sent right after the bind below
+    /// actually resolves (success or exhausted-retries failure), BEFORE the long-running accept
+    /// loop starts. Added because both call sites (startup.rs, startup_sync.rs) used to log
+    /// "Server started on ..." immediately after `tokio::spawn(...)`, which only schedules the
+    /// async block -- it says nothing about whether `start()` has even begun, let alone whether
+    /// the bind inside it actually succeeded. Found live: after a rapid sequence of manual
+    /// restarts, all 4 validators logged "Started on 0.0.0.0:19200" while `ss -tlnp` showed
+    /// nothing listening there at all -- the spawned task's bind must have failed and hit the
+    /// `error!()` branch below, but nothing upstream noticed or waited to find out, so the
+    /// misleading "started" line was the only signal anyone saw. This makes the caller's success
+    /// claim actually correspond to a real, confirmed bind.
+    ready_tx: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
 }
 
 impl PeerRpcServer {
@@ -83,6 +95,7 @@ impl PeerRpcServer {
             executor_client,
             node: None,
             shared_last_global_exec_index,
+            ready_tx: None,
         }
     }
 
@@ -92,10 +105,19 @@ impl PeerRpcServer {
         self
     }
 
+    /// Register a one-shot sender that receives the real bind outcome -- see the field's own
+    /// doc comment on why this exists. `send()`'s Err (receiver dropped) is intentionally
+    /// ignored: the caller not waiting for this is its own choice, not this server's problem.
+    pub fn with_ready_signal(mut self, tx: tokio::sync::oneshot::Sender<std::io::Result<()>>) -> Self {
+        self.ready_tx = Some(tx);
+        self
+    }
+
     /// Start the Peer RPC Server
-    pub async fn start(self) -> Result<()> {
+    pub async fn start(mut self) -> Result<()> {
         // Listen on all interfaces for WAN access
         let addr = format!("0.0.0.0:{}", self.port);
+        let ready_tx = self.ready_tx.take();
         // Defensive hardening, not the fix for Layer C (see
         // note/cross_chain_production_readiness_plan.md Phase 0.7 for the full writeup): the
         // "full" server started from startup.rs binds this exact port right after
@@ -139,9 +161,18 @@ impl PeerRpcServer {
             }
             match bound {
                 Some(l) => l,
-                None => return Err(last_err.unwrap().into()),
+                None => {
+                    let err = last_err.unwrap();
+                    if let Some(tx) = ready_tx {
+                        let _ = tx.send(Err(std::io::Error::new(err.kind(), err.to_string())));
+                    }
+                    return Err(err.into());
+                }
             }
         };
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(Ok(()));
+        }
         info!(
             "🌐 [PEER RPC] Started on {} (node_id={}, network_address={})",
             addr, self.node_id, self.network_address
