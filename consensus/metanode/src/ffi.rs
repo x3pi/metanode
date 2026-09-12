@@ -64,6 +64,38 @@ pub fn set_global_tokio_handle(handle: tokio::runtime::Handle) {
     }
 }
 
+/// RESUBMIT-DON'T-DISCARD (2026-09-11, per user request): a handle to the live
+/// `TransactionClientProxy` (already epoch-transition-safe -- see tx_submitter.rs's own doc
+/// comment, it swaps its inner client under the hood so this reference never goes stale across
+/// an epoch boundary), so `block_sending.rs`'s certified-skip path can resubmit a transaction
+/// this node still happens to have cached, when a quorum certificate has excluded it from ONE
+/// specific commit. Kept as a bare global here (not threaded through `ExecutorClient`'s
+/// constructor) for the same reason GLOBAL_COORDINATION_HUB/GLOBAL_TOKIO_HANDLE are: the
+/// alternative is a new constructor parameter at every one of ExecutorClient's existing call
+/// sites for a rarely-used, best-effort path. Re-stashed every time setup_consensus (first boot)
+/// or mode_transition (epoch/mode change) (re)creates the proxy, same rationale as the other
+/// globals here.
+pub static GLOBAL_TX_RESUBMIT_CLIENT: std::sync::RwLock<
+    Option<std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>>,
+> = std::sync::RwLock::new(None);
+
+pub fn set_global_tx_resubmit_client(
+    client: std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>,
+) {
+    match GLOBAL_TX_RESUBMIT_CLIENT.write() {
+        Ok(mut guard) => *guard = Some(client),
+        Err(poisoned) => *poisoned.into_inner() = Some(client),
+    }
+}
+
+pub fn get_global_tx_resubmit_client(
+) -> Option<std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>> {
+    match GLOBAL_TX_RESUBMIT_CLIENT.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
 /// PEER-BLOCK RECOVERY (2026-09-11): this node's configured `peer_rpc_addresses` (the
 /// lightweight custom HTTP peer-RPC protocol used by network::peer_rpc -- a different,
 /// separate transport from the tonic/gRPC NetworkClient used for DAG-level peer calls like
@@ -382,6 +414,18 @@ pub extern "C" fn metanode_attest_payload_loss(
         commit_index, hex_str
     );
     let result = handle.block_on(collector(claim.clone(), std::time::Duration::from_secs(10)));
+    apply_collection_result(result, &committee, commit_index, hex_str)
+}
+
+/// Shared by `metanode_attest_payload_loss` and `metanode_attest_payload_loss_for_commit`:
+/// turns one already-awaited `PayloadLossCollectionResult` into the documented 0/1/2/-1 return
+/// code, doing the certificate re-verification + recording + logging either function needs.
+fn apply_collection_result(
+    result: consensus_core::payload_loss_attestation::PayloadLossCollectionResult,
+    committee: &consensus_config::Committee,
+    commit_index: u32,
+    hex_str: &str,
+) -> i32 {
     use consensus_core::payload_loss_attestation::PayloadLossCollectionResult;
     match result {
         PayloadLossCollectionResult::Recovered => {
@@ -393,7 +437,7 @@ pub extern "C" fn metanode_attest_payload_loss(
             1
         }
         PayloadLossCollectionResult::Certified(certificate) => {
-            if let Err(e) = certificate.verify(&committee) {
+            if let Err(e) = certificate.verify(committee) {
                 error!(
                     "🛑 [PAYLOAD-LOSS-SKIP] BUG: collector returned a certificate that fails its \
                      own re-verification: {}. NOT applying it.",
@@ -418,6 +462,126 @@ pub extern "C" fn metanode_attest_payload_loss(
             );
             2
         }
+    }
+}
+
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP, whole-commit convenience wrapper (2026-09-11): a single
+/// commit's subdag can reference blocks from SEVERAL different authors, each carrying its own
+/// transactions -- so more than one digest can be missing at once for the same halted commit
+/// (reproduced live: a commit spanning 2 authors' blocks had 8 distinct missing digests). Before
+/// this, an operator had to grep CONSENSUS-HALT-TX-PAYLOAD-LOST's log line for the ONE digest
+/// name it prints (the first missing one `build_sorted_transactions` happens to hit), call
+/// `metanode_attest_payload_loss` for it, then discover from the retry loop STILL not resuming
+/// that there were more, repeating one at a time -- exactly the tedious, error-prone manual hunt
+/// the user asked to have handled automatically instead.
+///
+/// This reuses `STUCK_CLAIMS` (payload_loss_attestation.rs) -- the SAME registry
+/// `deliver_with_halt_retry` already populates with every digest it has found missing for a
+/// commit, and that peer attestation itself already relies on for fork-safety -- to discover the
+/// full set in one call, then certifies each one exactly as `metanode_attest_payload_loss` would.
+/// No new tracking was needed; this only adds a way to enumerate and drive what the system
+/// already knows.
+///
+/// Returns:
+///   0  = every claim currently stuck on this node for this commit is now resolved (certified
+///        skip and/or recovered) -- the retry loop should proceed within ~10s.
+///   1  = nothing was stuck for this commit on this node right now (already resolved by the
+///        time this ran, or this node was never stuck on it in the first place).
+///   2  = at least one claim still has insufficient attested stake -- re-run once more peers are
+///        reachable; claims that DID succeed this run are still recorded, only the remaining
+///        ones need a retry.
+///  -1  = could not run at all (same preconditions as `metanode_attest_payload_loss`), or at
+///        least one claim hit a hard error (e.g. a certificate that failed its own
+///        re-verification -- see the log for which).
+#[no_mangle]
+pub extern "C" fn metanode_attest_payload_loss_for_commit(commit_index: u32) -> i32 {
+    let collector = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().and_then(|hub| hub.get_payload_loss_collector())
+    };
+    let Some(collector) = collector else {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] No payload-loss collector wired yet -- consensus may not be \
+             fully started. Try again shortly."
+        );
+        return -1;
+    };
+    let committee = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .as_ref()
+            .and_then(|hub| hub.get_committee_for_payload_loss())
+    };
+    let Some(committee) = committee else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No committee available yet -- consensus may not be fully started.");
+        return -1;
+    };
+    let handle = {
+        let guard = match GLOBAL_TOKIO_HANDLE.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No tokio runtime handle available yet.");
+        return -1;
+    };
+
+    let claims = consensus_core::payload_loss_attestation::stuck_claims_for_commit(commit_index);
+    if claims.is_empty() {
+        info!(
+            "✅ [PAYLOAD-LOSS-SKIP] No claims currently stuck for commit_index={} on this node \
+             -- already resolved, or this node was never stuck on it.",
+            commit_index
+        );
+        return 1;
+    }
+    info!(
+        "🔎 [PAYLOAD-LOSS-SKIP] Found {} claim(s) currently stuck for commit_index={} -- \
+         attesting every one in this single admin action.",
+        claims.len(), commit_index
+    );
+
+    let codes: Vec<i32> = handle.block_on(async {
+        let mut codes = Vec::with_capacity(claims.len());
+        for claim in claims {
+            let hex_str = hex::encode(claim.tx_digest.0);
+            let result = collector(claim.clone(), std::time::Duration::from_secs(10)).await;
+            codes.push(apply_collection_result(result, &committee, commit_index, &hex_str));
+        }
+        codes
+    });
+
+    if codes.iter().any(|&c| c == -1) {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] commit_index={}: at least one claim hit a hard error -- see \
+             the log lines above for which digest(s). Re-run once resolved.",
+            commit_index
+        );
+        -1
+    } else if codes.iter().any(|&c| c == 2) {
+        error!(
+            "⏳ [PAYLOAD-LOSS-SKIP] commit_index={}: {} of {} claim(s) still need more attested \
+             stake -- the rest were resolved and recorded. Re-run once more peers are reachable.",
+            commit_index,
+            codes.iter().filter(|&&c| c == 2).count(),
+            codes.len()
+        );
+        2
+    } else {
+        info!(
+            "✅ [PAYLOAD-LOSS-SKIP] commit_index={}: all {} claim(s) resolved. The retry loop \
+             should proceed within ~10s.",
+            commit_index, codes.len()
+        );
+        0
     }
 }
 

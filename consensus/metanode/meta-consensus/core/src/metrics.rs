@@ -345,6 +345,12 @@ pub(crate) struct NodeMetrics {
     pub(crate) commit_sync_local_index: IntGauge,
     /// How many commits this node is ahead of quorum (negative = lagging)
     pub(crate) commit_sync_lead: IntGauge,
+    /// Fires each time STALL-DETECTOR 4b (GO-EXECUTION-STALL) observes go_confirmed_commit
+    /// frozen for 20s+ while commits are backlogged waiting on Go (highest_handled >
+    /// go_confirmed_commit). See commit_syncer::mod.rs's DETECTOR 4b doc comment
+    /// (project memory mục 17 UPDATE #4) for the root-caused Go-execution-pipeline stall
+    /// this is designed to surface. Alert on this counter increasing.
+    pub(crate) go_execution_stall_detected: IntCounter,
     /// Average commit rate of quorum (commits per second)
     pub(crate) quorum_commit_rate: Gauge,
     /// Average commit rate of this node (commits per second)
@@ -942,6 +948,12 @@ impl NodeMetrics {
             commit_sync_lead: register_or_replace_int_gauge(
                 "commit_sync_lead",
                 "How many commits this node is ahead of quorum (negative = lagging)",
+                registry,
+            ),
+            go_execution_stall_detected: register_or_replace_int_counter(
+                "go_execution_stall_detected",
+                "Incremented each time a genuine Go-execution-pipeline stall is detected \
+                 (go_confirmed_commit frozen while commits are backlogged waiting on Go)",
                 registry,
             ),
             quorum_commit_rate: register_or_replace_gauge(
