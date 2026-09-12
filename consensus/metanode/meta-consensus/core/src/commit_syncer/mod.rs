@@ -1592,16 +1592,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // never recovers on its own. Reproduced directly: a single-validator devnet stuck
         // >1 minute reporting zero DAG lag (local_commit == quorum_commit) while
         // synced_commit_index sat permanently behind under sustained high-throughput load.
+        // STATE MACHINE: Update state BEFORE making CatchingUp decisions!
+        // If STALL DETECTOR 4a lowered synced_commit_index, update_state() MUST
+        // run here to transition the node back to CatchingUp. Otherwise, the node
+        // uses the stale 'Healthy' phase and blindly trusts the DAG state below,
+        // instantly reverting the fix and causing a permanent execution deadlock.
+        self.update_state();
+
         let is_single_validator = self.inner.context.committee.size() <= 1;
         if !self.coordination_hub.is_startup_sync_active()
             && (is_single_validator || !self.coordination_hub.is_catching_up())
         {
-            self.synced_commit_index = self.synced_commit_index.max(local_commit_index);
+            // CRITICAL RECOVERY FIX (2026-09-12): Do not jump synced_commit_index past highest_handled_index.
+            // If execution is lagging behind the DAG (e.g., node crashed and DAG loaded from disk,
+            // but CommitVoteMonitor is empty), we MUST NOT jump synced_commit_index to DAG tip.
+            // If we do, CommitSyncer will never fetch CertifiedCommits for the missing range,
+            // leaving execution permanently deadlocked at DIGEST-GATE.
+            let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled_index);
+            let target_sync = self.synced_commit_index.max(local_commit_index);
+            
+            if target_sync > safe_jump_limit + 10 {
+                self.synced_commit_index = safe_jump_limit;
+            } else {
+                self.synced_commit_index = target_sync;
+            }
         }
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
         if let Some(scheduled) = self.highest_scheduled_index {
-            if scheduled > self.synced_commit_index && local_commit_index > self.inner.commit_consumer_monitor.highest_handled_commit() + 10 {
+            if scheduled > self.synced_commit_index && local_commit_index > highest_handled_index + 10 {
                 self.highest_scheduled_index = Some(self.synced_commit_index);
             }
         }
@@ -1635,8 +1654,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             0.0
         };
 
-        // STATE MACHINE: Update state before making decisions
-        self.update_state();
+        // STATE MACHINE: State is now updated earlier (before the synced_commit_index.max guard)
 
         // Log significant lag warnings (throttled)
         if lag > MODERATE_LAG_THRESHOLD

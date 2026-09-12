@@ -86,65 +86,15 @@ pub async fn perform_block_recovery_check(
             }
         };
 
-        // Count total TXs to determine how many GEIs this commit will consume
-        let mut total_txs = 0;
-        let cache = consensus_core::get_global_tx_cache().read();
-        for block in subdag.blocks.iter() {
-            let tx_digests = block.tx_digests();
-            if !tx_digests.is_empty() {
-                for digest in &tx_digests {
-                    if let Some(tx) = cache.get(digest) {
-                        let tx_data = tx.data();
-                        // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                        if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                            continue;
-                        }
-                        total_txs += 1;
-                    } else {
-                        warn!("⚠️ [RECOVERY] Missing transaction payload for digest {:?} in block {}", digest, block.reference());
-                        total_txs += 1; // Fallback to avoid undercounting
-                    }
-                }
-            } else {
-                for tx in block.transactions().iter() {
-                    let tx_data = tx.data();
-                    // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                    if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                        continue;
-                    }
-                    total_txs += 1;
-                }
-            }
-        }
-        drop(cache);
-        let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
-
-        // FIX (2026-09-05): must decide "is this commit empty for GEI purposes" the exact same
-        // way executor.rs's dispatch_commit() (the live execution path) does -- this
-        // reconstruction used to inline its own copy of that decision and had silently drifted
-        // from it (missing the `commit_index > 1` exemption: an epoch's very first commit
-        // always consumes exactly 1 GEI even when empty, never fast-skipped). Root-caused live:
-        // every epoch whose first commit happened to be empty (common on a quiet/idle devnet)
-        // made this replay under-count cumulative_fragment_offset by exactly 1 GEI relative to
-        // what live execution actually assigned -- accumulating, over many epochs, into a real,
-        // stable divergence (~73 GEI / ~370 CommitIndex observed live) between a node that
-        // replayed its history through this function and one that either executed it live or
-        // replayed it correctly. This is what LAYER-6 (fork_guard.rs) was catching as a
-        // "CONFIRMED FORK": both nodes' AccountStatesRoot still matched (the actual executed
-        // state was never wrong), but GlobalExecIndex/CommitIndex/LastBlockHash/block_hash for
-        // "the same" queried BlockNumber differed, because the replaying node's own GEI
-        // bookkeeping had silently drifted from what it originally would have assigned live.
-        // Now calling the exact same shared function dispatch_commit() itself uses, so the two
-        // paths cannot silently re-diverge on this decision again.
-        let geis_consumed: u64 = if crate::consensus::commit_processor::executor::commit_is_empty_for_gei(
-            total_txs, has_system_tx, commit_index,
+        // Unified State Transition Engine: rely on the single source of truth for GEI consumption
+        let (geis_consumed, _, total_txs) = match crate::consensus::commit_processor::executor::compute_commit_gei_and_valid_txs(
+            &subdag, false
         ) {
-            0
-        } else if total_txs > MAX_TXS_PER_GO_BLOCK {
-            let fragments = total_txs.div_ceil(MAX_TXS_PER_GO_BLOCK);
-            fragments as u64
-        } else {
-            1
+            Ok(result) => result,
+            Err(e) => {
+                warn!("⚠️ [RECOVERY] Critical failure computing GEI for commit {}: {}. Recovery cannot proceed sequentially.", commit_index, e);
+                return Err(anyhow::anyhow!("Missing block data for commit {}. Deferring to network sync.", commit_index));
+            }
         };
 
         let commit_end_gei = commit_start_gei + geis_consumed;

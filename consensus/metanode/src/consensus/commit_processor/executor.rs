@@ -140,6 +140,100 @@ pub(crate) fn commit_is_empty_for_gei(
     total_transactions == 0 && !has_system_tx && commit_index > 1
 }
 
+/// T2-5: Unified State Transition Engine
+/// Extracts GEI and valid transaction logic into a single source of truth for both Live Dispatch and Recovery Replay.
+/// Resolves the "Divergence/Deadlock" bug caused by payload_loss_attestation discrepancies.
+pub fn compute_commit_gei_and_valid_txs(
+    subdag: &consensus_core::CommittedSubDag,
+    fail_on_missing_payload: bool,
+) -> anyhow::Result<(u64, Vec<std::sync::Arc<consensus_core::Transaction>>, usize)> {
+    let cache = consensus_core::get_global_tx_cache().read();
+    let mut total_txs = 0;
+    let mut valid_txs = Vec::new();
+
+    for block in subdag.blocks.iter() {
+        let tx_digests = block.tx_digests();
+        if !tx_digests.is_empty() {
+            for digest in &tx_digests {
+                // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP
+                let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+                    commit_index: subdag.commit_ref.index,
+                    tx_digest: *digest,
+                };
+                if let Some(certificate) = consensus_core::payload_loss_attestation::get_certified_skip(&claim) {
+                    if let Some(tx) = cache.get(digest) {
+                        let tx_data = tx.data().to_vec();
+                        let digest_for_log = *digest;
+                        let commit_for_log = subdag.commit_ref.index;
+                        if let Some(client) = crate::ffi::get_global_tx_resubmit_client() {
+                            tokio::spawn(async move {
+                                use crate::node::tx_submitter::TransactionSubmitter;
+                                match client.submit(vec![tx_data]).await {
+                                    Ok((block_ref, _, _)) => tracing::info!(
+                                        "♻️ [PAYLOAD-LOSS-RESUBMIT] Digest {:?} resubmitted targeting block {:?}.",
+                                        digest_for_log, block_ref
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        "♻️ [PAYLOAD-LOSS-RESUBMIT] Digest {:?} resubmission failed: {}",
+                                        digest_for_log, e
+                                    ),
+                                }
+                            });
+                        }
+                    }
+                    tracing::error!(
+                        "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost tx {:?} in commit {} ({} attestations).",
+                        digest, subdag.commit_ref.index, certificate.attestations.len()
+                    );
+                    continue; // Skip without counting!
+                }
+
+                match cache.get(digest) {
+                    Some(tx) => {
+                        let tx_data = tx.data();
+                        if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                            continue;
+                        }
+                        total_txs += 1;
+                        valid_txs.push(std::sync::Arc::new(tx.clone()));
+                    }
+                    None => {
+                        if fail_on_missing_payload {
+                            anyhow::bail!(
+                                "Missing transaction payload for digest {:?} in block {} (commit {}) — TxPayloadCache has no entry.",
+                                digest, block.reference(), subdag.commit_ref.index
+                            );
+                        } else {
+                            tracing::warn!("⚠️ Missing transaction payload for digest {:?} in block {}", digest, block.reference());
+                            total_txs += 1; // Fallback to avoid undercounting during recovery
+                        }
+                    }
+                }
+            }
+        } else {
+            for tx in block.transactions().iter() {
+                let tx_data = tx.data();
+                if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
+                    continue;
+                }
+                total_txs += 1;
+                valid_txs.push(std::sync::Arc::new(tx.clone()));
+            }
+        }
+    }
+
+    let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
+    let geis_consumed: u64 = if commit_is_empty_for_gei(total_txs, has_system_tx, subdag.commit_ref.index) {
+        0
+    } else if total_txs > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {
+        total_txs.div_ceil(crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK) as u64
+    } else {
+        1
+    };
+
+    Ok((geis_consumed, valid_txs, total_txs))
+}
+
 pub async fn dispatch_commit(
     subdag: &CommittedSubDag,
     global_exec_index: u64,
@@ -152,51 +246,16 @@ pub async fn dispatch_commit(
     commit_consumer_monitor: Option<Arc<CommitConsumerMonitor>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
-    let mut total_transactions = 0;
 
-    // BUG FIX: BlockV3 (compact block) stores only tx_digests() — its transactions()
-    // unconditionally returns &[] (see BlockAPI impl for BlockV3 in block.rs). Counting
-    // via transactions() alone therefore misclassifies every BlockV3 commit as empty,
-    // which triggers the FAST-SKIP branch below (`return Ok(0)`) and silently drops the
-    // commit's real, already-quorum-committed transactions without ever delivering them
-    // to Go — GEI never advances for that commit. Mirror the same tx_digests()-first
-    // lookup that build_sorted_transactions() (block_sending.rs) already uses on the
-    // actual send path, so the count here matches what will really be sent.
-    {
-        let cache = consensus_core::get_global_tx_cache().read();
-        for block in subdag.blocks.iter() {
-            let tx_digests = block.tx_digests();
-            if !tx_digests.is_empty() {
-                for digest in &tx_digests {
-                    match cache.get(digest) {
-                        Some(tx) => {
-                            let tx_data = tx.data();
-                            // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                            if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                                continue;
-                            }
-                            total_transactions += 1;
-                        }
-                        None => {
-                            // Not in cache yet — still count it as real so this commit
-                            // isn't wrongly fast-skipped. build_sorted_transactions()
-                            // will warn/skip it at actual send time if truly missing.
-                            total_transactions += 1;
-                        }
-                    }
-                }
-            } else {
-                for tx in block.transactions().iter() {
-                    let tx_data = tx.data();
-                    // Skip 64-byte zero payloads (SystemTransaction artifacts at epoch boundaries)
-                    if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
-                        continue;
-                    }
-                    total_transactions += 1;
-                }
+    // Unified State Transition Engine: determine valid txs, skip payload-lost, and calculate exact GEI consumed
+    let (geis_consumed, _valid_txs, total_transactions) = 
+        match compute_commit_gei_and_valid_txs(subdag, false) {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("🚨 [FATAL] compute_commit_gei_and_valid_txs failed during dispatch: {}", e);
+                return Err(e);
             }
-        }
-    }
+        };
 
     let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
 
@@ -205,24 +264,8 @@ pub async fn dispatch_commit(
 
     // ═══════════════════════════════════════════════════════════════════
     // FAST PATH: Skip empty commits entirely during catch-up.
-    //
-    // Empty DAG rounds (no transactions, no system TX) make up 90%+ of
-    // commits during catch-up. Each one was going through:
-    //   1. Leader resolution (RwLock + HashMap + retries) → ~ms
-    //   2. Protobuf encode → ~μs
-    //   3. BlockDeliveryManager channel (oneshot await) → ~μs
-    //   4. Buffer + FFI call to Go CGo → ~ms
-    //   5. TX tracking + ForceCommit → ~μs
-    //
-    // With 4000+ empty commits, this adds ~4-8 seconds of unnecessary
-    // latency during catch-up. Go doesn't create blocks for empty commits
-    // anyway (block_number=0), so we can skip the entire pipeline.
-    //
-    // We still update:
-    //   - shared_last_global_exec_index → for GEI tracking
-    //   - executor_client.next_expected_index → to prevent gap detection
     // ═══════════════════════════════════════════════════════════════════
-    if commit_is_empty_for_gei(total_transactions, has_system_tx, commit_index) {
+    if geis_consumed == 0 {
         DIAG_FAST_SKIP_EMPTY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         diag_exec_maybe_print();
         tracing::trace!(
