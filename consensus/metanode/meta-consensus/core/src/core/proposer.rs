@@ -565,9 +565,15 @@ impl Core {
                 .link_causal_history(verified_block.reference());
         }
 
-        // Ensure the new block and its ancestors are persisted, before broadcasting it.
-        // We defer the real wait for the flush ticket in the broadcaster task to prevent blocking CoreThread.
-        let flush_ticket = self.dag_state.write().flush();
+        // Ensure the new block and its ancestors are DURABLY persisted, before broadcasting
+        // it. We defer the real wait for the flush ticket in the broadcaster task to prevent
+        // blocking CoreThread. Durable (fsync'd, not just async/OS-page-cache) specifically
+        // here: this is the one flush that gates broadcasting our OWN new block/vote to
+        // peers -- see `Store::write_durable`'s doc comment for why a true power loss
+        // (which the OS page cache does NOT survive, unlike a plain process crash/abort)
+        // could otherwise leave us having told peers about something we can no longer
+        // prove we did.
+        let flush_ticket = self.dag_state.write().flush_durable();
 
         // Now acknowledge the transactions for their inclusion to block
         ack_transactions(verified_block.reference());

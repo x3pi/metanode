@@ -1210,6 +1210,25 @@ impl DBBatch {
         self.write_opt(rocksdb::WriteOptions::default())
     }
 
+    /// Consume the batch and write it durably: forces `sync(true)` on this write
+    /// regardless of the table's own `sync_writes` setting (which defaults to `false`
+    /// everywhere in this codebase for throughput -- see `ReadWriteOptions::default()`).
+    ///
+    /// Added 2026-09-12 for the one call site where async-write durability actually
+    /// matters for BFT safety: a validator's own block/vote must be durably on disk
+    /// BEFORE it is broadcast to peers, or a true power loss (not just a process
+    /// crash -- the OS page cache survives a crash, just not a power-off) could leave
+    /// the validator having told peers about something it can no longer prove it did.
+    /// This is the only write on that path (see `core/proposer.rs`'s flush-before-
+    /// broadcast); every other write in the system stays async by design, so this is
+    /// deliberately a per-call opt-in, not a global default flip.
+    #[instrument(level = "trace", skip_all, err)]
+    pub fn write_durable(self) -> Result<(), TypedStoreError> {
+        let mut write_options = rocksdb::WriteOptions::default();
+        write_options.set_sync(true);
+        self.write_opt(write_options)
+    }
+
     /// Consume the batch and write its operations to the database with custom write options
     #[instrument(level = "trace", skip_all, err)]
     pub fn write_opt(
