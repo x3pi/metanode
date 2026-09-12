@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use consensus_core::{BlockAPI, CommittedSubDag};
+use consensus_core::{BlockAPI, CommitConsumerMonitor, CommittedSubDag};
 use std::sync::Arc;
 
 use tracing::{debug, error, info, trace, warn};
@@ -149,6 +149,7 @@ pub async fn dispatch_commit(
     tx_recycler: Option<Arc<crate::consensus::tx_recycler::TxRecycler>>,
     committed_transaction_hashes: Option<Arc<dashmap::DashSet<Vec<u8>>>>,
     storage_path: Option<std::path::PathBuf>,
+    commit_consumer_monitor: Option<Arc<CommitConsumerMonitor>>,
 ) -> Result<u64> {
     let commit_index = subdag.commit_ref.index;
     let mut total_transactions = 0;
@@ -228,6 +229,15 @@ pub async fn dispatch_commit(
             "⏭️ [FAST-SKIP] Empty commit #{} (GEI expected={}) skipped — no transactions",
             commit_index, global_exec_index
         );
+        // ROOT-CAUSE FIX (2026-09-12, mục 17 UPDATE #4): an empty commit never reaches Go at
+        // all (by design, see this branch's own comment) -- there is nothing to "confirm", so
+        // advance go_confirmed_commit immediately here too. Without this, a workload with many
+        // empty commits (the common case) would make go_confirmed_commit permanently lag
+        // highest_handled_commit even with Go perfectly healthy, defeating the whole point of
+        // tracking it separately (see CommitConsumerMonitor's doc comment).
+        if let Some(monitor) = commit_consumer_monitor.as_ref() {
+            monitor.set_go_confirmed_commit(commit_index);
+        }
         return Ok(0); // GEI DOES NOT ADVANCE FOR EMPTY COMMITS! This ensures mathematical determinism based purely on transactions.
     }
 
@@ -278,6 +288,13 @@ pub async fn dispatch_commit(
                     "⏭️ [GEI GUARD] Skipping commit #{}: Go GEI={} >= commit end GEI={}.",
                     commit_index, go_current_gei, global_exec_index + expected_fragments - 1
                 );
+                // ROOT-CAUSE FIX (2026-09-12, mục 17 UPDATE #4): go_current_gei just came from a
+                // real, synchronous RPC to Go and already proves Go is at or past this commit --
+                // an even more direct confirmation than response_rx. Advance go_confirmed_commit
+                // here too so this path doesn't look like a stall either.
+                if let Some(monitor) = commit_consumer_monitor.as_ref() {
+                    monitor.set_go_confirmed_commit(commit_index);
+                }
                 return Ok(expected_fragments);
             } else {
                 info!(
@@ -311,9 +328,26 @@ pub async fn dispatch_commit(
                     // so this buffer fills when Go is ~100 blocks behind → natural throttle.
                     let geis_consumed = expected_fragments;
 
+                    // ROOT-CAUSE FIX (2026-09-12, mục 17 UPDATE #4): this task already existed
+                    // purely to log a failure -- it previously did nothing on success, which is
+                    // exactly why commit_syncer's STALL-DETECTOR 4 could never tell "Go dispatch
+                    // enqueued" (the fast, optimistic path above, returned before this task even
+                    // runs) apart from "Go actually finished". Recording success here, into a
+                    // SEPARATE monotonic watermark (CommitConsumerMonitor::go_confirmed_commit),
+                    // closes that gap without touching the throughput-motivated fast return path
+                    // at all -- zero added latency on the hot path, this is purely an
+                    // observability addition for stall detection.
+                    let monitor_for_confirmation = commit_consumer_monitor.clone();
                     tokio::spawn(async move {
-                        if let Err(_) = response_rx.await {
-                            error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                        match response_rx.await {
+                            Ok(_) => {
+                                if let Some(monitor) = monitor_for_confirmation {
+                                    monitor.set_go_confirmed_commit(commit_index);
+                                }
+                            }
+                            Err(_) => {
+                                error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                            }
                         }
                     });
 

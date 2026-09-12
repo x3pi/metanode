@@ -139,9 +139,21 @@ pub(crate) struct CommitSyncer<C: NetworkClient> {
 
     // --- execution stall detection ---
     /// Tracks the last time highest_handled_commit changed.
-    /// Used to detect execution stalls where Go execution stops advancing.
+    /// Used to detect a DAG/dispatch-side gap: the node is stuck expecting a specific
+    /// commit index while quorum has moved past it. NOTE (2026-09-12, project memory
+    /// mục 17 UPDATE #4): this does NOT detect a Go-side execution stall on its own --
+    /// highest_handled_commit advances as soon as a commit is *enqueued* for Go, not
+    /// when Go actually finishes it. See `last_go_confirmed_change_at` below for the
+    /// detector that actually watches Go's real progress.
     last_highest_handled_change_at: tokio::time::Instant,
     last_known_highest_handled: CommitIndex,
+
+    /// Tracks the last time `go_confirmed_commit` (Go's REAL confirmed-execution
+    /// watermark, distinct from highest_handled_commit) changed. Used by
+    /// STALL-DETECTOR 4b to catch a genuine Go-execution-side stall: commits keep
+    /// being enqueued (highest_handled climbing) but Go never confirms finishing them.
+    last_go_confirmed_change_at: tokio::time::Instant,
+    last_known_go_confirmed: CommitIndex,
 
     // --- adaptive delay ---
     adaptive_delay_state: Option<Arc<AdaptiveDelayState>>,
@@ -319,6 +331,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             last_known_local_commit: synced_commit_index,
             last_highest_handled_change_at: tokio::time::Instant::now(),
             last_known_highest_handled: synced_commit_index,
+            last_go_confirmed_change_at: tokio::time::Instant::now(),
+            last_known_go_confirmed: synced_commit_index,
             adaptive_delay_state,
             active_sync_retry_count: 0,
             schedule_recovery_fetch_pending: false,
@@ -839,17 +853,24 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         }
 
                         // ════════════════════════════════════════════════════════
-                        // STALL DETECTOR 4: Go execution / gap detector.
+                        // STALL DETECTOR 4a: DAG/dispatch gap detector.
                         //
-                        // Detects when the Go execution layer (highest_handled)
-                        // has stopped advancing, while we are aware of a higher quorum
-                        // commit index. This indicates that the node is stuck expecting
-                        // a specific commit index (e.g. 263) due to a divergence or missing
-                        // commit, while the network has already processed past it (e.g. 264).
+                        // Detects when highest_handled_commit (the DAG-side "enqueued
+                        // for Go" watermark) has stopped advancing, while we are aware
+                        // of a higher quorum commit index. This indicates that the node
+                        // is stuck expecting a specific commit index (e.g. 263) due to a
+                        // divergence or missing commit, while the network has already
+                        // processed past it (e.g. 264).
                         //
                         // Recovery: Reset synced_commit_index to highest_handled, clear
                         // pending fetches and fetched ranges, forcing CommitSyncer to
                         // refetch the missing range starting from highest_handled + 1.
+                        //
+                        // NOTE (2026-09-12, project memory mục 17 UPDATE #4): this detector
+                        // does NOT catch a genuine Go-execution-side stall (Go enqueued but
+                        // never confirming) -- highest_handled advances on enqueue, not on
+                        // Go's actual completion, so it tracks synced_commit_index almost
+                        // in lockstep even while Go itself is wedged. See DETECTOR 4b below.
                         // ════════════════════════════════════════════════════════
                         if highest_handled != self.last_known_highest_handled {
                             self.last_highest_handled_change_at = now;
@@ -872,6 +893,65 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             self.pending_fetches.clear();
                             self.fetched_ranges.clear();
                             self.last_highest_handled_change_at = now; // Prevent rapid re-triggers
+                        }
+
+                        // ════════════════════════════════════════════════════════
+                        // STALL DETECTOR 4b: Go execution CONFIRMATION stall detector.
+                        //
+                        // Closes DETECTOR 4a's blind spot (root-caused 2026-09-12, project
+                        // memory mục 17 UPDATE #4): a live-reproduced incident showed a node
+                        // mid-catch-up whose Go execution layer got wedged for several
+                        // minutes downstream of `BlockDeliveryManager` -- while
+                        // highest_handled_commit kept climbing normally (commits were being
+                        // enqueued fine) and DETECTOR 4a's `highest_handled < synced_commit_index`
+                        // condition never became true, so it never fired.
+                        //
+                        // `go_confirmed_commit` (see CommitConsumerMonitor) only advances when
+                        // Go has genuinely finished a dispatched commit (BlockDeliveryManager's
+                        // response_rx resolved), so a real Go stall shows up here as
+                        // `go_confirmed_commit` frozen while `highest_handled` (backlog of
+                        // enqueued-but-unconfirmed work) keeps growing past it. If instead both
+                        // are flat together, Go is simply idle (nothing new to execute) -- not
+                        // a stall -- so that case must NOT trigger.
+                        //
+                        // Recovery here is DELIBERATELY alert-only, not a state-mutating nudge:
+                        // unlike DETECTOR 4a's scenario (a genuine DAG gap -- those commits were
+                        // never decided/dispatched, so refetching them is safe), 4b's backlog
+                        // commits WERE ALREADY dispatched to Go and may still be in-flight in
+                        // BlockDeliveryManager. Forcibly lowering `synced_commit_index` to force
+                        // a refetch/redispatch of a commit index that Go may still be actively
+                        // executing risks duplicate execution -- a hard fork -- exactly the class
+                        // of bug `processor.rs` documents removing similar logic to avoid ("we no
+                        // longer forcibly lower synced_commit_index"). Per the project's Zero-Fork
+                        // Invariant (prefer a visible hang over any fork risk), this detector only
+                        // raises loud, actionable alarms; automatic recovery for a genuine Go-side
+                        // execution wedge is left to a dedicated, carefully-scoped follow-up (e.g.
+                        // fixing Go's own peer-fetch failover so it never blocks indefinitely on a
+                        // single downed peer) rather than a speculative Rust-side workaround here.
+                        // ════════════════════════════════════════════════════════
+                        let go_confirmed = self.inner.commit_consumer_monitor.go_confirmed_commit();
+                        if go_confirmed != self.last_known_go_confirmed {
+                            self.last_go_confirmed_change_at = now;
+                            self.last_known_go_confirmed = go_confirmed;
+                        }
+                        let go_confirm_stall_duration = now.duration_since(self.last_go_confirmed_change_at);
+                        if go_confirm_stall_duration >= Duration::from_secs(20)
+                            && highest_handled > go_confirmed
+                        {
+                            tracing::error!(
+                                "🚨 [GO-EXECUTION-STALL] Go has not confirmed executing any new commit for {:.0}s \
+                                 (go_confirmed={}, highest_handled={}, backlog={}, quorum={}). Go's execution \
+                                 pipeline appears wedged downstream of BlockDeliveryManager -- this commit was \
+                                 already enqueued to Go and dispatch will NOT be retried automatically to avoid \
+                                 duplicate-execution fork risk. Investigate Go process health / peer connectivity.",
+                                go_confirm_stall_duration.as_secs_f64(),
+                                go_confirmed,
+                                highest_handled,
+                                highest_handled - go_confirmed,
+                                quorum_commit
+                            );
+                            self.inner.context.metrics.node_metrics.go_execution_stall_detected.inc();
+                            self.last_go_confirmed_change_at = now; // Prevent rapid re-triggers (still re-fires every 20s while stuck)
                         }
 
                         // ════════════════════════════════════════════════════════
