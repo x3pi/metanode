@@ -61,7 +61,10 @@ pub(super) async fn recover_from_block_stall(
             {
                 Ok(blocks) if !blocks.is_empty() => {
                     let count = blocks.len();
-                    match client_arc.sync_and_execute_blocks(blocks).await {
+                    // preserve_own_commit_index=true: this is a Validator recovering from a
+                    // block-execution stall, it has its own DAG -- see
+                    // note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                    match client_arc.sync_and_execute_blocks(blocks, true).await {
                         Ok((synced, last, _gei)) => {
                             info!(
                                 "✅ [STALL RECOVERY] Executed {} blocks (last={}). CommitSyncer should resume DAG catch-up.",

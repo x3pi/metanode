@@ -412,7 +412,9 @@ impl ConsensusNode {
                                     for chunk in chunks {
                                         let chunk_len = chunk.len();
                                         tracing::info!("🔄 [STARTUP-SYNC] Executing chunk of {} blocks (Epoch {})", chunk_len, chunk[0].epoch);
-                                        match barrier_client.sync_and_execute_blocks(chunk).await {
+                                        // preserve_own_commit_index=true: this node is a Validator with its own
+                                        // DAG -- see note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                                        match barrier_client.sync_and_execute_blocks(chunk, true).await {
                                             Ok((synced, last_block, _gei)) => {
                                                 total_synced_this_round += synced;
                                                 round_last_block = last_block;
@@ -426,6 +428,47 @@ impl ConsensusNode {
                                     }
                                     
                                     if chunk_sync_failed {
+                                        // ROOT-CAUSE FIX (2026-09-12, project memory mục 17 UPDATE #6):
+                                        // A chunk failure here is very often SYNC-FORK-GUARD on the Go side
+                                        // detecting a parent-hash mismatch and rolling ITS OWN internal block
+                                        // counter back (see block_processor's "ResetAllBlockCounters" log) --
+                                        // but until this fix, `local_block` on the Rust side was never told
+                                        // about that correction. Every subsequent round recomputed
+                                        // `from_block = local_block` (line ~354 above) from the SAME stale,
+                                        // pre-failure value, re-fetching the identical already-failing range
+                                        // from peers forever -- an infinite retry loop that permanently
+                                        // blocks this node's own STARTUP-SYNC (and, since a node stuck here
+                                        // cannot rejoin active consensus, can starve the whole cluster of
+                                        // quorum whenever another validator is down at the same time, e.g.
+                                        // n=4 with 1 already down leaves only 2 of 4 stake actively
+                                        // participating -- below the 3-of-4 BFT threshold). Live-reproduced
+                                        // and confirmed via this exact log sequence repeating identically
+                                        // across dozens of rounds with zero progress.
+                                        //
+                                        // Fix: re-query Go's ACTUAL current block number and adopt it
+                                        // unconditionally (even if lower than before -- unlike the startup
+                                        // re-query above, a lower value here is expected and correct: it is
+                                        // precisely what SYNC-FORK-GUARD just rolled back to). This lets the
+                                        // next round's peer-fetch start from the corrected point instead of
+                                        // looping on the same mismatched range forever.
+                                        match barrier_client.get_last_block_number().await {
+                                            Ok((corrected_block, _gei, _, _, _)) => {
+                                                tracing::warn!(
+                                                    "🔄 [STARTUP-SYNC] Chunk failure recovery: refreshing local_block {} -> {} from Go \
+                                                     (post SYNC-FORK-GUARD correction, if any) before retrying.",
+                                                    local_block, corrected_block
+                                                );
+                                                local_block = corrected_block;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "⚠️ [STARTUP-SYNC] Chunk failure recovery: failed to re-query Go's block \
+                                                     number ({}). Retrying with unchanged local_block={} -- if this keeps \
+                                                     failing, the round will not be able to make progress.",
+                                                    e, local_block
+                                                );
+                                            }
+                                        }
                                         tracing::error!("🚨 [STARTUP-SYNC] Halting sync round due to chunk failure. Node BLOCKED pending successful Go sync.");
                                         tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
                                         sync_round += 1;
@@ -646,7 +689,9 @@ impl ConsensusNode {
                                         &barrier_peers, local_block + 1, max_peer_block
                                     ).await {
                                         Ok(blocks) if !blocks.is_empty() => {
-                                            match barrier_client.sync_and_execute_blocks(blocks).await {
+                                            // preserve_own_commit_index=true: Validator, see
+                                            // note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                                            match barrier_client.sync_and_execute_blocks(blocks, true).await {
                                                 Ok((synced, last_block, _gei)) => {
                                                     tracing::info!(
                                                         "✅ [FINAL-GATE] Synced {} more blocks (last={})",
