@@ -213,6 +213,12 @@ message GetBlocksRangeResponse {
 message SyncBlocksRequest {
     repeated BlockData blocks = 1;   // Blocks to sync
     bool execute_mode = 2;           // When true, Go executes blocks through NOMT (not just store)
+    // See consensus/metanode/proto/validator_rpc.proto's copy of this message for the
+    // full doc comment (note/startup_sync_commit_index_import_fork_design_2026-09.md).
+    // When true, do NOT overwrite lastHandledCommitIndex/lastHandledCommitEpoch from
+    // these blocks' embedded header.CommitIndex() -- the caller (a Validator with its
+    // own DAG) owns that bookkeeping itself.
+    bool preserve_own_commit_index = 3;
 }
 
 // SyncBlocksResponse - Response after syncing blocks

@@ -58,18 +58,27 @@ impl ExecutorClient {
     /// Sync blocks to local Go Master (store-only mode)
     /// Used by SyncOnly nodes to write blocks received from peers
     pub async fn sync_blocks(&self, blocks: Vec<proto::BlockData>) -> Result<(u64, u64)> {
-        let (count, last_block, _) = self.sync_blocks_inner(blocks, false).await?;
+        let (count, last_block, _) = self.sync_blocks_inner(blocks, false, false).await?;
         Ok((count, last_block))
     }
 
     /// Sync AND EXECUTE blocks through NOMT on local Go Master
     /// Phase 1 fix: eliminates GEI inflation by executing blocks, not just storing.
     /// Returns (synced_count, last_block, last_executed_gei).
+    ///
+    /// `preserve_own_commit_index` MUST be `true` when the caller is a Validator with its
+    /// own consensus DAG (STARTUP-SYNC, stall_recovery, multi-epoch catch-up) -- see
+    /// `note/startup_sync_commit_index_import_fork_design_2026-09.md`. Passing `false` tells
+    /// Go it's safe to adopt these blocks' embedded header.CommitIndex() as its own
+    /// lastHandledCommitIndex, which is correct ONLY for a SyncOnly node that has no DAG of
+    /// its own to protect -- doing this for a Validator caused a real, live-reproduced fork
+    /// (the node's next_expected_index aliased to the wrong commit in its own DAG).
     pub async fn sync_and_execute_blocks(
         &self,
         blocks: Vec<proto::BlockData>,
+        preserve_own_commit_index: bool,
     ) -> Result<(u64, u64, u64)> {
-        self.sync_blocks_inner(blocks, true).await
+        self.sync_blocks_inner(blocks, true, preserve_own_commit_index).await
     }
 
     /// Internal: sync blocks with optional execute_mode flag
@@ -77,6 +86,7 @@ impl ExecutorClient {
         &self,
         blocks: Vec<proto::BlockData>,
         execute_mode: bool,
+        preserve_own_commit_index: bool,
     ) -> Result<(u64, u64, u64)> {
         if !self.is_enabled() {
             return Err(anyhow::anyhow!("Executor client is not enabled"));
@@ -113,6 +123,7 @@ impl ExecutorClient {
                     proto::SyncBlocksRequest {
                         blocks: chunk,
                         execute_mode,
+                        preserve_own_commit_index,
                     },
                 )),
             };

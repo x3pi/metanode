@@ -21,6 +21,25 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// shouldImportPeerCommitIndex decides whether a synced block's embedded
+// header.CommitIndex() is safe to adopt as this node's own lastHandledCommitIndex.
+//
+// ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
+// CommitIndex is the SENDING peer's own node-local consensus-DAG round counter, not a
+// value safe to graft onto a different node's bookkeeping -- fork_guard.rs (Rust side)
+// documents that two honest validators can legitimately use different local commit-round
+// numbers for the identical GEI/state. Importing it wholesale caused a real,
+// live-reproduced fork: the receiving node's next_expected_index aliased to the wrong
+// commit in its own DAG, producing different block content at the same GlobalExecIndex.
+//
+// Only a caller with NO DAG of its own (a genuine SyncOnly node, preserveOwnCommitIndex
+// == false, the pre-existing default) should have this value imported -- a Validator
+// (preserveOwnCommitIndex == true) owns this bookkeeping itself and must not have it
+// overwritten from peer data.
+func shouldImportPeerCommitIndex(preserveOwnCommitIndex bool, commitIndexFromHeader uint64) bool {
+	return !preserveOwnCommitIndex && commitIndexFromHeader > 0
+}
+
 // HandleSetSyncStartBlockRequest - Called by Rust when consensus ends
 // Tells Go: "Consensus ended at last_consensus_block, sync should start from last_consensus_block + 1"
 func (rh *RequestHandler) HandleSetSyncStartBlockRequest(request *pb.SetSyncStartBlockRequest) (*pb.SetSyncStartBlockResponse, error) {
@@ -364,7 +383,17 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 			// CRITICAL FIX: Restore lastHandledCommitIndex even for skipped blocks!
 			// If a node crashes or is restored from a corrupted rsync backup, lastHandledCommitIndex
 			// might be out of sync. We must restore it from the highest synced block header.
-			if header.CommitIndex() > 0 {
+			//
+			// ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
+			// header.CommitIndex() is the SENDING peer's own node-local DAG round counter, not
+			// a value safe to adopt as this node's own (fork_guard.rs documents that two honest
+			// validators can legitimately use different local commit-round numbers for the
+			// identical GEI/state). Only trust it when the caller has no DAG of its own
+			// (PreserveOwnCommitIndex=false, e.g. a genuine SyncOnly node) -- a Validator sets
+			// PreserveOwnCommitIndex=true and owns this bookkeeping itself via its own
+			// CommitProcessor, which already knows how to safely resume from its last trusted
+			// local index and fast-skip already-executed GEI ranges (see executor.rs's GEI GUARD).
+			if shouldImportPeerCommitIndex(request.PreserveOwnCommitIndex, header.CommitIndex()) {
 				commitIdx32 := uint32(header.CommitIndex())
 				currentEpoch := header.Epoch()
 				lastEpoch := storage.GetLastHandledCommitEpoch()
@@ -457,7 +486,12 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 
 		// CRITICAL FIX: Restore lastHandledCommitIndex from the synced block!
 		// This prevents Go from double-executing these commits when Rust resumes consensus.
-		if header.CommitIndex() > 0 {
+		//
+		// ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
+		// see the identical guard + full explanation above (skipped-block branch) -- same
+		// reasoning applies here: only import a peer's CommitIndex when the caller has no
+		// DAG of its own to protect.
+		if !request.PreserveOwnCommitIndex && header.CommitIndex() > 0 {
 			commitIdx32 := uint32(header.CommitIndex())
 			currentEpoch := header.Epoch()
 			lastEpoch := storage.GetLastHandledCommitEpoch()

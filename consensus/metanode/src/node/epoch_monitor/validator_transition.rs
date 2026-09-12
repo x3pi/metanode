@@ -127,7 +127,9 @@ pub(super) async fn validator_multi_epoch_transition(
                 {
                     Ok(blocks) if !blocks.is_empty() => {
                         info!("🚨 [EPOCH MONITOR] Fetched {} blocks up to boundary block {}. Executing blocks to un-stall epoch transition...", blocks.len(), boundary_block);
-                        match client_arc.sync_and_execute_blocks(blocks).await {
+                        // preserve_own_commit_index=true: Validator multi-epoch catch-up, has
+                        // its own DAG -- see note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                        match client_arc.sync_and_execute_blocks(blocks, true).await {
                             Ok((synced, last, _gei)) => {
                                 info!("✅ [EPOCH MONITOR] Executed {} blocks (last={}) up to boundary.", synced, last);
                                 // Query Go for the last handled commit index to align Rust CommitConsumerMonitor
