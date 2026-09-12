@@ -1,7 +1,7 @@
 # 🚀 Hướng Dẫn Chạy Kiểm Thử Deploy Cụm Node (`test_remote_deploy.sh`)
 
 Tài liệu hướng dẫn nhanh cách sử dụng script [`test_remote_deploy.sh`](./test_remote_deploy.sh) để tự động hóa toàn bộ quy trình:
-1. Dọn dẹp dữ liệu cũ trên các máy chủ (`/opt/metanode/node-*`).
+1. Chuẩn bị gói deploy trước; Ansible kiểm tra storage rồi mới dọn dữ liệu nếu chạy clean.
 2. Tự lấy/đóng gói ZIP bộ cài đặt và chuyển sang máy deployer.
 3. Chạy Ansible khởi tạo key, genesis, mở cổng firewall và kích hoạt dịch vụ cụm node.
 4. Tự động bật hệ thống giám sát (Monitors) và gửi giao dịch RPC kiểm chứng trên chain.
@@ -15,7 +15,7 @@ Tài liệu hướng dẫn nhanh cách sử dụng script [`test_remote_deploy.s
   ```
   *(Script sẽ tự động gọi `build_chain_bins.sh` biên dịch đủ 6 file nhị phân vào `deploy/bin/`, rồi gọi `package_deploy.sh` tạo file ZIP mới nhất và chuyển sang máy đích deploy).*
 
-- **Khi dùng binaries và ZIP đã có sẵn (chỉ deploy & test)**:
+- **Khi dùng binaries có sẵn (đóng gói ZIP mới, deploy & test)**:
   ```bash
   ./test_remote_deploy.sh
   ```
@@ -81,3 +81,24 @@ Tài liệu hướng dẫn nhanh cách sử dụng script [`test_remote_deploy.s
    # Hoặc chỉ định key trực tiếp qua CLI:
    ./test_remote_deploy.sh --key ~/.ssh/id_ed25519
    ```
+
+
+### 4. Dung lượng BTRFS và clean
+
+Cấu hình `btrfs_size: "600G"` ở host chứa node snapshot trong `deploy/test/inventory.yml`.
+
+```bash
+# Giữ dữ liệu, key/genesis cũ; tăng BTRFS nếu kích thước cấu hình lớn hơn hiện tại
+./test_remote_deploy.sh --skip-clean
+
+# Clean dữ liệu và tạo lại BTRFS theo kích thước cấu hình; sinh key/genesis cho chain mới
+./test_remote_deploy.sh
+```
+
+`--skip-clean` yêu cầu máy deployer đã có genesis và bộ cấu hình/key của cụm đang chạy.
+Script giữ genesis khi giải nén ZIP, không sinh lại key và không truyền `--clean` sang Ansible.
+Bước dọn thô qua SSH đã bỏ; Ansible là nơi kiểm tra phạm vi volume rồi mới dọn dữ liệu.
+Mặc định luôn đóng gói scripts/binaries hiện tại; ZIP truyền qua `--zip` phải có helper quản lý storage mới.
+
+Clean chỉ format volume snapshot khi toàn bộ node đang dùng volume đều nằm trong phạm vi clean.
+Xem [quy tắc resize và tạo lại BTRFS](../ansible/DEPLOY_GUIDE.md#6-tăng-dung-lượng-hoặc-tạo-lại-btrfs-snapshot).
