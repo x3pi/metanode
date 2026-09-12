@@ -22,6 +22,7 @@
    - [Kịch bản 8: Kéo toàn bộ Log của các Node về máy để Debug](#kịch-bản-8-kéo-toàn-bộ-log-của-các-node-về-máy-để-debug)
    - [Kịch bản 9: Dừng toàn bộ các Node trong mạng (Bảo trì Server)](#kịch-bản-9-dừng-toàn-bộ-các-node-trong-mạng-bảo-trì-server)
 5. [Kiểm Tra Trạng Thái & Giám Sát Mạng](#5-kiểm-tra-trạng-thái--giám-sát-mạng)
+6. [Tăng dung lượng hoặc tạo lại BTRFS snapshot](#6-tăng-dung-lượng-hoặc-tạo-lại-btrfs-snapshot)
 
 ---
 
@@ -329,3 +330,86 @@ Chỉ cần chạy thủ công nếu muốn bật lại monitor riêng lẻ:
 cd deploy/ansible/monitors
 ./start_monitors.sh
 ```
+
+
+## 6. Tăng dung lượng hoặc tạo lại BTRFS snapshot
+
+Chạy lệnh Ansible trong `deploy/ansible`. Lệnh nhanh cũng có trong
+[README — mục 2.2](README.md#22-tăng-dung-lượng-btrfs-hoặc-clean-để-tạo-lại).
+
+| Lệnh | Dữ liệu | Dung lượng |
+| --- | --- | --- |
+| `--start --btrfs-size 600G` | Giữ nguyên | Tăng đến tổng 600G; từ chối thu nhỏ |
+| `--start --clean --btrfs-size 300G` | Xóa trên phạm vi clean; không sinh lại key/genesis | Tạo lại filesystem ở tổng 300G nếu đủ phạm vi volume |
+| `--restart` | Giữ nguyên | Không resize |
+
+Không có cờ `--resize` riêng; dùng `--start` không kèm `--clean` để tăng dung lượng.
+
+Áp dụng cho storage một thiết bị do bộ deploy quản lý: file
+`/opt/metanode_cluster_btrfs.img` hoặc LV `ubuntu-vg/metanode_data`, mount tại
+`/mnt/metanode_snapshots`. Không tự resize/format phân vùng tùy ý, XFS, hay BTRFS nhiều thiết bị.
+
+Đặt `btrfs_size: "600G"` trong host chứa node snapshot của `inventory.yml`, hoặc dùng
+`--btrfs-size 600G`. Kích thước là **tổng dung lượng đích**, không phải số dung lượng cộng thêm.
+Sau khi dùng cờ CLI, cập nhật inventory cùng kích thước để lần deploy sau không yêu cầu thu nhỏ.
+
+### Tăng dung lượng và giữ dữ liệu
+
+```bash
+./ansible_deploy.sh --start --only-node 4 --btrfs-size 600G --prebuilt-bin
+```
+
+Node được chọn sẽ được dừng và khởi động lại theo luồng `--start`; không chạy lại `--gen-keys`.
+Script kiểm tra dung lượng, mở rộng image/LV, cập nhật loop device nếu cần, rồi resize BTRFS.
+Nếu kích thước đã đúng thì không resize lại. Nếu yêu cầu nhỏ hơn storage hiện tại, script dừng;
+không hỗ trợ thu nhỏ khi giữ dữ liệu. LVM có thể làm tròn lên theo kích thước extent.
+
+### Clean và tạo lại filesystem
+
+```bash
+./ansible_deploy.sh --start --clean --only-node 4 --btrfs-size 300G --prebuilt-bin
+```
+
+**Xóa toàn bộ nội dung volume snapshot được chọn**, tạo lại filesystem ở dung lượng đích
+(có thể lớn hoặc nhỏ hơn), sau đó tạo thư mục, gán quyền và chạy node. Với image, file được
+làm rỗng và tạo filesystem mới; với LVM, LV được đổi kích thước và format lại tại cùng đường dẫn.
+Không cần xóa rồi tạo lại tên LV.
+
+Chỉ cho phép khi mọi thư mục `node-N` trên volume và mọi bind mount của volume đều thuộc
+các node đang clean. Nếu node 4 và 5 dùng chung volume thì không thể chỉ clean node 4 bằng
+cách format volume; phải chọn đủ các node hoặc thực hiện dọn dữ liệu riêng ngoài chế độ này.
+Dữ liệu lạ, mount khác hoặc thiết bị không được quản lý khiến script dừng trước khi format.
+Không dùng lazy unmount; mount đang bận sẽ làm thao tác thất bại.
+Không bỏ `--only-node` chỉ để vượt kiểm tra: không có cờ này thì clean tác động toàn bộ node trong inventory.
+
+Storage đã tồn tại nhưng chưa mount phải được mount đúng tại `/mnt/metanode_snapshots`
+trước khi chạy. Storage chưa tồn tại vẫn được tạo theo luồng `node_setup` hiện có.
+File image dùng sparse allocation: dung lượng logic không phải dung lượng vật lý được dành riêng;
+script kiểm tra chỗ trống lúc chạy, nhưng cần tiếp tục theo dõi dung lượng ổ chứa image.
+
+Kiểm tra tại máy chứa snapshot sau deploy:
+
+```bash
+sudo btrfs filesystem show --raw /mnt/metanode_snapshots
+sudo btrfs filesystem usage /mnt/metanode_snapshots
+```
+
+Mỗi thao tác resize/recreate phải xác minh dung lượng filesystem trước khi báo thành công.
+Tham khảo [BTRFS resize](https://btrfs.readthedocs.io/en/latest/btrfs-filesystem.html).
+
+
+### Qua script test remote
+
+Sửa `btrfs_size` trong host chứa snapshot ở `deploy/test/inventory.yml`. Chạy từ root repo:
+
+```bash
+# Cụm đã tồn tại: giữ dữ liệu, không sinh lại key/genesis, tăng dung lượng nếu cần
+./deploy/test/test_remote_deploy.sh --skip-clean
+
+# Cụm test mới: tạo key/genesis và clean, tạo lại storage theo kích thước cấu hình
+./deploy/test/test_remote_deploy.sh
+```
+
+Với `--skip-clean`, máy deployer phải còn genesis và bộ key/cấu hình của cụm đang chạy.
+Script giữ genesis khi giải nén gói và không truyền `--clean` vào Ansible.
+Xem thêm [README của script test](../test/README.md#4-dung-lượng-btrfs-và-clean).
