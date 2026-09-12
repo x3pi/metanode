@@ -111,8 +111,32 @@ impl CommitConsumerArgs {
 /// 2. Waiting for consensus commit handler to finish processing replayed commits.
 ///    Current usage is actually outside of consensus.
 pub struct CommitConsumerMonitor {
-    // highest commit that has been handled by the consumer.
+    // highest commit that has been handed off for dispatch to the Go execution engine.
+    // ROOT-CAUSE NOTE (2026-09-12, project memory mục 17 UPDATE #4): despite the name and
+    // its doc comment above, this is NOT "processed" in the sense of "Go confirmed it
+    // executed" -- executor.rs's dispatch_commit() sets this (via the commit_index_callback)
+    // as soon as the commit is successfully enqueued onto BlockDeliveryManager's channel,
+    // deliberately BEFORE awaiting that delivery's real completion (`response_rx`) --
+    // see dispatch_commit's own "PIPELINE FIX" comment for why: waiting there was a real,
+    // deliberate throughput optimization (avoids an IPC serialization bottleneck), not an
+    // oversight. The result: this value climbs normally even while Go's own execution is
+    // genuinely stuck, as long as the bounded delivery channel itself isn't full -- which
+    // empty commits (the majority during low load) never touch at all, and even a handful
+    // of stuck real commits rarely fill on their own. This is what made commit_syncer's
+    // STALL-DETECTOR 4 ("Go execution / gap detector") blind to a live-reproduced,
+    // multi-minute Go-side stall: it compares THIS value against synced_commit_index, and
+    // both were advancing together throughout. See `go_confirmed_commit` below for the
+    // value that actually reflects Go's own confirmed progress, added to close this gap.
     highest_handled_commit: watch::Sender<u32>,
+
+    // The highest commit index Go has ACTUALLY confirmed executing, via
+    // BlockDeliveryManager's real response_rx completion (not just successful enqueue).
+    // Lags behind `highest_handled_commit` by design under normal load (that gap is exactly
+    // the in-flight delivery queue depth) -- the signal to watch for is this value NOT
+    // moving for an extended period while `highest_handled_commit` keeps climbing, which
+    // is precisely what `highest_handled_commit` alone could never distinguish from Go
+    // being merely a little behind.
+    go_confirmed_commit: watch::Sender<u32>,
 
     // At node startup, the last consensus commit processed by the commit consumer from the previous run.
     // This can be 0 if starting a new epoch.
@@ -126,6 +150,7 @@ impl CommitConsumerMonitor {
     ) -> Self {
         Self {
             highest_handled_commit: watch::Sender::new(replay_after_commit_index),
+            go_confirmed_commit: watch::Sender::new(replay_after_commit_index),
             consumer_last_processed_commit_index,
         }
     }
@@ -140,6 +165,24 @@ impl CommitConsumerMonitor {
         debug!("Highest handled commit set to {}", highest_handled_commit);
         self.highest_handled_commit
             .send_replace(highest_handled_commit);
+    }
+
+    /// Gets the highest commit index Go has ACTUALLY confirmed executing (see the field's
+    /// own doc comment for why this differs from `highest_handled_commit`). Only ever
+    /// advances (see `set_go_confirmed_commit`).
+    pub fn go_confirmed_commit(&self) -> CommitIndex {
+        *self.go_confirmed_commit.borrow()
+    }
+
+    /// Records that Go has actually confirmed executing up to `commit_index`. Never
+    /// regresses -- responses can theoretically arrive out of order across the bounded
+    /// delivery channel's in-flight capacity, and this must stay monotonic to be a
+    /// trustworthy "Go is alive and moving" signal for stall detection.
+    pub fn set_go_confirmed_commit(&self, commit_index: CommitIndex) {
+        if commit_index > *self.go_confirmed_commit.borrow() {
+            debug!("Go-confirmed commit advanced to {}", commit_index);
+            self.go_confirmed_commit.send_replace(commit_index);
+        }
     }
 
     /// Waits for consensus to replay commits until the consumer last processed commit index.
@@ -168,5 +211,53 @@ mod test {
 
         monitor.set_highest_handled_commit(100);
         assert_eq!(monitor.highest_handled_commit(), 100);
+    }
+
+    #[test]
+    fn test_go_confirmed_commit_initial_value_matches_replay_after() {
+        // go_confirmed_commit should start at replay_after_commit_index, same as
+        // highest_handled_commit, so a freshly-started node doesn't immediately look
+        // "stalled" relative to its own startup baseline.
+        let monitor = CommitConsumerMonitor::new(42, 42);
+        assert_eq!(monitor.go_confirmed_commit(), 42);
+        assert_eq!(monitor.go_confirmed_commit(), monitor.highest_handled_commit());
+    }
+
+    #[test]
+    fn test_go_confirmed_commit_advances() {
+        let monitor = CommitConsumerMonitor::new(0, 0);
+        monitor.set_go_confirmed_commit(5);
+        assert_eq!(monitor.go_confirmed_commit(), 5);
+
+        monitor.set_go_confirmed_commit(10);
+        assert_eq!(monitor.go_confirmed_commit(), 10);
+    }
+
+    #[test]
+    fn test_go_confirmed_commit_never_regresses() {
+        // Responses can theoretically arrive out of order across the bounded delivery
+        // channel's in-flight capacity -- set_go_confirmed_commit must ignore any
+        // out-of-order call that would move the watermark backwards.
+        let monitor = CommitConsumerMonitor::new(0, 0);
+        monitor.set_go_confirmed_commit(10);
+        monitor.set_go_confirmed_commit(3);
+        assert_eq!(monitor.go_confirmed_commit(), 10);
+
+        monitor.set_go_confirmed_commit(10);
+        assert_eq!(monitor.go_confirmed_commit(), 10);
+    }
+
+    #[test]
+    fn test_go_confirmed_commit_independent_of_highest_handled() {
+        // The whole point of this field: it must be able to lag behind
+        // highest_handled_commit (in-flight backlog) without being coupled to it.
+        let monitor = CommitConsumerMonitor::new(0, 0);
+        monitor.set_highest_handled_commit(50);
+        assert_eq!(monitor.highest_handled_commit(), 50);
+        assert_eq!(monitor.go_confirmed_commit(), 0);
+
+        monitor.set_go_confirmed_commit(20);
+        assert_eq!(monitor.highest_handled_commit(), 50);
+        assert_eq!(monitor.go_confirmed_commit(), 20);
     }
 }

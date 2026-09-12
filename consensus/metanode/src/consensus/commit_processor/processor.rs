@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use consensus_core::{BlockAPI, CommittedSubDag};
+use consensus_core::{BlockAPI, CommitConsumerMonitor, CommittedSubDag};
 use consensus_core::coordination_hub::PeerAttestResult;
 use tokio::sync::mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
@@ -105,6 +105,13 @@ use crate::node::executor_client::ExecutorClient;
 /// Configuration for the CommitProcessor
 pub struct CommitProcessorConfig {
     pub commit_index_callback: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    /// ROOT-CAUSE FIX (2026-09-12, mục 17 UPDATE #4): passed straight through to
+    /// dispatch_commit() so it can record Go's REAL confirmed progress (via
+    /// CommitConsumerMonitor::set_go_confirmed_commit), separately from
+    /// `commit_index_callback`/`highest_handled_commit` above which only reflects
+    /// successful hand-off to Go, not confirmed execution -- see that monitor's own doc
+    /// comment for the full story of the stall-detector blind spot this closes.
+    pub commit_consumer_monitor: Option<Arc<CommitConsumerMonitor>>,
     pub global_exec_index_callback: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     pub shared_last_global_exec_index: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub executor_client: Option<Arc<ExecutorClient>>,
@@ -134,6 +141,7 @@ impl Default for CommitProcessorConfig {
     fn default() -> Self {
         Self {
             commit_index_callback: None,
+            commit_consumer_monitor: None,
             global_exec_index_callback: None,
             shared_last_global_exec_index: None,
             executor_client: None,
@@ -190,6 +198,13 @@ impl CommitProcessor {
         F: Fn(u32) + Send + Sync + 'static,
     {
         self.config.commit_index_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// ROOT-CAUSE FIX (2026-09-12, mục 17 UPDATE #4): see CommitProcessorConfig's own doc
+    /// comment on this field for why it's separate from `with_commit_index_callback`.
+    pub fn with_commit_consumer_monitor(mut self, monitor: Arc<CommitConsumerMonitor>) -> Self {
+        self.config.commit_consumer_monitor = Some(monitor);
         self
     }
 
@@ -570,6 +585,7 @@ impl CommitProcessor {
 
         let CommitProcessorConfig {
             commit_index_callback,
+            commit_consumer_monitor,
             global_exec_index_callback: _,
             shared_last_global_exec_index,
             executor_client,
@@ -1261,6 +1277,7 @@ impl CommitProcessor {
                                 tx_recycler.clone(),
                                 committed_transaction_hashes.clone(),
                                 storage_path.clone(),
+                                commit_consumer_monitor.clone(),
                             )
                             .await?;
                             // WAL: Record COMMITTED after Go confirms
@@ -1501,6 +1518,7 @@ impl CommitProcessor {
                     tx_recycler.clone(),
                     committed_transaction_hashes.clone(),
                     storage_path.clone(),
+                    commit_consumer_monitor.clone(),
                 )
                 .await?;
                 if let Some(ref mut wal) = commit_wal {
@@ -1973,6 +1991,7 @@ impl CommitProcessor {
                             tx_recycler.clone(),
                             committed_transaction_hashes.clone(),
                             storage_path.clone(),
+                            commit_consumer_monitor.clone(),
                         )
                         .await?;
                         // WAL: Record COMMITTED after Go confirms
@@ -2143,6 +2162,7 @@ impl CommitProcessor {
                                     tx_recycler.clone(),
                                     committed_transaction_hashes.clone(),
                                     storage_path.clone(),
+                                    commit_consumer_monitor.clone(),
                                 )
                                 .await?;
                                 // WAL: Record COMMITTED after Go confirms

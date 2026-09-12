@@ -138,6 +138,7 @@ impl ConsensusNode {
                 commit_consumer.monitor(),
             ),
         )
+        .with_commit_consumer_monitor(commit_consumer.monitor())
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
                 shared_last_global_exec_index.clone(),
