@@ -162,8 +162,11 @@ impl RocksDBStore {
     }
 }
 
-impl Store for RocksDBStore {
-    fn write(&self, write_batch: WriteBatch) -> ConsensusResult<()> {
+impl RocksDBStore {
+    /// Shared implementation for `Store::write`/`Store::write_durable` -- identical except
+    /// for the final `batch.write()` vs `batch.write_durable()` call. See `write_durable`'s
+    /// own doc comment on the trait for why a durable variant exists at all.
+    fn write_inner(&self, write_batch: WriteBatch, durable: bool) -> ConsensusResult<()> {
         fail_point!("consensus-store-before-write");
 
         // Wait here if Go is currently copying RocksDB for a snapshot
@@ -243,9 +246,23 @@ impl Store for RocksDBStore {
                 .map_err(ConsensusError::RocksDBFailure)?;
         }
 
-        batch.write()?;
+        if durable {
+            batch.write_durable()?;
+        } else {
+            batch.write()?;
+        }
         fail_point!("consensus-store-after-write");
         Ok(())
+    }
+}
+
+impl Store for RocksDBStore {
+    fn write(&self, write_batch: WriteBatch) -> ConsensusResult<()> {
+        self.write_inner(write_batch, false)
+    }
+
+    fn write_durable(&self, write_batch: WriteBatch) -> ConsensusResult<()> {
+        self.write_inner(write_batch, true)
     }
 
     fn read_blocks(&self, refs: &[BlockRef]) -> ConsensusResult<Vec<Option<VerifiedBlock>>> {

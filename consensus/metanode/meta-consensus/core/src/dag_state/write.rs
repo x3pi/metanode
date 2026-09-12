@@ -530,6 +530,24 @@ impl DagState {
     /// After each flush, DagState becomes persisted in storage and it expected to recover
     /// all internal states from storage after restarts.
     pub fn flush(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        self.flush_inner(false)
+    }
+
+    /// Same as `flush`, but the underlying RocksDB write is durable (fsync'd before the
+    /// returned ticket resolves), not just handed to the OS page cache.
+    ///
+    /// Added 2026-09-12 (power-loss durability review): use this ONLY for the flush that
+    /// must complete before broadcasting a newly-proposed block/vote to peers
+    /// (`core/proposer.rs::try_new_block`) -- see `Store::write_durable`'s doc comment for
+    /// the full reasoning. Every other flush() caller (commit_finalizer processing
+    /// already-decided commits, tests, ...) should keep using plain `flush()`: they aren't
+    /// telling peers anything new, so the existing async-write throughput trade-off still
+    /// applies to them.
+    pub fn flush_durable(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        self.flush_inner(true)
+    }
+
+    fn flush_inner(&mut self, durable: bool) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let _s = self
             .context
             .metrics
@@ -609,9 +627,12 @@ impl DagState {
                 // panicked, in which case the whole process is going down anyway).
                 let _ = prev_chain.blocking_recv();
             }
-            store
-                .write(write_batch)
-                .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
+            let write_result = if durable {
+                store.write_durable(write_batch)
+            } else {
+                store.write(write_batch)
+            };
+            write_result.unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
             context.metrics.node_metrics.dag_state_store_write_count.inc();
             // Notify waiters that flush is complete
             let _ = tx_flush.send(());
