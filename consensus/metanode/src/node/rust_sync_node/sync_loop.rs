@@ -391,7 +391,10 @@ impl RustSyncNode {
                 }
 
                 // Execute current batch via FFI (this is the CPU-bound part)
-                let execute_result = self.executor_client.sync_and_execute_blocks(blocks_to_process).await;
+                // preserve_own_commit_index=false: a SyncOnly node has no consensus DAG of its
+                // own, so adopting these blocks' CommitIndex as lastHandledCommitIndex is safe
+                // and correct here -- see note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                let execute_result = self.executor_client.sync_and_execute_blocks(blocks_to_process, false).await;
 
                 // Wait for prefetch to complete (it's usually faster than FFI execution)
                 if let Some(handle) = prefetch_handle {

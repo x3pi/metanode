@@ -342,6 +342,61 @@ pub async fn fetch_blocks_from_peer(
     Ok(all_blocks)
 }
 
+/// Query a SINGLE block independently from EVERY peer in `peer_addresses`, in parallel.
+///
+/// Unlike `fetch_blocks_from_peer` (which spreads a range across peers for throughput and
+/// falls back peer-to-peer on failure -- exactly one answer per block), this is for
+/// **cross-checking**: it returns every peer's own individual answer, so the caller can
+/// tell "one peer disagrees" (transient/that peer is behind or misbehaving) apart from
+/// "peers disagree WITH EACH OTHER" (a real, live network split -- no single extra query
+/// can resolve that, the caller must decide by majority or refuse to conclude).
+///
+/// Added 2026-09-12 (`note/startup_sync_commit_index_import_fork_design_2026-09.md` mục
+/// 6.4) for LAYER-6's `runtime_fork_guard`: its previous design asked one peer at a time,
+/// rotating on retry -- against a genuine persistent fork this can land on either side of
+/// the split on different attempts, oscillating between "MISMATCH" and "NOW MATCHES"
+/// forever instead of ever reaching a firm conclusion (observed live, 400+ blocks, no
+/// resolution). Sui and Aptos's real designs both require quorum agreement, never a single
+/// peer's word, before trusting a value during catch-up/verification -- this is the same
+/// principle applied to LAYER-6's own peer comparison.
+pub async fn query_block_from_all_peers(
+    peer_addresses: &[String],
+    block_number: u64,
+) -> Vec<(String, Result<BlockData>)> {
+    let mut join_handles = Vec::new();
+    for peer_addr in peer_addresses {
+        let peer_addr = peer_addr.clone();
+        join_handles.push(tokio::spawn(async move {
+            let result = fetch_block_batch(&peer_addr, block_number, block_number)
+                .await
+                .and_then(|mut blocks| {
+                    if blocks.len() == 1 {
+                        Ok(blocks.remove(0))
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Expected exactly 1 block, got {}",
+                            blocks.len()
+                        ))
+                    }
+                });
+            (peer_addr, result)
+        }));
+    }
+
+    let mut results = Vec::with_capacity(join_handles.len());
+    for handle in join_handles {
+        match handle.await {
+            Ok((peer_addr, result)) => results.push((peer_addr, result)),
+            Err(e) => {
+                // Task panicked -- extremely unlikely, but don't lose the peer's slot in
+                // the tally; record it as a failure rather than silently dropping it.
+                results.push((String::from("<panicked task>"), Err(anyhow::anyhow!("{}", e))));
+            }
+        }
+    }
+    results
+}
+
 /// Fetch a single batch of blocks from one peer via HTTP
 async fn fetch_block_batch(
     peer_addr: &str,

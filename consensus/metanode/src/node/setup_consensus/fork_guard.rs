@@ -6,6 +6,77 @@ use crate::node::executor_client::ExecutorClient;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// Result of tallying every responding peer's answer for one block (see
+/// `tally_peer_answers` and `note/startup_sync_commit_index_import_fork_design_2026-09.md`
+/// mục 6.4). Deliberately has NO "single peer answered" case that's treated as
+/// authoritative on its own -- with only 1 responding peer, `agree_count ==
+/// total_responding == 1` still satisfies "strict majority" (1 > 1/2), which is
+/// correct: a lone reachable peer's answer is the best information available, same as
+/// the original design already assumed when only 1 peer is configured.
+#[derive(Debug)]
+enum PeerQuorumOutcome {
+    /// No peer answered successfully at all.
+    NoPeerData,
+    /// The peers that answered do NOT have a strict majority behind any single
+    /// (block_hash, state_root) pair -- e.g. 3 peers, 3 different answers, or a tie.
+    /// `answers` is (hex-encoded block_hash, count) per distinct answer, for logging.
+    Split { answers: Vec<(String, usize)> },
+    /// A strict majority (> half) of responding peers agree on this exact answer.
+    Majority {
+        hash: Vec<u8>,
+        state_root: Vec<u8>,
+        agree_count: usize,
+        total_responding: usize,
+    },
+}
+
+/// Tally every peer's individual answer for one block into a `PeerQuorumOutcome`.
+/// See that type's doc comment and the design doc (mục 6.4) for why this replaces
+/// the old "ask one peer, rotate on retry" comparison.
+fn tally_peer_answers(
+    peer_results: &[(String, anyhow::Result<crate::node::executor_client::proto::BlockData>)],
+) -> PeerQuorumOutcome {
+    use std::collections::HashMap;
+
+    // Group responding peers by (block_hash, state_root).
+    let mut groups: HashMap<(Vec<u8>, Vec<u8>), usize> = HashMap::new();
+    for (_peer_addr, result) in peer_results {
+        if let Ok(block) = result {
+            *groups
+                .entry((block.block_hash.clone(), block.state_root.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+
+    let total_responding: usize = groups.values().sum();
+    if total_responding == 0 {
+        return PeerQuorumOutcome::NoPeerData;
+    }
+
+    // Find the largest group. HashMap iteration order is unspecified, but ties are
+    // exactly the case we want to report as Split anyway, so which tied group "wins"
+    // here doesn't matter -- the strict-majority check below is what actually decides.
+    let ((majority_hash, majority_root), &agree_count) = groups
+        .iter()
+        .max_by_key(|(_, &count)| count)
+        .expect("groups is non-empty since total_responding > 0");
+
+    if agree_count * 2 > total_responding {
+        PeerQuorumOutcome::Majority {
+            hash: majority_hash.clone(),
+            state_root: majority_root.clone(),
+            agree_count,
+            total_responding,
+        }
+    } else {
+        let answers = groups
+            .into_iter()
+            .map(|((hash, _root), count)| (hex::encode(&hash), count))
+            .collect();
+        PeerQuorumOutcome::Split { answers }
+    }
+}
+
 impl ConsensusNode {
 
     /// Runtime Fork Guard — PERMANENT background block hash verification (Layer 6).
@@ -84,48 +155,67 @@ impl ConsensusNode {
                 }
             }
 
-            match crate::network::peer_rpc::fetch_blocks_from_peer(
-                &peers, next_check_block, next_check_block,
-            ).await {
-                Ok(peer_blocks) if !peer_blocks.is_empty() => {
-                    match client.get_blocks_range(next_check_block, next_check_block).await {
-                        Ok(local_blocks) if !local_blocks.is_empty() => {
-                            let local_hash = &local_blocks[0].block_hash;
-                            let peer_hash = &peer_blocks[0].block_hash;
-                            let local_state_root = &local_blocks[0].state_root;
-                            let peer_state_root = &peer_blocks[0].state_root;
-                            let local_raw = &local_blocks[0].raw_block_bytes;
-                            let peer_raw = &peer_blocks[0].raw_block_bytes;
+            // ═══════════════════════════════════════════════════════════════════
+            // QUORUM COMPARISON (2026-09-12, note/startup_sync_commit_index_import_
+            // fork_design_2026-09.md mục 6.4): query EVERY configured peer
+            // independently for this same block, instead of asking one peer at a
+            // time (rotating on retry). Against a genuine PERSISTENT fork (not a
+            // single flaky peer), single-peer rotation can land on either side of
+            // the split on different attempts, oscillating between "MISMATCH" and
+            // "NOW MATCHES" forever without ever reaching a firm conclusion —
+            // observed live for 400+ blocks with no resolution. Sui/Aptos's real
+            // designs both require quorum/majority agreement before trusting a
+            // value; this applies the same principle here.
+            // ═══════════════════════════════════════════════════════════════════
+            let local_result = client.get_blocks_range(next_check_block, next_check_block).await;
+            let peer_results = crate::network::peer_rpc::query_block_from_all_peers(
+                &peers, next_check_block,
+            ).await;
 
-                            // Raw-byte inequality alone is NOT a fork signal (see the doc
-                            // comment above — it legitimately varies with local CommitIndex).
-                            // Log it once as a breadcrumb, but never gate on it.
-                            if local_raw != peer_raw && local_hash == peer_hash {
-                                tracing::debug!(
-                                    "ℹ️ [LAYER-6] Block #{} raw bytes differ ({} vs {} bytes) but \
-                                     block_hash matches — expected CommitIndex-only divergence, not a fork.",
-                                    next_check_block, local_raw.len(), peer_raw.len()
-                                );
-                            }
-
-                            if local_hash == peer_hash && local_state_root == peer_state_root {
+            match local_result {
+                Ok(local_blocks) if !local_blocks.is_empty() => {
+                    let local_block = &local_blocks[0];
+                    match tally_peer_answers(&peer_results) {
+                        PeerQuorumOutcome::NoPeerData => {
+                            tracing::warn!(
+                                "⚠️ [LAYER-6] Block #{}: no peer answered (queried {} peer(s)). Skipping this check.",
+                                next_check_block, peers.len()
+                            );
+                            consecutive_failures += 1;
+                        }
+                        PeerQuorumOutcome::Split { answers } => {
+                            // Peers disagree WITH EACH OTHER — no single extra query from
+                            // this node can resolve that, and it is NOT safe to assume this
+                            // node is the one at fault. Loud, distinct alert; no abort.
+                            tracing::error!(
+                                "🚨🚨 [LAYER-6] Block #{}: PEER QUORUM ITSELF IS SPLIT — {} distinct \
+                                 answers across {} responding peer(s), no majority. This node's own \
+                                 answer (hash=0x{}) may or may not be correct — cannot determine from \
+                                 here. Requires operator investigation; NOT auto-halting since the \
+                                 correct side is unknown. Detail: {:?}",
+                                next_check_block, answers.len(), peer_results.len(),
+                                hex::encode(&local_block.block_hash), answers
+                            );
+                            consecutive_failures = 0;
+                        }
+                        PeerQuorumOutcome::Majority { hash: majority_hash, state_root: majority_root, agree_count, total_responding } => {
+                            if local_block.block_hash == majority_hash && local_block.state_root == majority_root {
                                 if next_check_block % 100 == 0 {
                                     tracing::info!(
-                                        "✅ [LAYER-6] Block #{} verified (block_hash match, state_root match)",
-                                        next_check_block
+                                        "✅ [LAYER-6] Block #{} verified ({}/{} responding peers agree, matches local)",
+                                        next_check_block, agree_count, total_responding
                                     );
                                 }
                                 consecutive_failures = 0;
                             } else {
                                 tracing::error!(
-                                    "🚨 [LAYER-6] Block #{} MISMATCH DETECTED! \
-                                     local_hash=0x{} peer_hash=0x{}, local_root=0x{} peer_root=0x{} \
-                                     (raw_bytes: local={} peer={} bytes). \
+                                    "🚨 [LAYER-6] Block #{} MISMATCH DETECTED! local_hash=0x{} local_root=0x{} \
+                                     vs peer MAJORITY ({}/{} responding peers) hash=0x{} root=0x{}. \
                                      ENTERING PENDING MODE — will re-verify 3 times before action.",
                                     next_check_block,
-                                    hex::encode(local_hash), hex::encode(peer_hash),
-                                    hex::encode(local_state_root), hex::encode(peer_state_root),
-                                    local_raw.len(), peer_raw.len()
+                                    hex::encode(&local_block.block_hash), hex::encode(&local_block.state_root),
+                                    agree_count, total_responding,
+                                    hex::encode(majority_hash), hex::encode(majority_root)
                                 );
 
                                 let mut confirmed_mismatch = true;
@@ -136,53 +226,40 @@ impl ConsensusNode {
                                     );
                                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                                    // Rotate which peer goes first each retry (when more than
-                                    // one is configured) so the 3 re-verifications are genuinely
-                                    // independent corroboration, not 3 repeated asks to whichever
-                                    // single peer answered first — `fetch_blocks_from_peer` always
-                                    // tries its slice's first entry before falling back, so without
-                                    // this a lone misbehaving/overloaded peers[0] could "confirm"
-                                    // its own bad answer on every retry.
-                                    let mut retry_peers = peers.clone();
-                                    let n = retry_peers.len();
-                                    if n > 1 {
-                                        retry_peers.rotate_left(retry as usize % n);
-                                    }
+                                    let retry_local = client.get_blocks_range(next_check_block, next_check_block).await;
+                                    let retry_peer_results = crate::network::peer_rpc::query_block_from_all_peers(
+                                        &peers, next_check_block,
+                                    ).await;
 
-                                    match crate::network::peer_rpc::fetch_blocks_from_peer(
-                                        &retry_peers, next_check_block, next_check_block,
-                                    ).await {
-                                        Ok(retry_peer_blocks) if !retry_peer_blocks.is_empty() => {
-                                            match client.get_blocks_range(next_check_block, next_check_block).await {
-                                                Ok(retry_local) if !retry_local.is_empty() => {
-                                                    if retry_local[0].block_hash == retry_peer_blocks[0].block_hash
-                                                        && retry_local[0].state_root == retry_peer_blocks[0].state_root
-                                                    {
-                                                        tracing::info!(
-                                                            "✅ [LAYER-6] Re-verify {}/3: Block #{} NOW MATCHES! \
-                                                             Was transient pipeline lag. Resuming.",
-                                                            retry, next_check_block
-                                                        );
-                                                        confirmed_mismatch = false;
-                                                        break;
-                                                    } else {
-                                                        tracing::error!(
-                                                            "🚨 [LAYER-6] Re-verify {}/3: Block #{} STILL MISMATCHES!",
-                                                            retry, next_check_block
-                                                        );
-                                                    }
-                                                }
-                                                _ => {
-                                                    tracing::warn!(
-                                                        "⚠️ [LAYER-6] Re-verify {}/3: Could not fetch local block #{}",
-                                                        retry, next_check_block
-                                                    );
-                                                }
+                                    match (retry_local, tally_peer_answers(&retry_peer_results)) {
+                                        (Ok(retry_local_blocks), PeerQuorumOutcome::Majority { hash, state_root, agree_count, total_responding })
+                                            if !retry_local_blocks.is_empty() =>
+                                        {
+                                            if retry_local_blocks[0].block_hash == hash && retry_local_blocks[0].state_root == state_root {
+                                                tracing::info!(
+                                                    "✅ [LAYER-6] Re-verify {}/3: Block #{} NOW MATCHES peer majority \
+                                                     ({}/{})! Was transient pipeline lag. Resuming.",
+                                                    retry, next_check_block, agree_count, total_responding
+                                                );
+                                                confirmed_mismatch = false;
+                                                break;
+                                            } else {
+                                                tracing::error!(
+                                                    "🚨 [LAYER-6] Re-verify {}/3: Block #{} STILL MISMATCHES peer majority ({}/{})!",
+                                                    retry, next_check_block, agree_count, total_responding
+                                                );
                                             }
+                                        }
+                                        (Ok(_), PeerQuorumOutcome::Split { answers }) => {
+                                            tracing::error!(
+                                                "🚨 [LAYER-6] Re-verify {}/3: peer quorum split ({} distinct answers) — \
+                                                 cannot confirm OR clear the mismatch this attempt.",
+                                                retry, answers.len()
+                                            );
                                         }
                                         _ => {
                                             tracing::warn!(
-                                                "⚠️ [LAYER-6] Re-verify {}/3: Could not reach peer for block #{}",
+                                                "⚠️ [LAYER-6] Re-verify {}/3: could not get a comparable answer (local fetch or peer quorum failed) for block #{}",
                                                 retry, next_check_block
                                             );
                                         }
@@ -192,7 +269,7 @@ impl ConsensusNode {
                                 if confirmed_mismatch {
                                     tracing::error!(
                                         "🚨🚨🚨 [LAYER-6] CONFIRMED FORK at block #{}! \
-                                         3/3 re-verifications failed. \
+                                         3/3 re-verifications failed against peer MAJORITY (not just 1 peer). \
                                          Setting is_terminally_failed and halting process.",
                                         next_check_block
                                     );
@@ -239,9 +316,6 @@ impl ConsensusNode {
                                     consecutive_failures = 0;
                                 }
                             }
-                        }
-                        _ => {
-                            consecutive_failures += 1;
                         }
                     }
                 }
