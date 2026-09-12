@@ -348,18 +348,66 @@ sự cố sẽ tái diễn định kỳ ngay cả sau khi mục 6 được tri�
 
 ---
 
-## 10. Việc cần làm tiếp (chưa code, chờ xác nhận hướng từ mục 6)
+## 10. Trạng thái triển khai (2026-09-12, user chọn "A đi")
 
-1. Xác nhận chọn Option A (kiến trúc đầy đủ) hay B (vá tạm) trước, hay làm B
-   ngay lập tức như circuit-breaker rồi làm A sau — cả 2 đều hợp lý, khác nhau
-   về thời gian/rủi ro.
-2. Thiết kế chi tiết interface giữa STARTUP-SYNC và CommitSyncer cho Option A
-   (hàm nào gọi hàm nào, DagState cần thêm API gì để "hỏi lại DAG nội bộ biết
-   gì về range N" một cách rẻ/nhanh).
-3. Viết lại `runtime_fork_guard` theo mục 6.4 (đa số peer, không xoay vòng 1).
-4. Test: cần 1 kịch bản test tái tạo được đúng "STARTUP-SYNC catch-up trên
-   Validator, không phải SyncOnly" — kịch bản hiện tại (`run_restart_test.sh`)
-   đã tình cờ tái tạo được 1 lần, nhưng không xác định — cần làm nó tái tạo
-   được theo yêu cầu để có test hồi quy thật sự (regression test), không chỉ
-   dựa vào may mắn khi test thủ công.
-5. Điều tra riêng câu hỏi mở ở mục 9.
+**ĐÃ LÀM — Option A, phiên bản gọn hơn dự kiến ban đầu**: khi đọc kỹ
+`executor.rs`'s GEI GUARD (đã có sẵn, xem mục 5), phát hiện ra rằng KHÔNG cần
+xây cơ chế "hỏi lại DAG biết gì về range N" như mục 6.2 dự tính — CommitProcessor
+vốn đã tự đi tuần tự từ `next_expected_index` và tự fast-skip mọi commit đã bị
+Go vượt qua (so `go_current_gei`), nên chỉ cần **ngăn Go/Rust không bị "tiêm"
+sai `next_expected_index` ngay từ đầu** là đủ — không cần logic mới, chỉ cần
+loại bỏ đúng chỗ import sai.
+
+Cụ thể đã sửa:
+1. **Proto**: thêm `bool preserve_own_commit_index` vào `SyncBlocksRequest`
+   (cả 2 bản .proto, đã regenerate Go bindings qua `protoc.sh`).
+2. **Go** (`unix_socket_handler_sync.go`): cả 2 chỗ gọi
+   `ForceSetLastHandledCommitIndex(commitIdx32)` (nhánh block-đã-tồn-tại và
+   nhánh block-mới-thực-thi) giờ gated qua hàm thuần `shouldImportPeerCommitIndex`
+   — trả `false` (không import) khi `preserve_own_commit_index=true`.
+3. **Rust**: `ExecutorClient::sync_and_execute_blocks` nhận thêm tham số
+   `preserve_own_commit_index: bool`. Tất cả 4 call site của Validator
+   (`startup_sync.rs` x2, `stall_recovery.rs`, `validator_transition.rs`) truyền
+   `true`. Call site duy nhất của SyncOnly (`rust_sync_node/sync_loop.rs`)
+   truyền `false`, giữ nguyên hành vi cũ.
+4. Không cần sửa gì thêm ở 3 chỗ `startup_sync.rs` tự đọc lại
+   `get_last_handled_commit_index()` rồi set `next_expected_index` — vì Go giờ
+   không còn bị nhiễm giá trị từ peer, các chỗ đọc lại này TỰ ĐỘNG lấy được giá
+   trị đúng (đã kiểm chứng bằng đọc code, xác nhận không có guard "chỉ nhận nếu
+   cao hơn" nào có thể chặn nhầm giá trị mới hợp lệ).
+
+**Mục 6.4 (LAYER-6 đa số peer) — ĐÃ LÀM luôn trong cùng đợt**: thêm
+`query_block_from_all_peers` (network/peer_rpc/client.rs) hỏi TẤT CẢ peer song
+song cho 1 block; `fork_guard.rs`'s `runtime_fork_guard` viết lại dùng
+`tally_peer_answers` (hàm thuần) để tính đa số tuyệt đối (>50% peer phản hồi
+đồng ý) trước khi kết luận khớp/lệch; khi bản thân các peer KHÔNG đồng thuận
+với nhau, log cảnh báo mới riêng biệt `PEER QUORUM ITSELF IS SPLIT` thay vì
+đoán mò.
+
+**Test**: `TestShouldImportPeerCommitIndex` (Go, 4 case) khoá đúng quyết định
+gating. Full suite: `cargo test -p consensus-core --release` 207/207,
+`-p metanode --release` 185/185, `go test ./executor/...` sạch (1 test flaky
+không liên quan, đã xác nhận pass riêng lẻ và khi chạy lại), `go build`/`go vet`
+sạch.
+
+**Live-verify trên local 232**: build lại từ đầu (`--reset-all --prebuilt-bin`),
+lặp lại đúng kịch bản tải nặng + node-0 restart + node-1 down **2 lần** — cả 2
+lần node-0 bắt kịp cluster sạch sẽ, hash+stateRoot+nội dung tx khớp tuyệt đối
+giữa các node còn sống. **Lưu ý trung thực**: cả 2 lần này KHÔNG tái hiện được
+đúng điều kiện kích hoạt gốc (SYNC-FORK-GUARD, cần node-0 tự phân kỳ cục bộ
+trước — xem mục 9, vẫn là câu hỏi mở, không phải lỗi tất định/luôn tái hiện
+được). Nên phần "sửa đúng chỗ" dựa trên suy luận trực tiếp từ code + bằng chứng
+đã thu thập trước đó (mục 2), không phải từ việc tái hiện lại chính xác vụ fork
+lần này — giống cách mục 16 (DagState write-ordering) cũng được chấp nhận dựa
+trên lập luận + test đầy đủ, không ép tái hiện race hiếm.
+
+Chạy thêm bài test chính thức đầy đủ (`run_restart_test.sh`, rolling restart cả
+4 node + full-cluster restart): **"HOÀN THÀNH XUẤT SẮC"**, 100% zero-fork,
+0 panic/crash trên cả 4 node.
+
+**Đã commit** vào branch riêng `fix/startup-sync-commit-index-import-fork`
+(`1fc0d36a`, dựa trên `dev` HEAD `db3fc422`) — **CHƯA merge**, chờ xác nhận.
+
+**Vẫn còn mở** (không nằm trong scope của fix này, xem mục 9): nguyên nhân gốc
+của chính cú phân kỳ ĐẦU TIÊN (block #397 trên node-0) — cần một phiên điều tra
+riêng.
