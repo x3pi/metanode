@@ -137,17 +137,20 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	// Start the Rust thread asynchronously
 	cConfigPath := C.CString(configPath)
 	cDataDir := C.CString(dataDir)
-	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
-	// but Rust converts to string_lossy. So we can free it.
-	defer C.free(unsafe.Pointer(cConfigPath))
-	defer C.free(unsafe.Pointer(cDataDir))
-
-	fmt.Println("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
 
 	// Call the new C++ static initialization function on the main thread safely
 	C.metanode_init_rocksdb(cDataDir)
 
-	C.metanode_start_consensus(cConfigPath, cDataDir)
+	// Start the Rust thread asynchronously
+	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
+	// but Rust converts to string_lossy. So we can free it.
+	go func() {
+		defer C.free(unsafe.Pointer(cConfigPath))
+		defer C.free(unsafe.Pointer(cDataDir))
+		logger.Info("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+		C.metanode_start_consensus(cConfigPath, cDataDir)
+		logger.Warn("[FFI Bridge] MetaNode Consensus Engine exited")
+	}()
 
 	return nil
 }

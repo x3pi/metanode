@@ -260,6 +260,11 @@ struct PhaseStateInput {
     /// Gate 5 in determine_startup_sync_exit() prevents Healthy transition
     /// until POST-GATE-VERIFY in consensus_node.rs confirms bit-perfect parity.
     block_hash_verified: bool,
+    /// Whether this is a single-validator committee (size <= 1). There is no
+    /// other validator this node's own DAG/quorum tracking could have diverged
+    /// from, so the "quorum_commit not yet discovered" guard below (which exists
+    /// to protect multi-validator clusters) doesn't apply.
+    is_single_validator: bool,
 }
 
 /// Result of phase determination — describes WHAT should happen, not HOW.
@@ -548,6 +553,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             recovery_barrier_can_propose: self.coordination_hub.recovery_barrier().can_propose(),
             recovery_barrier_phase: format!("{}", self.coordination_hub.recovery_barrier().phase()),
             block_hash_verified: self.coordination_hub.is_block_hash_verified(),
+            is_single_validator: self.inner.context.committee.size() <= 1,
         }
     }
 
@@ -2429,6 +2435,20 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 fetched_commit_range.end(),
                 commits.commits().len()
             );
+
+            // ═══════════════════════════════════════════════════════════════════════
+            // FORK-SAFETY / DEADLOCK FIX (2026-09-12):
+            // Inject fetched certified commits into CommitVoteMonitor.
+            // This guarantees that if a local node produced this commit before a restart,
+            // the DIGEST-GATE in CommitProcessor will be instantly satisfied. Without this,
+            // the local commit stays blocked forever because peers already moved on and
+            // will never vote for it again, AND Core's `filter_new_commits` drops the
+            // CertifiedCommit before it can reach the CommitProcessor to unblock it.
+            // ═══════════════════════════════════════════════════════════════════════
+            for commit in commits.commits() {
+                self.inner.commit_vote_monitor.inject_certified_commit(commit.index(), commit.digest());
+            }
+
             match self
                 .inner
                 .core_thread_dispatcher
@@ -3093,6 +3113,7 @@ mod tests {
             recovery_barrier_can_propose: true,
             recovery_barrier_phase: "Ready".to_string(),
             block_hash_verified,
+            is_single_validator: false,
         };
 
         // Case 1: lag == 0, block_hash_verified == true -> Healthy

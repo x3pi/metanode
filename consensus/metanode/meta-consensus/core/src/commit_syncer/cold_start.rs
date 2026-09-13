@@ -68,6 +68,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 reason: "CatchingUp — lag > 0, still syncing",
             },
 
+            // ─── CATCHING UP (normal): quorum not yet discovered ───
+            // `lag == 0` here can mean either "genuinely caught up to a known quorum"
+            // or "quorum_commit is still 0 because we haven't discovered it from peers
+            // yet" (e.g. the brief window before CommitSyncer's own
+            // `discover_quorum_commit()` resolves, or any other caller of
+            // `try_schedule_once`/`update_state` that runs before it). In a
+            // multi-validator cluster those two cases are NOT the same: the local DAG
+            // can be filled in from peers before an independent quorum is confirmed, so
+            // treating "quorum unknown" as "caught up" risks a premature
+            // CatchingUp→Healthy flip that defeats the SINGLE-VALIDATOR EXCEPTION guard
+            // below in try_schedule_once (reproduced directly by
+            // `multi_validator_does_not_advance_synced_commit_index_while_catching_up`).
+            // Single-validator clusters are exempt — same reasoning as that guard.
+            CatchingUp if input.quorum_commit == 0 && !input.is_single_validator => {
+                PhaseTransitionDecision::Hold {
+                    reason: "CatchingUp — quorum commit not yet discovered from peers",
+                }
+            }
+
             // ─── CATCHING UP (normal): Lag resolved but barrier still active → Hold ───
             CatchingUp if !input.recovery_barrier_can_propose => {
                 tracing::debug!(

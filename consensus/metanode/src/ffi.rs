@@ -604,6 +604,13 @@ pub extern "C" fn metanode_init_rocksdb(data_dir: *const std::os::raw::c_char) {
     if let Ok(dir) = c_str.to_str() {
         let path = format!("{}/rocksdb_dummy_init", dir);
         let _ = std::panic::catch_unwind(|| {
+            // Create a temporary Tokio runtime to prevent typed-store from panicking
+            // because it tries to spawn a metrics reporting task on initialization.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _guard = rt.enter();
             let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new(&path);
         });
     }
@@ -769,7 +776,6 @@ pub unsafe extern "C" fn metanode_start_consensus(
             );
         }));
 
-
 /// Custom writer that forwards Rust tracing logs to Go logger via CGo callback with dynamic log levels
 struct GoLogWriter {
     level: i32,
@@ -802,15 +808,16 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
     type Writer = GoLogWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        GoLogWriter { level: 1 } // Default to Info
+        GoLogWriter { level: 1 }
     }
 
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
         let level = match *meta.level() {
-            tracing::Level::ERROR => 3,
-            tracing::Level::WARN => 2,
+            tracing::Level::TRACE => 0,
+            tracing::Level::DEBUG => 0,
             tracing::Level::INFO => 1,
-            tracing::Level::DEBUG | tracing::Level::TRACE => 0,
+            tracing::Level::WARN => 2,
+            tracing::Level::ERROR => 3,
         };
         GoLogWriter { level }
     }

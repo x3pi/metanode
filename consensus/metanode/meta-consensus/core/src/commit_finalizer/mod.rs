@@ -128,6 +128,19 @@ impl CommitFinalizer {
     async fn run(mut self, mut receiver: UnboundedReceiver<CommittedSubDag>) {
         tracing::info!("🚀 [COMMIT FINALIZER] RUN LOOP STARTED");
         while let Some(committed_sub_dag) = receiver.recv().await {
+            // FORK-SAFETY UPGRADE PASS:
+            // If we receive a CertifiedCommit that was already processed locally, we MUST forward it
+            // directly to CommitProcessor so it can upgrade the pending local commit and unblock execution.
+            if let Some(last) = self.last_processed_commit {
+                if committed_sub_dag.commit_ref.index <= last && !committed_sub_dag.decided_with_local_blocks {
+                    tracing::warn!("🔄 [COMMIT FINALIZER] Forwarding CertifiedCommit {} directly to CommitProcessor for upgrade.", committed_sub_dag.commit_ref.index);
+                    if let Err(e) = self.commit_sender.send(committed_sub_dag) {
+                        tracing::debug!("Failed to send commit to handler: {e:?}");
+                    }
+                    continue;
+                }
+            }
+
             let already_finalized = !self.context.protocol_config.mysticeti_fastpath()
                 || committed_sub_dag.recovered_rejected_transactions;
             let finalized_commits = if !already_finalized {

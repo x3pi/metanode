@@ -193,6 +193,23 @@ impl CommitVoteMonitor {
         }
     }
 
+    /// Injects a certified commit directly into the vote monitor with full quorum weight.
+    /// This is used during catch-up to ensure that commits fetched from peers as CertifiedCommits
+    /// (which inherently have quorum support) instantly satisfy the DIGEST-GATE in the CommitProcessor.
+    /// This prevents a deadlock when the local node already produced the commit locally but lost the
+    /// votes after a restart, causing it to stall waiting for votes that will never arrive.
+    pub(crate) fn inject_certified_commit(&self, commit_index: CommitIndex, digest: CommitDigest) {
+        let mut state = self.state.lock();
+
+        let authority_stake = self.context.committee.total_stake();
+        let entry = state.digest_history
+            .entry(commit_index)
+            .or_insert_with(HashMap::new);
+        
+        // Inject sufficient weight to immediately pass the quorum threshold
+        *entry.entry(digest).or_insert(0) += authority_stake as u64;
+    }
+
     /// Seeds the quorum from Go execution state to break the chicken-and-egg
     /// deadlock where blocks need quorum to be produced, but quorum needs blocks
     /// to be computed via observe_block().

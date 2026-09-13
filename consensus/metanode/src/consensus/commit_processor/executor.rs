@@ -164,7 +164,7 @@ pub fn compute_commit_gei_and_valid_txs(
                     if let Some(tx) = cache.get(digest) {
                         let tx_data = tx.data().to_vec();
                         let digest_for_log = *digest;
-                        let commit_for_log = subdag.commit_ref.index;
+                        let _commit_for_log = subdag.commit_ref.index;
                         if let Some(client) = crate::ffi::get_global_tx_resubmit_client() {
                             tokio::spawn(async move {
                                 use crate::node::tx_submitter::TransactionSubmitter;

@@ -1,10 +1,9 @@
 // Copyright (c) MetaNode Team
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK;
 use crate::node::executor_client::ExecutorClient;
 use anyhow::Result;
-use consensus_core::{BlockAPI, CommitAPI};
+use consensus_core::CommitAPI;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
