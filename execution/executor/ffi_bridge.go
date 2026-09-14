@@ -240,21 +240,44 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 			tQueued = time.Now().UnixNano()
 		}
 
-		response := <-req.ResponseCh
-		if ffiTraceEnabled {
-			tRespRecv := time.Now().UnixNano()
-			serializeAndSetResponse(response, outPayload, outLen)
-			tSerialized := time.Now().UnixNano()
-			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
-				subDag.GetGlobalExecIndex(),
-				tAfterUnmarshal-tEntry,
-				tRespRecv-tQueued,
-				tSerialized-tRespRecv,
-				tSerialized-tEntry)
-		} else {
-			serializeAndSetResponse(response, outPayload, outLen)
+		// BOUNDED WAIT (restored 2026-09-14): a plain unbounded `<-req.ResponseCh` here
+		// was reintroduced by commit 608b5195 while making the QUEUE SEND above
+		// non-blocking, and it silently undid the exact fix executeBlockResponseTimeout's
+		// own doc comment describes -- confirmed live on this cluster (twice, node-2 then
+		// node-3): the speculative-execution/commit pipeline got stuck for unrelated
+		// reasons, this receive blocked forever, and the whole Rust->Go delivery pipeline
+		// froze permanently with zero self-recovery (go_confirmed_commit frozen while
+		// highest_handled kept climbing -- CommitSyncer's own STALL DETECTOR 4b flags this
+		// exact signature as "wedged downstream of BlockDeliveryManager", but couldn't fix
+		// it -- the fix belongs here, not on the Rust side, since Rust was only ever
+		// waiting on this one channel). Restored to the original bounded select so a stuck
+		// downstream pipeline becomes a bounded, visible failure that Rust's existing
+		// retry path (deliver_with_halt_retry) already handles, instead of a silent
+		// permanent hang requiring a manual restart.
+		select {
+		case response := <-req.ResponseCh:
+			if ffiTraceEnabled {
+				tRespRecv := time.Now().UnixNano()
+				serializeAndSetResponse(response, outPayload, outLen)
+				tSerialized := time.Now().UnixNano()
+				logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
+					subDag.GetGlobalExecIndex(),
+					tAfterUnmarshal-tEntry,
+					tRespRecv-tQueued,
+					tSerialized-tRespRecv,
+					tSerialized-tEntry)
+			} else {
+				serializeAndSetResponse(response, outPayload, outLen)
+			}
+			return C.bool(true)
+		case <-time.After(executeBlockResponseTimeout):
+			logger.Error("🚨 [FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "timed out waiting for Go execution response",
+			}, outPayload, outLen)
+			return C.bool(false)
 		}
-		return C.bool(true)
 	}
 
 	// FALLBACK: Use dataChan if authQueue not initialized
