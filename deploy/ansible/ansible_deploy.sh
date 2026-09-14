@@ -428,6 +428,7 @@ fi
 
 cd "$SCRIPT_DIR"
 set +e
+export PYTHONUNBUFFERED=1
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
 ansible_exit=$?
 set -e
