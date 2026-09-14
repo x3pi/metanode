@@ -2172,11 +2172,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 if authority == self.inner.context.own_index {
                     continue;
                 }
-                if let Ok(status) = self
-                    .inner
-                    .network_client
-                    .get_epoch_status(authority, timeout)
-                    .await
+                // BOUNDED (2026-09-14): `get_epoch_status`'s own `timeout` argument only
+                // sets tonic's `grpc-timeout` request header -- a hint the SERVER is
+                // expected to respect, not a client-side enforced deadline. tonic does
+                // not itself abandon waiting for a response when that header elapses, so
+                // if the peer's own handler is simply slow to respond (observed live: all
+                // 4 nodes restarting at once, each busy with its own heavy startup work,
+                // e.g. "last_handled=13988" of DAG history to load), this await can hang
+                // far longer than `timeout` actually implies -- stuck on THIS ONE peer
+                // with zero further attempt-log output, exactly what was seen live: a
+                // whole-cluster simultaneous restart stayed in Bootstrapping 6+ minutes
+                // (vs 0.3-0.4s for a single node restarting into 3 already-healthy peers).
+                // Every other network_client call in this file already double-wraps with
+                // an explicit `tokio::time::timeout` for exactly this reason (see
+                // patch_baseline_if_needed's fetch_commits calls) -- this one didn't.
+                if let Ok(Ok(status)) = tokio::time::timeout(
+                    timeout,
+                    self.inner.network_client.get_epoch_status(authority, timeout),
+                )
+                .await
                 {
                     reachable_peers += 1;
                     if status.epoch == self.inner.context.committee.epoch() {
