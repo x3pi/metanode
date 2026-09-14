@@ -1866,8 +1866,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
         //
         // Fork safety: Without baseline, ScheduleVerifying blocks the
         // node from Healthy → no proposals → no fork risk.
-        // ════════════════════════════════════════════════════════════════
-        const MAX_BASELINE_ATTEMPTS: u32 = 30; // 30 × 1s = 30s max
+        //
+        // BOUND FIXED AT THE ROOT (2026-09-14, mục 19 bug #4 investigation):
+        // the old "30 × 1s = 30s max" comment was wrong about the per-attempt
+        // cost, and the root cause wasn't the attempt count -- it was that a
+        // failed attempt used to try every OTHER committee authority (up to 3
+        // in a 4-node committee) SEQUENTIALLY, each paying its own full 5s
+        // fetch_commits timeout before the next was even tried: up to ~16s
+        // per attempt, not 1s. At 30 attempts that's a real worst case of ~8
+        // minutes, not 30s -- reproduced live: node-3 sat in Bootstrapping
+        // here for 6+ minutes after a whole-cluster restart before this
+        // returned. Just lowering the attempt count would still leave that
+        // same sequential-timeout-multiplication design in place (a smaller
+        // band-aid, not a fix) -- the actual fix, below, queries every peer
+        // CONCURRENTLY and takes the first success, so one attempt's cost is
+        // bounded by a single 5s timeout regardless of committee size. With
+        // that fixed, the ORIGINAL "30s" intent is honest again as documented.
+        const MAX_BASELINE_ATTEMPTS: u32 = 5; // 5 × (5s timeout + 1s backoff) = 30s real worst case
         let mut baseline_attempt: u32 = 0;
 
         loop {
@@ -1904,17 +1919,45 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
 
-            for authority in target_authorities.clone() {
-                if let Ok(Ok((serialized_commits, _, _))) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.inner.network_client.fetch_commits(
-                        authority,
-                        range.clone(),
-                        Duration::from_secs(4),
-                    ),
-                )
-                .await
-                {
+            // ROOT FIX (2026-09-14): query every candidate authority CONCURRENTLY
+            // instead of one at a time -- a slow or down peer must not cost a
+            // full timeout before the next one is even tried. This bounds one
+            // attempt's cost by a single 5s timeout regardless of committee
+            // size, instead of multiplying it by the number of peers tried.
+            let winner = {
+                use futures::{stream::FuturesUnordered, StreamExt as _};
+                let mut inflight: FuturesUnordered<_> = target_authorities
+                    .iter()
+                    .map(|&authority| {
+                        let inner = self.inner.clone();
+                        let range = range.clone();
+                        async move {
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                inner
+                                    .network_client
+                                    .fetch_commits(authority, range, Duration::from_secs(4)),
+                            )
+                            .await;
+                            (authority, result)
+                        }
+                    })
+                    .collect();
+
+                let mut winner = None;
+                while let Some((authority, result)) = inflight.next().await {
+                    if let Ok(Ok((serialized_commits, _, _))) = result {
+                        if !serialized_commits.is_empty() {
+                            winner = Some((authority, serialized_commits));
+                            break;
+                        }
+                    }
+                }
+                winner
+            };
+
+            {
+                if let Some((authority, serialized_commits)) = winner {
                     if let Some(serialized) = serialized_commits.first() {
                         if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
                             use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
