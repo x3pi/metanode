@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockDigest, BlockRef, Round};
-use tokio::sync::mpsc;
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::mpsc;
 use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
@@ -191,11 +191,10 @@ async fn test_handle_send_block() {
     let core_dispatcher = Arc::new(FakeCoreThreadDispatcher::new());
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -226,7 +225,7 @@ async fn test_handle_send_block() {
         store,
         None,
         None, // legacy_store_manager
-         0,    // epoch_base_index (tests start at epoch 0)
+        0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
         test_keys[0].1.clone(),
     ));
@@ -355,8 +354,7 @@ async fn test_handle_attest_payload_loss() {
 
     let peer = context.committee.to_authority_index(1).unwrap();
     let commit_index: crate::commit::CommitIndex = 7;
-    let missing_digest =
-        consensus_types::block::TxDigest([9u8; consensus_config::DIGEST_LENGTH]);
+    let missing_digest = consensus_types::block::TxDigest([9u8; consensus_config::DIGEST_LENGTH]);
     let claim = crate::payload_loss_attestation::PayloadLossClaim {
         commit_index,
         tx_digest: missing_digest,
@@ -396,7 +394,9 @@ async fn test_handle_attest_payload_loss() {
             assert!(attestation.verify(&pubkey).is_ok());
         }
         crate::network::AttestPayloadLossOutcome::Payload(_) => {
-            panic!("expected an attestation, got a payload for a digest never inserted into the cache");
+            panic!(
+                "expected an attestation, got a payload for a digest never inserted into the cache"
+            );
         }
     }
 
@@ -417,9 +417,10 @@ async fn test_handle_attest_payload_loss() {
     // same intent as the existing fetch_transactions RPC).
     let present_digest = consensus_types::block::TxDigest([5u8; consensus_config::DIGEST_LENGTH]);
     let tx_bytes = Bytes::from_static(b"hello world");
-    crate::transaction::get_global_tx_cache()
-        .write()
-        .insert(present_digest, crate::block::Transaction::new(tx_bytes.to_vec()));
+    crate::transaction::get_global_tx_cache().write().insert(
+        present_digest,
+        crate::block::Transaction::new(tx_bytes.to_vec()),
+    );
     let outcome = service
         .handle_attest_payload_loss(peer, commit_index, present_digest)
         .await
@@ -447,11 +448,10 @@ async fn test_handle_fetch_blocks() {
     let core_dispatcher = Arc::new(FakeCoreThreadDispatcher::new());
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -482,7 +482,7 @@ async fn test_handle_fetch_blocks() {
         store,
         None,
         None, // legacy_store_manager
-         0,    // epoch_base_index (tests start at epoch 0)
+        0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
         test_keys[0].1.clone(),
     ));
@@ -620,11 +620,10 @@ async fn test_handle_fetch_latest_blocks() {
     let core_dispatcher = Arc::new(FakeCoreThreadDispatcher::new());
     let (_tx_block_broadcast, rx_block_broadcast) = broadcast::channel(100);
     let network_client = Arc::new(FakeNetworkClient::default());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -655,7 +654,7 @@ async fn test_handle_fetch_latest_blocks() {
         store,
         None,
         None, // legacy_store_manager
-         0,    // epoch_base_index (tests start at epoch 0)
+        0,    // epoch_base_index (tests start at epoch 0)
         network_client.clone(),
         test_keys[0].1.clone(),
     ));
@@ -688,4 +687,3 @@ async fn test_handle_fetch_latest_blocks() {
         assert_eq!(verified_block.round(), 10);
     }
 }
-

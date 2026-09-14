@@ -6,17 +6,17 @@ use consensus_config::Epoch;
 use consensus_types::block::{
     BlockRef, Round, TransactionIndex, NUM_RESERVED_TRANSACTION_INDICES, PING_TRANSACTION_INDEX,
 };
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
 use tap::TapFallible;
 use thiserror::Error;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 use tracing::{error, warn};
 
 use crate::{block::Transaction, context::Context};
+use consensus_types::block::TxDigest;
 use std::collections::VecDeque;
 use std::sync::OnceLock;
-use consensus_types::block::TxDigest;
 
 /// Previously configured the on-disk directory for per-transaction payload
 /// persistence (one file per TX digest) in TxPayloadCache, so BlockV3
@@ -246,7 +246,11 @@ impl TransactionConsumer {
     // per block even with a large backlog and sub-block capacity of Go execution
     // capacity to spare).
     pub(crate) fn has_sufficient_transactions(&self) -> bool {
-        let pending_len = self.pending_transactions.as_ref().map(|g| g.transactions.len()).unwrap_or(0);
+        let pending_len = self
+            .pending_transactions
+            .as_ref()
+            .map(|g| g.transactions.len())
+            .unwrap_or(0);
         pending_len as u64 >= self.max_num_transactions_in_block
     }
 
@@ -264,7 +268,10 @@ impl TransactionConsumer {
         if stamped_at == 0 {
             return 0;
         }
-        self.context.clock.timestamp_utc_ms().saturating_sub(stamped_at)
+        self.context
+            .clock
+            .timestamp_utc_ms()
+            .saturating_sub(stamped_at)
     }
 
     // Attempts to fetch the next transactions that have been submitted for sequence. Respects the `max_transactions_in_block_bytes`
@@ -277,7 +284,10 @@ impl TransactionConsumer {
         let mut total_bytes = 0;
         let mut limit_reached = LimitReached::AllTransactionsIncluded;
         // FIX: Increase max_group_size from 2 to 500 (MAX_BUNDLE_SIZE) so that FFI batches are not dropped by TX-DROP-GUARD.
-        let mut group_verifier = crate::tx_group_filter::IncrementalGroupVerifier::new(crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE, self.max_num_transactions_in_block as usize);
+        let mut group_verifier = crate::tx_group_filter::IncrementalGroupVerifier::new(
+            crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE,
+            self.max_num_transactions_in_block as usize,
+        );
 
         // Handle one batch of incoming transactions from TransactionGuard.
         // The method will return `None` if all the transactions can be included in the block. Otherwise some or all of the transactions will be
@@ -297,14 +307,17 @@ impl TransactionConsumer {
             while let Some(tx) = iter.next() {
                 let tx_bytes = tx.data().len() as u64;
 
-                if total_bytes + local_total_bytes + tx_bytes > self.max_transactions_in_block_bytes {
+                if total_bytes + local_total_bytes + tx_bytes > self.max_transactions_in_block_bytes
+                {
                     limit_reached = LimitReached::MaxBytes;
                     remaining_txs.push(tx);
                     remaining_txs.extend(iter);
                     break;
                 }
 
-                if transactions.len() as u64 + accepted_txs.len() as u64 + 1 > self.max_num_transactions_in_block {
+                if transactions.len() as u64 + accepted_txs.len() as u64 + 1
+                    > self.max_num_transactions_in_block
+                {
                     limit_reached = LimitReached::MaxNumOfTransactions;
                     remaining_txs.push(tx);
                     remaining_txs.extend(iter);
@@ -363,7 +376,9 @@ impl TransactionConsumer {
                     // Root cause: Caller sent a single TransactionGuard where even the first transaction
                     // exceeds max_num_transactions_in_block OR max_transactions_in_block_bytes OR group_limit.
                     let drop_count = pending_transactions.transactions.len();
-                    let drop_bytes: usize = pending_transactions.transactions.iter()
+                    let drop_bytes: usize = pending_transactions
+                        .transactions
+                        .iter()
                         .map(|tx| tx.data().len())
                         .sum();
                     tracing::error!(

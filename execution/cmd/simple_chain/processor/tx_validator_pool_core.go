@@ -371,12 +371,32 @@ func (vp *TxValidatorPool) addTransactionsToPoolInternal(txs []types.Transaction
 
 	// Limit pool size to prevent GC stall / OOM
 	if vp.transactionPool.CountTransactions()+len(txs) >= MaxMempoolSize {
-		evictCount := len(txs)
-		if evictCount < 1000 {
-			evictCount = 1000
+		if vp.evictionInProgress.CompareAndSwap(false, true) {
+			evicted := func() int {
+				defer vp.evictionInProgress.Store(false)
+				evictCount := len(txs)
+				if evictCount < 1000 {
+					evictCount = 1000
+				}
+				logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
+				return vp.transactionPool.EvictLowestGasPrice(evictCount)
+			}()
+			if evicted == 0 {
+				err := fmt.Errorf("transaction pool is full (limit=%d) and could not evict", MaxMempoolSize)
+				errs := make([]error, len(txs))
+				for i := range errs {
+					errs[i] = err
+				}
+				return errs
+			}
+		} else {
+			err := fmt.Errorf("transaction pool is full (limit=%d), eviction already in progress", MaxMempoolSize)
+			errs := make([]error, len(txs))
+			for i := range errs {
+				errs[i] = err
+			}
+			return errs
 		}
-		logger.Warn("⚠️ Mempool is near full (limit=%d). Evicting %d lowest-fee transactions to make room for batch.", MaxMempoolSize, evictCount)
-		vp.transactionPool.EvictLowestGasPrice(evictCount)
 	}
 
 	minGasPrice := vp.chainState.GetConfig().MinGasPrice

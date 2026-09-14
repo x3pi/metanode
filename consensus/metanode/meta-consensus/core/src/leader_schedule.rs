@@ -88,18 +88,17 @@ impl LeaderSchedule {
             crate::commit::CommitRange::new(start..=end)
         };
 
-        let reputation_scores = crate::leader_scoring::ReputationScores::new(
-            mock_range,
-            scores_per_authority,
-        );
+        let reputation_scores =
+            crate::leader_scoring::ReputationScores::new(mock_range, scores_per_authority);
         let table = LeaderSwapTable::new(context, last_commit_index, reputation_scores);
-        
+
         {
             let mut write = self.leader_swap_table.write();
             *write = table;
         }
-        
-        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+
+        self.schedule_confirmed
+            .store(true, std::sync::atomic::Ordering::Release);
         tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via baseline scores injection.");
     }
 
@@ -107,7 +106,8 @@ impl LeaderSchedule {
     pub(crate) fn with_num_commits_per_schedule(mut self, num_commits_per_schedule: u64) -> Self {
         self.num_commits_per_schedule = num_commits_per_schedule;
         // In tests, auto-confirm the schedule so the SCHEDULE-GUARD doesn't block.
-        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+        self.schedule_confirmed
+            .store(true, std::sync::atomic::Ordering::Release);
         self
     }
 
@@ -134,8 +134,8 @@ impl LeaderSchedule {
         //    happened in this epoch yet. All nodes use the same default (no swaps) → safe.
         // 3. Otherwise → Node restarted mid-epoch without persisted CommitInfo.
         //    The default schedule may differ from the network's swapped schedule → NOT safe.
-        let is_confirmed = has_commit_info
-            || last_commit_index < Self::CONSENSUS_COMMITS_PER_SCHEDULE as u32;
+        let is_confirmed =
+            has_commit_info || last_commit_index < Self::CONSENSUS_COMMITS_PER_SCHEDULE as u32;
 
         tracing::info!(
             "LeaderSchedule recovered using {leader_swap_table:?}. There are {} committed subdags scored in DagState. schedule_confirmed={}{}",
@@ -151,7 +151,9 @@ impl LeaderSchedule {
         // create the schedule
         let schedule = Self::new(context, leader_swap_table);
         if is_confirmed {
-            schedule.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+            schedule
+                .schedule_confirmed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         schedule
     }
@@ -192,7 +194,11 @@ impl LeaderSchedule {
         dag_state.read().is_scoring_subdag_empty()
     }
 
-    pub(crate) fn update_leader_schedule_v2(&self, dag_state: &RwLock<DagState>, dag_state_writer: &crate::dag_state_actor::DagStateWriter) {
+    pub(crate) fn update_leader_schedule_v2(
+        &self,
+        dag_state: &RwLock<DagState>,
+        dag_state_writer: &crate::dag_state_actor::DagStateWriter,
+    ) {
         let _s = self
             .context
             .metrics
@@ -237,21 +243,27 @@ impl LeaderSchedule {
             .set(self.leader_swap_table.read().bad_nodes.len() as i64);
 
         // Mark the schedule as confirmed after a full scoring cycle.
-        if !self.schedule_confirmed.load(std::sync::atomic::Ordering::Acquire) {
-            tracing::info!("✅ [SCHEDULE] LeaderSchedule confirmed via full {}-commit scoring cycle.", self.num_commits_per_schedule);
+        if !self
+            .schedule_confirmed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::info!(
+                "✅ [SCHEDULE] LeaderSchedule confirmed via full {}-commit scoring cycle.",
+                self.num_commits_per_schedule
+            );
         }
-        self.schedule_confirmed.store(true, std::sync::atomic::Ordering::Release);
+        self.schedule_confirmed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
-
 
     pub(crate) fn elect_leader(&self, round: u32, leader_offset: u32) -> AuthorityIndex {
         // FORK-SAFETY (May 2026): Reputation swaps are permanently disabled in Metanode.
-        // During mid-epoch snapshot recovery, restoring nodes lose historical DAG blocks 
-        // necessary to compute identical reputation scores as continuous nodes. If reputation 
+        // During mid-epoch snapshot recovery, restoring nodes lose historical DAG blocks
+        // necessary to compute identical reputation scores as continuous nodes. If reputation
         // swaps are active, the resulting DAGs diverge completely, leading to fatal state forks.
         // We strictly enforce 100% deterministic stake-based election based on the round number.
         let is_reputation_swaps_disabled = true;
-            
+
         cfg_if::cfg_if! {
             // TODO: we need to differentiate the leader strategy in tests, so for
             // some type of testing (ex sim tests) we can use the staked approach.
@@ -678,8 +690,7 @@ mod tests {
         // concern from the scoring window).
         assert_eq!(11, dag_state.read().scoring_subdags_count());
         let recovered_scores = dag_state.read().calculate_scoring_subdag_scores();
-        let expected_scores =
-            ReputationScores::new((1..=11).into(), vec![33, 33, 33, 33]);
+        let expected_scores = ReputationScores::new((1..=11).into(), vec![33, 33, 33, 33]);
         assert_eq!(recovered_scores, expected_scores);
 
         let leader_schedule = LeaderSchedule::from_store(context.clone(), dag_state.clone());
@@ -1141,7 +1152,11 @@ mod tests {
         // is still applied.
         leader_schedule.update_leader_swap_table(leader_swap_table.clone());
         assert_eq!(
-            leader_schedule.leader_swap_table.read().reputation_scores.commit_range,
+            leader_schedule
+                .leader_swap_table
+                .read()
+                .reputation_scores
+                .commit_range,
             (21..=25).into()
         );
     }

@@ -8,17 +8,17 @@ use parking_lot::RwLock;
 
 use super::*;
 use crate::{
-    block::{BlockAPI, Slot, TestBlock, VerifiedBlock, genesis_blocks, GENESIS_ROUND},
+    block::{genesis_blocks, BlockAPI, Slot, TestBlock, VerifiedBlock, GENESIS_ROUND},
     commit::{CommitAPI, CommitDigest, CommitIndex},
     leader_scoring::ReputationScores,
-    storage::{mem_store::MemStore, WriteBatch, Store},
+    storage::{mem_store::MemStore, Store, WriteBatch},
     test_dag_builder::DagBuilder,
     test_dag_parser::parse_dag,
-    Context, CommitRef, TrustedCommit,
+    CommitRef, Context, TrustedCommit,
 };
-use std::sync::Arc;
-use std::collections::{BTreeMap, BTreeSet};
 use consensus_config::AuthorityIndex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_get_blocks() {
@@ -372,9 +372,7 @@ async fn test_link_causal_history() {
     assert_eq!(linked_blocks.len(), 7, "Linked blocks: {:?}", linked_blocks);
     for block_ref in linked_blocks {
         assert!(
-            block_ref.round == 4
-                || block_ref.round == 5
-                || block_ref == round_6_block.reference()
+            block_ref.round == 4 || block_ref.round == 5 || block_ref == round_6_block.reference()
         );
     }
 
@@ -588,8 +586,7 @@ async fn test_contains_cached_block_at_slot_panics_when_ask_out_of_range() {
 
     // When trying to request for authority 1 at block slot 3 it should panic, as anything
     // that is <= 3 should be evicted
-    let _ =
-        dag_state.contains_cached_block_at_slot(Slot::new(3, AuthorityIndex::new_for_test(1)));
+    let _ = dag_state.contains_cached_block_at_slot(Slot::new(3, AuthorityIndex::new_for_test(1)));
 }
 
 #[tokio::test]
@@ -1234,7 +1231,7 @@ async fn test_last_quorum() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // WHEN no blocks exist then genesis should be returned
     {
@@ -1287,7 +1284,7 @@ async fn test_last_block_for_authority() {
     let context = Arc::new(context);
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
     // WHEN no blocks exist then genesis should be returned
     {

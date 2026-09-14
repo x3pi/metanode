@@ -1,11 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
@@ -34,8 +30,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let base_parallel_fetches = self.inner.context.parameters.commit_sync_parallel_fetches;
         let effective_parallel_fetches = if self.coordination_hub.is_catching_up() {
             // Turbo: 3x parallel fetches for catching up
-            (base_parallel_fetches * 3)
-                .min(self.inner.context.committee.size())
+            (base_parallel_fetches * 3).min(self.inner.context.committee.size())
         } else {
             base_parallel_fetches
         };
@@ -55,10 +50,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         let target_parallel_fetches = effective_parallel_fetches
             .min(committee_cap)
-            .min(
-                effective_batches_ahead
-                    .saturating_sub(self.fetched_ranges.len()),
-            );
+            .min(effective_batches_ahead.saturating_sub(self.fetched_ranges.len()));
         // Start new fetches if there are pending batches and available slots.
         loop {
             if self.inflight_fetches.len() >= target_parallel_fetches {
@@ -67,13 +59,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let Some(commit_range) = self.pending_fetches.pop_first() else {
                 break;
             };
-            self.inflight_fetches
-                .spawn(Self::fetch_loop(
-                    self.inner.clone(),
-                    commit_range,
-                    self.coordination_hub.is_catching_up(), // is_severe_lag
-                    self.coordination_hub.is_catching_up(), // is_sync_mode
-                ));
+            self.inflight_fetches.spawn(Self::fetch_loop(
+                self.inner.clone(),
+                commit_range,
+                self.coordination_hub.is_catching_up(), // is_severe_lag
+                self.coordination_hub.is_catching_up(), // is_sync_mode
+            ));
         }
 
         let metrics = &self.inner.context.metrics.node_metrics;
@@ -235,7 +226,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     is_epoch_boundary = true;
                 }
                 let peer_start = status.current_epoch_start_commit;
-                if peer_start > 0 && commit_range.start() < peer_start && commit_range.end() >= peer_start {
+                if peer_start > 0
+                    && commit_range.start() < peer_start
+                    && commit_range.end() >= peer_start
+                {
                     tracing::info!(
                         "[COMMIT-SYNCER] Truncating fetch range {:?} from {} to end at {} (peer's epoch {} starts at {})",
                         commit_range,
@@ -246,11 +240,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     );
                     commit_range = CommitRange::new(commit_range.start()..=peer_start - 1);
                     is_epoch_boundary = true;
-                } else if peer_start > 0 && commit_range.start() >= peer_start && commit_range.end() > status.last_commit_index {
+                } else if peer_start > 0
+                    && commit_range.start() >= peer_start
+                    && commit_range.end() > status.last_commit_index
+                {
                     // Also useful: don't fetch past the peer's last commit index if we know it.
                     let max_end = status.last_commit_index.max(commit_range.start());
                     if max_end < commit_range.end() {
-                         commit_range = CommitRange::new(commit_range.start()..=max_end);
+                        commit_range = CommitRange::new(commit_range.start()..=max_end);
                     }
                 }
                 if peer_start > 0 && commit_range.end() == peer_start - 1 {
@@ -263,7 +260,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             }
             Err(e) => {
-                tracing::debug!("Failed to query epoch status from {}: {}", target_authority, e);
+                tracing::debug!(
+                    "Failed to query epoch status from {}: {}",
+                    target_authority,
+                    e
+                );
                 // Continue with original range if query fails; legacy nodes might not support it.
             }
         }

@@ -55,8 +55,8 @@ use crate::{
     block::{BlockAPI, SignedBlock, VerifiedBlock},
     block_verifier::BlockVerifier,
     commit::{
-        CertifiedCommits, Commit, CommitAPI as _, CommitDigest, CommitRange,
-        CommitRef, TrustedCommit,
+        CertifiedCommits, Commit, CommitAPI as _, CommitDigest, CommitRange, CommitRef,
+        TrustedCommit,
     },
     commit_vote_monitor::CommitVoteMonitor,
     context::Context,
@@ -274,10 +274,14 @@ enum PhaseTransitionDecision {
     /// Stay in current phase, no action needed.
     Hold { reason: &'static str },
     /// Transition to a new phase.
-    Transition { to: crate::coordination_hub::NodeConsensusPhase },
+    Transition {
+        to: crate::coordination_hub::NodeConsensusPhase,
+    },
     /// Transition to new phase AND clear startup_sync_active first.
     /// Used when all startup recovery gates have been passed.
-    TransitionAndClearStartup { to: crate::coordination_hub::NodeConsensusPhase },
+    TransitionAndClearStartup {
+        to: crate::coordination_hub::NodeConsensusPhase,
+    },
     /// Seed the CommitVoteMonitor with execution state to break bootstrap deadlock.
     /// Used when Go has state but Rust DAG is empty and quorum == 0.
     SeedQuorum { commit_index: u32 },
@@ -308,7 +312,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             network_client,
             dag_state,
             dag_state_writer,
-            coordination_hub: coordination_hub.clone(),
+            _coordination_hub: coordination_hub.clone(),
         });
         let dag_commit = inner.dag_state.read().last_commit_index();
         // FORK-SAFETY: DO NOT initialize with `handled_commit`!
@@ -316,7 +320,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // we MUST start fetching from 0 to reconstruct the LeaderSchedule!
         // CommitProcessor will safely skip executing these already-handled commits.
         let synced_commit_index = dag_commit;
-        
+
         CommitSyncer {
             inner,
             inflight_fetches: JoinSet::new(),
@@ -379,69 +383,67 @@ impl CommitSyncerSupervisor {
         dag_state_writer: crate::dag_state_actor::DagStateWriter,
     ) -> CommitSyncerHandle {
         let (tx_shutdown, mut rx_shutdown) = oneshot::channel();
-        
-        let supervisor_task = tokio::task::spawn(
-            async move {
-                let mut restart_delay = Duration::from_secs(1);
-                loop {
-                    tracing::info!("🛡️ [SUPERVISOR] Starting CommitSyncer task...");
 
-                    // LIVENESS FIX: Before starting the new CommitSyncer, ensure
-                    // CommitVoteMonitor has a non-zero quorum if Go has already
-                    // processed blocks. Without this, the restarted CommitSyncer
-                    // sees quorum=0 → bootstrap genesis timeout → Healthy with
-                    // no proposals → permanent liveness stall after snapshot recovery.
-                    let highest_handled = commit_consumer_monitor.highest_handled_commit();
-                    if highest_handled > 0 {
-                        commit_vote_monitor.seed_from_execution_state(highest_handled);
-                        tracing::info!(
+        let supervisor_task = tokio::task::spawn(async move {
+            let mut restart_delay = Duration::from_secs(1);
+            loop {
+                tracing::info!("🛡️ [SUPERVISOR] Starting CommitSyncer task...");
+
+                // LIVENESS FIX: Before starting the new CommitSyncer, ensure
+                // CommitVoteMonitor has a non-zero quorum if Go has already
+                // processed blocks. Without this, the restarted CommitSyncer
+                // sees quorum=0 → bootstrap genesis timeout → Healthy with
+                // no proposals → permanent liveness stall after snapshot recovery.
+                let highest_handled = commit_consumer_monitor.highest_handled_commit();
+                if highest_handled > 0 {
+                    commit_vote_monitor.seed_from_execution_state(highest_handled);
+                    tracing::info!(
                             "🛡️ [SUPERVISOR] Pre-seeded CommitVoteMonitor with highest_handled={} before restart",
                             highest_handled
                         );
-                    }
+                }
 
-                    let syncer = CommitSyncer::new(
-                        context.clone(),
-                        core_thread_dispatcher.clone(),
-                        commit_vote_monitor.clone(),
-                        commit_consumer_monitor.clone(),
-                        block_verifier.clone(),
-                        transaction_certifier.clone(),
-                        network_client.clone(),
-                        dag_state.clone(),
-                        coordination_hub.clone(),
-                        adaptive_delay_state.clone(),
-                        dag_state_writer.clone(),
-                    );
-                    
-                    let mut handle = syncer.start();
+                let syncer = CommitSyncer::new(
+                    context.clone(),
+                    core_thread_dispatcher.clone(),
+                    commit_vote_monitor.clone(),
+                    commit_consumer_monitor.clone(),
+                    block_verifier.clone(),
+                    transaction_certifier.clone(),
+                    network_client.clone(),
+                    dag_state.clone(),
+                    coordination_hub.clone(),
+                    adaptive_delay_state.clone(),
+                    dag_state_writer.clone(),
+                );
 
-                    tokio::select! {
-                        res = &mut handle.schedule_task => {
-                            if let Err(e) = res {
-                                if e.is_panic() {
-                                    tracing::error!("🔴 [SUPERVISOR] CommitSyncer panicked! Restarting in {:?}...", restart_delay);
-                                } else {
-                                    tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
-                                }
+                let mut handle = syncer.start();
+
+                tokio::select! {
+                    res = &mut handle.schedule_task => {
+                        if let Err(e) = res {
+                            if e.is_panic() {
+                                tracing::error!("🔴 [SUPERVISOR] CommitSyncer panicked! Restarting in {:?}...", restart_delay);
                             } else {
-                                tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected terminal halt (e.g. epoch mismatch). Stopping supervisor.");
-                                break;
+                                tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
                             }
-                            
-                            tokio::time::sleep(restart_delay).await;
-                            // Exponential backoff capped at 10 seconds
-                            restart_delay = std::cmp::min(restart_delay * 2, Duration::from_secs(10));
-                        }
-                        _ = &mut rx_shutdown => {
-                            tracing::info!("🛡️ [SUPERVISOR] Shutdown signal received. Stopping CommitSyncer...");
-                            handle.stop().await;
+                        } else {
+                            tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected terminal halt (e.g. epoch mismatch). Stopping supervisor.");
                             break;
                         }
+
+                        tokio::time::sleep(restart_delay).await;
+                        // Exponential backoff capped at 10 seconds
+                        restart_delay = std::cmp::min(restart_delay * 2, Duration::from_secs(10));
+                    }
+                    _ = &mut rx_shutdown => {
+                        tracing::info!("🛡️ [SUPERVISOR] Shutdown signal received. Stopping CommitSyncer...");
+                        handle.stop().await;
+                        break;
                     }
                 }
             }
-        );
+        });
 
         CommitSyncerHandle {
             schedule_task: supervisor_task,
@@ -451,7 +453,7 @@ impl CommitSyncerSupervisor {
 }
 
 impl<C: NetworkClient> CommitSyncer<C> {
-    // Derived interval 
+    // Derived interval
     fn poll_interval(&self) -> Duration {
         let phase = self.coordination_hub.get_phase();
         if phase == crate::coordination_hub::NodeConsensusPhase::Healthy {
@@ -464,14 +466,19 @@ impl<C: NetworkClient> CommitSyncer<C> {
         match phase {
             crate::coordination_hub::NodeConsensusPhase::Initializing => Duration::from_secs(1),
             crate::coordination_hub::NodeConsensusPhase::CatchingUp => Duration::from_millis(150),
-            crate::coordination_hub::NodeConsensusPhase::Bootstrapping => Duration::from_millis(200),
+            crate::coordination_hub::NodeConsensusPhase::Bootstrapping => {
+                Duration::from_millis(200)
+            }
             crate::coordination_hub::NodeConsensusPhase::Aligning => Duration::from_millis(200),
             crate::coordination_hub::NodeConsensusPhase::Healthy => Duration::from_secs(2),
             crate::coordination_hub::NodeConsensusPhase::StateSyncing => Duration::from_secs(5),
         }
     }
 
-    fn transition_phase_and_kick(&mut self, next_phase: crate::coordination_hub::NodeConsensusPhase) {
+    fn transition_phase_and_kick(
+        &mut self,
+        next_phase: crate::coordination_hub::NodeConsensusPhase,
+    ) {
         let current_phase = self.coordination_hub.get_phase();
         if current_phase != next_phase {
             self.coordination_hub.set_phase(next_phase);
@@ -491,11 +498,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 // SPARSE DAG. We must reset it to give the active network 5 full seconds to send CertifiedCommits
                 // and naturally unlock the committer via the DAG Density Guard.
                 self.last_quorum_change_at = tokio::time::Instant::now();
-                
+
                 let core_dispatcher = self.inner.core_thread_dispatcher.clone();
                 tokio::spawn(async move {
                     tracing::info!("🏃 [LIVENESS] Kicking Core to resume proposals after transitioning to Healthy...");
-                    if let Err(e) = core_dispatcher.new_block(consensus_types::block::Round::MAX, true).await {
+                    if let Err(e) = core_dispatcher
+                        .new_block(consensus_types::block::Round::MAX, true)
+                        .await
+                    {
                         tracing::warn!("Failed to kick Core thread to resume proposals: {:?}", e);
                     }
                 });
@@ -557,14 +567,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
     }
 
-
     /// Execute the side effects of a transition decision.
     /// This is the ONLY place where state is mutated during update_state().
     fn apply_transition(&mut self, decision: PhaseTransitionDecision, input: &PhaseStateInput) {
         match decision {
             PhaseTransitionDecision::Hold { reason } => {
                 // No action needed — stay in current phase.
-                tracing::trace!("🛡️ [STATE-MACHINE] PhaseTransitionDecision::Hold - reason: {}", reason);
+                tracing::trace!(
+                    "🛡️ [STATE-MACHINE] PhaseTransitionDecision::Hold - reason: {}",
+                    reason
+                );
             }
 
             PhaseTransitionDecision::Transition { to } => {
@@ -578,31 +590,36 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 if self.coordination_hub.is_startup_sync_active() {
                     self.coordination_hub.set_startup_sync_active(false);
                 }
-                
+
                 // FORK-SAFETY FIX (May 2026): We DO NOT force unlock the committer here.
                 // We rely on `commit_manager.rs` to unlock the committer ONLY AFTER it processes
                 // 5 CertifiedCommits from the active network (DAG density guard) OR after
                 // the 15-second cluster deadlock timeout. This prevents sparse DAG forks.
-                
+
                 if input.current_phase != to {
                     self.transition_phase_and_kick(to);
                 }
             }
 
             PhaseTransitionDecision::SeedQuorum { commit_index } => {
-                let seeded = self.inner.commit_vote_monitor.seed_from_execution_state(commit_index);
+                let seeded = self
+                    .inner
+                    .commit_vote_monitor
+                    .seed_from_execution_state(commit_index);
                 if seeded {
                     tracing::warn!(
                         "🌱 [QUORUM-SEED] Seeded CommitVoteMonitor with Go execution state \
                          (commit_index={}) after network poll confirmed to break bootstrap deadlock.",
                         commit_index
                     );
-                    
+
                     // CRITICAL FIX: If we are seeding the quorum, it means the entire cluster
                     // was wiped or is starting fresh. There are no peers to fetch a LeaderSchedule
                     // from, and no peers to generate 300 commits. We MUST bypass ScheduleVerifying
                     // to prevent a permanent cluster deadlock.
-                    self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                    self.coordination_hub
+                        .recovery_barrier()
+                        .set_schedule_pre_verified();
                     if self.coordination_hub.is_schedule_recovery_pending() {
                         self.coordination_hub.set_schedule_recovery_pending(false);
                     }
@@ -628,7 +645,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // ScheduleVerifying, because our LeaderSchedule is default/stale. We must stay in
             // ScheduleVerifying until we process 300 commits to naturally rebuild it.
             if !input.schedule_recovery_pending {
-                self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
+                self.coordination_hub
+                    .recovery_barrier()
+                    .set_schedule_pre_verified();
             } else {
                 tracing::warn!(
                     "⚠️ [RECOVERY-BARRIER] Lag is 0, but schedule_recovery_pending=true. \
@@ -740,7 +759,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         self.update_state();
                         self.patch_baseline_if_needed().await;
                         let new_state = self.coordination_hub.get_phase();
-                        
+
                         let local_commit = self.inner.dag_state.read().last_commit_index();
                         let quorum_commit = self.get_effective_quorum_commit();
                         let lag = quorum_commit.saturating_sub(local_commit);
@@ -797,28 +816,16 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             self.last_known_local_commit = local_commit;
                         }
                         let liveness_stall_duration = now.duration_since(self.last_local_commit_change_at);
-                        if liveness_stall_duration >= Duration::from_secs(10)
-                            && local_commit > 0
-                            && self.coordination_hub.is_healthy()
-                        {
-                            tracing::error!(
-                                "🚨 [LIVENESS-STALL] DAG commit frozen at {} for {:.0}s (quorum={}). \
-                                 All nodes may have stalled simultaneously. \
-                                 Transitioning to Bootstrapping to kick consensus pipeline.",
-                                local_commit,
-                                liveness_stall_duration.as_secs_f64(),
-                                quorum_commit
-                            );
-                            self.coordination_hub.set_phase(
-                                crate::coordination_hub::NodeConsensusPhase::Bootstrapping
-                            );
-                            // Re-seed quorum from local state so bootstrap exit logic works
-                            self.inner.commit_vote_monitor.seed_from_execution_state(
-                                std::cmp::max(highest_handled, local_commit)
-                            );
-                            self.last_local_commit_change_at = now; // reset to avoid rapid re-triggering
-                            self.last_quorum_change_at = now;
-                        }
+
+                        // BACKPRESSURE-AWARE LIVENESS CHECK:
+                        // If highest_handled > go_confirmed, the Go execution layer is actively working
+                        // on a backlog. The DAG is naturally backpressured.
+                        let _go_confirmed = self.inner.commit_consumer_monitor.go_confirmed_commit();
+                        let _has_execution_backlog = highest_handled > _go_confirmed;
+
+                        // LIVENESS-STALL Bootstrapping escape REMOVED (Zero-Fork Architecture).
+                        // Instead, ACTIVE PEER SYNC RECOVERY below will actively poll peers
+                        // if liveness_stall_duration >= 5s and determine recovery purely via data.
 
                         // ════════════════════════════════════════════════════════
                         // STALL DETECTOR 3: All-zero deadlock after bootstrap.
@@ -1231,7 +1238,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 let mut max_peer_commit: u32 = 0;
                                 let mut polled_stake = inner.context.committee.stake(inner.context.own_index);
                                 let timeout = Duration::from_secs(2);
-                                
+
                                 for authority in inner.context.committee.authorities().map(|(i, _)| i) {
                                     if authority == inner.context.own_index {
                                         continue;
@@ -1304,12 +1311,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 // elections → fork. Instead, ACTIVELY fetch CertifiedCommits
                                 // from peers to rebuild the schedule.
                                 //
-                                // We NEVER unlock based on timeout here. The system MUST wait 
+                                // We NEVER unlock based on timeout here. The system MUST wait
                                 // until it successfully receives the commits to reconstruct the DAG.
                                 if is_schedule_pending {
                                     // ZERO-TIMEOUT (May 2026): Replace retry-count-based escalation
                                     // with data-driven block hash verification.
-                                    // 
+                                    //
                                     // OLD: After 3 retries (~15s), force-clear schedule_recovery_pending
                                     // NEW: Require block_hash_verified=true before clearing.
                                     // This ensures the node's state is bit-perfect against the network.
@@ -1356,7 +1363,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
                                 // ── Case C: Peers SAME + schedule confirmed ──
                                 // The entire cluster is at the same commit level, but no one is committing.
-                                // This is a Cluster Cold Start Deadlock! All nodes are waiting for 
+                                // This is a Cluster Cold Start Deadlock! All nodes are waiting for
                                 // CertifiedCommits to fill their sparse DAGs, but no node is producing them.
                                 // It is SAFE to unlock the local committer because if all nodes have identical
                                 // sparse DAGs, they will all deterministically produce identical subdags!
@@ -1383,7 +1390,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         let is_dag_empty = self.inner.dag_state.read().last_commit.is_none();
                         let catching_up_stall = now.duration_since(self.last_quorum_change_at);
                         let is_fetching = !self.inflight_fetches.is_empty();
-                        
+
                         if self.coordination_hub.is_catching_up()
                             && is_dag_empty
                             && highest_handled > 0
@@ -1471,7 +1478,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                 "⚡ [STATE-CHANGE] {:?} → {:?}, interval: {}ms → {}ms",
                                 old_state, new_state, old_ms, target_interval.as_millis()
                             );
-                            
+
                             if new_state == crate::coordination_hub::NodeConsensusPhase::Healthy {
                                 info!("🛌 [STANDBY MODE] CommitSyncer has entered Standby Mode. Sleeping until quorum advances...");
                                 // When switching to Healthy, the 2-second interval tick continues as a background heartbeat,
@@ -1559,9 +1566,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // Instead, we recover the LeaderSwapTable by fetching baseline reputation scores
         // directly from peers via `patch_baseline_if_needed()`.
         // ═══════════════════════════════════════════════════════════════════════
-        
+
         // Update CoordinationHub so Core can read it to prevent divergent local commits
-        self.coordination_hub.update_quorum_commit_index(quorum_commit_index);
+        self.coordination_hub
+            .update_quorum_commit_index(quorum_commit_index);
 
         let metrics = &self.inner.context.metrics.node_metrics;
         metrics
@@ -1616,8 +1624,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // leaving execution permanently deadlocked at DIGEST-GATE.
             let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled_index);
             let target_sync = self.synced_commit_index.max(local_commit_index);
-            
-            if target_sync > safe_jump_limit + 10 {
+
+            if target_sync > safe_jump_limit {
                 self.synced_commit_index = safe_jump_limit;
             } else {
                 self.synced_commit_index = target_sync;
@@ -1626,11 +1634,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         // If synced_commit_index was forcibly lowered, ensure highest_scheduled doesn't block it
         if let Some(scheduled) = self.highest_scheduled_index {
-            if scheduled > self.synced_commit_index && local_commit_index > highest_handled_index + 10 {
+            if scheduled > self.synced_commit_index && local_commit_index > highest_handled_index {
                 self.highest_scheduled_index = Some(self.synced_commit_index);
             }
         }
-
 
         let unhandled_commits_threshold = self.unhandled_commits_threshold();
         // Throttle noisy logs:
@@ -1680,7 +1687,6 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.last_state_log_at = now;
         }
 
-
         if now.duration_since(self.last_schedule_log_at) >= min_interval
             || lag_jump
             || quorum_commit_index != self.last_logged_quorum_commit_index
@@ -1712,7 +1718,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // When in sync mode, use larger batches and more aggressive scheduling
         let base_batch_size = self.inner.context.parameters.commit_sync_batch_size;
         // STATE MACHINE: Use state to determine batch size and threshold
-        let effective_batch_size = if self.coordination_hub.is_catching_up() { base_batch_size * 4 } else { base_batch_size };
+        let effective_batch_size = if self.coordination_hub.is_catching_up() {
+            base_batch_size * 4
+        } else {
+            base_batch_size
+        };
 
         // Compute effective threshold based on state severity
         let effective_threshold = if self.coordination_hub.is_catching_up() {
@@ -1738,7 +1748,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // STATE MACHINE: Healthy phase ONLY checks threshold. CatchingUp and other
             // phases ALWAYS schedule to prevent deadlock: if fetches are blocked due
             // to lag, the node can never catch up.
-            let fetch_threshold_index = if self.coordination_hub.is_healthy() { highest_handled_index.max(local_commit_index) } else { highest_handled_index };
+            let fetch_threshold_index = if self.coordination_hub.is_healthy() {
+                highest_handled_index.max(local_commit_index)
+            } else {
+                highest_handled_index
+            };
             if self.coordination_hub.is_healthy()
                 && fetch_threshold_index + effective_threshold < range_end
             {
@@ -1766,7 +1780,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // We ALWAYS run this (regardless of phase) to prevent the node from permanently stalling
         // if it misses a few broadcasted blocks and falls just short of a full batch.
         let scheduled_up_to = self.highest_scheduled_index.unwrap_or(fetch_after_index);
-        let fetch_threshold_index = if self.coordination_hub.is_healthy() { highest_handled_index.max(local_commit_index) } else { highest_handled_index };
+        let fetch_threshold_index = if self.coordination_hub.is_healthy() {
+            highest_handled_index.max(local_commit_index)
+        } else {
+            highest_handled_index
+        };
         if scheduled_up_to < quorum_commit_index
             && fetch_threshold_index + effective_threshold >= quorum_commit_index
         {
@@ -1783,8 +1801,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
         let highest_handled = self.inner.commit_consumer_monitor.highest_handled_commit();
         let dag_commit = self.inner.dag_state.read().last_commit_index();
         let is_recovery = self.coordination_hub.recovery_barrier().is_active();
-        
-        let needs_baseline_injection = is_recovery && highest_handled > 0 && dag_commit < highest_handled as u32;
+
+        let needs_baseline_injection =
+            is_recovery && highest_handled > 0 && dag_commit < highest_handled as u32;
 
         if needs_baseline_injection {
             self.synced_commit_index = highest_handled as u32;
@@ -1815,10 +1834,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             self.coordination_hub.is_schedule_recovery_pending() && self.synced_commit_index > 0
         };
 
-        if !needs_baseline_injection && !is_synthetic_baseline && !needs_schedule_recovery { return; }
-        
+        if !needs_baseline_injection && !is_synthetic_baseline && !needs_schedule_recovery {
+            return;
+        }
+
         tracing::info!("🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #{} (current cycle: {})", last_schedule_change_index, current_cycle);
-        
+
         // ════════════════════════════════════════════════════════════════
         // PARTITION SAFETY (May 2026):
         // This loop was previously unbounded — if ALL peers were down,
@@ -1833,55 +1854,89 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // ════════════════════════════════════════════════════════════════
         const MAX_BASELINE_ATTEMPTS: u32 = 30; // 30 × 1s = 30s max
         let mut baseline_attempt: u32 = 0;
-        
+
         loop {
             baseline_attempt += 1;
-            
+
             if baseline_attempt > MAX_BASELINE_ATTEMPTS {
                 tracing::error!(
                     "🚨 [BASELINE] Failed to fetch baseline commit #{} after {} attempts. \
                      ALL peers unreachable (network partition?). \
                      Skipping baseline — entering ScheduleVerifying for natural rebuild. \
                      Fork-safe: no proposals until schedule is verified.",
-                    prev_index, MAX_BASELINE_ATTEMPTS
+                    prev_index,
+                    MAX_BASELINE_ATTEMPTS
                 );
                 self.coordination_hub.set_schedule_recovery_pending(true);
                 return;
             }
-            let mut target_authorities = self.inner.context.committee.authorities()
-                .filter_map(|(i, _)| if i != self.inner.context.own_index { Some(i) } else { None })
+            let mut target_authorities = self
+                .inner
+                .context
+                .committee
+                .authorities()
+                .filter_map(|(i, _)| {
+                    if i != self.inner.context.own_index {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
-                
+
             use rand::seq::SliceRandom;
             target_authorities.shuffle(&mut rand::thread_rng());
-            
+
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
-            
+
             for authority in target_authorities.clone() {
                 if let Ok(Ok((serialized_commits, _, _))) = tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.inner.network_client.fetch_commits(authority, range.clone(), Duration::from_secs(4))
-                ).await {
+                    self.inner.network_client.fetch_commits(
+                        authority,
+                        range.clone(),
+                        Duration::from_secs(4),
+                    ),
+                )
+                .await
+                {
                     if let Some(serialized) = serialized_commits.first() {
                         if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
                             use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
-                            let timestamp_ms = commit.timestamp_ms(); 
+                            let timestamp_ms = commit.timestamp_ms();
                             let leader_round = commit.leader().round;
                             let digest = crate::commit::TrustedCommit::compute_digest(serialized);
-                            
+
                             // Extract reputation scores from the last schedule change boundary
                             let mut reputation_scores: Option<Vec<(AuthorityIndex, u64)>> = None;
                             if last_schedule_change_index > 0 {
-                                let schedule_range: crate::commit::CommitRange = (last_schedule_change_index..=last_schedule_change_index).into();
+                                let schedule_range: crate::commit::CommitRange =
+                                    (last_schedule_change_index..=last_schedule_change_index)
+                                        .into();
                                 if let Ok(Ok((_, _, schedule_infos))) = tokio::time::timeout(
                                     Duration::from_secs(5),
-                                    self.inner.network_client.fetch_commits(authority, schedule_range, Duration::from_secs(4))
-                                ).await {
+                                    self.inner.network_client.fetch_commits(
+                                        authority,
+                                        schedule_range,
+                                        Duration::from_secs(4),
+                                    ),
+                                )
+                                .await
+                                {
                                     if let Some(info_bytes) = schedule_infos.first() {
-                                        if let Ok(info) = bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes) {
-                                            if !info.reputation_scores.scores_per_authority.is_empty() {
+                                        if let Ok(info) =
+                                            bcs::from_bytes::<crate::commit::CommitInfo>(info_bytes)
+                                        {
+                                            if !info
+                                                .reputation_scores
+                                                .scores_per_authority
+                                                .is_empty()
+                                            {
                                                 let context_arc = self.inner.context.clone();
-                                                reputation_scores = Some(info.reputation_scores.authorities_by_score(context_arc));
+                                                reputation_scores = Some(
+                                                    info.reputation_scores
+                                                        .authorities_by_score(context_arc),
+                                                );
                                             }
                                         }
                                     }
@@ -1902,13 +1957,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     last_schedule_change_index
                                 );
                             }
-                            
+
                             let schedule_ready_to_recover = if last_schedule_change_index == 0 {
                                 true
                             } else {
                                 reputation_scores.is_some()
                             };
-                            
+
                             if needs_baseline_injection || is_synthetic_baseline {
                                 tracing::info!(
                                     "🧹 [STARTUP] Injecting perfect baseline (commit #{}) with network digest {} and timestamp {}.",
@@ -1921,9 +1976,18 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     timestamp_ms,
                                     reputation_scores.clone(),
                                 );
-                                tracing::info!("✅ Baseline commit #{} successfully patched.", prev_index);
+                                tracing::info!(
+                                    "✅ Baseline commit #{} successfully patched.",
+                                    prev_index
+                                );
                                 // Core requires an empty batch to process the new baseline and update its internal schedule
-                                let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                let _ =
+                                    self.inner
+                                        .core_thread_dispatcher
+                                        .add_certified_commits(
+                                            crate::commit::CertifiedCommits::new(vec![], vec![]),
+                                        )
+                                        .await;
                                 self.last_fetched_schedule_cycle = Some(current_cycle);
                             } else if needs_schedule_recovery {
                                 if schedule_ready_to_recover {
@@ -1960,7 +2024,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         self.last_fetched_schedule_cycle = Some(current_cycle);
 
                                         // IMMEDIATE UNLOCK: If DAG-GC-GUARD override is needed
-                                        // or if the node is locked, we don't clear sparse_dag_boundary 
+                                        // or if the node is locked, we don't clear sparse_dag_boundary
                                         // because it was removed. If it was overridden, we can clear it.
                                         if self.coordination_hub.is_healthy()
                                             && self.coordination_hub.is_dag_gc_guard_overridden()
@@ -1973,7 +2037,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                             // Kick Core to start proposing
                                             let disp = self.inner.core_thread_dispatcher.clone();
                                             tokio::spawn(async move {
-                                                let _ = disp.new_block(consensus_types::block::Round::MAX, true).await;
+                                                let _ = disp
+                                                    .new_block(
+                                                        consensus_types::block::Round::MAX,
+                                                        true,
+                                                    )
+                                                    .await;
                                             });
                                         }
                                     } else {
@@ -1981,12 +2050,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
                                         self.inner.dag_state_writer.inject_baseline_scores(scores);
                                         // Send empty commits list to trigger Core to process the new baseline
-                                        let _ = self.inner.core_thread_dispatcher.add_certified_commits(crate::commit::CertifiedCommits::new(vec![], vec![])).await;
+                                        let _ = self
+                                            .inner
+                                            .core_thread_dispatcher
+                                            .add_certified_commits(
+                                                crate::commit::CertifiedCommits::new(
+                                                    vec![],
+                                                    vec![],
+                                                ),
+                                            )
+                                            .await;
                                         self.last_fetched_schedule_cycle = Some(current_cycle);
                                     }
                                 }
                             }
-                            
+
                             return;
                         }
                     }
@@ -1996,7 +2074,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 tracing::error!(
                     "🚨 [BASELINE] Attempt {}/{}: ALL peers unreachable for commit #{}. \
                      Will degrade to ScheduleVerifying after {} more attempts.",
-                    baseline_attempt, MAX_BASELINE_ATTEMPTS, prev_index,
+                    baseline_attempt,
+                    MAX_BASELINE_ATTEMPTS,
+                    prev_index,
                     MAX_BASELINE_ATTEMPTS - baseline_attempt
                 );
             } else {
@@ -2018,9 +2098,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
     /// of continuing with stale epoch data. The outer ConsensusNode will then restart
     /// consensus with the correct epoch from `get_current_epoch()`.
     async fn discover_quorum_commit(&mut self) {
-        tracing::info!("🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index...");
+        tracing::info!(
+            "🔍 [BOOTSTRAP] Actively polling peers to discover true quorum_commit_index..."
+        );
         let timeout = Duration::from_secs(3);
-        
+
         let committee_size = self.inner.context.committee.authorities().count();
         if committee_size <= 1 {
             tracing::info!("ℹ️ [BOOTSTRAP] Single-node cluster detected. Skipping peer polling.");
@@ -2045,7 +2127,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // The Supervisor does NOT interfere because this loop never
         // panics or returns — it just waits until the network converges.
         // ════════════════════════════════════════════════════════════════
-        
+
         loop {
             attempt += 1;
             let mut polled_peers = 0u32;
@@ -2055,12 +2137,17 @@ impl<C: NetworkClient> CommitSyncer<C> {
             let mut highest_peer_epoch: u64 = self.inner.context.committee.epoch() as u64;
             // Track peers at immediately preceding epoch (for deadlock breaking)
             let mut peers_at_prev_epoch = 0u32;
-            
+
             for (authority, authority_info) in self.inner.context.committee.authorities() {
                 if authority == self.inner.context.own_index {
                     continue;
                 }
-                if let Ok(status) = self.inner.network_client.get_epoch_status(authority, timeout).await {
+                if let Ok(status) = self
+                    .inner
+                    .network_client
+                    .get_epoch_status(authority, timeout)
+                    .await
+                {
                     reachable_peers += 1;
                     if status.epoch == self.inner.context.committee.epoch() {
                         max_peer_commit = std::cmp::max(max_peer_commit, status.last_commit_index);
@@ -2075,7 +2162,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                     }
                 }
             }
-            
+
             // ── EXIT CONDITION 1: Found same-epoch peers ──────────────
             if polled_peers > 0 {
                 tracing::info!(
@@ -2083,7 +2170,8 @@ impl<C: NetworkClient> CommitSyncer<C> {
                      Updating quorum_commit_index.",
                     max_peer_commit, polled_peers, attempt
                 );
-                self.coordination_hub.update_quorum_commit_index(max_peer_commit as u32);
+                self.coordination_hub
+                    .update_quorum_commit_index(max_peer_commit as u32);
                 break;
             }
 
@@ -2113,7 +2201,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // The node won't actually propose blocks until peers also
             // transition to epoch N and enough DAG density is reached.
             // ════════════════════════════════════════════════════════════════
-            if polled_peers == 0 && peers_at_prev_epoch > 0 && peers_at_higher_epoch == 0 && attempt >= 3 {
+            if polled_peers == 0
+                && peers_at_prev_epoch > 0
+                && peers_at_higher_epoch == 0
+                && attempt >= 3
+            {
                 let our_epoch = self.inner.context.committee.epoch();
                 tracing::warn!(
                     "🔓 [BOOTSTRAP] EXIT 1b: EPOCH BOUNDARY DEADLOCK BREAKER — \
@@ -2121,7 +2213,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                      Peers likely lost quorum after this node transitioned first. \
                      Seeding quorum with commit_index=0 to unblock epoch {} startup. \
                      L1-L4 guards prevent proposals until DAG is ready. (attempt {})",
-                    peers_at_prev_epoch, our_epoch - 1, our_epoch, our_epoch, attempt
+                    peers_at_prev_epoch,
+                    our_epoch - 1,
+                    our_epoch,
+                    our_epoch,
+                    attempt
                 );
                 self.coordination_hub.update_quorum_commit_index(0);
                 break;
@@ -2150,7 +2246,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // ════════════════════════════════════════════════════════════
             if peers_at_higher_epoch > 0 && polled_peers == 0 {
                 let quorum_threshold = self.inner.context.committee.quorum_threshold();
-                
+
                 if higher_epoch_stake >= quorum_threshold {
                     tracing::warn!(
                         "⚠️ [BOOTSTRAP] EPOCH MISMATCH — QUORUM VERIFIED! \
@@ -2160,7 +2256,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         peers_at_higher_epoch, higher_epoch_stake, quorum_threshold,
                         highest_peer_epoch, self.inner.context.committee.epoch()
                     );
-                    self.inner.commit_vote_monitor.observe_highest_seen_epoch(highest_peer_epoch);
+                    self.inner
+                        .commit_vote_monitor
+                        .observe_highest_seen_epoch(highest_peer_epoch);
                     self.coordination_hub.update_quorum_commit_index(0);
                     break;
                 } else {
@@ -2171,8 +2269,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         "⚠️ [BOOTSTRAP] Attempt {}: Potential epoch mismatch — \
                          {} peer(s) at epoch {} but insufficient stake ({}/{}) \
                          for quorum confirmation. Waiting for more peers...",
-                        attempt, peers_at_higher_epoch, highest_peer_epoch,
-                        higher_epoch_stake, quorum_threshold
+                        attempt,
+                        peers_at_higher_epoch,
+                        highest_peer_epoch,
+                        higher_epoch_stake,
+                        quorum_threshold
                     );
                 }
             }
@@ -2180,7 +2281,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // ── NO EXIT: Keep waiting with exponential backoff ────────
             // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap
             let backoff_secs = std::cmp::min(2u64 << attempt.min(4), 30);
-            
+
             if reachable_peers == 0 {
                 // No peers reachable at all — network partition or all nodes down
                 if attempt % 10 == 0 {
@@ -2189,13 +2290,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                          Node is ISOLATED. Staying in safe pending state. \
                          Will resume automatically when peers come online. \
                          Next retry in {}s...",
-                        attempt, backoff_secs
+                        attempt,
+                        backoff_secs
                     );
                 } else {
                     tracing::warn!(
                         "⚠️ [BOOTSTRAP] Attempt {}: No peers reachable. \
                          Retrying in {}s... (node is safe — no consensus running)",
-                        attempt, backoff_secs
+                        attempt,
+                        backoff_secs
                     );
                 }
             } else {
@@ -2204,10 +2307,13 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 tracing::warn!(
                     "⚠️ [BOOTSTRAP] Attempt {}: {} peer(s) reachable but none at \
                      local epoch {}. Waiting for network convergence ({}s backoff)...",
-                    attempt, reachable_peers, self.inner.context.committee.epoch(), backoff_secs
+                    attempt,
+                    reachable_peers,
+                    self.inner.context.committee.epoch(),
+                    backoff_secs
                 );
             }
-            
+
             tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
     }
@@ -2310,7 +2416,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 // ═══════════════════════════════════════════════════════════
                 let is_catching_up = self.coordination_hub.is_catching_up();
                 let is_startup = self.coordination_hub.is_startup_sync_active();
-                
+
                 if is_startup || is_catching_up {
                     tracing::debug!(
                         "[COMMIT-SYNCER] BLOCKED synced_commit_index advance {} → {} \
@@ -2320,7 +2426,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 } else if local_handled_gap > 50 {
                     // ═══════════════════════════════════════════════════════════
                     // FORK-SAFETY GATE (May 2026 — Structural Fix):
-                    // 
+                    //
                     // When a node restarts with a fresh DAG, the DAG syncs from
                     // peers rapidly (local_commit grows to 400+ in seconds). But
                     // the CommitProcessor is still at next_expected=197, processing
@@ -2340,8 +2446,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                          (execution parity gap={}, handled={}, local_commit={}). \
                          Go execution layer is far behind DAG state. \
                          Blocking to prevent premature Healthy transition and fork.",
-                        self.synced_commit_index, local_commit, local_handled_gap,
-                        highest_handled, local_commit
+                        self.synced_commit_index,
+                        local_commit,
+                        local_handled_gap,
+                        highest_handled,
+                        local_commit
                     );
                 } else {
                     tracing::info!(
@@ -2357,7 +2466,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
         }
         info!(
             "[NODE4-DEBUG] fetched result: range={}→{}, synced_commit={}, pending_ranges={}",
-            commit_start, commit_end, self.synced_commit_index, self.fetched_ranges.len()
+            commit_start,
+            commit_end,
+            self.synced_commit_index,
+            self.fetched_ranges.len()
         );
 
         // Only add new blocks if at least some of them are not already synced.
@@ -2366,30 +2478,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .insert((commit_start..=commit_end).into(), certified_commits);
             info!(
                 "[NODE4-DEBUG] inserted fetched range {}→{} into fetched_ranges (len={})",
-                commit_start, commit_end, self.fetched_ranges.len()
+                commit_start,
+                commit_end,
+                self.fetched_ranges.len()
             );
         }
         // Try to process as many fetched blocks as possible.
         while let Some((fetched_commit_range, _commits)) = self.fetched_ranges.first_key_value() {
             // Only pop fetched_ranges if there is no gap with blocks already synced.
             // Note: start, end and synced_commit_index are all inclusive.
-            let (fetched_commit_range, commits) =
-                if fetched_commit_range.start() <= self.synced_commit_index + 1 {
-                    info!(
-                        "[NODE4-DEBUG] processing range {}→{} (synced={})",
-                        fetched_commit_range.start(),
-                        fetched_commit_range.end(),
-                        self.synced_commit_index
-                    );
-                    self.fetched_ranges
-                        .pop_first()
-                        .expect("checked first_key_value above")
-                } else {
-                    // Found gap between earliest fetched block and latest synced block.
-                    // Schedule a fetch for the missing range to fill the gap.
-                    let gap_start = self.synced_commit_index + 1;
-                    let gap_end = fetched_commit_range.start() - 1;
-                    tracing::warn!(
+            let (fetched_commit_range, commits) = if fetched_commit_range.start()
+                <= self.synced_commit_index + 1
+            {
+                info!(
+                    "[NODE4-DEBUG] processing range {}→{} (synced={})",
+                    fetched_commit_range.start(),
+                    fetched_commit_range.end(),
+                    self.synced_commit_index
+                );
+                self.fetched_ranges
+                    .pop_first()
+                    .expect("checked first_key_value above")
+            } else {
+                // Found gap between earliest fetched block and latest synced block.
+                // Schedule a fetch for the missing range to fill the gap.
+                let gap_start = self.synced_commit_index + 1;
+                let gap_end = fetched_commit_range.start() - 1;
+                tracing::warn!(
                         "[COMMIT-SYNCER] GAP DETECTED: fetched_range={}→{} but synced={}. Scheduling gap fill {}→{}",
                         fetched_commit_range.start(),
                         fetched_commit_range.end(),
@@ -2397,20 +2512,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         gap_start,
                         gap_end
                     );
-                    if gap_start <= gap_end {
-                        let gap_range: CommitRange = (gap_start..=gap_end).into();
-                        // Only insert if not already inflight or pending
-                        if !self.pending_fetches.iter().any(|r| r.start() <= gap_start && r.end() >= gap_end) {
-                            tracing::info!(
-                                "[COMMIT-SYNCER] Inserting gap-fill fetch: {:?}",
-                                gap_range
-                            );
-                            self.pending_fetches.insert(gap_range);
-                        }
+                if gap_start <= gap_end {
+                    let gap_range: CommitRange = (gap_start..=gap_end).into();
+                    // Only insert if not already inflight or pending
+                    if !self
+                        .pending_fetches
+                        .iter()
+                        .any(|r| r.start() <= gap_start && r.end() >= gap_end)
+                    {
+                        tracing::info!("[COMMIT-SYNCER] Inserting gap-fill fetch: {:?}", gap_range);
+                        self.pending_fetches.insert(gap_range);
                     }
-                    metrics.commit_sync_gap_on_processing.inc();
-                    break;
-                };
+                }
+                metrics.commit_sync_gap_on_processing.inc();
+                break;
+            };
             // Avoid sending to Core a whole batch of already synced blocks.
             if fetched_commit_range.end() <= self.synced_commit_index {
                 continue;
@@ -2446,7 +2562,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // CertifiedCommit before it can reach the CommitProcessor to unblock it.
             // ═══════════════════════════════════════════════════════════════════════
             for commit in commits.commits() {
-                self.inner.commit_vote_monitor.inject_certified_commit(commit.index(), commit.digest());
+                self.inner
+                    .commit_vote_monitor
+                    .inject_certified_commit(commit.index(), commit.digest());
             }
 
             match self
@@ -2501,7 +2619,10 @@ impl<C: NetworkClient> CommitSyncer<C> {
             // FORK-SAFETY: Track that we fetched REAL commits from the network.
             // This counter gates the CatchingUp→Healthy transition to prevent
             // false parity from baseline-only synced_commit_index.
-            let commits_in_range = fetched_commit_range.end().saturating_sub(fetched_commit_range.start()) + 1;
+            let commits_in_range = fetched_commit_range
+                .end()
+                .saturating_sub(fetched_commit_range.start())
+                + 1;
             self.network_synced_commits += commits_in_range as u64;
 
             // RATE-LIMIT RESET: Removed active-sync schedule recovery rate limiter
@@ -2578,7 +2699,7 @@ struct Inner<C: NetworkClient> {
     network_client: Arc<C>,
     dag_state: Arc<RwLock<DagState>>,
     dag_state_writer: crate::dag_state_actor::DagStateWriter,
-    coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+    _coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
 }
 
 impl<C: NetworkClient> Inner<C> {
@@ -2590,7 +2711,7 @@ impl<C: NetworkClient> Inner<C> {
         commit_range: CommitRange,
         serialized_commits: Vec<Bytes>,
         serialized_vote_blocks: Vec<Bytes>,
-        _is_epoch_boundary: bool,
+        is_epoch_boundary: bool,
         is_catching_up: bool,
         is_historical: bool,
     ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>)> {
@@ -2653,13 +2774,14 @@ impl<C: NetworkClient> Inner<C> {
             // commit range spans epoch boundaries (e.g., snapshot restore). These blocks
             // are already quorum-certified, so re-checking epoch is incorrect and causes
             // permanent sync stalls (the "Block has wrong epoch" deadlock).
-            let (block, reject_transaction_votes) =
-                self.block_verifier.verify_for_commit_sync(block, serialized)?;
+            let (block, reject_transaction_votes) = self
+                .block_verifier
+                .verify_for_commit_sync(block, serialized)?;
             if self.context.protocol_config.mysticeti_fastpath() {
                 self.transaction_certifier
                     .add_voted_blocks(vec![(block.clone(), reject_transaction_votes)]);
             }
-            
+
             // FEED VOTE BLOCKS TO MONITOR:
             // Crucial for zero-timeout peer_commit_attestation in CommitProcessor.
             // If we don't observe these blocks, the monitor will stay at Insufficient
@@ -2704,16 +2826,38 @@ impl<C: NetworkClient> Inner<C> {
         //   commit chain integrity (previous_digest chaining verified above).
         // ═══════════════════════════════════════════════════════════════════
         let is_dag_empty = self.dag_state.read().last_commit.is_none();
-        let is_mismatched_epoch = vote_blocks.iter().any(|b| b.epoch() != self.context.committee.epoch());
+        let is_mismatched_epoch = vote_blocks
+            .iter()
+            .any(|b| b.epoch() != self.context.committee.epoch());
         let local_dag_commit = self.dag_state.read().last_commit_index();
         let is_historical_for_us = commit_range.end() <= local_dag_commit;
-        if is_dag_empty {
+        let has_any_digest_data = self.commit_vote_monitor.has_any_digest_data();
+        let (total_votes, _) = self
+            .commit_vote_monitor
+            .vote_count_for_index(end_commit_ref.index);
+        let is_true_cold_start = !has_any_digest_data && total_votes == 0;
+
+        if is_true_cold_start {
             tracing::info!(
-                "🔓 [COMMIT-SYNCER] Bypassing quorum verification for empty DAG (cold-start / snapshot recovery). \
+                "🔓 [COMMIT-SYNCER] Bypassing quorum verification for TRUE cold-start (no peer data). \
                  Trusting commit sequence from single peer {} based on cryptographic chaining.",
                 peer
             );
-        } else if _is_epoch_boundary || is_catching_up || is_historical || is_historical_for_us || is_mismatched_epoch || self.coordination_hub.get_phase() != crate::coordination_hub::NodeConsensusPhase::Healthy {
+        } else if is_dag_empty && (!has_any_digest_data || total_votes == 0) {
+            tracing::info!("⏳ [COMMIT-SYNCER] Delaying quorum verification for partial cold-start / early boot for end commit {}. Waiting for peers.", end_commit_ref);
+            return Err(ConsensusError::NotEnoughCommitVotes {
+                commit: Box::new(end_commit.clone()),
+                stake: 0,
+                peer,
+            });
+        } else if is_epoch_boundary
+            || is_catching_up
+            || is_historical
+            || is_historical_for_us
+            || is_mismatched_epoch
+            || self._coordination_hub.get_phase()
+                != crate::coordination_hub::NodeConsensusPhase::Healthy
+        {
             tracing::info!(
                 "🔓 [COMMIT-SYNCER] Bypassing quorum verification for commit {} from peer {} \
                  (historical / epoch boundary / catching up sync / local dag match / mismatched epoch / non-healthy phase). Cryptographic chaining guarantees safety.",
@@ -2750,12 +2894,12 @@ impl<C: NetworkClient> Inner<C> {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use super::{PhaseStateInput, PhaseTransitionDecision};
     use bytes::Bytes;
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockRef, Round};
-    use tokio::sync::mpsc;
     use parking_lot::RwLock;
-    use super::{PhaseStateInput, PhaseTransitionDecision};
+    use tokio::sync::mpsc;
 
     use crate::{
         block::{BlockAPI, TestBlock, VerifiedBlock},
@@ -2887,8 +3031,7 @@ mod tests {
         let network_client = Arc::new(FakeNetworkClient::default());
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             block_verifier.clone(),
@@ -2922,7 +3065,9 @@ mod tests {
         // Force highest_accepted_round > 1 to bypass cold-start fast-forward logic,
         // which would otherwise skip scheduling fetches from index 1 to 10.
         let test_block = TestBlock::new(2, 0).build();
-        dag_state.write().accept_block(VerifiedBlock::new_for_test(test_block));
+        dag_state
+            .write()
+            .accept_block(VerifiedBlock::new_for_test(test_block));
 
         // Observe round 15 blocks voting for commit 10 from authorities 0 to 2 in CommitVoteMonitor
         for i in 0..3 {
@@ -2999,7 +3144,9 @@ mod tests {
     // exact "DAG has real local progress, but the bookkeeping counter that gates
     // CatchingUp -> Healthy hasn't caught up" state that reproduced the permanent
     // single-validator livelock this covers.
-    fn build_catching_up_syncer_with_one_commit(committee_size: usize) -> CommitSyncer<FakeNetworkClient> {
+    fn build_catching_up_syncer_with_one_commit(
+        committee_size: usize,
+    ) -> CommitSyncer<FakeNetworkClient> {
         let (context, _) = Context::new_for_test(committee_size);
         let context = Arc::new(context);
         let block_verifier = Arc::new(NoopBlockVerifier {});
@@ -3119,23 +3266,38 @@ mod tests {
         // Case 1: lag == 0, block_hash_verified == true -> Healthy
         let input_lag0 = sample_input(0, true);
         let dec0 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag0);
-        assert!(matches!(dec0, PhaseTransitionDecision::TransitionAndClearStartup { to: NodeConsensusPhase::Healthy }));
+        assert!(matches!(
+            dec0,
+            PhaseTransitionDecision::TransitionAndClearStartup {
+                to: NodeConsensusPhase::Healthy
+            }
+        ));
 
         // Case 2: lag == 1 (moving-target live cluster), block_hash_verified == true -> Healthy
         let input_lag1 = sample_input(1, true);
         let dec1 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag1);
-        assert!(matches!(dec1, PhaseTransitionDecision::TransitionAndClearStartup { to: NodeConsensusPhase::Healthy }));
+        assert!(matches!(
+            dec1,
+            PhaseTransitionDecision::TransitionAndClearStartup {
+                to: NodeConsensusPhase::Healthy
+            }
+        ));
 
         // Case 3: lag == 1, but block_hash_verified == false -> Gate 5 MUST hold (Zero-Fork Invariant)
         let input_lag1_unverified = sample_input(1, false);
-        let dec1_unverified = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag1_unverified);
-        assert!(matches!(dec1_unverified, PhaseTransitionDecision::Hold { reason } if reason.contains("block hash not verified")));
+        let dec1_unverified =
+            CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag1_unverified);
+        assert!(
+            matches!(dec1_unverified, PhaseTransitionDecision::Hold { reason } if reason.contains("block hash not verified"))
+        );
 
         // Case 4: lag == 2 -> Gate 1 MUST hold (lag > 1)
         let input_lag2 = sample_input(2, true);
         let dec2 = CommitSyncer::<FakeNetworkClient>::determine_startup_sync_exit(&input_lag2);
-        assert!(matches!(dec2, PhaseTransitionDecision::Hold { reason } if reason.contains("parity not reached")));
+        assert!(
+            matches!(dec2, PhaseTransitionDecision::Hold { reason } if reason.contains("parity not reached"))
+        );
     }
 }
-pub mod fetcher;
 pub mod cold_start;
+pub mod fetcher;

@@ -1,10 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    pin::Pin,
-    sync::Arc,
-};
+use std::{pin::Pin, sync::Arc};
 
 use consensus_config::AuthorityIndex;
 use futures::{ready, task, Stream};
@@ -12,11 +9,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::ReusableBoxFuture;
 use tracing::{info, warn};
 
-use crate::{
-    block::ExtendedBlock,
-    context::Context,
-    error::ConsensusError,
-};
+use crate::{block::ExtendedBlock, context::Context, error::ConsensusError};
 
 struct Counter {
     count: usize,
@@ -176,4 +169,3 @@ async fn make_recv_future<T: Clone>(
     let result = rx.recv().await;
     (result, rx)
 }
-

@@ -170,7 +170,9 @@ impl RocksDBStore {
         fail_point!("consensus-store-before-write");
 
         // Wait here if Go is currently copying RocksDB for a snapshot
-        let _guard = RUST_EXECUTION_LOCK.read().expect("Failed to acquire RUST_EXECUTION_LOCK for RocksDB write");
+        let _guard = RUST_EXECUTION_LOCK
+            .read()
+            .expect("Failed to acquire RUST_EXECUTION_LOCK for RocksDB write");
 
         let mut batch = self.blocks.batch();
         for block in write_batch.blocks {
@@ -379,24 +381,30 @@ impl Store for RocksDBStore {
         let mut commits = vec![];
         let start_key = (range.start(), CommitDigest::MIN);
         let end_key = (range.end(), CommitDigest::MAX);
-        
+
         tracing::trace!(
             "🔍 [SCAN_COMMITS] Searching range: {:?} -> start_key: {:?}, end_key: {:?}",
-            range, start_key.0, end_key.0
+            range,
+            start_key.0,
+            end_key.0
         );
 
         let mut count = 0;
-        for result in self.commits.safe_range_iter((
-            Included(start_key),
-            Included(end_key),
-        )) {
+        for result in self
+            .commits
+            .safe_range_iter((Included(start_key), Included(end_key)))
+        {
             count += 1;
             let ((index, digest), serialized) = result?;
-            
+
             if count == 1 {
-                tracing::trace!("🔍 [SCAN_COMMITS] First commit found: index={}, digest={:?}", index, digest);
+                tracing::trace!(
+                    "🔍 [SCAN_COMMITS] First commit found: index={}, digest={:?}",
+                    index,
+                    digest
+                );
             }
-            
+
             let commit = TrustedCommit::new_trusted(
                 bcs::from_bytes(&serialized).map_err(ConsensusError::MalformedCommit)?,
                 serialized,
@@ -404,10 +412,11 @@ impl Store for RocksDBStore {
             assert_eq!(commit.digest(), digest);
             commits.push(commit);
         }
-        
+
         tracing::trace!(
             "🔍 [SCAN_COMMITS] Found {} commits for range {:?}",
-            commits.len(), range
+            commits.len(),
+            range
         );
         Ok(commits)
     }

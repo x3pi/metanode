@@ -129,9 +129,7 @@ impl ScoringSubdag {
                     commit_range.extend_to(subdag.commit_ref.index);
                 } else if subdag.commit_ref.index < commit_range.start() {
                     // Historical commit — expand range start downward
-                    *commit_range = CommitRange::new(
-                        subdag.commit_ref.index..=commit_range.end(),
-                    );
+                    *commit_range = CommitRange::new(subdag.commit_ref.index..=commit_range.end());
                 }
                 // else: index already within range, no expansion needed
             }

@@ -8,8 +8,8 @@ use consensus_core::{
     NoopBlockVerifier, TransactionCertifier,
 };
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use tokio::sync::mpsc;
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::mpsc;
 
 // The fixture and helper functions are adapted from consensus/core/src/commit_finalizer.rs tests.
 struct BenchFixture {
@@ -33,16 +33,14 @@ impl BenchFixture {
             Arc::new(MemStore::new()),
         )));
         let linearizer = Linearizer::new(context.clone(), dag_state.clone());
-        let (blocks_sender, _blocks_receiver) =
-            monitored_mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = monitored_mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),
             dag_state.clone(),
             blocks_sender,
         );
-        let (commit_sender, _commit_receiver) =
-            monitored_mpsc::unbounded_channel();
+        let (commit_sender, _commit_receiver) = monitored_mpsc::unbounded_channel();
         let commit_finalizer = CommitFinalizer::new(
             context.clone(),
             dag_state.clone(),

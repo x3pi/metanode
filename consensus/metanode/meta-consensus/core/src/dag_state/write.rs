@@ -14,7 +14,9 @@ use consensus_types::block::{BlockRef, Round, TransactionIndex};
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{CommitAPI as _, CommitIndex, CommitInfo, CommitRange, CommitRef, CommitVote, TrustedCommit},
+    commit::{
+        CommitAPI as _, CommitIndex, CommitInfo, CommitRange, CommitRef, CommitVote, TrustedCommit,
+    },
     dag_state::{dag_state_impl::DagState, types::BlockInfo},
     leader_scoring::ReputationScores,
     storage::WriteBatch,
@@ -287,10 +289,12 @@ impl DagState {
     pub fn add_commit(&mut self, commit: TrustedCommit) {
         let time_diff = if let Some(last_commit) = &self.last_commit {
             if commit.index() <= last_commit.index() {
-                let local_commits = self.store.scan_commits((commit.index()..=commit.index()).into())
+                let local_commits = self
+                    .store
+                    .scan_commits((commit.index()..=commit.index()).into())
                     .unwrap_or_default();
                 let local_commit_opt = local_commits.into_iter().next();
-                
+
                 if let Some(local_commit) = local_commit_opt {
                     if local_commit.digest() != commit.digest() {
                         tracing::warn!(
@@ -298,7 +302,8 @@ impl DagState {
                             commit.index(),
                             commit.digest()
                         );
-                        self.commits_to_delete.push((local_commit.index(), local_commit.digest()));
+                        self.commits_to_delete
+                            .push((local_commit.index(), local_commit.digest()));
                         self.commits_to_write.push(commit.clone());
                         if Some(commit.index()) == self.last_commit.as_ref().map(|c| c.index()) {
                             self.last_commit = Some(commit);
@@ -306,7 +311,7 @@ impl DagState {
                         return;
                     }
                 }
-                
+
                 tracing::warn!(
                     "⏭️ [SCHEDULE-RECOVERY] Skipping DagState state update for historical commit {} (last commit index {}). This is EXPECTED during LeaderSwapTable reconstruction.",
                     commit.index(),
@@ -326,7 +331,9 @@ impl DagState {
                 );
                 0
             } else {
-                commit.timestamp_ms().saturating_sub(last_commit.timestamp_ms())
+                commit
+                    .timestamp_ms()
+                    .saturating_sub(last_commit.timestamp_ms())
             };
             time_diff
         } else {
@@ -633,7 +640,11 @@ impl DagState {
                 store.write(write_batch)
             };
             write_result.unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
-            context.metrics.node_metrics.dag_state_store_write_count.inc();
+            context
+                .metrics
+                .node_metrics
+                .dag_state_store_write_count
+                .inc();
             // Notify waiters that flush is complete
             let _ = tx_flush.send(());
             let _ = tx_chain.send(());

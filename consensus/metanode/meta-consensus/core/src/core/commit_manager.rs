@@ -39,10 +39,7 @@ impl Core {
                 commits
             }
             Err(e) => {
-                tracing::error!(
-                    "[NODE4-DEBUG] filter_new_commits FAILED: {:?}",
-                    e
-                );
+                tracing::error!("[NODE4-DEBUG] filter_new_commits FAILED: {:?}", e);
                 return Err(e);
             }
         };
@@ -61,16 +58,12 @@ impl Core {
                     subdags.len(),
                     new_commit_index
                 );
-
             }
             Err(e) => {
                 tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
                 return Err(e);
             }
         }
-
-
-
 
         // Try to propose now since there are new blocks accepted.
         self.try_propose(false)?;
@@ -124,14 +117,15 @@ impl Core {
             if self.last_decided_leader.round < current_dag_leader.round {
                 tracing::warn!(
                     "🚀 [COLD-START] Fast-forwarding Core::last_decided_leader from round {} to {}",
-                    self.last_decided_leader.round, current_dag_leader.round
+                    self.last_decided_leader.round,
+                    current_dag_leader.round
                 );
                 self.last_decided_leader = current_dag_leader;
             }
-                
+
             // CRITICAL FIX: Restore LeaderSchedule from the baseline if available.
             // We MUST do this here before `commits_until_update` is calculated so that
-            // the synced commits evaluate against the correct pre-calculated schedule 
+            // the synced commits evaluate against the correct pre-calculated schedule
             // instead of an empty default schedule.
             // Note: This must run independently of the `last_decided_leader` check,
             // because during snapshot restore, last_decided_leader starts equal to current_dag_leader!
@@ -150,14 +144,16 @@ impl Core {
                 self.leader_schedule.update_from_baseline_scores(
                     self.context.clone(),
                     self.dag_state.read().last_commit_index(),
-                    scores
+                    scores,
                 );
-                
-                // Since the schedule is now fully restored and correct based on the network's 
+
+                // Since the schedule is now fully restored and correct based on the network's
                 // baseline, we DO NOT need to wait for a 300-commit cycle to verify it.
                 // We can tell the RecoveryBarrier to bypass the ScheduleVerifying phase!
-                self.coordination_hub.recovery_barrier().set_schedule_pre_verified();
-                
+                self.coordination_hub
+                    .recovery_barrier()
+                    .set_schedule_pre_verified();
+
                 if self.coordination_hub.is_schedule_recovery_pending() {
                     tracing::info!("🛡️ [SCHEDULE-RECOVERY] Baseline scores injected. UNBLOCKING local committer.");
                     self.coordination_hub.set_schedule_recovery_pending(false);
@@ -208,7 +204,7 @@ impl Core {
 
                     // DO NOT VERIFY THE SCHEDULE!
                     // This keeps the `is_schedule_recovery_pending()` guard active!
-                    
+
                     let propagation_scores = self
                         .leader_schedule
                         .leader_swap_table
@@ -231,7 +227,7 @@ impl Core {
 
                     // UNIFIED RECOVERY BARRIER (May 2026):
                     self.coordination_hub.recovery_barrier().schedule_verified();
-                    
+
                     if self.coordination_hub.is_schedule_recovery_pending() {
                         tracing::warn!("🛡️ [SCHEDULE-RECOVERY] Hit schedule update boundary, but keeping local committer blocked because DAG is sparse from snapshot recovery.");
                     }
@@ -275,7 +271,8 @@ impl Core {
                 .flat_map(|c| c.blocks())
                 .cloned()
                 .collect::<Vec<_>>();
-            self.block_manager.try_accept_committed_blocks(blocks.clone());
+            self.block_manager
+                .try_accept_committed_blocks(blocks.clone());
 
             // FIX: Ensure that blocks from certified commits are added to TransactionCertifier.
             // This prevents CommitFinalizer from panicking with "No vote info found" when it
@@ -321,7 +318,7 @@ impl Core {
                 //    leader locally that differs from the network, causing a metadata fork.
                 // 2. The DAG density check is unsafe because it permanently stalls the entire network
                 //    if any round naturally misses a block (e.g. node offline, delayed proposal).
-                // 
+                //
                 // Why it is safe without them:
                 // After a DAG wipe + fast-forward, last_commit_leader is round 0.
                 // The local committer evaluates down to round 1. Since ancient rounds are wiped,
@@ -339,7 +336,10 @@ impl Core {
                 // Only CertifiedCommits (network-verified) are safe to process during catch-up.
                 // FORK-PREVENTION: Also block if STARTUP-SYNC is active, even if lag=0 (Healthy),
                 // because the historical DAG is still sparse and under construction.
-                if self.coordination_hub.is_catching_up() || self.coordination_hub.is_state_syncing() || self.coordination_hub.is_startup_sync_active() {
+                if self.coordination_hub.is_catching_up()
+                    || self.coordination_hub.is_state_syncing()
+                    || self.coordination_hub.is_startup_sync_active()
+                {
                     tracing::info!(
                         "🛡️ [PHASE-GUARD] Blocking local committer. Node is in {:?} phase (startup_sync_active={}). \
                          Waiting for DAG to fully catch up.",
@@ -354,20 +354,25 @@ impl Core {
                 // Previously, we blocked the local committer here if `next_leader_round <= gc_round`
                 // because the DAG was considered sparse and evaluating it locally would produce
                 // divergent "Skip" decisions.
-                // 
-                // However, DagState has been patched to fetch missing GC-ed blocks directly 
+                //
+                // However, DagState has been patched to fetch missing GC-ed blocks directly
                 // from RocksDB (via `get_uncommitted_blocks_at_round`). This guarantees that the
-                // committer evaluates the EXACT same dense DAG state deterministically, eliminating 
+                // committer evaluates the EXACT same dense DAG state deterministically, eliminating
                 // the fork risk without causing cluster deadlocks during cold starts or fast-forwards.
                 // ═══════════════════════════════════════════════════════════════════
 
                 // FAST-PATH REJECTION: Abort early without quorum for a round.
-                // To decide a leader at `next_leader_round`, we need at least some blocks 
-                // in the voting round (`next_leader_round + 1`). If the voting round is completely 
+                // To decide a leader at `next_leader_round`, we need at least some blocks
+                // in the voting round (`next_leader_round + 1`). If the voting round is completely
                 // empty, it is impossible to reach a quorum, so we can safely break early to save CPU.
                 let next_leader_round = self.last_decided_leader.round + 1;
                 let voting_round = next_leader_round + 1;
-                if self.dag_state.read().get_uncommitted_blocks_at_round(voting_round).is_empty() {
+                if self
+                    .dag_state
+                    .read()
+                    .get_uncommitted_blocks_at_round(voting_round)
+                    .is_empty()
+                {
                     break;
                 }
 
@@ -414,9 +419,11 @@ impl Core {
             );
 
             // TODO: refcount subdags
-            let subdags = self
-                .commit_observer
-                .handle_commit(sequenced_leaders, precomputed_commits, local)?;
+            let subdags = self.commit_observer.handle_commit(
+                sequenced_leaders,
+                precomputed_commits,
+                local,
+            )?;
 
             // Update adaptive delay state with new commit index
             if let Some(adaptive_delay_state) = &self.adaptive_delay_state {
@@ -438,33 +445,36 @@ impl Core {
         // ancestor blocks → produces commits with different block sets → different digest.
         // The certified commits are already network-verified (2f+1 certifiers), so safety holds.
         for sub_dag in &mut committed_sub_dags {
-            if let Some(certified_commit) = certified_commits_map.remove(&sub_dag.commit_ref.index) {
+            if let Some(certified_commit) = certified_commits_map.remove(&sub_dag.commit_ref.index)
+            {
                 if certified_commit.reference() != sub_dag.commit_ref {
                     warn!(
                         "⚠️ [COLD-START] Commit digest mismatch at index {} \
                          (certified={:?}, local={:?}). \
                          Expected during snapshot restoration when ancestor blocks are missing. \
                          Using certified commit data (already network-verified).",
-                        sub_dag.commit_ref.index, certified_commit.reference(), sub_dag.commit_ref
+                        sub_dag.commit_ref.index,
+                        certified_commit.reference(),
+                        sub_dag.commit_ref
                     );
                 }
-                
+
                 // FORK-SAFETY FIX (May 2026): UNCONDITIONAL OVERRIDE
-                // Even if the leader digest matches, the local sparse DAG might have linearized 
-                // a different subset of ancestor blocks, resulting in a DIFFERENT timestamp_ms 
-                // or transaction sequence. We MUST ALWAYS override the entire subdag with the 
+                // Even if the leader digest matches, the local sparse DAG might have linearized
+                // a different subset of ancestor blocks, resulting in a DIFFERENT timestamp_ms
+                // or transaction sequence. We MUST ALWAYS override the entire subdag with the
                 // network's CertifiedCommit data to guarantee bit-perfect execution parity.
-                
+
                 // Force the authoritative network data to override the sparse local DAG's linearization
                 sub_dag.blocks = certified_commit.blocks().to_vec();
                 sub_dag.commit_ref = certified_commit.reference();
-                
+
                 // Ensure the entire SubDag is mathematically identical to the network
                 // by copying the leader and execution metadata.
                 sub_dag.leader = certified_commit.leader();
                 sub_dag.leader_address = certified_commit.leader_address().to_vec();
                 sub_dag.global_exec_index = certified_commit.global_exec_index();
-                
+
                 // The network's CertifiedCommit timestamp is authoritative.
                 sub_dag.timestamp_ms = certified_commit.timestamp_ms();
             }
@@ -510,7 +520,7 @@ impl Core {
                     let local_commits = self.dag_state.read().store().scan_commits((commit.index()..=commit.index()).into())
                         .unwrap_or_default();
                     let local_commit_opt = local_commits.into_iter().next();
-                    
+
                     if let Some(local_commit) = local_commit_opt {
                         if local_commit.digest() != commit.digest() {
                             tracing::warn!(
@@ -546,7 +556,8 @@ impl Core {
                 tracing::warn!(
                     "⚠️ [COLD-START] Expected commit index {}, but received {}. \
                      This is EXPECTED during snapshot restore when Node jumps forward.",
-                    last_commit_index + 1, commit.index()
+                    last_commit_index + 1,
+                    commit.index()
                 );
             }
         }

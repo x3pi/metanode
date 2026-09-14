@@ -3,8 +3,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::sync::mpsc::UnboundedSender;
 use parking_lot::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -66,7 +66,8 @@ impl CommitObserver {
         epoch_base_index: u64,
     ) -> Self {
         let store = dag_state.read().store();
-        let mut commit_interpreter = Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer);
+        let mut commit_interpreter =
+            Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer);
         commit_interpreter.set_epoch_base_index(epoch_base_index);
         let commit_finalizer_handle = CommitFinalizer::start(
             context.clone(),
@@ -120,7 +121,8 @@ impl CommitObserver {
         &mut self,
         epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
     ) {
-        self.commit_interpreter.set_epoch_eth_addresses(epoch_eth_addresses);
+        self.commit_interpreter
+            .set_epoch_eth_addresses(epoch_eth_addresses);
     }
 
     /// Creates and returns a list of committed subdags containing committed blocks, from a sequence
@@ -141,7 +143,9 @@ impl CommitObserver {
             .with_label_values(&["CommitObserver::handle_commit"])
             .start_timer();
 
-        let mut committed_sub_dags = self.commit_interpreter.handle_commit(committed_leaders, precomputed_commits);
+        let mut committed_sub_dags = self
+            .commit_interpreter
+            .handle_commit(committed_leaders, precomputed_commits);
         self.report_metrics(&committed_sub_dags);
 
         // Set if the commit is produced from local DAG, or received through commit sync.
@@ -172,7 +176,7 @@ impl CommitObserver {
                      Task died. Restarting CommitFinalizer automatically.",
                     commit.commit_ref, e
                 );
-                
+
                 self.commit_finalizer_handle = CommitFinalizer::start(
                     self.context.clone(),
                     self.dag_state.clone(),
@@ -180,10 +184,13 @@ impl CommitObserver {
                     self.commit_sender_keeper.clone(),
                     Some(self.last_processed_commit_index),
                 );
-                
+
                 // Retry sending the commit
                 if let Err(e2) = self.commit_finalizer_handle.send(commit.clone()) {
-                    tracing::error!("🚨 [COMMIT-OBSERVER] Auto-restart failed! Could not queue commit: {:?}", e2);
+                    tracing::error!(
+                        "🚨 [COMMIT-OBSERVER] Auto-restart failed! Could not queue commit: {:?}",
+                        e2
+                    );
                 } else {
                     tracing::info!("✅ [COMMIT-OBSERVER] CommitFinalizer auto-restart successful.");
                     self.last_processed_commit_index = commit.commit_ref.index;
@@ -220,7 +227,10 @@ impl CommitObserver {
                     replay_after_commit_index
                 );
             } else {
-                let go_commits = self.store.scan_commits((replay_after_commit_index..=replay_after_commit_index).into()).expect("Scanning for Go last commit should not fail");
+                let go_commits = self
+                    .store
+                    .scan_commits((replay_after_commit_index..=replay_after_commit_index).into())
+                    .expect("Scanning for Go last commit should not fail");
                 if let Some(go_commit) = go_commits.first() {
                     let local_digest = go_commit.digest().into_inner();
                     if local_digest != go_hash {
@@ -240,7 +250,6 @@ impl CommitObserver {
                 }
             }
         }
-
 
         let last_commit = self
             .store
@@ -343,7 +352,9 @@ impl CommitObserver {
                     reputation_scores,
                 );
 
-                if committed_sub_dag.commit_ref.index < last_commit_index && !committed_sub_dag.recovered_rejected_transactions {
+                if committed_sub_dag.commit_ref.index < last_commit_index
+                    && !committed_sub_dag.recovered_rejected_transactions
+                {
                     info!(
                         "Marking historical recovery commit {} as already finalized (index < last_commit_index {})",
                         committed_sub_dag.commit_ref.index, last_commit_index
@@ -380,7 +391,8 @@ impl CommitObserver {
                     tracing::warn!(
                         "⚠️ Commit finalizer channel closed during recovery at commit {} \
                          (likely task crashed): {:?}. Restarting Finalizer...",
-                        last_sent_commit_index, e
+                        last_sent_commit_index,
+                        e
                     );
                     self.commit_finalizer_handle = CommitFinalizer::start(
                         self.context.clone(),
@@ -479,9 +491,9 @@ impl CommitObserver {
 mod tests {
     use consensus_config::AuthorityIndex;
     use consensus_types::block::BlockRef;
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
     use parking_lot::RwLock;
     use rstest::rstest;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
     use tokio::time::timeout;
 
     use super::*;
@@ -565,7 +577,11 @@ mod tests {
         leader_schedule.update_leader_schedule_v2(&dag_state, &dag_state_writer);
 
         // Commit the next 5 leaders.
-        commits.extend(observer.handle_commit(leaders[5..].to_vec(), None, true).unwrap());
+        commits.extend(
+            observer
+                .handle_commit(leaders[5..].to_vec(), None, true)
+                .unwrap(),
+        );
 
         // Check commits are returned by CommitObserver::handle_commit is accurate
         let mut expected_stored_refs: Vec<BlockRef> = vec![];
@@ -715,7 +731,11 @@ mod tests {
         // consumer of the consensus output channel.
         let expected_last_processed_index: usize = 2;
         let mut commits = observer
-            .handle_commit(leaders[..expected_last_processed_index].to_vec(), None, true)
+            .handle_commit(
+                leaders[..expected_last_processed_index].to_vec(),
+                None,
+                true,
+            )
             .unwrap();
 
         // Check commits sent over consensus output channel is accurate
@@ -745,7 +765,11 @@ mod tests {
         // the consumer side where the commits were not persisted.
         commits.append(
             &mut observer
-                .handle_commit(leaders[expected_last_processed_index..].to_vec(), None, true)
+                .handle_commit(
+                    leaders[expected_last_processed_index..].to_vec(),
+                    None,
+                    true,
+                )
                 .unwrap(),
         );
 

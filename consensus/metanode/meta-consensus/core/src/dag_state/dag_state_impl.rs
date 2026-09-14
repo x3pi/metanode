@@ -16,8 +16,8 @@ use tracing::{debug, info};
 use crate::{
     block::{genesis_blocks, BlockAPI, VerifiedBlock, GENESIS_ROUND},
     commit::{
-        load_committed_subdag_from_store, CommitAPI as _, CommitInfo, CommitRef, CommitVote,
-        TrustedCommit, GENESIS_COMMIT_INDEX, CommitIndex, CommitDigest,
+        load_committed_subdag_from_store, CommitAPI as _, CommitDigest, CommitIndex, CommitInfo,
+        CommitRef, CommitVote, TrustedCommit, GENESIS_COMMIT_INDEX,
     },
     context::Context,
     dag_state::types::BlockInfo,
@@ -230,18 +230,23 @@ impl DagState {
         let mut scoring_subdag = ScoringSubdag::new(context.clone());
 
         if let Some(last_commit) = last_commit.as_ref() {
-            let commits_per_schedule = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
-            let scoring_window_start = (last_commit.index() / commits_per_schedule) * commits_per_schedule + 1;
+            let commits_per_schedule =
+                crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
+            let scoring_window_start =
+                (last_commit.index() / commits_per_schedule) * commits_per_schedule + 1;
             let scan_start = std::cmp::min(scoring_window_start, commit_recovery_start_index);
-            
+
             let commits = store
                 .scan_commits((scan_start..=last_commit.index()).into())
                 .unwrap_or_else(|e| {
-                    panic!("Failed to scan_commits for scoring subdag recovery: {:?}", e)
+                    panic!(
+                        "Failed to scan_commits for scoring subdag recovery: {:?}",
+                        e
+                    )
                 });
-                
+
             let mut scoring_subdags_to_add = Vec::new();
-            
+
             for commit in commits {
                 if commit.index() >= commit_recovery_start_index {
                     for block_ref in commit.blocks() {
@@ -252,14 +257,14 @@ impl DagState {
                         load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
                     unscored_committed_subdags.push(committed_subdag);
                 }
-                
+
                 if commit.index() >= scoring_window_start {
                     let committed_subdag =
                         load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
                     scoring_subdags_to_add.push(committed_subdag);
                 }
             }
-            
+
             scoring_subdag.add_subdags(scoring_subdags_to_add);
         }
 
@@ -477,7 +482,7 @@ impl DagState {
     ) {
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);
-        
+
         let synthetic_commit = TrustedCommit::new_for_test(
             target_index,
             real_digest,
@@ -508,4 +513,3 @@ impl DagState {
         }
     }
 }
-

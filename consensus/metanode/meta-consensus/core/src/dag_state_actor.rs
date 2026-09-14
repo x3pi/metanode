@@ -54,9 +54,7 @@ pub(crate) enum DagWriteCommand {
     /// Inject baseline reputation scores into `DagState` for LeaderSchedule
     /// recovery after snapshot restore.
     /// Replaces: `dag_state.write().baseline_reputation_scores = Some(scores)`
-    InjectBaselineScores {
-        scores: Vec<(AuthorityIndex, u64)>,
-    },
+    InjectBaselineScores { scores: Vec<(AuthorityIndex, u64)> },
 
     /// Take (consume) baseline reputation scores from `DagState`.
     /// Replaces: `dag_state.write().take_baseline_reputation_scores()`
@@ -136,7 +134,10 @@ impl DagStateWriter {
     /// Inject baseline reputation scores into DagState.
     /// Fire-and-forget: returns immediately without waiting for the write.
     pub(crate) fn inject_baseline_scores(&self, scores: Vec<(AuthorityIndex, u64)>) {
-        if let Err(e) = self.tx.send(DagWriteCommand::InjectBaselineScores { scores }) {
+        if let Err(e) = self
+            .tx
+            .send(DagWriteCommand::InjectBaselineScores { scores })
+        {
             tracing::error!(
                 "🔴 [DAG-WRITER] Failed to send InjectBaselineScores: actor thread dead? {}",
                 e
@@ -148,7 +149,10 @@ impl DagStateWriter {
     /// Request-reply: blocks the calling thread until the actor processes the command.
     pub(crate) fn take_baseline_scores(&self) -> Option<Vec<(AuthorityIndex, u64)>> {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::TakeBaselineScores { reply: reply_tx }) {
+        if let Err(e) = self
+            .tx
+            .send(DagWriteCommand::TakeBaselineScores { reply: reply_tx })
+        {
             tracing::error!(
                 "🔴 [DAG-WRITER] Failed to send TakeBaselineScores: actor thread dead? {}",
                 e
@@ -193,7 +197,10 @@ impl DagStateWriter {
 
     pub(crate) fn add_commit(&self, commit: TrustedCommit) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::AddCommit { commit, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::AddCommit {
+            commit,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send AddCommit: {}", e);
             return;
         }
@@ -202,7 +209,10 @@ impl DagStateWriter {
 
     pub(crate) fn accept_blocks(&self, blocks: Vec<VerifiedBlock>) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::AcceptBlocks { blocks, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::AcceptBlocks {
+            blocks,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send AcceptBlocks: {}", e);
             return;
         }
@@ -212,7 +222,10 @@ impl DagStateWriter {
     #[cfg(test)]
     pub(crate) fn set_last_commit(&self, commit: TrustedCommit) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit { commit, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit {
+            commit,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send SetLastCommit: {}", e);
             return;
         }
@@ -221,7 +234,10 @@ impl DagStateWriter {
 
     pub(crate) fn update_scoring_info(&self, scores: ReputationScores) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::UpdateScoringInfo { scores, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::UpdateScoringInfo {
+            scores,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send UpdateScoringInfo: {}", e);
             return;
         }
@@ -230,7 +246,10 @@ impl DagStateWriter {
 
     pub(crate) fn set_committed(&self, block_ref: BlockRef) -> bool {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::SetCommitted { block_ref, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::SetCommitted {
+            block_ref,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send SetCommitted: {}", e);
             return false;
         }

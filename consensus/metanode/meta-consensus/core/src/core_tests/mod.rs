@@ -6,9 +6,9 @@
 use std::{sync::Arc, vec};
 
 use consensus_config::{local_committee_and_keys, AuthorityIndex, Stake};
-use tokio::sync::mpsc::UnboundedReceiver;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
     block::{CertifiedBlocksOutput, ExtendedBlock, VerifiedBlock},
@@ -77,17 +77,16 @@ impl CoreTextFixture {
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
-    
         let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-        let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+        let mut block_manager =
+            BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let leader_schedule = Arc::new(
             LeaderSchedule::from_store(context.clone(), dag_state.clone())
                 .with_num_commits_per_schedule(10),
         );
         let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
         let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),
@@ -163,8 +162,8 @@ use consensus_config::Parameters;
 use consensus_types::block::{BlockTimestampMs, TransactionIndex};
 use futures::{stream::FuturesUnordered, StreamExt};
 use meta_protocol_config::ProtocolConfig;
-use tokio::sync::mpsc;
 use std::iter;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::{
@@ -179,13 +178,13 @@ use crate::{
 };
 use consensus_types::block::BlockRef;
 
+#[cfg(test)]
+mod ancestors;
+#[cfg(test)]
+mod commits;
+#[cfg(test)]
+mod proposal;
 /// Recover Core and continue proposing from the last round which forms a quorum.
 
 #[cfg(test)]
 mod recovery;
-#[cfg(test)]
-mod proposal;
-#[cfg(test)]
-mod commits;
-#[cfg(test)]
-mod ancestors;

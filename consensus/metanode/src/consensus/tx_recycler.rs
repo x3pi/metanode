@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 /// How long to wait before recycling unconfirmed TXs
-const RECYCLE_TIMEOUT: Duration = Duration::from_secs(15);
+const RECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Maximum number of pending TXs to track (memory safety).
 ///

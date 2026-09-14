@@ -15,11 +15,11 @@ async fn test_core_propose_after_genesis() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let (transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -34,7 +34,8 @@ async fn test_core_propose_after_genesis() {
         dag_state.clone(),
     ));
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -150,7 +151,13 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Wait for min round delay to allow blocks to be proposed. Core also enforces a
     // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
     // `min_round_delay` is configured lower, so wait for whichever is longer.
-    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        context
+            .parameters
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_1.clone(), vec![])]);
     _ = core.add_blocks(vec![block_1]);
@@ -166,7 +173,13 @@ async fn test_core_propose_once_receiving_a_quorum() {
     // Wait for min round delay to allow blocks to be proposed. Core also enforces a
     // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
     // `min_round_delay` is configured lower, so wait for whichever is longer.
-    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        context
+            .parameters
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     // add blocks to trigger proposal.
     transaction_certifier.add_voted_blocks(vec![(block_2.clone(), vec![1, 4])]);
     _ = core.add_blocks(vec![block_2.clone()]);
@@ -196,7 +209,6 @@ async fn test_core_propose_once_receiving_a_quorum() {
     assert_eq!(dag_state.read().last_commit_index(), 0);
 }
 
-
 #[tokio::test]
 async fn test_core_set_min_propose_round() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -210,7 +222,8 @@ async fn test_core_set_min_propose_round() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -219,8 +232,7 @@ async fn test_core_set_min_propose_round() {
     let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -230,7 +242,8 @@ async fn test_core_set_min_propose_round() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -592,7 +605,6 @@ async fn test_core_try_new_block_with_leader_timeout_and_low_scoring_authority()
     }
 }
 
-
 #[tokio::test]
 async fn test_core_set_propagation_delay_per_authority() {
     // TODO: create helper to avoid the duplicated code here.
@@ -603,7 +615,8 @@ async fn test_core_set_propagation_delay_per_authority() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
@@ -612,8 +625,7 @@ async fn test_core_set_propagation_delay_per_authority() {
     let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -623,7 +635,8 @@ async fn test_core_set_propagation_delay_per_authority() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -713,7 +726,6 @@ async fn test_core_set_propagation_delay_per_authority() {
     assert!(core.try_propose(true).unwrap().is_some());
 }
 
-
 #[tokio::test]
 async fn test_core_compress_proposal_references() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -773,7 +785,12 @@ async fn test_core_compress_proposal_references() {
     // Wait for min round delay to allow blocks to be proposed. Core also enforces a
     // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
     // `min_round_delay` is configured lower, so wait for whichever is longer.
-    sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        default_params
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     // add blocks to trigger proposal.
     core_fixture.add_blocks(all_blocks).unwrap();
 

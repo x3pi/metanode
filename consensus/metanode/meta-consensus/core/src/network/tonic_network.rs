@@ -223,7 +223,11 @@ impl NetworkClient for TonicClient {
             .await
             .map_err(|e| ConsensusError::NetworkRequest(format!("fetch_commits failed: {e:?}")))?;
         let response = response.into_inner();
-        Ok((response.commits, response.certifier_blocks, response.commit_infos))
+        Ok((
+            response.commits,
+            response.certifier_blocks,
+            response.commit_infos,
+        ))
     }
 
     async fn fetch_commits_by_global_range(
@@ -527,7 +531,8 @@ impl ChannelPool {
                 .user_agent("mysticeti")
                 .expect("static user_agent string is always valid");
 
-            let result = tonic::transport::Channel::connect(https_connector.clone(), endpoint).await;
+            let result =
+                tonic::transport::Channel::connect(https_connector.clone(), endpoint).await;
 
             match result {
                 Ok(channel) => break channel,
@@ -923,13 +928,12 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
                 return Err(tonic::Status::invalid_argument("invalid digest length"));
             }
         }
-        let transactions = self.service
+        let transactions = self
+            .service
             .handle_fetch_transactions(peer_index, digests)
             .await
             .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
-        Ok(Response::new(FetchTransactionsResponse {
-            transactions,
-        }))
+        Ok(Response::new(FetchTransactionsResponse { transactions }))
     }
 
     async fn attest_payload_loss(
@@ -1080,7 +1084,10 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                 // Track connection health
                 connections.update_peer(authority_index);
 
-                trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?}", authority_index);
+                trace!(
+                    "🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?}",
+                    authority_index
+                );
                 request.extensions_mut().insert(peer_info);
                 request
             })
@@ -1300,7 +1307,9 @@ impl ConnectionsInfo {
     }
 
     pub(crate) fn update_peer(&self, index: AuthorityIndex) {
-        self.last_seen.write().insert(index, std::time::Instant::now());
+        self.last_seen
+            .write()
+            .insert(index, std::time::Instant::now());
     }
 
     pub(crate) fn connected_peers(&self, timeout: std::time::Duration) -> Vec<AuthorityIndex> {

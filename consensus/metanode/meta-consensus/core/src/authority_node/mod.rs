@@ -11,6 +11,7 @@ use prometheus::Registry;
 use tokio::{sync::broadcast, task::JoinHandle};
 use tracing::info;
 
+use crate::dag_state_actor::DagStateActor;
 use crate::{
     adaptive_delay::AdaptiveDelayState,
     authority_service::AuthorityService,
@@ -39,7 +40,6 @@ use crate::{
     transaction_certifier::TransactionCertifier,
     CommitConsumerArgs,
 };
-use crate::dag_state_actor::DagStateActor;
 
 /// ConsensusAuthority is used by Sui to manage the lifetime of AuthorityNode.
 /// It hides the details of the implementation from the caller, MysticetiManager.
@@ -75,7 +75,9 @@ impl ConsensusAuthority {
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
         // FORK-SAFETY (2026-09-10): see AuthorityNode::start's own doc comment on this
         // same parameter. Optional -- pass None to preserve the exact previous behavior.
-        epoch_eth_addresses: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
+        epoch_eth_addresses: Option<
+            Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+        >,
     ) -> Self {
         match network_type {
             NetworkType::Tonic => {
@@ -242,7 +244,9 @@ where
         // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. Optional --
         // None preserves the exact previous behavior (leader_address resolved later,
         // downstream, per node).
-        epoch_eth_addresses: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
+        epoch_eth_addresses: Option<
+            Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+        >,
     ) -> Self {
         assert!(
             committee.is_valid_index(own_index),
@@ -326,7 +330,7 @@ where
         let store = Arc::new(RocksDBStore::new(store_path));
         let dag_state = DagState::new(context.clone(), store.clone());
         // REMOVED: dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
-        // This was overwriting the accurate ms-precision timestamp from Rust's DagState 
+        // This was overwriting the accurate ms-precision timestamp from Rust's DagState
         // with Go's second-precision timestamp, causing fork divergence.
 
         // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
@@ -336,7 +340,9 @@ where
         let go_handled = commit_consumer.replay_after_commit_index;
         let dag_handled = dag_state.last_commit_index();
         let effective_handled = go_handled.max(dag_handled); // kept for logging/logic
-        commit_consumer.monitor().set_highest_handled_commit(go_handled);
+        commit_consumer
+            .monitor()
+            .set_highest_handled_commit(go_handled);
         info!(
             "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
             go_handled, dag_handled, effective_handled
@@ -375,7 +381,7 @@ where
         }
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
-        // during the FastForwarding phase (see commit_syncer.rs). 
+        // during the FastForwarding phase (see commit_syncer.rs).
         // We intentionally do NOT align here because we need real network data
         // (commits from peers) to determine the correct baseline.
         let dag_state = Arc::new(RwLock::new(dag_state));
@@ -411,11 +417,10 @@ where
             "📡 [AUTHORITY NODE] About to spawn ProposedBlockHandler, keeper receiver_count={}",
             broadcast_sender_keeper.receiver_count()
         );
-        let proposed_block_handler =
-            tokio::spawn(async move { 
-                let mut handler = proposed_block_handler;
-                handler.run().await 
-            });
+        let proposed_block_handler = tokio::spawn(async move {
+            let mut handler = proposed_block_handler;
+            handler.run().await
+        });
 
         let sync_last_known_own_block = boot_counter == 0
             && dag_state.read().highest_accepted_round() == 0
@@ -425,7 +430,8 @@ where
                 .is_zero();
         info!("Sync last known own block: {sync_last_known_own_block}");
 
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+        let block_manager =
+            BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
@@ -455,8 +461,14 @@ where
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
-        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
-        info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
+        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(
+            min_round_delay_ms,
+            adaptive_delay_enabled,
+        ));
+        info!(
+            "Adaptive delay enabled: base_delay={}ms",
+            min_round_delay_ms
+        );
 
         // Cloned (ProtocolKeyPair explicitly implements Clone) before the original moves into
         // Core below -- AuthorityService needs its own copy to sign PayloadLossAttestations
@@ -499,7 +511,8 @@ where
                     .quorum_commit_digest(index)
                     .map(|d| d.into_inner())
             });
-            coordination_hub.set_quorum_advanced_notify(commit_vote_monitor.quorum_advanced_notify.clone());
+            coordination_hub
+                .set_quorum_advanced_notify(commit_vote_monitor.quorum_advanced_notify.clone());
         }
 
         // COLD-START-FIX (May 2026): Wire CommitVoteMonitor.has_any_digest_data() into
@@ -509,9 +522,7 @@ where
         // received any actual digest votes, permanently disabling COLD-START-BYPASS.
         {
             let monitor_ref = commit_vote_monitor.clone();
-            coordination_hub.set_digest_data_checker(move || {
-                monitor_ref.has_any_digest_data()
-            });
+            coordination_hub.set_digest_data_checker(move || monitor_ref.has_any_digest_data());
         }
 
         // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
@@ -529,62 +540,64 @@ where
         {
             let monitor_ref = commit_vote_monitor.clone();
             let ctx_ref = context.clone();
-            coordination_hub.set_peer_commit_attestation(move |index: u32, local_digest: [u8; 32]| {
-                use crate::coordination_hub::PeerAttestResult;
+            coordination_hub.set_peer_commit_attestation(
+                move |index: u32, local_digest: [u8; 32]| {
+                    use crate::coordination_hub::PeerAttestResult;
 
-                // First check: does quorum_commit_digest have a definitive answer?
-                if let Some(quorum_digest) = monitor_ref.quorum_commit_digest(index) {
-                    if quorum_digest.into_inner() == local_digest {
-                        return PeerAttestResult::Ok; // 2f+1 agree with us
-                    } else {
-                        return PeerAttestResult::Conflict; // 2f+1 disagree
-                    }
-                }
-
-                // No quorum digest yet. Check vote counts for this index.
-                let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
-
-                if total_stake == 0 {
-                    // No peer has voted for this index at all.
-                    // Check if this is a TRUE cold-start (no digest data anywhere)
-                    if !monitor_ref.has_any_digest_data() {
-                        // TRUE COLD-START: No digest votes exist in the entire monitor.
-                        // This means ALL nodes are in the same state — fresh epoch.
-                        // The local commit is deterministic (same DAG → same commits).
-                        // Safe to dispatch without timeout.
-                        PeerAttestResult::Ok
-                    } else {
-                        // Digest data exists for OTHER indices but not this one.
-                        // This could mean: GC'd (too old) or peers haven't voted yet.
-                        // Stay pending until peers catch up.
-                        PeerAttestResult::Insufficient
-                    }
-                } else if let Some((best_digest, best_stake)) = best_entry {
-                    // Some peers have voted. Check if majority matches local digest.
-                    let quorum_threshold = ctx_ref.committee.quorum_threshold();
-                    if best_digest.into_inner() == local_digest {
-                        // Majority matches us but hasn't reached quorum yet.
-                        // If we have validity threshold (f+1) agreement, it's very likely safe,
-                        // but we still wait for full quorum to be absolutely certain.
-                        if best_stake >= quorum_threshold {
-                            PeerAttestResult::Ok // Should have been caught above, but defensive
+                    // First check: does quorum_commit_digest have a definitive answer?
+                    if let Some(quorum_digest) = monitor_ref.quorum_commit_digest(index) {
+                        if quorum_digest.into_inner() == local_digest {
+                            return PeerAttestResult::Ok; // 2f+1 agree with us
                         } else {
-                            PeerAttestResult::Insufficient // Wait for full quorum
+                            return PeerAttestResult::Conflict; // 2f+1 disagree
                         }
-                    } else {
-                        // Majority of votes so far disagree with us.
-                        // If the disagreeing stake is already >= quorum, it's definitive.
-                        if best_stake >= quorum_threshold {
-                            PeerAttestResult::Conflict
+                    }
+
+                    // No quorum digest yet. Check vote counts for this index.
+                    let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
+
+                    if total_stake == 0 {
+                        // No peer has voted for this index at all.
+                        // Check if this is a TRUE cold-start (no digest data anywhere)
+                        if !monitor_ref.has_any_digest_data() {
+                            // TRUE COLD-START: No digest votes exist in the entire monitor.
+                            // This means ALL nodes are in the same state — fresh epoch.
+                            // The local commit is deterministic (same DAG → same commits).
+                            // Safe to dispatch without timeout.
+                            PeerAttestResult::Ok
                         } else {
-                            // Sub-quorum disagreement — could flip. Wait.
+                            // Digest data exists for OTHER indices but not this one.
+                            // This could mean: GC'd (too old) or peers haven't voted yet.
+                            // Stay pending until peers catch up.
                             PeerAttestResult::Insufficient
                         }
+                    } else if let Some((best_digest, best_stake)) = best_entry {
+                        // Some peers have voted. Check if majority matches local digest.
+                        let quorum_threshold = ctx_ref.committee.quorum_threshold();
+                        if best_digest.into_inner() == local_digest {
+                            // Majority matches us but hasn't reached quorum yet.
+                            // If we have validity threshold (f+1) agreement, it's very likely safe,
+                            // but we still wait for full quorum to be absolutely certain.
+                            if best_stake >= quorum_threshold {
+                                PeerAttestResult::Ok // Should have been caught above, but defensive
+                            } else {
+                                PeerAttestResult::Insufficient // Wait for full quorum
+                            }
+                        } else {
+                            // Majority of votes so far disagree with us.
+                            // If the disagreeing stake is already >= quorum, it's definitive.
+                            if best_stake >= quorum_threshold {
+                                PeerAttestResult::Conflict
+                            } else {
+                                // Sub-quorum disagreement — could flip. Wait.
+                                PeerAttestResult::Insufficient
+                            }
+                        }
+                    } else {
+                        PeerAttestResult::Insufficient
                     }
-                } else {
-                    PeerAttestResult::Insufficient
-                }
-            });
+                },
+            );
         }
 
         // PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment in
@@ -612,7 +625,11 @@ where
                     let fetches = peers.into_iter().map(|peer| {
                         let network_client = network_client.clone();
                         let digests = digests.clone();
-                        async move { network_client.fetch_transactions(peer, digests, timeout).await }
+                        async move {
+                            network_client
+                                .fetch_transactions(peer, digests, timeout)
+                                .await
+                        }
                     });
                     let results = futures::future::join_all(fetches).await;
                     let mut inserted = 0usize;
@@ -655,10 +672,10 @@ where
                 let committee = committee_for_collector.clone();
                 let own_keypair = own_keypair.clone();
                 Box::pin(async move {
+                    use crate::network::AttestPayloadLossOutcome;
                     use crate::payload_loss_attestation::{
                         PayloadLossAggregator, PayloadLossAttestation, PayloadLossCollectionResult,
                     };
-                    use crate::network::AttestPayloadLossOutcome;
 
                     // Own cache first -- if we somehow already have it (e.g. it arrived via
                     // gossip in between the halt and the operator running this), this is a
@@ -714,17 +731,30 @@ where
                         let claim = claim.clone();
                         async move {
                             let mut last = network_client
-                                .attest_payload_loss(peer, claim.commit_index, claim.tx_digest, timeout)
+                                .attest_payload_loss(
+                                    peer,
+                                    claim.commit_index,
+                                    claim.tx_digest,
+                                    timeout,
+                                )
                                 .await;
                             for _ in 1..PER_PEER_ATTEMPTS {
                                 let is_definitive = matches!(last, Ok(_))
-                                    || matches!(last, Err(crate::error::ConsensusError::PayloadLossAbstain));
+                                    || matches!(
+                                        last,
+                                        Err(crate::error::ConsensusError::PayloadLossAbstain)
+                                    );
                                 if is_definitive {
                                     break;
                                 }
                                 tokio::time::sleep(timeout).await;
                                 last = network_client
-                                    .attest_payload_loss(peer, claim.commit_index, claim.tx_digest, timeout)
+                                    .attest_payload_loss(
+                                        peer,
+                                        claim.commit_index,
+                                        claim.tx_digest,
+                                        timeout,
+                                    )
                                     .await;
                             }
                             (peer, last)
@@ -746,7 +776,10 @@ where
                     let unresponsive_stake: consensus_config::Stake = results
                         .iter()
                         .filter(|(_, r)| {
-                            !matches!(r, Ok(_) | Err(crate::error::ConsensusError::PayloadLossAbstain))
+                            !matches!(
+                                r,
+                                Ok(_) | Err(crate::error::ConsensusError::PayloadLossAbstain)
+                            )
                         })
                         .map(|(peer, _)| committee.stake(*peer))
                         .sum();
@@ -777,8 +810,12 @@ where
                              proceeding without them is no longer safe (one of them might hold \
                              the payload). Refusing to certify ({} attested-missing stake \
                              collected so far). Retry once more peers are reachable.",
-                            unresponsive_stake, claim.commit_index, claim.tx_digest,
-                            PER_PEER_ATTEMPTS, fault_tolerance, aggregator.attested_stake()
+                            unresponsive_stake,
+                            claim.commit_index,
+                            claim.tx_digest,
+                            PER_PEER_ATTEMPTS,
+                            fault_tolerance,
+                            aggregator.attested_stake()
                         );
                         return PayloadLossCollectionResult::Insufficient {
                             attested_missing_stake: aggregator.attested_stake(),
@@ -788,7 +825,9 @@ where
 
                     if aggregator.reached_quorum(&committee) {
                         match aggregator.into_certificate(&committee) {
-                            Some(certificate) => PayloadLossCollectionResult::Certified(certificate),
+                            Some(certificate) => {
+                                PayloadLossCollectionResult::Certified(certificate)
+                            }
                             None => PayloadLossCollectionResult::Insufficient {
                                 attested_missing_stake: 0,
                                 quorum_needed: committee.quorum_threshold(),
@@ -890,7 +929,6 @@ where
 
         network_manager.install_service(network_service).await;
 
-
         info!(
             "✅ [AUTHORITY NODE] Consensus authority started, took {:?}",
             start_time.elapsed()
@@ -952,7 +990,7 @@ where
     pub(crate) fn is_alive(&self) -> bool {
         let syncer_alive = self.commit_syncer_handle.is_alive();
         let core_alive = self.core_thread_handle.is_alive();
-        
+
         if !syncer_alive || !core_alive {
             tracing::warn!(
                 "🔴 [AUTHORITY LIVENESS] Node internal task crashed! CommitSyncer alive: {}, CoreThread alive: {}",
@@ -968,7 +1006,6 @@ where
         self.transaction_client.clone()
     }
 }
-
 
 #[cfg(test)]
 mod tests;

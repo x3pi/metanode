@@ -215,21 +215,18 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			}
 
 			// Gửi batch qua FFI (synchronous zero-copy injection)
-			success := executor.SubmitTransactionBatch(bTransaction)
-			if !success {
-				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
-					batchNum, totalBatches, len(batchTxs))
-				// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
-				remainingTxs := txs[batchStart:]
-				bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
-				// Slow down slightly on backpressure
-				time.Sleep(50 * time.Millisecond)
-				break // Break out of the batch loop to wait for the next tick
-			} else {
-				if shouldLogSend {
-					logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
-						batchNum, totalBatches, len(batchTxs))
+			for {
+				success := executor.SubmitTransactionBatch(bTransaction)
+				if success {
+					if shouldLogSend {
+						logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
+							batchNum, totalBatches, len(batchTxs))
+					}
+					break
 				}
+				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full). Retrying...",
+					batchNum, totalBatches, len(batchTxs))
+				time.Sleep(100 * time.Millisecond)
 				// (A "localNonceFloor" optimistic-advance step used to run
 				// here, crediting this batch as forwarded the moment FFI
 				// accepted it. Removed 2026-09-03 -- see ClearNoncesCache's

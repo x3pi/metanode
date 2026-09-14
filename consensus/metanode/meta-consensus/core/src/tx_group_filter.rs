@@ -14,7 +14,6 @@ pub mod proto {
 
 use proto::Transaction as ProtoTx;
 
-
 pub fn get_group_addresses(tx_data: &[u8]) -> Vec<Vec<u8>> {
     if let Ok(proto_tx) = ProtoTx::decode(tx_data) {
         let mut group_addrs = Vec::new();
@@ -138,7 +137,7 @@ impl IncrementalGroupVerifier {
 
         let i = self.next_index;
         let addrs = get_group_addresses(tx.data());
-        
+
         // Dry-run check before mutating any state
         let mut unique_roots = std::collections::HashSet::new();
         let mut new_size = 1; // Count this new transaction
@@ -150,13 +149,13 @@ impl IncrementalGroupVerifier {
                 }
             }
         }
-        
+
         if new_size > self.max_group_size {
             return false; // Limit exceeded, abort without mutating
         }
 
         self.next_index += 1;
-        
+
         // Ensure uf and component_sizes have enough capacity (should not happen if capacity is set correctly)
         if i >= self.uf.parent.len() {
             self.uf.parent.push(i);
@@ -169,7 +168,7 @@ impl IncrementalGroupVerifier {
             if let Some(&existing_root) = self.addr_to_root.get(&addr) {
                 let root_i = self.uf.find(i);
                 let root_j = self.uf.find(existing_root);
-                
+
                 if root_i != root_j {
                     let combined_size = self.component_sizes[root_i] + self.component_sizes[root_j];
                     self.uf.parent[root_i] = root_j;
@@ -179,7 +178,7 @@ impl IncrementalGroupVerifier {
                 self.addr_to_root.insert(addr, i);
             }
         }
-        
+
         true
     }
 }
