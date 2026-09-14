@@ -89,6 +89,15 @@ impl TonicClient {
             .accept_compressed(CompressionEncoding::Zstd);
         Ok(client)
     }
+
+    fn handle_error(&self, peer: AuthorityIndex, status: tonic::Status, msg: &str) -> ConsensusError {
+        self.channel_pool.remove_channel(peer);
+        if status.code() == tonic::Code::DeadlineExceeded {
+            ConsensusError::NetworkRequestTimeout(format!("{} failed: {:?}", msg, status))
+        } else {
+            ConsensusError::NetworkRequest(format!("{} failed: {:?}", msg, status))
+        }
+    }
 }
 
 // TODO: make sure callsites do not send request to own index, and return error otherwise.
@@ -108,7 +117,7 @@ impl NetworkClient for TonicClient {
             }
         }));
         let response = client.subscribe_blocks(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("subscribe_blocks failed: {e:?}"))
+            self.handle_error(peer, e, "subscribe_blocks")
         })?;
         let stream = response
             .into_inner()
@@ -158,13 +167,7 @@ impl NetworkClient for TonicClient {
         let mut stream = client
             .fetch_blocks(request)
             .await
-            .map_err(|e| {
-                if e.code() == tonic::Code::DeadlineExceeded {
-                    ConsensusError::NetworkRequestTimeout(format!("fetch_blocks failed: {e:?}"))
-                } else {
-                    ConsensusError::NetworkRequest(format!("fetch_blocks failed: {e:?}"))
-                }
-            })?
+            .map_err(|e| self.handle_error(peer, e, "fetch_blocks"))?
             .into_inner();
         let mut blocks = vec![];
         let mut total_fetched_bytes = 0;
@@ -188,14 +191,7 @@ impl NetworkClient for TonicClient {
                 }
                 Err(e) => {
                     if blocks.is_empty() {
-                        if e.code() == tonic::Code::DeadlineExceeded {
-                            return Err(ConsensusError::NetworkRequestTimeout(format!(
-                                "fetch_blocks failed mid-stream: {e:?}"
-                            )));
-                        }
-                        return Err(ConsensusError::NetworkRequest(format!(
-                            "fetch_blocks failed mid-stream: {e:?}"
-                        )));
+                        return Err(self.handle_error(peer, e, "fetch_blocks mid-stream"));
                     } else {
                         warn!("fetch_blocks failed mid-stream: {e:?}");
                         break;
@@ -221,7 +217,7 @@ impl NetworkClient for TonicClient {
         let response = client
             .fetch_commits(request)
             .await
-            .map_err(|e| ConsensusError::NetworkRequest(format!("fetch_commits failed: {e:?}")))?;
+            .map_err(|e| self.handle_error(peer, e, "fetch_commits"))?;
         let response = response.into_inner();
         Ok((
             response.commits,
@@ -246,11 +242,7 @@ impl NetworkClient for TonicClient {
         let response = client
             .fetch_commits_by_global_range(request)
             .await
-            .map_err(|e| {
-                ConsensusError::NetworkRequest(format!(
-                    "fetch_commits_by_global_range failed: {e:?}"
-                ))
-            })?;
+            .map_err(|e| self.handle_error(peer, e, "fetch_commits_by_global_range"))?;
         Ok(response.into_inner().commits)
     }
 
@@ -271,13 +263,7 @@ impl NetworkClient for TonicClient {
         let mut stream = client
             .fetch_latest_blocks(request)
             .await
-            .map_err(|e| {
-                if e.code() == tonic::Code::DeadlineExceeded {
-                    ConsensusError::NetworkRequestTimeout(format!("fetch_blocks failed: {e:?}"))
-                } else {
-                    ConsensusError::NetworkRequest(format!("fetch_blocks failed: {e:?}"))
-                }
-            })?
+            .map_err(|e| self.handle_error(peer, e, "fetch_latest_blocks"))?
             .into_inner();
         let mut blocks = vec![];
         let mut total_fetched_bytes = 0;
@@ -301,14 +287,7 @@ impl NetworkClient for TonicClient {
                 }
                 Err(e) => {
                     if blocks.is_empty() {
-                        if e.code() == tonic::Code::DeadlineExceeded {
-                            return Err(ConsensusError::NetworkRequestTimeout(format!(
-                                "fetch_blocks failed mid-stream: {e:?}"
-                            )));
-                        }
-                        return Err(ConsensusError::NetworkRequest(format!(
-                            "fetch_blocks failed mid-stream: {e:?}"
-                        )));
+                        return Err(self.handle_error(peer, e, "fetch_latest_blocks mid-stream"));
                     } else {
                         warn!("fetch_latest_blocks failed mid-stream: {e:?}");
                         break;
@@ -328,7 +307,7 @@ impl NetworkClient for TonicClient {
         let mut request = Request::new(GetLatestRoundsRequest {});
         request.set_timeout(timeout);
         let response = client.get_latest_rounds(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("get_latest_rounds failed: {e:?}"))
+            self.handle_error(peer, e, "get_latest_rounds")
         })?;
         let response = response.into_inner();
         Ok((response.highest_received, response.highest_accepted))
@@ -343,7 +322,7 @@ impl NetworkClient for TonicClient {
         let mut request = Request::new(GetEpochStatusRequest {});
         request.set_timeout(timeout);
         let response = client.get_epoch_status(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("get_epoch_status failed: {e:?}"))
+            self.handle_error(peer, e, "get_epoch_status")
         })?;
         Ok(response.into_inner())
     }
@@ -365,9 +344,7 @@ impl NetworkClient for TonicClient {
         client
             .send_epoch_change_proposal(request)
             .await
-            .map_err(|e| {
-                ConsensusError::NetworkRequest(format!("send_epoch_change_proposal failed: {e:?}"))
-            })?;
+            .map_err(|e| self.handle_error(peer, e, "send_epoch_change_proposal"))?;
         Ok(())
     }
 
@@ -385,7 +362,7 @@ impl NetworkClient for TonicClient {
         });
         request.set_timeout(timeout);
         client.send_epoch_change_vote(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("send_epoch_change_vote failed: {e:?}"))
+            self.handle_error(peer, e, "send_epoch_change_vote")
         })?;
         Ok(())
     }
@@ -405,7 +382,7 @@ impl NetworkClient for TonicClient {
         client
             .send_block(request)
             .await
-            .map_err(|e| ConsensusError::NetworkRequest(format!("send_block failed: {e:?}")))?;
+            .map_err(|e| self.handle_error(peer, e, "send_block"))?;
         Ok(())
     }
 
@@ -422,7 +399,7 @@ impl NetworkClient for TonicClient {
         });
         request.set_timeout(timeout);
         let response = client.fetch_transactions(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("fetch_transactions failed: {e:?}"))
+            self.handle_error(peer, e, "fetch_transactions")
         })?;
         Ok(response.into_inner().transactions)
     }
@@ -441,7 +418,7 @@ impl NetworkClient for TonicClient {
         });
         request.set_timeout(timeout);
         let response = client.attest_payload_loss(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("attest_payload_loss failed: {e:?}"))
+            self.handle_error(peer, e, "attest_payload_loss")
         })?;
         let response = response.into_inner();
         if !response.payload.is_empty() {
@@ -565,6 +542,13 @@ impl ChannelPool {
         // There should not be many concurrent attempts at connecting to the same peer.
         let channel = channels.entry(peer).or_insert(channel);
         Ok(channel.clone())
+    }
+
+    fn remove_channel(&self, peer: AuthorityIndex) {
+        let mut channels = self.channels.write();
+        if channels.remove(&peer).is_some() {
+            debug!("Evicted broken channel for peer {} from pool", peer);
+        }
     }
 }
 

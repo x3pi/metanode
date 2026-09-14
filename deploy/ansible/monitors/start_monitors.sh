@@ -881,10 +881,18 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
    • <b>Trạng thái:</b> ${probe_status_line}
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
 ────────────────────────
-👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):</b>
-Consensus bị kẹt vòng lặp. Chạy Fast Restart toàn cụm trong 2 giây để bầu lại Leader:
-<code>./ansible_deploy.sh --restart</code>
+👉 <b>HƯỚNG DẪN XỬ LÝ (TỰ ĐỘNG PHỤC HỒI):</b>
+Hệ thống phát hiện kẹt vòng lặp Consensus. Đang tự động kích hoạt Fast Restart toàn cụm trong nền để khôi phục!
 🟢 <i>An toàn: Giữ nguyên 100% dữ liệu, không tốn thời gian build lại.</i>"
+                                    
+                                    # Auto-recover in background, detached from TTY
+                                    echo "[$(date -u)] Auto-recovering chain stall..." >> "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
+                                    (
+                                        cd "${SCRIPT_DIR}/.."
+                                        export ANSIBLE_FORCE_COLOR=True
+                                        export PYTHONUNBUFFERED=1
+                                        ./ansible_deploy.sh --restart < /dev/null
+                                    ) >/dev/null 2>&1 &
                                 fi
                             fi
                         fi
