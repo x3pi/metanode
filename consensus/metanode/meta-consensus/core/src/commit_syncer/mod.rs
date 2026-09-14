@@ -2309,8 +2309,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
 
             // ── NO EXIT: Keep waiting with exponential backoff ────────
-            // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap
-            let backoff_secs = std::cmp::min(2u64 << attempt.min(4), 30);
+            // Exponential backoff: 2s → 4s → 5s cap.
+            // FAST-RECOVERY TUNING (2026-09-14): was 2s→4s→8s→16s→30s. Live-reproduced
+            // root cause of a 7-9.5 minute Bootstrapping stall on restart-into-existing-
+            // state: this loop's per-attempt peer poll is sequential (one get_epoch_status
+            // per peer, 3s timeout each), so a single transiently-unreachable peer (e.g.
+            // "Connection refused" for a few seconds right after a co-located node's own
+            // restart) already costs several seconds per attempt BEFORE the backoff sleep
+            // even starts -- at the old 30s cap, a handful of such attempts alone accounts
+            // for minutes of wall-clock time. This loop's safety comes from NEVER exiting
+            // without a quorum-verified condition (see the big comment above), not from any
+            // specific backoff duration, so shortening the cap doesn't weaken the fork-safety
+            // guarantee -- it only makes the node retry sooner once peers are actually
+            // reachable again. Matches this project's explicit fast-recovery priority
+            // (bounded RAM loss on restart is acceptable; slow recovery is not).
+            let backoff_secs = match attempt {
+                1 => 2,
+                2 => 4,
+                _ => 5,
+            };
 
             if reachable_peers == 0 {
                 // No peers reachable at all — network partition or all nodes down
