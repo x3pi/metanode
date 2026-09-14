@@ -1617,18 +1617,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if !self.coordination_hub.is_startup_sync_active()
             && (is_single_validator || !self.coordination_hub.is_catching_up())
         {
-            // CRITICAL RECOVERY FIX (2026-09-12): Do not jump synced_commit_index past highest_handled_index.
-            // If execution is lagging behind the DAG (e.g., node crashed and DAG loaded from disk,
-            // but CommitVoteMonitor is empty), we MUST NOT jump synced_commit_index to DAG tip.
-            // If we do, CommitSyncer will never fetch CertifiedCommits for the missing range,
-            // leaving execution permanently deadlocked at DIGEST-GATE.
-            let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled_index);
             let target_sync = self.synced_commit_index.max(local_commit_index);
 
-            if target_sync > safe_jump_limit {
-                self.synced_commit_index = safe_jump_limit;
-            } else {
+            // REGRESSION FIX (2026-09-14, found while re-baselining tests for the
+            // mục-19-bug-#4 investigation): the execution-progress cap below was
+            // being applied unconditionally, which silently re-broke the
+            // SINGLE-VALIDATOR EXCEPTION documented just above -- for a
+            // single-validator committee, local_commit_index already IS the
+            // verified truth (no peer to have diverged from), so it must not be
+            // re-throttled to highest_handled_index, which stays at 0 until Go
+            // actually executes something. Without this exemption,
+            // synced_commit_index gets stuck at 0 forever on a fresh/cold-start
+            // single-validator node, reintroducing the exact livelock this
+            // whole exception exists to prevent (mục 17 UPDATE #4). Caught by
+            // commit_syncer::tests::single_validator_advances_synced_commit_index_
+            // while_catching_up, which this same change made fail deterministically.
+            if is_single_validator {
                 self.synced_commit_index = target_sync;
+            } else {
+                // CRITICAL RECOVERY FIX (2026-09-12): Do not jump synced_commit_index past
+                // highest_handled_index. If execution is lagging behind the DAG (e.g., node
+                // crashed and DAG loaded from disk, but CommitVoteMonitor is empty), we MUST
+                // NOT jump synced_commit_index to DAG tip. If we do, CommitSyncer will never
+                // fetch CertifiedCommits for the missing range, leaving execution permanently
+                // deadlocked at DIGEST-GATE.
+                let safe_jump_limit =
+                    std::cmp::max(self.synced_commit_index, highest_handled_index);
+                self.synced_commit_index = target_sync.min(safe_jump_limit);
             }
         }
 
