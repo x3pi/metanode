@@ -754,7 +754,7 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
                         dead_nodes[$node_key]=0
                         # Node vua trai qua mot lan crash/restart that su -- neu truoc do co
                         # alert CONSENSUS-HALT, process cu da bi thay the boi mot lan khoi dong
-                        # moi (co the da duoc Operator xu ly theo runbook o tren), nen cho phep
+                        # moi (co le da duoc Operator xu ly theo runbook o tren), nen cho phep
                         # canh bao lai neu tinh trang lap lai o lan chay moi nay.
                         consensus_halt_alerted[$node_key]=0
                         tx_payload_lost_alerted[$node_key]=0
@@ -819,6 +819,7 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
                     last_block_progress_ts=$now_ts
                 else
                     stall_duration=$((now_ts - last_block_progress_ts))
+                    echo "[DEBUG] stall_duration=$stall_duration, STALL_THRESHOLD_SEC=$STALL_THRESHOLD_SEC, now=$now_ts, last=$last_block_progress_ts"
                     # Nếu block không tăng sau STALL_THRESHOLD_SEC, cảnh báo lặp lại mỗi 15 phút
                     if [ "$stall_duration" -ge "$STALL_THRESHOLD_SEC" ]; then
                         if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
@@ -831,40 +832,42 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
                                 fi
                             fi
 
-                            if [ "$pending_tx_count" -eq 0 ]; then
-                                echo "✅ [STALL CHECK] Mempool rỗng (0 pending txs) -- chuỗi chỉ đơn giản là đang nhàn rỗi (idle). Bỏ qua báo động giả."
+                            consensus_ready="true"
+                            if [ -n "$probe_target_url" ]; then
+                                ready_val=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_consensusReady","params":[],"id":1}' 2>/dev/null | jq -r '.result.ready' 2>/dev/null)
+                                if [ "$ready_val" == "false" ]; then
+                                    consensus_ready="false"
+                                fi
+                            fi
+
+                            if [ "$consensus_ready" == "false" ]; then
+                                echo "✅ [STALL CHECK] Node chưa sẵn sàng (đang Startup/CatchingUp/Syncing). Bỏ qua báo động giả CHAIN STALL."
                                 last_block_progress_ts=$now_ts
                             else
-                                # Kiểm tra xem node có đang trong trạng thái Syncing/CatchingUp không qua eth_consensusReady
-                                consensus_ready="true"
-                                if [ -n "$probe_target_url" ]; then
-                                    ready_val=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_consensusReady","params":[],"id":1}' 2>/dev/null | jq -r '.result.ready' 2>/dev/null)
-                                    if [ "$ready_val" == "false" ]; then
-                                        consensus_ready="false"
-                                    fi
-                                fi
-
-                                if [ "$consensus_ready" == "false" ]; then
-                                    echo "✅ [STALL CHECK] Node chưa sẵn sàng (đang Startup/CatchingUp/Syncing). Bỏ qua báo động giả CHAIN STALL."
-                                    last_block_progress_ts=$now_ts
-                                else
-                                    # Có giao dịch kẹt trong mempool nhưng block không tăng VÀ node đã ready -> STALL THẬT SỰ
-                                    probe_status_line="Mempool đang có $pending_tx_count giao dịch kẹt không được xử lý"
-                                    echo "⚠️ [STALL CHECK] $probe_status_line"
-                                
-                                # Tuỳ chọn thử thêm 1 tx thăm dò để kiểm tra sâu hơn RPC
-                                echo "🔎 [STALL PROBE] Gửi thêm 1 tx thăm dò tới ${probe_target_url:-<không có>}..."
+                                echo "🔎 [STALL PROBE] Gửi thêm 1 tx thăm dò tới ${probe_target_url:-<không có>} để kiểm tra xem có phải idle không..."
+                                probe_status_line="Mempool có $pending_tx_count tx."
+                                probe_rc=1
                                 if [ -n "$probe_target_url" ]; then
                                     LAST_PROBE_OUTPUT=""
                                     send_stall_probe_tx "$probe_target_url"
                                     probe_rc=$?
+                                fi
+                                
+                                if [ "$probe_rc" -eq 0 ]; then
+                                    echo "✅ [STALL CHECK] Tx thăm dò xác nhận thành công! Chuỗi đang bình thường. Bỏ qua."
+                                    last_block_progress_ts=$now_ts
+                                else
                                     if [ "$probe_rc" -eq 2 ]; then
                                         probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
                                         probe_status_line="$probe_status_line | Tx thăm dò: Bị từ chối ngay (${probe_err_snippet:-không rõ lỗi})"
+                                        if [ "$pending_tx_count" -eq 0 ]; then
+                                            echo "✅ [STALL CHECK] Mempool rỗng, probe fail. Coi như idle."
+                                            last_block_progress_ts=$now_ts
+                                            continue
+                                        fi
                                     elif [ "$probe_rc" -eq 3 ]; then
-                                        probe_status_line="$probe_status_line | Tx thăm dò: Hết 15s không thấy receipt"
+                                        probe_status_line="$probe_status_line | Tx thăm dò: Hết 15s không thấy receipt (STALL THẬT!)"
                                     fi
-                                fi
 
                                 last_stall_alert_ts=$now_ts
                                 is_chain_stalled=true
