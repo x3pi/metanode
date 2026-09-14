@@ -19,6 +19,9 @@ func TestSnapshotManager_DetectEpochChange(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSnapshotManager(dataDir, snapDir, 3, 5)
+	t.Cleanup(func() {
+		sm.WaitForBackgroundTasks()
+	})
 	cs := blockchain.NewTestChainState()
 
 	// By injecting mock ChainState directly, we skip testing complex behavior
@@ -33,6 +36,9 @@ func TestSnapshotManager_Callbacks(t *testing.T) {
 	os.MkdirAll(dataDir, 0755)
 
 	sm := NewSnapshotManager(dataDir, snapDir, 3, 0)
+	t.Cleanup(func() {
+		sm.WaitForBackgroundTasks()
+	})
 
 	sm.SetCheckpointCallback(func(destPath string) error {
 		return nil
@@ -60,6 +66,9 @@ func newTestSnapshotManagerForTrigger(t *testing.T, frequency, offset int) *Snap
 	require.NoError(t, os.MkdirAll(dataDir, 0755))
 
 	sm := NewSnapshotManager(dataDir, snapDir, 3, 20)
+	t.Cleanup(func() {
+		sm.WaitForBackgroundTasks()
+	})
 	sm.SetCheckpointCallback(func(destPath string) error { return nil })
 	sm.SetNomtSnapshotCallback(func(destPath string, useReflink bool) error { return nil })
 	sm.SetSnapshotFrequency(frequency)
