@@ -1,0 +1,33 @@
++ RPC_URL=http://192.168.1.232:10746
++ BLAST_DIR=/home/abc/chain-n/metanode/execution/cmd/tool/tps_blast
++ EXECUTION_P2P=192.168.1.232:6200
++ echo '🔫 Step 1: Blasting 2,000 TXs (Normal state - 4 nodes alive)'
+🔫 Step 1: Blasting 2,000 TXs (Normal state - 4 nodes alive)
++ cd /home/abc/chain-n/metanode/execution/cmd/tool/tps_blast
++ ./tps_blast -config ./config.json -node 192.168.1.232:6200 -count 2000 -batch 500 -sleep 1 -rpc http://192.168.1.232:10746 -skip-verify -no-wait
+═══════════════════════════════════════════════════
+  🔥 TPS BLAST — Fire-and-Forget BLS Registration
+═══════════════════════════════════════════════════
+  🔑 Generating 2000 accounts...
+  ✅ Generated 2000, saved to 
+  📊 Accounts to register: 2000
+
+📦 Pre-building 2000 BLS registration TXs...
+  ✅ Built 2000 TXs in 1.248s (1603 tx/s), 0 errors
+  🔌 Connecting to 192.168.1.232:6200 (attempt 1/20)...
+  ✅ Connected and InitConnection sent
+
+  🏁 Starting block: 519
+
+🔥 BLASTING 2000 BLS TXs via batch SendTransactions...
+   Batch size: 500, Sleep between batches: 1ms
+  [SYNC] START_INJECT_MS=1789356180388
+
+📩 SERVER RESPONDED WITH COMMAND: InitConnection
+  📤 [2000/2000] 144363 tx/s | elapsed 14ms   
+
+  📤 Injected: 2000 TXs in 14ms
+  🚀 Injection TPS: 142186 tx/s
+
+  🚀 Injection complete. Waiting 1s to ensure TCP flush, then exiting due to -no-wait.
++ sleep 10

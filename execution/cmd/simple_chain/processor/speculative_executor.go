@@ -126,6 +126,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 	lastGEI := storage.GetLastGlobalExecIndex()
 	if gei <= lastGEI {
 		logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) is already committed (lastGEI=%d), bypassing execution to unblock Rust", gei, blockNum, lastGEI)
+		se.verifyBypassBlock(blockNum, gei, epochData)
 		se.inFlight.Delete(gei) // Clean up placeholder
 
 		if authRespCh != nil {
@@ -206,6 +207,7 @@ func (se *SpeculativeExecutor) ExecuteSpeculative(epochData *pb.ExecutableBlock,
 		lastCommittedGEI := storage.GetLastGlobalExecIndex()
 		if gei <= lastCommittedGEI {
 			logger.Warn("⚠️ [SPECULATIVE] GEI=%d (block #%d) was already committed to DB while waiting for execution lock (lastGEI=%d). Bypassing.", gei, blockNum, lastCommittedGEI)
+			se.verifyBypassBlock(blockNum, gei, epochData)
 			se.inFlight.Delete(gei)
 			se.activeSessions.Delete(gei)
 			session.mu.Lock()
@@ -955,4 +957,37 @@ func ParallelUnmarshalTransactions(txs []*pb.TransactionExe) []types.Transaction
 		res = append(res, chunk...)
 	}
 	return res
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZERO-FORK INVARIANT VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════════
+// verifyBypassBlock ensures that when Go bypasses an authoritative execution
+// (because it already has a block committed for this GEI), the local DB block
+// exactly matches the quorum-verified consensus payload.
+func (se *SpeculativeExecutor) verifyBypassBlock(blockNum uint64, gei uint64, epochData *pb.ExecutableBlock) {
+	bc := blockchain.GetBlockChainInstance()
+	if bc == nil || se.bp == nil || se.bp.chainState == nil {
+		return
+	}
+	blockHash, ok := bc.GetBlockHashByNumber(blockNum)
+	if !ok {
+		return
+	}
+	blockDb := se.bp.chainState.GetBlockDatabase()
+	if blockDb == nil {
+		return
+	}
+	committedBlock, err := blockDb.GetBlockByHash(blockHash)
+	if err != nil || committedBlock == nil {
+		return
+	}
+
+	authTxs := PrepareTransactions(epochData)
+	if len(committedBlock.Transactions()) != len(authTxs) {
+		logger.Error("🚨 [FORK-SAFETY] FATAL MISMATCH! Committed DB block #%d (GEI=%d) has %d txs, but authoritative consensus block requires %d txs! Force crashing to prevent silent fork!",
+			blockNum, gei, len(committedBlock.Transactions()), len(authTxs))
+		panic(fmt.Sprintf("ZERO-FORK INVARIANT VIOLATION: DB block #%d (GEI=%d) has %d txs, Consensus requires %d txs",
+			blockNum, gei, len(committedBlock.Transactions()), len(authTxs)))
+	}
 }

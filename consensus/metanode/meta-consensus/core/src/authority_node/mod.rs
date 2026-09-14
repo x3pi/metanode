@@ -540,6 +540,7 @@ where
         {
             let monitor_ref = commit_vote_monitor.clone();
             let ctx_ref = context.clone();
+            let hub_ref = coordination_hub.clone();
             coordination_hub.set_peer_commit_attestation(
                 move |index: u32, local_digest: [u8; 32]| {
                     use crate::coordination_hub::PeerAttestResult;
@@ -559,16 +560,16 @@ where
                     if total_stake == 0 {
                         // No peer has voted for this index at all.
                         // Check if this is a TRUE cold-start (no digest data anywhere)
-                        if !monitor_ref.has_any_digest_data() {
-                            // TRUE COLD-START: No digest votes exist in the entire monitor.
-                            // This means ALL nodes are in the same state — fresh epoch.
+                        if hub_ref.is_epoch_transitioning() && !monitor_ref.has_any_digest_data() {
+                            // TRUE COLD-START: No digest votes exist in the entire monitor AND 
+                            // we are in an epoch transition where block proposal is halted.
                             // The local commit is deterministic (same DAG → same commits).
-                            // Safe to dispatch without timeout.
+                            // Safe to dispatch without timeout to prevent transition deadlock.
                             PeerAttestResult::Ok
                         } else {
-                            // Digest data exists for OTHER indices but not this one.
-                            // This could mean: GC'd (too old) or peers haven't voted yet.
-                            // Stay pending until peers catch up.
+                            // Digest data exists, OR we restarted mid-epoch (is_transitioning is false).
+                            // In mid-epoch, nodes CAN propose blocks, so we must wait for peers
+                            // to vote. Bypassing here on a mid-epoch restart causes forks!
                             PeerAttestResult::Insufficient
                         }
                     } else if let Some((best_digest, best_stake)) = best_entry {
