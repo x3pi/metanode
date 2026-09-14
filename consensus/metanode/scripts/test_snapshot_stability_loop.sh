@@ -299,7 +299,7 @@ collect_diagnostics() {
         for offset in 0 1 2 3 4; do
             local bn=$((min_block - offset))
             [ "$bn" -lt 1 ] && continue
-            local hex=$(printf "0x%x" "$bn")
+            local hex=$(printf -- "0x%x" "$bn")
             local row="| #$bn |"
             for j in $(seq 0 $((NUM_NODES - 1))); do
                 local port=${RPC_PORTS[$j]}

@@ -9,8 +9,8 @@ use std::{
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, Round, TransactionIndex};
 use parking_lot::RwLock;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
-use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 
 use crate::{
     commit::DEFAULT_WAVE_LENGTH,
@@ -27,12 +27,11 @@ use crate::{
 /// NOTE: 3 round is the minimum depth possible for indirect finalization and rejection.
 pub(crate) const INDIRECT_REJECT_DEPTH: Round = 3;
 
-
-pub mod types;
 #[cfg(test)]
 mod tests;
+pub mod types;
 
-use types::{CommitState, BlockState};
+use types::{BlockState, CommitState};
 
 /// Handle to CommitFinalizer, for sending CommittedSubDag.
 pub(crate) struct CommitFinalizerHandle {
@@ -115,19 +114,39 @@ impl CommitFinalizer {
         commit_sender: UnboundedSender<CommittedSubDag>,
         last_processed_commit: Option<CommitIndex>,
     ) -> CommitFinalizerHandle {
-        let mut processor = Self::new(context, dag_state, transaction_certifier, commit_sender, last_processed_commit);
+        let mut processor = Self::new(
+            context,
+            dag_state,
+            transaction_certifier,
+            commit_sender,
+            last_processed_commit,
+        );
         let (sender, receiver) = unbounded_channel();
         // Clone the sender and store it in the processor to prevent race condition.
         // This ensures the internal channel stays open until the task starts running.
         processor.internal_sender_keeper = Some(sender.clone());
-        let _handle =
-            tokio::spawn(processor.run(receiver));
+        let _handle = tokio::spawn(processor.run(receiver));
         CommitFinalizerHandle { sender }
     }
 
     async fn run(mut self, mut receiver: UnboundedReceiver<CommittedSubDag>) {
         tracing::info!("🚀 [COMMIT FINALIZER] RUN LOOP STARTED");
         while let Some(committed_sub_dag) = receiver.recv().await {
+            // FORK-SAFETY UPGRADE PASS:
+            // If we receive a CertifiedCommit that was already processed locally, we MUST forward it
+            // directly to CommitProcessor so it can upgrade the pending local commit and unblock execution.
+            if let Some(last) = self.last_processed_commit {
+                if committed_sub_dag.commit_ref.index <= last
+                    && !committed_sub_dag.decided_with_local_blocks
+                {
+                    tracing::warn!("🔄 [COMMIT FINALIZER] Forwarding CertifiedCommit {} directly to CommitProcessor for upgrade.", committed_sub_dag.commit_ref.index);
+                    if let Err(e) = self.commit_sender.send(committed_sub_dag) {
+                        tracing::debug!("Failed to send commit to handler: {e:?}");
+                    }
+                    continue;
+                }
+            }
+
             let already_finalized = !self.context.protocol_config.mysticeti_fastpath()
                 || committed_sub_dag.recovered_rejected_transactions;
             let finalized_commits = if !already_finalized {
@@ -194,7 +213,8 @@ impl CommitFinalizer {
                     // Stale/duplicate commit — skip entirely to avoid re-processing
                     tracing::warn!(
                         "⚠️ [COMMIT FINALIZER] Skipping stale commit index {} (last_processed={})",
-                        committed_sub_dag.commit_ref.index, last_processed_commit
+                        committed_sub_dag.commit_ref.index,
+                        last_processed_commit
                     );
                     return vec![];
                 }
@@ -204,7 +224,8 @@ impl CommitFinalizer {
                 tracing::warn!(
                     "⚠️ [COMMIT FINALIZER] Non-sequential commit: expected index {}, got {}. \
                      Gap of {} commits (likely FORWARD-JUMP catch-up). Proceeding.",
-                    expected, committed_sub_dag.commit_ref.index,
+                    expected,
+                    committed_sub_dag.commit_ref.index,
                     committed_sub_dag.commit_ref.index.saturating_sub(expected)
                 );
             }

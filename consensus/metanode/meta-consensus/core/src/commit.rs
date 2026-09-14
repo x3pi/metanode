@@ -704,20 +704,26 @@ pub fn try_load_committed_subdag_from_store(
     let commit_blocks = store
         .read_blocks(commit.blocks())
         .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read blocks: {:?}", e)))?;
-    
+
     let mut blocks = Vec::with_capacity(commit_blocks.len());
     for (idx, commit_block_opt) in commit_blocks.into_iter().enumerate() {
         let commit_block = commit_block_opt.ok_or_else(|| {
-            ConsensusError::StorageFailure(format!("Missing block referenced in commit {}", commit.index()))
+            ConsensusError::StorageFailure(format!(
+                "Missing block referenced in commit {}",
+                commit.index()
+            ))
         })?;
         if commit_block.reference() == commit.leader() {
             leader_block_idx = Some(idx);
         }
         blocks.push(commit_block);
     }
-    
+
     let leader_block_idx = leader_block_idx.ok_or_else(|| {
-        ConsensusError::StorageFailure(format!("Leader block missing from sub-dag in commit {}", commit.index()))
+        ConsensusError::StorageFailure(format!(
+            "Leader block missing from sub-dag in commit {}",
+            commit.index()
+        ))
     })?;
     let leader_block_ref = blocks[leader_block_idx].reference();
 
@@ -739,7 +745,9 @@ pub fn try_load_committed_subdag_from_store(
 
     let reject_votes = store
         .read_rejected_transactions(commit.reference())
-        .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read rejected txs: {:?}", e)))?;
+        .map_err(|e| {
+            ConsensusError::StorageFailure(format!("Failed to read rejected txs: {:?}", e))
+        })?;
     if let Some(reject_votes) = reject_votes {
         subdag.decided_with_local_blocks = true;
         subdag.recovered_rejected_transactions = true;

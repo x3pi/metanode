@@ -22,7 +22,7 @@ pub struct CommitConsumerArgs {
     pub(crate) consumer_last_processed_commit_index: CommitIndex,
     /// The hash of the last executed commit from Go Master state, used to perform anti-fork check at startup.
     pub(crate) last_executed_commit_hash: [u8; 32],
-    
+
     /// The timestamp of the last executed block from Go Master state, used for recovery.
     pub(crate) last_block_timestamp_ms: u64,
 
@@ -79,7 +79,6 @@ impl CommitConsumerArgs {
         self.align_executed_commit_hash = Some(Arc::new(cb));
         self
     }
-
 
     pub fn monitor(&self) -> Arc<CommitConsumerMonitor> {
         self.monitor.clone()
@@ -220,7 +219,10 @@ mod test {
         // "stalled" relative to its own startup baseline.
         let monitor = CommitConsumerMonitor::new(42, 42);
         assert_eq!(monitor.go_confirmed_commit(), 42);
-        assert_eq!(monitor.go_confirmed_commit(), monitor.highest_handled_commit());
+        assert_eq!(
+            monitor.go_confirmed_commit(),
+            monitor.highest_handled_commit()
+        );
     }
 
     #[test]

@@ -1,10 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeSet,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use consensus_config::AuthorityIndex;
 use consensus_types::block::BlockRef;
@@ -28,13 +25,13 @@ use crate::{
     transaction_certifier::TransactionCertifier,
 };
 
-pub mod handlers;
 pub mod broadcast;
+pub mod handlers;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use broadcast::SubscriptionCounter;
 pub(crate) use broadcast::BroadcastedBlockStream;
+pub(crate) use broadcast::SubscriptionCounter;
 
 pub(crate) const COMMIT_LAG_MULTIPLIER: u32 = 10000;
 
@@ -174,4 +171,3 @@ impl<C: CoreThreadDispatcher> AuthorityService<C> {
         Ok(excluded_ancestors)
     }
 }
-

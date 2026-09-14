@@ -433,53 +433,51 @@ impl RustSyncNode {
                         
                         let from_gei = go_last_gei + 1;
                         let to_gei = std::cmp::min(peer_gei, from_gei + 2000);
-                        
-                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer], from_gei, to_gei).await {
-                            Ok(exec_blocks) if !exec_blocks.is_empty() => {
-                                info!("✅ [RUST-SYNC] Fetched {} empty executable blocks. Pushing to Go FFI...", exec_blocks.len());
-                                let mut sent = 0;
-                                if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
-                                    for (gei, data) in exec_blocks {
-                                        let (success, _response) = {
-                                            let mut out_payload: *mut u8 = std::ptr::null_mut();
-                                            let mut out_len = 0usize;
-                                            let success = c_fn(
-                                                data.as_ptr(),
-                                                data.len(),
-                                                &mut out_payload,
-                                                &mut out_len,
-                                            );
-                                            let response = if !out_payload.is_null() && out_len > 0 {
-                                                let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
-                                                let resp = <crate::node::executor_client::proto::ExecuteBlockResponse as prost::Message>::decode(slice).ok();
-                                                if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
-                                                    free_fn(out_payload);
-                                                }
-                                                resp
-                                            } else {
-                                                None
-                                            };
-                                            (success, response)
-                                        };
 
-                                        if success {
-                                            sent += 1;
-                                        } else {
-                                            tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
-                                            break;
-                                        }
-                                    }
-                                    info!("✅ [RUST-SYNC] Successfully pushed {} empty commits to Go.", sent);
+                        // FORK-SAFETY (restored 2026-09-13, code review finding): always ask the
+                        // network for the real, verified content first, rather than blindly
+                        // trusting the "peer_block == go_block implies these GEIs are all empty"
+                        // heuristic and fabricating stand-in ExecutableBlocks locally. That
+                        // heuristic can be WRONG (e.g. the peer's own Go execution is itself
+                        // stalled for an unrelated reason, not because the commits are genuinely
+                        // empty -- exactly the class of Go-dispatch-stall bug this project has
+                        // repeatedly root-caused elsewhere) -- silently executing a synthesized
+                        // empty block in place of one that actually had real transactions would
+                        // permanently and silently diverge this SyncOnly node's state. Peers now
+                        // persist a real 0-byte file for genuinely-empty GEIs (see
+                        // block_store.rs's store_executable_blocks_batch), so this fetch reliably
+                        // succeeds for the common case; local synthesis remains ONLY as a
+                        // best-effort liveness fallback for a peer that hasn't deployed that fix
+                        // yet, logged loudly since it is the less-verified path.
+                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer.clone()], from_gei, to_gei).await {
+                            Ok(exec_blocks) if !exec_blocks.is_empty() => {
+                                info!("✅ [RUST-SYNC] Fetched {} verified empty executable blocks from peer. Pushing to Go FFI...", exec_blocks.len());
+                                if push_exec_blocks_to_go(exec_blocks) {
                                     return Ok(0);
-                                } else {
-                                    tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
                                 }
                             }
                             Ok(_) => {
-                                tracing::debug!("[RUST-SYNC] No executable blocks fetched from peer.");
+                                tracing::warn!(
+                                    "⚠️ [RUST-SYNC] Peer {} returned no executable blocks for GEI {}..{} \
+                                     (likely hasn't deployed the 0-byte-file fix yet). Falling back to \
+                                     local synthesis -- LESS VERIFIED, only safe if peer_block==go_block \
+                                     genuinely means these commits are empty.",
+                                    best_peer, from_gei, to_gei
+                                );
+                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)) {
+                                    return Ok(0);
+                                }
                             }
                             Err(e) => {
-                                tracing::warn!("⚠️ [RUST-SYNC] Failed to fetch executable blocks: {}", e);
+                                tracing::warn!(
+                                    "⚠️ [RUST-SYNC] Failed to fetch executable blocks from peer {}: {}. \
+                                     Falling back to local synthesis -- LESS VERIFIED, only safe if \
+                                     peer_block==go_block genuinely means these commits are empty.",
+                                    best_peer, e
+                                );
+                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)) {
+                                    return Ok(0);
+                                }
                             }
                         }
                     }
@@ -836,6 +834,55 @@ impl RustSyncNode {
             }
         }
     }
+}
+
+/// Synthesizes stand-in empty `ExecutableBlock`s for a GEI range, for use ONLY as a
+/// best-effort liveness fallback when fetching the real (peer-verified) content fails --
+/// see the call site's doc comment for why this is deliberately the less-trusted path.
+fn synthesize_empty_exec_blocks(from_gei: u64, to_gei: u64, go_block: u64) -> Vec<(u64, Vec<u8>)> {
+    (from_gei..=to_gei)
+        .map(|gei| {
+            let empty_block = crate::node::executor_client::proto::ExecutableBlock {
+                global_exec_index: gei,
+                is_authoritative_gei: false,
+                block_number: go_block, // Map it to the current Go block
+                ..Default::default()
+            };
+            let mut data = Vec::new();
+            prost::Message::encode(&empty_block, &mut data)
+                .expect("encoding a default-constructed ExecutableBlock cannot fail");
+            (gei, data)
+        })
+        .collect()
+}
+
+/// Pushes a list of (gei, serialized ExecutableBlock) pairs to Go via FFI, in order,
+/// stopping at the first failure. Returns true iff every block was pushed successfully.
+fn push_exec_blocks_to_go(exec_blocks: Vec<(u64, Vec<u8>)>) -> bool {
+    let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) else {
+        tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
+        return false;
+    };
+
+    let mut sent = 0;
+    for (gei, data) in &exec_blocks {
+        let mut out_payload: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+        let success = c_fn(data.as_ptr(), data.len(), &mut out_payload, &mut out_len);
+        if !out_payload.is_null() && out_len > 0 {
+            if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                free_fn(out_payload);
+            }
+        }
+        if success {
+            sent += 1;
+        } else {
+            tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
+            break;
+        }
+    }
+    info!("✅ [RUST-SYNC] Successfully pushed {}/{} empty commits to Go.", sent, exec_blocks.len());
+    sent == exec_blocks.len()
 }
 
 // Need Arc in scope for auto_epoch_sync and committee_refresh

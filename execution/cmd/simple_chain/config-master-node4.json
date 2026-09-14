@@ -104,7 +104,7 @@
   "db_type": 2,
   "genesis_file_path": "genesis.json",
 
-  "snapshot_enabled": true,
+  "snapshot_enabled": false,
   "snapshot_frequency_blocks": 200,
   "snapshot_block_offset": 200,
   "snapshot_max_snapshots": 3,

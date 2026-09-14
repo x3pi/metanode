@@ -1,5 +1,5 @@
-use super::*;
 use super::proposal::receive;
+use super::*;
 
 #[tokio::test]
 async fn test_smart_ancestor_selection() {
@@ -17,7 +17,8 @@ async fn test_smart_ancestor_selection() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
         LeaderSchedule::from_store(context.clone(), dag_state.clone())
             .with_num_commits_per_schedule(10),
@@ -25,8 +26,7 @@ async fn test_smart_ancestor_selection() {
 
     let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -37,7 +37,8 @@ async fn test_smart_ancestor_selection() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -154,7 +155,13 @@ async fn test_smart_ancestor_selection() {
     // Wait for min round delay to allow blocks to be proposed. Core also enforces a
     // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
     // `min_round_delay` is configured lower, so wait for whichever is longer.
-    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        context
+            .parameters
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     // Smart select should be triggered and no block should be proposed.
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
@@ -225,7 +232,13 @@ async fn test_smart_ancestor_selection() {
         .build();
     let blocks = builder.blocks(16..=16);
     // Wait for leader timeout to force blocks to be proposed.
-    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        context
+            .parameters
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     // Smart select should be triggered and no block should be proposed.
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
@@ -289,7 +302,13 @@ async fn test_smart_ancestor_selection() {
         .collect::<Vec<_>>();
 
     // Have enough ancestor blocks to propose now.
-    sleep(context.parameters.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY)).await;
+    sleep(
+        context
+            .parameters
+            .min_round_delay
+            .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+    )
+    .await;
     transaction_certifier.add_voted_blocks(blocks.iter().map(|b| (b.clone(), vec![])).collect());
     assert!(core.add_blocks(blocks).unwrap().is_empty());
     assert_eq!(core.last_proposed_block().round(), 23);
@@ -319,7 +338,8 @@ async fn test_excluded_ancestor_limit() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
         LeaderSchedule::from_store(context.clone(), dag_state.clone())
             .with_num_commits_per_schedule(10),
@@ -327,8 +347,7 @@ async fn test_excluded_ancestor_limit() {
 
     let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -339,7 +358,8 @@ async fn test_excluded_ancestor_limit() {
     // Need at least one subscriber to the block broadcast channel.
     let mut block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -412,7 +432,6 @@ async fn test_excluded_ancestor_limit() {
     assert_eq!(extended_block.excluded_ancestors.len(), 8);
 }
 
-
 #[tokio::test]
 async fn test_core_signals() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -430,8 +449,12 @@ async fn test_core_signals() {
         // Wait for min round delay to allow blocks to be proposed. Core also enforces a
         // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
         // `min_round_delay` is configured lower, so wait for whichever is longer.
-        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
-            .await;
+        sleep(
+            default_params
+                .min_round_delay
+                .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+        )
+        .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round
@@ -519,4 +542,3 @@ async fn test_core_signals() {
         assert_eq!(all_stored_commits.len(), 7);
     }
 }
-

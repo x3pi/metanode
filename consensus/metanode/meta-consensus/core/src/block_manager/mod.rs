@@ -18,9 +18,9 @@ use crate::{
     dag_state::DagState,
 };
 
-pub mod types;
 #[cfg(test)]
 mod tests;
+pub mod types;
 
 use types::{SuspendedBlock, TryAcceptResult};
 
@@ -55,7 +55,11 @@ pub(crate) struct BlockManager {
 }
 
 impl BlockManager {
-    pub(crate) fn new(context: Arc<Context>, dag_state: Arc<RwLock<DagState>>, dag_state_writer: crate::dag_state_actor::DagStateWriter) -> Self {
+    pub(crate) fn new(
+        context: Arc<Context>,
+        dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
+    ) -> Self {
         let committee_size = context.committee.size();
         Self {
             context,
@@ -168,8 +172,6 @@ impl BlockManager {
         }
 
         self.update_stats(missing_blocks.len() as u64);
-
-
 
         // Figure out the new missing blocks
         (accepted_blocks, missing_blocks)
@@ -313,10 +315,7 @@ impl BlockManager {
                 // Sort by round ascending (BTreeMap is already sorted by BlockRef which starts with round)
                 evict_refs.sort_by_key(|r| r.round);
 
-                let evict_cutoff_round = evict_refs
-                    .last()
-                    .map(|r| r.round)
-                    .unwrap_or(0);
+                let evict_cutoff_round = evict_refs.last().map(|r| r.round).unwrap_or(0);
 
                 for evict_ref in &evict_refs {
                     if let Some(suspended) = self.suspended_blocks.remove(evict_ref) {

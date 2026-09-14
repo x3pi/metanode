@@ -32,11 +32,11 @@ mod leader_timeout;
 mod legacy_store;
 mod linearizer;
 mod metrics;
-pub mod payload_loss_attestation;
 pub mod network; // Made public for SyncOnlyNode
+pub mod payload_loss_attestation;
 mod proposed_block_handler;
-pub mod recovery_barrier;
 mod reconfiguration;
+pub mod recovery_barrier;
 mod round_prober;
 mod round_tracker;
 mod stake_aggregator;
@@ -48,8 +48,8 @@ mod system_transaction_provider;
 mod threshold_clock;
 mod transaction;
 mod transaction_certifier;
-mod universal_committer;
 pub(crate) mod tx_group_filter;
+mod universal_committer;
 
 /// Consensus test utilities.
 #[cfg(test)]
@@ -73,8 +73,8 @@ pub use reconfiguration::{ReconfigCertStatus, ReconfigState};
 /// Exported API for testing and tools.
 pub use block::{SignedBlock, TestBlock, Transaction, VerifiedBlock};
 pub use commit::{
-    load_committed_subdag_from_store, try_load_committed_subdag_from_store, Commit, CommitAPI, CommitDigest, CommitIndex, CommitRange,
-    CommitRef, CommittedSubDag, TrustedCommit,
+    load_committed_subdag_from_store, try_load_committed_subdag_from_store, Commit, CommitAPI,
+    CommitDigest, CommitIndex, CommitRange, CommitRef, CommittedSubDag, TrustedCommit,
 };
 pub use commit_consumer::{CommitConsumerArgs, CommitConsumerMonitor};
 pub use commit_vote_monitor::CommitVoteMonitor;
@@ -85,8 +85,8 @@ pub use system_transaction_provider::{
     DefaultSystemTransactionProvider, SystemTransactionProvider,
 };
 pub use transaction::{
-    BlockStatus, ClientError, TransactionClient, TransactionVerifier, ValidationError,
-    TxPayloadCache, get_global_tx_cache, TX_PAYLOAD_DIR,
+    get_global_tx_cache, BlockStatus, ClientError, TransactionClient, TransactionVerifier,
+    TxPayloadCache, ValidationError, TX_PAYLOAD_DIR,
 };
 
 // Exported API for benchmarking

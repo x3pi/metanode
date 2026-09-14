@@ -59,14 +59,31 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
         match input.current_phase {
             // ─── CATCHING UP during startup recovery ───
-            CatchingUp if input.startup_sync_active => {
-                Self::determine_startup_sync_exit(input)
-            }
+            CatchingUp if input.startup_sync_active => Self::determine_startup_sync_exit(input),
 
             // ─── CATCHING UP (normal): Stay until lag=0 ───
             CatchingUp if input.lag > 0 => PhaseTransitionDecision::Hold {
                 reason: "CatchingUp — lag > 0, still syncing",
             },
+
+            // ─── CATCHING UP (normal): quorum not yet discovered ───
+            // `lag == 0` here can mean either "genuinely caught up to a known quorum"
+            // or "quorum_commit is still 0 because we haven't discovered it from peers
+            // yet" (e.g. the brief window before CommitSyncer's own
+            // `discover_quorum_commit()` resolves, or any other caller of
+            // `try_schedule_once`/`update_state` that runs before it). In a
+            // multi-validator cluster those two cases are NOT the same: the local DAG
+            // can be filled in from peers before an independent quorum is confirmed, so
+            // treating "quorum unknown" as "caught up" risks a premature
+            // CatchingUp→Healthy flip that defeats the SINGLE-VALIDATOR EXCEPTION guard
+            // below in try_schedule_once (reproduced directly by
+            // `multi_validator_does_not_advance_synced_commit_index_while_catching_up`).
+            // Single-validator clusters are exempt — same reasoning as that guard.
+            CatchingUp if input.quorum_commit == 0 && !input.is_single_validator => {
+                PhaseTransitionDecision::Hold {
+                    reason: "CatchingUp — quorum commit not yet discovered from peers",
+                }
+            }
 
             // ─── CATCHING UP (normal): Lag resolved but barrier still active → Hold ───
             CatchingUp if !input.recovery_barrier_can_propose => {
@@ -116,15 +133,22 @@ impl<C: NetworkClient> CommitSyncer<C> {
             Healthy
         };
 
-        match (input.highest_handled, input.quorum_commit, input.go_sync_completed) {
+        match (
+            input.highest_handled,
+            input.quorum_commit,
+            input.go_sync_completed,
+        ) {
             // ── Case 1: No local state, quorum exists → NOT genesis, DAG wipe ──
             (0, quorum, _) if quorum > 0 => {
                 tracing::info!(
                     "🚀 [BOOTSTRAP] highest_handled=0 but quorum={} found. \
                      NOT genesis — DAG wipe detected. Transitioning to {:?}.",
-                    quorum, next_phase_for_lag
+                    quorum,
+                    next_phase_for_lag
                 );
-                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+                PhaseTransitionDecision::Transition {
+                    to: next_phase_for_lag,
+                }
             }
 
             // ── Case 2: No local state, no quorum, network polled → GENESIS ──
@@ -134,7 +158,9 @@ impl<C: NetworkClient> CommitSyncer<C> {
                      Transitioning to {:?} to allow block 1 proposal.",
                     next_phase_for_lag
                 );
-                PhaseTransitionDecision::TransitionAndClearStartup { to: next_phase_for_lag }
+                PhaseTransitionDecision::TransitionAndClearStartup {
+                    to: next_phase_for_lag,
+                }
             }
 
             // ── Case 3: No local state, no quorum, still polling → WAIT ──
@@ -146,9 +172,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             (_, quorum, _) if quorum > 0 => {
                 tracing::info!(
                     "🚀 [BOOTSTRAP] Snapshot restore complete. quorum={}, transitioning to {:?}.",
-                    quorum, next_phase_for_lag
+                    quorum,
+                    next_phase_for_lag
                 );
-                PhaseTransitionDecision::Transition { to: next_phase_for_lag }
+                PhaseTransitionDecision::Transition {
+                    to: next_phase_for_lag,
+                }
             }
 
             // ── Case 5: Has local state, no quorum, network polled → SEED ──
@@ -218,13 +247,14 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // 1. The network is completely empty (no commits exist to fetch).
         // 2. We already had the full DAG locally before starting (local_commit == quorum_commit).
         let needs_network_sync = !is_empty_network && input.local_commit < input.quorum_commit;
-        
+
         if needs_network_sync && input.network_synced_commits == 0 {
             tracing::warn!(
                 "⚠️ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}), \
                  but network_synced_commits=0 — no actual commits fetched from peers yet. \
                  Blocking CatchingUp→Healthy to prevent baseline-only false parity.",
-                input.synced_commit_index, input.quorum_commit
+                input.synced_commit_index,
+                input.quorum_commit
             );
             return PhaseTransitionDecision::Hold {
                 reason: "Startup sync: no network-validated commits yet",
@@ -273,12 +303,12 @@ impl<C: NetworkClient> CommitSyncer<C> {
             "✅ [COMMIT-SYNCER] Mathematical parity reached (synced={} >= quorum={}, \
              network_synced={}) and RecoveryBarrier=Ready. \
              Clearing startup_sync. Local committer will unlock after DAG density confirmed.",
-            input.synced_commit_index, input.quorum_commit, input.network_synced_commits
+            input.synced_commit_index,
+            input.quorum_commit,
+            input.network_synced_commits
         );
         PhaseTransitionDecision::TransitionAndClearStartup {
             to: crate::coordination_hub::NodeConsensusPhase::Healthy,
         }
     }
 }
-
-

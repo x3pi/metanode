@@ -89,8 +89,8 @@ if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
     PROBE_TX_KEY=$(python3 -c "
 import json
 try:
-    keys = json.load(open('$PROBE_SUITE_CONFIG')).get('private_keys', [])
-    print(keys[0] if keys else '')
+    c = json.load(open('$PROBE_SUITE_CONFIG'))
+    print(c.get('private_key', ''))
 except Exception:
     print('')
 " 2>/dev/null)
@@ -822,68 +822,78 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
                     # Nếu block không tăng sau STALL_THRESHOLD_SEC, cảnh báo lặp lại mỗi 15 phút
                     if [ "$stall_duration" -ge "$STALL_THRESHOLD_SEC" ]; then
                         if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
-                            # Trước khi báo: thử 1 tx thăm dò. Nếu chain chỉ đang RẢNH (không có
-                            # giao dịch nên không tạo block mới -- không phải bị treo thật), tx
-                            # này sẽ được đưa vào block và ta bỏ qua cảnh báo giả (2026-09-08).
-                            confirmed_real_stall=true
-                            probe_status_line="Chưa thử được (không có node nào để gửi)"
-                            echo "🔎 [STALL PROBE] Nghi ngờ chain treo tại block #${last_seen_block} (đứng yên ${stall_duration}s) -- thử gửi 1 tx thăm dò tới ${probe_target_url:-<không có node nào>}..."
+                            # Kiểm tra mempool trước khi báo cáo CHAIN STALL
+                            pending_tx_count=0
                             if [ -n "$probe_target_url" ]; then
-                                LAST_PROBE_OUTPUT=""
-                                send_stall_probe_tx "$probe_target_url"
-                                probe_rc=$?
-                                case "$probe_rc" in
-                                    0)
-                                        sleep 3
-                                        probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
-                                        if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
-                                            last_seen_block=$((16#${probe_hex#0x}))
-                                            last_block_progress_ts=$now_ts
-                                            confirmed_real_stall=false
-                                            echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
-                                        else
-                                            probe_status_line="Tx thăm dò báo đã xác nhận nhưng block vẫn chưa nhích -- bất thường, cần xem log."
-                                        fi
-                                        ;;
-                                    2)
-                                        # 2026-09-08: gặp thật trên cụm CI -- PROBE_TX_KEY sai/chưa đăng ký BLS
-                                        # khiến RPC từ chối NGAY LÚC GỬI, không liên quan gì tới chain có treo
-                                        # hay không. Đừng khẳng định "không phải do rảnh" trong tình huống này.
-                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
-                                        probe_status_line="Bị RPC từ chối ngay khi gửi (lỗi cấu hình PROBE_TX_KEY, KHÔNG phải bằng chứng chain treo): ${probe_err_snippet:-không rõ lỗi}"
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                    3)
-                                        probe_status_line="Đã gửi được nhưng hết giờ chờ (15s) không thấy receipt -- tín hiệu treo thật."
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                    *)
-                                        probe_status_line="Không chạy được (thiếu công cụ hoặc không lấy được chain-id) -- không loại trừ được khả năng rảnh."
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                esac
+                                pending_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_pendingTransactions","params":[],"id":1}' 2>/dev/null | jq '.result | length' 2>/dev/null || echo "0")
+                                if [[ "$pending_hex" =~ ^[0-9]+$ ]]; then
+                                    pending_tx_count=$pending_hex
+                                fi
                             fi
 
-                            if [ "$confirmed_real_stall" == "true" ]; then
+                            if [ "$pending_tx_count" -eq 0 ]; then
+                                echo "✅ [STALL CHECK] Mempool rỗng (0 pending txs) -- chuỗi chỉ đơn giản là đang nhàn rỗi (idle). Bỏ qua báo động giả."
+                                last_block_progress_ts=$now_ts
+                            else
+                                # Kiểm tra xem node có đang trong trạng thái Syncing/CatchingUp không qua eth_consensusReady
+                                consensus_ready="true"
+                                if [ -n "$probe_target_url" ]; then
+                                    ready_val=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_consensusReady","params":[],"id":1}' 2>/dev/null | jq -r '.result.ready' 2>/dev/null)
+                                    if [ "$ready_val" == "false" ]; then
+                                        consensus_ready="false"
+                                    fi
+                                fi
+
+                                if [ "$consensus_ready" == "false" ]; then
+                                    echo "✅ [STALL CHECK] Node chưa sẵn sàng (đang Startup/CatchingUp/Syncing). Bỏ qua báo động giả CHAIN STALL."
+                                    last_block_progress_ts=$now_ts
+                                else
+                                    # Có giao dịch kẹt trong mempool nhưng block không tăng VÀ node đã ready -> STALL THẬT SỰ
+                                    probe_status_line="Mempool đang có $pending_tx_count giao dịch kẹt không được xử lý"
+                                    echo "⚠️ [STALL CHECK] $probe_status_line"
+                                
+                                # Tuỳ chọn thử thêm 1 tx thăm dò để kiểm tra sâu hơn RPC
+                                echo "🔎 [STALL PROBE] Gửi thêm 1 tx thăm dò tới ${probe_target_url:-<không có>}..."
+                                if [ -n "$probe_target_url" ]; then
+                                    LAST_PROBE_OUTPUT=""
+                                    send_stall_probe_tx "$probe_target_url"
+                                    probe_rc=$?
+                                    if [ "$probe_rc" -eq 2 ]; then
+                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
+                                        probe_status_line="$probe_status_line | Tx thăm dò: Bị từ chối ngay (${probe_err_snippet:-không rõ lỗi})"
+                                    elif [ "$probe_rc" -eq 3 ]; then
+                                        probe_status_line="$probe_status_line | Tx thăm dò: Hết 15s không thấy receipt"
+                                    fi
+                                fi
+
                                 last_stall_alert_ts=$now_ts
                                 is_chain_stalled=true
-                                send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
+                                    send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
 ────────────────────────
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>Hostname:</b> <code>$(hostname)</code>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
 🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
-   • <b>Node được kiểm tra (tx thăm dò):</b> <code>${probe_target_url:-không có}</code>
+   • <b>Node được kiểm tra:</b> <code>${probe_target_url:-không có}</code>
    • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
    • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
-   • <b>Kết quả tx thăm dò:</b> ${probe_status_line}
+   • <b>Trạng thái:</b> ${probe_status_line}
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
 ────────────────────────
-👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):</b>
-Consensus bị kẹt vòng lặp. Chạy Fast Restart toàn cụm trong 2 giây để bầu lại Leader:
-<code>./ansible_deploy.sh --restart</code>
+👉 <b>HƯỚNG DẪN XỬ LÝ (TỰ ĐỘNG PHỤC HỒI):</b>
+Hệ thống phát hiện kẹt vòng lặp Consensus. Đang tự động kích hoạt Fast Restart toàn cụm trong nền để khôi phục!
 🟢 <i>An toàn: Giữ nguyên 100% dữ liệu, không tốn thời gian build lại.</i>"
+                                    
+                                    # Auto-recover in background, detached from TTY
+                                    echo "[$(date -u)] Auto-recovering chain stall..." >> "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
+                                    (
+                                        cd "${SCRIPT_DIR}/.."
+                                        export ANSIBLE_FORCE_COLOR=True
+                                        export PYTHONUNBUFFERED=1
+                                        ./ansible_deploy.sh --restart < /dev/null
+                                    ) >/dev/null 2>&1 &
+                                fi
                             fi
                         fi
                     fi

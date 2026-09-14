@@ -133,7 +133,7 @@ impl ConsensusNode {
         client: Arc<ExecutorClient>,
         peers: Vec<String>,
         start_block: u64,
-        is_terminally_failed: Arc<AtomicBool>,
+        _is_terminally_failed: Arc<AtomicBool>,
     ) {
         const CHECK_INTERVAL: u64 = 10;
         let mut next_check_block = start_block + CHECK_INTERVAL;
@@ -273,45 +273,23 @@ impl ConsensusNode {
                                          Setting is_terminally_failed and halting process.",
                                         next_check_block
                                     );
-                                    is_terminally_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    // FOUND LIVE (2026-09-05): std::process::exit() calls libc's
-                                    // exit() -- which, unlike _exit()/abort(), runs every
-                                    // atexit()-registered handler and every linked C++ library's
-                                    // static-object destructor (via __cxa_atexit) before actually
-                                    // terminating. This binary statically links several nontrivial
-                                    // C/C++ libraries (Xapian, the custom MVM/EVM linker, NOMT's
-                                    // FFI) -- reproduced live, twice, on two different builds (one
-                                    // with an unrelated unrelated change, one on a clean revert of
-                                    // it, ruling out that change as the cause): this exact log line
-                                    // printed, "Calling std::process::exit(1)" logged immediately
-                                    // after, and the OS process (verified by exact PID + `ps
-                                    // -o lstart`, not a race) kept running for 46+ seconds
-                                    // afterward -- i.e. it hung *inside* exit(), most likely stuck
-                                    // in one of those handlers, never actually terminating. This
-                                    // silently defeats the entire safety mechanism: a node that
-                                    // detects a confirmed fork keeps running (and could keep
-                                    // participating in consensus with state already judged
-                                    // divergent) instead of halting.
-                                    //
-                                    // Fixed by calling abort() instead: it raises SIGABRT directly,
-                                    // skipping atexit()/__cxa_atexit entirely -- verified in
-                                    // isolation (a minimal thread::spawn + tokio::spawn + exit(1)
-                                    // repro terminated correctly in under 1s, so the hang is
-                                    // specific to this binary's real linked libraries, not to the
-                                    // exit()-from-a-tokio-task pattern itself). A clean shutdown
-                                    // doesn't matter here anyway -- state is already judged
-                                    // divergent, so running MORE code (even cleanup code) before
-                                    // dying is undesirable, not just unnecessary. Under systemd,
-                                    // `Restart=on-failure` restarts on an abnormal signal
-                                    // termination exactly the same as on a nonzero exit code, so
-                                    // this doesn't change the "FFI restart loop" recovery story at
-                                    // all -- only makes the halt itself actually happen.
-                                    tracing::error!(
-                                        "🛑 [LAYER-6] Calling std::process::abort() to halt node \
-                                         (skips atexit handlers that can hang -- see comment above). \
-                                         FFI restart loop will trigger STARTUP-SYNC resync."
+                                    // FIXED (2026-09-12): Phase 2 Auto-Healing
+                                    // Instead of halting the node with #DEAD, we trigger the Fast-Sync recovery mechanism
+                                    // which fetches the target block and state root from the quorum and replays it dynamically.
+                                    tracing::warn!(
+                                        "🛡️🔄 [LAYER-6] Triggering Auto-Healing State Reconciliation for block #{}",
+                                        next_check_block
                                     );
-                                    std::process::abort();
+                                    let client_clone = client.clone();
+                                    let peers_clone = peers.clone();
+                                    let target_block = next_check_block;
+                                    tokio::spawn(async move {
+                                        crate::node::setup_consensus::state_recovery::trigger_fast_sync(
+                                            client_clone,
+                                            peers_clone,
+                                            target_block,
+                                        ).await;
+                                    });
                                 } else {
                                     consecutive_failures = 0;
                                 }

@@ -372,6 +372,19 @@ if [ -n "$INVENTORY_BECOME_PASS" ]; then
     export ANSIBLE_BECOME_PASS="$INVENTORY_BECOME_PASS"
 fi
 
+# Fast Pre-flight Check: Kiểm tra khả năng kết nối mạng tới các server đích trước khi build/deploy
+if [ "$ACTION" != "gen_keys" ] && [ -f "${SCRIPT_DIR}/parse_inventory.py" ]; then
+    echo -e "\n🔍 [PRE-FLIGHT] Đang kiểm tra kết nối mạng (SSH port) tới các máy chủ đích..."
+    if ! python3 "${SCRIPT_DIR}/parse_inventory.py" "$INVENTORY" "check_reachability" "$TARGET_NODE"; then
+        echo -e "\n\033[0;31m❌ [LỖI KẾT NỐI SERVER] Máy chủ đích bị timeout hoặc không thể kết nối qua SSH!\033[0m"
+        echo -e "\033[0;33m   🛑 Dừng thực thi ngay lập tức để không tốn thời gian biên dịch hay triển khai dở dang.\033[0m\n"
+        send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Thất bại ngay bước kiểm tra kết nối: Máy chủ đích không phản hồi (Connection timed out / SSH unreachable)!
+- Target Node IPs: <code>${TARGET_NODES_IPS}</code>"
+        exit 4
+    fi
+    echo -e "✅ Kết nối tới các máy chủ đích: OK"
+fi
+
 if [ "$ACTION" == "gen_keys" ]; then
     echo -e "\n🔑 [GEN-KEYS] Bắt đầu sinh bộ Key & Genesis mẫu cục bộ (Không đụng tới server)..."
     cd "$SCRIPT_DIR"
@@ -415,6 +428,7 @@ fi
 
 cd "$SCRIPT_DIR"
 set +e
+export PYTHONUNBUFFERED=1
 ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
 ansible_exit=$?
 set -e
@@ -462,7 +476,19 @@ ${TCP_NODES_LIST}
 
 💡 <b>Xem log nhanh:</b> <code>./fetch_node_logs.sh</code> (thêm <code>--rpc</code> nếu cần log RPC; xem DEPLOY_GUIDE.md)"
 else
-    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+    ERROR_DESC="Lỗi không xác định"
+    case $ansible_exit in
+        1) ERROR_DESC="Lỗi chung (General error) - Playbook thất bại hoặc thiếu thư viện" ;;
+        2) ERROR_DESC="Lỗi thực thi Ansible hoặc máy chủ không phản hồi (Unreachable / Failed host / Syntax error)" ;;
+        3) ERROR_DESC="Lỗi Ansible Inventory - Host không hợp lệ hoặc thiếu quyền" ;;
+        4) ERROR_DESC="Lỗi kết nối SSH (Unreachable hosts) - Máy chủ từ chối kết nối hoặc timeout" ;;
+        13|141) ERROR_DESC="Bị ngắt kết nối (Broken pipe / SIGPIPE) - Script thoát đột ngột" ;;
+        99) ERROR_DESC="Lỗi kịch bản Deploy (Thường do thiếu TTY / chưa xác nhận Y/N)" ;;
+        127) ERROR_DESC="Không tìm thấy lệnh (Command not found) - Thiếu Ansible hoặc tiện ích" ;;
+        130) ERROR_DESC="Bị người dùng hủy bỏ (Ctrl+C)" ;;
+    esac
+
+    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>: <b>${ERROR_DESC}</b>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 

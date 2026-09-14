@@ -24,6 +24,30 @@ pub trait Store: Send + Sync {
     /// Writes blocks, consensus commits and other data to store atomically.
     fn write(&self, write_batch: WriteBatch) -> ConsensusResult<()>;
 
+    /// Same as `write`, but durable: the write must be fsync'd to disk before returning,
+    /// not just handed to the OS page cache. Default implementation just calls `write` --
+    /// safe for any backend without a meaningful sync/no-sync distinction (e.g. `MemStore`
+    /// in tests). `RocksDBStore` overrides this to actually request `sync(true)`.
+    ///
+    /// Added 2026-09-12 (note/... power-loss durability review, per explicit user request
+    /// to review "if the system loses power and RAM/recent state is destroyed, does it
+    /// still come back up correctly"): every write in this codebase is async by design for
+    /// throughput (`ReadWriteOptions::default().sync_writes == false`, never overridden) --
+    /// a genuine power loss (not a process crash/panic/abort, which the OS page cache
+    /// survives fine) can lose the most recently written data that was never fsync'd. That
+    /// is an acceptable trade-off for most writes (a node that "forgets" a few seconds of
+    /// its own history on restart looks exactly like a node that fell behind, and the
+    /// existing halt-not-guess / quorum-verification machinery already handles that safely
+    /// -- see project memory "Phuong an A"). The ONE place this actually matters for BFT
+    /// safety is the write that must complete BEFORE a validator broadcasts its own new
+    /// block/vote to peers (`core/proposer.rs`'s flush-before-broadcast) -- a validator
+    /// must not tell peers about something it cannot durably prove it did. This method
+    /// exists so that ONE call site can opt into durability without changing the default
+    /// for every other write in the system.
+    fn write_durable(&self, write_batch: WriteBatch) -> ConsensusResult<()> {
+        self.write(write_batch)
+    }
+
     /// Reads blocks for the given refs.
     fn read_blocks(&self, refs: &[BlockRef]) -> ConsensusResult<Vec<Option<VerifiedBlock>>>;
 

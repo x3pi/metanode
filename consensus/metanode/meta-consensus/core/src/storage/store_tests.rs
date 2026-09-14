@@ -105,6 +105,49 @@ async fn test_store_read(
     }
 }
 
+/// `write_durable` (added for the power-loss durability review, see
+/// `Store::write_durable`'s doc comment) must be functionally equivalent to `write` --
+/// same data readable back afterward -- for every backend, including `MemStore` (which
+/// has no sync/no-sync distinction and just inherits the trait's default `write_durable`
+/// implementation). This doesn't (and can't, from a unit test) prove the RocksDB write was
+/// actually fsync'd; it locks in that switching between the two paths never changes what
+/// gets written.
+#[rstest]
+#[tokio::test]
+async fn test_write_durable_persists_same_as_write(
+    #[values(new_rocksdb_teststore(), new_mem_teststore())] test_store: TestStore,
+) {
+    let store = test_store.store();
+
+    let durable_blocks: Vec<VerifiedBlock> = vec![
+        VerifiedBlock::new_for_test(TestBlock::new(1, 0).build()),
+        VerifiedBlock::new_for_test(TestBlock::new(1, 1).build()),
+    ];
+    store
+        .write_durable(WriteBatch::default().blocks(durable_blocks.clone()))
+        .expect("write_durable should not fail");
+
+    let refs: Vec<_> = durable_blocks.iter().map(|b| b.reference()).collect();
+    let read_blocks = store
+        .read_blocks(&refs)
+        .expect("Read blocks should not fail");
+    assert_eq!(read_blocks.len(), 2);
+    assert_eq!(read_blocks[0].as_ref().unwrap(), &durable_blocks[0]);
+    assert_eq!(read_blocks[1].as_ref().unwrap(), &durable_blocks[1]);
+
+    // A plain (non-durable) write afterward must still work fine on the same store --
+    // the two paths aren't mutually exclusive.
+    let regular_blocks: Vec<VerifiedBlock> =
+        vec![VerifiedBlock::new_for_test(TestBlock::new(2, 0).build())];
+    store
+        .write(WriteBatch::default().blocks(regular_blocks.clone()))
+        .expect("write should not fail");
+    let read_blocks = store
+        .read_blocks(&[regular_blocks[0].reference()])
+        .expect("Read blocks should not fail");
+    assert_eq!(read_blocks[0].as_ref().unwrap(), &regular_blocks[0]);
+}
+
 #[rstest]
 #[tokio::test]
 async fn scan_blocks(

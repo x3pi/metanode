@@ -1,0 +1,9 @@
+[
+  {
+    "action": "send_transaction",
+    "to_address": "0x47Bc6bCBAeDC731Fd2832df68CEd61053aCC02B0",
+    "from_address": "0xc613e48C78BFeEdcd046Bf5f3A8780EAc8E07C93",
+    "value": "1000",
+    "data_hex": ""
+  }
+]

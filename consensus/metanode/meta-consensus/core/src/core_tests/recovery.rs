@@ -43,13 +43,13 @@ async fn test_core_recover_from_store_for_full_round() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let mut block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -57,7 +57,8 @@ async fn test_core_recover_from_store_for_full_round() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -76,8 +77,7 @@ async fn test_core_recover_from_store_for_full_round() {
 
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -192,13 +192,13 @@ async fn test_core_recover_from_store_for_partial_round() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let mut block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -206,7 +206,8 @@ async fn test_core_recover_from_store_for_partial_round() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -225,8 +226,7 @@ async fn test_core_recover_from_store_for_partial_round() {
 
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -296,4 +296,3 @@ async fn test_core_recover_from_store_for_partial_round() {
     let all_stored_commits = store.scan_commits((0..=CommitIndex::MAX).into()).unwrap();
     assert_eq!(all_stored_commits.len(), 2);
 }
-

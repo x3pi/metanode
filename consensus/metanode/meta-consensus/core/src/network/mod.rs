@@ -248,7 +248,11 @@ pub(crate) trait NetworkService: Send + Sync + 'static {
         &self,
         peer: AuthorityIndex,
         commit_range: CommitRange,
-    ) -> ConsensusResult<(Vec<TrustedCommit>, Vec<VerifiedBlock>, Vec<crate::commit::CommitInfo>)>;
+    ) -> ConsensusResult<(
+        Vec<TrustedCommit>,
+        Vec<VerifiedBlock>,
+        Vec<crate::commit::CommitInfo>,
+    )>;
 
     /// Handles the request to fetch commits by global execution index range.
     /// Searches across all epochs to find commits in the requested global range.

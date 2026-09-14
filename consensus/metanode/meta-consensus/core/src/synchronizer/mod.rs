@@ -21,9 +21,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace};
 
-use crate::{
-    authority_service::COMMIT_LAG_MULTIPLIER, core_thread::CoreThreadDispatcher,
-};
+use crate::{authority_service::COMMIT_LAG_MULTIPLIER, core_thread::CoreThreadDispatcher};
 use crate::{
     block::{SignedBlock, VerifiedBlock},
     block_verifier::BlockVerifier,
@@ -165,7 +163,7 @@ enum Command {
     KickOffScheduler,
 }
 
-use tokio::sync::mpsc::{Sender, Receiver, channel};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub(crate) struct SynchronizerHandle {
     commands_sender: Sender<Command>,
@@ -242,7 +240,6 @@ pub(crate) struct Synchronizer<C: NetworkClient, V: BlockVerifier, D: CoreThread
     consecutive_sync_failures: Arc<AtomicU32>,
 }
 
-
 pub mod fetcher;
 pub mod scheduler;
 
@@ -258,8 +255,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         dag_state: Arc<RwLock<DagState>>,
         sync_last_known_own_block: bool,
     ) -> Arc<SynchronizerHandle> {
-        let (commands_sender, commands_receiver) =
-            channel(1_000);
+        let (commands_sender, commands_receiver) = channel(1_000);
         let inflight_blocks_map = InflightBlocksMap::new();
 
         // Spawn the tasks to fetch the blocks from the others
@@ -269,8 +265,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             if index == context.own_index {
                 continue;
             }
-            let (sender, receiver) =
-                channel(FETCH_BLOCKS_CONCURRENCY);
+            let (sender, receiver) = channel(FETCH_BLOCKS_CONCURRENCY);
             let fetch_blocks_from_authority_async = Self::fetch_blocks_from_authority(
                 index,
                 network_client.clone(),
@@ -321,7 +316,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             tasks: tokio::sync::Mutex::new(tasks),
         })
     }
-
 
     // The main loop to listen for the submitted commands.
     async fn run(&mut self) {
@@ -442,7 +436,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                         // fetching blocks from peers in a different epoch). This prevents a
                         // spam loop of ~5 futile requests/second per peer.
                         let failures = self.consecutive_sync_failures.load(Ordering::Relaxed);
-                        
+
                         // Detect if we are in sync mode (lagging)
                         let local_commit = self.dag_state.read().last_commit_index();
                         let quorum_commit = self.commit_vote_monitor.quorum_commit_index();
@@ -465,7 +459,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         }
     }
 
-
     fn get_highest_accepted_rounds(
         dag_state: Arc<RwLock<DagState>>,
         context: &Arc<Context>,
@@ -480,7 +473,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             .map(|(block, _)| block.round())
             .collect::<Vec<_>>()
     }
-
 
     fn verify_blocks(
         serialized_blocks: Vec<Bytes>,
@@ -537,17 +529,26 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                             "Verifying cross-epoch ancestor block from peer {} (expected epoch {}, got {})",
                             peer_index, expected, actual
                         );
-                        match block_verifier.verify_for_commit_sync(signed_block, serialized_block) {
+                        match block_verifier.verify_for_commit_sync(signed_block, serialized_block)
+                        {
                             Ok(result) => result,
                             Err(e) => {
-                                let hostname = context.committee.authority(peer_index).hostname.clone();
+                                let hostname =
+                                    context.committee.authority(peer_index).hostname.clone();
                                 context
                                     .metrics
                                     .node_metrics
                                     .invalid_blocks
-                                    .with_label_values(&[&hostname, "synchronizer_cross_epoch", e.clone().name()])
+                                    .with_label_values(&[
+                                        &hostname,
+                                        "synchronizer_cross_epoch",
+                                        e.clone().name(),
+                                    ])
                                     .inc();
-                                info!("Invalid cross-epoch block received from {}: {}", peer_index, e);
+                                info!(
+                                    "Invalid cross-epoch block received from {}: {}",
+                                    peer_index, e
+                                );
                                 return Err(e);
                             }
                         }
@@ -566,7 +567,11 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                 Err(ConsensusError::MissingTransactions(missing)) => {
                     // Fetch the missing transactions synchronously using block_on
                     let rt = tokio::runtime::Handle::current();
-                    let fetch_res = rt.block_on(network_client.fetch_transactions(peer_index, missing, FETCH_REQUEST_TIMEOUT));
+                    let fetch_res = rt.block_on(network_client.fetch_transactions(
+                        peer_index,
+                        missing,
+                        FETCH_REQUEST_TIMEOUT,
+                    ));
                     match fetch_res {
                         Ok(txs_bytes) => {
                             {
@@ -629,7 +634,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         Ok(verified_blocks)
     }
 
-
     fn is_commit_lagging(&self) -> bool {
         if self.commit_vote_monitor.highest_seen_epoch() > self.context.committee.epoch() {
             return true;
@@ -640,10 +644,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             + self.context.parameters.commit_sync_batch_size * COMMIT_LAG_MULTIPLIER;
         commit_threshold < quorum_commit_index
     }
-
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -657,8 +658,8 @@ mod tests {
     use bytes::Bytes;
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockDigest, BlockRef, Round};
-    use tokio::sync::mpsc;
     use parking_lot::RwLock;
+    use tokio::sync::mpsc;
     use tokio::{sync::Mutex, time::sleep};
 
     use crate::commit::{CommitVote, TrustedCommit};
@@ -934,8 +935,7 @@ mod tests {
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let network_client = Arc::new(MockNetworkClient::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -991,8 +991,7 @@ mod tests {
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1060,8 +1059,7 @@ mod tests {
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1138,8 +1136,7 @@ mod tests {
         let block_verifier = Arc::new(NoopBlockVerifier {});
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
         let transaction_certifier = TransactionCertifier::new(
@@ -1276,8 +1273,7 @@ mod tests {
         let block_verifier = Arc::new(NoopBlockVerifier {});
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
         let network_client = Arc::new(MockNetworkClient::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
@@ -1400,8 +1396,7 @@ mod tests {
         let context = Arc::new(context);
         let block_verifier = Arc::new(NoopBlockVerifier {});
         let core_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
@@ -1411,8 +1406,7 @@ mod tests {
             dag_state.clone(),
             blocks_sender,
         );
-        let (commands_sender, _commands_receiver) =
-            tokio::sync::mpsc::channel(1000);
+        let (commands_sender, _commands_receiver) = tokio::sync::mpsc::channel(1000);
 
         // Create input test blocks:
         // - Authority 0 block at round 60.

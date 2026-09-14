@@ -10,11 +10,6 @@ use std::{
     },
 };
 
-use async_trait::async_trait;
-use consensus_types::block::{BlockRef, Round};
-use parking_lot::RwLock;
-use thiserror::Error;
-use tokio::sync::{mpsc::{Sender, Receiver, WeakSender, channel}, oneshot, watch};
 use crate::{
     block::VerifiedBlock,
     commit::CertifiedCommits,
@@ -24,6 +19,14 @@ use crate::{
     dag_state::DagState,
     error::{ConsensusError, ConsensusResult},
     BlockAPI as _,
+};
+use async_trait::async_trait;
+use consensus_types::block::{BlockRef, Round};
+use parking_lot::RwLock;
+use thiserror::Error;
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender, WeakSender},
+    oneshot, watch,
 };
 
 const CORE_THREAD_COMMANDS_CHANNEL_SIZE: usize = 10000;
@@ -99,7 +102,9 @@ impl CoreThreadHandle {
     }
 
     pub fn is_alive(&self) -> bool {
-        self.join_handle.as_ref().map_or(false, |h| !h.is_finished())
+        self.join_handle
+            .as_ref()
+            .map_or(false, |h| !h.is_finished())
     }
 }
 
@@ -226,8 +231,7 @@ impl ChannelCoreThreadDispatcher {
                 .collect()
         };
 
-        let (sender, receiver) =
-            channel(CORE_THREAD_COMMANDS_CHANNEL_SIZE);
+        let (sender, receiver) = channel(CORE_THREAD_COMMANDS_CHANNEL_SIZE);
         let (tx_propagation_delay, mut rx_propagation_delay) = watch::channel(0);
         let (tx_last_known_proposed_round, mut rx_last_known_proposed_round) = watch::channel(0);
         rx_propagation_delay.mark_unchanged();
@@ -240,47 +244,48 @@ impl ChannelCoreThreadDispatcher {
             context: context.clone(),
         };
 
-        let join_handle = tokio::spawn(
-            async move {
-                use futures::FutureExt;
-                let res = std::panic::AssertUnwindSafe(core_thread.run()).catch_unwind().await;
-                match res {
-                    Ok(inner_res) => {
-                        std::fs::write("/tmp/core_thread_debug.log", format!("inner_res: {:?}\n", inner_res)).ok();
-                        match inner_res {
-                            Ok(()) => {
-                                println!("🟢 [CORE THREAD] Exiting gracefully with Ok(())!");
-                            }
-                            Err(err) => {
-                                println!("🔴 [CORE THREAD] Exiting with error: {:?}", err);
-                                if matches!(err, ConsensusError::Shutdown) {
-                                    tracing::warn!("🔴 [CORE THREAD] Exiting due to Shutdown.");
-                                } else {
-                                    panic!("Fatal error occurred: {err}");
-                                }
+        let join_handle = tokio::spawn(async move {
+            use futures::FutureExt;
+            let res = std::panic::AssertUnwindSafe(core_thread.run())
+                .catch_unwind()
+                .await;
+            match res {
+                Ok(inner_res) => {
+                    std::fs::write(
+                        "/tmp/core_thread_debug.log",
+                        format!("inner_res: {:?}\n", inner_res),
+                    )
+                    .ok();
+                    match inner_res {
+                        Ok(()) => {
+                            println!("🟢 [CORE THREAD] Exiting gracefully with Ok(())!");
+                        }
+                        Err(err) => {
+                            println!("🔴 [CORE THREAD] Exiting with error: {:?}", err);
+                            if matches!(err, ConsensusError::Shutdown) {
+                                tracing::warn!("🔴 [CORE THREAD] Exiting due to Shutdown.");
+                            } else {
+                                panic!("Fatal error occurred: {err}");
                             }
                         }
                     }
-                    Err(panic_err) => {
-                        let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
-                            Some(s.to_string())
-                        } else if let Some(s) = panic_err.downcast_ref::<String>() {
-                            Some(s.to_string())
-                        } else {
-                            None
-                        };
-                        let backtrace = std::backtrace::Backtrace::force_capture();
-                        let debug_msg = format!(
-                            "PANIC!: MSG: {:?}\nBACKTRACE:\n{}\n",
-                            msg, backtrace
-                        );
-                        std::fs::write("/tmp/core_thread_debug.log", &debug_msg).ok();
-                        println!("🔴 [CORE THREAD] PANIC CAUGHT: {}", debug_msg);
-                        std::panic::resume_unwind(panic_err);
-                    }
+                }
+                Err(panic_err) => {
+                    let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                        Some(s.to_string())
+                    } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                        Some(s.to_string())
+                    } else {
+                        None
+                    };
+                    let backtrace = std::backtrace::Backtrace::force_capture();
+                    let debug_msg = format!("PANIC!: MSG: {:?}\nBACKTRACE:\n{}\n", msg, backtrace);
+                    std::fs::write("/tmp/core_thread_debug.log", &debug_msg).ok();
+                    println!("🔴 [CORE THREAD] PANIC CAUGHT: {}", debug_msg);
+                    std::panic::resume_unwind(panic_err);
                 }
             }
-        );
+        });
 
         // Explicitly using downgraded sender in order to allow sharing the CoreThreadDispatcher but
         // able to shutdown the CoreThread by dropping the original sender.
@@ -477,8 +482,8 @@ impl CoreThreadDispatcher for MockCoreThreadDispatcher {
 
 #[cfg(test)]
 mod test {
-    use tokio::sync::mpsc;
     use parking_lot::RwLock;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::{
@@ -504,11 +509,11 @@ mod test {
         let store = Arc::new(MemStore::new());
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
         let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+        let block_manager =
+            BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
         let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
-        let (blocks_sender, _blocks_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
         let transaction_certifier = TransactionCertifier::new(
             context.clone(),
             Arc::new(NoopBlockVerifier {}),

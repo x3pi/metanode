@@ -29,7 +29,9 @@
 //! short timeout -- an automatic trigger risks treating a transient network partition as
 //! confirmed permanent loss.
 
-use consensus_config::{AuthorityIndex, Committee, ProtocolKeyPair, ProtocolKeySignature, ProtocolPublicKey};
+use consensus_config::{
+    AuthorityIndex, Committee, ProtocolKeyPair, ProtocolKeySignature, ProtocolPublicKey,
+};
 use consensus_types::block::TxDigest;
 use serde::{Deserialize, Serialize};
 use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
@@ -134,11 +136,12 @@ impl PayloadLossAggregator {
                 attestation.claim, self.claim
             )));
         }
-        let pubkey = committee.authority(attestation.authority).protocol_key.clone();
+        let pubkey = committee
+            .authority(attestation.authority)
+            .protocol_key
+            .clone();
         attestation.verify(&pubkey)?;
-        let reached = self
-            .aggregator
-            .add_unique(attestation.authority, committee);
+        let reached = self.aggregator.add_unique(attestation.authority, committee);
         self.attestations.push(attestation);
         Ok(reached && self.aggregator.reached_threshold(committee))
     }
@@ -190,7 +193,10 @@ impl PayloadLossCertificate {
                     attestation.claim, self.claim
                 )));
             }
-            let pubkey = committee.authority(attestation.authority).protocol_key.clone();
+            let pubkey = committee
+                .authority(attestation.authority)
+                .protocol_key
+                .clone();
             attestation.verify(&pubkey)?;
             aggregator.add_unique(attestation.authority, committee);
         }
@@ -246,8 +252,9 @@ impl PayloadLossCertificate {
 /// fails, which the collector closure in authority_node/mod.rs already silently drops via `if
 /// let Ok(...) = result`, so this needed zero changes to the network/client code, only to what
 /// the server decides to sign).
-static STUCK_CLAIMS: std::sync::OnceLock<parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>>> =
-    std::sync::OnceLock::new();
+static STUCK_CLAIMS: std::sync::OnceLock<
+    parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>>,
+> = std::sync::OnceLock::new();
 
 fn stuck_claims() -> &'static parking_lot::RwLock<std::collections::HashSet<PayloadLossClaim>> {
     STUCK_CLAIMS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashSet::new()))
@@ -311,8 +318,10 @@ static GLOBAL_CERTIFIED_SKIPS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 fn global_certified_skips(
-) -> &'static parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>> {
-    GLOBAL_CERTIFIED_SKIPS.get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
+) -> &'static parking_lot::RwLock<std::collections::HashMap<PayloadLossClaim, PayloadLossCertificate>>
+{
+    GLOBAL_CERTIFIED_SKIPS
+        .get_or_init(|| parking_lot::RwLock::new(std::collections::HashMap::new()))
 }
 
 /// Records a certificate as authorizing a skip for its exact claim. The caller (the
@@ -347,7 +356,10 @@ pub enum PayloadLossCollectionResult {
     /// enough stake) -- caller should report this plainly to the operator, not retry
     /// automatically (an automatic retry loop here would defeat the "operator-initiated"
     /// design point -- mục 11.2 point 6).
-    Insufficient { attested_missing_stake: u64, quorum_needed: u64 },
+    Insufficient {
+        attested_missing_stake: u64,
+        quorum_needed: u64,
+    },
 }
 
 #[cfg(test)]
@@ -461,7 +473,10 @@ mod tests {
         // unrelated occurrence of the same digest in commit B. Keying by the full
         // PayloadLossClaim (commit_index + tx_digest) fixes this -- assert it stays fixed.
         let digest = TxDigest([3u8; consensus_config::DIGEST_LENGTH]);
-        let claim_commit_5 = PayloadLossClaim { commit_index: 5, tx_digest: digest };
+        let claim_commit_5 = PayloadLossClaim {
+            commit_index: 5,
+            tx_digest: digest,
+        };
         let certificate = PayloadLossCertificate {
             claim: claim_commit_5.clone(),
             attestations: vec![],
@@ -472,8 +487,10 @@ mod tests {
             get_certified_skip(&claim_commit_5).is_some(),
             "lookup for the exact recorded claim must hit"
         );
-        let same_digest_different_commit =
-            PayloadLossClaim { commit_index: 6, tx_digest: digest };
+        let same_digest_different_commit = PayloadLossClaim {
+            commit_index: 6,
+            tx_digest: digest,
+        };
         assert!(
             get_certified_skip(&same_digest_different_commit).is_none(),
             "a certificate for commit 5 must NOT authorize skipping the same digest in commit 6"

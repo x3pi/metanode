@@ -137,17 +137,20 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	// Start the Rust thread asynchronously
 	cConfigPath := C.CString(configPath)
 	cDataDir := C.CString(dataDir)
-	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
-	// but Rust converts to string_lossy. So we can free it.
-	defer C.free(unsafe.Pointer(cConfigPath))
-	defer C.free(unsafe.Pointer(cDataDir))
-
-	fmt.Println("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
 
 	// Call the new C++ static initialization function on the main thread safely
 	C.metanode_init_rocksdb(cDataDir)
 
-	C.metanode_start_consensus(cConfigPath, cDataDir)
+	// Start the Rust thread asynchronously
+	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
+	// but Rust converts to string_lossy. So we can free it.
+	go func() {
+		defer C.free(unsafe.Pointer(cConfigPath))
+		defer C.free(unsafe.Pointer(cDataDir))
+		logger.Info("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+		C.metanode_start_consensus(cConfigPath, cDataDir)
+		logger.Warn("[FFI Bridge] MetaNode Consensus Engine exited")
+	}()
 
 	return nil
 }
@@ -220,57 +223,38 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		}
 
 		// Non-blocking send to authQueue (1000 buffer).
-		// If queue is full, Go is severely behind — drop block.
+		// If queue is full, Go is severely behind — drop block and let Rust retry.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
-			var tQueued int64
-			if ffiTraceEnabled {
-				tQueued = time.Now().UnixNano()
-			}
-			// Wait for speculative executor to finish and return actual authoritative response.
-			//
-			// BOUNDED WAIT (Aug 2026): previously this was an unbounded `<-req.ResponseCh`
-			// with no timeout at all. If anything downstream (ExecuteSpeculative's goroutine,
-			// StartCommitterLoop, commitSpeculativeResult) got stuck for any reason and never
-			// sent a response, this CGO call — and therefore the calling Rust goroutine
-			// (tokio::task::spawn_blocking, itself awaited with no timeout on the Rust side) —
-			// would block forever. Since Rust's block-sending pipeline sends one block at a
-			// time and waits for each CGO call to return before sending the next, one stuck
-			// response permanently froze the entire Rust->Go delivery pipeline (observed
-			// directly: 3-node cluster stalled 31+ minutes, consensus rounds kept advancing
-			// fine, only delivery to Go was stuck). A bounded wait here turns that into a
-			// bounded, visible failure that Rust's existing retry path already handles
-			// (record_send_failure -> circuit breaker / later resend), instead of a silent
-			// permanent hang requiring a manual restart.
-			select {
-			case response := <-req.ResponseCh:
-				if ffiTraceEnabled {
-					tRespRecv := time.Now().UnixNano()
-					serializeAndSetResponse(response, outPayload, outLen)
-					tSerialized := time.Now().UnixNano()
-					logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
-						subDag.GetGlobalExecIndex(),
-						tAfterUnmarshal-tEntry,
-						tRespRecv-tQueued,
-						tSerialized-tRespRecv,
-						tSerialized-tEntry)
-				} else {
-					serializeAndSetResponse(response, outPayload, outLen)
-				}
-				return C.bool(true)
-			case <-time.After(executeBlockResponseTimeout):
-				logger.Error("[FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
-				serializeAndSetResponse(&pb.ExecuteBlockResponse{
-					Success: false,
-					Error:   "timed out waiting for Go execution response",
-				}, outPayload, outLen)
-				return C.bool(false)
-			}
-		case <-time.After(5 * time.Second):
-			// Timeout if authoritative queue is completely blocked
-			logger.Error("[FFI BRIDGE] Timeout sending to authoritative queue")
+			// Sent successfully
+		default:
+			logger.Error("🚨 [FFI Bridge] authQueue is FULL! Dropping block %d to prevent Rust deadlock", subDag.GetBlockNumber())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "authQueue is full, execution lagging behind",
+			}, outPayload, outLen)
 			return C.bool(false)
 		}
+		var tQueued int64
+		if ffiTraceEnabled {
+			tQueued = time.Now().UnixNano()
+		}
+
+		response := <-req.ResponseCh
+		if ffiTraceEnabled {
+			tRespRecv := time.Now().UnixNano()
+			serializeAndSetResponse(response, outPayload, outLen)
+			tSerialized := time.Now().UnixNano()
+			logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
+				subDag.GetGlobalExecIndex(),
+				tAfterUnmarshal-tEntry,
+				tRespRecv-tQueued,
+				tSerialized-tRespRecv,
+				tSerialized-tEntry)
+		} else {
+			serializeAndSetResponse(response, outPayload, outLen)
+		}
+		return C.bool(true)
 	}
 
 	// FALLBACK: Use dataChan if authQueue not initialized
@@ -281,12 +265,11 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 				Success: true,
 			}, outPayload, outLen)
 			return C.bool(true)
-		case <-time.After(5 * time.Second):
-			logger.Error("[FFI Bridge] dataChan blocked for 5s. GEI=%d",
-				subDag.GetGlobalExecIndex())
+		default:
+			logger.Error("🚨 [FFI Bridge] listenerQueue is FULL! Dropping block %d to prevent Rust deadlock", subDag.GetBlockNumber())
 			serializeAndSetResponse(&pb.ExecuteBlockResponse{
 				Success: false,
-				Error:   "dataChan blocked for 5s",
+				Error:   "listenerQueue is full, execution lagging behind",
 			}, outPayload, outLen)
 			return C.bool(false)
 		}

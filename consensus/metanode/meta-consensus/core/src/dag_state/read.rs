@@ -121,7 +121,7 @@ impl DagState {
             blocks.push(block_info.block.clone())
         }
 
-        // HOTFIX: For authorities whose eviction round is >= requested round, we MUST check 
+        // HOTFIX: For authorities whose eviction round is >= requested round, we MUST check
         // the store. This ensures deterministic leader support evaluation even if blocks are GC'd.
         for (authority_index, _) in self.context.committee.authorities() {
             let eviction_round = self.evicted_rounds[authority_index];

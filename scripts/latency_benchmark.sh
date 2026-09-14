@@ -43,6 +43,6 @@ echo "=========================================================="
   -rounds=$ROUNDS \
   -verify-forks=false \
   -cooldown=5 \
-  -chain-id=1337 
+  -chain-id=991 
 
 echo "✅ Benchmark complete. Check the JSON report in scripts directory."

@@ -272,7 +272,7 @@ send_test_transaction() {
     
     log_info "Sending test transaction..."
     local tx_output
-    tx_output=$(GOTOOLCHAIN=go1.23.5 go run . 2>&1) || {
+    tx_output=$(GOTOOLCHAIN=go1.23.5 go run . --register-bls=true 2>&1) || {
         log_error "Transaction sender failed"
         echo "$tx_output"
         return 1

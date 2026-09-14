@@ -139,11 +139,31 @@ def build_finish_success_message(commit_info, branch, total_duration, test_resul
     lines.append("\n🏆 <i>Hệ thống đảm bảo tính toàn vẹn và ổn định cao nhất!</i>")
     return "\n".join(lines)
 
-def build_failure_message(commit_info, branch, failed_test_name, exit_code, log_path, tail_logs, server_ip):
+def build_failure_message(commit_info, branch, failed_test_name, exit_code, *args, **kwargs):
+    """
+    Build failure message for Telegram.
+    Extracts up to 20 trailing log lines and omits local log path.
+    Supports both signatures:
+      (commit_info, branch, test_name, exit_code, tail_logs, server_ip)
+      (commit_info, branch, test_name, exit_code, log_path, tail_logs, server_ip)
+    """
+    if len(args) == 2:
+        tail_logs, server_ip = args
+    elif len(args) >= 3:
+        _log_path, tail_logs, server_ip = args[:3]
+    else:
+        tail_logs = kwargs.get("tail_logs", "")
+        server_ip = kwargs.get("server_ip", "")
+
     timestamp = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
     short_hash = commit_info.get("hash", "")[:8]
     author = html.escape(commit_info.get("author", "Unknown"))
-    clean_tail = html.escape(tail_logs.strip())
+
+    # Extract last 20 lines
+    lines = str(tail_logs).strip().splitlines()
+    if len(lines) > 20:
+        lines = lines[-20:]
+    clean_tail = html.escape("\n".join(lines)) if lines else "(Không có log chi tiết)"
 
     return (
         f"🚨 <b>[METANODE CI PHÁT HIỆN LỖI KIỂM THỬ]</b>\n\n"
@@ -153,10 +173,8 @@ def build_failure_message(commit_info, branch, failed_test_name, exit_code, log_
         f"⚠️ <b>Mã lỗi (Exit code):</b> <code>{exit_code}</code>\n"
         f"🖥 <b>Server:</b> <code>{server_ip}</code>\n"
         f"🕒 <b>Thời gian dừng:</b> <code>{timestamp}</code>\n\n"
-        f"📋 <b>Log lỗi chi tiết (Tail):</b>\n"
-        f"<pre><code>{clean_tail}</code></pre>\n\n"
-        f"📁 <b>Đường dẫn log đầy đủ trên máy chủ:</b>\n"
-        f"<code>{html.escape(log_path)}</code>"
+        f"📋 <b>Log lỗi chi tiết (20 dòng cuối):</b>\n"
+        f"<pre><code>{clean_tail}</code></pre>"
     )
 
 if __name__ == "__main__":

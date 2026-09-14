@@ -23,6 +23,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 mod fork_guard;
+pub mod state_recovery;
 mod startup_sync;
 mod verification;
 
