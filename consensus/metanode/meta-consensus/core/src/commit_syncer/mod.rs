@@ -2452,7 +2452,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         highest_handled,
                         local_commit
                     );
+                    let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled);
+                    let target_sync = self.synced_commit_index.max(local_commit);
+
+                    if target_sync > safe_jump_limit {
+                        tracing::info!(
+                            "[COMMIT-SYNCER] Capping synced_commit_index advance {} → {} (target={}) to match execution progress",
+                            self.synced_commit_index, safe_jump_limit, target_sync
+                        );
+                        self.synced_commit_index = safe_jump_limit;
+                    } else {
+                        tracing::info!(
+                            "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
+                            self.synced_commit_index,
+                            local_commit,
+                            self.coordination_hub.get_phase(),
+                            local_handled_gap
+                        );
+                        self.synced_commit_index = local_commit;
+                    }
                 } else {
+                    // handled_gap <= 50: execution is close enough behind DAG state that
+                    // advancing straight to local_commit is safe (this is the common,
+                    // non-dangerous case the gap>50 fork-safety gate above doesn't apply
+                    // to) -- restored after a WIP edit accidentally folded this branch's
+                    // code into the gap>50 arm above, silently turning it into a no-op
+                    // and breaking single_validator_advances_synced_commit_index_while_
+                    // catching_up (caught by the full consensus-core suite before commit).
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
                         self.synced_commit_index,
