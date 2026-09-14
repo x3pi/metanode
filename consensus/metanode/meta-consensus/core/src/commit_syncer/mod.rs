@@ -1980,14 +1980,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     "✅ Baseline commit #{} successfully patched.",
                                     prev_index
                                 );
-                                // Core requires an empty batch to process the new baseline and update its internal schedule
-                                let _ =
-                                    self.inner
-                                        .core_thread_dispatcher
-                                        .add_certified_commits(
-                                            crate::commit::CertifiedCommits::new(vec![], vec![]),
-                                        )
-                                        .await;
+                                // Core requires an empty batch to process the new baseline and update its internal schedule.
+                                // BOUNDED (2026-09-14): this is the only await in the whole baseline-fetch
+                                // path that wasn't already wrapped in tokio::time::timeout -- every
+                                // fetch_commits call above is bounded at 5s, but this CoreThread
+                                // round-trip had none, so if CoreThread itself is ever briefly stuck
+                                // on something unrelated, this call (and the phase transition/recovery
+                                // barrier gated behind it) could hang far longer than the documented
+                                // ~30s MAX_BASELINE_ATTEMPTS bound implies -- reproduced live: a
+                                // restart-into-existing-state node stayed in Bootstrapping for 9+
+                                // minutes with this exact call as the last thing logged before it.
+                                // This is a best-effort "kick" (not a value we depend on for
+                                // correctness), so it's safe to give up and let the next attempt or
+                                // CommitSyncer tick retry rather than block indefinitely.
+                                if tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    self.inner.core_thread_dispatcher.add_certified_commits(
+                                        crate::commit::CertifiedCommits::new(vec![], vec![]),
+                                    ),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    tracing::warn!(
+                                        "⚠️ [BASELINE] Timed out kicking CoreThread with empty batch \
+                                         after baseline patch (commit #{}) -- CoreThread may be busy. \
+                                         Not fatal: proceeding, will retry via the normal schedule cadence.",
+                                        prev_index
+                                    );
+                                }
                                 self.last_fetched_schedule_cycle = Some(current_cycle);
                             } else if needs_schedule_recovery {
                                 if schedule_ready_to_recover {
@@ -2049,17 +2070,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         let scores = reputation_scores.unwrap_or_default();
                                         tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
                                         self.inner.dag_state_writer.inject_baseline_scores(scores);
-                                        // Send empty commits list to trigger Core to process the new baseline
-                                        let _ = self
-                                            .inner
-                                            .core_thread_dispatcher
-                                            .add_certified_commits(
+                                        // Send empty commits list to trigger Core to process the new baseline.
+                                        // BOUNDED -- see the sibling call above for why.
+                                        if tokio::time::timeout(
+                                            Duration::from_secs(10),
+                                            self.inner.core_thread_dispatcher.add_certified_commits(
                                                 crate::commit::CertifiedCommits::new(
                                                     vec![],
                                                     vec![],
                                                 ),
-                                            )
-                                            .await;
+                                            ),
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            tracing::warn!(
+                                                "⚠️ [BASELINE] Timed out kicking CoreThread with empty batch \
+                                                 after schedule-recovery injection -- CoreThread may be busy. \
+                                                 Not fatal: proceeding, will retry via the normal schedule cadence."
+                                            );
+                                        }
                                         self.last_fetched_schedule_cycle = Some(current_cycle);
                                     }
                                 }
