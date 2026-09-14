@@ -108,15 +108,20 @@ def plan(args):
     bind_targets = []
     if args.clean:
         if stored - active:
-            raise ValueError(f'Shared storage also contains nodes {sorted(stored - active)}; include them in clean')
+            if not getattr(args, 'reset_all', False):
+                raise ValueError(f'Shared storage also contains nodes {sorted(stored - active)}; include them in clean')
         if any(not re.fullmatch(r'node-\d+', p.name) or p.is_symlink() or not p.is_dir() for p in entries):
             raise ValueError('Unknown entries in snapshot storage; refusing to format')
         expected = {str(Path(args.install_dir) / f'node-{n}' / 'data') for n in active}
         for row in rows:
             if row['maj:min'] == root['maj:min'] and row['target'] != str(MOUNT):
                 if row['target'] not in expected:
-                    raise ValueError(f"Storage is also mounted at {row['target']}; refusing to format")
-                bind_targets.append(row['target'])
+                    if getattr(args, 'reset_all', False):
+                        bind_targets.append(row['target'])
+                    else:
+                        raise ValueError(f"Storage is also mounted at {row['target']}; refusing to format")
+                else:
+                    bind_targets.append(row['target'])
             elif row['target'].startswith(str(MOUNT) + '/') or any(row['target'].startswith(p + '/') for p in expected):
                 raise ValueError('Nested mount detected; refusing to format')
     return dict(kind=kind, device=device, target=target, current=current,
@@ -170,6 +175,7 @@ def main():
     parser.add_argument('--snapshot-nodes', default='')
     parser.add_argument('--install-dir', default='/opt/metanode')
     parser.add_argument('--clean', action='store_true')
+    parser.add_argument('--reset-all', action='store_true')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--verify', action='store_true')
     args = parser.parse_args()

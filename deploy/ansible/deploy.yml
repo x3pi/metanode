@@ -121,6 +121,7 @@
           --snapshot-nodes {{ (hostvars['localhost']['cluster_nodes'] | selectattr('snapshot_enabled') | map(attribute='node_id') | join(',')) | quote }}
           --install-dir {{ metanode_install_dir | quote }}
           {{ '--clean' if not (keep_data | bool) else '' }}
+          {{ '--reset-all' if (target_node == 'all' and not (keep_data | bool)) else '' }}
       when: ansible_action in ['start', 'setup'] and active_nodes | length > 0
 
     - name: Validate snapshot storage resize or recreation before stopping nodes
