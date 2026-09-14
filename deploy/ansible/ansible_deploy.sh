@@ -462,7 +462,19 @@ ${TCP_NODES_LIST}
 
 💡 <b>Xem log nhanh:</b> <code>./fetch_node_logs.sh</code> (thêm <code>--rpc</code> nếu cần log RPC; xem DEPLOY_GUIDE.md)"
 else
-    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>!
+    ERROR_DESC="Lỗi không xác định"
+    case $ansible_exit in
+        1) ERROR_DESC="Lỗi chung (General error) - Playbook thất bại hoặc thiếu thư viện" ;;
+        2) ERROR_DESC="Lỗi phân tích cú pháp (Syntax/Parsing error) trong YAML hoặc Shell" ;;
+        3) ERROR_DESC="Lỗi Ansible Inventory - Host không hợp lệ hoặc thiếu quyền" ;;
+        4) ERROR_DESC="Lỗi kết nối SSH (Unreachable hosts) - Máy chủ từ chối kết nối" ;;
+        13|141) ERROR_DESC="Bị ngắt kết nối (Broken pipe / SIGPIPE) - Script thoát đột ngột" ;;
+        99) ERROR_DESC="Lỗi kịch bản Deploy (Thường do thiếu TTY / chưa xác nhận Y/N)" ;;
+        127) ERROR_DESC="Không tìm thấy lệnh (Command not found) - Thiếu Ansible hoặc tiện ích" ;;
+        130) ERROR_DESC="Bị người dùng hủy bỏ (Ctrl+C)" ;;
+    esac
+
+    send_telegram_notification "❌ <b>[${ACTION_LABEL}]</b> Quá trình Ansible ${ACTION_LABEL} từ <code>${DEPLOY_SOURCE}</code> thất bại với mã lỗi <code>${ansible_exit}</code>: <b>${ERROR_DESC}</b>!
 - Target Node IPs: <code>${TARGET_NODES_IPS}</code>
 - Watcher Daemon: <code>${WATCHER_STATUS}</code>
 
