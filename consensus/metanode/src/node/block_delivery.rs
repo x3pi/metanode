@@ -194,12 +194,16 @@ impl BlockDeliveryManager {
                     // THIS digest is harmless (it just never gets asked about), so this
                     // deliberately doesn't try to parse `e` to distinguish the two.
                     let missing_now: Vec<_> = {
-                        let cache = consensus_core::get_global_tx_cache().read();
+                        // Bounded, per mục-19-bug-#4/#5 (see consensus_core::transaction's
+                        // TX_CACHE_LOCK_TIMEOUT doc comment): a stuck lock degrades to "treat
+                        // as still missing" here, which is exactly the correct behavior for
+                        // this claims-registry bookkeeping anyway.
+                        let cache = consensus_core::try_tx_cache_read("block_delivery missing_now");
                         msg.subdag
                             .blocks
                             .iter()
                             .flat_map(|b| b.tx_digests())
-                            .filter(|d| cache.get(d).is_none())
+                            .filter(|d| cache.as_ref().map_or(true, |c| c.get(d).is_none()))
                             .collect()
                     };
                     for digest in missing_now {

@@ -173,7 +173,7 @@ const TX_CACHE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 /// Bounded read acquisition of the global TX cache. Returns `None` (logging a
 /// loud, greppable marker) instead of blocking forever if the lock is stuck.
-pub(crate) fn try_tx_cache_read(
+pub fn try_tx_cache_read(
     site: &'static str,
 ) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
     let guard = get_global_tx_cache().try_read_for(TX_CACHE_LOCK_TIMEOUT);
@@ -196,7 +196,7 @@ pub(crate) fn try_tx_cache_read(
 
 /// Bounded write acquisition of the global TX cache. Returns `None` (logging
 /// a loud, greppable marker) instead of blocking forever if the lock is stuck.
-pub(crate) fn try_tx_cache_write(
+pub fn try_tx_cache_write(
     site: &'static str,
 ) -> Option<parking_lot::RwLockWriteGuard<'static, TxPayloadCache>> {
     let guard = get_global_tx_cache().try_write_for(TX_CACHE_LOCK_TIMEOUT);
@@ -222,7 +222,7 @@ pub(crate) fn try_tx_cache_write(
 /// this call at all means the lock got stuck again after the same
 /// transactions already passed a real cache check once during block
 /// verification -- a genuinely abnormal, most likely transient condition.
-pub(crate) fn retry_tx_cache_read_for_commit(
+pub fn retry_tx_cache_read_for_commit(
     site: &'static str,
 ) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
     const MAX_ATTEMPTS: u32 = 5; // 5 x 3s = 15s total before giving up
@@ -913,6 +913,61 @@ mod tests {
             lock.try_write_for(Duration::from_secs(1)).is_some(),
             "after the holder releases, a bounded acquisition must succeed"
         );
+    }
+
+    /// Regression test for the mục-19-bug-#5 self-deadlock: proves that a
+    /// SINGLE thread holding a read guard on a `parking_lot::RwLock`, then
+    /// trying to acquire a SECOND read guard on the exact same lock while a
+    /// writer is queued in between, genuinely gets stuck (parking_lot is
+    /// fair -- a queued writer blocks new readers, including reentrant ones
+    /// from a thread that already holds an outstanding read guard, to avoid
+    /// writer starvation). This is exactly the class of bug found live via
+    /// `sudo gdb` in `compute_commit_gei_and_valid_txs`, which used to hold
+    /// its own `GLOBAL_TX_CACHE` read guard across a call to
+    /// `extract_end_of_epoch_transaction()` (a second, independent read
+    /// acquisition on the same lock) -- fixed by reordering so the two
+    /// acquisitions never overlap on one thread. This test locks in *why*
+    /// that reordering is necessary, not just that the specific function
+    /// happens to be fixed today.
+    #[test]
+    fn reentrant_read_with_a_queued_writer_blocks_the_same_thread() {
+        use std::thread;
+
+        let lock: Arc<parking_lot::RwLock<i32>> = Arc::new(parking_lot::RwLock::new(0));
+
+        // Step 1: this thread (simulating compute_commit_gei_and_valid_txs)
+        // takes the first read guard, like the old `let cache = ...read();`.
+        let guard1 = lock.read();
+
+        // Step 2: a writer (simulating a concurrent block_verifier V1/V2
+        // insert) queues behind it on another thread.
+        let writer_lock = lock.clone();
+        let (writer_started_tx, writer_started_rx) = std::sync::mpsc::channel::<()>();
+        let writer = thread::spawn(move || {
+            writer_started_tx.send(()).unwrap();
+            let _guard = writer_lock.write();
+        });
+        writer_started_rx.recv().unwrap();
+        // Give the writer a moment to actually queue on the lock.
+        thread::sleep(Duration::from_millis(100));
+
+        // Step 3: THIS SAME thread, still holding guard1, tries a second
+        // (reentrant) read acquisition -- exactly what the old, buggy code
+        // did via the nested extract_end_of_epoch_transaction() call. With a
+        // writer already queued, parking_lot's fairness means this MUST NOT
+        // succeed immediately.
+        let reentrant_attempt = lock.try_read_for(Duration::from_millis(200));
+        assert!(
+            reentrant_attempt.is_none(),
+            "a reentrant read on a thread that already holds a read guard must be blocked \
+             once a writer has queued -- if this ever starts succeeding, parking_lot's \
+             fairness policy changed and the ordering fix in compute_commit_gei_and_valid_txs \
+             may no longer be load-bearing (though it would still be correct to keep it)"
+        );
+
+        // Cleanup: release guard1, let the writer through, join it.
+        drop(guard1);
+        writer.join().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
