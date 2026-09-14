@@ -499,6 +499,7 @@ where
         let (core_dispatcher, core_thread_handle) =
             ChannelCoreThreadDispatcher::start(context.clone(), &dag_state, core);
         let core_dispatcher = Arc::new(core_dispatcher);
+
         let leader_timeout_handle =
             LeaderTimeoutTask::start(core_dispatcher.clone(), &signals_receivers, context.clone());
 
@@ -634,8 +635,9 @@ where
                     });
                     let results = futures::future::join_all(fetches).await;
                     let mut inserted = 0usize;
+                    if let Some(mut cache) =
+                        crate::transaction::try_tx_cache_write("payload_loss_collector batch fetch")
                     {
-                        let mut cache = crate::transaction::get_global_tx_cache().write();
                         for result in results {
                             if let Ok(txs_bytes) = result {
                                 for tx_bytes in txs_bytes {
@@ -680,10 +682,11 @@ where
 
                     // Own cache first -- if we somehow already have it (e.g. it arrived via
                     // gossip in between the halt and the operator running this), this is a
-                    // no-op recovery, no need to query anyone.
-                    if crate::transaction::get_global_tx_cache()
-                        .read()
-                        .get(&claim.tx_digest)
+                    // no-op recovery, no need to query anyone. A stuck lock just means we
+                    // skip this shortcut and fall through to querying peers below, same as
+                    // an ordinary cache miss.
+                    if crate::transaction::try_tx_cache_read("payload_loss_collector own-cache check")
+                        .and_then(|cache| cache.get(&claim.tx_digest))
                         .is_some()
                     {
                         return PayloadLossCollectionResult::Recovered;
@@ -767,9 +770,15 @@ where
                     for (_, result) in &results {
                         if let Ok(AttestPayloadLossOutcome::Payload(payload)) = result {
                             let tx = crate::block::Transaction::new(payload.to_vec());
-                            crate::transaction::get_global_tx_cache()
-                                .write()
-                                .insert(tx.digest(), tx);
+                            if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                                "payload_loss_collector recovered-payload insert",
+                            ) {
+                                cache.insert(tx.digest(), tx);
+                            }
+                            // Still Recovered even if the cache insert above was skipped: the
+                            // payload genuinely was retrieved from a peer (the point of this
+                            // whole collector), a stuck local cache lock is a separate concern
+                            // already loudly logged by try_tx_cache_write.
                             return PayloadLossCollectionResult::Recovered;
                         }
                     }

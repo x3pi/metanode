@@ -413,8 +413,9 @@ impl Core {
                         .collect();
 
                     if !system_transactions.is_empty() {
-                        {
-                            let mut cache = crate::transaction::get_global_tx_cache().write();
+                        if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                            "try_new_block system-tx injection",
+                        ) {
                             for tx in &system_transactions {
                                 cache.insert(tx.digest(), tx.clone());
                             }

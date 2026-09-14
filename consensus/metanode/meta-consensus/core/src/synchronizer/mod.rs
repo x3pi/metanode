@@ -574,8 +574,9 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     ));
                     match fetch_res {
                         Ok(txs_bytes) => {
-                            {
-                                let mut cache = crate::transaction::get_global_tx_cache().write();
+                            if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                                "synchronizer missing-tx fetch",
+                            ) {
                                 for tx_bytes in txs_bytes {
                                     let tx = crate::block::Transaction::new(tx_bytes.to_vec());
                                     cache.insert(tx.digest(), tx);
