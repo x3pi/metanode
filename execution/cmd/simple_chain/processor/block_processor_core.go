@@ -189,8 +189,6 @@ type BlockProcessor struct {
 	// GEI Coalescing
 	geiUpdateChan chan AsyncGEIUpdate
 
-	forceCommitChan chan struct{}
-
 	// Self-monitoring fields
 	processedBlockCount uint64
 	lastRateCheckTime   time.Time
@@ -507,7 +505,6 @@ func NewBlockProcessor(
 		backupDbChannel:    make(chan CommitJob, 1000),
 		geiUpdateChan:      make(chan AsyncGEIUpdate, 100),
 
-		forceCommitChan:     make(chan struct{}, 64),
 		lastRateCheckTime:   time.Now(),
 		lastLazyRefreshTime: time.Now(),
 	}

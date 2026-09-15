@@ -758,12 +758,29 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 	}
 }
 
-// ForceCommit triggers an immediate block generation by sending a signal to forceCommitChan
+// ForceCommit is a documented no-op, kept only so the two `SetForceCommitCallback`
+// registrations (block_processor_network.go, peer_discovery_socket.go) and the
+// Rust-facing ForceCommitRequest RPC contract (unix_socket_handler.go's
+// HandleForceCommitRequest, called from Rust via executor_client::send_force_commit
+// during epoch transitions and elsewhere) keep compiling and keep returning
+// Success unchanged.
+//
+// DEAD CODE FOUND 2026-09 (Phuong an A mục 21's node-1 investigation, removed
+// mục 22): this used to send a signal into a `forceCommitChan chan struct{}`
+// field, but nothing anywhere ever received from that channel -- every call
+// filled an unread buffer that was itself only ever inspected for its `len()`
+// as a monitoring metric, never drained. So despite Rust actively calling this
+// on every epoch transition and logging "ForceCommit successful", the intended
+// effect ("flush transactions immediately and generate a block", per
+// send_force_commit's own doc comment) has not actually happened for as long
+// as this gap existed -- removing the channel changes nothing observable
+// (Go still logs receipt and returns Success, Rust still gets `Ok(true)`),
+// it just stops pretending internally. If "force an immediate commit" is
+// still a real requirement for epoch transitions, it needs a NEW, real
+// implementation here, not a revival of this one -- this session deliberately
+// scoped this to dead-code removal only, not a functional fix, since that
+// would be a behavior change to consensus-critical epoch-transition code
+// needing its own dedicated design/test pass.
 func (bp *BlockProcessor) ForceCommit() {
-	select {
-	case bp.forceCommitChan <- struct{}{}:
-		// Signal sent successfully
-	default:
-		// Channel full, already signaled
-	}
+	// Intentionally empty -- see doc comment above.
 }

@@ -88,7 +88,6 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 
 		// Pipeline health monitoring
 		backupDbLen := len(bp.backupDbChannel)
-		forceCommitLen := len(bp.forceCommitChan)
 
 		// Log summary every 5 minutes (10 times)
 		if time.Now().Unix()%300 < 30 { // Log in first 30 seconds of each 5 minutes
@@ -99,10 +98,12 @@ func (bp *BlockProcessor) startResourceMonitoring() {
 				createdBlocksChanLen, createdBlocksChanCap,
 				stateCommitBufferSize, subNodeBlockBufferSize,
 				goroutineCount, allocMB, sysMB)
-			logger.Info("PIPELINE_MONITOR: Channels[Commit:%d/%d, Backup:%d/%d, ForceCommit:%d/%d]",
+			// ForceCommit dropped from this line 2026-09 (mục 22): the channel it
+			// used to report on was removed as dead code -- see ForceCommit()'s
+			// doc comment in block_processor_processing.go.
+			logger.Info("PIPELINE_MONITOR: Channels[Commit:%d/%d, Backup:%d/%d]",
 				commitChannelLen, commitChannelCap,
-				backupDbLen, cap(bp.backupDbChannel),
-				forceCommitLen, cap(bp.forceCommitChan))
+				backupDbLen, cap(bp.backupDbChannel))
 		}
 	}
 }
