@@ -98,8 +98,9 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
                         .await
                     {
                         Ok(txs_bytes) => {
-                            {
-                                let mut cache = crate::transaction::get_global_tx_cache().write();
+                            if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                                "handle_send_block missing-tx fetch",
+                            ) {
                                 for tx_bytes in txs_bytes {
                                     let tx = crate::block::Transaction::new(tx_bytes.to_vec());
                                     cache.insert(tx.digest(), tx);
@@ -1031,8 +1032,14 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         _peer: AuthorityIndex,
         digests: Vec<consensus_types::block::TxDigest>,
     ) -> ConsensusResult<Vec<Bytes>> {
-        let cache = crate::transaction::get_global_tx_cache().read();
         let mut transactions = Vec::new();
+        // A stuck lock degrades to "found none of them" -- the caller
+        // (fetch_transactions) already treats a partial/empty response as
+        // normal and falls back to another peer.
+        let Some(cache) = crate::transaction::try_tx_cache_read("handle_fetch_transactions")
+        else {
+            return Ok(transactions);
+        };
         for digest in digests {
             if let Some(tx) = cache.get(&digest) {
                 transactions.push(tx.into_data());
@@ -1047,9 +1054,12 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
         commit_index: crate::commit::CommitIndex,
         tx_digest: consensus_types::block::TxDigest,
     ) -> ConsensusResult<crate::network::AttestPayloadLossOutcome> {
-        let found = crate::transaction::get_global_tx_cache()
-            .read()
-            .get(&tx_digest)
+        // A stuck lock degrades to "not found in cache" -- same as an
+        // ordinary cache miss, which the logic below already handles safely
+        // (it does not attest "missing" on a miss alone, see the comment
+        // just below).
+        let found = crate::transaction::try_tx_cache_read("handle_attest_payload_loss")
+            .and_then(|cache| cache.get(&tx_digest))
             .map(|tx| tx.into_data());
         if let Some(payload) = found {
             return Ok(crate::network::AttestPayloadLossOutcome::Payload(payload));

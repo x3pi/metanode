@@ -192,19 +192,34 @@ impl SignedBlockVerifier {
         // Pre-check BlockV3 transactions in cache, and insert BlockV1/V2 transactions to cache.
         match &**block {
             Block::V1(v1) => {
-                let mut cache = crate::transaction::get_global_tx_cache().write();
-                for tx in v1.transactions() {
-                    cache.insert(tx.digest(), tx.clone());
+                if let Some(mut cache) =
+                    crate::transaction::try_tx_cache_write("verify_block_inner V1")
+                {
+                    for tx in v1.transactions() {
+                        cache.insert(tx.digest(), tx.clone());
+                    }
                 }
             }
             Block::V2(v2) => {
-                let mut cache = crate::transaction::get_global_tx_cache().write();
-                for tx in v2.transactions() {
-                    cache.insert(tx.digest(), tx.clone());
+                if let Some(mut cache) =
+                    crate::transaction::try_tx_cache_write("verify_block_inner V2")
+                {
+                    for tx in v2.transactions() {
+                        cache.insert(tx.digest(), tx.clone());
+                    }
                 }
             }
             Block::V3(v3) => {
-                let cache = crate::transaction::get_global_tx_cache().read();
+                // FORK-SAFETY: if the cache lock itself is stuck (see
+                // try_tx_cache_read's doc comment), we cannot actually verify
+                // presence -- treat every digest as missing rather than
+                // silently assuming they're all present. This is the same
+                // conservative choice as a genuine cache miss: it triggers
+                // the existing peer re-fetch path instead of skipping a real
+                // check.
+                let Some(cache) = crate::transaction::try_tx_cache_read("verify_block_inner V3 (presence check)") else {
+                    return Err(ConsensusError::MissingTransactions(v3.tx_digests()));
+                };
                 let mut missing = Vec::new();
                 for digest in v3.tx_digests() {
                     if cache.get(&digest).is_none() {
@@ -226,7 +241,9 @@ impl SignedBlockVerifier {
                 txs = v2.transactions().to_vec();
             }
             Block::V3(v3) => {
-                let cache = crate::transaction::get_global_tx_cache().read();
+                let Some(cache) = crate::transaction::try_tx_cache_read("verify_block_inner V3 (collect)") else {
+                    return Err(ConsensusError::MissingTransactions(v3.tx_digests()));
+                };
                 for digest in v3.tx_digests() {
                     if let Some(tx) = cache.get(&digest) {
                         txs.push(tx);
@@ -301,8 +318,15 @@ fn get_block_transactions_data(block: &Block) -> Vec<Vec<u8>> {
             .map(|t| t.data().to_vec())
             .collect(),
         Block::V3(v3) => {
-            let cache = crate::transaction::get_global_tx_cache().read();
             let mut data = Vec::new();
+            // Best-effort: this feeds Mysticeti fastpath transaction voting,
+            // where honest validators are already documented to be allowed
+            // to vote differently -- if the cache lock is stuck, abstaining
+            // (empty data) is a safe degradation, not a fork risk.
+            let Some(cache) = crate::transaction::try_tx_cache_read("get_block_transactions_data")
+            else {
+                return data;
+            };
             for digest in v3.tx_digests() {
                 if let Some(tx) = cache.get(&digest) {
                     data.push(tx.data().to_vec());

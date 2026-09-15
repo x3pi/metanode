@@ -84,7 +84,12 @@ use crate::node::executor_client::ExecutorClient;
 /// recurred because that fix used the wrong (digest-blind) extraction
 /// method, not because confirm_committed was never called at all.
 pub(crate) fn extract_committed_tx_data(subdag: &CommittedSubDag) -> Vec<Vec<u8>> {
-    let cache = consensus_core::get_global_tx_cache().read();
+    // Bounded (mục 19 bug #4/#5): best-effort recycler bookkeeping, see the
+    // fallback comment inside the loop -- a stuck lock just means this
+    // returns fewer confirmed digests than it could have, never blocks.
+    let Some(cache) = consensus_core::try_tx_cache_read("extract_committed_tx_data") else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for block in &subdag.blocks {
         let tx_digests = block.tx_digests();
@@ -147,7 +152,35 @@ pub fn compute_commit_gei_and_valid_txs(
     subdag: &consensus_core::CommittedSubDag,
     fail_on_missing_payload: bool,
 ) -> anyhow::Result<(u64, Vec<std::sync::Arc<consensus_core::Transaction>>, usize)> {
-    let cache = consensus_core::get_global_tx_cache().read();
+    // ROOT-CAUSE FIX (2026-09-14, mục 19 bug #5): this MUST run before the
+    // `cache` read guard below is acquired, not after. `extract_end_of_epoch_
+    // transaction()` acquires its OWN read guard on the exact same
+    // GLOBAL_TX_CACHE lock -- computing it while `cache` was still held (as
+    // this function used to) is a single-thread REENTRANT read acquisition on
+    // one parking_lot::RwLock, which can genuinely self-deadlock: parking_lot
+    // is fair, so once any writer queues between the two acquisitions, the
+    // second (nested) read gets queued behind that writer to avoid writer
+    // starvation, while the writer itself waits for the FIRST read guard
+    // (held by this very thread) to release -- which never happens, since
+    // releasing it requires this function to finish, which requires the
+    // nested read to succeed first. Confirmed live via two `sudo gdb` stack
+    // traces 40 minutes apart showing this exact call chain
+    // (compute_commit_gei_and_valid_txs -> extract_end_of_epoch_transaction)
+    // stuck on GLOBAL_TX_CACHE while node-3 was replaying a large catch-up
+    // backlog (many concurrent block-verifier writers made hitting the
+    // narrow "writer queued between the two reads" window far more likely
+    // than under normal light load, explaining why this was never seen
+    // before that scale of catch-up). This reorder removes the overlap
+    // entirely -- both acquisitions now happen sequentially with a gap,
+    // never nested on this thread, so this specific self-deadlock can no
+    // longer occur regardless of writer traffic.
+    let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
+
+    // Bounded (mục 19 bug #4/#5): a stuck lock degrades every digest lookup
+    // below to "not found", which is already the designed-for missing-
+    // payload path (bail! or count-and-warn depending on fail_on_missing_
+    // payload) -- safe, not a new correctness risk.
+    let cache = consensus_core::try_tx_cache_read("compute_commit_gei_and_valid_txs");
     let mut total_txs = 0;
     let mut valid_txs = Vec::new();
 
@@ -161,7 +194,7 @@ pub fn compute_commit_gei_and_valid_txs(
                     tx_digest: *digest,
                 };
                 if let Some(certificate) = consensus_core::payload_loss_attestation::get_certified_skip(&claim) {
-                    if let Some(tx) = cache.get(digest) {
+                    if let Some(tx) = cache.as_ref().and_then(|c| c.get(digest)) {
                         let tx_data = tx.data().to_vec();
                         let digest_for_log = *digest;
                         let _commit_for_log = subdag.commit_ref.index;
@@ -181,14 +214,17 @@ pub fn compute_commit_gei_and_valid_txs(
                             });
                         }
                     }
-                    tracing::error!(
+                    // WARN, not error! (mục 19 bug #4): avoids the same synchronous
+                    // FFI-to-Go log path that must never be exercised on a
+                    // potentially-loaded commit-processing path.
+                    tracing::warn!(
                         "🛑✅ [PAYLOAD-LOSS-SKIP-APPLIED] Skipping certified-permanently-lost tx {:?} in commit {} ({} attestations).",
                         digest, subdag.commit_ref.index, certificate.attestations.len()
                     );
                     continue; // Skip without counting!
                 }
 
-                match cache.get(digest) {
+                match cache.as_ref().and_then(|c| c.get(digest)) {
                     Some(tx) => {
                         let tx_data = tx.data();
                         if tx_data.len() == 64 && tx_data.iter().all(|&b| b == 0) {
@@ -222,7 +258,6 @@ pub fn compute_commit_gei_and_valid_txs(
         }
     }
 
-    let has_system_tx = subdag.extract_end_of_epoch_transaction().is_some();
     let geis_consumed: u64 = if commit_is_empty_for_gei(total_txs, has_system_tx, subdag.commit_ref.index) {
         0
     } else if total_txs > crate::node::executor_client::block_sending::MAX_TXS_PER_GO_BLOCK {

@@ -134,6 +134,125 @@ pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
     GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(tx_payload_cache_capacity())))
 }
 
+/// ROOT FIX (2026-09-14, mục 19 bug #4 investigation): every acquisition of
+/// `GLOBAL_TX_CACHE` used to go through a raw, unbounded `parking_lot::RwLock`
+/// `.read()`/`.write()` call. Live-reproduced (via `sudo gdb -p <pid> -batch
+/// -ex "thread apply all bt"` on a genuinely wedged validator, see the
+/// project memory for the full incident) a permanent, 40+ minute freeze where
+/// a writer (`block_verifier::verify_block_inner`, on the P2P block-receive
+/// critical path for EVERY block) sat forever in
+/// `RawRwLock::wait_for_readers()`, and 6+ other threads queued behind it in
+/// `lock_exclusive_slow`/`lock_shared_slow` -- confirmed via a raw memory
+/// read of the lock's own state word (value 0x10, exactly one reader's worth
+/// of count with no writer bit) that a single reader guard was never
+/// released, for reasons not fully pinned down (exhaustive audit of every
+/// non-test call site found no explicit `.await` held across the guard, no
+/// `unsafe`/`mem::forget`/`ManuallyDrop` -- the leak mechanism itself remains
+/// an open question, flagged for follow-up).
+///
+/// PROVEN INEFFECTIVE: wrapping this kind of call in `tokio::time::timeout`
+/// does NOT help -- a thread blocked in parking_lot's underlying futex wait
+/// never returns control to the tokio executor, so the timer that would fire
+/// the timeout is never polled (confirmed live: a `TransactionClient::submit`
+/// call already wrapped in `tokio::time::timeout` was found stuck in the
+/// exact same raw lock wait during this same incident).
+///
+/// Root fix: use parking_lot's OWN native timed acquisition
+/// (`try_read_for`/`try_write_for`), which times out via the same underlying
+/// futex-with-timeout primitive the kernel enforces directly -- this is NOT
+/// an external cooperative timeout layered on top of a blocking call (which
+/// is what just proved ineffective above), it is the lock itself giving up.
+/// On timeout, every caller treats it exactly like a cache miss/skip: this
+/// cache's whole design already tolerates that (eviction under load, a
+/// never-cached payload) via existing recovery paths (peer re-fetch,
+/// quorum-certified payload-loss attestation), so degrading a stuck lock into
+/// a miss is safe, not a new correctness risk -- the alternative (the
+/// previous behavior) was an unbounded, silent, unrecoverable freeze of the
+/// entire node.
+const TX_CACHE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Bounded read acquisition of the global TX cache. Returns `None` (logging a
+/// loud, greppable marker) instead of blocking forever if the lock is stuck.
+pub fn try_tx_cache_read(
+    site: &'static str,
+) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
+    let guard = get_global_tx_cache().try_read_for(TX_CACHE_LOCK_TIMEOUT);
+    if guard.is_none() {
+        // WARN, not error!: see TX_CACHE_LOCK_TIMEOUT's doc comment -- error!/fatal!
+        // route through Go's deliberately-synchronous, writeMu-locked log path (the
+        // exact FFI-blocking class of bug this whole fix exists to avoid), while
+        // warn!/info!/debug! use the async, non-blocking log queue. This can fire
+        // from multiple contended threads at once, so it must stay on the safe side.
+        tracing::warn!(
+            "🚨 [TX-CACHE-LOCK-STUCK] read() at {} did not acquire GLOBAL_TX_CACHE within {:?} \
+             -- treating as a cache miss instead of blocking forever. This means the lock is \
+             wedged (see try_tx_cache_read's doc comment); the node itself may need a restart.",
+            site,
+            TX_CACHE_LOCK_TIMEOUT
+        );
+    }
+    guard
+}
+
+/// Bounded write acquisition of the global TX cache. Returns `None` (logging
+/// a loud, greppable marker) instead of blocking forever if the lock is stuck.
+pub fn try_tx_cache_write(
+    site: &'static str,
+) -> Option<parking_lot::RwLockWriteGuard<'static, TxPayloadCache>> {
+    let guard = get_global_tx_cache().try_write_for(TX_CACHE_LOCK_TIMEOUT);
+    if guard.is_none() {
+        // WARN, not error! -- see the identical comment in try_tx_cache_read above.
+        tracing::warn!(
+            "🚨 [TX-CACHE-LOCK-STUCK] write() at {} did not acquire GLOBAL_TX_CACHE within {:?} \
+             -- skipping this cache update instead of blocking forever. This means the lock is \
+             wedged (see try_tx_cache_write's doc comment); the node itself may need a restart.",
+            site,
+            TX_CACHE_LOCK_TIMEOUT
+        );
+    }
+    guard
+}
+
+/// Higher-stakes variant of [`try_tx_cache_read`] for callers where treating a
+/// stuck lock as "not found" is fork-relevant (currently: extracting system
+/// transactions, in particular EndOfEpoch, from an already-committed subdag —
+/// see `CommittedSubDag::extract_system_transactions`/
+/// `extract_end_of_epoch_transaction`). Retries with real backoff (well past
+/// a single `TX_CACHE_LOCK_TIMEOUT` window) before giving up, since reaching
+/// this call at all means the lock got stuck again after the same
+/// transactions already passed a real cache check once during block
+/// verification -- a genuinely abnormal, most likely transient condition.
+pub fn retry_tx_cache_read_for_commit(
+    site: &'static str,
+) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
+    const MAX_ATTEMPTS: u32 = 5; // 5 x 3s = 15s total before giving up
+    for attempt in 1..=MAX_ATTEMPTS {
+        if let Some(guard) = get_global_tx_cache().try_read_for(TX_CACHE_LOCK_TIMEOUT) {
+            return Some(guard);
+        }
+        tracing::warn!(
+            "🚨 [TX-CACHE-LOCK-STUCK] read() at {} attempt {}/{} did not acquire \
+             GLOBAL_TX_CACHE within {:?} -- retrying (this path retries because a miss \
+             here can be fork-relevant, unlike ordinary block-verification cache reads).",
+            site,
+            attempt,
+            MAX_ATTEMPTS,
+            TX_CACHE_LOCK_TIMEOUT
+        );
+    }
+    // WARN, not error! -- see the identical comment in try_tx_cache_read above.
+    tracing::warn!(
+        "🚨 [TX-CACHE-LOCK-STUCK] read() at {} gave up after {} attempts ({:?} total) -- \
+         proceeding as if no system transactions were found in this commit. The lock is \
+         genuinely wedged; the node likely needs a restart, and any EndOfEpoch transaction \
+         in this commit may have been missed.",
+        site,
+        MAX_ATTEMPTS,
+        TX_CACHE_LOCK_TIMEOUT * MAX_ATTEMPTS
+    );
+    None
+}
+
 /// The maximum number of transactions pending to the queue to be pulled for block proposal
 const MAX_PENDING_TRANSACTIONS: usize = 200_000;
 
@@ -645,8 +764,7 @@ impl TransactionClient {
         }
 
         let txs: Vec<Transaction> = transactions.into_iter().map(Transaction::new).collect();
-        {
-            let mut cache = crate::transaction::get_global_tx_cache().write();
+        if let Some(mut cache) = try_tx_cache_write("TransactionClient::submit_no_wait") {
             for tx in &txs {
                 cache.insert(tx.digest(), tx.clone());
             }
@@ -743,6 +861,114 @@ mod tests {
         context::Context,
         transaction::{BlockStatus, LimitReached, TransactionClient, TransactionConsumer},
     };
+
+    /// Regression test for the mục-19-bug-#4 fix: proves the actual mechanism
+    /// `try_tx_cache_read`/`try_tx_cache_write` rely on -- parking_lot's own
+    /// native `try_write_for`/`try_read_for` -- genuinely bounds a wait
+    /// rather than blocking forever, even against a lock held by another OS
+    /// thread with no cooperation from any async runtime. This is the
+    /// opposite of `tokio::time::timeout` wrapping a blocking call (proven
+    /// live to NOT work, see the doc comment on `TX_CACHE_LOCK_TIMEOUT`) --
+    /// deliberately a plain `#[test]`, not `#[tokio::test]`, since the
+    /// mechanism under test has nothing to do with any async runtime.
+    #[test]
+    fn bounded_lock_acquisition_times_out_against_a_real_stuck_holder() {
+        use std::thread;
+
+        let lock: Arc<parking_lot::RwLock<i32>> = Arc::new(parking_lot::RwLock::new(0));
+        let holder_lock = lock.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let holder = thread::spawn(move || {
+            let _guard = holder_lock.write();
+            // Hold the write lock until the test explicitly says to let go --
+            // simulating exactly the "someone never releases it" scenario
+            // this fix is meant to survive.
+            let _ = release_rx.recv();
+        });
+
+        // Give the holder thread a moment to actually acquire the lock first.
+        thread::sleep(Duration::from_millis(50));
+
+        // While held: both a write and a read attempt must time out quickly,
+        // not hang -- this is the core guarantee the whole fix depends on.
+        let write_attempt = lock.try_write_for(Duration::from_millis(100));
+        assert!(
+            write_attempt.is_none(),
+            "try_write_for must time out (return None) against a genuinely held lock, \
+             not block forever"
+        );
+        let read_attempt = lock.try_read_for(Duration::from_millis(100));
+        assert!(
+            read_attempt.is_none(),
+            "try_read_for must time out (return None) against a genuinely held write lock, \
+             not block forever"
+        );
+
+        // Release the holder and confirm acquisition succeeds normally afterward --
+        // proves the bounded path isn't just always returning None.
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(
+            lock.try_write_for(Duration::from_secs(1)).is_some(),
+            "after the holder releases, a bounded acquisition must succeed"
+        );
+    }
+
+    /// Regression test for the mục-19-bug-#5 self-deadlock: proves that a
+    /// SINGLE thread holding a read guard on a `parking_lot::RwLock`, then
+    /// trying to acquire a SECOND read guard on the exact same lock while a
+    /// writer is queued in between, genuinely gets stuck (parking_lot is
+    /// fair -- a queued writer blocks new readers, including reentrant ones
+    /// from a thread that already holds an outstanding read guard, to avoid
+    /// writer starvation). This is exactly the class of bug found live via
+    /// `sudo gdb` in `compute_commit_gei_and_valid_txs`, which used to hold
+    /// its own `GLOBAL_TX_CACHE` read guard across a call to
+    /// `extract_end_of_epoch_transaction()` (a second, independent read
+    /// acquisition on the same lock) -- fixed by reordering so the two
+    /// acquisitions never overlap on one thread. This test locks in *why*
+    /// that reordering is necessary, not just that the specific function
+    /// happens to be fixed today.
+    #[test]
+    fn reentrant_read_with_a_queued_writer_blocks_the_same_thread() {
+        use std::thread;
+
+        let lock: Arc<parking_lot::RwLock<i32>> = Arc::new(parking_lot::RwLock::new(0));
+
+        // Step 1: this thread (simulating compute_commit_gei_and_valid_txs)
+        // takes the first read guard, like the old `let cache = ...read();`.
+        let guard1 = lock.read();
+
+        // Step 2: a writer (simulating a concurrent block_verifier V1/V2
+        // insert) queues behind it on another thread.
+        let writer_lock = lock.clone();
+        let (writer_started_tx, writer_started_rx) = std::sync::mpsc::channel::<()>();
+        let writer = thread::spawn(move || {
+            writer_started_tx.send(()).unwrap();
+            let _guard = writer_lock.write();
+        });
+        writer_started_rx.recv().unwrap();
+        // Give the writer a moment to actually queue on the lock.
+        thread::sleep(Duration::from_millis(100));
+
+        // Step 3: THIS SAME thread, still holding guard1, tries a second
+        // (reentrant) read acquisition -- exactly what the old, buggy code
+        // did via the nested extract_end_of_epoch_transaction() call. With a
+        // writer already queued, parking_lot's fairness means this MUST NOT
+        // succeed immediately.
+        let reentrant_attempt = lock.try_read_for(Duration::from_millis(200));
+        assert!(
+            reentrant_attempt.is_none(),
+            "a reentrant read on a thread that already holds a read guard must be blocked \
+             once a writer has queued -- if this ever starts succeeding, parking_lot's \
+             fairness policy changed and the ordering fix in compute_commit_gei_and_valid_txs \
+             may no longer be load-bearing (though it would still be correct to keep it)"
+        );
+
+        // Cleanup: release guard1, let the writer through, join it.
+        drop(guard1);
+        writer.join().unwrap();
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn basic_submit_and_consume() {

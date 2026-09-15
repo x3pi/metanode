@@ -85,8 +85,9 @@ pub use system_transaction_provider::{
     DefaultSystemTransactionProvider, SystemTransactionProvider,
 };
 pub use transaction::{
-    get_global_tx_cache, BlockStatus, ClientError, TransactionClient, TransactionVerifier,
-    TxPayloadCache, ValidationError, TX_PAYLOAD_DIR,
+    get_global_tx_cache, retry_tx_cache_read_for_commit, try_tx_cache_read, try_tx_cache_write,
+    BlockStatus, ClientError, TransactionClient, TransactionVerifier, TxPayloadCache,
+    ValidationError, TX_PAYLOAD_DIR,
 };
 
 // Exported API for benchmarking

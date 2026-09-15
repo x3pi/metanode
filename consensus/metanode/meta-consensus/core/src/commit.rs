@@ -528,7 +528,20 @@ impl CommittedSubDag {
     /// Returns a vector of (block_ref, system_transaction) tuples
     pub fn extract_system_transactions(&self) -> Vec<(BlockRef, SystemTransaction)> {
         let mut system_txs = Vec::new();
-        let cache = crate::transaction::get_global_tx_cache().read();
+        // FORK-SAFETY: unlike block_verifier's per-block cache reads (which can
+        // safely defer to a peer re-fetch on a miss), a system transaction
+        // found here (in particular EndOfEpoch, see extract_end_of_epoch_
+        // transaction below) can be fork-relevant if silently missed -- by
+        // the time a subdag is committed, its transactions already passed
+        // verify_block_inner's own cache check once, so a stuck lock here is
+        // a genuinely abnormal, likely-transient re-occurrence. Retry with
+        // real backoff (well past the single 3s bound used elsewhere) before
+        // ever falling back to "found nothing", rather than treating a first
+        // timeout as equivalent to a real absence.
+        let cache = crate::transaction::retry_tx_cache_read_for_commit("extract_system_transactions");
+        let Some(cache) = cache.as_ref() else {
+            return system_txs;
+        };
 
         for block in &self.blocks {
             let tx_digests = block.tx_digests();
@@ -555,7 +568,10 @@ impl CommittedSubDag {
     /// Extract EndOfEpoch system transactions from this committed sub-dag
     /// Returns the first EndOfEpoch transaction found (there should be at most one per commit)
     pub fn extract_end_of_epoch_transaction(&self) -> Option<(BlockRef, SystemTransaction)> {
-        let cache = crate::transaction::get_global_tx_cache().read();
+        // FORK-SAFETY: see extract_system_transactions' identical comment above --
+        // missing an EndOfEpoch transaction here would be fork-relevant, so retry
+        // with real backoff rather than treating a first lock timeout as "not found".
+        let cache = crate::transaction::retry_tx_cache_read_for_commit("extract_end_of_epoch_transaction")?;
         for block in &self.blocks {
             let tx_digests = block.tx_digests();
             if !tx_digests.is_empty() {

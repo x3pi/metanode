@@ -148,7 +148,8 @@ impl CommitFinalizer {
             }
 
             let already_finalized = !self.context.protocol_config.mysticeti_fastpath()
-                || committed_sub_dag.recovered_rejected_transactions;
+                || committed_sub_dag.recovered_rejected_transactions
+                || !committed_sub_dag.decided_with_local_blocks;
             let finalized_commits = if !already_finalized {
                 self.process_commit(committed_sub_dag).await
             } else {

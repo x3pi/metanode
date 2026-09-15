@@ -1617,18 +1617,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
         if !self.coordination_hub.is_startup_sync_active()
             && (is_single_validator || !self.coordination_hub.is_catching_up())
         {
-            // CRITICAL RECOVERY FIX (2026-09-12): Do not jump synced_commit_index past highest_handled_index.
-            // If execution is lagging behind the DAG (e.g., node crashed and DAG loaded from disk,
-            // but CommitVoteMonitor is empty), we MUST NOT jump synced_commit_index to DAG tip.
-            // If we do, CommitSyncer will never fetch CertifiedCommits for the missing range,
-            // leaving execution permanently deadlocked at DIGEST-GATE.
-            let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled_index);
             let target_sync = self.synced_commit_index.max(local_commit_index);
 
-            if target_sync > safe_jump_limit {
-                self.synced_commit_index = safe_jump_limit;
-            } else {
+            // REGRESSION FIX (2026-09-14, found while re-baselining tests for the
+            // mục-19-bug-#4 investigation): the execution-progress cap below was
+            // being applied unconditionally, which silently re-broke the
+            // SINGLE-VALIDATOR EXCEPTION documented just above -- for a
+            // single-validator committee, local_commit_index already IS the
+            // verified truth (no peer to have diverged from), so it must not be
+            // re-throttled to highest_handled_index, which stays at 0 until Go
+            // actually executes something. Without this exemption,
+            // synced_commit_index gets stuck at 0 forever on a fresh/cold-start
+            // single-validator node, reintroducing the exact livelock this
+            // whole exception exists to prevent (mục 17 UPDATE #4). Caught by
+            // commit_syncer::tests::single_validator_advances_synced_commit_index_
+            // while_catching_up, which this same change made fail deterministically.
+            if is_single_validator {
                 self.synced_commit_index = target_sync;
+            } else {
+                // CRITICAL RECOVERY FIX (2026-09-12): Do not jump synced_commit_index past
+                // highest_handled_index. If execution is lagging behind the DAG (e.g., node
+                // crashed and DAG loaded from disk, but CommitVoteMonitor is empty), we MUST
+                // NOT jump synced_commit_index to DAG tip. If we do, CommitSyncer will never
+                // fetch CertifiedCommits for the missing range, leaving execution permanently
+                // deadlocked at DIGEST-GATE.
+                let safe_jump_limit =
+                    std::cmp::max(self.synced_commit_index, highest_handled_index);
+                self.synced_commit_index = target_sync.min(safe_jump_limit);
             }
         }
 
@@ -1851,8 +1866,23 @@ impl<C: NetworkClient> CommitSyncer<C> {
         //
         // Fork safety: Without baseline, ScheduleVerifying blocks the
         // node from Healthy → no proposals → no fork risk.
-        // ════════════════════════════════════════════════════════════════
-        const MAX_BASELINE_ATTEMPTS: u32 = 30; // 30 × 1s = 30s max
+        //
+        // BOUND FIXED AT THE ROOT (2026-09-14, mục 19 bug #4 investigation):
+        // the old "30 × 1s = 30s max" comment was wrong about the per-attempt
+        // cost, and the root cause wasn't the attempt count -- it was that a
+        // failed attempt used to try every OTHER committee authority (up to 3
+        // in a 4-node committee) SEQUENTIALLY, each paying its own full 5s
+        // fetch_commits timeout before the next was even tried: up to ~16s
+        // per attempt, not 1s. At 30 attempts that's a real worst case of ~8
+        // minutes, not 30s -- reproduced live: node-3 sat in Bootstrapping
+        // here for 6+ minutes after a whole-cluster restart before this
+        // returned. Just lowering the attempt count would still leave that
+        // same sequential-timeout-multiplication design in place (a smaller
+        // band-aid, not a fix) -- the actual fix, below, queries every peer
+        // CONCURRENTLY and takes the first success, so one attempt's cost is
+        // bounded by a single 5s timeout regardless of committee size. With
+        // that fixed, the ORIGINAL "30s" intent is honest again as documented.
+        const MAX_BASELINE_ATTEMPTS: u32 = 5; // 5 × (5s timeout + 1s backoff) = 30s real worst case
         let mut baseline_attempt: u32 = 0;
 
         loop {
@@ -1889,17 +1919,45 @@ impl<C: NetworkClient> CommitSyncer<C> {
 
             let range: crate::commit::CommitRange = (prev_index..=prev_index).into();
 
-            for authority in target_authorities.clone() {
-                if let Ok(Ok((serialized_commits, _, _))) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.inner.network_client.fetch_commits(
-                        authority,
-                        range.clone(),
-                        Duration::from_secs(4),
-                    ),
-                )
-                .await
-                {
+            // ROOT FIX (2026-09-14): query every candidate authority CONCURRENTLY
+            // instead of one at a time -- a slow or down peer must not cost a
+            // full timeout before the next one is even tried. This bounds one
+            // attempt's cost by a single 5s timeout regardless of committee
+            // size, instead of multiplying it by the number of peers tried.
+            let winner = {
+                use futures::{stream::FuturesUnordered, StreamExt as _};
+                let mut inflight: FuturesUnordered<_> = target_authorities
+                    .iter()
+                    .map(|&authority| {
+                        let inner = self.inner.clone();
+                        let range = range.clone();
+                        async move {
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                inner
+                                    .network_client
+                                    .fetch_commits(authority, range, Duration::from_secs(4)),
+                            )
+                            .await;
+                            (authority, result)
+                        }
+                    })
+                    .collect();
+
+                let mut winner = None;
+                while let Some((authority, result)) = inflight.next().await {
+                    if let Ok(Ok((serialized_commits, _, _))) = result {
+                        if !serialized_commits.is_empty() {
+                            winner = Some((authority, serialized_commits));
+                            break;
+                        }
+                    }
+                }
+                winner
+            };
+
+            {
+                if let Some((authority, serialized_commits)) = winner {
                     if let Some(serialized) = serialized_commits.first() {
                         if let Ok(commit) = bcs::from_bytes::<crate::commit::Commit>(serialized) {
                             use crate::commit::CommitAPI; // Import the trait for .timestamp_ms()
@@ -1980,14 +2038,35 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                     "✅ Baseline commit #{} successfully patched.",
                                     prev_index
                                 );
-                                // Core requires an empty batch to process the new baseline and update its internal schedule
-                                let _ =
-                                    self.inner
-                                        .core_thread_dispatcher
-                                        .add_certified_commits(
-                                            crate::commit::CertifiedCommits::new(vec![], vec![]),
-                                        )
-                                        .await;
+                                // Core requires an empty batch to process the new baseline and update its internal schedule.
+                                // BOUNDED (2026-09-14): this is the only await in the whole baseline-fetch
+                                // path that wasn't already wrapped in tokio::time::timeout -- every
+                                // fetch_commits call above is bounded at 5s, but this CoreThread
+                                // round-trip had none, so if CoreThread itself is ever briefly stuck
+                                // on something unrelated, this call (and the phase transition/recovery
+                                // barrier gated behind it) could hang far longer than the documented
+                                // ~30s MAX_BASELINE_ATTEMPTS bound implies -- reproduced live: a
+                                // restart-into-existing-state node stayed in Bootstrapping for 9+
+                                // minutes with this exact call as the last thing logged before it.
+                                // This is a best-effort "kick" (not a value we depend on for
+                                // correctness), so it's safe to give up and let the next attempt or
+                                // CommitSyncer tick retry rather than block indefinitely.
+                                if tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    self.inner.core_thread_dispatcher.add_certified_commits(
+                                        crate::commit::CertifiedCommits::new(vec![], vec![]),
+                                    ),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    tracing::warn!(
+                                        "⚠️ [BASELINE] Timed out kicking CoreThread with empty batch \
+                                         after baseline patch (commit #{}) -- CoreThread may be busy. \
+                                         Not fatal: proceeding, will retry via the normal schedule cadence.",
+                                        prev_index
+                                    );
+                                }
                                 self.last_fetched_schedule_cycle = Some(current_cycle);
                             } else if needs_schedule_recovery {
                                 if schedule_ready_to_recover {
@@ -2049,17 +2128,26 @@ impl<C: NetworkClient> CommitSyncer<C> {
                                         let scores = reputation_scores.unwrap_or_default();
                                         tracing::info!("✅ Recovered baseline reputation scores for schedule recovery. Injecting via DagStateWriter.");
                                         self.inner.dag_state_writer.inject_baseline_scores(scores);
-                                        // Send empty commits list to trigger Core to process the new baseline
-                                        let _ = self
-                                            .inner
-                                            .core_thread_dispatcher
-                                            .add_certified_commits(
+                                        // Send empty commits list to trigger Core to process the new baseline.
+                                        // BOUNDED -- see the sibling call above for why.
+                                        if tokio::time::timeout(
+                                            Duration::from_secs(10),
+                                            self.inner.core_thread_dispatcher.add_certified_commits(
                                                 crate::commit::CertifiedCommits::new(
                                                     vec![],
                                                     vec![],
                                                 ),
-                                            )
-                                            .await;
+                                            ),
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            tracing::warn!(
+                                                "⚠️ [BASELINE] Timed out kicking CoreThread with empty batch \
+                                                 after schedule-recovery injection -- CoreThread may be busy. \
+                                                 Not fatal: proceeding, will retry via the normal schedule cadence."
+                                            );
+                                        }
                                         self.last_fetched_schedule_cycle = Some(current_cycle);
                                     }
                                 }
@@ -2142,11 +2230,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 if authority == self.inner.context.own_index {
                     continue;
                 }
-                if let Ok(status) = self
-                    .inner
-                    .network_client
-                    .get_epoch_status(authority, timeout)
-                    .await
+                // BOUNDED (2026-09-14): `get_epoch_status`'s own `timeout` argument only
+                // sets tonic's `grpc-timeout` request header -- a hint the SERVER is
+                // expected to respect, not a client-side enforced deadline. tonic does
+                // not itself abandon waiting for a response when that header elapses, so
+                // if the peer's own handler is simply slow to respond (observed live: all
+                // 4 nodes restarting at once, each busy with its own heavy startup work,
+                // e.g. "last_handled=13988" of DAG history to load), this await can hang
+                // far longer than `timeout` actually implies -- stuck on THIS ONE peer
+                // with zero further attempt-log output, exactly what was seen live: a
+                // whole-cluster simultaneous restart stayed in Bootstrapping 6+ minutes
+                // (vs 0.3-0.4s for a single node restarting into 3 already-healthy peers).
+                // Every other network_client call in this file already double-wraps with
+                // an explicit `tokio::time::timeout` for exactly this reason (see
+                // patch_baseline_if_needed's fetch_commits calls) -- this one didn't.
+                if let Ok(Ok(status)) = tokio::time::timeout(
+                    timeout,
+                    self.inner.network_client.get_epoch_status(authority, timeout),
+                )
+                .await
                 {
                     reachable_peers += 1;
                     if status.epoch == self.inner.context.committee.epoch() {
@@ -2279,8 +2381,25 @@ impl<C: NetworkClient> CommitSyncer<C> {
             }
 
             // ── NO EXIT: Keep waiting with exponential backoff ────────
-            // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap
-            let backoff_secs = std::cmp::min(2u64 << attempt.min(4), 30);
+            // Exponential backoff: 2s → 4s → 5s cap.
+            // FAST-RECOVERY TUNING (2026-09-14): was 2s→4s→8s→16s→30s. Live-reproduced
+            // root cause of a 7-9.5 minute Bootstrapping stall on restart-into-existing-
+            // state: this loop's per-attempt peer poll is sequential (one get_epoch_status
+            // per peer, 3s timeout each), so a single transiently-unreachable peer (e.g.
+            // "Connection refused" for a few seconds right after a co-located node's own
+            // restart) already costs several seconds per attempt BEFORE the backoff sleep
+            // even starts -- at the old 30s cap, a handful of such attempts alone accounts
+            // for minutes of wall-clock time. This loop's safety comes from NEVER exiting
+            // without a quorum-verified condition (see the big comment above), not from any
+            // specific backoff duration, so shortening the cap doesn't weaken the fork-safety
+            // guarantee -- it only makes the node retry sooner once peers are actually
+            // reachable again. Matches this project's explicit fast-recovery priority
+            // (bounded RAM loss on restart is acceptable; slow recovery is not).
+            let backoff_secs = match attempt {
+                1 => 2,
+                2 => 4,
+                _ => 5,
+            };
 
             if reachable_peers == 0 {
                 // No peers reachable at all — network partition or all nodes down
@@ -2452,7 +2571,33 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         highest_handled,
                         local_commit
                     );
+                    let safe_jump_limit = std::cmp::max(self.synced_commit_index, highest_handled);
+                    let target_sync = self.synced_commit_index.max(local_commit);
+
+                    if target_sync > safe_jump_limit {
+                        tracing::info!(
+                            "[COMMIT-SYNCER] Capping synced_commit_index advance {} → {} (target={}) to match execution progress",
+                            self.synced_commit_index, safe_jump_limit, target_sync
+                        );
+                        self.synced_commit_index = safe_jump_limit;
+                    } else {
+                        tracing::info!(
+                            "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
+                            self.synced_commit_index,
+                            local_commit,
+                            self.coordination_hub.get_phase(),
+                            local_handled_gap
+                        );
+                        self.synced_commit_index = local_commit;
+                    }
                 } else {
+                    // handled_gap <= 50: execution is close enough behind DAG state that
+                    // advancing straight to local_commit is safe (this is the common,
+                    // non-dangerous case the gap>50 fork-safety gate above doesn't apply
+                    // to) -- restored after a WIP edit accidentally folded this branch's
+                    // code into the gap>50 arm above, silently turning it into a no-op
+                    // and breaking single_validator_advances_synced_commit_index_while_
+                    // catching_up (caught by the full consensus-core suite before commit).
                     tracing::info!(
                         "[COMMIT-SYNCER] Advancing synced_commit_index {} → {} (from local DAG, phase={:?}, handled_gap={})",
                         self.synced_commit_index,

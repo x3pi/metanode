@@ -844,8 +844,11 @@ impl PeerRpcServer {
         if submit_req.cache_only {
             let mut cached = 0usize;
             let mut decode_errors = Vec::new();
+            // Bounded (mục 19 bug #4/#5): a stuck lock just means these gossiped
+            // TXs don't get pre-cached -- the origin validator's own submission
+            // path is unaffected, this is purely a same-round-trip optimization.
+            if let Some(mut cache) = consensus_core::try_tx_cache_write("peer_rpc cache_only submit")
             {
-                let mut cache = consensus_core::get_global_tx_cache().write();
                 for tx_hex in &submit_req.transactions_hex {
                     match hex::decode(tx_hex) {
                         Ok(tx_bytes) => {

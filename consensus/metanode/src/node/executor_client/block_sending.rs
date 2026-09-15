@@ -1250,12 +1250,16 @@ impl ExecutorClient {
     /// a substitute for it.
     async fn ensure_tx_payloads_cached(&self, subdag: &CommittedSubDag) {
         let missing: Vec<consensus_types::block::TxDigest> = {
-            let cache = consensus_core::get_global_tx_cache().read();
+            // Bounded (mục 19 bug #4/#5): a stuck lock degrades to "treat as
+            // missing", which just means this recovery pass tries to fetch
+            // more than strictly necessary from peers -- safe, not a
+            // correctness risk.
+            let cache = consensus_core::try_tx_cache_read("ensure_tx_payloads_cached (before)");
             subdag
                 .blocks
                 .iter()
                 .flat_map(|block| block.tx_digests())
-                .filter(|digest| cache.get(digest).is_none())
+                .filter(|digest| cache.as_ref().map_or(true, |c| c.get(digest).is_none()))
                 .collect()
         };
         if missing.is_empty() {
@@ -1284,8 +1288,11 @@ impl ExecutorClient {
         );
         fetcher(missing.clone(), std::time::Duration::from_secs(5)).await;
         let still_missing = {
-            let cache = consensus_core::get_global_tx_cache().read();
-            missing.iter().filter(|d| cache.get(d).is_none()).count()
+            let cache = consensus_core::try_tx_cache_read("ensure_tx_payloads_cached (after)");
+            missing
+                .iter()
+                .filter(|d| cache.as_ref().map_or(true, |c| c.get(d).is_none()))
+                .count()
         };
         info!(
             "🔧 [TX-PAYLOAD-RECOVERY-DIAG] after peer fetch for commit {}: {}/{} digest(s) still missing.",
@@ -1298,7 +1305,12 @@ impl ExecutorClient {
     /// Returns true if every digest this subdag's blocks reference is currently in the local
     /// TxPayloadCache (i.e. `build_sorted_transactions` would not hit a missing-payload bail).
     fn all_tx_payloads_cached(subdag: &CommittedSubDag) -> bool {
-        let cache = consensus_core::get_global_tx_cache().read();
+        // Bounded (mục 19 bug #4/#5): a stuck lock degrades to "not all
+        // cached" (the conservative answer -- callers treat false as "go
+        // through the normal, safer path"), never blocks.
+        let Some(cache) = consensus_core::try_tx_cache_read("all_tx_payloads_cached") else {
+            return false;
+        };
         subdag
             .blocks
             .iter()
