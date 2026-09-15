@@ -487,75 +487,26 @@ impl ExecutorClient {
             .acquire()
             .await
             .map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
-        const MAX_RETRIES: u32 = 3;
-        const BACKOFF_MS: [u64; 3] = [100, 500, 1000];
-        // Found 2026-09-02 alongside the mempool eviction-panic root-cause fix
-        // (see transaction_pool.go): this call previously had NO timeout at all,
-        // so a Go side that ever hangs mid-request (that bug, or any future one)
-        // would leave the spawn_blocking future pending forever. Since
-        // rpc_semaphore only has 4 permits shared by every caller of this
-        // function (epoch transitions, block sync, and all rpc_queries*), 4
-        // simultaneous hangs -- or even one hang hit 4 times in a row -- would
-        // permanently starve every other consumer of this bridge, well beyond
-        // just the RPC path that happened to trigger it. A timeout can't cancel
-        // the underlying blocking OS thread (spawn_blocking closures aren't
-        // preemptible, and the CGo call has no cancellation hook), so a hung
-        // call still leaks one thread from Tokio's blocking pool for good --
-        // but it lets THIS caller stop waiting and release its semaphore permit,
-        // which is what actually matters: one bad call degrades to one leaked
-        // thread instead of cascading into a total, permanent lockup of this
-        // entire bridge. 10s is generous headroom over observed real latencies
-        // (production BLOCK-TRACE logs show this path completing in low
-        // milliseconds) while still bounding the worst case to a small multiple
-        // of it across all retries.
-        const CALL_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
-
+        // ═══════════════════════════════════════════════════════════════════════════
+        // FORK FIX (Zero-Fork Invariant): Remove timeout and retries for RPC requests.
+        // As documented on the Go side (ffi_bridge.go), Go processes RPC requests
+        // synchronously and waits indefinitely to prevent concurrent DB mutations.
+        // Rust MUST respect this honest backpressure and wait indefinitely as well.
+        // Previous timeouts caused tokio to cancel the await and retry, which leaked
+        // OS threads from the blocking pool and spawned concurrent mutations in Go,
+        // eventually exhausting the 512-thread pool and freezing the entire process.
+        // ═══════════════════════════════════════════════════════════════════════════
         let req_buf_clone = request_buf.to_vec();
+        
+        let join_result = tokio::task::spawn_blocking(move || Self::execute_rpc_request_inner(&req_buf_clone)).await;
 
-        for attempt in 0..=MAX_RETRIES {
-            let req = req_buf_clone.clone();
+        let result = join_result.map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?;
 
-            // Execute the blocking CGo FFI call in a spawn_blocking block to prevent
-            // blocking the async executor.
-            let join_result = tokio::time::timeout(
-                CALL_TIMEOUT,
-                tokio::task::spawn_blocking(move || Self::execute_rpc_request_inner(&req)),
-            )
-            .await;
-
-            let result = match join_result {
-                Ok(joined) => joined.map_err(|e| anyhow::anyhow!("Spawn blocking error: {}", e))?,
-                Err(_elapsed) => Err(anyhow::anyhow!(
-                    "Go FFI call timed out after {:?} (attempt {}/{})",
-                    CALL_TIMEOUT,
-                    attempt + 1,
-                    MAX_RETRIES + 1
-                )),
-            };
-
-            match result {
-                Ok(buf) if !buf.is_empty() => return Ok(buf),
-                Ok(_) => { /* empty response, considered equivalent to error/EOF */ }
-                Err(e) => {
-                    tracing::warn!(
-                        "RPC attempt {}/{} failed: {}",
-                        attempt + 1,
-                        MAX_RETRIES + 1,
-                        e
-                    );
-                }
-            }
-            if attempt < MAX_RETRIES {
-                tokio::time::sleep(tokio::time::Duration::from_millis(
-                    BACKOFF_MS[attempt as usize],
-                ))
-                .await;
-            }
+        match result {
+            Ok(buf) if !buf.is_empty() => Ok(buf),
+            Ok(_) => Err(anyhow::anyhow!("Empty response from Go FFI")),
+            Err(e) => Err(anyhow::anyhow!("Go FFI error: {}", e)),
         }
-        Err(anyhow::anyhow!(
-            "RPC request failed after {} retries",
-            MAX_RETRIES
-        ))
     }
 
     fn execute_rpc_request_inner(request_buf: &[u8]) -> Result<Vec<u8>> {

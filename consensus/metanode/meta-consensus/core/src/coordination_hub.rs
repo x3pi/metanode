@@ -564,6 +564,31 @@ impl ConsensusCoordinationHub {
         !(self.is_healthy() || self.is_catching_up()) || !self.recovery_barrier.can_propose()
     }
 
+    /// Returns true only when this node is a safe target for a brand-new, externally-submitted
+    /// transaction that the caller expects to actually get committed/executed in a reasonable
+    /// time -- i.e. the promise `eth_consensusReady`/`eth_syncing` makes to an RPC client.
+    ///
+    /// ROOT-CAUSE FIX (2026-09-15, "Phuong an A" mục 22 -- see project memory): this used to be
+    /// `!should_skip_proposal()`, reusing the SAME check that gates whether Core proposes DAG
+    /// blocks internally. That's the wrong check for THIS purpose: `should_skip_proposal()`
+    /// deliberately treats `CatchingUp` as a green light (a catching-up node should keep
+    /// participating in DAG rounds so it converges), but `commit_syncer.rs`'s own
+    /// "BLOCKED synced_commit_index advance ... Go execution layer is far behind DAG state"
+    /// gate documents that CatchingUp can mean Go's execution is 100+ commits behind the DAG,
+    /// with commits deliberately NOT being advanced to avoid a premature Healthy transition.
+    /// Reusing `should_skip_proposal()` here meant `eth_consensusReady` reported `true` within
+    /// ~8s of a node restarting -- confirmed live: a real transaction sent right after that
+    /// signal never got a receipt within 45s, because the DAG kept accepting new proposals
+    /// (allowed during CatchingUp) faster than Go could drain the backlog, so the execution
+    /// gap never closed -- a livelock that stalled block-height advancement across the WHOLE
+    /// 4-node cluster for several minutes (reproduced live via `sudo`-free RPC polling,
+    /// requiring the automated Health Monitor's watchdog restart to recover). A brand-new user
+    /// transaction has no reason to accept that risk, unlike the DAG's own internal
+    /// round-participation -- so this checks strictly `is_healthy()`, not also `is_catching_up()`.
+    pub fn is_ready_for_new_transactions(&self) -> bool {
+        self.is_healthy() && self.recovery_barrier.can_propose()
+    }
+
     /// Signal that STARTUP-SYNC has started/finished. While active, proposals are blocked.
     pub fn set_startup_sync_active(&self, active: bool) {
         self.startup_sync_active.store(active, Ordering::Release);

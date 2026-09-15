@@ -1870,6 +1870,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
             return;
         }
 
+        if current_cycle == 0 && needs_schedule_recovery && !needs_baseline_injection && !is_synthetic_baseline {
+            tracing::info!("✅ [BASELINE] Current cycle is 0 (Genesis). No baseline fetch needed for schedule. Injecting empty scores.");
+            self.inner.dag_state_writer.inject_baseline_scores(vec![]);
+            // Send empty commits list to trigger Core to process the new baseline.
+            let _ = tokio::time::timeout(
+                tokio::time::Duration::from_secs(10),
+                self.inner.core_thread_dispatcher.add_certified_commits(
+                    crate::commit::CertifiedCommits::new(vec![], vec![]),
+                ),
+            )
+            .await;
+            self.last_fetched_schedule_cycle = Some(current_cycle);
+            return;
+        }
+
         tracing::info!("🔗 [BASELINE] Fetching network schedule/digest data for boundary commit #{} (current cycle: {})", last_schedule_change_index, current_cycle);
 
         // ════════════════════════════════════════════════════════════════

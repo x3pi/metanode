@@ -22,7 +22,8 @@ pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec
 /// today's chaos-restart CI test: a node that just restarted answers `eth_blockNumber` (plain RPC
 /// liveness) within seconds, well before ConsensusCoordinationHub reaches a phase that actually
 /// accepts proposals (Healthy + RecoveryBarrier Ready/Inactive -- see
-/// coordination_hub.rs's `should_skip_proposal()`, the existing authoritative check this reuses).
+/// coordination_hub.rs's `is_ready_for_new_transactions()`, the authoritative check this reuses;
+/// note that's a STRICTER check than `should_skip_proposal()`, mục 22's fix, see its doc comment).
 /// A client/test-script that only checks "does RPC answer" sends a transaction into that window
 /// and gets an unexplained 45s timeout with no diagnostic -- exactly what this exists to prevent.
 ///
@@ -130,7 +131,10 @@ pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
         Err(poisoned) => poisoned.into_inner(),
     };
     match guard.as_ref() {
-        Some(hub) => !hub.should_skip_proposal(),
+        // ROOT-CAUSE FIX (2026-09-15, mục 22): was `!hub.should_skip_proposal()`, which also
+        // treats CatchingUp as ready -- see `is_ready_for_new_transactions`'s doc comment in
+        // coordination_hub.rs for why that's wrong for this specific, externally-facing signal.
+        Some(hub) => hub.is_ready_for_new_transactions(),
         None => false,
     }
 }
