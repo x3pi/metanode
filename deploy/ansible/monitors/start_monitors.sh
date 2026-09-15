@@ -710,6 +710,9 @@ giấu một phân nhánh (fork) thật đang tồn tại trên đĩa.
                     fi
                     if [ -n "$tx_lost_log_line" ] && [ "${tx_payload_lost_alerted[$node_key]:-0}" == "0" ]; then
                         tx_payload_lost_alerted[$node_key]=1
+                        # Extract the stuck commit index (e.g. "Failed to deliver commit 3905 (GEI=141)")
+                        # so the alert can give the EXACT command to run, not just point at a doc.
+                        stuck_commit_idx=$(echo "$tx_lost_log_line" | grep -oP 'deliver commit \K[0-9]+' || true)
                         send_tele "🛑🚨 <b>[NGHIÊM TRỌNG: MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH]</b> 🛑🚨
 ────────────────────────
 🎯 <b>NODE:</b>
@@ -731,12 +734,25 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
 👉 <b>HƯỚNG DẪN XỬ LÝ:</b>
 1. <b>Restart đơn lẻ node này KHÔNG giúp ích</b> nếu dữ liệu đã mất trên toàn cụm (nguyên
    nhân thường là deploy code mới cho CẢ cụm cùng lúc, đúng lúc có giao dịch đang xử lý dở).
+   Cụm cũng sẽ TỰ ĐỘNG thử Fast Restart mỗi khi phát hiện CHAIN STALL — bình thường vô hại
+   nhưng KHÔNG bao giờ tự sửa được đúng nguyên nhân này (dữ liệu mất khỏi RAM thì restart bao
+   nhiêu lần cũng vậy) — xem cảnh báo CHAIN STALL riêng nếu nó cứ lặp lại không dứt.
 2. Nếu một validator khác KHÔNG bị mất payload này vẫn còn sống (vd. chỉ 1 node restart,
    các node khác vẫn chạy liên tục): node này sẽ TỰ PHỤC HỒI khi peer đó phản hồi lại, không
    cần can thiệp gì thêm — sẽ có thông báo riêng khi phục hồi xong.
-3. Nếu KHÔNG node nào còn payload: cần liên hệ đội dev để xác định giao dịch nào bị ảnh
-   hưởng và quyết định hướng xử lý thủ công (không có cách tự động an toàn để bỏ qua).
-4. Chi tiết: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code> mục 10.
+3. Nếu KHÔNG node nào còn payload (mọi peer đều báo <code>NO blocks</code>/thiếu digest lặp
+   lại nhiều phút): dùng chính công cụ vận hành đã có sẵn cho đúng trường hợp này —
+   <b>quorum-certified skip</b> (<code>admin_attestPayloadLossForCommit</code>), gọi TRÊN CẢ
+   4 NODE cho commit bị kẹt${stuck_commit_idx:+ (<code>${stuck_commit_idx}</code>)}:
+   <code>curl -s -X POST http://&lt;node-ip&gt;:&lt;rpc-port&gt; -H 'Content-Type: application/json' \\
+     -d '{\"jsonrpc\":\"2.0\",\"method\":\"admin_attestPayloadLossForCommit\",\"params\":[\"&lt;securepassword&gt;\",${stuck_commit_idx:-<commit_index>}],\"id\":1}'</code>
+   Lặp lại cho commit kế tiếp nếu nó lại kẹt ngay sau đó (bình thường khi nhiều tx bị mất liên
+   tiếp) cho tới khi <code>eth_blockNumber</code> tăng đều trở lại. <u>Đây là quyết định
+   KHÔNG THỂ HOÀN TÁC</u> (chính thức công nhận giao dịch đã mất vĩnh viễn) — do đó công cụ
+   này CỐ TÌNH không được gọi tự động ở đây, luôn cần Operator xác nhận trước khi chạy.
+4. Chi tiết: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code> mục 10, và
+   [[project_consensus_halt_not_guess_phuong_an_a]] mục 22 (điểm 5) cho 1 ví dụ live đã dùng
+   đúng quy trình này để giải phóng ~95 commit bị kẹt tích lũy sau nhiều lần restart liên tục.
 ────────────────────────
 📜 <b>Dòng log gốc:</b>
 <code>${tx_lost_log_line}</code>"
@@ -871,6 +887,42 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
 
                                 last_stall_alert_ts=$now_ts
                                 is_chain_stalled=true
+
+                                # GITHUB ISSUE #105 FOLLOW-UP (mục 22): before blindly firing the
+                                # usual auto-restart, check whether BƯỚC 2 above already flagged an
+                                # active, unresolved CONSENSUS-HALT-TX-PAYLOAD-LOST on any node this
+                                # same cycle. Confirmed live (mục 22 point 5): a payload-loss halt
+                                # produces this EXACT stall signature (height frozen, probe tx never
+                                # confirms) but a restart -- single-node OR whole-cluster -- can NEVER
+                                # fix it (the missing data is gone from every peer's RAM, not from a
+                                # wedged process), so looping `--restart` here forever just burns
+                                # ~50s+ of downtime per cycle for zero benefit. Skip it in that case
+                                # and point back at the payload-loss alert's runbook instead, which
+                                # already gives the exact admin_attestPayloadLossForCommit command.
+                                payload_loss_active=false
+                                for pla_key in "${!tx_payload_lost_alerted[@]}"; do
+                                    if [ "${tx_payload_lost_alerted[$pla_key]}" == "1" ]; then
+                                        payload_loss_active=true
+                                        break
+                                    fi
+                                done
+
+                                if [ "$payload_loss_active" == "true" ]; then
+                                    send_tele "🚨 <b>[CHUỖI ĐỨNG IM — NGUYÊN NHÂN ĐÃ BIẾT: MẤT PAYLOAD]</b> 🚨
+────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+🎯 <b>Block hiện tại:</b> <code>#${last_seen_block}</code> (đứng im ${stall_duration}s)
+────────────────────────
+⚠️ Đã có cảnh báo <b>[MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH]</b> riêng cho node liên quan trong cùng
+chu kỳ kiểm tra này — đây gần như chắc chắn là NGUYÊN NHÂN của lần đứng im này, không phải một
+sự cố mới. <b>Bỏ qua Fast Restart tự động lần này</b> vì restart không bao giờ sửa được lỗi mất
+payload (dữ liệu mất khỏi RAM mọi node, không phải do tiến trình bị kẹt) — xem lại cảnh báo
+[MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH] gần nhất để lấy lệnh <code>admin_attestPayloadLossForCommit</code>
+chính xác cần chạy.
+────────────────────────"
+                                else
                                     send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
 ────────────────────────
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
@@ -887,7 +939,7 @@ ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
 👉 <b>HƯỚNG DẪN XỬ LÝ (TỰ ĐỘNG PHỤC HỒI):</b>
 Hệ thống phát hiện kẹt vòng lặp Consensus. Đang tự động kích hoạt Fast Restart toàn cụm trong nền để khôi phục!
 🟢 <i>An toàn: Giữ nguyên 100% dữ liệu, không tốn thời gian build lại.</i>"
-                                    
+
                                     # Auto-recover in background, detached from TTY
                                     echo "[$(date -u)] Auto-recovering chain stall..." >> "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
                                     (
@@ -896,6 +948,7 @@ Hệ thống phát hiện kẹt vòng lặp Consensus. Đang tự động kích 
                                         export PYTHONUNBUFFERED=1
                                         ./ansible_deploy.sh --restart < /dev/null
                                     ) >/dev/null 2>&1 &
+                                fi
                                 fi
                             fi
                         fi

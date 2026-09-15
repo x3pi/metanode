@@ -68,7 +68,23 @@ all:
           # Cách A (Khuyên dùng cho Production): Xác thực bằng SSH Key (không cần mật khẩu)
           ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
 
-          # Cách B (Dùng cho Lab / Devnet nội bộ): Xác thực bằng mật khẩu trực tiếp
+          # Cách B (Dùng cho Lab / Devnet nội bộ): Xác thực bằng mật khẩu trực tiếp.
+          # inventory.yml đã tự động bị gitignore nên mật khẩu ở đây không lộ ra
+          # remote git — NHƯNG nó vẫn nằm dạng plaintext trên đĩa máy deploy. Nếu
+          # máy đó có nhiều người dùng chung hoặc bạn muốn thêm 1 lớp bảo vệ nữa,
+          # mã hoá riêng 2 dòng này bằng ansible-vault thay vì để plaintext (GitHub
+          # issue #104): ansible_deploy.sh đã hỗ trợ sẵn, không cần sửa gì thêm —
+          #   1) tạo mật khẩu vault:   openssl rand -base64 24 > .vault_pass
+          #      (giữ .vault_pass ngoài git — đã có trong .gitignore)
+          #   2) mã hoá 1 giá trị:     ansible-vault encrypt_string \
+          #        --vault-password-file .vault_pass 'mat_khau_sudo' \
+          #        --name ansible_become_pass
+          #   3) dán khối `ansible_become_pass: !vault |` nó in ra vào ĐÚNG chỗ
+          #      2 dòng dưới đây (thay vì gõ mật khẩu trực tiếp), lặp lại cho
+          #      ansible_ssh_pass nếu cần.
+          #   ansible_deploy.sh tự phát hiện `.vault_pass` (hoặc biến môi trường
+          #   ANSIBLE_VAULT_PASSWORD_FILE) và tự thêm --vault-password-file —
+          #   không cần đổi cách chạy `./ansible_deploy.sh --start` như cũ.
           # ansible_ssh_pass: "mat_khau_ssh"
           # ansible_become_pass: "mat_khau_sudo"
 

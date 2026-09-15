@@ -88,6 +88,24 @@ send_telegram_notification() {
 INVENTORY="${SCRIPT_DIR}/inventory.yml"
 PLAYBOOK="${SCRIPT_DIR}/deploy.yml"
 
+# ANSIBLE-VAULT SUPPORT (2026-09, GitHub issue #104 hardening): purely opt-in and
+# backward-compatible -- if you never touch ansible-vault, VAULT_ARGS stays empty
+# and every ansible-playbook call below behaves exactly as before. To use it:
+# encrypt just the password fields in inventory.yml with
+# `ansible-vault encrypt_string --vault-password-file .vault_pass 'mat_khau_sudo' --name ansible_become_pass`
+# and paste the `!vault |` block it prints in place of the plaintext value (see
+# inventory.example.yml's "Cách B" comment for the full recipe). Store the vault
+# password itself in `${SCRIPT_DIR}/.vault_pass` (already gitignored, same as
+# inventory.yml) or point ANSIBLE_VAULT_PASSWORD_FILE at wherever you keep it --
+# either way ansible-playbook decrypts transparently at run time, so nothing
+# else in this script needs to know or care that a value is vault-encrypted.
+VAULT_ARGS=()
+if [ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ] && [ -f "${ANSIBLE_VAULT_PASSWORD_FILE}" ]; then
+    VAULT_ARGS=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
+elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+fi
+
 # Defaults
 ACTION=""
 EXPLICIT_ACTION="false"
@@ -388,7 +406,7 @@ fi
 if [ "$ACTION" == "gen_keys" ]; then
     echo -e "\n🔑 [GEN-KEYS] Bắt đầu sinh bộ Key & Genesis mẫu cục bộ (Không đụng tới server)..."
     cd "$SCRIPT_DIR"
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" --tags gen_keys
+    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}" --tags gen_keys
     exit_code=$?
     if [ $exit_code -eq 0 ]; then
         echo -e "\n=========================================================="
@@ -429,7 +447,7 @@ fi
 cd "$SCRIPT_DIR"
 set +e
 export PYTHONUNBUFFERED=1
-ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS"
+ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}"
 ansible_exit=$?
 set -e
 

@@ -480,6 +480,10 @@ deploy/ansible/monitors/inventory.yml
 **/inventory.yml
 !**/inventory.example.yml
 !**/inventory.sample.yml
+# ansible-vault password file (GitHub issue #104 hardening) -- never the vault-
+# encrypted inventory values themselves (those are fine to commit), just the
+# password used to decrypt them.
+**/.vault_pass
 **/config-local.json
 !**/config-local.example.json
 **/test_rpc
