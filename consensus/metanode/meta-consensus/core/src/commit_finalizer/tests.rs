@@ -64,6 +64,7 @@ mod tests {
         let commit_finalizer = CommitFinalizer::new(
             context.clone(),
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             commit_sender,
             None,

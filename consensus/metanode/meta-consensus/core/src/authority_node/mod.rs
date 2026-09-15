@@ -634,19 +634,23 @@ where
                         }
                     });
                     let results = futures::future::join_all(fetches).await;
-                    let mut inserted = 0usize;
+                    // Collect first, then insert_batch once (see its doc comment, mục 19
+                    // bug #6 throughput-regression follow-up) instead of one lock
+                    // acquisition per transaction.
+                    let to_insert: Vec<_> = results
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .flatten()
+                        .map(|tx_bytes| {
+                            let tx = crate::block::Transaction::new(tx_bytes.to_vec());
+                            (tx.digest(), tx)
+                        })
+                        .collect();
+                    let inserted = to_insert.len();
                     if let Some(mut cache) =
                         crate::transaction::try_tx_cache_write("payload_loss_collector batch fetch")
                     {
-                        for result in results {
-                            if let Ok(txs_bytes) = result {
-                                for tx_bytes in txs_bytes {
-                                    let tx = crate::block::Transaction::new(tx_bytes.to_vec());
-                                    cache.insert(tx.digest(), tx);
-                                    inserted += 1;
-                                }
-                            }
-                        }
+                        cache.insert_batch(to_insert);
                     }
                     if inserted > 0 {
                         tracing::info!(

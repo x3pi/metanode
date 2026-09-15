@@ -5,7 +5,7 @@ use anyhow::Result;
 use consensus_core::{BlockAPI, CommitConsumerMonitor, CommittedSubDag};
 use std::sync::Arc;
 
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// T2-5: Bounded semaphore for deferred TX tracking and persistence tasks.
 /// Prevents unbounded tokio::spawn accumulation under extreme commit rates
@@ -287,7 +287,7 @@ pub async fn dispatch_commit(
         match compute_commit_gei_and_valid_txs(subdag, false) {
             Ok(result) => result,
             Err(e) => {
-                tracing::error!("🚨 [FATAL] compute_commit_gei_and_valid_txs failed during dispatch: {}", e);
+                tracing::warn!("🚨 [FATAL] compute_commit_gei_and_valid_txs failed during dispatch: {}", e);
                 return Err(e);
             }
         };
@@ -394,7 +394,7 @@ pub async fn dispatch_commit(
                     };
 
                     if let Err(e) = sender.send(validated).await {
-                        error!("🚨 [FATAL] Failed to send commit to DeliveryManager: {}", e);
+                        warn!("🚨 [FATAL] Failed to send commit to DeliveryManager: {}", e);
                         anyhow::bail!("DeliveryManager channel closed.");
                     }
                     DIAG_DISPATCHED_TXS.fetch_add(total_transactions as u64, std::sync::atomic::Ordering::Relaxed);
@@ -424,7 +424,7 @@ pub async fn dispatch_commit(
                                 }
                             }
                             Err(_) => {
-                                error!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
+                                warn!("🚨 [FATAL] DeliveryManager closed response channel without replying.");
                             }
                         }
                     });
@@ -557,7 +557,7 @@ pub async fn dispatch_commit(
 
                     return Ok(geis_consumed);
                 } else {
-                    tracing::error!("🚨 [FATAL] delivery_sender is None in dispatch_commit. Cannot process commit.");
+                    tracing::warn!("🚨 [FATAL] delivery_sender is None in dispatch_commit. Cannot process commit.");
                     anyhow::bail!("delivery_sender missing.");
                 }
     } else {

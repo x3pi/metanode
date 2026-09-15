@@ -451,19 +451,18 @@ impl Core {
             .observe(transactions.len() as f64);
 
         // Consume the commit votes to be included.
+        // Routed through DagStateActor (2026-09-15): this used to call
+        // self.dag_state.write() directly, bypassing the actor's single-writer
+        // guarantee -- see dag_state_actor.rs's module doc for why that
+        // guarantee matters.
         let commit_votes = self
-            .dag_state
-            .write()
+            .dag_state_writer
             .take_commit_votes(MAX_COMMIT_VOTES_PER_BLOCK);
 
         let transaction_votes = if self.context.protocol_config.mysticeti_fastpath() {
-            let new_causal_history = {
-                let mut dag_state = self.dag_state.write();
-                ancestors
-                    .iter()
-                    .flat_map(|ancestor| dag_state.link_causal_history(ancestor.reference()))
-                    .collect()
-            };
+            let new_causal_history = self.dag_state_writer.link_causal_history_batch(
+                ancestors.iter().map(|a| a.reference()).collect(),
+            );
             self.transaction_certifier.get_own_votes(new_causal_history)
         } else {
             vec![]
@@ -579,7 +578,9 @@ impl Core {
         // (which the OS page cache does NOT survive, unlike a plain process crash/abort)
         // could otherwise leave us having told peers about something we can no longer
         // prove we did.
-        let flush_ticket = self.dag_state.write().flush_durable();
+        // Routed through DagStateActor (2026-09-15): see the take_commit_votes
+        // comment above.
+        let flush_ticket = self.dag_state_writer.flush_durable();
 
         // Now acknowledge the transactions for their inclusion to block
         ack_transactions(verified_block.reference());

@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as StdOrdering};
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 // TEMPORARY DIAGNOSTIC (2026-09-02/03): counts DIGEST-GATE outcomes,
 // bypassing the tracing subscriber (eprintln!, same rationale as
@@ -943,7 +943,7 @@ impl CommitProcessor {
                         .unwrap_or(next_expected_index)
                         .max(next_expected_index)
                         .saturating_sub(next_expected_index);
-                    error!(
+                    warn!(
                         "🛑🚨 [CONSENSUS-HALT-SUSPECTED-DIVERGENCE] next_expected_index={} has not \
                          advanced in {}s (pending_local head stuck, {} OOO commits buffered behind \
                          it, {} commits behind the DAG's own quorum-confirmed tip). Peer digest \
@@ -1954,7 +1954,7 @@ impl CommitProcessor {
                             match verifier(commit_index) {
                                 Some(quorum_digest) => {
                                     if quorum_digest != commit_digest {
-                                        error!(
+                                        warn!(
                                             "🚨🚨🚨 [DIGEST-AUDIT CRITICAL] DISPATCHING commit {} with MISMATCHED digest! \
                                              dispatched={}, quorum={}. THIS MAY CAUSE FORK! path={}",
                                             commit_index,

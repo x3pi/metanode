@@ -241,67 +241,91 @@ pub async fn fetch_blocks_from_peer(
         10u64
     };
 
+    // Chunk-level concurrency (how many block-ranges are in flight at once).
+    // Each chunk now opens one connection PER PEER (raced, see below), so
+    // total concurrent TCP connections = max_concurrent * peers.len() -- still
+    // cheap and bounded (e.g. 8 * 4 = 32).
     let max_concurrent = std::cmp::min(peer_addresses.len() * 2, 8);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
     let mut join_handles = Vec::new();
     let mut current_from = from_block;
-    let mut peer_idx = 0;
 
     let peer_list = peer_addresses.to_vec();
 
     while current_from <= to_block {
         let current_to = std::cmp::min(current_from + batch_size - 1, to_block);
-        
+
         let permit = semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
         let peers = peer_list.clone();
-        
+        let expected = (current_to - current_from + 1) as usize;
+
         // Spawn a task for this chunk
         let handle = tokio::spawn(async move {
             let _permit = permit;
-            let mut last_err = None;
-            
-            for i in 0..peers.len() {
-                let peer_addr = &peers[(peer_idx + i) % peers.len()];
-                match fetch_block_batch(peer_addr, current_from, current_to).await {
-                    Ok(blocks) => {
-                        let expected = (current_to - current_from + 1) as usize;
-                        if blocks.len() < expected {
-                            warn!(
-                                "⚠️ [BLOCK-FETCH] Peer {} returned incomplete blocks ({}/{}) for range {}-{}. Trying next peer.",
-                                peer_addr, blocks.len(), expected, current_from, current_to
-                            );
-                            last_err = Some(anyhow::anyhow!(
-                                "Incomplete blocks returned for range {}-{}",
-                                current_from, current_to
-                            ));
-                            continue;
-                        }
-                        
-                        info!(
-                            "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {}",
-                            blocks.len(), current_from, current_to, peer_addr
-                        );
-                        return Ok((current_from, current_to, blocks));
-                    }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ [BLOCK-FETCH] Peer {} failed for blocks {}-{}: {}",
+
+            // ARCHITECTURAL FIX (2026-09-15, mục 19 bug #6): race ALL peers
+            // concurrently for this chunk instead of trying them one at a
+            // time behind a per-peer timeout. Live-reproduced root cause:
+            // sequential-with-timeout means the FIRST peer picked determines
+            // how long this chunk takes to resolve even when other peers are
+            // healthy and instant -- shrinking that timeout (a prior, weaker
+            // version of this fix) only ever trades "wait a long time" for
+            // "wait a shorter but still arbitrary time"; it can't make a
+            // fundamentally sequential design fast, and can't be tuned to be
+            // correct for every possible peer-health scenario. Racing removes
+            // the timeout from the critical path entirely for the common
+            // case: a live-healthy peer answers in low milliseconds and wins
+            // regardless of what any timeout is set to, so no chunk ever
+            // waits on a slow/stuck peer unless EVERY peer is equally
+            // unhealthy -- at which point fetch_block_batch's own bounded
+            // read timeout (not tuned here, just a last-resort circuit
+            // breaker) is what finally gives up. This mirrors how real
+            // multi-validator systems (e.g. Sui's own consensus fetch paths)
+            // avoid depending on any single peer's latency for liveness.
+            let futures_iter = peers.iter().cloned().map(|peer_addr| {
+                Box::pin(async move {
+                    match fetch_block_batch(&peer_addr, current_from, current_to).await {
+                        Ok(blocks) if blocks.len() >= expected => Ok((peer_addr, blocks)),
+                        Ok(blocks) => Err(anyhow::anyhow!(
+                            "Peer {} returned incomplete blocks ({}/{}) for range {}-{}",
+                            peer_addr, blocks.len(), expected, current_from, current_to
+                        )),
+                        Err(e) => Err(anyhow::anyhow!(
+                            "Peer {} failed for blocks {}-{}: {}",
                             peer_addr, current_from, current_to, e
-                        );
-                        last_err = Some(e);
+                        )),
                     }
+                }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, Vec<BlockData>)>> + Send>>
+            });
+
+            match futures::future::select_ok(futures_iter).await {
+                Ok(((winner, blocks), _still_racing)) => {
+                    // Dropping `_still_racing` here cancels the other
+                    // in-flight peer connections immediately (their sockets
+                    // close on drop) instead of leaving them to run to
+                    // completion for no reason.
+                    info!(
+                        "✅ [BLOCK-FETCH] Got {} blocks ({}-{}) from peer {} (won race of {})",
+                        blocks.len(), current_from, current_to, winner, peers.len()
+                    );
+                    Ok((current_from, current_to, blocks))
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ [BLOCK-FETCH] All {} peer(s) failed for blocks {}-{}: {}",
+                        peers.len(), current_from, current_to, e
+                    );
+                    Err(anyhow::anyhow!(
+                        "All peers failed for batch {}-{}. Last error: {}",
+                        current_from, current_to, e
+                    ))
                 }
             }
-            Err(anyhow::anyhow!(
-                "All peers failed for batch {}-{}. Last error: {:?}",
-                current_from, current_to, last_err
-            ))
         });
-        
+
         join_handles.push(handle);
         current_from = current_to + 1;
-        peer_idx += 1;
     }
 
     let mut all_blocks_map = std::collections::BTreeMap::new();
@@ -422,10 +446,36 @@ async fn fetch_block_batch(
     );
     stream.write_all(request.as_bytes()).await?;
 
-    // Read response with timeout (block data can be large)
+    // Read response with a bounded timeout.
+    //
+    // 2026-09-15 (mục 19 bug #6, regression found while live-verifying the mục
+    // 19 items 1/2 fix): this used to be 300s, on the theory that "block data
+    // can be large". That reasoning doesn't hold up: the server's own
+    // `handle_get_blocks` never actually spends anywhere near 300s doing real
+    // work — its FFI call into Go (`execute_rpc_request`) is itself bounded to
+    // ~42s worst case (4 attempts × 10s + backoff, see that function's own doc
+    // comment), and it fetches at most `max_batch=20` blocks. So a *working*
+    // peer either answers in low milliseconds (the overwhelmingly common
+    // case) or returns an error response within ~42s — it never legitimately
+    // needs 300s. A 300s wait here only ever matters when the peer ISN'T
+    // going to answer in any bounded time (its connection-accept/read loop
+    // itself is stalled, e.g. from CPU contention during a synchronized
+    // whole-cluster restart, as observed live: a real ~5min connect-that-
+    // never-got-read against one peer). Live-reproduced: this exact 300s wait
+    // against one slow peer, with two other perfectly healthy peers a few
+    // milliseconds away, single-handedly caused a node to sit 8 blocks behind
+    // the cluster for the entire ~4 minute window `run_restart_test.sh`
+    // tolerates, failing the official test — not a lock/contention bug at
+    // all, just an oversized timeout preventing fast peer failover.
+    //
+    // 45s is chosen to sit just above that ~42s legitimate worst case (so a
+    // peer that's merely slow, not stuck, still gets to finish), while cutting
+    // the useless tail wait by ~85% so this function's own peer round-robin
+    // (see the caller) can actually do its job of trying the next peer.
+    const BLOCK_FETCH_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     let mut buffer = Vec::new();
     let mut temp = [0u8; 65536]; // 64KB buffer for block data
-    let read_result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+    let read_result = tokio::time::timeout(BLOCK_FETCH_READ_TIMEOUT, async {
         loop {
             match stream.read(&mut temp).await {
                 Ok(0) => break,
@@ -635,9 +685,11 @@ async fn fetch_executable_block_batch(
     );
     stream.write_all(request.as_bytes()).await?;
 
+    // See fetch_block_batch's BLOCK_FETCH_READ_TIMEOUT doc comment above (mục
+    // 19 bug #6): same reasoning applies to this sibling function.
     let mut buffer = Vec::new();
     let mut temp = [0u8; 65536];
-    let read_result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(45), async {
         loop {
             match stream.read(&mut temp).await {
                 Ok(0) => break,

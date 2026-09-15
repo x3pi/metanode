@@ -23,6 +23,23 @@
 //! the network. And it is not on the critical path of block processing. So the heuristics for
 //! synchronization, including triggers and retries, should be chosen to favor throughput and
 //! efficient resource usage, over faster reactions.
+//!
+//! ## Logging: `warn!`, never `error!`, on this module's diagnostic paths
+//!
+//! Downgraded 2026-09-15 (mục 19 bug #4 follow-up): every `tracing::error!`
+//! in this module and `fetcher.rs` was on a stall-detector/retry/lag-logging
+//! path that fires repeatedly during exactly the kind of contended, loaded
+//! catch-up scenario that made mục 19 bug #4's `error!` calls a real
+//! self-inflicted-freeze risk (`error!`/`fatal!` route through Go's
+//! deliberately-synchronous, `writeMu`-locked log path -- see
+//! `transaction.rs`'s `TX_CACHE_LOCK_TIMEOUT` doc comment for the live
+//! incident that proved this). None of these precede an immediate
+//! panic/abort where synchronous before-crash delivery would matter more
+//! than avoiding the block -- they're all "operation continues, alert an
+//! operator" diagnostics, so `warn!` (already routed through the async,
+//! non-blocking log queue) is strictly safer with no loss of visibility. If
+//! you add a new `error!` here, ask whether it's about to precede a crash;
+//! if not, use `warn!`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -423,9 +440,9 @@ impl CommitSyncerSupervisor {
                     res = &mut handle.schedule_task => {
                         if let Err(e) = res {
                             if e.is_panic() {
-                                tracing::error!("🔴 [SUPERVISOR] CommitSyncer panicked! Restarting in {:?}...", restart_delay);
+                                tracing::warn!("🔴 [SUPERVISOR] CommitSyncer panicked! Restarting in {:?}...", restart_delay);
                             } else {
-                                tracing::error!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
+                                tracing::warn!("🔴 [SUPERVISOR] CommitSyncer task cancelled! Restarting in {:?}...", restart_delay);
                             }
                         } else {
                             tracing::warn!("⚠️ [SUPERVISOR] CommitSyncer exited cleanly. Expected terminal halt (e.g. epoch mismatch). Stopping supervisor.");
@@ -704,7 +721,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
         // to restart with the correct epoch.
         // ═══════════════════════════════════════════════════════════════
         if self.epoch_mismatch_halt {
-            tracing::error!(
+            tracing::warn!(
                 "🛑 [COMMIT-SYNCER] HALTED due to epoch mismatch. \
                  CommitSyncer will NOT start schedule_loop. \
                  Returning to trigger epoch restart via CoreThread shutdown."
@@ -780,7 +797,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && highest_handled > 0
                             && self.coordination_hub.is_healthy()
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [STALL-DETECTOR] Quorum stuck at 0 for {:.0}s while Go has block state \
                                  (highest_handled={}). Re-seeding quorum and transitioning to Bootstrapping.",
                                 stall_duration.as_secs_f64(),
@@ -849,7 +866,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && self.coordination_hub.is_healthy()
                             && liveness_stall_duration >= Duration::from_secs(30)
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [ZERO-DEADLOCK] All-zero state for {:.0}s (local=0, quorum=0, highest_handled=0, phase=Healthy). \
                                  Kicking Core to force block proposal.",
                                 liveness_stall_duration.as_secs_f64()
@@ -893,7 +910,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         if execution_stall_duration >= Duration::from_secs(20)
                             && highest_handled < self.synced_commit_index
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [EXECUTION-STALL] Go execution stuck at {} for {:.0}s (quorum={}). \
                                  Resetting synced_commit_index to {} to fetch missing range.",
                                 highest_handled,
@@ -951,7 +968,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                         if go_confirm_stall_duration >= Duration::from_secs(20)
                             && highest_handled > go_confirmed
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [GO-EXECUTION-STALL] Go has not confirmed executing any new commit for {:.0}s \
                                  (go_confirmed={}, highest_handled={}, backlog={}, quorum={}). Go's execution \
                                  pipeline appears wedged downstream of BlockDeliveryManager -- this commit was \
@@ -1397,7 +1414,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && catching_up_stall >= Duration::from_secs(5)
                             && !is_fetching
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [STALL-DETECTOR] Node stuck in CatchingUp for {:.0}s and NOT fetching. \
                                  No peers have the past commits. Forcing fast-forward to highest_handled={}.",
                                 catching_up_stall.as_secs_f64(),
@@ -1432,7 +1449,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                             && catching_up_stall >= Duration::from_secs(5)
                             && !is_fetching
                         {
-                            tracing::error!(
+                            tracing::warn!(
                                 "🚨 [STALL-DETECTOR-5] Post-epoch-transition stall: CatchingUp for {:.0}s \
                                  with empty DAG, highest_handled=0, quorum={}, and NOT fetching. \
                                  New epoch has no local state. Fast-forwarding to quorum.",
@@ -1689,7 +1706,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             && now.duration_since(self.last_state_log_at) >= Duration::from_secs(10)
         {
             if self.coordination_hub.is_catching_up() {
-                tracing::error!(
+                tracing::warn!(
                     "🚨 [LAG-DETECTION] Phase={:?}, lag={} commits ({}% behind quorum), local_commit={}, quorum_commit={}, synced_commit={}",
                     self.coordination_hub.get_phase(), lag, lag_percentage, local_commit_index, quorum_commit_index, self.synced_commit_index
                 );
@@ -1889,7 +1906,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             baseline_attempt += 1;
 
             if baseline_attempt > MAX_BASELINE_ATTEMPTS {
-                tracing::error!(
+                tracing::warn!(
                     "🚨 [BASELINE] Failed to fetch baseline commit #{} after {} attempts. \
                      ALL peers unreachable (network partition?). \
                      Skipping baseline — entering ScheduleVerifying for natural rebuild. \
@@ -2159,7 +2176,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 }
             }
             if baseline_attempt % 10 == 0 {
-                tracing::error!(
+                tracing::warn!(
                     "🚨 [BASELINE] Attempt {}/{}: ALL peers unreachable for commit #{}. \
                      Will degrade to ScheduleVerifying after {} more attempts.",
                     baseline_attempt,
@@ -2404,7 +2421,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
             if reachable_peers == 0 {
                 // No peers reachable at all — network partition or all nodes down
                 if attempt % 10 == 0 {
-                    tracing::error!(
+                    tracing::warn!(
                         "🚨 [BOOTSTRAP] Attempt {}: ZERO peers reachable! \
                          Node is ISOLATED. Staying in safe pending state. \
                          Will resume automatically when peers come online. \

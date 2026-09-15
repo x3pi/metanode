@@ -39,7 +39,7 @@ impl Core {
                 commits
             }
             Err(e) => {
-                tracing::error!("[NODE4-DEBUG] filter_new_commits FAILED: {:?}", e);
+                tracing::warn!("[NODE4-DEBUG] filter_new_commits FAILED: {:?}", e);
                 return Err(e);
             }
         };
@@ -60,7 +60,7 @@ impl Core {
                 );
             }
             Err(e) => {
-                tracing::error!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
+                tracing::warn!("[NODE4-DEBUG] try_commit FAILED: {:?}", e);
                 return Err(e);
             }
         }

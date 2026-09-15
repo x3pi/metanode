@@ -72,6 +72,7 @@ impl CommitFinalizerHandle {
 pub struct CommitFinalizer {
     context: Arc<Context>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
     transaction_certifier: TransactionCertifier,
     commit_sender: UnboundedSender<CommittedSubDag>,
 
@@ -91,6 +92,7 @@ impl CommitFinalizer {
     pub fn new(
         context: Arc<Context>,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
         last_processed_commit: Option<CommitIndex>,
@@ -98,6 +100,7 @@ impl CommitFinalizer {
         Self {
             context,
             dag_state,
+            dag_state_writer,
             transaction_certifier,
             commit_sender,
             last_processed_commit,
@@ -110,6 +113,7 @@ impl CommitFinalizer {
     pub(crate) fn start(
         context: Arc<Context>,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
         last_processed_commit: Option<CommitIndex>,
@@ -117,6 +121,7 @@ impl CommitFinalizer {
         let mut processor = Self::new(
             context,
             dag_state,
+            dag_state_writer,
             transaction_certifier,
             commit_sender,
             last_processed_commit,
@@ -166,23 +171,34 @@ impl CommitFinalizer {
                         .leader
                         .round,
                 );
-                let flush_ticket = {
-                    let mut dag_state = self.dag_state.write();
-                    if !already_finalized {
-                        // Records rejected transactions in newly finalized commits.
-                        for commit in &finalized_commits {
-                            dag_state.add_finalized_commit(
+                // Routed through DagStateActor (2026-09-15): this used to call
+                // self.dag_state.write() directly, bypassing the actor's
+                // single-writer guarantee -- see dag_state_actor.rs's module
+                // doc for why that guarantee matters.
+                //
+                // Records rejected transactions in newly finalized commits (if
+                // any), then flushes -- commits and committed blocks must be
+                // persisted to storage before sending them to Sui to execute
+                // their finalized transactions. Commit metadata and
+                // uncommitted blocks can be persisted more lazily because
+                // they are recoverable. But for simplicity, all unpersisted
+                // commits and blocks are flushed to storage.
+                let commits_to_record = if already_finalized {
+                    Vec::new()
+                } else {
+                    finalized_commits
+                        .iter()
+                        .map(|commit| {
+                            (
                                 commit.commit_ref,
                                 commit.rejected_transactions_by_block.clone(),
-                            );
-                        }
-                    }
-                    // Commits and committed blocks must be persisted to storage before sending them to Sui
-                    // to execute their finalized transactions.
-                    // Commit metadata and uncommitted blocks can be persisted more lazily because they are recoverable.
-                    // But for simplicity, all unpersisted commits and blocks are flushed to storage.
-                    dag_state.flush()
+                            )
+                        })
+                        .collect()
                 };
+                let flush_ticket = self
+                    .dag_state_writer
+                    .add_finalized_commits_and_flush(commits_to_record);
 
                 if let Some(rx) = flush_ticket {
                     if let Err(e) = rx.await {

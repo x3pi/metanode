@@ -417,7 +417,7 @@ async fn test_handle_attest_payload_loss() {
     // same intent as the existing fetch_transactions RPC).
     let present_digest = consensus_types::block::TxDigest([5u8; consensus_config::DIGEST_LENGTH]);
     let tx_bytes = Bytes::from_static(b"hello world");
-    crate::transaction::get_global_tx_cache().write().insert(
+    crate::transaction::tx_cache_insert_for_test(
         present_digest,
         crate::block::Transaction::new(tx_bytes.to_vec()),
     );
