@@ -423,17 +423,39 @@ impl ExecutorClient {
 
             if let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) {
                 let ffi_start = std::time::Instant::now();
-                
-                let (success, response) = {
+
+                // ROOT-CAUSE FIX (2026-09-15, found researching a live node-wide Rust-
+                // runtime freeze -- see mục 21's node-1 incident): this used to call
+                // `c_fn(...)` directly, inline, on whatever tokio worker thread was
+                // running this async task. `execute_block` runs real Go-side work
+                // (NOMT/state execution, occasionally a durable flush -- see mục 18,
+                // measured up to ~1.2s p50) and a CGo call is non-preemptible: Rust's
+                // executor cannot reschedule anything else onto a worker thread that's
+                // inside one. The two OTHER call sites of this same `execute_block`
+                // callback in this file already wrap it in `spawn_blocking` (this one
+                // was the one exception -- the rarely-taken `global_exec_index == 0`
+                // "PHASE-B DIRECT SEND" bypass branch); this one didn't, and unlike a
+                // single slow call merely being slow, enough concurrent unwrapped calls
+                // equal to the runtime's total worker count stops the ENTIRE tokio
+                // runtime from making progress on anything, including unrelated tasks'
+                // own timers -- confirmed by external research into this exact tokio
+                // failure mode (blocked-workers-equal-total-workers executor
+                // starvation) matching a live incident where a `tokio::time::timeout`
+                // elsewhere in this same node never fired despite ~26 timeout windows'
+                // worth of elapsed time. `spawn_blocking` moves the actual blocking
+                // call onto tokio's separate, larger blocking-thread-pool, so it can
+                // never itself exhaust the core runtime's worker threads.
+                let data_vec = epoch_data_bytes.clone();
+                let (success, response) = tokio::task::spawn_blocking(move || {
                     let mut out_payload: *mut u8 = std::ptr::null_mut();
                     let mut out_len = 0usize;
                     let success = c_fn(
-                        epoch_data_bytes.as_ptr(),
-                        epoch_data_bytes.len(),
+                        data_vec.as_ptr(),
+                        data_vec.len(),
                         &mut out_payload,
                         &mut out_len,
                     );
-                    
+
                     let response = if !out_payload.is_null() && out_len > 0 {
                         let slice = unsafe { std::slice::from_raw_parts(out_payload, out_len) };
                         let resp = super::proto::ExecuteBlockResponse::decode(slice).ok();
@@ -445,7 +467,9 @@ impl ExecutorClient {
                         None
                     };
                     (success, response)
-                };
+                })
+                .await
+                .unwrap_or((false, None));
 
                 let ffi_elapsed = ffi_start.elapsed();
                 tracing::warn!(

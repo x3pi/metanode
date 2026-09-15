@@ -452,7 +452,7 @@ impl RustSyncNode {
                         match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer.clone()], from_gei, to_gei).await {
                             Ok(exec_blocks) if !exec_blocks.is_empty() => {
                                 info!("✅ [RUST-SYNC] Fetched {} verified empty executable blocks from peer. Pushing to Go FFI...", exec_blocks.len());
-                                if push_exec_blocks_to_go(exec_blocks) {
+                                if push_exec_blocks_to_go(exec_blocks).await {
                                     return Ok(0);
                                 }
                             }
@@ -464,7 +464,7 @@ impl RustSyncNode {
                                      genuinely means these commits are empty.",
                                     best_peer, from_gei, to_gei
                                 );
-                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)) {
+                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)).await {
                                     return Ok(0);
                                 }
                             }
@@ -475,7 +475,7 @@ impl RustSyncNode {
                                      peer_block==go_block genuinely means these commits are empty.",
                                     best_peer, e
                                 );
-                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)) {
+                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)).await {
                                     return Ok(0);
                                 }
                             }
@@ -858,31 +858,45 @@ fn synthesize_empty_exec_blocks(from_gei: u64, to_gei: u64, go_block: u64) -> Ve
 
 /// Pushes a list of (gei, serialized ExecutableBlock) pairs to Go via FFI, in order,
 /// stopping at the first failure. Returns true iff every block was pushed successfully.
-fn push_exec_blocks_to_go(exec_blocks: Vec<(u64, Vec<u8>)>) -> bool {
+///
+/// ROOT-CAUSE FIX (2026-09-15, same finding as `block_sending.rs`'s `buffer_and_flush`
+/// -- see mục 21's node-1 incident): each `c_fn(...)` call here runs real Go-side work
+/// and is non-preemptible; this used to run the whole loop directly on whatever tokio
+/// worker thread called this function, which can starve the entire runtime (not just
+/// this task) if enough concurrent blocking FFI calls elsewhere add up to the total
+/// worker count. Now `async` and wraps the CGo loop in `spawn_blocking`, matching the
+/// pattern already used correctly for this same `execute_block` callback elsewhere.
+async fn push_exec_blocks_to_go(exec_blocks: Vec<(u64, Vec<u8>)>) -> bool {
     let Some(c_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.execute_block) else {
         tracing::warn!("⚠️ [RUST-SYNC] GO_CALLBACKS not initialized!");
         return false;
     };
 
-    let mut sent = 0;
-    for (gei, data) in &exec_blocks {
-        let mut out_payload: *mut u8 = std::ptr::null_mut();
-        let mut out_len = 0usize;
-        let success = c_fn(data.as_ptr(), data.len(), &mut out_payload, &mut out_len);
-        if !out_payload.is_null() && out_len > 0 {
-            if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
-                free_fn(out_payload);
+    let total = exec_blocks.len();
+    let sent = tokio::task::spawn_blocking(move || {
+        let mut sent = 0;
+        for (gei, data) in &exec_blocks {
+            let mut out_payload: *mut u8 = std::ptr::null_mut();
+            let mut out_len = 0usize;
+            let success = c_fn(data.as_ptr(), data.len(), &mut out_payload, &mut out_len);
+            if !out_payload.is_null() && out_len > 0 {
+                if let Some(free_fn) = crate::ffi::GO_CALLBACKS.get().and_then(|c| c.free_go_buffer) {
+                    free_fn(out_payload);
+                }
+            }
+            if success {
+                sent += 1;
+            } else {
+                tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
+                break;
             }
         }
-        if success {
-            sent += 1;
-        } else {
-            tracing::warn!("⚠️ [RUST-SYNC] C_FN failed to push GEI {}", gei);
-            break;
-        }
-    }
-    info!("✅ [RUST-SYNC] Successfully pushed {}/{} empty commits to Go.", sent, exec_blocks.len());
-    sent == exec_blocks.len()
+        sent
+    })
+    .await
+    .unwrap_or(0);
+    info!("✅ [RUST-SYNC] Successfully pushed {}/{} empty commits to Go.", sent, total);
+    sent == total
 }
 
 // Need Arc in scope for auto_epoch_sync and committee_refresh

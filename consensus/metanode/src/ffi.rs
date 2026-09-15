@@ -292,21 +292,35 @@ pub extern "C" fn metanode_resume_consensus() {
     }
 }
 
-/// Call into Go to get the exact final StateRoot
-pub fn get_go_state_root() -> String {
-    if let Some(callbacks) = GO_CALLBACKS.get() {
-        if let Some(func) = callbacks.get_state_root {
-            let ptr = func();
-            if !ptr.is_null() {
-                let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
-                if let Some(free_func) = callbacks.free_go_buffer {
-                    free_func(ptr as *mut u8);
+/// Call into Go to get the exact final StateRoot.
+///
+/// ROOT-CAUSE FIX (2026-09-15, same finding as `block_sending.rs`/`sync_loop.rs` --
+/// see mục 21's node-1 incident): this used to call the `get_state_root` FFI callback
+/// directly on the calling task's tokio worker thread. Every call site is inside an
+/// async fn (health checks, startup-sync verification, and -- most frequently --
+/// every peer's `/peer_info` handler), and a CGo call is non-preemptible, so if Go's
+/// implementation ever needs to recompute rather than return a cached value, this
+/// could occupy a worker thread for as long as that takes. `spawn_blocking` moves it
+/// to tokio's separate blocking-thread-pool so it can never itself contribute to
+/// starving the core runtime.
+pub async fn get_go_state_root() -> String {
+    tokio::task::spawn_blocking(|| {
+        if let Some(callbacks) = GO_CALLBACKS.get() {
+            if let Some(func) = callbacks.get_state_root {
+                let ptr = func();
+                if !ptr.is_null() {
+                    let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+                    if let Some(free_func) = callbacks.free_go_buffer {
+                        free_func(ptr as *mut u8);
+                    }
+                    return s;
                 }
-                return s;
             }
         }
-    }
-    String::new()
+        String::new()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): operator-triggered entry point. NOT called

@@ -347,7 +347,7 @@ impl PeerRpcServer {
 
         let last_global_exec_index = shared_exec_index.load(std::sync::atomic::Ordering::SeqCst);
 
-        let state_root = crate::ffi::get_go_state_root();
+        let state_root = crate::ffi::get_go_state_root().await;
 
         let info = PeerInfoResponse {
             node_id,

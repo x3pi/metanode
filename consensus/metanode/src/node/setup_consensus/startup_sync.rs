@@ -661,7 +661,7 @@ impl ConsensusNode {
                                 }
                             }
         
-                            let local_root = crate::ffi::get_go_state_root();
+                            let local_root = crate::ffi::get_go_state_root().await;
                             if !local_root.is_empty() && local_root != "0000000000000000000000000000000000000000000000000000000000000000" {
                                 tracing::info!(
                                     "📊 [POST-SYNC-VERIFY] Local state root at block {}: 0x{}",
