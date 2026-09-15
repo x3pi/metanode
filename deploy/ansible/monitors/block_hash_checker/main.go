@@ -1,6 +1,7 @@
 package main
 
 import (
+	"block_hash_checker/logger"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -15,7 +16,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"block_hash_checker/logger"
 )
 
 // ===== JSON-RPC types =====
@@ -28,6 +28,8 @@ var loggedBlocks = make(map[uint64]bool)
 // halting the CI pipeline or sending Telegram alerts.
 var noStopFlag bool
 var daemonMode bool
+var globalMismatchRetries int = 8
+var globalMismatchDelay time.Duration = 2 * time.Second
 
 func clearLoggedBlocks() {
 	ghostMutex.Lock()
@@ -423,11 +425,15 @@ func main() {
 	lagThreshold := flag.Int("lag-threshold", 1000, "Ngưỡng chênh lệch block để kích hoạt cảnh báo NODE_LAGGING (0 = disable)")
 	noStop := flag.Bool("no-stop-flag", false, "Không ghi /tmp/MTN_CHAIN_ERROR_STOP và không os.Exit khi phát hiện lệch hash (chỉ log, không báo Telegram/CI)")
 	daemon := flag.Bool("daemon", false, "Chạy dưới dạng daemon (không tự động tắt khi tiến trình cha thoát)")
+	mismatchRetries := flag.Int("mismatch-retries", 5, "Số lần thử lại khi phát hiện lệch hash trước khi kết luận fork (chờ node commit DB)")
+	mismatchDelay := flag.Duration("mismatch-delay", 2*time.Second, "Khoảng thời gian chờ giữa các lần thử lại khi phát hiện lệch hash")
 	flag.Parse()
 
 	// Apply global flag
 	noStopFlag = *noStop
 	daemonMode = *daemon
+	globalMismatchRetries = *mismatchRetries
+	globalMismatchDelay = *mismatchDelay
 
 	if *nodesFlag == "" {
 		candidateConfigs := []string{
@@ -559,6 +565,49 @@ func main() {
 		fmt.Printf("✅ KẾT QUẢ: Tất cả %d blocks KHỚP giữa %d nodes (%.1fs)\n",
 			matchCount, len(nodes), elapsed.Seconds())
 	} else {
+		if globalMismatchRetries > 0 {
+			firstMismatchBlock := allMismatches[0].BlockNumber
+			fmt.Printf("\n⏳ [CẢNH BÁO LỆCH TẠM THỜI] Phát hiện %d blocks lệch (bắt đầu từ Block #%d). Có thể node chưa commit xuống DB kịp.\n", len(allMismatches), firstMismatchBlock)
+			fmt.Printf("   Bắt đầu Grace Period retry (tối đa %d lần x %v)...\n", globalMismatchRetries, globalMismatchDelay)
+
+			for attempt := 1; attempt <= globalMismatchRetries; attempt++ {
+				time.Sleep(globalMismatchDelay)
+				fmt.Printf("   🔄 [Thử lại %d/%d] Đang kiểm tra lại từ Block %d đến %d...\n", attempt, globalMismatchRetries, *fromBlock, *toBlock)
+
+				var retryMismatches []mismatch
+				var retryMatched uint64
+
+				for batchStart := *fromBlock; batchStart <= *toBlock; batchStart += uint64(*batchSize) {
+					batchEnd := batchStart + uint64(*batchSize) - 1
+					if batchEnd > *toBlock {
+						batchEnd = *toBlock
+					}
+					bMismatches, bMatched, _, _, _, _ := checkBatch(client, nodes, batchStart, batchEnd)
+					retryMismatches = append(retryMismatches, bMismatches...)
+					retryMatched += bMatched
+					if len(retryMismatches) > 0 {
+						break
+					}
+				}
+
+				if len(retryMismatches) == 0 {
+					fmt.Printf("   ✅ [TỰ HỘI TỤ THÀNH CÔNG (Sau %d lần thử lại)] Tất cả các node đã đồng bộ và commit DB khớp hash 100%%!\n", attempt)
+					allMismatches = nil
+					matchCount = retryMatched
+					break
+				} else {
+					fmt.Printf("   ⚠️ [Thử lại %d/%d] Vẫn còn lệch tại Block #%d. Tiếp tục chờ...\n", attempt, globalMismatchRetries, retryMismatches[0].BlockNumber)
+					allMismatches = retryMismatches
+				}
+			}
+		}
+
+		if len(allMismatches) == 0 {
+			fmt.Printf("\n✅ KẾT QUẢ: Tất cả %d blocks KHỚP giữa %d nodes sau khi tự hội tụ (%.1fs)\n",
+				matchCount, len(nodes), time.Since(startTime).Seconds())
+			return
+		}
+
 		fmt.Printf("🚨 KẾT QUẢ: Phát hiện %d blocks LỆCH HASH!\n", len(allMismatches))
 		fmt.Printf("   ✅ Khớp: %d | 🚨 Lệch: %d | ❌ Lỗi: %d (%.1fs)\n\n",
 			matchCount, len(allMismatches), errorCount, elapsed.Seconds())
@@ -1841,9 +1890,13 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lag
 
 	// Run immediately on start
 	if watchOnce(client, nodes, &totalChecks, &totalMismatches, trackedGhosts, &lastVerifiedBlock, nodeWasDead, lagThreshold) {
-		fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
-		fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
-		os.Exit(1)
+		if !noStopFlag {
+			fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
+			fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
+			os.Exit(1)
+		} else {
+			fmt.Printf("\n🔕 [--no-stop-flag] Phát hiện lệch hash nhưng tiếp tục quan sát (không dừng). Chi tiết tại %s\n", mismatchAlertFile)
+		}
 	}
 
 	for {
@@ -1854,9 +1907,13 @@ func runWatch(client *http.Client, nodes []nodeInfo, interval time.Duration, lag
 				os.Exit(0)
 			}
 			if watchOnce(client, nodes, &totalChecks, &totalMismatches, trackedGhosts, &lastVerifiedBlock, nodeWasDead, lagThreshold) {
-				fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
-				fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
-				os.Exit(1)
+				if !noStopFlag {
+					fmt.Printf("\n🛑 DỪNG WATCH MODE: Phát hiện lệch hash! Chi tiết đã ghi vào %s\n", mismatchAlertFile)
+					fmt.Printf("📊 Tổng kết: %d lần check, %d lệch phát hiện\n", totalChecks, totalMismatches)
+					os.Exit(1)
+				} else {
+					fmt.Printf("\n🔕 [--no-stop-flag] Phát hiện lệch hash nhưng tiếp tục quan sát (không dừng). Chi tiết tại %s\n", mismatchAlertFile)
+				}
 			}
 		case sig := <-sigCh:
 			fmt.Printf("\n\n🛑 Nhận signal %v — dừng watch mode\n", sig)
@@ -2007,16 +2064,67 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 		if batchEnd > maxBlock {
 			batchEnd = maxBlock
 		}
-		
+
 		bMismatches, bMatched, _, bSkipped, bNilBlocks, bEmptyBlocks := checkBatch(client, nodes, batchStart, batchEnd)
 		mismatches = append(mismatches, bMismatches...)
 		matched += bMatched
 		skipped += bSkipped
 		nilBlocks = append(nilBlocks, bNilBlocks...)
 		emptyBlocks = append(emptyBlocks, bEmptyBlocks...)
-		
+
 		if len(mismatches) > 0 {
 			break // Dừng ngay nếu phát hiện lệch hash trong chunk này
+		}
+	}
+
+	// GRACE PERIOD RETRY: A node (e.g. SyncOnly or lagging validator) may not have finished committing to DB.
+	// We wait and re-verify before declaring a permanent mismatch or halting the monitor.
+	if len(mismatches) > 0 && globalMismatchRetries > 0 {
+		firstMismatchBlock := mismatches[0].BlockNumber
+		fmt.Printf("\n⏳ [CẢNH BÁO LỆCH TẠM THỜI] Phát hiện lệch dữ liệu tại Block #%d. Có thể do node chưa commit xuống DB kịp.\n", firstMismatchBlock)
+		fmt.Printf("   Bắt đầu Grace Period retry (tối đa %d lần x %v)...\n", globalMismatchRetries, globalMismatchDelay)
+
+		for attempt := 1; attempt <= globalMismatchRetries; attempt++ {
+			time.Sleep(globalMismatchDelay)
+			fmt.Printf("   🔄 [Thử lại %d/%d] Đang kiểm tra lại từ Block #%d đến #%d...\n", attempt, globalMismatchRetries, from, maxBlock)
+
+			var retryMismatches []mismatch
+			var retryMatched, retrySkipped uint64
+			var retryNilBlocks, retryEmptyBlocks []uint64
+
+			for batchStart := from; batchStart <= maxBlock; batchStart += batchSize {
+				batchEnd := batchStart + batchSize - 1
+				if batchEnd > maxBlock {
+					batchEnd = maxBlock
+				}
+				bMismatches, bMatched, _, bSkipped, bNil, bEmpty := checkBatch(client, nodes, batchStart, batchEnd)
+				retryMismatches = append(retryMismatches, bMismatches...)
+				retryMatched += bMatched
+				retrySkipped += bSkipped
+				retryNilBlocks = append(retryNilBlocks, bNil...)
+				retryEmptyBlocks = append(retryEmptyBlocks, bEmpty...)
+
+				if len(retryMismatches) > 0 {
+					break
+				}
+			}
+
+			if len(retryMismatches) == 0 {
+				fmt.Printf("   ✅ [TỰ HỘI TỤ THÀNH CÔNG (Sau %d lần thử lại)] Tất cả các node đã đồng bộ và commit DB khớp hash 100%%!\n", attempt)
+				mismatches = nil
+				matched = retryMatched
+				skipped = retrySkipped
+				nilBlocks = retryNilBlocks
+				emptyBlocks = retryEmptyBlocks
+				break
+			} else {
+				fmt.Printf("   ⚠️ [Thử lại %d/%d] Vẫn còn lệch tại Block #%d. Tiếp tục chờ...\n", attempt, globalMismatchRetries, retryMismatches[0].BlockNumber)
+				mismatches = retryMismatches
+			}
+		}
+
+		if len(mismatches) > 0 {
+			fmt.Printf("\n🚨 [XÁC NHẬN FORK THỰC SỰ] Đã hết thời gian chờ (%d lần x %v) nhưng Block #%d vẫn bị lệch hash giữa các node!\n", globalMismatchRetries, globalMismatchDelay, mismatches[0].BlockNumber)
 		}
 	}
 
@@ -2257,6 +2365,11 @@ func watchOnce(client *http.Client, nodes []nodeInfo, totalChecks, totalMismatch
 		fmt.Printf("⚠️  Không thể ghi file CSV: %v\n", err)
 	} else {
 		fmt.Printf("📄 CSV chi tiết: %s\n", csvFile)
+	}
+
+	if noStopFlag {
+		*lastVerifiedBlock = minBlock
+		return false
 	}
 
 	return true // Signal caller to STOP

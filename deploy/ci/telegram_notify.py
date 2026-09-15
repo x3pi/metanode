@@ -6,6 +6,7 @@ Uses Python standard library (urllib) - zero external dependencies required.
 
 import sys
 import os
+import time
 import html
 import json
 import urllib.request
@@ -43,14 +44,39 @@ for env_path in [
 ]:
     load_env_file(env_path)
 
+def load_config_credentials():
+    """Load telegram bot_token and chat_id from ci_config.yaml dynamically."""
+    config_paths = [
+        os.path.join(BASE_DIR, "ci_config.yaml"),
+        os.path.join(METANODE_ROOT, "ci_config.yaml"),
+        os.path.join(METANODE_ROOT, "deploy", "ci", "ci_config.yaml"),
+    ]
+    for cp in config_paths:
+        if os.path.isfile(cp):
+            try:
+                import yaml
+                with open(cp, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                tele = cfg.get("telegram", {})
+                b_tok = tele.get("bot_token")
+                c_id = tele.get("chat_id")
+                if b_tok and c_id:
+                    return str(b_tok).strip(), str(c_id).strip()
+            except Exception:
+                pass
+    return None, None
+
 def send_telegram_message(token, chat_id, html_message):
-    """Send an HTML message via Telegram Bot API."""
+    """Send an HTML message via Telegram Bot API with retries, longer timeout, and curl fallback."""
     if not token or not chat_id:
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", token)
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID", chat_id)
+        cfg_token, cfg_chat_id = load_config_credentials()
+        if not token:
+            token = cfg_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not chat_id:
+            chat_id = cfg_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print("⚠️ Telegram token or chat_id is missing. Skipping notification.")
+        sys.stderr.write("⚠️ Telegram token or chat_id is missing in ci_config.yaml and environment. Skipping notification.\n")
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -66,14 +92,41 @@ def send_telegram_message(token, chat_id, html_message):
         "disable_web_page_preview": "true"
     }).encode("utf-8")
 
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    # Attempt sending up to 3 times with timeout=25s
+    max_attempts = 3
+    last_err = None
+
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception as e:
+            last_err = e
+            if attempt < max_attempts:
+                time.sleep(2)
+
+    # Fallback via curl if urllib failed
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                return True
-    except Exception as e:
-        sys.stderr.write(f"❌ Failed to send Telegram notification: {e}\n")
-        return False
+        import subprocess
+        curl_cmd = [
+            "curl", "-s", "--max-time", "25",
+            "-X", "POST", url,
+            "-d", f"chat_id={chat_id}",
+            "-d", "parse_mode=HTML",
+            "-d", "disable_web_page_preview=true",
+            "--data-urlencode", f"text={html_message}"
+        ]
+        res = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
+        if res.returncode == 0 and '"ok":true' in res.stdout:
+            return True
+        if res.returncode != 0:
+            last_err = f"curl error: {res.stderr.strip() or res.stdout.strip()}"
+    except Exception as curl_e:
+        last_err = f"{last_err} | curl fallback: {curl_e}"
+
+    sys.stderr.write(f"❌ Failed to send Telegram notification: {last_err}\n")
     return False
 
 def format_duration(seconds):
