@@ -3282,6 +3282,7 @@ dependencies = [
  "hex",
  "hostname",
  "itertools 0.13.0",
+ "libc",
  "meta-protocol-config",
  "metanode-keytool",
  "mysten-common",

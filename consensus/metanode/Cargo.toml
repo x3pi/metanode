@@ -53,6 +53,7 @@ shared-crypto = { path = "../../crates/shared-crypto" }
 
 # Utilities
 parking_lot = { workspace = true }
+libc = "0.2"
 itertools = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }

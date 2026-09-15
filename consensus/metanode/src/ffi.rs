@@ -875,6 +875,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
         // rebuilds a fresh Tokio runtime (cheap, and already what every iteration of the inner
         // loop implicitly relies on via "fresh Registry each loop") and tries again, instead of
         // ending the process's Rust consensus life for good.
+        //
+        // LIVENESS WATCHDOG (2026-09-15, mục 21 UPDATE 4): started once here, outside the outer
+        // restart loop, so it keeps watching across a runtime rebuild (this OS thread has no
+        // dependency on any particular tokio runtime instance). See liveness_watchdog.rs -- this
+        // is the halt-rather-than-guess safety net for the still-open total-runtime-freeze
+        // investigation, bounding a freeze's damage to its configured timeout instead of
+        // requiring a human to notice and run `systemctl restart` by hand, as happened live 3x.
+        crate::liveness_watchdog::ensure_started();
         let mut outer_restart_count: u32 = 0;
         loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -926,6 +934,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             crate::ffi::set_global_tokio_handle(rt.handle().clone());
 
             rt.block_on(async {
+                // LIVENESS WATCHDOG (mục 21 UPDATE 4): publish the heartbeat this runtime's
+                // watchdog thread checks. Respawned on every (re)built runtime -- the previous
+                // heartbeat task, if any, died along with its own runtime.
+                crate::liveness_watchdog::spawn_heartbeat_task();
+
                 let mut restart_count = 0u32;
 
                 loop {
