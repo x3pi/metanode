@@ -16,6 +16,7 @@ CLEAN_MODE=false
 CHECK_MODE=false
 UNMOUNT_MODE=false
 USE_LOOPBACK=false
+FORCE_CLEAN=false
 
 usage() {
     echo "Cách dùng: $0 [OPTIONS]"
@@ -23,6 +24,8 @@ usage() {
     echo "  --size, -s <SIZE>       Dung lượng BTRFS (Mặc định: 400G; ví dụ: 100G, 400G, 1T)"
     echo "  --mount-dir, -m <PATH>  Thư mục mount (Mặc định: /mnt/metanode_snapshots)"
     echo "  --clean, -c             Format và tạo mới lại storage (xóa dữ liệu cũ)"
+    echo "  --force, -f             Bắt buộc khi dùng --clean và storage đang chứa dữ liệu node"
+    echo "                          (bỏ qua bước kiểm tra an toàn dữ liệu node hiện có)"
     echo "  --check                 Chỉ kiểm tra tài nguyên khả dụng, không thay đổi hệ thống"
     echo "  --unmount, -u           Gỡ mount an toàn khỏi thư mục đích"
     echo "  -h, --help              Hiển thị trợ giúp"
@@ -34,6 +37,7 @@ while [[ "$#" -gt 0 ]]; do
         --size|-s) BTRFS_SIZE="$2"; shift 2 ;;
         --mount-dir|-m) MOUNT_DIR="$2"; shift 2 ;;
         --clean|-c) CLEAN_MODE=true; shift ;;
+        --force|-f) FORCE_CLEAN=true; shift ;;
         --check) CHECK_MODE=true; shift ;;
         --unmount|-u) UNMOUNT_MODE=true; shift ;;
         -h|--help) usage ;;
@@ -161,7 +165,25 @@ fi
 
 # 3. Format BTRFS nếu ở chế độ Clean hoặc thiết bị chưa phải chuẩn BTRFS
 if [ "$CLEAN_MODE" = true ]; then
+    # SAFETY CHECK (this script is manual/standalone-only -- the Ansible-driven path
+    # never passes --clean; it uses manage_snapshot_storage.py's own, stricter
+    # shared-node bounds check instead). Still worth a guard here: --clean wipes the
+    # WHOLE filesystem, so if it currently holds per-node data ("node-N" directories,
+    # the same convention manage_snapshot_storage.py uses), refuse unless the operator
+    # explicitly acknowledges that with --force. This can't tell WHICH nodes are still
+    # "active" the way the Python tool can (this script has no such context), so it
+    # cannot be as precise -- it only distinguishes "storage looks empty/fresh" from
+    # "storage has node data on it", which is the failure mode that actually matters
+    # for a manually-invoked, no-prompt destructive command.
     if mountpoint -q "$MOUNT_DIR"; then
+        existing_nodes=$(find "$MOUNT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'node-*' -printf '%f\n' 2>/dev/null | sort)
+        if [ -n "$existing_nodes" ] && [ "$FORCE_CLEAN" != true ]; then
+            echo "❌ [AN TOÀN DỮ LIỆU] $MOUNT_DIR hiện đang chứa dữ liệu của các node sau:" >&2
+            echo "$existing_nodes" | sed 's/^/     - /' >&2
+            echo "👉 --clean sẽ XÓA TOÀN BỘ các node trên, không chỉ node bạn đang thao tác." >&2
+            echo "   Nếu chắc chắn muốn xóa hết, chạy lại với thêm cờ --force." >&2
+            exit 1
+        fi
         echo "📂 Đang unmount $MOUNT_DIR để clean..." >&2
         run_cmd umount "$MOUNT_DIR" || run_cmd umount -l "$MOUNT_DIR"
     fi
@@ -198,6 +220,17 @@ if ! mountpoint -q "$MOUNT_DIR"; then
     echo "✅ Đã mount thành công vào $MOUNT_DIR!" >&2
 else
     echo "ℹ️  $MOUNT_DIR đã được mount từ trước." >&2
+fi
+
+# Ownership: the Ansible-driven path chowns each per-node subdirectory itself once it
+# creates them (see roles/node_setup/tasks/main.yml), so this is a no-op there in
+# practice. It matters for the standalone/systemd/manual invocation path, which has no
+# such follow-up step -- restores the ownership this script used to set unconditionally
+# before this rewrite. Skipped gracefully (not a hard failure) if the metanode user/group
+# doesn't exist yet, matching this script's existing "don't block on things a later step
+# will fix" philosophy (see the other `|| true` guards above).
+if id -u metanode >/dev/null 2>&1; then
+    run_cmd chown metanode:metanode "$MOUNT_DIR" 2>/dev/null || true
 fi
 
 # 5. Cập nhật /etc/fstab để tự động mount khi khởi động lại
