@@ -11,7 +11,7 @@ use crate::node::executor_client::ExecutorClient;
 use consensus_core::{BlockAPI, CommittedSubDag};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 // TEMPORARY DIAGNOSTIC (2026-09-03): counts commits actually reaching this
 // "STATION 4" delivery loop and calling send_committed_subdag, split by
@@ -95,7 +95,7 @@ impl BlockDeliveryManager {
                 commit_index, msg.global_exec_index, geis_consumed
             );
             if let Err(_) = msg.response_tx.send(geis_consumed) {
-                error!("🚨 [STATION 4: DELIVERY] Processor dropped response channel for commit {} before reply could be sent.", commit_index);
+                warn!("🚨 [STATION 4: DELIVERY] Processor dropped response channel for commit {} before reply could be sent.", commit_index);
             }
         }
         info!("🛑 [STATION 4: DELIVERY] BlockDeliveryManager closed (channel dropped).");
@@ -173,7 +173,7 @@ impl BlockDeliveryManager {
                         for claim in marked_claims.drain(..) {
                             consensus_core::payload_loss_attestation::unmark_stuck(&claim);
                         }
-                        error!(
+                        warn!(
                             "✅ [CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED] Commit {} (GEI={}) delivered \
                              successfully after {} failed attempt(s) -- resuming normal dispatch.",
                             commit_index, msg.global_exec_index, attempt
@@ -220,7 +220,7 @@ impl BlockDeliveryManager {
                     // of the last 200KB (start_monitors.sh's halt-check window) always has a
                     // recent occurrence without spamming the log every 10s forever.
                     if attempt == 1 || attempt % 12 == 0 {
-                        error!(
+                        warn!(
                             "🛑🚨 [CONSENSUS-HALT-TX-PAYLOAD-LOST] Failed to deliver commit {} (GEI={}) \
                              to the executor after {} attempt(s): {}. Peer recovery already attempted \
                              and failed -- HALTING dispatch on this commit rather than risk a fork by \

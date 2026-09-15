@@ -19,7 +19,7 @@ use tokio::{
     task::{JoinError, JoinSet},
     time::{sleep_until, Instant},
 };
-use tracing::{debug, error, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{authority_service::COMMIT_LAG_MULTIPLIER, core_thread::CoreThreadDispatcher};
 use crate::{
@@ -333,7 +333,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                     match command {
                         Command::FetchBlocks{ missing_block_refs, peer_index, result } => {
                             if peer_index == self.context.own_index {
-                                error!("We should never attempt to fetch blocks from our own node");
+                                warn!("We should never attempt to fetch blocks from our own node");
                                 continue;
                             }
 
@@ -405,7 +405,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                             } else if e.is_panic() {
                                 std::panic::resume_unwind(e.into_panic());
                             } else {
-                                error!("fetch our last block task failed (non-panic, non-cancel JoinError): {e}");
+                                warn!("fetch our last block task failed (non-panic, non-cancel JoinError): {e}");
                             }
                         },
                     };
@@ -418,7 +418,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                             } else if e.is_panic() {
                                 std::panic::resume_unwind(e.into_panic());
                             } else {
-                                error!("fetch blocks scheduler task failed (non-panic, non-cancel JoinError): {e}");
+                                warn!("fetch blocks scheduler task failed (non-panic, non-cancel JoinError): {e}");
                             }
                         },
                     };
@@ -577,10 +577,13 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
                             if let Some(mut cache) = crate::transaction::try_tx_cache_write(
                                 "synchronizer missing-tx fetch",
                             ) {
-                                for tx_bytes in txs_bytes {
+                                // insert_batch: see its doc comment (mục 19 bug #6
+                                // throughput-regression follow-up) -- avoids one lock
+                                // acquisition per transaction when many are fetched at once.
+                                cache.insert_batch(txs_bytes.into_iter().map(|tx_bytes| {
                                     let tx = crate::block::Transaction::new(tx_bytes.to_vec());
-                                    cache.insert(tx.digest(), tx);
-                                }
+                                    (tx.digest(), tx)
+                                }));
                             }
                             // Re-verify after inserting missing transactions into cache
                             block_verifier.verify_and_vote(signed_block, serialized_block)?

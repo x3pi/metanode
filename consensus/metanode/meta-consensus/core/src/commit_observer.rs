@@ -37,6 +37,7 @@ use crate::{
 pub(crate) struct CommitObserver {
     context: Arc<Context>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
     /// Persistent storage for blocks, commits and other consensus data.
     store: Arc<dyn Store>,
     transaction_certifier: TransactionCertifier,
@@ -66,12 +67,16 @@ impl CommitObserver {
         epoch_base_index: u64,
     ) -> Self {
         let store = dag_state.read().store();
-        let mut commit_interpreter =
-            Linearizer::new(context.clone(), dag_state.clone(), dag_state_writer);
+        let mut commit_interpreter = Linearizer::new(
+            context.clone(),
+            dag_state.clone(),
+            dag_state_writer.clone(),
+        );
         commit_interpreter.set_epoch_base_index(epoch_base_index);
         let commit_finalizer_handle = CommitFinalizer::start(
             context.clone(),
             dag_state.clone(),
+            dag_state_writer.clone(),
             transaction_certifier.clone(),
             commit_consumer.commit_sender.clone(),
             Some(commit_consumer.replay_after_commit_index),
@@ -85,6 +90,7 @@ impl CommitObserver {
         let mut observer = Self {
             context,
             dag_state,
+            dag_state_writer,
             store,
             transaction_certifier,
             leader_schedule,
@@ -180,6 +186,7 @@ impl CommitObserver {
                 self.commit_finalizer_handle = CommitFinalizer::start(
                     self.context.clone(),
                     self.dag_state.clone(),
+                    self.dag_state_writer.clone(),
                     self.transaction_certifier.clone(),
                     self.commit_sender_keeper.clone(),
                     Some(self.last_processed_commit_index),
@@ -397,6 +404,7 @@ impl CommitObserver {
                     self.commit_finalizer_handle = CommitFinalizer::start(
                         self.context.clone(),
                         self.dag_state.clone(),
+                        self.dag_state_writer.clone(),
                         self.transaction_certifier.clone(),
                         self.commit_sender_keeper.clone(),
                         Some(self.last_processed_commit_index),

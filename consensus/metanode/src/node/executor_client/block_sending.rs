@@ -14,7 +14,7 @@ use anyhow::Result;
 use consensus_core::{BlockAPI, CommittedSubDag, SystemTransaction};
 use prost::Message;
 
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::persistence::persist_last_sent_index;
 use super::proto::{ExecutableBlock, TransactionExe};
@@ -522,7 +522,7 @@ impl ExecutorClient {
 
             // PRODUCTION SAFETY: Buffer size limit to prevent memory exhaustion
             if buffer.len() >= MAX_BUFFER_SIZE {
-                error!("🚨 [BUFFER LIMIT] Buffer is full ({} blocks). Rejecting block global_exec_index={}. This indicates severe sync issues.",
+                warn!("🚨 [BUFFER LIMIT] Buffer is full ({} blocks). Rejecting block global_exec_index={}. This indicates severe sync issues.",
                     buffer.len(), global_exec_index);
                 return Err(anyhow::anyhow!(
                     "Buffer full: {} blocks (max {})",
@@ -535,15 +535,15 @@ impl ExecutorClient {
                     .get(&global_exec_index)
                     .map(|(d, e, c)| (d.len(), *e, *c))
                     .unwrap_or((0, 0, 0));
-                error!(
+                warn!(
                     "🚨 [DUPLICATE GLOBAL_EXEC_INDEX] Duplicate global_exec_index={} detected!",
                     global_exec_index
                 );
-                error!(
+                warn!(
                     "   📊 Existing: epoch={}, commit_index={}, data_size={} bytes",
                     existing_epoch, existing_commit, existing_epoch_data
                 );
-                error!(
+                warn!(
                     "   📊 New:      epoch={}, commit_index={}, data_size={} bytes, total_tx={}",
                     epoch,
                     commit_index,
@@ -556,11 +556,11 @@ impl ExecutorClient {
                 if is_same_commit {
                     warn!("   ✅ Same commit detected (epoch={}, commit_index={}) - skipping duplicate, existing commit in buffer will be sent", epoch, commit_index);
                 } else {
-                    error!("   🚨 DIFFERENT commits with same global_exec_index! This is a BUG!");
-                    error!("   🔍 Root cause analysis:");
-                    error!("      - Epochs different ({} vs {}): global_exec_index calculation may be wrong", existing_epoch, epoch);
-                    error!("      - Commit indexes different ({} vs {}): same global_exec_index calculated for different commits", existing_commit, commit_index);
-                    error!("      - This indicates last_global_exec_index was not updated correctly or calculation is wrong");
+                    warn!("   🚨 DIFFERENT commits with same global_exec_index! This is a BUG!");
+                    warn!("   🔍 Root cause analysis:");
+                    warn!("      - Epochs different ({} vs {}): global_exec_index calculation may be wrong", existing_epoch, epoch);
+                    warn!("      - Commit indexes different ({} vs {}): same global_exec_index calculated for different commits", existing_commit, commit_index);
+                    warn!("      - This indicates last_global_exec_index was not updated correctly or calculation is wrong");
                     warn!("   ⚠️  Keeping first-seen commit to ensure deterministic data");
                 }
             }
@@ -982,7 +982,7 @@ impl ExecutorClient {
             if let Ok((go_last_block, go_last_gei, _, _, _)) = self.get_last_block_number().await {
                 let mut last_verified = self.last_verified_go_index.lock().await;
                 if go_last_block < *last_verified {
-                    error!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
+                    warn!("🚨 [FORK DETECTED] Go's block number DECREASED! last_verified={}, go_now={}. CRITICAL: Possible fork or Go state corruption!",
                         *last_verified, go_last_block);
                 }
                 *last_verified = go_last_block;

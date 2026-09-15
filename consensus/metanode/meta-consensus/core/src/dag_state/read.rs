@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use tracing::error;
+use tracing::warn;
 
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockDigest, BlockRef, Round};
@@ -52,7 +52,7 @@ impl DagState {
             .map(|(_, block_ref)| **block_ref)
             .collect::<Vec<_>>();
         let store_results = self.store.read_blocks(&missing_refs).unwrap_or_else(|e| {
-            tracing::error!("Failed to read_blocks from storage in get_blocks: {:?}", e);
+            tracing::warn!("Failed to read_blocks from storage in get_blocks: {:?}", e);
             vec![None; missing_refs.len()]
         });
         self.context
@@ -105,7 +105,7 @@ impl DagState {
     /// Uncommitted blocks must exist in memory, so only in-memory blocks are checked.
     pub(crate) fn get_uncommitted_blocks_at_round(&self, round: Round) -> Vec<VerifiedBlock> {
         if round <= self.last_commit_round() {
-            error!("get_uncommitted_blocks_at_round called with round {} that has committed blocks (last_commit_round={})", round, self.last_commit_round());
+            warn!("get_uncommitted_blocks_at_round called with round {} that has committed blocks (last_commit_round={})", round, self.last_commit_round());
             return vec![];
         }
 
@@ -160,7 +160,7 @@ impl DagState {
             }
             let block_ref = linked.pop_last().expect("linked set should not be empty");
             let Some(block) = self.get_block(&block_ref) else {
-                tracing::error!(
+                tracing::warn!(
                     "Block {:?} should exist in DAG! Skipping to prevent fork/crash.",
                     block_ref
                 );
@@ -180,7 +180,7 @@ impl DagState {
             .filter_map(|r| {
                 let block = self.get_block(r);
                 if block.is_none() {
-                    tracing::error!("Block {:?} should exist in DAG! Skipping from result.", r);
+                    tracing::warn!("Block {:?} should exist in DAG! Skipping from result.", r);
                 }
                 block
             })
@@ -303,7 +303,7 @@ impl DagState {
         let mut equivocating_blocks = vec![vec![]; self.context.committee.size()];
 
         if end_round == GENESIS_ROUND {
-            error!(
+            warn!(
                 "Attempted to retrieve blocks earlier than the genesis round which is not possible"
             );
             return blocks.into_iter().map(|b| (b, vec![])).collect();
@@ -422,7 +422,7 @@ impl DagState {
             .store
             .contains_blocks(&missing_refs)
             .unwrap_or_else(|e| {
-                tracing::error!("Failed to read from storage in contains_blocks: {:?}", e);
+                tracing::warn!("Failed to read from storage in contains_blocks: {:?}", e);
                 vec![false; missing_refs.len()]
             });
         self.context

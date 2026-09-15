@@ -195,31 +195,30 @@ impl SignedBlockVerifier {
                 if let Some(mut cache) =
                     crate::transaction::try_tx_cache_write("verify_block_inner V1")
                 {
-                    for tx in v1.transactions() {
-                        cache.insert(tx.digest(), tx.clone());
-                    }
+                    // insert_batch, not a per-tx insert() loop: see its own doc comment
+                    // (mục 19 bug #6 throughput-regression follow-up) -- one acquisition
+                    // per shard actually touched by this block, not one per transaction.
+                    cache.insert_batch(v1.transactions().iter().map(|tx| (tx.digest(), tx.clone())));
                 }
             }
             Block::V2(v2) => {
                 if let Some(mut cache) =
                     crate::transaction::try_tx_cache_write("verify_block_inner V2")
                 {
-                    for tx in v2.transactions() {
-                        cache.insert(tx.digest(), tx.clone());
-                    }
+                    cache.insert_batch(v2.transactions().iter().map(|tx| (tx.digest(), tx.clone())));
                 }
             }
             Block::V3(v3) => {
-                // FORK-SAFETY: if the cache lock itself is stuck (see
-                // try_tx_cache_read's doc comment), we cannot actually verify
-                // presence -- treat every digest as missing rather than
-                // silently assuming they're all present. This is the same
-                // conservative choice as a genuine cache miss: it triggers
-                // the existing peer re-fetch path instead of skipping a real
-                // check.
-                let Some(cache) = crate::transaction::try_tx_cache_read("verify_block_inner V3 (presence check)") else {
-                    return Err(ConsensusError::MissingTransactions(v3.tx_digests()));
-                };
+                // FORK-SAFETY: the cache is sharded (see NUM_TX_CACHE_SHARDS' doc
+                // comment) -- if one digest's specific shard is stuck (see
+                // TxCacheReadHandle::get's doc comment), that ONE digest reads back
+                // as a miss below, same as a genuine cache miss. This is the
+                // conservative choice per-digest: it triggers the existing peer
+                // re-fetch path for just that digest instead of skipping a real
+                // check, without penalizing every other digest in this block whose
+                // shards are unaffected.
+                let cache = crate::transaction::try_tx_cache_read("verify_block_inner V3 (presence check)")
+                    .expect("try_tx_cache_read always returns Some -- no lock is taken until get() is called on a specific digest");
                 let mut missing = Vec::new();
                 for digest in v3.tx_digests() {
                     if cache.get(&digest).is_none() {

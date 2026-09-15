@@ -329,7 +329,7 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .expect("Spawn blocking should not fail");
 
             if let Err(e) = store_write_result {
-                tracing::error!("Failed to write CommitInfo to storage: {:?}", e);
+                tracing::warn!("Failed to write CommitInfo to storage: {:?}", e);
             }
         }
 

@@ -84,7 +84,188 @@ impl TxPayloadCache {
     }
 }
 
-pub(crate) static GLOBAL_TX_CACHE: OnceLock<RwLock<TxPayloadCache>> = OnceLock::new();
+/// ARCHITECTURAL FIX (2026-09-15, mục 19 bug #6 architecture review): this cache used to
+/// be ONE `RwLock<TxPayloadCache>` behind `GLOBAL_TX_CACHE`, with bounded
+/// (`try_read_for`/`try_write_for`) acquisition -- see `TX_CACHE_LOCK_TIMEOUT`'s doc
+/// comment for that earlier fix. That fix was real and necessary (it turns an unbounded
+/// freeze into a bounded one) but was PROVEN INSUFFICIENT ON ITS OWN, live, via `sudo
+/// gdb` on a node genuinely wedged during a large (3000+ commit) whole-cluster-restart
+/// catch-up: dozens of concurrent `verify_block_inner` calls (one per in-flight block)
+/// all still serialize on the exact same single lock. Bounding each individual wait to
+/// 3s does not change that only one of them can ever hold it at a time -- the node still
+/// made no forward progress for the whole catch-up window, just via many bounded waits
+/// back-to-back instead of one unbounded one. Per direct user feedback after this was
+/// found live ("kinh nghiệm tôi nó thường giảm thiểu lỗi chưa bao giờ giải quyết được
+/// 100% vấn đề" -- experience shows timeouts usually just reduce the damage, never fully
+/// solve the problem) the actual fix is architectural, not a smaller timeout: shard the
+/// cache by digest into `NUM_TX_CACHE_SHARDS` independent locks, so calls for DIFFERENT
+/// transactions (the overwhelmingly common case -- distinct blocks reference distinct
+/// digests) never contend with each other at all, no matter how many run concurrently.
+/// A cryptographic digest's leading byte is already uniformly distributed, so
+/// `digest.0[0] % NUM_TX_CACHE_SHARDS` spreads load evenly with no extra hashing. This
+/// mirrors how real high-throughput systems (Sui's own per-object locking, researched at
+/// the user's explicit request earlier this session) avoid a single global lock across
+/// independent keys in the first place, rather than tuning contention on one lock down
+/// to some hopefully-acceptable level.
+const NUM_TX_CACHE_SHARDS: usize = 32;
+
+/// CATCH-THE-CULPRIT INSTRUMENTATION (2026-09-15, same day as the sharding fix above):
+/// sharding alone did NOT fix the live incident -- redeployed and re-tested, the same
+/// node stalled again with the same `verify_block_inner` / `lock_exclusive_slow`
+/// signature, DAG commit index frozen for 5+ minutes, not self-recovering. This matches
+/// -- and may finally explain -- the still-unresolved mystery flagged in
+/// `TX_CACHE_LOCK_TIMEOUT`'s own doc comment below: a genuinely leaked guard (one that's
+/// acquired but never released) would explain why bounding the WAIT doesn't help
+/// (waiting bounds how long a *new* acquisition attempt blocks, but does nothing if the
+/// lock itself will never become free again) and why sharding doesn't help either (it
+/// just confines the permanently-wedged state to whichever one shard the leaked guard's
+/// digest happened to land on, instead of the whole cache). Per user direction after
+/// this was found: instead of guessing at another timeout/architecture tweak, catch the
+/// actual holder red-handed. Each shard now tracks who currently holds it (thread,
+/// call-site, and acquisition time) via a small side `Mutex` -- negligible overhead
+/// (held for nanoseconds around the real lock's own critical section) -- so that the
+/// NEXT time any acquisition times out, it can immediately log exactly which thread has
+/// been holding this shard, from which call site, and for how long. If that duration is
+/// large (seconds/minutes) and the thread is still alive, that is direct proof of a
+/// leaked guard, and the `site` string pinpoints which of the ~19 call sites is at fault
+/// -- something no amount of after-the-fact `sudo gdb` stack-walking could pin down on
+/// its own, since a `RwLock` guard carries no metadata about who is holding it.
+#[derive(Clone, Copy, Debug)]
+struct TxCacheHolderInfo {
+    id: u64,
+    thread: std::thread::ThreadId,
+    site: &'static str,
+    acquired_at: std::time::Instant,
+}
+
+static NEXT_TX_CACHE_HOLDER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct TxCacheShard {
+    lock: RwLock<TxPayloadCache>,
+    write_holder: Mutex<Option<TxCacheHolderInfo>>,
+    read_holders: Mutex<Vec<TxCacheHolderInfo>>,
+}
+
+impl TxCacheShard {
+    fn new(capacity: usize) -> Self {
+        Self {
+            lock: RwLock::new(TxPayloadCache::new(capacity)),
+            write_holder: Mutex::new(None),
+            read_holders: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Logs exactly who is (or recently was) holding this shard, for the timeout branch
+    /// of `get`/`insert` below to call right before giving up. Reads the diagnostic
+    /// mutexes, not the real `RwLock` -- so this itself never blocks on the stuck lock.
+    fn log_current_holders(&self, shard_idx: usize, waiting_site: &'static str, op: &str) {
+        if let Some(w) = *self.write_holder.lock() {
+            tracing::warn!(
+                "🚨🔍 [TX-CACHE-LOCK-STUCK-HOLDER] {}() at {} timed out waiting for shard {} \
+                 -- currently WRITE-HELD by thread {:?} (site=\"{}\") for {:?} so far. If this \
+                 duration keeps growing across repeated timeouts and that thread is still \
+                 alive, this is a genuinely leaked guard at that call site, not transient \
+                 contention.",
+                op, waiting_site, shard_idx, w.thread, w.site, w.acquired_at.elapsed()
+            );
+        }
+        let readers = self.read_holders.lock();
+        if !readers.is_empty() {
+            for r in readers.iter() {
+                tracing::warn!(
+                    "🚨🔍 [TX-CACHE-LOCK-STUCK-HOLDER] {}() at {} timed out waiting for shard {} \
+                     -- currently READ-HELD by thread {:?} (site=\"{}\") for {:?} so far \
+                     ({} reader(s) total on this shard right now).",
+                    op, waiting_site, shard_idx, r.thread, r.site, r.acquired_at.elapsed(), readers.len()
+                );
+            }
+        }
+        if self.write_holder.lock().is_none() && readers.is_empty() {
+            tracing::warn!(
+                "🚨🔍 [TX-CACHE-LOCK-STUCK-HOLDER] {}() at {} timed out waiting for shard {}, \
+                 but no holder is currently recorded -- the holder released between the \
+                 timeout and this check (a genuine race, harmless for diagnostics) or \
+                 contention is from parking_lot's writer-preference fairness rather than an \
+                 actual current holder.",
+                op, waiting_site, shard_idx
+            );
+        }
+    }
+}
+
+/// RAII marker: records this thread as the shard's write holder for exactly the
+/// lifetime of the real `RwLockWriteGuard` it accompanies, and always clears itself on
+/// drop (including on an unwinding panic) so a diagnostic mistake can never itself look
+/// like a second, independent leak.
+struct WriteHolderMarker<'a> {
+    shard: &'a TxCacheShard,
+}
+impl<'a> WriteHolderMarker<'a> {
+    fn new(shard: &'a TxCacheShard, site: &'static str) -> Self {
+        *shard.write_holder.lock() = Some(TxCacheHolderInfo {
+            id: NEXT_TX_CACHE_HOLDER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            thread: std::thread::current().id(),
+            site,
+            acquired_at: std::time::Instant::now(),
+        });
+        Self { shard }
+    }
+}
+impl<'a> Drop for WriteHolderMarker<'a> {
+    fn drop(&mut self) {
+        *self.shard.write_holder.lock() = None;
+    }
+}
+
+/// Read-side counterpart of [`WriteHolderMarker`]. Multiple readers can hold a shard at
+/// once, so each carries a unique id to remove exactly itself (not another reader) on drop.
+struct ReadHolderMarker<'a> {
+    shard: &'a TxCacheShard,
+    id: u64,
+}
+impl<'a> ReadHolderMarker<'a> {
+    fn new(shard: &'a TxCacheShard, site: &'static str) -> Self {
+        let id = NEXT_TX_CACHE_HOLDER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        shard.read_holders.lock().push(TxCacheHolderInfo {
+            id,
+            thread: std::thread::current().id(),
+            site,
+            acquired_at: std::time::Instant::now(),
+        });
+        Self { shard, id }
+    }
+}
+impl<'a> Drop for ReadHolderMarker<'a> {
+    fn drop(&mut self) {
+        self.shard.read_holders.lock().retain(|h| h.id != self.id);
+    }
+}
+
+static GLOBAL_TX_CACHE: OnceLock<Vec<TxCacheShard>> = OnceLock::new();
+
+fn tx_cache_shards() -> &'static Vec<TxCacheShard> {
+    GLOBAL_TX_CACHE.get_or_init(|| {
+        let per_shard_capacity = (tx_payload_cache_capacity() / NUM_TX_CACHE_SHARDS).max(1);
+        (0..NUM_TX_CACHE_SHARDS)
+            .map(|_| TxCacheShard::new(per_shard_capacity))
+            .collect()
+    })
+}
+
+/// Selects the one shard a given digest belongs to. Same digest always maps to the same
+/// shard (needed so a later `get()` finds what an earlier `insert()` put there).
+fn shard_index(digest: &TxDigest) -> usize {
+    digest.0[0] as usize % NUM_TX_CACHE_SHARDS
+}
+
+fn shard_for(digest: &TxDigest) -> &'static TxCacheShard {
+    &tx_cache_shards()[shard_index(digest)]
+}
+
+#[cfg(test)]
+pub(crate) fn tx_cache_insert_for_test(digest: TxDigest, tx: Transaction) {
+    shard_for(&digest).lock.write().insert(digest, tx);
+}
 
 /// CONFIRMED ROOT CAUSE (2026-09-02/03 investigation) OF SILENT TX LOSS AT
 /// EXTREME BURST SCALE: capacity here was hardcoded at 500_000, and
@@ -130,10 +311,6 @@ fn tx_payload_cache_capacity() -> usize {
         .unwrap_or(5_000_000)
 }
 
-pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
-    GLOBAL_TX_CACHE.get_or_init(|| RwLock::new(TxPayloadCache::new(tx_payload_cache_capacity())))
-}
-
 /// ROOT FIX (2026-09-14, mục 19 bug #4 investigation): every acquisition of
 /// `GLOBAL_TX_CACHE` used to go through a raw, unbounded `parking_lot::RwLock`
 /// `.read()`/`.write()` call. Live-reproduced (via `sudo gdb -p <pid> -batch
@@ -171,86 +348,207 @@ pub fn get_global_tx_cache() -> &'static RwLock<TxPayloadCache> {
 /// entire node.
 const TX_CACHE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Bounded read acquisition of the global TX cache. Returns `None` (logging a
-/// loud, greppable marker) instead of blocking forever if the lock is stuck.
-pub fn try_tx_cache_read(
+/// A short-lived handle for bounded reads of the (sharded, see `NUM_TX_CACHE_SHARDS`)
+/// global TX cache. Deliberately holds no lock itself: each `get()` call independently
+/// locks -- with the same bounded, native-timeout acquisition as before -- only the ONE
+/// shard that specific digest maps to, and releases it immediately after. This is what
+/// makes sharding actually pay off: two `get()` calls for two different digests, even
+/// from the same handle, can proceed fully in parallel (or one can be stuck without
+/// affecting the other) instead of both serializing on one lock for the handle's whole
+/// lifetime.
+pub struct TxCacheReadHandle {
     site: &'static str,
-) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
-    let guard = get_global_tx_cache().try_read_for(TX_CACHE_LOCK_TIMEOUT);
-    if guard.is_none() {
-        // WARN, not error!: see TX_CACHE_LOCK_TIMEOUT's doc comment -- error!/fatal!
-        // route through Go's deliberately-synchronous, writeMu-locked log path (the
-        // exact FFI-blocking class of bug this whole fix exists to avoid), while
-        // warn!/info!/debug! use the async, non-blocking log queue. This can fire
-        // from multiple contended threads at once, so it must stay on the safe side.
-        tracing::warn!(
-            "🚨 [TX-CACHE-LOCK-STUCK] read() at {} did not acquire GLOBAL_TX_CACHE within {:?} \
-             -- treating as a cache miss instead of blocking forever. This means the lock is \
-             wedged (see try_tx_cache_read's doc comment); the node itself may need a restart.",
-            site,
-            TX_CACHE_LOCK_TIMEOUT
-        );
-    }
-    guard
 }
 
-/// Bounded write acquisition of the global TX cache. Returns `None` (logging
-/// a loud, greppable marker) instead of blocking forever if the lock is stuck.
-pub fn try_tx_cache_write(
-    site: &'static str,
-) -> Option<parking_lot::RwLockWriteGuard<'static, TxPayloadCache>> {
-    let guard = get_global_tx_cache().try_write_for(TX_CACHE_LOCK_TIMEOUT);
-    if guard.is_none() {
-        // WARN, not error! -- see the identical comment in try_tx_cache_read above.
-        tracing::warn!(
-            "🚨 [TX-CACHE-LOCK-STUCK] write() at {} did not acquire GLOBAL_TX_CACHE within {:?} \
-             -- skipping this cache update instead of blocking forever. This means the lock is \
-             wedged (see try_tx_cache_write's doc comment); the node itself may need a restart.",
-            site,
-            TX_CACHE_LOCK_TIMEOUT
-        );
-    }
-    guard
-}
-
-/// Higher-stakes variant of [`try_tx_cache_read`] for callers where treating a
-/// stuck lock as "not found" is fork-relevant (currently: extracting system
-/// transactions, in particular EndOfEpoch, from an already-committed subdag —
-/// see `CommittedSubDag::extract_system_transactions`/
-/// `extract_end_of_epoch_transaction`). Retries with real backoff (well past
-/// a single `TX_CACHE_LOCK_TIMEOUT` window) before giving up, since reaching
-/// this call at all means the lock got stuck again after the same
-/// transactions already passed a real cache check once during block
-/// verification -- a genuinely abnormal, most likely transient condition.
-pub fn retry_tx_cache_read_for_commit(
-    site: &'static str,
-) -> Option<parking_lot::RwLockReadGuard<'static, TxPayloadCache>> {
-    const MAX_ATTEMPTS: u32 = 5; // 5 x 3s = 15s total before giving up
-    for attempt in 1..=MAX_ATTEMPTS {
-        if let Some(guard) = get_global_tx_cache().try_read_for(TX_CACHE_LOCK_TIMEOUT) {
-            return Some(guard);
+impl TxCacheReadHandle {
+    pub fn get(&self, digest: &TxDigest) -> Option<Transaction> {
+        let shard_idx = shard_index(digest);
+        let shard = shard_for(digest);
+        match shard.lock.try_read_for(TX_CACHE_LOCK_TIMEOUT) {
+            Some(guard) => {
+                let _marker = ReadHolderMarker::new(shard, self.site);
+                guard.get(digest)
+            }
+            None => {
+                // WARN, not error!: see TX_CACHE_LOCK_TIMEOUT's doc comment -- error!/fatal!
+                // route through Go's deliberately-synchronous, writeMu-locked log path (the
+                // exact FFI-blocking class of bug this whole fix exists to avoid), while
+                // warn!/info!/debug! use the async, non-blocking log queue. This can fire
+                // from multiple contended threads at once, so it must stay on the safe side.
+                shard.log_current_holders(shard_idx, self.site, "read");
+                tracing::warn!(
+                    "🚨 [TX-CACHE-LOCK-STUCK] read() at {} did not acquire this digest's \
+                     GLOBAL_TX_CACHE shard within {:?} -- treating as a cache miss instead of \
+                     blocking forever. Only the one shard holding this digest is affected; \
+                     every other digest (the other {} shards) is unaffected.",
+                    self.site,
+                    TX_CACHE_LOCK_TIMEOUT,
+                    NUM_TX_CACHE_SHARDS - 1
+                );
+                None
+            }
         }
-        tracing::warn!(
-            "🚨 [TX-CACHE-LOCK-STUCK] read() at {} attempt {}/{} did not acquire \
-             GLOBAL_TX_CACHE within {:?} -- retrying (this path retries because a miss \
-             here can be fork-relevant, unlike ordinary block-verification cache reads).",
-            site,
-            attempt,
-            MAX_ATTEMPTS,
-            TX_CACHE_LOCK_TIMEOUT
-        );
     }
-    // WARN, not error! -- see the identical comment in try_tx_cache_read above.
-    tracing::warn!(
-        "🚨 [TX-CACHE-LOCK-STUCK] read() at {} gave up after {} attempts ({:?} total) -- \
-         proceeding as if no system transactions were found in this commit. The lock is \
-         genuinely wedged; the node likely needs a restart, and any EndOfEpoch transaction \
-         in this commit may have been missed.",
-        site,
-        MAX_ATTEMPTS,
-        TX_CACHE_LOCK_TIMEOUT * MAX_ATTEMPTS
-    );
-    None
+}
+
+/// Bounded read acquisition of the global TX cache. Always returns `Some` -- unlike the
+/// pre-sharding version, no lock is actually taken until a specific digest is looked up
+/// via the returned handle's `get()`, so there is nothing to time out on yet at this
+/// point. Kept as `Option` so existing `if let Some(cache) = try_tx_cache_read(...)`
+/// call sites did not need to change when this was rearchitected.
+pub fn try_tx_cache_read(site: &'static str) -> Option<TxCacheReadHandle> {
+    Some(TxCacheReadHandle { site })
+}
+
+/// Write-side counterpart of [`TxCacheReadHandle`]. Same no-lock-until-first-use design:
+/// `insert()` locks only the one shard the digest being inserted maps to.
+pub struct TxCacheWriteHandle {
+    site: &'static str,
+}
+
+impl TxCacheWriteHandle {
+    pub fn insert(&mut self, digest: TxDigest, tx: Transaction) {
+        let shard_idx = shard_index(&digest);
+        let shard = shard_for(&digest);
+        match shard.lock.try_write_for(TX_CACHE_LOCK_TIMEOUT) {
+            Some(mut guard) => {
+                let _marker = WriteHolderMarker::new(shard, self.site);
+                guard.insert(digest, tx);
+            }
+            None => {
+                // WARN, not error! -- see the identical comment in TxCacheReadHandle::get above.
+                shard.log_current_holders(shard_idx, self.site, "write");
+                tracing::warn!(
+                    "🚨 [TX-CACHE-LOCK-STUCK] write() at {} did not acquire this digest's \
+                     GLOBAL_TX_CACHE shard within {:?} -- skipping this one cache update \
+                     instead of blocking forever. Only this digest's shard is affected; \
+                     every other digest (the other {} shards) is unaffected.",
+                    self.site,
+                    TX_CACHE_LOCK_TIMEOUT,
+                    NUM_TX_CACHE_SHARDS - 1
+                );
+            }
+        }
+    }
+
+    /// ARCHITECTURAL FIX (2026-09-15, same-day follow-up to the sharding fix above): a
+    /// caller inserting MANY (digest, tx) pairs at once (chiefly `verify_block_inner`,
+    /// once per transaction in a block) MUST use this instead of calling `insert()` in a
+    /// loop. Live-reproduced: after sharding first shipped, redeploying under the exact
+    /// same restart-catch-up scenario the sharding fix was built for showed NO
+    /// individual acquisition ever timing out (zero `TX-CACHE-LOCK-STUCK` log lines the
+    /// whole time -- ruled out via direct grep) yet the node still made no visible
+    /// forward progress for minutes, CPU only ~1-1.6 cores busy (not CPU-bound), and
+    /// `sudo gdb` kept catching 20+ threads inside the shard-lock's brief acquire path
+    /// at every snapshot. Root cause: calling `insert()` once PER TRANSACTION turns a
+    /// block with N transactions into N separate lock acquisitions where the
+    /// pre-sharding code (and the original mục-19-bug-#4 fix) acquired the cache's lock
+    /// only ONCE for the whole block. With ~20 blocks verified concurrently during
+    /// catch-up, that is a many-times-N increase in total lock-acquisition *count*
+    /// system-wide -- not a deadlock (nothing waits past `TX_CACHE_LOCK_TIMEOUT`), but
+    /// per-acquisition overhead (parking_lot's CAS/futex bookkeeping, compounded by
+    /// occasional brief same-shard collisions among 20 concurrent callers) accumulating
+    /// into a severe THROUGHPUT regression at this volume. This method restores
+    /// per-block-sized acquisition counts (one acquisition per shard actually touched by
+    /// the batch, i.e. at most `NUM_TX_CACHE_SHARDS`, typically far fewer for a small
+    /// block) while keeping sharding's real benefit: a batch destined for shard A never
+    /// blocks a concurrent caller whose batch only touches shard B.
+    pub fn insert_batch(&mut self, items: impl IntoIterator<Item = (TxDigest, Transaction)>) {
+        let mut by_shard: Vec<Vec<(TxDigest, Transaction)>> =
+            (0..NUM_TX_CACHE_SHARDS).map(|_| Vec::new()).collect();
+        for (digest, tx) in items {
+            by_shard[shard_index(&digest)].push((digest, tx));
+        }
+        for (shard_idx, batch) in by_shard.into_iter().enumerate() {
+            if batch.is_empty() {
+                continue;
+            }
+            let shard = &tx_cache_shards()[shard_idx];
+            match shard.lock.try_write_for(TX_CACHE_LOCK_TIMEOUT) {
+                Some(mut guard) => {
+                    let _marker = WriteHolderMarker::new(shard, self.site);
+                    for (digest, tx) in batch {
+                        guard.insert(digest, tx);
+                    }
+                }
+                None => {
+                    shard.log_current_holders(shard_idx, self.site, "write_batch");
+                    tracing::warn!(
+                        "🚨 [TX-CACHE-LOCK-STUCK] write_batch() at {} did not acquire shard {} \
+                         within {:?} -- skipping {} cache update(s) destined for this shard \
+                         instead of blocking forever. Every other shard in this same batch (and \
+                         this shard's own {} peer shards) is unaffected.",
+                        self.site,
+                        shard_idx,
+                        TX_CACHE_LOCK_TIMEOUT,
+                        batch.len(),
+                        NUM_TX_CACHE_SHARDS - 1
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Bounded write acquisition of the global TX cache. See [`try_tx_cache_read`] for why
+/// this always returns `Some` now.
+pub fn try_tx_cache_write(site: &'static str) -> Option<TxCacheWriteHandle> {
+    Some(TxCacheWriteHandle { site })
+}
+
+/// Higher-stakes read handle for callers where treating a stuck shard as "not found" is
+/// fork-relevant (currently: extracting system transactions, in particular EndOfEpoch,
+/// from an already-committed subdag — see `CommittedSubDag::extract_system_transactions`/
+/// `extract_end_of_epoch_transaction`). `get()` retries with real backoff (well past a
+/// single `TX_CACHE_LOCK_TIMEOUT` window) before giving up on a digest, since reaching
+/// this call at all means that digest's shard got stuck again after the same transaction
+/// already passed a real cache check once during block verification -- a genuinely
+/// abnormal, most likely transient condition.
+pub struct TxCacheReadHandleForCommit {
+    site: &'static str,
+}
+
+impl TxCacheReadHandleForCommit {
+    pub fn get(&self, digest: &TxDigest) -> Option<Transaction> {
+        const MAX_ATTEMPTS: u32 = 5; // 5 x 3s = 15s total before giving up on this digest
+        let shard_idx = shard_index(digest);
+        let shard = shard_for(digest);
+        for attempt in 1..=MAX_ATTEMPTS {
+            if let Some(guard) = shard.lock.try_read_for(TX_CACHE_LOCK_TIMEOUT) {
+                let _marker = ReadHolderMarker::new(shard, self.site);
+                return guard.get(digest);
+            }
+            shard.log_current_holders(shard_idx, self.site, "read (for-commit)");
+            tracing::warn!(
+                "🚨 [TX-CACHE-LOCK-STUCK] read() at {} attempt {}/{} did not acquire this \
+                 digest's GLOBAL_TX_CACHE shard within {:?} -- retrying (this path retries \
+                 because a miss here can be fork-relevant, unlike ordinary block-verification \
+                 cache reads). Other digests in other shards are unaffected and not retried \
+                 unnecessarily.",
+                self.site,
+                attempt,
+                MAX_ATTEMPTS,
+                TX_CACHE_LOCK_TIMEOUT
+            );
+        }
+        // WARN, not error! -- see the identical comment in TxCacheReadHandle::get above.
+        tracing::warn!(
+            "🚨 [TX-CACHE-LOCK-STUCK] read() at {} gave up after {} attempts ({:?} total) on \
+             this digest's shard -- treating as not found. That one shard is genuinely \
+             wedged; any EndOfEpoch transaction whose digest hashes to it may have been \
+             missed. Other digests (other shards) are unaffected.",
+            self.site,
+            MAX_ATTEMPTS,
+            TX_CACHE_LOCK_TIMEOUT * MAX_ATTEMPTS
+        );
+        None
+    }
+}
+
+/// See [`TxCacheReadHandleForCommit`]. Always returns `Some` -- see [`try_tx_cache_read`]
+/// for why.
+pub fn retry_tx_cache_read_for_commit(site: &'static str) -> Option<TxCacheReadHandleForCommit> {
+    Some(TxCacheReadHandleForCommit { site })
 }
 
 /// The maximum number of transactions pending to the queue to be pulled for block proposal
@@ -523,7 +821,7 @@ impl TransactionConsumer {
         let mut recv_count = 0;
         while self.pending_transactions.is_none() {
             if let Ok(t) = self.tx_receiver.try_recv() {
-                tracing::error!("🔥 [DEBUG] transaction_consumer.next() pulled a TransactionsGuard with {} txs!", t.transactions.len());
+                tracing::debug!("🔥 [DEBUG] transaction_consumer.next() pulled a TransactionsGuard with {} txs!", t.transactions.len());
                 recv_count += 1;
                 self.pending_transactions = handle_txs(t);
             } else {
@@ -544,7 +842,7 @@ impl TransactionConsumer {
         }
 
         if transactions.len() > 0 || recv_count > 0 {
-            tracing::error!("🔥 [DEBUG] transaction_consumer.next() returning {} txs. recv_count: {}, limit_reached: {:?}", transactions.len(), recv_count, limit_reached);
+            tracing::debug!("🔥 [DEBUG] transaction_consumer.next() returning {} txs. recv_count: {}, limit_reached: {:?}", transactions.len(), recv_count, limit_reached);
         }
 
         if !transactions.is_empty() {
@@ -765,9 +1063,9 @@ impl TransactionClient {
 
         let txs: Vec<Transaction> = transactions.into_iter().map(Transaction::new).collect();
         if let Some(mut cache) = try_tx_cache_write("TransactionClient::submit_no_wait") {
-            for tx in &txs {
-                cache.insert(tx.digest(), tx.clone());
-            }
+            // insert_batch: see its doc comment (mục 19 bug #6 throughput-regression
+            // follow-up) -- avoids one lock acquisition per transaction in a bundle.
+            cache.insert_batch(txs.iter().map(|tx| (tx.digest(), tx.clone())));
         }
         let t = TransactionsGuard {
             transactions: txs,
@@ -857,10 +1155,15 @@ mod tests {
 
     use crate::transaction::NoopTransactionVerifier;
     use crate::{
+        block::Transaction,
         block_verifier::SignedBlockVerifier,
         context::Context,
-        transaction::{BlockStatus, LimitReached, TransactionClient, TransactionConsumer},
+        transaction::{
+            shard_for, BlockStatus, LimitReached, TransactionClient, TransactionConsumer,
+            TxCacheReadHandle, TxCacheWriteHandle, NUM_TX_CACHE_SHARDS, TX_CACHE_LOCK_TIMEOUT,
+        },
     };
+    use consensus_types::block::TxDigest;
 
     /// Regression test for the mục-19-bug-#4 fix: proves the actual mechanism
     /// `try_tx_cache_read`/`try_tx_cache_write` rely on -- parking_lot's own
@@ -968,6 +1271,91 @@ mod tests {
         // Cleanup: release guard1, let the writer through, join it.
         drop(guard1);
         writer.join().unwrap();
+    }
+
+    /// Regression test for the mục-19-bug-#6 architectural fix: proves sharding actually
+    /// isolates contention across digests, not just bounds it. Live-reproduced: under a
+    /// large catch-up, dozens of concurrent `verify_block_inner` writers all serialized on
+    /// ONE global lock even though each individual acquisition was bounded to 3s -- the
+    /// node still made zero forward progress for the whole window. This test proves that
+    /// class of stall cannot happen anymore for two DIFFERENT digests: holding one
+    /// digest's shard lock indefinitely must never block a write to a digest that hashes
+    /// to a different shard, while it correctly DOES still block (and time out) a write to
+    /// a digest that hashes to the SAME shard -- i.e. this is testing real per-shard
+    /// isolation, not accidentally testing "everything always succeeds".
+    #[test]
+    fn sharded_cache_isolates_contention_across_different_shards() {
+        use std::thread;
+
+        // Find two digests that provably hash to different shards, and a third that
+        // hashes to the same shard as the first -- shard_for() only depends on
+        // digest.0[0] (`byte % NUM_TX_CACHE_SHARDS`), so this is trivial and
+        // deterministic: byte 0 and byte 1 land in different shards, and byte
+        // `NUM_TX_CACHE_SHARDS` wraps back to the same shard as byte 0.
+        let digest_a = TxDigest([0u8; consensus_config::DIGEST_LENGTH]);
+        let digest_b = TxDigest([1u8; consensus_config::DIGEST_LENGTH]);
+        assert!(
+            !std::ptr::eq(shard_for(&digest_a), shard_for(&digest_b)),
+            "test setup assumption broken: digest_a and digest_b must map to different shards"
+        );
+        let mut digest_a2_bytes = [0u8; consensus_config::DIGEST_LENGTH];
+        digest_a2_bytes[0] = NUM_TX_CACHE_SHARDS as u8;
+        let digest_a2 = TxDigest(digest_a2_bytes);
+        assert!(
+            std::ptr::eq(shard_for(&digest_a), shard_for(&digest_a2)),
+            "test setup assumption broken: digest_a and digest_a2 must map to the SAME shard \
+             (digest_a2's leading byte is exactly NUM_TX_CACHE_SHARDS ahead of digest_a's)"
+        );
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = thread::spawn(move || {
+            let _guard = shard_for(&digest_a).lock.write();
+            // Hold digest_a's shard write lock until told to let go.
+            let _ = release_rx.recv();
+        });
+        thread::sleep(Duration::from_millis(50));
+
+        // A write to a DIFFERENT shard (digest_b) must succeed immediately, completely
+        // unaffected by digest_a's shard being held -- this is the whole point of
+        // sharding: it must not just be "bounded", it must not contend at all.
+        let start = std::time::Instant::now();
+        let mut write_handle = TxCacheWriteHandle { site: "test" };
+        write_handle.insert(digest_b, Transaction::new(b"b".to_vec()));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "a write to a different shard took {:?} -- sharding is not actually isolating \
+             contention (it should return in microseconds, not wait on digest_a's shard at all)",
+            start.elapsed()
+        );
+        let read_handle = TxCacheReadHandle { site: "test" };
+        assert!(
+            read_handle.get(&digest_b).is_some(),
+            "the write to the other shard must have actually landed"
+        );
+
+        // A write to the SAME shard (digest_a2) must still correctly block and time out --
+        // proving this isn't a broken test that would pass even with no locking at all.
+        let start = std::time::Instant::now();
+        let mut same_shard_handle = TxCacheWriteHandle { site: "test" };
+        same_shard_handle.insert(digest_a2, Transaction::new(b"a2".to_vec()));
+        assert!(
+            start.elapsed() >= TX_CACHE_LOCK_TIMEOUT,
+            "a write to the SAME shard as a held lock returned in {:?}, faster than the {:?} \
+             bound -- it should have genuinely waited/timed out, not skipped contention",
+            start.elapsed(),
+            TX_CACHE_LOCK_TIMEOUT
+        );
+        assert!(
+            read_handle.get(&digest_a2).is_none(),
+            "the same-shard write should have been skipped (timed out), not landed"
+        );
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        // After release, the same-shard digest can now be inserted normally.
+        let mut retry_handle = TxCacheWriteHandle { site: "test" };
+        retry_handle.insert(digest_a2, Transaction::new(b"a2-retry".to_vec()));
+        assert!(read_handle.get(&digest_a2).is_some());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

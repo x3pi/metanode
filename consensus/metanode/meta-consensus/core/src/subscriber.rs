@@ -8,7 +8,7 @@ use consensus_types::block::Round;
 use futures::StreamExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::{task::JoinHandle, time::sleep};
-use tracing::{error, info};
+use tracing::{info, warn};
 
 use crate::{
     block::BlockAPI as _,
@@ -57,7 +57,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
 
     pub(crate) fn subscribe(&self, peer: AuthorityIndex) {
         if peer == self.context.own_index {
-            error!("Attempt to subscribe to own validator {peer} is ignored!");
+            warn!("Attempt to subscribe to own validator {peer} is ignored!");
             return;
         }
         let context = self.context.clone();

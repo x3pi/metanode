@@ -15,7 +15,7 @@
 //! such mismatches at the boundary before they reach Go.
 
 use std::fmt;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Comprehensive diagnostic snapshot for GEI validation failures.
 /// Contains all variables needed to diagnose the root cause of a fork.
@@ -139,7 +139,7 @@ pub fn validate_gei_continuity(
             delta,
         };
 
-        error!(
+        warn!(
             "🚨 [FORK-PREVENTED] GEI discontinuity detected! \
              Computed GEI {} is {} away from expected {} (go_last_gei={} + 1). \
              This would cause a permanent fork if executed.\n{}",
@@ -215,7 +215,7 @@ pub async fn validate_gei_against_peers(
                             );
                         } else if delta.abs() > CRITICAL_GEI_DELTA {
                             critical_mismatches += 1;
-                            error!(
+                            warn!(
                                 "🚨 [GEI-VALIDATOR] CRITICAL PEER MISMATCH! \
                                  local_gei={} vs peer_gei={} at block={} (peer={}, delta={}). \
                                  This indicates GEI inflation or state corruption.",
@@ -288,7 +288,7 @@ pub async fn validate_gei_against_peers(
     // HARD HALT: If 2+ peers confirm critical GEI divergence, this node is forked.
     // Continuing would propagate the fork to the network.
     if critical_mismatches >= 2 {
-        error!(
+        warn!(
             "🚨 [GEI-VALIDATOR] HALTING: {} peers confirm GEI divergence > {} at block {}. \
              Local GEI={} is inconsistent with cluster. Node must be re-synced from snapshot.",
             critical_mismatches, CRITICAL_GEI_DELTA, local_block_number, local_gei
