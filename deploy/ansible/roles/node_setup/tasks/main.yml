@@ -1,4 +1,25 @@
 ---
+- name: Create metanode group before assigning storage ownership
+  ansible.builtin.group:
+    name: metanode
+    system: yes
+
+- name: Create metanode user before assigning storage ownership
+  ansible.builtin.user:
+    name: metanode
+    group: metanode
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+
+- name: Grow existing managed snapshot storage without deleting data
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }}"
+    executable: python3
+  register: snapshot_storage_result
+  changed_when: (snapshot_storage_result.stdout | trim | from_json).changed
+  when: keep_data | bool
+
 - name: Ensure base deployment directory exists
   ansible.builtin.file:
     path: "{{ remote_deploy_dir }}"
@@ -15,7 +36,6 @@
     group: metanode
     mode: '0755'
   loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
-  ignore_errors: true # In case metanode user doesn't exist yet, it's fine
 
 - name: Unarchive release tarball
   ansible.builtin.unarchive:
@@ -239,44 +259,9 @@
     and not btrfs_disk.stat.exists
     and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
 
-- name: Automatically initialize BTRFS partition or sparse loopback image
-  # Mirrors deploy/systemd/cluster/setup-cluster-btrfs.sh's LVM-vs-loopback logic (including its
-  # existing-LV reuse check) so the Ansible-driven path and the manual/systemd path don't drift.
-  # Every fallback branch logs an explicit WARN (to stderr, so it doesn't pollute the stdout this
-  # task's caller parses as the resulting device path) instead of failing/falling back silently.
-  ansible.builtin.shell: |
-    set -e
-    target_size="{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}"
-    btrfs_img="/opt/metanode_cluster_btrfs.img"
-    created_dev=""
-    use_loopback=false
-
-    if sudo vgs ubuntu-vg >/dev/null 2>&1; then
-      if sudo lvs ubuntu-vg/metanode_data >/dev/null 2>&1; then
-        echo "WARN: LV ubuntu-vg/metanode_data already exists, reusing it instead of lvcreate" >&2
-        created_dev="/dev/ubuntu-vg/metanode_data"
-      else
-        lvcreate_err=$(sudo lvcreate -L "$target_size" -n metanode_data ubuntu-vg 2>&1 >/dev/null) || {
-          echo "WARN: lvcreate failed, falling back to loopback file. lvcreate said: ${lvcreate_err}" >&2
-          use_loopback=true
-        }
-        [ "$use_loopback" != true ] && created_dev="/dev/ubuntu-vg/metanode_data"
-      fi
-    else
-      echo "WARN: LVM volume group 'ubuntu-vg' not found, using loopback file" >&2
-      use_loopback=true
-    fi
-
-    if [ "$use_loopback" = true ] || [ -z "$created_dev" ]; then
-      created_dev="$btrfs_img"
-      mkdir -p /opt
-      truncate -s "$target_size" "$btrfs_img"
-    fi
-
-    mkfs.btrfs -f "$created_dev" >&2
-    echo "$created_dev"
-  args:
-    executable: /bin/bash
+- name: Automatically initialize and mount BTRFS storage using setup-cluster-btrfs.sh
+  ansible.builtin.script:
+    cmd: "{{ deploy_dir }}/cluster/setup-cluster-btrfs.sh --size {{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }} --mount-dir /mnt/metanode_snapshots"
   register: auto_btrfs_init
   when: >
     host_requires_btrfs | bool
@@ -285,7 +270,7 @@
 
 - name: Update BTRFS facts after auto initialization
   set_fact:
-    btrfs_device_path: "{{ auto_btrfs_init.stdout.strip() }}"
+    btrfs_device_path: "{{ auto_btrfs_init.stdout_lines[-1].strip() }}"
     btrfs_disk:
       stat:
         exists: true
@@ -345,6 +330,13 @@
     state: present
   when: btrfs_disk.stat.exists
 
+- name: Verify mounted managed snapshot storage has the requested size
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }} --verify"
+    executable: python3
+  changed_when: false
+  when: btrfs_disk.stat.exists and host_requires_btrfs | bool
+
 
 - name: Validate BTRFS availability for snapshot-enabled nodes
   ansible.builtin.fail:
@@ -368,7 +360,6 @@
     mode: '0755'
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
-  ignore_errors: true
 
 - name: Ensure the entire snapshot source subtree is owned by metanode, not just its top dir
   # The task above only chowns /mnt/metanode_snapshots/node-N itself (also ignore_errors, so a
@@ -391,7 +382,6 @@
     group: metanode
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
-  ignore_errors: true
 
 - name: Create execution snapshot target directories
   ansible.builtin.file:
@@ -402,7 +392,6 @@
     mode: '0755'
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists
-  ignore_errors: true
 
 - name: Setup Bind Mounts for snapshot-enabled nodes
   ansible.builtin.mount:

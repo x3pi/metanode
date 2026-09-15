@@ -104,7 +104,7 @@ def run_shell_cmd(cmd, cwd=None, timeout=None, log_file=None):
             log_fp.close()
         return 1, f"Execution failed: {e}"
 
-def tail_file(filepath, n_lines=25):
+def tail_file(filepath, n_lines=20):
     """Return last N lines of a file."""
     if not os.path.isfile(filepath):
         return "(Log file not found)"
@@ -114,6 +114,13 @@ def tail_file(filepath, n_lines=25):
             return "".join(lines[-n_lines:])
     except Exception as e:
         return f"(Error reading log: {e})"
+
+def tail_text(text, n_lines=20):
+    """Return last N lines of a string."""
+    if not text:
+        return "(Không có log output)"
+    lines = str(text).strip().splitlines()
+    return "\n".join(lines[-n_lines:])
 
 def main():
     parser = argparse.ArgumentParser(description="Metanode CI/CD Automated Test Runner")
@@ -239,9 +246,29 @@ def main():
                         ga_data = json.load(gaf)
                     print(f"✅ Đã nạp thành công {len(ga_data.get('alloc', []))} ví vào genesis.json (giữ nguyên genesis.json.example trên Git)!")
                 else:
-                    print(f"⚠️ Cảnh báo: Lệnh nạp ví vào genesis.json trả về mã lỗi {r_c}")
+                    print(f"❌ [LỖI GENESIS] Lệnh nạp ví vào genesis.json thất bại với mã lỗi {r_c}!")
+                    sys.exit(r_c)
         except Exception as e:
             print(f"⚠️ Cảnh báo khi kiểm tra genesis: {e}")
+
+    # 2.6. Pre-flight Check: Kiểm tra khả năng kết nối mạng tới các server trong cụm
+    if not args.dry_run and not args.skip_pre_action:
+        inv_file = os.path.join(repo_path, "deploy", "ansible", "inventory.yml")
+        parser_script = os.path.join(repo_path, "deploy", "ansible", "parse_inventory.py")
+        if os.path.isfile(inv_file) and os.path.isfile(parser_script):
+            print(f"\n🔍 [PRE-FLIGHT] Đang kiểm tra kết nối mạng (SSH port) tới các máy chủ trong cụm...")
+            c_code, c_out = run_shell_cmd(f"python3 {parser_script} {inv_file} check_reachability all", cwd=repo_path)
+            if c_code != 0:
+                print(f"\n❌ [LỖI KẾT NỐI SERVER] Phát hiện máy chủ cụm node bị timeout kết nối hoặc không phản hồi SSH!")
+                print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi server đích gặp lỗi kết nối.")
+                if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                    fail_msg = telegram_notify.build_failure_message(
+                        commit_info, branch, "Pre-flight Server Reachability", c_code,
+                        tail_text(c_out, 20), server_ip
+                    )
+                    telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                sys.exit(c_code)
+            print("✅ Kết nối tới tất cả máy chủ trong cụm: OK")
 
     pipeline_start_time = time.time()
 
@@ -252,13 +279,13 @@ def main():
         if args.dry_run:
             print(f"  [DRY-RUN] Sẽ chạy: {build_check_cmd}")
         else:
-            build_code, _ = run_shell_cmd(build_check_cmd, cwd=repo_path)
+            build_code, build_out = run_shell_cmd(build_check_cmd, cwd=repo_path)
             if build_code != 0:
                 print("❌ Build check thất bại! Dừng toàn bộ pipeline.")
                 if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
                     fail_msg = telegram_notify.build_failure_message(
                         commit_info, branch, "Build Check (Go/Rust/FFI)", build_code,
-                        "console", "Build compilation failed. See server console.", server_ip
+                        tail_text(build_out, 20), server_ip
                     )
                     telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
                 sys.exit(build_code)
@@ -278,12 +305,29 @@ def main():
             reset_cmd = interpolate_paths(chain_actions.get("reset_cmd") or chain_actions.get("reset_public_cmd"))
             update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
             if reset_cmd:
-                r_c, _ = run_shell_cmd(reset_cmd, cwd=repo_path)
+                r_c, r_out = run_shell_cmd(reset_cmd, cwd=repo_path)
                 if r_c != 0:
-                    print(f"⚠️ Cảnh báo: Lệnh reset chain trả về mã lỗi {r_c}")
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh reset chain thất bại với mã lỗi {r_c}!")
+                    print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi reset chain gặp lỗi.")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: --reset-chain", r_c,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(r_c)
             if update_ip_cmd:
                 print(f"👉 [CI FLAG] Đồng bộ lại IP/RPC endpoints...")
-                run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                u_c, u_out = run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                if u_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh đồng bộ IP thất bại với mã lỗi {u_c}!")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: update_ip", u_c,
+                            tail_text(u_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(u_c)
             wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
             print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
             time.sleep(wait_sec)
@@ -295,12 +339,29 @@ def main():
             restart_cmd = interpolate_paths(chain_actions.get("restart_cmd"))
             update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
             if restart_cmd:
-                r_c, _ = run_shell_cmd(restart_cmd, cwd=repo_path)
+                r_c, r_out = run_shell_cmd(restart_cmd, cwd=repo_path)
                 if r_c != 0:
-                    print(f"⚠️ Cảnh báo: Lệnh restart chain trả về mã lỗi {r_c}")
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh restart chain thất bại với mã lỗi {r_c}!")
+                    print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi restart chain gặp lỗi.")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: --restart-chain", r_c,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(r_c)
             if update_ip_cmd:
                 print(f"👉 [CI FLAG] Đồng bộ lại IP/RPC endpoints...")
-                run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                u_c, u_out = run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                if u_c != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh đồng bộ IP thất bại với mã lỗi {u_c}!")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "CI Flag: update_ip", u_c,
+                            tail_text(u_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(u_c)
             wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
             print(f"⏳ Đợi {wait_sec}s để RPC các node sẵn sàng...")
             time.sleep(wait_sec)
@@ -354,30 +415,63 @@ def main():
                 update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
                 print(f"👉 [PRE-ACTION] Reset cụm Public Chain để đạt môi trường sạch & TPS tối đa...")
                 if reset_cmd:
-                    r_code, _ = run_shell_cmd(reset_cmd, cwd=repo_path)
+                    r_code, r_out = run_shell_cmd(reset_cmd, cwd=repo_path)
                     if r_code != 0:
-                        print(f"⚠️ Cảnh báo: Lệnh reset chain trả về mã lỗi {r_code}")
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh reset chain thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi reset chain gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
                 if update_ip_cmd:
                     print(f"👉 [PRE-ACTION] Đồng bộ lại IP/RPC endpoints...")
-                    run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                    u_code, u_out = run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                    if u_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh đồng bộ IP thất bại với mã lỗi {u_code}!")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action} (update_ip)", u_code,
+                                tail_text(u_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(u_code)
                 wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
                 time.sleep(wait_sec)
             elif pre_action in ["deploy_private", "reset_private"]:
                 deploy_private_cmd = interpolate_paths(chain_actions.get("deploy_private_cmd"))
                 print(f"👉 [PRE-ACTION] Triển khai lại cụm Private Chains & Relayer Daemon...")
                 if deploy_private_cmd:
-                    r_code, _ = run_shell_cmd(deploy_private_cmd, cwd=repo_path)
+                    r_code, r_out = run_shell_cmd(deploy_private_cmd, cwd=repo_path)
                     if r_code != 0:
-                        print(f"⚠️ Cảnh báo: Lệnh deploy private chains trả về mã lỗi {r_code}")
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh deploy private chains thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi deploy private chains gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
                 wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
                 time.sleep(wait_sec)
             elif pre_action in ["prepare_tps", "reset_tps_chain"]:
                 tps_prep_cmd = interpolate_paths(chain_actions.get("prepare_tps_cmd") or chain_actions.get("reset_tps_chain_cmd"))
                 print(f"👉 [PRE-ACTION] Nạp 50k ví TPS (lọc trùng), xóa genesis.json cũ và reset cụm node...")
                 if tps_prep_cmd:
-                    r_code, _ = run_shell_cmd(tps_prep_cmd, cwd=repo_path)
+                    r_code, r_out = run_shell_cmd(tps_prep_cmd, cwd=repo_path)
                     if r_code != 0:
-                        print(f"⚠️ Cảnh báo: Lệnh prepare_tps trả về mã lỗi {r_code}")
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh prepare_tps thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi prepare_tps gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
                 wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
                 time.sleep(wait_sec)
             elif pre_action == "restart_chain":
@@ -385,16 +479,45 @@ def main():
                 update_ip_cmd = interpolate_paths(chain_actions.get("update_ip_cmd"))
                 print(f"👉 [PRE-ACTION] Restart nhanh cụm node...")
                 if restart_cmd:
-                    run_shell_cmd(restart_cmd, cwd=repo_path)
+                    r_code, r_out = run_shell_cmd(restart_cmd, cwd=repo_path)
+                    if r_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh restart chain thất bại với mã lỗi {r_code}!")
+                        print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi restart chain gặp lỗi.")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                                tail_text(r_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(r_code)
                 if update_ip_cmd:
                     print(f"👉 [PRE-ACTION] Đồng bộ lại IP/RPC endpoints...")
-                    run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                    u_code, u_out = run_shell_cmd(update_ip_cmd, cwd=repo_path)
+                    if u_code != 0:
+                        print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh đồng bộ IP thất bại với mã lỗi {u_code}!")
+                        if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                            fail_msg = telegram_notify.build_failure_message(
+                                commit_info, branch, f"Pre-action: {pre_action} (update_ip)", u_code,
+                                tail_text(u_out, 20), server_ip
+                            )
+                            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                        sys.exit(u_code)
                 wait_sec = chain_actions.get("wait_rpc_ready_seconds", 5)
                 time.sleep(wait_sec)
             elif pre_action != "none" and pre_action in chain_actions:
                 custom_cmd = interpolate_paths(chain_actions.get(pre_action))
                 print(f"👉 [PRE-ACTION] Thực thi hành động tùy biến: {pre_action}...")
-                run_shell_cmd(custom_cmd, cwd=repo_path)
+                r_code, r_out = run_shell_cmd(custom_cmd, cwd=repo_path)
+                if r_code != 0:
+                    print(f"\n❌ [LỖI NGHIÊM TRỌNG] Lệnh pre_action '{pre_action}' thất bại với mã lỗi {r_code}!")
+                    print(f"🛑 DỪNG TOÀN BỘ PIPELINE CI NGAY LẬP TỨC! Không được chạy tiếp khi pre_action gặp lỗi.")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, f"Pre-action: {pre_action}", r_code,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
+                    sys.exit(r_code)
 
         # Execute test
         test_log_file = os.path.join(run_log_dir, f"{test_id}.log")
@@ -479,9 +602,9 @@ def main():
 
             # Send Telegram notification on failure
             if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
-                tail_logs = tail_file(test_log_file, n_lines=25)
+                tail_logs = tail_file(test_log_file, n_lines=20)
                 fail_msg = telegram_notify.build_failure_message(
-                    commit_info, branch, test_name, exit_code, test_log_file, tail_logs, server_ip
+                    commit_info, branch, test_name, exit_code, tail_logs, server_ip
                 )
                 telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
 

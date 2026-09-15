@@ -1,19 +1,26 @@
 ---
+- name: Recreate managed snapshot storage at the requested size
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }}"
+    executable: python3
+  register: snapshot_storage_result
+  changed_when: (snapshot_storage_result.stdout | trim | default('{}', true) | from_json).changed | default(false)
+
 - name: Clean data and logs directories
   ansible.builtin.shell: |
+    set -e
     TARGET_PATH="{{ metanode_install_dir }}/node-{{ item[0] }}/{{ item[1] }}"
     if [ -d "$TARGET_PATH" ]; then
       if mountpoint -q "$TARGET_PATH"; then
-        rm -rf "$TARGET_PATH"/* "$TARGET_PATH"/.[!.]* 2>/dev/null || true
+        find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
       else
         rm -rf "$TARGET_PATH"
       fi
     fi
     SNAP_DIR="/mnt/metanode_snapshots/node-{{ item[0] }}"
     if [ -d "$SNAP_DIR" ]; then
-      rm -rf "$SNAP_DIR"/* "$SNAP_DIR"/.[!.]* 2>/dev/null || true
-      rmdir "$SNAP_DIR" 2>/dev/null || true
+      find "$SNAP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      rmdir "$SNAP_DIR"
     fi
   become: yes
   loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
-  failed_when: false

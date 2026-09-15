@@ -57,13 +57,13 @@ usage() {
     echo "  --inventory <PATH>      Đường dẫn file inventory.yml (Mặc định: deploy/test/inventory.yml)"
     echo "  --build, --build-bins   Tự động chạy build_chain_bins.sh rồi đóng gói package_deploy.sh"
     echo "  --build-zip             Bắt buộc tạo mới file zip bằng package_deploy.sh (không build lại bin)"
-    echo "  --zip <PATH>            Đường dẫn file zip deploy kit (Mặc định: tự tìm file mới nhất)"
+    echo "  --zip <PATH>            Đường dẫn file zip deploy kit (Mặc định: đóng gói mới)"
     echo "  --target-host <IP>      Chỉ định IP máy kiểm thử deploy (Mặc định: host đầu tiên trong inventory)"
     echo "  --target-user <USER>    User SSH máy kiểm thử (Mặc định: lấy từ inventory.yml)"
     echo "  --target-pass <PASS>    Mật khẩu SSH máy kiểm thử (Mặc định: lấy từ inventory.yml)"
     echo "  --target-key <PATH>     Đường dẫn SSH Private Key (Mặc định: lấy từ inventory.yml)"
     echo "  --target-dir <PATH>     Thư mục giải nén trên máy kiểm thử (Mặc định: ~/nhat/test-chain)"
-    echo "  --skip-clean            Bỏ qua bước dọn dẹp /opt/metanode trên các máy"
+    echo "  --skip-clean            Giữ data/key/genesis; chỉ tăng BTRFS nếu cần"
     echo "  --skip-tx               Bỏ qua bước gửi giao dịch RPC kiểm chứng"
     echo "  --rpc-url <URL>         Chỉ định RPC URL kiểm chứng (Mặc định: tự phát hiện theo inventory)"
     echo "  -h, --help              Hiển thị trợ giúp này"
@@ -375,56 +375,27 @@ if [ -z "$RPC_URL" ]; then
 fi
 echo -e "   • RPC Endpoint kiểm chứng:        ${BOLD}${RPC_URL}${NC}"
 
+# Repackage current scripts by default; an explicitly supplied kit must support storage management.
+if [ -z "$ZIP_FILE" ]; then
+    BUILD_ZIP=true
+elif [ "$BUILD_ZIP" = false ]; then
+    python3 - "$ZIP_FILE" <<'PYZIP'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as kit:
+    if 'deploy/ansible/scripts/manage_snapshot_storage.py' not in kit.namelist():
+        sys.exit('ZIP cũ chưa hỗ trợ resize/clean storage. Hãy đóng gói lại bằng --build-zip.')
+PYZIP
+fi
+
 # ==============================================================================
 # 3. DỌN DẸP DỮ LIỆU CŨ TRÊN CÁC MÁY CHỦ (/opt/metanode/node-X)
 # ==============================================================================
+# Storage preflight and cleanup belong to Ansible so shared-volume checks run
+# before any data is deleted. Do not detach mounts or remove snapshot directories here.
 if [ "$SKIP_CLEAN" = false ]; then
-    echo -e "\n${BOLD}[BƯỚC 3/6] Dọn dẹp sạch sẽ dữ liệu cũ (/opt/metanode/node-X)...${NC}"
-    
-    TOTAL_HOSTS=$(echo "$HOSTS_JSON" | jq -r 'length')
-    for (( i=0; i<$TOTAL_HOSTS; i++ )); do
-        H_IP=$(echo "$HOSTS_JSON" | jq -r ".[$i].ip")
-        H_USER=$(echo "$HOSTS_JSON" | jq -r ".[$i].user")
-        H_PASS=$(echo "$HOSTS_JSON" | jq -r ".[$i].pass")
-        H_BPASS=$(echo "$HOSTS_JSON" | jq -r ".[$i].become_pass")
-        H_KEY=$(echo "$HOSTS_JSON" | jq -r ".[$i].key")
-        N_IDS=$(echo "$HOSTS_JSON" | jq -r ".[$i].node_ids | join(\" \")")
-
-        echo -e "   👉 Đang dừng dịch vụ và dọn dẹp tại ${BOLD}${H_USER}@${H_IP}${NC} (Node IDs: [${N_IDS}])..."
-        
-        # Script dọn dẹp từ xa an toàn (xử lý cả mountpoint btrfs và tránh pkill tự match chính nó)
-        CLEAN_CMD=$(cat <<'EOF'
-pkill -9 -f '[s]tart_monitors.sh' 2>/dev/null || true
-pkill -9 -f '[b]lock_hash_checker' 2>/dev/null || true
-systemctl stop 'metanode-*' 2>/dev/null || true
-pkill -9 -x metanode 2>/dev/null || true
-pkill -9 -x simple_chain 2>/dev/null || true
-EOF
-)
-        for nid in $N_IDS; do
-            CLEAN_CMD="${CLEAN_CMD}
-if mountpoint -q \"/opt/metanode/node-${nid}/data\" 2>/dev/null; then
-    umount -l \"/opt/metanode/node-${nid}/data\" 2>/dev/null || true
-fi
-if mountpoint -q \"/opt/metanode/node-${nid}\" 2>/dev/null; then
-    umount -l \"/opt/metanode/node-${nid}\" 2>/dev/null || true
-fi
-rm -rf \"/opt/metanode/node-${nid}\"
-rm -rf \"/opt/metanode-deploy/node-${nid}_keys\"
-rm -rf \"/mnt/metanode_snapshots/node-${nid}\"/* \"/mnt/metanode_snapshots/node-${nid}\"/.[!.]* 2>/dev/null || true
-rm -rf \"/mnt/metanode_snapshots/node-${nid}\" 2>/dev/null || true
-"
-        done
-
-        if exec_remote_sudo "$H_IP" "$H_USER" "$H_PASS" "$H_BPASS" "$H_KEY" "$CLEAN_CMD"; then
-            echo -e "      ${GREEN}✓ Đã làm sạch trắng dữ liệu nodes [${N_IDS}] trên ${H_IP}${NC}"
-        else
-            echo -e "      ${RED}❌ LỖI: Không thể dọn dẹp dữ liệu cũ tại ${H_IP}! Vui lòng kiểm tra quyền sudo hoặc tiến trình đang bận.${NC}"
-            exit 1
-        fi
-    done
+    echo '   Clean sẽ do Ansible thực hiện sau khi kiểm tra storage và phạm vi node.'
 else
-    echo -e "\n${YELLOW}[BƯỚC 3/6] Bỏ qua bước dọn dẹp dữ liệu (--skip-clean).${NC}"
+    echo '   Giữ dữ liệu và genesis hiện tại; Ansible chỉ tăng storage nếu cần.'
 fi
 
 # ==============================================================================
@@ -497,10 +468,15 @@ echo -e "   📤 3. Đang gửi cấu hình: inventory.yml sang ${TARGET_HOST}..
 exec_scp "$TARGET_HOST" "$TARGET_USER" "$TARGET_PASS" "$TARGET_KEY" "$INVENTORY_FILE" "${TARGET_DIR}/inventory.yml"
 
 echo -e "   📦 4. Đang giải nén và cấu hình trên máy kiểm thử..."
+UNZIP_EXCLUDE=""
+if [ "$SKIP_CLEAN" = true ]; then
+    exec_remote "$TARGET_HOST" "$TARGET_USER" "$TARGET_PASS" "$TARGET_KEY" "test -f ${TARGET_DIR}/deploy/systemd/genesis.json"
+    UNZIP_EXCLUDE="-x deploy/systemd/genesis.json"
+fi
 EXTRACT_SCRIPT=$(cat <<EOF
 set -e
 cd "${TARGET_DIR}"
-unzip -o -q "${ZIP_BASENAME}"
+unzip -o -q "${ZIP_BASENAME}" ${UNZIP_EXCLUDE}
 mkdir -p "${TARGET_DIR}/deploy/ansible"
 cp -f "${TARGET_DIR}/inventory.yml" "${TARGET_DIR}/deploy/ansible/inventory.yml"
 cp -f "${TARGET_DIR}/inventory.yml" "${TARGET_DIR}/deploy/inventory.yml"
@@ -512,16 +488,21 @@ EOF
 exec_remote "$TARGET_HOST" "$TARGET_USER" "$TARGET_PASS" "$TARGET_KEY" "$EXTRACT_SCRIPT"
 echo -e "   ${GREEN}✓ Đã giải nén và cập nhật inventory.yml thành công!${NC}"
 
-echo -e "\n   🚀 5. Thực thi lệnh 1: ${BOLD}./ansible_deploy.sh --gen-keys --prebuilt-bin${NC}..."
+echo -e "\n   🚀 5. Chuẩn bị Key & Genesis..."
 CMD1="cd ${TARGET_DIR}/deploy/ansible && ./ansible_deploy.sh --gen-keys --prebuilt-bin"
+if [ "$SKIP_CLEAN" = true ]; then
+    CMD1="test -f ${TARGET_DIR}/deploy/systemd/genesis.json"
+fi
 if ! exec_remote "$TARGET_HOST" "$TARGET_USER" "$TARGET_PASS" "$TARGET_KEY" "$CMD1"; then
     echo -e "\n${RED}❌ [THẤT BẠI] Lệnh sinh khóa (--gen-keys) bị lỗi trên ${TARGET_HOST}!${NC}"
     exit 1
 fi
-echo -e "   ${GREEN}✓ Sinh khóa và Genesis thành công!${NC}"
+echo -e "   ${GREEN}✓ Key và Genesis sẵn sàng (giữ nguyên khi --skip-clean).${NC}"
 
-echo -e "\n   🚀 6. Thực thi lệnh 2: ${BOLD}./ansible_deploy.sh --start --clean --open-ports --prebuilt-bin${NC}..."
-CMD2="cd ${TARGET_DIR}/deploy/ansible && ./ansible_deploy.sh --start --clean --open-ports --prebuilt-bin"
+echo -e "\n   🚀 6. Triển khai binary và cấu hình storage..."
+CLEAN_ARG=""
+[ "$SKIP_CLEAN" = true ] || CLEAN_ARG="--clean"
+CMD2="cd ${TARGET_DIR}/deploy/ansible && ./ansible_deploy.sh --start ${CLEAN_ARG} --open-ports --prebuilt-bin"
 if ! exec_remote "$TARGET_HOST" "$TARGET_USER" "$TARGET_PASS" "$TARGET_KEY" "$CMD2"; then
     echo -e "\n${RED}❌ [THẤT BẠI] Quá trình triển khai cụm node bị lỗi trên ${TARGET_HOST}!${NC}"
     exit 1

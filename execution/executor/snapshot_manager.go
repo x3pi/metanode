@@ -65,6 +65,7 @@ type SnapshotManager struct {
 
 	// State tracking
 	mu                 sync.Mutex
+	bgWg               sync.WaitGroup
 	epochBoundaryBlock uint64 // Block number khi epoch transition
 	currentEpoch       uint64 // Epoch hiện tại
 	lastSeenEpoch      uint64 // Epoch cuối cùng đã thấy (để phát hiện thay đổi)
@@ -109,6 +110,12 @@ type SnapshotManager struct {
 
 	// Callback to get the current RPC supported block
 	rpcSupportedBlockCallback func() uint64
+}
+
+// WaitForBackgroundTasks waits for all asynchronous background snapshot and tarball tasks to finish.
+// This prevents filesystem race conditions during shutdowns and unit test cleanup.
+func (sm *SnapshotManager) WaitForBackgroundTasks() {
+	sm.bgWg.Wait()
 }
 
 // SetRpcSupportedBlockCallback registers a callback to fetch the current RPC supported block.
@@ -363,7 +370,9 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 	sm.mu.Unlock()
 
 	// Tạo snapshot trong goroutine riêng để không block block processing
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		defer func() {
 			sm.mu.Lock()
 			sm.isCreating = false
@@ -779,7 +788,9 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	logger.Info("📸 [SNAPSHOT] ✅ %s snapshot created: %s (took %v)", strings.ToUpper(method), snapshotName, time.Since(startTime))
 
 	// Run background tarball packaging to prevent network download race conditions
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		tarStart := time.Now()
 		tarName := snapshotName + ".tar"
 		tarPath := filepath.Join(sm.snapshotBaseDir, tarName)
@@ -966,7 +977,9 @@ func (sm *SnapshotManager) ForceSnapshotNow(blockNumber uint64, epoch uint64) {
 	logger.Info("📸 [SNAPSHOT] 🔔 ForceSnapshotNow: Creating mandatory epoch boundary snapshot at block %d (epoch=%d)", blockNumber, epoch)
 
 	// Tạo snapshot trong goroutine để không block block processing
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		defer func() {
 			sm.mu.Lock()
 			sm.isCreating = false

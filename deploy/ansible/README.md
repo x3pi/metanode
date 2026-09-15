@@ -31,7 +31,8 @@ Dưới đây là danh sách đầy đủ các tham số cấu hình mà bạn c
 | `--start` | Được gọi tự động nếu chạy không tham số | Khởi động Node, cập nhật file chạy (binary) mới nhất. **Giữ nguyên** Dữ liệu (Database) và Chìa khóa (Keys). |
 | `--reset-all` | N/A | Chế độ cài mới. **Xóa sạch** toàn bộ Dữ liệu cũ, đúc lại bộ Chìa khóa/Genesis mới và khởi động mạng lưới mới tinh. |
 | `--stop` | N/A | Gửi lệnh dừng an toàn (Stop) đến toàn bộ các dịch vụ (Execution, Consensus, RPC Proxy) đang chạy. |
-| `--clean` | `false` | Ép hệ thống **Xóa sạch Database cũ** nhưng KHÔNG đúc lại chìa khóa (Keys) mới. Hữu ích khi bạn muốn reset Blockchain về block 0 nhưng vẫn giữ nguyên danh tính Node. Kết hợp: `--start --clean`. |
+| `--clean` | `false` | Ép hệ thống **Xóa sạch Database cũ** nhưng KHÔNG đúc lại chìa khóa (Keys) mới. Hữu ích khi bạn muốn reset Blockchain về block 0 nhưng vẫn giữ nguyên danh tính Node. Kết hợp: `--start --clean`. Với volume snapshot được quản lý, tạo lại filesystem theo `btrfs_size` khi toàn bộ node dùng chung nằm trong phạm vi clean. |
+| `--btrfs-size SIZE` | Lấy từ `btrfs_size` trong inventory, fallback `400G` | Tổng dung lượng BTRFS đích. Với `--start`: tăng và giữ dữ liệu; với `--start --clean`: tạo lại filesystem, xóa dữ liệu. Xem mục 2.2. |
 | `--only-node N` | `all` (Mặc định chạy trên tất cả các node) | Chỉ định thực hiện các thao tác (start, stop, reset) **DUY NHẤT** trên máy chủ chứa Node số `N`. |
 | `--restore-node N`| `none` (Không thực hiện khôi phục) | Cờ đặc biệt: Báo hiệu sẽ khôi phục dữ liệu cho Node `N`. Hệ thống sẽ tải Snapshot và giải nén vào thư mục `data`. Thường kết hợp với `--reset-all`. |
 | `--snapshot-url` | Rỗng (`""`) | Cung cấp đường link tải Snapshot (Ví dụ: `http://192.168.1.230:8604`). Bắt buộc đi kèm khi sử dụng `--restore-node`. |
@@ -93,6 +94,63 @@ Nếu bạn đã có sẵn file nhị phân (sinh ra từ `deploy/build_private_
 - ⚡ **Siêu tốc:** Bỏ qua toàn bộ thời gian biên dịch Rust/C++/Go (từ 5-10 phút xuống chỉ còn 1-2 giây đóng gói).
 - 📦 **Độc lập:** Người vận hành máy deploy không cần cài đặt Go, Cargo (Rust), C++ EVM compilers.
 - 🎯 **Nhất quán:** Đảm bảo binary chạy trên cụm server đúng 100% bản đã kiểm thử và đóng gói.
+
+---
+
+### 2.2. Tăng dung lượng BTRFS hoặc clean để tạo lại
+
+Chạy các lệnh dưới đây trong `deploy/ansible`. Dung lượng là **ổ đĩa lưu data/snapshot**, không phải RAM.
+`600G` là tổng dung lượng đích, không phải tăng thêm 600G.
+
+Trong host chứa node snapshot của `inventory.yml`, đặt:
+
+```yaml
+btrfs_size: "600G"
+```
+
+**Tăng lên 600G, giữ data và key/genesis của node 4:**
+
+```bash
+./ansible_deploy.sh --start --only-node 4 --btrfs-size 600G --prebuilt-bin
+```
+
+Không chạy lại `--gen-keys`. Node được dừng rồi khởi động lại theo luồng deploy.
+Nếu dung lượng đã đúng, script không resize lại; nếu yêu cầu nhỏ hơn hiện tại, script từ chối.
+Sau khi dùng cờ CLI, lưu kích thước mới vào inventory để lần sau không dùng lại kích thước cũ.
+
+**Xóa dữ liệu và tạo lại BTRFS ở 300G:**
+
+```bash
+./ansible_deploy.sh --start --clean --only-node 4 --btrfs-size 300G --prebuilt-bin
+```
+
+Lệnh này **xóa toàn bộ nội dung volume snapshot được chọn** rồi tạo filesystem mới,
+có thể lớn hoặc nhỏ hơn trước. `--start --clean` không sinh lại key/genesis.
+Nếu volume còn chứa node khác ngoài phạm vi clean, script dừng trước khi format.
+Không bỏ `--only-node` chỉ để vượt kiểm tra: bỏ cờ này sẽ clean toàn bộ node trong inventory.
+
+Chỉ hỗ trợ tự động cho image `/opt/metanode_cluster_btrfs.img` hoặc LV
+`ubuntu-vg/metanode_data`, dùng BTRFS một thiết bị tại `/mnt/metanode_snapshots`.
+`--restart` không resize; không có cờ `--resize` riêng. Kiểm tra trên máy chứa snapshot:
+
+```bash
+sudo btrfs filesystem show --raw /mnt/metanode_snapshots
+sudo btrfs filesystem usage /mnt/metanode_snapshots
+```
+
+**Nếu chạy qua script test**, sửa `btrfs_size` trong `deploy/test/inventory.yml`,
+rồi từ root repo chạy:
+
+```bash
+# Giữ data/key/genesis hiện có trên deployer, tăng storage nếu cần
+./deploy/test/test_remote_deploy.sh --skip-clean
+
+# Clean storage và sinh key/genesis cho chain test mới
+./deploy/test/test_remote_deploy.sh
+```
+
+Chi tiết giới hạn, dung lượng vật lý và lỗi cần xử lý:
+[DEPLOY_GUIDE.md — BTRFS snapshot](DEPLOY_GUIDE.md#6-tăng-dung-lượng-hoặc-tạo-lại-btrfs-snapshot).
 
 ---
 
@@ -183,9 +241,10 @@ Khi bạn chạy lệnh deploy với cờ `--all-monitors`:
 
 ### 3. `clean_data` (Dọn dẹp tùy chọn)
 - Nếu lệnh chạy của bạn giữ data (không có `--clean`/`--reset-all`), Ansible sẽ **bỏ qua (skip)** role này.
-- Nếu có, nó xóa sạch hai thư mục `data` và `logs` của từng node đích.
+- Nếu có, nó tạo lại volume BTRFS được quản lý khi đủ phạm vi node dùng chung, rồi xóa `data` và `logs` của từng node đích. Kiểm tra storage chạy trước khi dừng node; lỗi unmount/format/xóa làm deploy dừng.
 
 ### 4. `node_setup` (Phân phối cấu hình + BTRFS)
+- Tạo user `metanode` trước khi gán quyền storage; khi giữ data, tăng BTRFS hiện có theo `btrfs_size` và xác minh kích thước.
 - Giải nén tệp `metanode-deploy.tar.gz` trên remote server, đẩy đúng Keys vào đúng thư mục node.
 - Tự dò + mount phân vùng BTRFS cho node có `snapshot_enabled: true` (bind-mount `/mnt/metanode_snapshots/node-N` vào `data/`); **chặn cứng (fail)** nếu node cần snapshot mà máy không có BTRFS/XFS — thà dừng sớm còn hơn để node crash lúc runtime.
 
