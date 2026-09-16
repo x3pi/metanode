@@ -157,6 +157,16 @@ for dir_name in $LEVELDB_DIRS; do
     fi
 done
 
+if [ ! -d "$DST/data/data/consensus/xapian" ] || [ -z "$(ls -A "$DST/data/data/consensus/xapian" 2>/dev/null)" ]; then
+    if [ -d "$DOWNLOAD_DIR/consensus/xapian" ]; then
+        mkdir -p "$DST/data/data/consensus"
+        cp -a "$DOWNLOAD_DIR/consensus/xapian" "$DST/data/data/consensus/"
+    elif [ -d "$DOWNLOAD_DIR/db/consensus/xapian" ]; then
+        mkdir -p "$DST/data/data/consensus"
+        cp -a "$DOWNLOAD_DIR/db/consensus/xapian" "$DST/data/data/consensus/"
+    fi
+fi
+
 [ -d "$DOWNLOAD_DIR/other" ] && { mkdir -p "$DST/data"; cp -r "$DOWNLOAD_DIR/other" "$DST/data/"; }
 [ -f "$DOWNLOAD_DIR/metadata.json" ] && { cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/metadata.json" 2>/dev/null || true; cp -a "$DOWNLOAD_DIR/metadata.json" "$DST/data/data/metadata.json" 2>/dev/null || true; }
 if [ -d "$DOWNLOAD_DIR/back_up" ]; then cp -r "$DOWNLOAD_DIR/back_up/"* "$DST/back_up/" 2>/dev/null || true; fi

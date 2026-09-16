@@ -110,8 +110,9 @@ def plan(args):
         if stored - active:
             if not getattr(args, 'reset_all', False):
                 raise ValueError(f'Shared storage also contains nodes {sorted(stored - active)}; include them in clean')
-        if any(not re.fullmatch(r'node-\d+', p.name) or p.is_symlink() or not p.is_dir() for p in entries):
-            raise ValueError('Unknown entries in snapshot storage; refusing to format')
+        if not getattr(args, 'reset_all', False):
+            if any(not re.fullmatch(r'node-\d+', p.name) or p.is_symlink() or not p.is_dir() for p in entries):
+                raise ValueError('Unknown entries in snapshot storage; refusing to format')
         expected = {str(Path(args.install_dir) / f'node-{n}' / 'data') for n in active}
         for row in rows:
             if row['maj:min'] == root['maj:min'] and row['target'] != str(MOUNT):

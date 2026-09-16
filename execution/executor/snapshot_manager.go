@@ -163,6 +163,8 @@ func NewSnapshotManager(dataDir, snapshotBaseDir string, maxSnapshots, blocksAft
 			"executor_state",
 		},
 		xapianDirs: []string{
+			"consensus/xapian",
+			"xapian",
 			"xapian_node",
 			"other",
 		},
@@ -703,7 +705,8 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 					// "back_up" has also been explicitly handled in Phase 2.5/2.
 					// Copying them recursively here leads to redundant copies (double data size)
 					// and corrupted nested directory structures on restore.
-					if processedDirs[name] || name == "data" || name == "back_up" {
+					dataDirBase := filepath.Base(sm.dataDir)
+					if processedDirs[name] || name == "data" || name == "db" || name == dataDirBase || name == "back_up" || name == "backup" || name == "snapshots" || name == "logs" {
 						continue
 					}
 					srcPath := filepath.Join(sm.snapshotSourceDir, name)
