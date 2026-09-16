@@ -250,19 +250,33 @@ func (s *ExplorerSearchService) Commit() error {
 	var commitWg sync.WaitGroup
 	commitWg.Add(s.numShards)
 
+	// 2026-09 mục 22: this used to always `return nil` no matter what
+	// happened in the per-shard goroutines below -- goxapian.Database.Commit()
+	// itself used to be unable to report failure at all, so this was doubly
+	// silent. Both are fixed now; collect per-shard errors under a mutex
+	// (concurrent goroutines can't safely append to a shared slice/error
+	// without one) and return them joined so a caller actually finds out a
+	// shard's commit failed instead of believing every shard was flushed.
+	var mu sync.Mutex
+	var errs []error
+
 	for i := 0; i < s.numShards; i++ {
 		go func(shardIndex int) {
 			defer commitWg.Done()
 			s.locks[shardIndex].Lock()
 			defer s.locks[shardIndex].Unlock()
 			if s.dbs[shardIndex] != nil {
-				s.dbs[shardIndex].Commit()
+				if err := s.dbs[shardIndex].Commit(); err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("shard %d: %w", shardIndex, err))
+					mu.Unlock()
+				}
 			}
 		}(i)
 	}
 
 	commitWg.Wait()
-	return nil
+	return errors.Join(errs...)
 }
 
 // doIndexTransaction là hàm thực thi việc đánh chỉ mục, được gọi bởi các worker.
@@ -315,7 +329,11 @@ func (s *ExplorerSearchService) doIndexTransaction(job indexJob) error {
 	doc.SetData(jsonData)
 
 	uniqueTerm := "H" + hash // Sử dụng term định danh duy nhất dựa trên hash
-	db.ReplaceDocumentByTerm(uniqueTerm, doc)
+	// 2026-09 mục 22: ReplaceDocumentByTerm now reports failure instead of
+	// silently discarding it -- propagate rather than swallow.
+	if err := db.ReplaceDocumentByTerm(uniqueTerm, doc); err != nil {
+		return fmt.Errorf("could not index transaction %s into shard %d: %w", hash, shardIndex, err)
+	}
 	return nil
 }
 
