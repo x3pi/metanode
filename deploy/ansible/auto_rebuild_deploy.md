@@ -8,7 +8,7 @@ Tài liệu hướng dẫn sử dụng công cụ Git Auto-Deploy Watcher cho c�
 
 `auto_rebuild_deploy.sh` là daemon chạy ngầm định kỳ (mỗi 5 giây) kiểm tra commit mới trên Git remote:
 - **Khi vừa bật script:** Ghi nhận commit hiện tại của local làm mốc ban đầu, **KHÔNG restart server ngay**.
-- **Khi có commit mới trên remote:** Tự động `git pull`, kích hoạt `./ansible_deploy.sh --restart` và cập nhật mã commit đã deploy vào file `.last_deployed_commit` để tránh lặp lại.
+- **Khi có commit mới trên remote:** Tự động `git pull`, kích hoạt `./ansible_deploy.sh --start --fast` (rebuild và phân phối binary mới tới các node, giữ nguyên dữ liệu) và cập nhật mã commit đã deploy vào file `.last_deployed_commit` để tránh lặp lại.
 - **Hoàn toàn KHÔNG chạy test suites** (không tốn tài nguyên chạy benchmark TPS, spam hay chaos restart).
 
 ---
@@ -84,4 +84,4 @@ cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible
 
 - `auto_deploy.pid`: Lưu PID tiến trình daemon đang chạy.
 - `auto_deploy.log`: Lưu toàn bộ log kiểm tra và log deploy.
-- `.last_deployed_commit`: Lưu mã SHA-1 của commit đã restart gần nhất để đối chiếu.
+- `.last_deployed_commit`: Lưu mã SHA-1 của commit đã deploy gần nhất để đối chiếu.

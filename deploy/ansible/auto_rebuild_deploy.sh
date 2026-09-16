@@ -193,10 +193,10 @@ if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
     echo "✅ Initial deploy successful."
     echo "$LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
 else
-    # Mặc định: Ghi nhận commit hiện tại ở local làm mốc ban đầu, KHÔNG restart ngay
+    # Mặc định: Ghi nhận commit hiện tại ở local làm mốc ban đầu, KHÔNG deploy ngay
     echo "📌 Đã ghi nhận commit hiện tại ở local: ${LOCAL_HASH::8}"
     echo "$LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
-    echo "💡 Watcher sẽ chờ khi nào có commit mới từ remote (${REMOTE}/${BRANCH}) mới thực hiện pull và restart."
+    echo "💡 Watcher sẽ chờ khi nào có commit mới từ remote (${REMOTE}/${BRANCH}) mới thực hiện pull, build và cập nhật hệ thống."
 fi
 
 cd "$PROJECT_ROOT"
@@ -234,11 +234,11 @@ while true; do
             COMMIT_AUTHOR=$(git log -1 --pretty=%an)
             export DEPLOY_SOURCE="Auto-Deploy (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH::8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
             
-            echo "🚀 Kích hoạt restart hệ thống cho $DEPLOY_SOURCE..."
+            echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
             cd "$ANSIBLE_DIR"
-            ./ansible_deploy.sh --restart ${args[@]+"${args[@]}"}
+            ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}
             
-            # CẬP NHẬT COMMIT ĐÃ RESTART VÀO FILE ĐỂ KHÔNG RESTART LẶP LẠI
+            # CẬP NHẬT COMMIT ĐÃ DEPLOY VÀO FILE ĐỂ KHÔNG DEPLOY LẶP LẠI
             echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
             
             # Go back to root
