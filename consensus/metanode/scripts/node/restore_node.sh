@@ -296,6 +296,23 @@ for folder in "$SNAP_DIR"/*; do
       fi
   fi
 done
+
+if [ ! -d "$NODE_DATA/data/data/consensus/xapian" ] || [ -z "$(ls -A "$NODE_DATA/data/data/consensus/xapian" 2>/dev/null)" ]; then
+    if [ -d "$SNAP_DIR/consensus/xapian" ]; then
+        echo "    📦 Mapping Xapian database from consensus/xapian..."
+        mkdir -p "$NODE_DATA/data/data/consensus"
+        cp -a "$SNAP_DIR/consensus/xapian" "$NODE_DATA/data/data/consensus/"
+    elif [ -d "$SNAP_DIR/xapian" ]; then
+        echo "    📦 Mapping Xapian database from xapian..."
+        mkdir -p "$NODE_DATA/data/data/consensus"
+        cp -a "$SNAP_DIR/xapian" "$NODE_DATA/data/data/consensus/"
+    elif [ -d "$SNAP_DIR/db/consensus/xapian" ]; then
+        echo "    📦 Mapping Xapian database from db/consensus/xapian..."
+        mkdir -p "$NODE_DATA/data/data/consensus"
+        cp -a "$SNAP_DIR/db/consensus/xapian" "$NODE_DATA/data/data/consensus/"
+    fi
+fi
+
 # 🚨 CRITICAL: Keep `rust_consensus` imported from the snapshot to maintain alignment
 # between the execution state and consensus DAG state.
 # rm -rf "$NODE_DATA/data/data/consensus/rust_consensus" 2>/dev/null || true
