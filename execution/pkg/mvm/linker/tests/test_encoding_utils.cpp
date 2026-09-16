@@ -464,6 +464,85 @@ TEST_SUITE("readStringDynamic") {
 }
 
 // =====================================================================
+// Integer-overflow bounds-check regression tests (2026-09, Phuong an A
+// mục 22, "check kỹ luôn phần xapian trong mvm").
+//
+// Every bounds check in this file used to be `offset + needed >
+// buffer.size()`. On a 64-bit build, size_t is uint64_t, so an attacker-
+// supplied offset near SIZE_MAX makes `offset + needed` WRAP AROUND to a
+// small value, making an astronomically out-of-bounds offset look "in
+// bounds" to the check while the actual read still uses the real,
+// wrapped-around-only-during-the-check offset -- either landing back
+// in-bounds at an unintended byte (attacker picks which byte of the buffer
+// gets misread as something else) or genuinely out of the buffer's
+// allocated memory (undefined behavior: heap over-read, information
+// disclosure, or a crash) -- reachable directly from Xapian search
+// precompile calldata (see xapian_search.cpp's decodeSearchParams). Fixed
+// via boundsExceeded()'s subtract-after-checking-offset-first pattern.
+// These tests pin that fix: every one of them used to (or, for the ones
+// added purely for coverage, would) either wrongly succeed or invoke UB
+// under the old `offset + needed > size` check instead of cleanly
+// throwing std::out_of_range.
+// =====================================================================
+TEST_SUITE("integer_overflow_bounds_checks") {
+    TEST_CASE("readUint256: offset near SIZE_MAX throws instead of wrapping in-bounds") {
+        std::vector<uint8_t> buf(64, 0xAB);
+        size_t evil_offset = std::numeric_limits<size_t>::max() - 16; // +32 wraps to 15
+        CHECK_THROWS_AS(readUint256(buf, evil_offset), std::out_of_range);
+    }
+
+    TEST_CASE("readUint256AsUint64: offset near SIZE_MAX throws") {
+        std::vector<uint8_t> buf(64, 0);
+        size_t evil_offset = std::numeric_limits<size_t>::max() - 1; // +32 wraps to 30
+        CHECK_THROWS_AS(readUint256AsUint64(buf, evil_offset), std::out_of_range);
+    }
+
+    TEST_CASE("readUint64Padded: offset near SIZE_MAX throws") {
+        std::vector<uint8_t> buf(64, 0);
+        size_t evil_offset = std::numeric_limits<size_t>::max() - 20;
+        CHECK_THROWS_AS(readUint64Padded(buf, evil_offset), std::out_of_range);
+    }
+
+    TEST_CASE("readBoolPadded: offset near SIZE_MAX throws") {
+        std::vector<uint8_t> buf(64, 0);
+        size_t evil_offset = std::numeric_limits<size_t>::max() - 5;
+        CHECK_THROWS_AS(readBoolPadded(buf, evil_offset), std::out_of_range);
+    }
+
+    TEST_CASE("readBytesPadded: huge offset+len combination throws instead of wrapping") {
+        std::vector<uint8_t> buf(64, 0);
+        // offset itself is in-bounds-looking (small), but len is chosen so
+        // offset + len wraps around near SIZE_MAX -- the OLD check computed
+        // this sum first and could see it as small/in-bounds.
+        size_t offset = 10;
+        size_t evil_len = std::numeric_limits<size_t>::max() - 5; // offset+len wraps
+        CHECK_THROWS_AS(readBytesPadded(buf, offset, evil_len), std::out_of_range);
+    }
+
+    TEST_CASE("readStringFromData: huge offset+len combination throws instead of wrapping") {
+        std::vector<uint8_t> buf(64, 0);
+        size_t offset = 10;
+        size_t evil_len = std::numeric_limits<size_t>::max() - 5;
+        CHECK_THROWS_AS(readStringFromData(buf, offset, evil_len), std::out_of_range);
+    }
+
+    TEST_CASE("readStringDynamic: data_offset near SIZE_MAX (fits in uint64, "
+              "so readUint256AsUint64 does NOT hit its own sentinel) throws "
+              "instead of the +32 wrapping back in-bounds") {
+        // Build a buffer whose offset-pointer slot encodes SIZE_MAX-16 as a
+        // plain uint64 (top 24 bytes zero, so readUint256AsUint64 returns it
+        // as-is rather than its own overflow sentinel) -- this is exactly
+        // the shape of value a real uint256 calldata field can carry.
+        std::vector<uint8_t> buf(32, 0);
+        uint64_t evil = std::numeric_limits<uint64_t>::max() - 16;
+        for (int i = 0; i < 8; ++i) {
+            buf[31 - i] = static_cast<uint8_t>((evil >> (i * 8)) & 0xFF);
+        }
+        CHECK_THROWS_AS(readStringDynamic(buf, 0), std::out_of_range);
+    }
+}
+
+// =====================================================================
 // getPaddedSize
 // =====================================================================
 TEST_SUITE("getPaddedSize") {

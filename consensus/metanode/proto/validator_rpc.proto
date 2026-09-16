@@ -200,6 +200,21 @@ message GetBlocksRangeResponse {
 message SyncBlocksRequest {
     repeated BlockData blocks = 1;   // Blocks to sync
     bool execute_mode = 2;           // When true, Go executes blocks through NOMT (not just store)
+    // ARCHITECTURE FIX (2026-09-12, note/startup_sync_commit_index_import_fork_design_2026-09.md):
+    // When true, the caller has its OWN consensus DAG (a Validator, e.g. STARTUP-SYNC or
+    // stall_recovery catching up on a restart) and Go must NOT overwrite its own
+    // lastHandledCommitIndex/lastHandledCommitEpoch from these synced blocks' embedded
+    // header.CommitIndex() field -- that field is the SENDING peer's own node-local DAG
+    // round counter (see fork_guard.rs's doc comment: "two honest validators can commit
+    // the identical GEI/state via different local commit-round numbers"), not a value
+    // safe to adopt as this node's own. Importing it caused a real, live-reproduced fork
+    // (this node's `next_expected_index` aliased to the wrong commit in its own DAG).
+    // The caller's own CommitProcessor already knows how to safely resume from its last
+    // trusted local commit index and fast-skip already-executed GEI ranges (see
+    // executor.rs's GEI GUARD) -- it needs the block/state DATA from this sync, nothing
+    // more. Only a SyncOnly node (no DAG of its own) should leave this false, matching
+    // the historical behavior this field defaults to when unset.
+    bool preserve_own_commit_index = 3;
 }
 
 // SyncBlocksResponse - Response after syncing blocks

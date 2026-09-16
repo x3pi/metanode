@@ -148,7 +148,7 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 			c.hasEntryCache.Store(addrStr, true)
 		}
 
-		if !hasEntry {
+		if !hasEntry && blockNumber > 0 {
 			oldKey := c.encodeKey(change.Key, 0)
 			oldVal := change.OldValue
 			if len(oldVal) == 0 {

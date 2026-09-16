@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round};
@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{sort_sub_dag_blocks, Commit, CommittedSubDag, TrustedCommit, CommitAPI},
+    commit::{sort_sub_dag_blocks, Commit, CommitAPI, CommittedSubDag, TrustedCommit},
     context::Context,
     dag_state::DagState,
 };
@@ -67,6 +67,16 @@ pub struct Linearizer {
     /// FORK PREVENTION: We only commit when ALL blocks for a round are present.
     /// This list is processed first on each handle_commit call.
     deferred_leaders: Vec<(VerifiedBlock, Option<crate::commit::CertifiedCommit>)>,
+    /// FORK-SAFETY (2026-09-10): optional app-layer map of epoch -> (authority index ->
+    /// ETH address), used to embed a real, consensus-agreed leader_address directly into
+    /// a freshly-created Commit (see try_collect_sub_dag_and_commit below) instead of
+    /// leaving every node to independently re-resolve it later from its own local cache
+    /// state -- see note/consensus_local_dag_trust_gap_design_2026-09.md mục 8/8.5 for the
+    /// real, live divergence this closes (two nodes computed a different leader_address
+    /// for the identical commit). None in tests/benches that don't set it (via
+    /// set_epoch_eth_addresses) -- behaves exactly as before in that case.
+    epoch_eth_addresses:
+        Option<Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>>,
 }
 
 impl Linearizer {
@@ -81,7 +91,19 @@ impl Linearizer {
             dag_state_writer,
             epoch_base_index: 0,
             deferred_leaders: Vec::new(),
+            epoch_eth_addresses: None,
         }
+    }
+
+    /// Set the shared epoch_eth_addresses map used to embed leader_address into freshly
+    /// created Commits. Optional -- if never called, Linearizer behaves exactly as before
+    /// (leader_address left empty, resolved later downstream by CommitProcessor as
+    /// today). See the field's own doc comment.
+    pub fn set_epoch_eth_addresses(
+        &mut self,
+        epoch_eth_addresses: Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+    ) {
+        self.epoch_eth_addresses = Some(epoch_eth_addresses);
     }
 
     /// Set the epoch base index for global_exec_index calculation.
@@ -127,71 +149,78 @@ impl Linearizer {
         let last_commit_timestamp_ms = dag_state.last_commit_timestamp_ms();
 
         let start_linearize = std::time::Instant::now();
-        let (to_commit_blocks, timestamp_ms, final_commit) = if let Some(certified_commit) = precomputed_commit.as_ref() {
-            let mut blocks = certified_commit.blocks().to_vec();
-            crate::commit::sort_sub_dag_blocks(&mut blocks);
-            (Some(blocks), certified_commit.timestamp_ms(), Some(certified_commit.deref().clone()))
-        } else {
-            let blocks = Self::linearize_sub_dag(leader_block.clone(), &dag_state);
+        let (to_commit_blocks, timestamp_ms, final_commit) =
+            if let Some(certified_commit) = precomputed_commit.as_ref() {
+                let mut blocks = certified_commit.blocks().to_vec();
+                crate::commit::sort_sub_dag_blocks(&mut blocks);
+                (
+                    Some(blocks),
+                    certified_commit.timestamp_ms(),
+                    Some(certified_commit.deref().clone()),
+                )
+            } else {
+                let blocks = Self::linearize_sub_dag(leader_block.clone(), &dag_state);
 
-            // ═══════════════════════════════════════════════════════════════════════════
-            // COLD-START-GUARD: Multi-layer ancestor verification for local commits.
-            //
-            // Layer 1 (Guard 6 — ALWAYS ACTIVE):
-            //   Verify that all round-1 parent blocks REFERENCED by the leader are
-            //   present in the local DAG. If any referenced block is missing, the
-            //   median_timestamp_by_stake() will compute from a different input set.
-            //   This is safe at Genesis because by the time a leader is elected,
-            //   the referenced validators' blocks are always in the local DAG.
-            //
-            // Layer 2 (Guard 6a — ONLY AFTER RECOVERY, last_commit_index > 0):
-            //   Require full committee representation (all validators at round-1).
-            //   After snapshot recovery, the DAG may have a sparse set of blocks
-            //   at boundary rounds. If the leader only references 3/5 validators,
-            //   the median can differ from nodes that have the full 5/5 set.
-            //   SKIP at Genesis (commit_index==0): validators start at different
-            //   times so the leader naturally can't reference all of them.
-            //
-            // Layer 3 (Guard 6b — ONLY AFTER RECOVERY, last_commit_index > 0):
-            //   Deep ancestor check: verify ALL ancestors (not just round-1).
-            //   Missing blocks at older rounds can cause linearize_sub_dag to
-            //   produce a different sub-dag ordering.
-            //   SKIP at Genesis: older rounds don't exist yet.
-            // ═══════════════════════════════════════════════════════════════════════════
+                // ═══════════════════════════════════════════════════════════════════════════
+                // COLD-START-GUARD: Multi-layer ancestor verification for local commits.
+                //
+                // Layer 1 (Guard 6 — ALWAYS ACTIVE):
+                //   Verify that all round-1 parent blocks REFERENCED by the leader are
+                //   present in the local DAG. If any referenced block is missing, the
+                //   median_timestamp_by_stake() will compute from a different input set.
+                //   This is safe at Genesis because by the time a leader is elected,
+                //   the referenced validators' blocks are always in the local DAG.
+                //
+                // Layer 2 (Guard 6a — ONLY AFTER RECOVERY, last_commit_index > 0):
+                //   Require full committee representation (all validators at round-1).
+                //   After snapshot recovery, the DAG may have a sparse set of blocks
+                //   at boundary rounds. If the leader only references 3/5 validators,
+                //   the median can differ from nodes that have the full 5/5 set.
+                //   SKIP at Genesis (commit_index==0): validators start at different
+                //   times so the leader naturally can't reference all of them.
+                //
+                // Layer 3 (Guard 6b — ONLY AFTER RECOVERY, last_commit_index > 0):
+                //   Deep ancestor check: verify ALL ancestors (not just round-1).
+                //   Missing blocks at older rounds can cause linearize_sub_dag to
+                //   produce a different sub-dag ordering.
+                //   SKIP at Genesis: older rounds don't exist yet.
+                // ═══════════════════════════════════════════════════════════════════════════
 
-            // --- Guard 6: Referenced parent blocks must be present (unconditional) ---
-            let parent_refs = leader_block
-                .ancestors()
-                .iter()
-                .filter(|block_ref| block_ref.round == leader_block.round() - 1)
-                .cloned()
-                .collect::<Vec<_>>();
-            let parent_blocks = dag_state.get_blocks(&parent_refs);
-            let missing_parents = parent_refs.iter().zip(parent_blocks.iter()).filter(|(_pref, pblock)| {
-                pblock.is_none()
-            }).count();
-            if missing_parents > 0 {
-                tracing::warn!(
-                    "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
+                // --- Guard 6: Referenced parent blocks must be present (unconditional) ---
+                let parent_refs = leader_block
+                    .ancestors()
+                    .iter()
+                    .filter(|block_ref| block_ref.round == leader_block.round() - 1)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let parent_blocks = dag_state.get_blocks(&parent_refs);
+                let missing_parents = parent_refs
+                    .iter()
+                    .zip(parent_blocks.iter())
+                    .filter(|(_pref, pblock)| pblock.is_none())
+                    .count();
+                if missing_parents > 0 {
+                    tracing::warn!(
+                        "🛡️ [COLD-START-GUARD] ABORTING local commit for leader {:?}: \
                      {}/{} referenced round-{} ancestor blocks missing from DAG. \
                      Deferring to prevent timestamp divergence.",
-                    leader_block.reference(),
-                    missing_parents,
-                    parent_refs.len(),
-                    leader_block.round() - 1,
+                        leader_block.reference(),
+                        missing_parents,
+                        parent_refs.len(),
+                        leader_block.round() - 1,
+                    );
+                    return None;
+                }
+
+                let ts = Self::calculate_commit_timestamp(
+                    &self.context,
+                    &dag_state,
+                    &leader_block,
+                    last_commit_timestamp_ms,
                 );
-                return None;
-            }
 
-            let ts = Self::calculate_commit_timestamp(
-                &self.context,
-                &dag_state,
-                &leader_block,
-                last_commit_timestamp_ms,
-            );
-
-            (blocks, ts, None)
-        };
+                (blocks, ts, None)
+            };
 
         let linearize_elapsed = start_linearize.elapsed();
         if linearize_elapsed.as_millis() > 50 {
@@ -211,7 +240,9 @@ impl Linearizer {
         };
 
         // Check if this is a historical commit (already committed during previous epochs)
-        let is_historical = final_commit.as_ref().map_or(false, |fc| fc.index() <= last_commit_index);
+        let is_historical = final_commit
+            .as_ref()
+            .map_or(false, |fc| fc.index() <= last_commit_index);
 
         drop(dag_state);
 
@@ -238,18 +269,53 @@ impl Linearizer {
         } else {
             let commit_index = last_commit_index + 1;
             let global_exec_index = self.epoch_base_index + commit_index as u64;
+            let commit_blocks = to_commit
+                .iter()
+                .map(|block| block.reference())
+                .collect::<Vec<_>>();
 
-            let commit = Commit::new(
-                commit_index,
-                last_commit_digest,
-                timestamp_ms,
-                leader_block.reference(),
-                to_commit
-                    .iter()
-                    .map(|block| block.reference())
-                    .collect::<Vec<_>>(),
-                global_exec_index,
-            );
+            // FORK-SAFETY (2026-09-10): best-effort, NON-BLOCKING embed of the real
+            // leader_address into the digested Commit itself, so it becomes part of
+            // what quorum votes/DIGEST-GATE already cover instead of something every
+            // node independently re-resolves later from its own local cache. Uses
+            // try_read() deliberately -- this is the hot commit-creation path, so it
+            // must never block waiting on a lock. On any miss (no map set, this
+            // epoch not cached yet, index out of bounds, or a lock contention race)
+            // this just falls through to the exact same Commit::new(...) as before;
+            // CommitProcessor::resolve_leader_address (with its own, now-bounded-or-
+            // indefinite retry, see mục 8.5b) remains the safety net for that case,
+            // unchanged. See note/consensus_local_dag_trust_gap_design_2026-09.md
+            // mục 8.5 for the full design rationale.
+            let embedded_leader_address: Option<Vec<u8>> =
+                self.epoch_eth_addresses.as_ref().and_then(|map| {
+                    let guard = map.try_read().ok()?;
+                    let epoch = self.context.committee.epoch();
+                    let addrs = guard.get(&epoch)?;
+                    let idx = leader_block.reference().author.value();
+                    let addr = addrs.get(idx)?;
+                    (addr.len() == 20).then(|| addr.clone())
+                });
+
+            let commit = if let Some(leader_address) = embedded_leader_address {
+                Commit::new_with_leader_address(
+                    commit_index,
+                    last_commit_digest,
+                    timestamp_ms,
+                    leader_block.reference(),
+                    commit_blocks,
+                    global_exec_index,
+                    leader_address,
+                )
+            } else {
+                Commit::new(
+                    commit_index,
+                    last_commit_digest,
+                    timestamp_ms,
+                    leader_block.reference(),
+                    commit_blocks,
+                    global_exec_index,
+                )
+            };
             let serialized = commit
                 .serialize()
                 .unwrap_or_else(|e| panic!("Failed to serialize commit: {}", e));
@@ -333,26 +399,25 @@ impl Linearizer {
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
 
-            let uncommitted_ancestors: Vec<BlockRef> = x.ancestors()
+            let uncommitted_ancestors: Vec<BlockRef> = x
+                .ancestors()
                 .iter()
                 .copied()
-                .filter(|ancestor| {
-                    ancestor.round > gc_round && !dag_state.is_committed(ancestor)
-                })
+                .filter(|ancestor| ancestor.round > gc_round && !dag_state.is_committed(ancestor))
                 .collect();
-                
+
             let ancestor_blocks = dag_state.get_blocks(&uncommitted_ancestors);
-            
+
             for (idx, ancestor_opt) in ancestor_blocks.into_iter().enumerate() {
                 match ancestor_opt {
                     Some(ancestor) => {
                         if visited.insert(ancestor.reference()) {
                             buffer.push(ancestor);
                         }
-                    },
+                    }
                     None => {
                         let missing_ref = uncommitted_ancestors[idx];
-                        
+
                         tracing::warn!(
                             "⚠️ [LINEARIZER] FORK PREVENTION: Missing uncommitted ancestor block {:?} during linearization! \
                              Aborting sub-dag collection to prevent state divergence. Will retry when block arrives.", missing_ref
@@ -362,7 +427,7 @@ impl Linearizer {
                 }
             }
         }
-        
+
         assert!(
             to_commit.iter().all(|block| block.round() > gc_round),
             "No blocks <= {gc_round} should be committed. Leader round {}, blocks {to_commit:?}.",
@@ -395,14 +460,19 @@ impl Linearizer {
             std::mem::take(&mut self.deferred_leaders);
         let had_deferred = !all_leaders.is_empty();
 
-        let new_leaders_with_ts = committed_leaders.into_iter().enumerate().map(|(i, leader)| {
-            let commit = precomputed_commits.as_ref().map(|commits| commits[i].clone());
-            (leader, commit)
-        });
+        let new_leaders_with_ts = committed_leaders
+            .into_iter()
+            .enumerate()
+            .map(|(i, leader)| {
+                let commit = precomputed_commits
+                    .as_ref()
+                    .map(|commits| commits[i].clone());
+                (leader, commit)
+            });
         all_leaders.extend(new_leaders_with_ts);
 
         let gc_round = self.dag_state.read().gc_round();
-        
+
         // Filter out leaders that are <= gc_round.
         // This is crucial for handling cold-start fast-forwards, where gc_round
         // is synthetically advanced. Without this, the linearizer would panic
@@ -429,7 +499,8 @@ impl Linearizer {
 
         while let Some((leader_block, precomputed_ts)) = leaders_iter.next() {
             // Try to collect the sub-dag. Returns None if blocks are missing.
-            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts.clone()) {
+            match self.try_collect_sub_dag_and_commit(leader_block.clone(), precomputed_ts.clone())
+            {
                 Some((sub_dag, commit, is_historical)) => {
                     // Success! All blocks were available.
                     self.update_blocks_pruned_metric(&sub_dag);
@@ -576,7 +647,6 @@ fn median_timestamps_by_stake_inner(
         .expect("timestamps non-empty — empty case handled above")
         .0
 }
-
 
 #[cfg(test)]
 mod tests;

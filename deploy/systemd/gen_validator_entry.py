@@ -486,7 +486,6 @@ sudo ufw allow {metrics_port}/tcp comment 'Consensus Metrics'
 # Sync/Snapshot
 sudo ufw allow {snapshot_port}/tcp comment 'Snapshot Server'
 
-sudo ufw reload
 echo "Ports opened for {args.hostname}!"
 """
     ports_script_file = os.path.join(keys_dir, "open_ports.sh")

@@ -22,7 +22,8 @@ pub static FFI_TX_SENDER: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<Vec
 /// today's chaos-restart CI test: a node that just restarted answers `eth_blockNumber` (plain RPC
 /// liveness) within seconds, well before ConsensusCoordinationHub reaches a phase that actually
 /// accepts proposals (Healthy + RecoveryBarrier Ready/Inactive -- see
-/// coordination_hub.rs's `should_skip_proposal()`, the existing authoritative check this reuses).
+/// coordination_hub.rs's `is_ready_for_new_transactions()`, the authoritative check this reuses;
+/// note that's a STRICTER check than `should_skip_proposal()`, mục 22's fix, see its doc comment).
 /// A client/test-script that only checks "does RPC answer" sends a transaction into that window
 /// and gets an unexplained 45s timeout with no diagnostic -- exactly what this exists to prevent.
 ///
@@ -49,6 +50,76 @@ pub fn set_global_coordination_hub(hub: consensus_core::coordination_hub::Consen
     }
 }
 
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): a Handle to the running consensus Tokio
+/// runtime, so a plain synchronous FFI call from Go's own thread (no ambient tokio context of
+/// its own) can `Handle::block_on` an async task on it -- see `metanode_attest_payload_loss`.
+/// Re-stashed on every (re)build of the runtime (same rationale as GLOBAL_COORDINATION_HUB's
+/// doc comment) so this never points at a stale, already-shut-down runtime after a restart.
+pub static GLOBAL_TOKIO_HANDLE: std::sync::RwLock<Option<tokio::runtime::Handle>> =
+    std::sync::RwLock::new(None);
+
+pub fn set_global_tokio_handle(handle: tokio::runtime::Handle) {
+    match GLOBAL_TOKIO_HANDLE.write() {
+        Ok(mut guard) => *guard = Some(handle),
+        Err(poisoned) => *poisoned.into_inner() = Some(handle),
+    }
+}
+
+/// RESUBMIT-DON'T-DISCARD (2026-09-11, per user request): a handle to the live
+/// `TransactionClientProxy` (already epoch-transition-safe -- see tx_submitter.rs's own doc
+/// comment, it swaps its inner client under the hood so this reference never goes stale across
+/// an epoch boundary), so `block_sending.rs`'s certified-skip path can resubmit a transaction
+/// this node still happens to have cached, when a quorum certificate has excluded it from ONE
+/// specific commit. Kept as a bare global here (not threaded through `ExecutorClient`'s
+/// constructor) for the same reason GLOBAL_COORDINATION_HUB/GLOBAL_TOKIO_HANDLE are: the
+/// alternative is a new constructor parameter at every one of ExecutorClient's existing call
+/// sites for a rarely-used, best-effort path. Re-stashed every time setup_consensus (first boot)
+/// or mode_transition (epoch/mode change) (re)creates the proxy, same rationale as the other
+/// globals here.
+pub static GLOBAL_TX_RESUBMIT_CLIENT: std::sync::RwLock<
+    Option<std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>>,
+> = std::sync::RwLock::new(None);
+
+pub fn set_global_tx_resubmit_client(
+    client: std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>,
+) {
+    match GLOBAL_TX_RESUBMIT_CLIENT.write() {
+        Ok(mut guard) => *guard = Some(client),
+        Err(poisoned) => *poisoned.into_inner() = Some(client),
+    }
+}
+
+pub fn get_global_tx_resubmit_client(
+) -> Option<std::sync::Arc<crate::node::tx_submitter::TransactionClientProxy>> {
+    match GLOBAL_TX_RESUBMIT_CLIENT.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// PEER-BLOCK RECOVERY (2026-09-11): this node's configured `peer_rpc_addresses` (the
+/// lightweight custom HTTP peer-RPC protocol used by network::peer_rpc -- a different,
+/// separate transport from the tonic/gRPC NetworkClient used for DAG-level peer calls like
+/// fetch_transactions/attest_payload_loss), stashed once at startup so
+/// executor_client/block_sending.rs's payload-loss recovery path can reach
+/// network::peer_rpc::fetch_executable_blocks_from_peer without needing this threaded through
+/// every one of ExecutorClient::new's ~16 call sites. Source of truth is still
+/// NodeConfig::peer_rpc_addresses (config.rs) -- this is just a process-wide read-only copy of
+/// it, set once where that config is first in scope (setup_storage.rs), not re-derived.
+pub static GLOBAL_PEER_RPC_ADDRESSES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Idempotent: only the first call actually sets it (matches the "static config for the
+/// process's lifetime" nature of peer_rpc_addresses -- unlike GLOBAL_COORDINATION_HUB/
+/// GLOBAL_TOKIO_HANDLE, this never needs to change across an epoch transition or internal FFI
+/// restart, so a plain OnceLock -- not a RwLock<Option<...>> -- is the right, simpler fit).
+pub fn set_global_peer_rpc_addresses(addresses: Vec<String>) {
+    let _ = GLOBAL_PEER_RPC_ADDRESSES.set(addresses);
+}
+
+pub fn get_global_peer_rpc_addresses() -> Vec<String> {
+    GLOBAL_PEER_RPC_ADDRESSES.get().cloned().unwrap_or_default()
+}
+
 /// FFI entry point for Go's `eth_syncing` handler (MetaAPI.Syncing() in rpc_state.go).
 /// Returns true when this node's consensus layer would actually accept/propose a transaction
 /// right now, false otherwise (still initializing/bootstrapping/catching-up/state-syncing, or no
@@ -60,7 +131,10 @@ pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
         Err(poisoned) => poisoned.into_inner(),
     };
     match guard.as_ref() {
-        Some(hub) => !hub.should_skip_proposal(),
+        // ROOT-CAUSE FIX (2026-09-15, mục 22): was `!hub.should_skip_proposal()`, which also
+        // treats CatchingUp as ready -- see `is_ready_for_new_transactions`'s doc comment in
+        // coordination_hub.rs for why that's wrong for this specific, externally-facing signal.
+        Some(hub) => hub.is_ready_for_new_transactions(),
         None => false,
     }
 }
@@ -222,21 +296,311 @@ pub extern "C" fn metanode_resume_consensus() {
     }
 }
 
-/// Call into Go to get the exact final StateRoot
-pub fn get_go_state_root() -> String {
-    if let Some(callbacks) = GO_CALLBACKS.get() {
-        if let Some(func) = callbacks.get_state_root {
-            let ptr = func();
-            if !ptr.is_null() {
-                let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
-                if let Some(free_func) = callbacks.free_go_buffer {
-                    free_func(ptr as *mut u8);
+/// Call into Go to get the exact final StateRoot.
+///
+/// ROOT-CAUSE FIX (2026-09-15, same finding as `block_sending.rs`/`sync_loop.rs` --
+/// see mục 21's node-1 incident): this used to call the `get_state_root` FFI callback
+/// directly on the calling task's tokio worker thread. Every call site is inside an
+/// async fn (health checks, startup-sync verification, and -- most frequently --
+/// every peer's `/peer_info` handler), and a CGo call is non-preemptible, so if Go's
+/// implementation ever needs to recompute rather than return a cached value, this
+/// could occupy a worker thread for as long as that takes. `spawn_blocking` moves it
+/// to tokio's separate blocking-thread-pool so it can never itself contribute to
+/// starving the core runtime.
+pub async fn get_go_state_root() -> String {
+    tokio::task::spawn_blocking(|| {
+        if let Some(callbacks) = GO_CALLBACKS.get() {
+            if let Some(func) = callbacks.get_state_root {
+                let ptr = func();
+                if !ptr.is_null() {
+                    let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+                    if let Some(free_func) = callbacks.free_go_buffer {
+                        free_func(ptr as *mut u8);
+                    }
+                    return s;
                 }
-                return s;
             }
         }
+        String::new()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): operator-triggered entry point. NOT called
+/// automatically from anywhere -- an operator invokes this (via whatever thin CLI/admin wrapper
+/// calls into this FFI boundary) only after `CONSENSUS-HALT-TX-PAYLOAD-LOST` (block_delivery.rs
+/// mục 10) has been showing for this exact commit for a genuinely long time, per mục 11.2
+/// point 6 of note/consensus_local_dag_trust_gap_design_2026-09.md -- never on a short
+/// automatic timeout, since that risks treating a transient network partition as confirmed
+/// permanent loss.
+///
+/// `tx_digest_hex` must be exactly `2 * DIGEST_LENGTH` hex characters (no `0x` prefix).
+/// Returns:
+///   0 = quorum-certified as permanently lost; the certified-skip list has been updated, and
+///       the stuck delivery retry loop (block_delivery.rs) will pick this up and proceed on
+///       its next attempt (within ~10s) without needing anything else from the operator.
+///   1 = recovered instead -- a peer (or this node itself) actually still had the payload; it
+///       has been inserted into the local TxPayloadCache, no skip was needed or applied.
+///   2 = insufficient stake attested so far to reach quorum -- see the log line this prints
+///       for exactly how much stake responded "confirmed missing" vs. how much is needed; the
+///       operator may re-run this later once more peers are reachable, or investigate why they
+///       aren't.
+///  -1 = could not run at all (bad input, or this node's consensus isn't up yet -- e.g. no
+///       committee/network client wired, same precondition TxFetcherFn already documents).
+#[no_mangle]
+pub extern "C" fn metanode_attest_payload_loss(
+    commit_index: u32,
+    tx_digest_hex: *const std::os::raw::c_char,
+) -> i32 {
+    if tx_digest_hex.is_null() {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] metanode_attest_payload_loss: null tx_digest_hex");
+        return -1;
     }
-    String::new()
+    let hex_str = match unsafe { std::ffi::CStr::from_ptr(tx_digest_hex) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            error!("🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex is not valid UTF-8");
+            return -1;
+        }
+    };
+    let digest_bytes = match hex::decode(hex_str) {
+        Ok(b) if b.len() == consensus_config::DIGEST_LENGTH => b,
+        Ok(b) => {
+            error!(
+                "🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex has {} bytes, expected {}",
+                b.len(), consensus_config::DIGEST_LENGTH
+            );
+            return -1;
+        }
+        Err(e) => {
+            error!("🛑 [PAYLOAD-LOSS-SKIP] tx_digest_hex is not valid hex: {}", e);
+            return -1;
+        }
+    };
+    let mut digest_arr = [0u8; consensus_config::DIGEST_LENGTH];
+    digest_arr.copy_from_slice(&digest_bytes);
+    let tx_digest = consensus_types::block::TxDigest(digest_arr);
+
+    let collector = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().and_then(|hub| hub.get_payload_loss_collector())
+    };
+    let Some(collector) = collector else {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] No payload-loss collector wired yet -- consensus may not be \
+             fully started. Try again shortly."
+        );
+        return -1;
+    };
+    let committee = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .as_ref()
+            .and_then(|hub| hub.get_committee_for_payload_loss())
+    };
+    let Some(committee) = committee else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No committee available yet -- consensus may not be fully started.");
+        return -1;
+    };
+
+    let handle = {
+        let guard = match GLOBAL_TOKIO_HANDLE.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No tokio runtime handle available yet.");
+        return -1;
+    };
+
+    let claim = consensus_core::payload_loss_attestation::PayloadLossClaim {
+        commit_index,
+        tx_digest,
+    };
+    info!(
+        "🔎 [PAYLOAD-LOSS-SKIP] Operator-triggered attestation collection starting for \
+         commit_index={} tx_digest=0x{}...",
+        commit_index, hex_str
+    );
+    let result = handle.block_on(collector(claim.clone(), std::time::Duration::from_secs(10)));
+    apply_collection_result(result, &committee, commit_index, hex_str)
+}
+
+/// Shared by `metanode_attest_payload_loss` and `metanode_attest_payload_loss_for_commit`:
+/// turns one already-awaited `PayloadLossCollectionResult` into the documented 0/1/2/-1 return
+/// code, doing the certificate re-verification + recording + logging either function needs.
+fn apply_collection_result(
+    result: consensus_core::payload_loss_attestation::PayloadLossCollectionResult,
+    committee: &consensus_config::Committee,
+    commit_index: u32,
+    hex_str: &str,
+) -> i32 {
+    use consensus_core::payload_loss_attestation::PayloadLossCollectionResult;
+    match result {
+        PayloadLossCollectionResult::Recovered => {
+            info!(
+                "✅ [PAYLOAD-LOSS-SKIP] Recovered -- a peer (or this node) actually had the \
+                 payload for commit_index={} tx_digest=0x{}, no skip needed.",
+                commit_index, hex_str
+            );
+            1
+        }
+        PayloadLossCollectionResult::Certified(certificate) => {
+            if let Err(e) = certificate.verify(committee) {
+                error!(
+                    "🛑 [PAYLOAD-LOSS-SKIP] BUG: collector returned a certificate that fails its \
+                     own re-verification: {}. NOT applying it.",
+                    e
+                );
+                return -1;
+            }
+            consensus_core::payload_loss_attestation::record_certified_skip(certificate);
+            info!(
+                "🛑✅ [PAYLOAD-LOSS-SKIP-CERTIFIED] Quorum-certified permanent loss for \
+                 commit_index={} tx_digest=0x{} -- recorded. The stuck delivery retry loop will \
+                 pick this up and skip this transaction within ~10s.",
+                commit_index, hex_str
+            );
+            0
+        }
+        PayloadLossCollectionResult::Insufficient { attested_missing_stake, quorum_needed } => {
+            error!(
+                "⏳ [PAYLOAD-LOSS-SKIP] Not enough stake attested yet for commit_index={} \
+                 tx_digest=0x{}: {} of {} needed. Re-run later once more peers are reachable.",
+                commit_index, hex_str, attested_missing_stake, quorum_needed
+            );
+            2
+        }
+    }
+}
+
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP, whole-commit convenience wrapper (2026-09-11): a single
+/// commit's subdag can reference blocks from SEVERAL different authors, each carrying its own
+/// transactions -- so more than one digest can be missing at once for the same halted commit
+/// (reproduced live: a commit spanning 2 authors' blocks had 8 distinct missing digests). Before
+/// this, an operator had to grep CONSENSUS-HALT-TX-PAYLOAD-LOST's log line for the ONE digest
+/// name it prints (the first missing one `build_sorted_transactions` happens to hit), call
+/// `metanode_attest_payload_loss` for it, then discover from the retry loop STILL not resuming
+/// that there were more, repeating one at a time -- exactly the tedious, error-prone manual hunt
+/// the user asked to have handled automatically instead.
+///
+/// This reuses `STUCK_CLAIMS` (payload_loss_attestation.rs) -- the SAME registry
+/// `deliver_with_halt_retry` already populates with every digest it has found missing for a
+/// commit, and that peer attestation itself already relies on for fork-safety -- to discover the
+/// full set in one call, then certifies each one exactly as `metanode_attest_payload_loss` would.
+/// No new tracking was needed; this only adds a way to enumerate and drive what the system
+/// already knows.
+///
+/// Returns:
+///   0  = every claim currently stuck on this node for this commit is now resolved (certified
+///        skip and/or recovered) -- the retry loop should proceed within ~10s.
+///   1  = nothing was stuck for this commit on this node right now (already resolved by the
+///        time this ran, or this node was never stuck on it in the first place).
+///   2  = at least one claim still has insufficient attested stake -- re-run once more peers are
+///        reachable; claims that DID succeed this run are still recorded, only the remaining
+///        ones need a retry.
+///  -1  = could not run at all (same preconditions as `metanode_attest_payload_loss`), or at
+///        least one claim hit a hard error (e.g. a certificate that failed its own
+///        re-verification -- see the log for which).
+#[no_mangle]
+pub extern "C" fn metanode_attest_payload_loss_for_commit(commit_index: u32) -> i32 {
+    let collector = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().and_then(|hub| hub.get_payload_loss_collector())
+    };
+    let Some(collector) = collector else {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] No payload-loss collector wired yet -- consensus may not be \
+             fully started. Try again shortly."
+        );
+        return -1;
+    };
+    let committee = {
+        let guard = match GLOBAL_COORDINATION_HUB.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .as_ref()
+            .and_then(|hub| hub.get_committee_for_payload_loss())
+    };
+    let Some(committee) = committee else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No committee available yet -- consensus may not be fully started.");
+        return -1;
+    };
+    let handle = {
+        let guard = match GLOBAL_TOKIO_HANDLE.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        error!("🛑 [PAYLOAD-LOSS-SKIP] No tokio runtime handle available yet.");
+        return -1;
+    };
+
+    let claims = consensus_core::payload_loss_attestation::stuck_claims_for_commit(commit_index);
+    if claims.is_empty() {
+        info!(
+            "✅ [PAYLOAD-LOSS-SKIP] No claims currently stuck for commit_index={} on this node \
+             -- already resolved, or this node was never stuck on it.",
+            commit_index
+        );
+        return 1;
+    }
+    info!(
+        "🔎 [PAYLOAD-LOSS-SKIP] Found {} claim(s) currently stuck for commit_index={} -- \
+         attesting every one in this single admin action.",
+        claims.len(), commit_index
+    );
+
+    let codes: Vec<i32> = handle.block_on(async {
+        let mut codes = Vec::with_capacity(claims.len());
+        for claim in claims {
+            let hex_str = hex::encode(claim.tx_digest.0);
+            let result = collector(claim.clone(), std::time::Duration::from_secs(10)).await;
+            codes.push(apply_collection_result(result, &committee, commit_index, &hex_str));
+        }
+        codes
+    });
+
+    if codes.iter().any(|&c| c == -1) {
+        error!(
+            "🛑 [PAYLOAD-LOSS-SKIP] commit_index={}: at least one claim hit a hard error -- see \
+             the log lines above for which digest(s). Re-run once resolved.",
+            commit_index
+        );
+        -1
+    } else if codes.iter().any(|&c| c == 2) {
+        error!(
+            "⏳ [PAYLOAD-LOSS-SKIP] commit_index={}: {} of {} claim(s) still need more attested \
+             stake -- the rest were resolved and recorded. Re-run once more peers are reachable.",
+            commit_index,
+            codes.iter().filter(|&&c| c == 2).count(),
+            codes.len()
+        );
+        2
+    } else {
+        info!(
+            "✅ [PAYLOAD-LOSS-SKIP] commit_index={}: all {} claim(s) resolved. The retry loop \
+             should proceed within ~10s.",
+            commit_index, codes.len()
+        );
+        0
+    }
 }
 
 /// Returns the current number of items in the FFI TX queue.
@@ -258,6 +622,13 @@ pub extern "C" fn metanode_init_rocksdb(data_dir: *const std::os::raw::c_char) {
     if let Ok(dir) = c_str.to_str() {
         let path = format!("{}/rocksdb_dummy_init", dir);
         let _ = std::panic::catch_unwind(|| {
+            // Create a temporary Tokio runtime to prevent typed-store from panicking
+            // because it tries to spawn a metrics reporting task on initialization.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _guard = rt.enter();
             let _ = consensus_core::storage::rocksdb_store::RocksDBStore::new(&path);
         });
     }
@@ -423,7 +794,6 @@ pub unsafe extern "C" fn metanode_start_consensus(
             );
         }));
 
-
 /// Custom writer that forwards Rust tracing logs to Go logger via CGo callback with dynamic log levels
 struct GoLogWriter {
     level: i32,
@@ -456,15 +826,16 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
     type Writer = GoLogWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        GoLogWriter { level: 1 } // Default to Info
+        GoLogWriter { level: 1 }
     }
 
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
         let level = match *meta.level() {
-            tracing::Level::ERROR => 3,
-            tracing::Level::WARN => 2,
+            tracing::Level::TRACE => 0,
+            tracing::Level::DEBUG => 0,
             tracing::Level::INFO => 1,
-            tracing::Level::DEBUG | tracing::Level::TRACE => 0,
+            tracing::Level::WARN => 2,
+            tracing::Level::ERROR => 3,
         };
         GoLogWriter { level }
     }
@@ -508,6 +879,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
         // rebuilds a fresh Tokio runtime (cheap, and already what every iteration of the inner
         // loop implicitly relies on via "fresh Registry each loop") and tries again, instead of
         // ending the process's Rust consensus life for good.
+        //
+        // LIVENESS WATCHDOG (2026-09-15, mục 21 UPDATE 4): started once here, outside the outer
+        // restart loop, so it keeps watching across a runtime rebuild (this OS thread has no
+        // dependency on any particular tokio runtime instance). See liveness_watchdog.rs -- this
+        // is the halt-rather-than-guess safety net for the still-open total-runtime-freeze
+        // investigation, bounding a freeze's damage to its configured timeout instead of
+        // requiring a human to notice and run `systemctl restart` by hand, as happened live 3x.
+        crate::liveness_watchdog::ensure_started();
         let mut outer_restart_count: u32 = 0;
         loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -551,8 +930,19 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
                     return;
                 }
             };
+            // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): stash a Handle to this runtime
+            // so metanode_attest_payload_loss (a plain sync FFI call from Go's own thread, no
+            // ambient tokio context of its own) can `Handle::block_on` the async collector.
+            // Re-stashed on every (re)build of this runtime, same rationale as
+            // set_global_coordination_hub's doc comment.
+            crate::ffi::set_global_tokio_handle(rt.handle().clone());
 
             rt.block_on(async {
+                // LIVENESS WATCHDOG (mục 21 UPDATE 4): publish the heartbeat this runtime's
+                // watchdog thread checks. Respawned on every (re)built runtime -- the previous
+                // heartbeat task, if any, died along with its own runtime.
+                crate::liveness_watchdog::spawn_heartbeat_task();
+
                 let mut restart_count = 0u32;
 
                 loop {
@@ -660,16 +1050,55 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GoLogMakeWriter {
             }
             Err(e) => {
                 outer_restart_count += 1;
+
+                // GIVE-UP-AND-LET-SYSTEMD-RESTART (2026-09-10): found live, same cluster, same
+                // day, verifying the DIGEST-GATE/PERMANENT-GAP-RECOVERY work above -- node-0 hit
+                // the exact RocksDB "lock hold by current process" panic this loop already knows
+                // about, but this time the SAME-PROCESS in-place recovery (rebuild Tokio runtime,
+                // retry) never worked at all: 6 outer attempts, ~6+ minutes, growing backoff
+                // maxed out at 60s each -- zero progress. Only an actual `systemctl restart`
+                // (killing the whole OS process, not just this Tokio runtime) fixed it. Root
+                // cause not fully confirmed (plausible: a raw OS thread from an earlier attempt,
+                // outside Tokio's own tracked pool, stuck holding the on-disk LOCK file forever,
+                // which rebuilding the runtime here has no way to reach or terminate) -- but the
+                // empirical fix is unambiguous: rebuilding-in-place has a real, observed ceiling
+                // past which it never recovers, while a real process restart reliably does.
+                //
+                // Fix: past a bounded number of in-place attempts, stop trying to self-heal
+                // inside this process and exit cleanly instead, letting systemd's own
+                // `Restart=on-failure` (RestartSec=15s, see metanode-execution.service.j2) do a
+                // real process restart -- which this session confirmed actually works, unlike
+                // continuing to loop here. `std::process::exit`, not a panic/abort: a controlled,
+                // intentional exit, not an uncontrolled unwind through Go's side of this same OS
+                // process. If the SAME problem recurs across multiple real restarts in a row,
+                // systemd's own circuit breaker (StartLimitBurst=5 / StartLimitIntervalSec=300)
+                // takes over and leaves the unit stopped rather than restart-looping forever --
+                // at that point this needs a human, which is the correct outcome for a problem
+                // that survives an actual process restart, not something this loop should keep
+                // guessing at indefinitely.
+                const MAX_IN_PROCESS_RESTARTS: u32 = 3;
+                if outer_restart_count >= MAX_IN_PROCESS_RESTARTS {
+                    eprintln!(
+                        "🚨🚨🚨 [RUST FFI] Consensus engine panicked {} times in this process \
+                         with zero progress (latest: {:?}). Giving up on in-process recovery -- \
+                         exiting so systemd restarts the whole process fresh (Restart=on-failure, \
+                         15s). If this keeps recurring across real restarts, systemd's own \
+                         StartLimitBurst will stop the unit and this needs an operator.",
+                        outer_restart_count, e
+                    );
+                    std::process::exit(1);
+                }
+
                 // Same growing-backoff shape as the inner loop's own FFI RESTART backoff (see
                 // its comment) -- reusing the reasoning: a flat/short wait was consistently not
                 // enough for a same-process RocksDB LOCK file (and whatever else was mid-
                 // teardown) to actually finish releasing before the next attempt.
                 let backoff_secs = (10 * outer_restart_count.min(6)).min(60) as u64;
                 eprintln!(
-                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}): {:?}. \
+                    "🚨 [RUST FFI] Consensus engine panicked (outer restart #{}/{}): {:?}. \
                      Rebuilding the Tokio runtime and retrying in {}s instead of leaving Rust \
                      consensus permanently dead for the rest of this process's life.",
-                    outer_restart_count, e, backoff_secs
+                    outer_restart_count, MAX_IN_PROCESS_RESTARTS, e, backoff_secs
                 );
                 // DO NOT re-panic — that would abort() the Go process.
                 // Blocking sleep is fine here: the Tokio runtime that panicked has already been

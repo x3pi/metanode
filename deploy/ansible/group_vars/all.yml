@@ -52,3 +52,8 @@ verify_device_key: false
 # Alertmanager version installed by roles/alertmanager (see its tasks/main.yml for the
 # download URL pattern). Pin explicitly rather than "latest" so a deploy run is reproducible.
 alertmanager_version: "0.27.0"
+
+# Prebuilt binary deployment options (true = skip compilation, use existing binaries)
+ansible_use_prebuilt: false
+ansible_prebuilt_bin_dir: ""
+

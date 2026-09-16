@@ -43,7 +43,7 @@ impl PostRecoveryHealthCheck {
             return result;
         }
 
-        let local_root = crate::ffi::get_go_state_root();
+        let local_root = crate::ffi::get_go_state_root().await;
         
         // Fetch local info
         let (local_block, local_gei, _, _, _) = self.executor_client.get_last_block_number().await.unwrap_or((0, 0, false, [0u8; 32], 0));

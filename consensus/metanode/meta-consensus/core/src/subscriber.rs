@@ -8,7 +8,7 @@ use consensus_types::block::Round;
 use futures::StreamExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::{task::JoinHandle, time::sleep};
-use tracing::{error, info};
+use tracing::{info, warn};
 
 use crate::{
     block::BlockAPI as _,
@@ -57,7 +57,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
 
     pub(crate) fn subscribe(&self, peer: AuthorityIndex) {
         if peer == self.context.own_index {
-            error!("Attempt to subscribe to own validator {peer} is ignored!");
+            warn!("Attempt to subscribe to own validator {peer} is ignored!");
             return;
         }
         let context = self.context.clone();
@@ -83,9 +83,9 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
 
         let mut subscriptions = self.subscriptions.lock();
         self.unsubscribe_locked(peer, &mut subscriptions[peer.value()]);
-        
+
         let coordination_hub = self.coordination_hub.clone();
-        
+
         subscriptions[peer.value()] = Some(tokio::spawn(Self::subscription_loop(
             context,
             network_client,
@@ -167,7 +167,9 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 Ok(blocks) => {
                     tracing::warn!(
                         "Subscribed to peer {} {} after {} attempts",
-                        peer, peer_hostname, retries
+                        peer,
+                        peer_hostname,
+                        retries
                     );
                     context
                         .metrics
@@ -180,7 +182,9 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 Err(e) => {
                     tracing::warn!(
                         "Failed to subscribe to blocks from peer {} {}: {}",
-                        peer, peer_hostname, e
+                        peer,
+                        peer_hostname,
+                        e
                     );
                     context
                         .metrics
@@ -229,7 +233,10 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                 | ConsensusError::InvalidGenesisAncestor(_) => {
                                     let is_recovering = coordination_hub
                                         .as_ref()
-                                        .map(|hub| hub.is_startup_sync_active() || hub.recovery_barrier().is_active())
+                                        .map(|hub| {
+                                            hub.is_startup_sync_active()
+                                                || hub.recovery_barrier().is_active()
+                                        })
                                         .unwrap_or(false);
 
                                     if is_recovering {
@@ -251,7 +258,8 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                 ConsensusError::Shutdown => {
                                     tracing::warn!(
                                         "Subscriber block handler shut down for peer {} {}",
-                                        peer, peer_hostname
+                                        peer,
+                                        peer_hostname
                                     );
                                     break 'stream;
                                 }
@@ -269,7 +277,8 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                     None => {
                         tracing::warn!(
                             "Subscription to blocks from peer {} {} ended",
-                            peer, peer_hostname
+                            peer,
+                            peer_hostname
                         );
                         retries += 1;
                         break 'stream;

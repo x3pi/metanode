@@ -158,7 +158,16 @@ func (bp *BlockProcessor) indexSingleBlock(blockNum uint64) {
 		}
 	}
 
-	bp.storageManager.GetExplorerSearchService().Commit()
+	// 2026-09 mục 22: Commit() used to always report success even when a
+	// shard's underlying Xapian commit actually failed (both this wrapper and
+	// goxapian.Database.Commit() itself were `void`/always-nil) -- log it now
+	// that a real error can come back. Explorer/search indexing is not
+	// consensus-critical (the canonical chain state lives elsewhere), so a
+	// failed commit here is logged rather than treated as fatal, but it must
+	// no longer be silent.
+	if err := bp.storageManager.GetExplorerSearchService().Commit(); err != nil {
+		logger.Error("❌ [INDEXING] Failed to commit explorer search index for block #%d: %v", blockNum, err)
+	}
 	err = bp.storageManager.GetExplorerSearchService().AddBlockToIndexRanges(block.Header().BlockNumber())
 	if err != nil {
 		logger.Error("Error updating block ranges after indexing block #%d: %v", block.Header().BlockNumber(), err)

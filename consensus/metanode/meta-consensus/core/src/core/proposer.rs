@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, iter, time::Duration, vec};
 
 use itertools::Itertools as _;
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockRef, BlockTimestampMs, Round};
@@ -12,8 +12,8 @@ use meta_macros::fail_point;
 use crate::{
     ancestor::AncestorState,
     block::{
-        Block, BlockAPI, BlockV1, BlockV2, BlockV3, ExtendedBlock, SignedBlock, Slot, VerifiedBlock,
-        GENESIS_ROUND,
+        Block, BlockAPI, BlockV1, BlockV2, BlockV3, ExtendedBlock, SignedBlock, Slot,
+        VerifiedBlock, GENESIS_ROUND,
     },
     commit::{CertifiedCommit, CommitAPI, DecidedLeader, Decision},
     core::{Core, MAX_COMMIT_VOTES_PER_BLOCK},
@@ -28,7 +28,8 @@ impl Core {
             return Ok(None);
         }
         if let Some((extended_block, flush_ticket)) = self.try_new_block(force) {
-            self.signals.new_block_with_ticket(extended_block.clone(), flush_ticket)?;
+            self.signals
+                .new_block_with_ticket(extended_block.clone(), flush_ticket)?;
 
             fail_point!("consensus-after-propose");
 
@@ -58,9 +59,9 @@ impl Core {
             let dag_state = self.dag_state.read();
             let clock_round = dag_state.threshold_clock_round();
             let last_proposed_round = dag_state.get_last_proposed_block().round();
-            
+
             if clock_round <= last_proposed_round {
-                debug!(
+                warn!(
                     "Skipping block proposal for round {} as it is not higher than the last proposed block {}",
                     clock_round,
                     last_proposed_round
@@ -70,11 +71,11 @@ impl Core {
 
             // COLD-START RECOVERY FIX:
             // If the DAG was fast-forwarded (e.g. gc_round is high), but the threshold_clock is still at 1
-            // (or any low round) because we haven't synced recent blocks yet, proposing a block at this round 
+            // (or any low round) because we haven't synced recent blocks yet, proposing a block at this round
             // is invalid and will be rejected by the BlockManager, causing a crash.
             let gc_round = dag_state.gc_round();
             if clock_round <= gc_round {
-                debug!(
+                warn!(
                     "Skipping block proposal for round {} as it is <= gc_round {} (node is catching up)",
                     clock_round,
                     gc_round
@@ -262,9 +263,13 @@ impl Core {
             // mechanism can add to any single transaction's latency -- never removes the floor
             // outright, just refuses to reapply it indefinitely to the same waiting backlog.
             let oldest_wait_ms = self.transaction_consumer.oldest_pending_wait_ms();
-            let oldest_tx_waited_long_enough = oldest_wait_ms >= min_aggregation_delay.as_millis() as u64;
+            let oldest_tx_waited_long_enough =
+                oldest_wait_ms >= min_aggregation_delay.as_millis() as u64;
 
-            if effective_delay < min_aggregation_delay && !has_sufficient_txs && !oldest_tx_waited_long_enough {
+            if effective_delay < min_aggregation_delay
+                && !has_sufficient_txs
+                && !oldest_tx_waited_long_enough
+            {
                 effective_delay = min_aggregation_delay;
             }
 
@@ -275,7 +280,7 @@ impl Core {
                     .saturating_sub(self.last_proposed_timestamp_ms()),
             ) < effective_delay
             {
-                debug!(
+                warn!(
                     "Skipping block proposal for round {} as it is too soon after the last proposed block timestamp {}; effective delay is {}ms (base: {}ms, go_lag: {})",
                     clock_round,
                     self.last_proposed_timestamp_ms(),
@@ -306,7 +311,7 @@ impl Core {
 
         let excluded_ancestors_limit = self.context.committee.size() * 2;
         if excluded_and_equivocating_ancestors.len() > excluded_ancestors_limit {
-            debug!(
+            warn!(
                 "Dropping {} excluded ancestor(s) during proposal due to size limit",
                 excluded_and_equivocating_ancestors.len() - excluded_ancestors_limit,
             );
@@ -392,7 +397,7 @@ impl Core {
                 // Get current commit index from dag_state
                 let current_commit_index = self.dag_state.read().last_commit_index();
 
-                tracing::debug!(
+                tracing::warn!(
                     "🔍 Leader checking for system transactions: epoch={}, commit_index={}",
                     current_epoch,
                     current_commit_index
@@ -408,8 +413,9 @@ impl Core {
                         .collect();
 
                     if !system_transactions.is_empty() {
-                        {
-                            let mut cache = crate::transaction::get_global_tx_cache().write();
+                        if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                            "try_new_block system-tx injection",
+                        ) {
                             for tx in &system_transactions {
                                 cache.insert(tx.digest(), tx.clone());
                             }
@@ -429,7 +435,7 @@ impl Core {
             } else {
                 // Not leader - don't inject system transactions
                 // Other nodes will receive the system transaction from the leader's block
-                tracing::debug!(
+                tracing::warn!(
                     "⏭️ Skipping system transaction injection: not leader for round {} (leader={})",
                     clock_round,
                     leader_for_round.value()
@@ -445,19 +451,18 @@ impl Core {
             .observe(transactions.len() as f64);
 
         // Consume the commit votes to be included.
+        // Routed through DagStateActor (2026-09-15): this used to call
+        // self.dag_state.write() directly, bypassing the actor's single-writer
+        // guarantee -- see dag_state_actor.rs's module doc for why that
+        // guarantee matters.
         let commit_votes = self
-            .dag_state
-            .write()
+            .dag_state_writer
             .take_commit_votes(MAX_COMMIT_VOTES_PER_BLOCK);
 
         let transaction_votes = if self.context.protocol_config.mysticeti_fastpath() {
-            let new_causal_history = {
-                let mut dag_state = self.dag_state.write();
-                ancestors
-                    .iter()
-                    .flat_map(|ancestor| dag_state.link_causal_history(ancestor.reference()))
-                    .collect()
-            };
+            let new_causal_history = self.dag_state_writer.link_causal_history_batch(
+                ancestors.iter().map(|a| a.reference()).collect(),
+            );
             self.transaction_certifier.get_own_votes(new_causal_history)
         } else {
             vec![]
@@ -565,13 +570,20 @@ impl Core {
                 .link_causal_history(verified_block.reference());
         }
 
-        // Ensure the new block and its ancestors are persisted, before broadcasting it.
-        // We defer the real wait for the flush ticket in the broadcaster task to prevent blocking CoreThread.
-        let flush_ticket = self.dag_state.write().flush();
+        // Ensure the new block and its ancestors are DURABLY persisted, before broadcasting
+        // it. We defer the real wait for the flush ticket in the broadcaster task to prevent
+        // blocking CoreThread. Durable (fsync'd, not just async/OS-page-cache) specifically
+        // here: this is the one flush that gates broadcasting our OWN new block/vote to
+        // peers -- see `Store::write_durable`'s doc comment for why a true power loss
+        // (which the OS page cache does NOT survive, unlike a plain process crash/abort)
+        // could otherwise leave us having told peers about something we can no longer
+        // prove we did.
+        // Routed through DagStateActor (2026-09-15): see the take_commit_votes
+        // comment above.
+        let flush_ticket = self.dag_state_writer.flush_durable();
 
         // Now acknowledge the transactions for their inclusion to block
         ack_transactions(verified_block.reference());
-
 
         self.context
             .metrics
@@ -591,7 +603,7 @@ impl Core {
             .update_from_verified_block(&extended_block);
 
         let prop_total = prop_start.elapsed() + ancestors_elapsed;
-        tracing::debug!(
+        tracing::warn!(
             "⏱️ [PERF-RUST] try_new_block proposal for round {} (txs: {}): total={:?}, ancestors={:?}, tx_pack={:?}, sign={:?}, accept={:?}",
             clock_round,
             verified_block.transactions().len(),
@@ -619,9 +631,10 @@ impl Core {
         // - Healthy: normal consensus — proposals allowed.
         // ═══════════════════════════════════════════════════════════════════
         if self.coordination_hub.should_skip_proposal() {
-            debug!(
+            warn!(
                 "Skip proposing for round {}: node phase is {:?}",
-                clock_round, self.coordination_hub.get_phase()
+                clock_round,
+                self.coordination_hub.get_phase()
             );
             core_skipped_proposals
                 .with_label_values(&["catching_up"])
@@ -630,15 +643,18 @@ impl Core {
         }
 
         if self.propagation_delay
-                > self
-                    .context
-                    .parameters
-                    .propagation_delay_stop_proposal_threshold
+            > self
+                .context
+                .parameters
+                .propagation_delay_stop_proposal_threshold
         {
             // FALLBACK MECHANISM: Allow slow proposals to break deadlocks when delay is high
             let max_delay_timeout = Duration::from_millis(2000); // 2 seconds fallback
             let time_since_last_proposal = Duration::from_millis(
-                self.context.clock.timestamp_utc_ms().saturating_sub(self.last_proposed_timestamp_ms())
+                self.context
+                    .clock
+                    .timestamp_utc_ms()
+                    .saturating_sub(self.last_proposed_timestamp_ms()),
             );
 
             if time_since_last_proposal > max_delay_timeout {
@@ -649,7 +665,7 @@ impl Core {
                     time_since_last_proposal.as_millis()
                 );
             } else {
-                debug!(
+                warn!(
                     "Skip proposing for round {clock_round}, high propagation delay {} > {}.",
                     self.propagation_delay,
                     self.context
@@ -683,7 +699,7 @@ impl Core {
                 .inc();
             return false;
         };
-        
+
         if clock_round <= last_known_proposed_round {
             info!(
                 "Skip proposing for round {clock_round} as last known proposed round is {last_known_proposed_round}"
@@ -716,7 +732,7 @@ impl Core {
             std::mem::take(certified_commits)
         };
 
-        tracing::debug!(
+        tracing::warn!(
             "Selected {} certified leaders: {}",
             to_commit.len(),
             to_commit.iter().map(|c| c.leader().to_string()).join(",")
@@ -830,7 +846,7 @@ impl Core {
 
         if smart_select && !parent_round_quorum.reached_threshold(&self.context.committee) {
             node_metrics.smart_selection_wait.inc();
-            debug!(
+            warn!(
                 "Only found {} stake of good ancestors to include for round {clock_round}, will wait for more.",
                 parent_round_quorum.stake()
             );
@@ -848,7 +864,7 @@ impl Core {
             if !parent_round_quorum.reached_threshold(&self.context.committee)
                 && ancestor.round() == quorum_round
             {
-                debug!(
+                warn!(
                     "Including temporarily excluded parent round ancestor {ancestor} with score {score} to propose for round {clock_round}"
                 );
                 parent_round_quorum.add(ancestor.author(), &self.context.committee);
@@ -956,7 +972,7 @@ impl Core {
             return (vec![], BTreeSet::new());
         }
 
-        debug!(
+        warn!(
             "Included {} ancestors & excluded {} low performing or equivocating ancestors for proposal in round {clock_round}",
             ancestors_to_propose.len(),
             excluded_and_equivocating_ancestors.len()

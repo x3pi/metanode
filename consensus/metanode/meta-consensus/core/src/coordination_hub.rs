@@ -39,9 +39,10 @@ pub enum PeerAttestResult {
 // - **Aligning**: Phase 5 — Aligning Go ↔ Rust state (filtering already-executed blocks).
 // - **Healthy**: Phase 6 — Active consensus participation (proposing, voting).
 
-use std::sync::Arc;
-use parking_lot::RwLock;
 use crate::recovery_barrier::RecoveryBarrier;
+use consensus_config::Committee;
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Represents the global operational phase of the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +56,7 @@ pub enum NodeConsensusPhase {
     /// CommitSyncer is establishing the network baseline (reset_to_network_baseline).
     /// Core must NOT propose blocks to avoid equivocation.
     Bootstrapping,
-    
+
     /// Phase 3A: Node is significantly lagging behind the network quorum.
     /// Aggressive commit synchronization is active via CommitSyncer.
     CatchingUp,
@@ -79,7 +80,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone)]
 pub struct ConsensusCoordinationHub {
     phase: Arc<RwLock<NodeConsensusPhase>>,
-    
+
     /// ═══════════════════════════════════════════════════════════════
     /// UNIFIED RECOVERY BARRIER (May 2026 — Architectural Fix)
     ///
@@ -91,7 +92,7 @@ pub struct ConsensusCoordinationHub {
     /// Only Ready or Inactive allows proposals.
     /// ═══════════════════════════════════════════════════════════════
     recovery_barrier: Arc<RecoveryBarrier>,
-    
+
     /// Global flag indicating if the epoch is currently transitioning.
     /// Mutated during Start/End of epoch transition.
     /// Read by TX Receivers (UDS) to reject transactions, and by Executors to pause execution.
@@ -133,10 +134,9 @@ pub struct ConsensusCoordinationHub {
     /// the entire session lifetime. It ensures the local committer guard
     /// remains active even after RecoveryBarrier transitions to Ready.
     recovery_was_activated: Arc<AtomicBool>,
-    
+
     /// Override flag for the DAG-GC-GUARD. Used to break cold start deadlocks.
     override_dag_gc_guard: Arc<AtomicBool>,
-
 
     /// SPARSE DAG BOUNDARY (Architectural Fix for Snapshot Recovery Fork):
     /// When a node recovers from a snapshot, its local DAG is sparse for past rounds.
@@ -144,7 +144,6 @@ pub struct ConsensusCoordinationHub {
     /// leader support evaluation (FORK).
     /// This boundary defines the round below which the local committer MUST NOT evaluate.
     /// The node must rely purely on `CertifiedCommits` until `last_decided_leader` passes this boundary.
-
 
     /// DIGEST-GATE (May 2026): Callback to query quorum-agreed commit digest.
     /// Wraps CommitVoteMonitor.quorum_commit_digest() for cross-crate access.
@@ -172,14 +171,23 @@ pub struct ConsensusCoordinationHub {
     ///
     /// Takes (commit_index: u32, local_digest: [u8; 32]) → PeerAttestResult
     /// ═══════════════════════════════════════════════════════════════════
-    peer_commit_attestation: Arc<RwLock<Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>>>,
-    
+    peer_commit_attestation:
+        Arc<RwLock<Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>>>>,
+
     /// ZERO-TIMEOUT (May 2026): Notifier for when quorum index might have advanced.
     /// This allows CommitProcessor to wake up instantly when new peer votes arrive.
     quorum_advanced_notify: Arc<RwLock<Option<Arc<tokio::sync::Notify>>>>,
 
     /// PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment.
     tx_fetcher: Arc<RwLock<Option<TxFetcherFn>>>,
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): see PayloadLossCollectorFn's doc
+    /// comment.
+    payload_loss_collector: Arc<RwLock<Option<PayloadLossCollectorFn>>>,
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): a copy of the current committee, so
+    /// the operator-triggered FFI entry point (metanode_attest_payload_loss, ffi.rs) can
+    /// independently re-verify a returned PayloadLossCertificate before recording it, without
+    /// needing its own separate plumbing to reach the committee.
+    committee_for_payload_loss: Arc<RwLock<Option<Committee>>>,
 }
 
 /// Attempts to fetch the given transaction digests' raw bytes from reachable peers and insert
@@ -213,6 +221,33 @@ pub type TxFetcherFn = Arc<
         + Sync,
 >;
 
+/// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): the operator-triggered collector. Given
+/// one exact `(commit_index, tx_digest)` this node is stuck on (per
+/// CONSENSUS-HALT-TX-PAYLOAD-LOST, see block_delivery.rs mục 10), fans out
+/// `NetworkClient::attest_payload_loss` to every other committee member (and checks this
+/// node's own cache too), and either:
+///   - finds the payload somewhere (including locally) and inserts it into the global
+///     TxPayloadCache -- ordinary recovery, same effect as the existing TxFetcherFn;
+///   - or collects enough signed attestations to reach quorum, producing a
+///     `PayloadLossCertificate` (crate::payload_loss_attestation) that this node (and any
+///     other node it's given to) can independently re-verify and then safely treat this exact
+///     transaction as permanently absent.
+/// Deliberately NOT called from anywhere automatically -- wired in authority_node/mod.rs (same
+/// place as TxFetcherFn) but only ever invoked by an explicit operator action (see ffi.rs's
+/// metanode_attest_payload_loss), per mục 11.2 point 6's design: an automatic trigger risks
+/// treating a transient network partition as confirmed permanent loss. See
+/// note/consensus_local_dag_trust_gap_design_2026-09.md mục 11 for the full design.
+pub type PayloadLossCollectorFn = Arc<
+    dyn Fn(
+            crate::payload_loss_attestation::PayloadLossClaim,
+            std::time::Duration,
+        ) -> futures::future::BoxFuture<
+            'static,
+            crate::payload_loss_attestation::PayloadLossCollectionResult,
+        > + Send
+        + Sync,
+>;
+
 impl ConsensusCoordinationHub {
     pub fn new() -> Self {
         Self {
@@ -233,12 +268,15 @@ impl ConsensusCoordinationHub {
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
             tx_fetcher: Arc::new(RwLock::new(None)),
+            payload_loss_collector: Arc::new(RwLock::new(None)),
+            committee_for_payload_loss: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Set initial GEI value (e.g., loaded from DB or network boundary)
     pub async fn set_initial_global_exec_index(&self, gei: u64) {
-        self.global_exec_index.store(gei, std::sync::atomic::Ordering::SeqCst);
+        self.global_exec_index
+            .store(gei, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Retrieve the shared reference to the Global Execution Index
@@ -258,12 +296,14 @@ impl ConsensusCoordinationHub {
 
     /// Set epoch transitioning flag
     pub fn set_epoch_transitioning(&self, is_transitioning: bool) {
-        self.is_transitioning.store(is_transitioning, Ordering::Release);
+        self.is_transitioning
+            .store(is_transitioning, Ordering::Release);
     }
-    
+
     /// Atomically swap the epoch transitioning flag and return the old value
     pub fn swap_epoch_transitioning(&self, is_transitioning: bool) -> bool {
-        self.is_transitioning.swap(is_transitioning, Ordering::SeqCst)
+        self.is_transitioning
+            .swap(is_transitioning, Ordering::SeqCst)
     }
 
     /// Update the highest quorum commit index observed
@@ -300,7 +340,9 @@ impl ConsensusCoordinationHub {
     }
 
     /// Get a clone of the digest verifier callback for passing to CommitProcessor
-    pub fn get_digest_verifier(&self) -> Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>> {
+    pub fn get_digest_verifier(
+        &self,
+    ) -> Option<Arc<dyn Fn(u32) -> Option<[u8; 32]> + Send + Sync>> {
         let guard = self.digest_verifier.read();
         guard.clone()
     }
@@ -339,7 +381,9 @@ impl ConsensusCoordinationHub {
 
     /// ZERO-TIMEOUT (May 2026): Get a clone of the peer attestation callback.
     /// CommitProcessor uses this to verify unattested local commits.
-    pub fn get_peer_commit_attestation(&self) -> Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>> {
+    pub fn get_peer_commit_attestation(
+        &self,
+    ) -> Option<Arc<dyn Fn(u32, [u8; 32]) -> PeerAttestResult + Send + Sync>> {
         let guard = self.peer_commit_attestation.read();
         guard.clone()
     }
@@ -358,6 +402,33 @@ impl ConsensusCoordinationHub {
     /// recovery, exactly as if the fetch had been tried and found nothing.
     pub fn get_tx_fetcher(&self) -> Option<TxFetcherFn> {
         let guard = self.tx_fetcher.read();
+        guard.clone()
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): set the collector callback. See
+    /// PayloadLossCollectorFn's doc comment.
+    pub fn set_payload_loss_collector(&self, collector: PayloadLossCollectorFn) {
+        let mut guard = self.payload_loss_collector.write();
+        *guard = Some(collector);
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): get a clone of the collector callback,
+    /// if wired. None before authority_node has started, or for a SyncOnly node that never
+    /// wires one.
+    pub fn get_payload_loss_collector(&self) -> Option<PayloadLossCollectorFn> {
+        let guard = self.payload_loss_collector.read();
+        guard.clone()
+    }
+
+    /// QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): publish the current committee for
+    /// metanode_attest_payload_loss (ffi.rs) to independently re-verify a certificate against.
+    pub fn set_committee_for_payload_loss(&self, committee: Committee) {
+        let mut guard = self.committee_for_payload_loss.write();
+        *guard = Some(committee);
+    }
+
+    pub fn get_committee_for_payload_loss(&self) -> Option<Committee> {
+        let guard = self.committee_for_payload_loss.read();
         guard.clone()
     }
 
@@ -380,12 +451,12 @@ impl ConsensusCoordinationHub {
     }
 
     /// Transition to a new consensus phase.
-    /// 
+    ///
     /// FORK-SAFETY (May 2026): This is the **choke-point guard** for ALL transitions
     /// to Healthy. Rather than guarding each individual code path in CommitSyncer's
     /// update_state() (which has 6+ branches that can resolve to Healthy), we block
     /// the transition here at the single point where ALL paths converge.
-    /// 
+    ///
     /// If `startup_sync_active` is true, the node has NOT yet proven network parity
     /// (no certified commits fetched from peers). Transitioning to Healthy would allow
     /// the node to propose blocks with a diverged DAG view → consensus fork.
@@ -407,10 +478,10 @@ impl ConsensusCoordinationHub {
             //   Layer 2: recovery_barrier.can_propose() (architectural)
             //   Layer 3: block_hash_verified (bit-perfect parity)
             // ═══════════════════════════════════════════════════════════════
-            let recovery_hash_unverified = self.recovery_was_activated.load(Ordering::Acquire) 
+            let recovery_hash_unverified = self.recovery_was_activated.load(Ordering::Acquire)
                 && !self.block_hash_verified.load(Ordering::Acquire);
-            
-            if new_phase == NodeConsensusPhase::Healthy 
+
+            if new_phase == NodeConsensusPhase::Healthy
                 && (self.startup_sync_active.load(Ordering::Acquire)
                     || !self.recovery_barrier.can_propose()
                     || recovery_hash_unverified)
@@ -436,7 +507,7 @@ impl ConsensusCoordinationHub {
             );
             // Phase changed.
             *w = new_phase;
-            
+
             if new_phase == NodeConsensusPhase::Healthy {
                 // Legacy resets removed
             }
@@ -452,8 +523,6 @@ impl ConsensusCoordinationHub {
     pub fn is_healthy_stable(&self) -> bool {
         self.is_healthy()
     }
-
-
 
     /// Convenience check for whether the node is explicitly catching up.
     pub fn is_catching_up(&self) -> bool {
@@ -492,7 +561,32 @@ impl ConsensusCoordinationHub {
     ///
     /// This replaces the fragmented check of startup_sync_active + schedule_recovery_pending.
     pub fn should_skip_proposal(&self) -> bool {
-        !self.is_healthy() || !self.recovery_barrier.can_propose()
+        !(self.is_healthy() || self.is_catching_up()) || !self.recovery_barrier.can_propose()
+    }
+
+    /// Returns true only when this node is a safe target for a brand-new, externally-submitted
+    /// transaction that the caller expects to actually get committed/executed in a reasonable
+    /// time -- i.e. the promise `eth_consensusReady`/`eth_syncing` makes to an RPC client.
+    ///
+    /// ROOT-CAUSE FIX (2026-09-15, "Phuong an A" mục 22 -- see project memory): this used to be
+    /// `!should_skip_proposal()`, reusing the SAME check that gates whether Core proposes DAG
+    /// blocks internally. That's the wrong check for THIS purpose: `should_skip_proposal()`
+    /// deliberately treats `CatchingUp` as a green light (a catching-up node should keep
+    /// participating in DAG rounds so it converges), but `commit_syncer.rs`'s own
+    /// "BLOCKED synced_commit_index advance ... Go execution layer is far behind DAG state"
+    /// gate documents that CatchingUp can mean Go's execution is 100+ commits behind the DAG,
+    /// with commits deliberately NOT being advanced to avoid a premature Healthy transition.
+    /// Reusing `should_skip_proposal()` here meant `eth_consensusReady` reported `true` within
+    /// ~8s of a node restarting -- confirmed live: a real transaction sent right after that
+    /// signal never got a receipt within 45s, because the DAG kept accepting new proposals
+    /// (allowed during CatchingUp) faster than Go could drain the backlog, so the execution
+    /// gap never closed -- a livelock that stalled block-height advancement across the WHOLE
+    /// 4-node cluster for several minutes (reproduced live via `sudo`-free RPC polling,
+    /// requiring the automated Health Monitor's watchdog restart to recover). A brand-new user
+    /// transaction has no reason to accept that risk, unlike the DAG's own internal
+    /// round-participation -- so this checks strictly `is_healthy()`, not also `is_catching_up()`.
+    pub fn is_ready_for_new_transactions(&self) -> bool {
+        self.is_healthy() && self.recovery_barrier.can_propose()
     }
 
     /// Signal that STARTUP-SYNC has started/finished. While active, proposals are blocked.
@@ -512,11 +606,14 @@ impl ConsensusCoordinationHub {
 
     /// Sets whether Go has completed its startup peer-sync.
     pub fn set_startup_go_sync_completed(&self, completed: bool) {
-        self.startup_go_sync_completed.store(completed, Ordering::Release);
+        self.startup_go_sync_completed
+            .store(completed, Ordering::Release);
         if completed {
             // When Go completes its peer sync, advance the barrier from GoSyncing → DagCatchingUp
             self.recovery_barrier.go_sync_done();
-            tracing::info!("✅ [STARTUP-SYNC] Go sync completed, advancing barrier to DagCatchingUp");
+            tracing::info!(
+                "✅ [STARTUP-SYNC] Go sync completed, advancing barrier to DagCatchingUp"
+            );
         }
     }
 
@@ -528,7 +625,9 @@ impl ConsensusCoordinationHub {
     /// Marks that a snapshot recovery is in progress and the LeaderSchedule
     /// needs re-confirmation from the network before local commit evaluation.
     pub fn set_schedule_recovery_pending(&self, pending: bool) {
-        let was_pending = self.schedule_recovery_pending.swap(pending, Ordering::Release);
+        let was_pending = self
+            .schedule_recovery_pending
+            .swap(pending, Ordering::Release);
         if pending && !was_pending {
             tracing::warn!(
                 "🔒 [SCHEDULE-RECOVERY] LeaderSchedule recovery PENDING: \
@@ -566,7 +665,8 @@ impl ConsensusCoordinationHub {
     pub fn activate_recovery_barrier(&self) {
         self.recovery_barrier.activate();
         // Also set legacy flags for backward compatibility
-        self.schedule_recovery_pending.store(true, Ordering::Release);
+        self.schedule_recovery_pending
+            .store(true, Ordering::Release);
         // Reset block hash verification — must be re-verified after each recovery
         self.block_hash_verified.store(false, Ordering::Release);
         // NETWORK-FIRST-COMMIT-GUARD: Mark this session as recovery-activated.
@@ -609,7 +709,8 @@ impl ConsensusCoordinationHub {
 
     /// Override the DAG-GC-GUARD. Used by the Cold Start Deadlock Breaker.
     pub fn set_override_dag_gc_guard(&self, override_guard: bool) {
-        self.override_dag_gc_guard.store(override_guard, Ordering::Release);
+        self.override_dag_gc_guard
+            .store(override_guard, Ordering::Release);
         if override_guard {
             tracing::warn!("🔓 [DEADLOCK-BREAKER] DAG-GC-GUARD override activated!");
         }
@@ -619,10 +720,6 @@ impl ConsensusCoordinationHub {
     pub fn is_dag_gc_guard_overridden(&self) -> bool {
         self.override_dag_gc_guard.load(Ordering::Acquire)
     }
-
-
-
-
 }
 
 impl Default for ConsensusCoordinationHub {
@@ -654,6 +751,8 @@ impl ConsensusCoordinationHub {
             peer_commit_attestation: Arc::new(RwLock::new(None)),
             quorum_advanced_notify: Arc::new(RwLock::new(None)),
             tx_fetcher: Arc::new(RwLock::new(None)),
+            payload_loss_collector: Arc::new(RwLock::new(None)),
+            committee_for_payload_loss: Arc::new(RwLock::new(None)),
         }
     }
 

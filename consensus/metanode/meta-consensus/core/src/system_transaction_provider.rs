@@ -306,9 +306,9 @@ impl DefaultSystemTransactionProvider {
             .expect("SystemTime before UNIX_EPOCH")
             .as_millis() as u64;
         // Only set once (don't reset on repeated calls)
-        self.healthy_since_ms.compare_exchange(
-            0, now_ms, Ordering::SeqCst, Ordering::SeqCst
-        ).ok();
+        self.healthy_since_ms
+            .compare_exchange(0, now_ms, Ordering::SeqCst, Ordering::SeqCst)
+            .ok();
         if self.epoch_change_suppressed.load(Ordering::SeqCst) {
             info!(
                 "🛡️ SystemTransactionProvider::notify_healthy: Node entered Healthy phase at {}ms. \
@@ -370,7 +370,9 @@ impl DefaultSystemTransactionProvider {
                     //   2. All nodes commit the SAME leader block via consensus
                     //   3. All nodes process the same EndOfEpoch → same epoch transition
                     {
-                        let mut ts_guard = self.epoch_start_timestamp_ms.write()
+                        let mut ts_guard = self
+                            .epoch_start_timestamp_ms
+                            .write()
                             .unwrap_or_else(|p| p.into_inner());
                         *ts_guard = now_ms;
                     }
@@ -389,7 +391,8 @@ impl DefaultSystemTransactionProvider {
                     tracing::debug!(
                         "🛡️ SystemTransactionProvider: EndOfEpoch SUPPRESSED. \
                          Healthy for {}s / {}s needed for auto-unsuppress.",
-                        healthy_duration_s, unsuppress_threshold
+                        healthy_duration_s,
+                        unsuppress_threshold
                     );
                     return false;
                 }

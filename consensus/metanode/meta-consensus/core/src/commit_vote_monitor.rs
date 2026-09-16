@@ -49,7 +49,9 @@ impl CommitVoteMonitor {
         let state = VoteState {
             highest_voted_commits: vec![0; size],
             digest_history: BTreeMap::new(),
-            authority_voted_indices: (0..size).map(|_| std::collections::HashSet::new()).collect(),
+            authority_voted_indices: (0..size)
+                .map(|_| std::collections::HashSet::new())
+                .collect(),
             highest_seen_epoch: current_epoch,
         };
         Self {
@@ -79,7 +81,8 @@ impl CommitVoteMonitor {
                 // double-counting from duplicate blocks during catch-up.
                 if state.authority_voted_indices[author].insert(vote.index) {
                     let authority_stake = self.context.committee.authority(author).stake;
-                    let entry = state.digest_history
+                    let entry = state
+                        .digest_history
                         .entry(vote.index)
                         .or_insert_with(HashMap::new);
                     *entry.entry(vote.digest).or_insert(0) += authority_stake;
@@ -88,7 +91,8 @@ impl CommitVoteMonitor {
 
             // GC: Prune old digest history entries to prevent unbounded growth.
             // Keep entries from (quorum - RETAIN) onwards.
-            let gc_below = self.compute_quorum_index_inner(&state.highest_voted_commits)
+            let gc_below = self
+                .compute_quorum_index_inner(&state.highest_voted_commits)
                 .saturating_sub(DIGEST_HISTORY_RETAIN);
             if gc_below > 0 {
                 // Split off entries below gc_below
@@ -179,18 +183,40 @@ impl CommitVoteMonitor {
     ///   - (>0, Some) → Some peers voted but haven't reached quorum yet
     ///
     /// ZERO-TIMEOUT (May 2026): This enables data-driven dispatch without timeouts.
-    pub fn vote_count_for_index(&self, target_index: CommitIndex) -> (u64, Option<(CommitDigest, u64)>) {
+    pub fn vote_count_for_index(
+        &self,
+        target_index: CommitIndex,
+    ) -> (u64, Option<(CommitDigest, u64)>) {
         let state = self.state.lock();
         match state.digest_history.get(&target_index) {
             None => (0, None),
             Some(digest_stakes) => {
                 let total_stake: u64 = digest_stakes.values().sum();
-                let best = digest_stakes.iter()
+                let best = digest_stakes
+                    .iter()
                     .max_by_key(|&(_, s)| *s)
                     .map(|(d, s)| (*d, *s));
                 (total_stake, best)
             }
         }
+    }
+
+    /// Injects a certified commit directly into the vote monitor with full quorum weight.
+    /// This is used during catch-up to ensure that commits fetched from peers as CertifiedCommits
+    /// (which inherently have quorum support) instantly satisfy the DIGEST-GATE in the CommitProcessor.
+    /// This prevents a deadlock when the local node already produced the commit locally but lost the
+    /// votes after a restart, causing it to stall waiting for votes that will never arrive.
+    pub(crate) fn inject_certified_commit(&self, commit_index: CommitIndex, digest: CommitDigest) {
+        let mut state = self.state.lock();
+
+        let authority_stake = self.context.committee.total_stake();
+        let entry = state
+            .digest_history
+            .entry(commit_index)
+            .or_insert_with(HashMap::new);
+
+        // Inject sufficient weight to immediately pass the quorum threshold
+        *entry.entry(digest).or_insert(0) += authority_stake as u64;
     }
 
     /// Seeds the quorum from Go execution state to break the chicken-and-egg

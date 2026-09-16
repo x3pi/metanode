@@ -64,7 +64,9 @@ impl Context {
             protocol_config,
             metrics,
             clock,
-            reputation_swaps_disabled_for_epoch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reputation_swaps_disabled_for_epoch: Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             oldest_pending_tx_at_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }

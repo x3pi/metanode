@@ -125,7 +125,7 @@ impl RecoveryBarrier {
     #[inline]
     pub fn can_propose(&self) -> bool {
         let phase = self.phase.load(Ordering::Acquire);
-        phase == RecoveryPhase::Inactive as u8 
+        phase == RecoveryPhase::Inactive as u8
             || phase == RecoveryPhase::Ready as u8
             || phase == RecoveryPhase::ScheduleVerifying as u8
     }
@@ -165,7 +165,9 @@ impl RecoveryBarrier {
     ///
     /// Transitions: `Inactive → GoSyncing`
     pub fn activate(&self) {
-        let prev = self.phase.swap(RecoveryPhase::GoSyncing as u8, Ordering::Release);
+        let prev = self
+            .phase
+            .swap(RecoveryPhase::GoSyncing as u8, Ordering::Release);
         let prev_phase = RecoveryPhase::from_u8(prev);
         tracing::warn!(
             "🛡️ [RECOVERY-BARRIER] ACTIVATED: {} → GoSyncing. \
@@ -213,7 +215,7 @@ impl RecoveryBarrier {
         } else {
             RecoveryPhase::ScheduleVerifying as u8
         };
-        
+
         let result = self.phase.compare_exchange(
             RecoveryPhase::DagCatchingUp as u8,
             next_phase,
@@ -252,7 +254,7 @@ impl RecoveryBarrier {
     pub fn set_schedule_pre_verified(&self) {
         self.is_pre_verified.store(true, Ordering::Release);
         tracing::info!("🛡️ [RECOVERY-BARRIER] Schedule marked as PRE-VERIFIED via baseline.");
-        
+
         // If we are ALREADY in ScheduleVerifying when this is called, we can jump to Ready!
         let _ = self.phase.compare_exchange(
             RecoveryPhase::ScheduleVerifying as u8,
@@ -295,14 +297,13 @@ impl RecoveryBarrier {
 
     /// Reset the barrier to Inactive (for epoch transitions or testing).
     pub fn reset(&self) {
-        let prev = self.phase.swap(RecoveryPhase::Inactive as u8, Ordering::Release);
+        let prev = self
+            .phase
+            .swap(RecoveryPhase::Inactive as u8, Ordering::Release);
         self.is_pre_verified.store(false, Ordering::Release);
         let prev_phase = RecoveryPhase::from_u8(prev);
         if prev_phase != RecoveryPhase::Inactive {
-            tracing::info!(
-                "🔄 [RECOVERY-BARRIER] Reset: {} → Inactive.",
-                prev_phase
-            );
+            tracing::info!("🔄 [RECOVERY-BARRIER] Reset: {} → Inactive.", prev_phase);
         }
     }
 }
@@ -317,7 +318,9 @@ impl Clone for RecoveryBarrier {
     fn clone(&self) -> Self {
         Self {
             phase: AtomicU8::new(self.phase.load(Ordering::Acquire)),
-            is_pre_verified: std::sync::atomic::AtomicBool::new(self.is_pre_verified.load(Ordering::Acquire)),
+            is_pre_verified: std::sync::atomic::AtomicBool::new(
+                self.is_pre_verified.load(Ordering::Acquire),
+            ),
         }
     }
 }
@@ -337,7 +340,7 @@ mod tests {
     #[test]
     fn test_full_recovery_sequence() {
         let barrier = RecoveryBarrier::new();
-        
+
         // Activate for snapshot recovery
         barrier.activate();
         assert!(!barrier.can_propose());

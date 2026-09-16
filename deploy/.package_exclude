@@ -1,0 +1,52 @@
+# ==============================================================================
+# Deploy Package Exclusion Rules (.package_exclude)
+# Bỏ qua các file rác, logs, keys cá nhân, và dữ liệu runtime khi đóng gói deploy kit
+# ==============================================================================
+
+# Git & IDE
+.git*
+*.swp
+*~
+.DS_Store
+*.code-workspace
+
+# Python cache
+__pycache__/*
+*/__pycache__/*
+*.pyc
+
+# Runtime logs, PIDs, crash dumps
+*.log
+*/*.log
+*/*/*.log
+*.pid
+*/*.pid
+ci/logs/*
+*/ci/logs/*
+*/logs_crash/*
+monitors/logs_crash/*
+systemd/relayer_logs/*
+
+# Runtime data & directories
+*/data/*
+systemd/*_data/*
+systemd/single_chain_data/*
+systemd/root_anchor_data/*
+systemd/private_chains_data/*
+
+# Unused deployment modules
+ansible_private_chains
+ansible_private_chains/*
+
+# Secret keys & individual environment configs
+.env
+*/.env
+*/*/.env
+.last_deployed_commit
+*/.last_deployed_commit
+inventory.yml
+*/inventory.yml
+private_dev_keys.json
+*/private_dev_keys.json
+systemd/*_keys/*
+ci/ci_config.yaml

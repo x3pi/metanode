@@ -311,8 +311,16 @@ func (s *MiningService) _indexJob(job *Job) error {
 	uniqueTerm := "Q" + job.JobID // Sử dụng "Q" cho JobID
 	doc.AddTerm(uniqueTerm)
 
-	s.db.ReplaceDocumentByTerm(uniqueTerm, doc)
-	s.db.Commit()
+	// 2026-09 mục 22: ReplaceDocumentByTerm/Commit now report failure instead
+	// of silently discarding it (see goxapian/xapian.go's own doc comments) --
+	// propagate rather than swallow, matching this project's own halt-not-
+	// guess stance on silent write loss.
+	if err := s.db.ReplaceDocumentByTerm(uniqueTerm, doc); err != nil {
+		return fmt.Errorf("could not index job %s: %w", job.JobID, err)
+	}
+	if err := s.db.Commit(); err != nil {
+		return fmt.Errorf("could not commit job index for %s: %w", job.JobID, err)
+	}
 	return nil
 }
 
@@ -332,8 +340,13 @@ func (s *MiningService) _indexTransactionRecord(record *TransactionRecord) error
 	doc.AddTerm("R" + strings.ToLower(record.Sender))    // Thêm term cho Sender
 	doc.AddTerm("P" + strings.ToLower(record.Recipient)) // Thêm term cho Recipient
 
-	s.db.ReplaceDocumentByTerm(TxHistoryPrefix+record.TxID, doc) // Replace dựa trên TxID
-	s.db.Commit()
+	// 2026-09 mục 22: see the same note in _indexJob above.
+	if err := s.db.ReplaceDocumentByTerm(TxHistoryPrefix+record.TxID, doc); err != nil { // Replace dựa trên TxID
+		return fmt.Errorf("could not index transaction record %s: %w", record.TxID, err)
+	}
+	if err := s.db.Commit(); err != nil {
+		return fmt.Errorf("could not commit transaction record index for %s: %w", record.TxID, err)
+	}
 	return nil
 }
 

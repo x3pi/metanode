@@ -215,28 +215,42 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 			}
 
 			// Gửi batch qua FFI (synchronous zero-copy injection)
-			success := executor.SubmitTransactionBatch(bTransaction)
-			if !success {
-				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full? will retry)",
-					batchNum, totalBatches, len(batchTxs))
-				// Re-add CURRENT AND ALL REMAINING transactions to the transaction pool
-				remainingTxs := txs[batchStart:]
-				bf.transactionProcessor.transactionPool.AddTransactions(remainingTxs)
-				// Slow down slightly on backpressure
-				time.Sleep(50 * time.Millisecond)
-				break // Break out of the batch loop to wait for the next tick
-			} else {
-				if shouldLogSend {
-					logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
-						batchNum, totalBatches, len(batchTxs))
+			for {
+				success := executor.SubmitTransactionBatch(bTransaction)
+				if success {
+					if shouldLogSend {
+						logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",
+							batchNum, totalBatches, len(batchTxs))
+					}
+					break
 				}
+				logger.Warn("⚠️  [TX FLOW] Failed to inject batch [%d/%d] (%d txs) to FFI channel (pool full). Retrying...",
+					batchNum, totalBatches, len(batchTxs))
+				time.Sleep(100 * time.Millisecond)
 				// (A "localNonceFloor" optimistic-advance step used to run
 				// here, crediting this batch as forwarded the moment FFI
 				// accepted it. Removed 2026-09-03 -- see ClearNoncesCache's
 				// doc comment in tx_validator_pool_core.go for why: it
 				// could permanently strand a sender if the batch didn't
 				// fully land on-chain, which turned out to be a worse
-				// failure mode than the narrow race it was meant to close.)
+				// failure mode than the narrow race it was meant to close.
+				//
+				// RE-ADDED 2026-09-11, deliberately NOT the same mechanism:
+				// AdvanceNoncesCacheForForwarded writes into the SAME
+				// noncesCache that ClearNoncesCache() already wipes wholesale
+				// on every commit -- unlike the removed "floor" (a separate,
+				// never-cleared value), a crash/restart before this batch
+				// actually lands wipes noncesCache too (it's in-memory,
+				// non-persistent), and even short of that, the very next
+				// commit from ANY source self-corrects it via a fresh DB
+				// read exactly like any other cache entry. The only residual
+				// cost if this batch never lands is the same bounded,
+				// self-healing staleness window every other cache-miss
+				// already accepts -- not a permanent stranding. This is
+				// safe specifically BECAUSE it targets what this earlier
+				// attempt got wrong (see this file's own history above),
+				// not because the underlying risk is zero.)
+				bf.transactionProcessor.AdvanceNoncesCacheForForwarded(batchTxs)
 				for _, tx := range batchTxs {
 					tx_processor.GlobalTxTraceStore.UpdateTrace(tx.Hash(), "FORWARDED_TO_RUST", "Transaction batch forwarded to Rust consensus engine via FFI")
 					if entry, ok := bf.transactionProcessor.env.GetTxHashConnEntry(tx.Hash()); ok {

@@ -12,6 +12,19 @@
 # on every `--start`/`--reset-all` run, so a transient GitHub outage can't fail an unrelated
 # code-update deploy.
 
+- name: Ensure prometheus system group exists
+  ansible.builtin.group:
+    name: prometheus
+    system: yes
+
+- name: Ensure prometheus system user exists
+  ansible.builtin.user:
+    name: prometheus
+    group: prometheus
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+
 - name: Check whether alertmanager binary is already installed
   ansible.builtin.stat:
     path: /usr/local/bin/alertmanager

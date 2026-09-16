@@ -42,12 +42,47 @@ impl ConsensusNode {
                                 executor_client_for_proc.clone(),
                                 shared_last_global_exec_index.clone(),
                             );
+                            // BIND-CONFIRM (2026-09-10): same fix as startup.rs's "full" server
+                            // call site -- see PeerRpcServer::ready_tx's doc comment. This early
+                            // server exists specifically to unblock peers querying THIS node
+                            // during startup-sync, so a silent bind failure here defeats its own
+                            // purpose without anyone noticing.
+                            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                            let peer_server = peer_server.with_ready_signal(ready_tx);
                             tracing::info!("📡 [PEER RPC] Starting EARLY server on 0.0.0.0:{} to prevent STARTUP-SYNC deadlock", peer_port);
                             early_peer_server_handle = Some(tokio::spawn(async move {
                                 if let Err(e) = peer_server.start().await {
                                     tracing::error!("Early Peer RPC server error: {}", e);
                                 }
                             }));
+                            match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
+                                Ok(Ok(Ok(()))) => {
+                                    tracing::info!("📡 [PEER RPC] EARLY server confirmed bound on 0.0.0.0:{}", peer_port);
+                                }
+                                Ok(Ok(Err(e))) => {
+                                    tracing::error!(
+                                        "🚨 [PEER RPC] EARLY server FAILED to bind 0.0.0.0:{}: {}. \
+                                         Peers cannot query this node during startup-sync until the \
+                                         'full' server (startup.rs) takes over -- STARTUP-SYNC may \
+                                         deadlock against peers waiting on this node.",
+                                        peer_port, e
+                                    );
+                                }
+                                Ok(Err(_)) => {
+                                    tracing::error!(
+                                        "🚨 [PEER RPC] EARLY server task for port {} ended before \
+                                         confirming bind (likely panicked). Treating as failed.",
+                                        peer_port
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "⏳ [PEER RPC] EARLY server for port {} did not confirm bind \
+                                         within 10s. Continuing without waiting further.",
+                                        peer_port
+                                    );
+                                }
+                            }
                         }
                     }
         
@@ -377,7 +412,9 @@ impl ConsensusNode {
                                     for chunk in chunks {
                                         let chunk_len = chunk.len();
                                         tracing::info!("🔄 [STARTUP-SYNC] Executing chunk of {} blocks (Epoch {})", chunk_len, chunk[0].epoch);
-                                        match barrier_client.sync_and_execute_blocks(chunk).await {
+                                        // preserve_own_commit_index=true: this node is a Validator with its own
+                                        // DAG -- see note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                                        match barrier_client.sync_and_execute_blocks(chunk, true).await {
                                             Ok((synced, last_block, _gei)) => {
                                                 total_synced_this_round += synced;
                                                 round_last_block = last_block;
@@ -391,6 +428,47 @@ impl ConsensusNode {
                                     }
                                     
                                     if chunk_sync_failed {
+                                        // ROOT-CAUSE FIX (2026-09-12, project memory mục 17 UPDATE #6):
+                                        // A chunk failure here is very often SYNC-FORK-GUARD on the Go side
+                                        // detecting a parent-hash mismatch and rolling ITS OWN internal block
+                                        // counter back (see block_processor's "ResetAllBlockCounters" log) --
+                                        // but until this fix, `local_block` on the Rust side was never told
+                                        // about that correction. Every subsequent round recomputed
+                                        // `from_block = local_block` (line ~354 above) from the SAME stale,
+                                        // pre-failure value, re-fetching the identical already-failing range
+                                        // from peers forever -- an infinite retry loop that permanently
+                                        // blocks this node's own STARTUP-SYNC (and, since a node stuck here
+                                        // cannot rejoin active consensus, can starve the whole cluster of
+                                        // quorum whenever another validator is down at the same time, e.g.
+                                        // n=4 with 1 already down leaves only 2 of 4 stake actively
+                                        // participating -- below the 3-of-4 BFT threshold). Live-reproduced
+                                        // and confirmed via this exact log sequence repeating identically
+                                        // across dozens of rounds with zero progress.
+                                        //
+                                        // Fix: re-query Go's ACTUAL current block number and adopt it
+                                        // unconditionally (even if lower than before -- unlike the startup
+                                        // re-query above, a lower value here is expected and correct: it is
+                                        // precisely what SYNC-FORK-GUARD just rolled back to). This lets the
+                                        // next round's peer-fetch start from the corrected point instead of
+                                        // looping on the same mismatched range forever.
+                                        match barrier_client.get_last_block_number().await {
+                                            Ok((corrected_block, _gei, _, _, _)) => {
+                                                tracing::warn!(
+                                                    "🔄 [STARTUP-SYNC] Chunk failure recovery: refreshing local_block {} -> {} from Go \
+                                                     (post SYNC-FORK-GUARD correction, if any) before retrying.",
+                                                    local_block, corrected_block
+                                                );
+                                                local_block = corrected_block;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "⚠️ [STARTUP-SYNC] Chunk failure recovery: failed to re-query Go's block \
+                                                     number ({}). Retrying with unchanged local_block={} -- if this keeps \
+                                                     failing, the round will not be able to make progress.",
+                                                    e, local_block
+                                                );
+                                            }
+                                        }
                                         tracing::error!("🚨 [STARTUP-SYNC] Halting sync round due to chunk failure. Node BLOCKED pending successful Go sync.");
                                         tokio::time::sleep(std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
                                         sync_round += 1;
@@ -583,7 +661,7 @@ impl ConsensusNode {
                                 }
                             }
         
-                            let local_root = crate::ffi::get_go_state_root();
+                            let local_root = crate::ffi::get_go_state_root().await;
                             if !local_root.is_empty() && local_root != "0000000000000000000000000000000000000000000000000000000000000000" {
                                 tracing::info!(
                                     "📊 [POST-SYNC-VERIFY] Local state root at block {}: 0x{}",
@@ -611,7 +689,9 @@ impl ConsensusNode {
                                         &barrier_peers, local_block + 1, max_peer_block
                                     ).await {
                                         Ok(blocks) if !blocks.is_empty() => {
-                                            match barrier_client.sync_and_execute_blocks(blocks).await {
+                                            // preserve_own_commit_index=true: Validator, see
+                                            // note/startup_sync_commit_index_import_fork_design_2026-09.md.
+                                            match barrier_client.sync_and_execute_blocks(blocks, true).await {
                                                 Ok((synced, last_block, _gei)) => {
                                                     tracing::info!(
                                                         "✅ [FINAL-GATE] Synced {} more blocks (last={})",

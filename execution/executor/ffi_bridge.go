@@ -29,6 +29,8 @@ void metanode_resume_consensus();
 bool metanode_submit_transaction_batch(const uint8_t* payload, size_t len);
 bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_dir);
 bool metanode_is_ready_for_transactions();
+int32_t metanode_attest_payload_loss(uint32_t commit_index, const char* tx_digest_hex);
+int32_t metanode_attest_payload_loss_for_commit(uint32_t commit_index);
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -135,17 +137,20 @@ func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler
 	// Start the Rust thread asynchronously
 	cConfigPath := C.CString(configPath)
 	cDataDir := C.CString(dataDir)
-	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
-	// but Rust converts to string_lossy. So we can free it.
-	defer C.free(unsafe.Pointer(cConfigPath))
-	defer C.free(unsafe.Pointer(cDataDir))
-
-	fmt.Println("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
 
 	// Call the new C++ static initialization function on the main thread safely
 	C.metanode_init_rocksdb(cDataDir)
 
-	C.metanode_start_consensus(cConfigPath, cDataDir)
+	// Start the Rust thread asynchronously
+	// We do NOT defer C.free(cConfigPath) here if the Rust side takes ownership,
+	// but Rust converts to string_lossy. So we can free it.
+	go func() {
+		defer C.free(unsafe.Pointer(cConfigPath))
+		defer C.free(unsafe.Pointer(cDataDir))
+		logger.Info("[FFI Bridge] Starting MetaNode Consensus Engine via CGo FFI")
+		C.metanode_start_consensus(cConfigPath, cDataDir)
+		logger.Warn("[FFI Bridge] MetaNode Consensus Engine exited")
+	}()
 
 	return nil
 }
@@ -218,55 +223,59 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 		}
 
 		// Non-blocking send to authQueue (1000 buffer).
-		// If queue is full, Go is severely behind — drop block.
+		// If queue is full, Go is severely behind — drop block and let Rust retry.
 		select {
 		case defaultAuthoritativeBlockQueue <- req:
-			var tQueued int64
+			// Sent successfully
+		default:
+			logger.Error("🚨 [FFI Bridge] authQueue is FULL! Dropping block %d to prevent Rust deadlock", subDag.GetBlockNumber())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "authQueue is full, execution lagging behind",
+			}, outPayload, outLen)
+			return C.bool(false)
+		}
+		var tQueued int64
+		if ffiTraceEnabled {
+			tQueued = time.Now().UnixNano()
+		}
+
+		// BOUNDED WAIT (restored 2026-09-14): a plain unbounded `<-req.ResponseCh` here
+		// was reintroduced by commit 608b5195 while making the QUEUE SEND above
+		// non-blocking, and it silently undid the exact fix executeBlockResponseTimeout's
+		// own doc comment describes -- confirmed live on this cluster (twice, node-2 then
+		// node-3): the speculative-execution/commit pipeline got stuck for unrelated
+		// reasons, this receive blocked forever, and the whole Rust->Go delivery pipeline
+		// froze permanently with zero self-recovery (go_confirmed_commit frozen while
+		// highest_handled kept climbing -- CommitSyncer's own STALL DETECTOR 4b flags this
+		// exact signature as "wedged downstream of BlockDeliveryManager", but couldn't fix
+		// it -- the fix belongs here, not on the Rust side, since Rust was only ever
+		// waiting on this one channel). Restored to the original bounded select so a stuck
+		// downstream pipeline becomes a bounded, visible failure that Rust's existing
+		// retry path (deliver_with_halt_retry) already handles, instead of a silent
+		// permanent hang requiring a manual restart.
+		select {
+		case response := <-req.ResponseCh:
 			if ffiTraceEnabled {
-				tQueued = time.Now().UnixNano()
+				tRespRecv := time.Now().UnixNano()
+				serializeAndSetResponse(response, outPayload, outLen)
+				tSerialized := time.Now().UnixNano()
+				logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
+					subDag.GetGlobalExecIndex(),
+					tAfterUnmarshal-tEntry,
+					tRespRecv-tQueued,
+					tSerialized-tRespRecv,
+					tSerialized-tEntry)
+			} else {
+				serializeAndSetResponse(response, outPayload, outLen)
 			}
-			// Wait for speculative executor to finish and return actual authoritative response.
-			//
-			// BOUNDED WAIT (Aug 2026): previously this was an unbounded `<-req.ResponseCh`
-			// with no timeout at all. If anything downstream (ExecuteSpeculative's goroutine,
-			// StartCommitterLoop, commitSpeculativeResult) got stuck for any reason and never
-			// sent a response, this CGO call — and therefore the calling Rust goroutine
-			// (tokio::task::spawn_blocking, itself awaited with no timeout on the Rust side) —
-			// would block forever. Since Rust's block-sending pipeline sends one block at a
-			// time and waits for each CGO call to return before sending the next, one stuck
-			// response permanently froze the entire Rust->Go delivery pipeline (observed
-			// directly: 3-node cluster stalled 31+ minutes, consensus rounds kept advancing
-			// fine, only delivery to Go was stuck). A bounded wait here turns that into a
-			// bounded, visible failure that Rust's existing retry path already handles
-			// (record_send_failure -> circuit breaker / later resend), instead of a silent
-			// permanent hang requiring a manual restart.
-			select {
-			case response := <-req.ResponseCh:
-				if ffiTraceEnabled {
-					tRespRecv := time.Now().UnixNano()
-					serializeAndSetResponse(response, outPayload, outLen)
-					tSerialized := time.Now().UnixNano()
-					logger.Warn("⏱️ [FFI-TRACE] gei=%d stage=GO_CGO unmarshal_ns=%d queue_to_resp_ns=%d serialize_ns=%d total_ns=%d",
-						subDag.GetGlobalExecIndex(),
-						tAfterUnmarshal-tEntry,
-						tRespRecv-tQueued,
-						tSerialized-tRespRecv,
-						tSerialized-tEntry)
-				} else {
-					serializeAndSetResponse(response, outPayload, outLen)
-				}
-				return C.bool(true)
-			case <-time.After(executeBlockResponseTimeout):
-				logger.Error("[FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
-				serializeAndSetResponse(&pb.ExecuteBlockResponse{
-					Success: false,
-					Error:   "timed out waiting for Go execution response",
-				}, outPayload, outLen)
-				return C.bool(false)
-			}
-		case <-time.After(5 * time.Second):
-			// Timeout if authoritative queue is completely blocked
-			logger.Error("[FFI BRIDGE] Timeout sending to authoritative queue")
+			return C.bool(true)
+		case <-time.After(executeBlockResponseTimeout):
+			logger.Error("🚨 [FFI BRIDGE] Timeout waiting for speculative execution response (GEI=%d) — treating as failure so Rust can retry instead of hanging forever", subDag.GetGlobalExecIndex())
+			serializeAndSetResponse(&pb.ExecuteBlockResponse{
+				Success: false,
+				Error:   "timed out waiting for Go execution response",
+			}, outPayload, outLen)
 			return C.bool(false)
 		}
 	}
@@ -279,12 +288,11 @@ func cgo_execute_block(payload *C.uint8_t, length C.size_t, outPayload **C.uint8
 				Success: true,
 			}, outPayload, outLen)
 			return C.bool(true)
-		case <-time.After(5 * time.Second):
-			logger.Error("[FFI Bridge] dataChan blocked for 5s. GEI=%d",
-				subDag.GetGlobalExecIndex())
+		default:
+			logger.Error("🚨 [FFI Bridge] listenerQueue is FULL! Dropping block %d to prevent Rust deadlock", subDag.GetBlockNumber())
 			serializeAndSetResponse(&pb.ExecuteBlockResponse{
 				Success: false,
-				Error:   "dataChan blocked for 5s",
+				Error:   "listenerQueue is full, execution lagging behind",
 			}, outPayload, outLen)
 			return C.bool(false)
 		}
@@ -465,6 +473,39 @@ func ResumeRustConsensus() {
 // process startup -- see GLOBAL_COORDINATION_HUB's doc comment in ffi.rs.
 func IsRustConsensusReadyForTransactions() bool {
 	return bool(C.metanode_is_ready_for_transactions())
+}
+
+// AttestPayloadLoss is the Go-side wrapper for the operator-triggered
+// metanode_attest_payload_loss FFI entry point (see its doc comment in consensus/metanode/src
+// /ffi.rs and mục 11 of note/consensus_local_dag_trust_gap_design_2026-09.md, 2026-09-11).
+// NOT called automatically from anywhere in this codebase -- see whatever admin/debug RPC
+// method wires this in for the operator-facing side of that guarantee.
+// txDigestHex must be exactly 2*DIGEST_LENGTH hex characters, no "0x" prefix.
+// Returns: 0 = quorum-certified skip applied, 1 = recovered from a peer/locally (no skip
+// needed), 2 = insufficient stake attested so far, -1 = could not run (see Rust-side logs for
+// the specific reason in every case -- this integer alone is not the full story).
+func AttestPayloadLoss(commitIndex uint32, txDigestHex string) int32 {
+	cDigest := C.CString(txDigestHex)
+	defer C.free(unsafe.Pointer(cDigest))
+	return int32(C.metanode_attest_payload_loss(C.uint32_t(commitIndex), cDigest))
+}
+
+// AttestPayloadLossForCommit is the Go-side wrapper for
+// metanode_attest_payload_loss_for_commit (see its doc comment in consensus/metanode/src/ffi.rs,
+// 2026-09-11) -- the whole-commit convenience form of AttestPayloadLoss above. A single halted
+// commit's subdag can reference blocks from several different authors, each with its own
+// transactions, so more than one digest can be missing at once for the very same commit
+// (reproduced live: 8 distinct missing digests on one commit). Rather than the operator grepping
+// CONSENSUS-HALT-TX-PAYLOAD-LOST's log line for one digest at a time and calling AttestPayloadLoss
+// per digest, re-running whenever the retry loop still doesn't resume, this discovers every
+// digest this node is currently, actively stuck on for commitIndex (via the same STUCK_CLAIMS
+// registry the halt/retry loop already maintains) and attests all of them in one call.
+// Returns: 0 = every claim resolved, 1 = nothing was stuck for this commit on this node right
+// now, 2 = at least one claim still needs more attested stake (the rest were still resolved and
+// recorded -- re-run later), -1 = could not run at all, or at least one claim hit a hard error
+// (see Rust-side logs either way -- this integer alone is not the full story).
+func AttestPayloadLossForCommit(commitIndex uint32) int32 {
+	return int32(C.metanode_attest_payload_loss_for_commit(C.uint32_t(commitIndex)))
 }
 
 // RestoreRustConsensusFromSnapshot purges local DAG and restores from the snapshot payload

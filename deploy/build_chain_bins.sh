@@ -3,14 +3,15 @@
 # ║  🛠️  METANODE PRIVATE CHAIN KIT — BINARY BUILDER & SYNC TOOL                 ║
 # ║                                                                              ║
 # ║  Biên dịch mới nhất từ mã nguồn repo và cập nhật vào thư mục:                ║
-# ║  deploy/private_chain_kit/bin/                                               ║
+# ║  deploy/bin/                                                                 ║
 # ║                                                                              ║
-# ║  Bao gồm 5 file nhị phân:                                                    ║
-# ║  1. metanode            (Consensus Engine - Rust)                           ║
-# ║  2. simple_chain        (Execution Node - Go + CGO + Rust FFI + MVM)        ║
-# ║  3. cross_chain_relayer (Relayer daemon - Go)                                ║
-# ║  4. register_chains     (On-chain Chain & BLS Registration Tool - Go)        ║
-# ║  5. bls_pubkey          (BLS G1 Pubkey Derivation Tool - Go)                 ║
+# ║  Bao gồm 6 file nhị phân:                                                    ║
+# ║  1. metanode               (Consensus Engine - Rust)                         ║
+# ║  2. simple_chain           (Execution Node - Go + CGO + Rust FFI + MVM)      ║
+# ║  3. cross_chain_relayer    (Relayer daemon - Go)                              ║
+# ║  4. register_chains        (On-chain Chain & BLS Registration Tool - Go)      ║
+# ║  5. bls_pubkey             (BLS G1 Pubkey Derivation Tool - Go)               ║
+# ║  6. gen_recovery_committee (Recovery Committee BLS Setup Tool - Go)        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -e
@@ -20,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GO_ROOT="$REPO_ROOT/execution"
 RUST_ROOT="$REPO_ROOT/consensus/metanode"
-DEFAULT_DEST_BIN="$SCRIPT_DIR/private_chain_kit/bin"
+DEFAULT_DEST_BIN="$SCRIPT_DIR/bin"
 DEST_BIN="${DEST_BIN:-$DEFAULT_DEST_BIN}"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -46,15 +47,15 @@ usage() {
     echo -e "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --all              (Mặc định) Build toàn bộ 5 binaries (Rust, Go Node, Tools)"
-    echo "  --tools-only       Chỉ build các công cụ Go cross-chain (relayer, register_chains, bls_pubkey)"
+    echo "  --all              (Mặc định) Build toàn bộ 6 binaries (Rust, Go Node, Tools)"
+    echo "  --tools-only       Chỉ build các công cụ Go cross-chain (relayer, register_chains, bls_pubkey...)"
     echo "  --node-only        Chỉ build 2 node cốt lõi (metanode + simple_chain)"
     echo "  --clean            Xóa sạch go build cache và cargo artifacts trước khi build"
-    echo "  --dest <DIR>       Chỉ định thư mục đích (Mặc định: deploy/private_chain_kit/bin)"
+    echo "  --dest <DIR>       Chỉ định thư mục đích (Mặc định: deploy/bin)"
     echo "  -h, --help         Hiển thị hướng dẫn này"
     echo ""
     echo "Ví dụ:"
-    echo "  $0                 # Build đủ cả 5 file và cập nhật vào private_chain_kit/bin"
+    echo "  $0                 # Build đủ cả 6 file và cập nhật vào deploy/bin"
     echo "  $0 --tools-only    # Build siêu nhanh chỉ các tool Go cross-chain (5-10s)"
     echo "  $0 --clean         # Build lại từ đầu sạch sẽ hoàn toàn"
     echo ""
@@ -185,6 +186,10 @@ if [ "$BUILD_NODE_ONLY" = false ]; then
     echo -e "    🔨 Building bls_pubkey..."
     (cd "$GO_ROOT" && go build -o "$DEST_BIN/bls_pubkey" ./cmd/tool/bls_pubkey)
     chmod +x "$DEST_BIN/bls_pubkey"
+    
+    echo -e "    🔨 Building gen_recovery_committee..."
+    (cd "$GO_ROOT" && go build -o "$DEST_BIN/gen_recovery_committee" ./cmd/tool/gen_recovery_committee)
+    chmod +x "$DEST_BIN/gen_recovery_committee"
     
     echo -e "${GREEN}  ✅ Bộ công cụ Go Cross-Chain đã cập nhật vào $DEST_BIN ($(( $(date +%s) - t_start ))s)${NC}"
 fi

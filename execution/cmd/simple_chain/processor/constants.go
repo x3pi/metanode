@@ -124,6 +124,25 @@ const (
 	// FutureTxTimeout is the timeout for future transactions waiting for their predecessors.
 	FutureTxTimeout = 5 * time.Minute
 
+	// StaleFutureCacheThreshold: ROOT-CAUSE FIX (2026-09-11) for the noncesCache staleness
+	// race documented above ProcessTransactionsInPoolSub's `nonceMap[from]++` line and in
+	// ClearNoncesCache's own doc comment (block_processor_commit.go) -- a commit's
+	// ClearNoncesCache() can fire before its CommitAsync() NOMT write actually lands, so a
+	// re-fetch racing that window caches a stale (too-low) expected nonce and misclassifies
+	// an already-valid transaction as "future" forever, until SOME LATER commit (from any
+	// source) happens to clear the cache again. That is "usually" fast, but has no upper
+	// bound -- live-reproduced on 234/230 (2026-09-11) as an 8+ minute full block-production
+	// freeze after a node restart. Rather than touch NOMT's async-commit timing itself (the
+	// team's 2026-09-02 investigation tried 3 different fixes elsewhere in this exact area
+	// and each made things worse -- see the comments above), this bounds the SYMPTOM
+	// directly: an address with a transaction stuck "future" for longer than this gets its
+	// cached expected-nonce forcibly re-fetched from the DB THIS tick (same code path as an
+	// ordinary cache miss, not a new one), instead of waiting on an unrelated future commit
+	// to clear the whole cache. Deliberately far shorter than FutureTxTimeout (5m, which
+	// gives up on the tx entirely) -- this doesn't give up, it just stops trusting a cache
+	// value that has had ample chance to be proven wrong.
+	StaleFutureCacheThreshold = 2 * time.Second
+
 	// CommitMaxRetries is the number of retries for commit operations.
 	CommitMaxRetries = 3
 

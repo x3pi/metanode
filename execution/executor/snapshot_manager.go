@@ -50,12 +50,22 @@ type SnapshotManager struct {
 	snapshotSourceDir string // Thư mục cần snapshot (cho rsync/hybrid method, vd: data-write)
 	frequencyBlocks   uint64 // Nếu > 0, tạo snapshot định kỳ mỗi N block thay vì chờ hết epoch
 	blockOffset       uint64 // Per-node offset to stagger snapshots (prevents all nodes pausing at same block)
+	// nextPeriodicTarget: block number ngưỡng tiếp theo sẽ trigger snapshot định kỳ. 0 = chưa khởi tạo.
+	// THRESHOLD-CROSSING thay vì exact modulo: OnBlockCommitted nhận blockNumber từ
+	// storage.UpdateLastBlockNumber, vốn CAS monotonic và có thể nhảy cóc qua nhiều block cùng lúc
+	// (fast-sync/resume nạp một loạt block rồi mới gọi update, hoặc 2 goroutine ghi đè lẫn nhau) --
+	// một check "(blockNumber-offset) % frequency == 0" có thể bị nhảy qua đúng bội số và không bao
+	// giờ trigger lại cho tới bội số kế tiếp (quan sát thực tế: node SyncOnly chạy tới block #101
+	// với frequency=50 mà chưa từng trigger lần nào). Threshold-crossing (>=) đảm bảo trigger đúng 1
+	// lần dù blockNumber nhảy qua nhiều bội số cùng lúc.
+	nextPeriodicTarget uint64
 
 	// Filesystem capabilities
 	reflinkSupported bool // true nếu filesystem hỗ trợ cp --reflink (btrfs, xfs)
 
 	// State tracking
 	mu                 sync.Mutex
+	bgWg               sync.WaitGroup
 	epochBoundaryBlock uint64 // Block number khi epoch transition
 	currentEpoch       uint64 // Epoch hiện tại
 	lastSeenEpoch      uint64 // Epoch cuối cùng đã thấy (để phát hiện thay đổi)
@@ -100,6 +110,12 @@ type SnapshotManager struct {
 
 	// Callback to get the current RPC supported block
 	rpcSupportedBlockCallback func() uint64
+}
+
+// WaitForBackgroundTasks waits for all asynchronous background snapshot and tarball tasks to finish.
+// This prevents filesystem race conditions during shutdowns and unit test cleanup.
+func (sm *SnapshotManager) WaitForBackgroundTasks() {
+	sm.bgWg.Wait()
 }
 
 // SetRpcSupportedBlockCallback registers a callback to fetch the current RPC supported block.
@@ -322,12 +338,23 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 
 	// Tính năng 2: Tạo snapshot tĩnh dựa trên chu kỳ block cố định
 	// STAGGER FIX: Dùng offset per-node để tránh tất cả nodes snapshot cùng lúc
-	// Formula: (blockNumber - offset) % frequency == 0
 	// Ví dụ frequency=500, node0 offset=0 → snap ở 500, 1000, 1500
 	//                        node1 offset=100 → snap ở 600, 1100, 1600
+	// THRESHOLD-CROSSING (>=) thay vì exact modulo: blockNumber có thể nhảy cóc qua đúng bội số
+	// (xem giải thích ở field nextPeriodicTarget), nên so sánh ngưỡng thay vì chờ trùng khớp tuyệt đối.
 	var isPeriodicTrigger bool
 	if sm.frequencyBlocks > 0 && blockNumber > sm.blockOffset {
-		isPeriodicTrigger = (blockNumber-sm.blockOffset)%sm.frequencyBlocks == 0
+		if sm.nextPeriodicTarget == 0 {
+			sm.nextPeriodicTarget = sm.blockOffset + sm.frequencyBlocks
+		}
+		if blockNumber >= sm.nextPeriodicTarget {
+			isPeriodicTrigger = true
+			// Advance past this AND any targets the jump skipped over, so the very next
+			// call doesn't immediately re-trigger and we don't fall behind permanently.
+			for sm.nextPeriodicTarget <= blockNumber {
+				sm.nextPeriodicTarget += sm.frequencyBlocks
+			}
+		}
 	}
 
 	if !isStandardTrigger && !isPeriodicTrigger {
@@ -343,7 +370,9 @@ func (sm *SnapshotManager) OnBlockCommitted(blockNumber uint64) {
 	sm.mu.Unlock()
 
 	// Tạo snapshot trong goroutine riêng để không block block processing
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		defer func() {
 			sm.mu.Lock()
 			sm.isCreating = false
@@ -759,7 +788,9 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	logger.Info("📸 [SNAPSHOT] ✅ %s snapshot created: %s (took %v)", strings.ToUpper(method), snapshotName, time.Since(startTime))
 
 	// Run background tarball packaging to prevent network download race conditions
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		tarStart := time.Now()
 		tarName := snapshotName + ".tar"
 		tarPath := filepath.Join(sm.snapshotBaseDir, tarName)
@@ -946,7 +977,9 @@ func (sm *SnapshotManager) ForceSnapshotNow(blockNumber uint64, epoch uint64) {
 	logger.Info("📸 [SNAPSHOT] 🔔 ForceSnapshotNow: Creating mandatory epoch boundary snapshot at block %d (epoch=%d)", blockNumber, epoch)
 
 	// Tạo snapshot trong goroutine để không block block processing
+	sm.bgWg.Add(1)
 	go func() {
+		defer sm.bgWg.Done()
 		defer func() {
 			sm.mu.Lock()
 			sm.isCreating = false

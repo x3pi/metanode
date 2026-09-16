@@ -56,8 +56,8 @@ INV_PATH=$(get_inv_path)
 PARSE_PY=$(get_parse_py)
 
 if [ -n "$INV_PATH" ]; then
-    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
-    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | tr -d '"'"'")
+    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
     if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
     if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
 fi
@@ -89,8 +89,8 @@ if [ -z "$PROBE_TX_KEY" ] && [ -f "$PROBE_SUITE_CONFIG" ]; then
     PROBE_TX_KEY=$(python3 -c "
 import json
 try:
-    keys = json.load(open('$PROBE_SUITE_CONFIG')).get('private_keys', [])
-    print(keys[0] if keys else '')
+    c = json.load(open('$PROBE_SUITE_CONFIG'))
+    print(c.get('private_key', ''))
 except Exception:
     print('')
 " 2>/dev/null)
@@ -108,9 +108,12 @@ PROBE_TOOL_BIN="${SCRIPT_DIR}/stall_probe_tool"
 # an older deploy still running it. Computed once, included in every alert below. Short hash +
 # "-dirty" suffix if this checkout has uncommitted changes (matches `git describe`-style
 # convention already used by ansible_deploy.sh's own "Commit: <hash>" banner).
-CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-if [ "$CODE_VERSION" != "unknown" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
-    CODE_VERSION="${CODE_VERSION}-dirty"
+CODE_VERSION="N/A"
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    CODE_VERSION=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "N/A")
+    if [ "$CODE_VERSION" != "N/A" ] && [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
+        CODE_VERSION="${CODE_VERSION}-dirty"
+    fi
 fi
 
 send_tele() {
@@ -285,6 +288,18 @@ fi
 if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--multi" ]; then
     echo "🌐 Đang khởi động chế độ Giám Sát Chéo Đa Máy (Mutual Cross-Monitoring)..."
     
+    # Priority for --all-hosts: monitors/inventory.yml (${SCRIPT_DIR}/inventory.yml)
+    if [ -f "${SCRIPT_DIR}/inventory.yml" ]; then
+        INV_PATH="${SCRIPT_DIR}/inventory.yml"
+    fi
+
+    if [ -n "$INV_PATH" ]; then
+        BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
+        if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
+    fi
+    
     if [ -z "$INV_PATH" ] || ! command -v ansible >/dev/null 2>&1; then
         echo -e "⚠️ Không tìm thấy Ansible hoặc inventory.yml. Chuyển về chế độ giám sát cục bộ."
         exec /bin/bash "${SCRIPT_DIR}/start_monitors.sh"
@@ -316,11 +331,9 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
         fi
     fi
 
-    # 3. Chuẩn bị file copy sang các node (luôn luôn sync file mới nhất từ root, không để file cũ bị lệch IP)
-    if [ -f "$INV_PATH" ]; then
-        if [ "$(readlink -f "$INV_PATH" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/inventory.yml" 2>/dev/null)" ]; then
-            cp -f "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
-        fi
+    # 3. Chuẩn bị file copy sang các node (không ghi đè monitors/inventory.yml nếu đã có sẵn)
+    if [ ! -f "${SCRIPT_DIR}/inventory.yml" ] && [ -f "$INV_PATH" ]; then
+        cp -f "$INV_PATH" "${SCRIPT_DIR}/inventory.yml"
     fi
     if [ -f "$PARSE_PY" ]; then
         if [ "$(readlink -f "$PARSE_PY" 2>/dev/null)" != "$(readlink -f "${SCRIPT_DIR}/parse_inventory.py" 2>/dev/null)" ]; then
@@ -356,7 +369,23 @@ if [ "${1:-}" == "health" ]; then
     echo "Starting health monitor loop with Smart Crash/Server-Down Detection..."
     declare -A dead_nodes
     declare -A failure_type
-    
+    # Phuong an A (2026-09-10): consensus engine tu dung dispatch (khong tu doan tiep khi
+    # khong xac nhan duoc voi da so validator, xem processor.rs +
+    # note/consensus_local_dag_trust_gap_design_2026-09.md) thay vi crash hay treo im lang --
+    # RPC/service van "song" binh thuong nen dead_nodes[] khong bat duoc tinh huong nay, can
+    # theo doi rieng. "1" = da alert va CHUA thay bang chung node duoc restart that su (chi
+    # reset khi dead_nodes[] ghi nhan mot lan crash/restart that -- xem 2 diem reset ben duoi)
+    # -- co chu y KHONG tu "recover" khi dong log chi don gian troi khoi cua so tail, vi thieu
+    # bang chung khong phai la bang chung da het treo.
+    declare -A consensus_halt_alerted
+    # Same idea, separate marker/flag (2026-09-11): CONFIRMED permanent tx-payload loss
+    # (block_delivery.rs) rather than SUSPECTED divergence (processor.rs) -- different
+    # cause, different runbook, so tracked and alerted independently. Unlike
+    # consensus_halt_alerted, this one CAN self-clear without a crash/restart (the retry
+    # loop keeps running and may succeed on its own once a peer regains the payload) --
+    # see the CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED check below.
+    declare -A tx_payload_lost_alerted
+
     # Chain Stall Detector tracking
     last_seen_block=0
     last_block_progress_ts=$(date +%s)
@@ -445,7 +474,12 @@ if [ "${1:-}" == "health" ]; then
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Thảm họa (Disaster)
 ────────────────────────
-⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS."
+⚠️ Máy chủ vật lý <code>${ip}</code> đang tắt nguồn, đứt mạng hoặc treo cứng OS.
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ CHO DEV:</b>
+1. Kiểm tra nguồn điện & kết nối mạng của máy chủ <code>${ip}</code>.
+2. Sau khi máy chủ online trở lại, bật lại riêng node <code>${node_key}</code> (giữ nguyên Data):
+<code>./ansible_deploy.sh --start --only-node ${node_id}</code>"
 
                         elif [ "$server_rebooted" == "true" ]; then
                             # TRƯỜNG HỢP B: SERVER VỪA BỊ KHỞI ĐỘNG LẠI (REBOOT) — TEST BỊ DỪNG HẾT
@@ -479,6 +513,10 @@ if [ "${1:-}" == "health" ]; then
 ────────────────────────
 ⛔ <b>TOÀN BỘ TIẾN TRÌNH TEST / BENCHMARK ĐÃ BỊ DỪNG!</b>
 Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel Panic, OOM Killer cạn RAM, Quá tải CPU hoặc Sập nguồn).
+
+👉 <b>HƯỚNG DẪN XỬ LÝ CHO DEV:</b>
+Khởi động lại riêng node <code>${node_key}</code> (giữ nguyên Data):
+<code>./ansible_deploy.sh --start --only-node ${node_id}</code>
 
 🛠 <b>Lệnh kiểm tra nguyên nhân Reboot trực tiếp trên máy ${ip}:</b>
 • Xem log lần boot trước:
@@ -576,14 +614,166 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
    • <b>Mức độ:</b> Khẩn cấp (Critical)
 ────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV):</b>
+• <b>Bước 1:</b> Khởi động lại riêng node <code>${node_key}</code> (Giữ nguyên Data):
+  <code>./ansible_deploy.sh --start --only-node ${node_id}</code>
+  <i>(hoặc fast restart: <code>./ansible_deploy.sh --restart --only-node ${node_id}</code>)</i>
+
+• <b>Bước 2:</b> Nếu restart vẫn sập (hỏng DB hoặc tụt quá xa > 5 epoch): Khôi phục từ Snapshot:
+  <code>./ansible_deploy.sh --reset-all --only-node ${node_id} --restore-node ${node_id} --snapshot-url <URL_SNAPSHOT></code>
+  ⚠️ <i>LƯU Ý: Tuyệt đối KHÔNG bỏ cờ <code>--only-node ${node_id}</code>!</i>
+
+────────────────────────
 📦 <b>Đã tự động sao lưu gói Logs mới nhất!</b>
 🛠 <b>Lệnh kéo Logs về máy trạm để Debug:</b>
 <code>scp -r $ssh_user@$MONITOR_IP:$crash_dir ./node_${node_id}_crash_${crash_time}</code>"
                         fi
                     fi
                 else
+                    # ─── KIỂM TRA THÊM: CONSENSUS TỰ DỪNG (Phuong an A) dù node vẫn trả lời RPC ──
+                    # Khác 3 tình huống ở trên (server down / reboot / node crash): ở đây RPC vẫn
+                    # sống, service vẫn "active" -- consensus engine CHỦ ĐỘNG dừng dispatch vì
+                    # không xác nhận được với đa số validator khác trong thời gian dài, thay vì tự
+                    # đoán tiếp (xem processor.rs, note/consensus_local_dag_trust_gap_design_2026-09.md).
+                    # Quét cửa sổ cuối (200KB) của execution.log trong thư mục NGÀY MỚI NHẤT
+                    # (Go logger tự rotate theo ngày + kích thước -- xem execution/pkg/logger,
+                    # cùng quy ước glob "logs/execution/*/execution.log" mà ansible_deploy.sh và
+                    # phần kéo log crash phía trên đã dùng; Rust log [RUST] đi qua cùng logger
+                    # này, KHÔNG PHẢI file phẳng logs/execution/execution.log).
+                    ip_for_halt_check=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
+                    is_local_for_halt_check=false
+                    if [ "$ip_for_halt_check" == "$MONITOR_IP" ] || [ "$ip_for_halt_check" == "127.0.0.1" ] || [ "$ip_for_halt_check" == "localhost" ]; then
+                        is_local_for_halt_check=true
+                    fi
+                    halt_log_line=""
+                    if [ "$is_local_for_halt_check" == "true" ]; then
+                        latest_exec_date_dir_for_halt=$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1 || true)
+                        if [ -n "$latest_exec_date_dir_for_halt" ]; then
+                            halt_log_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-SUSPECTED-DIVERGENCE" | tail -n 1 || true)
+                        fi
+                    else
+                        resolve_ssh_auth "$node_key" "$node_id" "$RPC_CONFIG_DATA"
+                        halt_log_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-SUSPECTED-DIVERGENCE' | tail -n 1" 2>/dev/null || true)
+                    fi
+                    if [ -n "$halt_log_line" ] && [ "${consensus_halt_alerted[$node_key]:-0}" == "0" ]; then
+                        consensus_halt_alerted[$node_key]=1
+                        send_tele "🛑🚨 <b>[NGHIÊM TRỌNG: CONSENSUS TỰ DỪNG — NGHI NGỜ PHÂN NHÁNH (FORK)]</b> 🛑🚨
+────────────────────────
+🎯 <b>NODE:</b>
+   • <b>IP:</b> <code>${ip_for_halt_check}</code>
+   • <b>Node:</b> <code>${node_key}</code> (${node_url})
+   • <b>RPC:</b> vẫn phản hồi bình thường — <u>ĐÂY KHÔNG PHẢI node crash/down</u>
+
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+   • <b>Mức độ:</b> NGHIÊM TRỌNG NHẤT — không tự phục hồi, cần Operator can thiệp
+────────────────────────
+⚠️ Consensus engine đã <b>CHỦ ĐỘNG DỪNG</b> dispatch commit vì không thể xác nhận với đa số
+validator khác trong thời gian dài (xem PERMANENT-GAP-RECOVERY / Phương án A). Đây là hành
+vi AN TOÀN CÓ CHỦ ĐÍCH (giống Sui mainnet: dừng lại thay vì tự đoán tiếp khi không chắc chắn)
+— KHÔNG PHẢI bug crash, và <u>KHÔNG được tự ý bỏ qua hoặc restart hàng loạt</u> vì có thể che
+giấu một phân nhánh (fork) thật đang tồn tại trên đĩa.
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (RUNBOOK CHO DEV/OPERATOR) — đọc kỹ trước khi làm gì:</b>
+1. <b>KHÔNG restart node này ngay.</b> Trước tiên xác minh block hash/state root của node này
+   khớp với ít nhất 2 validator khác đang khỏe (block_hash_checker hoặc so sánh
+   <code>eth_getBlockByNumber</code> thủ công).
+2. Nếu KHỚP với đa số: có thể an toàn restart để node tự đồng bộ lại:
+   <code>./ansible_deploy.sh --restart --only-node ${node_id}</code>
+3. Nếu LỆCH với đa số (nghi ngờ fork thật): PHẢI khôi phục từ snapshot đã biết tốt, KHÔNG chỉ
+   restart suông:
+   <code>./ansible_deploy.sh --reset-all --only-node ${node_id} --restore-node ${node_id} --snapshot-url <URL_SNAPSHOT></code>
+4. Chi tiết thiết kế & nguyên nhân gốc: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code>
+────────────────────────
+📜 <b>Dòng log gốc:</b>
+<code>${halt_log_line}</code>"
+                    fi
+
+                    # ─── KIỂM TRA THÊM: MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH (2026-09-11) ──
+                    # KHÁC với "nghi ngờ phân nhánh" ở trên: đây là một node đã THỬ hỏi các
+                    # peer khác để khôi phục payload một giao dịch bị thiếu (TxPayloadCache
+                    # chỉ lưu RAM, mất khi restart) và KHÔNG peer nào còn giữ nó -- thường xảy
+                    # ra khi CẢ CỤM restart cùng lúc (vd: deploy code mới toàn cụm) đúng lúc có
+                    # giao dịch đang "bay" giữa các node. KHÔNG phải nghi ngờ fork (mọi node
+                    # đều đồng ý dữ liệu đã mất), nên hướng xử lý khác hẳn -- xem block_delivery.rs.
+                    tx_lost_log_line=""
+                    tx_lost_recovered_line=""
+                    if [ "$is_local_for_halt_check" == "true" ]; then
+                        if [ -n "$latest_exec_date_dir_for_halt" ]; then
+                            tx_lost_log_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-TX-PAYLOAD-LOST\]" | tail -n 1 || true)
+                            tx_lost_recovered_line=$(tail -c 200000 "$latest_exec_date_dir_for_halt/execution.log" 2>/dev/null | grep "CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED" | tail -n 1 || true)
+                        fi
+                    else
+                        tx_lost_log_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-TX-PAYLOAD-LOST\]' | tail -n 1" 2>/dev/null || true)
+                        tx_lost_recovered_line=$(ssh_remote -o ConnectTimeout=5 "$SSH_USER@$ip_for_halt_check" "d=\$(ls -dt /opt/metanode/node-${node_id}/logs/execution/20* 2>/dev/null | head -n 1); [ -n \"\$d\" ] && tail -c 200000 \"\$d/execution.log\" 2>/dev/null | grep 'CONSENSUS-HALT-TX-PAYLOAD-LOST-RECOVERED' | tail -n 1" 2>/dev/null || true)
+                    fi
+                    if [ -n "$tx_lost_log_line" ] && [ "${tx_payload_lost_alerted[$node_key]:-0}" == "0" ]; then
+                        tx_payload_lost_alerted[$node_key]=1
+                        # Extract the stuck commit index (e.g. "Failed to deliver commit 3905 (GEI=141)")
+                        # so the alert can give the EXACT command to run, not just point at a doc.
+                        stuck_commit_idx=$(echo "$tx_lost_log_line" | grep -oP 'deliver commit \K[0-9]+' || true)
+                        send_tele "🛑🚨 <b>[NGHIÊM TRỌNG: MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH]</b> 🛑🚨
+────────────────────────
+🎯 <b>NODE:</b>
+   • <b>IP:</b> <code>${ip_for_halt_check}</code>
+   • <b>Node:</b> <code>${node_key}</code> (${node_url})
+   • <b>RPC:</b> vẫn phản hồi bình thường — <u>ĐÂY KHÔNG PHẢI node crash/down</u>
+
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+   • <b>Code version:</b> <code>${CODE_VERSION}</code>
+   • <b>Mức độ:</b> NGHIÊM TRỌNG — không tự phục hồi bằng restart, cần Operator can thiệp
+────────────────────────
+⚠️ Node này đã thử hỏi các peer khác để khôi phục payload một giao dịch bị thiếu khỏi
+TxPayloadCache (cache RAM, mất khi restart) NHƯNG không peer nào còn giữ nó. Node đang
+<b>DỪNG DISPATCH</b> ở đúng commit này để tránh fork (không được phép âm thầm bỏ qua giao
+dịch), và sẽ tự thử lại mỗi 10s — <b>KHÁC với "nghi ngờ phân nhánh": đây KHÔNG phải nghi
+ngờ fork, mọi node đều đồng ý dữ liệu đã mất thật.</b>
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ:</b>
+1. <b>Restart đơn lẻ node này KHÔNG giúp ích</b> nếu dữ liệu đã mất trên toàn cụm (nguyên
+   nhân thường là deploy code mới cho CẢ cụm cùng lúc, đúng lúc có giao dịch đang xử lý dở).
+   Cụm cũng sẽ TỰ ĐỘNG thử Fast Restart mỗi khi phát hiện CHAIN STALL — bình thường vô hại
+   nhưng KHÔNG bao giờ tự sửa được đúng nguyên nhân này (dữ liệu mất khỏi RAM thì restart bao
+   nhiêu lần cũng vậy) — xem cảnh báo CHAIN STALL riêng nếu nó cứ lặp lại không dứt.
+2. Nếu một validator khác KHÔNG bị mất payload này vẫn còn sống (vd. chỉ 1 node restart,
+   các node khác vẫn chạy liên tục): node này sẽ TỰ PHỤC HỒI khi peer đó phản hồi lại, không
+   cần can thiệp gì thêm — sẽ có thông báo riêng khi phục hồi xong.
+3. Nếu KHÔNG node nào còn payload (mọi peer đều báo <code>NO blocks</code>/thiếu digest lặp
+   lại nhiều phút): dùng chính công cụ vận hành đã có sẵn cho đúng trường hợp này —
+   <b>quorum-certified skip</b> (<code>admin_attestPayloadLossForCommit</code>), gọi TRÊN CẢ
+   4 NODE cho commit bị kẹt${stuck_commit_idx:+ (<code>${stuck_commit_idx}</code>)}:
+   <code>curl -s -X POST http://&lt;node-ip&gt;:&lt;rpc-port&gt; -H 'Content-Type: application/json' \\
+     -d '{\"jsonrpc\":\"2.0\",\"method\":\"admin_attestPayloadLossForCommit\",\"params\":[\"&lt;securepassword&gt;\",${stuck_commit_idx:-<commit_index>}],\"id\":1}'</code>
+   Lặp lại cho commit kế tiếp nếu nó lại kẹt ngay sau đó (bình thường khi nhiều tx bị mất liên
+   tiếp) cho tới khi <code>eth_blockNumber</code> tăng đều trở lại. <u>Đây là quyết định
+   KHÔNG THỂ HOÀN TÁC</u> (chính thức công nhận giao dịch đã mất vĩnh viễn) — do đó công cụ
+   này CỐ TÌNH không được gọi tự động ở đây, luôn cần Operator xác nhận trước khi chạy.
+4. Chi tiết: <code>note/consensus_local_dag_trust_gap_design_2026-09.md</code> mục 10, và
+   [[project_consensus_halt_not_guess_phuong_an_a]] mục 22 (điểm 5) cho 1 ví dụ live đã dùng
+   đúng quy trình này để giải phóng ~95 commit bị kẹt tích lũy sau nhiều lần restart liên tục.
+────────────────────────
+📜 <b>Dòng log gốc:</b>
+<code>${tx_lost_log_line}</code>"
+                    elif [ -n "$tx_lost_recovered_line" ] && [ "${tx_payload_lost_alerted[$node_key]:-0}" == "1" ]; then
+                        tx_payload_lost_alerted[$node_key]=0
+                        send_tele "✅ <b>[ĐÃ PHỤC HỒI: PAYLOAD GIAO DỊCH ĐÃ KHÔI PHỤC ĐƯỢC]</b> ✅
+────────────────────────
+🎯 <b>NODE:</b> <code>${node_key}</code> (${ip_for_halt_check})
+   • <b>Trạng thái:</b> Đã lấy được payload từ peer, dispatch bình thường trở lại.
+📜 <b>Dòng log gốc:</b>
+<code>${tx_lost_recovered_line}</code>"
+                    fi
+
                     if [ "${dead_nodes[$node_key]:-0}" == "1" ]; then
                         dead_nodes[$node_key]=0
+                        # Node vua trai qua mot lan crash/restart that su -- neu truoc do co
+                        # alert CONSENSUS-HALT, process cu da bi thay the boi mot lan khoi dong
+                        # moi (co le da duoc Operator xu ly theo runbook o tren), nen cho phep
+                        # canh bao lai neu tinh trang lap lai o lan chay moi nay.
+                        consensus_halt_alerted[$node_key]=0
+                        tx_payload_lost_alerted[$node_key]=0
                         prev_type=${failure_type[$node_key]:-"NODE_CRASH"}
                         ip=$(echo "$node_url" | awk -F/ '{print $3}' | awk -F: '{print $1}')
                         
@@ -602,6 +792,8 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                     elif [ "${dead_nodes[$node_key]:-0}" == "2" ]; then
                         # Node tắt chủ động nay bật lại bình thường, reset cờ êm đềm
                         dead_nodes[$node_key]=0
+                        consensus_halt_alerted[$node_key]=0
+                        tx_payload_lost_alerted[$node_key]=0
                     fi
                 fi
             done < <(jq -r '.nodes | to_entries[] | "\(.key) \(.value)"' "$RPC_JSON_PATH" 2>/dev/null || true)
@@ -643,67 +835,121 @@ Máy chủ <code>${ip}</code> bị khởi động lại (khả năng do: Kernel 
                     last_block_progress_ts=$now_ts
                 else
                     stall_duration=$((now_ts - last_block_progress_ts))
+                    echo "[DEBUG] stall_duration=$stall_duration, STALL_THRESHOLD_SEC=$STALL_THRESHOLD_SEC, now=$now_ts, last=$last_block_progress_ts"
                     # Nếu block không tăng sau STALL_THRESHOLD_SEC, cảnh báo lặp lại mỗi 15 phút
                     if [ "$stall_duration" -ge "$STALL_THRESHOLD_SEC" ]; then
                         if [ $((now_ts - last_stall_alert_ts)) -ge 900 ]; then
-                            # Trước khi báo: thử 1 tx thăm dò. Nếu chain chỉ đang RẢNH (không có
-                            # giao dịch nên không tạo block mới -- không phải bị treo thật), tx
-                            # này sẽ được đưa vào block và ta bỏ qua cảnh báo giả (2026-09-08).
-                            confirmed_real_stall=true
-                            probe_status_line="Chưa thử được (không có node nào để gửi)"
-                            echo "🔎 [STALL PROBE] Nghi ngờ chain treo tại block #${last_seen_block} (đứng yên ${stall_duration}s) -- thử gửi 1 tx thăm dò tới ${probe_target_url:-<không có node nào>}..."
+                            # Kiểm tra mempool trước khi báo cáo CHAIN STALL
+                            pending_tx_count=0
                             if [ -n "$probe_target_url" ]; then
-                                LAST_PROBE_OUTPUT=""
-                                send_stall_probe_tx "$probe_target_url"
-                                probe_rc=$?
-                                case "$probe_rc" in
-                                    0)
-                                        sleep 3
-                                        probe_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | jq -r .result 2>/dev/null || echo "")
-                                        if [[ "$probe_hex" =~ ^0x[0-9a-fA-F]+$ ]] && [ $((16#${probe_hex#0x})) -gt "$last_seen_block" ]; then
-                                            last_seen_block=$((16#${probe_hex#0x}))
-                                            last_block_progress_ts=$now_ts
-                                            confirmed_real_stall=false
-                                            echo "✅ [STALL PROBE] Tx thăm dò đã vào block #${last_seen_block} -- chain chỉ đang rảnh (không có giao dịch), KHÔNG phải bị treo thật. Bỏ qua cảnh báo."
-                                        else
-                                            probe_status_line="Tx thăm dò báo đã xác nhận nhưng block vẫn chưa nhích -- bất thường, cần xem log."
-                                        fi
-                                        ;;
-                                    2)
-                                        # 2026-09-08: gặp thật trên cụm CI -- PROBE_TX_KEY sai/chưa đăng ký BLS
-                                        # khiến RPC từ chối NGAY LÚC GỬI, không liên quan gì tới chain có treo
-                                        # hay không. Đừng khẳng định "không phải do rảnh" trong tình huống này.
-                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
-                                        probe_status_line="Bị RPC từ chối ngay khi gửi (lỗi cấu hình PROBE_TX_KEY, KHÔNG phải bằng chứng chain treo): ${probe_err_snippet:-không rõ lỗi}"
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                    3)
-                                        probe_status_line="Đã gửi được nhưng hết giờ chờ (15s) không thấy receipt -- tín hiệu treo thật."
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                    *)
-                                        probe_status_line="Không chạy được (thiếu công cụ hoặc không lấy được chain-id) -- không loại trừ được khả năng rảnh."
-                                        echo "⚠️ [STALL PROBE] $probe_status_line"
-                                        ;;
-                                esac
+                                pending_hex=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_pendingTransactions","params":[],"id":1}' 2>/dev/null | jq '.result | length' 2>/dev/null || echo "0")
+                                if [[ "$pending_hex" =~ ^[0-9]+$ ]]; then
+                                    pending_tx_count=$pending_hex
+                                fi
                             fi
 
-                            if [ "$confirmed_real_stall" == "true" ]; then
+                            consensus_ready="true"
+                            if [ -n "$probe_target_url" ]; then
+                                ready_val=$(curl -s -m 3 -X POST "$probe_target_url" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_consensusReady","params":[],"id":1}' 2>/dev/null | jq -r '.result.ready' 2>/dev/null)
+                                if [ "$ready_val" == "false" ]; then
+                                    consensus_ready="false"
+                                fi
+                            fi
+
+                            if [ "$consensus_ready" == "false" ]; then
+                                echo "✅ [STALL CHECK] Node chưa sẵn sàng (đang Startup/CatchingUp/Syncing). Bỏ qua báo động giả CHAIN STALL."
+                                last_block_progress_ts=$now_ts
+                            else
+                                echo "🔎 [STALL PROBE] Gửi thêm 1 tx thăm dò tới ${probe_target_url:-<không có>} để kiểm tra xem có phải idle không..."
+                                probe_status_line="Mempool có $pending_tx_count tx."
+                                probe_rc=1
+                                if [ -n "$probe_target_url" ]; then
+                                    LAST_PROBE_OUTPUT=""
+                                    send_stall_probe_tx "$probe_target_url"
+                                    probe_rc=$?
+                                fi
+                                
+                                if [ "$probe_rc" -eq 0 ]; then
+                                    echo "✅ [STALL CHECK] Tx thăm dò xác nhận thành công! Chuỗi đang bình thường. Bỏ qua."
+                                    last_block_progress_ts=$now_ts
+                                else
+                                    if [ "$probe_rc" -eq 2 ]; then
+                                        probe_err_snippet=$(echo "$LAST_PROBE_OUTPUT" | grep "send error:" | head -1 | sed 's/^ *//')
+                                        probe_status_line="$probe_status_line | Tx thăm dò: Bị từ chối ngay (${probe_err_snippet:-không rõ lỗi})"
+                                        if [ "$pending_tx_count" -eq 0 ]; then
+                                            echo "✅ [STALL CHECK] Mempool rỗng, probe fail. Coi như idle."
+                                            last_block_progress_ts=$now_ts
+                                            continue
+                                        fi
+                                    elif [ "$probe_rc" -eq 3 ]; then
+                                        probe_status_line="$probe_status_line | Tx thăm dò: Hết 15s không thấy receipt (STALL THẬT!)"
+                                    fi
+
                                 last_stall_alert_ts=$now_ts
                                 is_chain_stalled=true
-                                send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
+
+                                # GITHUB ISSUE #105 FOLLOW-UP (mục 22): before blindly firing the
+                                # usual auto-restart, check whether BƯỚC 2 above already flagged an
+                                # active, unresolved CONSENSUS-HALT-TX-PAYLOAD-LOST on any node this
+                                # same cycle. Confirmed live (mục 22 point 5): a payload-loss halt
+                                # produces this EXACT stall signature (height frozen, probe tx never
+                                # confirms) but a restart -- single-node OR whole-cluster -- can NEVER
+                                # fix it (the missing data is gone from every peer's RAM, not from a
+                                # wedged process), so looping `--restart` here forever just burns
+                                # ~50s+ of downtime per cycle for zero benefit. Skip it in that case
+                                # and point back at the payload-loss alert's runbook instead, which
+                                # already gives the exact admin_attestPayloadLossForCommit command.
+                                payload_loss_active=false
+                                for pla_key in "${!tx_payload_lost_alerted[@]}"; do
+                                    if [ "${tx_payload_lost_alerted[$pla_key]}" == "1" ]; then
+                                        payload_loss_active=true
+                                        break
+                                    fi
+                                done
+
+                                if [ "$payload_loss_active" == "true" ]; then
+                                    send_tele "🚨 <b>[CHUỖI ĐỨNG IM — NGUYÊN NHÂN ĐÃ BIẾT: MẤT PAYLOAD]</b> 🚨
+────────────────────────
+📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
+   • <b>Hostname:</b> <code>$(hostname)</code>
+   • <b>IP:</b> <code>${MONITOR_IP}</code>
+🎯 <b>Block hiện tại:</b> <code>#${last_seen_block}</code> (đứng im ${stall_duration}s)
+────────────────────────
+⚠️ Đã có cảnh báo <b>[MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH]</b> riêng cho node liên quan trong cùng
+chu kỳ kiểm tra này — đây gần như chắc chắn là NGUYÊN NHÂN của lần đứng im này, không phải một
+sự cố mới. <b>Bỏ qua Fast Restart tự động lần này</b> vì restart không bao giờ sửa được lỗi mất
+payload (dữ liệu mất khỏi RAM mọi node, không phải do tiến trình bị kẹt) — xem lại cảnh báo
+[MẤT VĨNH VIỄN PAYLOAD GIAO DỊCH] gần nhất để lấy lệnh <code>admin_attestPayloadLossForCommit</code>
+chính xác cần chạy.
+────────────────────────"
+                                else
+                                    send_tele "🚨 <b>[NGHIÊM TRỌNG: CHUỖI BỊ ĐỨNG IM / CHAIN STALL]</b> 🚨
 ────────────────────────
 📡 <b>MÁY PHÁT HIỆN & BÁO CÁO (Reporter Server):</b>
    • <b>Hostname:</b> <code>$(hostname)</code>
    • <b>IP:</b> <code>${MONITOR_IP}</code>
    • <b>Code version:</b> <code>${CODE_VERSION}</code>
 🎯 <b>TÌNH TRẠNG CONSENSUS / EXECUTION BỊ TREO:</b>
-   • <b>Node được kiểm tra (tx thăm dò):</b> <code>${probe_target_url:-không có}</code>
+   • <b>Node được kiểm tra:</b> <code>${probe_target_url:-không có}</code>
    • <b>Block hiện tại:</b> <code>#${last_seen_block}</code>
    • <b>Thời gian không tăng block:</b> <code>${stall_duration}s</code> (ngưỡng: ${STALL_THRESHOLD_SEC}s)
-   • <b>Kết quả tx thăm dò:</b> ${probe_status_line}
+   • <b>Trạng thái:</b> ${probe_status_line}
    • <b>Nguyên nhân khả dĩ:</b> Mất kết nối P2P quá f node, deadlock consensus, hoặc stall round.
-────────────────────────"
+────────────────────────
+👉 <b>HƯỚNG DẪN XỬ LÝ (TỰ ĐỘNG PHỤC HỒI):</b>
+Hệ thống phát hiện kẹt vòng lặp Consensus. Đang tự động kích hoạt Fast Restart toàn cụm trong nền để khôi phục!
+🟢 <i>An toàn: Giữ nguyên 100% dữ liệu, không tốn thời gian build lại.</i>"
+
+                                    # Auto-recover in background, detached from TTY
+                                    echo "[$(date -u)] Auto-recovering chain stall..." >> "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
+                                    (
+                                        cd "${SCRIPT_DIR}/.."
+                                        export ANSIBLE_FORCE_COLOR=True
+                                        export PYTHONUNBUFFERED=1
+                                        ./ansible_deploy.sh --restart < /dev/null
+                                    ) >/dev/null 2>&1 &
+                                fi
+                                fi
                             fi
                         fi
                     fi

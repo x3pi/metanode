@@ -1,9 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use crate::{block::BlockAPI, CommitIndex, CommittedSubDag, VerifiedBlock};
 use consensus_types::block::{BlockRef, TransactionIndex};
-use crate::{block::BlockAPI, CommittedSubDag, VerifiedBlock, CommitIndex};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct CommitState {
     pub(crate) commit: CommittedSubDag,

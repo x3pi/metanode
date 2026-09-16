@@ -54,9 +54,24 @@
   loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
   failed_when: false
 
+# SELF-MATCH BUG (2026-09-10): every pgrep/pkill -f pattern below uses the bracket trick
+# ("/[b]in" instead of "/bin") -- the classic `ps aux | grep '[s]shd'` idiom. Found live: the
+# literal pattern "node-N/bin" written in THIS SAME task's own shell script text also matches
+# via `-f` against the invoking bash process's own command line (ansible embeds the script
+# source verbatim into what `ps`/pgrep sees), so `pgrep -f "node-{{ item }}/bin"` ALWAYS
+# reported "still running" regardless of whether the real service had already exited --
+# confirmed via /var/log/metanode/shutdown_times.log showing 100% "forced=yes" across 125
+# consecutive deploys, while journalctl showed systemd had already cleanly stopped the unit
+# 20+ seconds before the wait loop gave up and declared a timeout. Not a correctness bug (the
+# real process was in fact already gone, so the subsequent SIGKILL was a harmless no-op), but
+# a silent 90-second waste on every single node stop -- the "DATA-DRIVEN, not a fixed sleep"
+# fix from commit 43aaa300 was itself unknowingly behaving like a fixed 90s sleep the whole
+# time. A regex character class like [b] matches the literal character 'b' against a REAL
+# process's cmdline, but does NOT match the literal three characters "[b]" appearing in this
+# script's own embedded source, breaking the self-match.
 - name: Check if targeted node processes are running
   ansible.builtin.shell: |
-    pgrep -f "node-{{ item }}/bin" || pgrep -f "node-{{ item }}/config" || false
+    pgrep -f "node-{{ item }}/[b]in" || pgrep -f "node-{{ item }}/[c]onfig" || false
   loop: "{{ active_nodes }}"
   register: node_process_check
   failed_when: false
@@ -64,21 +79,65 @@
 
 - name: Send SIGTERM to targeted node processes for graceful shutdown
   ansible.builtin.shell: |
-    pkill -15 -f "node-{{ item }}/bin" || true
-    pkill -15 -f "node-{{ item }}/config" || true
+    pkill -15 -f "node-{{ item }}/[b]in" || true
+    pkill -15 -f "node-{{ item }}/[c]onfig" || true
   loop: "{{ active_nodes }}"
   when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
   failed_when: false
 
-- name: Wait 10 seconds for graceful database flush
-  ansible.builtin.pause:
-    seconds: 10
-  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
-
-- name: Force kill any stubborn targeted node processes (SIGKILL)
+- name: Wait for targeted node processes to actually exit after SIGTERM
+  # DATA-DRIVEN, not a fixed sleep: polls whether the process is really gone every 1s
+  # instead of guessing how long a graceful DB flush takes. A fixed "sleep 10" here raced
+  # with slower flushes (e.g. multiple co-located nodes competing for disk I/O on the same
+  # host, or a heavier genesis) -- the still-alive process got SIGKILLed mid-flush right as
+  # clean_data/node_setup recreated a "fresh" data dir, and its last in-flight writes landed
+  # in that fresh dir, resurrecting stale block data straight through a supposedly clean
+  # --reset-all (observed live: a node reporting block #97 immediately after reset, tripping
+  # the NOMT-vs-header integrity check). Bounded at 90s to match the systemd unit's own
+  # TimeoutStopSec=90, so this is never LESS patient than systemd already promises to be --
+  # it just stops waiting the moment the process is confirmed gone instead of always waiting
+  # the full window (or, worse, less than a slow flush actually needs).
   ansible.builtin.shell: |
-    pkill -9 -f "node-{{ item }}/bin" || true
-    pkill -9 -f "node-{{ item }}/config" || true
+    mkdir -p /var/log/metanode 2>/dev/null || true
+    logline_prefix="$(date -Iseconds) node-{{ item }}"
+    for i in $(seq 1 90); do
+      if ! pgrep -f "node-{{ item }}/[b]in" >/dev/null 2>&1 && ! pgrep -f "node-{{ item }}/[c]onfig" >/dev/null 2>&1; then
+        echo "node-{{ item }} exited after ${i}s"
+        echo "${logline_prefix} exited_after_seconds=${i} forced=no" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "node-{{ item }} still running after 90s -- forcing"
+    echo "${logline_prefix} exited_after_seconds=90+ forced=yes" >> /var/log/metanode/shutdown_times.log 2>/dev/null || true
+    exit 1
+  args:
+    executable: /bin/bash
   loop: "{{ active_nodes }}"
+  when: node_process_check.results | selectattr('rc', 'equalto', 0) | list | length > 0
+  register: graceful_exit_wait
   failed_when: false
+  changed_when: false
+
+- name: Force kill only node processes that failed to exit gracefully (SIGKILL, last resort)
+  ansible.builtin.shell: |
+    pkill -9 -f "node-{{ item.item }}/[b]in" || true
+    pkill -9 -f "node-{{ item.item }}/[c]onfig" || true
+  loop: "{{ graceful_exit_wait.results | default([]) }}"
+  when: item.rc is defined and item.rc != 0
+  failed_when: false
+
+- name: WARN if any node needed SIGKILL after the 90s graceful-shutdown window
+  # Not a failure (SIGKILL as a last resort IS the safety net working as designed), but a
+  # node needing the full 90s + force-kill on every deploy is itself a regression signal --
+  # either the graceful-shutdown path is getting slower (heavier state, I/O contention from
+  # co-located nodes) or something is preventing it from responding to SIGTERM at all. Grep
+  # /var/log/metanode/shutdown_times.log (one line per node per deploy, every run -- not just
+  # the forced ones) on any host to track this trend over time; wire an alert off
+  # "forced=yes" there if this starts happening routinely instead of only occasionally.
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ [SHUTDOWN-TIMING] {{ (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list) }}
+      không thoát graceful trong 90s, phải SIGKILL. Xem /var/log/metanode/shutdown_times.log để theo dõi xu hướng.
+  when: (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0
 

@@ -16,8 +16,8 @@ use tracing::{debug, info};
 use crate::{
     block::{genesis_blocks, BlockAPI, VerifiedBlock, GENESIS_ROUND},
     commit::{
-        load_committed_subdag_from_store, CommitAPI as _, CommitInfo, CommitRef, CommitVote,
-        TrustedCommit, GENESIS_COMMIT_INDEX, CommitIndex, CommitDigest,
+        load_committed_subdag_from_store, CommitAPI as _, CommitDigest, CommitIndex, CommitInfo,
+        CommitRef, CommitVote, TrustedCommit, GENESIS_COMMIT_INDEX,
     },
     context::Context,
     dag_state::types::BlockInfo,
@@ -109,6 +109,18 @@ pub struct DagState {
 
     // Stores reputation scores fetched during a cold-start baseline reset
     pub(crate) baseline_reputation_scores: Option<Vec<(AuthorityIndex, u64)>>,
+
+    // Tail of a chain linking successive `flush()` calls' RocksDB writes together, so they
+    // land on disk in the exact order flush() was called -- see the doc comment inside
+    // `flush()` (dag_state/write.rs) for why this is REQUIRED for correctness, not just perf:
+    // without it, two flushes with pending commits issued close together by different
+    // unsynchronized callers (CoreThread's un-awaited proposal flush, commit_finalizer,
+    // commit_syncer, ...) could land on RocksDB out of commit-index order via ordinary
+    // spawn_blocking thread-pool scheduling, and a crash in between leaves a genuine
+    // permanent gap in the persisted `commits` table -- which is exactly what trips
+    // commit_observer.rs's "Gap in scanned commits" replay assert and crash-loops the node
+    // on every subsequent restart (the gap is real and on-disk, so it never self-heals).
+    pub(crate) pending_write_chain: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl DagState {
@@ -218,18 +230,23 @@ impl DagState {
         let mut scoring_subdag = ScoringSubdag::new(context.clone());
 
         if let Some(last_commit) = last_commit.as_ref() {
-            let commits_per_schedule = crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
-            let scoring_window_start = (last_commit.index() / commits_per_schedule) * commits_per_schedule + 1;
+            let commits_per_schedule =
+                crate::leader_schedule::LeaderSchedule::commits_per_schedule() as u32;
+            let scoring_window_start =
+                (last_commit.index() / commits_per_schedule) * commits_per_schedule + 1;
             let scan_start = std::cmp::min(scoring_window_start, commit_recovery_start_index);
-            
+
             let commits = store
                 .scan_commits((scan_start..=last_commit.index()).into())
                 .unwrap_or_else(|e| {
-                    panic!("Failed to scan_commits for scoring subdag recovery: {:?}", e)
+                    panic!(
+                        "Failed to scan_commits for scoring subdag recovery: {:?}",
+                        e
+                    )
                 });
-                
+
             let mut scoring_subdags_to_add = Vec::new();
-            
+
             for commit in commits {
                 if commit.index() >= commit_recovery_start_index {
                     for block_ref in commit.blocks() {
@@ -240,14 +257,14 @@ impl DagState {
                         load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
                     unscored_committed_subdags.push(committed_subdag);
                 }
-                
+
                 if commit.index() >= scoring_window_start {
                     let committed_subdag =
                         load_committed_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
                     scoring_subdags_to_add.push(committed_subdag);
                 }
             }
-            
+
             scoring_subdag.add_subdags(scoring_subdags_to_add);
         }
 
@@ -285,6 +302,7 @@ impl DagState {
             evicted_rounds: vec![0; num_authorities],
             fallback_last_commit_timestamp_ms: last_commit_timestamp_ms,
             baseline_reputation_scores: None,
+            pending_write_chain: None,
         };
 
         for (authority_index, _) in context.committee.authorities() {
@@ -464,7 +482,7 @@ impl DagState {
     ) {
         let gc_depth = self.context.protocol_config.gc_depth();
         let target_index = synced_commit_index.max(1);
-        
+
         let synthetic_commit = TrustedCommit::new_for_test(
             target_index,
             real_digest,
@@ -495,4 +513,3 @@ impl DagState {
         }
     }
 }
-

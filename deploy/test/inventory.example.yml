@@ -1,0 +1,63 @@
+# ==============================================================================
+# METANODE TEST CLUSTER INVENTORY TEMPLATE (inventory.example.yml)
+# Copy file này thành inventory.yml và điền thông tin server / tài khoản:
+#   cp inventory.example.yml inventory.yml
+# ==============================================================================
+
+all:
+  children:
+    metanode_cluster:
+      vars:
+        # ----------------------------------------------------------------------
+        # 1. CẤU HÌNH THÔNG BÁO TELEGRAM (Tùy chọn)
+        # ----------------------------------------------------------------------
+        # Điền Token Bot và Chat ID nhóm để nhận thông báo tự động khi deploy/crash
+        # Bỏ trống hoặc giữ nguyên nếu không muốn nhận thông báo Telegram.
+        telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+        telegram_chat_id: "YOUR_TELEGRAM_CHAT_ID_HERE"
+
+        # [TÙY CHỌN] Khóa riêng (hex) của 1 tài khoản CÓ SỐ DƯ dùng để thăm dò chain
+        # probe_tx_key: "0xYOUR_FUNDED_DEV_ACCOUNT_PRIVATE_KEY_HERE"
+
+        # ----------------------------------------------------------------------
+        # 2. CẤU HÌNH CONSENSUS & SNAPSHOT TOÀN CỤM
+        # ----------------------------------------------------------------------
+        epoch_duration_seconds: 600
+        snapshot_frequency_blocks: 500
+        snapshot_max_snapshots: 2
+        snapshot_max_part_size_mb: 600
+        btrfs_size: "400G"
+        epochs_to_keep: 5
+
+      hosts:
+        # ======================================================================
+        # MÁY CHỦ 1 (Ví dụ: Master / RPC Node)
+        # ======================================================================
+        server_1:
+          ansible_host: 192.168.1.10
+          ansible_user: "ubuntu"
+          node_ids: [0, 3]
+          rpc_nodes: [0, 3]
+
+          # --- XÁC THỰC SSH ---
+          # Cách A (Khuyên dùng): Dùng SSH Key
+          # ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+
+          # Cách B: Dùng Mật khẩu
+          ansible_ssh_pass: "YOUR_SSH_PASSWORD"
+          ansible_become_pass: "YOUR_SUDO_PASSWORD"
+
+        # ======================================================================
+        # MÁY CHỦ 2 (Ví dụ: Worker / Sync Node)
+        # ======================================================================
+        server_2:
+          ansible_host: 192.168.1.11
+          ansible_user: "ubuntu"
+          node_ids: [1, 2, 4]
+          rpc_nodes: [1, 2, 4]
+          synconly_nodes: [4]
+          snapshot_nodes: [4]
+
+          # Cách B: Dùng Mật khẩu
+          ansible_ssh_pass: "YOUR_SSH_PASSWORD"
+          ansible_become_pass: "YOUR_SUDO_PASSWORD"

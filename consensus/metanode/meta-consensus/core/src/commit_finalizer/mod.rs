@@ -9,8 +9,8 @@ use std::{
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, Round, TransactionIndex};
 use parking_lot::RwLock;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
-use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 
 use crate::{
     commit::DEFAULT_WAVE_LENGTH,
@@ -27,12 +27,11 @@ use crate::{
 /// NOTE: 3 round is the minimum depth possible for indirect finalization and rejection.
 pub(crate) const INDIRECT_REJECT_DEPTH: Round = 3;
 
-
-pub mod types;
 #[cfg(test)]
 mod tests;
+pub mod types;
 
-use types::{CommitState, BlockState};
+use types::{BlockState, CommitState};
 
 /// Handle to CommitFinalizer, for sending CommittedSubDag.
 pub(crate) struct CommitFinalizerHandle {
@@ -73,6 +72,7 @@ impl CommitFinalizerHandle {
 pub struct CommitFinalizer {
     context: Arc<Context>,
     dag_state: Arc<RwLock<DagState>>,
+    dag_state_writer: crate::dag_state_actor::DagStateWriter,
     transaction_certifier: TransactionCertifier,
     commit_sender: UnboundedSender<CommittedSubDag>,
 
@@ -92,6 +92,7 @@ impl CommitFinalizer {
     pub fn new(
         context: Arc<Context>,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
         last_processed_commit: Option<CommitIndex>,
@@ -99,6 +100,7 @@ impl CommitFinalizer {
         Self {
             context,
             dag_state,
+            dag_state_writer,
             transaction_certifier,
             commit_sender,
             last_processed_commit,
@@ -111,25 +113,48 @@ impl CommitFinalizer {
     pub(crate) fn start(
         context: Arc<Context>,
         dag_state: Arc<RwLock<DagState>>,
+        dag_state_writer: crate::dag_state_actor::DagStateWriter,
         transaction_certifier: TransactionCertifier,
         commit_sender: UnboundedSender<CommittedSubDag>,
         last_processed_commit: Option<CommitIndex>,
     ) -> CommitFinalizerHandle {
-        let mut processor = Self::new(context, dag_state, transaction_certifier, commit_sender, last_processed_commit);
+        let mut processor = Self::new(
+            context,
+            dag_state,
+            dag_state_writer,
+            transaction_certifier,
+            commit_sender,
+            last_processed_commit,
+        );
         let (sender, receiver) = unbounded_channel();
         // Clone the sender and store it in the processor to prevent race condition.
         // This ensures the internal channel stays open until the task starts running.
         processor.internal_sender_keeper = Some(sender.clone());
-        let _handle =
-            tokio::spawn(processor.run(receiver));
+        let _handle = tokio::spawn(processor.run(receiver));
         CommitFinalizerHandle { sender }
     }
 
     async fn run(mut self, mut receiver: UnboundedReceiver<CommittedSubDag>) {
         tracing::info!("🚀 [COMMIT FINALIZER] RUN LOOP STARTED");
         while let Some(committed_sub_dag) = receiver.recv().await {
+            // FORK-SAFETY UPGRADE PASS:
+            // If we receive a CertifiedCommit that was already processed locally, we MUST forward it
+            // directly to CommitProcessor so it can upgrade the pending local commit and unblock execution.
+            if let Some(last) = self.last_processed_commit {
+                if committed_sub_dag.commit_ref.index <= last
+                    && !committed_sub_dag.decided_with_local_blocks
+                {
+                    tracing::warn!("🔄 [COMMIT FINALIZER] Forwarding CertifiedCommit {} directly to CommitProcessor for upgrade.", committed_sub_dag.commit_ref.index);
+                    if let Err(e) = self.commit_sender.send(committed_sub_dag) {
+                        tracing::debug!("Failed to send commit to handler: {e:?}");
+                    }
+                    continue;
+                }
+            }
+
             let already_finalized = !self.context.protocol_config.mysticeti_fastpath()
-                || committed_sub_dag.recovered_rejected_transactions;
+                || committed_sub_dag.recovered_rejected_transactions
+                || !committed_sub_dag.decided_with_local_blocks;
             let finalized_commits = if !already_finalized {
                 self.process_commit(committed_sub_dag).await
             } else {
@@ -146,23 +171,34 @@ impl CommitFinalizer {
                         .leader
                         .round,
                 );
-                let flush_ticket = {
-                    let mut dag_state = self.dag_state.write();
-                    if !already_finalized {
-                        // Records rejected transactions in newly finalized commits.
-                        for commit in &finalized_commits {
-                            dag_state.add_finalized_commit(
+                // Routed through DagStateActor (2026-09-15): this used to call
+                // self.dag_state.write() directly, bypassing the actor's
+                // single-writer guarantee -- see dag_state_actor.rs's module
+                // doc for why that guarantee matters.
+                //
+                // Records rejected transactions in newly finalized commits (if
+                // any), then flushes -- commits and committed blocks must be
+                // persisted to storage before sending them to Sui to execute
+                // their finalized transactions. Commit metadata and
+                // uncommitted blocks can be persisted more lazily because
+                // they are recoverable. But for simplicity, all unpersisted
+                // commits and blocks are flushed to storage.
+                let commits_to_record = if already_finalized {
+                    Vec::new()
+                } else {
+                    finalized_commits
+                        .iter()
+                        .map(|commit| {
+                            (
                                 commit.commit_ref,
                                 commit.rejected_transactions_by_block.clone(),
-                            );
-                        }
-                    }
-                    // Commits and committed blocks must be persisted to storage before sending them to Sui
-                    // to execute their finalized transactions.
-                    // Commit metadata and uncommitted blocks can be persisted more lazily because they are recoverable.
-                    // But for simplicity, all unpersisted commits and blocks are flushed to storage.
-                    dag_state.flush()
+                            )
+                        })
+                        .collect()
                 };
+                let flush_ticket = self
+                    .dag_state_writer
+                    .add_finalized_commits_and_flush(commits_to_record);
 
                 if let Some(rx) = flush_ticket {
                     if let Err(e) = rx.await {
@@ -194,7 +230,8 @@ impl CommitFinalizer {
                     // Stale/duplicate commit — skip entirely to avoid re-processing
                     tracing::warn!(
                         "⚠️ [COMMIT FINALIZER] Skipping stale commit index {} (last_processed={})",
-                        committed_sub_dag.commit_ref.index, last_processed_commit
+                        committed_sub_dag.commit_ref.index,
+                        last_processed_commit
                     );
                     return vec![];
                 }
@@ -204,7 +241,8 @@ impl CommitFinalizer {
                 tracing::warn!(
                     "⚠️ [COMMIT FINALIZER] Non-sequential commit: expected index {}, got {}. \
                      Gap of {} commits (likely FORWARD-JUMP catch-up). Proceeding.",
-                    expected, committed_sub_dag.commit_ref.index,
+                    expected,
+                    committed_sub_dag.commit_ref.index,
                     committed_sub_dag.commit_ref.index.saturating_sub(expected)
                 );
             }

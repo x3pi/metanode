@@ -14,7 +14,7 @@ sleep 10
 
 # Step 2: Run load test
 echo "🔥 Step 2: Blasting 200,000 transactions..."
-cd ../../execution/cmd/tool/tps_blast
+cd ../../../execution/cmd/tool/tps_blast
 ./run_multinode_load.sh 10 20000  # 10 accounts * 20000 = 200K TXs
 sleep 10
 
@@ -39,7 +39,7 @@ cd ../../../../consensus/metanode/scripts
 sleep 10
 
 echo "🔥 Blasting 100,000 more transactions after recovery..."
-cd ../../execution/cmd/tool/tps_blast
+cd ../../../execution/cmd/tool/tps_blast
 ./run_multinode_load.sh 10 10000
 sleep 10
 

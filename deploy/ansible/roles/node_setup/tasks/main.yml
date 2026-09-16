@@ -1,4 +1,25 @@
 ---
+- name: Create metanode group before assigning storage ownership
+  ansible.builtin.group:
+    name: metanode
+    system: yes
+
+- name: Create metanode user before assigning storage ownership
+  ansible.builtin.user:
+    name: metanode
+    group: metanode
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+
+- name: Grow existing managed snapshot storage without deleting data
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }}"
+    executable: python3
+  register: snapshot_storage_result
+  changed_when: (snapshot_storage_result.stdout | trim | from_json).changed
+  when: keep_data | bool
+
 - name: Ensure base deployment directory exists
   ansible.builtin.file:
     path: "{{ remote_deploy_dir }}"
@@ -15,7 +36,6 @@
     group: metanode
     mode: '0755'
   loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
-  ignore_errors: true # In case metanode user doesn't exist yet, it's fine
 
 - name: Unarchive release tarball
   ansible.builtin.unarchive:
@@ -26,6 +46,15 @@
     mode: '0755'
     extra_opts: ['--strip-components=1']
 
+- name: Check if local node key directory exists
+  delegate_to: localhost
+  ansible.builtin.stat:
+    path: "{{ deploy_dir }}/node-{{ item }}_keys"
+  loop: "{{ active_nodes }}"
+  register: local_keys_to_copy
+  become: no
+  when: ansible_action in ['start', 'setup']
+
 - name: Copy keys for each node to remote
   # mode/directory_mode tightened from 0755 (found 2026-08-27 during a config-security
   # review): this directory holds raw private keys (execution.json's private_key, BLS
@@ -35,14 +64,48 @@
   # root via `become: yes`, which ignores these permission bits entirely, so 0600/0700
   # changes nothing about whether the deploy itself still works.
   ansible.builtin.copy:
-    src: "{{ deploy_dir }}/node-{{ item }}_keys/"
-    dest: "{{ remote_deploy_dir }}/node-{{ item }}_keys/"
+    src: "{{ deploy_dir }}/node-{{ item.item }}_keys/"
+    dest: "{{ remote_deploy_dir }}/node-{{ item.item }}_keys/"
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
     mode: '0600'
     directory_mode: '0700'
+  loop: "{{ local_keys_to_copy.results | default([]) }}"
+  when:
+    - ansible_action in ['start', 'setup']
+    - item.stat is defined and item.stat.exists
+
+- name: Ensure open_ports.sh is executable
+  ansible.builtin.file:
+    path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
+    mode: '0755'
   loop: "{{ active_nodes }}"
-  when: ansible_action == 'setup'
+  when: ansible_action in ['start', 'setup']
+  failed_when: false
+
+- name: Extract node configuration for snapshot evaluation
+  set_fact:
+    node_configs: >-
+      {%- set configs = {} -%}
+      {%- for nid in active_nodes -%}
+        {%- for node in hostvars['localhost']['cluster_nodes'] -%}
+          {%- if node.node_id | string == nid | string -%}
+            {%- set _ = configs.update({nid | string: node}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ configs }}
+
+- name: Determine if current host requires BTRFS for snapshots
+  set_fact:
+    host_requires_btrfs: >-
+      {%- set ns = namespace(needed=false) -%}
+      {%- for nid in active_nodes -%}
+        {%- if node_configs[nid | string].snapshot_enabled | default(false) -%}
+          {%- set ns.needed = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.needed }}
 
 - name: Auto-detect BTRFS device path for /opt/metanode
   ansible.builtin.shell: |
@@ -99,14 +162,142 @@
     get_mime: false
   register: btrfs_disk
 
-- name: Unmount all existing node data bind mounts before resetting
+- name: Check available disk space before BTRFS initialization
   ansible.builtin.shell: |
-    for d in /opt/metanode/node-*/data; do
+    python3 - <<'EOF'
+    import sys, shutil, re, subprocess, os
+
+    req_str = "{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}".strip()
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT])?B?$", req_str, re.IGNORECASE)
+    if not m:
+        print(f"INVALID_FORMAT:{req_str}")
+        sys.exit(1)
+
+    val = float(m.group(1))
+    unit = (m.group(2) or "G").upper()
+    req_bytes = int(val * units[unit])
+    req_gb = round(req_bytes / (1024**3), 2)
+
+    # Check LVM free space
+    lvm_bytes = 0
+    has_lvm = False
+    try:
+        res = subprocess.run(["vgs", "--noheadings", "-o", "vg_free", "--units", "b", "--nosuffix", "ubuntu-vg"],
+                             capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            has_lvm = True
+            lvm_bytes = int(float(res.stdout.strip().split()[0]))
+    except Exception:
+        pass
+
+    # Check filesystem free space for loop file
+    target = "/opt"
+    check_dir = target if os.path.exists(target) else "/"
+    stat = shutil.disk_usage(check_dir)
+    free_bytes = stat.free
+    free_gb = round(free_bytes / (1024**3), 2)
+
+    if has_lvm and lvm_bytes >= req_bytes:
+        print(f"OK:LVM:{req_gb}:{round(lvm_bytes / (1024**3), 2)}")
+        sys.exit(0)
+    elif free_bytes >= req_bytes:
+        print(f"OK:LOOP:{req_gb}:{free_gb}")
+        sys.exit(0)
+    else:
+        max_avail = max(lvm_bytes, free_bytes)
+        avail_gb = round(max_avail / (1024**3), 2)
+        print(f"ERR_INSUFFICIENT:{req_gb}:{avail_gb}:{check_dir}")
+        sys.exit(2)
+    EOF
+  args:
+    executable: /bin/bash
+  register: disk_space_check
+  failed_when: false
+  changed_when: false
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Fail if requested BTRFS size format is invalid
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI CẤU HÌNH DUNG LƯỢNG SNAPSHOT]
+      Máy chủ '{{ inventory_hostname }}' ({{ ansible_host | default('') }}) có giá trị 'btrfs_size' không đúng định dạng:
+      '{{ disk_space_check.stdout.split(':')[1] | default(btrfs_size | default('400G')) }}'
+      👉 Định dạng hợp lệ: số + đơn vị K/M/G/T (ví dụ: 100G, 500G, 1T, 2T). Vui lòng sửa lại biến 'btrfs_size' trong inventory.yml.
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+    and disk_space_check.rc == 1
+
+- name: Fail if requested BTRFS size exceeds available disk space
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI CẤU HÌNH DUNG LƯỢNG SNAPSHOT]
+      Máy chủ '{{ inventory_hostname }}' ({{ ansible_host | default('') }}) cần bật tính năng Snapshot,
+      nhưng dung lượng btrfs_size cấu hình là '{{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }}' ({{ disk_space_check.stdout.split(':')[1] }} GB)
+      VƯỢT QUÁ dung lượng ổ cứng còn trống hiện tại (chỉ còn {{ disk_space_check.stdout.split(':')[2] }} GB)!
+      👉 Hướng dẫn khắc phục:
+         Vui lòng mở file inventory.yml chỉnh lại biến 'btrfs_size' nhỏ hơn (ví dụ: btrfs_size: '{{ (disk_space_check.stdout.split(':')[2] | float * 0.8) | int }}G')
+         hoặc chạy ./ansible_deploy.sh với cờ --btrfs-size {{ (disk_space_check.stdout.split(':')[2] | float * 0.8) | int }}G!
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+    and disk_space_check.rc == 2
+
+- name: Ensure btrfs-progs is installed on snapshot host
+  ansible.builtin.apt:
+    name: btrfs-progs
+    state: present
+    update_cache: false
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Automatically initialize and mount BTRFS storage using setup-cluster-btrfs.sh
+  ansible.builtin.script:
+    cmd: "{{ deploy_dir }}/cluster/setup-cluster-btrfs.sh --size {{ btrfs_size | default(hostvars[groups['metanode_cluster'][0]]['btrfs_size'] | default('400G')) }} --mount-dir /mnt/metanode_snapshots"
+  register: auto_btrfs_init
+  when: >
+    host_requires_btrfs | bool
+    and not btrfs_disk.stat.exists
+    and (fs_type.stdout | default('unknown') not in ['btrfs', 'xfs'])
+
+- name: Update BTRFS facts after auto initialization
+  set_fact:
+    btrfs_device_path: "{{ auto_btrfs_init.stdout_lines[-1].strip() }}"
+    btrfs_disk:
+      stat:
+        exists: true
+  when:
+    - auto_btrfs_init is defined
+    - auto_btrfs_init.stdout is defined
+    - auto_btrfs_init.stdout.strip() != ""
+
+- name: Unmount all existing node data bind mounts before resetting
+  # Scoped to active_nodes (the nodes THIS run is actually touching), never a blind glob over
+  # every node-*/data on the host. A glob here unmounts bind mounts for nodes not even part of
+  # this run -- e.g. a targeted `--restore-node 1` (active_nodes=[1]) used to unmount node-4's
+  # bind mount too, purely because it matched the glob pattern, while node-4's own process kept
+  # running untouched. That process's already-open file handles kept working, but any fresh
+  # path lookup (like its snapshot HTTP server re-scanning its snapshot directory) started
+  # resolving through the now-uncovered, empty underlying dir instead -- reproduced live: a
+  # snapshot node that had just created real snapshot files stopped being able to find/serve
+  # them, immediately after an unrelated node's --restore-node run touched the same host.
+  ansible.builtin.shell: |
+    for nid in {{ active_nodes | join(' ') }}; do
+      d="{{ metanode_install_dir }}/node-${nid}/data"
       if mountpoint -q "$d"; then
         umount "$d" || umount -l "$d" || true
       fi
     done
   changed_when: false
+  when: active_nodes | length > 0
 
 - name: Unmount /opt/metanode if it is mounted to BTRFS disk
   ansible.builtin.shell: |
@@ -139,27 +330,22 @@
     state: present
   when: btrfs_disk.stat.exists
 
-- name: Extract node configuration for snapshot evaluation
-  set_fact:
-    node_configs: >-
-      {%- set configs = {} -%}
-      {%- for nid in active_nodes -%}
-        {%- for node in hostvars['localhost']['cluster_nodes'] -%}
-          {%- if node.node_id | string == nid | string -%}
-            {%- set _ = configs.update({nid | string: node}) -%}
-          {%- endif -%}
-        {%- endfor -%}
-      {%- endfor -%}
-      {{ configs }}
+- name: Verify mounted managed snapshot storage has the requested size
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/manage_snapshot_storage.py {{ snapshot_storage_args }} --verify"
+    executable: python3
+  changed_when: false
+  when: btrfs_disk.stat.exists and host_requires_btrfs | bool
+
 
 - name: Validate BTRFS availability for snapshot-enabled nodes
   ansible.builtin.fail:
     msg: |
       [CẢNH BÁO / LỖI DEPLOY] Node {{ item }} được cấu hình snapshot (snapshot_enabled: true),
-      nhưng không tìm thấy phân vùng hoặc file BTRFS (btrfs_device_path: '{{ btrfs_device_path | default("") }}')
-      và thư mục cài đặt {{ metanode_install_dir }} (fs_type: '{{ fs_type.stdout | default("unknown") }}') không nằm trên hệ thống tệp BTRFS/XFS.
+      nhưng không tìm thấy phân vùng hoặc file loop BTRFS để gắn kết riêng cho node này (btrfs_device_path: '{{ btrfs_device_path | default("") }}').
+      Thư mục cài đặt gốc {{ metanode_install_dir }} đang dùng định dạng '{{ fs_type.stdout | default("unknown") }}' (không hỗ trợ CoW snapshot trực tiếp).
       Node sẽ bị crash khi runtime nếu tiếp tục.
-      Hướng dẫn khắc phục: Vui lòng cấu hình phân vùng BTRFS (hoặc tạo file loop /opt/metanode_cluster_btrfs.img) trước khi deploy, hoặc tắt snapshot.
+      Hướng dẫn khắc phục: Vui lòng kiểm tra lại việc tạo file loop BTRFS (/opt/metanode_cluster_btrfs.img) hoặc tắt snapshot cho Node {{ item }}.
   loop: "{{ active_nodes }}"
   when: >
     node_configs[item | string].snapshot_enabled
@@ -174,7 +360,28 @@
     mode: '0755'
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
-  ignore_errors: true
+
+- name: Ensure the entire snapshot source subtree is owned by metanode, not just its top dir
+  # The task above only chowns /mnt/metanode_snapshots/node-N itself (also ignore_errors, so a
+  # transient failure there silently leaves even that top dir un-chowned). Content further down
+  # the subtree -- created by root-context steps (mkfs.btrfs's root-owned volume root, or a
+  # previous run's own root-owned leftovers, since btrfs COW snapshots/reflinks can carry an
+  # old owner forward) -- stays root:root and is invisible to a top-level, non-recursive chown.
+  # The service runs as user "metanode" (see systemd unit), so anything it needs to open/create
+  # under here (e.g. execution/backup/consensus/backup_db/LOCK) must actually be writable by
+  # that user, all the way down -- not just at the mount point. Reproduced live: a fresh
+  # --reset-all left execution/backup/consensus/backup_db root-owned while its metanode-owned
+  # parent "backup" dir looked fine, and PebbleDB failed to open the LOCK file with "permission
+  # denied" on next start, crash-looping the snapshot node. Recursive and idempotent -- safe to
+  # run on every deploy regardless of whether this run actually needed it.
+  ansible.builtin.file:
+    path: "/mnt/metanode_snapshots/node-{{ item }}"
+    state: directory
+    recurse: yes
+    owner: metanode
+    group: metanode
+  loop: "{{ active_nodes }}"
+  when: btrfs_disk.stat.exists and node_configs[item | string].snapshot_enabled
 
 - name: Create execution snapshot target directories
   ansible.builtin.file:
@@ -185,7 +392,6 @@
     mode: '0755'
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists
-  ignore_errors: true
 
 - name: Setup Bind Mounts for snapshot-enabled nodes
   ansible.builtin.mount:
@@ -206,3 +412,67 @@
   loop: "{{ active_nodes }}"
   when: btrfs_disk.stat.exists and not node_configs[item | string].snapshot_enabled
   changed_when: false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SMOKE TESTS (2026-09-09): both regression tests for real bugs found live on this
+# exact host class (multiple co-located nodes + BTRFS snapshot nodes). They run
+# BEFORE systemd_services starts any process, so a bad deploy fails loud and fast
+# here instead of surfacing 10+ minutes later as a crash-loop or a snapshot that
+# silently never gets served.
+# ═══════════════════════════════════════════════════════════════════════════
+
+- name: "SMOKE TEST: check whether /opt/metanode itself got mounted"
+  # deploy/systemd/cluster/setup-cluster-btrfs.sh (the standalone manual/systemd deploy
+  # script) intentionally mounts BTRFS onto the whole metanode_install_dir -- correct for
+  # that flow, but wrong here: this Ansible role's own architecture mounts BTRFS only at
+  # /mnt/metanode_snapshots plus per-node bind mounts (see tasks above), leaving
+  # metanode_install_dir itself as a plain directory shared by ALL nodes. If anything
+  # mounts something directly onto it, every node's already-deployed bin/config/keys gets
+  # shadowed by whatever that mount's root contains. Reproduced live: node binaries became
+  # "No such file or directory" immediately after a stray call to that script ran mid-play.
+  ansible.builtin.shell: mountpoint -q "{{ metanode_install_dir }}" && echo MOUNTED || echo OK
+  register: opt_metanode_mount_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail if metanode_install_dir itself is mounted (shadows every node's files)
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI MOUNT] '{{ metanode_install_dir }}' (thư mục cha chứa TẤT CẢ các node) đang là
+      một mount point riêng -- điều này che khuất bin/config/keys của mọi node bên dưới.
+      👉 Chỉ '/mnt/metanode_snapshots' và các bind-mount riêng từng node
+      ('{{ metanode_install_dir }}/node-N/data') mới được phép mount. Kiểm tra lại xem có
+      script nào (vd deploy/systemd/cluster/setup-cluster-btrfs.sh) vừa mount đè lên
+      '{{ metanode_install_dir }}' không, rồi `umount` nó trước khi deploy tiếp.
+  when: opt_metanode_mount_check.stdout | trim == 'MOUNTED'
+
+- name: "SMOKE TEST: check every active node's data dir for files not owned by metanode"
+  # The service runs as user "metanode" (see the systemd unit), so anything it needs to
+  # open/create must be writable by that user all the way down its directory tree -- not
+  # just at the top. Root-context steps (mkfs.btrfs's root-owned volume root, a btrfs COW
+  # snapshot/reflink carrying an old owner forward, a non-recursive chown further up)
+  # leave stragglers invisible to anything less than a full recursive scan. Reproduced
+  # live: a snapshot node ran fine for 30+ minutes, then on its next restart PebbleDB
+  # failed to open execution/backup/consensus/backup_db/LOCK with "permission denied" --
+  # that one subdirectory was root-owned despite its parent looking fine.
+  ansible.builtin.shell: |
+    find "{{ metanode_install_dir }}/node-{{ item }}/data" -not -user metanode 2>/dev/null | head -5
+  loop: "{{ active_nodes }}"
+  register: ownership_smoke_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail deploy if any node's data directory has files not owned by metanode
+  ansible.builtin.fail:
+    msg: |
+      ❌ [LỖI QUYỀN SỞ HỮU] Node {{ item.item }}: tìm thấy file/thư mục KHÔNG thuộc sở hữu
+      user 'metanode' dưới {{ metanode_install_dir }}/node-{{ item.item }}/data -- service
+      chạy bằng user 'metanode' sẽ không mở/ghi được các file này khi khởi động.
+      Ví dụ: {{ item.stdout_lines | join(', ') }}
+      👉 Nguyên nhân thường gặp: một bước chạy với quyền root (mkfs.btrfs, script khác) tạo
+      ra các file/thư mục này mà không chown lại đệ quy. Kiểm tra lại các bước
+      BTRFS/bind-mount phía trên trong role này.
+  loop: "{{ ownership_smoke_check.results }}"
+  loop_control:
+    label: "node-{{ item.item }}"
+  when: item.stdout | trim != ''

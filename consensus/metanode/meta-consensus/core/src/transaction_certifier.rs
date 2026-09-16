@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use consensus_config::Stake;
 use consensus_types::block::{BlockRef, Round, TransactionIndex};
-use tokio::sync::mpsc::UnboundedSender;
 use parking_lot::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 use crate::{

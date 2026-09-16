@@ -177,7 +177,7 @@ func generateAccounts(n int) []TestAccount {
 // worker's slice of indices is fully independent: no shared mutable state,
 // each writes only to its own pre-allocated slot, so this parallelizes with
 // zero coordination overhead across all available cores.
-func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64) [][]byte {
+func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64, round int) [][]byte {
 	amount := big.NewInt(0)
 	signer := types.LatestSignerForChainID(big.NewInt(int64(chainID)))
 	gasPrice := big.NewInt(1000000)
@@ -216,7 +216,7 @@ func buildTransactions(accounts []TestAccount, numTxs int, chainID uint64) [][]b
 					continue
 				}
 				destAddr := common.HexToAddress(fmt.Sprintf("0x000000000000000000000000000000000000%04x", i))
-				nonce := acc.Nonce + uint64(i/len(accounts))
+				nonce := acc.Nonce + uint64(i/len(accounts)) + uint64((round-1)*(numTxs/len(accounts)))
 
 				tx := types.NewTransaction(nonce, destAddr, amount, 10000000, gasPrice, nil)
 				signedTx, err := types.SignTx(tx, signer, ecdsaKey)
@@ -556,7 +556,7 @@ func runBenchmark(cfg BenchConfig) BenchReport {
 		if !quiet {
 			fmt.Printf("  📦 Building %d transactions...\n", cfg.NumTxs)
 		}
-		payloads := buildTransactions(accounts, cfg.NumTxs, cfg.ChainID)
+		payloads := buildTransactions(accounts, cfg.NumTxs, cfg.ChainID, round)
 		if !quiet {
 			fmt.Printf("  ✅ Built %d transactions\n", len(payloads))
 		}

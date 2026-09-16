@@ -89,6 +89,15 @@ impl TonicClient {
             .accept_compressed(CompressionEncoding::Zstd);
         Ok(client)
     }
+
+    fn handle_error(&self, peer: AuthorityIndex, status: tonic::Status, msg: &str) -> ConsensusError {
+        self.channel_pool.remove_channel(peer);
+        if status.code() == tonic::Code::DeadlineExceeded {
+            ConsensusError::NetworkRequestTimeout(format!("{} failed: {:?}", msg, status))
+        } else {
+            ConsensusError::NetworkRequest(format!("{} failed: {:?}", msg, status))
+        }
+    }
 }
 
 // TODO: make sure callsites do not send request to own index, and return error otherwise.
@@ -108,7 +117,7 @@ impl NetworkClient for TonicClient {
             }
         }));
         let response = client.subscribe_blocks(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("subscribe_blocks failed: {e:?}"))
+            self.handle_error(peer, e, "subscribe_blocks")
         })?;
         let stream = response
             .into_inner()
@@ -158,13 +167,7 @@ impl NetworkClient for TonicClient {
         let mut stream = client
             .fetch_blocks(request)
             .await
-            .map_err(|e| {
-                if e.code() == tonic::Code::DeadlineExceeded {
-                    ConsensusError::NetworkRequestTimeout(format!("fetch_blocks failed: {e:?}"))
-                } else {
-                    ConsensusError::NetworkRequest(format!("fetch_blocks failed: {e:?}"))
-                }
-            })?
+            .map_err(|e| self.handle_error(peer, e, "fetch_blocks"))?
             .into_inner();
         let mut blocks = vec![];
         let mut total_fetched_bytes = 0;
@@ -188,14 +191,7 @@ impl NetworkClient for TonicClient {
                 }
                 Err(e) => {
                     if blocks.is_empty() {
-                        if e.code() == tonic::Code::DeadlineExceeded {
-                            return Err(ConsensusError::NetworkRequestTimeout(format!(
-                                "fetch_blocks failed mid-stream: {e:?}"
-                            )));
-                        }
-                        return Err(ConsensusError::NetworkRequest(format!(
-                            "fetch_blocks failed mid-stream: {e:?}"
-                        )));
+                        return Err(self.handle_error(peer, e, "fetch_blocks mid-stream"));
                     } else {
                         warn!("fetch_blocks failed mid-stream: {e:?}");
                         break;
@@ -221,9 +217,13 @@ impl NetworkClient for TonicClient {
         let response = client
             .fetch_commits(request)
             .await
-            .map_err(|e| ConsensusError::NetworkRequest(format!("fetch_commits failed: {e:?}")))?;
+            .map_err(|e| self.handle_error(peer, e, "fetch_commits"))?;
         let response = response.into_inner();
-        Ok((response.commits, response.certifier_blocks, response.commit_infos))
+        Ok((
+            response.commits,
+            response.certifier_blocks,
+            response.commit_infos,
+        ))
     }
 
     async fn fetch_commits_by_global_range(
@@ -242,11 +242,7 @@ impl NetworkClient for TonicClient {
         let response = client
             .fetch_commits_by_global_range(request)
             .await
-            .map_err(|e| {
-                ConsensusError::NetworkRequest(format!(
-                    "fetch_commits_by_global_range failed: {e:?}"
-                ))
-            })?;
+            .map_err(|e| self.handle_error(peer, e, "fetch_commits_by_global_range"))?;
         Ok(response.into_inner().commits)
     }
 
@@ -267,13 +263,7 @@ impl NetworkClient for TonicClient {
         let mut stream = client
             .fetch_latest_blocks(request)
             .await
-            .map_err(|e| {
-                if e.code() == tonic::Code::DeadlineExceeded {
-                    ConsensusError::NetworkRequestTimeout(format!("fetch_blocks failed: {e:?}"))
-                } else {
-                    ConsensusError::NetworkRequest(format!("fetch_blocks failed: {e:?}"))
-                }
-            })?
+            .map_err(|e| self.handle_error(peer, e, "fetch_latest_blocks"))?
             .into_inner();
         let mut blocks = vec![];
         let mut total_fetched_bytes = 0;
@@ -297,14 +287,7 @@ impl NetworkClient for TonicClient {
                 }
                 Err(e) => {
                     if blocks.is_empty() {
-                        if e.code() == tonic::Code::DeadlineExceeded {
-                            return Err(ConsensusError::NetworkRequestTimeout(format!(
-                                "fetch_blocks failed mid-stream: {e:?}"
-                            )));
-                        }
-                        return Err(ConsensusError::NetworkRequest(format!(
-                            "fetch_blocks failed mid-stream: {e:?}"
-                        )));
+                        return Err(self.handle_error(peer, e, "fetch_latest_blocks mid-stream"));
                     } else {
                         warn!("fetch_latest_blocks failed mid-stream: {e:?}");
                         break;
@@ -324,7 +307,7 @@ impl NetworkClient for TonicClient {
         let mut request = Request::new(GetLatestRoundsRequest {});
         request.set_timeout(timeout);
         let response = client.get_latest_rounds(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("get_latest_rounds failed: {e:?}"))
+            self.handle_error(peer, e, "get_latest_rounds")
         })?;
         let response = response.into_inner();
         Ok((response.highest_received, response.highest_accepted))
@@ -339,7 +322,7 @@ impl NetworkClient for TonicClient {
         let mut request = Request::new(GetEpochStatusRequest {});
         request.set_timeout(timeout);
         let response = client.get_epoch_status(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("get_epoch_status failed: {e:?}"))
+            self.handle_error(peer, e, "get_epoch_status")
         })?;
         Ok(response.into_inner())
     }
@@ -361,9 +344,7 @@ impl NetworkClient for TonicClient {
         client
             .send_epoch_change_proposal(request)
             .await
-            .map_err(|e| {
-                ConsensusError::NetworkRequest(format!("send_epoch_change_proposal failed: {e:?}"))
-            })?;
+            .map_err(|e| self.handle_error(peer, e, "send_epoch_change_proposal"))?;
         Ok(())
     }
 
@@ -381,7 +362,7 @@ impl NetworkClient for TonicClient {
         });
         request.set_timeout(timeout);
         client.send_epoch_change_vote(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("send_epoch_change_vote failed: {e:?}"))
+            self.handle_error(peer, e, "send_epoch_change_vote")
         })?;
         Ok(())
     }
@@ -401,7 +382,7 @@ impl NetworkClient for TonicClient {
         client
             .send_block(request)
             .await
-            .map_err(|e| ConsensusError::NetworkRequest(format!("send_block failed: {e:?}")))?;
+            .map_err(|e| self.handle_error(peer, e, "send_block"))?;
         Ok(())
     }
 
@@ -418,9 +399,38 @@ impl NetworkClient for TonicClient {
         });
         request.set_timeout(timeout);
         let response = client.fetch_transactions(request).await.map_err(|e| {
-            ConsensusError::NetworkRequest(format!("fetch_transactions failed: {e:?}"))
+            self.handle_error(peer, e, "fetch_transactions")
         })?;
         Ok(response.into_inner().transactions)
+    }
+
+    async fn attest_payload_loss(
+        &self,
+        peer: AuthorityIndex,
+        commit_index: crate::commit::CommitIndex,
+        tx_digest: consensus_types::block::TxDigest,
+        timeout: Duration,
+    ) -> ConsensusResult<crate::network::AttestPayloadLossOutcome> {
+        let mut client = self.get_client(peer, timeout).await?;
+        let mut request = Request::new(AttestPayloadLossRequest {
+            commit_index,
+            tx_digest: tx_digest.0.to_vec(),
+        });
+        request.set_timeout(timeout);
+        let response = client.attest_payload_loss(request).await.map_err(|e| {
+            self.handle_error(peer, e, "attest_payload_loss")
+        })?;
+        let response = response.into_inner();
+        if !response.payload.is_empty() {
+            return Ok(crate::network::AttestPayloadLossOutcome::Payload(
+                response.payload,
+            ));
+        }
+        let attestation: crate::payload_loss_attestation::PayloadLossAttestation =
+            bcs::from_bytes(&response.attestation).map_err(ConsensusError::SerializationFailure)?;
+        Ok(crate::network::AttestPayloadLossOutcome::Attestation(
+            attestation,
+        ))
     }
 }
 
@@ -498,7 +508,8 @@ impl ChannelPool {
                 .user_agent("mysticeti")
                 .expect("static user_agent string is always valid");
 
-            let result = tonic::transport::Channel::connect(https_connector.clone(), endpoint).await;
+            let result =
+                tonic::transport::Channel::connect(https_connector.clone(), endpoint).await;
 
             match result {
                 Ok(channel) => break channel,
@@ -531,6 +542,13 @@ impl ChannelPool {
         // There should not be many concurrent attempts at connecting to the same peer.
         let channel = channels.entry(peer).or_insert(channel);
         Ok(channel.clone())
+    }
+
+    fn remove_channel(&self, peer: AuthorityIndex) {
+        let mut channels = self.channels.write();
+        if channels.remove(&peer).is_some() {
+            debug!("Evicted broken channel for peer {} from pool", peer);
+        }
     }
 }
 
@@ -894,13 +912,54 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
                 return Err(tonic::Status::invalid_argument("invalid digest length"));
             }
         }
-        let transactions = self.service
+        let transactions = self
+            .service
             .handle_fetch_transactions(peer_index, digests)
             .await
             .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
-        Ok(Response::new(FetchTransactionsResponse {
-            transactions,
-        }))
+        Ok(Response::new(FetchTransactionsResponse { transactions }))
+    }
+
+    async fn attest_payload_loss(
+        &self,
+        request: Request<AttestPayloadLossRequest>,
+    ) -> Result<Response<AttestPayloadLossResponse>, tonic::Status> {
+        let peer_index = request
+            .extensions()
+            .get::<PeerInfo>()
+            .map(|p| p.authority_index)
+            .unwrap_or_else(|| {
+                trace!("⚠️ [PEERINFO] PeerInfo missing, using dummy index 0");
+                AuthorityIndex::new_for_test(0)
+            });
+        let request_inner = request.into_inner();
+        if request_inner.tx_digest.len() != consensus_config::DIGEST_LENGTH {
+            return Err(tonic::Status::invalid_argument("invalid digest length"));
+        }
+        let mut arr = [0u8; consensus_config::DIGEST_LENGTH];
+        arr.copy_from_slice(&request_inner.tx_digest);
+        let tx_digest = consensus_types::block::TxDigest(arr);
+        let outcome = self
+            .service
+            .handle_attest_payload_loss(peer_index, request_inner.commit_index, tx_digest)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+        match outcome {
+            crate::network::AttestPayloadLossOutcome::Payload(payload) => {
+                Ok(Response::new(AttestPayloadLossResponse {
+                    payload,
+                    attestation: Bytes::new(),
+                }))
+            }
+            crate::network::AttestPayloadLossOutcome::Attestation(attestation) => {
+                let attestation_bytes = bcs::to_bytes(&attestation)
+                    .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+                Ok(Response::new(AttestPayloadLossResponse {
+                    payload: Bytes::new(),
+                    attestation: Bytes::from(attestation_bytes),
+                }))
+            }
+        }
     }
 }
 
@@ -1009,7 +1068,10 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                 // Track connection health
                 connections.update_peer(authority_index);
 
-                trace!("🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?}", authority_index);
+                trace!(
+                    "🔧 [PEERINFO] Injecting PeerInfo with authority_index={:?}",
+                    authority_index
+                );
                 request.extensions_mut().insert(peer_info);
                 request
             })
@@ -1229,7 +1291,9 @@ impl ConnectionsInfo {
     }
 
     pub(crate) fn update_peer(&self, index: AuthorityIndex) {
-        self.last_seen.write().insert(index, std::time::Instant::now());
+        self.last_seen
+            .write()
+            .insert(index, std::time::Instant::now());
     }
 
     pub(crate) fn connected_peers(&self, timeout: std::time::Duration) -> Vec<AuthorityIndex> {
@@ -1492,6 +1556,29 @@ pub(crate) struct FetchTransactionsRequest {
 pub(crate) struct FetchTransactionsResponse {
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub transactions: Vec<Bytes>,
+}
+
+// Added 2026-09-11 -- see payload_loss_attestation.rs and mục 11 of
+// note/consensus_local_dag_trust_gap_design_2026-09.md.
+#[derive(Clone, prost::Message)]
+pub(crate) struct AttestPayloadLossRequest {
+    #[prost(uint32, tag = "1")]
+    pub commit_index: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub tx_digest: Vec<u8>,
+}
+
+/// Exactly one of `payload`/`attestation` is non-empty. If the responding peer has the
+/// transaction, `payload` is its raw bytes (letting a caller unblock immediately, exactly as
+/// the existing `fetch_transactions` does) -- it does NOT need to be treated as an
+/// attestation. If it doesn't, `attestation` is the BCS-serialized, signed
+/// `PayloadLossAttestation` confirming this peer also doesn't have it.
+#[derive(Clone, prost::Message)]
+pub(crate) struct AttestPayloadLossResponse {
+    #[prost(bytes = "bytes", tag = "1")]
+    pub payload: Bytes,
+    #[prost(bytes = "bytes", tag = "2")]
+    pub attestation: Bytes,
 }
 
 fn chunk_blocks(blocks: Vec<Bytes>, chunk_limit: usize) -> Vec<Vec<Bytes>> {

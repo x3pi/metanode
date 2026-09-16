@@ -87,7 +87,10 @@ impl Commit {
     /// Create a new commit with embedded leader address.
     /// FORK-SAFETY (May 2026): leader_address is consensus-agreed and must not
     /// be recalculated locally. Same immutability pattern as global_exec_index.
-    #[allow(dead_code)]
+    /// Used by linearizer/mod.rs (2026-09-10) to embed a real, resolved leader
+    /// address at commit-creation time when available -- see that call site's
+    /// own doc comment and note/consensus_local_dag_trust_gap_design_2026-09.md
+    /// mục 8.5.
     pub(crate) fn new_with_leader_address(
         index: CommitIndex,
         previous_digest: CommitDigest,
@@ -525,7 +528,20 @@ impl CommittedSubDag {
     /// Returns a vector of (block_ref, system_transaction) tuples
     pub fn extract_system_transactions(&self) -> Vec<(BlockRef, SystemTransaction)> {
         let mut system_txs = Vec::new();
-        let cache = crate::transaction::get_global_tx_cache().read();
+        // FORK-SAFETY: unlike block_verifier's per-block cache reads (which can
+        // safely defer to a peer re-fetch on a miss), a system transaction
+        // found here (in particular EndOfEpoch, see extract_end_of_epoch_
+        // transaction below) can be fork-relevant if silently missed -- by
+        // the time a subdag is committed, its transactions already passed
+        // verify_block_inner's own cache check once, so a stuck lock here is
+        // a genuinely abnormal, likely-transient re-occurrence. Retry with
+        // real backoff (well past the single 3s bound used elsewhere) before
+        // ever falling back to "found nothing", rather than treating a first
+        // timeout as equivalent to a real absence.
+        let cache = crate::transaction::retry_tx_cache_read_for_commit("extract_system_transactions");
+        let Some(cache) = cache.as_ref() else {
+            return system_txs;
+        };
 
         for block in &self.blocks {
             let tx_digests = block.tx_digests();
@@ -552,7 +568,10 @@ impl CommittedSubDag {
     /// Extract EndOfEpoch system transactions from this committed sub-dag
     /// Returns the first EndOfEpoch transaction found (there should be at most one per commit)
     pub fn extract_end_of_epoch_transaction(&self) -> Option<(BlockRef, SystemTransaction)> {
-        let cache = crate::transaction::get_global_tx_cache().read();
+        // FORK-SAFETY: see extract_system_transactions' identical comment above --
+        // missing an EndOfEpoch transaction here would be fork-relevant, so retry
+        // with real backoff rather than treating a first lock timeout as "not found".
+        let cache = crate::transaction::retry_tx_cache_read_for_commit("extract_end_of_epoch_transaction")?;
         for block in &self.blocks {
             let tx_digests = block.tx_digests();
             if !tx_digests.is_empty() {
@@ -701,20 +720,26 @@ pub fn try_load_committed_subdag_from_store(
     let commit_blocks = store
         .read_blocks(commit.blocks())
         .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read blocks: {:?}", e)))?;
-    
+
     let mut blocks = Vec::with_capacity(commit_blocks.len());
     for (idx, commit_block_opt) in commit_blocks.into_iter().enumerate() {
         let commit_block = commit_block_opt.ok_or_else(|| {
-            ConsensusError::StorageFailure(format!("Missing block referenced in commit {}", commit.index()))
+            ConsensusError::StorageFailure(format!(
+                "Missing block referenced in commit {}",
+                commit.index()
+            ))
         })?;
         if commit_block.reference() == commit.leader() {
             leader_block_idx = Some(idx);
         }
         blocks.push(commit_block);
     }
-    
+
     let leader_block_idx = leader_block_idx.ok_or_else(|| {
-        ConsensusError::StorageFailure(format!("Leader block missing from sub-dag in commit {}", commit.index()))
+        ConsensusError::StorageFailure(format!(
+            "Leader block missing from sub-dag in commit {}",
+            commit.index()
+        ))
     })?;
     let leader_block_ref = blocks[leader_block_idx].reference();
 
@@ -736,7 +761,9 @@ pub fn try_load_committed_subdag_from_store(
 
     let reject_votes = store
         .read_rejected_transactions(commit.reference())
-        .map_err(|e| ConsensusError::StorageFailure(format!("Failed to read rejected txs: {:?}", e)))?;
+        .map_err(|e| {
+            ConsensusError::StorageFailure(format!("Failed to read rejected txs: {:?}", e))
+        })?;
     if let Some(reject_votes) = reject_votes {
         subdag.decided_with_local_blocks = true;
         subdag.recovered_rejected_transactions = true;

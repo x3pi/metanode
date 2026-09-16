@@ -4,6 +4,52 @@ Tài liệu hướng dẫn nhanh, ngắn gọn và dễ hiểu về cách sử d
 
 ---
 
+## ✅ 0. TRƯỚC KHI TRIỂN KHAI THẬT: `production_readiness_check.sh`
+
+**Một lệnh duy nhất trả lời "có được deploy lên môi trường thật không":**
+
+```bash
+cd deploy/ci
+./production_readiness_check.sh              # build + 3 vòng reset + bộ test correctness
+./production_readiness_check.sh --reset-rounds 5   # kỹ hơn ở tầng deploy
+./production_readiness_check.sh --full        # + toàn bộ benchmark (TPS/spam), lâu hơn nhiều
+```
+
+Chạy tuần tự 3 tầng, dừng ngay ở tầng đầu tiên fail:
+1. **Build** — Go + Rust + FFI compile sạch (`build_check.sh --all`).
+2. **Deploy stability** — `--reset-all` lặp lại N vòng liên tiếp trên cụm nhiều node/host
+   (`verify_multi_reset_stability.sh`) — bắt các race condition chỉ lộ ra khi lặp lại,
+   không phải lần chạy đầu.
+3. **Ứng dụng** — `blockstm_logic`, `node_chaos_restart`, `snapshot_recovery` (mặc định;
+   `--full` chạy thêm cả benchmark hiệu năng).
+
+Kết thúc in báo cáo PASS/FAIL từng tầng + log chi tiết tại `/tmp/production_readiness_*.log`.
+Chỉ khi cả 3 tầng đều PASS mới nên bấm nút triển khai thật.
+
+### Dùng riêng lẻ từng phần
+
+- **Chỉ kiểm tra deploy có ổn định qua nhiều lần reset không** (không chạy
+  test ứng dụng):
+  ```bash
+  cd deploy/ci
+  ./verify_multi_reset_stability.sh 5   # 5 vòng --reset-all liên tiếp
+  ```
+- **Diễn tập sự cố vận hành thật** (cảnh báo có tới người trực không, node
+  hỏng thật có tự phục hồi qua P2P không, đĩa đầy/mất mạng có đúng runbook
+  không) — 4 kịch bản KHÔNG nằm trong test ứng dụng thông thường:
+  ```bash
+  cd deploy/ci/incident_drills
+  cat README.md   # đọc trước: nguyên tắc an toàn + thứ tự khuyến nghị
+  ./drill_telegram_alert.sh   # an toàn, chạy được ngay
+  # 3 drill còn lại xâm lấn thật (ghi disk, xoá data node, chặn mạng) --
+  # mặc định dry-run, cần thêm --confirm và cửa sổ bảo trì để chạy thật
+  ```
+
+📄 Bối cảnh đầy đủ (bug đã fix, trạng thái cụm, việc còn mở) của lần hardening
+gần nhất: xem `note/deploy_hardening_and_incident_drills_2026-09.md`.
+
+---
+
 ## 📌 1. LỆNH CHẠY TEST THỦ CÔNG (`run-now`)
 
 Tất cả các lệnh đều bắt đầu bằng `./ci.sh run-now` từ thư mục gốc `metanode`:
@@ -32,7 +78,7 @@ cd /home/abc/nhat/con-chain-v2/metanode
 ./ci.sh run-now --only cross_chain_gateway
 
 # 5. Chạy bộ Unit Test & E2E cơ bản:
-./ci.sh run-now --only unit_and_e2e_tests
+./ci.sh run-now --only snapshot_recovery
 ```
 
 ---

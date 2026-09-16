@@ -14,7 +14,9 @@ use consensus_types::block::{BlockRef, Round, TransactionIndex};
 
 use crate::{
     block::{BlockAPI, VerifiedBlock},
-    commit::{CommitAPI as _, CommitIndex, CommitInfo, CommitRange, CommitRef, CommitVote, TrustedCommit},
+    commit::{
+        CommitAPI as _, CommitIndex, CommitInfo, CommitRange, CommitRef, CommitVote, TrustedCommit,
+    },
     dag_state::{dag_state_impl::DagState, types::BlockInfo},
     leader_scoring::ReputationScores,
     storage::WriteBatch,
@@ -287,10 +289,12 @@ impl DagState {
     pub fn add_commit(&mut self, commit: TrustedCommit) {
         let time_diff = if let Some(last_commit) = &self.last_commit {
             if commit.index() <= last_commit.index() {
-                let local_commits = self.store.scan_commits((commit.index()..=commit.index()).into())
+                let local_commits = self
+                    .store
+                    .scan_commits((commit.index()..=commit.index()).into())
                     .unwrap_or_default();
                 let local_commit_opt = local_commits.into_iter().next();
-                
+
                 if let Some(local_commit) = local_commit_opt {
                     if local_commit.digest() != commit.digest() {
                         tracing::warn!(
@@ -298,7 +302,8 @@ impl DagState {
                             commit.index(),
                             commit.digest()
                         );
-                        self.commits_to_delete.push((local_commit.index(), local_commit.digest()));
+                        self.commits_to_delete
+                            .push((local_commit.index(), local_commit.digest()));
                         self.commits_to_write.push(commit.clone());
                         if Some(commit.index()) == self.last_commit.as_ref().map(|c| c.index()) {
                             self.last_commit = Some(commit);
@@ -306,7 +311,7 @@ impl DagState {
                         return;
                     }
                 }
-                
+
                 tracing::warn!(
                     "⏭️ [SCHEDULE-RECOVERY] Skipping DagState state update for historical commit {} (last commit index {}). This is EXPECTED during LeaderSwapTable reconstruction.",
                     commit.index(),
@@ -326,7 +331,9 @@ impl DagState {
                 );
                 0
             } else {
-                commit.timestamp_ms().saturating_sub(last_commit.timestamp_ms())
+                commit
+                    .timestamp_ms()
+                    .saturating_sub(last_commit.timestamp_ms())
             };
             time_diff
         } else {
@@ -530,6 +537,24 @@ impl DagState {
     /// After each flush, DagState becomes persisted in storage and it expected to recover
     /// all internal states from storage after restarts.
     pub fn flush(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        self.flush_inner(false)
+    }
+
+    /// Same as `flush`, but the underlying RocksDB write is durable (fsync'd before the
+    /// returned ticket resolves), not just handed to the OS page cache.
+    ///
+    /// Added 2026-09-12 (power-loss durability review): use this ONLY for the flush that
+    /// must complete before broadcasting a newly-proposed block/vote to peers
+    /// (`core/proposer.rs::try_new_block`) -- see `Store::write_durable`'s doc comment for
+    /// the full reasoning. Every other flush() caller (commit_finalizer processing
+    /// already-decided commits, tests, ...) should keep using plain `flush()`: they aren't
+    /// telling peers anything new, so the existing async-write throughput trade-off still
+    /// applies to them.
+    pub fn flush_durable(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        self.flush_inner(true)
+    }
+
+    fn flush_inner(&mut self, durable: bool) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let _s = self
             .context
             .metrics
@@ -590,13 +615,39 @@ impl DagState {
             pending_finalized_commits,
         );
 
+        // Chain this write behind the previous flush()'s write, so RocksDB writes land in
+        // exactly flush()-call order across every caller (CoreThread's un-awaited proposal
+        // flush, commit_finalizer, commit_syncer, ...) even though each still gets its own
+        // short-lived spawn_blocking task exactly as before. Without this, two flushes with
+        // pending commits issued close together could complete out of order via ordinary
+        // thread-pool scheduling, and a crash in between would leave a genuine on-disk gap
+        // in the `commits` table -- see the doc comment on `pending_write_chain` in
+        // dag_state_impl.rs for the full story. `self.pending_write_chain.replace(..)` both
+        // hands this flush its predecessor to wait on and records itself as the new tail;
+        // both happen synchronously here, still under this DagState's write-lock, so the
+        // chain's link order always matches flush() call order.
+        let (tx_chain, rx_chain) = tokio::sync::oneshot::channel();
+        let prev_chain = self.pending_write_chain.replace(rx_chain);
         tokio::task::spawn_blocking(move || {
-            store
-                .write(write_batch)
-                .unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
-            context.metrics.node_metrics.dag_state_store_write_count.inc();
+            if let Some(prev_chain) = prev_chain {
+                // Ignore a closed sender: the predecessor's write already completed (or
+                // panicked, in which case the whole process is going down anyway).
+                let _ = prev_chain.blocking_recv();
+            }
+            let write_result = if durable {
+                store.write_durable(write_batch)
+            } else {
+                store.write(write_batch)
+            };
+            write_result.unwrap_or_else(|e| panic!("Failed to write to storage: {:?}", e));
+            context
+                .metrics
+                .node_metrics
+                .dag_state_store_write_count
+                .inc();
             // Notify waiters that flush is complete
             let _ = tx_flush.send(());
+            let _ = tx_chain.send(());
         });
 
         // Clean up old cached data. After flushing, all cached blocks are guaranteed to be persisted.

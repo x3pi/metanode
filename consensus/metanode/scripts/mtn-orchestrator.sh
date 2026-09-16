@@ -284,6 +284,13 @@ start_go_master() {
     local script_file="/tmp/run_node_${node_id}.sh"
     echo "#!/bin/bash" > "$script_file"
     echo "cd \"$GO_DIR\"" >> "$script_file"
+    # SECURITY (see GitHub issue #103): SKIP_MEMPOOL_SIG_VERIFY disables tx signature
+    # verification -- must default OFF and only be opt-in via the orchestrator's own
+    # environment, never hardcoded on. Set MTN_SKIP_MEMPOOL_SIG_VERIFY=true in the
+    # environment calling this script if a specific local debug session needs it.
+    if [ "${MTN_SKIP_MEMPOOL_SIG_VERIFY:-false}" = "true" ]; then
+        echo "export SKIP_MEMPOOL_SIG_VERIFY=true" >> "$script_file"
+    fi
     echo "$cmd" >> "$script_file"
     chmod +x "$script_file"
 

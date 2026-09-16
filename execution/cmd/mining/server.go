@@ -113,8 +113,14 @@ func (s *SearchService) _indexJob(job *Job) error {
 	uniqueTerm := "Q" + job.JobID
 	doc.AddTerm(uniqueTerm)
 
-	s.db.ReplaceDocumentByTerm(uniqueTerm, doc)
-	s.db.Commit()
+	// 2026-09 mục 22: ReplaceDocumentByTerm/Commit now report failure instead
+	// of silently discarding it -- propagate rather than swallow.
+	if err := s.db.ReplaceDocumentByTerm(uniqueTerm, doc); err != nil {
+		return fmt.Errorf("không thể index job %s: %w", job.JobID, err)
+	}
+	if err := s.db.Commit(); err != nil {
+		return fmt.Errorf("không thể commit chỉ mục job %s: %w", job.JobID, err)
+	}
 
 	logger.Info("✔️ Đã index/update Job ID %s trong Xapian.", job.JobID)
 	return nil

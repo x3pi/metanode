@@ -1,9 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use consensus_config::AuthorityIndex;
@@ -11,8 +8,8 @@ use consensus_types::block::Round;
 use futures::{stream::FuturesUnordered, StreamExt as _};
 use itertools::Itertools as _;
 use meta_macros::fail_point_async;
-use tokio::sync::mpsc::{Receiver, Sender};
 use parking_lot::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use tokio::{
     sync::mpsc::error::TrySendError,
@@ -32,11 +29,7 @@ use crate::{
     transaction_certifier::TransactionCertifier,
 };
 
-
-use super::{
-    Synchronizer, BlocksGuard, Command, FETCH_REQUEST_TIMEOUT,
-    FETCH_BLOCKS_CONCURRENCY,
-};
+use super::{BlocksGuard, Command, Synchronizer, FETCH_BLOCKS_CONCURRENCY, FETCH_REQUEST_TIMEOUT};
 
 impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C, V, D> {
     #[allow(clippy::too_many_arguments)]
@@ -199,7 +192,7 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             let dag_state = dag_state.clone();
             let transaction_certifier = transaction_certifier.clone();
             let network_client = network_client.clone();
-            
+
             verification_tasks.push(tokio::task::spawn_blocking(move || {
                 Self::verify_blocks(
                     chunk,
@@ -282,7 +275,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         Ok(())
     }
 
-
     pub(super) async fn fetch_blocks_request(
         network_client: Arc<C>,
         peer: AuthorityIndex,
@@ -335,5 +327,4 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
         };
         (resp, blocks_guard, retries, peer, highest_rounds)
     }
-
 }

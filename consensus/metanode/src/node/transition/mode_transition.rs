@@ -360,6 +360,7 @@ pub async fn transition_mode_only(
             Some(node.system_transaction_provider.clone() as Arc<dyn SystemTransactionProvider>),
             Some(node.legacy_store_manager.clone()), // Pass legacy store manager to avoid RocksDB lock conflicts
             node.coordination_hub.clone(),
+            Some(node.epoch_eth_addresses.clone()),
         )
         .await,
     );
@@ -376,9 +377,11 @@ pub async fn transition_mode_only(
                 "✅ [MODE TRANSITION] Updated existing TransactionClientProxy with new authority"
             );
         } else {
-            node.transaction_client_proxy = Some(Arc::new(
+            let new_proxy = Arc::new(
                 crate::node::tx_submitter::TransactionClientProxy::new(auth.transaction_client()),
-            ));
+            );
+            crate::ffi::set_global_tx_resubmit_client(new_proxy.clone());
+            node.transaction_client_proxy = Some(new_proxy);
             info!("✅ [MODE TRANSITION] Created NEW TransactionClientProxy for Validator mode");
         }
     }

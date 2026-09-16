@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{
-        atomic::Ordering,
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
@@ -30,10 +27,9 @@ use crate::{
     network::NetworkClient,
 };
 
-
 use super::{
-    Synchronizer, BlocksGuard, InflightBlocksMap,
-    FETCH_REQUEST_TIMEOUT, FETCH_FROM_PEERS_TIMEOUT, MAX_PERIODIC_SYNC_PEERS,
+    BlocksGuard, InflightBlocksMap, Synchronizer, FETCH_FROM_PEERS_TIMEOUT, FETCH_REQUEST_TIMEOUT,
+    MAX_PERIODIC_SYNC_PEERS,
 };
 
 impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C, V, D> {
@@ -202,7 +198,6 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             });
     }
 
-
     pub(super) async fn start_fetch_missing_blocks_task(&mut self) -> ConsensusResult<()> {
         if self.context.committee.size() == 1 {
             trace!(
@@ -239,106 +234,102 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             return Ok(());
         }
 
-        self.fetch_blocks_scheduler_task
-            .spawn(async move {
-                /* let _scope = tracing::info_span!("FetchMissingBlocksScheduler").entered(); */
-                context
-                    .metrics
-                    .node_metrics
-                    .fetch_blocks_scheduler_inflight
-                    .inc();
-                let total_requested = missing_blocks.len();
+        self.fetch_blocks_scheduler_task.spawn(async move {
+            /* let _scope = tracing::info_span!("FetchMissingBlocksScheduler").entered(); */
+            context
+                .metrics
+                .node_metrics
+                .fetch_blocks_scheduler_inflight
+                .inc();
+            let total_requested = missing_blocks.len();
 
-                fail_point_async!("consensus-delay");
-                
-                let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-                let fetch_context = context.clone();
-                let fetch_network_client = network_client.clone();
-                let fetch_dag_state = dag_state.clone();
-                let fetch_blocks_to_fetch = blocks_to_fetch.clone();
-                
-                // Fetch blocks from peers concurrently
-                tokio::spawn(async move {
-                    Self::fetch_blocks_from_authorities(
-                        fetch_context,
-                        fetch_blocks_to_fetch,
-                        fetch_network_client,
-                        missing_blocks,
-                        fetch_dag_state,
-                        tx,
-                    )
-                    .await;
-                });
+            fail_point_async!("consensus-delay");
 
-                // Now process the returned results immediately as they stream in
-                let mut total_fetched = 0;
-                let mut any_success = false;
-                while let Some((blocks_guard, fetched_blocks, peer)) = rx.recv().await {
-                    total_fetched += fetched_blocks.len();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+            let fetch_context = context.clone();
+            let fetch_network_client = network_client.clone();
+            let fetch_dag_state = dag_state.clone();
+            let fetch_blocks_to_fetch = blocks_to_fetch.clone();
 
-                    if let Err(err) = Self::process_fetched_blocks(
-                        fetched_blocks,
-                        peer,
-                        blocks_guard,
-                        core_dispatcher.clone(),
-                        block_verifier.clone(),
-                        transaction_certifier.clone(),
-                        commit_vote_monitor.clone(),
-                        context.clone(),
-                        commands_sender.clone(),
-                        dag_state.clone(),
-                        "periodic",
-                        network_client.clone(),
-                    )
-                    .await
-                    {
-                        warn!(
-                            "Error occurred while processing fetched blocks from peer {peer}: {err}"
-                        );
-                        context
-                            .metrics
-                            .node_metrics
-                            .synchronizer_process_fetched_failures
-                            .with_label_values(&[
-                                &context.committee.authority(peer).hostname,
-                                "periodic",
-                            ])
-                            .inc();
-                    } else {
-                        any_success = true;
-                    }
-                }
-
-                context
-                    .metrics
-                    .node_metrics
-                    .fetch_blocks_scheduler_inflight
-                    .dec();
-
-                // Track consecutive failures for exponential backoff.
-                // When all syncs fail (e.g., lagging node fetching wrong-epoch blocks),
-                // increase backoff to avoid spamming peers.
-                if any_success {
-                    consecutive_sync_failures.store(0, Ordering::Relaxed);
-                } else {
-                    let prev = consecutive_sync_failures.fetch_add(1, Ordering::Relaxed);
-                    if prev < 5 {
-                        info!(
-                            "Periodic sync: all peers returned errors ({} consecutive failures). \
-                             Backing off to reduce load.",
-                            prev + 1
-                        );
-                    }
-                }
-
-                debug!(
-                    "Total blocks requested to fetch: {}, total fetched: {}",
-                    total_requested, total_fetched
-                );
+            // Fetch blocks from peers concurrently
+            tokio::spawn(async move {
+                Self::fetch_blocks_from_authorities(
+                    fetch_context,
+                    fetch_blocks_to_fetch,
+                    fetch_network_client,
+                    missing_blocks,
+                    fetch_dag_state,
+                    tx,
+                )
+                .await;
             });
+
+            // Now process the returned results immediately as they stream in
+            let mut total_fetched = 0;
+            let mut any_success = false;
+            while let Some((blocks_guard, fetched_blocks, peer)) = rx.recv().await {
+                total_fetched += fetched_blocks.len();
+
+                if let Err(err) = Self::process_fetched_blocks(
+                    fetched_blocks,
+                    peer,
+                    blocks_guard,
+                    core_dispatcher.clone(),
+                    block_verifier.clone(),
+                    transaction_certifier.clone(),
+                    commit_vote_monitor.clone(),
+                    context.clone(),
+                    commands_sender.clone(),
+                    dag_state.clone(),
+                    "periodic",
+                    network_client.clone(),
+                )
+                .await
+                {
+                    warn!("Error occurred while processing fetched blocks from peer {peer}: {err}");
+                    context
+                        .metrics
+                        .node_metrics
+                        .synchronizer_process_fetched_failures
+                        .with_label_values(&[
+                            &context.committee.authority(peer).hostname,
+                            "periodic",
+                        ])
+                        .inc();
+                } else {
+                    any_success = true;
+                }
+            }
+
+            context
+                .metrics
+                .node_metrics
+                .fetch_blocks_scheduler_inflight
+                .dec();
+
+            // Track consecutive failures for exponential backoff.
+            // When all syncs fail (e.g., lagging node fetching wrong-epoch blocks),
+            // increase backoff to avoid spamming peers.
+            if any_success {
+                consecutive_sync_failures.store(0, Ordering::Relaxed);
+            } else {
+                let prev = consecutive_sync_failures.fetch_add(1, Ordering::Relaxed);
+                if prev < 5 {
+                    info!(
+                        "Periodic sync: all peers returned errors ({} consecutive failures). \
+                             Backing off to reduce load.",
+                        prev + 1
+                    );
+                }
+            }
+
+            debug!(
+                "Total blocks requested to fetch: {}, total fetched: {}",
+                total_requested, total_fetched
+            );
+        });
         Ok(())
     }
-
 
     /// Fetches the `missing_blocks` from peers. Requests the same number of authorities with missing blocks from each peer.
     /// Each response from peer can contain the requested blocks, and additional blocks from the last accepted round for
@@ -522,5 +513,4 @@ impl<C: NetworkClient, V: BlockVerifier, D: CoreThreadDispatcher> Synchronizer<C
             }
         }
     }
-
 }

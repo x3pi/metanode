@@ -5,7 +5,7 @@
 #include <limits>    // for std::numeric_limits
 #include <iostream>
 
-#include <iomanip>  
+#include <iomanip>
 
 namespace encoding
 {
@@ -17,6 +17,45 @@ void printHex2(const std::vector<uint8_t> &bytes)
     }
     std::cout << std::dec << std::endl;
 }
+
+// SECURITY FIX (2026-09, Phuong an A mục 22, "check kỹ luôn phần xapian
+// trong mvm"): every bounds check in this file used to be written as
+// `offset + needed > buffer.size()`. `offset` and `needed` here are `size_t`
+// values derived directly from attacker-controlled transaction calldata (via
+// readUint256AsUint64 -- see xapian_search.cpp's decodeSearchParams, reachable
+// by anyone calling the Xapian search precompile). On a 64-bit build, size_t
+// is uint64_t, and `offset + needed` WRAPS AROUND if it exceeds 2^64-1 --
+// e.g. offset = 2^64-16 (a value a Solidity uint256 can legitimately encode
+// in its low 64 bits with the upper 192 bits still zero, so it does NOT hit
+// readUint256AsUint64's own separate "doesn't fit in uint64" sentinel) and
+// needed = 32 wraps to 16, which can be SMALLER than buffer.size() even
+// though the real offset is astronomically out of bounds. The bounds check
+// then reports "in bounds" and the actual read (`buffer[offset + ...]`,
+// `buffer.data() + offset`, `buffer.begin() + offset`) uses the ORIGINAL,
+// wrapped-around-during-the-check-but-not-during-the-access value -- either
+// landing back in-bounds at an unintended byte (a correctness bug: attacker
+// picks which byte of the buffer gets misread as something else) or, if it
+// doesn't happen to wrap back into range, a genuine out-of-bounds heap read
+// with attacker-controlled offset/length (`std::vector::operator[]` and
+// pointer arithmetic are UB out of bounds, not checked like `.at()`) -- a
+// real memory-disclosure/crash primitive directly reachable from a
+// transaction, not a hypothetical.
+//
+// Fixed by replacing every `offset + needed > buffer.size()` with the
+// overflow-free `boundsExceeded(offset, needed, buffer.size())` below, which
+// only ever subtracts after first confirming `offset <= size` (so the
+// subtraction itself can't underflow either), and never adds two
+// caller-controlled sizes together at all.
+namespace {
+inline bool boundsExceeded(size_t offset, size_t needed, size_t bufferSize)
+{
+    if (offset > bufferSize) {
+        return true;
+    }
+    return (bufferSize - offset) < needed;
+}
+} // namespace
+
     void appendUint16Padded(std::vector<uint8_t> &buffer, uint16_t value)
     {
         size_t initial_size = buffer.size();
@@ -59,7 +98,7 @@ void printHex2(const std::vector<uint8_t> &bytes)
 
     uint64_t readUint256(const std::vector<uint8_t> &buffer, size_t offset)
     {
-        if (offset + 32 > buffer.size())
+        if (boundsExceeded(offset, 32, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading uint256");
         }
@@ -78,7 +117,7 @@ void printHex2(const std::vector<uint8_t> &bytes)
         uint64_t length = readUint256(buffer, offset);
         offset += 32;
 
-        if (offset + length > buffer.size())
+        if (boundsExceeded(offset, length, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading string");
         }
@@ -137,7 +176,7 @@ void printHex2(const std::vector<uint8_t> &bytes)
     // Đọc 32 byte như uint256 nhưng chỉ lấy 8 byte cuối (Big Endian) thành uint64
     uint64_t readUint64Padded(const std::vector<uint8_t> &buffer, size_t offset)
     {
-        if (offset + 32 > buffer.size())
+        if (boundsExceeded(offset, 32, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading uint64 padded");
         }
@@ -154,7 +193,7 @@ void printHex2(const std::vector<uint8_t> &bytes)
     // Hàm này nên được dùng khi đọc offset hoặc length của kiểu động.
     uint64_t readUint256AsUint64(const std::vector<uint8_t> &buffer, size_t offset)
     {
-        if (offset + 32 > buffer.size())
+        if (boundsExceeded(offset, 32, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading uint256 as uint64");
         }
@@ -163,9 +202,12 @@ void printHex2(const std::vector<uint8_t> &bytes)
         {
             if (buffer[offset + i] != 0)
             {
-                // Hoặc throw lỗi, hoặc trả về giá trị max(), hoặc xử lý khác
-                // Ở đây tạm trả về max để biểu thị lỗi/tràn số tiềm ẩn
-                // Hoặc throw: throw std::overflow_error("Value too large for uint64");
+                // Value doesn't fit in 64 bits. Callers that feed this result
+                // back into boundsExceeded() (every caller in this file does)
+                // will correctly reject it as out-of-range regardless of this
+                // sentinel's exact value, so std::numeric_limits<uint64_t>::max()
+                // stays intentional here (tested behavior, see
+                // test_encoding_utils.cpp) rather than throwing directly.
                 return std::numeric_limits<uint64_t>::max();
             }
         }
@@ -180,7 +222,7 @@ void printHex2(const std::vector<uint8_t> &bytes)
 
     bool readBoolPadded(const std::vector<uint8_t> &buffer, size_t offset)
     {
-        if (offset + 32 > buffer.size())
+        if (boundsExceeded(offset, 32, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading bool padded");
         }
@@ -198,13 +240,13 @@ void printHex2(const std::vector<uint8_t> &bytes)
     // Đọc bytes từ vị trí data_offset với độ dài len (không có padding độ dài ở đầu)
     std::vector<uint8_t> readBytesPadded(const std::vector<uint8_t> &buffer, size_t data_offset, size_t len)
     {
-        if (data_offset + len > buffer.size())
+        if (boundsExceeded(data_offset, len, buffer.size()))
         { // Kiểm tra len thôi, padding có thể vượt quá
             throw std::out_of_range("Buffer overflow when reading bytes data");
         }
         // Kích thước thực tế cần đọc (bao gồm padding)
         size_t padded_len_to_read = getPaddedSize(len);
-        if (data_offset + padded_len_to_read > buffer.size())
+        if (boundsExceeded(data_offset, padded_len_to_read, buffer.size()))
         {
             // Nếu không đủ padding, có thể là lỗi encode hoặc cuối buffer
             // Tạm thời chấp nhận đọc hết phần còn lại nếu len hợp lệ
@@ -220,12 +262,12 @@ void printHex2(const std::vector<uint8_t> &bytes)
     // Đọc string từ vị trí data_offset và độ dài len đã biết
     std::string readStringFromData(const std::vector<uint8_t> &buffer, size_t data_offset, size_t len)
     {
-        if (data_offset + len > buffer.size())
+        if (boundsExceeded(data_offset, len, buffer.size()))
         {
             throw std::out_of_range("Buffer overflow when reading string data");
         }
         size_t padded_len_to_read = getPaddedSize(len);
-        if (data_offset + padded_len_to_read > buffer.size())
+        if (boundsExceeded(data_offset, padded_len_to_read, buffer.size()))
         {
             padded_len_to_read = buffer.size() - data_offset;
             if (padded_len_to_read < len)
@@ -238,10 +280,10 @@ void printHex2(const std::vector<uint8_t> &bytes)
 
     // Hàm đọc string động từ vị trí chứa con trỏ offset
      std::string readStringDynamic(const std::vector<uint8_t>& buffer, size_t offset_ptr) {
-         if (offset_ptr + 32 > buffer.size()) throw std::out_of_range("readStringDynamic: Offset pointer out of bounds");
+         if (boundsExceeded(offset_ptr, 32, buffer.size())) throw std::out_of_range("readStringDynamic: Offset pointer out of bounds");
          uint64_t data_offset = readUint256AsUint64(buffer, offset_ptr);
 
-         if (data_offset + 32 > buffer.size()) throw std::out_of_range("readStringDynamic: Data offset out of bounds (for length)");
+         if (boundsExceeded(static_cast<size_t>(data_offset), 32, buffer.size())) throw std::out_of_range("readStringDynamic: Data offset out of bounds (for length)");
          uint64_t length_u64 = readUint256AsUint64(buffer, data_offset);
 
          // Kiểm tra tràn số size_t
@@ -249,7 +291,10 @@ void printHex2(const std::vector<uint8_t> &bytes)
              throw std::overflow_error("readStringDynamic: String length exceeds size_t limit");
          }
          size_t length = static_cast<size_t>(length_u64);
-         size_t actual_data_offset = data_offset + 32;
+         // data_offset was already bounds-checked above (>= 0, <= buffer.size()
+         // with 32 bytes to spare), so + 32 cannot overflow into something
+         // smaller than data_offset itself here.
+         size_t actual_data_offset = static_cast<size_t>(data_offset) + 32;
 
          return readStringFromData(buffer, actual_data_offset, length);
      }

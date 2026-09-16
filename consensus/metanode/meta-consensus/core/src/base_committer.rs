@@ -190,23 +190,32 @@ impl BaseCommitter {
     /// one block at a slot will be supported by the given block. If block A supports B
     /// at a slot, it is guaranteed that any processed block by the same author that
     /// directly or indirectly includes A will also support B at that slot.
-    fn find_supported_block(&self, leader_slot: Slot, from: &VerifiedBlock) -> Option<BlockRef> {
+    fn find_supported_block(
+        &self,
+        leader_slot: Slot,
+        from: &VerifiedBlock,
+        support_cache: &mut HashMap<BlockRef, Option<BlockRef>>,
+    ) -> Option<BlockRef> {
         if from.round() < leader_slot.round {
             return None;
         }
+
+        if let Some(cached) = support_cache.get(&from.reference()) {
+            return *cached;
+        }
+
+        let mut result = None;
         for ancestor in from.ancestors() {
             if Slot::from(*ancestor) == leader_slot {
-                return Some(*ancestor);
+                result = Some(*ancestor);
+                break;
             }
             // Weak links may point to blocks with lower round numbers than strong links.
             if ancestor.round <= leader_slot.round {
                 continue;
             }
-            let ancestor_block_opt = self
-                .dag_state
-                .read()
-                .get_block(ancestor);
-            
+            let ancestor_block_opt = self.dag_state.read().get_block(ancestor);
+
             let ancestor_block = match ancestor_block_opt {
                 Some(block) => block,
                 None => {
@@ -218,19 +227,29 @@ impl BaseCommitter {
                 }
             };
 
-            if let Some(support) = self.find_supported_block(leader_slot, &ancestor_block) {
-                return Some(support);
+            if let Some(support) =
+                self.find_supported_block(leader_slot, &ancestor_block, support_cache)
+            {
+                result = Some(support);
+                break;
             }
         }
-        None
+
+        support_cache.insert(from.reference(), result);
+        result
     }
 
     /// Check whether the specified block (`potential_vote`) is a vote for
     /// the specified leader (`leader_block`).
-    fn is_vote(&self, potential_vote: &VerifiedBlock, leader_block: &VerifiedBlock) -> bool {
+    fn is_vote(
+        &self,
+        potential_vote: &VerifiedBlock,
+        leader_block: &VerifiedBlock,
+        support_cache: &mut HashMap<BlockRef, Option<BlockRef>>,
+    ) -> bool {
         let reference = leader_block.reference();
         let leader_slot = Slot::from(reference);
-        self.find_supported_block(leader_slot, potential_vote) == Some(reference)
+        self.find_supported_block(leader_slot, potential_vote, support_cache) == Some(reference)
     }
 
     /// Check whether the specified block (`potential_certificate`) is a certificate
@@ -244,6 +263,7 @@ impl BaseCommitter {
         potential_certificate: &VerifiedBlock,
         leader_block: &VerifiedBlock,
         all_votes: &mut HashMap<BlockRef, bool>,
+        support_cache: &mut HashMap<BlockRef, Option<BlockRef>>,
     ) -> bool {
         let gc_round = self.dag_state.read().gc_round();
 
@@ -256,7 +276,7 @@ impl BaseCommitter {
 
                 let is_vote = {
                     if let Some(potential_vote) = potential_vote {
-                        self.is_vote(&potential_vote, leader_block)
+                        self.is_vote(&potential_vote, leader_block, support_cache)
                     } else {
                         if reference.round > gc_round {
                             tracing::debug!(
@@ -328,9 +348,12 @@ impl BaseCommitter {
         let mut certified_leader_blocks: Vec<_> = leader_blocks
             .into_iter()
             .filter(|leader_block| {
-                let mut votes_stake_aggregator = crate::stake_aggregator::StakeAggregator::<crate::stake_aggregator::ValidityThreshold>::new();
+                let mut votes_stake_aggregator = crate::stake_aggregator::StakeAggregator::<
+                    crate::stake_aggregator::ValidityThreshold,
+                >::new();
                 let mut all_votes = HashMap::new();
-                
+                let mut support_cache = HashMap::new();
+
                 for potential_certificate in &potential_certificates {
                     for reference in potential_certificate.ancestors() {
                         let is_vote = if let Some(is_vote) = all_votes.get(reference) {
@@ -339,7 +362,7 @@ impl BaseCommitter {
                             let potential_vote = self.dag_state.read().get_block(reference);
                             let is_vote = {
                                 if let Some(potential_vote) = potential_vote {
-                                    self.is_vote(&potential_vote, leader_block)
+                                    self.is_vote(&potential_vote, leader_block, &mut support_cache)
                                 } else {
                                     false
                                 }
@@ -349,7 +372,8 @@ impl BaseCommitter {
                         };
 
                         if is_vote {
-                            if votes_stake_aggregator.add(reference.author, &self.context.committee) {
+                            if votes_stake_aggregator.add(reference.author, &self.context.committee)
+                            {
                                 return true;
                             }
                         }
@@ -435,10 +459,15 @@ impl BaseCommitter {
 
         let mut certificate_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         let mut all_votes = HashMap::new();
+        let mut support_cache = HashMap::new();
         for decision_block in &decision_blocks {
             let authority = decision_block.reference().author;
-            if self.is_certificate(decision_block, leader_block, &mut all_votes)
-                && certificate_stake_aggregator.add(authority, &self.context.committee)
+            if self.is_certificate(
+                decision_block,
+                leader_block,
+                &mut all_votes,
+                &mut support_cache,
+            ) && certificate_stake_aggregator.add(authority, &self.context.committee)
             {
                 return true;
             }

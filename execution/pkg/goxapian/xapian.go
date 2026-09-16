@@ -12,16 +12,56 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"unsafe"
 )
 
 // --- Struct Wrappers ---
-type Database struct{ ptr C.xapian_database_t }
-type Document struct{ ptr C.xapian_document_t }
-type QueryParser struct{ ptr C.xapian_queryparser_t }
-type Query struct{ ptr C.xapian_query_t }
-type Enquire struct{ ptr C.xapian_enquire_t }
-type MSet struct{ ptr C.xapian_mset_t }
+//
+// Each wrapper's `closed` flag (added 2026-09, Phuong an A mục 22 -- "check
+// lại toàn bộ cgo của xapian") guards against a real TOCTOU race in the
+// original `if ptr != nil { free(ptr); ptr = nil }` pattern used throughout
+// this file: manual Close() and the runtime.SetFinalizer callback below can
+// run concurrently (finalizers run on their own goroutine), and two
+// concurrent callers could both observe a non-nil ptr before either nils it
+// out, double-freeing the underlying C++ object -- undefined behavior, not
+// just a leak. atomic.CompareAndSwapInt32 in Close() makes "am I the one who
+// gets to free this" a single atomic decision instead of a check-then-act
+// race, and every other method now gates on the same `closed` flag (instead
+// of re-reading `ptr`, which a concurrent Close() could be mutating) so a
+// call racing a Close() either fully happens-before it or is cleanly
+// rejected, never sees a half-freed object.
+type Database struct {
+	ptr    C.xapian_database_t
+	closed int32
+}
+type Document struct {
+	ptr    C.xapian_document_t
+	closed int32
+}
+type QueryParser struct {
+	ptr    C.xapian_queryparser_t
+	closed int32
+}
+type Query struct {
+	ptr    C.xapian_query_t
+	closed int32
+}
+type Enquire struct {
+	ptr    C.xapian_enquire_t
+	closed int32
+}
+type MSet struct {
+	ptr    C.xapian_mset_t
+	closed int32
+}
+
+func (db *Database) isClosed() bool    { return atomic.LoadInt32(&db.closed) != 0 }
+func (doc *Document) isClosed() bool   { return atomic.LoadInt32(&doc.closed) != 0 }
+func (qp *QueryParser) isClosed() bool { return atomic.LoadInt32(&qp.closed) != 0 }
+func (q *Query) isClosed() bool        { return atomic.LoadInt32(&q.closed) != 0 }
+func (enq *Enquire) isClosed() bool    { return atomic.LoadInt32(&enq.closed) != 0 }
+func (mset *MSet) isClosed() bool      { return atomic.LoadInt32(&mset.closed) != 0 }
 
 // --- Query Operator Constants ---
 type QueryOp int
@@ -56,39 +96,65 @@ func NewWritableDatabase(path string) (*Database, error) {
 	return db, nil
 }
 func (db *Database) Close() {
-	if db.ptr != nil {
-		C.database_close(db.ptr)
-		db.ptr = nil
+	if !atomic.CompareAndSwapInt32(&db.closed, 0, 1) {
+		return
 	}
+	C.database_close(db.ptr)
 }
 func (db *Database) GetDocCount() uint {
-	if db.ptr == nil {
+	if db.isClosed() {
 		return 0
 	}
 	return uint(C.database_get_doccount(db.ptr))
 }
 func (db *Database) AddDocument(doc *Document) uint {
-	if db.ptr == nil || doc.ptr == nil {
+	if db.isClosed() || doc.isClosed() {
 		return 0 // Or an appropriate error code/value
 	}
 	return uint(C.database_add_document(db.ptr, doc.ptr))
 }
-func (db *Database) ReplaceDocumentByTerm(uniqueTerm string, doc *Document) {
-	if db.ptr == nil || doc.ptr == nil {
-		return
+
+// ReplaceDocumentByTerm now returns an error (2026-09, mục 22) -- the
+// underlying C.database_replace_document_by_term used to be a `void` call
+// that silently discarded a failed write (disk full, DB corruption, lock
+// conflict). Every existing caller compiled fine ignoring a bare error
+// return already (Go doesn't force callers to check errors), so this is a
+// non-breaking signature widening; new/updated call sites should check it.
+func (db *Database) ReplaceDocumentByTerm(uniqueTerm string, doc *Document) error {
+	if db.isClosed() {
+		return fmt.Errorf("goxapian: database is closed")
+	}
+	if doc.isClosed() {
+		return fmt.Errorf("goxapian: document is closed")
 	}
 	cTerm := C.CString(uniqueTerm)
 	defer C.free(unsafe.Pointer(cTerm))
-	C.database_replace_document_by_term(db.ptr, cTerm, doc.ptr)
-}
-func (db *Database) Commit() {
-	if db.ptr == nil {
-		return
+	ok := C.database_replace_document_by_term(db.ptr, cTerm, doc.ptr)
+	if !bool(ok) {
+		return fmt.Errorf("goxapian: replace_document_by_term failed for term %q (see stderr for the Xapian error)", uniqueTerm)
 	}
-	C.database_commit(db.ptr)
+	return nil
+}
+
+// Commit now returns an error (2026-09, mục 22) -- this is the single most
+// important fix in this package: Commit() used to be a `void` call, so a
+// caller that just wrote documents and called Commit() had ZERO way to
+// detect that the flush actually failed and silently believed its data was
+// durably persisted when it might not have been. Every existing call site
+// (explorer/service.go, pkg/mining/service.go, cmd/mining/server.go) has
+// been updated to log this error rather than discard it.
+func (db *Database) Commit() error {
+	if db.isClosed() {
+		return fmt.Errorf("goxapian: database is closed")
+	}
+	ok := C.database_commit(db.ptr)
+	if !bool(ok) {
+		return fmt.Errorf("goxapian: commit failed (see stderr for the Xapian error)")
+	}
+	return nil
 }
 func (db *Database) Enquire() *Enquire {
-	if db.ptr == nil {
+	if db.isClosed() {
 		return nil
 	}
 	enqPtr := C.enquire_new(db.ptr)
@@ -101,7 +167,7 @@ func (db *Database) Enquire() *Enquire {
 }
 
 func (db *Database) DumpAllDocs() string {
-	if db.ptr == nil {
+	if db.isClosed() {
 		return "Database is not open."
 	}
 	cData := C.database_dump_all_docs(db.ptr)
@@ -123,13 +189,13 @@ func NewDocument() *Document {
 	return doc
 }
 func (doc *Document) Close() {
-	if doc.ptr != nil {
-		C.document_free(doc.ptr)
-		doc.ptr = nil
+	if !atomic.CompareAndSwapInt32(&doc.closed, 0, 1) {
+		return
 	}
+	C.document_free(doc.ptr)
 }
 func (doc *Document) SetData(data string) {
-	if doc.ptr == nil {
+	if doc.isClosed() {
 		return
 	}
 	cData := C.CString(data)
@@ -137,7 +203,7 @@ func (doc *Document) SetData(data string) {
 	C.document_set_data(doc.ptr, cData)
 }
 func (doc *Document) AddTerm(term string) {
-	if doc.ptr == nil {
+	if doc.isClosed() {
 		return
 	}
 	cTerm := C.CString(term)
@@ -145,7 +211,7 @@ func (doc *Document) AddTerm(term string) {
 	C.document_add_term(doc.ptr, cTerm)
 }
 func (doc *Document) GetData() string {
-	if doc.ptr == nil {
+	if doc.isClosed() {
 		return "" // Or an empty string to indicate no data
 	}
 	cData := C.document_get_data(doc.ptr)
@@ -167,19 +233,19 @@ func NewQueryParser() *QueryParser {
 	return qp
 }
 func (qp *QueryParser) Close() {
-	if qp.ptr != nil {
-		C.queryparser_free(qp.ptr)
-		qp.ptr = nil
+	if !atomic.CompareAndSwapInt32(&qp.closed, 0, 1) {
+		return
 	}
+	C.queryparser_free(qp.ptr)
 }
 func (qp *QueryParser) SetDatabase(db *Database) {
-	if qp.ptr == nil || db.ptr == nil {
+	if qp.isClosed() || db.isClosed() {
 		return
 	}
 	C.queryparser_set_database(qp.ptr, db.ptr)
 }
 func (qp *QueryParser) SetStemmer(lang string) {
-	if qp.ptr == nil {
+	if qp.isClosed() {
 		return
 	}
 	cLang := C.CString(lang)
@@ -187,14 +253,14 @@ func (qp *QueryParser) SetStemmer(lang string) {
 	C.queryparser_set_stemming_language(qp.ptr, cLang)
 }
 func (qp *QueryParser) SetDefaultOp(op QueryOp) {
-	if qp.ptr == nil {
+	if qp.isClosed() {
 		return
 	}
 	C.queryparser_set_default_op(qp.ptr, C.xapian_query_op(op))
 }
 
 func (qp *QueryParser) AddPrefix(field, prefix string) {
-	if qp.ptr == nil {
+	if qp.isClosed() {
 		return
 	}
 	cField := C.CString(field)
@@ -206,7 +272,7 @@ func (qp *QueryParser) AddPrefix(field, prefix string) {
 
 // **ĐÃ SỬA**: Sửa đổi ParseQuery để nhận các cờ tính năng
 func (qp *QueryParser) ParseQuery(query string, features ...QueryParserFeature) *Query {
-	if qp.ptr == nil {
+	if qp.isClosed() {
 		return nil
 	}
 	cQuery := C.CString(query)
@@ -228,28 +294,28 @@ func (qp *QueryParser) ParseQuery(query string, features ...QueryParserFeature) 
 }
 
 func (q *Query) Close() {
-	if q.ptr != nil {
-		C.query_free(q.ptr)
-		q.ptr = nil
+	if !atomic.CompareAndSwapInt32(&q.closed, 0, 1) {
+		return
 	}
+	C.query_free(q.ptr)
 }
 
 // --- Enquire Methods ---
 func (enq *Enquire) Close() {
-	if enq.ptr != nil {
-		C.enquire_free(enq.ptr)
-		enq.ptr = nil
+	if !atomic.CompareAndSwapInt32(&enq.closed, 0, 1) {
+		return
 	}
+	C.enquire_free(enq.ptr)
 }
 func (enq *Enquire) SetQuery(q *Query) {
-	if enq.ptr == nil || q.ptr == nil {
+	if enq.isClosed() || q.isClosed() {
 		return
 	}
 	C.enquire_set_query(enq.ptr, q.ptr)
 }
 
 func (enq *Enquire) GetMSet(first, maxitems uint) *MSet {
-	if enq.ptr == nil {
+	if enq.isClosed() {
 		return nil
 	}
 	msetPtr := C.enquire_get_mset(enq.ptr, C.uint(first), C.uint(maxitems))
@@ -263,19 +329,19 @@ func (enq *Enquire) GetMSet(first, maxitems uint) *MSet {
 
 // --- MSet Methods ---
 func (mset *MSet) Close() {
-	if mset.ptr != nil {
-		C.mset_free(mset.ptr)
-		mset.ptr = nil
+	if !atomic.CompareAndSwapInt32(&mset.closed, 0, 1) {
+		return
 	}
+	C.mset_free(mset.ptr)
 }
 func (mset *MSet) GetSize() int {
-	if mset.ptr == nil {
+	if mset.isClosed() {
 		return 0 // Or an appropriate default/error value
 	}
 	return int(C.mset_get_size(mset.ptr))
 }
 func (mset *MSet) GetDocument(index uint) *Document {
-	if mset.ptr == nil {
+	if mset.isClosed() {
 		return nil
 	}
 	docPtr := C.mset_get_document(mset.ptr, C.uint(index))
@@ -287,14 +353,14 @@ func (mset *MSet) GetDocument(index uint) *Document {
 	return doc
 }
 func (mset *MSet) GetRank(index uint) int {
-	if mset.ptr == nil {
+	if mset.isClosed() {
 		return -1
 	}
 	return int(C.mset_get_rank(mset.ptr, C.uint(index)))
 }
 
 func (mset *MSet) GetMatchesEstimated() uint {
-	if mset.ptr == nil {
+	if mset.isClosed() {
 		return 0
 	}
 	return uint(C.mset_get_matches_estimated(mset.ptr))

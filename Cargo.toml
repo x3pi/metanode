@@ -55,3 +55,16 @@ tempfile = "3.8"
 opt-level = 3
 lto = "thin"
 codegen-units = 16
+
+# PARKING_LOT_CORE PATCH (Phuong an A mục 22, 2026-09-15): pins parking_lot_core
+# to a local vendored copy of 0.9.12 with one hand-applied upstream fix
+# (Amanieu/parking_lot commit 77e184d, "Fix WordLock queue unlock retries") --
+# see consensus/vendor/parking_lot_core-0.9.12/README.md for the full
+# rationale, the live incidents this is trying to address, and the confidence
+# level (best current hypothesis, not a proven root-cause fix -- the freeze
+# class has never been reproduced on demand). Only parking_lot_core is
+# patched; parking_lot itself stays on the normal crates.io 0.12.5 release.
+# To roll back: delete this [patch] table (parking_lot_core reverts to the
+# unpatched crates.io release on the next `cargo build`).
+[patch.crates-io]
+parking_lot_core = { path = "consensus/vendor/parking_lot_core-0.9.12" }

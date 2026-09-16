@@ -1,5 +1,5 @@
-use super::*;
 use super::proposal::receive;
+use super::*;
 
 #[tokio::test]
 async fn test_commit_and_notify_for_block_status() {
@@ -64,13 +64,13 @@ async fn test_commit_and_notify_for_block_status() {
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -78,7 +78,8 @@ async fn test_commit_and_notify_for_block_status() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -100,8 +101,7 @@ async fn test_commit_and_notify_for_block_status() {
 
     // Now recover Core and other components.
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -134,10 +134,31 @@ async fn test_commit_and_notify_for_block_status() {
     // Flush the DAG state to storage.
     dag_state.write().flush();
 
-    let last_commit = store
-        .read_last_commit()
-        .unwrap()
-        .expect("last commit should be set");
+    // FLAKY TEST FIX (2026-09-10): Core::new() -> recover() -> try_commit()
+    // synchronously decides the commit, but persisting it to `store` happens via
+    // CommitObserver::handle_commit() -> commit_finalizer_handle.send(..), which
+    // is consumed by a `tokio::spawn`-ed CommitFinalizer task (commit_finalizer/
+    // mod.rs) -- a genuinely separate, asynchronously-scheduled task, not
+    // something `Core::new()` waits on. This test used to read `store` right
+    // after construction with zero yield points, racing the CommitFinalizer
+    // task's own scheduling -- confirmed flaky standalone (~40-60% failure rate
+    // over 15 isolated runs, independent of --test-threads and of any other
+    // test's state) before this fix, found while investigating an unrelated
+    // live-cluster issue. Poll with a real yield (tokio::time::sleep) instead of
+    // asserting immediately, so the CommitFinalizer task actually gets a chance
+    // to run; this only adds latency when the task hasn't finished yet, it does
+    // not weaken what's being asserted.
+    let last_commit = {
+        let mut found = None;
+        for _ in 0..200 {
+            if let Some(commit) = store.read_last_commit().unwrap() {
+                found = Some(commit);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        found.expect("last commit should be set (waited up to 2s for CommitFinalizer)")
+    };
 
     assert_eq!(last_commit.index(), 5);
 
@@ -239,13 +260,13 @@ async fn test_multiple_commits_advance_threshold_clock() {
     // create dag state after all blocks have been written to store
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
         dag_state.clone(),
     ));
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -253,7 +274,8 @@ async fn test_multiple_commits_advance_threshold_clock() {
         blocks_sender,
     );
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -275,8 +297,7 @@ async fn test_multiple_commits_advance_threshold_clock() {
 
     // Now spin up core
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -327,7 +348,6 @@ async fn test_multiple_commits_advance_threshold_clock() {
     assert_eq!(core.last_proposed_round(), 12);
 }
 
-
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_leader_schedule_change() {
     // // // // // // telemetry_subscribers::init_for_testing();
@@ -345,8 +365,12 @@ async fn test_leader_schedule_change() {
         // Wait for min round delay to allow blocks to be proposed. Core also enforces a
         // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
         // `min_round_delay` is configured lower, so wait for whichever is longer.
-        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
-            .await;
+        sleep(
+            default_params
+                .min_round_delay
+                .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+        )
+        .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round
@@ -571,9 +595,7 @@ async fn test_filter_new_commits() {
     // (UnexpectedCertifiedCommitIndex), but that's expected to happen during
     // snapshot restore when the node jumps forward, so it's now just a
     // `tracing::warn!` and the gapped commit is returned anyway instead of rejected.
-    let certified_commits = core
-        .filter_new_commits(certified_commits.clone())
-        .unwrap();
+    let certified_commits = core.filter_new_commits(certified_commits.clone()).unwrap();
     assert_eq!(certified_commits.len(), 1);
     assert_eq!(certified_commits.first().unwrap().reference().index, 6);
 }
@@ -703,7 +725,8 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+    let block_manager =
+        BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(
         LeaderSchedule::from_store(context.clone(), dag_state.clone())
             .with_num_commits_per_schedule(10),
@@ -712,8 +735,7 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     let (_transaction_client, tx_receiver) = TransactionClient::new(context.clone());
     let transaction_consumer = TransactionConsumer::new(tx_receiver, context.clone());
     let (signals, signal_receivers) = CoreSignals::new(context.clone());
-    let (blocks_sender, _blocks_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         Arc::new(NoopBlockVerifier {}),
@@ -723,7 +745,8 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     // Need at least one subscriber to the block broadcast channel.
     let _block_receiver = signal_receivers.block_broadcast_receiver();
 
-    let (commit_consumer, _commit_receiver, _transaction_receiver) = CommitConsumerArgs::new(0, 0, [0; 32], 0);
+    let (commit_consumer, _commit_receiver, _transaction_receiver) =
+        CommitConsumerArgs::new(0, 0, [0; 32], 0);
     let commit_observer = CommitObserver::new(
         context.clone(),
         commit_consumer,
@@ -824,7 +847,6 @@ async fn try_commit_with_certified_commits_gced_blocks() {
     }
 }
 
-
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_commit_on_leader_schedule_change_boundary_without_multileader() {
     parameterized_test_commit_on_leader_schedule_change_boundary(Some(1)).await;
@@ -856,8 +878,12 @@ async fn parameterized_test_commit_on_leader_schedule_change_boundary(
         // Wait for min round delay to allow blocks to be proposed. Core also enforces a
         // MIN_PROPOSAL_AGGREGATION_DELAY floor (see core/proposer.rs::try_new_block) even when
         // `min_round_delay` is configured lower, so wait for whichever is longer.
-        sleep(default_params.min_round_delay.max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY))
-            .await;
+        sleep(
+            default_params
+                .min_round_delay
+                .max(crate::core::MIN_PROPOSAL_AGGREGATION_DELAY),
+        )
+        .await;
 
         for core_fixture in &mut cores {
             // add the blocks from last round
@@ -993,4 +1019,3 @@ async fn parameterized_test_commit_on_leader_schedule_change_boundary(
         );
     }
 }
-

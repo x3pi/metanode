@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
@@ -65,6 +65,18 @@ pub struct PeerRpcServer {
     node: Option<Arc<tokio::sync::RwLock<crate::node::ConsensusNode>>>,
     /// Shared index to get the last global execution index
     shared_last_global_exec_index: Arc<std::sync::atomic::AtomicU64>,
+    /// BIND-CONFIRM (2026-09-10): optional one-shot signal sent right after the bind below
+    /// actually resolves (success or exhausted-retries failure), BEFORE the long-running accept
+    /// loop starts. Added because both call sites (startup.rs, startup_sync.rs) used to log
+    /// "Server started on ..." immediately after `tokio::spawn(...)`, which only schedules the
+    /// async block -- it says nothing about whether `start()` has even begun, let alone whether
+    /// the bind inside it actually succeeded. Found live: after a rapid sequence of manual
+    /// restarts, all 4 validators logged "Started on 0.0.0.0:19200" while `ss -tlnp` showed
+    /// nothing listening there at all -- the spawned task's bind must have failed and hit the
+    /// `warn!()` branch below, but nothing upstream noticed or waited to find out, so the
+    /// misleading "started" line was the only signal anyone saw. This makes the caller's success
+    /// claim actually correspond to a real, confirmed bind.
+    ready_tx: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
 }
 
 impl PeerRpcServer {
@@ -83,6 +95,7 @@ impl PeerRpcServer {
             executor_client,
             node: None,
             shared_last_global_exec_index,
+            ready_tx: None,
         }
     }
 
@@ -92,10 +105,19 @@ impl PeerRpcServer {
         self
     }
 
+    /// Register a one-shot sender that receives the real bind outcome -- see the field's own
+    /// doc comment on why this exists. `send()`'s Err (receiver dropped) is intentionally
+    /// ignored: the caller not waiting for this is its own choice, not this server's problem.
+    pub fn with_ready_signal(mut self, tx: tokio::sync::oneshot::Sender<std::io::Result<()>>) -> Self {
+        self.ready_tx = Some(tx);
+        self
+    }
+
     /// Start the Peer RPC Server
-    pub async fn start(self) -> Result<()> {
+    pub async fn start(mut self) -> Result<()> {
         // Listen on all interfaces for WAN access
         let addr = format!("0.0.0.0:{}", self.port);
+        let ready_tx = self.ready_tx.take();
         // Defensive hardening, not the fix for Layer C (see
         // note/cross_chain_production_readiness_plan.md Phase 0.7 for the full writeup): the
         // "full" server started from startup.rs binds this exact port right after
@@ -139,9 +161,18 @@ impl PeerRpcServer {
             }
             match bound {
                 Some(l) => l,
-                None => return Err(last_err.unwrap().into()),
+                None => {
+                    let err = last_err.unwrap();
+                    if let Some(tx) = ready_tx {
+                        let _ = tx.send(Err(std::io::Error::new(err.kind(), err.to_string())));
+                    }
+                    return Err(err.into());
+                }
             }
         };
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(Ok(()));
+        }
         info!(
             "🌐 [PEER RPC] Started on {} (node_id={}, network_address={})",
             addr, self.node_id, self.network_address
@@ -157,7 +188,7 @@ impl PeerRpcServer {
             let (mut stream, peer_addr) = match listener.accept().await {
                 Ok((s, addr)) => (s, addr),
                 Err(e) => {
-                    error!("🌐 [PEER RPC] Failed to accept connection: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to accept connection: {}", e);
                     continue;
                 }
             };
@@ -276,7 +307,7 @@ impl PeerRpcServer {
         let epoch = match timeout(Duration::from_secs(5), executor.get_current_epoch()).await {
             Ok(Ok(e)) => e,
             Ok(Err(e)) => {
-                error!("🌐 [PEER RPC] Failed to get epoch: {}", e);
+                warn!("🌐 [PEER RPC] Failed to get epoch: {}", e);
                 let response = format!(
                     "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Failed to get epoch: {}\"}}",
                     e.to_string().replace('"', "\\\"")
@@ -285,7 +316,7 @@ impl PeerRpcServer {
                 return;
             }
             Err(_) => {
-                error!("🌐 [PEER RPC] Timeout getting epoch from Go");
+                warn!("🌐 [PEER RPC] Timeout getting epoch from Go");
                 let _ = stream.write_all(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Timeout getting epoch\"}").await;
                 return;
             }
@@ -294,7 +325,7 @@ impl PeerRpcServer {
         let last_block = match timeout(Duration::from_secs(5), executor.get_last_block_number()).await {
             Ok(Ok((b, _, _, _, _))) => b,
             Ok(Err(e)) => {
-                error!("🌐 [PEER RPC] Failed to get last block: {}", e);
+                warn!("🌐 [PEER RPC] Failed to get last block: {}", e);
                 let response = format!(
                     "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Failed to get last block: {}\"}}",
                     e.to_string().replace('"', "\\\"")
@@ -303,7 +334,7 @@ impl PeerRpcServer {
                 return;
             }
             Err(_) => {
-                error!("🌐 [PEER RPC] Timeout getting last block from Go");
+                warn!("🌐 [PEER RPC] Timeout getting last block from Go");
                 let _ = stream.write_all(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Timeout getting last block\"}").await;
                 return;
             }
@@ -316,7 +347,7 @@ impl PeerRpcServer {
 
         let last_global_exec_index = shared_exec_index.load(std::sync::atomic::Ordering::SeqCst);
 
-        let state_root = crate::ffi::get_go_state_root();
+        let state_root = crate::ffi::get_go_state_root().await;
 
         let info = PeerInfoResponse {
             node_id,
@@ -335,7 +366,7 @@ impl PeerRpcServer {
         );
 
         if let Err(e) = stream.write_all(response.as_bytes()).await {
-            error!("🌐 [PEER RPC] Failed to write response: {}", e);
+            warn!("🌐 [PEER RPC] Failed to write response: {}", e);
         }
 
         debug!(
@@ -423,7 +454,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!(
+                    warn!(
                         "🌐 [PEER RPC] Failed to write /get_epoch_boundary_data response: {}",
                         e
                     );
@@ -452,7 +483,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!("🌐 [PEER RPC] Failed to write error response: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to write error response: {}", e);
                 }
             }
             Err(_) => {
@@ -473,7 +504,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
                 }
             }
         }
@@ -586,7 +617,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!(
+                    warn!(
                         "🌐 [PEER RPC] Failed to write /get_executable_blocks response: {}",
                         e
                     );
@@ -653,8 +684,19 @@ impl PeerRpcServer {
         // Fetch blocks from Go Master via executor_client
         // CRITICAL: Add timeout to prevent peer RPC handler from hanging
         // if Go Master is busy or not responding.
+        //
+        // 2026-09-15 (mục 19 bug #6): tightened from 300s to 45s. This call
+        // goes through `ExecutorClient::execute_rpc_request`, which is ALREADY
+        // internally bounded to ~42s worst case (4 attempts x 10s + backoff —
+        // see that function's own doc comment) before it gives up and returns
+        // an Err. 300s here was ~7x looser than the real bound and did
+        // nothing but delay how fast a genuinely stuck request gets reported
+        // back to the caller (this node's own peer_rpc client, which then
+        // needs that failure promptly to fail over to a healthier peer — see
+        // client.rs's BLOCK_FETCH_READ_TIMEOUT). 45s keeps a small margin
+        // above the real 42s bound instead of a further one.
         let fetch_result = timeout(
-            Duration::from_secs(300),
+            Duration::from_secs(45),
             executor.get_blocks_range(from, actual_to)
         ).await;
 
@@ -687,7 +729,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!("🌐 [PEER RPC] Failed to write /get_blocks response: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to write /get_blocks response: {}", e);
                 }
             }
             Ok(Err(e)) => {
@@ -707,7 +749,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!("🌐 [PEER RPC] Failed to write error response: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to write error response: {}", e);
                 }
             }
             Err(_) => {
@@ -727,7 +769,7 @@ impl PeerRpcServer {
                 );
 
                 if let Err(e) = stream.write_all(http_response.as_bytes()).await {
-                    error!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
+                    warn!("🌐 [PEER RPC] Failed to write timeout response: {}", e);
                 }
             }
         }
@@ -811,20 +853,30 @@ impl PeerRpcServer {
         // seen would make a later delegated submission (cache_only=false) of
         // the same TX be skipped, losing it.
         if submit_req.cache_only {
-            let mut cached = 0usize;
             let mut decode_errors = Vec::new();
-            {
-                let mut cache = consensus_core::get_global_tx_cache().write();
-                for tx_hex in &submit_req.transactions_hex {
-                    match hex::decode(tx_hex) {
-                        Ok(tx_bytes) => {
-                            let tx = consensus_core::Transaction::new(tx_bytes);
-                            cache.insert(tx.digest(), tx);
-                            cached += 1;
-                        }
-                        Err(e) => decode_errors.push(format!("Hex decode error: {}", e)),
+            // Decode first, then insert_batch once (mục 19 bug #6 throughput-
+            // regression follow-up) instead of one lock acquisition per transaction.
+            let to_insert: Vec<_> = submit_req
+                .transactions_hex
+                .iter()
+                .filter_map(|tx_hex| match hex::decode(tx_hex) {
+                    Ok(tx_bytes) => {
+                        let tx = consensus_core::Transaction::new(tx_bytes);
+                        Some((tx.digest(), tx))
                     }
-                }
+                    Err(e) => {
+                        decode_errors.push(format!("Hex decode error: {}", e));
+                        None
+                    }
+                })
+                .collect();
+            let cached = to_insert.len();
+            // Bounded (mục 19 bug #4/#5): a stuck lock just means these gossiped
+            // TXs don't get pre-cached -- the origin validator's own submission
+            // path is unaffected, this is purely a same-round-trip optimization.
+            if let Some(mut cache) = consensus_core::try_tx_cache_write("peer_rpc cache_only submit")
+            {
+                cache.insert_batch(to_insert);
             }
             info!(
                 "📡 [TX PRE-PROPAGATE] Cached {}/{} TX payloads from peer for compact-block reconstruction",

@@ -23,6 +23,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 mod fork_guard;
+pub mod state_recovery;
 mod startup_sync;
 mod verification;
 
@@ -138,6 +139,7 @@ impl ConsensusNode {
                 commit_consumer.monitor(),
             ),
         )
+        .with_commit_consumer_monitor(commit_consumer.monitor())
         .with_global_exec_index_callback(
             crate::consensus::commit_callbacks::create_global_exec_index_callback(
                 shared_last_global_exec_index.clone(),
@@ -336,6 +338,7 @@ impl ConsensusNode {
                             as Arc<dyn SystemTransactionProvider>),
                         None,
                         coordination_hub.clone(),
+                        Some(epoch_eth_addresses_arc.clone()),
                     )
                     .await,
                 ),
@@ -368,6 +371,9 @@ impl ConsensusNode {
         let transaction_client_proxy = authority
             .as_ref()
             .map(|auth| Arc::new(TransactionClientProxy::new(auth.transaction_client())));
+        if let Some(ref proxy) = transaction_client_proxy {
+            crate::ffi::set_global_tx_resubmit_client(proxy.clone());
+        }
 
         let tx_recycler = Arc::new(crate::consensus::tx_recycler::TxRecycler::new());
         info!("♻️ [TX RECYCLER] Created shared TxRecycler instance");

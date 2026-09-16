@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-07
+> **Last updated:** 2026-09-12
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -17,6 +17,8 @@ metanode/
 │   │   ├── telegram_notify.py ← Telegram notification module
 │   │   └── README.md       ← Comprehensive operations & test guide
 │   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
+│   │   ├── scripts/manage_snapshot_storage.py ← Managed BTRFS grow/recreate, shared-node checks and size verification
+│   │   ├── scripts/test_manage_snapshot_storage.py ← Non-destructive storage command tests
 │   │   ├── monitors/       ← Decoupled health and block hash monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains

@@ -27,9 +27,7 @@ pub async fn store_executable_block(
     global_exec_index: u64,
     data: &[u8],
 ) -> Result<()> {
-    if data.is_empty() {
-        return Ok(()); // Skip empty blocks (no-op commits)
-    }
+    // Empty blocks (no-op commits) are written as 0-byte files so sync peers don't treat them as missing.
 
     let dir = storage_path.join(BLOCKS_DIR);
     tokio::fs::create_dir_all(&dir).await?;
@@ -60,9 +58,6 @@ pub async fn store_executable_blocks_batch(
 
     let mut stored = 0u64;
     for (gei, data) in blocks {
-        if data.is_empty() {
-            continue;
-        }
         let file_path = dir.join(format!("{}.bin", gei));
         tokio::fs::write(&file_path, data).await?;
         stored += 1;

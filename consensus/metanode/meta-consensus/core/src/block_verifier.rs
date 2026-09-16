@@ -93,7 +93,11 @@ impl SignedBlockVerifier {
 
     /// Core verification logic. When `skip_epoch_check` is true, the epoch
     /// validation is bypassed (used by commit sync for cross-epoch blocks).
-    fn verify_block_inner(&self, block: &SignedBlock, skip_epoch_check: bool) -> ConsensusResult<()> {
+    fn verify_block_inner(
+        &self,
+        block: &SignedBlock,
+        skip_epoch_check: bool,
+    ) -> ConsensusResult<()> {
         let committee = &self.context.committee;
         // The block must belong to the current epoch and have valid authority index,
         // before having its signature verified.
@@ -188,19 +192,33 @@ impl SignedBlockVerifier {
         // Pre-check BlockV3 transactions in cache, and insert BlockV1/V2 transactions to cache.
         match &**block {
             Block::V1(v1) => {
-                let mut cache = crate::transaction::get_global_tx_cache().write();
-                for tx in v1.transactions() {
-                    cache.insert(tx.digest(), tx.clone());
+                if let Some(mut cache) =
+                    crate::transaction::try_tx_cache_write("verify_block_inner V1")
+                {
+                    // insert_batch, not a per-tx insert() loop: see its own doc comment
+                    // (mục 19 bug #6 throughput-regression follow-up) -- one acquisition
+                    // per shard actually touched by this block, not one per transaction.
+                    cache.insert_batch(v1.transactions().iter().map(|tx| (tx.digest(), tx.clone())));
                 }
             }
             Block::V2(v2) => {
-                let mut cache = crate::transaction::get_global_tx_cache().write();
-                for tx in v2.transactions() {
-                    cache.insert(tx.digest(), tx.clone());
+                if let Some(mut cache) =
+                    crate::transaction::try_tx_cache_write("verify_block_inner V2")
+                {
+                    cache.insert_batch(v2.transactions().iter().map(|tx| (tx.digest(), tx.clone())));
                 }
             }
             Block::V3(v3) => {
-                let cache = crate::transaction::get_global_tx_cache().read();
+                // FORK-SAFETY: the cache is sharded (see NUM_TX_CACHE_SHARDS' doc
+                // comment) -- if one digest's specific shard is stuck (see
+                // TxCacheReadHandle::get's doc comment), that ONE digest reads back
+                // as a miss below, same as a genuine cache miss. This is the
+                // conservative choice per-digest: it triggers the existing peer
+                // re-fetch path for just that digest instead of skipping a real
+                // check, without penalizing every other digest in this block whose
+                // shards are unaffected.
+                let cache = crate::transaction::try_tx_cache_read("verify_block_inner V3 (presence check)")
+                    .expect("try_tx_cache_read always returns Some -- no lock is taken until get() is called on a specific digest");
                 let mut missing = Vec::new();
                 for digest in v3.tx_digests() {
                     if cache.get(&digest).is_none() {
@@ -222,7 +240,9 @@ impl SignedBlockVerifier {
                 txs = v2.transactions().to_vec();
             }
             Block::V3(v3) => {
-                let cache = crate::transaction::get_global_tx_cache().read();
+                let Some(cache) = crate::transaction::try_tx_cache_read("verify_block_inner V3 (collect)") else {
+                    return Err(ConsensusError::MissingTransactions(v3.tx_digests()));
+                };
                 for digest in v3.tx_digests() {
                     if let Some(tx) = cache.get(&digest) {
                         txs.push(tx);
@@ -235,13 +255,14 @@ impl SignedBlockVerifier {
         self.check_transactions(&batch)?;
 
         // Enforce group size limit per block/commit
-        if !crate::tx_group_filter::verify_group_limit(&txs, crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE) {
+        if !crate::tx_group_filter::verify_group_limit(
+            &txs,
+            crate::tx_group_filter::MAX_TRANSACTION_GROUP_SIZE,
+        ) {
             return Err(ConsensusError::InvalidTransaction(
                 "Block contains transactions exceeding group size limit".to_string(),
             ));
         }
-
-
 
         Ok(())
     }
@@ -285,11 +306,26 @@ impl SignedBlockVerifier {
 
 fn get_block_transactions_data(block: &Block) -> Vec<Vec<u8>> {
     match block {
-        Block::V1(v1) => v1.transactions().iter().map(|t| t.data().to_vec()).collect(),
-        Block::V2(v2) => v2.transactions().iter().map(|t| t.data().to_vec()).collect(),
+        Block::V1(v1) => v1
+            .transactions()
+            .iter()
+            .map(|t| t.data().to_vec())
+            .collect(),
+        Block::V2(v2) => v2
+            .transactions()
+            .iter()
+            .map(|t| t.data().to_vec())
+            .collect(),
         Block::V3(v3) => {
-            let cache = crate::transaction::get_global_tx_cache().read();
             let mut data = Vec::new();
+            // Best-effort: this feeds Mysticeti fastpath transaction voting,
+            // where honest validators are already documented to be allowed
+            // to vote differently -- if the cache lock is stuck, abstaining
+            // (empty data) is a safe degradation, not a fork risk.
+            let Some(cache) = crate::transaction::try_tx_cache_read("get_block_transactions_data")
+            else {
+                return data;
+            };
             for digest in v3.tx_digests() {
                 if let Some(tx) = cache.get(&digest) {
                     data.push(tx.data().to_vec());
@@ -309,8 +345,6 @@ impl BlockVerifier for SignedBlockVerifier {
     ) -> ConsensusResult<(VerifiedBlock, Vec<TransactionIndex>)> {
         self.verify_block(&block)?;
 
-
-
         // If the block verification passed then we can produce the verified block, but we should only return it if the transaction verification passed as well.
         let verified_block = VerifiedBlock::new_verified(block, serialized_block);
 
@@ -324,7 +358,6 @@ impl BlockVerifier for SignedBlockVerifier {
                 .map_err(|e| ConsensusError::InvalidTransaction(e.to_string()))?;
             vec![]
         };
-
 
         Ok((verified_block, rejected_transactions))
     }
@@ -850,16 +883,20 @@ mod test {
         {
             let block = test_block.clone().set_epoch(1).build();
             let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
-            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
-            
+            let serialized_block = signed_block
+                .serialize()
+                .expect("Block serialization failed.");
+
             // This should fail normal verification
             assert!(matches!(
                 verifier.verify_block(&signed_block),
                 Err(ConsensusError::WrongEpoch { .. })
             ));
-            
+
             // But it should pass commit sync verification
-            assert!(verifier.verify_for_commit_sync(signed_block, serialized_block).is_ok());
+            assert!(verifier
+                .verify_for_commit_sync(signed_block, serialized_block)
+                .is_ok());
         }
 
         // Other validation rules must STILL apply
@@ -867,8 +904,10 @@ mod test {
         {
             let block = test_block.clone().set_round(0).build();
             let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
-            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
-            
+            let serialized_block = signed_block
+                .serialize()
+                .expect("Block serialization failed.");
+
             assert!(matches!(
                 verifier.verify_for_commit_sync(signed_block, serialized_block),
                 Err(ConsensusError::UnexpectedGenesisBlock)
@@ -877,22 +916,29 @@ mod test {
 
         // 2. Invalid authority index
         {
-            let block = test_block.clone().set_author(AuthorityIndex::new_for_test(4)).build();
+            let block = test_block
+                .clone()
+                .set_author(AuthorityIndex::new_for_test(4))
+                .build();
             let signed_block = SignedBlock::new(block, author_protocol_keypair).unwrap();
-            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
-            
+            let serialized_block = signed_block
+                .serialize()
+                .expect("Block serialization failed.");
+
             assert!(matches!(
                 verifier.verify_for_commit_sync(signed_block, serialized_block),
                 Err(ConsensusError::InvalidAuthorityIndex { .. })
             ));
         }
-        
+
         // 3. Invalid signature
         {
             let block = test_block.clone().build();
             let signed_block = SignedBlock::new(block, &keypairs[3].1).unwrap();
-            let serialized_block = signed_block.serialize().expect("Block serialization failed.");
-            
+            let serialized_block = signed_block
+                .serialize()
+                .expect("Block serialization failed.");
+
             assert!(matches!(
                 verifier.verify_for_commit_sync(signed_block, serialized_block),
                 Err(ConsensusError::SignatureVerificationFailure(_))

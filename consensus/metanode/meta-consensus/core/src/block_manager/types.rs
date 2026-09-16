@@ -1,13 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeSet,
-    time::Instant,
-};
+use std::{collections::BTreeSet, time::Instant};
 
-use consensus_types::block::BlockRef;
 use crate::VerifiedBlock;
+use consensus_types::block::BlockRef;
 
 pub(crate) struct SuspendedBlock {
     pub(crate) block: VerifiedBlock,

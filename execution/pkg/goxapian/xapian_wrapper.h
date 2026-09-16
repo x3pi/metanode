@@ -1,6 +1,14 @@
 #ifndef XAPIAN_WRAPPER_H
 #define XAPIAN_WRAPPER_H
 
+// This header is included both from xapian_wrapper.cpp (C++, where `bool` is
+// a built-in keyword) and, transitively via cgo, as plain C (where `bool`
+// only exists via <stdbool.h>) -- needed once database_commit/
+// database_replace_document_by_term started returning bool (2026-09, mục 22).
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,8 +29,12 @@ xapian_database_t database_new_writable(const char* path, int flags);
 void database_close(xapian_database_t db);
 unsigned int database_get_doccount(xapian_database_t db);
 xapian_docid_t database_add_document(xapian_database_t db, xapian_document_t doc);
-void database_commit(xapian_database_t db);
-void database_replace_document_by_term(xapian_database_t db, const char* unique_term, xapian_document_t doc);
+// Return values added 2026-09 (Phuong an A mục 22): both are true on success,
+// false if the underlying Xapian::Error (or any other exception) was caught.
+// Previously void -- a caller had no way to know a commit/replace silently
+// failed to persist.
+bool database_commit(xapian_database_t db);
+bool database_replace_document_by_term(xapian_database_t db, const char* unique_term, xapian_document_t doc);
 const char* database_dump_all_docs(xapian_database_t db);
 
 // === Document Functions ===

@@ -30,16 +30,33 @@
 //! The actor runs on `std::thread::spawn` (not tokio) because `CoreThread`
 //! operates in a synchronous loop. `std::sync::mpsc::Sender::send()` never
 //! blocks the caller (unbounded channel) and doesn't require `.await`.
+//!
+//! ## History: the invariant was violated in production code for a while
+//!
+//! Despite the "only this thread calls `.write()`" claim above, `core/
+//! proposer.rs` (3 call sites: `take_commit_votes`, `link_causal_history`,
+//! `flush_durable`) and `commit_finalizer/mod.rs` (1 call site:
+//! `add_finalized_commit` + `flush`) called `dag_state.write()` directly for
+//! a long time, bypassing this actor entirely. Found 2026-09-14 while
+//! investigating an unrelated live freeze (mục 19 bug #4/#5 in project
+//! memory) that turned out NOT to be caused by this gap -- but it was a
+//! real, live violation of this module's own documented invariant, closed
+//! 2026-09-15 by adding `TakeCommitVotes`, `LinkCausalHistoryBatch`,
+//! `FlushDurable`, and `AddFinalizedCommitsAndFlush` below and routing all 4
+//! call sites through them. As of that date the invariant is true again in
+//! code, not just in this comment -- if you add a new `dag_state.write()`
+//! call anywhere outside this file, you are reintroducing exactly this gap.
 
+use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 
 use consensus_config::AuthorityIndex;
-use consensus_types::block::{BlockRef, BlockTimestampMs};
+use consensus_types::block::{BlockRef, BlockTimestampMs, TransactionIndex};
 use parking_lot::RwLock;
 
 use crate::{
     block::VerifiedBlock,
-    commit::{CommitDigest, TrustedCommit},
+    commit::{CommitDigest, CommitRef, CommitVote, TrustedCommit},
     dag_state::DagState,
     leader_scoring::ReputationScores,
 };
@@ -54,9 +71,7 @@ pub(crate) enum DagWriteCommand {
     /// Inject baseline reputation scores into `DagState` for LeaderSchedule
     /// recovery after snapshot restore.
     /// Replaces: `dag_state.write().baseline_reputation_scores = Some(scores)`
-    InjectBaselineScores {
-        scores: Vec<(AuthorityIndex, u64)>,
-    },
+    InjectBaselineScores { scores: Vec<(AuthorityIndex, u64)> },
 
     /// Take (consume) baseline reputation scores from `DagState`.
     /// Replaces: `dag_state.write().take_baseline_reputation_scores()`
@@ -111,6 +126,51 @@ pub(crate) enum DagWriteCommand {
         block_ref: BlockRef,
         reply: std::sync::mpsc::Sender<bool>,
     },
+
+    /// Take (consume) up to `limit` pending commit votes, for embedding in a
+    /// newly-proposed block.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `dag_state.write().take_commit_votes(limit)`
+    /// Added 2026-09-15 (mục 19 follow-up: closed a real doc-vs-code gap where
+    /// `core/proposer.rs` bypassed this actor and wrote `dag_state` directly).
+    TakeCommitVotes {
+        limit: usize,
+        reply: std::sync::mpsc::Sender<Vec<CommitVote>>,
+    },
+
+    /// Link the causal history of each of `root_blocks` (in order), returning
+    /// the concatenated list of newly-linked blocks across all of them.
+    /// Request-reply: caller waits for completion.
+    /// Replaces: `ancestors.iter().flat_map(|a| dag_state.write().link_causal_history(a.reference())).collect()`
+    /// Added 2026-09-15 (see TakeCommitVotes above).
+    LinkCausalHistoryBatch {
+        root_blocks: Vec<BlockRef>,
+        reply: std::sync::mpsc::Sender<Vec<BlockRef>>,
+    },
+
+    /// Flush buffered blocks/commits to storage, durably (fsync'd) -- see
+    /// `DagState::flush_durable`'s own doc comment for when this is required
+    /// instead of `AddFinalizedCommitsAndFlush`'s plain (async) write.
+    /// Replaces: `dag_state.write().flush_durable()`
+    /// Added 2026-09-15 (see TakeCommitVotes above).
+    FlushDurable {
+        reply: std::sync::mpsc::Sender<Option<tokio::sync::oneshot::Receiver<()>>>,
+    },
+
+    /// Record rejected transactions for each of `commits` (if not empty), then
+    /// flush -- the exact two-step sequence `CommitFinalizer::run` used to do
+    /// under one directly-held write guard.
+    /// Replaces:
+    /// ```ignore
+    /// let mut dag_state = dag_state.write();
+    /// for (commit_ref, rejected) in commits { dag_state.add_finalized_commit(commit_ref, rejected); }
+    /// dag_state.flush()
+    /// ```
+    /// Added 2026-09-15 (see TakeCommitVotes above).
+    AddFinalizedCommitsAndFlush {
+        commits: Vec<(CommitRef, BTreeMap<BlockRef, Vec<TransactionIndex>>)>,
+        reply: std::sync::mpsc::Sender<Option<tokio::sync::oneshot::Receiver<()>>>,
+    },
 }
 
 /// Handle for sending write commands to the `DagStateActor`.
@@ -136,7 +196,10 @@ impl DagStateWriter {
     /// Inject baseline reputation scores into DagState.
     /// Fire-and-forget: returns immediately without waiting for the write.
     pub(crate) fn inject_baseline_scores(&self, scores: Vec<(AuthorityIndex, u64)>) {
-        if let Err(e) = self.tx.send(DagWriteCommand::InjectBaselineScores { scores }) {
+        if let Err(e) = self
+            .tx
+            .send(DagWriteCommand::InjectBaselineScores { scores })
+        {
             tracing::error!(
                 "🔴 [DAG-WRITER] Failed to send InjectBaselineScores: actor thread dead? {}",
                 e
@@ -148,7 +211,10 @@ impl DagStateWriter {
     /// Request-reply: blocks the calling thread until the actor processes the command.
     pub(crate) fn take_baseline_scores(&self) -> Option<Vec<(AuthorityIndex, u64)>> {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::TakeBaselineScores { reply: reply_tx }) {
+        if let Err(e) = self
+            .tx
+            .send(DagWriteCommand::TakeBaselineScores { reply: reply_tx })
+        {
             tracing::error!(
                 "🔴 [DAG-WRITER] Failed to send TakeBaselineScores: actor thread dead? {}",
                 e
@@ -193,7 +259,10 @@ impl DagStateWriter {
 
     pub(crate) fn add_commit(&self, commit: TrustedCommit) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::AddCommit { commit, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::AddCommit {
+            commit,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send AddCommit: {}", e);
             return;
         }
@@ -202,7 +271,10 @@ impl DagStateWriter {
 
     pub(crate) fn accept_blocks(&self, blocks: Vec<VerifiedBlock>) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::AcceptBlocks { blocks, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::AcceptBlocks {
+            blocks,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send AcceptBlocks: {}", e);
             return;
         }
@@ -212,7 +284,10 @@ impl DagStateWriter {
     #[cfg(test)]
     pub(crate) fn set_last_commit(&self, commit: TrustedCommit) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit { commit, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit {
+            commit,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send SetLastCommit: {}", e);
             return;
         }
@@ -221,7 +296,10 @@ impl DagStateWriter {
 
     pub(crate) fn update_scoring_info(&self, scores: ReputationScores) {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::UpdateScoringInfo { scores, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::UpdateScoringInfo {
+            scores,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send UpdateScoringInfo: {}", e);
             return;
         }
@@ -230,11 +308,79 @@ impl DagStateWriter {
 
     pub(crate) fn set_committed(&self, block_ref: BlockRef) -> bool {
         let (reply_tx, reply_rx) = mpsc::channel();
-        if let Err(e) = self.tx.send(DagWriteCommand::SetCommitted { block_ref, reply: reply_tx }) {
+        if let Err(e) = self.tx.send(DagWriteCommand::SetCommitted {
+            block_ref,
+            reply: reply_tx,
+        }) {
             tracing::error!("🔴 [DAG-WRITER] Failed to send SetCommitted: {}", e);
             return false;
         }
         reply_rx.recv().unwrap_or(false)
+    }
+
+    /// Take (consume) up to `limit` pending commit votes.
+    /// Request-reply: blocks the calling thread until the actor processes the command.
+    pub(crate) fn take_commit_votes(&self, limit: usize) -> Vec<CommitVote> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::TakeCommitVotes {
+            limit,
+            reply: reply_tx,
+        }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send TakeCommitVotes: {}", e);
+            return Vec::new();
+        }
+        reply_rx.recv().unwrap_or_default()
+    }
+
+    /// Link the causal history of each of `root_blocks`, returning the
+    /// concatenated list of newly-linked blocks.
+    /// Request-reply: blocks the calling thread until the actor processes the command.
+    pub(crate) fn link_causal_history_batch(&self, root_blocks: Vec<BlockRef>) -> Vec<BlockRef> {
+        if root_blocks.is_empty() {
+            return Vec::new();
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::LinkCausalHistoryBatch {
+            root_blocks,
+            reply: reply_tx,
+        }) {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send LinkCausalHistoryBatch: {}", e);
+            return Vec::new();
+        }
+        reply_rx.recv().unwrap_or_default()
+    }
+
+    /// Flush buffered blocks/commits to storage, durably (fsync'd) -- see
+    /// `DagState::flush_durable`.
+    pub(crate) fn flush_durable(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self
+            .tx
+            .send(DagWriteCommand::FlushDurable { reply: reply_tx })
+        {
+            tracing::error!("🔴 [DAG-WRITER] Failed to send FlushDurable: {}", e);
+            return None;
+        }
+        reply_rx.recv().ok().flatten()
+    }
+
+    /// Record rejected transactions for each of `commits` (if not empty), then flush.
+    pub(crate) fn add_finalized_commits_and_flush(
+        &self,
+        commits: Vec<(CommitRef, BTreeMap<BlockRef, Vec<TransactionIndex>>)>,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if let Err(e) = self.tx.send(DagWriteCommand::AddFinalizedCommitsAndFlush {
+            commits,
+            reply: reply_tx,
+        }) {
+            tracing::error!(
+                "🔴 [DAG-WRITER] Failed to send AddFinalizedCommitsAndFlush: {}",
+                e
+            );
+            return None;
+        }
+        reply_rx.recv().ok().flatten()
     }
 }
 
@@ -252,9 +398,22 @@ impl DagStateActor {
     pub(crate) fn spawn(dag_state: Arc<RwLock<DagState>>) -> DagStateWriter {
         let (tx, rx) = mpsc::channel::<DagWriteCommand>();
 
+        // Captured here (spawn() is always called from within an ambient
+        // tokio context -- node startup, or a #[tokio::test]) and entered on
+        // the actor's own bare std::thread below. Needed since 2026-09-15,
+        // when `FlushDurable`/`AddFinalizedCommitsAndFlush` were added:
+        // `DagState::flush_inner` uses `Handle::current()`/`tokio::spawn`
+        // internally (the mục-16 chained-oneshot write-ordering mechanism),
+        // which panics ("there is no reactor running") without this -- this
+        // actor thread is a plain `std::thread`, not a tokio task. `.enter()`
+        // only provides the ambient context for scheduling onto the
+        // CAPTURED runtime; it does not run an executor loop on this thread.
+        let tokio_handle = tokio::runtime::Handle::current();
+
         std::thread::Builder::new()
             .name("dag-state-actor".to_string())
             .spawn(move || {
+                let _guard = tokio_handle.enter();
                 tracing::info!("🟢 [DAG-STATE-ACTOR] Started on dedicated thread");
                 Self::run_loop(rx, dag_state);
                 tracing::info!("🔴 [DAG-STATE-ACTOR] Stopped (all writers dropped)");
@@ -333,6 +492,34 @@ impl DagStateActor {
                 DagWriteCommand::SetCommitted { block_ref, reply } => {
                     let result = dag_state.write().set_committed(&block_ref);
                     let _ = reply.send(result);
+                }
+
+                DagWriteCommand::TakeCommitVotes { limit, reply } => {
+                    let votes = dag_state.write().take_commit_votes(limit);
+                    let _ = reply.send(votes);
+                }
+
+                DagWriteCommand::LinkCausalHistoryBatch { root_blocks, reply } => {
+                    let mut state = dag_state.write();
+                    let linked = root_blocks
+                        .into_iter()
+                        .flat_map(|root| state.link_causal_history(root))
+                        .collect();
+                    let _ = reply.send(linked);
+                }
+
+                DagWriteCommand::FlushDurable { reply } => {
+                    let ticket = dag_state.write().flush_durable();
+                    let _ = reply.send(ticket);
+                }
+
+                DagWriteCommand::AddFinalizedCommitsAndFlush { commits, reply } => {
+                    let mut state = dag_state.write();
+                    for (commit_ref, rejected) in commits {
+                        state.add_finalized_commit(commit_ref, rejected);
+                    }
+                    let ticket = state.flush();
+                    let _ = reply.send(ticket);
                 }
             }
         }

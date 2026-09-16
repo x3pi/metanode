@@ -6,6 +6,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVENTORY="$SCRIPT_DIR/inventory.yml"
 PLAYBOOK="$SCRIPT_DIR/deploy.yml"
 
+# ANSIBLE-VAULT SUPPORT (2026-09, GitHub issue #104 hardening) -- same opt-in
+# mechanism as deploy/ansible/ansible_deploy.sh: empty unless a vault password
+# source is present, so this changes nothing for anyone not using vault. See
+# that script's own comment (or deploy/ansible/inventory.example.yml) for the
+# full encrypt/use recipe.
+VAULT_ARGS=()
+if [ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ] && [ -f "${ANSIBLE_VAULT_PASSWORD_FILE}" ]; then
+    VAULT_ARGS=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
+elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
+    VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
+fi
+
 echo "═══════════════════════════════════════════════════════════════"
 echo "🌐 METANODE PRIVATE CHAINS — ANSIBLE DEPLOYMENT MANAGER"
 echo "═══════════════════════════════════════════════════════════════"
@@ -191,13 +203,15 @@ if [ "$ACTION" != "none" ]; then
             -e "deploy_action=$ACTION" \
             -e "target_chain=$TARGET_CHAIN" \
             -e "open_ports=$OPEN_PORTS" \
+            "${VAULT_ARGS[@]}" \
             --limit localhost
     else
         echo "🚀 Đang thực thi Ansible Playbook ..."
         ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
             -e "deploy_action=$ACTION" \
             -e "target_chain=$TARGET_CHAIN" \
-            -e "open_ports=$OPEN_PORTS"
+            -e "open_ports=$OPEN_PORTS" \
+            "${VAULT_ARGS[@]}"
     fi
 fi
 
@@ -577,7 +591,8 @@ if [ "$DETERMINISTIC_GENESIS" -eq 1 ] && { [ "$ACTION" = "setup" ] || [ "$ACTION
     ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
         -e "deploy_action=setup" \
         -e "target_chain=$TARGET_CHAIN" \
-        -e "open_ports=$OPEN_PORTS"
+        -e "open_ports=$OPEN_PORTS" \
+        "${VAULT_ARGS[@]}"
 fi
 
 echo ""

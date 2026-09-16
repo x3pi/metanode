@@ -11,6 +11,7 @@ use prometheus::Registry;
 use tokio::{sync::broadcast, task::JoinHandle};
 use tracing::info;
 
+use crate::dag_state_actor::DagStateActor;
 use crate::{
     adaptive_delay::AdaptiveDelayState,
     authority_service::AuthorityService,
@@ -39,7 +40,6 @@ use crate::{
     transaction_certifier::TransactionCertifier,
     CommitConsumerArgs,
 };
-use crate::dag_state_actor::DagStateActor;
 
 /// ConsensusAuthority is used by Sui to manage the lifetime of AuthorityNode.
 /// It hides the details of the implementation from the caller, MysticetiManager.
@@ -73,6 +73,11 @@ impl ConsensusAuthority {
         // Legacy store manager from ConsensusNode, to avoid re-opening locked RocksDB files
         legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+        // FORK-SAFETY (2026-09-10): see AuthorityNode::start's own doc comment on this
+        // same parameter. Optional -- pass None to preserve the exact previous behavior.
+        epoch_eth_addresses: Option<
+            Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+        >,
     ) -> Self {
         match network_type {
             NetworkType::Tonic => {
@@ -93,6 +98,7 @@ impl ConsensusAuthority {
                     system_transaction_provider,
                     legacy_store_manager,
                     coordination_hub,
+                    epoch_eth_addresses,
                 )
                 .await;
                 Self::WithTonic(Some(authority))
@@ -232,6 +238,15 @@ where
         // during epoch transitions. If None, no legacy stores will be available.
         existing_legacy_store_manager: Option<Arc<LegacyEpochStoreManager>>,
         coordination_hub: crate::coordination_hub::ConsensusCoordinationHub,
+        // FORK-SAFETY (2026-09-10): app-layer map of epoch -> (authority index -> ETH
+        // address), forwarded to CommitObserver/Linearizer to embed a real leader_address
+        // into freshly-created commits. See that call site's own comment and
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. Optional --
+        // None preserves the exact previous behavior (leader_address resolved later,
+        // downstream, per node).
+        epoch_eth_addresses: Option<
+            Arc<tokio::sync::RwLock<std::collections::HashMap<u64, Vec<Vec<u8>>>>>,
+        >,
     ) -> Self {
         assert!(
             committee.is_valid_index(own_index),
@@ -315,7 +330,7 @@ where
         let store = Arc::new(RocksDBStore::new(store_path));
         let dag_state = DagState::new(context.clone(), store.clone());
         // REMOVED: dag_state.set_last_commit_timestamp_ms(commit_consumer.last_block_timestamp_ms);
-        // This was overwriting the accurate ms-precision timestamp from Rust's DagState 
+        // This was overwriting the accurate ms-precision timestamp from Rust's DagState
         // with Go's second-precision timestamp, causing fork divergence.
 
         // CRITICAL FIX: Align the CommitConsumerMonitor with the Go execution progress.
@@ -325,7 +340,9 @@ where
         let go_handled = commit_consumer.replay_after_commit_index;
         let dag_handled = dag_state.last_commit_index();
         let effective_handled = go_handled.max(dag_handled); // kept for logging/logic
-        commit_consumer.monitor().set_highest_handled_commit(go_handled);
+        commit_consumer
+            .monitor()
+            .set_highest_handled_commit(go_handled);
         info!(
             "📊 [STARTUP] CommitConsumerMonitor aligned: go_handled={}, dag_handled={}, effective={}",
             go_handled, dag_handled, effective_handled
@@ -364,7 +381,7 @@ where
         }
 
         // NOTE: Commit index alignment is now handled by ConsensusCoordinationHub
-        // during the FastForwarding phase (see commit_syncer.rs). 
+        // during the FastForwarding phase (see commit_syncer.rs).
         // We intentionally do NOT align here because we need real network data
         // (commits from peers) to determine the correct baseline.
         let dag_state = Arc::new(RwLock::new(dag_state));
@@ -400,11 +417,10 @@ where
             "📡 [AUTHORITY NODE] About to spawn ProposedBlockHandler, keeper receiver_count={}",
             broadcast_sender_keeper.receiver_count()
         );
-        let proposed_block_handler =
-            tokio::spawn(async move { 
-                let mut handler = proposed_block_handler;
-                handler.run().await 
-            });
+        let proposed_block_handler = tokio::spawn(async move {
+            let mut handler = proposed_block_handler;
+            handler.run().await
+        });
 
         let sync_last_known_own_block = boot_counter == 0
             && dag_state.read().highest_accepted_round() == 0
@@ -414,7 +430,8 @@ where
                 .is_zero();
         info!("Sync last known own block: {sync_last_known_own_block}");
 
-        let block_manager = BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
+        let block_manager =
+            BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
         let leader_schedule = Arc::new(LeaderSchedule::from_store(
             context.clone(),
@@ -422,7 +439,7 @@ where
         ));
 
         let commit_consumer_monitor = commit_consumer.monitor();
-        let commit_observer = CommitObserver::new(
+        let mut commit_observer = CommitObserver::new(
             context.clone(),
             commit_consumer,
             dag_state.clone(),
@@ -432,11 +449,34 @@ where
             epoch_base_index,
         )
         .await;
+        // FORK-SAFETY (2026-09-10): wire the app-layer epoch_eth_addresses map through so
+        // freshly-created commits get a real, embedded leader_address instead of every
+        // node independently re-resolving one later. See CommitObserver/Linearizer's own
+        // set_epoch_eth_addresses doc comments and
+        // note/consensus_local_dag_trust_gap_design_2026-09.md mục 8.5. No-op when the
+        // caller doesn't set one (e.g. tests/benches).
+        if let Some(epoch_eth_addresses) = epoch_eth_addresses.clone() {
+            commit_observer.set_epoch_eth_addresses(epoch_eth_addresses);
+        }
 
         let round_tracker = Arc::new(RwLock::new(PeerRoundTracker::new(context.clone())));
 
-        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(min_round_delay_ms, adaptive_delay_enabled));
-        info!("Adaptive delay enabled: base_delay={}ms", min_round_delay_ms);
+        let adaptive_delay_state = Arc::new(AdaptiveDelayState::new(
+            min_round_delay_ms,
+            adaptive_delay_enabled,
+        ));
+        info!(
+            "Adaptive delay enabled: base_delay={}ms",
+            min_round_delay_ms
+        );
+
+        // Cloned (ProtocolKeyPair explicitly implements Clone) before the original moves into
+        // Core below -- AuthorityService needs its own copy to sign PayloadLossAttestations
+        // when a peer asks whether this node has a transaction payload (mục 11 of
+        // note/consensus_local_dag_trust_gap_design_2026-09.md, 2026-09-11). Same class of use
+        // as Core's own block-signing, not a new exposure surface: AuthorityService already
+        // handles every peer network request and already holds comparably sensitive state.
+        let protocol_keypair_for_authority_service = protocol_keypair.clone();
 
         let core = Core::new(
             context.clone(),
@@ -459,6 +499,7 @@ where
         let (core_dispatcher, core_thread_handle) =
             ChannelCoreThreadDispatcher::start(context.clone(), &dag_state, core);
         let core_dispatcher = Arc::new(core_dispatcher);
+
         let leader_timeout_handle =
             LeaderTimeoutTask::start(core_dispatcher.clone(), &signals_receivers, context.clone());
 
@@ -471,7 +512,8 @@ where
                     .quorum_commit_digest(index)
                     .map(|d| d.into_inner())
             });
-            coordination_hub.set_quorum_advanced_notify(commit_vote_monitor.quorum_advanced_notify.clone());
+            coordination_hub
+                .set_quorum_advanced_notify(commit_vote_monitor.quorum_advanced_notify.clone());
         }
 
         // COLD-START-FIX (May 2026): Wire CommitVoteMonitor.has_any_digest_data() into
@@ -481,9 +523,7 @@ where
         // received any actual digest votes, permanently disabling COLD-START-BYPASS.
         {
             let monitor_ref = commit_vote_monitor.clone();
-            coordination_hub.set_digest_data_checker(move || {
-                monitor_ref.has_any_digest_data()
-            });
+            coordination_hub.set_digest_data_checker(move || monitor_ref.has_any_digest_data());
         }
 
         // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
@@ -501,62 +541,65 @@ where
         {
             let monitor_ref = commit_vote_monitor.clone();
             let ctx_ref = context.clone();
-            coordination_hub.set_peer_commit_attestation(move |index: u32, local_digest: [u8; 32]| {
-                use crate::coordination_hub::PeerAttestResult;
+            let hub_ref = coordination_hub.clone();
+            coordination_hub.set_peer_commit_attestation(
+                move |index: u32, local_digest: [u8; 32]| {
+                    use crate::coordination_hub::PeerAttestResult;
 
-                // First check: does quorum_commit_digest have a definitive answer?
-                if let Some(quorum_digest) = monitor_ref.quorum_commit_digest(index) {
-                    if quorum_digest.into_inner() == local_digest {
-                        return PeerAttestResult::Ok; // 2f+1 agree with us
-                    } else {
-                        return PeerAttestResult::Conflict; // 2f+1 disagree
-                    }
-                }
-
-                // No quorum digest yet. Check vote counts for this index.
-                let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
-
-                if total_stake == 0 {
-                    // No peer has voted for this index at all.
-                    // Check if this is a TRUE cold-start (no digest data anywhere)
-                    if !monitor_ref.has_any_digest_data() {
-                        // TRUE COLD-START: No digest votes exist in the entire monitor.
-                        // This means ALL nodes are in the same state — fresh epoch.
-                        // The local commit is deterministic (same DAG → same commits).
-                        // Safe to dispatch without timeout.
-                        PeerAttestResult::Ok
-                    } else {
-                        // Digest data exists for OTHER indices but not this one.
-                        // This could mean: GC'd (too old) or peers haven't voted yet.
-                        // Stay pending until peers catch up.
-                        PeerAttestResult::Insufficient
-                    }
-                } else if let Some((best_digest, best_stake)) = best_entry {
-                    // Some peers have voted. Check if majority matches local digest.
-                    let quorum_threshold = ctx_ref.committee.quorum_threshold();
-                    if best_digest.into_inner() == local_digest {
-                        // Majority matches us but hasn't reached quorum yet.
-                        // If we have validity threshold (f+1) agreement, it's very likely safe,
-                        // but we still wait for full quorum to be absolutely certain.
-                        if best_stake >= quorum_threshold {
-                            PeerAttestResult::Ok // Should have been caught above, but defensive
+                    // First check: does quorum_commit_digest have a definitive answer?
+                    if let Some(quorum_digest) = monitor_ref.quorum_commit_digest(index) {
+                        if quorum_digest.into_inner() == local_digest {
+                            return PeerAttestResult::Ok; // 2f+1 agree with us
                         } else {
-                            PeerAttestResult::Insufficient // Wait for full quorum
+                            return PeerAttestResult::Conflict; // 2f+1 disagree
                         }
-                    } else {
-                        // Majority of votes so far disagree with us.
-                        // If the disagreeing stake is already >= quorum, it's definitive.
-                        if best_stake >= quorum_threshold {
-                            PeerAttestResult::Conflict
+                    }
+
+                    // No quorum digest yet. Check vote counts for this index.
+                    let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
+
+                    if total_stake == 0 {
+                        // No peer has voted for this index at all.
+                        // Check if this is a TRUE cold-start (no digest data anywhere)
+                        if hub_ref.is_epoch_transitioning() && !monitor_ref.has_any_digest_data() {
+                            // TRUE COLD-START: No digest votes exist in the entire monitor AND 
+                            // we are in an epoch transition where block proposal is halted.
+                            // The local commit is deterministic (same DAG → same commits).
+                            // Safe to dispatch without timeout to prevent transition deadlock.
+                            PeerAttestResult::Ok
                         } else {
-                            // Sub-quorum disagreement — could flip. Wait.
+                            // Digest data exists, OR we restarted mid-epoch (is_transitioning is false).
+                            // In mid-epoch, nodes CAN propose blocks, so we must wait for peers
+                            // to vote. Bypassing here on a mid-epoch restart causes forks!
                             PeerAttestResult::Insufficient
                         }
+                    } else if let Some((best_digest, best_stake)) = best_entry {
+                        // Some peers have voted. Check if majority matches local digest.
+                        let quorum_threshold = ctx_ref.committee.quorum_threshold();
+                        if best_digest.into_inner() == local_digest {
+                            // Majority matches us but hasn't reached quorum yet.
+                            // If we have validity threshold (f+1) agreement, it's very likely safe,
+                            // but we still wait for full quorum to be absolutely certain.
+                            if best_stake >= quorum_threshold {
+                                PeerAttestResult::Ok // Should have been caught above, but defensive
+                            } else {
+                                PeerAttestResult::Insufficient // Wait for full quorum
+                            }
+                        } else {
+                            // Majority of votes so far disagree with us.
+                            // If the disagreeing stake is already >= quorum, it's definitive.
+                            if best_stake >= quorum_threshold {
+                                PeerAttestResult::Conflict
+                            } else {
+                                // Sub-quorum disagreement — could flip. Wait.
+                                PeerAttestResult::Insufficient
+                            }
+                        }
+                    } else {
+                        PeerAttestResult::Insufficient
                     }
-                } else {
-                    PeerAttestResult::Insufficient
-                }
-            });
+                },
+            );
         }
 
         // PEER TX-PAYLOAD RECOVERY (2026-09-09): see TxFetcherFn's doc comment in
@@ -584,21 +627,30 @@ where
                     let fetches = peers.into_iter().map(|peer| {
                         let network_client = network_client.clone();
                         let digests = digests.clone();
-                        async move { network_client.fetch_transactions(peer, digests, timeout).await }
+                        async move {
+                            network_client
+                                .fetch_transactions(peer, digests, timeout)
+                                .await
+                        }
                     });
                     let results = futures::future::join_all(fetches).await;
-                    let mut inserted = 0usize;
+                    // Collect first, then insert_batch once (see its doc comment, mục 19
+                    // bug #6 throughput-regression follow-up) instead of one lock
+                    // acquisition per transaction.
+                    let to_insert: Vec<_> = results
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .flatten()
+                        .map(|tx_bytes| {
+                            let tx = crate::block::Transaction::new(tx_bytes.to_vec());
+                            (tx.digest(), tx)
+                        })
+                        .collect();
+                    let inserted = to_insert.len();
+                    if let Some(mut cache) =
+                        crate::transaction::try_tx_cache_write("payload_loss_collector batch fetch")
                     {
-                        let mut cache = crate::transaction::get_global_tx_cache().write();
-                        for result in results {
-                            if let Ok(txs_bytes) = result {
-                                for tx_bytes in txs_bytes {
-                                    let tx = crate::block::Transaction::new(tx_bytes.to_vec());
-                                    cache.insert(tx.digest(), tx);
-                                    inserted += 1;
-                                }
-                            }
-                        }
+                        cache.insert_batch(to_insert);
                     }
                     if inserted > 0 {
                         tracing::info!(
@@ -606,6 +658,200 @@ where
                              peers to fill local TxPayloadCache gap(s) (e.g. after a restart).",
                             inserted
                         );
+                    }
+                })
+            }));
+        }
+
+        // QUORUM-CERTIFIED PAYLOAD-LOSS SKIP (2026-09-11): see PayloadLossCollectorFn's doc
+        // comment in coordination_hub.rs and mục 11 of
+        // note/consensus_local_dag_trust_gap_design_2026-09.md. Only ever invoked by an
+        // explicit operator action (ffi.rs's metanode_attest_payload_loss) -- wiring it here
+        // just makes it available, it does not run itself.
+        coordination_hub.set_committee_for_payload_loss(context.committee.clone());
+        {
+            let network_client_for_collector = network_client.clone();
+            let committee_for_collector = context.committee.clone();
+            let own_index = context.own_index;
+            let own_keypair = protocol_keypair_for_authority_service.clone();
+            coordination_hub.set_payload_loss_collector(Arc::new(move |claim, timeout| {
+                let network_client = network_client_for_collector.clone();
+                let committee = committee_for_collector.clone();
+                let own_keypair = own_keypair.clone();
+                Box::pin(async move {
+                    use crate::network::AttestPayloadLossOutcome;
+                    use crate::payload_loss_attestation::{
+                        PayloadLossAggregator, PayloadLossAttestation, PayloadLossCollectionResult,
+                    };
+
+                    // Own cache first -- if we somehow already have it (e.g. it arrived via
+                    // gossip in between the halt and the operator running this), this is a
+                    // no-op recovery, no need to query anyone. A stuck lock just means we
+                    // skip this shortcut and fall through to querying peers below, same as
+                    // an ordinary cache miss.
+                    if crate::transaction::try_tx_cache_read("payload_loss_collector own-cache check")
+                        .and_then(|cache| cache.get(&claim.tx_digest))
+                        .is_some()
+                    {
+                        return PayloadLossCollectionResult::Recovered;
+                    }
+
+                    let peers: Vec<AuthorityIndex> = committee
+                        .authorities()
+                        .map(|(i, _)| i)
+                        .filter(|&i| i != own_index)
+                        .collect();
+
+                    // FORK FIX (found live 2026-09-11, via a local-232 chaos repro -- see
+                    // project_consensus_halt_not_guess_phuong_an_a mục 13 for the full incident):
+                    // a peer that failed to answer at all within one `timeout` window (network
+                    // hiccup, or -- as reproduced -- the peer itself being transiently degraded by
+                    // an unrelated issue) used to be silently dropped from consideration, exactly
+                    // like an `Err` from a malformed attestation. The difference matters: a
+                    // malformed/abstaining response is a peer that DID answer and had nothing
+                    // useful to add, safe to ignore. A peer that never answered at all is
+                    // genuinely unknown -- it might actually hold the payload (as reproduced: the
+                    // 4th validator was mid-recovery from an unrelated stall, timed out on the
+                    // first query, and DID have the transaction all along) -- and a quorum reached
+                    // only among the others then certifies a skip that peer disagrees with,
+                    // forking it the instant it comes back and executes the real transaction
+                    // anyway.
+                    //
+                    // The fix has two parts, matched to why a real 3f+1 BFT system tolerates f
+                    // faults in the first place -- an initial reviewer correctly pointed out that
+                    // simply requiring every peer to answer, forever, would quietly trade away the
+                    // committee's whole fault-tolerance property for this one feature (a single
+                    // permanently-dead validator would brick it):
+                    //   1. RETRY generously per peer (not a single short shot) before ever treating
+                    //      it as unreachable -- this is what actually would have caught the
+                    //      reproduced case, since that validator was genuinely alive and answered
+                    //      correctly once given a little more time.
+                    //   2. Only AFTER exhausting retries, fall back to proper stake-weighted BFT
+                    //      reasoning: proceeding without a peer is safe exactly when the STAKE of
+                    //      every still-unresponsive peer, combined, does not exceed the
+                    //      committee's own fault tolerance (`total_stake - quorum_threshold`) --
+                    //      the same bound the whole consensus protocol already relies on to
+                    //      tolerate f faulty/offline authorities. More unresponsive stake than
+                    //      that means the safety margin is gone and this must refuse, not guess.
+                    const PER_PEER_ATTEMPTS: u32 = 5;
+                    let queries = peers.into_iter().map(|peer| {
+                        let network_client = network_client.clone();
+                        let claim = claim.clone();
+                        async move {
+                            let mut last = network_client
+                                .attest_payload_loss(
+                                    peer,
+                                    claim.commit_index,
+                                    claim.tx_digest,
+                                    timeout,
+                                )
+                                .await;
+                            for _ in 1..PER_PEER_ATTEMPTS {
+                                let is_definitive = matches!(last, Ok(_))
+                                    || matches!(
+                                        last,
+                                        Err(crate::error::ConsensusError::PayloadLossAbstain)
+                                    );
+                                if is_definitive {
+                                    break;
+                                }
+                                tokio::time::sleep(timeout).await;
+                                last = network_client
+                                    .attest_payload_loss(
+                                        peer,
+                                        claim.commit_index,
+                                        claim.tx_digest,
+                                        timeout,
+                                    )
+                                    .await;
+                            }
+                            (peer, last)
+                        }
+                    });
+                    let results = futures::future::join_all(queries).await;
+
+                    // A payload from ANY peer wins immediately -- ordinary recovery.
+                    for (_, result) in &results {
+                        if let Ok(AttestPayloadLossOutcome::Payload(payload)) = result {
+                            let tx = crate::block::Transaction::new(payload.to_vec());
+                            if let Some(mut cache) = crate::transaction::try_tx_cache_write(
+                                "payload_loss_collector recovered-payload insert",
+                            ) {
+                                cache.insert(tx.digest(), tx);
+                            }
+                            // Still Recovered even if the cache insert above was skipped: the
+                            // payload genuinely was retrieved from a peer (the point of this
+                            // whole collector), a stuck local cache lock is a separate concern
+                            // already loudly logged by try_tx_cache_write.
+                            return PayloadLossCollectionResult::Recovered;
+                        }
+                    }
+
+                    let unresponsive_stake: consensus_config::Stake = results
+                        .iter()
+                        .filter(|(_, r)| {
+                            !matches!(
+                                r,
+                                Ok(_) | Err(crate::error::ConsensusError::PayloadLossAbstain)
+                            )
+                        })
+                        .map(|(peer, _)| committee.stake(*peer))
+                        .sum();
+                    let fault_tolerance = committee.total_stake() - committee.quorum_threshold();
+
+                    // Otherwise aggregate attestations -- including our own, since the whole
+                    // reason this collector is running is that WE don't have it either.
+                    let mut aggregator = PayloadLossAggregator::new(claim.clone());
+                    if let Ok(own_attestation) =
+                        PayloadLossAttestation::sign(claim.clone(), own_index, &own_keypair)
+                    {
+                        let _ = aggregator.add(own_attestation, &committee);
+                    }
+                    for (_, result) in results {
+                        if let Ok(AttestPayloadLossOutcome::Attestation(attestation)) = result {
+                            // A malformed/mismatched/badly-signed attestation from a byzantine
+                            // or buggy peer is simply not counted -- Err here is not fatal to
+                            // the collection as a whole.
+                            let _ = aggregator.add(attestation, &committee);
+                        }
+                    }
+
+                    if unresponsive_stake > fault_tolerance {
+                        tracing::warn!(
+                            "⏳ [PAYLOAD-LOSS-SKIP] Peer(s) totalling {} stake never answered \
+                             commit_index={} tx_digest={:?} even after {} attempts each -- this \
+                             exceeds the committee's own fault-tolerance bound ({} stake), so \
+                             proceeding without them is no longer safe (one of them might hold \
+                             the payload). Refusing to certify ({} attested-missing stake \
+                             collected so far). Retry once more peers are reachable.",
+                            unresponsive_stake,
+                            claim.commit_index,
+                            claim.tx_digest,
+                            PER_PEER_ATTEMPTS,
+                            fault_tolerance,
+                            aggregator.attested_stake()
+                        );
+                        return PayloadLossCollectionResult::Insufficient {
+                            attested_missing_stake: aggregator.attested_stake(),
+                            quorum_needed: committee.quorum_threshold(),
+                        };
+                    }
+
+                    if aggregator.reached_quorum(&committee) {
+                        match aggregator.into_certificate(&committee) {
+                            Some(certificate) => {
+                                PayloadLossCollectionResult::Certified(certificate)
+                            }
+                            None => PayloadLossCollectionResult::Insufficient {
+                                attested_missing_stake: 0,
+                                quorum_needed: committee.quorum_threshold(),
+                            },
+                        }
+                    } else {
+                        PayloadLossCollectionResult::Insufficient {
+                            attested_missing_stake: aggregator.attested_stake(),
+                            quorum_needed: committee.quorum_threshold(),
+                        }
                     }
                 })
             }));
@@ -676,6 +922,7 @@ where
             legacy_store_manager, // Pass initialized manager
             epoch_base_index,     // CRITICAL: Pass epoch_base for cold-start fallback
             network_client.clone(),
+            protocol_keypair_for_authority_service,
         ));
 
         let subscriber = {
@@ -695,7 +942,6 @@ where
         };
 
         network_manager.install_service(network_service).await;
-
 
         info!(
             "✅ [AUTHORITY NODE] Consensus authority started, took {:?}",
@@ -758,7 +1004,7 @@ where
     pub(crate) fn is_alive(&self) -> bool {
         let syncer_alive = self.commit_syncer_handle.is_alive();
         let core_alive = self.core_thread_handle.is_alive();
-        
+
         if !syncer_alive || !core_alive {
             tracing::warn!(
                 "🔴 [AUTHORITY LIVENESS] Node internal task crashed! CommitSyncer alive: {}, CoreThread alive: {}",
@@ -774,7 +1020,6 @@ where
         self.transaction_client.clone()
     }
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -8,3 +8,4 @@ pub mod node;
 pub mod types;
 
 pub mod ffi;
+pub mod liveness_watchdog;
