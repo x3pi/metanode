@@ -1,4 +1,42 @@
 // Unit tests for XapianManager (Database logic for Xapian Handlers)
+//
+// REWRITTEN 2026-09 (Phuong an A mục 22, "check kỹ luôn phần xapian trong
+// mvm"): this file had not been touched since 2026-04-22, while
+// XapianManager's real write API went through two major changes since then
+// it never followed:
+//   1. 2026-07-02 (commit 4108fe70): physical Xapian::docid replaced by a
+//      virtual string docid throughout (new_document/add_value/add_term/
+//      set_data/index_text/get_data/get_value/get_terms all take/return
+//      `std::string`, not `Xapian::docid`).
+//   2. The write methods (new_document, add_value, add_term, set_data,
+//      index_text) only perform a REAL write when called WITH a txHash
+//      pointer -- without one they take a "test/offchain stub" branch that
+//      fabricates a plausible-looking virtual docid but writes NOTHING to
+//      any real document (see each method's own `if (txHash != nullptr)`
+//      branch in xapian_manager.cpp). The old version of this file always
+//      called them with no txHash at all, so even before either of the
+//      above breaking changes, it was exercising a no-op stub path, not the
+//      real one -- its assertions (e.g. "get_data returns what was just
+//      written") could only ever have been testing that stub's own
+//      internal consistency, never real persistence.
+// The actual on-chain write flow is: <write call>(..., &txHash) stages a
+// XapianLog::LogEntry in a per-txHash buffer, then
+// XapianRegistry::commitBufferForTxHash(&txHash) (global registry, not a
+// XapianManager method -- see xapian_registry.cpp) replays that buffer into
+// the real Xapian::Document and appends it to comprehensive_log, or
+// XapianRegistry::clearBufferForTxHash(&txHash) discards it uncommitted.
+// This file now exercises that real path throughout.
+//
+// Also found and left in place (NOT fixed here, flagged as a separate
+// finding): XapianManager::apply_buffered_tx/clear_buffer/
+// mvmCommitTransaction/mvmCancelTransaction are declared in
+// xapian_manager.h but have NO implementation anywhere and NO callers
+// anywhere -- confirmed dead/superseded declarations (the real commit/
+// cancel flow is XapianRegistry::commitBufferForTxHash/clearBufferForTxHash
+// above), same class of finding as this session's earlier
+// forceCommitChan cleanup in pkg/goxapian. Left alone here since removing
+// declared-but-unused class members is a separate, narrower cleanup than
+// what this test-repair pass is for.
 
 #include <signal.h>
 #undef SIGSTKSZ
@@ -8,8 +46,11 @@
 #include <doctest/doctest.h>
 
 #include "xapian/xapian_manager.h"
+#include "xapian/xapian_registry.h"
 #include "my_extension/utils.h"
+#include <mvm/util.h>
 #include <filesystem>
+#include <atomic>
 
 // Helper to remove test DB directory
 void cleanup_test_db(const std::string& base_path) {
@@ -36,12 +77,31 @@ std::shared_ptr<XapianManager> create_test_manager(const std::string& db_name, c
     return XapianManager::getInstance(db_name, addr, reset);
 }
 
+// Each test case gets its own fake txHash so buffered writes from different
+// test cases (which may run against the same manager/db_name) never collide
+// in the shared tx_buffers map.
+static std::atomic<uint64_t> g_fake_tx_counter{1};
+uint256_t next_fake_tx_hash() {
+    return uint256_t(g_fake_tx_counter.fetch_add(1));
+}
+
+// Stages `write` (a call to one of XapianManager's log-buffering write
+// methods with &txHash as its last argument) and immediately commits it for
+// real via the actual registry-level flow, matching what on-chain execution
+// really does. Returns the resulting virtualDocId/return value of `write`.
+template <typename F>
+auto commit_write(uint256_t txHash, F write) -> decltype(write()) {
+    auto result = write();
+    registry.commitBufferForTxHash(&txHash);
+    return result;
+}
+
 TEST_SUITE("XapianManager") {
-    
+
     // Setup before each testcase
     std::string test_db_name = "test_collection";
-    mvm::Address mock_addr = 123456789; 
-    
+    mvm::Address mock_addr = 123456789;
+
     TEST_CASE("Database Initialization and Creation") {
         try {
             init_xapian_test_env();
@@ -50,12 +110,12 @@ TEST_SUITE("XapianManager") {
             // Create manager with reset = true
             auto manager = create_test_manager(test_db_name, mock_addr, true);
             REQUIRE(manager != nullptr);
-            
+
             // Assert that the database path was created
             auto expected_path = mvm::createFullPath(mock_addr, test_db_name);
             CHECK(std::filesystem::exists(expected_path));
-            
-    
+
+
         } catch (const Xapian::Error& e) {
             std::cerr << "Xapian exception: " << e.get_description() << std::endl;
             FAIL("Xapian error");
@@ -70,48 +130,69 @@ TEST_SUITE("XapianManager") {
 
     TEST_CASE("Document Lifecycle: Create, Get, Update, Delete") {
         init_xapian_test_env();
- 
 
         auto manager = create_test_manager(test_db_name, mock_addr, true);
         REQUIRE(manager != nullptr);
 
-        // 1. Create new document
+        // 1. Create new document -- staged, then committed for real via the
+        // registry (see commit_write's doc comment for why: new_document()
+        // alone, with no txHash, only fabricates an ID and writes nothing).
+        uint256_t txHash1 = next_fake_tx_hash();
         std::string initial_data = "{\"title\": \"Hello World\"}";
-        Xapian::docid doc_id = manager->new_document(initial_data, 100);
-        REQUIRE(doc_id > 0);
+        std::string doc_id = commit_write(txHash1, [&]() {
+            return manager->new_document(initial_data, 100, nullptr, &txHash1);
+        });
+        REQUIRE(!doc_id.empty());
+        manager->commit_changes();
 
         // 2. Get data
         std::string retrieved_data = manager->get_data(doc_id, 100);
         CHECK(retrieved_data == initial_data);
 
         // 3. Set data (Update in-place with same blockNumber)
+        uint256_t txHash2 = next_fake_tx_hash();
         std::string new_data = "{\"title\": \"Updated\"}";
-        bool set_ok = manager->set_data(doc_id, new_data, 100);
-        CHECK(set_ok == true);
-        
+        std::string set_result = commit_write(txHash2, [&]() {
+            return manager->set_data(doc_id, new_data, 100, nullptr, &txHash2);
+        });
+        CHECK(set_result == doc_id);
+        manager->commit_changes();
+
         CHECK(manager->get_data(doc_id, 100) == new_data);
 
         // 4. Delete document
-        bool del_ok = manager->delete_document(doc_id, 100);
+        uint256_t txHash3 = next_fake_tx_hash();
+        bool del_ok = commit_write(txHash3, [&]() {
+            return manager->delete_document(doc_id, 100, nullptr, &txHash3);
+        });
         CHECK(del_ok == true);
+        manager->commit_changes();
 
         // Teardown
         manager->commit_changes();
-        manager->destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
     }
 
     TEST_CASE("Values and Terms") {
         init_xapian_test_env();
- 
+
         auto manager = create_test_manager(test_db_name, mock_addr, true);
         REQUIRE(manager != nullptr);
 
-        Xapian::docid doc_id = manager->new_document("doc data", 200);
+        uint256_t txHashNewDoc = next_fake_tx_hash();
+        std::string doc_id = commit_write(txHashNewDoc, [&]() {
+            return manager->new_document("doc data", 200, nullptr, &txHashNewDoc);
+        });
+        manager->commit_changes();
 
         // --- Values ---
         SUBCASE("Add and Get Values") {
-            bool val_ok = manager->add_value(doc_id, 1, "test_value_1", false, 200);
-            CHECK(val_ok == true);
+            uint256_t txHash = next_fake_tx_hash();
+            std::string val_result = commit_write(txHash, [&]() {
+                return manager->add_value(doc_id, 1, "test_value_1", false, 200, nullptr, &txHash);
+            });
+            CHECK(val_result == doc_id);
+            manager->commit_changes();
 
             // Get value back
             std::string retrieved_val = manager->get_value(doc_id, 1, false, 200);
@@ -120,14 +201,22 @@ TEST_SUITE("XapianManager") {
 
         // --- Terms ---
         SUBCASE("Add and Get Terms") {
-            bool term_ok = manager->add_term(doc_id, "QTERM1", 200);
-            CHECK(term_ok == true);
-            
-            manager->add_term(doc_id, "QTERM2", 200);
+            uint256_t txHashT1 = next_fake_tx_hash();
+            std::string term_result = commit_write(txHashT1, [&]() {
+                return manager->add_term(doc_id, "QTERM1", 200, nullptr, &txHashT1);
+            });
+            CHECK(term_result == doc_id);
+            manager->commit_changes();
+
+            uint256_t txHashT2 = next_fake_tx_hash();
+            commit_write(txHashT2, [&]() {
+                return manager->add_term(doc_id, "QTERM2", 200, nullptr, &txHashT2);
+            });
+            manager->commit_changes();
 
             std::vector<std::string> terms = manager->get_terms(doc_id, 200);
             CHECK(terms.size() >= 2);
-            
+
             bool found_term1 = false;
             for(const auto& t : terms) {
                 if (t == "QTERM1") found_term1 = true;
@@ -136,23 +225,31 @@ TEST_SUITE("XapianManager") {
         }
 
         manager->commit_changes();
-        manager->destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
     }
 
     TEST_CASE("Index Text") {
         init_xapian_test_env();
- 
+
         auto manager = create_test_manager(test_db_name, mock_addr, true);
         REQUIRE(manager != nullptr);
 
-        Xapian::docid doc_id = manager->new_document("doc data", 300);
+        uint256_t txHashNewDoc = next_fake_tx_hash();
+        std::string doc_id = commit_write(txHashNewDoc, [&]() {
+            return manager->new_document("doc data", 300, nullptr, &txHashNewDoc);
+        });
+        manager->commit_changes();
 
         // Indexing some text with a prefix 'S'
-        bool idx_ok = manager->index_text(doc_id, "searchable text content", 1, "S", 300);
-        CHECK(idx_ok == true);
+        uint256_t txHash = next_fake_tx_hash();
+        std::string idx_result = commit_write(txHash, [&]() {
+            return manager->index_text(doc_id, "searchable text content", 1, "S", 300, nullptr, &txHash);
+        });
+        CHECK(idx_result == doc_id);
+        manager->commit_changes();
 
         std::vector<std::string> terms = manager->get_terms(doc_id, 300);
-        
+
         bool found_searchable = false;
         for(const auto& t : terms) {
             if (t.rfind("S", 0) == 0 && t.length() > 1) {
@@ -162,27 +259,67 @@ TEST_SUITE("XapianManager") {
         CHECK(found_searchable == true);
 
         manager->commit_changes();
-        manager->destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
     }
 
     TEST_CASE("Change Logs and Hash Generation") {
         init_xapian_test_env();
- 
+
         auto manager = create_test_manager(test_db_name, mock_addr, true);
         REQUIRE(manager != nullptr);
 
-        manager->new_document("change log test", 400);
+        uint256_t txHash = next_fake_tx_hash();
+        commit_write(txHash, [&]() {
+            return manager->new_document("change log test", 400, nullptr, &txHash);
+        });
 
+        // Must read comprehensive_log BEFORE commit_changes(): commit_changes()
+        // clears it right after a successful Xapian commit (it holds only
+        // changes staged SINCE the last commit, not full history -- see its
+        // own "Xóa các log đã staged sau khi commit thành công" comment in
+        // xapian_manager.cpp). Reading after commit_changes() would always
+        // see an empty log regardless of whether commitBufferForTxHash worked.
         std::vector<XapianLog::LogEntry> logs = manager->getChangeLogs();
+        CHECK(!logs.empty());
+
+        manager->commit_changes();
+        CHECK(manager->getChangeLogs().empty()); // confirms the clear-on-commit behavior above
 
         std::array<uint8_t, 32> hash = manager->getChangeHash();
         bool is_zero = true;
         for(auto b : hash) {
             if (b != 0) is_zero = false;
         }
-        CHECK((is_zero == true || is_zero == false)); 
+        CHECK((is_zero == true || is_zero == false));
 
         manager->commit_changes();
-        manager->destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
+        XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
+    }
+
+    // NEW (2026-09, mục 22): a fake transaction that is CANCELLED (via
+    // XapianRegistry::clearBufferForTxHash, never committed) must leave no
+    // trace on the real document -- confirms the buffer/commit separation
+    // this whole rewrite depends on is actually real, not just that
+    // commit_write's own plumbing happens to work.
+    TEST_CASE("Cancelled transaction leaves no trace") {
+        init_xapian_test_env();
+
+        auto manager = create_test_manager(test_db_name, mock_addr, true);
+        REQUIRE(manager != nullptr);
+
+        uint256_t txHash = next_fake_tx_hash();
+        std::string doc_id = manager->new_document("should not persist", 500, nullptr, &txHash);
+        REQUIRE(!doc_id.empty());
+
+        // Cancel instead of commit.
+        registry.clearBufferForTxHash(&txHash);
+        manager->commit_changes();
+
+        // The document must not exist for real -- get_data on an unknown
+        // virtual docid returns "" (see XapianManager::get_data's own
+        // DocNotFoundError handling).
+        CHECK(manager->get_data(doc_id, 500) == "");
+
+        XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
     }
 }

@@ -183,8 +183,14 @@ if(BUILD_TESTS)
   add_test(NAME crypto_helpers_tests COMMAND mvm_crypto_helpers_tests)
 
   # Xapian Manager tests
+  # test_xapian_manager_stubs.cpp provides GetXapianPruneRetentionBlocks/
+  # GetCurrentBlockNumberForXapianPrune -- the real implementations live in
+  # mvm_api.go (Go `//export`) and are only linked in as part of the full
+  # simple_chain binary; this standalone test executable needs its own
+  # stand-in to link at all (see that file's own doc comment).
   add_executable(mvm_xapian_manager_tests
     tests/test_xapian_manager.cpp
+    tests/test_xapian_manager_stubs.cpp
   )
 
   target_link_libraries(mvm_xapian_manager_tests
