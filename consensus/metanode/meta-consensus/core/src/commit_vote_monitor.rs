@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     block::{BlockAPI as _, VerifiedBlock},
@@ -271,6 +272,177 @@ impl CommitVoteMonitor {
         let state = self.state.lock();
         state.highest_seen_epoch
     }
+
+    /// Returns a lightweight snapshot of consensus vote progress for external monitoring.
+    /// Fast in-memory clone of scalar fields and vector with zero disk/network I/O.
+    pub fn get_vote_snapshot(&self) -> ConsensusVoteSnapshot {
+        let state = self.state.lock();
+        let epoch = self.context.committee.epoch();
+        let quorum_commit_index = self.compute_quorum_index_inner(&state.highest_voted_commits);
+        let highest_seen_epoch = state.highest_seen_epoch;
+        let own_index = self.context.own_index.value();
+
+        let mut authorities = Vec::with_capacity(self.context.committee.size());
+        for (idx, authority) in self.context.committee.authorities() {
+            let highest_voted = state
+                .highest_voted_commits
+                .get(idx.value())
+                .copied()
+                .unwrap_or(0);
+            authorities.push(AuthorityVoteInfo {
+                authority_index: idx.value(),
+                hostname: authority.hostname.clone(),
+                address: authority.address.to_string(),
+                stake: authority.stake,
+                highest_voted_commit: highest_voted,
+            });
+        }
+
+        // Populate recent 10 commits with exact per-authority voting data from memory
+        let mut recent_commits = Vec::new();
+        let quorum_threshold = self.context.committee.quorum_threshold();
+        if quorum_commit_index > 0 {
+            let start_commit = quorum_commit_index.saturating_sub(9).max(1);
+            for c in start_commit..=quorum_commit_index {
+                let quorum_digest = state.digest_history.get(&c).and_then(|digest_stakes| {
+                    if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
+                        if *best_stake >= quorum_threshold {
+                            let hex_str: String = best_digest.into_inner().iter().map(|b| format!("{:02x}", b)).collect();
+                            return Some(format!("0x{}", hex_str));
+                        }
+                    }
+                    None
+                });
+                let quorum_reached = quorum_digest.is_some();
+                let mut voters = Vec::new();
+                let mut missing_voters = Vec::new();
+                let mut total_stake = 0;
+
+                for (idx, authority) in self.context.committee.authorities() {
+                    let has_voted = state
+                        .authority_voted_indices
+                        .get(idx.value())
+                        .map(|set| set.contains(&c))
+                        .unwrap_or(false);
+
+                    let name = if authority.hostname.is_empty() {
+                        format!("val-{}", idx.value())
+                    } else {
+                        authority.hostname.clone()
+                    };
+
+                    if has_voted {
+                        total_stake += authority.stake;
+                        voters.push(name);
+                    } else {
+                        missing_voters.push(name);
+                    }
+                }
+
+                recent_commits.push(CommitVoteDetails {
+                    commit_index: c,
+                    quorum_reached,
+                    quorum_digest,
+                    total_stake,
+                    quorum_threshold,
+                    voters,
+                    missing_voters,
+                });
+            }
+        }
+
+        ConsensusVoteSnapshot {
+            epoch,
+            quorum_commit_index,
+            own_index,
+            highest_seen_epoch,
+            authorities,
+            recent_commits,
+        }
+    }
+
+    /// Returns the exact voting breakdown for a specific commit index.
+    pub fn get_commit_vote_details(&self, target_index: CommitIndex) -> CommitVoteDetails {
+        let state = self.state.lock();
+        let quorum_threshold = self.context.committee.quorum_threshold();
+        let quorum_digest = state.digest_history.get(&target_index).and_then(|digest_stakes| {
+            if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
+                if *best_stake >= quorum_threshold {
+                    let hex_str: String = best_digest.into_inner().iter().map(|b| format!("{:02x}", b)).collect();
+                    return Some(format!("0x{}", hex_str));
+                }
+            }
+            None
+        });
+        let quorum_reached = quorum_digest.is_some();
+        let mut voters = Vec::new();
+        let mut missing_voters = Vec::new();
+        let mut total_stake = 0;
+
+        for (idx, authority) in self.context.committee.authorities() {
+            let has_voted = state
+                .authority_voted_indices
+                .get(idx.value())
+                .map(|set| set.contains(&target_index))
+                .unwrap_or(false);
+
+            let name = if authority.hostname.is_empty() {
+                format!("val-{}", idx.value())
+            } else {
+                authority.hostname.clone()
+            };
+
+            if has_voted {
+                total_stake += authority.stake;
+                voters.push(name);
+            } else {
+                missing_voters.push(name);
+            }
+        }
+
+        CommitVoteDetails {
+            commit_index: target_index,
+            quorum_reached,
+            quorum_digest,
+            total_stake,
+            quorum_threshold,
+            voters,
+            missing_voters,
+        }
+    }
+}
+
+/// Authority voting details for monitoring
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorityVoteInfo {
+    pub authority_index: usize,
+    pub hostname: String,
+    pub address: String,
+    pub stake: u64,
+    pub highest_voted_commit: CommitIndex,
+}
+
+/// Detailed voting breakdown for a single commit
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitVoteDetails {
+    pub commit_index: CommitIndex,
+    pub quorum_reached: bool,
+    pub quorum_digest: Option<String>,
+    pub total_stake: u64,
+    pub quorum_threshold: u64,
+    pub voters: Vec<String>,
+    pub missing_voters: Vec<String>,
+}
+
+/// Snapshot of consensus progress and per-authority votes
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConsensusVoteSnapshot {
+    pub epoch: u64,
+    pub quorum_commit_index: CommitIndex,
+    pub own_index: usize,
+    pub highest_seen_epoch: u64,
+    pub authorities: Vec<AuthorityVoteInfo>,
+    pub recent_commits: Vec<CommitVoteDetails>,
 }
 
 #[cfg(test)]

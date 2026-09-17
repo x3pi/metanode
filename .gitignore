@@ -573,3 +573,5 @@ deploy/*.zip
 deploy/metanode-deploy-*.zip
 execution/deploy/private_chain_kit/bin/cross_chain_relayer
 deploy/ansible/monitors/stall_probe_tool
+deploy/ansible/monitors/node_monitor/vote_monitor
+deploy/ansible/monitors/vote_monitor/vote_monitor

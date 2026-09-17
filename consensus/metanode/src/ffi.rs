@@ -139,6 +139,59 @@ pub extern "C" fn metanode_is_ready_for_transactions() -> bool {
     }
 }
 
+/// CONSENSUS VOTE MONITORING: Export real-time consensus vote state from
+/// CommitVoteMonitor via CoordinationHub to Go execution layer for monitoring.
+/// Returns a JSON-serialized C string or null pointer if unavailable.
+/// Caller must free returned string with metanode_free_string.
+#[no_mangle]
+pub extern "C" fn metanode_get_consensus_votes() -> *mut c_char {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(hub) = guard.as_ref() {
+        if let Some(snapshot) = hub.get_consensus_votes() {
+            if let Ok(json_str) = serde_json::to_string(&snapshot) {
+                if let Ok(c_str) = std::ffi::CString::new(json_str) {
+                    return c_str.into_raw();
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// CONSENSUS VOTE MONITORING: Export detailed vote breakdown for a specific commit index.
+/// Returns a JSON-serialized C string or null pointer if unavailable.
+/// Caller must free returned string with metanode_free_string.
+#[no_mangle]
+pub extern "C" fn metanode_get_commit_votes(commit_index: u32) -> *mut c_char {
+    let guard = match GLOBAL_COORDINATION_HUB.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(hub) = guard.as_ref() {
+        if let Some(details) = hub.get_commit_vote_details(commit_index) {
+            if let Ok(json_str) = serde_json::to_string(&details) {
+                if let Ok(c_str) = std::ffi::CString::new(json_str) {
+                    return c_str.into_raw();
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// Frees a string allocated by metanode_get_consensus_votes or metanode_get_commit_votes.
+#[no_mangle]
+pub extern "C" fn metanode_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            let _ = std::ffi::CString::from_raw(s);
+        }
+    }
+}
+
 /// Retrieves the current node's peer tx-fetcher, if one has been wired (see TxFetcherFn's doc
 /// comment in coordination_hub.rs). Used by build_sorted_transactions's callers
 /// (executor_client/block_sending.rs) to attempt recovering a TxPayloadCache miss from peers

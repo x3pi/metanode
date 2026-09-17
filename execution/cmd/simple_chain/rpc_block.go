@@ -869,3 +869,30 @@ func (api *MetaAPI) GetBlockTraces(ctx context.Context, startBlock uint64, endBl
 	traces := pipeline.GlobalBlockTraceStore.GetTraces(startBlock, endBlock)
 	return traces, nil
 }
+
+// GetConsensusVotes returns real-time consensus vote status directly from Rust CommitVoteMonitor.
+func (api *MetaAPI) GetConsensusVotes(ctx context.Context) (map[string]interface{}, error) {
+	votesJSON, err := executor.GetConsensusVotes()
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(votesJSON), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse consensus votes: %w", err)
+	}
+	return result, nil
+}
+
+// GetCommitVotes returns detailed consensus vote information for a specific commit index.
+func (api *MetaAPI) GetCommitVotes(ctx context.Context, commitIndex uint32) (map[string]interface{}, error) {
+	votesJSON, err := executor.GetCommitVotes(commitIndex)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(votesJSON), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse commit votes: %w", err)
+	}
+	return result, nil
+}
+

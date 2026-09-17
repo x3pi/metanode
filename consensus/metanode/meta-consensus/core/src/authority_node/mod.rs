@@ -526,6 +526,15 @@ where
             coordination_hub.set_digest_data_checker(move || monitor_ref.has_any_digest_data());
         }
 
+        // CONSENSUS VOTE MONITORING: Wire CommitVoteMonitor.get_vote_snapshot() into CoordinationHub
+        // so external monitors can inspect live per-validator consensus votes via FFI/RPC.
+        {
+            let monitor_ref = commit_vote_monitor.clone();
+            coordination_hub.set_consensus_votes_provider(move || monitor_ref.get_vote_snapshot());
+            let monitor_ref2 = commit_vote_monitor.clone();
+            coordination_hub.set_commit_vote_details_provider(move |idx| monitor_ref2.get_commit_vote_details(idx));
+        }
+
         // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
         // Wire CommitVoteMonitor into CoordinationHub as the peer attestation callback.
         // This replaces ALL timeout-based bypass mechanisms (COLD-START-BYPASS 10s,
