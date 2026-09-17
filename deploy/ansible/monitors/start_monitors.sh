@@ -265,6 +265,7 @@ if [ "${1:-}" == "stop" ] || [ "${1:-}" == "--stop" ]; then
     pkill -9 -f "[s]tart_monitors.sh health" || true
     pkill -9 -f "[s]tart_monitors.sh resources" || true
     pkill -9 -f "[b]lock_hash_checker" || true
+    pkill -9 -f "[v]ote_monitor" || true
     pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
     echo "✅ Đã dừng toàn bộ monitors cục bộ."
     exit 0
@@ -274,11 +275,12 @@ fi
 if [ "${1:-}" == "stop-all" ] || [ "${1:-}" == "--stop-all" ]; then
     echo "🛑 Đang dừng các tiến trình monitor trên toàn bộ cụm máy..."
     if [ -n "$INV_PATH" ] && command -v ansible >/dev/null 2>&1; then
-        ansible metanode_cluster -i "$INV_PATH" -m shell -a "pkill -9 -f '[s]tart_monitors.sh health' || true; pkill -9 -f '[s]tart_monitors.sh resources' || true; pkill -9 -f '[b]lock_hash_checker' || true; pkill -9 -f 'go run [m]ain.go.*--no-stop-flag' || true" >/dev/null 2>&1 || true
+        ansible metanode_cluster -i "$INV_PATH" -m shell -a "pkill -9 -f '[s]tart_monitors.sh health' || true; pkill -9 -f '[s]tart_monitors.sh resources' || true; pkill -9 -f '[b]lock_hash_checker' || true; pkill -9 -f '[v]ote_monitor' || true; pkill -9 -f 'go run [m]ain.go.*--no-stop-flag' || true" >/dev/null 2>&1 || true
     fi
     pkill -9 -f "[s]tart_monitors.sh health" || true
     pkill -9 -f "[s]tart_monitors.sh resources" || true
     pkill -9 -f "[b]lock_hash_checker" || true
+    pkill -9 -f "[v]ote_monitor" || true
     pkill -9 -f "go run [m]ain.go.*--no-stop-flag" || true
     echo "✅ Đã dừng toàn bộ monitors trên tất cả các node."
     exit 0
@@ -355,6 +357,11 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
     fi
     if [ -d "$BLOCK_CHECKER_DIR" ]; then
         ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${BLOCK_CHECKER_DIR}/ dest=/opt/metanode/monitors/block_hash_checker/ mode=preserve" >/dev/null 2>&1 || true
+    fi
+    VOTE_MONITOR_DIR="${SCRIPT_DIR}/vote_monitor"
+    if [ -d "$VOTE_MONITOR_DIR" ]; then
+        ansible metanode_cluster -i "$INV_PATH" -b -m file -a "path=/opt/metanode/monitors/vote_monitor state=directory mode=0777 owner=abc group=abc" >/dev/null 2>&1 || true
+        ansible metanode_cluster -i "$INV_PATH" -m copy -a "src=${VOTE_MONITOR_DIR}/ dest=/opt/metanode/monitors/vote_monitor/ mode=preserve" >/dev/null 2>&1 || true
     fi
 
     echo "🚀 Kích hoạt Monitor trên tất cả các máy trong cụm song song..."
@@ -1048,6 +1055,8 @@ echo "🔄 Đang khởi động các tiến trình giám sát trên máy này ($
 # 1. Kill old processes
 pkill -f "go run main.go.*--no-stop-flag" || true
 pkill -f "block_hash_checker.*--daemon" || true
+pkill -f "vote_monitor.*--daemon" || true
+pkill -f "vote_monitor" || true
 pkill -f "start_monitors.sh health" || true
 pkill -f "start_monitors.sh resources" || true
 
@@ -1096,6 +1105,29 @@ if [ -d "$BLOCK_CHECKER_DIR" ]; then
     fi
 else
     echo "⚠️ Không tìm thấy thư mục block_hash_checker"
+fi
+
+# 5. Start Validator Vote Monitor in background
+VOTE_MONITOR_DIR="${SCRIPT_DIR}/vote_monitor"
+if [ -d "$VOTE_MONITOR_DIR" ]; then
+    cd "$VOTE_MONITOR_DIR" || exit 1
+    if { [ ! -f "vote_monitor" ] || [ "main.go" -nt "vote_monitor" ]; } && command -v go >/dev/null 2>&1; then
+        go build -buildvcs=false -o vote_monitor main.go || true
+    fi
+    if [ -f "vote_monitor" ]; then
+        chmod +x "vote_monitor"
+        nohup ./vote_monitor --daemon --interval 2s > /dev/null 2>&1 &
+        VOTE_PID=$!
+        sleep 1
+        if ! kill -0 $VOTE_PID 2>/dev/null; then
+            echo -e "\033[0;31m❌ [ERROR] Validator Vote Monitor khởi động thất bại!\033[0m"
+        else
+            echo "✅ Đã bật Validator Vote Monitor (giám sát vote block tuần tự & stall 10p)"
+        fi
+    fi
+    cd "$SCRIPT_DIR" || true
+else
+    echo "⚠️ Không tìm thấy thư mục vote_monitor"
 fi
 
 echo "🎉 Hoàn tất khởi động các Monitors ngầm!"

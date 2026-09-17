@@ -197,7 +197,7 @@ fn authority_setup(num_authorities: usize, authority_index: u32) -> AuthorityTes
             .build();
 
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-    let mut block_manager =
+    let block_manager =
         BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
 
     AuthorityTestFixture {

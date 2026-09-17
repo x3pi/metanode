@@ -3,9 +3,8 @@ use super::*;
 use consensus_config::AuthorityIndex;
 use rstest::rstest;
 
-use super::*;
 use crate::{
-    commit::{CommitAPI as _, CommitDigest, DEFAULT_WAVE_LENGTH},
+    commit::{CommitDigest, DEFAULT_WAVE_LENGTH},
     context::Context,
     leader_schedule::{LeaderSchedule, LeaderSwapTable},
     storage::mem_store::MemStore,

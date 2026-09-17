@@ -433,6 +433,7 @@ if [ "$ACTION" != "open_ports" ]; then
     fi
     pkill -9 -f "start_monitors.sh" || true
     pkill -9 -f "block_hash_checker" || true
+    pkill -9 -f "vote_monitor" || true
     pkill -9 -f "go run main.go.*--no-stop-flag" || true
 
     if [ "$KEEP_DATA" == "false" ]; then
@@ -441,6 +442,8 @@ if [ "$ACTION" != "open_ports" ]; then
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/block_checker_daemon.log"
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/"*.csv
+        rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor.log"
+        rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor_daemon.log"
     fi
 fi
 
@@ -535,8 +538,9 @@ if [ "$ACTION" != "open_ports" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
+        pkill -f "vote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
-            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true" >/dev/null 2>&1 || true
+            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true; pkill -f 'vote_monitor' || true" >/dev/null 2>&1 || true
         fi
     fi
 fi

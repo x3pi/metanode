@@ -12,7 +12,6 @@ use bytes::Bytes;
 use consensus_config::AuthorityIndex;
 use consensus_types::block::{BlockDigest, BlockRef, Round};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::mpsc;
 use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
@@ -194,7 +193,7 @@ async fn test_handle_send_block() {
     let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let _dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -451,7 +450,7 @@ async fn test_handle_fetch_blocks() {
     let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let _dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),
@@ -623,7 +622,7 @@ async fn test_handle_fetch_latest_blocks() {
     let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
     let store = Arc::new(MemStore::new());
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
-    let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+    let _dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
     let transaction_certifier = TransactionCertifier::new(
         context.clone(),
         block_verifier.clone(),

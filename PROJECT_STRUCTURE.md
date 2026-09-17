@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-12
+> **Last updated:** 2026-09-17
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -19,7 +19,10 @@ metanode/
 │   ├── ansible/            ← Ansible deployment scripts for Public Chain (Root Anchor)
 │   │   ├── scripts/manage_snapshot_storage.py ← Managed BTRFS grow/recreate, shared-node checks and size verification
 │   │   ├── scripts/test_manage_snapshot_storage.py ← Non-destructive storage command tests
-│   │   ├── monitors/       ← Decoupled health and block hash monitors
+│   │   ├── monitors/       ← Decoupled health, consensus vote, and block hash monitors
+│   │   │   ├── vote_monitor/        ← Real-time BFT consensus vote & quorum audit monitor
+│   │   │   ├── block_hash_checker/  ← Real-time multi-node block hash synchronization monitor
+│   │   │   └── start_monitors.sh    ← Background daemon manager for all monitors
 │   │   └── stop_all.sh     ← Script to stop all background deployment processes
 │   ├── ansible_private_chains/ ← Decoupled Ansible manager for Multi-Machine Private Chains
 │   └── systemd/            ← Systemd deployment scripts, key generators (gen_validator_entry.py, gen_private_chain.py), and env templates

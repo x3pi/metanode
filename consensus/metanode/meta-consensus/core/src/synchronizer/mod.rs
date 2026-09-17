@@ -663,7 +663,7 @@ mod tests {
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockDigest, BlockRef, Round};
     use parking_lot::RwLock;
-    use tokio::sync::mpsc;
+    
     use tokio::{sync::Mutex, time::sleep};
 
     use crate::commit::{CommitVote, TrustedCommit};

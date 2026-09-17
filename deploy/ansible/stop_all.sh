@@ -16,6 +16,10 @@ done
 echo "🛑 Stopping local background monitors..."
 pkill -f "start_monitors.sh health" || true
 pkill -f "block_hash_checker" || true
+pkill -f "vote_monitor" || true
+if [ -f "${SCRIPT_DIR}/monitors/start_monitors.sh" ]; then
+    bash "${SCRIPT_DIR}/monitors/start_monitors.sh" --stop >/dev/null 2>&1 || true
+fi
 echo "✅ Local monitors stopped."
 
 echo "🛑 Stopping git auto-rebuild watcher daemon..."

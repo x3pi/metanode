@@ -77,7 +77,9 @@ pub use commit::{
     CommitDigest, CommitIndex, CommitRange, CommitRef, CommittedSubDag, TrustedCommit,
 };
 pub use commit_consumer::{CommitConsumerArgs, CommitConsumerMonitor};
-pub use commit_vote_monitor::CommitVoteMonitor;
+pub use commit_vote_monitor::{
+    AuthorityVoteInfo, CommitVoteDetails, CommitVoteMonitor, ConsensusVoteSnapshot,
+};
 pub use context::Clock;
 pub use metrics::Metrics;
 pub use system_transaction::{SystemTransaction, SystemTransactionKind};

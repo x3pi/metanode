@@ -190,9 +190,15 @@ def main():
         if not args.dry_run:
             # Khôi phục genesis.json.example về trạng thái sạch của git trước khi pull để tránh merge conflict
             run_shell_cmd("git checkout -- deploy/systemd/genesis.json.example 2>/dev/null || true", cwd=repo_path)
-            pull_res, _ = run_shell_cmd(f"git checkout {branch} && git pull {remote} {branch}", cwd=repo_path)
+            pull_res, pull_out = run_shell_cmd(f"git checkout {branch} && git pull {remote} {branch}", cwd=repo_path)
             if pull_res != 0:
                 print("❌ Git pull thất bại!")
+                if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                    fail_msg = telegram_notify.build_failure_message(
+                        {"hash": "unknown", "author": "git", "message": "git pull error"},
+                        branch, "Git Pull", pull_res, tail_text(pull_out, 20), server_ip
+                    )
+                    telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
                 sys.exit(pull_res)
             if os.path.isdir(os.path.join(suite_path, ".git")):
                 run_shell_cmd("git pull", cwd=suite_path)
@@ -240,13 +246,19 @@ def main():
 
             if need_update:
                 add_cmd = f"python3 {manage_genesis} add {genesis_example} {keys_file} {genesis_active}"
-                r_c, _ = run_shell_cmd(add_cmd, cwd=repo_path)
+                r_c, r_out = run_shell_cmd(add_cmd, cwd=repo_path)
                 if r_c == 0:
                     with open(genesis_active, "r", encoding="utf-8") as gaf:
                         ga_data = json.load(gaf)
                     print(f"✅ Đã nạp thành công {len(ga_data.get('alloc', []))} ví vào genesis.json (giữ nguyên genesis.json.example trên Git)!")
                 else:
                     print(f"❌ [LỖI GENESIS] Lệnh nạp ví vào genesis.json thất bại với mã lỗi {r_c}!")
+                    if tele_enabled and tele_cfg.get("notify_on_test_fail", True):
+                        fail_msg = telegram_notify.build_failure_message(
+                            commit_info, branch, "Genesis Key Management", r_c,
+                            tail_text(r_out, 20), server_ip
+                        )
+                        telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_msg)
                     sys.exit(r_c)
         except Exception as e:
             print(f"⚠️ Cảnh báo khi kiểm tra genesis: {e}")
@@ -370,7 +382,7 @@ def main():
     test_results = []
     has_failure = False
 
-    active_tests = [t for t in tests if t.get("enabled", True) and (not args.only or t.get("id") == args.only)]
+    active_tests = [t for t in tests if (t.get("id") == args.only if args.only else t.get("enabled", True))]
     total_active = len(active_tests)
     current_step = 0
 
@@ -633,8 +645,34 @@ def main():
         print("🎉 TẤT CẢ CÁC BÀI TEST ĐÃ HOÀN TẤT THÀNH CÔNG!")
         sys.exit(0)
     elif has_failure:
+        if tele_enabled and tele_cfg.get("notify_on_finish", True) and not args.dry_run:
+            fail_summary_msg = telegram_notify.build_finish_failure_summary_message(
+                commit_info, branch, total_pipeline_duration, test_results, server_ip
+            )
+            telegram_notify.send_telegram_message(tele_token, tele_chat_id, fail_summary_msg)
         print("🚨 PIPELINE KẾT THÚC VỚI LỖI!")
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n⚠️ CI Runner bị dừng bởi người dùng (KeyboardInterrupt).")
+        sys.exit(130)
+    except Exception as exc:
+        import traceback
+        err_tb = traceback.format_exc()
+        print(f"\n💥 [LỖI KHÔNG XỬ LÝ ĐƯỢC]:\n{err_tb}")
+        try:
+            tok, cid = telegram_notify.load_config_credentials()
+            if tok and cid:
+                c_info = get_git_info(os.path.abspath(os.path.join(BASE_DIR, "..", "..")))
+                srv_ip = get_server_ip()
+                fail_msg = telegram_notify.build_failure_message(
+                    c_info, "unknown", "CI Runner Critical Error", 1,
+                    f"Unhandled Python Exception:\n{err_tb[-1500:]}", srv_ip
+                )
+                telegram_notify.send_telegram_message(tok, cid, fail_msg)
+        except Exception:
+            pass
+        sys.exit(1)
