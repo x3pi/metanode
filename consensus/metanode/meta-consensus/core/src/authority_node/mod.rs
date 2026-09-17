@@ -532,7 +532,9 @@ where
             let monitor_ref = commit_vote_monitor.clone();
             coordination_hub.set_consensus_votes_provider(move || monitor_ref.get_vote_snapshot());
             let monitor_ref2 = commit_vote_monitor.clone();
-            coordination_hub.set_commit_vote_details_provider(move |idx| monitor_ref2.get_commit_vote_details(idx));
+            coordination_hub.set_commit_vote_details_provider(move |idx| {
+                monitor_ref2.get_commit_vote_details(idx)
+            });
         }
 
         // ZERO-TIMEOUT PEER ATTESTATION (May 2026):
@@ -571,7 +573,7 @@ where
                         // No peer has voted for this index at all.
                         // Check if this is a TRUE cold-start (no digest data anywhere)
                         if hub_ref.is_epoch_transitioning() && !monitor_ref.has_any_digest_data() {
-                            // TRUE COLD-START: No digest votes exist in the entire monitor AND 
+                            // TRUE COLD-START: No digest votes exist in the entire monitor AND
                             // we are in an epoch transition where block proposal is halted.
                             // The local commit is deterministic (same DAG → same commits).
                             // Safe to dispatch without timeout to prevent transition deadlock.
@@ -698,9 +700,11 @@ where
                     // no-op recovery, no need to query anyone. A stuck lock just means we
                     // skip this shortcut and fall through to querying peers below, same as
                     // an ordinary cache miss.
-                    if crate::transaction::try_tx_cache_read("payload_loss_collector own-cache check")
-                        .and_then(|cache| cache.get(&claim.tx_digest))
-                        .is_some()
+                    if crate::transaction::try_tx_cache_read(
+                        "payload_loss_collector own-cache check",
+                    )
+                    .and_then(|cache| cache.get(&claim.tx_digest))
+                    .is_some()
                     {
                         return PayloadLossCollectionResult::Recovered;
                     }

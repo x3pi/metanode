@@ -189,8 +189,18 @@ pub struct ConsensusCoordinationHub {
     /// needing its own separate plumbing to reach the committee.
     committee_for_payload_loss: Arc<RwLock<Option<Committee>>>,
     /// CONSENSUS VOTE MONITORING: Provider callback for querying live consensus vote progress.
-    consensus_votes_provider: Arc<RwLock<Option<Arc<dyn Fn() -> crate::commit_vote_monitor::ConsensusVoteSnapshot + Send + Sync>>>>,
-    commit_vote_details_provider: Arc<RwLock<Option<Arc<dyn Fn(u32) -> crate::commit_vote_monitor::CommitVoteDetails + Send + Sync>>>>,
+    consensus_votes_provider: Arc<
+        RwLock<
+            Option<
+                Arc<dyn Fn() -> crate::commit_vote_monitor::ConsensusVoteSnapshot + Send + Sync>,
+            >,
+        >,
+    >,
+    commit_vote_details_provider: Arc<
+        RwLock<
+            Option<Arc<dyn Fn(u32) -> crate::commit_vote_monitor::CommitVoteDetails + Send + Sync>>,
+        >,
+    >,
 }
 
 /// Attempts to fetch the given transaction digests' raw bytes from reachable peers and insert
@@ -418,7 +428,10 @@ impl ConsensusCoordinationHub {
     }
 
     /// CONSENSUS VOTE MONITORING: Queries vote breakdown for a specific commit index.
-    pub fn get_commit_vote_details(&self, commit_index: u32) -> Option<crate::commit_vote_monitor::CommitVoteDetails> {
+    pub fn get_commit_vote_details(
+        &self,
+        commit_index: u32,
+    ) -> Option<crate::commit_vote_monitor::CommitVoteDetails> {
         let guard = self.commit_vote_details_provider.read();
         guard.as_ref().map(|f| f(commit_index))
     }
@@ -788,6 +801,8 @@ impl ConsensusCoordinationHub {
             tx_fetcher: Arc::new(RwLock::new(None)),
             payload_loss_collector: Arc::new(RwLock::new(None)),
             committee_for_payload_loss: Arc::new(RwLock::new(None)),
+            consensus_votes_provider: Arc::new(RwLock::new(None)),
+            commit_vote_details_provider: Arc::new(RwLock::new(None)),
         }
     }
 

@@ -106,6 +106,7 @@ pub(crate) enum DagWriteCommand {
     },
 
     #[cfg(test)]
+    #[allow(dead_code)]
     SetLastCommit {
         commit: TrustedCommit,
         reply: std::sync::mpsc::Sender<()>,
@@ -282,6 +283,7 @@ impl DagStateWriter {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn set_last_commit(&self, commit: TrustedCommit) {
         let (reply_tx, reply_rx) = mpsc::channel();
         if let Err(e) = self.tx.send(DagWriteCommand::SetLastCommit {

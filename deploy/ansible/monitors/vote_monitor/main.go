@@ -74,27 +74,31 @@ type blockHeaderResult struct {
 
 // NodeState tracks current status of each node
 type NodeState struct {
-	Name            string
-	URL             string
-	Role            string // "validator" only (synconly filtered out)
-	Address         string // ETH / Validator address (e.g. 0x87ba...)
-	CurrentHeight   uint64
-	CurrentCommit   uint32
-	QuorumCommit    uint32
-	ConsensusEpoch  uint64
-	HasConsensusVotes bool
-	CurrentHash     string
-	LastResponded   time.Time
-	LastVotedTime   time.Time
-	LastVotedHeight uint64
-	Latency         time.Duration
-	IsAlive         bool
-	IsIgnored       bool
-	ErrorMessage    string
-	ConsecutiveMiss int
+	Name                string
+	URL                 string
+	Role                string // "validator" only (synconly filtered out)
+	Address             string // ETH / Validator address (e.g. 0x87ba...)
+	CurrentHeight       uint64
+	CurrentCommit       uint32
+	QuorumCommit        uint32
+	ConsensusEpoch      uint64
+	HasConsensusVotes   bool
+	CurrentHash         string
+	LastResponded       time.Time
+	LastVotedTime       time.Time
+	LastVotedHeight     uint64
+	Latency             time.Duration
+	IsAlive             bool
+	IsIgnored           bool
+	ErrorMessage        string
+	ConsecutiveMiss     int
 	TotalMissed         uint64
 	MissAlertSent       bool
 	LastMissLoggedBlock uint64
+	LastMissAlertTime   time.Time
+	RecoverStableCount  int
+	PrevReportedHeight  uint64
+	StallCycleCount     int
 }
 
 // ConsensusVoteSnapshot models Rust CommitVoteMonitor vote snapshot directly from BFT consensus
@@ -113,15 +117,19 @@ type AuthorityVoteInfo struct {
 	VoteCount          int    `json:"vote_count"`
 }
 
-// CommitVoteDetails models commit-level voting breakdown with exact voters and missing nodes
+// CommitVoteDetails models commit-level voting breakdown with exact voters, conflicting nodes, and missing nodes
 type CommitVoteDetails struct {
-	CommitIndex     uint32   `json:"commit_index"`
-	QuorumDigest    string   `json:"quorum_digest"`
-	QuorumReached   bool     `json:"quorum_reached"`
-	TotalStake      uint64   `json:"total_stake"`
-	QuorumThreshold uint64   `json:"quorum_threshold"`
-	Voters          []string `json:"voters"`
-	MissingVoters   []string `json:"missing_voters"`
+	CommitIndex              uint32   `json:"commit_index"`
+	LeadingDigest            *string  `json:"leading_digest"`
+	QuorumDigest             *string  `json:"quorum_digest"`
+	QuorumReached            bool     `json:"quorum_reached"`
+	VoterAttributionComplete bool     `json:"voter_attribution_complete"`
+	TotalStake               uint64   `json:"total_stake"`
+	TotalVotedStake          uint64   `json:"total_voted_stake"`
+	QuorumThreshold          uint64   `json:"quorum_threshold"`
+	Voters                   []string `json:"voters"`
+	ConflictingVoters        []string `json:"conflicting_voters"`
+	MissingVoters            []string `json:"missing_voters"`
 }
 
 // BlockVoteRecord tracks voting status of each individual block sequentially
@@ -833,20 +841,44 @@ func formatConsensusAuditTable(recentCommits []CommitVoteDetails, states []*Node
 	sb.WriteString(fmt.Sprintf("%s%s│                 REAL BFT CONSENSUS COMMIT VOTE AUDIT (RUST)                 │%s\n", cBold, cCyan, cReset))
 	sb.WriteString(fmt.Sprintf("%s%s└─────────────────────────────────────────────────────────────────────────────┘%s\n", cBold, cCyan, cReset))
 
-	// Column widths: COMMIT(8) QUORUM(14) VOTED VALIDATORS(22) MISSING(14) DIGEST(11) -> 73
-	sb.WriteString(fmt.Sprintf("%s%s %s %s %s %s%s\n",
+	// Column widths: COMMIT(7) STATUS(14) QUORUM VOTERS(17) CONFLICT(11) NO VOTE(11) DIGEST(12) -> 77
+	sb.WriteString(fmt.Sprintf("%s%s %s %s %s %s %s%s\n",
 		cBold,
-		padRight("COMMIT", 8),
-		padRight("QUORUM", 14),
-		padRight("VOTED VALIDATORS", 22),
-		padRight("MISSING", 14),
-		padRight("DIGEST", 11),
+		padRight("COMMIT", 7),
+		padRight("STATUS", 14),
+		padRight("QUORUM VOTERS", 17),
+		padRight("CONFLICT", 11),
+		padRight("NO VOTE", 11),
+		padRight("DIGEST", 12),
 		cReset))
-	sb.WriteString(strings.Repeat("─", 73) + "\n")
+	sb.WriteString(strings.Repeat("─", 77) + "\n")
 
 	authToNode := make(map[int]string)
 	for _, s := range states {
 		authToNode[extractNodeIndex(s.Name)] = s.Name
+	}
+
+	formatNodeList := func(list []string, maxLen int, color string) string {
+		if len(list) == 0 {
+			return fmt.Sprintf("%snone%s", cDim, cReset)
+		}
+		nodes := make([]string, 0, len(list))
+		for _, v := range list {
+			idx := extractNodeIndex(v)
+			if name, ok := authToNode[idx]; ok {
+				nodes = append(nodes, name)
+			} else {
+				nodes = append(nodes, v)
+			}
+		}
+		s := strings.Join(nodes, ",")
+		if len(s) > maxLen && maxLen > 2 {
+			s = s[:maxLen-2] + ".."
+		}
+		if color != "" {
+			return fmt.Sprintf("%s[%s]%s", color, s, cReset)
+		}
+		return fmt.Sprintf("[%s]", s)
 	}
 
 	// Show commits in newest-first order
@@ -854,60 +886,58 @@ func formatConsensusAuditTable(recentCommits []CommitVoteDetails, states []*Node
 		c := recentCommits[i]
 		commitStr := fmt.Sprintf("#%d", c.CommitIndex)
 
-		var quorumStr string
+		var statusStr string
+		var votersStr, conflictStr, missingStr string
+
 		if c.QuorumReached {
-			quorumStr = fmt.Sprintf("%s✅ REACHED (%d)%s", cGreen, len(c.Voters), cReset)
-		} else {
-			quorumStr = fmt.Sprintf("%s⏳ PENDING (%d)%s", cYellow, len(c.Voters), cReset)
-		}
-
-		votedNodes := make([]string, 0, len(c.Voters))
-		for _, v := range c.Voters {
-			idx := extractNodeIndex(v)
-			if name, ok := authToNode[idx]; ok {
-				votedNodes = append(votedNodes, name)
+			if !c.VoterAttributionComplete {
+				statusStr = fmt.Sprintf("%s✅ CERTIFIED%s", cGreen, cReset)
+				votersStr = fmt.Sprintf("%s[NETWORK CERT]%s", cCyan, cReset)
+				conflictStr = fmt.Sprintf("%snone%s", cDim, cReset)
+				missingStr = fmt.Sprintf("%snone%s", cDim, cReset)
 			} else {
-				votedNodes = append(votedNodes, v)
+				statusStr = fmt.Sprintf("%s✅ REACHED (%d)%s", cGreen, len(c.Voters), cReset)
+				votersStr = formatNodeList(c.Voters, 15, cGreen)
+				conflictStr = formatNodeList(c.ConflictingVoters, 9, cRed)
+				missingStr = formatNodeList(c.MissingVoters, 9, cYellow)
 			}
-		}
-		votedStr := strings.Join(votedNodes, ",")
-		if len(votedStr) > 20 {
-			votedStr = votedStr[:18] + ".."
-		}
-
-		missingNodes := make([]string, 0, len(c.MissingVoters))
-		for _, v := range c.MissingVoters {
-			idx := extractNodeIndex(v)
-			if name, ok := authToNode[idx]; ok {
-				missingNodes = append(missingNodes, name)
-			} else {
-				missingNodes = append(missingNodes, v)
-			}
-		}
-		var missingStr string
-		if len(missingNodes) == 0 {
-			missingStr = fmt.Sprintf("%snone%s", cDim, cReset)
+		} else if len(c.ConflictingVoters) > 0 {
+			statusStr = fmt.Sprintf("%s⚠️ CONFLICT (%d)%s", cRed, len(c.Voters), cReset)
+			votersStr = formatNodeList(c.Voters, 15, cGreen)
+			conflictStr = formatNodeList(c.ConflictingVoters, 9, cRed)
+			missingStr = formatNodeList(c.MissingVoters, 9, cYellow)
 		} else {
-			missingStr = fmt.Sprintf("%s[%s]%s", cRed, strings.Join(missingNodes, ","), cReset)
+			statusStr = fmt.Sprintf("%s⏳ PENDING (%d)%s", cYellow, len(c.Voters), cReset)
+			votersStr = formatNodeList(c.Voters, 15, cGreen)
+			conflictStr = formatNodeList(c.ConflictingVoters, 9, cRed)
+			missingStr = formatNodeList(c.MissingVoters, 9, cYellow)
 		}
 
-		digestStr := c.QuorumDigest
-		if len(digestStr) > 10 {
-			digestStr = digestStr[:8] + ".."
-		}
-		if digestStr == "" {
-			digestStr = "-"
+		digestStr := "-"
+		if c.QuorumDigest != nil && *c.QuorumDigest != "" {
+			digestStr = *c.QuorumDigest
+			if len(digestStr) > 11 {
+				digestStr = digestStr[:9] + ".."
+			}
+			digestStr = fmt.Sprintf("%s%s%s", cCyan, digestStr, cReset)
+		} else if c.LeadingDigest != nil && *c.LeadingDigest != "" {
+			digestStr = *c.LeadingDigest
+			if len(digestStr) > 11 {
+				digestStr = digestStr[:9] + ".."
+			}
+			digestStr = fmt.Sprintf("%s%s%s", cDim, digestStr, cReset)
 		}
 
-		sb.WriteString(fmt.Sprintf("%s %s %s %s %s\n",
-			padRight(commitStr, 8),
-			padRight(quorumStr, 14),
-			padRight(fmt.Sprintf("[%s]", votedStr), 22),
-			padRight(missingStr, 14),
-			padRight(digestStr, 11)))
+		sb.WriteString(fmt.Sprintf("%s %s %s %s %s %s\n",
+			padRight(commitStr, 7),
+			padRight(statusStr, 14),
+			padRight(votersStr, 17),
+			padRight(conflictStr, 11),
+			padRight(missingStr, 11),
+			padRight(digestStr, 12)))
 	}
 
-	sb.WriteString(strings.Repeat("─", 73) + "\n")
+	sb.WriteString(strings.Repeat("─", 77) + "\n")
 	return sb.String()
 }
 
@@ -1741,25 +1771,42 @@ func main() {
 				if s.IsIgnored {
 					s.ConsecutiveMiss = 0
 					s.MissAlertSent = false
+					s.RecoverStableCount = 0
+					s.StallCycleCount = 0
 					continue
 				}
 
 				if !s.IsAlive {
 					s.ConsecutiveMiss++
 					s.TotalMissed++
+					s.RecoverStableCount = 0
+					s.StallCycleCount++
 				} else {
 					lag := int64(currentMaxHeight) - int64(s.CurrentHeight)
 					if lag <= 1 {
-						if s.MissAlertSent {
-							recoveryMsg := fmt.Sprintf("Node *%s* (%s) đã vote trở lại tại block #%d (sau %d block lỡ).",
+						// Anti-flapping: Require 3 consecutive polls with lag <= 1 before declaring recovered
+						s.RecoverStableCount++
+						if s.MissAlertSent && s.RecoverStableCount >= 3 {
+							recoveryMsg := fmt.Sprintf("Node *%s* (%s) đã hoàn tất đồng bộ tại block #%d (sau %d block lỡ).\n• Trạng thái: ✅ Đã bắt kịp chiều cao mạng.",
 								s.Name, s.URL, s.CurrentHeight, s.ConsecutiveMiss)
 							logMessage("🟢 %s", recoveryMsg)
 							sendTelegramAlert("METANODE VOTE RECOVERED", recoveryMsg, true)
 							s.MissAlertSent = false
+							s.RecoverStableCount = 0
 						}
 						s.ConsecutiveMiss = 0
+						s.StallCycleCount = 0
 					} else {
+						s.RecoverStableCount = 0
 						s.ConsecutiveMiss = int(lag)
+
+						// Track if height is advancing or stalled
+						if s.PrevReportedHeight > 0 && s.CurrentHeight <= s.PrevReportedHeight {
+							s.StallCycleCount++
+						} else {
+							s.StallCycleCount = 0
+						}
+
 						if s.LastMissLoggedBlock != currentMaxHeight {
 							s.TotalMissed++
 							s.LastMissLoggedBlock = currentMaxHeight
@@ -1769,13 +1816,74 @@ func main() {
 					}
 				}
 
-				if s.ConsecutiveMiss >= maxMisses && !s.MissAlertSent {
-					alertMsg := fmt.Sprintf("Node *%s* (%s) KHÔNG VOTE liên tiếp *%d* blocks!\n• Block mạng: `#%d`\n• Block của node: `#%d`\n• Trạng thái: Có thể bị desync, crash hoặc network partition.",
-						s.Name, s.URL, s.ConsecutiveMiss, currentMaxHeight, s.CurrentHeight)
+				// Rate limiting: cooldown 3 minutes between alerts of the same node
+				alertCooldown := 1 * time.Minute
+				canAlert := !s.MissAlertSent || time.Since(s.LastMissAlertTime) >= alertCooldown
+
+				// Determine if node is actively catching up
+				isCatchingUp := s.IsAlive && s.PrevReportedHeight > 0 && s.CurrentHeight > s.PrevReportedHeight
+				consensusHealthy := s.HasConsensusVotes && latestConsensusSnapshot != nil &&
+					(s.CurrentCommit+2 >= latestConsensusSnapshot.QuorumCommitIndex)
+
+				// Suppress alert if node is actively catching up and consensus is voting normally
+				// (Only trigger alert if node is dead, or stall count >= 3, or lag is critical >= 50)
+				shouldSuppress := isCatchingUp && consensusHealthy && s.ConsecutiveMiss < 50
+
+				if s.ConsecutiveMiss >= maxMisses && canAlert && !shouldSuppress {
+					var consensusStatus string
+					if s.HasConsensusVotes {
+						if latestConsensusSnapshot != nil && s.CurrentCommit+2 >= latestConsensusSnapshot.QuorumCommitIndex {
+							consensusStatus = fmt.Sprintf("Commit #%d (Mạng: #%d | ✅ Đang vote bình thường)", s.CurrentCommit, latestConsensusSnapshot.QuorumCommitIndex)
+						} else {
+							consensusStatus = fmt.Sprintf("Commit #%d (Mạng: #%d | ⚠️ Chậm consensus)", s.CurrentCommit, s.QuorumCommit)
+						}
+					} else {
+						consensusStatus = "Không có dữ liệu BFT"
+					}
+
+					var syncProgress string
+					if !s.IsAlive {
+						syncProgress = "❌ Mất kết nối RPC"
+					} else if isCatchingUp {
+						syncProgress = fmt.Sprintf("⏳ Đang Catch-up (Tiến triển: #%d → #%d)", s.PrevReportedHeight, s.CurrentHeight)
+					} else if s.StallCycleCount >= 3 {
+						syncProgress = fmt.Sprintf("⏸️ ĐỨNG YÊN suốt %d chu kỳ (#%d không đổi)", s.StallCycleCount, s.CurrentHeight)
+					} else {
+						syncProgress = "Chậm xử lý block"
+					}
+
+					var diagnosis string
+					if !s.IsAlive {
+						diagnosis = "Node mất kết nối RPC hoặc tiến trình bị dừng. Cần kiểm tra service hệ thống."
+					} else if consensusHealthy {
+						diagnosis = "Rust Consensus vẫn vote tốt; tầng Go Execution đang nạp block đuổi theo (Bình thường sau restart/tải TPS cao)."
+					} else {
+						diagnosis = "Node bị chậm cả consensus lẫn execution. Có thể gặp sự cố mạng hoặc nghẽn I/O."
+					}
+
+					nodeIdx := extractNodeIndex(s.Name)
+					alertMsg := fmt.Sprintf("Node *%s* (%s) đang chậm *%d* blocks!\n"+
+						"• ⛓️ *Go Block*: `#%d` (Mạng: `#%d` | Chậm: `%d` blk)\n"+
+						"• 🗳️ *Rust BFT Consensus*: %s\n"+
+						"• 📈 *Tiến trình*: %s\n"+
+						"• ⚡ *RPC Latency*: `%v`\n"+
+						"• 🩺 *Chẩn đoán*: %s\n\n"+
+						"🔧 *Lệnh debug nhanh*:\n`journalctl -u metanode-execution-%d -n 40 --no-pager`",
+						s.Name, s.URL, s.ConsecutiveMiss,
+						s.CurrentHeight, currentMaxHeight, s.ConsecutiveMiss,
+						consensusStatus,
+						syncProgress,
+						s.Latency.Round(time.Millisecond),
+						diagnosis,
+						nodeIdx)
+
 					logMessage("🚨 ALERT TRIGGERED: %s", alertMsg)
 					sendTelegramAlert("METANODE MISSED BLOCKS ALERT", alertMsg, false)
 					s.MissAlertSent = true
+					s.LastMissAlertTime = time.Now()
 				}
+
+				s.PrevReportedHeight = s.CurrentHeight
 			}
 		}
 

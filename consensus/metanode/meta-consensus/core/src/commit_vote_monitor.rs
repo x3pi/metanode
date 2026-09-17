@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -20,8 +20,11 @@ struct VoteState {
     // FORK-FIX (May 2026): Full digest history per commit index.
     // GC: entries below quorum_commit_index - DIGEST_HISTORY_RETAIN are pruned
     digest_history: BTreeMap<CommitIndex, HashMap<CommitDigest, u64>>,
-    // Tracks which authority has already voted for which commit index.
-    authority_voted_indices: Vec<std::collections::HashSet<CommitIndex>>,
+    // Tracks what digest each authority has voted for per commit index: authority -> (CommitIndex -> CommitDigest)
+    authority_voted_commits: Vec<HashMap<CommitIndex, CommitDigest>>,
+    // Tracks commit indices that were injected via CertifiedCommits (catch-up / recovery)
+    // where per-validator individual votes are not available.
+    injected_commits: BTreeSet<CommitIndex>,
     // Highest seen epoch in future blocks or network packets (for catching up)
     highest_seen_epoch: u64,
 }
@@ -50,9 +53,8 @@ impl CommitVoteMonitor {
         let state = VoteState {
             highest_voted_commits: vec![0; size],
             digest_history: BTreeMap::new(),
-            authority_voted_indices: (0..size)
-                .map(|_| std::collections::HashSet::new())
-                .collect(),
+            authority_voted_commits: (0..size).map(|_| HashMap::new()).collect(),
+            injected_commits: BTreeSet::new(),
             highest_seen_epoch: current_epoch,
         };
         Self {
@@ -80,7 +82,10 @@ impl CommitVoteMonitor {
                 // Accumulate digest vote for this specific commit index.
                 // Only count each (authority, commit_index) pair ONCE to prevent
                 // double-counting from duplicate blocks during catch-up.
-                if state.authority_voted_indices[author].insert(vote.index) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    state.authority_voted_commits[author].entry(vote.index)
+                {
+                    e.insert(vote.digest);
                     let authority_stake = self.context.committee.authority(author).stake;
                     let entry = state
                         .digest_history
@@ -100,9 +105,10 @@ impl CommitVoteMonitor {
                 let to_keep = state.digest_history.split_off(&gc_below);
                 state.digest_history = to_keep;
                 // Also clean authority_voted for pruned indices
-                for voted_set in state.authority_voted_indices.iter_mut() {
-                    voted_set.retain(|idx| *idx >= gc_below);
+                for voted_map in state.authority_voted_commits.iter_mut() {
+                    voted_map.retain(|idx, _| *idx >= gc_below);
                 }
+                state.injected_commits.retain(|idx| *idx >= gc_below);
             }
         }
         if updated {
@@ -195,7 +201,7 @@ impl CommitVoteMonitor {
                 let total_stake: u64 = digest_stakes.values().sum();
                 let best = digest_stakes
                     .iter()
-                    .max_by_key(|&(_, s)| *s)
+                    .max_by(|(d1, s1), (d2, s2)| s1.cmp(s2).then_with(|| d1.cmp(d2)))
                     .map(|(d, s)| (*d, *s));
                 (total_stake, best)
             }
@@ -218,6 +224,9 @@ impl CommitVoteMonitor {
 
         // Inject sufficient weight to immediately pass the quorum threshold
         *entry.entry(digest).or_insert(0) += authority_stake as u64;
+
+        // Mark this commit as injected from CertifiedCommit (voter attribution incomplete)
+        state.injected_commits.insert(commit_index);
     }
 
     /// Seeds the quorum from Go execution state to break the chicken-and-egg
@@ -300,54 +309,10 @@ impl CommitVoteMonitor {
 
         // Populate recent 10 commits with exact per-authority voting data from memory
         let mut recent_commits = Vec::new();
-        let quorum_threshold = self.context.committee.quorum_threshold();
         if quorum_commit_index > 0 {
             let start_commit = quorum_commit_index.saturating_sub(9).max(1);
             for c in start_commit..=quorum_commit_index {
-                let quorum_digest = state.digest_history.get(&c).and_then(|digest_stakes| {
-                    if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
-                        if *best_stake >= quorum_threshold {
-                            let hex_str: String = best_digest.into_inner().iter().map(|b| format!("{:02x}", b)).collect();
-                            return Some(format!("0x{}", hex_str));
-                        }
-                    }
-                    None
-                });
-                let quorum_reached = quorum_digest.is_some();
-                let mut voters = Vec::new();
-                let mut missing_voters = Vec::new();
-                let mut total_stake = 0;
-
-                for (idx, authority) in self.context.committee.authorities() {
-                    let has_voted = state
-                        .authority_voted_indices
-                        .get(idx.value())
-                        .map(|set| set.contains(&c))
-                        .unwrap_or(false);
-
-                    let name = if authority.hostname.is_empty() {
-                        format!("val-{}", idx.value())
-                    } else {
-                        authority.hostname.clone()
-                    };
-
-                    if has_voted {
-                        total_stake += authority.stake;
-                        voters.push(name);
-                    } else {
-                        missing_voters.push(name);
-                    }
-                }
-
-                recent_commits.push(CommitVoteDetails {
-                    commit_index: c,
-                    quorum_reached,
-                    quorum_digest,
-                    total_stake,
-                    quorum_threshold,
-                    voters,
-                    missing_voters,
-                });
+                recent_commits.push(self.compute_commit_vote_details_inner(&state, c));
             }
         }
 
@@ -361,30 +326,58 @@ impl CommitVoteMonitor {
         }
     }
 
-    /// Returns the exact voting breakdown for a specific commit index.
-    pub fn get_commit_vote_details(&self, target_index: CommitIndex) -> CommitVoteDetails {
-        let state = self.state.lock();
+    /// Computes the exact voting breakdown for a specific commit index from current state.
+    /// Categorizes authorities into voters (voted leading_digest), conflicting_voters (voted other digest),
+    /// and missing_voters (unvoted). Breaks ties between equal stake digests deterministically.
+    fn compute_commit_vote_details_inner(
+        &self,
+        state: &VoteState,
+        target_index: CommitIndex,
+    ) -> CommitVoteDetails {
         let quorum_threshold = self.context.committee.quorum_threshold();
-        let quorum_digest = state.digest_history.get(&target_index).and_then(|digest_stakes| {
-            if let Some((best_digest, best_stake)) = digest_stakes.iter().max_by_key(|&(_, s)| *s) {
-                if *best_stake >= quorum_threshold {
-                    let hex_str: String = best_digest.into_inner().iter().map(|b| format!("{:02x}", b)).collect();
-                    return Some(format!("0x{}", hex_str));
-                }
-            }
-            None
+
+        // Deterministic tie-breaking: if stakes are equal, break ties using digest ordering
+        let (leading_digest, leading_stake, total_voted_stake_history) = state
+            .digest_history
+            .get(&target_index)
+            .map(|digest_stakes| {
+                let total_voted: u64 = digest_stakes.values().sum();
+                let best = digest_stakes
+                    .iter()
+                    .max_by(|(d1, s1), (d2, s2)| s1.cmp(s2).then_with(|| d1.cmp(d2)));
+                let (best_d, best_s) = best.map(|(d, s)| (Some(*d), *s)).unwrap_or((None, 0));
+                (best_d, best_s, total_voted)
+            })
+            .unwrap_or((None, 0, 0));
+
+        let quorum_reached = leading_stake >= quorum_threshold && leading_digest.is_some();
+
+        let leading_digest_str = leading_digest.as_ref().map(|d| {
+            let hex_str: String = d
+                .into_inner()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            format!("0x{}", hex_str)
         });
-        let quorum_reached = quorum_digest.is_some();
+
+        let quorum_digest = if quorum_reached {
+            leading_digest_str.clone()
+        } else {
+            None
+        };
+
         let mut voters = Vec::new();
+        let mut conflicting_voters = Vec::new();
         let mut missing_voters = Vec::new();
         let mut total_stake = 0;
+        let mut total_voted_stake = 0;
 
         for (idx, authority) in self.context.committee.authorities() {
-            let has_voted = state
-                .authority_voted_indices
+            let voted_digest = state
+                .authority_voted_commits
                 .get(idx.value())
-                .map(|set| set.contains(&target_index))
-                .unwrap_or(false);
+                .and_then(|m| m.get(&target_index));
 
             let name = if authority.hostname.is_empty() {
                 format!("val-{}", idx.value())
@@ -392,23 +385,52 @@ impl CommitVoteMonitor {
                 authority.hostname.clone()
             };
 
-            if has_voted {
-                total_stake += authority.stake;
-                voters.push(name);
-            } else {
-                missing_voters.push(name);
+            match voted_digest {
+                Some(d) if leading_digest.as_ref() == Some(d) => {
+                    total_stake += authority.stake;
+                    total_voted_stake += authority.stake;
+                    voters.push(name);
+                }
+                Some(_) => {
+                    total_voted_stake += authority.stake;
+                    conflicting_voters.push(name);
+                }
+                None => {
+                    missing_voters.push(name);
+                }
             }
         }
+
+        let voters_stake = total_stake;
+        // In case votes were injected via inject_certified_commit without per-authority records
+        total_stake = total_stake.max(leading_stake);
+        total_voted_stake = total_voted_stake.max(total_voted_stake_history);
+
+        // Voter attribution completeness:
+        // Live consensus observes individual validator blocks so voter attribution is complete.
+        // Injected certified commits represent aggregate quorum proof from network recovery without per-validator votes.
+        let is_injected = state.injected_commits.contains(&target_index);
+        let voter_attribution_complete = !is_injected || (voters_stake >= quorum_threshold);
 
         CommitVoteDetails {
             commit_index: target_index,
             quorum_reached,
+            voter_attribution_complete,
+            leading_digest: leading_digest_str,
             quorum_digest,
             total_stake,
+            total_voted_stake,
             quorum_threshold,
             voters,
+            conflicting_voters,
             missing_voters,
         }
+    }
+
+    /// Returns the exact voting breakdown for a specific commit index.
+    pub fn get_commit_vote_details(&self, target_index: CommitIndex) -> CommitVoteDetails {
+        let state = self.state.lock();
+        self.compute_commit_vote_details_inner(&state, target_index)
     }
 }
 
@@ -427,10 +449,14 @@ pub struct AuthorityVoteInfo {
 pub struct CommitVoteDetails {
     pub commit_index: CommitIndex,
     pub quorum_reached: bool,
+    pub voter_attribution_complete: bool,
+    pub leading_digest: Option<String>,
     pub quorum_digest: Option<String>,
     pub total_stake: u64,
+    pub total_voted_stake: u64,
     pub quorum_threshold: u64,
     pub voters: Vec<String>,
+    pub conflicting_voters: Vec<String>,
     pub missing_voters: Vec<String>,
 }
 
@@ -497,5 +523,144 @@ mod test {
 
         // Highest commit index per authority should be 7, 8, 7, 8 now.
         assert_eq!(monitor.quorum_commit_index(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_commit_vote_details_quorum_and_conflict() {
+        let context = Arc::new(Context::new_for_test(4).0);
+        let monitor = CommitVoteMonitor::new(context.clone());
+
+        // 1. Test empty state
+        let empty_details = monitor.get_commit_vote_details(10);
+        assert_eq!(empty_details.commit_index, 10);
+        assert!(!empty_details.quorum_reached);
+        assert!(empty_details.leading_digest.is_none());
+        assert!(empty_details.quorum_digest.is_none());
+        assert_eq!(empty_details.total_stake, 0);
+        assert_eq!(empty_details.total_voted_stake, 0);
+        assert_eq!(empty_details.voters.len(), 0);
+        assert_eq!(empty_details.conflicting_voters.len(), 0);
+        assert_eq!(empty_details.missing_voters.len(), 4);
+
+        // 2. Test conflict: Auth 0 and Auth 1 vote MIN, Auth 2 votes MAX, Auth 3 unvoted. Quorum threshold is 3.
+        let block_0 = VerifiedBlock::new_for_test(
+            TestBlock::new(10, 0)
+                .set_commit_votes(vec![CommitRef::new(10, CommitDigest::MIN)])
+                .build(),
+        );
+        let block_1 = VerifiedBlock::new_for_test(
+            TestBlock::new(10, 1)
+                .set_commit_votes(vec![CommitRef::new(10, CommitDigest::MIN)])
+                .build(),
+        );
+        let block_2 = VerifiedBlock::new_for_test(
+            TestBlock::new(10, 2)
+                .set_commit_votes(vec![CommitRef::new(10, CommitDigest::MAX)])
+                .build(),
+        );
+        monitor.observe_block(&block_0);
+        monitor.observe_block(&block_1);
+        monitor.observe_block(&block_2);
+
+        let conflict_details = monitor.get_commit_vote_details(10);
+        assert!(!conflict_details.quorum_reached);
+        assert!(conflict_details.leading_digest.is_some());
+        assert!(conflict_details.quorum_digest.is_none());
+        // Stake for MIN is 2 (Auth 0 and Auth 1). Auth 2 voted MAX.
+        assert_eq!(conflict_details.total_stake, 2);
+        assert_eq!(conflict_details.total_voted_stake, 3);
+        // Verify each validator belongs to exactly one category:
+        assert_eq!(
+            conflict_details.voters,
+            vec!["test_host_0".to_string(), "test_host_1".to_string()]
+        );
+        assert_eq!(
+            conflict_details.conflicting_voters,
+            vec!["test_host_2".to_string()]
+        );
+        assert_eq!(
+            conflict_details.missing_voters,
+            vec!["test_host_3".to_string()]
+        );
+
+        // 3. Test quorum reached: Auth 3 votes MIN -> reaches 3 votes >= quorum_threshold (3).
+        let block_3 = VerifiedBlock::new_for_test(
+            TestBlock::new(10, 3)
+                .set_commit_votes(vec![CommitRef::new(10, CommitDigest::MIN)])
+                .build(),
+        );
+        monitor.observe_block(&block_3);
+
+        let quorum_details = monitor.get_commit_vote_details(10);
+        assert!(quorum_details.quorum_reached);
+        assert!(quorum_details.leading_digest.is_some());
+        assert!(quorum_details.quorum_digest.is_some());
+        assert_eq!(quorum_details.leading_digest, quorum_details.quorum_digest);
+        assert_eq!(quorum_details.total_stake, 3);
+        assert_eq!(quorum_details.total_voted_stake, 4);
+        assert_eq!(
+            quorum_details.voters,
+            vec![
+                "test_host_0".to_string(),
+                "test_host_1".to_string(),
+                "test_host_3".to_string()
+            ]
+        );
+        assert_eq!(
+            quorum_details.conflicting_voters,
+            vec!["test_host_2".to_string()]
+        );
+        assert!(quorum_details.missing_voters.is_empty());
+
+        // 4. Test deterministic tie-break: Auth 0 votes MIN, Auth 1 votes MAX (stakes 1 vs 1)
+        let tie_block_0 = VerifiedBlock::new_for_test(
+            TestBlock::new(20, 0)
+                .set_commit_votes(vec![CommitRef::new(20, CommitDigest::MIN)])
+                .build(),
+        );
+        let tie_block_1 = VerifiedBlock::new_for_test(
+            TestBlock::new(20, 1)
+                .set_commit_votes(vec![CommitRef::new(20, CommitDigest::MAX)])
+                .build(),
+        );
+        monitor.observe_block(&tie_block_0);
+        monitor.observe_block(&tie_block_1);
+
+        let tie_details = monitor.get_commit_vote_details(20);
+        assert_eq!(tie_details.total_stake, 1);
+        assert_eq!(tie_details.total_voted_stake, 2);
+        // MAX > MIN, so MAX deterministically wins tie-break:
+        assert_eq!(tie_details.voters, vec!["test_host_1".to_string()]);
+        assert_eq!(
+            tie_details.conflicting_voters,
+            vec!["test_host_0".to_string()]
+        );
+        assert_eq!(
+            tie_details.missing_voters,
+            vec!["test_host_2".to_string(), "test_host_3".to_string()]
+        );
+
+        // 5. Test snapshot contains the quorum commit details
+        let snapshot = monitor.get_vote_snapshot();
+        assert_eq!(snapshot.quorum_commit_index, 10);
+        assert!(!snapshot.recent_commits.is_empty());
+        let last_commit = snapshot.recent_commits.last().unwrap();
+        assert_eq!(last_commit.commit_index, 10);
+        assert!(last_commit.quorum_reached);
+        assert!(last_commit.voter_attribution_complete);
+        assert_eq!(last_commit.total_stake, 3);
+        assert_eq!(last_commit.total_voted_stake, 4);
+        assert_eq!(last_commit.voters.len(), 3);
+        assert_eq!(last_commit.conflicting_voters.len(), 1);
+        assert!(last_commit.missing_voters.is_empty());
+
+        // 6. Test injected certified commit (recovery): quorum is reached but voter attribution is incomplete
+        monitor.inject_certified_commit(30, CommitDigest::MIN);
+        let injected_details = monitor.get_commit_vote_details(30);
+        assert!(injected_details.quorum_reached);
+        assert!(!injected_details.voter_attribution_complete);
+        assert!(injected_details.total_stake >= injected_details.quorum_threshold);
+        assert!(injected_details.quorum_digest.is_some());
+        assert_eq!(injected_details.voters.len(), 0);
     }
 }

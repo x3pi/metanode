@@ -18,7 +18,7 @@ use crate::{
     context::Context,
     core::{Core, CoreSignals, CoreSignalsReceivers},
     dag_state::DagState,
-    error::{ConsensusError, ConsensusResult},
+    error::ConsensusResult,
     leader_schedule::LeaderSchedule,
     round_tracker::PeerRoundTracker,
     storage::mem_store::MemStore,
@@ -78,7 +78,7 @@ impl CoreTextFixture {
         let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
 
         let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
-        let mut block_manager =
+        let block_manager =
             BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
         let leader_schedule = Arc::new(
             LeaderSchedule::from_store(context.clone(), dag_state.clone())
@@ -163,7 +163,6 @@ use consensus_types::block::{BlockTimestampMs, TransactionIndex};
 use futures::{stream::FuturesUnordered, StreamExt};
 use meta_protocol_config::ProtocolConfig;
 use std::iter;
-use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::{
