@@ -154,6 +154,7 @@ for dir_name in $LEVELDB_DIRS; do
         else
             mv "$DOWNLOAD_DIR/$dir_name" "$DST/data/data/$dir_name"
         fi
+    fi
 done
 
 if [ ! -d "$DST/data/data/consensus/xapian" ] || [ -z "$(ls -A "$DST/data/data/consensus/xapian" 2>/dev/null)" ]; then
