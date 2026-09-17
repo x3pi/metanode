@@ -157,54 +157,74 @@ func (app *App) initBlockchain() error {
 						headerStakeRoot := app.startLastBlock.Header().StakeStatesRoot()
 
 						if nomtAccountRoot != headerAccountRoot || nomtStakeRoot != headerStakeRoot {
-							logger.Warn("⚠️ [SNAPSHOT] NOMT root MISMATCH in metadata recovery path: account(nomt=%s header=%s), stake(nomt=%s header=%s). Wiping NOMT database and resetting block tip to genesis to force clean sync!",
+							// ═══════════════════════════════════════════════════════════════
+							// FIX (Phuong an A mục 23, 2026-09-17): this branch used to WIPE
+							// nomt_db and reset the tip straight to genesis on ANY root
+							// mismatch here — destroying real, already-committed state. The
+							// sibling "GetLastBlock() succeeded" path below handles the exact
+							// same situation (metadata/header pointing at a stale block while
+							// NOMT is actually further along, e.g. a lastBlockHashKey flush
+							// that lagged NOMT's own commit right before a stop) by searching
+							// LevelDB for the block NOMT's roots actually belong to instead of
+							// guessing. Reuse that same safe search here — only fall back to
+							// wiping if truly no matching block exists anywhere nearby.
+							logger.Warn("⚠️ [SNAPSHOT] NOMT root MISMATCH in metadata recovery path: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB before considering any destructive reset...",
 								nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 
-							// Close all handles
-							trie.CloseNomtDB()
-
-							// Wipe nomt_db directory
-							nomtDbDir := filepath.Join(app.config.Databases.RootPath, "consensus", "nomt_db")
-							if err := os.RemoveAll(nomtDbDir); err != nil {
-								logger.Error("❌ [STARTUP] Failed to wipe NOMT database directory at %s: %v", nomtDbDir, err)
+							if blk, found := app.findBlockMatchingNomtRoots(blockDatabase, app.startLastBlock.Header().BlockNumber(), nomtAccountRoot, nomtStakeRoot); found {
+								logger.Warn("🛡️ [STARTUP] ✅ Found matching block #%d for NOMT's actual roots in metadata recovery path (GEI=%d). Aligning startup tip to it instead of wiping.",
+									blk.Header().BlockNumber(), blk.Header().GlobalExecIndex())
+								app.alignStartupTipToBlock(blk)
 							} else {
-								logger.Info("✅ [STARTUP] Successfully wiped NOMT database directory at %s", nomtDbDir)
-							}
+								logger.Error("🚨 [STARTUP] No block in LevelDB matches NOMT's actual roots (account=%s, stake=%s). This is the true last resort: wiping NOMT database and resetting block tip to genesis to force clean sync!",
+									nomtAccountRoot.Hex(), nomtStakeRoot.Hex())
 
-							// Re-initialize startLastBlock to genesis block 0
-							var blk0 types.Block
-							key := []byte("blockNumber_0")
-							if data, err := app.storageManager.GetStorageMapping().Get(key); err == nil && data != nil && len(data) == 32 {
-								blockHash := e_common.BytesToHash(data)
-								if b, err := blockDatabase.GetBlockByHash(blockHash); err == nil && b != nil {
-									blk0 = b
+								// Close all handles
+								trie.CloseNomtDB()
+
+								// Wipe nomt_db directory
+								nomtDbDir := filepath.Join(app.config.Databases.RootPath, "consensus", "nomt_db")
+								if err := os.RemoveAll(nomtDbDir); err != nil {
+									logger.Error("❌ [STARTUP] Failed to wipe NOMT database directory at %s: %v", nomtDbDir, err)
+								} else {
+									logger.Info("✅ [STARTUP] Successfully wiped NOMT database directory at %s", nomtDbDir)
 								}
+
+								// Re-initialize startLastBlock to genesis block 0
+								var blk0 types.Block
+								key := []byte("blockNumber_0")
+								if data, err := app.storageManager.GetStorageMapping().Get(key); err == nil && data != nil && len(data) == 32 {
+									blockHash := e_common.BytesToHash(data)
+									if b, err := blockDatabase.GetBlockByHash(blockHash); err == nil && b != nil {
+										blk0 = b
+									}
+								}
+								if blk0 != nil {
+									logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0 in metadata recovery reset.")
+									app.startLastBlock = blk0
+								} else {
+									// Fallback to dummy genesis block if not found
+									app.startLastBlock = block.NewBlock(
+										block.NewBlockHeader(
+											e_common.Hash{},
+											0,
+											trie.EmptyRootHash,
+											e_common.Hash{},
+											e_common.Hash{},
+											e_common.Address{},
+											app.genesis.Config.EpochTimestampMs,
+											trie.EmptyRootHash,
+											0,
+										),
+										nil,
+										nil,
+									)
+								}
+								storage.ResetAllBlockCounters(0)
+								storage.ForceSetLastGlobalExecIndex(0)
+								storage.ForceSetLastHandledCommitIndex(0)
+								storage.UpdateLastHandledCommitEpoch(0)
 							}
-							if blk0 != nil {
-								logger.Info("🛡️ [STARTUP] ✅ Successfully loaded genesis block #0 in metadata recovery reset.")
-								app.startLastBlock = blk0
-							} else {
-								// Fallback to dummy genesis block if not found
-								app.startLastBlock = block.NewBlock(
-									block.NewBlockHeader(
-										e_common.Hash{},
-										0,
-										trie.EmptyRootHash,
-										e_common.Hash{},
-										e_common.Hash{},
-										e_common.Address{},
-										app.genesis.Config.EpochTimestampMs,
-										trie.EmptyRootHash,
-										0,
-									),
-									nil,
-									nil,
-								)
-							}
-							storage.ResetAllBlockCounters(0)
-							storage.ForceSetLastGlobalExecIndex(0)
-							storage.ForceSetLastHandledCommitIndex(0)
-							storage.UpdateLastHandledCommitEpoch(0)
 						}
 					}
 
@@ -509,73 +529,17 @@ func (app *App) initBlockchain() error {
 					logger.Warn("🛡️ [STARTUP] NOMT Root MISMATCH: account(nomt=%s header=%s), stake(nomt=%s header=%s). Searching for correct matching block in LevelDB...",
 						nomtAccountRoot.Hex()[:18], headerAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
 
-					found := false
-					for bn := app.startLastBlock.Header().BlockNumber(); bn > 0; bn-- {
-						key := []byte(fmt.Sprintf("blockNumber_%d", bn))
-						data, err := app.storageManager.GetStorageMapping().Get(key)
-						if err != nil || data == nil || len(data) != 32 {
-							continue
-						}
-						blockHash := e_common.BytesToHash(data)
-						blk, err := blockDatabase.GetBlockByHash(blockHash)
-						if err != nil || blk == nil {
-							continue
-						}
-						// BOTH roots must match!
-						if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
-							correctedGEI := blk.Header().GlobalExecIndex()
-							logger.Warn("🛡️ [STARTUP] ✅ Found matching fallback block #%d (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height to this block.",
-								bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
-							app.startLastBlock = blk
-							storage.ResetAllBlockCounters(bn)
-							storage.ForceSetLastGlobalExecIndex(correctedGEI)
-							storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
-							storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
-							found = true
-							break
-						}
-					}
-
-					// 🛡️ FORWARD PROBE: If backward search didn't find a matching block, check if NOMT root
-					// is ahead of LevelDB's startLastBlock (e.g. crash happened during sync block apply after
-					// NOMT updated its root but before LevelDB lastblock pointer was updated).
-					if !found {
-						currentLastBn := app.startLastBlock.Header().BlockNumber()
-						for bn := currentLastBn + 1; bn <= currentLastBn + 100; bn++ {
-							key := []byte(fmt.Sprintf("blockNumber_%d", bn))
-							data, err := app.storageManager.GetStorageMapping().Get(key)
-							if err != nil || data == nil || len(data) != 32 {
-								break // no more forward blocks in mapping
-							}
-							blockHash := e_common.BytesToHash(data)
-							blk, err := blockDatabase.GetBlockByHash(blockHash)
-							if err != nil || blk == nil {
-								break
-							}
-							if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
-								correctedGEI := blk.Header().GlobalExecIndex()
-								logger.Warn("🛡️ [STARTUP] ✅ Found matching FORWARD block #%d in LevelDB (accountRoot=%s, stakeRoot=%s, GEI=%d). Aligning startup tip block height forward!",
-									bn, nomtAccountRoot.Hex()[:18]+"...", nomtStakeRoot.Hex()[:18]+"...", correctedGEI)
-								app.startLastBlock = blk
-								storage.ResetAllBlockCounters(bn)
-								storage.ForceSetLastGlobalExecIndex(correctedGEI)
-								storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
-								storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
-								found = true
-								break
-							}
-						}
-					}
-
-					if !found {
-						if trie.GetStateBackend() == trie.BackendNOMT {
-							logger.Warn("🛡️ [STARTUP] ⚠️ No exact block match found in LevelDB for NOMT roots (nomtAccount=%s, nomtStake=%s). Preserving NOMT state at startup tip block #%d (headerAccount=%s, headerStake=%s) and registering future unaligned root for catch-up bypass.",
-								nomtAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], app.startLastBlock.Header().BlockNumber(), headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
-							futureNomtRoot = nomtAccountRoot
-						} else {
-							logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
-								nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
-						}
+					if blk, found := app.findBlockMatchingNomtRoots(blockDatabase, app.startLastBlock.Header().BlockNumber(), nomtAccountRoot, nomtStakeRoot); found {
+						logger.Warn("🛡️ [STARTUP] ✅ Found matching block #%d for NOMT's actual roots (GEI=%d). Aligning startup tip block height to it.",
+							blk.Header().BlockNumber(), blk.Header().GlobalExecIndex())
+						app.alignStartupTipToBlock(blk)
+					} else if trie.GetStateBackend() == trie.BackendNOMT {
+						logger.Warn("🛡️ [STARTUP] ⚠️ No exact block match found in LevelDB for NOMT roots (nomtAccount=%s, nomtStake=%s). Preserving NOMT state at startup tip block #%d (headerAccount=%s, headerStake=%s) and registering future unaligned root for catch-up bypass.",
+							nomtAccountRoot.Hex()[:18], nomtStakeRoot.Hex()[:18], app.startLastBlock.Header().BlockNumber(), headerAccountRoot.Hex()[:18], headerStakeRoot.Hex()[:18])
+						futureNomtRoot = nomtAccountRoot
+					} else {
+						logger.Fatal("🚨 [STARTUP] CRITICAL DATABASE MISMATCH: roots (account=%s, stake=%s) do not match any block in LevelDB, and header mismatch exists (account=%s, stake=%s). Halting to prevent state fork!",
+							nomtAccountRoot.Hex(), nomtStakeRoot.Hex(), headerAccountRoot.Hex(), headerStakeRoot.Hex())
 					}
 				}
 			}
@@ -929,6 +893,61 @@ SKIP_GENESIS:
 
 
 	return nil
+}
+
+// findBlockMatchingNomtRoots searches the LevelDB blockNumber_N -> hash mapping for a block
+// whose header AccountStatesRoot/StakeStatesRoot exactly match the roots NOMT actually has on
+// disk. It searches backward from startBlockNumber first (the common case: LevelDB's recorded
+// tip is slightly AHEAD of what NOMT actually persisted), then probes forward up to 100 blocks
+// (the case where NOMT committed a block whose blockNumber_N mapping write raced/lagged behind
+// LevelDB's own last-block pointer). This is the same search used by the normal ("GetLastBlock
+// succeeded") startup path below — factored out so the crash-recovery path (GetLastBlock failed
+// entirely) can reuse it instead of destructively wiping NOMT on any root mismatch.
+func (app *App) findBlockMatchingNomtRoots(blockDatabase *block.BlockDatabase, startBlockNumber uint64, nomtAccountRoot, nomtStakeRoot e_common.Hash) (types.Block, bool) {
+	for bn := startBlockNumber; bn > 0; bn-- {
+		key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+		data, err := app.storageManager.GetStorageMapping().Get(key)
+		if err != nil || data == nil || len(data) != 32 {
+			continue
+		}
+		blockHash := e_common.BytesToHash(data)
+		blk, err := blockDatabase.GetBlockByHash(blockHash)
+		if err != nil || blk == nil {
+			continue
+		}
+		if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
+			return blk, true
+		}
+	}
+
+	for bn := startBlockNumber + 1; bn <= startBlockNumber+100; bn++ {
+		key := []byte(fmt.Sprintf("blockNumber_%d", bn))
+		data, err := app.storageManager.GetStorageMapping().Get(key)
+		if err != nil || data == nil || len(data) != 32 {
+			break // no more forward blocks in mapping
+		}
+		blockHash := e_common.BytesToHash(data)
+		blk, err := blockDatabase.GetBlockByHash(blockHash)
+		if err != nil || blk == nil {
+			break
+		}
+		if blk.Header().AccountStatesRoot() == nomtAccountRoot && blk.Header().StakeStatesRoot() == nomtStakeRoot {
+			return blk, true
+		}
+	}
+
+	return nil, false
+}
+
+// alignStartupTipToBlock realigns every in-memory startup counter (block number, GEI, commit
+// index/epoch) to the given block, which was found to be the one NOMT's actual on-disk roots
+// correspond to. Used by both startup recovery paths after findBlockMatchingNomtRoots succeeds.
+func (app *App) alignStartupTipToBlock(blk types.Block) {
+	app.startLastBlock = blk
+	storage.ResetAllBlockCounters(blk.Header().BlockNumber())
+	storage.ForceSetLastGlobalExecIndex(blk.Header().GlobalExecIndex())
+	storage.ForceSetLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
+	storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
 }
 
 // initGenesisBlock creates the genesis block if it doesn't exist
