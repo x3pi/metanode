@@ -1272,7 +1272,12 @@ impl ExecutorClient {
     /// same in-memory entry at the same time) leaves that unchanged fork-safety net exactly as
     /// it was before this existed. Always call this before `build_sorted_transactions`, never as
     /// a substitute for it.
-    async fn ensure_tx_payloads_cached(&self, subdag: &CommittedSubDag) {
+    ///
+    /// `pub(crate)` (2026-09-17): also called from `node::recovery::perform_block_recovery_check`
+    /// to warm the cache before its own speculative `compute_commit_gei_and_valid_txs(_, false)`
+    /// GEI-counting pass -- see that call site's comment for why a cold cache there causes a
+    /// real, confirmed-live fork.
+    pub(crate) async fn ensure_tx_payloads_cached(&self, subdag: &CommittedSubDag) {
         let missing: Vec<consensus_types::block::TxDigest> = {
             // Bounded (mục 19 bug #4/#5): a stuck lock degrades to "treat as
             // missing", which just means this recovery pass tries to fetch
