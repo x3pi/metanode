@@ -3076,7 +3076,7 @@ mod tests {
     use consensus_config::{AuthorityIndex, Parameters};
     use consensus_types::block::{BlockRef, Round};
     use parking_lot::RwLock;
-    use tokio::sync::mpsc;
+    
 
     use crate::{
         block::{BlockAPI, TestBlock, VerifiedBlock},

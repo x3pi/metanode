@@ -289,7 +289,17 @@ func SubmitTransaction(ctx context.Context, tx *types.Transaction) (common.Hash,
 	return tx.Hash(), nil
 }
 
-func (api *MetaAPI) SendRawTransaction(ctx context.Context, input []byte, inputEth []byte, pubKeyBlsL []byte) (common.Hash, error) {
+func (api *MetaAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes, inputEth *hexutil.Bytes, pubKeyBlsL *hexutil.Bytes) (common.Hash, error) {
+	// Standard Ethereum format (1 argument: raw transaction hex)
+	// Supports MetaMask, ethclient, ethers.js, and web3 over both HTTP and WebSocket
+	if inputEth == nil && pubKeyBlsL == nil {
+		return api.SendRawEthTransaction(ctx, input)
+	}
+
+	var ethBytes []byte
+	if inputEth != nil {
+		ethBytes = *inputEth
+	}
 
 	txM := &transaction.Transaction{}
 	err := txM.Unmarshal(input)
@@ -298,11 +308,11 @@ func (api *MetaAPI) SendRawTransaction(ctx context.Context, input []byte, inputE
 		logger.Error("Lỗi Unmarshal txM: %v", err)
 		return common.Hash{}, err
 	}
-	if len(inputEth) > 0 {
+	if len(ethBytes) > 0 {
 
 		txEth := new(types.Transaction)
 
-		if err := txEth.UnmarshalBinary(inputEth); err != nil {
+		if err := txEth.UnmarshalBinary(ethBytes); err != nil {
 			// BỔ SUNG LOG
 			logger.Error("Lỗi UnmarshalBinary txEth: %v", err)
 			return common.Hash{}, err

@@ -31,6 +31,9 @@ bool metanode_restore_from_snapshot(const char* data_dir, const char* snapshot_d
 bool metanode_is_ready_for_transactions();
 int32_t metanode_attest_payload_loss(uint32_t commit_index, const char* tx_digest_hex);
 int32_t metanode_attest_payload_loss_for_commit(uint32_t commit_index);
+char* metanode_get_consensus_votes();
+char* metanode_get_commit_votes(uint32_t commit_index);
+void metanode_free_string(char* s);
 
 // Gateway functions that we will export
 extern bool cgo_execute_block(uint8_t* payload, size_t len, uint8_t** out_payload, size_t* out_len);
@@ -520,4 +523,24 @@ func RestoreRustConsensusFromSnapshot(dataDir string, snapshotDir string) error 
 		return fmt.Errorf("failed to restore rust_consensus via FFI")
 	}
 	return nil
+}
+
+// GetConsensusVotes retrieves JSON-serialized real-time consensus vote state from Rust CommitVoteMonitor.
+func GetConsensusVotes() (string, error) {
+	cStr := C.metanode_get_consensus_votes()
+	if cStr == nil {
+		return "", fmt.Errorf("consensus votes not available")
+	}
+	defer C.metanode_free_string(cStr)
+	return C.GoString(cStr), nil
+}
+
+// GetCommitVotes retrieves JSON-serialized vote details for a specific commit index.
+func GetCommitVotes(commitIndex uint32) (string, error) {
+	cStr := C.metanode_get_commit_votes(C.uint32_t(commitIndex))
+	if cStr == nil {
+		return "", fmt.Errorf("commit votes not available for index %d", commitIndex)
+	}
+	defer C.metanode_free_string(cStr)
+	return C.GoString(cStr), nil
 }

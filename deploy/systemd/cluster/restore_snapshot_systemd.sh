@@ -322,6 +322,27 @@ for item in "$SNAP_SRC_DIR"/*; do
     fi
 done
 
+# 5b-xapian: Đảm bảo Xapian luôn được khôi phục dù snapshot lưu ở xapian, consensus/xapian hay db/consensus/xapian
+if [ ! -d "${INSTALL_DIR}/data/execution/db/consensus/xapian" ] || [ -z "$(ls -A "${INSTALL_DIR}/data/execution/db/consensus/xapian" 2>/dev/null)" ]; then
+    if [ -d "$SNAP_SRC_DIR/consensus/xapian" ]; then
+        echo -e "    📦 Khôi phục Xapian database từ consensus/xapian -> consensus/xapian..."
+        mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+        cp -a "$SNAP_SRC_DIR/consensus/xapian" "${INSTALL_DIR}/data/execution/db/consensus/"
+    elif [ -d "$SNAP_SRC_DIR/xapian" ]; then
+        echo -e "    📦 Khôi phục Xapian database từ xapian -> consensus/xapian..."
+        mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+        cp -a "$SNAP_SRC_DIR/xapian" "${INSTALL_DIR}/data/execution/db/consensus/"
+    elif [ -d "$SNAP_SRC_DIR/db/consensus/xapian" ]; then
+        echo -e "    📦 Khôi phục Xapian database từ db/consensus/xapian -> consensus/xapian..."
+        mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+        cp -a "$SNAP_SRC_DIR/db/consensus/xapian" "${INSTALL_DIR}/data/execution/db/consensus/"
+    elif [ -d "$SNAP_SRC_DIR/xapian_node" ]; then
+        echo -e "    📦 Khôi phục Xapian database từ xapian_node -> consensus/xapian..."
+        mkdir -p "${INSTALL_DIR}/data/execution/db/consensus"
+        cp -a "$SNAP_SRC_DIR/xapian_node" "${INSTALL_DIR}/data/execution/db/consensus/xapian"
+    fi
+fi
+
 # 🚨 CRITICAL: Xóa thư mục rust_consensus từ snapshot (nếu có) để tránh split-brain
 rm -rf "${INSTALL_DIR}/data/execution/db/consensus/rust_consensus" 2>/dev/null || true
 echo -e "${GREEN}  ✅ Đã xóa rust_consensus cũ để ép node chạy Bootstrapping sạch${NC}"

@@ -43,7 +43,7 @@ async fn test_core_recover_from_store_for_full_round() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager =
+    let block_manager =
         BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),
@@ -192,7 +192,7 @@ async fn test_core_recover_from_store_for_partial_round() {
     let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store.clone())));
     let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
 
-    let mut block_manager =
+    let block_manager =
         BlockManager::new(context.clone(), dag_state.clone(), dag_state_writer.clone());
     let leader_schedule = Arc::new(LeaderSchedule::from_store(
         context.clone(),

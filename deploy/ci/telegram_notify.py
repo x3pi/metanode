@@ -192,6 +192,36 @@ def build_finish_success_message(commit_info, branch, total_duration, test_resul
     lines.append("\n🏆 <i>Hệ thống đảm bảo tính toàn vẹn và ổn định cao nhất!</i>")
     return "\n".join(lines)
 
+def build_finish_failure_summary_message(commit_info, branch, total_duration, test_results, server_ip):
+    timestamp = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+    short_hash = commit_info.get("hash", "")[:8]
+    dur_str = format_duration(total_duration)
+    author = html.escape(commit_info.get("author", "Unknown"))
+
+    lines = [
+        f"❌ <b>[METANODE CI PIPELINE THẤT BẠI]</b>\n",
+        f"🌿 <b>Nhánh:</b> <code>{html.escape(branch)}</code>",
+        f"📌 <b>Commit:</b> <code>{short_hash}</code> (bởi <b>{author}</b>)",
+        f"⏱️ <b>Tổng thời gian:</b> <code>{dur_str}</code>",
+        f"🖥 <b>Server:</b> <code>{server_ip}</code>",
+        f"🕒 <b>Kết thúc:</b> <code>{timestamp}</code>\n",
+        f"📊 <b>Chi tiết kết quả:</b>"
+    ]
+
+    for res in test_results:
+        t_name = html.escape(res.get("name", "Test"))
+        t_dur = format_duration(res.get("duration", 0))
+        status = res.get("status", "UNKNOWN")
+        icon = "✅" if status == "PASSED" else "❌"
+        extra = res.get("extra", "")
+        if extra:
+            lines.append(f"  {icon} <b>{t_name}</b> - {status} ({t_dur})\n     └─ <i>{html.escape(extra)}</i>")
+        else:
+            lines.append(f"  {icon} <b>{t_name}</b> - {status} ({t_dur})")
+
+    lines.append("\n⚠️ <i>Vui lòng kiểm tra log lỗi chi tiết để khắc phục!</i>")
+    return "\n".join(lines)
+
 def build_failure_message(commit_info, branch, failed_test_name, exit_code, *args, **kwargs):
     """
     Build failure message for Telegram.

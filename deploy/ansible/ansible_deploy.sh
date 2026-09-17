@@ -433,6 +433,7 @@ if [ "$ACTION" != "open_ports" ]; then
     fi
     pkill -9 -f "start_monitors.sh" || true
     pkill -9 -f "block_hash_checker" || true
+    pkill -9 -f "vote_monitor" || true
     pkill -9 -f "go run main.go.*--no-stop-flag" || true
 
     if [ "$KEEP_DATA" == "false" ]; then
@@ -441,6 +442,8 @@ if [ "$ACTION" != "open_ports" ]; then
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/block_checker_daemon.log"
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/chain_anomalies.log"
         rm -f "${SCRIPT_DIR}/monitors/block_hash_checker/"*.csv
+        rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor.log"
+        rm -f "${SCRIPT_DIR}/monitors/vote_monitor/vote_monitor_daemon.log"
     fi
 fi
 
@@ -457,19 +460,34 @@ if [ $ansible_exit -eq 0 ]; then
         git rev-parse HEAD > "${SCRIPT_DIR}/.last_deployed_commit" 2>/dev/null || true
     fi
 
-    # Read and format Node RPC IPs and TCP Nodes from /tmp/rpc_nodes.json
+    # Read and format Node RPC IPs, WebSocket URLs and TCP Nodes from /tmp/rpc_nodes.json
     RPC_NODES_LIST=""
+    WS_NODES_LIST=""
     TCP_NODES_LIST=""
     if [ -f "/tmp/rpc_nodes.json" ]; then
         RPC_NODES_LIST=$(jq -r '.nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
+        WS_NODES_LIST=$(jq -r '.ws_nodes // {} | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
         TCP_NODES_LIST=$(jq -r '.tcp_nodes | to_entries[] | "  • \(.key): \(.value)"' /tmp/rpc_nodes.json 2>/dev/null || true)
     fi
 
     echo -e "\n⚙️ Danh sách Node RPC (IP & Port):"
     echo "$RPC_NODES_LIST"
 
+    if [ -n "$WS_NODES_LIST" ]; then
+        echo -e "\n🔌 Danh sách Node WebSocket (WS URL):"
+        echo "$WS_NODES_LIST"
+    fi
+
     echo -e "\n🌐 Danh sách Node TCP (Consensus P2P):"
     echo "$TCP_NODES_LIST"
+
+    # Tự động đồng bộ cấu hình sang metanode-suite (update-ip.sh)
+    UPDATE_IP_SCRIPT="${SCRIPT_DIR}/../../../metanode-suite/scripts/update-ip/update-ip.sh"
+    if [ -f "$UPDATE_IP_SCRIPT" ]; then
+        echo -e "\n🔄 Đang đồng bộ cấu hình sang metanode-suite (update-ip.sh)..."
+        bash "$UPDATE_IP_SCRIPT" >/dev/null 2>&1 || true
+        echo "✅ Đã tự động cập nhật cấu hình test-chain & configs (bao gồm WebSocket) trong metanode-suite!"
+    fi
 
     echo -e  "\n📋 *Node Roles:*"
     echo "${ROLES_OUTPUT}"
@@ -485,6 +503,11 @@ ${ROLES_OUTPUT}
 ⚙️ <b>Danh sách Node RPC:</b>
 <pre>
 ${RPC_NODES_LIST}
+</pre>
+
+🔌 <b>Danh sách Node WebSocket:</b>
+<pre>
+${WS_NODES_LIST}
 </pre>
 
 🌐 <b>Danh sách Node TCP (Consensus P2P):</b>
@@ -535,8 +558,9 @@ if [ "$ACTION" != "open_ports" ]; then
         fi
     elif [ "$ACTION" == "stop" ]; then
         echo -e "\n⏸ Không bật lại Health Monitor vì hệ thống đang ở trạng thái STOP..."
+        pkill -f "vote_monitor" || true
         if [ "$ALL_MONITORS" == "true" ]; then
-            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true" >/dev/null 2>&1 || true
+            ansible metanode_cluster -i "$INVENTORY" -m shell -a "pkill -f 'start_monitors.sh' || true; pkill -f 'block_hash_checker' || true; pkill -f 'vote_monitor' || true" >/dev/null 2>&1 || true
         fi
     fi
 fi

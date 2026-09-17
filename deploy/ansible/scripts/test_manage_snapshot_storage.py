@@ -85,6 +85,12 @@ class StorageTests(unittest.TestCase):
         (self.mount / 'node-5').mkdir()
         self.assertTrue(storage.plan(self.args)['changed'])
 
+    def test_unknown_entries_allowed_with_reset_all(self):
+        self.args.clean = True
+        self.args.reset_all = True
+        (self.mount / 'unrelated').write_text('keep')
+        self.assertTrue(storage.plan(self.args)['changed'])
+
     def test_full_shared_clean_allowed(self):
         self.args.clean = True
         self.args.nodes = '4,5'

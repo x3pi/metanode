@@ -3,7 +3,7 @@
 
 mod tests {
     use parking_lot::RwLock;
-    use tokio::sync::mpsc;
+    
 
     use crate::{
         block::{BlockAPI, BlockTransactionVotes},
@@ -19,7 +19,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
-    use super::*;
+    
 
     struct Fixture {
         context: Arc<Context>,

@@ -16,7 +16,6 @@ use rstest::rstest;
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
 
-use super::*;
 use crate::{
     block::{BlockAPI as _, CertifiedBlocksOutput, GENESIS_ROUND},
     transaction::NoopTransactionVerifier,
