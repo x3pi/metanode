@@ -73,8 +73,9 @@ pub use reconfiguration::{ReconfigCertStatus, ReconfigState};
 /// Exported API for testing and tools.
 pub use block::{SignedBlock, TestBlock, Transaction, VerifiedBlock};
 pub use commit::{
-    load_committed_subdag_from_store, try_load_committed_subdag_from_store, Commit, CommitAPI,
-    CommitDigest, CommitIndex, CommitRange, CommitRef, CommittedSubDag, TrustedCommit,
+    load_committed_subdag_from_store, try_load_committed_subdag_from_store,
+    verify_subdag_block_signatures, Commit, CommitAPI, CommitDigest, CommitIndex, CommitRange,
+    CommitRef, CommittedSubDag, TrustedCommit,
 };
 pub use commit_consumer::{CommitConsumerArgs, CommitConsumerMonitor};
 pub use commit_vote_monitor::{

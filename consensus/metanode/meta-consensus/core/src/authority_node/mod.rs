@@ -125,16 +125,6 @@ impl ConsensusAuthority {
         }
     }
 
-    #[cfg(test)]
-    fn context(&self) -> &Arc<Context> {
-        match self {
-            Self::WithTonic(Some(authority)) => &authority.context,
-            Self::WithTonic(None) => {
-                panic!("context() called after authority was stopped — caller must check lifecycle before access")
-            }
-        }
-    }
-
     /// Extract the store for use in LegacyEpochStoreManager.
     /// This should be called before stop() to preserve the store for legacy sync.
     pub fn take_store(&self) -> Arc<dyn crate::storage::Store> {
@@ -142,6 +132,20 @@ impl ConsensusAuthority {
             Self::WithTonic(Some(authority)) => authority.store.clone(),
             Self::WithTonic(None) => {
                 panic!("take_store() called after authority was stopped — caller must check lifecycle before access")
+            }
+        }
+    }
+
+    /// DISK-REPLAY TRUST GAP FIX (2026-09-17): exposes this authority's `Context` (committee
+    /// public keys, immutable for the epoch) so callers outside this crate -- specifically
+    /// `node::recovery::perform_block_recovery_check` -- can re-verify block signatures on data
+    /// loaded from local storage before trusting it for replay. Same access pattern/lifecycle
+    /// contract as `take_store` above.
+    pub fn context(&self) -> Arc<Context> {
+        match self {
+            Self::WithTonic(Some(authority)) => authority.context.clone(),
+            Self::WithTonic(None) => {
+                panic!("context() called after authority was stopped — caller must check lifecycle before access")
             }
         }
     }

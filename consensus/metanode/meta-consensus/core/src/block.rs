@@ -745,6 +745,19 @@ impl VerifiedBlock {
         &self.serialized
     }
 
+    /// DISK-REPLAY TRUST GAP FIX (2026-09-17): re-verifies this block's signature against the
+    /// committee's public key for its claimed author. `Store::read_blocks()` (the path used when
+    /// replaying old commits from local RocksDB, e.g. on restart) only self-checks the digest --
+    /// the digest is computed FROM the same bytes just read, so corrupted-but-internally-
+    /// consistent disk data would still "match". This is the only way to know the bytes actually
+    /// came from the validator that claims to have authored them, matching the signature check
+    /// already done for every block received fresh over the network (`block_verifier.rs`).
+    /// Cheap (single Ed25519/BLS verify, no I/O, no locks) -- safe to call on a whole replay
+    /// batch, see `verify_subdag_block_signatures` in commit.rs.
+    pub(crate) fn verify_signature(&self, context: &Context) -> ConsensusResult<()> {
+        self.block.verify_signature(context)
+    }
+
     /// Computes digest from the serialized block with signature.
     pub(crate) fn compute_digest(serialized: &[u8]) -> BlockDigest {
         let mut hasher = DefaultHashFunction::new();

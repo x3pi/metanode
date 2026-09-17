@@ -353,6 +353,9 @@ impl ConsensusNode {
         if let Some(ref auth) = authority {
             if config.executor_read_enabled && storage.last_global_exec_index > 0 {
                 let recovery_store = auth.take_store();
+                // DISK-REPLAY TRUST GAP FIX (2026-09-17): needed so recovery can re-verify block
+                // signatures on data loaded from local storage before replaying it.
+                let recovery_context = auth.context();
                 info!("🔍 [RECOVERY] Initiating block recovery check using the active consensus store instance...");
                 if let Err(e) = crate::node::recovery::perform_block_recovery_check(
                     &executor_client_for_proc,
@@ -360,6 +363,7 @@ impl ConsensusNode {
                     storage.epoch_base_exec_index,
                     storage.current_epoch,
                     &recovery_store,
+                    &recovery_context,
                     config.node_id as u32,
                 )
                 .await {

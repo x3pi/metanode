@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     block::{BlockAPI, Slot, VerifiedBlock},
+    context::Context,
     error::{ConsensusError, ConsensusResult},
     leader_scoring::ReputationScores,
     storage::Store,
@@ -774,6 +775,43 @@ pub fn try_load_committed_subdag_from_store(
     }
 
     Ok(subdag)
+}
+
+/// DISK-REPLAY TRUST GAP FIX (2026-09-17): re-verifies every block signature in a subdag loaded
+/// via `try_load_committed_subdag_from_store`. That loader (and `Store::read_blocks()` beneath
+/// it) trusts local RocksDB data on the strength of a self-referential digest check alone --
+/// the digest is computed FROM the same bytes just read, so internally-consistent-but-corrupted
+/// disk data would still pass it. A block received fresh over the network always goes through
+/// `block_verifier.rs`'s real signature check before being trusted (`verify_and_vote` /
+/// `verify_for_commit_sync`); a block reconstructed from local storage during restart-replay
+/// never did.
+///
+/// Call this on every subdag loaded from store before treating it as trustworthy for replay
+/// (see `node::recovery::perform_block_recovery_check` in the `metanode` crate, the confirmed
+/// live trigger for this gap: cold-restart replay of historical commits). On failure, the
+/// correct response is the same "halt rather than guess" principle already used elsewhere in
+/// this codebase for suspected local-data corruption: refuse to replay, defer to the network
+/// catch-up path (`CommitSyncer`), which re-verifies signatures unconditionally and never has
+/// this gap -- never attempt to "fix" or silently drop the offending block locally.
+///
+/// Cheap: pure CPU (Ed25519/BLS verify against `context.committee`, already loaded and
+/// per-epoch-immutable -- no locks, no I/O), microseconds per block.
+pub fn verify_subdag_block_signatures(
+    subdag: &CommittedSubDag,
+    context: &Context,
+) -> ConsensusResult<()> {
+    for block in &subdag.blocks {
+        block.verify_signature(context).map_err(|e| {
+            ConsensusError::StorageFailure(format!(
+                "Signature verification failed for block {:?} loaded from local storage \
+                 (commit {}): {:?} -- local disk data cannot be trusted as-is.",
+                block.reference(),
+                subdag.commit_ref.index,
+                e
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
