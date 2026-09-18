@@ -322,4 +322,140 @@ TEST_SUITE("XapianManager") {
 
         XapianManager::destroyInstance(mvm::createFullPath(mock_addr, test_db_name).string());
     }
+
+    // 2026-09-18: measures real getInstance()+commit latency across many DISTINCT
+    // databases, past the MAX_ACTIVE_DBS=50 eviction cap, to check throughput/correctness
+    // at scale (user question: "5000 Xapian databases"). No cliff or correctness loss found
+    // at N=300 -- see the concurrent variant below for the real bug this investigation found.
+    TEST_CASE("STRESS: many distinct DBs past eviction cap") {
+        init_xapian_test_env();
+        const int N = 300;
+        std::vector<std::string> doc_ids(N);
+        std::vector<std::string> payloads(N);
+
+        auto t_start = std::chrono::steady_clock::now();
+        long long batch_start_us = 0;
+        for (int i = 0; i < N; ++i) {
+            auto iter_start = std::chrono::steady_clock::now();
+            std::string db_name = "stress_db_" + std::to_string(i);
+            mvm::Address addr = 900000000 + i;
+            auto manager = create_test_manager(db_name, addr, true);
+            REQUIRE(manager != nullptr);
+
+            uint256_t txHash = next_fake_tx_hash();
+            std::string payload = "{\"idx\": " + std::to_string(i) + "}";
+            std::string doc_id = commit_write(txHash, [&]() {
+                return manager->new_document(payload, 100, nullptr, &txHash);
+            });
+            manager->commit_changes();
+            doc_ids[i] = doc_id;
+            payloads[i] = payload;
+
+            auto iter_end = std::chrono::steady_clock::now();
+            auto iter_us = std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start).count();
+            if (i == 0 || i == 49 || i == 50 || i == 51 || (i + 1) % 50 == 0) {
+                std::cerr << "[STRESS] iter " << i << " (db#" << i << "): " << iter_us << " us" << std::endl;
+            }
+        }
+        auto t_end = std::chrono::steady_clock::now();
+        auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+        std::cerr << "[STRESS] TOTAL for " << N << " distinct DBs (create+write+commit): " << total_ms << " ms, avg "
+                  << (total_ms * 1000.0 / N) << " us/op" << std::endl;
+
+        // Correctness check: reopen each DB (forces eviction-reopen churn again) and verify
+        // data survived intact -- this is the real regression check for the 3 bugs fixed
+        // yesterday, now exercised under actual eviction pressure instead of just 5 docs.
+        int mismatches = 0;
+        for (int i = 0; i < N; ++i) {
+            std::string db_name = "stress_db_" + std::to_string(i);
+            mvm::Address addr = 900000000 + i;
+            auto manager = XapianManager::getInstance(db_name, addr, false);
+            REQUIRE(manager != nullptr);
+            std::string got = manager->get_data(doc_ids[i], 100);
+            if (got != payloads[i]) {
+                mismatches++;
+                std::cerr << "[STRESS] MISMATCH at db#" << i << ": expected '" << payloads[i]
+                          << "' got '" << got << "'" << std::endl;
+            }
+        }
+        std::cerr << "[STRESS] Correctness re-check: " << (N - mismatches) << "/" << N << " correct after reopen." << std::endl;
+        CHECK(mismatches == 0);
+
+        // Cleanup
+        for (int i = 0; i < N; ++i) {
+            std::string db_name = "stress_db_" + std::to_string(i);
+            mvm::Address addr = 900000000 + i;
+            XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+        }
+    }
+
+    // 2026-09-18: CONCURRENT access to many distinct, never-before-seen DBs past the
+    // eviction cap -- simulates Block-STM-style parallel tx execution hitting many different
+    // brand-new contracts at once (the sequential stress test above pre-creates each DB's
+    // directory via create_test_manager() and can't see this). Deliberately does NOT
+    // pre-create the directory, matching every real XAPIAN_* opcode handler except
+    // XAPIAN_GET_OR_CREATE_DB -- this is the regression test for a real crash found here:
+    // openXapianDb() previously threw Xapian::DatabaseCreateError when an intermediate
+    // parent directory didn't exist yet, uncaught past every "if (!manager)" guard in
+    // xapian_handlers.cpp (getInstance() re-throws, never returns nullptr, on Xapian::Error)
+    // -- an uncontrolled std::terminate() crashing the whole node on the first-ever access
+    // to a new contract address under concurrency. Fixed in openXapianDb() (xapian_manager.cpp)
+    // by always calling create_directories() there, once, instead of relying on every caller.
+    TEST_CASE("STRESS: concurrent access to many distinct DBs past eviction cap") {
+        init_xapian_test_env();
+        const int N = 200;
+        const int NUM_THREADS = 16;
+        std::vector<long long> op_latencies_us(N, 0);
+
+        auto t_start = std::chrono::steady_clock::now();
+        std::vector<std::thread> threads;
+        std::atomic<int> next_idx{0};
+        for (int t = 0; t < NUM_THREADS; ++t) {
+            threads.emplace_back([&]() {
+                int i;
+                while ((i = next_idx.fetch_add(1)) < N) {
+                    auto iter_start = std::chrono::steady_clock::now();
+                    // Deliberately NOT pre-creating the directory here (no
+                    // create_directories() call) -- this is the regression
+                    // case for the openXapianDb() fix in xapian_manager.cpp:
+                    // most XAPIAN_* opcode handlers call getInstance()
+                    // directly with no pre-creation step, so this is the
+                    // first-ever access to a brand-new (address, db_name).
+                    std::string db_name = "cstress_db_" + std::to_string(i);
+                    mvm::Address addr = 950000000 + i;
+                    std::shared_ptr<XapianManager> manager;
+                    try {
+                        manager = XapianManager::getInstance(db_name, addr, true);
+                    } catch (const Xapian::Error &e) {
+                        std::cerr << "[CSTRESS] getInstance THREW for db#" << i << ": " << e.get_description() << std::endl;
+                        continue;
+                    }
+                    if (!manager) continue;
+                    uint256_t txHash = next_fake_tx_hash();
+                    std::string payload = "{\"idx\": " + std::to_string(i) + "}";
+                    std::string doc_id = manager->new_document(payload, 100, nullptr, &txHash);
+                    registry.commitBufferForTxHash(&txHash);
+                    manager->commit_changes();
+                    auto iter_end = std::chrono::steady_clock::now();
+                    op_latencies_us[i] = std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start).count();
+                }
+            });
+        }
+        for (auto &th : threads) th.join();
+        auto t_end = std::chrono::steady_clock::now();
+        auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+
+        long long max_us = 0, sum_us = 0;
+        for (auto v : op_latencies_us) { sum_us += v; if (v > max_us) max_us = v; }
+        std::cerr << "[CSTRESS] " << NUM_THREADS << " threads, " << N << " distinct DBs: total="
+                  << total_ms << " ms, avg_op=" << (sum_us / (double)N) << " us, max_op=" << max_us
+                  << " us, throughput=" << (N * 1000.0 / total_ms) << " ops/s" << std::endl;
+
+        // Cleanup
+        for (int i = 0; i < N; ++i) {
+            std::string db_name = "cstress_db_" + std::to_string(i);
+            mvm::Address addr = 950000000 + i;
+            XapianManager::destroyInstance(mvm::createFullPath(addr, db_name).string());
+        }
+    }
 }

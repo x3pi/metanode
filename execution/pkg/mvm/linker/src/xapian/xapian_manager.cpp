@@ -164,8 +164,25 @@ static Xapian::WritableDatabase openXapianDb(const mvm::Address &addr,
     // underlying constructor directly avoids -Wdeprecated-declarations.
     return Xapian::WritableDatabase(std::string(), Xapian::DB_BACKEND_INMEMORY);
   }
-  return Xapian::WritableDatabase(mvm::createFullPath(addr, db_name).string(),
-                                  Xapian::DB_CREATE_OR_OPEN);
+  // createFullPath() nests 2 levels below g_xapian_base_path
+  // (<base>/<address>/<hashed_dbname>) -- Xapian's glass backend can create
+  // the leaf directory itself on DB_CREATE_OR_OPEN, but NOT missing
+  // intermediate parents (e.g. a brand-new contract address that has never
+  // had an XAPIAN_GET_OR_CREATE_DB call). Only that one opcode handler
+  // pre-creates the path today; every other XAPIAN_* opcode (NEW_DOCUMENT,
+  // SET_DATA_DOCUMENT, ...) calls getInstance() directly and can be the
+  // FIRST call for a given (address, db_name) pair -- confirmed live via a
+  // 16-thread/200-distinct-DB concurrent stress test that reliably threw
+  // Xapian::DatabaseCreateError here, uncaught past every "if (!manager)"
+  // guard in xapian_handlers.cpp since getInstance() re-throws rather than
+  // returning nullptr -- an uncontrolled std::terminate() crashing the
+  // whole node process instead of a graceful per-tx failure. Ensuring the
+  // directory here, once, covers every opcode/call site instead of relying
+  // on each one to remember its own create_directories() pre-step.
+  std::filesystem::path db_path = mvm::createFullPath(addr, db_name);
+  std::error_code ec;
+  std::filesystem::create_directories(db_path, ec);
+  return Xapian::WritableDatabase(db_path.string(), Xapian::DB_CREATE_OR_OPEN);
 }
 
 // Constructor của XapianManager
