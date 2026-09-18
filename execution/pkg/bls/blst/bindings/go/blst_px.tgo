@@ -331,7 +331,15 @@ func P1sToAffine(points []*P1, optional ...int) P1Affines {
         npoints = len(points)
     }
     ret := make([]P1Affine, npoints)
-    _cgoCheckPointer := func(...interface{}) {}
+    // points[:npoints] is a []*P1 -- its backing array holds Go pointers,
+    // so each element must be pinned before &points[0] crosses into C
+    // (see GH issue #125: the disabled _cgoCheckPointer this replaces
+    // silenced exactly the runtime check that would catch this).
+    var pinner runtime.Pinner
+    defer pinner.Unpin()
+    for _, p := range points[:npoints] {
+        pinner.Pin(p)
+    }
     C.blst_p1s_to_affine(&ret[0], &points[0], C.size_t(npoints))
     return ret
 }
@@ -389,7 +397,11 @@ func P1AffinesAdd(points []*P1Affine, optional ...int) *P1 {
         npoints = len(points)
     }
     var ret P1
-    _cgoCheckPointer := func(...interface{}) {}
+    var pinner runtime.Pinner
+    defer pinner.Unpin()
+    for _, p := range points[:npoints] {
+        pinner.Pin(p)
+    }
     C.blst_p1s_add(&ret, &points[0], C.size_t(npoints))
     return &ret
 }
