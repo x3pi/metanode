@@ -577,4 +577,5 @@ deploy/ansible/monitors/node_monitor/vote_monitor
 deploy/ansible/monitors/vote_monitor/vote_monitor
 deploy/ansible/auto_deploy.lock
 deploy/.bin.lock
+deploy/.build.lock
 deploy/.bin_staging.*

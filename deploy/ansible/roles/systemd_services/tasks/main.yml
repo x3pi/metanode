@@ -22,11 +22,29 @@
   loop: "{{ active_nodes | product(['bin', 'config', 'keys', 'data/execution/db/data/xapian_node', 'data/execution/backup', 'data/execution/snapshots', 'data/execution/explorer', 'data/consensus', 'logs/execution', 'logs/consensus']) | list }}"
 
 
-- name: Copy binaries to node bin directory
+- name: Ensure remote staging bin directory exists
+  ansible.builtin.file:
+    path: "{{ remote_deploy_dir }}/bin"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Copy binaries once to remote staging bin directory
   ansible.builtin.copy:
-    src: "{{ ansible_prebuilt_bin_dir | default(project_root + '/deploy/bin') }}/{{ item[1] }}"
-    dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/bin/{{ item[1] }}"
+    src: "{{ (ansible_prebuilt_bin_dir | default(project_root + '/deploy/bin', true)) }}/{{ item }}"
+    dest: "{{ remote_deploy_dir }}/bin/{{ item }}"
     remote_src: no
+    mode: '0755'
+  loop:
+    - metanode
+    - simple_chain
+
+- name: Distribute binaries from remote staging to each node bin directory
+  ansible.builtin.copy:
+    src: "{{ remote_deploy_dir }}/bin/{{ item[1] }}"
+    dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/bin/{{ item[1] }}"
+    remote_src: yes
     owner: metanode
     group: metanode
     mode: '0755'

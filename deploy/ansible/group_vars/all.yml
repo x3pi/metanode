@@ -5,7 +5,8 @@ remote_deploy_dir: "/opt/metanode-deploy"
 metanode_install_dir: "/opt/metanode"
 
 # Operational configuration defaults
-ansible_action: "start"      # 'start' or 'stop'
+# Supported actions: 'deploy', 'setup', 'start', 'stop', 'restart', 'gen_keys', 'open_ports'
+ansible_action: "deploy"
 target_node: "all"           # 'all' or specific node id (e.g. 2)
 keep_data: true              # true or false
 restore_node: "none"         # 'none' or specific node id (e.g. 2)

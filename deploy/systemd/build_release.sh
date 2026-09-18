@@ -25,7 +25,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RELEASE_DIR="$PROJECT_ROOT/metanode-deploy"
 TARBALL_NAME="metanode-deploy.tar.gz"
 DEPLOY_BIN_DIR="$PROJECT_ROOT/deploy/bin"
-# Clean up any leftover staging directories from previous interrupted runs
+
+# Concurrency guard: Serialize builds so concurrent runs do not race on staging directories or compilers
+exec 201> "${PROJECT_ROOT}/deploy/.build.lock"
+flock -x 201
+
+# Clean up any leftover staging directories from previous interrupted runs (safe under build lock)
 rm -rf "${PROJECT_ROOT}/deploy/.bin_staging."* 2>/dev/null || true
 STAGING_BIN_DIR=$(mktemp -d "${PROJECT_ROOT}/deploy/.bin_staging.XXXXXX")
 
@@ -42,6 +47,7 @@ BUILD_FAST=false
 PREBUILT_DIR=""
 DO_BUILD=false
 DO_PACKAGE=false
+RUST_ONLY=false
 export ENABLE_DEBUG_CPP=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -51,6 +57,7 @@ while [[ "$#" -gt 0 ]]; do
         --prebuilt-dir|--bin-dir) PREBUILT_DIR="$2"; shift ;;
         --build-only) DO_BUILD=true ;;
         --package) DO_PACKAGE=true ;;
+        --rust-only) RUST_ONLY=true ;;
         *) log_err "Unknown parameter: $1" ;;
     esac
     shift
@@ -77,7 +84,9 @@ if [ "$DO_PACKAGE" = true ]; then
     command -v tar &>/dev/null || log_err "tar command is missing."
 fi
 if [ "$DO_BUILD" = true ] && [ -z "$PREBUILT_DIR" ]; then
-    command -v go &>/dev/null || log_err "Go compiler is not installed."
+    if [ "$RUST_ONLY" = false ]; then
+        command -v go &>/dev/null || log_err "Go compiler is not installed."
+    fi
     command -v cargo &>/dev/null || log_err "Rust (cargo) is not installed."
 fi
 log_ok "Dependencies met."
@@ -119,34 +128,38 @@ build_binaries() {
         cp "$PROJECT_ROOT/target/$TARGET_DIR/metanode" "$STAGING_BIN_DIR/"
         log_ok "Metanode binary compiled."
 
-        # 1.5. Build EVM Linker (C++)
-        log_step "Building EVM Linker (C++)"
-        cd "$PROJECT_ROOT/execution/pkg/mvm"
-        bash build.sh
-        log_ok "EVM Linker built successfully."
+        if [ "$RUST_ONLY" = false ]; then
+            # 1.5. Build EVM Linker (C++)
+            log_step "Building EVM Linker (C++)"
+            cd "$PROJECT_ROOT/execution/pkg/mvm"
+            bash build.sh
+            log_ok "EVM Linker built successfully."
 
-        # 2. Build Go (Execution & Tools)
-        log_step "Building Go Execution Engine & Tools"
-        cd "$PROJECT_ROOT/execution/cmd/simple_chain"
-        go clean -cache
-        go build -a -o simple_chain .
-        cp simple_chain "$STAGING_BIN_DIR/"
-        log_ok "simple_chain binary compiled."
+            # 2. Build Go (Execution & Tools)
+            log_step "Building Go Execution Engine & Tools"
+            cd "$PROJECT_ROOT/execution/cmd/simple_chain"
+            go clean -cache
+            go build -a -o simple_chain .
+            cp simple_chain "$STAGING_BIN_DIR/"
+            log_ok "simple_chain binary compiled."
 
-        cd "$PROJECT_ROOT/execution"
-        if [ -d "cmd/tool/gen_recovery_committee" ]; then
-            go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
-            cp gen_recovery_committee "$STAGING_BIN_DIR/"
-            log_ok "gen_recovery_committee compiled."
-        fi
-
-        # Tools build (optional but good to have)
-        for tool in cross_chain_relayer register_chains bls_pubkey; do
-            if [ -d "cmd/tool/$tool" ]; then
-                go build -o "$tool" "./cmd/tool/$tool"
-                cp "$tool" "$STAGING_BIN_DIR/"
+            cd "$PROJECT_ROOT/execution"
+            if [ -d "cmd/tool/gen_recovery_committee" ]; then
+                go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
+                cp gen_recovery_committee "$STAGING_BIN_DIR/"
+                log_ok "gen_recovery_committee compiled."
             fi
-        done
+
+            # Tools build (optional but good to have)
+            for tool in cross_chain_relayer register_chains bls_pubkey; do
+                if [ -d "cmd/tool/$tool" ]; then
+                    go build -o "$tool" "./cmd/tool/$tool"
+                    cp "$tool" "$STAGING_BIN_DIR/"
+                fi
+            done
+        else
+            log_info "Skipping C++ and Go builds (--rust-only specified)."
+        fi
     fi
 
     # Create build metadata
@@ -163,16 +176,22 @@ build_binaries() {
 }
 EOF
 
-    # Atomic move
+    # Atomic move or partial update under lock
     log_step "Publishing Binaries to $DEPLOY_BIN_DIR"
     exec 200> "$PROJECT_ROOT/deploy/.bin.lock"
     flock -x 200
-    rm -rf "${DEPLOY_BIN_DIR}_old"
-    if [ -d "$DEPLOY_BIN_DIR" ]; then
-        mv "$DEPLOY_BIN_DIR" "${DEPLOY_BIN_DIR}_old"
+    if [ "$RUST_ONLY" = true ]; then
+        mkdir -p "$DEPLOY_BIN_DIR"
+        cp -p "$STAGING_BIN_DIR/metanode" "$DEPLOY_BIN_DIR/"
+        cp -p "$STAGING_BIN_DIR/.build_metadata" "$DEPLOY_BIN_DIR/" 2>/dev/null || true
+    else
+        rm -rf "${DEPLOY_BIN_DIR}_old"
+        if [ -d "$DEPLOY_BIN_DIR" ]; then
+            mv "$DEPLOY_BIN_DIR" "${DEPLOY_BIN_DIR}_old"
+        fi
+        mv "$STAGING_BIN_DIR" "$DEPLOY_BIN_DIR"
+        rm -rf "${DEPLOY_BIN_DIR}_old"
     fi
-    mv "$STAGING_BIN_DIR" "$DEPLOY_BIN_DIR"
-    rm -rf "${DEPLOY_BIN_DIR}_old"
     flock -u 200
 
     log_ok "Build published successfully to $DEPLOY_BIN_DIR."

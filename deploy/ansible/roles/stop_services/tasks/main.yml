@@ -125,3 +125,22 @@
       không thoát graceful trong 90s, phải SIGKILL. Xem /var/log/metanode/shutdown_times.log để theo dõi xu hướng.
   when: (graceful_exit_wait.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0
 
+- name: Clean up stale unix domain sockets in /tmp (all nodes)
+  ansible.builtin.shell: |
+    rm -f /tmp/executor*.sock /tmp/rust-go-*.sock /tmp/metanode-tx-*.sock 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  when: target_node | default('all') == 'all'
+  failed_when: false
+  changed_when: false
+
+- name: Clean up targeted node unix domain sockets in /tmp
+  ansible.builtin.shell: |
+    rm -f /tmp/executor*{{ item }}*.sock /tmp/rust-go-*{{ item }}*.sock /tmp/metanode-tx-*{{ item }}*.sock 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  loop: "{{ active_nodes }}"
+  when: target_node | default('all') != 'all'
+  failed_when: false
+  changed_when: false
+

@@ -515,6 +515,7 @@ if [[ "$ACTION" == "setup" || "$ACTION" == "deploy" || "$ACTION" == "gen_keys" ]
         BUILD_ARGS=("--build-only")
         if [[ "$FAST" == "true" ]]; then BUILD_ARGS+=("--fast"); fi
         if [[ "$DEBUG_CPP" == "true" ]]; then BUILD_ARGS+=("--debug-cpp"); fi
+        if [[ "$ACTION" == "gen_keys" ]]; then BUILD_ARGS+=("--rust-only"); fi
 
         if ! bash "${SCRIPT_DIR}/../systemd/build_release.sh" "${BUILD_ARGS[@]}"; then
             echo -e "\033[0;31m❌ [LỖI DỪNG THỰC THI] Quá trình biên dịch thất bại!\033[0m"
