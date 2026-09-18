@@ -98,6 +98,33 @@ std::shared_ptr<XapianManager> XapianManager::getInstance(const std::string &db_
         return it->second;
     }
 
+    // --- BẮT ĐẦU HANDLE EVICTION ---
+    constexpr size_t MAX_ACTIVE_DBS = 50;
+    std::vector<std::pair<std::chrono::steady_clock::time_point, std::shared_ptr<XapianManager>>> candidates;
+    for (const auto& pair : instances) {
+        // FORK-SAFETY / DATA-LOSS FIX: is_evictable() must gate this -- an instance can have
+        // use_count()==1 (no active caller holding it right now) while still carrying
+        // uncommitted Xapian writes staged between two commit points (tx_buffers /
+        // comprehensive_log / has_uncommitted_writes). Closing its db handle in that state
+        // (evict_handles() -> db.close()) discards those uncommitted writes -- Xapian does not
+        // persist a WritableDatabase's pending changes across close(), and ensure_db_open()'s
+        // later reopen only reads back the last COMMITTED state from disk, with no log replay.
+        if (pair.second && pair.second.use_count() == 1 && pair.second->is_db_open
+            && pair.second->is_evictable()) {
+            candidates.push_back({pair.second->last_access_time, pair.second});
+        }
+    }
+    
+    if (candidates.size() >= MAX_ACTIVE_DBS) {
+        std::sort(candidates.begin(), candidates.end(), 
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+        size_t to_evict = (candidates.size() - MAX_ACTIVE_DBS) + 1;
+        for (size_t i = 0; i < to_evict; ++i) {
+            candidates[i].second->evict_handles();
+        }
+    }
+    // --- KẾT THÚC HANDLE EVICTION ---
+
     try
     {
         auto new_instance = std::make_shared<XapianManager>(db_name, addr);
@@ -393,10 +420,17 @@ bool XapianManager::is_idle_for(std::chrono::minutes duration) {
       std::chrono::duration_cast<std::chrono::minutes>(now - last_access_time);
   return idle_duration >= duration;
 }
+
+bool XapianManager::is_evictable() const {
+  std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(tx_buffers_mutex));
+  return tx_buffers.empty() && comprehensive_log.xapian_doc_logs.empty() && !has_uncommitted_writes.load();
+}
+
 // Dump tất cả tài liệu trong database với đầy đủ thông tin để debug
 void XapianManager::dump_all_documents(uint256_t blockNumber) {
   touch();
   try {
+    ensure_db_open();
     std::cerr << "\n========== [DEBUG DUMP] Database: " << db_name
               << " (At Block: " << mvm::uint256_to_double(blockNumber)
               << ") ==========" << std::endl;
@@ -606,6 +640,7 @@ Xapian::Document XapianManager::get_overlayed_document(const std::string& virtua
     bool found = false;
     
     try {
+        ensure_db_open();
         Xapian::docid did = resolveVirtualDocId(virtualDocId, search_db);
         if (did != 0) {
             if (search_db != nullptr) {
@@ -800,11 +835,22 @@ std::vector<std::string> XapianManager::get_terms(const std::string& virtualDocI
 // Commit các thay đổi đã được staged vào database Xapian
 bool XapianManager::commit_changes() {
   touch(); // Cập nhật thời gian truy cập
-  std::lock_guard<std::shared_mutex> lock(changes_mutex);
+  std::lock_guard<std::shared_mutex> lock_changes(changes_mutex);
   bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
   if (!has_writes && comprehensive_log.xapian_doc_logs.empty()) {
     return true; // Không có thay đổi nào cần commit -> Thoát ngay lập tức (zero-cost)
   }
+  // SELF-DEADLOCK FIX: ensure_db_open() takes db_mutex itself (unconditionally, even
+  // when no reopen is actually needed) -- it MUST run here, before we take our own
+  // db_mutex below, not after. Calling it while already holding db_mutex (the previous
+  // code had both in the same scope) is a non-recursive std::mutex re-lock by the same
+  // thread, which blocks forever. Confirmed live via gdb: this deadlocked on the very
+  // first real commit_changes() call with pending writes (the has_writes early-return
+  // above is the only path that ever skipped it before). Safe to call here, still
+  // outside our own db_mutex: this instance can't be concurrently evicted while we
+  // already hold changes_mutex (evict_handles() takes changes_mutex first too).
+  ensure_db_open();
+  std::lock_guard<std::mutex> lock(db_mutex);
   try {
     db.commit(); // Thực hiện commit Xapian (áp dụng cả comprehensive_log và replay_log)
     comprehensive_log.xapian_doc_logs.clear(); // Xóa các log đã staged sau khi commit thành công
@@ -916,6 +962,7 @@ bool XapianManager::compactInPlace(size_t minSizeBytes, std::chrono::minutes min
     return false; // Not worth the I/O yet.
   }
 
+  ensure_db_open();
   std::filesystem::path tmp_path = full_path;
   tmp_path += ".compact_tmp";
   std::filesystem::path backup_path = full_path;
@@ -1067,6 +1114,7 @@ size_t XapianManager::pruneOldVersions(uint64_t currentBlockHeight, uint64_t ret
     return 0;
   }
 
+  ensure_db_open();
   std::vector<Xapian::docid> to_delete;
   try {
     // valuestream_begin(254): by construction, ONLY documents that have a
@@ -1391,6 +1439,7 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
         undo_snapshot_[nid] = std::nullopt; // did not exist before this batch
     };
 
+    ensure_db_open();
     auto get_or_load_doc = [&](const std::string& v_docid) -> Xapian::Document& {
         std::string nid = normalize_docid(v_docid);
         capture_undo_if_needed(nid);
@@ -1506,7 +1555,8 @@ bool XapianManager::replay_log(const std::vector<XapianLog::LogEntry> &log_to_re
 // Khôi phục trạng thái về lần commit cuối cùng bằng cách xóa log staged và mở
 // lại DB
 bool XapianManager::revertUncommittedChanges() {
-  std::unique_lock<std::shared_mutex> lock(changes_mutex); // Khóa để thao tác an toàn
+  std::unique_lock<std::shared_mutex> lock_changes(changes_mutex); // Khóa để thao tác an toàn
+  std::lock_guard<std::mutex> lock(db_mutex);
   bool has_writes = has_uncommitted_writes.load(std::memory_order_acquire);
   
   // FORK-SAFETY: Return immediately if there are no uncommitted changes
@@ -1704,4 +1754,46 @@ XapianLog::ComprehensiveLog XapianManager::removeLogsUntilNearestEndCommand()
     std::lock_guard<std::shared_mutex> lock(changes_mutex);
     comprehensive_log.removeLogsUntilNearestEndCommand();
     return comprehensive_log;
+}
+void XapianManager::ensure_db_open() {
+    if (mvm::IsXapianBasePathEmpty()) return;
+    std::lock_guard<std::mutex> lock(db_mutex);
+    if (!is_db_open) {
+        try {
+            db = openXapianDb(address, db_name);
+            is_db_open = true;
+        } catch (...) {}
+    }
+}
+
+void XapianManager::evict_handles() {
+    if (mvm::IsXapianBasePathEmpty()) return;
+    std::unique_lock<std::shared_mutex> ch_lock(changes_mutex);
+    std::lock_guard<std::mutex> lock(db_mutex);
+    if (is_db_open) {
+        try { db.close(); } catch (...) {}
+        is_db_open = false;
+    }
+    
+    {
+        std::lock_guard<std::mutex> s_lock(search_pool.pool_mutex);
+        for (size_t i = 0; i < search_pool.pool.size(); ++i) {
+            if (!search_pool.in_use[i] && search_pool.pool[i]) {
+                try { search_pool.pool[i]->close(); } catch (...) {}
+                delete search_pool.pool[i];
+                search_pool.pool[i] = nullptr;
+            }
+        }
+    }
+    
+    {
+        std::lock_guard<std::mutex> r_lock(simple_read_pool.pool_mutex);
+        for (size_t i = 0; i < simple_read_pool.pool.size(); ++i) {
+            if (!simple_read_pool.in_use[i] && simple_read_pool.pool[i]) {
+                try { simple_read_pool.pool[i]->close(); } catch (...) {}
+                delete simple_read_pool.pool[i];
+                simple_read_pool.pool[i] = nullptr;
+            }
+        }
+    }
 }
