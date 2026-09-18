@@ -100,6 +100,43 @@ cmd_stop() {
     fi
 }
 
+cmd_help() {
+    cat << 'EOF'
+🚀 Git Auto-Rebuild & Deploy Daemon for Metanode
+
+CÚ PHÁP:
+    ./auto_rebuild_deploy.sh [LỆNH | TÙY CHỌN]
+
+LỆNH ĐIỀU KHIỂN:
+    start                  Khởi động watcher chạy ngầm (daemon)
+    stop                   Dừng watcher và dọn dẹp sạch sẽ
+    status                 Xem trạng thái hoạt động của watcher
+    logs                   Xem log thời gian thực (tail -f)
+    help, -h, --help       Hiển thị hướng dẫn này
+
+TÙY CHỌN KHỞI ĐỘNG:
+    --immediate, --now     ⚡ Kích hoạt deploy ngay lập tức khi kéo code mới về và build check pass (không hẹn giờ)
+    --at <HH:MM>           🕒 Hẹn giờ deploy (mặc định: 21:00 giờ Việt Nam Asia/Ho_Chi_Minh)
+    --branch <tên_nhánh>   Chỉ định nhánh git cần theo dõi (mặc định: main)
+    --initial-deploy       Kích hoạt deploy ngay 1 lần lúc vừa bật watcher
+    -d, --daemon           Chạy dưới dạng tiến trình ngầm (tương đương lệnh 'start')
+
+VÍ DỤ SỬ DỤNG:
+    # 1. Chế độ deploy ngay lập tức (kéo commit về -> build check pass -> deploy restart ngay):
+    ./auto_rebuild_deploy.sh start --immediate
+    (hoặc: ./auto_rebuild_deploy.sh start --now)
+
+    # 2. Chạy hẹn giờ mặc định 21:00 tối:
+    ./auto_rebuild_deploy.sh start
+
+    # 3. Hẹn giờ lúc 23:30:
+    ./auto_rebuild_deploy.sh start --at 23:30
+
+    # 4. Kiểm tra trạng thái:
+    ./auto_rebuild_deploy.sh status
+EOF
+}
+
 cmd_status() {
     echo "=========================================================="
     echo "📊 TRẠNG THÁI GIT AUTO-DEPLOY WATCHER"
@@ -108,6 +145,15 @@ cmd_status() {
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null | xargs)
         echo "🟢 Trạng thái       : ĐANG CHẠY (PID: $pid)"
+        local cmdline
+        cmdline=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+        if echo "$cmdline" | grep -q -- "--immediate"; then
+            echo "⚡ Chế độ deploy    : NGAY LẬP TỨC (--immediate)"
+        elif echo "$cmdline" | grep -oE -- "--at [0-9:]+" >/dev/null 2>&1; then
+            local at_val
+            at_val=$(echo "$cmdline" | grep -oE -- "--at [0-9:]+" | awk '{print $2}')
+            echo "⏰ Lịch hẹn deploy  : 🕒 ${at_val} (Asia/Ho_Chi_Minh)"
+        fi
     else
         echo "🔴 Trạng thái       : ĐÃ DỪNG"
     fi
@@ -143,12 +189,17 @@ case "${1:-}" in
         cmd_logs
         exit 0
         ;;
+    help|-h|--help)
+        cmd_help
+        exit 0
+        ;;
 esac
 
 # Check for flags
 DAEMON_MODE=false
 FORCE_INITIAL_DEPLOY=false
 CUSTOM_BRANCH=""
+IS_IMMEDIATE=false
 SCHEDULE_AT="21:00"
 args=()
 
@@ -158,17 +209,32 @@ while [ $# -gt 0 ]; do
             DAEMON_MODE=true
             shift
             ;;
+        --immediate|--now|--no-schedule)
+            IS_IMMEDIATE=true
+            SCHEDULE_AT=""
+            shift
+            ;;
         --initial-deploy)
             FORCE_INITIAL_DEPLOY=true
             shift
             ;;
         --at|--schedule)
-            SCHEDULE_AT="$2"
+            if [ -z "${2:-}" ] || [ "${2:-}" = "none" ] || [ "${2:-}" = "false" ]; then
+                IS_IMMEDIATE=true
+                SCHEDULE_AT=""
+            else
+                SCHEDULE_AT="$2"
+                IS_IMMEDIATE=false
+            fi
             shift 2
             ;;
         --branch)
             CUSTOM_BRANCH="$2"
             shift 2
+            ;;
+        -h|--help|help)
+            cmd_help
+            exit 0
             ;;
         stop)
             cmd_stop
@@ -206,7 +272,9 @@ if [ "$DAEMON_MODE" = true ]; then
     if [ -n "$CUSTOM_BRANCH" ]; then
         CHILD_ARGS+=(--branch "$CUSTOM_BRANCH")
     fi
-    if [ -n "$SCHEDULE_AT" ]; then
+    if [ "$IS_IMMEDIATE" = true ] || [ -z "$SCHEDULE_AT" ]; then
+        CHILD_ARGS+=(--immediate)
+    else
         CHILD_ARGS+=(--at "$SCHEDULE_AT")
     fi
     if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
@@ -335,6 +403,9 @@ if [ -n "$SCHEDULE_AT" ]; then
     else
         echo "⚠️ Định dạng thời gian --at không hợp lệ: $SCHEDULE_AT (Ví dụ: --at 21:00)"
     fi
+else
+    echo "⚡ Chế độ: KÍCH HOẠT DEPLOY NGAY LẬP TỨC (--immediate)"
+    echo "💡 Watcher sẽ kiểm tra remote liên tục mỗi ${CHECK_INTERVAL}s. Khi có commit mới -> Kéo về -> Build Check -> Deploy & restart chain ngay nếu pass."
 fi
 
 if [ "$FORCE_INITIAL_DEPLOY" = true ] && [ -z "$SCHEDULE_AT" ]; then
@@ -458,12 +529,19 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
                 
                 # Nếu không đặt lịch hẹn (--at rỗng) và build pass -> Deploy ngay
                 if [ -z "$SCHEDULE_AT" ] && [ "$BUILD_VERIFIED" = true ]; then
-                    export DEPLOY_SOURCE="Auto-Deploy (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
+                    export DEPLOY_SOURCE="Auto-Deploy Immediate (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
                     echo "🚀 Kích hoạt build & deploy hệ thống ngay lập tức..."
+                    send_telegram_notification "🚀 <b>[Kích Hoạt Deploy Ngay Lập Tức]</b>
+Commit <code>${NEW_LOCAL_HASH:0:8}</code> đã vượt qua Build Check!
+Đang tiến hành biên dịch và restart toàn bộ cụm node...
+• <b>Tác giả:</b> ${COMMIT_AUTHOR}
+• <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
                     cd "$ANSIBLE_DIR"
                     ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}
                     echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
                     cd "$PROJECT_ROOT"
+                    send_telegram_notification "✅ <b>[Deploy Hoàn Tất]</b>
+Cụm node đã được cập nhật thành công lên commit <code>${NEW_LOCAL_HASH:0:8}</code>!"
                 fi
             else
                 if [ "$HAS_UNSTAGED" = true ]; then
