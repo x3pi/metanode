@@ -45,6 +45,9 @@ public:
   static void commitAllInstances();
   // --- Member Variables ---
   Xapian::WritableDatabase db;
+  bool is_db_open = true; // Theo dõi trạng thái của file descriptor db
+  void ensure_db_open();
+  void evict_handles();
   mutable std::shared_mutex changes_mutex; // shared_mutex: cho phép nhiều reader song song, exclusive khi write/commit
 
   // --- Search Database Pool ---
@@ -129,6 +132,7 @@ public:
   // --- Idle Management ---
   void touch();
   bool is_idle_for(std::chrono::minutes duration);
+  bool is_evictable() const;
   // onlyIfIdle=true: re-kiểm tra idle/refcount một cách atomic (dưới cùng 1
   // lock với việc erase khỏi map) trước khi hủy, để tránh race giữa lúc
   // caller khác quyết định huỷ và lúc thực sự huỷ (TOCTOU).
