@@ -110,7 +110,102 @@ fi
 # ==============================================================================
 # 1. NEW CLI PARSER & LEGACY ADAPTER (PHASE 1)
 # ==============================================================================
-COMMAND=""
+# ==============================================================================
+# 1. LEGACY ARGUMENT ADAPTER (Rewriting / Translation Layer)
+# ==============================================================================
+if [[ $# -gt 0 ]] && [[ "$1" == --* && "$1" != "--help" && "$1" != "-h" ]]; then
+    echo -e "\033[0;33m⚠️  [LEGACY ADAPTER] Đang sử dụng cú pháp cờ cũ. Khuyến nghị chuyển sang cú pháp subcommand mới.\033[0m"
+
+    LEGACY_CMD=""
+    HAS_TARGET="false"
+    NEW_ARGS=()
+    ACTION_COUNT=0
+    STANDALONE_OPEN_PORTS="false"
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --start)       LEGACY_CMD="deploy"; ACTION_COUNT=$((ACTION_COUNT+1)) ;;
+            --stop)        LEGACY_CMD="stop"; ACTION_COUNT=$((ACTION_COUNT+1)) ;;
+            --restart)     LEGACY_CMD="restart"; ACTION_COUNT=$((ACTION_COUNT+1)) ;;
+            --reset-all)   LEGACY_CMD="reset-all"; NEW_ARGS+=(--yes-reset-all --overwrite); ACTION_COUNT=$((ACTION_COUNT+1)) ;;
+            --gen-keys)    LEGACY_CMD="gen-keys"; ACTION_COUNT=$((ACTION_COUNT+1)) ;;
+            --open-ports)  STANDALONE_OPEN_PORTS="true" ;;
+            --restore-node)
+                LEGACY_CMD="restore"; ACTION_COUNT=$((ACTION_COUNT+1))
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu node cho restore\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--node "$2"); HAS_TARGET="true"; shift
+                ;;
+            --only-node)
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu node cho --only-node\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--node "$2"); HAS_TARGET="true"; shift
+                ;;
+            --snapshot-url)
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu URL cho --snapshot-url\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--snapshot-url "$2"); shift
+                ;;
+            --btrfs-size)
+                if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu kích thước cho --btrfs-size\033[0m" >&2; exit 1; fi
+                NEW_ARGS+=(--btrfs-size "$2"); shift
+                ;;
+            --bin-dir|--prebuilt-bin|--use-prebuilt)
+                if [[ $# -gt 1 && ! "$2" =~ ^-- ]]; then
+                    NEW_ARGS+=(--bin-dir "$2"); shift
+                else
+                    NEW_ARGS+=(--bin-dir "${SCRIPT_DIR}/../bin")
+                fi
+                ;;
+            --skip-build)  NEW_ARGS+=(--bin-dir "${SCRIPT_DIR}/../bin") ;;
+            --fast)        NEW_ARGS+=(--fast) ;;
+            --debug-cpp)   NEW_ARGS+=(--debug-cpp) ;;
+            --overwrite)   NEW_ARGS+=(--overwrite) ;;
+            --clean)
+                echo -e "\033[0;31m❌ [LỖI] Flag --clean độc lập đã bị loại bỏ. Hãy dùng lệnh 'reset-data' hoặc 'reset-all' tùy mục đích.\033[0m" >&2
+                exit 1
+                ;;
+            --all-monitors|--monitor-all)
+                echo -e "\033[0;31m❌ [LỖI] Legacy flags --all-monitors không còn được hỗ trợ ngầm định. Vui lòng dùng lệnh 'monitors' riêng.\033[0m" >&2
+                exit 1
+                ;;
+            *)
+                echo -e "\033[0;31m❌ [LỖI] Cờ legacy không hợp lệ: $1\033[0m" >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    # Xử lý cờ --open-ports (nếu đi kèm action khác như --start thì thành option --open-ports; nếu đứng một mình thì thành command open-ports)
+    if [[ "$STANDALONE_OPEN_PORTS" == "true" ]]; then
+        if [[ -n "$LEGACY_CMD" ]]; then
+            NEW_ARGS+=(--open-ports)
+        else
+            LEGACY_CMD="open-ports"
+            ACTION_COUNT=$((ACTION_COUNT+1))
+        fi
+    fi
+
+    if [[ $ACTION_COUNT -gt 1 ]]; then
+        echo -e "\033[0;31m❌ [LỖI] Các tham số legacy xung đột nhau. Không thể kết hợp nhiều hành động chính.\033[0m" >&2
+        exit 1
+    fi
+    if [[ -z "$LEGACY_CMD" ]]; then
+        echo -e "\033[0;31m❌ [LỖI] Không có action chính nào được chỉ định.\033[0m" >&2
+        exit 1
+    fi
+
+    # Ngầm định tác động toàn cụm (--all) cho các lệnh cluster nếu caller không chỉ định --only-node
+    if [[ "$HAS_TARGET" == "false" ]] && [[ "$LEGACY_CMD" =~ ^(deploy|start|stop|restart|open-ports)$ ]]; then
+        NEW_ARGS+=(--all)
+    fi
+
+    # Ghi đè lại mảng positional parameters (ARGV rewrite)
+    set -- "$LEGACY_CMD" "${NEW_ARGS[@]}"
+fi
+
+# ==============================================================================
+# 2. UNIFIED STRICT CLI PARSER & VALIDATOR (Single Source of Truth)
+# ==============================================================================
+COMMAND="${1:-}"
 TARGET_NODE=""
 ALL_NODES="false"
 INVENTORY="${SCRIPT_DIR}/inventory.yml"
@@ -122,150 +217,51 @@ BTRFS_SIZE_VAL=""
 WITH_FIREWALL="false"
 OVERWRITE="false"
 YES_RESET_ALL="false"
-LGC_CLEAN="false"
 
-# Kiểm tra Legacy Adapter
-IS_LEGACY="false"
-if [[ $# -gt 0 ]] && [[ "$1" == --* && "$1" != "--help" && "$1" != "-h" ]]; then
-    IS_LEGACY="true"
-fi
+shift || true
 
-if [[ "$IS_LEGACY" == "true" ]]; then
-    # Legacy parser
-    LGC_START="false"
-    LGC_RESTART="false"
-    LGC_RESET="false"
-    LGC_STOP="false"
-    LGC_GEN_KEYS="false"
-    LGC_CLEAN="false"
-    LGC_OPEN_PORTS="false"
-    LGC_RESTORE="false"
+case "$COMMAND" in
+    deploy|start|stop|restart|restore|reset-data|reset-all|gen-keys|open-ports|monitors|build) ;;
+    -h|--help|help|"") COMMAND="help" ;;
+    *) echo -e "\033[0;31m❌ [LỖI] Command không hợp lệ: $COMMAND\033[0m"; exit 1 ;;
+esac
 
-    while [[ "$#" -gt 0 ]]; do
-        case $1 in
-            --start) LGC_START="true" ;;
-            --restart) LGC_RESTART="true" ;;
-            --reset-all) LGC_RESET="true" ;;
-            --stop) LGC_STOP="true" ;;
-            --clean) LGC_CLEAN="true" ;;
-            --gen-keys) LGC_GEN_KEYS="true" ;;
-            --only-node) TARGET_NODE="$2"; shift ;;
-            --restore-node) RESTORE_NODE="$2"; LGC_RESTORE="true"; shift ;;
-            --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
-            --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
-            --open-ports) LGC_OPEN_PORTS="true" ;;
-            --fast) FAST="true" ;;
-            --debug-cpp) DEBUG_CPP="true" ;;
-            --overwrite) OVERWRITE="true" ;;
-            --all-monitors|--monitor-all) echo -e "\033[0;31m❌ [LỖI] Legacy flags --all-monitors không còn được hỗ trợ ngầm định. Vui lòng dùng lệnh 'monitors' riêng.\033[0m"; exit 1 ;;
-            --bin-dir|--prebuilt-bin|--use-prebuilt)
-                if [[ "$#" -gt 1 && ! "$2" =~ ^-- ]]; then
-                    BIN_DIR="$2"
-                    shift
-                else
-                    BIN_DIR="${SCRIPT_DIR}/../bin"
-                fi
-                ;;
-            --skip-build) BIN_DIR="${SCRIPT_DIR}/../bin" ;;
-            *) echo -e "\033[0;31m❌ [LỖI] Cờ legacy không hợp lệ: $1\033[0m"; exit 1 ;;
-        esac
-        shift
-    done
-
-    # Resolve legacy actions
-    ACTION_COUNT=0
-    [[ "$LGC_RESET" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-    [[ "$LGC_RESTORE" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-    [[ "$LGC_GEN_KEYS" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-    [[ "$LGC_STOP" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-    [[ "$LGC_RESTART" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-    [[ "$LGC_START" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
-
-    if [[ $ACTION_COUNT -gt 1 ]]; then
-        echo -e "\033[0;31m❌ [LỖI] Các tham số legacy xung đột nhau. Không thể kết hợp nhiều hành động chính (ví dụ: --start và --clean độc lập là không hợp lệ nếu --clean không đi chung --start trong kịch bản legacy, hoặc --stop và --reset-all).\033[0m"
-        exit 1
-    fi
-
-    if [[ "$LGC_RESET" == "true" ]]; then
-        COMMAND="reset-all"
-        YES_RESET_ALL="true"
-        OVERWRITE="true"
-        if [[ -n "$TARGET_NODE" ]]; then
-            echo -e "\033[0;31m❌ [LỖI] --reset-all --only-node N không còn được hỗ trợ để đảm bảo an toàn.\033[0m"
-            exit 1
-        fi
-    elif [[ "$LGC_RESTORE" == "true" ]]; then
-        if [[ -n "$TARGET_NODE" && "$TARGET_NODE" != "$RESTORE_NODE" ]]; then
-            echo -e "\033[0;31m❌ [LỖI] Xung đột giữa --restore-node và --only-node.\033[0m"
-            exit 1
-        fi
-        COMMAND="restore"
-        if [[ -z "$RESTORE_NODE" ]]; then echo -e "\033[0;31m❌ Thiếu node cho restore\033[0m"; exit 1; fi
-        TARGET_NODE="$RESTORE_NODE"
-    elif [[ "$LGC_GEN_KEYS" == "true" ]]; then
-        COMMAND="gen-keys"
-    elif [[ "$LGC_STOP" == "true" ]]; then
-        COMMAND="stop"
-        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
-    elif [[ "$LGC_RESTART" == "true" ]]; then
-        COMMAND="restart"
-        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
-    elif [[ "$LGC_START" == "true" ]]; then
-        COMMAND="deploy"
-        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
-    elif [[ "$LGC_OPEN_PORTS" == "true" ]]; then
-        COMMAND="open-ports"
-        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
-    elif [[ "$LGC_CLEAN" == "true" ]]; then
-        echo -e "\033[0;31m❌ [LỖI] Flag --clean độc lập đã bị loại bỏ. Hãy dùng lệnh 'reset-data' hoặc 'reset-all' tùy mục đích.\033[0m"
-        exit 1
-    else
-        echo -e "\033[0;31m❌ [LỖI] Không có action chính nào được chỉ định.\033[0m"
-        exit 1
-    fi
-
-    if [[ "$LGC_CLEAN" == "true" ]] && [[ "$COMMAND" == "deploy" ]]; then
-        # Handled in the strict mapping block
-        true
-    fi
-    if [[ "$LGC_OPEN_PORTS" == "true" ]]; then
-        WITH_FIREWALL="true"
-    fi
-else
-    # New strict parser
-    COMMAND="${1:-}"
-    shift || true
-
-    case "$COMMAND" in
-        deploy|start|stop|restart|restore|reset-data|reset-all|gen-keys|open-ports|monitors|build) ;;
-        -h|--help|help|"") COMMAND="help" ;;
-        *) echo -e "\033[0;31m❌ [LỖI] Command không hợp lệ: $COMMAND\033[0m"; exit 1 ;;
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --inventory)
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho --inventory\033[0m"; exit 1; fi
+            INVENTORY="$2"; shift
+            ;;
+        --node)
+            if [[ -n "$TARGET_NODE" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --node bị lặp lại.\033[0m"; exit 1; fi
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu giá trị cho --node\033[0m"; exit 1; fi
+            TARGET_NODE="$2"; shift
+            ;;
+        --all)
+            if [[ "$ALL_NODES" == "true" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --all bị lặp lại.\033[0m"; exit 1; fi
+            ALL_NODES="true"
+            ;;
+        --bin-dir)
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu đường dẫn cho --bin-dir\033[0m"; exit 1; fi
+            BIN_DIR="$2"; shift
+            ;;
+        --fast) FAST="true" ;;
+        --debug-cpp) DEBUG_CPP="true" ;;
+        --snapshot-url)
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu URL cho --snapshot-url\033[0m"; exit 1; fi
+            SNAPSHOT_URL="$2"; shift
+            ;;
+        --btrfs-size)
+            if [[ $# -lt 2 || "$2" =~ ^-- ]]; then echo -e "\033[0;31m❌ Thiếu giá trị cho --btrfs-size\033[0m"; exit 1; fi
+            BTRFS_SIZE_VAL="$2"; shift
+            ;;
+        --open-ports) WITH_FIREWALL="true" ;;
+        --overwrite) OVERWRITE="true" ;;
+        --yes-reset-all) YES_RESET_ALL="true" ;;
+        *) echo -e "\033[0;31m❌ [LỖI] Option không hợp lệ hoặc sai vị trí: $1\033[0m"; exit 1 ;;
     esac
-
-    while [[ "$#" -gt 0 ]]; do
-        case $1 in
-            --inventory) INVENTORY="$2"; shift ;;
-            --node)
-                if [[ -n "$TARGET_NODE" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --node bị lặp lại.\033[0m"; exit 1; fi
-                TARGET_NODE="$2"; shift
-                ;;
-            --all)
-                if [[ "$ALL_NODES" == "true" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --all bị lặp lại.\033[0m"; exit 1; fi
-                ALL_NODES="true"
-                ;;
-            --bin-dir) BIN_DIR="$2"; shift ;;
-            --fast) FAST="true" ;;
-            --debug-cpp) DEBUG_CPP="true" ;;
-            --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
-            --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
-            --open-ports) WITH_FIREWALL="true" ;;
-            --overwrite) OVERWRITE="true" ;;
-            --yes-reset-all) YES_RESET_ALL="true" ;;
-            *) echo -e "\033[0;31m❌ [LỖI] Option không hợp lệ hoặc sai vị trí: $1\033[0m"; exit 1 ;;
-        esac
-        shift
-    done
-fi
+    shift
+done
 
 if [[ "$COMMAND" == "help" ]]; then
     echo "Usage: $0 <command> [options]"
@@ -332,7 +328,6 @@ case "$COMMAND" in
     deploy)
         ACTION="deploy"
         KEEP_DATA="true"
-        if [[ "$LGC_CLEAN" == "true" ]]; then KEEP_DATA="false"; fi
         if [[ "$WITH_FIREWALL" == "true" ]]; then OPEN_PORTS="true"; fi
         ;;
     start)
