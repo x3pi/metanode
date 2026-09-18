@@ -13,6 +13,13 @@
 # paths started resolving through the wrong mount, so it could never find/serve a snapshot.
 # Removed: redundant with node_setup and actively broke the cluster when it ran.
 
+- name: Ensure cluster directory exists for scripts
+  ansible.builtin.file:
+    path: "{{ remote_deploy_dir }}/cluster"
+    state: directory
+    mode: '0755'
+  when: "restore_node is defined and restore_node != ''"
+
 - name: Sync latest restore_snapshot_systemd script
   ansible.builtin.copy:
     src: "{{ deploy_dir }}/cluster/restore_snapshot_systemd.sh"

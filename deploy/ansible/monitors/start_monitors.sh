@@ -56,8 +56,8 @@ INV_PATH=$(get_inv_path)
 PARSE_PY=$(get_parse_py)
 
 if [ -n "$INV_PATH" ]; then
-    BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
-    CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+    BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+    CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
     if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
     if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
 fi
@@ -296,8 +296,8 @@ if [ "${1:-}" == "--all-hosts" ] || [ "${1:-}" == "--all" ] || [ "${1:-}" == "--
     fi
 
     if [ -n "$INV_PATH" ]; then
-        BOT_TOKEN=$(grep -E '^\s*telegram_bot_token:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
-        CHAT_ID=$(grep -E '^\s*telegram_chat_id:' "$INV_PATH" | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g')
+        BOT_TOKEN=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        CHAT_ID=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$INV_PATH" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
         if [ -n "$BOT_TOKEN" ]; then export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"; fi
         if [ -n "$CHAT_ID" ]; then export TELEGRAM_CHAT_ID="$CHAT_ID"; fi
     fi

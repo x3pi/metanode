@@ -28,13 +28,13 @@ load_telegram_config() {
         chat_id=$(grep -E '^\s*TELEGRAM_CHAT_ID=' "$env_file" 2>/dev/null | head -n 1 | cut -d'=' -f2- | tr -d '"\r' || true)
     fi
     if [ -z "$token" ] && [ -f "${ANSIBLE_DIR}/inventory.yml" ]; then
-        token=$(grep -E '^\s*telegram_bot_token:' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-        chat_id=$(grep -E '^\s*telegram_chat_id:' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
     fi
     [ -n "$token" ] && TELEGRAM_BOT_TOKEN="$token"
     [ -n "$chat_id" ] && TELEGRAM_CHAT_ID="$chat_id"
     export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-""}"
-    export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-"-1003867050625"}"
+    export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-""}"
 }
 
 send_telegram_notification() {
@@ -212,10 +212,18 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --at|--schedule)
-            SCHEDULE_AT="${2:-}"
+            if [ $# -lt 2 ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ [LỖI] Cờ $1 yêu cầu giá trị thời gian (ví dụ: --at 21:00)" >&2
+                exit 1
+            fi
+            SCHEDULE_AT="$2"
             shift 2
             ;;
         --branch)
+            if [ $# -lt 2 ] || [[ "$2" =~ ^-- ]]; then
+                echo "❌ [LỖI] Cờ $1 yêu cầu tên nhánh git (ví dụ: --branch dev)" >&2
+                exit 1
+            fi
             CUSTOM_BRANCH="$2"
             shift 2
             ;;
@@ -292,7 +300,7 @@ fi
 echo "$$" > "$PID_FILE"
 trap 'rm -f "$PID_FILE" "$LOCK_FILE"' EXIT INT TERM
 
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 1
 
 # Auto-detect current active branch if not specified (defaults to main)
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
@@ -396,9 +404,9 @@ fi
 
 if [ "$FORCE_INITIAL_DEPLOY" = true ] && [ -z "$SCHEDULE_AT" ]; then
     echo "🚀 Performing initial deployment as requested via --initial-deploy..."
-    cd "$ANSIBLE_DIR"
+    cd "$ANSIBLE_DIR" || exit 1
     export DEPLOY_SOURCE="Auto-Deploy (Initial Run)"
-    if ! ./ansible_deploy.sh ${args[@]+"${args[@]}"}; then
+    if ! ./ansible_deploy.sh deploy --all ${args[@]+"${args[@]}"}; then
         echo "❌ Initial deploy failed! Exiting auto-deploy watcher."
         exit 1
     fi
@@ -418,7 +426,7 @@ else
     fi
 fi
 
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 1
 echo "👀 Entering Watcher mode. Polling every ${CHECK_INTERVAL}s..."
 
 while true; do
@@ -446,15 +454,15 @@ while true; do
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
                 
                 echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
-                cd "$ANSIBLE_DIR"
-                if ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}; then
+                cd "$ANSIBLE_DIR" || exit 1
+                if ./ansible_deploy.sh deploy --all --fast ${args[@]+"${args[@]}"}; then
                     echo "$CURRENT_LOCAL" > "$LAST_DEPLOYED_FILE"
-                    cd "$PROJECT_ROOT"
+                    cd "$PROJECT_ROOT" || exit 1
                     echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
                     send_telegram_notification "✅ <b>[Deploy Lịch Hẹn Hoàn Tất]</b>
 Cụm node đã được cập nhật thành công lên commit <code>${CURRENT_LOCAL:0:8}</code>!"
                 else
-                    cd "$PROJECT_ROOT"
+                    cd "$PROJECT_ROOT" || exit 1
                     echo "❌ Lỗi xảy ra trong quá trình deploy theo lịch hẹn!"
                     send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
 Tiến trình cập nhật lên commit <code>${CURRENT_LOCAL:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
@@ -533,14 +541,14 @@ Commit <code>${NEW_LOCAL_HASH:0:8}</code> đã vượt qua Build Check!
 Đang tiến hành biên dịch và restart toàn bộ cụm node...
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
-                    cd "$ANSIBLE_DIR"
-                    if ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}; then
+                    cd "$ANSIBLE_DIR" || exit 1
+                    if ./ansible_deploy.sh deploy --all --fast ${args[@]+"${args[@]}"}; then
                         echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
-                        cd "$PROJECT_ROOT"
+                        cd "$PROJECT_ROOT" || exit 1
                         send_telegram_notification "✅ <b>[Deploy Hoàn Tất]</b>
 Cụm node đã được cập nhật thành công lên commit <code>${NEW_LOCAL_HASH:0:8}</code>!"
                     else
-                        cd "$PROJECT_ROOT"
+                        cd "$PROJECT_ROOT" || exit 1
                         send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
 Tiến trình cập nhật lên commit <code>${NEW_LOCAL_HASH:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
                     fi

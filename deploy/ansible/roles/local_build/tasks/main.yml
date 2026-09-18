@@ -1,32 +1,20 @@
 ---
-- name: Build Standalone Release Package
-  ansible.builtin.shell: |
-    {% if ansible_use_prebuilt | default(false) | bool %}
-    bash build_release.sh --prebuilt-dir "{{ ansible_prebuilt_bin_dir }}"
-    {% elif ansible_build_fast | default(false) | bool %}
-    bash build_release.sh --fast {% if ansible_debug_cpp | default(false) | bool %}--debug-cpp{% endif %}
-    {% else %}
-    bash build_release.sh {% if ansible_debug_cpp | default(false) | bool %}--debug-cpp{% endif %}
-    {% endif %}
-  args:
-    chdir: "{{ deploy_dir }}"
-  register: build_result
-  changed_when: build_result.rc == 0
-  when: ansible_action != 'gen_keys'
+# Build steps have been moved to the bash wrapper (ansible_deploy.sh) and build_release.sh.
+# Ansible now always runs with prebuilt binaries (ansible_use_prebuilt=true).
 
-- name: Build metanode keytool binary for local key generation
-  ansible.builtin.command:
-    argv:
-      - cargo
-      - build
-      - --release
-      - -p
-      - metanode
-      - --bin
-      - metanode
-  args:
-    chdir: "{{ deploy_dir }}/../.."
-  when: ansible_action == 'gen_keys' and not (ansible_use_prebuilt | default(false) | bool)
+- name: Check if genesis.json exists to determine if we should overwrite
+  ansible.builtin.stat:
+    path: "{{ deploy_dir }}/genesis.json"
+  register: genesis_stat
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+
+- name: Fail if keys already exist and overwrite not enabled (gen_keys)
+  ansible.builtin.fail:
+    msg: "Keys and genesis.json already exist at {{ deploy_dir }}. Use --overwrite to force regeneration."
+  when: >
+    cluster_nodes is defined and ansible_action == 'gen_keys'
+    and (genesis_stat.stat.exists | default(false))
+    and not (ansible_overwrite | default('false') | bool)
 
 - name: Reset validators in genesis.json on fresh setup (preserves custom alloc/accounts)
   ansible.builtin.shell: |
@@ -45,7 +33,9 @@
     '
   args:
     chdir: "{{ deploy_dir }}"
-  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+  when: >
+    cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+    and (ansible_overwrite | default('false') | bool or not (genesis_stat.stat.exists | default(false)))
 
 - name: Generate Validator Keys
   ansible.builtin.shell: |
@@ -67,7 +57,9 @@
   args:
     chdir: "{{ deploy_dir }}"
   loop: "{{ cluster_nodes }}"
-  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+  when: >
+    cluster_nodes is defined and ansible_action in ['setup', 'gen_keys']
+    and (ansible_overwrite | default('false') | bool or not (genesis_stat.stat.exists | default(false)))
 
 # `cluster_nodes`/`peers_map` are already built dynamically from inventory.yml -- see
 # deploy.yml's "Local build and configuration generation" play (pre_tasks, `set_fact`), which
@@ -106,7 +98,8 @@
   args:
     chdir: "{{ deploy_dir }}"
     creates: "{{ deploy_dir }}/../../execution/gen_recovery_committee"
-  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys'] and not (recovery_committee_helper_stat.stat.exists | default(false))
+  # In the new workflow, wrapper handles compiling it if missing, but we keep this as a fallback if not prebuilt
+  when: cluster_nodes is defined and ansible_action in ['setup', 'gen_keys'] and not (recovery_committee_helper_stat.stat.exists | default(false)) and not (ansible_use_prebuilt | default(false) | bool)
 
 - name: Ensure independent RecoveryCommittee keys exist (idempotent -- devnet default only)
   ansible.builtin.shell: |

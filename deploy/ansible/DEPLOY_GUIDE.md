@@ -117,9 +117,9 @@ server_1:
 ```bash
 cd deploy/ansible
 # Dùng binary có sẵn trong deploy/bin (siêu tốc, không cần build Rust):
-./ansible_deploy.sh --gen-keys --prebuilt-bin
+./ansible_deploy.sh --gen-keys --overwrite --prebuilt-bin
 ```
-*👉 Lệnh này dùng file `deploy/bin/metanode` có sẵn để tạo đủ bộ key cho toàn bộ nodes trong `deploy/systemd/node-X_keys/` và file `deploy/systemd/genesis.json`.*
+*👉 Lệnh này dùng file `deploy/bin/metanode` có sẵn để tạo đủ bộ key cho toàn bộ nodes trong `deploy/systemd/node-X_keys/` và file `deploy/systemd/genesis.json` (nếu đã có keys cũ và muốn tạo lại từ đầu, thêm cờ `--overwrite`).*
 
 ##### 1.2. (Tùy chọn) Thay Thế Key Cho 1 Node Bất Kỳ:
 Nếu muốn đổi bộ key của riêng 1 Node (ví dụ Node 2), dùng tool có sẵn để vừa tạo key mới vừa tự động cập nhật vào `genesis.json`:
@@ -204,10 +204,10 @@ cd deploy/ansible
 * **Khi nào dùng:** 
   - [block_hash_checker](file:///home/abc/nhat/con-chain-v2/metanode/deploy/ansible/monitors/block_hash_checker/main.go) báo lệch hash / stateRoot trên riêng Node X.
   - Ổ đĩa của Node X bị hỏng, corrupt RocksDB, hoặc node bị offline quá lâu dẫn đến tụt lại phía sau quá 5 epochs không sync kịp P2P.
-* **⚠️ BẮT BUỘC kèm `--only-node <N>`:** `--reset-all` tự nó xóa data của **TẤT CẢ** nodes. Bắt buộc phải có `--only-node <N>` để chỉ xóa dữ liệu cũ của node cần sửa và kéo snapshot sạch về!
+* **⚠️ Lưu ý:** Lệnh restore chỉ xóa dữ liệu cũ của node đích được chỉ định và kéo snapshot về, không ảnh hưởng đến các validator khác đang chạy.
 * **Câu lệnh:**
   ```bash
-  ./ansible_deploy.sh --reset-all --only-node 2 --restore-node 2 --snapshot-url http://192.168.1.234:8604
+  ./ansible_deploy.sh --only-node 2 --restore-node 2 --snapshot-url http://192.168.1.234:8604
   ```
 * **Nguồn snapshot:** Khuyến nghị dùng endpoint của node `SyncOnly` (ví dụ port `8604` trong cụm) thay vì validator để tránh khóa ghi RocksDB của validator.
 
