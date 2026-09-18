@@ -115,19 +115,19 @@ LỆNH ĐIỀU KHIỂN:
     help, -h, --help       Hiển thị hướng dẫn này
 
 TÙY CHỌN KHỞI ĐỘNG:
-    --immediate, --now     ⚡ Kích hoạt deploy ngay lập tức khi kéo code mới về và build check pass (không hẹn giờ)
-    --at <HH:MM>           🕒 Hẹn giờ deploy (mặc định: 21:00 giờ Việt Nam Asia/Ho_Chi_Minh)
+    (Mặc định)             ⚡ Khi KHÔNG có --at: Tự động deploy & restart ngay khi kéo commit mới và build pass
+    --at <HH:MM>           🕒 Hẹn giờ deploy (ví dụ: --at 21:00 giờ Việt Nam Asia/Ho_Chi_Minh)
+    --immediate, --now     ⚡ Tương đương mặc định (deploy ngay lập tức không hẹn giờ)
     --branch <tên_nhánh>   Chỉ định nhánh git cần theo dõi (mặc định: main)
     --initial-deploy       Kích hoạt deploy ngay 1 lần lúc vừa bật watcher
     -d, --daemon           Chạy dưới dạng tiến trình ngầm (tương đương lệnh 'start')
 
 VÍ DỤ SỬ DỤNG:
-    # 1. Chế độ deploy ngay lập tức (kéo commit về -> build check pass -> deploy restart ngay):
-    ./auto_rebuild_deploy.sh start --immediate
-    (hoặc: ./auto_rebuild_deploy.sh start --now)
-
-    # 2. Chạy hẹn giờ mặc định 21:00 tối:
+    # 1. Chạy mặc định (kéo commit về -> build check pass -> deploy & restart chain ngay):
     ./auto_rebuild_deploy.sh start
+
+    # 2. Chạy có hẹn giờ deploy (ví dụ: 21:00 tối):
+    ./auto_rebuild_deploy.sh start --at 21:00
 
     # 3. Hẹn giờ lúc 23:30:
     ./auto_rebuild_deploy.sh start --at 23:30
@@ -147,12 +147,12 @@ cmd_status() {
         echo "🟢 Trạng thái       : ĐANG CHẠY (PID: $pid)"
         local cmdline
         cmdline=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
-        if echo "$cmdline" | grep -q -- "--immediate"; then
-            echo "⚡ Chế độ deploy    : NGAY LẬP TỨC (--immediate)"
-        elif echo "$cmdline" | grep -oE -- "--at [0-9:]+" >/dev/null 2>&1; then
+        if echo "$cmdline" | grep -oE -- "--at [0-9:]+" >/dev/null 2>&1; then
             local at_val
             at_val=$(echo "$cmdline" | grep -oE -- "--at [0-9:]+" | awk '{print $2}')
             echo "⏰ Lịch hẹn deploy  : 🕒 ${at_val} (Asia/Ho_Chi_Minh)"
+        else
+            echo "⚡ Chế độ deploy    : NGAY LẬP TỨC (Không hẹn giờ)"
         fi
     else
         echo "🔴 Trạng thái       : ĐÃ DỪNG"
@@ -199,8 +199,7 @@ esac
 DAEMON_MODE=false
 FORCE_INITIAL_DEPLOY=false
 CUSTOM_BRANCH=""
-IS_IMMEDIATE=false
-SCHEDULE_AT="21:00"
+SCHEDULE_AT=""
 args=()
 
 while [ $# -gt 0 ]; do
@@ -210,7 +209,6 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --immediate|--now|--no-schedule)
-            IS_IMMEDIATE=true
             SCHEDULE_AT=""
             shift
             ;;
@@ -219,13 +217,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --at|--schedule)
-            if [ -z "${2:-}" ] || [ "${2:-}" = "none" ] || [ "${2:-}" = "false" ]; then
-                IS_IMMEDIATE=true
-                SCHEDULE_AT=""
-            else
-                SCHEDULE_AT="$2"
-                IS_IMMEDIATE=false
-            fi
+            SCHEDULE_AT="${2:-}"
             shift 2
             ;;
         --branch)
@@ -272,9 +264,7 @@ if [ "$DAEMON_MODE" = true ]; then
     if [ -n "$CUSTOM_BRANCH" ]; then
         CHILD_ARGS+=(--branch "$CUSTOM_BRANCH")
     fi
-    if [ "$IS_IMMEDIATE" = true ] || [ -z "$SCHEDULE_AT" ]; then
-        CHILD_ARGS+=(--immediate)
-    else
+    if [ -n "$SCHEDULE_AT" ]; then
         CHILD_ARGS+=(--at "$SCHEDULE_AT")
     fi
     if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
@@ -293,6 +283,7 @@ if [ "$DAEMON_MODE" = true ]; then
     echo "🛑 To stop it, run:   $0 stop"
     exit 0
 fi
+
 
 # Thiết lập File Lock cấp Linux Kernel độc quyền (flock) để loại trừ 100% race condition
 exec 200>"$LOCK_FILE"

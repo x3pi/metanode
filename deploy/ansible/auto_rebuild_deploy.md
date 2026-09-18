@@ -42,9 +42,9 @@ cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible
 
 | Lệnh | Ý nghĩa |
 | :--- | :--- |
-| `./auto_rebuild_deploy.sh start --immediate` | **Chế độ Deploy ngay lập tức** (kéo code về -> build check pass -> deploy & restart ngay) |
-| `./auto_rebuild_deploy.sh start` | **Khởi động watcher chạy ngầm** (Mặc định hẹn giờ deploy lúc `21:00` VN) |
-| `./auto_rebuild_deploy.sh start --at 22:30` | Khởi động watcher hẹn giờ deploy vào thời điểm khác (ví dụ: `22:30`) |
+| `./auto_rebuild_deploy.sh start` | **Khởi động watcher mặc định: Deploy ngay lập tức** khi có commit mới và build check pass (không hẹn giờ) |
+| `./auto_rebuild_deploy.sh start --at 21:00` | Khởi động watcher **Hẹn giờ deploy** vào lúc 21:00 tối (Asia/Ho_Chi_Minh) |
+| `./auto_rebuild_deploy.sh start --at 23:30` | Khởi động watcher hẹn giờ deploy vào khung giờ tùy chọn khác |
 | `./auto_rebuild_deploy.sh stop` | **Dừng watcher** và dọn dẹp sạch sẽ toàn bộ tiến trình con |
 | `./auto_rebuild_deploy.sh status` | Xem trạng thái hoạt động (Đang chạy / Đã dừng, Chế độ, PID, commit đã deploy) |
 | `./auto_rebuild_deploy.sh logs` | **Xem log trực tiếp theo thời gian thực** (`Ctrl+C` để thoát) |
@@ -54,27 +54,25 @@ cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible
 
 ## 📋 4. Chi Tiết Các Kịch Bản Sử Dụng
 
-### 🔹 Kịch bản 1: Chế độ Deploy ngay lập tức (Continuous Deployment - Không hẹn giờ)
-```bash
-./auto_rebuild_deploy.sh start --immediate
-# hoặc cú pháp ngắn gọn:
-./auto_rebuild_deploy.sh start --now
-```
-*Ở chế độ này, mỗi khi có commit mới trên remote: Script kéo về $\rightarrow$ chạy Build Check (Go + Rust + FFI) độc lập $\rightarrow$ Nếu PASS sẽ tự động kích hoạt deploy và khởi động lại cụm node ngay lập tức mà không cần chờ đến giờ hẹn.*
-
-### 🔹 Kịch bản 2: Chạy chuẩn sản xuất (Hẹn giờ 21h00 tối) — *Khuyên dùng cho Mainnet/Testnet*
+### 🔹 Kịch bản 1: Mặc định — Deploy ngay lập tức (Continuous Deployment - Không hẹn giờ)
 ```bash
 ./auto_rebuild_deploy.sh start
 ```
-*Hệ thống sẽ chạy ngầm, ban ngày có commit mới sẽ tự kéo về build kiểm tra và bắn Telegram. Đúng 21:00 tối mới khởi động lại các node.*
+*Khi không truyền tham số `--at`, hệ thống mặc định chạy chế độ Deploy ngay lập tức: Mỗi khi có commit mới trên remote $\rightarrow$ Kéo về $\rightarrow$ Chạy Build Check (Go + Rust + FFI) độc lập $\rightarrow$ Nếu PASS sẽ tự động kích hoạt deploy và khởi động lại cụm node ngay lập tức.*
 
-### 🔹 Kịch bản 3: Hẹn giờ deploy vào khung giờ tùy chọn
+### 🔹 Kịch bản 2: Hẹn giờ deploy ban đêm (Ví dụ: 21h00 tối)
 ```bash
-# Hẹn giờ 23:00 đêm:
-./auto_rebuild_deploy.sh start --at 23:00
+./auto_rebuild_deploy.sh start --at 21:00
+```
+*Hệ thống sẽ chạy ngầm, ban ngày có commit mới sẽ tự kéo về build kiểm tra trước và gửi kết quả lên Telegram. Đúng 21:00 tối mới khởi động lại các node.*
+
+### 🔹 Kịch bản 3: Hẹn giờ khung giờ khác hoặc theo dõi nhánh khác
+```bash
+# Hẹn giờ 23:30 đêm:
+./auto_rebuild_deploy.sh start --at 23:30
 
 # Chỉ định rõ nhánh git cần theo dõi:
-./auto_rebuild_deploy.sh start --branch main --at 21:00
+./auto_rebuild_deploy.sh start --branch dev --at 21:00
 ```
 
 ### 🔹 Kịch bản 4: Kiểm tra trạng thái hoạt động
