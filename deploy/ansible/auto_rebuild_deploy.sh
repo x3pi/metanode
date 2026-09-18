@@ -447,10 +447,18 @@ while true; do
                 
                 echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
                 cd "$ANSIBLE_DIR"
-                ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}
-                echo "$CURRENT_LOCAL" > "$LAST_DEPLOYED_FILE"
-                cd "$PROJECT_ROOT"
-                echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
+                if ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}; then
+                    echo "$CURRENT_LOCAL" > "$LAST_DEPLOYED_FILE"
+                    cd "$PROJECT_ROOT"
+                    echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
+                    send_telegram_notification "✅ <b>[Deploy Lịch Hẹn Hoàn Tất]</b>
+Cụm node đã được cập nhật thành công lên commit <code>${CURRENT_LOCAL:0:8}</code>!"
+                else
+                    cd "$PROJECT_ROOT"
+                    echo "❌ Lỗi xảy ra trong quá trình deploy theo lịch hẹn!"
+                    send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+Tiến trình cập nhật lên commit <code>${CURRENT_LOCAL:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
+                fi
             else
                 echo "🛑 Đã đến giờ hẹn nhưng commit ${CURRENT_LOCAL:0:8} chưa vượt qua bài kiểm tra Build Check! Hủy đợt deploy này."
                 send_telegram_notification "🛑 <b>[HỦY DEPLOY ${SCHEDULE_AT}]</b>
@@ -505,7 +513,10 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
             if git pull --rebase "$REMOTE" "$BRANCH"; then
                 if [ "$HAS_UNSTAGED" = true ]; then
                     echo "📦 Phục hồi lại các thay đổi local từ stash..."
-                    git stash pop >/dev/null 2>&1 || true
+                    if ! git stash pop >/dev/null 2>&1; then
+                        echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash! (conflict markers). Vui lòng kiểm tra thủ công."
+                        send_telegram_notification "⚠️ <b>[CẢNH BÁO STASH POP]</b> Lỗi xung đột khi phục hồi file (conflict). Cần kiểm tra thủ công!"
+                    fi
                 fi
                 NEW_LOCAL_HASH=$(git rev-parse HEAD)
                 echo "✅ Đã kéo mã nguồn về thành công (HEAD: ${NEW_LOCAL_HASH:0:8})."
@@ -523,18 +534,26 @@ Commit <code>${NEW_LOCAL_HASH:0:8}</code> đã vượt qua Build Check!
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
                     cd "$ANSIBLE_DIR"
-                    ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}
-                    echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
-                    cd "$PROJECT_ROOT"
-                    send_telegram_notification "✅ <b>[Deploy Hoàn Tất]</b>
+                    if ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}; then
+                        echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
+                        cd "$PROJECT_ROOT"
+                        send_telegram_notification "✅ <b>[Deploy Hoàn Tất]</b>
 Cụm node đã được cập nhật thành công lên commit <code>${NEW_LOCAL_HASH:0:8}</code>!"
+                    else
+                        cd "$PROJECT_ROOT"
+                        send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+Tiến trình cập nhật lên commit <code>${NEW_LOCAL_HASH:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
+                    fi
                 fi
             else
+                git rebase --abort >/dev/null 2>&1 || true
                 if [ "$HAS_UNSTAGED" = true ]; then
-                    git stash pop >/dev/null 2>&1 || true
+                    if ! git stash pop >/dev/null 2>&1; then
+                        echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash!"
+                    fi
                 fi
                 echo "❌ Lỗi kéo mã nguồn (git pull --rebase) từ ${REMOTE}/${BRANCH}!"
-                send_telegram_notification "❌ <b>[LỖI GIT PULL]</b> Không thể kéo commit <code>${REMOTE_HASH:0:8}</code> về local do conflict hoặc lỗi git!"
+                send_telegram_notification "❌ <b>[LỖI GIT PULL]</b> Không thể kéo commit <code>${REMOTE_HASH:0:8}</code> về do conflict! Đã tự abort rebase."
             fi
         fi
     else
