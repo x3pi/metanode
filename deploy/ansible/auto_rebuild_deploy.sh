@@ -194,7 +194,7 @@ if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
     echo "$LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
 else
     # Mặc định: Ghi nhận commit hiện tại ở local làm mốc ban đầu, KHÔNG deploy ngay
-    echo "📌 Đã ghi nhận commit hiện tại ở local: ${LOCAL_HASH::8}"
+    echo "📌 Đã ghi nhận commit hiện tại ở local: ${LOCAL_HASH:0:8}"
     echo "$LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
     echo "💡 Watcher sẽ chờ khi nào có commit mới từ remote (${REMOTE}/${BRANCH}) mới thực hiện pull, build và cập nhật hệ thống."
 fi
@@ -217,22 +217,23 @@ while true; do
         # Chỉ kích hoạt khi remote có commit mới khác commit đã lưu/đã deploy
         if [ -n "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "$LAST_DEPLOYED" ]; then
             echo -e "\n🔔 [$(date '+%Y-%m-%d %H:%M:%S')] Phát hiện commit mới trên remote!"
-            echo "   Commit đã ghi nhận trước: ${LAST_DEPLOYED::8:-"(Chưa có)"}"
-            echo "   Commit mới trên remote  : ${REMOTE_HASH::8}"
+            PREV_COMMIT="${LAST_DEPLOYED:0:8}"
+            echo "   Commit đã ghi nhận trước: ${PREV_COMMIT:-"(Chưa có)"}"
+            echo "   Commit mới trên remote  : ${REMOTE_HASH:0:8}"
             
             # Nếu local chưa có commit này thì kéo về
             if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
                 echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
                 git pull "$REMOTE" "$BRANCH"
             else
-                echo "ℹ️ Local đã có sẵn commit ${REMOTE_HASH::8}."
+                echo "ℹ️ Local đã có sẵn commit ${REMOTE_HASH:0:8}."
             fi
             
             # Extract new commit details for notification
             NEW_LOCAL_HASH=$(git rev-parse HEAD)
             COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1)
             COMMIT_AUTHOR=$(git log -1 --pretty=%an)
-            export DEPLOY_SOURCE="Auto-Deploy (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH::8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
+            export DEPLOY_SOURCE="Auto-Deploy (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
             
             echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
             cd "$ANSIBLE_DIR"
@@ -243,7 +244,7 @@ while true; do
             
             # Go back to root
             cd "$PROJECT_ROOT"
-            echo "✅ Hoàn tất lượt cập nhật cho commit ${NEW_LOCAL_HASH::8}. Tiếp tục theo dõi..."
+            echo "✅ Hoàn tất lượt cập nhật cho commit ${NEW_LOCAL_HASH:0:8}. Tiếp tục theo dõi..."
         fi
     else
         echo "⚠️ [$(date '+%Y-%m-%d %H:%M:%S')] Không thể kết nối fetch từ git remote (${REMOTE}/${BRANCH}). Sẽ thử lại sau..."
