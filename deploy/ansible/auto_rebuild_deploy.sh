@@ -115,9 +115,8 @@ LỆNH ĐIỀU KHIỂN:
     help, -h, --help       Hiển thị hướng dẫn này
 
 TÙY CHỌN KHỞI ĐỘNG:
-    (Mặc định)             ⚡ Khi KHÔNG có --at: Tự động deploy & restart ngay khi kéo commit mới và build pass
     --at <HH:MM>           🕒 Hẹn giờ deploy (ví dụ: --at 21:00 giờ Việt Nam Asia/Ho_Chi_Minh)
-    --immediate, --now     ⚡ Tương đương mặc định (deploy ngay lập tức không hẹn giờ)
+                           (Mặc định nếu không có --at: Deploy ngay lập tức khi build check pass)
     --branch <tên_nhánh>   Chỉ định nhánh git cần theo dõi (mặc định: main)
     --initial-deploy       Kích hoạt deploy ngay 1 lần lúc vừa bật watcher
     -d, --daemon           Chạy dưới dạng tiến trình ngầm (tương đương lệnh 'start')
@@ -206,10 +205,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -d|--daemon|start)
             DAEMON_MODE=true
-            shift
-            ;;
-        --immediate|--now|--no-schedule)
-            SCHEDULE_AT=""
             shift
             ;;
         --initial-deploy)
@@ -395,7 +390,7 @@ if [ -n "$SCHEDULE_AT" ]; then
         echo "⚠️ Định dạng thời gian --at không hợp lệ: $SCHEDULE_AT (Ví dụ: --at 21:00)"
     fi
 else
-    echo "⚡ Chế độ: KÍCH HOẠT DEPLOY NGAY LẬP TỨC (--immediate)"
+    echo "⚡ Chế độ: KÍCH HOẠT DEPLOY NGAY LẬP TỨC (Mặc định không hẹn giờ)"
     echo "💡 Watcher sẽ kiểm tra remote liên tục mỗi ${CHECK_INTERVAL}s. Khi có commit mới -> Kéo về -> Build Check -> Deploy & restart chain ngay nếu pass."
 fi
 
