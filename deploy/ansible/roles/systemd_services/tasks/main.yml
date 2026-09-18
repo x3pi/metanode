@@ -24,9 +24,9 @@
 
 - name: Copy binaries to node bin directory
   ansible.builtin.copy:
-    src: "{{ remote_deploy_dir }}/bin/{{ item[1] }}"
+    src: "{{ ansible_prebuilt_bin_dir | default(project_root + '/deploy/bin') }}/{{ item[1] }}"
     dest: "{{ metanode_install_dir }}/node-{{ item[0] }}/bin/{{ item[1] }}"
-    remote_src: yes
+    remote_src: no
     owner: metanode
     group: metanode
     mode: '0755'
@@ -58,7 +58,7 @@
     group: metanode
     mode: '0600'
   loop: "{{ active_nodes | product(['protocol_key.json', 'network_key.json', 'authority_key.json', 'eth_key.json']) | list }}"
-  when: ansible_action in ['start', 'setup']
+  when: ansible_action in ['deploy', 'setup']
 
 - name: Copy genesis file
   ansible.builtin.copy:
@@ -69,7 +69,7 @@
     group: metanode
     mode: '0644'
   loop: "{{ active_nodes }}"
-  when: ansible_action in ['start', 'setup']
+  when: ansible_action in ['deploy', 'setup']
 
 - name: Generate systemd service for Execution
   ansible.builtin.template:
@@ -115,12 +115,3 @@
     enabled: yes
     daemon_reload: yes
   loop: "{{ active_nodes }}"
-
-
-
-# - name: Generate and start systemd service for RPC Proxy
-#   ansible.builtin.shell: |
-#     bash install-rpc-systemd.sh --node {{ item }} --no-build
-#   args:
-#     chdir: "{{ remote_deploy_dir }}/cluster"
-#   loop: "{{ active_nodes }}"

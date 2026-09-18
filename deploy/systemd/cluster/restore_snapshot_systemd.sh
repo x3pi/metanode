@@ -102,8 +102,6 @@ SNAP_FILES_URL="${SNAPSHOT_URL}/files"
 
 # Service names
 svc_exec="metanode-execution-${NODE_ID}"
-svc_cons="metanode-consensus-${NODE_ID}"
-svc_rpc="metanode-rpc-${NODE_ID}"
 
 # Helper get rpc port
 get_node_rpc_port() {
@@ -192,9 +190,8 @@ START_TIME=$(date +%s)
 # Step 1: Dừng các service
 echo ""
 echo -e "${BLUE}[1/7] 🛑 Dừng các service systemd của Node $NODE_ID...${NC}"
-systemctl stop "$svc_cons" 2>/dev/null || true
 systemctl stop "$svc_exec" 2>/dev/null || true
-echo -e "${GREEN}  ✅ Đã dừng: $svc_exec, $svc_cons${NC}"
+echo -e "${GREEN}  ✅ Đã dừng: $svc_exec${NC}"
 
 # Step 2: Xóa dữ liệu cũ
 echo -e "${BLUE}[2/7] 🗑️  Xóa dữ liệu cũ của Node $NODE_ID...${NC}"
@@ -400,17 +397,6 @@ else
     echo -e "${YELLOW}    ⚠️ Không tìm thấy log block của Go. Kiểm tra logs: journalctl -u $svc_exec -n 50${NC}"
 fi
 
-if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_cons}.service"; then
-    echo -e "${CYAN}  [5c] Khởi động Consensus Layer (Rust)...${NC}"
-    systemctl start "$svc_cons" || true
-fi
-
-# Khởi động lại RPC Proxy nếu có
-if systemctl list-units --full --all 2>/dev/null | grep -q "${svc_rpc}.service"; then
-    echo -e "${CYAN}  [5d] Khởi động RPC Proxy...${NC}"
-    systemctl start "$svc_rpc" || true
-fi
-
 echo -e "${GREEN}  ✅ Các service đã được khởi động tuần tự${NC}"
 
 # Step 7: Giám sát Block Sync
@@ -468,11 +454,9 @@ if [ "$SYNCED" = true ]; then
     echo -e "  ${GREEN}✅ Node $NODE_ID đã khởi động thành công và online!${NC}"
 else
     echo -e "  ${RED}❌ Node $NODE_ID khởi động thất bại hoặc RPC không phản hồi sau 120s.${NC}"
-    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI SYSTEMD (Execution & Consensus) ---${NC}"
+    echo -e "${YELLOW}🔍 --- TRÍCH XUẤT LOG LỖI SYSTEMD (Execution) ---${NC}"
     echo -e "${CYAN}=== metanode-execution-${NODE_ID} logs (last 50 lines) ===${NC}"
     journalctl -u "$svc_exec" -n 50 --no-pager || true
-    echo -e "${CYAN}=== metanode-consensus-${NODE_ID} logs (last 50 lines) ===${NC}"
-    journalctl -u "$svc_cons" -n 50 --no-pager || true
     echo -e "${YELLOW}🔍 ---------------------------------------------------------${NC}"
     exit 1
 fi
@@ -485,5 +469,4 @@ echo -e "${GREEN}═════════════════════
 echo ""
 echo -e "👉 Kiểm tra log trực tiếp bằng:"
 echo "   - execution: journalctl -u $svc_exec -f"
-echo "   - consensus: journalctl -u $svc_cons -f"
 echo ""

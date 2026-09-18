@@ -1,20 +1,20 @@
 ---
 # 2026-09-08: metanode-execution.service.j2 (and metanode-consensus.service.j2) now set
 # StartLimitIntervalSec=300/StartLimitBurst=5 (crash-loop circuit breaker). Once tripped,
-# `systemctl restart` on the unit fails with "Start request repeated too quickly" -- confirmed
-# empirically that a plain restart is NOT enough to clear it, unlike a normal restart of a
+# `systemctl start` on the unit fails with "Start request repeated too quickly" -- confirmed
+# empirically that a plain start is NOT enough to clear it, unlike a normal start of a
 # healthy unit. `failed_when: false` below was already silently swallowing that failure before
-# this fix, so a node stuck in the tripped state looked "restarted OK" while staying down. Clear
-# the lockout for every service class before restarting; harmless no-op on any unit that never
+# this fix, so a node stuck in the tripped state looked "started OK" while staying down. Clear
+# the lockout for every service class before starting; harmless no-op on any unit that never
 # failed.
-- name: Clear systemd start-limit lockout before restarting (Execution)
+- name: Clear systemd start-limit lockout before starting (Execution)
   ansible.builtin.command: "systemctl reset-failed metanode-execution-{{ item }}"
   loop: "{{ active_nodes }}"
   failed_when: false
   changed_when: false
 
-- name: Restart Execution services
+- name: Start Execution services
   ansible.builtin.systemd:
     name: "metanode-execution-{{ item }}"
-    state: restarted
+    state: started
   loop: "{{ active_nodes }}"

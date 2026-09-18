@@ -37,14 +37,6 @@
     mode: '0755'
   loop: "{{ active_nodes | product(['data', 'logs']) | list }}"
 
-- name: Unarchive release tarball
-  ansible.builtin.unarchive:
-    src: "{{ project_root }}/metanode-deploy.tar.gz"
-    dest: "{{ remote_deploy_dir }}"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0755'
-    extra_opts: ['--strip-components=1']
 
 - name: Check if local node key directory exists
   delegate_to: localhost
@@ -53,7 +45,7 @@
   loop: "{{ active_nodes }}"
   register: local_keys_to_copy
   become: no
-  when: ansible_action in ['start', 'setup']
+  when: ansible_action in ['deploy', 'setup']
 
 - name: Copy keys for each node to remote
   # mode/directory_mode tightened from 0755 (found 2026-08-27 during a config-security
@@ -72,7 +64,7 @@
     directory_mode: '0700'
   loop: "{{ local_keys_to_copy.results | default([]) }}"
   when:
-    - ansible_action in ['start', 'setup']
+    - ansible_action in ['deploy', 'setup']
     - item.stat is defined and item.stat.exists
 
 - name: Ensure open_ports.sh is executable
@@ -80,7 +72,7 @@
     path: "{{ remote_deploy_dir }}/node-{{ item }}_keys/open_ports.sh"
     mode: '0755'
   loop: "{{ active_nodes }}"
-  when: ansible_action in ['start', 'setup']
+  when: ansible_action in ['deploy', 'setup']
   failed_when: false
 
 - name: Extract node configuration for snapshot evaluation

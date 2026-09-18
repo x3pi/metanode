@@ -29,8 +29,9 @@ load_env_file() {
                 continue
             fi
             if [[ "$line" =~ = ]]; then
-                local key=$(echo "${line%%=*}" | xargs)
-                local val=$(echo "${line#*=}" | xargs)
+                local key val
+                key=$(echo "${line%%=*}" | xargs)
+                val=$(echo "${line#*=}" | xargs)
                 val="${val%\"}"
                 val="${val#\"}"
                 val="${val%\'}"
@@ -57,8 +58,8 @@ load_telegram_config() {
     # telegram_bot_token line). `|| true` on each grep keeps a genuine no-match a normal,
     # silent "not configured" case instead of a fatal, unexplained script exit.
     if [ -f "$target_yml" ]; then
-        token=$(grep -E '^\s*telegram_bot_token:' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-        chat_id=$(grep -E '^\s*telegram_chat_id:' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "$target_yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
     fi
 
     # 2. Fallback to .env if not found in YAML
@@ -106,20 +107,305 @@ elif [ -f "${SCRIPT_DIR}/.vault_pass" ]; then
     VAULT_ARGS=(--vault-password-file "${SCRIPT_DIR}/.vault_pass")
 fi
 
-# Defaults
-ACTION=""
-EXPLICIT_ACTION="false"
-KEEP_DATA="true"
-TARGET_NODE="all"
-RESTORE_NODE="none"
+# ==============================================================================
+# 1. NEW CLI PARSER & LEGACY ADAPTER (PHASE 1)
+# ==============================================================================
+COMMAND=""
+TARGET_NODE=""
+ALL_NODES="false"
+INVENTORY="${SCRIPT_DIR}/inventory.yml"
+BIN_DIR=""
+FAST="false"
+DEBUG_CPP="false"
 SNAPSHOT_URL=""
 BTRFS_SIZE_VAL=""
+WITH_FIREWALL="false"
+OVERWRITE="false"
+YES_RESET_ALL="false"
+LGC_CLEAN="false"
+
+# Kiểm tra Legacy Adapter
+IS_LEGACY="false"
+if [[ $# -gt 0 ]] && [[ "$1" == --* && "$1" != "--help" && "$1" != "-h" ]]; then
+    IS_LEGACY="true"
+fi
+
+if [[ "$IS_LEGACY" == "true" ]]; then
+    # Legacy parser
+    LGC_START="false"
+    LGC_RESTART="false"
+    LGC_RESET="false"
+    LGC_STOP="false"
+    LGC_GEN_KEYS="false"
+    LGC_CLEAN="false"
+    LGC_OPEN_PORTS="false"
+    LGC_RESTORE="false"
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --start) LGC_START="true" ;;
+            --restart) LGC_RESTART="true" ;;
+            --reset-all) LGC_RESET="true" ;;
+            --stop) LGC_STOP="true" ;;
+            --clean) LGC_CLEAN="true" ;;
+            --gen-keys) LGC_GEN_KEYS="true" ;;
+            --only-node) TARGET_NODE="$2"; shift ;;
+            --restore-node) RESTORE_NODE="$2"; LGC_RESTORE="true"; shift ;;
+            --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
+            --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
+            --open-ports) LGC_OPEN_PORTS="true" ;;
+            --fast) FAST="true" ;;
+            --debug-cpp) DEBUG_CPP="true" ;;
+            --overwrite) OVERWRITE="true" ;;
+            --all-monitors|--monitor-all) echo -e "\033[0;31m❌ [LỖI] Legacy flags --all-monitors không còn được hỗ trợ ngầm định. Vui lòng dùng lệnh 'monitors' riêng.\033[0m"; exit 1 ;;
+            --bin-dir|--prebuilt-bin|--use-prebuilt)
+                if [[ "$#" -gt 1 && ! "$2" =~ ^-- ]]; then
+                    BIN_DIR="$2"
+                    shift
+                else
+                    BIN_DIR="${SCRIPT_DIR}/../bin"
+                fi
+                ;;
+            --skip-build) BIN_DIR="${SCRIPT_DIR}/../bin" ;;
+            *) echo -e "\033[0;31m❌ [LỖI] Cờ legacy không hợp lệ: $1\033[0m"; exit 1 ;;
+        esac
+        shift
+    done
+
+    # Resolve legacy actions
+    ACTION_COUNT=0
+    [[ "$LGC_RESET" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+    [[ "$LGC_RESTORE" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+    [[ "$LGC_GEN_KEYS" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+    [[ "$LGC_STOP" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+    [[ "$LGC_RESTART" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+    [[ "$LGC_START" == "true" ]] && ACTION_COUNT=$((ACTION_COUNT+1))
+
+    if [[ $ACTION_COUNT -gt 1 ]]; then
+        echo -e "\033[0;31m❌ [LỖI] Các tham số legacy xung đột nhau. Không thể kết hợp nhiều hành động chính (ví dụ: --start và --clean độc lập là không hợp lệ nếu --clean không đi chung --start trong kịch bản legacy, hoặc --stop và --reset-all).\033[0m"
+        exit 1
+    fi
+
+    if [[ "$LGC_RESET" == "true" ]]; then
+        COMMAND="reset-all"
+        YES_RESET_ALL="true"
+        OVERWRITE="true"
+        if [[ -n "$TARGET_NODE" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] --reset-all --only-node N không còn được hỗ trợ để đảm bảo an toàn.\033[0m"
+            exit 1
+        fi
+    elif [[ "$LGC_RESTORE" == "true" ]]; then
+        if [[ -n "$TARGET_NODE" && "$TARGET_NODE" != "$RESTORE_NODE" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Xung đột giữa --restore-node và --only-node.\033[0m"
+            exit 1
+        fi
+        COMMAND="restore"
+        if [[ -z "$RESTORE_NODE" ]]; then echo -e "\033[0;31m❌ Thiếu node cho restore\033[0m"; exit 1; fi
+        TARGET_NODE="$RESTORE_NODE"
+    elif [[ "$LGC_GEN_KEYS" == "true" ]]; then
+        COMMAND="gen-keys"
+    elif [[ "$LGC_STOP" == "true" ]]; then
+        COMMAND="stop"
+        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
+    elif [[ "$LGC_RESTART" == "true" ]]; then
+        COMMAND="restart"
+        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
+    elif [[ "$LGC_START" == "true" ]]; then
+        COMMAND="deploy"
+        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
+    elif [[ "$LGC_OPEN_PORTS" == "true" ]]; then
+        COMMAND="open-ports"
+        if [[ -z "$TARGET_NODE" ]]; then ALL_NODES="true"; fi
+    elif [[ "$LGC_CLEAN" == "true" ]]; then
+        echo -e "\033[0;31m❌ [LỖI] Flag --clean độc lập đã bị loại bỏ. Hãy dùng lệnh 'reset-data' hoặc 'reset-all' tùy mục đích.\033[0m"
+        exit 1
+    else
+        echo -e "\033[0;31m❌ [LỖI] Không có action chính nào được chỉ định.\033[0m"
+        exit 1
+    fi
+
+    if [[ "$LGC_CLEAN" == "true" ]] && [[ "$COMMAND" == "deploy" ]]; then
+        # Handled in the strict mapping block
+        true
+    fi
+    if [[ "$LGC_OPEN_PORTS" == "true" ]]; then
+        WITH_FIREWALL="true"
+    fi
+else
+    # New strict parser
+    COMMAND="${1:-}"
+    shift || true
+
+    case "$COMMAND" in
+        deploy|start|stop|restart|restore|reset-data|reset-all|gen-keys|open-ports|monitors|build) ;;
+        -h|--help|help|"") COMMAND="help" ;;
+        *) echo -e "\033[0;31m❌ [LỖI] Command không hợp lệ: $COMMAND\033[0m"; exit 1 ;;
+    esac
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --inventory) INVENTORY="$2"; shift ;;
+            --node)
+                if [[ -n "$TARGET_NODE" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --node bị lặp lại.\033[0m"; exit 1; fi
+                TARGET_NODE="$2"; shift
+                ;;
+            --all)
+                if [[ "$ALL_NODES" == "true" ]]; then echo -e "\033[0;31m❌ [LỖI] Option --all bị lặp lại.\033[0m"; exit 1; fi
+                ALL_NODES="true"
+                ;;
+            --bin-dir) BIN_DIR="$2"; shift ;;
+            --fast) FAST="true" ;;
+            --debug-cpp) DEBUG_CPP="true" ;;
+            --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
+            --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
+            --open-ports) WITH_FIREWALL="true" ;;
+            --overwrite) OVERWRITE="true" ;;
+            --yes-reset-all) YES_RESET_ALL="true" ;;
+            *) echo -e "\033[0;31m❌ [LỖI] Option không hợp lệ hoặc sai vị trí: $1\033[0m"; exit 1 ;;
+        esac
+        shift
+    done
+fi
+
+if [[ "$COMMAND" == "help" ]]; then
+    echo "Usage: $0 <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  deploy          Triển khai (build + distribute + start)"
+    echo "  start           Khởi động service (chưa hỗ trợ độc lập)"
+    echo "  restart         Khởi động lại service nhanh"
+    echo "  stop            Dừng service"
+    echo "  restore         Khôi phục dữ liệu từ snapshot"
+    echo "  reset-data      Xóa dữ liệu node"
+    echo "  reset-all       Xóa toàn cụm và tạo mới (nguy hiểm)"
+    echo "  gen-keys        Tạo keys cục bộ"
+    echo "  open-ports      Cấu hình tường lửa"
+    echo "  build           Biên dịch mã nguồn (chưa hỗ trợ)"
+    echo ""
+    echo "Options:"
+    echo "  --node N, --all      Chỉ định mục tiêu"
+    echo "  --inventory PATH     Sử dụng inventory khác (mặc định: inventory.yml)"
+    echo "  --fast               Biên dịch nhanh"
+    echo "  --debug-cpp          Bật debug C++"
+    echo "  --bin-dir DIR        Sử dụng prebuilt binaries"
+    echo "  --open-ports         Mở cổng firewall"
+    echo "  --yes-reset-all      Xác nhận phá hủy cụm"
+    echo "  --snapshot-url URL   URL để khôi phục snapshot"
+    echo "  --btrfs-size SIZE    Kích thước phân vùng BTRFS"
+    exit 0
+fi
+
+# Validation "--node N" vs "--all"
+if [[ "$COMMAND" =~ ^(deploy|start|stop|restart|open-ports|reset-data)$ ]]; then
+    if [[ -n "$TARGET_NODE" && "$ALL_NODES" == "true" ]]; then
+        echo -e "\033[0;31m❌ [LỖI] --node và --all loại trừ nhau.\033[0m"
+        exit 1
+    fi
+    if [[ -z "$TARGET_NODE" && "$ALL_NODES" == "false" ]]; then
+        echo -e "\033[0;31m❌ [LỖI] Lệnh $COMMAND yêu cầu phải có --node N hoặc --all.\033[0m"
+        exit 1
+    fi
+fi
+
+# Map to legacy Ansible Extra Vars behavior
+ACTION=""
+KEEP_DATA="true"
+RESTORE_NODE="none"
 OPEN_PORTS="false"
-BUILD_FAST="false"
-DEBUG_CPP="false"
-ALL_MONITORS="false"
+ALL_MONITORS="false" # Not used yet
+BUILD_FAST="$FAST"
 USE_PREBUILT="false"
-PREBUILT_BIN_DIR=""
+PREBUILT_BIN_DIR="$BIN_DIR"
+
+if [[ -n "$BIN_DIR" ]]; then
+    USE_PREBUILT="true"
+fi
+
+case "$COMMAND" in
+    build)
+        ACTION="build"
+        if [[ -n "$TARGET_NODE" || "$ALL_NODES" == "true" || -n "$BIN_DIR" || -n "$SNAPSHOT_URL" || -n "$BTRFS_SIZE_VAL" || "$WITH_FIREWALL" == "true" || "$YES_RESET_ALL" == "true" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Lệnh build chỉ hỗ trợ các cờ biên dịch (--fast, --debug-cpp).\033[0m"
+            exit 1
+        fi
+        ;;
+    deploy)
+        ACTION="deploy"
+        KEEP_DATA="true"
+        if [[ "$LGC_CLEAN" == "true" ]]; then KEEP_DATA="false"; fi
+        if [[ "$WITH_FIREWALL" == "true" ]]; then OPEN_PORTS="true"; fi
+        ;;
+    start)
+        ACTION="start"
+        if [[ "$USE_PREBUILT" == "true" || "$FAST" == "true" || "$DEBUG_CPP" == "true" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Các cờ build (--bin-dir, --fast, --debug-cpp) không hợp lệ với service commands.\033[0m"
+            exit 1
+        fi
+        ;;
+    stop|restart|open-ports)
+        if [[ "$COMMAND" == "stop" ]]; then ACTION="stop"
+        elif [[ "$COMMAND" == "restart" ]]; then ACTION="restart"
+        elif [[ "$COMMAND" == "open-ports" ]]; then ACTION="open_ports"
+        fi
+        if [[ "$USE_PREBUILT" == "true" || "$FAST" == "true" || "$DEBUG_CPP" == "true" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Các cờ build (--bin-dir, --fast, --debug-cpp) không hợp lệ với service commands.\033[0m"
+            exit 1
+        fi
+        ;;
+    restore)
+        if [[ -z "$TARGET_NODE" || "$ALL_NODES" == "true" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Lệnh restore chỉ chấp nhận --node N.\033[0m"
+            exit 1
+        fi
+        if [[ -z "$SNAPSHOT_URL" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Lệnh restore bắt buộc phải có --snapshot-url URL.\033[0m"
+            exit 1
+        fi
+        ACTION="deploy"
+        KEEP_DATA="false"
+        RESTORE_NODE="$TARGET_NODE"
+        ;;
+    reset-data)
+        if [[ -z "$TARGET_NODE" || "$ALL_NODES" == "true" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Lệnh reset-data chỉ chấp nhận --node N.\033[0m"
+            exit 1
+        fi
+        ACTION="deploy"
+        KEEP_DATA="false"
+        ;;
+    reset-all)
+        if [[ -n "$TARGET_NODE" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Lệnh reset-all không nhận selector --node.\033[0m"
+            exit 1
+        fi
+        if [[ "$YES_RESET_ALL" == "false" ]]; then
+            echo -e "\033[0;31m❌ [LỖI] Phải truyền cờ --yes-reset-all để xác nhận phá hủy toàn cụm.\033[0m"
+            exit 1
+        fi
+        ACTION="setup"
+        KEEP_DATA="false"
+        OVERWRITE="true"
+        TARGET_NODE="all"
+        if [[ "$WITH_FIREWALL" == "true" ]]; then OPEN_PORTS="true"; fi
+        ;;
+    gen-keys)
+        ACTION="gen_keys"
+        if [[ "$OVERWRITE" != "true" && -f "${SCRIPT_DIR}/../systemd/genesis.json" ]]; then
+            echo -e "\n\033[0;31m❌ [LỖI DỪNG THỰC THI] Keys và genesis.json đã tồn tại tại deploy/systemd/!\033[0m"
+            echo -e "\033[0;33m   Để tránh vô tình ghi đè phá hủy keys của Validator, lệnh gen-keys mặc định không ghi đè.\033[0m"
+            echo -e "\033[0;36m   👉 Nếu thực sự muốn tạo lại toàn bộ keys và genesis mới, hãy thêm cờ: --overwrite\033[0m\n"
+            exit 1
+        fi
+        ;;
+    monitors)
+        echo -e "\033[0;31m❌ [LỖI] Lệnh monitors chưa được hỗ trợ trong wrapper.\033[0m"
+        exit 1
+        ;;
+esac
+
+if [[ -z "$TARGET_NODE" && "$ALL_NODES" == "true" ]]; then
+    TARGET_NODE="all"
+fi
 
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-"Manual (Local Machine)"}"
 # BUG FIX (2026-09-10): must query the metanode repo (SCRIPT_DIR), not the caller's cwd.
@@ -135,70 +421,11 @@ if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-
     GIT_BRANCH=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     GIT_COMMIT=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
     if [[ "$GIT_BRANCH" != "unknown" ]] || [[ "$GIT_COMMIT" != "unknown" ]]; then
-        if [[ ! "$DEPLOY_SOURCE" =~ "Branch:" ]] && [[ ! "$DEPLOY_SOURCE" =~ "$GIT_BRANCH" ]]; then
+        if [[ ! "$DEPLOY_SOURCE" =~ Branch: ]] && [[ ! "$DEPLOY_SOURCE" =~ $GIT_BRANCH ]]; then
             DEPLOY_SOURCE="$DEPLOY_SOURCE (Branch: $GIT_BRANCH | Commit: $GIT_COMMIT)"
         fi
     fi
 fi
-
-# Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --start) ACTION="start"; KEEP_DATA="true"; EXPLICIT_ACTION="true" ;;
-        --restart) ACTION="restart"; KEEP_DATA="true"; EXPLICIT_ACTION="true" ;;
-        --reset-all) ACTION="setup"; KEEP_DATA="false"; EXPLICIT_ACTION="true" ;;
-        --stop) ACTION="stop"; EXPLICIT_ACTION="true" ;;
-        --clean) KEEP_DATA="false" ;;
-        --gen-keys) ACTION="gen_keys"; EXPLICIT_ACTION="true" ;;
-        --only-node) TARGET_NODE="$2"; shift ;;
-        --restore-node) RESTORE_NODE="$2"; shift ;;
-        --snapshot-url) SNAPSHOT_URL="$2"; shift ;;
-        --btrfs-size) BTRFS_SIZE_VAL="$2"; shift ;;
-        --open-ports) OPEN_PORTS="true" ;;
-        --fast) BUILD_FAST="true" ;;
-        --debug-cpp) DEBUG_CPP="true" ;;
-        --all-monitors|--monitor-all) ALL_MONITORS="true" ;;
-        --bin-dir)
-            USE_PREBUILT="true"
-            PREBUILT_BIN_DIR="$2"
-            shift
-            ;;
-        --prebuilt-bin|--use-prebuilt)
-            USE_PREBUILT="true"
-            if [[ "$#" -gt 1 && ! "$2" =~ ^-- ]]; then
-                PREBUILT_BIN_DIR="$2"
-                shift
-            fi
-            ;;
-        --skip-build)
-            USE_PREBUILT="true"
-            ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS]"
-            echo "Options:"
-            echo "  --start             Start nodes (re-distribute binaries)"
-            echo "  --restart           Fast restart systemd services"
-            echo "  --reset-all         Fresh setup (gen keys, clears data)"
-            echo "  --gen-keys          Only generate keys & genesis locally (does not touch servers)"
-            echo "  --stop              Stop nodes and monitors"
-            echo "  --clean             Clear data before starting nodes"
-            echo "  --only-node N       Only apply actions to node N"
-            echo "  --restore-node N    Restore node N from snapshot url"
-            echo "  --snapshot-url U    Snapshot URL to use (e.g. http://ip:8604)"
-            echo "  --btrfs-size SIZE   Size of BTRFS partition/image (e.g. 50G, 100G, 400G)"
-            echo "  --open-ports        Open firewall ports for the nodes"
-            echo "  --all-monitors      Run monitors mutually across ALL machines"
-            echo "  --fast              Fast build (skip redundant steps)"
-            echo "  --debug-cpp         Enable debug mode for C++ MVM linker"
-            echo "  --skip-build        Sử dụng binary có sẵn, bỏ qua toàn bộ bước build code"
-            echo "  --prebuilt-bin [D]  Sử dụng binary có sẵn từ thư mục D (Mặc định: deploy/bin)"
-            echo "  --bin-dir D         Chỉ định thư mục chứa file binary có sẵn"
-            exit 0
-            ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
-    esac
-    shift
-done
 
 # Resolve Telegram configuration from YAML:
 # If --all-monitors flag is active, read from monitors/inventory.yml.
@@ -264,12 +491,40 @@ if [ "$USE_PREBUILT" == "true" ]; then
     done
 fi
 
-# Resolve default action if not explicitly specified
-if [ "$EXPLICIT_ACTION" == "false" ]; then
-    if [ "$OPEN_PORTS" == "true" ]; then
-        ACTION="open_ports"
-    else
-        ACTION="start"
+# ==============================================================================
+# 1.5. NEW BUILD WORKFLOW & ARTIFACT CONTRACT (PHASE 2)
+# ==============================================================================
+
+if [[ "$COMMAND" == "build" ]]; then
+    echo -e "\n🔨 [BUILD] Bắt đầu quá trình biên dịch (Build-Only)..."
+    BUILD_ARGS=("--build-only")
+    if [[ "$FAST" == "true" ]]; then BUILD_ARGS+=("--fast"); fi
+    if [[ "$DEBUG_CPP" == "true" ]]; then BUILD_ARGS+=("--debug-cpp"); fi
+
+    if ! bash "${SCRIPT_DIR}/../systemd/build_release.sh" "${BUILD_ARGS[@]}"; then
+        echo -e "\033[0;31m❌ [LỖI] Quá trình biên dịch thất bại.\033[0m"
+        exit 1
+    fi
+    echo -e "\n✅ [BUILD] Biên dịch thành công. Các tệp nhị phân đã được đưa vào deploy/bin."
+    exit 0
+fi
+
+if [[ "$ACTION" == "setup" || "$ACTION" == "deploy" || "$ACTION" == "gen_keys" ]]; then
+    if [[ "$USE_PREBUILT" == "false" ]]; then
+        echo -e "\n🔨 [BUILD] Biên dịch mã nguồn trước khi deploy (Build-Only)..."
+        BUILD_ARGS=("--build-only")
+        if [[ "$FAST" == "true" ]]; then BUILD_ARGS+=("--fast"); fi
+        if [[ "$DEBUG_CPP" == "true" ]]; then BUILD_ARGS+=("--debug-cpp"); fi
+
+        if ! bash "${SCRIPT_DIR}/../systemd/build_release.sh" "${BUILD_ARGS[@]}"; then
+            echo -e "\033[0;31m❌ [LỖI DỪNG THỰC THI] Quá trình biên dịch thất bại!\033[0m"
+            exit 1
+        fi
+
+        # Bắt buộc chuyển sang chế độ prebuilt cho luồng Ansible
+        USE_PREBUILT="true"
+        PREBUILT_BIN_DIR="${SCRIPT_DIR}/../bin"
+        echo -e "✅ [BUILD] Biên dịch thành công. Chuyển Ansible sang dùng prebuilt tại: $PREBUILT_BIN_DIR"
     fi
 fi
 
@@ -328,10 +583,11 @@ fi
 ACTION_LABEL=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
 
 echo -e "\n🚀 Starting Ansible ${ACTION_LABEL} with:"
+echo "   Command:            $COMMAND"
 echo "   Deployer Server IP: $DEPLOY_IP"
 echo "   Target Node IPs:    $TARGET_NODES_IPS"
 echo "   Source:             $DEPLOY_SOURCE"
-echo "   Action:             $ACTION"
+echo "   Legacy Action:      $ACTION"
 echo "   Target Node:        $TARGET_NODE"
 echo "   Keep Data:          $KEEP_DATA"
 echo "   Restore Node:       $RESTORE_NODE"
@@ -371,7 +627,7 @@ ${ROLES_OUTPUT}
 </pre>"
 
 # Prepare extra vars
-EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}'"
+EXTRA_VARS="ansible_action=${ACTION} target_node=${TARGET_NODE} keep_data=${KEEP_DATA} restore_node=${RESTORE_NODE} open_ports=${OPEN_PORTS} ansible_build_fast=${BUILD_FAST} ansible_debug_cpp=${DEBUG_CPP} ansible_use_prebuilt=${USE_PREBUILT} ansible_prebuilt_bin_dir='${PREBUILT_BIN_DIR}' ansible_overwrite=${OVERWRITE}"
 if [ -n "$SNAPSHOT_URL" ]; then
     EXTRA_VARS="${EXTRA_VARS} snapshot_url='${SNAPSHOT_URL}'"
 fi
@@ -406,8 +662,12 @@ fi
 if [ "$ACTION" == "gen_keys" ]; then
     echo -e "\n🔑 [GEN-KEYS] Bắt đầu sinh bộ Key & Genesis mẫu cục bộ (Không đụng tới server)..."
     cd "$SCRIPT_DIR"
-    ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}" --tags gen_keys
+    exec 200> "${SCRIPT_DIR}/../.bin.lock"
+    flock -s 200
+    ANSIBLE_PLAYBOOK_CMD=(ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}" --tags gen_keys)
+    "${ANSIBLE_PLAYBOOK_CMD[@]}"
     exit_code=$?
+    flock -u 200
     if [ $exit_code -eq 0 ]; then
         echo -e "\n=========================================================="
         echo -e "✅ ĐÃ TẠO XONG KEYS & GENESIS MẪU CỤC BỘ!"
@@ -419,8 +679,9 @@ if [ "$ACTION" == "gen_keys" ]; then
         echo -e "   1. Vào deploy/systemd/node-X_keys thay file key của bạn."
         echo -e "   2. Mở deploy/systemd/genesis.json chỉnh chainId, ví nhận tiền (alloc)..."
         echo -e "\n🚀 KHI ĐÃ SẴN SÀNG KHỞI ĐỘNG CHUỖI TỪ BLOCK 0 VỚI BỘ KEY NÀY:"
-        echo -e "   ./ansible_deploy.sh --start --clean --open-ports"
-        echo -e "   (⚠️ Không dùng --reset-all để tránh bị đúc đè lại key)"
+        echo -e "   ./ansible_deploy.sh deploy --all"
+        echo -e "   (Thêm cờ --open-ports nếu muốn cấu hình tường lửa)"
+        echo -e "   (⚠️ Không dùng reset-all để tránh bị tạo đè lại key)"
         echo -e "==========================================================\n"
     fi
     exit $exit_code
@@ -450,8 +711,15 @@ fi
 cd "$SCRIPT_DIR"
 set +e
 export PYTHONUNBUFFERED=1
-ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}"
+
+exec 200> "${SCRIPT_DIR}/../.bin.lock"
+flock -s 200
+
+ANSIBLE_PLAYBOOK_CMD=(ansible-playbook -i "$INVENTORY" "$PLAYBOOK" -e "$EXTRA_VARS" "${VAULT_ARGS[@]}")
+"${ANSIBLE_PLAYBOOK_CMD[@]}"
 ansible_exit=$?
+
+flock -u 200
 set -e
 
 if [ $ansible_exit -eq 0 ]; then

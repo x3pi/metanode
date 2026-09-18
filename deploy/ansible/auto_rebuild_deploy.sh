@@ -28,8 +28,8 @@ load_telegram_config() {
         chat_id=$(grep -E '^\s*TELEGRAM_CHAT_ID=' "$env_file" 2>/dev/null | head -n 1 | cut -d'=' -f2- | tr -d '"\r' || true)
     fi
     if [ -z "$token" ] && [ -f "${ANSIBLE_DIR}/inventory.yml" ]; then
-        token=$(grep -E '^\s*telegram_bot_token:' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
-        chat_id=$(grep -E '^\s*telegram_chat_id:' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        token=$(grep -E '^\s*(telegram_bot_token|bot_token):' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
+        chat_id=$(grep -E '^\s*(telegram_chat_id|chat_id):' "${ANSIBLE_DIR}/inventory.yml" 2>/dev/null | head -n 1 | awk '{print $2}' | sed 's/["\x27]//g' || true)
     fi
     [ -n "$token" ] && TELEGRAM_BOT_TOKEN="$token"
     [ -n "$chat_id" ] && TELEGRAM_CHAT_ID="$chat_id"

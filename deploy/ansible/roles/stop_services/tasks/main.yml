@@ -38,22 +38,6 @@
   loop: "{{ active_nodes }}"
   failed_when: false
 
-- name: Stop and disable targeted metanode consensus services
-  ansible.builtin.systemd:
-    name: "metanode-consensus-{{ item }}"
-    state: stopped
-    enabled: no
-  loop: "{{ active_nodes }}"
-  failed_when: false
-
-- name: Stop and disable legacy metanode services for targeted nodes
-  ansible.builtin.systemd:
-    name: "{{ item[1] }}-{{ item[0] }}"
-    state: stopped
-    enabled: no
-  loop: "{{ active_nodes | product(['metanode', 'metanode-rpc']) | list }}"
-  failed_when: false
-
 # SELF-MATCH BUG (2026-09-10): every pgrep/pkill -f pattern below uses the bracket trick
 # ("/[b]in" instead of "/bin") -- the classic `ps aux | grep '[s]shd'` idiom. Found live: the
 # literal pattern "node-N/bin" written in THIS SAME task's own shell script text also matches

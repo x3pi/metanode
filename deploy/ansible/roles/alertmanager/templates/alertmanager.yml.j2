@@ -8,8 +8,8 @@
   destination for this whole repo's tooling, not two that can drift out of sync.
 #}
 {% set _cluster_hosts = groups['metanode_cluster'] | default([]) %}
-{% set tg_bot_token = (hostvars[_cluster_hosts[0]].telegram_bot_token | default('')) if _cluster_hosts | length > 0 else '' %}
-{% set tg_chat_id = (hostvars[_cluster_hosts[0]].telegram_chat_id | default('')) if _cluster_hosts | length > 0 else '' %}
+{% set tg_bot_token = (hostvars[_cluster_hosts[0]].telegram_bot_token | default(hostvars[_cluster_hosts[0]].bot_token | default(''))) if _cluster_hosts | length > 0 else '' %}
+{% set tg_chat_id = (hostvars[_cluster_hosts[0]].telegram_chat_id | default(hostvars[_cluster_hosts[0]].chat_id | default(''))) if _cluster_hosts | length > 0 else '' %}
 global:
   resolve_timeout: 5m
 
