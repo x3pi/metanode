@@ -353,6 +353,12 @@ else
     fi
     LAST_DEP_INIT=$(cat "$LAST_DEPLOYED_FILE" 2>/dev/null | xargs || echo "")
     echo "📌 Đã ghi nhận commit đã deploy gần nhất: ${LAST_DEP_INIT:0:8}"
+    
+    # Nếu local đang có commit mới hơn commit đã deploy gần nhất mà chưa verify
+    if [ "$LOCAL_HASH" != "$LAST_DEP_INIT" ] && [ "$BUILD_VERIFIED" = false ]; then
+        echo "🔍 Phát hiện local có commit mới (${LOCAL_HASH:0:8}) chưa deploy. Chạy Build Check kiểm tra trước..."
+        verify_local_commit "$LOCAL_HASH"
+    fi
 fi
 
 cd "$PROJECT_ROOT"
@@ -407,10 +413,9 @@ Các node tiếp tục chạy phiên bản ổn định trước đó."
     # ─── 2. KIỂM TRA COMMIT MỚI TRÊN REMOTE ─────────────────────────
     if git fetch "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
         REMOTE_HASH=$(git rev-parse "${REMOTE}/${BRANCH}" 2>/dev/null || echo "")
-        LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
         
-        # Nếu remote có commit mới mà local chưa có
-        if [ -n "$REMOTE_HASH" ] && [ "$REMOTE_HASH" != "$LOCAL_HASH" ]; then
+        # Chỉ kích hoạt khi REMOTE_HASH là commit mới mà local HEAD CHƯA CÓ
+        if [ -n "$REMOTE_HASH" ] && ! git merge-base --is-ancestor "$REMOTE_HASH" HEAD 2>/dev/null; then
             COMMIT_MSG=$(git log -1 --pretty=%B "${REMOTE}/${BRANCH}" 2>/dev/null | head -n 1)
             COMMIT_AUTHOR=$(git log -1 --pretty=%an "${REMOTE}/${BRANCH}" 2>/dev/null || echo "Unknown")
             
@@ -431,8 +436,20 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
 🔄 <b>Hành động:</b> Đang tự động kéo mã nguồn về và chạy <b>Build Check</b>...
 ⏰ <i>Lưu ý: Hệ thống sẽ tự động deploy vào ${sched_txt}.</i>"
             
+            # Tự động stash nếu working tree có file unstaged để tránh xung đột khi rebase
+            HAS_UNSTAGED=false
+            if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+                HAS_UNSTAGED=true
+                echo "📦 Tạm lưu các file chưa commit ở local vào git stash..."
+                git stash push -u -m "auto-deploy-stash-$(date +%s)" >/dev/null 2>&1 || true
+            fi
+
             echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
             if git pull --rebase "$REMOTE" "$BRANCH"; then
+                if [ "$HAS_UNSTAGED" = true ]; then
+                    echo "📦 Phục hồi lại các thay đổi local từ stash..."
+                    git stash pop >/dev/null 2>&1 || true
+                fi
                 NEW_LOCAL_HASH=$(git rev-parse HEAD)
                 echo "✅ Đã kéo mã nguồn về thành công (HEAD: ${NEW_LOCAL_HASH:0:8})."
                 
@@ -449,6 +466,9 @@ Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
                     cd "$PROJECT_ROOT"
                 fi
             else
+                if [ "$HAS_UNSTAGED" = true ]; then
+                    git stash pop >/dev/null 2>&1 || true
+                fi
                 echo "❌ Lỗi kéo mã nguồn (git pull --rebase) từ ${REMOTE}/${BRANCH}!"
                 send_telegram_notification "❌ <b>[LỖI GIT PULL]</b> Không thể kéo commit <code>${REMOTE_HASH:0:8}</code> về local do conflict hoặc lỗi git!"
             fi
