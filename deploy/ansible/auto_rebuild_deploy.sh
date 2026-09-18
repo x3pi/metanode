@@ -10,6 +10,7 @@ set -u
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_DIR="${PROJECT_ROOT}/deploy/ansible"
 PID_FILE="${ANSIBLE_DIR}/auto_deploy.pid"
+LOCK_FILE="${ANSIBLE_DIR}/auto_deploy.lock"
 LOG_FILE="${ANSIBLE_DIR}/auto_deploy.log"
 LAST_DEPLOYED_FILE="${ANSIBLE_DIR}/.last_deployed_commit"
 CHECK_INTERVAL=5
@@ -47,10 +48,17 @@ send_telegram_notification() {
 }
 
 is_running() {
+    # 1. Kiểm tra qua PID file nếu tồn tại
     if [ -f "$PID_FILE" ]; then
         local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null | xargs)
-        if [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1; then
+        pid=$(cat "$PID_FILE" 2>/dev/null | xargs || echo "")
+        if [ -n "$pid" ] && [ "$pid" != "$$" ] && ps -p "$pid" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    # 2. Kiểm tra qua file lock kernel (nếu file lock đang bị giữ bởi tiến trình khác)
+    if [ -f "$LOCK_FILE" ]; then
+        if ! flock -n "$LOCK_FILE" true >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -58,26 +66,37 @@ is_running() {
 }
 
 cmd_stop() {
-    if is_running; then
+    local stopped=false
+    local target_pids=""
+    if [ -f "$PID_FILE" ]; then
         local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null | xargs)
-        echo "🛑 Đang dừng Auto-Deploy Watcher (PID: $pid)..."
-        pkill -P "$pid" 2>/dev/null || true
-        kill "$pid" 2>/dev/null || true
-        rm -f "$PID_FILE"
+        pid=$(cat "$PID_FILE" 2>/dev/null | xargs || echo "")
+        [ -n "$pid" ] && target_pids="$pid"
+    fi
+
+    local stray_pids
+    stray_pids=$(pgrep -f "auto_rebuild_deploy.sh" 2>/dev/null | grep -v "$$" || true)
+    target_pids=$(echo "$target_pids $stray_pids" | xargs -n1 | sort -u | xargs || echo "")
+
+    if [ -n "$target_pids" ]; then
+        echo "🛑 Đang dừng Auto-Deploy Watcher (PID: $target_pids)..."
+        for p in $target_pids; do
+            pkill -9 -P "$p" 2>/dev/null || true
+            kill -TERM "$p" 2>/dev/null || true
+        done
+        sleep 0.2
+        for p in $target_pids; do
+            if ps -p "$p" >/dev/null 2>&1; then
+                kill -9 "$p" 2>/dev/null || true
+            fi
+        done
+        stopped=true
+    fi
+    rm -f "$PID_FILE" "$LOCK_FILE"
+    if [ "$stopped" = true ]; then
         echo "✅ Watcher đã được dừng thành công."
     else
-        local stray_pids
-        stray_pids=$(pgrep -f "auto_rebuild_deploy.sh" 2>/dev/null | grep -v "$$" || true)
-        if [ -n "$stray_pids" ]; then
-            echo "🛑 Đang dọn dẹp các tiến trình watcher đang chạy (PID: $stray_pids)..."
-            kill $stray_pids 2>/dev/null || true
-            rm -f "$PID_FILE"
-            echo "✅ Đã dừng các tiến trình watcher."
-        else
-            echo "ℹ️ Auto-Deploy Watcher hiện không chạy."
-            rm -f "$PID_FILE"
-        fi
+        echo "ℹ️ Auto-Deploy Watcher hiện không chạy."
     fi
 }
 
@@ -130,7 +149,7 @@ esac
 DAEMON_MODE=false
 FORCE_INITIAL_DEPLOY=false
 CUSTOM_BRANCH=""
-SCHEDULE_AT=""
+SCHEDULE_AT="21:00"
 args=()
 
 while [ $# -gt 0 ]; do
@@ -170,15 +189,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ "$DAEMON_MODE" = true ]; then
-    if is_running; then
-        local_pid=$(cat "$PID_FILE" 2>/dev/null | xargs)
-        echo "⚠️  Watcher daemon đang chạy với PID: $local_pid"
-        echo "📜 Xem log: $0 logs"
-        echo "🛑 Dừng:    $0 stop"
-        exit 0
+# Kiểm tra chặn chạy trùng lặp: CHỈ CHO PHÉP DUY NHẤT 1 TIẾN TRÌNH CHẠY (Áp dụng cho CẢ daemon và foreground)
+if is_running; then
+    running_pid=$(cat "$PID_FILE" 2>/dev/null | xargs || true)
+    if [ -z "$running_pid" ]; then
+        running_pid=$(pgrep -f "auto_rebuild_deploy.sh" 2>/dev/null | grep -v "$$" | head -n 1 || true)
     fi
+    echo "⚠️  Watcher đang chạy với PID: ${running_pid:-"Không rõ"}"
+    echo "📜 Xem log: $0 logs"
+    echo "🛑 Dừng:    $0 stop"
+    exit 0
+fi
 
+if [ "$DAEMON_MODE" = true ]; then
     CHILD_ARGS=()
     if [ -n "$CUSTOM_BRANCH" ]; then
         CHILD_ARGS+=(--branch "$CUSTOM_BRANCH")
@@ -202,6 +225,18 @@ if [ "$DAEMON_MODE" = true ]; then
     echo "🛑 To stop it, run:   $0 stop"
     exit 0
 fi
+
+# Thiết lập File Lock cấp Linux Kernel độc quyền (flock) để loại trừ 100% race condition
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "❌ [LỖI] Đã có một tiến trình Watcher khác đang giữ lock!"
+    echo "🛑 Dừng: $0 stop"
+    exit 1
+fi
+
+# Ghi nhận PID cho tiến trình đang chạy và dọn dẹp file khi thoát
+echo "$$" > "$PID_FILE"
+trap 'rm -f "$PID_FILE" "$LOCK_FILE"' EXIT INT TERM
 
 cd "$PROJECT_ROOT"
 
