@@ -97,6 +97,7 @@ esac
 DAEMON_MODE=false
 FORCE_INITIAL_DEPLOY=false
 CUSTOM_BRANCH=""
+SCHEDULE_AT=""
 args=()
 
 while [ $# -gt 0 ]; do
@@ -108,6 +109,10 @@ while [ $# -gt 0 ]; do
         --initial-deploy)
             FORCE_INITIAL_DEPLOY=true
             shift
+            ;;
+        --at|--schedule)
+            SCHEDULE_AT="$2"
+            shift 2
             ;;
         --branch)
             CUSTOM_BRANCH="$2"
@@ -145,6 +150,9 @@ if [ "$DAEMON_MODE" = true ]; then
     if [ -n "$CUSTOM_BRANCH" ]; then
         CHILD_ARGS+=(--branch "$CUSTOM_BRANCH")
     fi
+    if [ -n "$SCHEDULE_AT" ]; then
+        CHILD_ARGS+=(--at "$SCHEDULE_AT")
+    fi
     if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
         CHILD_ARGS+=(--initial-deploy)
     fi
@@ -181,8 +189,45 @@ git checkout "$BRANCH" 2>/dev/null || true
 
 LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
 
+# Handle scheduled deploy at specific time (Timezone: Asia/Ho_Chi_Minh)
+if [ -n "$SCHEDULE_AT" ]; then
+    TARGET_EPOCH=$(TZ="Asia/Ho_Chi_Minh" date -d "$SCHEDULE_AT" +%s 2>/dev/null || echo "")
+    if [ -n "$TARGET_EPOCH" ]; then
+        NOW_EPOCH=$(date +%s)
+        if [ "$TARGET_EPOCH" -le "$NOW_EPOCH" ]; then
+            TARGET_EPOCH=$(TZ="Asia/Ho_Chi_Minh" date -d "tomorrow $SCHEDULE_AT" +%s 2>/dev/null || echo "")
+        fi
+        WAIT_SECONDS=$((TARGET_EPOCH - NOW_EPOCH))
+        TARGET_HUMAN=$(TZ="Asia/Ho_Chi_Minh" date -d "@$TARGET_EPOCH" '+%Y-%m-%d %H:%M:%S %Z')
+        HOURS=$((WAIT_SECONDS / 3600))
+        MINUTES=$(((WAIT_SECONDS % 3600) / 60))
+        echo "⏰ Đã lên lịch hẹn: Sẽ kéo code và deploy vào lúc $TARGET_HUMAN"
+        echo "⏳ Đang chờ đến giờ hẹn... (còn khoảng ${HOURS}h ${MINUTES}m)"
+        sleep "$WAIT_SECONDS"
+        echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] Đã đến giờ hẹn ($SCHEDULE_AT)! Tiến hành kéo mã nguồn và deploy..."
+        
+        # Kéo code mới về
+        git fetch "$REMOTE" "$BRANCH" >/dev/null 2>&1 || true
+        echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
+        git pull --rebase "$REMOTE" "$BRANCH"
+        
+        NEW_LOCAL_HASH=$(git rev-parse HEAD)
+        COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1)
+        COMMIT_AUTHOR=$(git log -1 --pretty=%an)
+        export DEPLOY_SOURCE="Auto-Deploy (Scheduled ${SCHEDULE_AT}, Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
+        
+        echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
+        cd "$ANSIBLE_DIR"
+        ./ansible_deploy.sh --start --fast ${args[@]+"${args[@]}"}
+        
+        echo "$NEW_LOCAL_HASH" > "$LAST_DEPLOYED_FILE"
+        cd "$PROJECT_ROOT"
+        echo "✅ Hoàn tất đợt deploy theo lịch hẹn ${SCHEDULE_AT}!"
+    else
+        echo "⚠️ Định dạng thời gian --at không hợp lệ: $SCHEDULE_AT (Ví dụ: --at 21:00)"
+    fi
 # Handle initial startup
-if [ "$FORCE_INITIAL_DEPLOY" = true ]; then
+elif [ "$FORCE_INITIAL_DEPLOY" = true ]; then
     echo "🚀 Performing initial deployment as requested via --initial-deploy..."
     cd "$ANSIBLE_DIR"
     export DEPLOY_SOURCE="Auto-Deploy (Initial Run)"
@@ -224,7 +269,7 @@ while true; do
             # Nếu local chưa có commit này thì kéo về
             if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
                 echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
-                git pull "$REMOTE" "$BRANCH"
+                git pull --rebase "$REMOTE" "$BRANCH"
             else
                 echo "ℹ️ Local đã có sẵn commit ${REMOTE_HASH:0:8}."
             fi
