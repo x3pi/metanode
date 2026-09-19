@@ -4,32 +4,38 @@ Tài liệu hướng dẫn sử dụng công cụ **Git Auto-Rebuild & Deploy Da
 
 ---
 
-## 🎯 1. Mục Đích & Cơ Chế Hoạt Động (2-Phase Architecture)
+## 🎯 1. Mục Đích & Cơ Chế Hoạt Động
 
-`auto_rebuild_deploy.sh` là daemon chạy ngầm định kỳ (mỗi 5 giây) kiểm tra commit mới trên Git remote theo mô hình **2 pha (Kiểm tra trước - Triển khai sau)** nhằm đảm bảo an toàn tuyệt đối cho mạng lưới:
+`auto_rebuild_deploy.sh` là daemon chạy ngầm định kỳ (mỗi 5 giây) kiểm tra commit mới trên Git remote với 2 chế độ hoạt động:
 
-### 🔹 Pha 1: Phát hiện & Kiểm thử biên dịch (Build Verification)
-- **Phát hiện Commit:** Khi dev push commit mới lên Git remote (`origin/main`), script lập tức phát hiện.
-- **Báo cáo Telegram tức thì:** Gửi thông báo chi tiết mã commit, tác giả, lời nhắn commit và trạng thái đang kéo code.
-- **Tự động kéo code (`git pull --rebase`):** Tự động rebase code mới về máy chủ mà không làm gián đoạn hay sinh merge commit rác.
-- **Chạy kiểm tra biên dịch (`build_check.sh`):** Tự động biên dịch thử toàn bộ hệ thống (EVM & NOMT FFI, Rust Consensus, Go Execution) ở môi trường cách ly:
-  - **✅ Nếu Build THÀNH CÔNG:** Gửi thông báo Telegram xác nhận mã nguồn hợp lệ, sẵn sàng cho lịch deploy ban đêm.
-  - **❌ Nếu Build THẤT BẠI:** Bắn cảnh báo đỏ lên Telegram kèm trích xuất đoạn log lỗi, đồng thời **TỰ ĐỘNG KHÓA / TẠM HOÃN** lịch deploy tối nay để ngăn ngừa đưa code lỗi vào mạng lưới.
-- **Không gián đoạn mạng lưới:** Toàn bộ quá trình build check diễn ra độc lập, các node blockchain đang chạy vẫn hoạt động bình thường 100%.
+### 🔹 Chế độ 1: Hẹn giờ deploy ban đêm (`--at 21:00`) — An Toàn & Sạch Sẽ Cho Dev
+- **Ban ngày:** Khi có commit mới trên Git remote (`origin/main`), watcher phát hiện và gửi thông báo Telegram xác nhận đã ghi nhận commit mới.
+- **KHÔNG kéo code về trước:** Tuyệt đối **không** đụng chạm hay pull vào local working tree trong giờ làm việc. Thư mục mã nguồn trên máy chủ được giữ nguyên vẹn 100%, không gây xung đột với công việc của dev.
+- **Đúng giờ hẹn (21:00 tối):** Script mới tự động thực thi:
+  1. `git pull --rebase`: Kéo mã nguồn mới nhất từ remote về.
+  2. Kích hoạt `./ansible_deploy.sh deploy --all --fast` (đã tích hợp sẵn quy trình biên dịch Go + Rust + EVM FFI; nếu compile fail sẽ dừng ngay lập tức và giữ nguyên cụm node an toàn).
 
-### 🔹 Pha 2: Triển khai theo lịch hẹn (Scheduled Deployment)
-- **Khung giờ mặc định:** **`21:00` hàng ngày theo giờ Việt Nam (`Asia/Ho_Chi_Minh` / GMT+7)** (có thể tùy chỉnh qua cờ `--at`).
-- **Triển khai an toàn:** Đúng 21:00:00, nếu bản commit mới nhất đã vượt qua Build Check, script mới kích hoạt `./ansible_deploy.sh --start --fast` để cập nhật binary và restart toàn bộ cụm node.
-- **Downtime tối thiểu (Zero-downtime):** Nhờ đã được biên dịch sẵn từ ban ngày, thời gian restart toàn bộ cụm node diễn ra siêu tốc (chỉ mất 5 - 10 giây).
+### 🔹 Chế độ 2: Deploy ngay lập tức (Mặc định khi không có `--at`)
+- Daemon liên tục theo dõi remote: Khi phát hiện commit mới trên remote $\rightarrow$ Kéo về ngay $\rightarrow$ Kích hoạt `./ansible_deploy.sh deploy --all --fast` để cập nhật và khởi động lại cụm node.
+- Script chỉ theo dõi commit từ remote, **không tự động deploy code local** chưa push lên Git để tránh gián đoạn công việc dev.
+
+### 🔹 Chế độ 3: Kích hoạt thủ công ngay lập tức (`run-now`)
+- Bất cứ khi nào bạn muốn deploy ngay lập tức (dù đang hẹn giờ hay daemon đang dừng):
+  `./auto_rebuild_deploy.sh run-now`
+  Script sẽ tự động kéo code mới nhất từ remote về và kích hoạt deploy ngay lập tức.
 
 ---
 
-## 🔒 2. Cơ Chế Khóa Độc Quyền (Singleton Guarantee)
+## 🔒 2. Cơ Chế Khóa Độc Quyền & An Toàn Tuyệt Đối (Zero-Fork & Mutex Guarantee)
 
-Script được tích hợp **3 tầng bảo vệ chống chạy trùng lặp**:
-1. **Global Singleton Check:** Kiểm tra toàn cục trước mọi chế độ thực thi (cả background daemon lẫn chạy trực tiếp foreground). Nếu đã có tiến trình chạy, mọi lệnh gọi sau sẽ bị từ chối ngay lập tức kèm cảnh báo PID.
-2. **File Lock cấp Linux Kernel (`flock`):** Khóa độc quyền tệp `auto_deploy.lock` thông qua cơ chế `flock` của hệ điều hành Linux, triệt tiêu 100% race condition.
-3. **Dọn dẹp triệt để (`cmd_stop`):** Khi gọi `stop`, script quét sạch các tiến trình cha và con (`sleep`, `git`, `build_check`), thu hồi file lock và PID file sạch sẽ.
+Script được tích hợp **4 tầng bảo vệ chống chạy trùng lặp và xung đột mã nguồn**:
+1. **Daemon Singleton Check:** Kiểm tra toàn cục trước khi khởi chạy watcher daemon. Khóa độc quyền tệp `auto_deploy.lock` (trên file descriptor riêng) thông qua cơ chế `flock` của Linux kernel, đảm bảo chỉ có duy nhất 1 daemon hoạt động.
+2. **Operation Mutex Lock (`.deploy_operation.lock`):** Mỗi khi diễn ra thao tác kéo code / biên dịch / deploy (cả từ daemon lẫn từ lệnh thủ công `run-now`), script chiếm quyền khóa Mutex độc quyền (non-blocking). Nếu một tiến trình deploy đang chạy thì tiến trình kia sẽ bị từ chối hoặc trì hoãn sang chu kỳ sau, triệt tiêu 100% race condition tranh chấp git hoặc build nhị phân.
+3. **Clean HEAD Deployment & Fail-Closed Stash Guard:** Mọi đợt build và deploy chỉ diễn ra trên working tree 100% sạch tương ứng đúng với Git HEAD. Nếu local có thay đổi chưa commit, script sẽ tạm stash chúng trước; nếu stash thất bại sẽ lập tức dừng deploy (fail-closed). Quá trình biên dịch và restart chỉ chạy trên mã nguồn sạch của commit remote. Sau khi deploy và kiểm thử giao dịch hoàn tất, script mới phục hồi lại các thay đổi local (`git stash pop`), đảm bảo binary trên cụm node phản ánh chính xác 100% commit SHA được ghi nhận.
+4. **Post-Deploy Transaction Verification (Kiểm thử giao dịch tự động):** Sau khi hoàn tất restart cụm node, hệ thống đợi 10 giây để mạng lưới ổn định, sau đó tự động kích hoạt script test giao dịch (`metanode-suite/scripts/rpc-tcp-simple.sh`) lần lượt trên **Node 1** và **Node 0**:
+   - Nếu cả 2 node PASS: Gửi thông báo Telegram xác nhận mạng hoạt động bình thường.
+   - Nếu thất bại: Gửi thông báo Telegram báo lỗi chi tiết kèm **20 dòng log cuối cùng** để xử lý kịp thời.
+5. **Dọn dẹp triệt để (`cmd_stop`):** Khi gọi `stop`, script quét sạch các tiến trình cha và con, thu hồi toàn bộ file lock và PID file sạch sẽ.
 
 ---
 
@@ -37,14 +43,15 @@ Script được tích hợp **3 tầng bảo vệ chống chạy trùng lặp**:
 
 Đứng tại thư mục `deploy/ansible`:
 ```bash
-cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible
+cd /home/abc/nhat/con-chain-v2/metanode/deploy/ansible
 ```
 
 | Lệnh | Ý nghĩa |
 | :--- | :--- |
 | `./auto_rebuild_deploy.sh start` | **Khởi động watcher mặc định: Deploy ngay lập tức** khi có commit mới và build check pass (không hẹn giờ) |
-| `./auto_rebuild_deploy.sh start --at 21:00` | Khởi động watcher **Hẹn giờ deploy** vào lúc 21:00 tối (Asia/Ho_Chi_Minh) |
-| `./auto_rebuild_deploy.sh start --at 23:30` | Khởi động watcher hẹn giờ deploy vào khung giờ tùy chọn khác |
+| `./auto_rebuild_deploy.sh start --at 21:00` | Khởi động watcher **Hẹn giờ deploy** vào lúc 21:00 tối (không kéo code về trước, đúng giờ mới kéo & deploy) |
+| `./auto_rebuild_deploy.sh run-now` | **Kích hoạt deploy ngay lập tức** bản commit mới nhất (không cần chờ giờ hẹn) |
+| `./auto_rebuild_deploy.sh run-now --force` | Ép buộc build và deploy lại commit hiện tại |
 | `./auto_rebuild_deploy.sh stop` | **Dừng watcher** và dọn dẹp sạch sẽ toàn bộ tiến trình con |
 | `./auto_rebuild_deploy.sh status` | Xem trạng thái hoạt động (Đang chạy / Đã dừng, Chế độ, PID, commit đã deploy) |
 | `./auto_rebuild_deploy.sh logs` | **Xem log trực tiếp theo thời gian thực** (`Ctrl+C` để thoát) |
@@ -58,22 +65,19 @@ cd /home/abc/nhat/consensus-chain/metanode/deploy/ansible
 ```bash
 ./auto_rebuild_deploy.sh start
 ```
-*Khi không truyền tham số `--at`, hệ thống mặc định chạy chế độ Deploy ngay lập tức: Mỗi khi có commit mới trên remote $\rightarrow$ Kéo về $\rightarrow$ Chạy Build Check (Go + Rust + FFI) độc lập $\rightarrow$ Nếu PASS sẽ tự động kích hoạt deploy và khởi động lại cụm node ngay lập tức.*
+*Hệ thống liên tục theo dõi remote: Mỗi khi có commit mới trên remote $\rightarrow$ Kéo về $\rightarrow$ Chạy Build Check (Go + Rust + FFI) độc lập $\rightarrow$ Nếu PASS sẽ tự động kích hoạt deploy và khởi động lại cụm node ngay lập tức.*
 
 ### 🔹 Kịch bản 2: Hẹn giờ deploy ban đêm (Ví dụ: 21h00 tối)
 ```bash
 ./auto_rebuild_deploy.sh start --at 21:00
 ```
-*Hệ thống sẽ chạy ngầm, ban ngày có commit mới sẽ tự kéo về build kiểm tra trước và gửi kết quả lên Telegram. Đúng 21:00 tối mới khởi động lại các node.*
+*Hệ thống chạy ngầm theo dõi remote mà KHÔNG làm thay đổi working tree local ban ngày. Đúng 21:00 tối mới kéo code về, biên dịch kiểm tra và deploy lên cluster.*
 
-### 🔹 Kịch bản 3: Hẹn giờ khung giờ khác hoặc theo dõi nhánh khác
+### 🔹 Kịch bản 3: Kích hoạt triển khai ngay lập tức (Run Now)
 ```bash
-# Hẹn giờ 23:30 đêm:
-./auto_rebuild_deploy.sh start --at 23:30
-
-# Chỉ định rõ nhánh git cần theo dõi:
-./auto_rebuild_deploy.sh start --branch dev --at 21:00
+./auto_rebuild_deploy.sh run-now
 ```
+*Kéo code mới nhất từ remote, kiểm tra build và deploy ngay lập tức.*
 
 ### 🔹 Kịch bản 4: Kiểm tra trạng thái hoạt động
 ```bash
