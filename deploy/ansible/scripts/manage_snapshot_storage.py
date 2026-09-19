@@ -190,7 +190,7 @@ def main():
             state = plan(args)
         else:
             with open('/run/lock/metanode-snapshot-storage.lock', 'w') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_EX)
                 state = plan(args)
                 apply(args, state)
         print(json.dumps({'changed': bool(state and state['changed']), 'check': args.check,
