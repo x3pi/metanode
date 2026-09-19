@@ -18,6 +18,8 @@ REMOTE="origin"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
+LAST_NOTIFIED_REMOTE_HASH=""
+SCHEDULE_AT=""
 
 load_telegram_config() {
     local env_file="${ANSIBLE_DIR}/.env"
@@ -100,6 +102,82 @@ cmd_stop() {
     fi
 }
 
+cmd_run_now() {
+    echo "=========================================================="
+    echo "🚀 KÍCH HOẠT DEPLOY NGAY LẬP TỨC (RUN-NOW)"
+    echo "=========================================================="
+    cd "$PROJECT_ROOT" || exit 1
+    load_telegram_config
+    
+    local target_branch
+    target_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    if [ "$target_branch" = "HEAD" ] || [ -z "$target_branch" ]; then
+        target_branch="main"
+    fi
+    
+    local force_flag=false
+    local pass_args=()
+    for arg in "$@"; do
+        if [ "$arg" = "--force" ]; then
+            force_flag=true
+        else
+            pass_args+=("$arg")
+        fi
+    done
+
+    # 1. Kéo code mới nhất từ remote về nếu có
+    echo "🔄 Đang kiểm tra remote (${REMOTE}/${target_branch})..."
+    git fetch "$REMOTE" "$target_branch" >/dev/null 2>&1 || true
+    if ! git merge-base --is-ancestor "${REMOTE}/${target_branch}" HEAD 2>/dev/null; then
+        echo "📦 Phát hiện commit mới trên remote. Đang kéo về (git pull --rebase)..."
+        if ! git pull --rebase "$REMOTE" "$target_branch"; then
+            echo "❌ [LỖI] Xung đột git khi pull rebase! Đang abort..."
+            git rebase --abort >/dev/null 2>&1 || true
+            exit 1
+        fi
+    fi
+
+    local current_hash
+    current_hash=$(git rev-parse HEAD 2>/dev/null || echo "")
+    local last_dep=""
+    if [ -f "$LAST_DEPLOYED_FILE" ]; then
+        last_dep=$(cat "$LAST_DEPLOYED_FILE" 2>/dev/null | xargs || echo "")
+    fi
+
+    if [ "$current_hash" = "$last_dep" ] && [ "$force_flag" = false ]; then
+        echo "ℹ️ Commit hiện tại (${current_hash:0:8}) đã được deploy lên cluster trước đó."
+        echo "💡 Gợi ý: Dùng '$0 run-now --force' nếu bạn muốn ép buộc deploy lại."
+        exit 0
+    fi
+
+    local commit_msg
+    commit_msg=$(git log -1 --pretty=%B | head -n 1)
+    local commit_author
+    commit_author=$(git log -1 --pretty=%an)
+    export DEPLOY_SOURCE="Auto-Deploy Manual Run-Now (Branch: ${target_branch}, Git Commit ${current_hash:0:8} by ${commit_author}: \"${commit_msg}\")"
+    
+    echo "🚀 Kích hoạt build & deploy hệ thống ngay lập tức..."
+    send_telegram_notification "🚀 <b>[Kích Hoạt Deploy Thủ Công (Run-Now)]</b>
+Đang tiến hành biên dịch và restart toàn bộ cụm node lên commit <code>${current_hash:0:8}</code>...
+• <b>Tác giả:</b> ${commit_author}
+• <b>Nội dung:</b> <i>${commit_msg}</i>"
+    
+    cd "$ANSIBLE_DIR" || exit 1
+    if ./ansible_deploy.sh deploy --all --fast ${pass_args[@]+"${pass_args[@]}"}; then
+        echo "$current_hash" > "$LAST_DEPLOYED_FILE"
+        cd "$PROJECT_ROOT" || exit 1
+        echo "✅ Deploy hoàn tất thành công!"
+        send_telegram_notification "✅ <b>[Deploy Thủ Công Hoàn Tất]</b>
+Cụm node đã được cập nhật thành công lên commit <code>${current_hash:0:8}</code>!"
+    else
+        cd "$PROJECT_ROOT" || exit 1
+        echo "❌ Lỗi xảy ra trong quá trình deploy!"
+        send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+Tiến trình cập nhật lên commit <code>${current_hash:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
+        exit 1
+    fi
+}
+
 cmd_help() {
     cat << 'EOF'
 🚀 Git Auto-Rebuild & Deploy Daemon for Metanode
@@ -109,6 +187,7 @@ CÚ PHÁP:
 
 LỆNH ĐIỀU KHIỂN:
     start                  Khởi động watcher chạy ngầm (daemon)
+    run-now, deploy-now    Kích hoạt deploy ngay lập tức (không cần đợi commit mới hay giờ hẹn)
     stop                   Dừng watcher và dọn dẹp sạch sẽ
     status                 Xem trạng thái hoạt động của watcher
     logs                   Xem log thời gian thực (tail -f)
@@ -116,7 +195,9 @@ LỆNH ĐIỀU KHIỂN:
 
 TÙY CHỌN KHỞI ĐỘNG:
     --at <HH:MM>           🕒 Hẹn giờ deploy (ví dụ: --at 21:00 giờ Việt Nam Asia/Ho_Chi_Minh)
-                           (Mặc định nếu không có --at: Deploy ngay lập tức khi build check pass)
+                           (Khi hẹn giờ: KHÔNG kéo code về trước, giữ nguyên local repo,
+                            đúng 21:00 mới tự động kéo về, build check và deploy)
+                           (Mặc định nếu không có --at: Tự động kéo về và deploy ngay khi có commit mới)
     --branch <tên_nhánh>   Chỉ định nhánh git cần theo dõi (mặc định: main)
     --initial-deploy       Kích hoạt deploy ngay 1 lần lúc vừa bật watcher
     -d, --daemon           Chạy dưới dạng tiến trình ngầm (tương đương lệnh 'start')
@@ -125,13 +206,16 @@ VÍ DỤ SỬ DỤNG:
     # 1. Chạy mặc định (kéo commit về -> build check pass -> deploy & restart chain ngay):
     ./auto_rebuild_deploy.sh start
 
-    # 2. Chạy có hẹn giờ deploy (ví dụ: 21:00 tối):
+    # 2. Chạy có hẹn giờ deploy (ví dụ: 21:00 tối, không đụng working tree ban ngày):
     ./auto_rebuild_deploy.sh start --at 21:00
 
-    # 3. Hẹn giờ lúc 23:30:
-    ./auto_rebuild_deploy.sh start --at 23:30
+    # 3. Kích hoạt deploy ngay lập tức (bất kể đang hẹn giờ hay vừa dừng watcher):
+    ./auto_rebuild_deploy.sh run-now
 
-    # 4. Kiểm tra trạng thái:
+    # 4. Ép buộc deploy lại commit hiện tại:
+    ./auto_rebuild_deploy.sh run-now --force
+
+    # 5. Kiểm tra trạng thái:
     ./auto_rebuild_deploy.sh status
 EOF
 }
@@ -186,6 +270,11 @@ case "${1:-}" in
         ;;
     logs)
         cmd_logs
+        exit 0
+        ;;
+    run-now|deploy-now)
+        shift
+        cmd_run_now "$@"
         exit 0
         ;;
     help|-h|--help)
@@ -323,63 +412,6 @@ LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
 BUILD_VERIFIED=false
 LAST_VERIFIED_HASH=""
 
-# Helper function to run Build Check and notify Telegram
-verify_local_commit() {
-    local target_hash="$1"
-    local build_script="${PROJECT_ROOT}/consensus/metanode/scripts/build_check.sh"
-    local build_log="/tmp/build_check_${target_hash:0:8}.log"
-    local build_start
-    build_start=$(date +%s)
-    
-    echo "🔨 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] Bắt đầu chạy Build Check (Go + Rust + FFI)..."
-    if bash "$build_script" --fast > "$build_log" 2>&1; then
-        local build_end
-        build_end=$(date +%s)
-        local build_dur=$((build_end - build_start))
-        BUILD_VERIFIED=true
-        LAST_VERIFIED_HASH="$target_hash"
-        echo "✅ Build Check THÀNH CÔNG trong ${build_dur}s!"
-        
-        local sched_label="ngay sau đây"
-        if [ -n "$SCHEDULE_AT" ]; then
-            sched_label="lúc <b>${SCHEDULE_AT} (Asia/Ho_Chi_Minh)</b>"
-        fi
-        
-        send_telegram_notification "✅ <b>[Build Check THÀNH CÔNG]</b>
-• <b>Commit:</b> <code>${target_hash:0:8}</code>
-• <b>Thời gian kiểm tra:</b> ${build_dur}s
-• <b>Trạng thái:</b> Đã biên dịch sạch (Go + Rust + FFI)!
-⏰ <b>Lịch deploy:</b> Đã sẵn sàng deploy vào ${sched_label}. Các node hiện tại vẫn hoạt động bình thường."
-        return 0
-    else
-        local build_end
-        build_end=$(date +%s)
-        local build_dur=$((build_end - build_start))
-        BUILD_VERIFIED=false
-        LAST_VERIFIED_HASH=""
-        local err_snippet
-        err_snippet=$(tail -n 12 "$build_log" 2>/dev/null | tr '<>' '[]' | head -c 1200)
-        echo "❌ Build Check THẤT BẠI sau ${build_dur}s!"
-        
-        local sched_notice=""
-        if [ -n "$SCHEDULE_AT" ]; then
-            sched_notice="Lịch deploy lúc <b>${SCHEDULE_AT}</b> sẽ <b>BỊ TẠM HOÃN</b> để bảo vệ mạng lưới!"
-        else
-            sched_notice="Hệ thống <b>TỪ CHỐI DEPLOY</b> bản code này để bảo vệ mạng lưới!"
-        fi
-        
-        send_telegram_notification "❌ <b>[CẢNH BÁO: Build Check THẤT BẠI]</b>
-• <b>Commit:</b> <code>${target_hash:0:8}</code>
-• <b>Thời gian kiểm tra:</b> ${build_dur}s
-• <b>Chi tiết lỗi:</b>
-<pre>
-${err_snippet}
-</pre>
-⚠️ <b>Cảnh báo:</b> ${sched_notice}"
-        return 1
-    fi
-}
-
 TARGET_DEPLOY_EPOCH=""
 if [ -n "$SCHEDULE_AT" ]; then
     TARGET_DEPLOY_EPOCH=$(TZ="Asia/Ho_Chi_Minh" date -d "$SCHEDULE_AT" +%s 2>/dev/null || echo "")
@@ -393,7 +425,7 @@ if [ -n "$SCHEDULE_AT" ]; then
         HOURS=$((WAIT_SECONDS / 3600))
         MINUTES=$(((WAIT_SECONDS % 3600) / 60))
         echo "⏰ Đã lên lịch hẹn: Sẽ deploy vào lúc $TARGET_HUMAN (còn khoảng ${HOURS}h ${MINUTES}m)"
-        echo "💡 Watcher sẽ kiểm tra remote liên tục mỗi ${CHECK_INTERVAL}s. Khi có commit mới sẽ tự động kéo về và chạy Build Check kiểm tra trước."
+        echo "💡 Chế độ hẹn giờ: Mã nguồn local được giữ nguyên vẹn. Đến đúng giờ hẹn sẽ tự động kéo về, biên dịch và deploy."
     else
         echo "⚠️ Định dạng thời gian --at không hợp lệ: $SCHEDULE_AT (Ví dụ: --at 21:00)"
     fi
@@ -418,12 +450,6 @@ else
     fi
     LAST_DEP_INIT=$(cat "$LAST_DEPLOYED_FILE" 2>/dev/null | xargs || echo "")
     echo "📌 Đã ghi nhận commit đã deploy gần nhất: ${LAST_DEP_INIT:0:8}"
-    
-    # Nếu local đang có commit mới hơn commit đã deploy gần nhất mà chưa verify
-    if [ "$LOCAL_HASH" != "$LAST_DEP_INIT" ] && [ "$BUILD_VERIFIED" = false ]; then
-        echo "🔍 Phát hiện local có commit mới (${LOCAL_HASH:0:8}) chưa deploy. Chạy Build Check kiểm tra trước..."
-        verify_local_commit "$LOCAL_HASH"
-    fi
 fi
 
 cd "$PROJECT_ROOT" || exit 1
@@ -434,47 +460,64 @@ while true; do
     
     # ─── 1. KIỂM TRA ĐẾN GIỜ HẸN DEPLOY ────────────────────────────
     if [ -n "$TARGET_DEPLOY_EPOCH" ] && [ "$NOW_EPOCH" -ge "$TARGET_DEPLOY_EPOCH" ]; then
-        CURRENT_LOCAL=$(git rev-parse HEAD 2>/dev/null || echo "")
+        echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] ĐÃ ĐẾN GIỜ HẸN DEPLOY (${SCHEDULE_AT})!"
+        
         LAST_DEP=""
         if [ -f "$LAST_DEPLOYED_FILE" ]; then
             LAST_DEP=$(cat "$LAST_DEPLOYED_FILE" 2>/dev/null | xargs || echo "")
         fi
         
-        echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] ĐÃ ĐẾN GIỜ HẸN DEPLOY (${SCHEDULE_AT})!"
+        # Đến giờ hẹn mới thực hiện kéo code mới nhất từ remote về working tree
+        echo "🔄 Đang kiểm tra và kéo mã nguồn mới nhất từ ${REMOTE}/${BRANCH}..."
+        HAS_UNSTAGED=false
+        if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+            HAS_UNSTAGED=true
+            echo "📦 Tạm lưu các file chưa commit ở local vào git stash..."
+            git stash push -u -m "auto-deploy-stash-$(date +%s)" >/dev/null 2>&1 || true
+        fi
         
-        if [ "$CURRENT_LOCAL" != "$LAST_DEP" ]; then
-            if [ "$BUILD_VERIFIED" = true ] && [ "$LAST_VERIFIED_HASH" = "$CURRENT_LOCAL" ]; then
-                COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1)
-                COMMIT_AUTHOR=$(git log -1 --pretty=%an)
-                export DEPLOY_SOURCE="Auto-Deploy (Scheduled ${SCHEDULE_AT}, Branch: ${BRANCH}, Git Commit ${CURRENT_LOCAL:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
-                
-                send_telegram_notification "🚀 <b>[Đến Giờ Hẹn Deploy ${SCHEDULE_AT}]</b>
-Đã đến lịch hẹn! Tiến hành triển khai commit <code>${CURRENT_LOCAL:0:8}</code> (đã vượt qua Build Check) lên toàn bộ cụm node...
+        PULL_OK=true
+        if ! git pull --rebase "$REMOTE" "$BRANCH"; then
+            PULL_OK=false
+            git rebase --abort >/dev/null 2>&1 || true
+            echo "❌ Lỗi kéo mã nguồn (git pull --rebase) từ ${REMOTE}/${BRANCH}!"
+            send_telegram_notification "❌ <b>[LỖI GIT PULL ĐẾN GIỜ HẸN]</b>
+Đã đến giờ hẹn (${SCHEDULE_AT}) nhưng không thể kéo mã nguồn mới từ remote do xung đột git! Đã tạm hoãn đợt deploy này."
+        fi
+        
+        if [ "$HAS_UNSTAGED" = true ]; then
+            echo "📦 Phục hồi lại các thay đổi local từ stash..."
+            git stash pop >/dev/null 2>&1 || true
+        fi
+        
+        CURRENT_LOCAL=$(git rev-parse HEAD 2>/dev/null || echo "")
+        
+        if [ "$PULL_OK" = true ] && [ "$CURRENT_LOCAL" != "$LAST_DEP" ]; then
+            COMMIT_MSG=$(git log -1 --pretty=%B | head -n 1)
+            COMMIT_AUTHOR=$(git log -1 --pretty=%an)
+            export DEPLOY_SOURCE="Auto-Deploy (Scheduled ${SCHEDULE_AT}, Branch: ${BRANCH}, Git Commit ${CURRENT_LOCAL:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
+            
+            send_telegram_notification "🚀 <b>[Đến Giờ Hẹn Deploy ${SCHEDULE_AT}]</b>
+Đã đến lịch hẹn! Tiến hành triển khai commit <code>${CURRENT_LOCAL:0:8}</code> lên toàn bộ cụm node...
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
-                
-                echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
-                cd "$ANSIBLE_DIR" || exit 1
-                if ./ansible_deploy.sh deploy --all --fast ${args[@]+"${args[@]}"}; then
-                    echo "$CURRENT_LOCAL" > "$LAST_DEPLOYED_FILE"
-                    cd "$PROJECT_ROOT" || exit 1
-                    echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
-                    send_telegram_notification "✅ <b>[Deploy Lịch Hẹn Hoàn Tất]</b>
+            
+            echo "🚀 Kích hoạt build & deploy hệ thống cho $DEPLOY_SOURCE..."
+            cd "$ANSIBLE_DIR" || exit 1
+            if ./ansible_deploy.sh deploy --all --fast ${args[@]+"${args[@]}"}; then
+                echo "$CURRENT_LOCAL" > "$LAST_DEPLOYED_FILE"
+                cd "$PROJECT_ROOT" || exit 1
+                echo "✅ Hoàn tất deploy theo lịch hẹn ${SCHEDULE_AT}!"
+                send_telegram_notification "✅ <b>[Deploy Lịch Hẹn Hoàn Tất]</b>
 Cụm node đã được cập nhật thành công lên commit <code>${CURRENT_LOCAL:0:8}</code>!"
-                else
-                    cd "$PROJECT_ROOT" || exit 1
-                    echo "❌ Lỗi xảy ra trong quá trình deploy theo lịch hẹn!"
-                    send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
-Tiến trình cập nhật lên commit <code>${CURRENT_LOCAL:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
-                fi
             else
-                echo "🛑 Đã đến giờ hẹn nhưng commit ${CURRENT_LOCAL:0:8} chưa vượt qua bài kiểm tra Build Check! Hủy đợt deploy này."
-                send_telegram_notification "🛑 <b>[HỦY DEPLOY ${SCHEDULE_AT}]</b>
-Hệ thống <b>KHÔNG</b> khởi động lại các node vì commit <code>${CURRENT_LOCAL:0:8}</code> chưa vượt qua kiểm tra biên dịch (Build Check).
-Các node tiếp tục chạy phiên bản ổn định trước đó."
+                cd "$PROJECT_ROOT" || exit 1
+                echo "❌ Lỗi xảy ra trong quá trình deploy theo lịch hẹn!"
+                send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
+Tiến trình cập nhật lên commit <code>${CURRENT_LOCAL:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
             fi
-        else
-            echo "ℹ️ Đến giờ hẹn nhưng không có commit mới nào cần deploy (HEAD vẫn là ${CURRENT_LOCAL:0:8})."
+        elif [ "$PULL_OK" = true ]; then
+            echo "ℹ️ Đến giờ hẹn nhưng không có commit mới nào cần deploy (HEAD vẫn là ${CURRENT_LOCAL:0:8}, trùng với commit đã deploy)."
         fi
         
         # Đặt lịch hẹn tiếp theo sang ngày mai
@@ -489,56 +532,66 @@ Các node tiếp tục chạy phiên bản ổn định trước đó."
         
         # Chỉ kích hoạt khi REMOTE_HASH là commit mới mà local HEAD CHƯA CÓ
         if [ -n "$REMOTE_HASH" ] && ! git merge-base --is-ancestor "$REMOTE_HASH" HEAD 2>/dev/null; then
-            COMMIT_MSG=$(git log -1 --pretty=%B "${REMOTE}/${BRANCH}" 2>/dev/null | head -n 1)
-            COMMIT_AUTHOR=$(git log -1 --pretty=%an "${REMOTE}/${BRANCH}" 2>/dev/null || echo "Unknown")
-            
-            echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] Phát hiện commit mới trên remote (${REMOTE}/${BRANCH})!"
-            echo "   Commit mới : ${REMOTE_HASH:0:8} by $COMMIT_AUTHOR: $COMMIT_MSG"
-            
-            # GỬI TELEGRAM BÁO PHÁT HIỆN VÀ ĐANG PULL
-            sched_txt="ngay sau khi build thành công"
             if [ -n "$SCHEDULE_AT" ]; then
-                sched_txt="lúc <b>${SCHEDULE_AT} (Asia/Ho_Chi_Minh)</b>"
-            fi
-            send_telegram_notification "🔔 <b>[Phát hiện Commit mới trên Remote]</b>
+                # TRƯỜNG HỢP CÓ HẸN GIỜ: KHÔNG kéo code về trước, giữ nguyên working tree local!
+                if [ "$REMOTE_HASH" != "${LAST_NOTIFIED_REMOTE_HASH:-}" ]; then
+                    LAST_NOTIFIED_REMOTE_HASH="$REMOTE_HASH"
+                    COMMIT_MSG=$(git log -1 --pretty=%B "${REMOTE}/${BRANCH}" 2>/dev/null | head -n 1)
+                    COMMIT_AUTHOR=$(git log -1 --pretty=%an "${REMOTE}/${BRANCH}" 2>/dev/null || echo "Unknown")
+                    
+                    echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] Phát hiện commit mới trên remote (${REMOTE}/${BRANCH})!"
+                    echo "   Commit mới : ${REMOTE_HASH:0:8} by $COMMIT_AUTHOR: $COMMIT_MSG"
+                    echo "   ⏰ Chế độ hẹn giờ (${SCHEDULE_AT}): KHÔNG kéo về trước. Mã nguồn local được giữ nguyên 100%."
+                    echo "   💡 Hệ thống sẽ tự động kéo về và biên dịch deploy đúng lúc ${SCHEDULE_AT}."
+                    
+                    send_telegram_notification "🔔 <b>[Phát hiện Commit mới trên Remote]</b>
 Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
 • <b>Commit:</b> <code>${REMOTE_HASH:0:8}</code>
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>
 
-🔄 <b>Hành động:</b> Đang tự động kéo mã nguồn về và chạy <b>Build Check</b>...
-⏰ <i>Lưu ý: Hệ thống sẽ tự động deploy vào ${sched_txt}.</i>"
-            
-            # Tự động stash nếu working tree có file unstaged để tránh xung đột khi rebase
-            HAS_UNSTAGED=false
-            if ! git diff-index --quiet HEAD -- 2>/dev/null; then
-                HAS_UNSTAGED=true
-                echo "📦 Tạm lưu các file chưa commit ở local vào git stash..."
-                git stash push -u -m "auto-deploy-stash-$(date +%s)" >/dev/null 2>&1 || true
-            fi
-
-            echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
-            if git pull --rebase "$REMOTE" "$BRANCH"; then
-                if [ "$HAS_UNSTAGED" = true ]; then
-                    echo "📦 Phục hồi lại các thay đổi local từ stash..."
-                    if ! git stash pop >/dev/null 2>&1; then
-                        echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash! (conflict markers). Vui lòng kiểm tra thủ công."
-                        send_telegram_notification "⚠️ <b>[CẢNH BÁO STASH POP]</b> Lỗi xung đột khi phục hồi file (conflict). Cần kiểm tra thủ công!"
-                    fi
+⏰ <b>Lịch hẹn:</b> Hệ thống sẽ <b>tự động kéo về, biên dịch & deploy vào lúc ${SCHEDULE_AT} (Asia/Ho_Chi_Minh)</b>.
+💡 <i>Mã nguồn trên máy chủ local được giữ nguyên vẹn để không làm gián đoạn công việc của bạn.</i>"
                 fi
-                NEW_LOCAL_HASH=$(git rev-parse HEAD)
-                echo "✅ Đã kéo mã nguồn về thành công (HEAD: ${NEW_LOCAL_HASH:0:8})."
+            else
+                # TRƯỜNG HỢP KHÔNG HẸN GIỜ: Deploy ngay lập tức
+                COMMIT_MSG=$(git log -1 --pretty=%B "${REMOTE}/${BRANCH}" 2>/dev/null | head -n 1)
+                COMMIT_AUTHOR=$(git log -1 --pretty=%an "${REMOTE}/${BRANCH}" 2>/dev/null || echo "Unknown")
                 
-                # Chạy Build Check
-                verify_local_commit "$NEW_LOCAL_HASH"
+                echo -e "\n🔔 [$(TZ='Asia/Ho_Chi_Minh' date '+%Y-%m-%d %H:%M:%S %Z')] Phát hiện commit mới trên remote (${REMOTE}/${BRANCH})!"
+                echo "   Commit mới : ${REMOTE_HASH:0:8} by $COMMIT_AUTHOR: $COMMIT_MSG"
                 
-                # Nếu không đặt lịch hẹn (--at rỗng) và build pass -> Deploy ngay
-                if [ -z "$SCHEDULE_AT" ] && [ "$BUILD_VERIFIED" = true ]; then
+                send_telegram_notification "🔔 <b>[Phát hiện Commit mới trên Remote]</b>
+Hệ thống phát hiện commit mới trên nhánh <code>${BRANCH}</code>:
+• <b>Commit:</b> <code>${REMOTE_HASH:0:8}</code>
+• <b>Tác giả:</b> ${COMMIT_AUTHOR}
+• <b>Nội dung:</b> <i>${COMMIT_MSG}</i>
+
+🔄 <b>Hành động:</b> Đang tự động kéo mã nguồn về và tiến hành deploy ngay..."
+                
+                HAS_UNSTAGED=false
+                if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+                    HAS_UNSTAGED=true
+                    echo "📦 Tạm lưu các file chưa commit ở local vào git stash..."
+                    git stash push -u -m "auto-deploy-stash-$(date +%s)" >/dev/null 2>&1 || true
+                fi
+
+                echo "🔄 Đang kéo mã nguồn mới từ ${REMOTE}/${BRANCH}..."
+                if git pull --rebase "$REMOTE" "$BRANCH"; then
+                    if [ "$HAS_UNSTAGED" = true ]; then
+                        echo "📦 Phục hồi lại các thay đổi local từ stash..."
+                        if ! git stash pop >/dev/null 2>&1; then
+                            echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash! (conflict markers). Vui lòng kiểm tra thủ công."
+                            send_telegram_notification "⚠️ <b>[CẢNH BÁO STASH POP]</b> Lỗi xung đột khi phục hồi file (conflict). Cần kiểm tra thủ công!"
+                        fi
+                    fi
+                    NEW_LOCAL_HASH=$(git rev-parse HEAD)
+                    echo "✅ Đã kéo mã nguồn về thành công (HEAD: ${NEW_LOCAL_HASH:0:8})."
+                    
                     export DEPLOY_SOURCE="Auto-Deploy Immediate (Branch: ${BRANCH}, Git Commit ${NEW_LOCAL_HASH:0:8} by ${COMMIT_AUTHOR}: \"${COMMIT_MSG}\")"
                     echo "🚀 Kích hoạt build & deploy hệ thống ngay lập tức..."
                     send_telegram_notification "🚀 <b>[Kích Hoạt Deploy Ngay Lập Tức]</b>
-Commit <code>${NEW_LOCAL_HASH:0:8}</code> đã vượt qua Build Check!
-Đang tiến hành biên dịch và restart toàn bộ cụm node...
+Đang tiến hành biên dịch và restart toàn bộ cụm node lên commit <code>${NEW_LOCAL_HASH:0:8}</code>...
 • <b>Tác giả:</b> ${COMMIT_AUTHOR}
 • <b>Nội dung:</b> <i>${COMMIT_MSG}</i>"
                     cd "$ANSIBLE_DIR" || exit 1
@@ -550,18 +603,18 @@ Cụm node đã được cập nhật thành công lên commit <code>${NEW_LOCAL
                     else
                         cd "$PROJECT_ROOT" || exit 1
                         send_telegram_notification "❌ <b>[LỖI DEPLOY THỰC TẾ]</b>
-Tiến trình cập nhật lên commit <code>${NEW_LOCAL_HASH:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy!"
+Tiến trình cập nhật lên commit <code>${NEW_LOCAL_HASH:0:8}</code> ĐÃ THẤT BẠI ở bước chạy ansible_deploy (biên dịch hoặc triển khai lỗi)!"
                     fi
-                fi
-            else
-                git rebase --abort >/dev/null 2>&1 || true
-                if [ "$HAS_UNSTAGED" = true ]; then
-                    if ! git stash pop >/dev/null 2>&1; then
-                        echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash!"
+                else
+                    git rebase --abort >/dev/null 2>&1 || true
+                    if [ "$HAS_UNSTAGED" = true ]; then
+                        if ! git stash pop >/dev/null 2>&1; then
+                            echo "⚠️ Cảnh báo: Lỗi xung đột khi phục hồi stash!"
+                        fi
                     fi
+                    echo "❌ Lỗi kéo mã nguồn (git pull --rebase) từ ${REMOTE}/${BRANCH}!"
+                    send_telegram_notification "❌ <b>[LỖI GIT PULL]</b> Không thể kéo commit <code>${REMOTE_HASH:0:8}</code> về do conflict! Đã tự abort rebase."
                 fi
-                echo "❌ Lỗi kéo mã nguồn (git pull --rebase) từ ${REMOTE}/${BRANCH}!"
-                send_telegram_notification "❌ <b>[LỖI GIT PULL]</b> Không thể kéo commit <code>${REMOTE_HASH:0:8}</code> về do conflict! Đã tự abort rebase."
             fi
         fi
     else
