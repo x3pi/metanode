@@ -26,12 +26,16 @@ Tài liệu hướng dẫn sử dụng công cụ **Git Auto-Rebuild & Deploy Da
 
 ---
 
-## 🔒 2. Cơ Chế Khóa Độc Quyền (Singleton Guarantee)
+## 🔒 2. Cơ Chế Khóa Độc Quyền & An Toàn Tuyệt Đối (Zero-Fork & Mutex Guarantee)
 
-Script được tích hợp **3 tầng bảo vệ chống chạy trùng lặp**:
-1. **Global Singleton Check:** Kiểm tra toàn cục trước mọi chế độ thực thi (cả background daemon lẫn chạy trực tiếp foreground). Nếu đã có tiến trình chạy, mọi lệnh gọi sau sẽ bị từ chối ngay lập tức kèm cảnh báo PID.
-2. **File Lock cấp Linux Kernel (`flock`):** Khóa độc quyền tệp `auto_deploy.lock` thông qua cơ chế `flock` của hệ điều hành Linux, triệt tiêu 100% race condition.
-3. **Dọn dẹp triệt để (`cmd_stop`):** Khi gọi `stop`, script quét sạch các tiến trình cha và con (`sleep`, `git`, `build_check`), thu hồi file lock và PID file sạch sẽ.
+Script được tích hợp **4 tầng bảo vệ chống chạy trùng lặp và xung đột mã nguồn**:
+1. **Daemon Singleton Check:** Kiểm tra toàn cục trước khi khởi chạy watcher daemon. Khóa độc quyền tệp `auto_deploy.lock` (trên file descriptor riêng) thông qua cơ chế `flock` của Linux kernel, đảm bảo chỉ có duy nhất 1 daemon hoạt động.
+2. **Operation Mutex Lock (`.deploy_operation.lock`):** Mỗi khi diễn ra thao tác kéo code / biên dịch / deploy (cả từ daemon lẫn từ lệnh thủ công `run-now`), script chiếm quyền khóa Mutex độc quyền (non-blocking). Nếu một tiến trình deploy đang chạy thì tiến trình kia sẽ bị từ chối hoặc trì hoãn sang chu kỳ sau, triệt tiêu 100% race condition tranh chấp git hoặc build nhị phân.
+3. **Clean HEAD Deployment & Fail-Closed Stash Guard:** Mọi đợt build và deploy chỉ diễn ra trên working tree 100% sạch tương ứng đúng với Git HEAD. Nếu local có thay đổi chưa commit, script sẽ tạm stash chúng trước; nếu stash thất bại sẽ lập tức dừng deploy (fail-closed). Quá trình biên dịch và restart chỉ chạy trên mã nguồn sạch của commit remote. Sau khi deploy và kiểm thử giao dịch hoàn tất, script mới phục hồi lại các thay đổi local (`git stash pop`), đảm bảo binary trên cụm node phản ánh chính xác 100% commit SHA được ghi nhận.
+4. **Post-Deploy Transaction Verification (Kiểm thử giao dịch tự động):** Sau khi hoàn tất restart cụm node, hệ thống đợi 10 giây để mạng lưới ổn định, sau đó tự động kích hoạt script test giao dịch (`metanode-suite/scripts/rpc-tcp-simple.sh`) lần lượt trên **Node 1** và **Node 0**:
+   - Nếu cả 2 node PASS: Gửi thông báo Telegram xác nhận mạng hoạt động bình thường.
+   - Nếu thất bại: Gửi thông báo Telegram báo lỗi chi tiết kèm **20 dòng log cuối cùng** để xử lý kịp thời.
+5. **Dọn dẹp triệt để (`cmd_stop`):** Khi gọi `stop`, script quét sạch các tiến trình cha và con, thu hồi toàn bộ file lock và PID file sạch sẽ.
 
 ---
 
