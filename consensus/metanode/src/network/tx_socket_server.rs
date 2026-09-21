@@ -448,12 +448,19 @@ impl TxSocketServer {
                 }
             }
 
-            // Node acceptance check (takes node lock momentarily)
+            let mut is_sync_only = false;
+            let mut should_accept_tx = true;
+            let mut tx_reason = String::new();
+
+            // Node acceptance check (takes node lock momentarily). The guard is scoped to
+            // this block so it is NOT held across the peer-forward / sleep awaits below.
             if let Some(ref node_arc) = node {
                 let lock_result = tokio::time::timeout(std::time::Duration::from_millis(200), node_arc.read()).await;
                 match lock_result {
                     Ok(node_guard) => {
                         let (should_accept, should_queue, reason) = node_guard.check_transaction_acceptance().await;
+                        should_accept_tx = should_accept;
+                        tx_reason = reason.clone();
                         
                         // Update current_client just in case we transitioned recently
                         if let Some(fresh_submitter) = node_guard.transaction_submitter() {
@@ -466,91 +473,8 @@ impl TxSocketServer {
                             return; // Enqueued successfully
                         }
 
-                        if !should_accept {
-                            let is_sync_only = reason.contains("Node is still initializing");
-                            if is_sync_only {
-                                // Fallback to discovery addresses if peer_rpc_addresses is empty
-                                let mut targets = peer_rpc_addresses.clone();
-                                if targets.is_empty() {
-                                    if let Some(ref discovery_lock) = peer_discovery_addresses {
-                                        targets = discovery_lock.read().await.clone();
-                                    }
-                                }
-
-                                if !targets.is_empty() {
-                                    info!(
-                                        "📡 [FFI TX FLOW] Node is running in SyncOnly. Attempting to forward {} TXs to active validators...",
-                                        transactions_to_submit.len()
-                                    );
-                                    let mut forwarded = false;
-                                    let mut explicitly_rejected = false;
-                                    let tx_hex_list: Vec<String> = transactions_to_submit.iter().map(hex::encode).collect();
-                                    // Delegated submission: this SyncOnly node cannot propose,
-                                    // so the receiving validator MUST submit to its consensus.
-                                    let req = crate::network::peer_rpc::SubmitTransactionRequest {
-                                        transactions_hex: tx_hex_list,
-                                        cache_only: false,
-                                    };
-                                    let body_arc_opt = match serde_json::to_string(&req) {
-                                        Ok(body) => Some(std::sync::Arc::new(body)),
-                                        Err(e) => {
-                                            error!("❌ [FFI TX FLOW] Failed to serialize SyncOnly transactions: {}", e);
-                                            None
-                                        }
-                                    };
-
-                                    if let Some(body_arc) = body_arc_opt {
-                                        for peer_addr in &targets {
-                                            match crate::network::peer_rpc::forward_serialized_transactions_to_peer(
-                                                peer_addr,
-                                                body_arc.clone(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(resp) => {
-                                                    if resp.success {
-                                                        info!(
-                                                            "📡 [FFI TX FLOW] Successfully forwarded {} TXs to validator {}",
-                                                            transactions_to_submit.len(),
-                                                            peer_addr
-                                                        );
-                                                        forwarded = true;
-                                                        break;
-                                                    } else {
-                                                        warn!(
-                                                            "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
-                                                            peer_addr, resp.error
-                                                        );
-                                                        explicitly_rejected = true;
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!(
-                                                        "📡 [FFI TX FLOW] Failed to forward transactions to validator {}: {}",
-                                                        peer_addr, e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if forwarded || explicitly_rejected {
-                                        return; // Exit thread. If rejected, drop it permanently so client can retry/fail.
-                                    }
-                                }
-
-                                warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/20).", transactions_to_submit.len(), attempt + 1);
-                                drop(node_guard);
-                                attempt += 1;
-                                if attempt >= 20 {
-                                    error!("🚨 [FFI TX FLOW] Dropping {} TXs after 20 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
-                                    return;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                continue;
-                            }
-
-                            warn!("🚫 [FFI TX FLOW] Rejecting {} TXs: {}", transactions_to_submit.len(), reason);
-                            return; // Permanent failure
+                        if !should_accept_tx {
+                            is_sync_only = reason.contains("Node is still initializing");
                         }
                     }
                     Err(_) => {
@@ -566,6 +490,91 @@ impl TxSocketServer {
                         }
                     }
                 }
+            }
+
+            if !should_accept_tx {
+                if is_sync_only {
+                    // Fallback to discovery addresses if peer_rpc_addresses is empty
+                    let mut targets = peer_rpc_addresses.clone();
+                    if targets.is_empty() {
+                        if let Some(ref discovery_lock) = peer_discovery_addresses {
+                            targets = discovery_lock.read().await.clone();
+                        }
+                    }
+
+                    if !targets.is_empty() {
+                        info!(
+                            "📡 [FFI TX FLOW] Node is running in SyncOnly. Attempting to forward {} TXs to active validators...",
+                            transactions_to_submit.len()
+                        );
+                        let mut forwarded = false;
+                        let mut explicitly_rejected = false;
+                        let tx_hex_list: Vec<String> = transactions_to_submit.iter().map(hex::encode).collect();
+                        // Delegated submission: this SyncOnly node cannot propose,
+                        // so the receiving validator MUST submit to its consensus.
+                        let req = crate::network::peer_rpc::SubmitTransactionRequest {
+                            transactions_hex: tx_hex_list,
+                            cache_only: false,
+                        };
+                        let body_arc_opt = match serde_json::to_string(&req) {
+                            Ok(body) => Some(std::sync::Arc::new(body)),
+                            Err(e) => {
+                                error!("❌ [FFI TX FLOW] Failed to serialize SyncOnly transactions: {}", e);
+                                None
+                            }
+                        };
+
+                        if let Some(body_arc) = body_arc_opt {
+                            for peer_addr in &targets {
+                                match crate::network::peer_rpc::forward_serialized_transactions_to_peer(
+                                    peer_addr,
+                                    body_arc.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        if resp.success {
+                                            info!(
+                                                "📡 [FFI TX FLOW] Successfully forwarded {} TXs to validator {}",
+                                                transactions_to_submit.len(),
+                                                peer_addr
+                                            );
+                                            forwarded = true;
+                                            break;
+                                        } else {
+                                            warn!(
+                                                "📡 [FFI TX FLOW] Validator {} rejected forwarded transactions: {:?}",
+                                                peer_addr, resp.error
+                                            );
+                                            explicitly_rejected = true;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "📡 [FFI TX FLOW] Failed to forward transactions to validator {}: {}",
+                                            peer_addr, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if forwarded || explicitly_rejected {
+                            return; // Exit thread. If rejected, drop it permanently so client can retry/fail.
+                        }
+                    }
+
+                    warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/20).", transactions_to_submit.len(), attempt + 1);
+                    attempt += 1;
+                    if attempt >= 20 {
+                        error!("🚨 [FFI TX FLOW] Dropping {} TXs after 20 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+
+                warn!("🚫 [FFI TX FLOW] Rejecting {} TXs: {}", transactions_to_submit.len(), tx_reason);
+                return; // Permanent failure
             }
 
             // ORDER GATE: wait for this batch's turn before actually handing
