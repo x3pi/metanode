@@ -1252,6 +1252,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		}
 	}
 
+	ceilingDebited := false
 	if enforceCeiling && isNative {
 		// Check per_chain_allocation ceiling (Scenario 10.7) — only meaningful for a private
 		// chain's own commit (the X -> Reserve leg). Reserve-issued commits skip this entirely.
@@ -1266,6 +1267,7 @@ func (g *GatewayEngine) attestCommitInternal(
 		// Debit source chain allocation upon successful BFT attestation. The matching credit to
 		// the destination happens per-message in ClaimMessage (Section 2.3.1).
 		g.SupplyLedger.PerChainAllocation[sourceChainID] = new(big.Int).Sub(currentAlloc, aggregateAmount)
+		ceilingDebited = sourceChainID == g.LocalChainID
 	}
 
 	attested := AttestedCommit{
@@ -1275,6 +1277,8 @@ func (g *GatewayEngine) attestCommitInternal(
 		Epoch:         cert.Epoch,
 		FundedAmount:  new(big.Int).Set(aggregateAmount),
 		ClaimedAmount: big.NewInt(0),
+
+		CeilingDebited: ceilingDebited,
 	}
 	g.AttestedCommits[key] = attested
 
@@ -1815,6 +1819,7 @@ func (g *GatewayEngine) Refund(
 	g.MessageStatus[message.MessageID] = MessageStatusRefunded
 	// A relayed leg 2 that failed is now resolved: the Reserve-side credit in step 7 below is what
 	// re-balances the release made by ReleaseRelayedValue, so the in-flight record is done.
+	_, wasRelayed := g.RelayedInFlight[message.MessageID]
 	delete(g.RelayedInFlight, message.MessageID)
 
 	// 7. Restore allocation in GlobalSupplyLedger.
@@ -1829,7 +1834,26 @@ func (g *GatewayEngine) Refund(
 	// allocation here. Reserve handles the PerChainAllocation decrement and emits an Outbound
 	// message to refund the Value. The local Source chain MUST NOT mint Value again.
 	is2Hop := g.ReserveChainID != 0 && g.LocalChainID != g.ReserveChainID && message.DestChainID != g.ReserveChainID
-	if !is2Hop {
+	// A Reserve-sourced message only ever debited Reserve's pool if it was a relayed leg 2
+	// (ReleaseRelayedValue); an ordinary Reserve-issued transfer skips the ledger on issue
+	// (attestReserveIssuedCommit exempts it), so crediting the pool back here would print +V of
+	// allocation per failed transfer -- and that pool is what RegisterChainViaStake funds new chains
+	// from. Legacy relayed messages (in flight across the upgrade, no record) keep the +V from their
+	// ClaimMessage credit that was never released, which is exactly right without a second credit.
+	reserveSourced := g.ReserveChainID != 0 && g.LocalChainID == g.ReserveChainID && message.SourceChainID == g.LocalChainID
+	reserveDebited := wasRelayed
+	if reserveSourced && !reserveDebited {
+		// Reserve attested its own commit through the ceiling-enforcing path, which really debited
+		// its pool (only that path sets CeilingDebited -- attestReserveIssuedCommit never does).
+		assetIdStr := "0"
+		if message.AssetID != nil {
+			assetIdStr = message.AssetID.String()
+		}
+		if a, ok := g.AttestedCommits[fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)]; ok && a.CeilingDebited {
+			reserveDebited = true
+		}
+	}
+	if !is2Hop && (!reserveSourced || reserveDebited) {
 		if g.SupplyLedger != nil && message.Value != nil && message.Value.Sign() > 0 && (message.AssetID == nil || message.AssetID.Sign() == 0) {
 			currentAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
 			g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(currentAlloc, message.Value)

@@ -41,12 +41,17 @@
 > message already in flight at upgrade time has no `RelayedInFlight` record: its success-path credit
 > stays rejected and its failure-path refund keeps the old +V double count (no regression, not fixed).
 >
-> **Adjacent, NOT fixed (separate flow, needs its own decision):** an ordinary Reserve-issued native
-> transfer (not relayed) never debits Reserve's ledger on issue (`attestReserveIssuedCommit` skips
-> the ceiling), yet `refund()` on Reserve credits it back on failure — the same +V inflation class.
-> Also `refund()` returns the value on Reserve, not on A; routing it back to A would need an
-> explicit design (original-source record on Reserve), not an overwritten `SourceChainID`.
-
+> **Adjacent, fixed the same day:** an ordinary (non-relayed) Reserve-issued native transfer never
+> debits Reserve's pool on issue (`attestReserveIssuedCommit` deliberately skips the ceiling), yet
+> `refund()` on Reserve credited the pool back on failure — +V of allocation printed per failed
+> transfer, and that pool funds new chains in `RegisterChainViaStake`. `Refund()` now credits a
+> Reserve-sourced message only if a matching debit really happened: a recorded relay
+> (`RelayedInFlight`) or Reserve attesting its own commit through the enforcing `AttestCommit`
+> path (`AttestedCommit.CeilingDebited`, set only there). Legacy relayed messages in flight at
+> upgrade keep their un-released ClaimMessage credit and now correctly get no second one.
+>
+> **Still open (design decision):** `refund()` returns the value on Reserve, not on A. Routing it
+> back to A needs an explicit original-source record on Reserve, not an overwritten `SourceChainID`.
 
 ## 1. Executive Summary
 This audit focuses on the logical and security soundness of the cross-chain architecture, particularly the 2-hop routing mechanism (Chain A -> Reserve -> Chain B) introduced for `Native` assets and ceiling-enforced commits.

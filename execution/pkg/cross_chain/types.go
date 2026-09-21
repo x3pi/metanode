@@ -346,6 +346,11 @@ type AttestedCommit struct {
 	Epoch         uint64      `json:"epoch"`
 	FundedAmount  *big.Int    `json:"funded_amount"`
 	ClaimedAmount *big.Int    `json:"claimed_amount"`
+	// CeilingDebited is set only when a chain attests its OWN commit through the ceiling-enforcing
+	// AttestCommit path (so its PerChainAllocation really was debited). Refund() on that chain needs
+	// it to know whether a matching credit is owed. Omitted (and never set) for every other
+	// attestation, so existing serialized entries are unchanged.
+	CeilingDebited bool `json:"ceiling_debited,omitempty"`
 }
 
 // UpdateCommitteePayload is the JSON payload for UpdateCommitteeWithRecoveryCert (RecoveryCommittee-

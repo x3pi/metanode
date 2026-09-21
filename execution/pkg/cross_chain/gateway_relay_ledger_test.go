@@ -208,3 +208,80 @@ func TestRelayedFlow_NewFieldDoesNotChangeSerializationWhenUnused(t *testing.T) 
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "relayed_in_flight")
 }
+
+// An ordinary (non-relayed) Reserve-issued native transfer never debits Reserve's PerChainAllocation
+// pool on issue (attestReserveIssuedCommit skips the ceiling), so a failure refund must NOT credit
+// the pool either -- otherwise every failed Reserve->B transfer inflates the pool by V, and that
+// pool is what RegisterChainViaStake funds new chains from.
+func TestReserveIssuedRefund_NonRelayedDoesNotInflateReservePool(t *testing.T) {
+	engine, _ := setupTestGatewayEngine() // Reserve == 102
+	kp103 := bls.GenerateKeyPair()
+	pop103 := PopSign(kp103.PrivateKey(), kp103.PublicKey())
+	engine.ChainRegistry[relayChainB] = ChainRegistry{
+		ChainID:         relayChainB,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 10000, PopSignature: pop103.Bytes()}},
+		Epoch:           7,
+		QuorumThreshold: 6667,
+	}
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	_, err := engine.Outbound(sender, OutboundParams{
+		DestChainID: relayChainB, Target: target, Value: big.NewInt(500), AssetID: big.NewInt(0),
+		Tip: big.NewInt(0), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xCAFE"))
+	require.NoError(t, err)
+	root, msgs, err := engine.BatchOutboundCommit(relayChainB, 0)
+	require.NoError(t, err)
+	_, layers, _, _, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+
+	sig := bls.Sign(kp103.PrivateKey(), ComputeMessageFailureAttestMessage(msgs[0].MessageID, relayChainB))
+	failCert := QuorumCert{Epoch: 7, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
+	require.NoError(t, engine.Refund(msgs[0], GetMerkleProof(layers, 0), root, failCert))
+
+	assert.Equal(t, int64(5000), engine.SupplyLedger.GetAllocation(relayChainReserve).Int64(), "Reserve pool must be unchanged: it was never debited on issue")
+	assert.Equal(t, int64(10000), engine.SupplyLedger.GetAllocation(relayChainA).Int64()+engine.SupplyLedger.GetAllocation(relayChainReserve).Int64())
+}
+
+// Someone submitting Reserve's own (publicly available) commit cert through
+// AttestReserveIssuedCommit ON Reserve records an AttestedCommit but never debits the pool. That
+// record must not be mistaken for a debit when the message later fails and is refunded.
+func TestReserveIssuedRefund_ReserveIssuedAttestationOnReserveIsNotADebit(t *testing.T) {
+	engine, _ := setupTestGatewayEngine() // Reserve == 102
+	kpReserve := bls.GenerateKeyPair()
+	engine.ChainRegistry[relayChainReserve] = ChainRegistry{
+		ChainID:         relayChainReserve,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kpReserve.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kpReserve.PrivateKey(), kpReserve.PublicKey()).Bytes()}},
+		Epoch:           3,
+		QuorumThreshold: 6667,
+	}
+	kp103 := bls.GenerateKeyPair()
+	engine.ChainRegistry[relayChainB] = ChainRegistry{
+		ChainID:         relayChainB,
+		Committee:       []ValidatorEntry{{PubkeyBLS: kp103.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp103.PrivateKey(), kp103.PublicKey()).Bytes()}},
+		Epoch:           7,
+		QuorumThreshold: 6667,
+	}
+
+	_, err := engine.Outbound(common.HexToAddress("0x1111111111111111111111111111111111111111"), OutboundParams{
+		DestChainID: relayChainB, Target: common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		Value: big.NewInt(500), AssetID: big.NewInt(0), Tip: big.NewInt(0), GasFee: big.NewInt(0), HopCount: 1,
+	}, common.HexToHash("0xF00D"))
+	require.NoError(t, err)
+	root, msgs, err := engine.BatchOutboundCommit(relayChainB, 3)
+	require.NoError(t, err)
+	_, layers, aggAmounts, aggIdx, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+
+	attSig := bls.Sign(kpReserve.PrivateKey(), ComputeCommitRootAttestMessage(root))
+	_, err = engine.AttestReserveIssuedCommit(relayChainReserve, root, aggAmounts["0"], big.NewInt(0), GetMerkleProof(layers, aggIdx["0"]),
+		QuorumCert{Epoch: 3, AggregateSignature: attSig.Bytes(), SignerBitmap: []byte{0x01}})
+	require.NoError(t, err)
+	require.Equal(t, int64(5000), engine.SupplyLedger.GetAllocation(relayChainReserve).Int64(), "attestReserveIssuedCommit must not debit")
+
+	failSig := bls.Sign(kp103.PrivateKey(), ComputeMessageFailureAttestMessage(msgs[0].MessageID, relayChainB))
+	require.NoError(t, engine.Refund(msgs[0], GetMerkleProof(layers, 0), root,
+		QuorumCert{Epoch: 7, AggregateSignature: failSig.Bytes(), SignerBitmap: []byte{0x01}}))
+	assert.Equal(t, int64(5000), engine.SupplyLedger.GetAllocation(relayChainReserve).Int64(), "no debit happened, so no credit may be owed")
+}
