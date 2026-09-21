@@ -446,10 +446,14 @@ impl RustSyncNode {
                         // permanently and silently diverge this SyncOnly node's state. Peers now
                         // persist a real 0-byte file for genuinely-empty GEIs (see
                         // block_store.rs's store_executable_blocks_batch), so this fetch reliably
-                        // succeeds for the common case; local synthesis remains ONLY as a
-                        // best-effort liveness fallback for a peer that hasn't deployed that fix
-                        // yet, logged loudly since it is the less-verified path.
-                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&[best_peer.clone()], from_gei, to_gei).await {
+                        // succeeds for the common case. There is deliberately NO local-synthesis
+                        // fallback: if the content cannot be fetched we retry next iteration
+                        // (halt-not-guess), and to keep that from stalling on a single lagging or
+                        // not-yet-upgraded peer we ask ALL peers (best peer first) -- every honest
+                        // peer holds byte-identical content for a given GEI.
+                        let mut fetch_peers = vec![best_peer.clone()];
+                        fetch_peers.extend(peer_rpc_addresses.iter().filter(|a| **a != best_peer).cloned());
+                        match crate::network::peer_rpc::fetch_executable_blocks_from_peer(&fetch_peers, from_gei, to_gei).await {
                             Ok(exec_blocks) if !exec_blocks.is_empty() => {
                                 info!("✅ [RUST-SYNC] Fetched {} verified empty executable blocks from peer. Pushing to Go FFI...", exec_blocks.len());
                                 if push_exec_blocks_to_go(exec_blocks).await {
