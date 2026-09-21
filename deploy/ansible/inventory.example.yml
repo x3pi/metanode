@@ -92,7 +92,7 @@ all:
         # MÁY CHỦ 2
         # ======================================================================
         server_2:
-          ansible_host: 192.168.1.230
+          ansible_host: 192.168.1.234
           ansible_user: "abc"
           node_ids: [1, 2]
           rpc_nodes: [1, 2]

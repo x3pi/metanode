@@ -570,6 +570,12 @@ where
                         }
                     }
 
+                    // Single-validator committee: no peers exist to attest.
+                    // The single node IS 100% of the network stake, so local commit is always authoritative.
+                    if ctx_ref.committee.size() <= 1 {
+                        return PeerAttestResult::Ok;
+                    }
+
                     // No quorum digest yet. Check vote counts for this index.
                     let (total_stake, best_entry) = monitor_ref.vote_count_for_index(index);
 

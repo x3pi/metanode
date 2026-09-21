@@ -346,7 +346,8 @@ const GatewayABI = `[
 			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
 			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
 			{"internalType": "bytes", "name": "signerPubkeyBls", "type": "bytes"},
-			{"internalType": "bytes", "name": "signature", "type": "bytes"}
+			{"internalType": "bytes", "name": "signature", "type": "bytes"},
+			{"internalType": "bytes", "name": "compressedTxs", "type": "bytes"}
 		],
 		"name": "submitCommitAttestation",
 		"outputs": [],
@@ -660,6 +661,17 @@ const GatewayABI = `[
 			{"indexed": false, "internalType": "uint8", "name": "status", "type": "uint8"}
 		],
 		"name": "MessageStatusChanged",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "internalType": "uint256", "name": "sourceChainId", "type": "uint256"},
+			{"indexed": true, "internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"indexed": true, "internalType": "bytes32", "name": "commitRoot", "type": "bytes32"},
+			{"indexed": false, "internalType": "bytes", "name": "compressedTxs", "type": "bytes"}
+		],
+		"name": "PrivateChainBatchStored",
 		"type": "event"
 	}
 ]`

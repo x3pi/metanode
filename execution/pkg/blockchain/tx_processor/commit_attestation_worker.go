@@ -2,10 +2,15 @@ package tx_processor
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -89,6 +94,8 @@ func (w *CommitAttestationWorker) OnCommitFinalized(sourceChainID, epoch uint64,
 // Run blocks, processing commit signals, until ctx is cancelled.
 func (w *CommitAttestationWorker) Run(ctx context.Context) {
 	logger.Info("✅ Commit Attestation Worker started")
+	go w.backfillPendingBatches(ctx)
+	go w.periodicBatchPoster(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -96,6 +103,120 @@ func (w *CommitAttestationWorker) Run(ctx context.Context) {
 			return
 		case sig := <-w.signalChan:
 			w.handleCommit(ctx, sig)
+		}
+	}
+}
+
+func (w *CommitAttestationWorker) backfillPendingBatches(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			files, err := os.ReadDir("pending_batches")
+			if err != nil {
+				continue
+			}
+			for _, file := range files {
+				if !file.IsDir() && strings.HasPrefix(file.Name(), "commit_") {
+					path := filepath.Join("pending_batches", file.Name())
+					calldata, err := os.ReadFile(path)
+					if err == nil {
+						_, submitErr := w.signAndSubmit(ctx, calldata)
+						if submitErr == nil {
+							os.Remove(path)
+							logger.Info("♻️ [COMMIT ATTESTATION] Backfilled pending batch: %s", file.Name())
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func (w *CommitAttestationWorker) periodicBatchPoster(ctx context.Context) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	var lastBackedUpBlock uint64 = 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			bc := blockchain.GetBlockChainInstance()
+			if bc == nil {
+				continue
+			}
+			lastBlk := bc.GetLastBlock()
+			if lastBlk == nil {
+				continue
+			}
+			targetBlock := lastBlk.Header().BlockNumber()
+			if targetBlock <= lastBackedUpBlock {
+				continue
+			}
+
+			registry, exists, err := w.client.GetChainRegistry(ctx, w.localChainID)
+			if err != nil || !exists {
+				continue
+			}
+			epoch := registry.Epoch
+
+			var allRawTxs [][]byte
+			var maxBlock uint64 = lastBackedUpBlock
+
+			for bNum := lastBackedUpBlock + 1; bNum <= targetBlock; bNum++ {
+				blk := bc.GetBlockByNumber(bNum)
+				if blk == nil {
+					continue
+				}
+				txs, err := bc.GetTransactionsForBlock(blk)
+				if err != nil || len(txs) == 0 {
+					maxBlock = bNum
+					continue
+				}
+				for _, tx := range txs {
+					if ethTx := tx.ToEthTransaction(); ethTx != nil {
+						if ethBytes, err := ethTx.MarshalBinary(); err == nil {
+							allRawTxs = append(allRawTxs, ethBytes)
+							continue
+						}
+					}
+					b, err := tx.Marshal()
+					if err == nil {
+						allRawTxs = append(allRawTxs, b)
+					}
+				}
+				maxBlock = bNum
+			}
+
+			if len(allRawTxs) == 0 {
+				lastBackedUpBlock = maxBlock
+				continue
+			}
+
+			// Nén toàn bộ allRawTxs vào 1 batch duy nhất
+			txBytes, _ := json.Marshal(allRawTxs)
+			var buf bytes.Buffer
+			zw := zlib.NewWriter(&buf)
+			zw.Write(txBytes)
+			zw.Close()
+			compressedTxs := buf.Bytes()
+
+			commitRoot := lastBlk.Header().Hash()
+			logger.Info("📦 [PERIODIC BATCH POSTER] Packing %d txs (blocks %d..%d) into single batch for chain %d. Submitting to Root Anchor...", len(allRawTxs), lastBackedUpBlock+1, targetBlock, w.localChainID)
+
+			txHash, err := w.submitMyShareWithData(ctx, w.localChainID, epoch, commitRoot, compressedTxs)
+			if err != nil {
+				logger.Warn("⚠️ [PERIODIC BATCH POSTER] Failed to submit batch: %v", err)
+				continue
+			}
+			logger.Info("✅ [PERIODIC BATCH POSTER] Successfully backed up %d txs up to block %d to Root Anchor (txHash=%s)", len(allRawTxs), targetBlock, txHash.Hex())
+			lastBackedUpBlock = targetBlock
 		}
 	}
 }
@@ -139,6 +260,10 @@ func (w *CommitAttestationWorker) SubmitMyShare(ctx context.Context, sourceChain
 }
 
 func (w *CommitAttestationWorker) submitMyShare(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash) (common.Hash, error) {
+	return w.submitMyShareWithData(ctx, sourceChainID, epoch, commitRoot, nil)
+}
+
+func (w *CommitAttestationWorker) submitMyShareWithData(ctx context.Context, sourceChainID, epoch uint64, commitRoot common.Hash, compressedTxs []byte) (common.Hash, error) {
 	privKey, pubKey, err := w.blsKeyPair()
 	if err != nil {
 		return common.Hash{}, err
@@ -151,7 +276,7 @@ func (w *CommitAttestationWorker) submitMyShare(ctx context.Context, sourceChain
 		return common.Hash{}, err
 	}
 	calldata, err := h.abi.Pack("submitCommitAttestation",
-		new(big.Int).SetUint64(sourceChainID), epoch, commitRoot, pubKey.Bytes(), sig.Bytes(),
+		new(big.Int).SetUint64(sourceChainID), epoch, commitRoot, pubKey.Bytes(), sig.Bytes(), compressedTxs,
 	)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("pack submitCommitAttestation: %w", err)
@@ -308,5 +433,12 @@ func (w *CommitAttestationWorker) signAndSubmit(ctx context.Context, calldata []
 		lastErr = err
 		logger.Warn("⚠️ [COMMIT ATTESTATION] submit share attempt %d failed: %v (will retry with fresh nonce)", attempt+1, err)
 	}
+
+	// If all attempts failed, save to pending_batches/
+	os.MkdirAll("pending_batches", 0755)
+	filename := fmt.Sprintf("pending_batches/commit_%d.dat", time.Now().UnixNano())
+	os.WriteFile(filename, calldata, 0644)
+	logger.Error("❌ [COMMIT ATTESTATION] Root Anchor offline. Saved calldata to %s for later recovery", filename)
+
 	return common.Hash{}, lastErr
 }

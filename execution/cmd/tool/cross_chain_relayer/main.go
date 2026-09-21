@@ -272,6 +272,7 @@ func main() {
 		GasPriceBumpPercent: gasPriceBumpPercent,
 		MaxGasPriceWei:      maxGasPriceWei,
 		MaxPollBackoff:      time.Duration(maxPollBackoffS) * time.Second,
+		UnrelayedBatchesPersistPath: "pending_batches/unrelayed_batches.json",
 	}
 
 	daemon, err := relayer_daemon.NewRelayerDaemon(cfg)

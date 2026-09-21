@@ -433,6 +433,28 @@ func (bc *BlockChain) GetLastBlock() mtn_types.Block {
 	return block
 }
 
+func (bc *BlockChain) GetTransactionsForBlock(blk mtn_types.Block) ([]mtn_types.Transaction, error) {
+	if blk == nil {
+		return nil, errors.New("block is nil")
+	}
+	txHashes := blk.Transactions()
+	if len(txHashes) == 0 {
+		return nil, nil
+	}
+	txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(blk.Header().TransactionsRoot(), bc.storageManager.GetStorageTransaction())
+	if err != nil {
+		return nil, err
+	}
+	var txList []mtn_types.Transaction
+	for _, tHash := range txHashes {
+		tx, err := txDB.GetTransaction(tHash)
+		if err == nil && tx != nil {
+			txList = append(txList, tx)
+		}
+	}
+	return txList, nil
+}
+
 func (bc *BlockChain) SetChangelogDB(db *state_changelog.StateChangelogDB) {
 	bc.changelogDB = db
 }

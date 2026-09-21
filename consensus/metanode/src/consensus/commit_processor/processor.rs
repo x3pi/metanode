@@ -1097,10 +1097,15 @@ impl CommitProcessor {
             //   block content at the same GEI slot → FORK.
             // ═══════════════════════════════════════════════════════════════
             if !pending_local_commits.is_empty() {
-                if let Some(ref verifier) = digest_verifier {
+                let mut verified_indices: Vec<u32> = Vec::new();
+                let mut discarded_indices: Vec<u32> = Vec::new();
+
+                if committee_size <= 1 {
+                    for (&local_idx, _) in pending_local_commits.iter() {
+                        verified_indices.push(local_idx);
+                    }
+                } else if let Some(ref verifier) = digest_verifier {
                     // Collect indices to dispatch — MUST be contiguous from the lowest
-                    let mut verified_indices: Vec<u32> = Vec::new();
-                    let mut discarded_indices: Vec<u32> = Vec::new();
                     for (&local_idx, local_commit) in pending_local_commits.iter() {
                         let local_digest = local_commit.commit_ref.digest.into_inner();
 
@@ -1228,8 +1233,9 @@ impl CommitProcessor {
                             }
                         }
                     }
+                }
                     
-                    // Remove collected discarded indices
+                // Remove collected discarded indices
                     for idx in discarded_indices {
                         pending_local_commits.remove(&idx);
                         pending_local_timestamps.remove(&idx);
@@ -1329,7 +1335,6 @@ impl CommitProcessor {
                         break; // break from outer main loop
                     }
                 }
-            }
 
             // CRITICAL FIX: Drain pending out-of-order commits BEFORE blocking on `recv()`.
             // If DIGEST-GATE POLL just dispatched a commit and advanced `next_expected_index`,
@@ -1350,7 +1355,9 @@ impl CommitProcessor {
                 // ═══════════════════════════════════════════════════════
                 if pending.decided_with_local_blocks {
                     let local_digest = pending.commit_ref.digest.into_inner();
-                    let digest_match = if let Some(ref verifier) = digest_verifier {
+                    let digest_match = if committee_size <= 1 {
+                        true
+                    } else if let Some(ref verifier) = digest_verifier {
                         match verifier(next_expected_index) {
                             Some(quorum_digest) => {
                                 if quorum_digest == local_digest {
@@ -1672,11 +1679,13 @@ impl CommitProcessor {
                         let dispatch_subdag: Option<CommittedSubDag>;
 
                         if subdag.decided_with_local_blocks {
-                            // LOCAL commit: ALWAYS buffer first.
+                            // LOCAL commit: buffer unless single validator.
                             let local_digest = subdag.commit_ref.digest.into_inner();
 
-                            // Check if digest is already verified by network quorum
-                            let digest_match = if let Some(ref verifier) = digest_verifier {
+                            // Check if digest is already verified by network quorum (or single validator)
+                            let digest_match = if committee_size <= 1 {
+                                true
+                            } else if let Some(ref verifier) = digest_verifier {
                                 match verifier(commit_index) {
                                     Some(quorum_digest) => {
                                         if quorum_digest == local_digest {

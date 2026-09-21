@@ -57,20 +57,18 @@ impl CoreSignals {
     pub(crate) fn new_block(&self, extended_block: ExtendedBlock) -> ConsensusResult<()> {
         // When there is only one authority in committee, it is unnecessary to broadcast
         // the block which will fail anyway without subscribers to the signal.
-        if self.context.committee.size() > 1 {
-            if extended_block.block.round() == GENESIS_ROUND {
-                debug!("Ignoring broadcasting genesis block to peers");
-                return Ok(());
-            }
+        if extended_block.block.round() == GENESIS_ROUND {
+            debug!("Ignoring broadcasting genesis block to peers");
+            return Ok(());
+        }
 
-            if let Err(err) = self.tx_block_broadcast.send(extended_block) {
+        if let Err(err) = self.tx_block_broadcast.send(extended_block) {
+            if self.context.committee.size() > 1 {
                 warn!("Couldn't broadcast the block to any receiver: {err}");
                 return Err(ConsensusError::Shutdown);
+            } else {
+                debug!("Did not broadcast block to receivers as no receivers subscribed: {err}");
             }
-        } else {
-            debug!(
-                "Did not broadcast block {extended_block:?} to receivers as committee size is <= 1"
-            );
         }
         Ok(())
     }
@@ -83,29 +81,28 @@ impl CoreSignals {
         extended_block: ExtendedBlock,
         flush_ticket: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> ConsensusResult<()> {
-        if self.context.committee.size() > 1 {
-            if extended_block.block.round() == GENESIS_ROUND {
-                debug!("Ignoring broadcasting genesis block to peers");
-                return Ok(());
-            }
-
-            let sender = self.tx_block_broadcast.clone();
-            tokio::spawn(async move {
-                if let Some(ticket) = flush_ticket {
-                    if let Err(e) = ticket.await {
-                        warn!("RocksDB flush ticket failed before broadcast: {:?}", e);
-                        // We still might want to broadcast if it crashed? No, if flush failed we probably panic.
-                    }
-                }
-                if let Err(err) = sender.send(extended_block) {
-                    warn!("Couldn't broadcast the block: {err}");
-                }
-            });
-        } else {
-            debug!(
-                "Did not broadcast block {extended_block:?} to receivers as committee size is <= 1"
-            );
+        if extended_block.block.round() == GENESIS_ROUND {
+            debug!("Ignoring broadcasting genesis block to peers");
+            return Ok(());
         }
+
+        let is_single_validator = self.context.committee.size() <= 1;
+        let sender = self.tx_block_broadcast.clone();
+        tokio::spawn(async move {
+            if let Some(ticket) = flush_ticket {
+                if let Err(e) = ticket.await {
+                    warn!("RocksDB flush ticket failed before broadcast: {:?}", e);
+                    // We still might want to broadcast if it crashed? No, if flush failed we probably panic.
+                }
+            }
+            if let Err(err) = sender.send(extended_block) {
+                if !is_single_validator {
+                    warn!("Couldn't broadcast the block: {err}");
+                } else {
+                    debug!("Couldn't broadcast the block (no receivers): {err}");
+                }
+            }
+        });
         Ok(())
     }
 

@@ -1322,6 +1322,7 @@ func (h *GatewayHandler) handleWrite(
 		commitRoot := mustHash(args[2])
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
+		compressedTxs := mustBytes(args[5])
 
 		registry, exists := engine.GetChainRegistryEntry(sourceChainID)
 		if !exists {
@@ -1354,6 +1355,16 @@ func (h *GatewayHandler) handleWrite(
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("submitCommitAttestation: %w", err)
+		}
+
+		if event, ok := h.abi.Events["PrivateChainBatchStored"]; ok {
+			eventData, packErr := event.Inputs.NonIndexed().Pack(compressedTxs)
+			if packErr == nil {
+				eventLogs = append(eventLogs, smart_contract.NewEventLog(
+					tx.Hash(), tx.ToAddress(), eventData,
+					[][]byte{event.ID.Bytes(), leftPadUint64(sourceChainID), leftPadUint64(epoch), commitRoot.Bytes()},
+				))
+			}
 		}
 
 	case "submitMessageFailureAttestation":
