@@ -237,6 +237,11 @@ pub struct TxSocketServer {
     tx_recycler: Option<Arc<TxRecycler>>,
 }
 
+/// SyncOnly peer-forward retry budget: 5 backoff steps up to 1s, then 1s each
+/// => roughly 30s total before a batch is dropped.
+const MAX_FORWARD_ATTEMPTS: u32 = 30;
+const FORWARD_TOTAL_BUDGET_SECS: u32 = 30;
+
 impl TxSocketServer {
     pub fn with_node(
         transaction_client: Arc<dyn TransactionSubmitter>,
@@ -420,6 +425,7 @@ impl TxSocketServer {
 
         // RETRY LOOP FOR EPOCH TRANSITIONS
         let mut attempt = 0;
+        let mut forward_attempt: u32 = 0;
         let mut current_client = client;
 
         loop {
@@ -563,13 +569,29 @@ impl TxSocketServer {
                         }
                     }
 
-                    warn!("⏳ [FFI TX FLOW] Node is catching up. Delaying {} TXs internally (attempt {}/20).", transactions_to_submit.len(), attempt + 1);
-                    attempt += 1;
-                    if attempt >= 20 {
-                        error!("🚨 [FFI TX FLOW] Dropping {} TXs after 20 failed attempts to forward. Preventing FFI channel deadlock.", transactions_to_submit.len());
+                    // Dedicated counter: `attempt` above is shared with the epoch-transition
+                    // wait, so a batch that already waited >=1s there would otherwise be
+                    // dropped on its very first failed forward.
+                    forward_attempt += 1;
+                    if forward_attempt >= MAX_FORWARD_ATTEMPTS {
+                        error!(
+                            "🚨 [FFI TX FLOW] Dropping {} TXs after {} failed attempts (~{}s) to forward to any validator.",
+                            transactions_to_submit.len(),
+                            forward_attempt,
+                            FORWARD_TOTAL_BUDGET_SECS
+                        );
                         return;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    // Capped exponential backoff (50ms, 100ms, ... 1s). While validators are
+                    // unreachable this holds the batch's pipeline permit, so pressure builds
+                    // toward Go's FFI send (which times out and reports failure) instead of
+                    // silently discarding txs after ~1s as before.
+                    let backoff_ms = std::cmp::min(50u64 << std::cmp::min(forward_attempt - 1, 5), 1000);
+                    warn!(
+                        "⏳ [FFI TX FLOW] No validator accepted {} TXs. Retrying in {}ms (attempt {}/{}).",
+                        transactions_to_submit.len(), backoff_ms, forward_attempt, MAX_FORWARD_ATTEMPTS
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     continue;
                 }
 
