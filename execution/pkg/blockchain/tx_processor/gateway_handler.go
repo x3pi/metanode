@@ -928,6 +928,12 @@ func (h *GatewayHandler) handleWrite(
 				if _, err := engine.Outbound(msg.Sender, relayParams, tx.Hash()); err != nil {
 					return nil, nil, fmt.Errorf("claimMessage relay onward: %w", err)
 				}
+				// ClaimMessage above just credited Reserve's own ledger with this Value, but relaying
+				// never mints it here -- it is in flight to finalDestChainID. Release it so Reserve's
+				// ledger stays conserved (see ReleaseRelayedValue).
+				if err := engine.ReleaseRelayedValue(msg.MessageID, relayValue); err != nil {
+					return nil, nil, fmt.Errorf("claimMessage relay ledger release: %w", err)
+				}
 				relayedOnward = true
 				logger.Info("🔀 [GATEWAY] claimMessage relaying onward: chain %d -> chain %d (via chain %d), target=%s, value=%s, payloadLen=%d", msg.SourceChainID, finalDestChainID, engine.LocalChainID, msg.Target.Hex(), relayValue.String(), len(innerPayload))
 			}

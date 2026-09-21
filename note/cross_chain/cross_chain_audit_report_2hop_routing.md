@@ -1,5 +1,53 @@
 # Cross-Chain Architecture Audit Report: 2-Hop Routing & Reliability
 
+> ## ⚠️ VERIFICATION ADDENDUM (2026-09-21) — read this before acting on sections 2–6
+>
+> Every claim below was re-checked against the code and against a live-state trace of the real
+> `claimMessage`/`refund` handlers. The headline finding does **not** hold; a different, smaller
+> defect does. Sections 2–6 are kept unedited for the record.
+>
+> **Refuted — "permanent lock of funds on the Reserve chain".** When leg 2 fails on B, the relayer
+> calls `refund()` on **Reserve** (leg 2's source chain is Reserve). The handler mints the Value to
+> the original sender (`leg2.Sender` keeps the original sender) **on Reserve** — verified: sender
+> balance on Reserve = V after the refund. Funds are refunded on Reserve rather than returned to A;
+> they are not trapped. (`RefundReserveAllocation` is a separate path for direct A→B messages that
+> Reserve only ceiling-attests; it is not what a relayed leg-2 failure uses.)
+>
+> **Refuted — "Option A (immutable `SourceChainID`) is mandatory".** An uncommitted attempt to
+> carry A in leg 2's `SourceChainID` broke `CreditReserveAllocation`/`RefundReserveAllocation`
+> tests and, more importantly, would make B look up the commit attestation and committee of the
+> wrong chain: leg 2's batch is produced and signed by **Reserve**, so `SourceChainID` must stay
+> Reserve for the verification chain to be sound. Not adopted.
+>
+> **Confirmed and fixed — Reserve's `PerChainAllocation` ledger drifts on every relayed transfer**
+> (fail-closed on success, **inflating** on failure). Traced with V=500, ledger A=Reserve=50_000:
+>
+> | step | before fix | after fix |
+> |---|---|---|
+> | leg 1 attested + claimed on Reserve | A 49_500, Reserve 50_500 | A 49_500, Reserve **50_000** (value released: it is in flight) |
+> | leg 2 succeeds, `creditReserveAllocation` | **rejected** (`ErrCommitNotAttested`: Reserve never attests its own commits) → B never credited, Reserve stuck at +V | B **+V**, Σ conserved |
+> | leg 2 fails, `refund()` on Reserve | Reserve 51_000 (**+2V**; only V was minted) → Σ inflated by V | Reserve 50_500, Σ conserved |
+>
+> Fix: `GatewayEngine.ReleaseRelayedValue` (called by the claimMessage relay branch, Reserve-only,
+> idempotent, recorded in `RelayedInFlight`) + `CreditReserveAllocation` accepts Reserve's own
+> `CommittedBatches` **only** for a message recorded as relayed with the identical Value (so an
+> ordinary Reserve-issued transfer can never be credited without a matching release). Tests:
+> `pkg/cross_chain/gateway_relay_ledger_test.go`, plus ledger/balance assertions added to
+> `TestComprehensive_TwoHopValueTransfer_*` / `*_LegTwoFailsAndRefundsOnReserve`.
+>
+> **Deployment note:** this changes state-machine semantics (ledger arithmetic on Reserve), so it
+> must be rolled out to all validators of a chain together, like any consensus-affecting change. The
+> new state field is `omitempty`, so a chain that never relayed serializes byte-identically. A relayed
+> message already in flight at upgrade time has no `RelayedInFlight` record: its success-path credit
+> stays rejected and its failure-path refund keeps the old +V double count (no regression, not fixed).
+>
+> **Adjacent, NOT fixed (separate flow, needs its own decision):** an ordinary Reserve-issued native
+> transfer (not relayed) never debits Reserve's ledger on issue (`attestReserveIssuedCommit` skips
+> the ceiling), yet `refund()` on Reserve credits it back on failure — the same +V inflation class.
+> Also `refund()` returns the value on Reserve, not on A; routing it back to A would need an
+> explicit design (original-source record on Reserve), not an overwritten `SourceChainID`.
+
+
 ## 1. Executive Summary
 This audit focuses on the logical and security soundness of the cross-chain architecture, particularly the 2-hop routing mechanism (Chain A -> Reserve -> Chain B) introduced for `Native` assets and ceiling-enforced commits.
 

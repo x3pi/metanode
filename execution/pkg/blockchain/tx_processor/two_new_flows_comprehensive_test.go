@@ -301,6 +301,13 @@ func TestComprehensive_TwoHopValueTransfer_NativeCoins_A_Reserve_B(t *testing.T)
 	assert.Equal(t, uint8(2), leg2Msg.HopCount)
 	assert.Empty(t, leg2Msg.Payload, "inner payload was nil")
 
+	// Invariant C (ledger conservation across the relay hop): ClaimMessage credited Reserve with
+	// the value, but relaying never mints it there -- it is in flight to B -- so the relay must have
+	// released that credit again. Before ReleaseRelayedValue Reserve stayed at 50_000+V forever.
+	assert.Equal(t, int64(50_000), reloadedReserve.SupplyLedger.GetAllocation(reserveChainID).Int64(), "Reserve must not keep the in-flight value")
+	assert.Equal(t, int64(50_000)-transferValue.Int64(), reloadedReserve.SupplyLedger.GetAllocation(chainAID).Int64(), "A debited by AttestCommit")
+	assert.Contains(t, reloadedReserve.RelayedInFlight, leg1Msg.MessageID, "relay must be recorded as in flight")
+
 	// Step 6: Build Commit tree for Leg 2, sign with kpReserve
 	commitRoot2, layers2, aggAmounts2, aggIndex2, err := cross_chain.BuildCommitTree([]cross_chain.CrossChainMessage{leg2Msg})
 	require.NoError(t, err)
@@ -653,6 +660,20 @@ func TestComprehensive_TwoHopContractCall_LegTwoFailsAndRefundsOnReserve(t *test
 	finalStatusOut, err := h.abi.Unpack("getMessageStatus", finalStatusResult)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(cross_chain.MessageStatusRefunded), finalStatusOut[0].(uint8), "Reserve's status for the ORIGINAL leg-1 MessageID must reflect the refund")
+
+	// The refund lands on Reserve itself (leg 2's source): the original sender is minted the Value
+	// there, NOT trapped. Reserve's ledger must record exactly that one credit -- before
+	// ReleaseRelayedValue it double-counted (ClaimMessage's credit was never released), leaving
+	// Reserve at +2V while only V of real coin was ever minted there.
+	afterRefund, err := loadGatewayEngine(csReserve)
+	require.NoError(t, err)
+	v := leg2Msg.Value.Int64()
+	assert.Equal(t, int64(50_000)+v, afterRefund.SupplyLedger.GetAllocation(reserveChainID).Int64(), "Reserve credited exactly once for the V minted back")
+	assert.Equal(t, int64(50_000)-v, afterRefund.SupplyLedger.GetAllocation(chainAID).Int64())
+	assert.Equal(t, int64(100_000), afterRefund.SupplyLedger.GetAllocation(chainAID).Int64()+afterRefund.SupplyLedger.GetAllocation(reserveChainID).Int64()+afterRefund.SupplyLedger.GetAllocation(chainBID).Int64(), "sum of allocations conserved")
+	senderAcct, err := csReserve.GetAccountStateDB().AccountState(leg2Msg.Sender)
+	require.NoError(t, err)
+	assert.Equal(t, 0, senderAcct.Balance().Cmp(leg2Msg.Value), "sender must hold the refunded Value on Reserve")
 }
 
 func TestComprehensive_TwoHop_SecurityGuards_SelfLoopAndUnregisteredTarget(t *testing.T) {

@@ -101,7 +101,13 @@ type GatewayEngine struct {
 	// counterpart of AttestCommit's source-side debit, since ClaimMessage's own credit lands on
 	// the CLAIMING chain's local ledger copy, which is non-authoritative for any chain other than
 	// Reserve itself).
-	ReserveCreditedMessages    map[common.Hash]bool
+	ReserveCreditedMessages map[common.Hash]bool
+	// RelayedInFlight records, on Reserve only, every native value currently "in flight" on a
+	// 2-hop A -> Reserve -> B relay: MessageID -> Value. See ReleaseRelayedValue's doc comment.
+	// `omitempty` + lazy allocation keep the serialized GatewayEngine byte-identical to the
+	// pre-existing format for any chain that has never relayed, so this field does not change
+	// state roots on upgrade.
+	RelayedInFlight            map[common.Hash]*big.Int `json:"relayed_in_flight,omitempty"`
 	DeadChains                 map[uint64]bool
 	DeadChainClaimed           map[string]bool
 	ActiveContext              *CrossChainContext
@@ -1488,6 +1494,56 @@ func (g *GatewayEngine) FinalizeFailedAfterExecutionRevert(
 	return nil
 }
 
+// ReleaseRelayedValue is called on Reserve at the moment claimMessage relays a leg-1 message
+// onward (leg 2), and removes from Reserve's own ledger the value ClaimMessage just credited to it.
+//
+// Why: for a relayed A -> Reserve -> B transfer, ClaimMessage (dest == Reserve) credits
+// PerChainAllocation[Reserve] += V, but relaying never mints V on Reserve -- it only queues leg 2,
+// so V is IN FLIGHT, not held. Before this fix nothing ever removed that credit, which made Reserve's
+// ledger permanently over-record (and, on the success path, B under-record) by V per transfer, and
+// on the failure path (Refund() on Reserve legitimately credits Reserve += V again when it mints V
+// back to the sender there) double-count it: proven with a live-state trace, Reserve ended at
+// +2V while only V of real coin ever existed there (sum of PerChainAllocation inflated by V per
+// failed relayed message).
+//
+// With this release the ledger stays conserved on both outcomes:
+//
+//	success: A -V (AttestCommit), Reserve +V -V (net 0), B +V (CreditReserveAllocation on leg 2)
+//	failure: A -V, Reserve +V -V +V (Refund mints V on Reserve), B 0
+//
+// Idempotent per MessageID (write-once), Reserve-only, native-only (callers only relay native
+// messages), and fail-safe: clamps at zero rather than going negative, like every other reversal
+// in this file.
+func (g *GatewayEngine) ReleaseRelayedValue(messageID common.Hash, value *big.Int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.ReserveChainID == 0 || g.LocalChainID != g.ReserveChainID {
+		// Non-Reserve engines' PerChainAllocation copy is non-authoritative (see
+		// CreditReserveAllocation's doc comment) -- nothing to release.
+		return nil
+	}
+	if value == nil || value.Sign() <= 0 || g.SupplyLedger == nil {
+		return nil
+	}
+	if _, already := g.RelayedInFlight[messageID]; already {
+		return nil
+	}
+
+	currentAlloc := g.SupplyLedger.GetAllocation(g.LocalChainID)
+	released := new(big.Int).Sub(currentAlloc, value)
+	if released.Sign() < 0 {
+		released = big.NewInt(0)
+	}
+	g.SupplyLedger.PerChainAllocation[g.LocalChainID] = released
+
+	if g.RelayedInFlight == nil {
+		g.RelayedInFlight = make(map[common.Hash]*big.Int)
+	}
+	g.RelayedInFlight[messageID] = new(big.Int).Set(value)
+	return nil
+}
+
 // CreditReserveAllocation is the missing third leg of a 2-hop A -> Reserve -> B value route
 // (Section 2.3.1 finding, 2026-09-04). ClaimMessage's own PerChainAllocation credit (see its doc
 // comment above) writes to g.LocalChainID's copy of the ledger -- correct when the claiming chain
@@ -1558,7 +1614,20 @@ func (g *GatewayEngine) CreditReserveAllocation(
 	}
 	key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 	if _, exists := g.AttestedCommits[key]; !exists {
-		return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+		// Leg 2 of a relayed A -> Reserve -> B transfer is SOURCED by Reserve itself: Reserve never
+		// attests its own commits (attestReserveIssuedCommit runs on the destination), so the
+		// AttestedCommits lookup above can never succeed for it -- B's allocation was therefore
+		// never credited on Reserve's ledger for ANY relayed transfer. A chain trivially knows its
+		// own real batches, so g.CommittedBatches is the correct proof here (same reasoning as
+		// Refund()'s own identical fix). Deliberately narrow: only for a message Reserve itself
+		// recorded as relayed in-flight (ReleaseRelayedValue) with exactly that Value -- crediting B
+		// for an ordinary Reserve-issued transfer, whose value was never released from Reserve's
+		// ledger, would inflate the sum of allocations.
+		relayedValue, isRelayed := g.RelayedInFlight[message.MessageID]
+		_, hasOwnBatch := g.CommittedBatches[commitRoot]
+		if message.SourceChainID != g.LocalChainID || !isRelayed || !hasOwnBatch || relayedValue.Cmp(message.Value) != 0 {
+			return fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
+		}
 	}
 
 	leafHash := ComputeMessageLeafHash(message)
@@ -1592,6 +1661,7 @@ func (g *GatewayEngine) CreditReserveAllocation(
 		g.SupplyLedger.PerChainAllocation[message.DestChainID] = new(big.Int).Add(currentAlloc, message.Value)
 	}
 	g.ReserveCreditedMessages[message.MessageID] = true
+	delete(g.RelayedInFlight, message.MessageID)
 
 	return nil
 }
@@ -1743,6 +1813,9 @@ func (g *GatewayEngine) Refund(
 
 	// 6. Atomically set status to Refunded
 	g.MessageStatus[message.MessageID] = MessageStatusRefunded
+	// A relayed leg 2 that failed is now resolved: the Reserve-side credit in step 7 below is what
+	// re-balances the release made by ReleaseRelayedValue, so the in-flight record is done.
+	delete(g.RelayedInFlight, message.MessageID)
 
 	// 7. Restore allocation in GlobalSupplyLedger.
 	//
