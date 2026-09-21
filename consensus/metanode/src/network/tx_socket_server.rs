@@ -237,10 +237,47 @@ pub struct TxSocketServer {
     tx_recycler: Option<Arc<TxRecycler>>,
 }
 
-/// SyncOnly peer-forward retry budget: 5 backoff steps up to 1s, then 1s each
-/// => roughly 30s total before a batch is dropped.
-const MAX_FORWARD_ATTEMPTS: u32 = 30;
-const FORWARD_TOTAL_BUDGET_SECS: u32 = 30;
+/// SyncOnly peer-forward retry budget: 5 backoff steps up to 1s, then 1s each => ~10 minutes
+/// before a batch is dropped. Long on purpose: a validator restart/outage must not silently lose
+/// user txs. The cost of waiting is bounded -- each waiting batch holds one of the 512 pipeline
+/// permits, and once those and the FFI channel fill, Go's `try_send` returns false, which is
+/// visible backpressure instead of silent loss. The loop also re-evaluates node acceptance every
+/// iteration, so if this node becomes a validator meanwhile the batch is submitted directly.
+const MAX_FORWARD_ATTEMPTS: u32 = 600;
+const FORWARD_TOTAL_BUDGET_SECS: u32 = 600;
+
+/// Backoff before retry number `attempt` (1-based): 50, 100, 200, 400, 800, then 1000ms.
+fn forward_backoff_ms(attempt: u32) -> u64 {
+    std::cmp::min(50u64 << std::cmp::min(attempt.saturating_sub(1), 5), 1000)
+}
+
+#[cfg(test)]
+mod forward_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_then_caps_at_one_second() {
+        let steps: Vec<u64> = (1..=8).map(forward_backoff_ms).collect();
+        assert_eq!(steps, vec![50, 100, 200, 400, 800, 1000, 1000, 1000]);
+    }
+
+    #[test]
+    fn total_budget_matches_the_documented_ten_minutes() {
+        let total_ms: u64 = (1..MAX_FORWARD_ATTEMPTS).map(forward_backoff_ms).sum();
+        let secs = total_ms / 1000;
+        assert!(
+            (FORWARD_TOTAL_BUDGET_SECS as u64 - 15..=FORWARD_TOTAL_BUDGET_SECS as u64 + 15).contains(&secs),
+            "sum of backoffs {}s should be within 15s of the documented {}s",
+            secs,
+            FORWARD_TOTAL_BUDGET_SECS
+        );
+    }
+
+    #[test]
+    fn attempt_zero_does_not_underflow() {
+        assert_eq!(forward_backoff_ms(0), 50);
+    }
+}
 
 impl TxSocketServer {
     pub fn with_node(
@@ -586,11 +623,14 @@ impl TxSocketServer {
                     // unreachable this holds the batch's pipeline permit, so pressure builds
                     // toward Go's FFI send (which times out and reports failure) instead of
                     // silently discarding txs after ~1s as before.
-                    let backoff_ms = std::cmp::min(50u64 << std::cmp::min(forward_attempt - 1, 5), 1000);
-                    warn!(
-                        "⏳ [FFI TX FLOW] No validator accepted {} TXs. Retrying in {}ms (attempt {}/{}).",
-                        transactions_to_submit.len(), backoff_ms, forward_attempt, MAX_FORWARD_ATTEMPTS
-                    );
+                    let backoff_ms = forward_backoff_ms(forward_attempt);
+                    // Log the first failure and then every 10th, not all ~600 attempts per batch.
+                    if forward_attempt == 1 || forward_attempt % 10 == 0 {
+                        warn!(
+                            "⏳ [FFI TX FLOW] No validator accepted {} TXs. Retrying in {}ms (attempt {}/{}).",
+                            transactions_to_submit.len(), backoff_ms, forward_attempt, MAX_FORWARD_ATTEMPTS
+                        );
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     continue;
                 }
