@@ -276,6 +276,17 @@ impl ConsensusNode {
                     }
         
                     const ACCEPTABLE_GAP: u64 = 2;
+                    // ROOT-CAUSE FIX (2026-09-21, live CI failure: node-2 stuck in GoSyncing for 20min
+                    // after a restart, `eth_consensusReady=false`, Xapian tx receipt timeout):
+                    // demanding gap <= ACCEPTABLE_GAP forever can NEVER be met while the chain itself
+                    // produces blocks at about the same rate this loop can import them (each round
+                    // has a non-zero fetch+execute+flush cost, so a few new blocks always appear
+                    // meanwhile). Once the node is demonstrably chasing the tip (>= this many rounds),
+                    // the remaining small gap is exactly what the barrier's DagCatchingUp phase
+                    // (certified-commit replay) exists to close -- hand over to it instead of
+                    // livelocking here and starving this validator out of consensus.
+                    const TIP_CHASE_ROUNDS: u64 = 10;
+                    const TIP_CHASE_ACCEPTABLE_GAP: u64 = 16;
                     const INITIAL_RETRY_DELAY_MS: u64 = 500;
                     const MAX_RETRY_DELAY_MS: u64 = 5000;
                     let mut total_synced_blocks: u64 = 0;
@@ -333,7 +344,12 @@ impl ConsensusNode {
                                 break;
                             }
         
-                            if local_block > 0 && local_block + ACCEPTABLE_GAP >= max_peer_block {
+                            let acceptable_gap = if sync_round >= TIP_CHASE_ROUNDS {
+                                TIP_CHASE_ACCEPTABLE_GAP
+                            } else {
+                                ACCEPTABLE_GAP
+                            };
+                            if local_block > 0 && local_block + acceptable_gap >= max_peer_block {
                                 tracing::info!(
                                     "✅ [STARTUP-SYNC] Local state in sync (local_block={}, peer_block={}, round={}). Starting consensus...",
                                     local_block, max_peer_block, sync_round
@@ -358,6 +374,7 @@ impl ConsensusNode {
                             let mut shuffled_peers = barrier_peers.clone();
                             shuffled_peers.shuffle(&mut rand::thread_rng());
         
+                            let mut round_made_progress = false;
                             match crate::network::peer_rpc::fetch_blocks_from_peer(&shuffled_peers, from_block, to_block).await {
                                 Ok(blocks) if !blocks.is_empty() => {
                                     tracing::info!(
@@ -481,6 +498,7 @@ impl ConsensusNode {
                                     );
                                     total_synced_blocks += total_synced_this_round;
                                     local_block = round_last_block;
+                                    round_made_progress = total_synced_this_round > 0;
                                             
                                             if let Ok((_, new_gei, _, _, _)) = barrier_client.get_last_block_number().await {
                                                 coordination_hub.set_initial_global_exec_index(new_gei).await;
@@ -569,11 +587,18 @@ impl ConsensusNode {
                                 }
                             }
         
-                            let delay = std::cmp::min(
-                                INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
-                                MAX_RETRY_DELAY_MS
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                            // The backoff below is a FAILURE/no-data retry delay. Applying it after a
+                            // round that DID import blocks (the original behaviour) slept a full
+                            // MAX_RETRY_DELAY_MS (5s) between successful rounds, during which the chain
+                            // produced ~18 more blocks -- so the gap never closed (observed live:
+                            // steady gap 15-31 for 20 minutes). Only back off when no progress was made.
+                            if !round_made_progress {
+                                let delay = std::cmp::min(
+                                    INITIAL_RETRY_DELAY_MS * (1 << sync_round.min(4)),
+                                    MAX_RETRY_DELAY_MS
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                            }
                             sync_round += 1;
                         }
         
