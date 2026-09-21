@@ -458,26 +458,17 @@ impl RustSyncNode {
                             }
                             Ok(_) => {
                                 tracing::warn!(
-                                    "⚠️ [RUST-SYNC] Peer {} returned no executable blocks for GEI {}..{} \
-                                     (likely hasn't deployed the 0-byte-file fix yet). Falling back to \
-                                     local synthesis -- LESS VERIFIED, only safe if peer_block==go_block \
-                                     genuinely means these commits are empty.",
+                                    "⚠️ [RUST-SYNC] Peer {} returned no executable blocks for GEI {}..{}. Waiting for peer to write them or advance its block.",
                                     best_peer, from_gei, to_gei
                                 );
-                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)).await {
-                                    return Ok(0);
-                                }
+                                return Ok(0);
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "⚠️ [RUST-SYNC] Failed to fetch executable blocks from peer {}: {}. \
-                                     Falling back to local synthesis -- LESS VERIFIED, only safe if \
-                                     peer_block==go_block genuinely means these commits are empty.",
+                                    "⚠️ [RUST-SYNC] Failed to fetch executable blocks from peer {}: {}. Retrying later.",
                                     best_peer, e
                                 );
-                                if push_exec_blocks_to_go(synthesize_empty_exec_blocks(from_gei, to_gei, go_block)).await {
-                                    return Ok(0);
-                                }
+                                return Ok(0);
                             }
                         }
                     }
@@ -834,26 +825,6 @@ impl RustSyncNode {
             }
         }
     }
-}
-
-/// Synthesizes stand-in empty `ExecutableBlock`s for a GEI range, for use ONLY as a
-/// best-effort liveness fallback when fetching the real (peer-verified) content fails --
-/// see the call site's doc comment for why this is deliberately the less-trusted path.
-fn synthesize_empty_exec_blocks(from_gei: u64, to_gei: u64, go_block: u64) -> Vec<(u64, Vec<u8>)> {
-    (from_gei..=to_gei)
-        .map(|gei| {
-            let empty_block = crate::node::executor_client::proto::ExecutableBlock {
-                global_exec_index: gei,
-                is_authoritative_gei: false,
-                block_number: go_block, // Map it to the current Go block
-                ..Default::default()
-            };
-            let mut data = Vec::new();
-            prost::Message::encode(&empty_block, &mut data)
-                .expect("encoding a default-constructed ExecutableBlock cannot fail");
-            (gei, data)
-        })
-        .collect()
 }
 
 /// Pushes a list of (gei, serialized ExecutableBlock) pairs to Go via FFI, in order,
