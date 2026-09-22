@@ -335,7 +335,7 @@ func TestRelayer_Scenario10_3_ContractCallFailedAndAutomatedRefund(t *testing.T)
 		AggregateSignature: sig101.Bytes(),
 		SignerBitmap:       []byte{0x01},
 	}
-	_, err = chains[101].AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101)
+	_, err = chains[101].AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101, 0)
 	require.NoError(t, err)
 
 	// Destination chain (102) reverts and committee signs failure cert

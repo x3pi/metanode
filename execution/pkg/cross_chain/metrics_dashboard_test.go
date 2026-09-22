@@ -106,7 +106,7 @@ func TestP7_2_InstantSecurityAlertOnAllocationRejected(t *testing.T) {
 	}
 
 	// Trigger overdraw attack via gateway
-	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, big.NewInt(0), MerkleProof{}, cert)
+	_, err := gateway.AttestCommit(101, commitRoot, hackAmount, big.NewInt(0), MerkleProof{}, cert, 0)
 	assert.ErrorIs(t, err, ErrAllocationExceeded, "Overdraw attempt must be rejected")
 
 	// Verify instant alert received in channel within milliseconds (< 1s)

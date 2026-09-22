@@ -83,7 +83,7 @@ func TestCommitAttestationWorker_SingleValidatorLifecycle(t *testing.T) {
 	}, ledger)
 	destEngine.ReserveChainID = 999 // C8 fix: destEngine plays Reserve, attesting chain 888's commit
 
-	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(100), big.NewInt(0), cross_chain.MerkleProof{}, *cert)
+	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(100), big.NewInt(0), cross_chain.MerkleProof{}, *cert, 0)
 	require.NoError(t, err)
 	require.NotNil(t, attested)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
@@ -172,7 +172,7 @@ func TestCommitAttestationWorker_MultiValidatorQuorum(t *testing.T) {
 	}, ledger2)
 	destEngine.ReserveChainID = 1000 // C8 fix: destEngine plays Reserve, attesting localChainID's commit
 
-	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(500), big.NewInt(0), cross_chain.MerkleProof{}, *cert)
+	attested, err := destEngine.AttestCommit(localChainID, commitRoot, big.NewInt(500), big.NewInt(0), cross_chain.MerkleProof{}, *cert, 0)
 	require.NoError(t, err)
 	require.NotNil(t, attested)
 	assert.Equal(t, big.NewInt(500), attested.FundedAmount)

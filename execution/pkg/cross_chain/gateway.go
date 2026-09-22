@@ -25,6 +25,7 @@ var (
 	ErrUnknownSourceChain           = errors.New("unknown source chain ID")
 	ErrEpochMismatch                = errors.New("epoch mismatch for source chain")
 	ErrAllocationExceeded           = errors.New("aggregate amount exceeds source chain allocation ceiling (Scenario 10.7)")
+	ErrVelocityLimitExceeded        = errors.New("aggregate amount exceeds the 24h velocity limit for this source chain")
 	ErrQuorumNotReached             = errors.New("BFT quorum stake threshold not reached")
 	ErrCommitNotAttested            = errors.New("commit root has not been attested by source chain")
 	ErrInvalidMerkleProof           = errors.New("invalid Merkle proof")
@@ -116,6 +117,25 @@ type GatewayEngine struct {
 	ChannelSequence            map[string]uint64
 	RelayerBalances            map[common.Address]*big.Int
 	allocationRejectedListener AllocationRejectedListener
+
+	// OutflowInWindow / OutflowWindowStart / OutflowWindowBaseAlloc (2026-09-22) implement the
+	// velocity limit from note/cross_chain/production_security_hardening_research.md §3.2 item 5:
+	// at most 20% of a source chain's ceiling may be debited via AttestCommit within a rolling 24h
+	// window, bounding how fast a compromised chain's committee can drain its own ceiling even with
+	// a 100% valid quorum cert (Ronin/Harmony-class damage limitation -- see the research doc's mục
+	// 1.2/1.5). The 20% reference is SupplyLedger.PerChainAllocation[sourceChainID] as it stood at
+	// the moment the current window opened (OutflowWindowBaseAlloc), not re-read live after every
+	// debit within the same window -- re-reading live would make the effective remaining budget
+	// shrink faster than 20% of what the chain actually held when the window started, as each
+	// legitimate attest within the window reduces the base the next one's 20% is measured against.
+	// Deliberately keyed and checked ONLY inside attestCommitInternal's enforceCeiling branch (i.e.
+	// only when running on Reserve, the one place PerChainAllocation is authoritative) -- an earlier
+	// attempt at this feature checked it at outbound() time on the SOURCE chain's own, non-
+	// authoritative local ledger copy, which is typically zero and hard-rejected virtually every
+	// real transfer; see that commit's own message for the full account.
+	OutflowInWindow        map[uint64]*big.Int `json:"outflow_in_window,omitempty"`
+	OutflowWindowStart     map[uint64]uint64   `json:"outflow_window_start,omitempty"`
+	OutflowWindowBaseAlloc map[uint64]*big.Int `json:"outflow_window_base_alloc,omitempty"`
 
 	// PendingCommitteeAttestations collects individual BLS signature shares for a pending
 	// CommitteeUpdate, keyed by "sourceChainId:oldEpoch:payloadHashHex" (Milestone C). Cleared
@@ -1139,8 +1159,9 @@ func (g *GatewayEngine) AttestCommit(
 	assetId *big.Int,
 	aggregateProof MerkleProof,
 	cert QuorumCert,
+	blockTime uint64,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, true)
+	return g.attestCommitInternal(sourceChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, true, blockTime)
 }
 
 // AttestReserveIssuedCommit executes Phase 1 of Attest-then-Claim for a commit issued by RESERVE
@@ -1157,7 +1178,58 @@ func (g *GatewayEngine) AttestReserveIssuedCommit(
 	aggregateProof MerkleProof,
 	cert QuorumCert,
 ) (*AttestedCommit, error) {
-	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false)
+	return g.attestCommitInternal(reserveChainID, commitRoot, aggregateAmount, assetId, aggregateProof, cert, false, 0)
+}
+
+// checkAndRecordVelocity enforces the rolling-24h/20%-of-window-start-allocation outflow velocity
+// limit described in GatewayEngine.OutflowInWindow's own doc comment. Caller must already hold
+// g.mu (only ever called from within attestCommitInternal's enforceCeiling branch).
+func (g *GatewayEngine) checkAndRecordVelocity(sourceChainID uint64, amount, currentAlloc *big.Int, blockTime uint64) error {
+	const windowSeconds = 24 * 60 * 60
+
+	if g.OutflowInWindow == nil {
+		g.OutflowInWindow = make(map[uint64]*big.Int)
+	}
+	if g.OutflowWindowStart == nil {
+		g.OutflowWindowStart = make(map[uint64]uint64)
+	}
+	if g.OutflowWindowBaseAlloc == nil {
+		g.OutflowWindowBaseAlloc = make(map[uint64]*big.Int)
+	}
+
+	windowStart, hasWindow := g.OutflowWindowStart[sourceChainID]
+	// A new window starts on the first-ever attest for this chain, once the window has genuinely
+	// elapsed, or (defensively) if blockTime ever regresses -- never let a backward jump underflow
+	// the uint64 subtraction below into a huge "elapsed" value that would wrongly reset every time.
+	if !hasWindow || blockTime < windowStart || blockTime-windowStart >= windowSeconds {
+		windowStart = blockTime
+		g.OutflowWindowStart[sourceChainID] = windowStart
+		g.OutflowInWindow[sourceChainID] = big.NewInt(0)
+		// Snapshot the ceiling as it stands RIGHT NOW, at window open -- see the field's own doc
+		// comment for why this must stay fixed for the rest of the window rather than being re-read
+		// (and shrinking) after every debit within it.
+		g.OutflowWindowBaseAlloc[sourceChainID] = new(big.Int).Set(currentAlloc)
+	}
+
+	baseAlloc := g.OutflowWindowBaseAlloc[sourceChainID]
+	if baseAlloc == nil {
+		baseAlloc = currentAlloc
+	}
+
+	spent := g.OutflowInWindow[sourceChainID]
+	if spent == nil {
+		spent = big.NewInt(0)
+	}
+	newSpent := new(big.Int).Add(spent, amount)
+
+	limit := new(big.Int).Div(baseAlloc, big.NewInt(5)) // 20% of the window's starting allocation
+	if newSpent.Cmp(limit) > 0 {
+		return fmt.Errorf("%w: chain %d would attest %s within the current 24h window (limit %s, 20%% of the window's starting allocation %s)",
+			ErrVelocityLimitExceeded, sourceChainID, newSpent.String(), limit.String(), baseAlloc.String())
+	}
+
+	g.OutflowInWindow[sourceChainID] = newSpent
+	return nil
 }
 
 func (g *GatewayEngine) attestCommitInternal(
@@ -1168,6 +1240,7 @@ func (g *GatewayEngine) attestCommitInternal(
 	aggregateProof MerkleProof,
 	cert QuorumCert,
 	enforceCeiling bool,
+	blockTime uint64,
 ) (*AttestedCommit, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1263,6 +1336,18 @@ func (g *GatewayEngine) attestCommitInternal(
 				g.allocationRejectedListener(sourceChainID, aggregateAmount, currentAlloc)
 			}
 			return nil, fmt.Errorf("%w: requested %s exceeds available %s", ErrAllocationExceeded, aggregateAmount.String(), currentAlloc.String())
+		}
+
+		// Velocity limit (independent of the hard per-commit cap just above -- a single commit
+		// could otherwise legally fund up to the ENTIRE ceiling in one shot): bound how much of
+		// this ceiling can be drained within a rolling 24h window. See OutflowInWindow's own doc
+		// comment for the full rationale and why this specific location (inside enforceCeiling,
+		// against currentAlloc, which is only ever read here on Reserve) is the only place this
+		// check is meaningful.
+		if aggregateAmount.Sign() > 0 {
+			if err := g.checkAndRecordVelocity(sourceChainID, aggregateAmount, currentAlloc, blockTime); err != nil {
+				return nil, err
+			}
 		}
 
 		// Debit source chain allocation upon successful BFT attestation. The matching credit to
@@ -2030,7 +2115,7 @@ func (g *GatewayEngine) VerifyAndExecute(
 	relayer common.Address,
 	blockTime uint64,
 ) (MessageStatus, error) {
-	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert); err != nil {
+	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert, blockTime); err != nil {
 		return MessageStatusPending, err
 	}
 	return g.ClaimMessage(message, messageProof, commitRoot, relayer, blockTime)

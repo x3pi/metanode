@@ -1031,7 +1031,7 @@ func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
 					AggregateSignature: args[7].([]byte),
 					SignerBitmap:       args[8].([]byte),
 				}
-				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert, 0)
 				if attestErr != nil {
 					status = 0
 				}
@@ -1436,7 +1436,7 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund(t *testing.T) {
 					AggregateSignature: args[7].([]byte),
 					SignerBitmap:       args[8].([]byte),
 				}
-				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert, 0)
 				if attestErr != nil {
 					status = 0
 				}
@@ -1827,7 +1827,7 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund_TwoHop(t *testing.T) {
 			case "attestCommit":
 				proof := cross_chain.MerkleProof{LeafIndex: args[4].(*big.Int).Uint64(), Siblings: bytes32SliceToHashes(args[5].([][32]byte))}
 				cert := cross_chain.QuorumCert{Epoch: args[6].(uint64), AggregateSignature: args[7].([]byte), SignerBitmap: args[8].([]byte)}
-				_, attestErr := reserveEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				_, attestErr := reserveEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert, 0)
 				if attestErr != nil {
 					t.Logf("reserve attestCommit error (non-fatal per RelayBatch's own tolerant handling): %v", attestErr)
 					status = 0
@@ -2196,7 +2196,7 @@ func TestRelayerDaemon_TwoConcurrentInstances_NoDoubleProcessing(t *testing.T) {
 				// Idempotent: the second concurrent instance's redundant attestCommit call is
 				// expected to hit AttestedCommits' write-once guard and return the EXISTING
 				// result harmlessly -- must not itself count as a test failure.
-				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert, 0)
 				if attestErr != nil {
 					status = 0
 				}

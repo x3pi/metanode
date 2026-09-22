@@ -183,7 +183,7 @@ func TestRelayerDaemon_UnrelayedBatchSurvivesProcessRestart(t *testing.T) {
 					AggregateSignature: args[7].([]byte),
 					SignerBitmap:       args[8].([]byte),
 				}
-				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert)
+				_, attestErr := destEngine.AttestCommit(args[0].(*big.Int).Uint64(), common.Hash(args[1].([32]byte)), args[2].(*big.Int), args[3].(*big.Int), proof, cert, 0)
 				if attestErr != nil {
 					status = 0
 				}

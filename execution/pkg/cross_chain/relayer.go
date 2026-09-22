@@ -427,7 +427,7 @@ func (r *RelayerEngine) RelayMessage(
 		}
 
 		// Step 1: Attest commit on Reserve (checks per_chain_allocation ceiling)
-		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
+		_, err := reserveEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert, 0)
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("reserve attest failed: %w", err)
@@ -475,7 +475,7 @@ func (r *RelayerEngine) RelayMessage(
 	}
 
 	// ROUTE B: Value == 0 (Pure Message / Contract Call) -> Direct 1-Hop Routing (Section 2.2(a))
-	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert)
+	_, err := destEngine.AttestCommit(msg.SourceChainID, commitRoot, aggregateAmount, msg.AssetID, aggregateProof, cert, 0)
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct attest failed: %w", err)

@@ -103,15 +103,16 @@ func TestGateway_P2_2_AttestCommitAndScenario10_7_AllocationGuard(t *testing.T) 
 
 	// Attack Case (Scenario 10.7): aggregateAmount = 6000 > available allocation = 5000 -> REJECT
 	rootAttack, certAttack := signFor(big.NewInt(6000))
-	_, errAttack := engine.AttestCommit(101, rootAttack, big.NewInt(6000), big.NewInt(0), MerkleProof{}, certAttack)
+	_, errAttack := engine.AttestCommit(101, rootAttack, big.NewInt(6000), big.NewInt(0), MerkleProof{}, certAttack, 0)
 	assert.ErrorIs(t, errAttack, ErrAllocationExceeded)
 
-	// Valid Case: aggregateAmount = 2000 <= 5000 -> Succeeded & Deducts allocation to 3000
-	rootValid, certValid := signFor(big.NewInt(2000))
-	attested, errValid := engine.AttestCommit(101, rootValid, big.NewInt(2000), big.NewInt(0), MerkleProof{}, certValid)
+	// Valid Case: aggregateAmount = 800 (<= 5000 hard cap AND <= 1000, the 20%-per-24h velocity
+	// limit added later -- cross-chain audit follow-up) -> Succeeded & Deducts allocation to 4200.
+	rootValid, certValid := signFor(big.NewInt(800))
+	attested, errValid := engine.AttestCommit(101, rootValid, big.NewInt(800), big.NewInt(0), MerkleProof{}, certValid, 0)
 	require.NoError(t, errValid)
-	assert.Equal(t, big.NewInt(2000), attested.FundedAmount)
-	assert.Equal(t, big.NewInt(3000), engine.SupplyLedger.PerChainAllocation[101])
+	assert.Equal(t, big.NewInt(800), attested.FundedAmount)
+	assert.Equal(t, big.NewInt(4200), engine.SupplyLedger.PerChainAllocation[101])
 }
 
 // TestGateway_AllocateSupplyWithCert_UnblocksAttestCommit proves the fix for a real dead end
@@ -164,7 +165,7 @@ func TestGateway_AllocateSupplyWithCert_UnblocksAttestCommit(t *testing.T) {
 
 	// Before anything: even a modest amount is rejected, ceiling is 0.
 	root, cert := signFor(big.NewInt(100))
-	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	_, errBefore := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert, 0)
 	assert.ErrorIs(t, errBefore, ErrAllocationExceeded)
 
 	// C7 fix (2026-08-27, mechanism updated 2026-09-04): AllocateSupplyWithCert attempting to
@@ -200,7 +201,7 @@ func TestGateway_AllocateSupplyWithCert_UnblocksAttestCommit(t *testing.T) {
 	assert.Equal(t, big.NewInt(1000), engine.SupplyLedger.GetAllocation(103))
 
 	// The exact same commit now succeeds, and debits normally afterward.
-	attested, errAfter := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert)
+	attested, errAfter := engine.AttestCommit(103, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, cert, 0)
 	require.NoError(t, errAfter)
 	assert.Equal(t, big.NewInt(100), attested.FundedAmount)
 	assert.Equal(t, big.NewInt(900), engine.SupplyLedger.GetAllocation(103))
@@ -317,7 +318,7 @@ func TestGateway_P2_3_ClaimMessageAndDoubleClaimPrevention(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0x0F},
 	}
-	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 
 	// First Claim -> SUCCESS (P2.3)
@@ -369,7 +370,7 @@ func TestGateway_P2_3_1_HardCapCommitCapacityDefense(t *testing.T) {
 		AggregateSignature: sig.Bytes(),
 		SignerBitmap:       []byte{0x0F},
 	}
-	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, big.NewInt(500), big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 
 	// Attacker tries to claim 600 -> MUST REJECT (Hard-cap capacity exceeded)
@@ -432,7 +433,7 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 		SignerBitmap:       []byte{0x0F},
 	}
 	// Step 1 (source debit, on Reserve): matches the real relayer's first leg.
-	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 	preCreditSourceAlloc := engine.SupplyLedger.GetAllocation(101)
 	assert.Equal(t, big.NewInt(4500), preCreditSourceAlloc) // 5000 - 500
@@ -474,7 +475,7 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 	// (kpForged) is a newly-generated keypair, distinct from the outer test's `kp`.
 	forgedSig := bls.Sign(kpForged.PrivateKey(), forgedCommitMsg)
 	_, errForgedAttest := forgedEngine.AttestCommit(101, forgedCommitRoot, forgedAggAmounts["0"], big.NewInt(0), forgedAggregateProof,
-		QuorumCert{Epoch: 5, AggregateSignature: forgedSig.Bytes(), SignerBitmap: []byte{0x0F}})
+		QuorumCert{Epoch: 5, AggregateSignature: forgedSig.Bytes(), SignerBitmap: []byte{0x0F}}, 0)
 	require.NoError(t, errForgedAttest)
 	rogueKey := bls.GenerateKeyPair() // NOT chain 103's registered committee key
 	forgedSuccessDigest := ComputeMessageSuccessAttestMessage(forgedMsg.MessageID, 103)
@@ -499,7 +500,7 @@ func TestGateway_CreditReserveAllocation_2HopDestCredit(t *testing.T) {
 	badAggregateProof := GetMerkleProof(badLayers, badAggIndex["0"])
 	badSig := bls.Sign(kpBad.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), badCommitRoot.Bytes()...))
 	badCert := QuorumCert{Epoch: 5, AggregateSignature: badSig.Bytes(), SignerBitmap: []byte{0x0F}}
-	_, errBadAttest := badEngine.AttestCommit(101, badCommitRoot, badAggAmounts["0"], big.NewInt(0), badAggregateProof, badCert)
+	_, errBadAttest := badEngine.AttestCommit(101, badCommitRoot, badAggAmounts["0"], big.NewInt(0), badAggregateProof, badCert, 0)
 	require.NoError(t, errBadAttest)
 	wrongProof := MerkleProof{LeafIndex: 0, Siblings: []common.Hash{common.HexToHash("0xFF")}}
 	errBadProof := badEngine.CreditReserveAllocation(badMsg, wrongProof, badCommitRoot, successCert)
@@ -555,7 +556,7 @@ func TestGateway_CustomAssetNeverTouchesNativePerChainAllocation(t *testing.T) {
 	// Must succeed DESPITE hugeValue >> chain 101's real native allocation, and despite
 	// ReserveChainID being unset -- neither the C8 Reserve gate nor the ceiling check apply to a
 	// non-native asset.
-	_, errAttest := engine.AttestCommit(101, commitRoot, hugeValue, hugeAssetID, aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, hugeValue, hugeAssetID, aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 	assert.Zero(t, engine.SupplyLedger.GetAllocation(101).Cmp(sourceAllocBefore), "attesting a custom-asset commit must not touch chain 101's native allocation")
 
@@ -614,7 +615,7 @@ func TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund(t *testing
 
 	sig := bls.Sign(kp.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...))
 	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
-	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 
 	// Simulate an OPTIMISTIC credit that already happened (e.g. a relayer credited B before a
@@ -736,7 +737,7 @@ func TestGateway_P2_4_RefundPathwayAndSupplyRestoration(t *testing.T) {
 		AggregateSignature: sig101.Bytes(),
 		SignerBitmap:       []byte{0x01},
 	}
-	_, err = engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101)
+	_, err = engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert101, 0)
 	require.NoError(t, err)
 
 	// Destination (102) fails and signs failure cert
@@ -854,7 +855,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig3,
 		SignerBitmap:       []byte{0x07}, // bits 0, 1, 2 set: 1 + 2 + 4 = 7
 	}
-	attested, err := gateway.AttestCommit(201, commitRoot, big.NewInt(1000), big.NewInt(0), MerkleProof{}, cert3)
+	attested, err := gateway.AttestCommit(201, commitRoot, big.NewInt(1000), big.NewInt(0), MerkleProof{}, cert3, 0)
 	require.NoError(t, err)
 	assert.Equal(t, commitRoot, attested.CommitRoot)
 
@@ -869,7 +870,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig2,
 		SignerBitmap:       []byte{0x03}, // bits 0, 1 set: 1 + 2 = 3
 	}
-	_, errQuorum := gateway.AttestCommit(201, commitRoot2, big.NewInt(1001), big.NewInt(0), MerkleProof{}, cert2)
+	_, errQuorum := gateway.AttestCommit(201, commitRoot2, big.NewInt(1001), big.NewInt(0), MerkleProof{}, cert2, 0)
 	assert.ErrorIs(t, errQuorum, ErrQuorumNotReached)
 
 	// Case 3: Bitmap claims 3 signers (0, 1, 2) but aggregate signature only contains 2 signers -> BLS Verify Fails
@@ -878,7 +879,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig2,      // only 2 signatures aggregated
 		SignerBitmap:       []byte{0x07}, // claims 3 signers
 	}
-	_, errBLS := gateway.AttestCommit(201, commitRoot2, big.NewInt(1001), big.NewInt(0), MerkleProof{}, certForged)
+	_, errBLS := gateway.AttestCommit(201, commitRoot2, big.NewInt(1001), big.NewInt(0), MerkleProof{}, certForged, 0)
 	assert.ErrorIs(t, errBLS, ErrInvalidBLSSignature)
 
 	// Case 4: All 4 validators sign -> Stake = 100 >= 67 -> SUCCESS
@@ -894,7 +895,7 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 		AggregateSignature: aggSig4,
 		SignerBitmap:       []byte{0x0F}, // bits 0, 1, 2, 3 set = 15
 	}
-	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), big.NewInt(0), MerkleProof{}, cert4)
+	attested4, err4 := gateway.AttestCommit(201, commitRoot4, big.NewInt(2000), big.NewInt(0), MerkleProof{}, cert4, 0)
 	require.NoError(t, err4)
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }
@@ -1495,7 +1496,7 @@ func TestGateway_ClaimMessage_BadProofDoesNotBurnClaimedAmountCap(t *testing.T) 
 	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
 	sig := bls.Sign(kp.PrivateKey(), commitMsg)
 	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
-	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 
 	// Attacker repeatedly submits the SAME message with a garbage proof -- must reject with
@@ -1551,7 +1552,7 @@ func TestGateway_ClaimMessage_RejectsWrongDestinationForZeroValueMessage(t *test
 	// aggregateAmount is 0 for an all-zero-value commit, so this attests cleanly on chain 102 even
 	// though 102 is not the message's real DestChainID (999) -- exactly the scenario a malicious
 	// or merely-misconfigured relayer could reach.
-	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert, 0)
 	require.NoError(t, errAttest)
 
 	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)

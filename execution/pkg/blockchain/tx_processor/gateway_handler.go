@@ -836,7 +836,7 @@ func (h *GatewayHandler) handleWrite(
 			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
 		}
-		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
+		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert, blockTime); err != nil {
 			return nil, nil, err
 		}
 

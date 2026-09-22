@@ -67,7 +67,7 @@ func newRelayFixture(t *testing.T) *relayFixture {
 	aggProof1 := GetMerkleProof(layers1, aggIndex1["0"])
 	sig1 := bls.Sign(kpA.PrivateKey(), append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot1.Bytes()...))
 	cert1 := QuorumCert{Epoch: 5, AggregateSignature: sig1.Bytes(), SignerBitmap: []byte{0x0F}}
-	_, err = engine.AttestCommit(relayChainA, commitRoot1, aggAmounts1["0"], big.NewInt(0), aggProof1, cert1)
+	_, err = engine.AttestCommit(relayChainA, commitRoot1, aggAmounts1["0"], big.NewInt(0), aggProof1, cert1, 0)
 	require.NoError(t, err)
 	_, err = engine.ClaimMessage(leg1, proof1, commitRoot1, relayer, 0)
 	require.NoError(t, err)
