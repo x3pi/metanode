@@ -256,20 +256,36 @@ có gap ở đây, đây là điểm dự án đã làm đúng ngay từ đầu,
    cao nhất nếu câu trả lời xấu.
 
 ### 3.2 Cần quyết định thiết kế trước khi làm (không tự ý code)
-4. **Packet-timeout ở tầng ứng dụng** (mục 2.1, học từ IBC) — cho sender tự huỷ + hoàn tiền 1
-   message `Pending` quá lâu không ai claim, KHÔNG đụng đến tầng dispatch/đồng thuận. Cần bàn: bằng
-   chứng "không ai claim" xác nhận thế nào một cách data-driven (không dùng `Duration`/timeout để
-   TỰ ĐỘNG quyết định — đúng tinh thần Zero-Fork Invariant — có thể là: sender tự submit + 1 khoảng
-   block đã trôi qua đủ lớn được TÍNH BẰNG block height thật của chain đích, không phải wall-clock
-   timeout nội bộ node).
-5. **Rate-limit theo cửa sổ thời gian** (mục "Rate Limiting" ở 2.2, general pattern) bên cạnh
-   `FundedAmount`/`ClaimedAmount` ceiling per-commit hiện tại — hiện KHÔNG có giới hạn "tối đa X
-   value/giờ" nào, chỉ có giới hạn theo từng commit riêng lẻ. Nếu 1 commit đơn lẻ có thể funded rất
-   lớn, ceiling hiện tại không chặn được 1 vụ rút giá trị lớn trong 1 lần dù quorum cert hợp lệ 100%
-   (khác quorum bị forge — đây là về giới hạn thiệt hại NẾU 1 committee thật sự bị compromise, tương
-   tự bài học Ronin/Harmony). **Đây là quyết định kinh tế/vận hành (ngưỡng bao nhiêu, theo asset
-   nào), không phải bug — cần user chốt có muốn đánh đổi UX (transfer lớn bị chia nhỏ/chờ) lấy giới
-   hạn thiệt hại hay không.**
+4. **✅ ĐÃ LÀM (2026-09-22, commit `5ab51458`)** — Packet-timeout ở tầng ứng dụng (mục 2.1, học từ
+   IBC). Dùng `CrossChainMessage.TimeoutTimestamp` (mới) so với `blockTime` THẬT của chain đích
+   (tham số đã có sẵn trong `handleWrite`, lấy từ block header đã consensus-hoá — không phải wall-
+   clock/`Duration`, đúng tinh thần Zero-Fork Invariant) — `ClaimMessage`/`VerifyAndExecute` finalize
+   `MessageStatusFailedTimeout` thay vì `Success` một khi đã quá hạn, kích hoạt lại đúng pipeline
+   failure-cert đã có sẵn (`MessageFailedCallback`→`MessageFailureAttestationWorker`) để nguồn
+   `Refund()` được — tái dùng nguyên vẹn cơ chế đã audit cho payload-revert, không phải primitive
+   mới. Việc này bắt đầu từ 1 bản WIP của agent khác có 3 bug thật (đã sửa): (a) `status` trả về từ
+   `ClaimMessage` không được check trước khi mint/relay — 1 message hết hạn vẫn bị giao tiền thật
+   trong khi ledger credit bị bỏ qua, tạo lệch sổ cái; (b) `FailedTimeout` early-return bỏ qua
+   `saveGatewayEngine` + không emit `MessageStatusChanged` — trạng thái bị âm thầm mất, observer
+   không thấy; (c) tính năng rate-limit đi kèm (xem mục 5 dưới) có lỗi kiến trúc gốc, đã bỏ hẳn. Chi
+   tiết đầy đủ trong commit message `5ab51458`, không lặp lại ở đây.
+5. **⚠️ ĐÃ THỬ, ĐÃ BỎ (2026-09-22) — phát hiện lỗi kiến trúc gốc, cần thiết kế lại chứ không phải
+   chỉnh tham số.** Bản WIP ban đầu implement rate-limit bằng cách check
+   `PerChainAllocation[destChainID]` (sai chain) ngay tại `outbound()` handler trên chain NGUỒN. Sửa
+   thành `PerChainAllocation[engine.LocalChainID]` (đúng chain) vẫn KHÔNG chạy được — xác nhận bằng
+   chính test suite hiện có: entry đó trên bản sao LOCAL của 1 chain thường (không phải Reserve)
+   thường là 0, vì theo đúng kiến trúc đã audit trước đó (`CreditReserveAllocation`'s doc comment),
+   ceiling thật của 1 chain X chỉ có ý nghĩa authoritative trên bản sao của RESERVE, không phải trên
+   bản sao của chính X — check tại `outbound()` (chạy trên X, không phải Reserve) về bản chất luôn so
+   với 1 con số gần như luôn = 0 → **chặn cứng gần như MỌI giao dịch outbound() có Value > 0** (xác
+   nhận bằng hàng chục test thật FAIL ngay khi thêm check này). Đã gỡ bỏ hoàn toàn (không chỉ tắt) để
+   không vô tình bị bật lại. **Thiết kế đúng cho tính năng này:** check phải chạy Ở RESERVE, bên
+   trong `attestCommitInternal` (nơi ceiling thật `PerChainAllocation[sourceChainID]` đã được
+   debit/check — mục 5.5.B của `shard_design_ton_real.md` mô tả đúng vị trí này cho thiết kế shard
+   tương lai), không phải tại `outbound()` trên chain nguồn. Vẫn là quyết định kinh tế/vận hành
+   (ngưỡng bao nhiêu %, theo cửa sổ thời gian nào) CẦN user chốt trước, cộng thêm giờ còn cần 1
+   quyết định kiến trúc (đặt check ở attestCommitInternal thay vì outbound) — độ ưu tiên không đổi,
+   nhưng phạm vi thực hiện lớn hơn ước tính ban đầu.
 
 ### 3.3 Không khuyến nghị (đã cân nhắc, không áp dụng)
 - **Risk Management Network kiểu CCIP riêng biệt** (mục 2.2) — quá nặng so với quy mô mạng riêng
