@@ -1,17 +1,29 @@
 # Production Security Hardening — bài học từ các cross-chain bridge khác
 
+> **Trạng thái (2026-09-22): ĐÃ ĐÓNG — cả 5 hạng mục ở mục 3 đã xử lý xong.** Đây giờ là tài liệu
+> tham khảo (mục 1/2 = nghiên cứu đối chiếu, còn giá trị lâu dài) + audit trail (mục 3 = quyết định
+> đã chốt, kèm commit). Không cần đọc lại từ đầu để biết "còn việc gì chưa làm" — mục 3.1/3.2 ngay
+> dưới là toàn bộ.
+>
 > Research doc, không phải audit report. Mục tiêu: đối chiếu từng lỗ hổng/kiến trúc phòng thủ đã
 > biết trên các bridge thật (đã bị hack hoặc đã production nhiều năm) với `GatewayEngine`
-> (`execution/pkg/cross_chain/gateway.go`) hiện tại, để biết cái gì ĐÃ có tương đương, cái gì THIẾU
-> thật sự, và cái gì KHÔNG áp dụng (đừng copy pattern chỉ vì "bridge lớn nào cũng có").
->
-> Bối cảnh đã biết khi viết doc này (2026-09-22, ngay sau commit `ef562e28` — 10 finding vừa vá):
-> attest-then-claim với BLS 2f+1 quorum cert theo `(2*totalStake)/3+1` (vừa fix), ceiling
-> `PerChainAllocation` per-commit (không phải theo thời gian), 2-hop qua Reserve chain, governance
-> thuần cert-based (`GovernanceEngine` propose/vote/72h-timelock đã bị XOÁ theo yêu cầu người dùng
-> — xem `project_root_anchor_min_founding_chains`/memory, đừng đề xuất lại DAO governance mà không
-> nhắc điều này), `DeclareChainDeadWithCert` (gateway.go:622) là kill-switch per-chain đã có sẵn,
-> cert-gated. Không có circuit breaker toàn Gateway, không có rate-limit theo thời gian.
+> (`execution/pkg/cross_chain/gateway.go`), để biết cái gì ĐÃ có tương đương, cái gì THIẾU thật sự,
+> và cái gì KHÔNG áp dụng (đừng copy pattern chỉ vì "bridge lớn nào cũng có").
+
+---
+
+## 0. Tóm tắt trạng thái
+
+| # | Hạng mục | Trạng thái | Commit |
+|---|---|---|---|
+| 1 | Audit/fuzz Merkle tree tự viết (BNB Token Hub-class) | ✅ Đã audit, không tìm thấy bug | `fe49a99a` |
+| 2 | `UpdateCommitteePayload` decode path (Poly Network-class) | ✅ Đã kiểm tra, an toàn | `fe49a99a` |
+| 3 | Vận hành `RecoveryCommittee` (Ronin/Harmony-class) | ✅ Đã xác nhận: devnet default, chưa production-grade | `41214f94` |
+| 4 | Packet-timeout tầng ứng dụng (học từ IBC) | ✅ Đã triển khai | `5ab51458` |
+| 5 | Velocity limit 20%/24h (Ronin/Harmony damage-limitation) | ✅ Đã triển khai | `e23eaac8` |
+
+Chi tiết từng mục ở §3. Nguồn nghiên cứu gốc (7 vụ hack + 5 kiến trúc phòng thủ) ở §1/§2 — vẫn còn
+giá trị tham khảo cho công việc sau này, không phụ thuộc trạng thái đóng/mở ở trên.
 
 ---
 
@@ -220,82 +232,50 @@ có gap ở đây, đây là điểm dự án đã làm đúng ngay từ đầu,
 ## 3. Danh sách ưu tiên hoá cụ thể
 
 ### 3.1 Nên làm sớm (rẻ, rõ ràng, không đổi kiến trúc)
-1. **✅ ĐÃ LÀM (2026-09-22)** — Audit/fuzz riêng cho Merkle tree tự viết (`BuildMerkleTree`,
-   `BuildCommitTree` trong relayer.go; `VerifyMerkleProof`, `hashPair`, `ComputeMessageLeafHash`
-   trong gateway.go; `HashAggregateValueLeaf` trong epoch_sync.go) — theo đúng lớp lỗi đã gây ra vụ
-   BNB Token Hub $586M (mục 1.6). Thêm vào `execution/pkg/cross_chain/security_audit_test.go`:
-   6 test property + 1 native Go fuzz target (`FuzzMerkleProof_TamperedSiblingsNeverForgeVerification`,
-   chạy sạch ~14.5M exec/30s không tìm được forge nào). Kết quả: **không tìm thấy bug** — nhưng phát
-   hiện 1 điều đáng ghi lại: `BuildCommitTree` LUÔN thêm ít nhất 1 `AggregateValueLeaf` cho mỗi
-   assetId khác nhau, nên 1 commit dù chỉ có 1 message cũng KHÔNG BAO GIỜ là cây 1-leaf thật sự (luôn
-   ≥2 leaf) — trường hợp cây 1-leaf thật (`BuildMerkleTree` gọi trực tiếp) chỉ test được bằng cách
-   bỏ qua `BuildCommitTree`. Domain separation (0x00 message / 0x01 internal / 0x02 aggregate) xác
-   nhận chặn đứng mọi khả năng nhầm lẫn leaf-type; "promote unpaired node unchanged" (thay vì
-   duplicate-and-hash kiểu Bitcoin) xác nhận an toàn ở mọi parity từ n=1 đến n=17 lá; proof của 1 leaf
-   xác nhận không thể tái sử dụng cho leaf khác trong cùng cây. Xem chi tiết trong file test, không
-   lặp lại ở đây.
-2. **✅ ĐÃ KIỂM TRA (2026-09-22) — AN TOÀN, không phải fix.** `gateway_handler.go`'s
-   `"updateCommitteeWithRecoveryCert"` case (dòng ~1779): outer call decode bằng ABI chuẩn
-   (`h.abi.MethodById`/`method.Inputs.Unpack`, giống mọi method khác), `args[0]` là 1 tham số
-   `bytes` ABI-decoded chuẩn. Payload BÊN TRONG `bytes` đó decode bằng `json.Unmarshal` thẳng vào
-   `cross_chain.UpdateCommitteePayload` (`gateway_handler.go:1785`) — thoạt nhìn giống rủi ro
-   "decode lỏng lẻo" kiểu Poly Network, nhưng khác biệt cốt lõi: `UpdateCommitteeWithRecoveryCert`
-   (gateway.go:665-721) tính digest ký (`ComputeRecoveryUpdateCommitteeMessage`, dòng 702) trực
-   tiếp từ CÁC FIELD ĐÃ DECODE (`update.ChainID/NewEpoch/NewCommittee/QuorumThreshold/StateRoot/
-   AccountTreeRoot`), và CHÍNH CÁC FIELD ĐÓ (không parse lại lần nào khác) được ghi thẳng vào
-   `g.ChainRegistry[update.ChainID]` (dòng 706-719) — decode-once, dùng cho cả verify lẫn state
-   write, không có đường decode thứ 2 nào để lệch nhau. Đây CHÍNH LÀ điều làm Poly Network bị hack
-   (2 contract tin 2 cách hiểu khác nhau của cùng 1 input) — ở đây không tồn tại 2 cách hiểu.
-   `UpdateCommitteePayload` (types.go:365) chỉ có field `uint64`/`common.Hash`/`[]ValidatorEntry`,
-   không có `interface{}`/map/custom `UnmarshalJSON` nào gây mập mờ ngữ nghĩa. Root fix khác đã có
-   sẵn: `ChainID==0` bị reject (dòng 672-674, kể cả sau khi alias từ `SourceChainID`), epoch phải
-   tăng nghiêm ngặt (dòng 688-690, có test `RejectsReplayAsRollback`), `ValidateQuorumThreshold`
-   chặn floor 2/3 (dòng 698-699). **Kết luận: không có gap, không cần sửa gì.**
-3. **✅ ĐÃ XÁC NHẬN (2026-09-22) — đây là devnet default, chưa phải cấu hình production.** Đọc trực
-   tiếp deploy tooling (không phải khuyến nghị): 4 thành viên, stake bằng nhau (1000/người,
-   `gen_recovery_committee/main.go:38`), threshold 6667/10000 (`inject_recovery_committee.py:71`) →
-   cần đúng 3/4 mới đạt quorum. Khoá private hiện **plaintext trên đĩa**, quyền file `600`, tại
-   `deploy/systemd/recovery_committee_keys/member_{0..3}/` — KHÔNG phải HSM/air-gapped/MPC. Độc lập
-   với khoá validator consensus chính (fix có chủ đích 2026-09-04, đúng tinh thần tránh gộp quyền
-   kiểu Ronin). Đường production đã có sẵn sẵn nhưng CHƯA được dùng:
-   `recovery_committee_json_override_file` (đã xác nhận `deploy/ansible/recovery_committee_public.json`
-   hiện tại chỉ chứa public key + PoP, không có private key) — doc của chính script khuyến nghị sinh
-   khoá thật hoàn toàn ngoài băng thông (air-gapped, 1 người 1 khoá vật lý) trước khi dùng cho giá
-   trị thật. **Rủi ro Ronin/Harmony (mục 1.2/1.5) áp dụng NẾU cluster này lên production với setup
-   khoá hiện tại** (đe doạ chính: 4 khoá nằm cùng 1 máy — compromise máy đó có ngay 4/4, vượt xa
-   ngưỡng 3/4 cần); KHÔNG áp dụng nếu vẫn chỉ là devnet/local-cluster như hiện tại.
+1. **✅ Audit/fuzz Merkle tree tự viết** (`BuildMerkleTree`/`BuildCommitTree` trong relayer.go;
+   `VerifyMerkleProof`/`hashPair`/`ComputeMessageLeafHash` trong gateway.go;
+   `HashAggregateValueLeaf` trong epoch_sync.go — lớp lỗi gây vụ BNB Token Hub $586M, mục 1.6).
+   6 test property + 1 fuzz target trong `security_audit_test.go`
+   (`FuzzMerkleProof_TamperedSiblingsNeverForgeVerification`, ~14.5M exec/30s, không forge được
+   proof nào). **Không tìm thấy bug.** Domain separation (0x00 message / 0x01 internal / 0x02
+   aggregate) xác nhận chặn đứng nhầm lẫn leaf-type; "promote unpaired node unchanged" an toàn ở
+   mọi parity n=1..17. Ghi chú phụ: `BuildCommitTree` luôn thêm ≥1 `AggregateValueLeaf`, nên 1
+   commit không bao giờ là cây 1-leaf thật (test riêng cây 1-leaf phải gọi thẳng `BuildMerkleTree`).
+2. **✅ `UpdateCommitteePayload` decode path — an toàn, không phải fix.** Nghi ngờ ban đầu: payload
+   bên trong `bytes` ABI decode bằng `json.Unmarshal` (`gateway_handler.go:1785`), giống dạng "decode
+   lỏng lẻo" gây ra Poly Network. Khác biệt cốt lõi: digest ký (`ComputeRecoveryUpdateCommitteeMessage`,
+   gateway.go:702) tính trực tiếp từ field ĐÃ DECODE, và CHÍNH field đó ghi thẳng vào
+   `g.ChainRegistry` — decode-once, không có đường decode thứ 2 để lệch nhau (đây chính xác là điều
+   Poly Network thiếu). `UpdateCommitteePayload` (types.go:365) không có field mập mờ ngữ nghĩa nào.
+3. **✅ Vận hành `RecoveryCommittee` — đây là devnet default, chưa phải cấu hình production.** 4
+   thành viên, stake bằng nhau (`gen_recovery_committee/main.go:38`), threshold 6667/10000 →
+   3/4 mới đạt quorum. Khoá private **plaintext trên đĩa** (quyền `600`,
+   `deploy/systemd/recovery_committee_keys/member_{0..3}/`) — không phải HSM/air-gapped/MPC, dù đã
+   độc lập với khoá validator consensus (tránh đúng lớp lỗi gộp quyền của Ronin). Đường production
+   đã có sẵn nhưng chưa dùng: `recovery_committee_json_override_file` (nạp key sinh air-gapped
+   ngoài băng thông). **Rủi ro Ronin/Harmony (mục 1.2/1.5) chỉ áp dụng nếu cluster này lên
+   production với setup khoá hiện tại** (4 khoá cùng 1 máy — compromise máy đó có ngay 4/4, vượt
+   ngưỡng 3/4) — không áp dụng khi vẫn là devnet/local-cluster.
 
 ### 3.2 Cần quyết định thiết kế trước khi làm (không tự ý code)
-4. **✅ ĐÃ LÀM (2026-09-22, commit `5ab51458`)** — Packet-timeout ở tầng ứng dụng (mục 2.1, học từ
-   IBC). Dùng `CrossChainMessage.TimeoutTimestamp` (mới) so với `blockTime` THẬT của chain đích
-   (tham số đã có sẵn trong `handleWrite`, lấy từ block header đã consensus-hoá — không phải wall-
-   clock/`Duration`, đúng tinh thần Zero-Fork Invariant) — `ClaimMessage`/`VerifyAndExecute` finalize
-   `MessageStatusFailedTimeout` thay vì `Success` một khi đã quá hạn, kích hoạt lại đúng pipeline
-   failure-cert đã có sẵn (`MessageFailedCallback`→`MessageFailureAttestationWorker`) để nguồn
-   `Refund()` được — tái dùng nguyên vẹn cơ chế đã audit cho payload-revert, không phải primitive
-   mới. Việc này bắt đầu từ 1 bản WIP của agent khác có 3 bug thật (đã sửa): (a) `status` trả về từ
-   `ClaimMessage` không được check trước khi mint/relay — 1 message hết hạn vẫn bị giao tiền thật
-   trong khi ledger credit bị bỏ qua, tạo lệch sổ cái; (b) `FailedTimeout` early-return bỏ qua
-   `saveGatewayEngine` + không emit `MessageStatusChanged` — trạng thái bị âm thầm mất, observer
-   không thấy; (c) tính năng rate-limit đi kèm (xem mục 5 dưới) có lỗi kiến trúc gốc, đã bỏ hẳn. Chi
-   tiết đầy đủ trong commit message `5ab51458`, không lặp lại ở đây.
-5. **✅ ĐÃ LÀM (2026-09-22, commit `e23eaac8`)** — lần thử đầu (WIP của agent khác) có lỗi kiến trúc
-   gốc: check `PerChainAllocation[destChainID]` (sai chain), và ngay cả sửa thành
-   `PerChainAllocation[engine.LocalChainID]` cũng KHÔNG chạy được vì đặt tại `outbound()` trên chain
-   NGUỒN — entry đó trên bản sao LOCAL của 1 chain thường (không phải Reserve) hầu như luôn = 0
-   (đúng theo kiến trúc `CreditReserveAllocation`'s doc comment đã audit trước đó: ceiling thật của 1
-   chain X chỉ authoritative trên bản sao của RESERVE) → **chặn cứng gần như MỌI outbound() có
-   Value > 0** (xác nhận bằng hàng chục test FAIL thật). Đã thiết kế lại đúng chỗ: check nằm TRONG
-   `attestCommitInternal`'s `enforceCeiling` branch (chỉ chạy khi `AttestCommit()` được gọi trên
-   chính Reserve, qua C8 gate) — cùng biến `currentAlloc` authoritative mà hard-cap check hiện có
-   đang dùng, cùng dòng code, không phải bản sao lệch chain nào. User chốt: hard reject (không dùng
-   Time-Delayed Queue) + 20%/24h (khớp `shard_design_ton_real.md` mục 5.5.D). Điểm thiết kế thêm
-   (không có trong bản thử đầu): ngưỡng 20% chốt CỐ ĐỊNH lúc cửa sổ mở (`OutflowWindowBaseAlloc`),
-   không tính lại theo `currentAlloc` đang co lại sau mỗi lần debit trong cùng cửa sổ — nếu không sẽ
-   tạo giới hạn "co ngót" khó đoán (phát hiện + tự sửa ngay trong phiên này, trước khi commit). Test
-   mới: `TestGateway_VelocityLimit_CapsOutflowPer24hWindow`. 2 test cũ giả định rút 100% ceiling
-   trong 1 lần đã được viết lại để phản ánh đúng 2 lớp phòng thủ độc lập (hard cap + velocity) thay
-   vì chỉ patch cho qua compile.
+4. **✅ Packet-timeout tầng ứng dụng** (mục 2.1, học từ IBC — commit `5ab51458`).
+   `CrossChainMessage.TimeoutTimestamp` so với `blockTime` thật của chain đích (từ block header đã
+   consensus-hoá, không phải wall-clock — đúng tinh thần Zero-Fork Invariant). `ClaimMessage`/
+   `VerifyAndExecute` finalize `MessageStatusFailedTimeout` khi quá hạn, kích hoạt lại đúng pipeline
+   failure-cert có sẵn (`MessageFailedCallback`→`MessageFailureAttestationWorker`) để nguồn
+   `Refund()` được — tái dùng cơ chế đã audit cho payload-revert, không phải primitive mới. Bắt đầu
+   từ 1 bản WIP có 3 bug thật, đã sửa cả 3 (chi tiết: commit message `5ab51458`).
+5. **✅ Velocity limit 20%/24h** (mục "Rate Limiting" tổng quát, Ronin/Harmony damage-limitation —
+   commit `e23eaac8`). Đặt trong `attestCommitInternal`'s `enforceCeiling` branch (chỉ chạy khi
+   `AttestCommit()` gọi trên chính Reserve, qua C8 gate) — dùng cùng biến `currentAlloc`
+   authoritative mà hard-cap check hiện có đang dùng. Ngưỡng 20% chốt CỐ ĐỊNH lúc cửa sổ mở
+   (`OutflowWindowBaseAlloc`), không tính lại theo alloc đang co sau mỗi debit trong cùng cửa sổ
+   (tránh giới hạn "co ngót" khó đoán). User chốt: hard reject (không Time-Delayed Queue). Lần thử
+   đầu (WIP khác) đặt check sai chỗ (`outbound()` trên chain nguồn, đọc `PerChainAllocation` không
+   authoritative — luôn ≈0 → chặn cứng mọi outbound() có Value > 0, xác nhận bằng hàng chục test
+   FAIL thật). Test mới: `TestGateway_VelocityLimit_CapsOutflowPer24hWindow`; 2 test cũ giả định rút
+   100% ceiling trong 1 lần được viết lại để phản ánh đúng 2 lớp phòng thủ độc lập (hard cap +
+   velocity). Chi tiết đầy đủ trong commit message `e23eaac8`.
 
 ### 3.3 Không khuyến nghị (đã cân nhắc, không áp dụng)
 - **Risk Management Network kiểu CCIP riêng biệt** (mục 2.2) — quá nặng so với quy mô mạng riêng
