@@ -644,3 +644,265 @@ func TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCre
 	_, errRetryClaim := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
 	assert.ErrorIs(t, errRetryClaim, ErrAlreadyClaimed, "a Failed message must be terminal -- no retry claim allowed")
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MERKLE TREE PROPERTY/FUZZ AUDIT SUITE (note/cross_chain/production_security_hardening_research.md
+// §3.1 priority #1): BuildMerkleTree/BuildCommitTree/GetMerkleProof/VerifyMerkleProof are a
+// hand-rolled Merkle implementation, never independently audited for the algorithm itself (only
+// for gateway.go's business logic around it) -- the exact bug class that cost the BNB Token Hub
+// bridge $586M (a missed edge case in IAVL range-proof verification, not a business-logic bug).
+// This suite locks down the structural properties that make this specific implementation safe:
+// domain separation between leaf types (0x00 message / 0x01 internal / 0x02 aggregate) and the
+// "promote unpaired node unchanged" odd-layer rule combined with VerifyMerkleProof's index-blind,
+// sorted-pair verification (mirrors OpenZeppelin's MerkleProof.sol pattern).
+// ══════════════════════════════════════════════════════════════════════════════
+
+// makeAuditTestMessage builds a distinct, deterministic CrossChainMessage for index i -- distinct
+// MessageID (and therefore distinct leaf hash) per index, otherwise fixed/valid fields.
+func makeAuditTestMessage(i int) CrossChainMessage {
+	var idBytes [32]byte
+	idBytes[31] = byte(i)
+	idBytes[30] = byte(i >> 8)
+	return CrossChainMessage{
+		MessageID:     common.BytesToHash(idBytes[:]),
+		SourceChainID: 101,
+		DestChainID:   102,
+		Sender:        common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Target:        common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		Payload:       []byte{byte(i)},
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(int64(i + 1)),
+		Sequence:      uint64(i + 1),
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+		HopCount:      1,
+	}
+}
+
+// TestAudit_MerkleTree_OddLeafCountsRoundTrip proves BuildMerkleTree's "promote the unpaired node
+// unchanged" rule (relayer.go's BuildMerkleTree, `next = append(next, current[i])` when there's no
+// pair) never breaks proof generation/verification at ANY layer parity. Every leaf, at every tree
+// size from 1 to 17 messages (covering every combination of odd/even counts across every layer of
+// the tree, not just the top layer), must produce a proof GetMerkleProof/VerifyMerkleProof agree on.
+func TestAudit_MerkleTree_OddLeafCountsRoundTrip(t *testing.T) {
+	for n := 1; n <= 17; n++ {
+		n := n
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			msgs := make([]CrossChainMessage, n)
+			for i := 0; i < n; i++ {
+				msgs[i] = makeAuditTestMessage(i)
+			}
+			root, layers, aggAmounts, aggIndex, err := BuildCommitTree(msgs)
+			require.NoError(t, err)
+
+			for i := 0; i < n; i++ {
+				proof := GetMerkleProof(layers, i)
+				leaf := ComputeMessageLeafHash(msgs[i])
+				assert.True(t, VerifyMerkleProof(leaf, proof, root), "message leaf %d must verify against root for n=%d", i, n)
+			}
+
+			// The aggregate-value leaf (appended after all message leaves) must also round-trip.
+			aggProof := GetMerkleProof(layers, aggIndex["0"])
+			aggLeaf := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: aggAmounts["0"]})
+			assert.True(t, VerifyMerkleProof(aggLeaf, aggProof, root), "aggregate leaf must verify against root for n=%d", n)
+		})
+	}
+}
+
+// TestAudit_MerkleTree_SingleLeafTreeRootEqualsLeaf covers the n=1 degenerate case of the
+// underlying BuildMerkleTree primitive directly: its loop (`for len(current) > 1`) never executes
+// for a single leaf, so root == that leaf hash with an empty sibling list. A different leaf must
+// NOT verify against that same root.
+//
+// NOTE (discovered writing this test): BuildCommitTree itself NEVER produces a true 1-leaf tree in
+// practice -- it always appends at least one AggregateValueLeaf per distinct assetId present, so
+// even a single-message commit is really a 2-leaf tree (message leaf + its own aggregate-value
+// leaf). Exercising the real 1-leaf degenerate case therefore means calling BuildMerkleTree
+// directly, not going through BuildCommitTree.
+func TestAudit_MerkleTree_SingleLeafTreeRootEqualsLeaf(t *testing.T) {
+	msg := makeAuditTestMessage(0)
+	leaf := ComputeMessageLeafHash(msg)
+	root, layers := BuildMerkleTree([]common.Hash{leaf})
+	assert.Equal(t, leaf, root, "single-leaf tree root must equal the leaf hash directly")
+
+	proof := GetMerkleProof(layers, 0)
+	assert.Empty(t, proof.Siblings)
+	assert.True(t, VerifyMerkleProof(leaf, proof, root))
+
+	otherLeaf := ComputeMessageLeafHash(makeAuditTestMessage(1))
+	assert.False(t, VerifyMerkleProof(otherLeaf, proof, root), "a different message must not verify against a single-leaf tree's root")
+}
+
+// TestAudit_MerkleTree_DomainSeparationPreventsLeafTypeConfusion proves a message leaf
+// (ComputeMessageLeafHash, 0x00 prefix) can never collide with an AggregateValueLeaf
+// (HashAggregateValueLeaf, 0x02 prefix) even when their underlying numeric fields are crafted to
+// be as similar as possible -- this is exactly the property that stops a claimMessage() proof
+// being satisfied by an aggregate leaf (or vice versa) inside the same commit tree.
+func TestAudit_MerkleTree_DomainSeparationPreventsLeafTypeConfusion(t *testing.T) {
+	// Try many (assetID, amount)-shaped values, including ones chosen to align with what a
+	// message leaf's own encoding would produce for a similarly-valued message.
+	candidates := []struct {
+		assetID *big.Int
+		amount  *big.Int
+	}{
+		{big.NewInt(0), big.NewInt(0)},
+		{big.NewInt(0), big.NewInt(1)},
+		{big.NewInt(1), big.NewInt(1)},
+		{new(big.Int).SetBytes(common.HexToAddress("0x1111111111111111111111111111111111111111").Bytes()), big.NewInt(500)},
+	}
+	for _, c := range candidates {
+		aggLeaf := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: c.assetID, AggregateAmount: c.amount})
+		for i := 0; i < 8; i++ {
+			msgLeaf := ComputeMessageLeafHash(makeAuditTestMessage(i))
+			assert.NotEqual(t, aggLeaf, msgLeaf, "aggregate leaf (assetID=%s, amount=%s) must never equal message leaf %d", c.assetID, c.amount, i)
+		}
+	}
+
+	// The internal-node domain (hashPair, 0x01) must also never collide with either leaf domain
+	// for a real pair drawn from an actual tree.
+	msgs := []CrossChainMessage{makeAuditTestMessage(0), makeAuditTestMessage(1)}
+	root, _, aggAmounts, _, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+	aggLeaf := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: aggAmounts["0"]})
+	assert.NotEqual(t, root, ComputeMessageLeafHash(msgs[0]))
+	assert.NotEqual(t, root, ComputeMessageLeafHash(msgs[1]))
+	assert.NotEqual(t, root, aggLeaf)
+}
+
+// TestAudit_MerkleTree_ProofNotTransferableToDifferentLeaf proves a valid proof for leaf i cannot
+// be reused to "prove" a DIFFERENT leaf j against the same root -- i.e. VerifyMerkleProof's
+// index-blind, sorted-pair-hashing design (no left/right bit, no use of proof.LeafIndex at all)
+// does not let an attacker substitute an unrelated leaf into someone else's real proof.
+func TestAudit_MerkleTree_ProofNotTransferableToDifferentLeaf(t *testing.T) {
+	const n = 6
+	msgs := make([]CrossChainMessage, n)
+	for i := 0; i < n; i++ {
+		msgs[i] = makeAuditTestMessage(i)
+	}
+	root, layers, _, _, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+
+	for i := 0; i < n; i++ {
+		proofI := GetMerkleProof(layers, i)
+		for j := 0; j < n; j++ {
+			if i == j {
+				continue
+			}
+			leafJ := ComputeMessageLeafHash(msgs[j])
+			assert.False(t, VerifyMerkleProof(leafJ, proofI, root), "leaf %d's proof must not also validate leaf %d", i, j)
+		}
+	}
+}
+
+// TestAudit_MerkleTree_OutOfRangeLeafIndexNeverForgesProof locks GenerateMerkleProof's existing
+// bounds check and proves GetMerkleProof's error-swallowing fallback (`MerkleProof{LeafIndex:
+// uint64(leafIndex)}` with nil Siblings, returned instead of propagating the error) can never be
+// mistaken for a real proof against an actual multi-leaf root.
+func TestAudit_MerkleTree_OutOfRangeLeafIndexNeverForgesProof(t *testing.T) {
+	msgs := []CrossChainMessage{makeAuditTestMessage(0), makeAuditTestMessage(1), makeAuditTestMessage(2)}
+	root, layers, _, _, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+
+	_, errNeg := GenerateMerkleProof(layers, -1)
+	assert.Error(t, errNeg)
+	_, errOver := GenerateMerkleProof(layers, len(layers[0]))
+	assert.Error(t, errOver)
+
+	// GetMerkleProof's fallback for an invalid index degenerates to {LeafIndex, Siblings: nil} --
+	// verifying that against the real (multi-leaf, so root != any single leaf) root with any real
+	// leaf must fail.
+	degenerateProof := GetMerkleProof(layers, 999)
+	assert.Empty(t, degenerateProof.Siblings)
+	for i := range msgs {
+		leaf := ComputeMessageLeafHash(msgs[i])
+		assert.False(t, VerifyMerkleProof(leaf, degenerateProof, root), "an out-of-range leaf index must never yield a proof that verifies")
+	}
+}
+
+// TestAudit_MerkleTree_AggregateLeafIndicesNeverCollideWithMessageLeaves proves BuildCommitTree's
+// per-asset AggregateValueLeaf indices (appended after ALL message leaves) never alias a real
+// message leaf's index -- attestCommitInternal's ceiling enforcement trusts that a Merkle-proven
+// AggregateValueLeaf is structurally distinct from any message leaf it aggregates.
+func TestAudit_MerkleTree_AggregateLeafIndicesNeverCollideWithMessageLeaves(t *testing.T) {
+	msgs := []CrossChainMessage{
+		makeAuditTestMessage(0),
+		makeAuditTestMessage(1),
+		makeAuditTestMessage(2),
+	}
+	msgs[1].AssetID = big.NewInt(7)
+	msgs[2].AssetID = big.NewInt(7)
+
+	root, layers, aggAmounts, aggIndex, err := BuildCommitTree(msgs)
+	require.NoError(t, err)
+	require.Len(t, aggIndex, 2, "expected 2 distinct assetIDs (0 and 7)")
+
+	seen := make(map[int]bool)
+	for assetKey, idx := range aggIndex {
+		assert.GreaterOrEqual(t, idx, len(msgs), "aggregate leaf index for asset %s must come after every message leaf", assetKey)
+		assert.False(t, seen[idx], "aggregate leaf indices must be mutually distinct")
+		seen[idx] = true
+
+		proof := GetMerkleProof(layers, idx)
+		assetID, _ := new(big.Int).SetString(assetKey, 10)
+		leaf := HashAggregateValueLeaf(AggregateValueLeaf{AssetID: assetID, AggregateAmount: aggAmounts[assetKey]})
+		assert.True(t, VerifyMerkleProof(leaf, proof, root), "aggregate leaf for asset %s must verify", assetKey)
+	}
+}
+
+// FuzzMerkleProof_TamperedSiblingsNeverForgeVerification fuzzes byte-level mutations of a real
+// proof's sibling list and leaf against a fixed real tree, asserting VerifyMerkleProof only ever
+// returns true for the exact, unmodified (leaf, proof) pair -- broad regression coverage for the
+// exact class of bug (a missed edge case in hand-rolled Merkle proof verification) that cost the
+// BNB Token Hub bridge $586M. Run with: go test -fuzz=FuzzMerkleProof_TamperedSiblingsNeverForgeVerification ./pkg/cross_chain/
+func FuzzMerkleProof_TamperedSiblingsNeverForgeVerification(f *testing.F) {
+	const n = 5
+	msgs := make([]CrossChainMessage, n)
+	for i := 0; i < n; i++ {
+		msgs[i] = makeAuditTestMessage(i)
+	}
+	root, layers, _, _, err := BuildCommitTree(msgs)
+	if err != nil {
+		f.Fatal(err)
+	}
+	leaves := make([]common.Hash, n)
+	for i := range msgs {
+		leaves[i] = ComputeMessageLeafHash(msgs[i])
+	}
+
+	f.Add(0, 0, byte(0x01))
+	f.Add(2, 1, byte(0xFF))
+	f.Add(4, -1, byte(0x80))
+
+	f.Fuzz(func(t *testing.T, leafIdx int, mutateSiblingIdx int, mutateByte byte) {
+		if leafIdx < 0 {
+			leafIdx = -leafIdx
+		}
+		leafIdx %= n
+		leaf := leaves[leafIdx]
+		proof := GetMerkleProof(layers, leafIdx)
+
+		// Baseline: the real, unmodified proof must always verify.
+		if !VerifyMerkleProof(leaf, proof, root) {
+			t.Fatalf("genuine unmodified proof for leaf %d failed to verify", leafIdx)
+		}
+
+		if len(proof.Siblings) == 0 || mutateByte == 0 {
+			return // nothing to mutate, or a no-op mutation -- baseline check above is the assertion.
+		}
+		idx := mutateSiblingIdx
+		if idx < 0 {
+			idx = -idx
+		}
+		idx %= len(proof.Siblings)
+
+		tampered := MerkleProof{LeafIndex: proof.LeafIndex, Siblings: append([]common.Hash(nil), proof.Siblings...)}
+		tampered.Siblings[idx][0] ^= mutateByte
+
+		if tampered.Siblings[idx] == proof.Siblings[idx] {
+			return // mutateByte happened to be a genuine no-op (0x00 XOR), nothing to assert.
+		}
+		if VerifyMerkleProof(leaf, tampered, root) {
+			t.Fatalf("mutated sibling %d (byte flip 0x%02x) for leaf %d still verified against the real root", idx, mutateByte, leafIdx)
+		}
+	})
+}
