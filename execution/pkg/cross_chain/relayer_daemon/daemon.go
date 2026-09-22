@@ -104,6 +104,15 @@ type pendingRefund struct {
 	proof      cross_chain.MerkleProof
 }
 
+// pendingCredit is a message known to have successfully claimed on its destination chain
+// but has not yet successfully credited on the Reserve chain (PerChainAllocation sync).
+type pendingCredit struct {
+	msg         cross_chain.CrossChainMessage
+	commitRoot  common.Hash
+	proof       cross_chain.MerkleProof
+	successCert cross_chain.QuorumCert
+}
+
 // RelayerDaemon is the automated production daemon that watches for cross-chain messages,
 // aggregates BLS QuorumCerts from Root Anchor, and executes claims on destination chains.
 type RelayerDaemon struct {
@@ -125,6 +134,10 @@ type RelayerDaemon struct {
 	// quorum yet, or the refund() send itself failed transiently. Retried at the start of every
 	// BatchAndRelay tick for that message's own source chain (see retryPendingRefunds).
 	pendingRefunds map[common.Hash]*pendingRefund
+	// pendingCredits tracks messages successfully claimed on the destination chain but not yet
+	// successfully synced back to Reserve's PerChainAllocation (creditReserveAllocation).
+	// Retried at the start of every BatchAndRelay tick.
+	pendingCredits map[common.Hash]*pendingCredit
 	nonces         map[uint64]uint64
 	nonceMu        sync.Mutex
 	chainLocks     map[uint64]*sync.Mutex
@@ -198,6 +211,7 @@ func NewRelayerDaemon(cfg DaemonConfig) (*RelayerDaemon, error) {
 		attestedCommits:   make(map[string]bool),
 		unrelayedBatches:  loadUnrelayedBatches(cfg.UnrelayedBatchesPersistPath),
 		pendingRefunds:    make(map[common.Hash]*pendingRefund),
+		pendingCredits:    make(map[common.Hash]*pendingCredit),
 		nonces:            make(map[uint64]uint64),
 		chainLocks:        make(map[uint64]*sync.Mutex),
 		stopCh:            make(chan struct{}),
@@ -284,78 +298,6 @@ func (d *RelayerDaemon) AddChain(ctx context.Context, chainID uint64, rpcURL str
 		}
 	}
 	return nil
-}
-
-// RelayMessage handles the full attestation and dispatch cycle for a single cross-chain message.
-func (d *RelayerDaemon) RelayMessage(
-	ctx context.Context,
-	msg cross_chain.CrossChainMessage,
-	commitRoot common.Hash,
-	epoch uint64,
-	aggregateProof cross_chain.MerkleProof,
-	messageProof cross_chain.MerkleProof,
-) (common.Hash, error) {
-	d.mu.Lock()
-	if d.processedMessages[msg.MessageID] {
-		d.mu.Unlock()
-		return common.Hash{}, fmt.Errorf("message %s already processed by daemon", msg.MessageID.Hex())
-	}
-	d.mu.Unlock()
-
-	// Step 1: Poll Root Anchor for BLS shares until QuorumCert is produced
-	cert, err := d.pollAndAggregateCommitCert(ctx, msg.SourceChainID, epoch, commitRoot)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("poll and aggregate QuorumCert: %w", err)
-	}
-
-	// Step 2: Submit verifyAndExecute to destination chain
-	aggSiblings := make([][32]byte, len(aggregateProof.Siblings))
-	for i, s := range aggregateProof.Siblings {
-		aggSiblings[i] = s
-	}
-	msgSiblings := make([][32]byte, len(messageProof.Siblings))
-	for i, s := range messageProof.Siblings {
-		msgSiblings[i] = s
-	}
-
-	calldata, err := d.abi.Pack("verifyAndExecute",
-		msg.MessageID,
-		new(big.Int).SetUint64(msg.SourceChainID),
-		new(big.Int).SetUint64(msg.DestChainID),
-		new(big.Int).SetUint64(msg.Sequence),
-		msg.HopCount,
-		msg.Sender,
-		msg.Target,
-		msg.AssetID,
-		msg.Value,
-		msg.Payload,
-		msg.Tip,
-		msg.GasFee,
-		msg.Ordered,
-		new(big.Int).SetUint64(aggregateProof.LeafIndex),
-		aggSiblings,
-		new(big.Int).SetUint64(messageProof.LeafIndex),
-		msgSiblings,
-		commitRoot,
-		cert.Epoch,
-		[]byte(cert.AggregateSignature),
-		[]byte(cert.SignerBitmap),
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("pack verifyAndExecute calldata: %w", err)
-	}
-
-	txHash, err := d.sendToChain(ctx, msg.DestChainID, calldata, 500_000)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("broadcast verifyAndExecute tx: %w", err)
-	}
-
-	d.mu.Lock()
-	d.processedMessages[msg.MessageID] = true
-	d.mu.Unlock()
-
-	logger.Info("🚀 [RELAYER DAEMON] successfully relayed message %s to chain %d (tx=%s)", msg.MessageID.Hex(), msg.DestChainID, txHash.Hex())
-	return txHash, nil
 }
 
 // sendToChain signs calldata with the relayer's own key and broadcasts it to chainID's
@@ -755,8 +697,14 @@ func (d *RelayerDaemon) RelayBatch(
 					creditReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, creditCalldata, 3_000_000)
 					if err != nil {
 						logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s failed to send: %v", msg.MessageID.Hex(), err)
+						d.mu.Lock()
+						d.pendingCredits[msg.MessageID] = &pendingCredit{msg: msg, commitRoot: commitRoot, proof: msgProof, successCert: *successCert}
+						d.mu.Unlock()
 					} else if creditReceipt.Status != 1 {
 						logger.Warn("⚠️ [RELAYER DAEMON] creditReserveAllocation for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(creditReceipt.Return))
+						d.mu.Lock()
+						d.pendingCredits[msg.MessageID] = &pendingCredit{msg: msg, commitRoot: commitRoot, proof: msgProof, successCert: *successCert}
+						d.mu.Unlock()
 					} else {
 						logger.Info("💰 [RELAYER DAEMON] credited chain %d's allocation on Reserve for message %s", destChainID, msg.MessageID.Hex())
 					}
@@ -923,6 +871,11 @@ func (d *RelayerDaemon) pollAndAggregateFailureCert(
 		default:
 		}
 
+		committeeMap := make(map[string]uint64, len(reg.Committee))
+		for _, v := range reg.Committee {
+			committeeMap[string(v.PubkeyBLS)] = v.Stake
+		}
+
 		pubkeys, sigs, err := d.rootAnchorClient.GetMessageFailureAttestationShares(ctx, destChainID, messageID, epoch)
 		if err == nil && len(pubkeys) > 0 {
 			var accumulatedStake uint64
@@ -932,17 +885,20 @@ func (d *RelayerDaemon) pollAndAggregateFailureCert(
 			for j := 0; j < len(pubkeys) && j < len(sigs); j++ {
 				pk := pubkeys[j]
 				sigBytes := sigs[j]
-				for _, v := range reg.Committee {
-					if bytes.Equal(v.PubkeyBLS, pk) {
-						accumulatedStake += v.Stake
-						validPubkeys = append(validPubkeys, pk)
-						validSigs = append(validSigs, sigBytes)
-						break
-					}
+				if stake, exists := committeeMap[string(pk)]; exists {
+					accumulatedStake += stake
+					validPubkeys = append(validPubkeys, pk)
+					validSigs = append(validSigs, sigBytes)
 				}
 			}
 
 			if accumulatedStake >= threshold && len(validSigs) > 0 {
+				latestReg, latestExists, errReg := d.rootAnchorClient.GetChainRegistry(ctx, destChainID)
+				if errReg == nil && latestExists && latestReg != nil && latestReg.Epoch != epoch {
+					logger.Warn("⚠️ [RELAYER DAEMON] pollAndAggregateFailureCert for %s: epoch changed from %d to %d during polling. Skipping cert generation.", messageID.Hex(), epoch, latestReg.Epoch)
+					return nil, fmt.Errorf("epoch changed during polling")
+				}
+
 				var aggSig []byte
 				if len(validSigs) == 1 {
 					aggSig = validSigs[0]
@@ -1019,6 +975,11 @@ func (d *RelayerDaemon) pollAndAggregateSuccessCert(
 		default:
 		}
 
+		committeeMap := make(map[string]uint64, len(reg.Committee))
+		for _, v := range reg.Committee {
+			committeeMap[string(v.PubkeyBLS)] = v.Stake
+		}
+
 		pubkeys, sigs, err := d.rootAnchorClient.GetMessageSuccessAttestationShares(ctx, destChainID, messageID, epoch)
 		if err == nil && len(pubkeys) > 0 {
 			var accumulatedStake uint64
@@ -1028,17 +989,20 @@ func (d *RelayerDaemon) pollAndAggregateSuccessCert(
 			for j := 0; j < len(pubkeys) && j < len(sigs); j++ {
 				pk := pubkeys[j]
 				sigBytes := sigs[j]
-				for _, v := range reg.Committee {
-					if bytes.Equal(v.PubkeyBLS, pk) {
-						accumulatedStake += v.Stake
-						validPubkeys = append(validPubkeys, pk)
-						validSigs = append(validSigs, sigBytes)
-						break
-					}
+				if stake, exists := committeeMap[string(pk)]; exists {
+					accumulatedStake += stake
+					validPubkeys = append(validPubkeys, pk)
+					validSigs = append(validSigs, sigBytes)
 				}
 			}
 
 			if accumulatedStake >= threshold && len(validSigs) > 0 {
+				latestReg, latestExists, errReg := d.rootAnchorClient.GetChainRegistry(ctx, destChainID)
+				if errReg == nil && latestExists && latestReg != nil && latestReg.Epoch != epoch {
+					logger.Warn("⚠️ [RELAYER DAEMON] pollAndAggregateSuccessCert for %s: epoch changed from %d to %d during polling. Skipping cert generation.", messageID.Hex(), epoch, latestReg.Epoch)
+					return nil, fmt.Errorf("epoch changed during polling")
+				}
+
 				var aggSig []byte
 				if len(validSigs) == 1 {
 					aggSig = validSigs[0]
@@ -1093,6 +1057,47 @@ func (d *RelayerDaemon) retryPendingRefunds(ctx context.Context, sourceChainID, 
 	}
 }
 
+// retryPendingCredits retries every message queued in d.pendingCredits whose SOURCE chain is
+// sourceChainID. Best-effort: errors are logged, never returned.
+func (d *RelayerDaemon) retryPendingCredits(ctx context.Context, sourceChainID, destChainID uint64) {
+	d.mu.Lock()
+	var toRetry []*pendingCredit
+	for _, pc := range d.pendingCredits {
+		if pc.msg.SourceChainID == sourceChainID {
+			toRetry = append(toRetry, pc)
+		}
+	}
+	d.mu.Unlock()
+
+	for _, pc := range toRetry {
+		creditCalldata, err := d.abi.Pack("creditReserveAllocation",
+			pc.msg.MessageID, new(big.Int).SetUint64(pc.msg.SourceChainID), new(big.Int).SetUint64(pc.msg.DestChainID),
+			new(big.Int).SetUint64(pc.msg.Sequence), pc.msg.HopCount, pc.msg.Sender, pc.msg.Target,
+			pc.msg.AssetID, pc.msg.Value, pc.msg.Payload, pc.msg.Tip, pc.msg.GasFee, pc.msg.Ordered,
+			new(big.Int).SetUint64(pc.proof.LeafIndex), toBytes32Slice(pc.proof.Siblings), pc.commitRoot,
+			pc.successCert.Epoch, []byte(pc.successCert.AggregateSignature), []byte(pc.successCert.SignerBitmap),
+		)
+		if err != nil {
+			logger.Warn("⚠️ [RELAYER DAEMON] retry pack creditReserveAllocation for %s: %v", pc.msg.MessageID.Hex(), err)
+			continue
+		}
+
+		creditReceipt, err := d.sendToChainAndWait(ctx, d.config.ReserveChainID, creditCalldata, 3_000_000)
+		if err != nil {
+			logger.Warn("⚠️ [RELAYER DAEMON] retry creditReserveAllocation for %s failed to send: %v", pc.msg.MessageID.Hex(), err)
+			continue
+		} else if creditReceipt.Status != 1 {
+			logger.Warn("⚠️ [RELAYER DAEMON] retry creditReserveAllocation for %s reverted: %s", pc.msg.MessageID.Hex(), DecodeRevertReason(creditReceipt.Return))
+			continue
+		}
+
+		logger.Info("💰 [RELAYER DAEMON] retry credited chain %d's allocation on Reserve for message %s", pc.msg.DestChainID, pc.msg.MessageID.Hex())
+		d.mu.Lock()
+		delete(d.pendingCredits, pc.msg.MessageID)
+		d.mu.Unlock()
+	}
+}
+
 // BatchAndRelay is the single unit of work a watch loop performs for one (sourceChainID,
 // destChainID) pair: if there are real pending outbound() messages queued on sourceChainID for
 // destChainID, submit a real batchOutboundCommit() there, then immediately relay the resulting
@@ -1105,6 +1110,10 @@ func (d *RelayerDaemon) BatchAndRelay(ctx context.Context, sourceChainID, destCh
 	// successfully refunded on sourceChainID (mục 2.4 / 2026-09-05 finding #1 fix) -- best-effort,
 	// errors are logged but never block this tick's normal batch/relay work below.
 	d.retryPendingRefunds(ctx, sourceChainID, destChainID)
+
+	// Retry any messages known to have successfully claimed on destChainID but not yet
+	// credited on Reserve (PerChainAllocation sync).
+	d.retryPendingCredits(ctx, sourceChainID, destChainID)
 
 	// Check if there is an unrelayed batch from a previous attempt (e.g. destination was restarting)
 	d.mu.Lock()
@@ -1338,6 +1347,11 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 		default:
 		}
 
+		committeeMap := make(map[string]uint64, len(reg.Committee))
+		for _, v := range reg.Committee {
+			committeeMap[string(v.PubkeyBLS)] = v.Stake
+		}
+
 		pubkeys, sigs, err := d.rootAnchorClient.GetCommitAttestationShares(ctx, sourceChainID, epoch, commitRoot)
 		if err == nil && len(pubkeys) > 0 {
 			var accumulatedStake uint64
@@ -1347,17 +1361,20 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 			for j := 0; j < len(pubkeys) && j < len(sigs); j++ {
 				pk := pubkeys[j]
 				sigBytes := sigs[j]
-				for _, v := range reg.Committee {
-					if bytes.Equal(v.PubkeyBLS, pk) {
-						accumulatedStake += v.Stake
-						validPubkeys = append(validPubkeys, pk)
-						validSigs = append(validSigs, sigBytes)
-						break
-					}
+				if stake, exists := committeeMap[string(pk)]; exists {
+					accumulatedStake += stake
+					validPubkeys = append(validPubkeys, pk)
+					validSigs = append(validSigs, sigBytes)
 				}
 			}
 
 			if accumulatedStake >= threshold && len(validSigs) > 0 {
+				latestReg, latestExists, errReg := d.rootAnchorClient.GetChainRegistry(ctx, sourceChainID)
+				if errReg == nil && latestExists && latestReg != nil && latestReg.Epoch != epoch {
+					logger.Warn("⚠️ [RELAYER DAEMON] pollAndAggregateCommitCert for epoch %d: epoch changed to %d during polling. Skipping cert generation.", epoch, latestReg.Epoch)
+					return nil, fmt.Errorf("epoch changed during polling")
+				}
+
 				var aggSig []byte
 				if len(validSigs) == 1 {
 					aggSig = validSigs[0]

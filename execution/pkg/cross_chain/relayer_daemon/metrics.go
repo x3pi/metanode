@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -218,25 +219,31 @@ func (d *RelayerDaemon) StartBalanceMonitor(ctx context.Context, interval time.D
 	go func() {
 		defer d.wg.Done()
 		refresh := func() {
+			var wg sync.WaitGroup
 			for _, chainID := range d.ConfiguredChains() {
-				client, exists := d.GetChainClient(chainID)
-				if !exists {
-					continue
-				}
-				bal, err := client.GetBalance(ctx, d.relayerAddr)
-				if err != nil {
-					logger.Warn("⚠️ [RELAYER DAEMON] balance query failed for chain %d: %v", chainID, err)
-					continue
-				}
-				d.balancesMu.Lock()
-				if d.balances == nil {
-					d.balances = make(map[uint64]*big.Int)
-				}
-				d.balances[chainID] = bal
-				d.balancesMu.Unlock()
-				balF, _ := new(big.Float).SetInt(bal).Float64()
-				relayerBalanceWei.WithLabelValues(chainIDLabel(chainID)).Set(balF)
+				wg.Add(1)
+				go func(cID uint64) {
+					defer wg.Done()
+					client, exists := d.GetChainClient(cID)
+					if !exists {
+						return
+					}
+					bal, err := client.GetBalance(ctx, d.relayerAddr)
+					if err != nil {
+						logger.Warn("⚠️ [RELAYER DAEMON] balance query failed for chain %d: %v", cID, err)
+						return
+					}
+					d.balancesMu.Lock()
+					if d.balances == nil {
+						d.balances = make(map[uint64]*big.Int)
+					}
+					d.balances[cID] = bal
+					d.balancesMu.Unlock()
+					balF, _ := new(big.Float).SetInt(bal).Float64()
+					relayerBalanceWei.WithLabelValues(chainIDLabel(cID)).Set(balF)
+				}(chainID)
 			}
+			wg.Wait()
 		}
 		refresh()
 		ticker := time.NewTicker(interval)

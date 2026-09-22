@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -190,9 +191,12 @@ func (a *AssetRegistryEngine) LockAndBridgeAsset(
 		Payload:       recipient.Bytes(),
 		AssetID:       new(big.Int).Set(assetID),
 		Value:         new(big.Int).Set(amount),
-		Tip:           new(big.Int).Set(tip),
+		Tip:           big.NewInt(0),
 		HopCount:      1,
 		Ordered:       false,
+	}
+	if tip != nil {
+		msg.Tip = new(big.Int).Set(tip)
 	}
 
 	return msg, nil
@@ -262,10 +266,9 @@ func (a *AssetRegistryEngine) VerifyAssetConservationInvariant(assetID *big.Int)
 
 	// Compute total active circulating supply across all chains + vault
 	sumCirculation := big.NewInt(0)
+	prefix := assetKey + ":"
 	for k, v := range a.CirculationBalances {
-		var aID string
-		fmt.Sscanf(k, "%s:", &aID)
-		if len(k) > len(assetKey) && k[:len(assetKey)+1] == assetKey+":" {
+		if strings.HasPrefix(k, prefix) {
 			if v != nil {
 				sumCirculation.Add(sumCirculation, v)
 			}

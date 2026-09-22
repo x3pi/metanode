@@ -142,7 +142,12 @@ func GetGatewayHandler() (*GatewayHandler, error) {
 // gatewayStateStorageKey is the single fixed storage slot (on GATEWAY_CONTRACT_ADDRESS) holding
 // the JSON-serialized GatewayEngine state. Keccak256, matching every other storage-key derivation
 // convention used across this codebase's contract storage (see smart_contract_db.go).
-var gatewayStateStorageKey = crypto.Keccak256([]byte("gateway_engine_state_v1"))
+var (
+	gatewayStateStorageKey = crypto.Keccak256([]byte("gateway_engine_state_v1"))
+	transferFromSelector   = crypto.Keccak256Hash([]byte("transferFrom(address,address,uint256)")).Bytes()[:4]
+	transferSelector       = crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+	mintSelector           = crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+)
 
 // loadGatewayEngine deserializes GatewayEngine state from chainState, or returns a fresh,
 // unconfigured engine (empty ChainRegistry, zero-supply ledger) if this is the first write ever
@@ -223,6 +228,18 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	if engine.RegisteredPops == nil {
 		engine.RegisteredPops = make(map[string][]byte)
+	}
+
+	// AttestedCommitsByRoot is persisted (omitempty) going forward -- a normal load only needs to
+	// rebuild it here once, for a blob written before this field existed (or, harmlessly, one
+	// that's genuinely empty so far). Rebuilding unconditionally on every load would pay this
+	// O(len(AttestedCommits)) cost on every single Gateway transaction, not just the rare Refund()
+	// calls that actually need the index -- defeating the point of persisting it at all.
+	if len(engine.AttestedCommitsByRoot) == 0 {
+		engine.AttestedCommitsByRoot = make(map[common.Hash]uint64, len(engine.AttestedCommits))
+		for _, v := range engine.AttestedCommits {
+			engine.AttestedCommitsByRoot[v.CommitRoot] = v.SourceChainID
+		}
 	}
 	applyReserveChainIDConfig(&engine)
 	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
@@ -692,6 +709,9 @@ func (h *GatewayHandler) handleWrite(
 
 	switch method.Name {
 	case "outbound":
+		if !args[0].(*big.Int).IsUint64() {
+			return nil, nil, fmt.Errorf("outbound: destChainId overflows uint64")
+		}
 		params := cross_chain.OutboundParams{
 			DestChainID:      mustUint64(args[0]),
 			Target:           mustAddress(args[1]),
@@ -774,7 +794,7 @@ func (h *GatewayHandler) handleWrite(
 				}
 
 				// Construct transferFrom(address,address,uint256)
-				transferFromID := crypto.Keccak256Hash([]byte("transferFrom(address,address,uint256)")).Bytes()[:4]
+				transferFromID := transferFromSelector
 				callData := make([]byte, 4+32+32+32)
 				copy(callData[0:4], transferFromID)
 				copy(callData[4:36], common.LeftPadBytes(tx.FromAddress().Bytes(), 32))
@@ -1058,14 +1078,14 @@ func (h *GatewayHandler) handleWrite(
 
 				if engine.LocalChainID == asset.HomeChainID {
 					// Unlock from vault: transfer(recipient, value)
-					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+					transferID := transferSelector
 					callData = make([]byte, 4+32+32)
 					copy(callData[0:4], transferID)
 					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
 					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 				} else {
 					// Mint wrapped token: mint(recipient, value)
-					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+					mintID := mintSelector
 					callData = make([]byte, 4+32+32)
 					copy(callData[0:4], mintID)
 					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
@@ -1271,14 +1291,14 @@ func (h *GatewayHandler) handleWrite(
 					var callData []byte
 					if engine.LocalChainID == asset.HomeChainID {
 						// Unlock from vault back to sender: transfer(sender, value)
-						transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+						transferID := transferSelector
 						callData = make([]byte, 4+32+32)
 						copy(callData[0:4], transferID)
 						copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
 						copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 					} else {
 						// Mint wrapped token back to sender (if failed outbound): mint(sender, value)
-						mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+						mintID := mintSelector
 						callData = make([]byte, 4+32+32)
 						copy(callData[0:4], mintID)
 						copy(callData[4:36], common.LeftPadBytes(msg.Sender.Bytes(), 32))
@@ -1935,14 +1955,14 @@ func (h *GatewayHandler) handleWrite(
 
 				if engine.LocalChainID == asset.HomeChainID {
 					// Unlock from vault: transfer(recipient, value)
-					transferID := crypto.Keccak256Hash([]byte("transfer(address,uint256)")).Bytes()[:4]
+					transferID := transferSelector
 					callData = make([]byte, 4+32+32)
 					copy(callData[0:4], transferID)
 					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
 					copy(callData[36:68], common.LeftPadBytes(msg.Value.Bytes(), 32))
 				} else {
 					// Mint wrapped token: mint(recipient, value)
-					mintID := crypto.Keccak256Hash([]byte("mint(address,uint256)")).Bytes()[:4]
+					mintID := mintSelector
 					callData = make([]byte, 4+32+32)
 					copy(callData[0:4], mintID)
 					copy(callData[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
@@ -2085,16 +2105,6 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			return nil, fmt.Errorf("marshal committed batch messages: %w", err)
 		}
 		return method.Outputs.Pack(true, batch.Epoch, messagesJSON)
-
-	case "getOriginalSender":
-		sender, sourceChainID, err := engine.GetOriginalSender()
-		if err != nil {
-			return nil, err
-		}
-		return method.Outputs.Pack(sender, new(big.Int).SetUint64(sourceChainID))
-
-	case "isCalledByGateway":
-		return method.Outputs.Pack(engine.IsCalledByGateway())
 
 	case "getChainRegistry":
 		args, err := method.Inputs.Unpack(argData)

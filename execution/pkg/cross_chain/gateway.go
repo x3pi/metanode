@@ -92,12 +92,21 @@ type AllocationRejectedListener func(chainID uint64, requested, available *big.I
 // exported accessor below rather than touching a map field directly, so this guarantee actually
 // holds for the whole codebase, not just for calls made from within this file.
 type GatewayEngine struct {
-	mu              sync.RWMutex
-	LocalChainID    uint64
-	ChainRegistry   map[uint64]ChainRegistry
-	SupplyLedger    *GlobalSupplyLedger
-	AttestedCommits map[string]AttestedCommit
-	MessageStatus   map[common.Hash]MessageStatus
+	mu                    sync.RWMutex
+	LocalChainID          uint64
+	ChainRegistry         map[uint64]ChainRegistry
+	SupplyLedger          *GlobalSupplyLedger
+	AttestedCommits       map[string]AttestedCommit
+	// AttestedCommitsByRoot is a commitRoot->sourceChainID index over AttestedCommits, used by
+	// Refund()'s fallback lookup (see its own call site) to avoid an O(n) scan of AttestedCommits
+	// (which only ever grows, never pruned, over a chain's whole lifetime). MUST be persisted
+	// (omitempty, not "-") to actually pay off: every real Gateway transaction loads a fresh engine
+	// from storage and processes exactly one operation before saving it back (loadGatewayEngine/
+	// saveGatewayEngine, gateway_handler.go) -- attestCommitInternal (which writes this index) and
+	// Refund (which reads it) always run in separate transactions/engine-loads, so a "json:-"
+	// in-memory-only index would be empty on every single read and never save any work at all.
+	AttestedCommitsByRoot map[common.Hash]uint64 `json:"attested_commits_by_root,omitempty"`
+	MessageStatus         map[common.Hash]MessageStatus
 	// ReserveCreditedMessages guards CreditReserveAllocation's write-once semantics, keyed by
 	// MessageID -- see that function's doc comment for why it exists (the destination-side
 	// counterpart of AttestCommit's source-side debit, since ClaimMessage's own credit lands on
@@ -157,7 +166,11 @@ type GatewayEngine struct {
 	// Missing Reserve Refund" finding), keyed by "destChainId:messageIdHex:epoch". Required before
 	// CreditReserveAllocation may credit Reserve's ledger -- closes the gap where anyone could
 	// previously credit Reserve for a message regardless of whether it actually succeeded.
-	PendingMessageSuccessAttestations map[string][]CommitAttestationShare
+	PendingMessageSuccessAttestations      map[string][]CommitAttestationShare
+	PendingCommitteeAttestationsIndex      map[string]map[string]bool `json:"-"`
+	PendingCommitAttestationsIndex         map[string]map[string]bool `json:"-"`
+	PendingMessageFailureAttestationsIndex map[string]map[string]bool `json:"-"`
+	PendingMessageSuccessAttestationsIndex map[string]map[string]bool `json:"-"`
 
 	// PendingOutboundMessages queues real outbound() messages (their sender already validated
 	// and their Value/Tip/GasFee already burned/locked) not yet batched into a commit root for
@@ -275,6 +288,7 @@ func NewGatewayEngine(
 		ChainRegistry:                     registry,
 		SupplyLedger:                      ledger,
 		AttestedCommits:                   make(map[string]AttestedCommit),
+		AttestedCommitsByRoot:             make(map[common.Hash]uint64),
 		MessageStatus:                     make(map[common.Hash]MessageStatus),
 		ReserveCreditedMessages:           make(map[common.Hash]bool),
 		DeadChains:                        make(map[uint64]bool),
@@ -948,11 +962,20 @@ func (g *GatewayEngine) Outbound(
 func (g *GatewayEngine) AddPendingCommitteeAttestationShare(key string, share CommitteeAttestationShare) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, s := range g.PendingCommitteeAttestations[key] {
-		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
-			return fmt.Errorf("pubkey already submitted a share")
+	if g.PendingCommitteeAttestationsIndex == nil {
+		g.PendingCommitteeAttestationsIndex = make(map[string]map[string]bool)
+	}
+	if g.PendingCommitteeAttestationsIndex[key] == nil {
+		g.PendingCommitteeAttestationsIndex[key] = make(map[string]bool)
+		for _, s := range g.PendingCommitteeAttestations[key] {
+			g.PendingCommitteeAttestationsIndex[key][string(s.SignerPubkeyBLS)] = true
 		}
 	}
+	pubkeyStr := string(share.SignerPubkeyBLS)
+	if g.PendingCommitteeAttestationsIndex[key][pubkeyStr] {
+		return fmt.Errorf("pubkey already submitted a share")
+	}
+	g.PendingCommitteeAttestationsIndex[key][pubkeyStr] = true
 	g.PendingCommitteeAttestations[key] = append(g.PendingCommitteeAttestations[key], share)
 	return nil
 }
@@ -963,7 +986,12 @@ func (g *GatewayEngine) GetPendingCommitteeAttestationShares(key string) []Commi
 	defer g.mu.RUnlock()
 	shares := g.PendingCommitteeAttestations[key]
 	res := make([]CommitteeAttestationShare, len(shares))
-	copy(res, shares)
+	for i, s := range shares {
+		res[i] = CommitteeAttestationShare{
+			SignerPubkeyBLS: append([]byte(nil), s.SignerPubkeyBLS...),
+			Signature:       append([]byte(nil), s.Signature...),
+		}
+	}
 	return res
 }
 
@@ -972,17 +1000,29 @@ func (g *GatewayEngine) ClearPendingCommitteeAttestations(key string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.PendingCommitteeAttestations, key)
+	if g.PendingCommitteeAttestationsIndex != nil {
+		delete(g.PendingCommitteeAttestationsIndex, key)
+	}
 }
 
 // AddPendingCommitAttestationShare thread-safely adds a commit attestation share.
 func (g *GatewayEngine) AddPendingCommitAttestationShare(key string, share CommitAttestationShare) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, s := range g.PendingCommitAttestations[key] {
-		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
-			return fmt.Errorf("pubkey already submitted a share")
+	if g.PendingCommitAttestationsIndex == nil {
+		g.PendingCommitAttestationsIndex = make(map[string]map[string]bool)
+	}
+	if g.PendingCommitAttestationsIndex[key] == nil {
+		g.PendingCommitAttestationsIndex[key] = make(map[string]bool)
+		for _, s := range g.PendingCommitAttestations[key] {
+			g.PendingCommitAttestationsIndex[key][string(s.SignerPubkeyBLS)] = true
 		}
 	}
+	pubkeyStr := string(share.SignerPubkeyBLS)
+	if g.PendingCommitAttestationsIndex[key][pubkeyStr] {
+		return fmt.Errorf("pubkey already submitted a share")
+	}
+	g.PendingCommitAttestationsIndex[key][pubkeyStr] = true
 	g.PendingCommitAttestations[key] = append(g.PendingCommitAttestations[key], share)
 	return nil
 }
@@ -993,7 +1033,12 @@ func (g *GatewayEngine) GetPendingCommitAttestationShares(key string) []CommitAt
 	defer g.mu.RUnlock()
 	shares := g.PendingCommitAttestations[key]
 	res := make([]CommitAttestationShare, len(shares))
-	copy(res, shares)
+	for i, s := range shares {
+		res[i] = CommitAttestationShare{
+			SignerPubkeyBLS: append([]byte(nil), s.SignerPubkeyBLS...),
+			Signature:       append([]byte(nil), s.Signature...),
+		}
+	}
 	return res
 }
 
@@ -1006,11 +1051,20 @@ func (g *GatewayEngine) AddPendingMessageFailureAttestationShare(key string, sha
 	if g.PendingMessageFailureAttestations == nil {
 		g.PendingMessageFailureAttestations = make(map[string][]CommitAttestationShare)
 	}
-	for _, s := range g.PendingMessageFailureAttestations[key] {
-		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
-			return fmt.Errorf("pubkey already submitted a share")
+	if g.PendingMessageFailureAttestationsIndex == nil {
+		g.PendingMessageFailureAttestationsIndex = make(map[string]map[string]bool)
+	}
+	if g.PendingMessageFailureAttestationsIndex[key] == nil {
+		g.PendingMessageFailureAttestationsIndex[key] = make(map[string]bool)
+		for _, s := range g.PendingMessageFailureAttestations[key] {
+			g.PendingMessageFailureAttestationsIndex[key][string(s.SignerPubkeyBLS)] = true
 		}
 	}
+	pubkeyStr := string(share.SignerPubkeyBLS)
+	if g.PendingMessageFailureAttestationsIndex[key][pubkeyStr] {
+		return fmt.Errorf("pubkey already submitted a share")
+	}
+	g.PendingMessageFailureAttestationsIndex[key][pubkeyStr] = true
 	g.PendingMessageFailureAttestations[key] = append(g.PendingMessageFailureAttestations[key], share)
 	return nil
 }
@@ -1022,7 +1076,12 @@ func (g *GatewayEngine) GetPendingMessageFailureAttestationShares(key string) []
 	defer g.mu.RUnlock()
 	shares := g.PendingMessageFailureAttestations[key]
 	res := make([]CommitAttestationShare, len(shares))
-	copy(res, shares)
+	for i, s := range shares {
+		res[i] = CommitAttestationShare{
+			SignerPubkeyBLS: append([]byte(nil), s.SignerPubkeyBLS...),
+			Signature:       append([]byte(nil), s.Signature...),
+		}
+	}
 	return res
 }
 
@@ -1035,11 +1094,20 @@ func (g *GatewayEngine) AddPendingMessageSuccessAttestationShare(key string, sha
 	if g.PendingMessageSuccessAttestations == nil {
 		g.PendingMessageSuccessAttestations = make(map[string][]CommitAttestationShare)
 	}
-	for _, s := range g.PendingMessageSuccessAttestations[key] {
-		if bytes.Equal(s.SignerPubkeyBLS, share.SignerPubkeyBLS) {
-			return fmt.Errorf("pubkey already submitted a share")
+	if g.PendingMessageSuccessAttestationsIndex == nil {
+		g.PendingMessageSuccessAttestationsIndex = make(map[string]map[string]bool)
+	}
+	if g.PendingMessageSuccessAttestationsIndex[key] == nil {
+		g.PendingMessageSuccessAttestationsIndex[key] = make(map[string]bool)
+		for _, s := range g.PendingMessageSuccessAttestations[key] {
+			g.PendingMessageSuccessAttestationsIndex[key][string(s.SignerPubkeyBLS)] = true
 		}
 	}
+	pubkeyStr := string(share.SignerPubkeyBLS)
+	if g.PendingMessageSuccessAttestationsIndex[key][pubkeyStr] {
+		return fmt.Errorf("pubkey already submitted a share")
+	}
+	g.PendingMessageSuccessAttestationsIndex[key][pubkeyStr] = true
 	g.PendingMessageSuccessAttestations[key] = append(g.PendingMessageSuccessAttestations[key], share)
 	return nil
 }
@@ -1050,7 +1118,12 @@ func (g *GatewayEngine) GetPendingMessageSuccessAttestationShares(key string) []
 	defer g.mu.RUnlock()
 	shares := g.PendingMessageSuccessAttestations[key]
 	res := make([]CommitAttestationShare, len(shares))
-	copy(res, shares)
+	for i, s := range shares {
+		res[i] = CommitAttestationShare{
+			SignerPubkeyBLS: append([]byte(nil), s.SignerPubkeyBLS...),
+			Signature:       append([]byte(nil), s.Signature...),
+		}
+	}
 	return res
 }
 
@@ -1367,6 +1440,10 @@ func (g *GatewayEngine) attestCommitInternal(
 		CeilingDebited: ceilingDebited,
 	}
 	g.AttestedCommits[key] = attested
+	if g.AttestedCommitsByRoot == nil {
+		g.AttestedCommitsByRoot = make(map[common.Hash]uint64)
+	}
+	g.AttestedCommitsByRoot[commitRoot] = sourceChainID
 
 	return &attested, nil
 }
@@ -1453,7 +1530,11 @@ func (g *GatewayEngine) ClaimMessage(
 	// headroom with nothing but a garbage proof, permanently blocking every legitimate claim
 	// against that commit with ErrAllocationExceeded.
 	if message.Value != nil && message.Value.Sign() > 0 {
-		newClaimed := new(big.Int).Add(attested.ClaimedAmount, message.Value)
+		claimed := attested.ClaimedAmount
+		if claimed == nil {
+			claimed = big.NewInt(0)
+		}
+		newClaimed := new(big.Int).Add(claimed, message.Value)
 		if newClaimed.Cmp(attested.FundedAmount) > 0 {
 			return MessageStatusPending, fmt.Errorf("%w: commit cap %s exceeded by %s", ErrAllocationExceeded, attested.FundedAmount.String(), newClaimed.String())
 		}
@@ -1900,10 +1981,16 @@ func (g *GatewayEngine) Refund(
 		key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 		_, exists = g.AttestedCommits[key]
 		if !exists {
-			for _, v := range g.AttestedCommits {
-				if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
+			if g.AttestedCommitsByRoot != nil {
+				if srcID, ok := g.AttestedCommitsByRoot[commitRoot]; ok && srcID == message.SourceChainID {
 					exists = true
-					break
+				}
+			} else {
+				for _, v := range g.AttestedCommits {
+					if v.SourceChainID == message.SourceChainID && v.CommitRoot == commitRoot {
+						exists = true
+						break
+					}
 				}
 			}
 		}

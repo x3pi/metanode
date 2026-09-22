@@ -320,11 +320,7 @@ func ComputeCommitteeUpdateDigest(sourceChainID, newEpoch uint64, newCommittee [
 func HashAccountLeaf(leaf AccountLeaf) common.Hash {
 	var data []byte
 	data = append(data, leaf.Account.Bytes()...)
-	balBytes := leaf.Balance.Bytes()
-	// Pad balance to 32 bytes
-	padded := make([]byte, 32)
-	copy(padded[32-len(balBytes):], balBytes)
-	data = append(data, padded...)
+	data = append(data, padTo32(leaf.Balance)...)
 
 	hasher := sha3.NewLegacyKeccak256()
 	hasher.Write(data)

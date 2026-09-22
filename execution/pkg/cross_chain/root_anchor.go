@@ -1,7 +1,6 @@
 package cross_chain
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -138,28 +137,20 @@ func (c *RootAnchorCommittee) SimulateChainOutage(offlineChainID uint64) (bool, 
 func (c *RootAnchorCommittee) VerifyQuorumVotes(votingPubkeys [][]byte) (bool, uint64, uint64) {
 	threshold := c.BftQuorumThreshold()
 	var accumulatedStake uint64
-	seenKeys := make([][]byte, 0, len(votingPubkeys))
+
+	voteMap := make(map[string]bool, len(votingPubkeys))
+	for _, vk := range votingPubkeys {
+		voteMap[string(vk)] = true
+	}
+
+	seenKeys := make(map[string]bool)
 
 	for _, entry := range c.AllValidators {
-		isVoting := false
-		for _, vk := range votingPubkeys {
-			if bytes.Equal(vk, entry.PubkeyBLS) {
-				isVoting = true
-				break
-			}
-		}
-
-		if isVoting {
-			alreadyCounted := false
-			for _, sk := range seenKeys {
-				if bytes.Equal(sk, entry.PubkeyBLS) {
-					alreadyCounted = true
-					break
-				}
-			}
-			if !alreadyCounted {
+		pubStr := string(entry.PubkeyBLS)
+		if voteMap[pubStr] {
+			if !seenKeys[pubStr] {
 				accumulatedStake += entry.Stake
-				seenKeys = append(seenKeys, entry.PubkeyBLS)
+				seenKeys[pubStr] = true
 			}
 		}
 	}
