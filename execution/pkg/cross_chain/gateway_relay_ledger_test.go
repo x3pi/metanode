@@ -69,7 +69,7 @@ func newRelayFixture(t *testing.T) *relayFixture {
 	cert1 := QuorumCert{Epoch: 5, AggregateSignature: sig1.Bytes(), SignerBitmap: []byte{0x0F}}
 	_, err = engine.AttestCommit(relayChainA, commitRoot1, aggAmounts1["0"], big.NewInt(0), aggProof1, cert1)
 	require.NoError(t, err)
-	_, err = engine.ClaimMessage(leg1, proof1, commitRoot1, relayer)
+	_, err = engine.ClaimMessage(leg1, proof1, commitRoot1, relayer, 0)
 	require.NoError(t, err)
 
 	// What claimMessage's relay branch does right after ClaimMessage:

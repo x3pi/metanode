@@ -693,15 +693,16 @@ func (h *GatewayHandler) handleWrite(
 	switch method.Name {
 	case "outbound":
 		params := cross_chain.OutboundParams{
-			DestChainID: mustUint64(args[0]),
-			Target:      mustAddress(args[1]),
-			Payload:     mustBytes(args[2]),
-			AssetID:     mustBigInt(args[3]),
-			Value:       mustBigInt(args[4]),
-			Tip:         mustBigInt(args[5]),
-			GasFee:      mustBigInt(args[6]),
-			HopCount:    mustUint8(args[7]),
-			Ordered:     mustBool(args[8]),
+			DestChainID:      mustUint64(args[0]),
+			Target:           mustAddress(args[1]),
+			Payload:          mustBytes(args[2]),
+			AssetID:          mustBigInt(args[3]),
+			Value:            mustBigInt(args[4]),
+			Tip:              mustBigInt(args[5]),
+			GasFee:           mustBigInt(args[6]),
+			HopCount:         mustUint8(args[7]),
+			Ordered:          mustBool(args[8]),
+			TimeoutTimestamp: mustUint64(args[9]),
 		}
 
 		// SECURITY FIX (2026-09-05, found in proactive re-audit): unlike the relay-onward path
@@ -862,28 +863,47 @@ func (h *GatewayHandler) handleWrite(
 
 	case "claimMessage":
 		msg := cross_chain.CrossChainMessage{
-			MessageID:     mustHash(args[0]),
-			SourceChainID: mustUint64(args[1]),
-			DestChainID:   mustUint64(args[2]),
-			Sequence:      mustUint64(args[3]),
-			HopCount:      mustUint8(args[4]),
-			Sender:        mustAddress(args[5]),
-			Target:        mustAddress(args[6]),
-			AssetID:       mustBigInt(args[7]),
-			Value:         mustBigInt(args[8]),
-			Payload:       mustBytes(args[9]),
-			Tip:           mustBigInt(args[10]),
-			GasFee:        mustBigInt(args[11]),
-			Ordered:       mustBool(args[12]),
+			MessageID:        mustHash(args[0]),
+			SourceChainID:    mustUint64(args[1]),
+			DestChainID:      mustUint64(args[2]),
+			Sequence:         mustUint64(args[3]),
+			HopCount:         mustUint8(args[4]),
+			Sender:           mustAddress(args[5]),
+			Target:           mustAddress(args[6]),
+			AssetID:          mustBigInt(args[7]),
+			Value:            mustBigInt(args[8]),
+			Payload:          mustBytes(args[9]),
+			Tip:              mustBigInt(args[10]),
+			GasFee:           mustBigInt(args[11]),
+			Ordered:          mustBool(args[12]),
+			TimeoutTimestamp: mustUint64(args[13]),
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[13]).Uint64(),
-			Siblings:  mustHashSlice(args[14]),
+			LeafIndex: mustBigInt(args[14]).Uint64(),
+			Siblings:  mustHashSlice(args[15]),
 		}
-		commitRoot := mustHash(args[15])
-		status, err := engine.ClaimMessage(msg, proof, commitRoot, tx.FromAddress())
+		commitRoot := mustHash(args[16])
+		status, err := engine.ClaimMessage(msg, proof, commitRoot, tx.FromAddress(), blockTime)
 		if err != nil {
 			return nil, nil, err
+		}
+
+		if status == cross_chain.MessageStatusFailedTimeout {
+			logger.Info("💥 [GATEWAY] claimMessage %s finalized as FAILED_TIMEOUT", msg.MessageID.Hex())
+			fireMessageFailedCallback(engine, msg)
+			if event, ok := h.abi.Events["MessageStatusChanged"]; ok {
+				eventData, packErr := event.Inputs.NonIndexed().Pack(uint8(status))
+				if packErr == nil {
+					eventLogs = append(eventLogs, smart_contract.NewEventLog(
+						tx.Hash(), tx.ToAddress(), eventData,
+						[][]byte{event.ID.Bytes(), msg.MessageID.Bytes()},
+					))
+				}
+			}
+			if err := saveGatewayEngine(chainState, engine); err != nil {
+				return nil, nil, err
+			}
+			return eventLogs, nil, nil
 		}
 
 		// 2-hop A -> Reserve -> B value & CONTRACT_CALL routing
@@ -926,19 +946,21 @@ func (h *GatewayHandler) handleWrite(
 					relayGasFee = new(big.Int).Set(msg.GasFee)
 				}
 				relayParams := cross_chain.OutboundParams{
-					DestChainID: finalDestChainID,
-					Target:      msg.Target,
-					Payload:     innerPayload,
-					Value:       relayValue,
-					AssetID:     big.NewInt(0),
-					Tip:         big.NewInt(0),
-					GasFee:      relayGasFee,
-					HopCount:    msg.HopCount + 1,
-					Ordered:     false,
+					DestChainID:      finalDestChainID,
+					Target:           msg.Target,
+					Payload:          innerPayload,
+					Value:            relayValue,
+					AssetID:          big.NewInt(0),
+					Tip:              big.NewInt(0),
+					GasFee:           relayGasFee,
+					HopCount:         msg.HopCount + 1,
+					Ordered:          false,
+					TimeoutTimestamp: msg.TimeoutTimestamp,
 					// Finding #7 (see Outbound's own doc comment in gateway.go): keep leg 1's
 					// MessageID for leg 2 instead of minting a fresh one from this tx's own hash.
 					OriginalID: &msg.MessageID,
 				}
+
 				// Sender is the ORIGINAL cross-chain sender (msg.Sender), carried forward
 				// unchanged -- NOT msg.Target. The resulting leg-2 message's own Sender field is
 				// what settleGasCappedContractCall later refunds unused GasFee to and uses as the
@@ -1840,9 +1862,27 @@ func (h *GatewayHandler) handleWrite(
 			SignerBitmap:       mustBytes(args[20]),
 		}
 
-		status, err := engine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, tx.FromAddress())
+		status, err := engine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, tx.FromAddress(), blockTime)
 		if err != nil {
 			return nil, nil, err
+		}
+
+		if status == cross_chain.MessageStatusFailedTimeout {
+			logger.Info("💥 [GATEWAY] VerifyAndExecute %s finalized as FAILED_TIMEOUT", msg.MessageID.Hex())
+			fireMessageFailedCallback(engine, msg)
+			if event, ok := h.abi.Events["MessageStatusChanged"]; ok {
+				eventData, packErr := event.Inputs.NonIndexed().Pack(uint8(status))
+				if packErr == nil {
+					eventLogs = append(eventLogs, smart_contract.NewEventLog(
+						tx.Hash(), tx.ToAddress(), eventData,
+						[][]byte{event.ID.Bytes(), msg.MessageID.Bytes()},
+					))
+				}
+			}
+			if err := saveGatewayEngine(chainState, engine); err != nil {
+				return nil, nil, err
+			}
+			return eventLogs, nil, nil
 		}
 
 		// SECURITY FIX (2026-09-05, finding #1 / mục 2.4 point 1) -- see the identical, more fully

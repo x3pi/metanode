@@ -321,13 +321,13 @@ func TestGateway_P2_3_ClaimMessageAndDoubleClaimPrevention(t *testing.T) {
 	require.NoError(t, errAttest)
 
 	// First Claim -> SUCCESS (P2.3)
-	status, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	status, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)
 	require.NoError(t, errClaim)
 	assert.Equal(t, MessageStatusSuccess, status)
 	assert.Equal(t, MessageStatusSuccess, engine.GetMessageStatus(msg.MessageID))
 
 	// Second Claim -> MUST REJECT (Double Claim / Idempotent Guard)
-	_, errDup := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	_, errDup := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)
 	assert.ErrorIs(t, errDup, ErrAlreadyClaimed)
 }
 
@@ -373,7 +373,7 @@ func TestGateway_P2_3_1_HardCapCommitCapacityDefense(t *testing.T) {
 	require.NoError(t, errAttest)
 
 	// Attacker tries to claim 600 -> MUST REJECT (Hard-cap capacity exceeded)
-	_, errOverClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	_, errOverClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)
 	assert.ErrorIs(t, errOverClaim, ErrAllocationExceeded)
 }
 
@@ -564,7 +564,7 @@ func TestGateway_CustomAssetNeverTouchesNativePerChainAllocation(t *testing.T) {
 	// separate step gateway_handler.go's claimMessage dispatch case performs afterward, outside
 	// this function's scope.
 	relayer := common.HexToAddress("0x8888888888888888888888888888888888888888")
-	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)
 	require.NoError(t, errClaim)
 	assert.Zero(t, engine.SupplyLedger.GetAllocation(101).Cmp(sourceAllocBefore), "claiming a custom asset must not touch the source chain's native allocation")
 	assert.Zero(t, engine.SupplyLedger.GetAllocation(102).Cmp(destAllocBefore), "claiming a huge custom-asset amount must NOT inflate the claiming chain's own native allocation")
@@ -1502,13 +1502,13 @@ func TestGateway_ClaimMessage_BadProofDoesNotBurnClaimedAmountCap(t *testing.T) 
 	// ErrInvalidMerkleProof and must NOT touch ClaimedAmount.
 	badProof := MerkleProof{LeafIndex: realProof.LeafIndex, Siblings: []common.Hash{common.HexToHash("0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD")}}
 	for i := 0; i < 3; i++ {
-		_, errBad := engine.ClaimMessage(msg, badProof, commitRoot, relayer)
+		_, errBad := engine.ClaimMessage(msg, badProof, commitRoot, relayer, 0)
 		assert.ErrorIs(t, errBad, ErrInvalidMerkleProof)
 	}
 
 	// The REAL claim for the full funded amount (500) must still succeed -- proving the repeated
 	// bad-proof attempts above never burned the commit's ClaimedAmount headroom.
-	status, errClaim := engine.ClaimMessage(msg, realProof, commitRoot, relayer)
+	status, errClaim := engine.ClaimMessage(msg, realProof, commitRoot, relayer, 0)
 	require.NoError(t, errClaim)
 	assert.Equal(t, MessageStatusSuccess, status)
 }
@@ -1554,7 +1554,7 @@ func TestGateway_ClaimMessage_RejectsWrongDestinationForZeroValueMessage(t *test
 	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
 	require.NoError(t, errAttest)
 
-	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer, 0)
 	assert.Error(t, errClaim, "claiming on the wrong destination chain must be rejected even for a zero-value message")
 	assert.NotEqual(t, MessageStatusSuccess, engine.GetMessageStatus(msg.MessageID))
 }

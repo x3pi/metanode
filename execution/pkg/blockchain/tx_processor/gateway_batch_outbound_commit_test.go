@@ -92,6 +92,7 @@ func TestGatewayHandler_BatchOutboundCommit_EndToEnd(t *testing.T) {
 		calldata, err := h.abi.Pack("outbound",
 			big.NewInt(destChainID), target, []byte{payloadByte}, big.NewInt(0), big.NewInt(0),
 			big.NewInt(0), big.NewInt(0), uint8(1), false,
+			uint64(0), // timeoutTimestamp
 		)
 		require.NoError(t, err)
 		tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, uint64(i), big.NewInt(0), marshalCallData(t, calldata))
@@ -164,6 +165,7 @@ func TestGatewayHandler_BatchOutboundCommit_EndToEnd(t *testing.T) {
 			msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 			big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+			uint64(0), // timeoutTimestamp
 			new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 		)
 		require.NoError(t, err)

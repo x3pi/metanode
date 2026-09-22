@@ -225,7 +225,7 @@ func TestAudit_AntiReplayAndConcurrentDoubleClaim(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+			status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer, 0)
 			if err == nil && status == MessageStatusSuccess {
 				atomic.AddInt32(&successCount, 1)
 			} else if err != nil {
@@ -281,7 +281,7 @@ func TestAudit_AntiDoubleMintViaRefundRaceGuard(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 1: Claim message successfully
-	status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+	status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer, 0)
 	require.NoError(t, err)
 	assert.Equal(t, MessageStatusSuccess, status)
 
@@ -515,7 +515,7 @@ func TestAudit_ZeroForkDestinationOfflineStability(t *testing.T) {
 	// 3. No arbitrary state corruption or balance minting can happen without QuorumCert
 	unattestedCommit := common.HexToHash("0x8888888888888888888888888888888888888888888888888888888888888888")
 	proof := MerkleProof{Siblings: []common.Hash{}}
-	status, errUnattested := engine.ClaimMessage(*msg, proof, unattestedCommit, sender)
+	status, errUnattested := engine.ClaimMessage(*msg, proof, unattestedCommit, sender, 0)
 	assert.ErrorIs(t, errUnattested, ErrCommitNotAttested)
 	assert.Equal(t, MessageStatusPending, status)
 	assert.Equal(t, MessageStatusPending, engine.GetMessageStatus(msg.MessageID))
@@ -612,7 +612,7 @@ func TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCre
 
 	allocBefore := new(big.Int).Set(ledger.GetAllocation(102))
 
-	status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+	status, err := engine.ClaimMessage(*msg, proof, commitRoot, relayer, 0)
 	require.NoError(t, err)
 	assert.Equal(t, MessageStatusSuccess, status)
 	assert.Equal(t, big.NewInt(7), engine.RelayerBalances[relayer], "tip must be provisionally credited by ClaimMessage")
@@ -641,7 +641,7 @@ func TestGatewayEngine_FinalizeFailedAfterExecutionRevert_ReversesProvisionalCre
 	errSecondFinalize := engine.FinalizeFailedAfterExecutionRevert(*msg, commitRoot, relayer)
 	assert.Error(t, errSecondFinalize, "must reject finalizing an already-Failed message a second time")
 
-	_, errRetryClaim := engine.ClaimMessage(*msg, proof, commitRoot, relayer)
+	_, errRetryClaim := engine.ClaimMessage(*msg, proof, commitRoot, relayer, 0)
 	assert.ErrorIs(t, errRetryClaim, ErrAlreadyClaimed, "a Failed message must be terminal -- no retry claim allowed")
 }
 

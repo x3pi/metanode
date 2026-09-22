@@ -452,7 +452,7 @@ func (r *RelayerEngine) RelayMessage(
 			return nil, fmt.Errorf("dest attest from reserve failed: %w", err)
 		}
 
-		status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
+		status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr, uint64(time.Now().Unix()))
 		if err != nil {
 			r.Stats.FailedRelays++
 			return nil, fmt.Errorf("dest claim message failed: %w", err)
@@ -481,7 +481,7 @@ func (r *RelayerEngine) RelayMessage(
 		return nil, fmt.Errorf("dest direct attest failed: %w", err)
 	}
 
-	status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr)
+	status, err := destEngine.ClaimMessage(msg, messageProof, commitRoot, relayerAddr, uint64(time.Now().Unix()))
 	if err != nil {
 		r.Stats.FailedRelays++
 		return nil, fmt.Errorf("dest direct claim failed: %w", err)

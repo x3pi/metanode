@@ -387,6 +387,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 			leg1Msg.MessageID, big.NewInt(int64(leg1Msg.SourceChainID)), big.NewInt(int64(leg1Msg.DestChainID)),
 			big.NewInt(int64(leg1Msg.Sequence)), leg1Msg.HopCount, leg1Msg.Sender, leg1Msg.Target,
 			leg1Msg.AssetID, leg1Msg.Value, leg1Msg.Payload, leg1Msg.Tip, leg1Msg.GasFee, leg1Msg.Ordered,
+			uint64(0), // timeoutTimestamp
 			new(big.Int).SetUint64(messageProof1.LeafIndex), hashesToBytes32Direct(messageProof1.Siblings), commitRoot1,
 		)
 		claimTx1 := newTxLocal(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallDataDirect(claimCalldata1))
@@ -425,6 +426,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				leg2Msg.MessageID, big.NewInt(int64(leg2Msg.SourceChainID)), big.NewInt(int64(leg2Msg.DestChainID)),
 				big.NewInt(int64(leg2Msg.Sequence)), leg2Msg.HopCount, leg2Msg.Sender, leg2Msg.Target,
 				leg2Msg.AssetID, leg2Msg.Value, leg2Msg.Payload, leg2Msg.Tip, leg2Msg.GasFee, leg2Msg.Ordered,
+				uint64(0), // timeoutTimestamp
 				new(big.Int).SetUint64(messageProof2.LeafIndex), hashesToBytes32Direct(messageProof2.Siblings), commitRoot2,
 			)
 			claimTx2 := newHighGasTxLocal(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallDataDirect(claimCalldata2))
@@ -518,6 +520,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 				leg1Msg.MessageID, big.NewInt(int64(leg1Msg.SourceChainID)), big.NewInt(int64(leg1Msg.DestChainID)),
 				big.NewInt(int64(leg1Msg.Sequence)), leg1Msg.HopCount, leg1Msg.Sender, leg1Msg.Target,
 				leg1Msg.AssetID, leg1Msg.Value, leg1Msg.Payload, leg1Msg.Tip, leg1Msg.GasFee, leg1Msg.Ordered,
+				uint64(0), // timeoutTimestamp
 				new(big.Int).SetUint64(messageProof1.LeafIndex), hashesToBytes32Direct(messageProof1.Siblings), commitRoot1,
 			)
 			claimTx1 := newTxLocal(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallDataDirect(claimCalldata1))
@@ -551,6 +554,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 					leg2Msg.MessageID, big.NewInt(int64(leg2Msg.SourceChainID)), big.NewInt(int64(leg2Msg.DestChainID)),
 					big.NewInt(int64(leg2Msg.Sequence)), leg2Msg.HopCount, leg2Msg.Sender, leg2Msg.Target,
 					leg2Msg.AssetID, leg2Msg.Value, leg2Msg.Payload, leg2Msg.Tip, leg2Msg.GasFee, leg2Msg.Ordered,
+					uint64(0), // timeoutTimestamp
 					new(big.Int).SetUint64(messageProof2.LeafIndex), hashesToBytes32Direct(messageProof2.Siblings), commitRoot2,
 				)
 				claimTx2 := newHighGasTxLocal(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallDataDirect(claimCalldata2))
@@ -619,6 +623,7 @@ func RunTwoNewFlowsExperiment() []FlowTestResult {
 			msgSelf.MessageID, big.NewInt(int64(msgSelf.SourceChainID)), big.NewInt(int64(msgSelf.DestChainID)),
 			big.NewInt(int64(msgSelf.Sequence)), msgSelf.HopCount, msgSelf.Sender, msgSelf.Target,
 			msgSelf.AssetID, msgSelf.Value, msgSelf.Payload, msgSelf.Tip, msgSelf.GasFee, msgSelf.Ordered,
+			uint64(0), // timeoutTimestamp
 			new(big.Int).SetUint64(messageProofSelf.LeafIndex), hashesToBytes32Direct(messageProofSelf.Siblings), commitRootSelf,
 		)
 		claimTxSelf := newTxLocal(relayer, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallDataDirect(claimCalldataSelf))

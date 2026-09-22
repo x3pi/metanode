@@ -646,7 +646,7 @@ func (d *RelayerDaemon) RelayBatch(
 		claimCalldata, err := d.abi.Pack("claimMessage",
 			msg.MessageID, new(big.Int).SetUint64(msg.SourceChainID), new(big.Int).SetUint64(msg.DestChainID),
 			new(big.Int).SetUint64(msg.Sequence), msg.HopCount, msg.Sender, msg.Target,
-			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+			msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered, msg.TimeoutTimestamp,
 			new(big.Int).SetUint64(msgProof.LeafIndex), toBytes32Slice(msgProof.Siblings), commitRoot,
 		)
 		if err != nil {

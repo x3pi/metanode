@@ -236,42 +236,45 @@ type CrossChainMessage struct {
 	// paid regardless of whether the message calls a contract). isContractCall()==true with
 	// GasFee==0 fails closed rather than executing for free (mục 5.3 risk #9). See
 	// gateway_handler.go's executeContractCallForGateway call sites for the settlement logic.
-	GasFee  *big.Int `json:"gas_fee"`
-	Ordered bool     `json:"ordered"`
+	GasFee           *big.Int `json:"gas_fee"`
+	Ordered          bool     `json:"ordered"`
+	TimeoutTimestamp uint64   `json:"timeout_timestamp"`
 }
 
 // Custom JSON marshaler for CrossChainMessage to handle big.Int fields cleanly
 type crossChainMessageJSON struct {
-	MessageID     common.Hash    `json:"message_id"`
-	SourceChainID uint64         `json:"source_chain_id"`
-	DestChainID   uint64         `json:"dest_chain_id"`
-	Sequence      uint64         `json:"sequence"`
-	HopCount      uint8          `json:"hop_count"`
-	Sender        common.Address `json:"sender"`
-	Target        common.Address `json:"target"`
-	AssetID       *hexutil.Big   `json:"asset_id"`
-	Value         *hexutil.Big   `json:"value"`
-	Payload       hexutil.Bytes  `json:"payload"`
-	Tip           *hexutil.Big   `json:"tip"`
-	GasFee        *hexutil.Big   `json:"gas_fee"`
-	Ordered       bool           `json:"ordered"`
+	MessageID        common.Hash    `json:"message_id"`
+	SourceChainID    uint64         `json:"source_chain_id"`
+	DestChainID      uint64         `json:"dest_chain_id"`
+	Sequence         uint64         `json:"sequence"`
+	HopCount         uint8          `json:"hop_count"`
+	Sender           common.Address `json:"sender"`
+	Target           common.Address `json:"target"`
+	AssetID          *hexutil.Big   `json:"asset_id"`
+	Value            *hexutil.Big   `json:"value"`
+	Payload          hexutil.Bytes  `json:"payload"`
+	Tip              *hexutil.Big   `json:"tip"`
+	GasFee           *hexutil.Big   `json:"gas_fee"`
+	Ordered          bool           `json:"ordered"`
+	TimeoutTimestamp uint64         `json:"timeout_timestamp"`
 }
 
 func (m CrossChainMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(crossChainMessageJSON{
-		MessageID:     m.MessageID,
-		SourceChainID: m.SourceChainID,
-		DestChainID:   m.DestChainID,
-		Sequence:      m.Sequence,
-		HopCount:      m.HopCount,
-		Sender:        m.Sender,
-		Target:        m.Target,
-		AssetID:       (*hexutil.Big)(m.AssetID),
-		Value:         (*hexutil.Big)(m.Value),
-		Payload:       m.Payload,
-		Tip:           (*hexutil.Big)(m.Tip),
-		GasFee:        (*hexutil.Big)(m.GasFee),
-		Ordered:       m.Ordered,
+		MessageID:        m.MessageID,
+		SourceChainID:    m.SourceChainID,
+		DestChainID:      m.DestChainID,
+		Sequence:         m.Sequence,
+		HopCount:         m.HopCount,
+		Sender:           m.Sender,
+		Target:           m.Target,
+		AssetID:          (*hexutil.Big)(m.AssetID),
+		Value:            (*hexutil.Big)(m.Value),
+		Payload:          m.Payload,
+		Tip:              (*hexutil.Big)(m.Tip),
+		GasFee:           (*hexutil.Big)(m.GasFee),
+		Ordered:          m.Ordered,
+		TimeoutTimestamp: m.TimeoutTimestamp,
 	})
 }
 
@@ -293,6 +296,7 @@ func (m *CrossChainMessage) UnmarshalJSON(data []byte) error {
 	m.Tip = (*big.Int)(aux.Tip)
 	m.GasFee = (*big.Int)(aux.GasFee)
 	m.Ordered = aux.Ordered
+	m.TimeoutTimestamp = aux.TimeoutTimestamp
 	return nil
 }
 
@@ -322,10 +326,11 @@ type AssetEntry struct {
 type MessageStatus uint8
 
 const (
-	MessageStatusPending  MessageStatus = 0
-	MessageStatusSuccess  MessageStatus = 1
-	MessageStatusFailed   MessageStatus = 2
-	MessageStatusRefunded MessageStatus = 3
+	MessageStatusPending       MessageStatus = 0
+	MessageStatusSuccess       MessageStatus = 1
+	MessageStatusFailed        MessageStatus = 2
+	MessageStatusRefunded      MessageStatus = 3
+	MessageStatusFailedTimeout MessageStatus = 4
 )
 
 // Channel tracks message progress between source and destination chains (Section 11.6).

@@ -114,6 +114,7 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 		big.NewInt(0),      // gasFee
 		uint8(1),           // hopCount
 		false,              // ordered
+		uint64(0),          // timeoutTimestamp
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -241,6 +242,7 @@ func TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain(t *testing.T
 		calldata, err := h.abi.Pack("outbound",
 			big.NewInt(destChainID), target, []byte{}, big.NewInt(0), big.NewInt(100),
 			big.NewInt(0), big.NewInt(0), uint8(0), false,
+			uint64(0), // timeoutTimestamp
 		)
 		if err != nil {
 			t.Fatalf("pack outbound() calldata: %v", err)
@@ -368,6 +370,7 @@ func TestGatewayHandler_AttestCommitThenClaimMessage(t *testing.T) {
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), messageProofSiblings, commitRoot,
 	)
 	if err != nil {
@@ -459,6 +462,7 @@ func TestGatewayHandler_Refund(t *testing.T) {
 
 	outboundCalldata, err := h.abi.Pack("outbound",
 		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(0), big.NewInt(0), uint8(1), false,
+		uint64(0), // timeoutTimestamp
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -645,6 +649,7 @@ func TestGatewayHandler_Refund_DoesNotRestoreTipOrGasFee(t *testing.T) {
 	const gasFeeAmount = 20
 	outboundCalldata, err := h.abi.Pack("outbound",
 		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
+		uint64(0), // timeoutTimestamp
 	)
 	require.NoError(t, err)
 	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
@@ -784,6 +789,7 @@ func TestGatewayHandler_Refund_TwoHop_RestoresNothingLocally(t *testing.T) {
 	outboundCalldata, err := h.abi.Pack("outbound",
 		big.NewInt(destChainID), target, []byte{}, big.NewInt(0),
 		big.NewInt(valueAmount), big.NewInt(tipAmount), big.NewInt(gasFeeAmount), uint8(1), false,
+		uint64(0), // timeoutTimestamp
 	)
 	require.NoError(t, err)
 	outboundTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, outboundCalldata))
@@ -1206,6 +1212,7 @@ func TestGatewayHandler_OutboundFailsOnInsufficientBalance(t *testing.T) {
 
 	calldata, err := h.abi.Pack("outbound",
 		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), big.NewInt(0), uint8(1), false,
+		uint64(0), // timeoutTimestamp
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -1237,6 +1244,7 @@ func TestGatewayHandler_OutboundFailsHopCountExceededDoesNotBurn(t *testing.T) {
 	// Let's pass HopCount = 100.
 	calldata, err := h.abi.Pack("outbound",
 		big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(100), big.NewInt(10), big.NewInt(0), uint8(100), false,
+		uint64(0), // timeoutTimestamp
 	)
 	if err != nil {
 		t.Fatalf("pack outbound() calldata: %v", err)
@@ -1331,6 +1339,7 @@ func TestGatewayHandler_ClaimMessageMintsRealValue(t *testing.T) {
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	if err != nil {
@@ -1430,6 +1439,7 @@ func TestGatewayHandler_ClaimMessageRelaysOnwardViaReserve(t *testing.T) {
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -1507,6 +1517,7 @@ func TestGatewayHandler_ClaimMessageRelay_ForwardsRealPayloadAndGasFee(t *testin
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -1594,6 +1605,7 @@ func TestGatewayHandler_ClaimMessageRelay_FullTwoHopContractCall(t *testing.T) {
 		leg1Msg.MessageID, big.NewInt(int64(leg1Msg.SourceChainID)), big.NewInt(int64(leg1Msg.DestChainID)),
 		big.NewInt(int64(leg1Msg.Sequence)), leg1Msg.HopCount, leg1Msg.Sender, leg1Msg.Target,
 		leg1Msg.AssetID, leg1Msg.Value, leg1Msg.Payload, leg1Msg.Tip, leg1Msg.GasFee, leg1Msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof1.LeafIndex), hashesToBytes32(messageProof1.Siblings), commitRoot1,
 	)
 	require.NoError(t, err)
@@ -1636,6 +1648,7 @@ func TestGatewayHandler_ClaimMessageRelay_FullTwoHopContractCall(t *testing.T) {
 		leg2Msg.MessageID, big.NewInt(int64(leg2Msg.SourceChainID)), big.NewInt(int64(leg2Msg.DestChainID)),
 		big.NewInt(int64(leg2Msg.Sequence)), leg2Msg.HopCount, leg2Msg.Sender, leg2Msg.Target,
 		leg2Msg.AssetID, leg2Msg.Value, leg2Msg.Payload, leg2Msg.Tip, leg2Msg.GasFee, leg2Msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof2.LeafIndex), hashesToBytes32(messageProof2.Siblings), commitRoot2,
 	)
 	require.NoError(t, err)
@@ -1687,6 +1700,7 @@ func TestGatewayHandler_ClaimMessageRelay_RejectsSelfLoop(t *testing.T) {
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -1727,6 +1741,7 @@ func TestGatewayHandler_ClaimMessageRelay_RejectsUnknownDestination(t *testing.T
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -1932,6 +1947,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 	// 1. Outbound on Home Chain (101)
 	outboundCalldata, err := h.abi.Pack("outbound",
 		big.NewInt(int64(destChainID)), target, []byte{}, assetID, big.NewInt(100), big.NewInt(0), big.NewInt(0), uint8(1), false,
+		uint64(0), // timeoutTimestamp
 	)
 	if err != nil {
 		t.Fatalf("pack outbound: %v", err)
@@ -2000,6 +2016,7 @@ func TestGatewayHandler_CustomAsset_Outbound_ClaimMessage(t *testing.T) {
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		big.NewInt(0), [][32]byte{}, leafHash,
 	)
 	if err != nil {
@@ -2114,6 +2131,7 @@ func TestGatewayHandler_ConsecutiveTransactionsFromSameSenderAdvanceNonce(t *tes
 		calldata, err := h.abi.Pack("outbound",
 			big.NewInt(102), target, []byte{}, big.NewInt(0), big.NewInt(1),
 			big.NewInt(0), big.NewInt(0), uint8(0), false,
+			uint64(0), // timeoutTimestamp
 		)
 		if err != nil {
 			t.Fatalf("pack outbound() calldata: %v", err)

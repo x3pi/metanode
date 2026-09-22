@@ -81,7 +81,8 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
 			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "uint8", "name": "hopCount", "type": "uint8"},
-			{"internalType": "bool", "name": "ordered", "type": "bool"}
+			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint64", "name": "timeoutTimestamp", "type": "uint64"}
 		],
 		"name": "outbound",
 		"outputs": [{"internalType": "bytes32", "name": "messageId", "type": "bytes32"}],
@@ -137,6 +138,7 @@ const GatewayABI = `[
 			{"internalType": "uint256", "name": "tip", "type": "uint256"},
 			{"internalType": "uint256", "name": "gasFee", "type": "uint256"},
 			{"internalType": "bool", "name": "ordered", "type": "bool"},
+			{"internalType": "uint64", "name": "timeoutTimestamp", "type": "uint64"},
 			{"internalType": "uint256", "name": "proofLeafIndex", "type": "uint256"},
 			{"internalType": "bytes32[]", "name": "proofSiblings", "type": "bytes32[]"},
 			{"internalType": "bytes32", "name": "commitRoot", "type": "bytes32"}

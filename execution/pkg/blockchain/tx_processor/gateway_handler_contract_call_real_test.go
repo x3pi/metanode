@@ -110,6 +110,7 @@ func TestGatewayHandler_ClaimMessagePayload_ExecutesRealContractCall(t *testing.
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)
@@ -299,6 +300,7 @@ func TestGatewayHandler_ClaimMessagePayload_FailsClosedWithoutGasFee(t *testing.
 		msg.MessageID, big.NewInt(int64(msg.SourceChainID)), big.NewInt(int64(msg.DestChainID)),
 		big.NewInt(int64(msg.Sequence)), msg.HopCount, msg.Sender, msg.Target,
 		msg.AssetID, msg.Value, msg.Payload, msg.Tip, msg.GasFee, msg.Ordered,
+		uint64(0), // timeoutTimestamp
 		new(big.Int).SetUint64(messageProof.LeafIndex), hashesToBytes32(messageProof.Siblings), commitRoot,
 	)
 	require.NoError(t, err)

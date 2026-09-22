@@ -201,7 +201,7 @@ func TestRelayerDaemon_Lifecycle(t *testing.T) {
 				AggregateSignature: sig.Bytes(),
 				SignerBitmap:       []byte{0x01},
 			}
-			st, err := destEngine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, from)
+			st, err := destEngine.VerifyAndExecute(msg, aggregateProof, cert, messageProof, commitRoot, from, 0)
 			assert.NoError(t, err)
 			assert.Equal(t, cross_chain.MessageStatusSuccess, st)
 
@@ -1052,11 +1052,11 @@ func TestRelayerDaemon_WatchChainPair_RealBatchAndRelay(t *testing.T) {
 					Ordered:       args[12].(bool),
 				}
 				proof := cross_chain.MerkleProof{
-					LeafIndex: args[13].(*big.Int).Uint64(),
-					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+					LeafIndex: args[14].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[15].([][32]byte)),
 				}
-				commitRoot := common.Hash(args[15].([32]byte))
-				_, claimErr := destEngine.ClaimMessage(msg, proof, commitRoot, from)
+				commitRoot := common.Hash(args[16].([32]byte))
+				_, claimErr := destEngine.ClaimMessage(msg, proof, commitRoot, from, 0)
 				if claimErr != nil {
 					status = 0
 				}
@@ -1457,11 +1457,11 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund(t *testing.T) {
 					Ordered:       args[12].(bool),
 				}
 				proof := cross_chain.MerkleProof{
-					LeafIndex: args[13].(*big.Int).Uint64(),
-					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+					LeafIndex: args[14].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[15].([][32]byte)),
 				}
-				commitRoot := common.Hash(args[15].([32]byte))
-				_, claimErr := destEngine.ClaimMessage(claimMsg, proof, commitRoot, from)
+				commitRoot := common.Hash(args[16].([32]byte))
+				_, claimErr := destEngine.ClaimMessage(claimMsg, proof, commitRoot, from, 0)
 				if claimErr != nil {
 					status = 0
 				} else if finalizeErr := destEngine.FinalizeFailedAfterExecutionRevert(claimMsg, commitRoot, from); finalizeErr != nil {
@@ -1541,9 +1541,9 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund(t *testing.T) {
 // asserts Reserve's own engine ends up with a fresh, real Value-only outbound refund message
 // queued back to A, proving the loop that actually returns Value to the user is really wired up.
 func TestRelayerDaemon_ClaimMessageFails_PursuesRefund_TwoHop(t *testing.T) {
-	const sourceChainID = 971   // A
-	const reserveChainID = 972  // Reserve
-	const destChainID = 973     // B
+	const sourceChainID = 971  // A
+	const reserveChainID = 972 // Reserve
+	const destChainID = 973    // B
 	const epoch = uint64(0)
 	const valueAmount = 500
 
@@ -1939,9 +1939,9 @@ func TestRelayerDaemon_ClaimMessageFails_PursuesRefund_TwoHop(t *testing.T) {
 					AssetID: args[7].(*big.Int), Value: args[8].(*big.Int), Payload: args[9].([]byte),
 					Tip: args[10].(*big.Int), GasFee: args[11].(*big.Int), Ordered: args[12].(bool),
 				}
-				proof := cross_chain.MerkleProof{LeafIndex: args[13].(*big.Int).Uint64(), Siblings: bytes32SliceToHashes(args[14].([][32]byte))}
-				commitRoot := common.Hash(args[15].([32]byte))
-				_, claimErr := destEngine.ClaimMessage(claimMsg, proof, commitRoot, from)
+				proof := cross_chain.MerkleProof{LeafIndex: args[14].(*big.Int).Uint64(), Siblings: bytes32SliceToHashes(args[15].([][32]byte))}
+				commitRoot := common.Hash(args[16].([32]byte))
+				_, claimErr := destEngine.ClaimMessage(claimMsg, proof, commitRoot, from, 0)
 				if claimErr != nil {
 					status = 0
 				} else if finalizeErr := destEngine.FinalizeFailedAfterExecutionRevert(claimMsg, commitRoot, from); finalizeErr != nil {
@@ -2217,15 +2217,15 @@ func TestRelayerDaemon_TwoConcurrentInstances_NoDoubleProcessing(t *testing.T) {
 					Ordered:       args[12].(bool),
 				}
 				proof := cross_chain.MerkleProof{
-					LeafIndex: args[13].(*big.Int).Uint64(),
-					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+					LeafIndex: args[14].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[15].([][32]byte)),
 				}
-				cr := common.Hash(args[15].([32]byte))
+				cr := common.Hash(args[16].([32]byte))
 				// The engine's own g.mu.Lock() inside ClaimMessage is what actually decides the
 				// race -- exactly one of the two concurrent callers should get MessageStatusPending
 				// -> Success and credit `from`'s tip; the other must get ErrAlreadyClaimed
 				// (ClaimMessage's ErrAlreadyClaimed check), never a double-credit.
-				_, claimErr := destEngine.ClaimMessage(msg, proof, cr, from)
+				_, claimErr := destEngine.ClaimMessage(msg, proof, cr, from, 0)
 				if claimErr != nil {
 					status = 0
 				}

@@ -46,16 +46,17 @@ var (
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
 type OutboundParams struct {
-	DestChainID uint64         `json:"dest_chain_id"`
-	Target      common.Address `json:"target"`
-	Payload     []byte         `json:"payload"`
-	AssetID     *big.Int       `json:"asset_id"`
-	Value       *big.Int       `json:"value"`
-	Tip         *big.Int       `json:"tip"`
-	GasFee      *big.Int       `json:"gas_fee"`
-	HopCount    uint8          `json:"hop_count"`
-	Ordered     bool           `json:"ordered"`
-	OriginalID  *common.Hash   `json:"original_id,omitempty"` // Preserves MessageID across relay hops
+	DestChainID      uint64         `json:"dest_chain_id"`
+	Target           common.Address `json:"target"`
+	Payload          []byte         `json:"payload"`
+	AssetID          *big.Int       `json:"asset_id"`
+	Value            *big.Int       `json:"value"`
+	Tip              *big.Int       `json:"tip"`
+	GasFee           *big.Int       `json:"gas_fee"`
+	HopCount         uint8          `json:"hop_count"`
+	Ordered          bool           `json:"ordered"`
+	TimeoutTimestamp uint64         `json:"timeout_timestamp"`
+	OriginalID       *common.Hash   `json:"original_id,omitempty"` // Preserves MessageID across relay hops
 }
 
 // CrossChainContext stores execution context accessible via GetOriginalSender / IsCalledByGateway.
@@ -1292,6 +1293,7 @@ func (g *GatewayEngine) ClaimMessage(
 	proof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
+	blockTime uint64,
 ) (MessageStatus, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1328,6 +1330,11 @@ func (g *GatewayEngine) ClaimMessage(
 
 	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
 		return MessageStatusPending, ErrInvalidMerkleProof
+	}
+
+	if message.TimeoutTimestamp > 0 && blockTime > message.TimeoutTimestamp {
+		g.MessageStatus[message.MessageID] = MessageStatusFailedTimeout
+		return MessageStatusFailedTimeout, nil
 	}
 
 	// SECURITY FIX (cross-chain audit): destination-chain binding must be checked for EVERY
@@ -2021,11 +2028,12 @@ func (g *GatewayEngine) VerifyAndExecute(
 	messageProof MerkleProof,
 	commitRoot common.Hash,
 	relayer common.Address,
+	blockTime uint64,
 ) (MessageStatus, error) {
 	if _, err := g.AttestCommit(message.SourceChainID, commitRoot, message.Value, message.AssetID, aggregateProof, cert); err != nil {
 		return MessageStatusPending, err
 	}
-	return g.ClaimMessage(message, messageProof, commitRoot, relayer)
+	return g.ClaimMessage(message, messageProof, commitRoot, relayer, blockTime)
 }
 
 // ClaimDeadChainBalance allows user to recover funds on Reserve using account-tree Merkle proof (P2.8).

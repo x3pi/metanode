@@ -204,11 +204,11 @@ func TestRelayerDaemon_UnrelayedBatchSurvivesProcessRestart(t *testing.T) {
 					Ordered:       args[12].(bool),
 				}
 				proof := cross_chain.MerkleProof{
-					LeafIndex: args[13].(*big.Int).Uint64(),
-					Siblings:  bytes32SliceToHashes(args[14].([][32]byte)),
+					LeafIndex: args[14].(*big.Int).Uint64(),
+					Siblings:  bytes32SliceToHashes(args[15].([][32]byte)),
 				}
-				cr := common.Hash(args[15].([32]byte))
-				_, claimErr := destEngine.ClaimMessage(msg, proof, cr, from)
+				cr := common.Hash(args[16].([32]byte))
+				_, claimErr := destEngine.ClaimMessage(msg, proof, cr, from, 0)
 				if claimErr != nil {
 					status = 0
 				}
