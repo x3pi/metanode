@@ -279,23 +279,23 @@ có gap ở đây, đây là điểm dự án đã làm đúng ngay từ đầu,
    `saveGatewayEngine` + không emit `MessageStatusChanged` — trạng thái bị âm thầm mất, observer
    không thấy; (c) tính năng rate-limit đi kèm (xem mục 5 dưới) có lỗi kiến trúc gốc, đã bỏ hẳn. Chi
    tiết đầy đủ trong commit message `5ab51458`, không lặp lại ở đây.
-5. **⚠️ ĐÃ THỬ, ĐÃ BỎ (2026-09-22) — phát hiện lỗi kiến trúc gốc, cần thiết kế lại chứ không phải
-   chỉnh tham số.** Bản WIP ban đầu implement rate-limit bằng cách check
-   `PerChainAllocation[destChainID]` (sai chain) ngay tại `outbound()` handler trên chain NGUỒN. Sửa
-   thành `PerChainAllocation[engine.LocalChainID]` (đúng chain) vẫn KHÔNG chạy được — xác nhận bằng
-   chính test suite hiện có: entry đó trên bản sao LOCAL của 1 chain thường (không phải Reserve)
-   thường là 0, vì theo đúng kiến trúc đã audit trước đó (`CreditReserveAllocation`'s doc comment),
-   ceiling thật của 1 chain X chỉ có ý nghĩa authoritative trên bản sao của RESERVE, không phải trên
-   bản sao của chính X — check tại `outbound()` (chạy trên X, không phải Reserve) về bản chất luôn so
-   với 1 con số gần như luôn = 0 → **chặn cứng gần như MỌI giao dịch outbound() có Value > 0** (xác
-   nhận bằng hàng chục test thật FAIL ngay khi thêm check này). Đã gỡ bỏ hoàn toàn (không chỉ tắt) để
-   không vô tình bị bật lại. **Thiết kế đúng cho tính năng này:** check phải chạy Ở RESERVE, bên
-   trong `attestCommitInternal` (nơi ceiling thật `PerChainAllocation[sourceChainID]` đã được
-   debit/check — mục 5.5.B của `shard_design_ton_real.md` mô tả đúng vị trí này cho thiết kế shard
-   tương lai), không phải tại `outbound()` trên chain nguồn. Vẫn là quyết định kinh tế/vận hành
-   (ngưỡng bao nhiêu %, theo cửa sổ thời gian nào) CẦN user chốt trước, cộng thêm giờ còn cần 1
-   quyết định kiến trúc (đặt check ở attestCommitInternal thay vì outbound) — độ ưu tiên không đổi,
-   nhưng phạm vi thực hiện lớn hơn ước tính ban đầu.
+5. **✅ ĐÃ LÀM (2026-09-22, commit `e23eaac8`)** — lần thử đầu (WIP của agent khác) có lỗi kiến trúc
+   gốc: check `PerChainAllocation[destChainID]` (sai chain), và ngay cả sửa thành
+   `PerChainAllocation[engine.LocalChainID]` cũng KHÔNG chạy được vì đặt tại `outbound()` trên chain
+   NGUỒN — entry đó trên bản sao LOCAL của 1 chain thường (không phải Reserve) hầu như luôn = 0
+   (đúng theo kiến trúc `CreditReserveAllocation`'s doc comment đã audit trước đó: ceiling thật của 1
+   chain X chỉ authoritative trên bản sao của RESERVE) → **chặn cứng gần như MỌI outbound() có
+   Value > 0** (xác nhận bằng hàng chục test FAIL thật). Đã thiết kế lại đúng chỗ: check nằm TRONG
+   `attestCommitInternal`'s `enforceCeiling` branch (chỉ chạy khi `AttestCommit()` được gọi trên
+   chính Reserve, qua C8 gate) — cùng biến `currentAlloc` authoritative mà hard-cap check hiện có
+   đang dùng, cùng dòng code, không phải bản sao lệch chain nào. User chốt: hard reject (không dùng
+   Time-Delayed Queue) + 20%/24h (khớp `shard_design_ton_real.md` mục 5.5.D). Điểm thiết kế thêm
+   (không có trong bản thử đầu): ngưỡng 20% chốt CỐ ĐỊNH lúc cửa sổ mở (`OutflowWindowBaseAlloc`),
+   không tính lại theo `currentAlloc` đang co lại sau mỗi lần debit trong cùng cửa sổ — nếu không sẽ
+   tạo giới hạn "co ngót" khó đoán (phát hiện + tự sửa ngay trong phiên này, trước khi commit). Test
+   mới: `TestGateway_VelocityLimit_CapsOutflowPer24hWindow`. 2 test cũ giả định rút 100% ceiling
+   trong 1 lần đã được viết lại để phản ánh đúng 2 lớp phòng thủ độc lập (hard cap + velocity) thay
+   vì chỉ patch cho qua compile.
 
 ### 3.3 Không khuyến nghị (đã cân nhắc, không áp dụng)
 - **Risk Management Network kiểu CCIP riêng biệt** (mục 2.2) — quá nặng so với quy mô mạng riêng
