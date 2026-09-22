@@ -251,9 +251,19 @@ có gap ở đây, đây là điểm dự án đã làm đúng ngay từ đầu,
    sẵn: `ChainID==0` bị reject (dòng 672-674, kể cả sau khi alias từ `SourceChainID`), epoch phải
    tăng nghiêm ngặt (dòng 688-690, có test `RejectsReplayAsRollback`), `ValidateQuorumThreshold`
    chặn floor 2/3 (dòng 698-699). **Kết luận: không có gap, không cần sửa gì.**
-3. **Xác nhận vận hành `RecoveryCommittee`**: bao nhiêu member, threshold bao nhiêu, khoá lưu ở đâu
-   (mục 1.2/1.5) — đây là câu hỏi cho người vận hành, không phải code, nhưng là điểm tập trung rủi ro
-   cao nhất nếu câu trả lời xấu.
+3. **✅ ĐÃ XÁC NHẬN (2026-09-22) — đây là devnet default, chưa phải cấu hình production.** Đọc trực
+   tiếp deploy tooling (không phải khuyến nghị): 4 thành viên, stake bằng nhau (1000/người,
+   `gen_recovery_committee/main.go:38`), threshold 6667/10000 (`inject_recovery_committee.py:71`) →
+   cần đúng 3/4 mới đạt quorum. Khoá private hiện **plaintext trên đĩa**, quyền file `600`, tại
+   `deploy/systemd/recovery_committee_keys/member_{0..3}/` — KHÔNG phải HSM/air-gapped/MPC. Độc lập
+   với khoá validator consensus chính (fix có chủ đích 2026-09-04, đúng tinh thần tránh gộp quyền
+   kiểu Ronin). Đường production đã có sẵn sẵn nhưng CHƯA được dùng:
+   `recovery_committee_json_override_file` (đã xác nhận `deploy/ansible/recovery_committee_public.json`
+   hiện tại chỉ chứa public key + PoP, không có private key) — doc của chính script khuyến nghị sinh
+   khoá thật hoàn toàn ngoài băng thông (air-gapped, 1 người 1 khoá vật lý) trước khi dùng cho giá
+   trị thật. **Rủi ro Ronin/Harmony (mục 1.2/1.5) áp dụng NẾU cluster này lên production với setup
+   khoá hiện tại** (đe doạ chính: 4 khoá nằm cùng 1 máy — compromise máy đó có ngay 4/4, vượt xa
+   ngưỡng 3/4 cần); KHÔNG áp dụng nếu vẫn chỉ là devnet/local-cluster như hiện tại.
 
 ### 3.2 Cần quyết định thiết kế trước khi làm (không tự ý code)
 4. **✅ ĐÃ LÀM (2026-09-22, commit `5ab51458`)** — Packet-timeout ở tầng ứng dụng (mục 2.1, học từ
