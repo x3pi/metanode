@@ -559,6 +559,20 @@ func (d *RelayerDaemon) RelayBatch(
 		return fmt.Errorf("poll and aggregate QuorumCert: %w", err)
 	}
 
+	// SECURITY FIX (cross-chain audit, found reviewing the new velocity-limit's interaction with
+	// this daemon): an on-chain revert of attestCommit/attestReserveIssuedCommit/claimMessage used
+	// to be logged and swallowed here, so this function always returned nil -- BatchAndRelay then
+	// deleted this batch's ONLY retry record (unrelayedBatches) believing everything succeeded,
+	// even though the reverted messages are still MessageStatusPending on-chain with no
+	// AttestedCommits entry to ever claim against. Once batched, a message is no longer counted by
+	// getPendingOutboundCount either, so nothing else would ever pick it up again -- a real,
+	// permanent fund lock. A legitimate, non-malicious batch can now hit this for real: the 24h/20%
+	// velocity limit (gateway.go's checkAndRecordVelocity) can correctly reject attestCommit for a
+	// perfectly valid large batch. unresolved tracks whether anything in this batch still needs a
+	// retry; the messages themselves are safe either way (nothing here mutates state on a revert),
+	// this only fixes whether the daemon REMEMBERS to try again.
+	unresolved := false
+
 	attestedAssets := make(map[string]bool)
 	for _, msg := range messages {
 		assetIDStr := "0"
@@ -596,6 +610,7 @@ func (d *RelayerDaemon) RelayBatch(
 				return fmt.Errorf("attestCommit on reserve (%d) for assetId %s: %w", d.config.ReserveChainID, assetIDStr, err)
 			}
 			if reserveReceipt.Status != 1 {
+				unresolved = true
 				logger.Info("ℹ️ [RELAYER DAEMON] reserve attestCommit for chain %d asset %s reverted: %s", sourceChainID, assetIDStr, DecodeRevertReason(reserveReceipt.Return))
 			}
 
@@ -614,6 +629,7 @@ func (d *RelayerDaemon) RelayBatch(
 					return fmt.Errorf("attestReserveIssuedCommit on dest (%d) for assetId %s: %w", destChainID, assetIDStr, err)
 				}
 				if destReceipt.Status != 1 {
+					unresolved = true
 					logger.Info("ℹ️ [RELAYER DAEMON] dest attestReserveIssuedCommit for chain %d asset %s reverted: %s", destChainID, assetIDStr, DecodeRevertReason(destReceipt.Return))
 				}
 			}
@@ -633,6 +649,7 @@ func (d *RelayerDaemon) RelayBatch(
 				return fmt.Errorf("%s for assetId %s: %w", attestMethod, assetIDStr, err)
 			}
 			if receipt.Status != 1 {
+				unresolved = true
 				logger.Info("ℹ️ [RELAYER DAEMON] %s for chain %d asset %s reverted: %s", attestMethod, sourceChainID, assetIDStr, DecodeRevertReason(receipt.Return))
 			}
 		}
@@ -654,10 +671,20 @@ func (d *RelayerDaemon) RelayBatch(
 		}
 		receipt, err := d.sendToChainAndWait(ctx, destChainID, claimCalldata, 3_000_000)
 		if err != nil {
+			unresolved = true
 			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s failed to send: %v", msg.MessageID.Hex(), err)
 			continue
 		}
 		if receipt.Status != 1 {
+			// A claimMessage revert is not always a real problem: ClaimMessage's own idempotency
+			// guard reverts a second, race-losing claim attempt for a message another relayer (or
+			// another instance of this same daemon) already resolved in the meantime -- harmless,
+			// nothing to retry. Only mark this batch unresolved if the message is STILL genuinely
+			// Pending, meaning this revert reflects a real, unresolved problem (bad proof, expired
+			// commit, etc.) rather than a benign double-submit race.
+			if d.getMessageStatus(ctx, destClient, msg.MessageID) == cross_chain.MessageStatusPending {
+				unresolved = true
+			}
 			logger.Warn("⚠️ [RELAYER DAEMON] claimMessage for %s reverted: %s", msg.MessageID.Hex(), DecodeRevertReason(receipt.Return))
 			continue
 		}
@@ -736,6 +763,9 @@ func (d *RelayerDaemon) RelayBatch(
 				}
 			}
 		}
+	}
+	if unresolved {
+		return fmt.Errorf("RelayBatch: at least one attestCommit/attestReserveIssuedCommit/claimMessage in this batch reverted or failed to send (see warnings above) -- batch kept queued for retry")
 	}
 	return nil
 }
@@ -870,7 +900,11 @@ func (d *RelayerDaemon) pollAndAggregateFailureCert(
 		return nil, fmt.Errorf("committee for chain %d has 0 total stake", destChainID)
 	}
 
-	threshold := (totalStake*2 + 2) / 3
+	// Must match gateway.go's VerifyQuorumCertAgainstRegistry canonical formula exactly -- the
+	// old (totalStake*2+2)/3 fallback diverges from (2*TotalStake)/3+1 whenever totalStake is a
+	// multiple of 3, letting the daemon believe it has quorum one stake-unit early and submit a
+	// cert the on-chain check then rejects (fails closed, but wastes a broadcast and a poll cycle).
+	threshold := (totalStake*2)/3 + 1
 	if reg.QuorumThreshold > 0 {
 		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
 	}
@@ -962,7 +996,11 @@ func (d *RelayerDaemon) pollAndAggregateSuccessCert(
 		return nil, fmt.Errorf("committee for chain %d has 0 total stake", destChainID)
 	}
 
-	threshold := (totalStake*2 + 2) / 3
+	// Must match gateway.go's VerifyQuorumCertAgainstRegistry canonical formula exactly -- the
+	// old (totalStake*2+2)/3 fallback diverges from (2*TotalStake)/3+1 whenever totalStake is a
+	// multiple of 3, letting the daemon believe it has quorum one stake-unit early and submit a
+	// cert the on-chain check then rejects (fails closed, but wastes a broadcast and a poll cycle).
+	threshold := (totalStake*2)/3 + 1
 	if reg.QuorumThreshold > 0 {
 		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
 	}
@@ -1277,7 +1315,11 @@ func (d *RelayerDaemon) pollAndAggregateCommitCert(
 		return nil, fmt.Errorf("committee for chain %d has 0 total stake", sourceChainID)
 	}
 
-	threshold := (totalStake*2 + 2) / 3
+	// Must match gateway.go's VerifyQuorumCertAgainstRegistry canonical formula exactly -- the
+	// old (totalStake*2+2)/3 fallback diverges from (2*TotalStake)/3+1 whenever totalStake is a
+	// multiple of 3, letting the daemon believe it has quorum one stake-unit early and submit a
+	// cert the on-chain check then rejects (fails closed, but wastes a broadcast and a poll cycle).
+	threshold := (totalStake*2)/3 + 1
 	if reg.QuorumThreshold > 0 {
 		threshold = (totalStake*reg.QuorumThreshold + 9999) / 10000
 	}
