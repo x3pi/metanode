@@ -484,11 +484,29 @@ func isContractCall(chainState *blockchain.ChainState, target common.Address) bo
 // see the CONTRACT_CALL call sites in claimMessage/verifyAndExecute) can settle/refund the
 // unused portion. Most callers (custom-asset transfer/mint, which use fixed internally-built
 // callData with no attacker-controlled gas-cost risk) simply ignore it.
+//
+// sourceChainID is the ORIGINAL cross-chain message's SourceChainID, non-zero only when this
+// call is executing a real cross-chain message's Payload on behalf of its original remote sender
+// (the claimMessage/verifyAndExecute CONTRACT_CALL branches). Pass 0 for every other caller
+// (internal Gateway-initiated transferFrom/transfer/mint calls against a token contract) -- those
+// are not cross-chain payload executions and must not expose a cross-chain context to the callee.
+//
+// SECURITY FIX (cross-chain audit): before this fix, the target contract's
+// CROSS_CHAIN_CONTEXT.getOriginalSender()/getSourceChainId() precompile calls were unconditionally
+// unreachable in production -- MVMApi.SetCrossChainContext was never called anywhere outside a
+// test harness, so any Solidity contract gating logic on the caller's real cross-chain identity
+// always saw a failed/empty precompile result.
 func executeContractCallForGateway(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64, sender common.Address, target common.Address, payload []byte, amount *big.Int, gasLimit uint64,
+	sourceChainID uint64,
 ) (uint64, error) {
 	_, mvmE := createVmProcessorForGateway(ctx, chainState, tx, blockTime)
+
+	if sourceChainID != 0 {
+		mvmE.SetCrossChainContext(sender, sourceChainID)
+		defer mvmE.ClearCrossChainContext()
+	}
 
 	lastBlockHeader := *chainState.GetcurrentBlockHeader()
 	leaderAddr := lastBlockHeader.LeaderAddress()
@@ -551,12 +569,13 @@ func executeContractCallForGateway(
 func settleGasCappedContractCall(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction,
 	blockTime uint64, msgSender common.Address, target common.Address, payload []byte, gasFee *big.Int,
+	sourceChainID uint64,
 ) (executionReverted bool, err error) {
 	if gasFee == nil || gasFee.Sign() <= 0 {
 		return false, fmt.Errorf("CONTRACT_CALL requires a locked gasFee (mục 2.6.5): got %v", gasFee)
 	}
 	gasCap := new(big.Int).Div(gasFee, big.NewInt(mt_common.MINIMUM_BASE_FEE)).Uint64()
-	gasUsed, execErr := executeContractCallForGateway(ctx, chainState, tx, blockTime, msgSender, target, payload, big.NewInt(0), gasCap)
+	gasUsed, execErr := executeContractCallForGateway(ctx, chainState, tx, blockTime, msgSender, target, payload, big.NewInt(0), gasCap, sourceChainID)
 
 	spent := new(big.Int).Mul(new(big.Int).SetUint64(gasUsed), big.NewInt(mt_common.MINIMUM_BASE_FEE))
 	unused := new(big.Int).Sub(gasFee, spent)
@@ -774,7 +793,7 @@ func (h *GatewayHandler) handleWrite(
 				// standards-compliant ERC-20, confirmed by a real deployed-contract test
 				// reverting with ERR_EXECUTION_REVERTED before this fix.
 				if _, err := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); err != nil {
 					return nil, nil, fmt.Errorf("outbound custom asset transferFrom failed: %w", err)
 				}
@@ -966,7 +985,7 @@ func (h *GatewayHandler) handleWrite(
 		} else if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			// Sender of the internal EVM call is msg.Sender (the original sender on source chain)
 			reverted, execErr := settleGasCappedContractCall(
-				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee, msg.SourceChainID,
 			)
 			if execErr != nil {
 				// A genuine infra/precondition failure (e.g. missing locked GasFee, or the gas
@@ -1039,7 +1058,7 @@ func (h *GatewayHandler) handleWrite(
 				// (which doesn't hold the locked tokens — the Gateway does), not the vault's;
 				// and any real access-controlled mint() would reject a non-Gateway caller.
 				if _, execErr := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); execErr != nil {
 					// SECURITY FIX (2026-09-05, finding #1): a business-logic revert of the
 					// vault/wrapped-token contract's own transfer()/mint() (e.g. paused,
@@ -1249,7 +1268,7 @@ func (h *GatewayHandler) handleWrite(
 					// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 					// full reasoning.
 					if _, err := executeContractCallForGateway(
-						ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(),
+						ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, sourceContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 					); err != nil {
 						return nil, nil, fmt.Errorf("refund custom asset restoration failed: %w", err)
 					}
@@ -1836,7 +1855,7 @@ func (h *GatewayHandler) handleWrite(
 		// Task 1.3: Contract Call (only for Native or Pure messages)
 		if (msg.AssetID == nil || msg.AssetID.Sign() == 0) && len(msg.Payload) > 0 && isContractCall(chainState, msg.Target) {
 			reverted, execErr := settleGasCappedContractCall(
-				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee,
+				ctx, chainState, tx, blockTime, msg.Sender, msg.Target, msg.Payload, msg.GasFee, msg.SourceChainID,
 			)
 			if execErr != nil {
 				return nil, nil, fmt.Errorf("verifyAndExecute payload execution failed: %v", execErr)
@@ -1895,7 +1914,7 @@ func (h *GatewayHandler) handleWrite(
 				// tx.FromAddress() — see the outbound() transferFrom fix comment above for the
 				// full reasoning.
 				if _, execErr := executeContractCallForGateway(
-					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(),
+					ctx, chainState, tx, blockTime, mt_common.GATEWAY_CONTRACT_ADDRESS, targetContract, callData, big.NewInt(0), tx.MaxGas(), 0,
 				); execErr != nil {
 					// SECURITY FIX (2026-09-05, finding #1): finalize Failed instead of
 					// hard-reverting -- see the identical claimMessage custom-asset handling.

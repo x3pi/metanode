@@ -58,6 +58,12 @@ func TestGatewayHandler_BatchOutboundCommit_EndToEnd(t *testing.T) {
 	popSig := cross_chain.PopSign(kp.PrivateKey(), kp.PublicKey())
 	destEngine, err := loadGatewayEngine(csDest)
 	require.NoError(t, err)
+	// Give the destination chain its own real LocalChainID (defaults to 0 otherwise, same as
+	// sourceEngine above). This test used to pass without it only because ClaimMessage's
+	// destination-chain binding check ran solely for Value > 0 messages (cross-chain audit fix) --
+	// these 2 messages are zero-value pure CONTRACT_CALLs, so the mismatch (claiming engine 0 vs.
+	// real destChainID 402) was never actually caught before.
+	destEngine.LocalChainID = destChainID
 	destEngine.ChainRegistry[sourceChainID] = cross_chain.ChainRegistry{
 		ChainID: sourceChainID,
 		Committee: []cross_chain.ValidatorEntry{

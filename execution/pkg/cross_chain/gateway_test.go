@@ -646,6 +646,10 @@ func TestGateway_RefundReserveAllocation_ReversesCreditAndEmitsRefund(t *testing
 	refundTxHash := common.HexToHash("0xCCCC")
 	require.NoError(t, engine.RefundReserveAllocation(msg, proof, commitRoot, genuineFailCert, refundTxHash))
 	assert.Zero(t, engine.SupplyLedger.GetAllocation(103).Sign(), "B's Reserve-side credit must be fully reversed")
+	// SECURITY FIX (cross-chain audit): A's own ceiling on Reserve's authoritative ledger, debited
+	// by AttestCommit(101, ...) above (5000 -> 4700), must be restored on a genuine refund -- the
+	// missing source-side counterpart to CreditReserveAllocation's destination-side credit.
+	assert.Equal(t, big.NewInt(5000), engine.SupplyLedger.GetAllocation(101), "A's own Reserve-side ceiling debited by AttestCommit must be restored on genuine refund")
 	assert.Equal(t, MessageStatusRefunded, engine.GetMessageStatus(msg.MessageID))
 
 	pending := engine.PendingOutboundMessages[101]
@@ -1454,4 +1458,170 @@ func TestGateway_UpdateCommitteeWithRecoveryCert_RecoversChainStuckManyEpochsBeh
 	assert.Equal(t, uint64(500), reg.Epoch, "chain recovered to the current epoch despite the 495-epoch gap")
 	assert.Equal(t, 1, len(reg.Committee))
 	assert.Equal(t, kpNew.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
+}
+
+// TestGateway_ClaimMessage_BadProofDoesNotBurnClaimedAmountCap is the regression test for the
+// cross-chain audit finding: ClaimMessage used to debit and persist attested.ClaimedAmount against
+// the commit's FundedAmount cap BEFORE verifying the Merkle proof, with no rollback on proof
+// failure. Anyone who could read a real attested commit's public key (sourceChainID, commitRoot,
+// assetID) could repeatedly call ClaimMessage with a garbage proof, silently burning the whole
+// FundedAmount headroom and permanently blocking every legitimate claim with
+// ErrAllocationExceeded. The fix moves proof verification before the hard-cap debit.
+func TestGateway_ClaimMessage_BadProofDoesNotBurnClaimedAmountCap(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	relayer := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
+		SourceChainID: 101,
+		DestChainID:   102,
+		Sender:        sender,
+		Target:        target,
+		Payload:       []byte{},
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(500),
+		Sequence:      1,
+		Tip:           big.NewInt(0),
+		HopCount:      1,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	realProof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	require.NoError(t, errAttest)
+
+	// Attacker repeatedly submits the SAME message with a garbage proof -- must reject with
+	// ErrInvalidMerkleProof and must NOT touch ClaimedAmount.
+	badProof := MerkleProof{LeafIndex: realProof.LeafIndex, Siblings: []common.Hash{common.HexToHash("0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD")}}
+	for i := 0; i < 3; i++ {
+		_, errBad := engine.ClaimMessage(msg, badProof, commitRoot, relayer)
+		assert.ErrorIs(t, errBad, ErrInvalidMerkleProof)
+	}
+
+	// The REAL claim for the full funded amount (500) must still succeed -- proving the repeated
+	// bad-proof attempts above never burned the commit's ClaimedAmount headroom.
+	status, errClaim := engine.ClaimMessage(msg, realProof, commitRoot, relayer)
+	require.NoError(t, errClaim)
+	assert.Equal(t, MessageStatusSuccess, status)
+}
+
+// TestGateway_ClaimMessage_RejectsWrongDestinationForZeroValueMessage is the regression test for
+// the cross-chain audit finding: the message.DestChainID == g.LocalChainID binding check used to
+// live only inside the `message.Value.Sign() > 0` branch, so a zero-value CONTRACT_CALL message
+// could be claimed (and its ActiveContext{OriginalSender, SourceChainID} trusted) on ANY chain
+// holding a matching AttestedCommits entry via the 2-hop fallback lookup, not just its real
+// DestChainID -- a message-redirection / authorization bypass.
+func TestGateway_ClaimMessage_RejectsWrongDestinationForZeroValueMessage(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	relayer := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// Zero-value pure CONTRACT_CALL message whose REAL destination is chain 999, not this
+	// engine's own chain (102).
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"),
+		SourceChainID: 101,
+		DestChainID:   999,
+		Sender:        sender,
+		Target:        target,
+		Payload:       []byte{0x01},
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(0),
+		Sequence:      1,
+		HopCount:      1,
+	}
+
+	commitRoot, layers, aggAmounts, aggIndex, errTree := BuildCommitTree([]CrossChainMessage{msg})
+	require.NoError(t, errTree)
+	proof := GetMerkleProof(layers, 0)
+	aggregateProof := GetMerkleProof(layers, aggIndex["0"])
+
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), commitRoot.Bytes()...)
+	sig := bls.Sign(kp.PrivateKey(), commitMsg)
+	cert := QuorumCert{Epoch: 5, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x0F}}
+	// aggregateAmount is 0 for an all-zero-value commit, so this attests cleanly on chain 102 even
+	// though 102 is not the message's real DestChainID (999) -- exactly the scenario a malicious
+	// or merely-misconfigured relayer could reach.
+	_, errAttest := engine.AttestCommit(101, commitRoot, aggAmounts["0"], big.NewInt(0), aggregateProof, cert)
+	require.NoError(t, errAttest)
+
+	_, errClaim := engine.ClaimMessage(msg, proof, commitRoot, relayer)
+	assert.Error(t, errClaim, "claiming on the wrong destination chain must be rejected even for a zero-value message")
+	assert.NotEqual(t, MessageStatusSuccess, engine.GetMessageStatus(msg.MessageID))
+}
+
+// TestVerifyQuorumCertAgainstRegistry_MatchesCanonicalThresholdAtMultipleOfThree is the regression
+// test for the cross-chain audit finding: the default quorum formula (totalStake*2+2)/3 diverges
+// from RootAnchorCommittee.BftQuorumThreshold()'s canonical (2*TotalStake)/3+1 whenever totalStake
+// is a multiple of 3 (totalStake=3: old formula gives 2, canonical gives 3), accepting one unit
+// less stake than the project's own defined 2f+1 BFT-safe threshold.
+func TestVerifyQuorumCertAgainstRegistry_MatchesCanonicalThresholdAtMultipleOfThree(t *testing.T) {
+	kp1 := bls.GenerateKeyPair()
+	kp2 := bls.GenerateKeyPair()
+	kp3 := bls.GenerateKeyPair()
+
+	registry := ChainRegistry{
+		ChainID: 301,
+		Epoch:   1,
+		Committee: []ValidatorEntry{
+			{PubkeyBLS: kp1.PublicKey().Bytes(), Stake: 1},
+			{PubkeyBLS: kp2.PublicKey().Bytes(), Stake: 1},
+			{PubkeyBLS: kp3.PublicKey().Bytes(), Stake: 1},
+		},
+		// No QuorumThreshold override -- exercises the default formula directly.
+	}
+
+	digest := []byte("test-digest-multiple-of-three")
+	sig1 := bls.Sign(kp1.PrivateKey(), digest)
+	sig2 := bls.Sign(kp2.PrivateKey(), digest)
+
+	// Only 2 of 3 stake units sign -- must be rejected: below the canonical 2f+1 = 3 threshold.
+	aggSig2 := bls.CreateAggregateSign([][]byte{sig1.Bytes(), sig2.Bytes()})
+	cert2 := QuorumCert{Epoch: 1, AggregateSignature: aggSig2, SignerBitmap: []byte{0x03}}
+	errQuorum := VerifyQuorumCertAgainstRegistry(registry, cert2, digest)
+	assert.ErrorIs(t, errQuorum, ErrQuorumNotReached)
+
+	// All 3 stake units sign -- must pass.
+	sig3 := bls.Sign(kp3.PrivateKey(), digest)
+	aggSig3 := bls.CreateAggregateSign([][]byte{sig1.Bytes(), sig2.Bytes(), sig3.Bytes()})
+	cert3 := QuorumCert{Epoch: 1, AggregateSignature: aggSig3, SignerBitmap: []byte{0x07}}
+	require.NoError(t, VerifyQuorumCertAgainstRegistry(registry, cert3, digest))
+}
+
+// TestGateway_Refund_NilAssetIDDoesNotPanic is the regression test for the cross-chain audit
+// finding: Refund() called message.AssetID.String() with no nil check, unlike every sibling
+// function in this file (ClaimMessage, RefundReserveAllocation, CreditReserveAllocation), which
+// all guard AssetID with an explicit nil check first -- reachable whenever CommittedBatches
+// doesn't have the commit (a documented-reachable path for commits predating CommittedBatches
+// tracking) and the caller passes a message with a nil AssetID.
+func TestGateway_Refund_NilAssetIDDoesNotPanic(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	target := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	msg := CrossChainMessage{
+		MessageID:     common.HexToHash("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+		SourceChainID: engine.LocalChainID,
+		DestChainID:   101,
+		Sender:        sender,
+		Target:        target,
+		Payload:       []byte{},
+		AssetID:       nil,
+		Value:         big.NewInt(100),
+		Sequence:      1,
+	}
+
+	require.NotPanics(t, func() {
+		err := engine.Refund(msg, MerkleProof{}, common.HexToHash("0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"), QuorumCert{})
+		assert.Error(t, err)
+	})
 }

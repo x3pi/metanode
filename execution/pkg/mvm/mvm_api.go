@@ -1705,18 +1705,13 @@ func GetCrossChainSender(mvmId *C.uchar) C.struct_Value_return {
 	fmvmId := common.BytesToAddress(bmvmId)
 	mvmApi := GetMVMApi(fmvmId)
 
-	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] GetCrossChainSender called for mvmId: %s\n", fmvmId.Hex())
-
 	if mvmApi == nil || !mvmApi.crossChainActive {
-		fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ⚠️ mvmApi == nil (%v) OR !crossChainActive for mvmId: %s\n", mvmApi == nil, fmvmId.Hex())
 		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
 	}
 
 	// ABI-encode address: pad to 32 bytes (12 bytes zero + 20 bytes address)
 	result := make([]byte, 32)
 	copy(result[12:], mvmApi.crossChainSender.Bytes())
-
-	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ✅ Returning sender: %s\n", mvmApi.crossChainSender.Hex())
 
 	data_p := (*C.uchar)(C.CBytes(result))
 	return C.struct_Value_return{
@@ -1732,18 +1727,13 @@ func GetCrossChainSourceId(mvmId *C.uchar) C.struct_Value_return {
 	fmvmId := common.BytesToAddress(bmvmId)
 	mvmApi := GetMVMApi(fmvmId)
 
-	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] GetCrossChainSourceId called for mvmId: %s\n", fmvmId.Hex())
-
 	if mvmApi == nil || !mvmApi.crossChainActive {
-		fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ⚠️ mvmApi == nil (%v) OR !crossChainActive for mvmId: %s\n", mvmApi == nil, fmvmId.Hex())
 		return C.struct_Value_return{data_p: nil, data_size: 0, success: false}
 	}
 
 	// ABI-encode uint256: big-endian 32 bytes
 	u256 := uint256.NewInt(mvmApi.crossChainSourceId)
 	sourceIdBytes := u256.Bytes32()
-
-	fmt.Printf("[CROSS-CHAIN-DEBUG-GO] ✅ Returning sourceChainId: %d\n", mvmApi.crossChainSourceId)
 
 	data_p := (*C.uchar)(C.CBytes(sourceIdBytes[:]))
 	return C.struct_Value_return{

@@ -1323,6 +1323,23 @@ func (g *GatewayEngine) ClaimMessage(
 		return MessageStatusPending, fmt.Errorf("%w: commit %s on chain %d", ErrCommitNotAttested, commitRoot.Hex(), message.SourceChainID)
 	}
 
+	// Canonical leaf hash with 0x00 domain separation
+	leafHash := ComputeMessageLeafHash(message)
+
+	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
+		return MessageStatusPending, ErrInvalidMerkleProof
+	}
+
+	// SECURITY FIX (cross-chain audit): destination-chain binding must be checked for EVERY
+	// message, not only ones with Value > 0. This used to live inside the `message.Value.Sign() >
+	// 0` block below, so a zero-value CONTRACT_CALL message could be claimed on ANY chain that
+	// happens to hold a matching AttestedCommits entry (via the 2-hop fallback lookup above), not
+	// just its real DestChainID -- letting a wrong chain execute the payload with a forged-valid
+	// ActiveContext{OriginalSender, SourceChainID}. Checked before any state mutation below.
+	if message.DestChainID != g.LocalChainID {
+		return MessageStatusPending, fmt.Errorf("%w: message destChainId %d does not match claiming engine's chain %d", ErrInvalidMerkleProof, message.DestChainID, g.LocalChainID)
+	}
+
 	// NOTE (2026-09-05, evaluated + rejected -- see note/cross_chain/security_audit_findings.md
 	// finding #8): a proposed patch folded Tip and GasFee into this hard-cap/PerChainAllocation
 	// accounting too, reasoning that they are "unbacked" native mints. Verified this is a false
@@ -1336,7 +1353,13 @@ func (g *GatewayEngine) ClaimMessage(
 	// needing Reserve at all -- virtually every real payload message carries a nonzero GasFee, so
 	// this made Reserve mandatory for direct A->B messaging network-wide. Reverted; kept only the
 	// genuinely-correct half of that patch (removing refund()'s double-refund of Tip/GasFee below).
-	// Hard-cap verification: ClaimedAmount + Value <= FundedAmount (Section 2.3.1)
+	//
+	// Hard-cap verification: ClaimedAmount + Value <= FundedAmount (Section 2.3.1). Runs AFTER
+	// Merkle proof verification above (SECURITY FIX, cross-chain audit): this used to run BEFORE
+	// the proof check and persist the ClaimedAmount debit regardless of whether the proof then
+	// verified, with no rollback on failure -- letting anyone burn a commit's entire FundedAmount
+	// headroom with nothing but a garbage proof, permanently blocking every legitimate claim
+	// against that commit with ErrAllocationExceeded.
 	if message.Value != nil && message.Value.Sign() > 0 {
 		newClaimed := new(big.Int).Add(attested.ClaimedAmount, message.Value)
 		if newClaimed.Cmp(attested.FundedAmount) > 0 {
@@ -1344,25 +1367,14 @@ func (g *GatewayEngine) ClaimMessage(
 		}
 		attested.ClaimedAmount = newClaimed
 		g.AttestedCommits[key] = attested
-	}
 
-	// Canonical leaf hash with 0x00 domain separation
-	leafHash := ComputeMessageLeafHash(message)
-
-	if !VerifyMerkleProof(leafHash, proof, commitRoot) {
-		return MessageStatusPending, ErrInvalidMerkleProof
-	}
-
-	// Credit this chain's allocation ceiling with the value being finalized here (Section 2.3.1
-	// fix). This is the missing counterpart to AttestCommit's debit — without it, value silently
-	// evaporates from Σ per_chain_allocation on every successful transfer (proven via reproduction:
-	// 100 transferred -> 200 destroyed). ClaimMessage is the correct place because it is the only
-	// point that knows the message's real, individual DestChainID (a single attested commit can
-	// route to several distinct destinations).
-	if message.Value != nil && message.Value.Sign() > 0 {
-		if message.DestChainID != g.LocalChainID {
-			return MessageStatusPending, fmt.Errorf("%w: message destChainId %d does not match claiming engine's chain %d", ErrInvalidMerkleProof, message.DestChainID, g.LocalChainID)
-		}
+		// Credit this chain's allocation ceiling with the value being finalized here (Section 2.3.1
+		// fix). This is the missing counterpart to AttestCommit's debit — without it, value silently
+		// evaporates from Σ per_chain_allocation on every successful transfer (proven via reproduction:
+		// 100 transferred -> 200 destroyed). ClaimMessage is the correct place because it is the only
+		// point that knows the message's real, individual DestChainID (a single attested commit can
+		// route to several distinct destinations).
+		//
 		// SECURITY FIX (2026-09-05): PerChainAllocation is the NATIVE COIN ledger -- crediting it
 		// for a custom asset (AssetID != 0) would let a chain "launder" arbitrary custom-asset
 		// volume (often 10^18-scale, unrelated to real native coin held) into real NATIVE-coin
@@ -1707,7 +1719,12 @@ func VerifyQuorumCertAgainstRegistry(registry ChainRegistry, cert QuorumCert, di
 		return ErrZeroTotalStake
 	}
 
-	threshold := (totalStake*2 + 2) / 3
+	// SECURITY FIX (cross-chain audit): must match RootAnchorCommittee.BftQuorumThreshold()'s
+	// canonical (2*TotalStake)/3 + 1 exactly. The old (totalStake*2+2)/3 formula diverges from it
+	// whenever totalStake is a multiple of 3 (e.g. totalStake=3: old gives 2, canonical gives 3),
+	// silently accepting one unit less stake than the project's own defined 2f+1 BFT-safe
+	// threshold for a QuorumCert.
+	threshold := (totalStake*2)/3 + 1
 	if registry.QuorumThreshold > 0 {
 		threshold = (totalStake*uint64(registry.QuorumThreshold) + 9999) / 10000
 	}
@@ -1780,7 +1797,15 @@ func (g *GatewayEngine) Refund(
 	// keeps working unchanged.
 	_, hasCommittedBatch := g.CommittedBatches[commitRoot]
 	if !hasCommittedBatch {
-		key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), message.AssetID.String())
+		// SECURITY FIX (cross-chain audit): message.AssetID can be nil (e.g. an ABI-decode edge
+		// case, or a message built by test/tooling code that leaves it unset) -- guard it exactly
+		// like every sibling function in this file (ClaimMessage, RefundReserveAllocation,
+		// CreditReserveAllocation) instead of dereferencing it unconditionally and panicking.
+		assetIdStr := "0"
+		if message.AssetID != nil {
+			assetIdStr = message.AssetID.String()
+		}
+		key := fmt.Sprintf("%d:%s:%s", message.SourceChainID, commitRoot.Hex(), assetIdStr)
 		_, exists = g.AttestedCommits[key]
 		if !exists {
 			for _, v := range g.AttestedCommits {
@@ -1930,6 +1955,21 @@ func (g *GatewayEngine) RefundReserveAllocation(
 				reverted = big.NewInt(0)
 			}
 			g.SupplyLedger.PerChainAllocation[message.DestChainID] = reverted
+		}
+
+		// SECURITY FIX (cross-chain audit): restore the SOURCE chain's own allocation that
+		// AttestCommit debited at step 1 of the direct-attest 2-hop route -- this is the missing
+		// source-side counterpart to CreditReserveAllocation's destination-side credit, just on the
+		// failure path instead of the success path. Without this, Reserve's authoritative
+		// PerChainAllocation[message.SourceChainID] never recovers after a refund: the refund
+		// message queued below is claimed on the SOURCE chain's own separate GatewayEngine
+		// instance, which only credits ITS OWN non-authoritative local ledger copy (see
+		// CreditReserveAllocation's doc comment for the identical class of bug this mirrors on the
+		// destination side). Native-only, matching attestCommitInternal's isNative gate on the
+		// original debit -- a custom asset (AssetID != 0) never touches this ledger at all.
+		if message.AssetID == nil || message.AssetID.Sign() == 0 {
+			srcAlloc := g.SupplyLedger.GetAllocation(message.SourceChainID)
+			g.SupplyLedger.PerChainAllocation[message.SourceChainID] = new(big.Int).Add(srcAlloc, message.Value)
 		}
 	}
 
