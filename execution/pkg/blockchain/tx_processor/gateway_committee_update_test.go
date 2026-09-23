@@ -3,6 +3,7 @@ package tx_processor
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -332,6 +333,107 @@ func TestGatewayHandler_CommitteeUpdate_InsufficientQuorumRejected(t *testing.T)
 	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 1, big.NewInt(0), marshalCallData(t, calldata))
 	if _, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); !failed {
 		t.Fatal("expected committeeUpdate with only 25% stake to be rejected for insufficient quorum")
+	}
+}
+
+// TestGatewayHandler_CommitteeUpdate_MatchesCanonicalThresholdAtMultipleOfThree is the regression
+// test for the committeeUpdate-specific instance of the cross-chain audit finding already fixed
+// in gateway.go's VerifyQuorumCertAgainstRegistry and 3 places in relayer_daemon/daemon.go (see
+// TestVerifyQuorumCertAgainstRegistry_MatchesCanonicalThresholdAtMultipleOfThree in
+// pkg/cross_chain/gateway_test.go): the default quorum formula (totalStake*2+2)/3 diverges from
+// the canonical (2*TotalStake)/3+1 whenever totalStake is a multiple of 3 (totalStake=3: old
+// formula gives 2, canonical gives 3) -- this call site (committeeUpdate's own local
+// verification loop, gateway_handler.go, no registry.QuorumThreshold override) still had the
+// stale formula and was missed by that earlier fix.
+func TestGatewayHandler_CommitteeUpdate_MatchesCanonicalThresholdAtMultipleOfThree(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	const sourceChainID = 303
+	const oldEpoch = 1
+
+	// 3 equal-stake members, totalStake=3 -- exercises the default (no QuorumThreshold override)
+	// formula path directly, exactly like the gateway.go regression test.
+	old := []committeeMember{
+		newCommitteeMember(t, 1),
+		newCommitteeMember(t, 1),
+		newCommitteeMember(t, 1),
+	}
+	oldCommittee := make([]cross_chain.ValidatorEntry, len(old))
+	for i, m := range old {
+		oldCommittee[i] = m.entry
+	}
+	engine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (seed): %v", err)
+	}
+	engine.ChainRegistry[sourceChainID] = cross_chain.ChainRegistry{
+		ChainID:   sourceChainID,
+		Committee: oldCommittee,
+		Epoch:     oldEpoch,
+		// No QuorumThreshold override -- exercises the default formula directly.
+	}
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine (seed): %v", err)
+	}
+
+	sender := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	newEpoch := uint64(oldEpoch + 1)
+	stateRoot := common.HexToHash("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+	accountTreeRoot := common.HexToHash("0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
+	payloadHash := cross_chain.ComputeCommitteeUpdateDigest(sourceChainID, newEpoch, oldCommittee, stateRoot, accountTreeRoot)
+
+	nonce := uint64(0)
+	for _, m := range old {
+		popCalldata, _ := h.abi.Pack("registerCommitteePop", m.entry.PubkeyBLS, m.entry.PopSignature)
+		popTx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, nonce, big.NewInt(0), marshalCallData(t, popCalldata))
+		nonce++
+		if _, _, failed := h.HandleTransaction(context.Background(), cs, popTx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0); failed {
+			t.Fatal("registerCommitteePop unexpectedly failed")
+		}
+	}
+
+	// Only 2 of 3 stake units sign -- below the canonical 2f+1=3 threshold. The old buggy formula
+	// (totalStake*2+2)/3 = (3*2+2)/3 = 8/3 = 2 (integer division) would have wrongly accepted
+	// this as meeting quorum; the canonical (totalStake*2)/3+1 = 2+1 = 3 must reject it.
+	signers := old[:2]
+	sigs := make([][]byte, len(signers))
+	pubkeys := make([][]byte, len(signers))
+	for i, m := range signers {
+		sig := bls.Sign(m.kp.PrivateKey(), payloadHash.Bytes())
+		sigs[i] = sig.Bytes()
+		pubkeys[i] = m.entry.PubkeyBLS
+	}
+	aggSignature := bls.CreateAggregateSign(sigs)
+
+	newPubkeys := make([][]byte, len(oldCommittee))
+	newStakes := make([]uint64, len(oldCommittee))
+	newPops := make([][]byte, len(oldCommittee))
+	for i, v := range oldCommittee {
+		newPubkeys[i] = v.PubkeyBLS
+		newStakes[i] = v.Stake
+		newPops[i] = v.PopSignature
+	}
+
+	calldata, err := h.abi.Pack("committeeUpdate",
+		new(big.Int).SetUint64(sourceChainID), newEpoch,
+		newPubkeys, newStakes, newPops,
+		uint64(0), stateRoot, accountTreeRoot, payloadHash,
+		pubkeys, aggSignature,
+	)
+	if err != nil {
+		t.Fatalf("pack committeeUpdate: %v", err)
+	}
+	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, nonce, big.NewInt(0), marshalCallData(t, calldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed {
+		t.Fatal("expected committeeUpdate with 2/3 stake units (below the canonical 2f+1=3 threshold) to be rejected")
+	}
+	if rcp != nil && !strings.Contains(string(rcp.Return()), "BFT quorum stake threshold not reached") {
+		t.Fatalf("expected a quorum-threshold rejection, got: %s", string(rcp.Return()))
 	}
 }
 

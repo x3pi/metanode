@@ -1677,7 +1677,15 @@ func (h *GatewayHandler) handleWrite(
 				return nil, nil, fmt.Errorf("committeeUpdate: aggPubkeys contains a key that is not a member of chain %d's current committee", sourceChainID)
 			}
 		}
-		threshold := (totalStake*2 + 2) / 3
+		// SECURITY FIX (found while writing dApp-guide vote/attestation docs, 2026-09-23): this was
+		// the one remaining call site still using the stale (totalStake*2+2)/3 formula -- the same
+		// class of bug already fixed in gateway.go:1900 (VerifyQuorumCertAgainstRegistry) and 3
+		// places in relayer_daemon/daemon.go. It diverges from the canonical (2*TotalStake)/3+1
+		// whenever totalStake is a multiple of 3 (e.g. totalStake=3: old gives 2, canonical gives
+		// 3), silently accepting 1 unit less stake than the project's own defined 2f+1 BFT-safe
+		// threshold -- for committeeUpdate specifically, the highest-value target of all (it
+		// transfers control of a chain's entire validator committee).
+		threshold := (totalStake*2)/3 + 1
 		if registry.QuorumThreshold > 0 {
 			threshold = (totalStake*registry.QuorumThreshold + 9999) / 10000
 		}
