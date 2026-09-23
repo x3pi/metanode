@@ -60,19 +60,22 @@ Node muốn có khả năng gửi giá trị cross-node phải nạp quỹ trư�
 ### 3.3. Chuyển giá trị cross-node (Transfer) — luồng thành công
 
 1. User A (Node 1) gửi yêu cầu chuyển cho User B (Node 2).
-2. Node 1 trừ balance cục bộ của A, đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V`, kèm metadata (`Target: B`, `MessageID`, `Payload` nếu là contract-call). **Không cần batch-rồi-chờ-ký-committee** (committee = 1 nên chữ ký chỉ là chính Node 1 tự ký, gộp luôn vào transaction này) — đơn giản hơn hẳn 3 bước của mô hình cũ.
-3. Ngay khi transaction confirm trên Parent Chain: **tiền đã thật sự nằm ở `NodeFloatAccount[2]`** — không còn khái niệm "Pending chờ claim" cho phần GIÁ TRỊ.
-4. Node 2 theo dõi Parent Chain, thấy có credit mới addressed cho mình, kiểm tra local: `B` có phải account hợp lệ đang được chính mình quản lý không (không đổi so với bản trước).
-5. Nếu hợp lệ: Node 2 cộng balance cục bộ cho B. Xong — không cần cert thành công gửi ngược lại để "đóng Pending" như mô hình cũ, vì tiền đã an toàn ngay từ bước 3.
+2. ⚠️ **Pre-flight check bắt buộc (mục 8 #11) — TRƯỚC KHI đụng vào balance cục bộ của A:** Node 1 đọc `NodeFloatAccount[1]` mới nhất, xác nhận `>= V`. Nếu KHÔNG đủ (Float cạn — mục 3.5), **từ chối/queue yêu cầu ngay tại đây, KHÔNG trừ balance cục bộ của A** — trả cho user 1 trạng thái rõ ràng "đang chờ node nạp quỹ", tách bạch hẳn với lỗi mất kết nối. Đây là điểm dễ nhầm nhất: mất-kết-nối và float-không-đủ là 2 nguyên nhân khác hẳn nhau, không được gộp chung xử lý "cứ retry là được" — float-không-đủ cần node nạp thêm thật, retry đơn thuần không giải quyết được. Việc đọc-kiểm tra-rồi-ghi phải được node tự serialize/khoá nội bộ (không xử lý song song nhiều outbound Transfer cùng lúc mà không khoá), tránh 2 yêu cầu cùng đọc thấy "đủ" rồi cùng trừ vượt quá số dư thật.
+3. Qua được pre-flight check: Node 1 trừ balance cục bộ của A, đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V`, kèm metadata (`Target: B`, `MessageID` duy nhất, `Payload` nếu là contract-call). **Không cần batch-rồi-chờ-ký-committee** (committee = 1 nên chữ ký chỉ là chính Node 1 tự ký, gộp luôn vào transaction này) — đơn giản hơn hẳn 3 bước của mô hình cũ.
+4. Ngay khi transaction confirm trên Parent Chain: **tiền đã thật sự nằm ở `NodeFloatAccount[2]`** — không còn khái niệm "Pending chờ claim" cho phần GIÁ TRỊ.
+5. Node 2 theo dõi Parent Chain, thấy có credit mới addressed cho mình. ⚠️ **Chống xử lý trùng bắt buộc (mục 8 #13):** Node 2 phải tự kiểm tra `MessageID` này đã xử lý (credit hoặc refund) chưa trước khi làm bất cứ gì — mô hình cũ có `ErrAlreadyClaimed` tự động trong `ClaimMessage`, mô hình mới KHÔNG còn hàm trung tâm nào làm việc này hộ, node phải tự giữ 1 bảng "MessageID đã xử lý" cục bộ.
+6. Node 2 kiểm tra local: `B` có phải account hợp lệ đang được chính mình quản lý không (không đổi so với bản trước).
+7. Nếu hợp lệ: Node 2 **trước tiên** gửi 1 transaction nhỏ lên Parent Chain đánh dấu `MessageID` này = `Claimed` (mục 3.6 — cần cho cơ chế Reclaim-theo-timeout), **rồi mới** cộng balance cục bộ cho B. Không cần cert thành công gửi ngược lại Node 1 để "đóng Pending" như mô hình cũ, vì tiền đã an toàn ngay từ bước 4 — đánh dấu `Claimed` chỉ để phối hợp với mục 3.6, không phải điều kiện an toàn giá trị.
 
 ### 3.4. Nếu kiểm tra local thất bại (account không hợp lệ) hoặc Contract Call bị revert
 
 Tiền **đã thật sự nằm ở `NodeFloatAccount[2]`** (khác mô hình cũ, nơi tiền chỉ là 1 "quyền claim" chưa thực sự di chuyển) — nên hoàn tiền giờ đơn giản là **1 giao dịch Transfer khác, chiều ngược lại**, dùng lại đúng cơ chế ở mục 3.3, không cần `FinalizeFailedAfterExecutionRevert`/`destFailureCert`/`Refund` 3 bước như trước:
 
 1. Node 2 phát hiện B không hợp lệ, hoặc Contract Call revert (hoàn tác toàn bộ thay đổi state đã thử).
-2. Node 2 gửi Transfer ngược: `NodeFloatAccount[2] -= Value` (**chỉ đúng phần `Value`**), `NodeFloatAccount[1] += Value`.
-3. Node 1 nhận lại, cộng trả cho User A.
-4. ⚠️ **`GasFee` KHÔNG được hoàn** (quy tắc không đổi so với bản trước — vẫn cần giữ, xem mục 8 #6): Node 2 đã thực sự tốn chi phí tính toán để thử thực thi/kiểm tra dù kết quả thất bại. Nếu hoàn cả `GasFee`, kẻ tấn công spam giao dịch cố tình gây revert để bào CPU/RAM Node 2 miễn phí.
+2. ⚠️ **Chống hoàn tiền 2 lần bắt buộc (mục 8 #12):** mô hình cũ có guard tường minh trong `Refund()` (chỉ chạy khi `MessageStatus == Pending`). Mô hình mới không còn hàm trung tâm này — Node 2 **phải tự đánh dấu `MessageID` = `Claimed`** trên Parent Chain (đúng bước đã thêm ở mục 3.3 bước 7, dùng chung 1 cơ chế cho cả credit thành công lẫn hoàn tiền) **TRƯỚC KHI** gửi Transfer hoàn tiền — nếu crash giữa chừng và retry lại từ đầu, Node 2 phải kiểm tra `MessageID` này đã `Claimed` chưa trước khi tạo giao dịch hoàn tiền mới, tránh gửi hoàn tiền 2 lần (tự bào mòn quỹ của chính Node 2, không phải lỗi hệ thống nhưng vẫn là mất tiền thật cho node đó).
+3. Node 2 gửi Transfer ngược: `NodeFloatAccount[2] -= Value` (**chỉ đúng phần `Value`**), `NodeFloatAccount[1] += Value`.
+4. Node 1 nhận lại, cộng trả cho User A.
+5. ⚠️ **`GasFee` KHÔNG được hoàn** (quy tắc không đổi so với bản trước — vẫn cần giữ, xem mục 8 #6): Node 2 đã thực sự tốn chi phí tính toán để thử thực thi/kiểm tra dù kết quả thất bại. Nếu hoàn cả `GasFee`, kẻ tấn công spam giao dịch cố tình gây revert để bào CPU/RAM Node 2 miễn phí.
 
 ### 3.5. Node chưa nạp quỹ đủ / thanh khoản cạn — vấn đề MỚI, cần chính sách vận hành
 
@@ -81,6 +84,13 @@ Tiền **đã thật sự nằm ở `NodeFloatAccount[2]`** (khác mô hình cũ
 - Nếu `NodeFloatAccount[1]` không đủ để gửi 1 Transfer, giao dịch outbound của user bị **block** cho tới khi node kịp nạp thêm — giống bài toán thanh khoản kênh (channel liquidity) của Lightning Network.
 - Cần cơ chế cảnh báo + auto top-up khi Float Account xuống dưới ngưỡng (mục 9.2).
 - Vốn bị khoá thật (locked capital): node phải giữ 1 khoản tiền "nằm chờ" trên Parent Chain — chi phí cơ hội thật, khác mô hình cũ (chỉ cần bond đủ tỷ lệ, không cần tiền thật nằm sẵn để phục vụ giao dịch).
+
+### 3.6. Node đích còn sống nhưng kẹt/chậm xử lý — Timeout & Reclaim (mục 8 #15, MỚI)
+
+Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường hợp này là Node 2 **vẫn hoạt động bình thường** nhưng vì lý do nào đó (backlog, bug, quá tải) không xử lý (không credit local, không hoàn tiền) 1 credit đã nhận trong thời gian dài — tiền nằm im ở `NodeFloatAccount[2]`, User A không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian nếu không thiết kế thêm.
+
+- **Cơ chế Reclaim:** nếu quá 1 khoảng thời gian cấu hình (ví dụ tương tự `TimeoutTimestamp` cũ) kể từ lúc Transfer confirm mà `MessageID` vẫn CHƯA được đánh dấu `Claimed` (mục 3.3 bước 7), **chính Node 1** (thay mặt User A) có quyền gửi 1 transaction Reclaim thẳng lên Parent Chain: `NodeFloatAccount[2] -= Value`, `NodeFloatAccount[1] += Value` — **không cần Node 2 hợp tác**, vì tiền vốn dĩ do Parent Chain custody thật (điểm mạnh của mô hình Float Account so với mô hình cũ, nơi phải phụ thuộc đích tạo `destFailureCert`).
+- **Chặn race Reclaim-vs-Claimed (bắt buộc):** Parent Chain chỉ cho Reclaim thành công nếu `MessageID` đó **chưa** được đánh dấu `Claimed` tại thời điểm xử lý Reclaim — nếu Node 2 vừa kịp đánh dấu `Claimed` (đang credit local cho B) đúng lúc Node 1 gửi Reclaim, chỉ 1 trong 2 thắng (Parent Chain xử lý tuần tự, ai đến trước với `MessageID` chưa bị đánh dấu thì thắng) — bên thua bị từ chối, không có chuyện cả 2 cùng thành công.
 
 ---
 
@@ -94,13 +104,23 @@ Vì mỗi giao dịch Transfer (mục 3.3) giờ đã an toàn tuyệt đối b�
 
 Nếu node khai khống khi Nạp quỹ (Deposit) vượt quá số dư local thật, `SlashOnEquivocation`/phát hiện gian lận (qua đối chiếu snapshot định kỳ, mục 6.3) vẫn tịch thu bond như cũ — nhưng giờ thiệt hại tối đa bị giới hạn bởi **giới hạn nạp quỹ mỗi chu kỳ**, không phải toàn bộ giá trị có thể "mint" qua từng message riêng lẻ như trước.
 
-### 4.2. Vì sao KHÔNG cần velocity-limit/hard-cap cho từng giao dịch Transfer nữa
+### 4.2. Velocity-limit cho Transfer: không cần để chống MINT SAI, nhưng vẫn cần vì lý do KHÁC (đã sửa lại — xem mục 4.4)
 
-Mô hình cũ cần `checkAndRecordVelocity` áp cho mọi `AttestCommit` vì mỗi message là 1 "tuyên bố mint" cần giới hạn thiệt hại nếu sai. Mô hình mới: mỗi Transfer là ghi sổ trực tiếp trên số dư THẬT đã có sẵn trong `NodeFloatAccount` — không có gì để "mint sai" ở bước này, nên **không cần velocity-limit cho Transfer**. Velocity-limit chỉ còn cần cho **bước Nạp quỹ** (đã có ở mục 4.1 qua giới hạn "mỗi chu kỳ").
+Mô hình cũ cần `checkAndRecordVelocity` áp cho mọi `AttestCommit` vì mỗi message là 1 "tuyên bố mint" cần giới hạn thiệt hại nếu sai. Mô hình mới: mỗi Transfer là ghi sổ trực tiếp trên số dư THẬT đã có sẵn trong `NodeFloatAccount` — không có gì để "mint sai" ở bước này, nên **đúng là không cần velocity-limit CHO LÝ DO CHỐNG-GIAN-LẬN**. ⚠️ **Nhưng đây không phải toàn bộ câu chuyện — velocity-limit còn có vai trò thứ 2 hoàn toàn khác mà bản thảo đầu của mục này đã bỏ sót: giới hạn thiệt hại khi KHOÁ KÝ CỦA NODE BỊ LỘ (không phải khi node cố ý gian lận). Xem mục 4.4 — vai trò này vẫn cần, chỉ là lý do khác.**
 
 ### 4.3. Bất biến tổng cung
 
 `Σ NodeFloatAccount + Σ (local balance chưa nạp quỹ, không kiểm chứng được on-chain) == genesis_total_supply`. Lưu ý phần thứ 2 (local balance chưa nạp) **không tự động kiểm chứng được** — đây chính là lý do bước Nạp quỹ vẫn cần căn cứ snapshot + bond như mục 4.1, không thể bỏ hoàn toàn.
+
+### 4.4. [MỚI — mục 8 #14] Velocity-limit cho Transfer OUTFLOW: giới hạn thiệt hại khi khoá ký node bị lộ
+
+**Vấn đề:** vì Float Account là tiền thật và Transfer không còn hard-cap/velocity nào (mục 4.2), nếu khoá ký (device key/BLS key) của 1 node bị lộ, kẻ tấn công có thể gửi 1 Transfer DUY NHẤT rút sạch **TOÀN BỘ** `NodeFloatAccount` của node đó sang 1 địa chỉ kiểm soát bởi kẻ tấn công, ngay lập tức — không có gì cản. Đây là rủi ro **nặng hơn** cả #9 (custody local, mục 2.3), vì quỹ liên-node có thể lớn hơn hẳn tổng số dư local của node (mục 3.5 khuyến khích giữ đủ thanh khoản để không bị block giao dịch).
+
+**Quyết định:** tái áp dụng velocity-limit, nhưng cho **Transfer OUTFLOW** (không phải cho Deposit như mục 4.1 — đây là 1 giới hạn khác, mục đích khác):
+
+> Tổng giá trị gửi ra (Transfer outflow) của 1 `NodeFloatAccount` trong 1 cửa sổ trượt (ví dụ 24h) không được vượt quá X% số dư đầu cửa sổ — mặc định đề xuất giữ nguyên **20%/24h** (số đã dùng quen ở bản trước cho mục đích khác, nhưng cùng bậc độ lớn hợp lý cho mục đích mới này) — cần đội xác nhận lại theo dữ liệu traffic thật.
+
+Đây **không phải** hard-cap chống gian lận (không có gì để gian lận ở bước Transfer) mà là **circuit-breaker chống lộ khoá** — giống hệt lý do các sàn/ngân hàng đặt hạn mức rút tiền/ngày ngay cả với tài khoản đã xác minh đầy đủ danh tính. Khi vượt ngưỡng: giao dịch bị tạm giữ + cảnh báo operator ngay (không tự động từ chối vĩnh viễn, vì đây có thể là traffic hợp lệ tăng đột biến, không phải luôn là dấu hiệu bị hack).
 
 ---
 
@@ -166,6 +186,7 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 | Account Registry | Mở rộng `AccountManager` contract có sẵn | `user_address -> chainID` |
 | `ChainRegistry` | Có sẵn (`gateway.go`) | Danh tính + `NodeBlsPublicKey` từng node |
 | **`NodeFloatAccount` (MỚI)** | Cần xây | `chainID -> balance` — tiền thật, thay cho `PerChainAllocation`-làm-trần |
+| **`ClaimedMessages` (MỚI)** | Cần xây | `MessageID -> bool` — đánh dấu đã xử lý (credit local hoặc hoàn tiền), dùng để chống xử lý trùng (#13), chống hoàn tiền 2 lần (#12), và làm điều kiện chặn Reclaim (mục 3.6, #15) |
 | `SecurityBondLedger` | Có sẵn | Bond, phạm vi thu hẹp chỉ còn bảo vệ bước Nạp quỹ (mục 4.1) |
 | `DeadChains` | Có sẵn | Node đã tuyên bố chết, chặn outflow mới |
 
@@ -194,6 +215,11 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 | 8 | `RecoveryCommittee` — thực thể duy nhất có quyền tuyên bố node chết, tịch thu bond, thay khoá ký bất kỳ node nào — chưa được định nghĩa | Lộ/compromise `RecoveryCommittee` ảnh hưởng TOÀN hệ thống, nặng hơn lộ 1 node đơn lẻ | Cần đội xác định thành viên, ngưỡng quorum, quy trình bảo vệ khoá — quyết định tổ chức thật, không tự đề xuất được (mục 9.1, còn mở) |
 | 9 | Custody 100% device key (PKS) — Node bị hack có thể ký giao dịch nội bộ giả | Mất tiền không để lại bằng chứng mật mã, ngoài phạm vi bảo vệ của Float Account (tiền không rời node) | Không giải quyết triệt để bằng kỹ thuật — giảm thiểu bằng delay/anomaly-detection/non-custodial tuỳ chọn (mục 2.3) |
 | 10 | Thanh khoản Float Account cạn giữa chừng (mới, do đổi mô hình) | Giao dịch outbound bị block cho tới khi node kịp nạp thêm | Cảnh báo + auto top-up khi xuống dưới ngưỡng (mục 3.5, 9.2) |
+| 11 | **[MỚI]** Không phân biệt "mất kết nối" (retry được) với "Float Account không đủ" (retry đơn thuần không giải quyết được) trước khi trừ balance cục bộ | User bị trừ tiền cục bộ nhưng giao dịch kẹt vô thời hạn nếu chỉ retry mà không nạp quỹ thật | Pre-flight check `NodeFloatAccount >= V` TRƯỚC khi đụng balance cục bộ, tách bạch 2 loại lỗi rõ ràng cho user (mục 3.3 bước 2) |
+| 12 | **[MỚI]** Reverse Transfer (hoàn tiền, mục 3.4) không có cơ chế chống gửi 2 lần — mô hình cũ có guard `MessageStatus==Pending` trong `Refund()`, mô hình mới chưa thay thế | Crash giữa chừng rồi retry có thể gửi hoàn tiền 2 lần, tự bào mòn quỹ của chính node đang hoàn tiền | Đánh dấu `MessageID` = `Claimed` trên Parent Chain TRƯỚC khi gửi hoàn tiền, kiểm tra lại trạng thái này trước khi retry (mục 3.3 bước 7, mục 3.4 bước 2) |
+| 13 | **[MỚI]** Node đích không có cơ chế chống xử lý trùng 1 credit đến — mô hình cũ có `ErrAlreadyClaimed` tự động trong `ClaimMessage`, mô hình mới không còn hàm trung tâm nào làm việc này hộ | Node đích có thể credit local 2 lần cho cùng 1 `MessageID` nếu logic theo dõi/watcher bị lỗi hoặc quét lại block cũ | Node đích tự giữ bảng "MessageID đã xử lý", kiểm tra trước khi làm bất cứ gì (mục 3.3 bước 5) |
+| 14 | **[MỚI, NGHIÊM TRỌNG]** Bỏ velocity-limit cho Transfer với lý do "không mint sai được" đúng cho gian lận nhưng bỏ sót vai trò giới hạn thiệt hại khi KHOÁ KÝ node bị lộ | Node bị lộ khoá có thể bị rút sạch TOÀN BỘ Float Account trong 1 giao dịch tức thời — nặng hơn cả #9 (custody local) vì quỹ liên-node có thể lớn hơn local balance | Tái áp dụng velocity-limit cho Transfer OUTFLOW (khác mục đích với Deposit ở mục 4.1) — circuit-breaker chống lộ khoá, không phải hard-cap chống gian lận (mục 4.4) |
+| 15 | **[MỚI]** Không có timeout nếu node đích còn sống nhưng kẹt/chậm xử lý 1 credit đã nhận (khác node chết hẳn, không cần `RecoveryCommittee`) | Tiền nằm im ở Float Account của đích, User A gốc không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian | Cơ chế Reclaim: quá timeout mà `MessageID` chưa `Claimed`, Node 1 tự reclaim thẳng từ Parent Chain không cần Node 2 hợp tác — có chặn race với việc Node 2 vừa kịp `Claimed` (mục 3.6) |
 
 ---
 
@@ -210,6 +236,8 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 | Q(giới hạn nạp quỹ mỗi chu kỳ) | Bao nhiêu mỗi chu kỳ? | Công thức: gắn với số dư đã chứng minh qua snapshot gần nhất, trừ phần đã nạp — không phải số tuyệt đối cố định | mục 3.2 |
 | Q(tần suất snapshot) | Bao nhiêu lâu 1 lần? | **Mặc định 15 phút**, có thể tăng sau khi đo chi phí thật — chỉ ảnh hưởng Trường hợp B (mục 6.3) | mục 6.3 |
 | Q(ngưỡng Float Account) | Ngưỡng tối thiểu cảnh báo/auto top-up? | Còn mở — cần dữ liệu traffic thật để tính (mục 3.5) |
+| Q(velocity Transfer outflow) | Ngưỡng circuit-breaker chống lộ khoá cho Transfer (mục 4.4)? | **Mặc định khởi điểm 20%/24h**, giữ nguyên tinh thần bản trước nhưng đổi mục đích — cần đội xác nhận lại theo traffic thật, không chặn triển khai ban đầu | mục 4.4, mục 8 #14 |
+| Q(timeout Reclaim) | Bao lâu thì Node 1 được phép Reclaim nếu Node 2 chưa `Claimed`? | Công thức tương tự `TimeoutTimestamp` cũ (mục 6.2 bản trước) — chưa có số tuyệt đối, cần đo chu kỳ xử lý bình thường thật trước khi chốt | mục 3.6, mục 8 #15 |
 | Q(RecoveryCommittee) | Ai ngồi trong đó, bao nhiêu người, ngưỡng quorum? | **CÒN MỞ THẬT SỰ** — quyết định tổ chức/nhân sự, không tự đề xuất được. **Chặn cứng go-live**: code không chạy được nếu thiếu config này | mục 8 #8 |
 | Q5 | Vốn Reserve ban đầu cho N node? | **CÒN MỞ** — cần số liệu tài chính thật | mục 5.1 |
 | Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | **CÒN MỞ** — khẩu vị rủi ro kinh doanh thật | mục 2.3 |
@@ -226,9 +254,9 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 
 ### 9.3. Checklist bảo mật trước khi go-live
 
-- [ ] #1–#10 ở mục 8 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #7 (Snapshot Pipeline cho Trường hợp B) và #8 (`RecoveryCommittee`).
+- [ ] #1–#15 ở mục 8 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #7 (Snapshot Pipeline cho Trường hợp B), #8 (`RecoveryCommittee`), và #14 (velocity-limit chống lộ khoá — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận).
 - [ ] `RecoveryCommittee`, Q5, Q9-rủi-ro đã có quyết định bằng văn bản từ đội — không được bỏ qua.
-- [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết với Float Account còn dư → rút lại được ngay không cần Merkle proof (Trường hợp A), (4) Node chết với local balance chưa nạp quỹ → chạy đúng pipeline Snapshot+Velocity+Delay 72h (Trường hợp B), (5) Migration có message đến giữa lúc Freeze, (6) node cố tình giấu dữ liệu snapshot → Archival Service VETO được.
+- [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết với Float Account còn dư → rút lại được ngay không cần Merkle proof (Trường hợp A), (4) Node chết với local balance chưa nạp quỹ → chạy đúng pipeline Snapshot+Velocity+Delay 72h (Trường hợp B), (5) Migration có message đến giữa lúc Freeze, (6) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (7) Float không đủ → user thấy đúng thông báo "chờ nạp quỹ", KHÔNG bị trừ tiền cục bộ (#11), (8) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#12), (9) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#14), (10) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#15).
 - [ ] Đã xác nhận `Σ NodeFloatAccount + Σ local-chưa-nạp == genesis_total_supply` được kiểm tra tự động định kỳ.
 - [ ] Đã xác nhận bằng số liệu thật: `SecurityBond` mỗi node ≥ hệ số an toàn × giới hạn nạp quỹ mỗi chu kỳ của node đó.
 
@@ -314,20 +342,24 @@ sequenceDiagram
     Note over N1,RA: (Định kỳ, không phải mỗi giao dịch) Node 1 Deposit\ncăn cứ snapshot local-balance mới nhất — mục 3.2
 
     A->>N1: Gửi yêu cầu chuyển cho B (Node 2)
-    N1->>N1: Trừ balance cục bộ của A
-    N1->>RA: Transfer atomic: FA[1] -= V, FA[2] += V\n(kèm Target=B, MessageID)
+    N1->>RA: Pre-flight: đọc FA[1] mới nhất (#11)
+    RA-->>N1: FA[1] đủ V
+    N1->>N1: Trừ balance cục bộ của A (chỉ SAU KHI pre-flight đủ)
+    N1->>RA: Transfer atomic: FA[1] -= V, FA[2] += V\n(kèm Target=B, MessageID duy nhất)
     RA-->>N1: Xác nhận — tiền đã thật ở FA[2]
 
     N2->>RA: Theo dõi, thấy credit mới addressed cho mình
+    N2->>N2: Kiểm tra MessageID chưa có trong\nClaimedMessages cục bộ (#13)
     N2->>N2: Kiểm tra local: B có hợp lệ không?
+    N2->>RA: Đánh dấu MessageID = Claimed (#12, #15)\nTRƯỚC KHI credit local
     N2->>B: Hợp lệ -> cộng balance cục bộ cho B
 
-    Note over N1,N2: KHÔNG cần cert thành công gửi ngược lại —\ntiền đã an toàn ngay khi Transfer confirm (khác mô hình cũ)
+    Note over N1,N2: Tiền đã an toàn ngay khi Transfer confirm (bước ①-②).\nBước "Claimed" chỉ phối hợp chống trùng/Reclaim (mục 3.6),\nkhông phải điều kiện an toàn giá trị.
 ```
 
-**Tóm tắt bằng lời:** Node 1 định kỳ nạp sẵn 1 khoản quỹ vào tài khoản của mình trên Parent Chain. Khi User A muốn chuyển tiền cho User B (ở Node 2), Node 1 trừ tiền A cục bộ, rồi chuyển thẳng đúng số đó từ tài khoản của mình sang tài khoản Node 2 trên Parent Chain — 1 bước, xong ngay. Node 2 thấy tiền về, kiểm tra B có đúng là tài khoản của mình không rồi cộng tiền. Khác bản trước: tiền đã thật sự an toàn ngay khi bước chuyển khoản xác nhận xong, không cần chờ thêm 1 vòng "xác nhận đã xử lý" nào nữa mới coi là an toàn.
+**Tóm tắt bằng lời:** Node 1 định kỳ nạp sẵn 1 khoản quỹ vào tài khoản của mình trên Parent Chain. Khi User A muốn chuyển tiền cho User B (ở Node 2), Node 1 **kiểm tra trước** xem quỹ của mình có đủ không — nếu đủ mới trừ tiền A cục bộ, rồi chuyển thẳng đúng số đó sang tài khoản Node 2 trên Parent Chain. Node 2 thấy tiền về, kiểm tra chưa xử lý giao dịch này lần nào, kiểm tra B có đúng là tài khoản của mình không, đánh dấu "đã nhận" trên sổ chung rồi mới cộng tiền cục bộ. Khác bản trước: tiền đã thật sự an toàn ngay khi bước chuyển khoản xác nhận xong.
 
-### 11.4. Thất bại & Hoàn tiền
+### 11.4. Thất bại, Hoàn tiền & Reclaim-theo-timeout
 
 ```mermaid
 sequenceDiagram
@@ -337,13 +369,20 @@ sequenceDiagram
 
     Note over N1,N2: Tiếp nối 11.3 — Transfer đã confirm, tiền đã ở FA[2]
 
-    N2->>N2: Kiểm tra local: B KHÔNG hợp lệ\n(hoặc Contract Call revert, hoàn tác state)
-    N2->>RA: Transfer ngược: FA[2] -= Value, FA[1] += Value\n(CHỈ Value — KHÔNG gửi lại GasFee, mục 8 #6)
-    RA-->>N1: Xác nhận — tiền đã về lại FA[1]
-    N1->>N1: Cộng trả cho User A
+    alt Node 2 phát hiện lỗi (B không hợp lệ / Contract revert)
+        N2->>RA: Đánh dấu MessageID = Claimed TRƯỚC (#12)\n(kiểm tra chưa Claimed trước đó, chống hoàn 2 lần)
+        N2->>RA: Transfer ngược: FA[2] -= Value, FA[1] += Value\n(CHỈ Value — KHÔNG gửi lại GasFee, #6)
+        RA-->>N1: Xác nhận — tiền đã về lại FA[1]
+        N1->>N1: Cộng trả cho User A
+    else Node 2 còn sống nhưng KẸT/CHẬM xử lý quá timeout (#15, MỚI)
+        N1->>RA: Reclaim: kiểm tra MessageID CHƯA Claimed?
+        RA-->>N1: Chưa Claimed -> cho Reclaim: FA[2] -= V, FA[1] += V
+        Note over N1,N2: Nếu N2 vừa kịp Claimed đúng lúc N1 Reclaim,\nParent Chain xử lý tuần tự — chỉ 1 bên thắng, không double
+        N1->>N1: Cộng trả cho User A
+    end
 ```
 
-**Tóm tắt bằng lời:** Nếu Node 2 phát hiện người nhận không hợp lệ, hoặc hợp đồng thông minh bị lỗi, nó chỉ cần chuyển khoản ngược lại đúng số tiền gốc cho Node 1 — dùng lại đúng cơ chế chuyển khoản bình thường, không cần quy trình riêng nào khác. Phần phí đã trả để Node 2 thử tính toán thì không được hoàn, vì Node 2 đã thực sự tốn công dù kết quả thất bại.
+**Tóm tắt bằng lời:** Có 2 tình huống cần hoàn tiền. Nếu Node 2 chủ động phát hiện lỗi (người nhận sai, hợp đồng lỗi), nó tự đánh dấu đã xử lý xong rồi chuyển khoản ngược lại — phần phí tính toán không được hoàn vì Node 2 đã thực sự tốn công. Tình huống thứ hai mới hơn: nếu Node 2 vẫn còn sống nhưng vì lý do gì đó không xử lý quá lâu, Node 1 không cần chờ Node 2 hợp tác — có thể tự đòi lại tiền thẳng từ Parent Chain sau khi hết thời gian chờ, miễn là Node 2 chưa kịp đánh dấu "đã xử lý" giao dịch đó. Nếu cả hai xảy ra gần như cùng lúc, chỉ một bên thắng, không bao giờ có chuyện tiền bị xử lý 2 lần.
 
 ### 11.5. Node chết — 2 trường hợp khác biệt
 
@@ -422,22 +461,27 @@ Thực thể BLS committee cố định, set 1 lần từ config lúc triển kh
 
 ### 13.3. Giao dịch cross-node
 
-1. Xác thực + trừ balance cục bộ người gửi, **cùng 1 lần ghi** với việc tạo bản ghi "đang gửi" — không tách rời (tránh crash giữa chừng làm mất dấu).
+1. **Pre-flight check (mục 8 #11):** đọc `NodeFloatAccount` mới nhất, xác nhận đủ `V`. Không đủ → từ chối/queue ngay, KHÔNG đụng balance cục bộ người gửi, báo user rõ ràng "chờ nạp quỹ" (khác hẳn lỗi mất kết nối).
+2. Đủ quỹ: Xác thực + trừ balance cục bộ người gửi, **cùng 1 lần ghi** với việc tạo bản ghi "đang gửi" — không tách rời (tránh crash giữa chừng làm mất dấu).
    → Trạng thái local: `LOCAL_APPLIED_PENDING_SEND`.
-2. Gửi Transfer atomic lên Parent Chain (mục 3.3) — **không cần bước gom batch/ký riêng như bản trước**, vì mỗi Transfer đã tự đủ điều kiện gửi ngay (committee = 1, chữ ký gộp luôn vào transaction).
-   → Nếu gửi thất bại do mất kết nối: giữ nguyên trạng thái, vào Retry Queue, gửi lại đúng transaction đã có — không tạo transaction mới cho cùng 1 yêu cầu.
+3. Gửi Transfer atomic lên Parent Chain (mục 3.3) — **không cần bước gom batch/ký riêng như bản trước**, vì mỗi Transfer đã tự đủ điều kiện gửi ngay (committee = 1, chữ ký gộp luôn vào transaction).
+   → Nếu gửi thất bại do mất kết nối (khác hẳn "float không đủ" đã lọc ở bước 1): giữ nguyên trạng thái, vào Retry Queue, gửi lại đúng transaction đã có — không tạo transaction mới cho cùng 1 yêu cầu.
    → Khi Parent Chain xác nhận: trạng thái local: `SENT_CONFIRMED` — **tiền đã an toàn tuyệt đối tại đây**, khác bản trước (nơi phải chờ thêm cert từ phía đích mới coi là xong).
-3. (Không bắt buộc) Nhận thông báo Node đích đã xử lý local xong hay hoàn tiền — cập nhật `CONFIRMED_SUCCESS`/`CONFIRMED_REFUNDED` để làm audit trail, nhưng **không còn ý nghĩa bảo mật** (tiền đã an toàn từ bước 2), chỉ phục vụ tra cứu/UX.
+4. Nếu quá timeout mà chưa thấy Node đích đánh dấu `Claimed` (mục 3.6, #15): tự gửi Reclaim, không cần Node đích hợp tác.
+5. Nhận thông báo Node đích đã `Claimed` (credit local xong hoặc hoàn tiền) — cập nhật `CONFIRMED_SUCCESS`/`CONFIRMED_REFUNDED` để làm audit trail. **Không còn ý nghĩa bảo mật cho phần giá trị** (tiền đã an toàn từ bước 3), nhưng giờ có thêm ý nghĩa vận hành: đây là điều kiện để KHÔNG tự động gửi Reclaim ở bước 4.
+
+**Phía Node đích, khi thấy credit mới:** kiểm tra `MessageID` chưa có trong `ClaimedMessages` cục bộ (#13) → kiểm tra `B` hợp lệ → gửi transaction đánh dấu `Claimed` lên Parent Chain (#12, #15) → rồi mới credit local cho B (hoặc gửi Transfer hoàn tiền nếu không hợp lệ/revert).
 
 ### 13.4. Bảng trạng thái local (đã đơn giản hơn bản trước — bớt 2 trạng thái trung gian)
 
 | Trạng thái | Ý nghĩa | Chuyển tiếp khi nào |
 |---|---|---|
+| `PENDING_FLOAT` (MỚI) | Yêu cầu đã nhận, đang chờ Float Account đủ — CHƯA đụng balance cục bộ | Khi pre-flight check qua |
 | `LOCAL_APPLIED_PENDING_SEND` | Đã trừ tiền cục bộ, chưa gửi Transfer lên Parent Chain | Khi gửi Transfer thành công |
-| `SENT_CONFIRMED` | Parent Chain đã xác nhận Transfer — **tiền đã an toàn tuyệt đối** | Khi nhận thông báo xử lý local xong ở đích (không bắt buộc để an toàn) |
+| `SENT_CONFIRMED` | Parent Chain đã xác nhận Transfer — **tiền đã an toàn tuyệt đối** | Khi nhận thông báo `Claimed` từ đích, HOẶC khi tự gửi Reclaim vì quá timeout |
 | `CONFIRMED_SUCCESS` / `CONFIRMED_REFUNDED` | Audit trail cuối, lưu vĩnh viễn | — |
 
-So với mô hình cũ (5 trạng thái: `LOCAL_APPLIED_PENDING_BATCH` → `BATCHED_PENDING_SIGN` → `SIGNED_PENDING_SUBMIT` → `SUBMITTED_ATTESTED` → `CONFIRMED_*`), mô hình mới **bớt 2 bước trung gian** (không cần gom batch riêng, không cần tách bước ký khỏi bước gửi) — vì mỗi Transfer đã atomic và đủ điều kiện tự gửi ngay.
+So với mô hình cũ (5 trạng thái: `LOCAL_APPLIED_PENDING_BATCH` → `BATCHED_PENDING_SIGN` → `SIGNED_PENDING_SUBMIT` → `SUBMITTED_ATTESTED` → `CONFIRMED_*`), mô hình mới vẫn gọn hơn (không cần gom batch riêng, không cần tách bước ký khỏi bước gửi), nhưng đã thêm lại `PENDING_FLOAT` so với bản nháp đầu tiên của v2 — cần thiết để tách bạch rõ lỗi mất-kết-nối và lỗi float-không-đủ (#11).
 
 ---
 
