@@ -700,6 +700,36 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "uint64", "name": "blockHeight", "type": "uint64"},
+			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "validatorSetHash", "type": "bytes32"},
+			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
+		],
+		"name": "submitCheckpoint",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getCheckpoint",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "uint64", "name": "blockHeight", "type": "uint64"},
+			{"internalType": "bytes32", "name": "stateRoot", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "validatorSetHash", "type": "bytes32"},
+			{"internalType": "uint64", "name": "submittedAt", "type": "uint64"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true, "internalType": "bytes32", "name": "messageId", "type": "bytes32"},

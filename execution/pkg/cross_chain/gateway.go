@@ -51,6 +51,7 @@ var (
 	ErrUnbondingNotReady            = errors.New("unbonding period has not yet elapsed")
 	ErrNotEquivocation              = errors.New("SlashOnEquivocation: the two commit roots are identical -- not a contradiction")
 	ErrCannotVerifyEquivocation     = errors.New("SlashOnEquivocation: chain is neither currently registered nor has a matching unbonding-period committee snapshot to verify against")
+	ErrCheckpointNotMonotonic       = errors.New("SubmitCheckpoint: blockHeight does not advance past this chain's currently recorded checkpoint")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -305,6 +306,28 @@ type GatewayEngine struct {
 	BondLeverage              uint64              `json:"bond_leverage,omitempty"`
 	MinSecurityBondToRegister *big.Int            `json:"min_security_bond_to_register,omitempty"`
 	UnbondingPeriodSeconds    uint64              `json:"unbonding_period_seconds,omitempty"`
+
+	// Checkpoints holds each chain's latest self-reported liveness/state signal (Phase B tầng 1,
+	// note/cross_chain/root_anchor_production_security_hardening_plan.md, adapted from
+	// shard_design_ton_real.md mục 5.6's ShardCheckpoint) -- see SubmitCheckpoint's own doc
+	// comment. Deliberately NOT a Data Availability guarantee -- see ChainCheckpoint's own doc
+	// comment for the exact, honest limit of what this does and doesn't prove.
+	Checkpoints map[uint64]ChainCheckpoint `json:"checkpoints,omitempty"`
+}
+
+// ChainCheckpoint is one chain's latest periodic liveness/state self-report. Proves only that
+// chainID's committee could produce and BLS-sign a state root as of BlockHeight at SubmittedAt --
+// it is NOT a Data Availability proof (nothing here verifies the actual data behind StateRoot is
+// published or reconstructable anywhere -- see root_anchor_production_security_hardening_plan.md
+// §0's calibration of that gap). Its only real job is to make chain silence/staleness an
+// observable, timestamped fact instead of "nobody happened to notice" -- RecoveryCommittee and
+// off-chain monitoring (Phase C) are the consumers, this is purely a reporting primitive.
+type ChainCheckpoint struct {
+	Epoch            uint64      `json:"epoch"`
+	BlockHeight      uint64      `json:"block_height"`
+	StateRoot        common.Hash `json:"state_root"`
+	ValidatorSetHash common.Hash `json:"validator_set_hash"`
+	SubmittedAt      uint64      `json:"submitted_at"` // blockTime (unix seconds) this checkpoint was accepted
 }
 
 // SecurityBondLedger tracks each chain's locked collateral, entirely separate from
@@ -563,6 +586,56 @@ func (g *GatewayEngine) SlashOnEquivocation(
 	// Both certs are real, both signed by the SAME committee at the SAME epoch, over 2 DIFFERENT
 	// commit roots -- mathematically unforgeable proof of equivocation. Forfeit.
 	g.forfeitBond(chainID)
+	return nil
+}
+
+// SubmitCheckpoint records chainID's latest self-reported liveness/state signal (Phase B tầng 1
+// -- see ChainCheckpoint's own doc comment for exactly what this does and does not prove).
+// Permissionless to RELAY (anyone holding the signed cert may submit it -- same pattern as every
+// other cert-gated call in this file), but requires a real QuorumCert from chainID's OWN
+// currently-registered committee, so it cannot be spoofed by a third party.
+//
+// Monotonic: rejects a checkpoint whose BlockHeight does not strictly advance past the chain's
+// currently recorded one. Without this, a captured committee could replay (or the chain's own
+// operator tooling could accidentally resubmit) an old checkpoint to reset the staleness clock
+// off-chain monitoring (Phase C) reads, without the chain actually having progressed at all.
+func (g *GatewayEngine) SubmitCheckpoint(
+	chainID, epoch, blockHeight uint64,
+	stateRoot, validatorSetHash common.Hash,
+	cert QuorumCert,
+	blockTime uint64,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	registry, exists := g.ChainRegistry[chainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, chainID)
+	}
+	if g.DeadChains[chainID] {
+		return fmt.Errorf("%w: chain %d", ErrChainDeclaredDead, chainID)
+	}
+	if cert.Epoch != registry.Epoch {
+		return fmt.Errorf("%w: expected %d, got %d", ErrEpochMismatch, registry.Epoch, cert.Epoch)
+	}
+	digest := ComputeCheckpointMessage(chainID, epoch, blockHeight, stateRoot, validatorSetHash)
+	if err := VerifyQuorumCertAgainstRegistry(registry, cert, digest); err != nil {
+		return fmt.Errorf("SubmitCheckpoint: %w", err)
+	}
+
+	if g.Checkpoints == nil {
+		g.Checkpoints = make(map[uint64]ChainCheckpoint)
+	}
+	if existing, ok := g.Checkpoints[chainID]; ok && blockHeight <= existing.BlockHeight {
+		return fmt.Errorf("%w: got %d, current %d", ErrCheckpointNotMonotonic, blockHeight, existing.BlockHeight)
+	}
+	g.Checkpoints[chainID] = ChainCheckpoint{
+		Epoch:            epoch,
+		BlockHeight:      blockHeight,
+		StateRoot:        stateRoot,
+		ValidatorSetHash: validatorSetHash,
+		SubmittedAt:      blockTime,
+	}
 	return nil
 }
 

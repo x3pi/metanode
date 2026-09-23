@@ -184,6 +184,33 @@ func ComputeUnregisterChainMessage(chainID uint64) []byte {
 	return buf
 }
 
+// CheckpointDomainTag domain-separates GatewayEngine.SubmitCheckpoint's payload (Phase B tầng 1,
+// note/cross_chain/root_anchor_production_security_hardening_plan.md, adapted from
+// shard_design_ton_real.md mục 5.6's ShardCheckpoint) — signed by the reporting chain's OWN
+// currently-registered committee, self-authorized (a chain reporting its own liveness/state needs
+// no third-party authorization, unlike DeclareChainDead/UnregisterChain).
+var CheckpointDomainTag = []byte("CHECKPOINT_V1:")
+
+// ComputeCheckpointMessage computes the digest chainID's own committee signs to periodically
+// self-report a liveness/state signal to Root Anchor -- NOT a Data Availability proof (it proves
+// only that the committee could produce and sign a state root at this height, not that the data
+// behind it is published/reconstructable anywhere), just a signal RecoveryCommittee and off-chain
+// monitoring can act on when it goes stale.
+func ComputeCheckpointMessage(chainID, epoch, blockHeight uint64, stateRoot, validatorSetHash common.Hash) []byte {
+	var buf []byte
+	buf = append(buf, CheckpointDomainTag...)
+	var idBuf [8]byte
+	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], epoch)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], blockHeight)
+	buf = append(buf, idBuf[:]...)
+	buf = append(buf, stateRoot.Bytes()...)
+	buf = append(buf, validatorSetHash.Bytes()...)
+	return buf
+}
+
 // RecoveryUpdateCommitteeDomainTag domain-separates GatewayEngine.UpdateCommitteeWithRecoveryCert's
 // payload — distinct from CommitteeUpdateDomainTag (ApplyCommitteeUpdate's OWN-committee-signs-its-
 // successor path, epoch_sync.go above) on purpose: that path requires the chain's CURRENT/OLD

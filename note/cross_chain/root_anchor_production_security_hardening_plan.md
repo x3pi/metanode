@@ -85,7 +85,17 @@ Cũng nên chặn tương tự ở `Outbound()` (đừng nhận thêm giao dịc
 
 Không có kế hoạch nào có sẵn trong repo cho hướng này — đây là phần thật sự MỚI của tài liệu này.
 
-### Tầng 1 (rẻ, làm được ngay) — Checkpoint liveness thật, không chỉ URL thụ động
+### Tầng 1 — Checkpoint liveness thật — ✅ PHẦN ON-CHAIN ĐÃ IMPLEMENT (2026-09-23)
+
+> `SubmitCheckpoint`/`ChainCheckpoint` (`gateway.go`) + ABI `submitCheckpoint`/`getCheckpoint` đã
+> build xong: chain tự ký (uỷ ban hiện tại của chính nó) báo cáo định kỳ
+> `(epoch, blockHeight, stateRoot, validatorSetHash)`, bắt buộc `blockHeight` tăng đơn điệu (chặn
+> replay/rollback tự làm mới đồng hồ staleness), `SubmittedAt` (blockTime) làm cơ sở tính độ trễ.
+> Test: `pkg/cross_chain/checkpoint_test.go` (6 case) + `gateway_handler_checkpoint_test.go` (2 case
+> ABI end-to-end). **CHƯA làm phần job giám sát chủ động** (health-check `ArchivalEndpoint` qua
+> HTTP thật + tự động cảnh báo N-epoch-không-nộp-checkpoint) — đó là việc OFF-CHAIN, gộp chung vào
+> Phase C (dịch vụ giám sát độc lập) thay vì làm riêng ở đây, tránh trùng lặp phạm vi. Chi tiết dự
+> kiến ban đầu giữ nguyên bên dưới cho tham khảo.
 
 - Build `ShardCheckpoint`/liveness signal đã spec ở mục 5.6 (StateRootHash + ValidatorSetHash định kỳ, mỗi K block) — dù mục 5.6 viết cho ngữ cảnh "shard", cơ chế báo cáo định kỳ này áp dụng được y hệt cho private chain hiện tại, không cần chờ pivot.
 - Thêm 1 job giám sát (chạy cạnh `RelayerDaemon` hoặc độc lập) **chủ động health-check `ArchivalEndpoint`** theo chu kỳ (HTTP GET/RPC ping thật, không chỉ lưu chuỗi) — biến field thụ động thành tín hiệu thật.

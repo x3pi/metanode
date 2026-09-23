@@ -663,7 +663,7 @@ func (h *GatewayHandler) HandleTransaction(
 		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation",
 		"refundReserveAllocation", "submitMessageSuccessAttestation",
-		"postSecurityBond", "claimUnbondedBond", "slashOnEquivocation":
+		"postSecurityBond", "claimUnbondedBond", "slashOnEquivocation", "submitCheckpoint":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -2311,6 +2311,36 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
+	case "submitCheckpoint":
+		// Phase B tầng 1 (note/cross_chain/root_anchor_production_security_hardening_plan.md) --
+		// pure ledger bookkeeping, no real balance ever moves for a checkpoint.
+		cpChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCheckpoint: chainId: %w", err)
+		}
+		cpEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCheckpoint: epoch: %w", err)
+		}
+		cpBlockHeight, err := mustUint64(args[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCheckpoint: blockHeight: %w", err)
+		}
+		cpStateRoot := mustHash(args[3])
+		cpValidatorSetHash := mustHash(args[4])
+		cpCertEpoch, err := mustUint64(args[5])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCheckpoint: cert epoch: %w", err)
+		}
+		cpCert := cross_chain.QuorumCert{
+			Epoch:              cpCertEpoch,
+			AggregateSignature: hexutil.Bytes(mustBytes(args[6])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[7])),
+		}
+		if err := engine.SubmitCheckpoint(cpChainID, cpEpoch, cpBlockHeight, cpStateRoot, cpValidatorSetHash, cpCert, blockTime); err != nil {
+			return nil, nil, err
+		}
+
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)
 	}
@@ -2601,6 +2631,21 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		}
 		req := engine.SecurityBond.UnbondingRequests[reqChainID]
 		return method.Outputs.Pack(true, req.Amount, new(big.Int).SetUint64(req.ReleaseAt), req.GenesisWallet)
+
+	case "getCheckpoint":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getCheckpoint input: %w", err)
+		}
+		cpChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getCheckpoint: chainId: %w", err)
+		}
+		cp, ok := engine.Checkpoints[cpChainID]
+		if !ok {
+			return method.Outputs.Pack(false, uint64(0), uint64(0), common.Hash{}, common.Hash{}, uint64(0))
+		}
+		return method.Outputs.Pack(true, cp.Epoch, cp.BlockHeight, cp.StateRoot, cp.ValidatorSetHash, cp.SubmittedAt)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)
