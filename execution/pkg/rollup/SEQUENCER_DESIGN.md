@@ -31,7 +31,7 @@
 
 ### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
 
-Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn — bắt buộc xây cả 3 làm baseline trước go-live (mục 9.1 Q9-phần-build). Mức rủi ro còn lại có chấp nhận được với quy mô tài sản thật hay không là quyết định threat-model của đội (Q9-phần-rủi-ro, còn mở).
+Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live (mục 9.1 Q9-phần-build). Mức rủi ro còn lại có chấp nhận được với quy mô tài sản thật hay không là quyết định threat-model của đội (Q9-phần-rủi-ro, còn mở).
 
 ### 2.4. 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
 
@@ -216,6 +216,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 | 12 | Không có timeout nếu node đích còn sống nhưng kẹt/chậm xử lý 1 credit đã nhận (khác node chết hẳn, không cần `RecoveryCommittee`) | Tiền nằm im ở Float Account của đích, User A gốc không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian | Cơ chế Reclaim: quá timeout mà `MessageID` chưa `Claimed`, Node 1 tự reclaim thẳng từ Parent Chain không cần Node 2 hợp tác — có chặn race với việc Node 2 vừa kịp `Claimed` (mục 3.6) |
 | 13 | Node đích không có bước phục hồi nếu crash ĐÚNG GIỮA lúc đánh dấu `Claimed` (đã gửi lên Parent Chain) và lúc credit local cho B (chưa kịp làm) | Restart mà không kiểm tra đúng trạng thái này có thể credit local 2 lần, hoặc bỏ sót vĩnh viễn | Node đích cần state machine cục bộ riêng: `MARKED_CLAIMED_PENDING_CREDIT` → `CREDITED` — khi restart, nếu thấy `Claimed` trên Parent Chain nhưng local chưa ghi `CREDITED`, phải tiếp tục credit chứ không được re-mark `Claimed` cũng không được bỏ qua (mục 13.3) |
 | 14 | Velocity-limit chống lộ khoá cho Transfer outflow (#11/mục 4.4) chưa nói rõ có loại trừ Hoàn tiền (mục 3.4)/Reclaim (mục 3.6) hay không | Nếu áp chung 1 ngưỡng cho cả 2 loại, 1 node đang bị tấn công spam-revert (#5) có thể bị chính circuit-breaker này chặn luôn cả việc hoàn tiền hợp lệ cho user vô tội đang chờ — DoS tầng 2 do chính cơ chế phòng thủ gây ra | Loại trừ tường minh: ngưỡng chỉ áp cho Transfer gửi MỚI (mục 3.3); Hoàn tiền/Reclaim luôn được miễn vì chỉ trả lại đúng giá trị đã thực nhận trước đó, không phải bề mặt tấn công mới (mục 4.4) |
+| 15 | **[CÒN MỞ]** Không có cơ chế nào để user report "node thực thi sai" ở cấp giao dịch cá nhân — `RecoveryCommittee`/Snapshot Pipeline chỉ hoạt động cấp toàn-chain (node chết/double-sign), không có nhánh cho node vẫn sống nhưng tính sai/censorship/rollback 1 giao dịch | User bị hại không có kênh nào để khiếu nại có bằng chứng, cũng không có bằng chứng chống chối bỏ (response giao dịch hiện không được ký) | Signed Receipt (bắt buộc, nền tảng) + kênh report vận hành qua `RecoveryCommittee` (Hướng A) làm baseline trước go-live; fraud-proof đầy đủ qua publish tx log (Hướng B) để dành roadmap dài hạn — chi tiết đầy đủ + đánh đổi từng hướng ở mục 15, **cần đội chọn hướng, không tự đề xuất được** |
 
 ---
 
@@ -233,8 +234,9 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 | Q(timeout Reclaim) | Bao lâu thì Node 1 được phép Reclaim nếu Node 2 chưa `Claimed`? | Chưa có số tuyệt đối, cần đo chu kỳ xử lý bình thường thật trước khi chốt | mục 3.6, #12 |
 | Q(RecoveryCommittee) | Ai ngồi trong đó, bao nhiêu người, ngưỡng quorum? | **CÒN MỞ THẬT SỰ** — quyết định tổ chức/nhân sự, không tự đề xuất được. **Chặn cứng go-live**: code không chạy được nếu thiếu config này | #7 |
 | Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | **CÒN MỞ** — khẩu vị rủi ro kinh doanh thật | mục 2.3 |
+| Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ) cho #15? | **CÒN MỞ THẬT SỰ** — khuyến nghị Hướng A làm baseline (mục 15.5), nhưng cần đội chốt chính thức trước khi viết code | mục 15, #15 |
 
-**2 mục còn mở thật sự, không tự đề xuất số được:** `RecoveryCommittee` thành viên, Q9-rủi-ro (custody risk acceptance).
+**3 mục còn mở thật sự, không tự đề xuất số được:** `RecoveryCommittee` thành viên, Q9-rủi-ro (custody risk acceptance), Q(report node sai) — hướng A hay B (khuyến nghị đã có, nhưng cần đội chốt chính thức).
 
 ### 9.2. Vận hành
 
@@ -246,8 +248,9 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 9.3. Checklist bảo mật trước khi go-live
 
-- [ ] #1–#14 ở mục 8 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), và #13 (crash-recovery giữa `Claimed` và credit local).
-- [ ] `RecoveryCommittee`, Q9-rủi-ro đã có quyết định bằng văn bản từ đội — không được bỏ qua.
+- [ ] #1–#15 ở mục 8 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), và #15 (cơ chế report node sai — mục 15, chưa có hướng chốt).
+- [ ] `RecoveryCommittee`, Q9-rủi-ro, Q(report node sai) đã có quyết định bằng văn bản từ đội — không được bỏ qua.
+- [ ] Signed Receipt (mục 15.2) đã triển khai cho MỌI giao dịch (nội bộ lẫn cross-node) trước go-live — đây là điều kiện nền tảng bắt buộc dù chọn Hướng A hay B, không phải tính năng tuỳ chọn.
 - [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết → Parent Chain biết TỔNG số thật ngay (mục 4.3, tự động), Archival Service chạy đúng pipeline Snapshot+Delay 72h để chứng minh PHÂN BỔ cho user (mục 6.3), (4) Migration có message đến giữa lúc Freeze, (5) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (6) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#9), (7) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#11), (8) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#12), (9) crash Node 2 đúng giữa lúc `Claimed` và credit local, khởi động lại → xác nhận tự hoàn tất credit, không credit trùng, không bỏ sót (#13), (10) Node 2 chết hẳn khi đang có Transfer tới nhưng chưa `Claimed` → xác nhận dùng đúng cơ chế Reclaim (mục 3.6), không phải Transfer ngược (mục 3.4, vốn cần Node 2 sống), (11) giả lập 1 node vừa bị chạm ngưỡng velocity outflow (#11) vừa cần hoàn tiền hợp lệ cho user khác → xác nhận hoàn tiền vẫn đi qua bình thường, không bị chặn nhầm bởi circuit-breaker (#14).
 - [ ] `Σ NodeFloatAccount == genesis_total_supply` (mục 4.3) được kiểm tra tự động định kỳ trên Parent Chain — đây là bất biến kiểm chứng được hoàn toàn.
 
@@ -255,14 +258,15 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ## 10. Lộ trình triển khai
 
-1. **Chốt 2 mục còn mở** (`RecoveryCommittee`, Q9-rủi-ro) trước khi viết code.
+1. **Chốt 3 mục còn mở** (`RecoveryCommittee`, Q9-rủi-ro, Q(report node sai) — mục 15) trước khi viết code.
 2. **Xây `NodeFloatAccount` trên Parent Chain** — cấu trúc dữ liệu mới, thay thế vai trò "trần phân bổ" của `PerChainAllocation` cho mục đích cross-node.
 3. **Xây luồng user tự nạp tiền vào tài khoản của mình** — atomic tăng `NodeFloatAccount` cùng lúc với balance cục bộ user, không có bước "nạp quỹ" riêng của node (mục 3.2).
 4. **Xây luồng Transfer atomic** (mục 3.3) thay thế `Outbound`/`BatchOutboundCommit`/`ClaimMessage` 3 bước cho phần giá trị — giữ nguyên cơ chế message/payload cho phần gọi Contract.
 5. **Giữ nguyên Snapshot & Archival Pipeline** (mục 6.3) — phục vụ chứng minh PHÂN BỔ khi node chết, không phải chứng minh tổng số (đã tự động ở mục 4.3).
 6. **Bổ sung Account Registry** (mục 5).
-7. **Dựng hạ tầng vận hành** (mục 9.2) song song, không để tới sau khi code xong mới làm.
-8. **Chạy checklist 9.3** trước khi cho traffic thật.
+7. **Xây Signed Receipt cho mọi giao dịch** (mục 15.2) + kênh report vận hành (Hướng A, mục 15.3) — nền tảng bắt buộc trước go-live, không phải tính năng có thể hoãn.
+8. **Dựng hạ tầng vận hành** (mục 9.2) song song, không để tới sau khi code xong mới làm.
+9. **Chạy checklist 9.3** trước khi cho traffic thật.
 
 ---
 
@@ -585,3 +589,69 @@ sequenceDiagram
 | 5 | Phí ưu tiên xử lý | ❌ Chưa có, chỉ cần khi hệ thống lớn | Đầu cơ |
 
 **Khuyến nghị:** #1 đủ cho giai đoạn ra mắt; #3 (phí custody đơn thuần) vẫn khả thi, nhưng phần "đầu tư float nhàn rỗi" của ý tưởng này không hợp lý — bất biến mục 3.5 nghĩa là không có "phần nhàn rỗi" nào tách rời khỏi tiền user để đầu tư mà không phá vỡ chính bất biến đó.
+
+---
+
+## 15. Cơ chế Report & Tranh chấp khi Node Thực thi Sai
+
+### 15.1. Vấn đề & phạm vi — gap hiện tại
+
+**Hiện trạng: KHÔNG có cơ chế nào cho user report "node tôi thực thi sai" ở cấp giao dịch/tài khoản cá nhân.** Cần phân biệt rõ với các cơ chế đã có, vì cả 2 đều hoạt động ở **cấp toàn-chain**, không phải cấp giao dịch:
+- `RecoveryCommittee` (mục 6.2) chỉ can thiệp khi tuyên bố **cả node chết hẳn**, hoặc bắt được double-sign checkpoint (`SlashOnEquivocation`) — không có nhánh nào cho "node vẫn sống, nhưng tính sai balance của 1 user cụ thể".
+- Snapshot Pipeline (mục 6.3) chỉ chụp **state hiện tại** định kỳ để chứng minh PHÂN BỔ khi node chết — không lưu **transaction log replay được**, nên không ai verify được node đã tính đúng hay sai cho 1 giao dịch cụ thể trong quá khứ, chỉ verify được "state hôm nay có khớp với root node từng công bố hay không".
+
+**Taxonomy lỗi cần phân biệt (mỗi loại cần bằng chứng/xử lý khác nhau):**
+1. **Node báo balance sai** (thấp hơn thực tế phải có) — do bug tính toán, hoặc cố ý gian lận.
+2. **Censorship** — node từ chối xử lý 1 giao dịch hợp lệ (không có lỗi kỹ thuật, chỉ không chịu làm).
+3. **Rollback âm thầm** — node đã báo giao dịch thành công, sau đó đảo ngược/xoá dấu vết mà không thông báo.
+4. **Khoá bị lộ** — kẻ tấn công tự tạo + tự ký request giả (đã ghi nhận ở #8, mục 2.3 — khác bản chất với 3 loại trên vì không phải lỗi thực thi, mà là request từ đầu đã không do user thật gửi).
+5. **Bug logic thực thi smart contract** — node tính sai kết quả 1 contract call do lỗi trong chính engine thực thi, không phải gian lận cố ý.
+
+### 15.2. Điều kiện tiên quyết cho MỌI hướng giải quyết: Signed Receipt
+
+Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc ký — response chỉ là 1 câu trả lời thường, node có thể nói bất cứ điều gì mà không để lại bằng chứng chống chối bỏ.
+
+**Đề xuất nền tảng:** mọi phản hồi giao dịch (nội bộ lẫn cross-node) phải kèm 1 **receipt ký bằng `NodeBlsPrivateKey`** (khoá đã có sẵn, cùng khoá dùng ký Transfer lên Parent Chain — mục 3.3), chứa tối thiểu: `{user_address, nonce, pre_balance, post_balance, tx_hash hoặc payload_hash, timestamp, result: success|fail}`. User tự giữ receipt này ở phía client — node không thể từ chối đã ký sau này (non-repudiation).
+
+- **Chi phí không đáng kể:** node đã có BLS key sẵn; ký thêm 1 message nhỏ mỗi giao dịch rẻ hơn nhiều so với năng lực đã đo (~52.000 chữ ký/giây theo `cmd/rpc/BLS_PERFORMANCE_REPORT.md` hiện có trong repo) — dư sức cho throughput giao dịch nội bộ thực tế.
+- **Đây là điều kiện NỀN TẢNG bắt buộc** dù chọn Hướng A hay B bên dưới — không có receipt thì không có gì để report/verify cả, kể cả điều tra thủ công.
+
+### 15.3. Hướng A — Kênh report vận hành (nhẹ, khả thi ngay)
+
+- User giữ receipt đã ký làm bằng chứng.
+- Khi nghi ngờ sai lệch: gửi report (kèm receipt liên quan) qua kênh support/operator — dùng chung khung runbook đã có ở mục 9.2 ("kịch bản node bị nghi compromise").
+- Operator điều tra: truy cập LevelDB/log thực tế của node, đối chiếu receipt vs state thực tế.
+- Nếu xác nhận sai: xử lý thủ công (hoàn tiền qua thao tác vận hành trực tiếp), hoặc escalate lên `RecoveryCommittee` nếu đủ nghiêm trọng để coi là node compromise (kích hoạt luồng #8).
+- **Bắt buộc tách vai trò:** người điều tra report KHÔNG được là chính operator của node bị report (xung đột lợi ích) — nên route qua `RecoveryCommittee` hoặc 1 bên vận hành độc lập, không phải chính đội vận hành node đó tự điều tra mình.
+
+**Ưu điểm:** triển khai nhanh, không cần thay đổi kiến trúc cốt lõi, không cần node publish dữ liệu công khai.
+**Nhược điểm:** KHÔNG trustless — phụ thuộc thiện chí + năng lực điều tra của operator/`RecoveryCommittee`; không có SLA bắt buộc; không tự động hoá.
+
+### 15.4. Hướng B — Fraud-proof đầy đủ qua publish transaction log (nặng, đổi kiến trúc)
+
+- Node publish (không chỉ Merkle root state, mà) **toàn bộ input log** — mọi giao dịch nội bộ theo đúng thứ tự — đủ để bất kỳ ai replay lại state-transition function và tự tính ra state, đối chiếu với root đã công bố.
+- Mở rộng vai trò Archival Service (mục 6.3): dùng liên tục để bất kỳ verifier nào (không cần quyền đặc biệt) tự replay kiểm tra, không chỉ để phục hồi lúc node chết.
+- **Challenge window:** nếu verifier phát hiện root công bố không khớp kết quả replay → submit fraud-proof lên Parent Chain trong 1 khung thời gian (có thể dùng lại cơ chế Withdrawal Delay 72h đã có, mục 6.3) → nếu đúng, trigger slash `SecurityBond` + hoàn tiền cho user bị hại từ phần bond bị tịch thu.
+
+**Ưu điểm:** thật sự trustless — không cần tin operator/`RecoveryCommittee` điều tra công tâm, ai cũng tự verify được.
+**Nhược điểm — đáng kể, không phải chi tiết nhỏ:**
+1. Chi phí băng thông/lưu trữ lớn hơn hẳn (toàn bộ tx log thay vì chỉ root) — đặc biệt nặng vì giao dịch nội bộ "chiếm đa số giao dịch thực tế" (mục 13.1).
+2. Cần đặc tả lại "giao dịch nội bộ" (mục 13.2) theo 1 state-transition function **deterministic, replay được** — hiện tài liệu mới mô tả ở mức khái niệm, chưa cam kết determinism nào.
+3. Cần 1 engine replay **độc lập** với chính binary của node — nếu chỉ dùng lại code node để replay, bug trong chính node sẽ bị replay giống hệt, không phát hiện được gì. Đây là bài toán "verifier implementation" kinh điển của các hệ rollup thật (Optimism/Arbitrum tốn nhiều năm mới làm đúng) — không nên đánh giá thấp effort.
+4. **Mâu thuẫn 1 phần với chính lý do chọn Float Account** (mục 3.1): "Parent Chain không lưu state ứng dụng" là giả định nền tảng của toàn bộ thiết kế hiện tại. Hướng B không đòi Parent Chain lưu state, nhưng đòi node công khai TOÀN BỘ log — về bản chất đảo ngược phần lớn lợi ích "custody riêng tư, gọn nhẹ" mà mô hình Float Account đang theo đuổi.
+
+### 15.5. So sánh & khuyến nghị
+
+| Tiêu chí | Hướng A (report vận hành) | Hướng B (fraud-proof đầy đủ) |
+|---|---|---|
+| Trustless | Không — dựa vào operator/`RecoveryCommittee` | Có |
+| Effort triển khai | Thấp — chỉ cần thêm signed receipt + quy trình | Rất cao — đổi kiến trúc thực thi + verifier engine độc lập |
+| Chi phí vận hành liên tục | Thấp | Cao (băng thông/lưu trữ toàn bộ tx log) |
+| Phù hợp giai đoạn | Bắt buộc trước go-live | Roadmap dài hạn, khi quy mô tài sản đủ lớn để đáng đầu tư |
+
+**Khuyến nghị:** Signed Receipt + Hướng A là **baseline bắt buộc trước go-live** — đây chính là mảnh còn thiếu thứ 4 trong bộ mitigation đã liệt kê ở mục 2.3 cho rủi ro #8 (hiện mới có 3: ngưỡng rút+delay, anomaly detection, non-custodial tuỳ chọn — thiếu hẳn 1 kênh cho user tự report). Hướng B để dành làm lựa chọn dài hạn/tuỳ chọn, không chặn go-live — chỉ đáng đầu tư nếu quy mô tài sản custody tập trung lớn tới mức rủi ro ở #8 không còn chấp nhận được nữa (liên quan trực tiếp Q9-rủi-ro, mục 2.3, còn mở).
+
+### 15.6. Giới hạn nền tảng — dù chọn hướng nào
+
+- **Không giải quyết được trường hợp khoá bị lộ hoàn toàn (loại 4 ở mục 15.1):** nếu kẻ tấn công tự tạo VÀ tự ký request giả từ đầu, receipt chỉ chứng minh "node đã ký cái này" — không chứng minh "user thật sự yêu cầu cái này". Đây vẫn là giới hạn của #8 đã ghi nhận từ trước — Signed Receipt giải quyết lớp "node nói dối về kết quả nó tự thực thi", KHÔNG giải quyết lớp "khoá bị lộ, request giả từ đầu".
+- **Không giúp gì cho giao dịch trong "cửa sổ mất mát 15 phút"** (mục 6.3 điểm 4) nếu node chết trước khi ai kịp lấy được receipt hoặc archival data — receipt chỉ hữu ích nếu đã có nơi lưu ngoài node (client của user, hoặc archival đã kịp thu thập).
