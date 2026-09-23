@@ -22,6 +22,143 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestMustUint64 is a direct unit test of the shared mustUint64 helper (~35 call sites across
+// gateway_handler.go) -- see TestGatewayHandler_Outbound_RejectsDestChainIdOverflowingUint64 for
+// the one end-to-end regression test through real ABI dispatch; this covers the helper's own
+// boundary/type behavior exhaustively without needing 35 handler-level tests to do it.
+func TestMustUint64(t *testing.T) {
+	maxUint64 := new(big.Int).SetUint64(^uint64(0))
+	overflowBy1 := new(big.Int).Add(maxUint64, big.NewInt(1))
+	overflowLarge := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(5)) // 2^64+5
+
+	tests := []struct {
+		name    string
+		in      interface{}
+		want    uint64
+		wantErr bool
+	}{
+		{"zero", big.NewInt(0), 0, false},
+		{"small value", big.NewInt(42), 42, false},
+		{"exactly math.MaxUint64", maxUint64, ^uint64(0), false},
+		{"overflow by 1", overflowBy1, 0, true},
+		{"overflow by a lot (2^64+5, would alias to 5 if truncated)", overflowLarge, 0, true},
+		{"raw uint64 (non-big.Int ABI decode shape)", uint64(777), 777, false},
+		{"nil", nil, 0, true},
+		{"wrong type (string)", "not a number", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := mustUint64(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("mustUint64(%v) = (%d, nil), want an error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mustUint64(%v) returned unexpected error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Fatalf("mustUint64(%v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGatewayHandler_AttestedCommitsByRootPersistsAcrossReload is the regression test for the
+// AttestedCommitsByRoot index bug fixed alongside the security_review_followup_plan.md work
+// (commit 7a5a386c): every real Gateway transaction round-trips the WHOLE engine through
+// chainState's storage as one JSON blob (loadGatewayEngine/saveGatewayEngine), processing exactly
+// one operation before saving and loading a brand-new *GatewayEngine value for the next
+// transaction -- a field tagged `json:"-"` is therefore NEVER seen by the next transaction's load,
+// no matter what the current transaction wrote to it in memory. AttestedCommitsByRoot (an index
+// over AttestedCommits used by Refund()'s fallback lookup) had exactly that tag; this proves the
+// fix (now `omitempty`, persisted for real) by forcing a real save+reload cycle -- not just
+// checking the in-memory value, which would pass even with the old, broken tag.
+func TestGatewayHandler_AttestedCommitsByRootPersistsAcrossReload(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	const sourceChainID = uint64(555)
+	commitRoot := common.HexToHash("0x1234567812345678123456781234567812345678123456781234567812345678")
+
+	engine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (initial): %v", err)
+	}
+	key := fmt.Sprintf("%d:%s:%s", sourceChainID, commitRoot.Hex(), "0")
+	engine.AttestedCommits[key] = cross_chain.AttestedCommit{
+		SourceChainID: sourceChainID,
+		CommitRoot:    commitRoot,
+		AssetID:       big.NewInt(0),
+		Epoch:         1,
+		FundedAmount:  big.NewInt(100),
+		ClaimedAmount: big.NewInt(0),
+	}
+	engine.AttestedCommitsByRoot[commitRoot] = sourceChainID
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine: %v", err)
+	}
+
+	// A brand new transaction loading fresh state (exactly what every real Gateway tx does) must
+	// see the SAME index entry -- proving it actually survived the JSON round trip, not just that
+	// it was set in the in-memory engine that wrote it.
+	reloaded, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (reload): %v", err)
+	}
+	gotSourceID, ok := reloaded.AttestedCommitsByRoot[commitRoot]
+	if !ok {
+		t.Fatal("AttestedCommitsByRoot entry did not survive a save+reload round trip (still tagged json:\"-\"?)")
+	}
+	if gotSourceID != sourceChainID {
+		t.Fatalf("AttestedCommitsByRoot[commitRoot] = %d after reload, want %d", gotSourceID, sourceChainID)
+	}
+}
+
+// TestGatewayHandler_AttestedCommitsByRootRebuildsForLegacyBlob covers the other half of the same
+// fix: a blob written before AttestedCommitsByRoot existed (or one that's genuinely empty so far)
+// must have the index rebuilt from AttestedCommits on load, exactly once -- not left permanently
+// empty, and not rebuilt unconditionally on every single load (which would defeat the point of
+// persisting it -- see loadGatewayEngine's own doc comment on this exact tradeoff).
+func TestGatewayHandler_AttestedCommitsByRootRebuildsForLegacyBlob(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+
+	const sourceChainID = uint64(777)
+	commitRoot := common.HexToHash("0xABCDEF00ABCDEF00ABCDEF00ABCDEF00ABCDEF00ABCDEF00ABCDEF00ABCDEF00")
+
+	engine, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (initial): %v", err)
+	}
+	key := fmt.Sprintf("%d:%s:%s", sourceChainID, commitRoot.Hex(), "0")
+	engine.AttestedCommits[key] = cross_chain.AttestedCommit{
+		SourceChainID: sourceChainID,
+		CommitRoot:    commitRoot,
+		AssetID:       big.NewInt(0),
+		Epoch:         1,
+		FundedAmount:  big.NewInt(100),
+		ClaimedAmount: big.NewInt(0),
+	}
+	// Simulate a legacy blob: AttestedCommits is populated but the index was never built (as if
+	// written by a version of this code before the field existed).
+	engine.AttestedCommitsByRoot = nil
+	if err := saveGatewayEngine(cs, engine); err != nil {
+		t.Fatalf("saveGatewayEngine: %v", err)
+	}
+
+	reloaded, err := loadGatewayEngine(cs)
+	if err != nil {
+		t.Fatalf("loadGatewayEngine (reload): %v", err)
+	}
+	gotSourceID, ok := reloaded.AttestedCommitsByRoot[commitRoot]
+	if !ok {
+		t.Fatal("expected loadGatewayEngine to rebuild AttestedCommitsByRoot from AttestedCommits for a legacy blob")
+	}
+	if gotSourceID != sourceChainID {
+		t.Fatalf("rebuilt AttestedCommitsByRoot[commitRoot] = %d, want %d", gotSourceID, sourceChainID)
+	}
+}
+
 // hashesToBytes32 converts a MerkleProof's []common.Hash siblings into the [][32]byte shape the
 // GatewayABI's bytes32[] proofSiblings parameter expects.
 func hashesToBytes32(hashes []common.Hash) [][32]byte {

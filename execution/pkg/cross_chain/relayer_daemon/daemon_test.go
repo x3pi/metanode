@@ -2275,3 +2275,113 @@ func TestDecodeRevertReason(t *testing.T) {
 	rawBinary := []byte{0xde, 0xad, 0xbe, 0xef}
 	assert.Equal(t, "0xdeadbeef", DecodeRevertReason(rawBinary))
 }
+
+// TestRelayerDaemon_RetryPendingCredits_SucceedsAfterInitialRevert is the regression test called
+// for in note/cross_chain/security_review_followup_plan.md mục 1.1: unlike pendingRefunds (which
+// has always had a real retry queue, used by processFailedClaim), a failed/reverted
+// creditReserveAllocation used to just log a warning and give up -- the message had already
+// claimed successfully on its real destination (funds delivered), but Reserve's own
+// PerChainAllocation ledger permanently under-counted it, risking a later legitimate outbound from
+// that chain being wrongly rejected against a ceiling computed from the wrong number. pendingCredits
+// + retryPendingCredits (daemon.go) closes that gap by mirroring pendingRefunds' own retry pattern
+// exactly. This test drives retryPendingCredits directly (not the full BatchAndRelay path) against
+// a mock Reserve-chain RPC server that reverts the first creditReserveAllocation attempt and
+// succeeds the second, proving the entry survives a revert and is only cleared once it truly lands.
+func TestRelayerDaemon_RetryPendingCredits_SucceedsAfterInitialRevert(t *testing.T) {
+	const sourceChainID = uint64(801)
+	const destChainID = uint64(802)
+	const reserveChainID = uint64(803)
+
+	relayerKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	relayerKeyHex := hex.EncodeToString(crypto.FromECDSA(relayerKey))
+
+	var mu sync.Mutex
+	receiptCalls := 0
+
+	reserveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			ID     json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := func(result interface{}) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}
+		switch req.Method {
+		case "eth_chainId":
+			reply(hexutil.EncodeBig(big.NewInt(int64(reserveChainID))))
+		case "eth_getTransactionCount":
+			reply(hexutil.EncodeUint64(0))
+		case "eth_sendRawTransaction":
+			var params []interface{}
+			_ = json.Unmarshal(req.Params, &params)
+			rawHex, _ := params[0].(string)
+			rawBytes, _ := hexutil.Decode(rawHex)
+			var ethTx ethtypes.Transaction
+			require.NoError(t, ethTx.UnmarshalBinary(rawBytes))
+			reply(ethTx.Hash().Hex())
+		case "eth_getTransactionReceipt":
+			mu.Lock()
+			attempt := receiptCalls
+			receiptCalls++
+			mu.Unlock()
+			// First attempt (attempt==0) reverts; every attempt after that succeeds.
+			status := uint64(1)
+			if attempt == 0 {
+				status = 0
+			}
+			reply(map[string]interface{}{"status": hexutil.EncodeUint64(status), "return": "0x"})
+		default:
+			reply("0x0")
+		}
+	}))
+	defer reserveSrv.Close()
+
+	cfg := DaemonConfig{
+		RelayerKeyHex:     relayerKeyHex,
+		RootAnchorURLs:    []string{reserveSrv.URL},
+		ChainRPCURLs:      map[uint64]string{reserveChainID: reserveSrv.URL},
+		ReserveChainID:    reserveChainID,
+		PollInterval:      5 * time.Millisecond,
+		MaxPollIterations: 3,
+	}
+	daemon, err := NewRelayerDaemon(cfg)
+	require.NoError(t, err)
+	defer daemon.Stop()
+
+	msg := cross_chain.CrossChainMessage{
+		MessageID:     common.HexToHash("0xC001"),
+		SourceChainID: sourceChainID,
+		DestChainID:   destChainID,
+		Sequence:      1,
+		Sender:        common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Target:        common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		AssetID:       big.NewInt(0),
+		Value:         big.NewInt(500),
+		Payload:       []byte{},
+		Tip:           big.NewInt(0),
+		GasFee:        big.NewInt(0),
+	}
+	proof := cross_chain.MerkleProof{LeafIndex: 0, Siblings: nil}
+	commitRoot := common.HexToHash("0xAAAA")
+	successCert := cross_chain.QuorumCert{Epoch: 0, AggregateSignature: []byte{0x01}, SignerBitmap: []byte{0x01}}
+
+	daemon.pendingCredits[msg.MessageID] = &pendingCredit{
+		msg: msg, commitRoot: commitRoot, proof: proof, successCert: successCert,
+	}
+
+	// First retry: creditReserveAllocation reverts -- entry must survive, not be silently dropped.
+	daemon.retryPendingCredits(context.Background(), sourceChainID, destChainID)
+	if _, stillPending := daemon.pendingCredits[msg.MessageID]; !stillPending {
+		t.Fatal("expected pendingCredits entry to survive a reverted retry attempt")
+	}
+
+	// Second retry: succeeds -- entry must now be cleared from the queue.
+	daemon.retryPendingCredits(context.Background(), sourceChainID, destChainID)
+	if _, stillPending := daemon.pendingCredits[msg.MessageID]; stillPending {
+		t.Fatal("expected pendingCredits entry to be removed after a successful retry")
+	}
+}
