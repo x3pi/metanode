@@ -45,7 +45,17 @@ Cũng nên chặn tương tự ở `Outbound()` (đừng nhận thêm giao dịc
 
 ---
 
-## Phase A — `SecurityBond` + `SlashOnEquivocation` (build thiết kế đã có, ưu tiên cao nhất)
+## Phase A — `SecurityBond` + `SlashOnEquivocation` — ✅ ĐÃ IMPLEMENT (2026-09-23)
+
+> Build xong toàn bộ cơ chế mô tả bên dưới, với 1 điều chỉnh có chủ đích so với thiết kế gốc (giữ
+> `RegisterChainViaStake`'s ABI signature KHÔNG đổi — bond post qua 1 hàm mới riêng
+> `postSecurityBond`, xem "Điều chỉnh khi build" bên dưới) và 1 knob an toàn bổ sung
+> (`BondLeverage`/`MinSecurityBondToRegister` mặc định = 0/tắt, opt-in qua config, để không phá vỡ
+> retroactive mọi chain đã đăng ký từ trước — xem field's doc comment trong `gateway.go`). ABI mới:
+> `postSecurityBond`, `claimUnbondedBond`, `slashOnEquivocation` (write) +
+> `getSecurityBond`/`getUnbondingRequest` (view). Test: `pkg/cross_chain/security_bond_test.go` (11
+> test, engine-level) + `gateway_handler_security_bond_test.go` (3 test, ABI/real-balance
+> end-to-end). Chi tiết thiết kế gốc giữ nguyên bên dưới cho tham khảo.
 
 **Đã thiết kế đầy đủ ở `note/cross_chain/shard_design_ton_real.md` mục 5.5 (thiết kế) + mục 8.8 (việc cần code) — tài liệu này KHÔNG lặp lại chi tiết, chỉ tóm tắt phạm vi build và điều chỉnh cho việc build thẳng lên `gateway.go` hiện tại (không phải chờ shard pivot):**
 
@@ -58,13 +68,16 @@ Cũng nên chặn tương tự ở `Outbound()` (đừng nhận thêm giao dịc
 5. **Unbonding Period**: `UnregisterChainWithCert` không hoàn Bond ngay — giữ đủ `UNBONDING_PERIOD >= MAX_TIMEOUT_BLOCKS_tương_đương + T_SLASH_BUFFER` để `SlashOnEquivocation` không bị "rút trước khi bị bắt" vô hiệu hoá (chain hiện tại chưa có khái niệm `MAX_TIMEOUT_BLOCKS` xuyên chain — cần định nghĩa mới hoặc dùng 1 hằng số thời gian độc lập, xem mục "Cần làm thêm so với bản gốc" bên dưới).
 6. **Cả 2 đường tịch thu bắt buộc set `DeadChains[X]=true` ngay lập tức** (đóng băng rút thêm) — **phụ thuộc trực tiếp vào Quick Win #0 đã làm xong trước đó**, nếu không tịch thu Bond xong mà `PerChainAllocation[X]` vẫn rút được bình thường thì toàn bộ Phase A vô nghĩa.
 
-### Cần làm thêm so với bản gốc (vì build thẳng lên Root Anchor hiện tại, không qua "shard" framing)
+### Điều chỉnh thật khi build (so với dự kiến ban đầu)
 
-- Bản gốc (mục 5.5) viết trong ngữ cảnh `PerChainAllocation[Y]` tăng qua 3-hop `InTransitTo[Y]` buffer (dành cho luồng value-transfer nội bộ mạng "shard" mới, mục 5.3). Trên `gateway.go` hiện tại, tương đương gần nhất là **`CreditReserveAllocation`** (ghi có sau khi `claimMessage` thành công thật ở đích, xác nhận qua success cert) — ceiling-cap-theo-bond nên chèn ở đây, không phải ở `ClaimMessage` tại chỗ claim (đúng tinh thần "check sớm nhất có thể, trước khi tiền thực sự tới tay user", nhưng với dữ liệu ceiling hiện tại — cần xác nhận lại điểm chèn chính xác khi code, không suy luận suông).
-- `MAX_TIMEOUT_BLOCKS`/`UNBONDING_PERIOD` cần định nghĩa mới cho Root Anchor hiện tại — chain hiện tại không có khái niệm "timeout height" xuyên chain thống nhất như thiết kế shard mới (mục 5.4/8.5) đã có; cần 1 hằng số thời gian độc lập hoặc dùng lại đúng `MaxHopCount`/thời gian khối trung bình làm cơ sở ước lượng.
-- Cần review lại 7 điểm mục 10 đã tự liệt kê là "cần review code-level độc lập của người trước khi coi là final" TRƯỚC khi code Phase A thật — đừng bỏ qua bước này chỉ vì nó nằm trong 1 doc khác.
+- **`CreditReserveAllocation`** (không phải `InTransitTo[Y]` buffer của thiết kế shard gốc — chain hiện tại chưa có 3-state ledger đó) là điểm chèn ceiling-cap-theo-bond thật cho phía nhận; **`TransferAllocationWithCert`** là điểm chèn cho phía cấp vốn ban đầu. Cả 2 đã implement, check chạy trên allocation ỨNG VIÊN (candidate), trước khi mutation thật xảy ra.
+- **`bondAmount` KHÔNG bundle vào `RegisterChainViaStake`** như thiết kế gốc đề xuất (tránh đổi ABI signature của 1 method đang dùng rộng — `register_chains`/`live_asset_bridge`/`verify_two_flows` CLI tools, blast radius lớn) — thay bằng 1 hàm ABI hoàn toàn mới, độc lập: `postSecurityBond(chainId, amount)`, permissionless, gọi được bất kỳ lúc nào sau khi chain đã đăng ký (kể cả retroactive cho chain đã đăng ký từ trước feature này tồn tại). Sạch hơn thiết kế gốc, không breaking change nào.
+- **`MAX_TIMEOUT_BLOCKS` không dùng** (khái niệm đó thuộc thiết kế shard-messenger mới, chưa tồn tại trên Root Anchor hiện tại) — `UNBONDING_PERIOD` implement đơn giản hơn: `UnbondingPeriodSeconds uint64`, cấu hình độc lập (`cross_chain.unbonding_period_seconds`), so với `blockTime` (unix seconds, cùng clock nguồn velocity-limit đã dùng sẵn).
+- **`BondLeverage`/`MinSecurityBondToRegister` mặc định = 0 (TẮT)** — khác `MinNativeStakeToRegister` (bắt buộc từ đầu), đây là knob OPT-IN: bật `BondLeverage>0` trước khi bất kỳ chain nào post bond sẽ khiến MỌI tăng allocation của MỌI chain (kể cả chain hợp pháp) bị chặn ngay lập tức (cap = leverage×0 = 0) — 1 cách tự-DoS retroactive toàn mạng nếu bật nhầm thời điểm. Vận hành đúng: chờ chain thật post bond qua `postSecurityBond` trước, rồi mới bật `BondLeverage` trên TẤT CẢ validator cùng lúc (đồng thuận, giống mọi config khác trong file này).
+- **`SlashOnEquivocation` không cần kiểu `TrustedCommit` mới** — tái dùng nguyên vẹn `QuorumCert`+`commitRoot common.Hash`+`ComputeCommitRootAttestMessage`+`VerifyQuorumCertAgainstRegistry` đã có sẵn (KISS, không phát minh interface mới). Verify chống "hit-and-run" (unregister rồi equivocate) bằng snapshot `Committee`/`Epoch` chụp lại trong `UnbondingRequest` lúc `UnregisterChainWithCert` — KHÔNG cần lịch sử committee đầy đủ theo epoch (mục 8.6 gốc, chưa build) — phạm vi MVP có chủ đích: chỉ bắt equivocation ở epoch CUỐI CÙNG chain đó có trước khi unregister, không phải epoch bất kỳ trong lịch sử.
+- **Chưa review code-level độc lập của người** — đúng cảnh báo gốc của `shard_design_ton_real.md`, giữ nguyên: implementation này build xong + tự test đầy đủ (14 test case: 11 engine-level + 3 ABI/real-balance end-to-end), nhưng CHƯA qua 1 vòng review riêng của người trước khi coi là production-final, đúng tinh thần "đây là nơi tiền thật của người dùng đi qua".
 
-**Ưu tiên: CAO NHẤT trong 4 hướng của plan này** — trực tiếp trả lời "thiệt hại tối đa nếu 1 chain bị chiếm" bằng 1 con số cụ thể, đã thiết kế xong 90%, chỉ còn code + test + review người.
+**Ưu tiên: CAO NHẤT trong 4 hướng của plan này** — trực tiếp trả lời "thiệt hại tối đa nếu 1 chain bị chiếm" bằng 1 con số cụ thể.
 
 ---
 

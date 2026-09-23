@@ -44,6 +44,13 @@ var (
 	ErrChainAlreadyRegistered       = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
 	ErrInvalidTransferNonce         = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
 	ErrChainDeclaredDead            = errors.New("chain has been declared dead by RecoveryCommittee — cannot attest new commits or accept new outbound messages to it")
+	ErrBondCapExceeded              = errors.New("resulting allocation would exceed this chain's SecurityBond-backed ceiling (PerChainAllocation <= BondLeverage * SecurityBond)")
+	ErrNoBondToPost                 = errors.New("PostSecurityBond: amount must be positive")
+	ErrBelowMinSecurityBond         = errors.New("PostSecurityBond: resulting bond is below MinSecurityBondToRegister")
+	ErrNoUnbondingRequest           = errors.New("no pending unbonding request for this chain")
+	ErrUnbondingNotReady            = errors.New("unbonding period has not yet elapsed")
+	ErrNotEquivocation              = errors.New("SlashOnEquivocation: the two commit roots are identical -- not a contradiction")
+	ErrCannotVerifyEquivocation     = errors.New("SlashOnEquivocation: chain is neither currently registered nor has a matching unbonding-period committee snapshot to verify against")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -274,6 +281,54 @@ type GatewayEngine struct {
 	// minimum here must fail closed rather than silently reopening permissionless Sybil
 	// registration for every chain, founding or not.
 	MinNativeStakeToRegister *big.Int `json:"min_native_stake_to_register,omitempty"`
+
+	// SecurityBond + BondLeverage + MinSecurityBondToRegister + UnbondingPeriodSeconds
+	// (note/cross_chain/root_anchor_production_security_hardening_plan.md Phase A, adapted from
+	// note/cross_chain/shard_design_ton_real.md mục 5.5/8.8): bound the maximum damage a single
+	// chain's captured committee can do -- MinNativeStakeToRegister above becomes real circulating
+	// PerChainAllocation the moment it's posted (see RegisterChainViaStake), so it is bootstrap
+	// capital, NOT collateral, and bounds nothing. SecurityBond is a SEPARATE, permanently-locked
+	// deposit (PostSecurityBond) that never becomes circulating allocation; BondLeverage caps how
+	// far PerChainAllocation[X] may rise relative to it (checkBondCap, enforced in
+	// TransferAllocationWithCert/CreditReserveAllocation -- the refund-restore paths are
+	// deliberately EXEMPT, see those call sites' own comments).
+	//
+	// BondLeverage == 0 (the default/zero value) means DISABLED -- no cap is enforced anywhere,
+	// identical to this feature not existing at all. This is deliberate, not a placeholder: every
+	// chain registered before this feature shipped has Bond[X] == 0, and enforcing a nonzero
+	// BondLeverage against a zero bond would reject 100% of their future allocation increases,
+	// an instant, retroactive denial-of-service on every already-live chain. An operator turns
+	// this on only after real chains have actually posted bonds via PostSecurityBond -- the exact
+	// same "config-set, zero means off" pattern MinNativeStakeToRegister/QuorumThreshold already
+	// use elsewhere in this file.
+	SecurityBond              *SecurityBondLedger `json:"security_bond,omitempty"`
+	BondLeverage              uint64              `json:"bond_leverage,omitempty"`
+	MinSecurityBondToRegister *big.Int            `json:"min_security_bond_to_register,omitempty"`
+	UnbondingPeriodSeconds    uint64              `json:"unbonding_period_seconds,omitempty"`
+}
+
+// SecurityBondLedger tracks each chain's locked collateral, entirely separate from
+// GlobalSupplyLedger.PerChainAllocation -- Bond never circulates, is never spent on gas, and is
+// only ever read for the ceiling-cap check (checkBondCap) or moved on forfeiture/unbonding.
+type SecurityBondLedger struct {
+	// Bond is the chain's currently-active (not pending withdrawal) collateral.
+	Bond map[uint64]*big.Int `json:"bond,omitempty"`
+	// UnbondingRequests holds bond amounts a chain has asked to withdraw (via
+	// UnregisterChainWithCert) but that are not yet releasable -- see UnbondingPeriodSeconds.
+	// Snapshots GenesisWallet/Committee/Epoch at request time so ClaimUnbondedBond and
+	// SlashOnEquivocation still work after the chain's own ChainRegistry entry is gone.
+	UnbondingRequests map[uint64]*UnbondingRequest `json:"unbonding_requests,omitempty"`
+}
+
+// UnbondingRequest is one chain's pending SecurityBond withdrawal, created by
+// UnregisterChainWithCert and resolved by either ClaimUnbondedBond (after ReleaseAt) or
+// forfeiture (DeclareChainDeadWithCert / SlashOnEquivocation, at any time before that).
+type UnbondingRequest struct {
+	Amount        *big.Int         `json:"amount"`
+	ReleaseAt     uint64           `json:"release_at"` // blockTime (unix seconds) after which claimable
+	GenesisWallet common.Address   `json:"genesis_wallet"`
+	Committee     []ValidatorEntry `json:"committee,omitempty"`
+	Epoch         uint64           `json:"epoch"`
 }
 
 // NewGatewayEngine initializes a new GatewayEngine instance for the local chain.
@@ -321,6 +376,22 @@ func (g *GatewayEngine) EnsureAssetRegistry() {
 	}
 }
 
+// ensureSecurityBond lazily initializes SecurityBond and its inner maps -- same "omitempty until
+// first real use" pattern as RelayedInFlight (see its own doc comment), so a chain that has never
+// touched SecurityBond keeps a byte-identical serialized state to before this feature existed.
+// Callers must already hold g.mu.
+func (g *GatewayEngine) ensureSecurityBond() {
+	if g.SecurityBond == nil {
+		g.SecurityBond = &SecurityBondLedger{}
+	}
+	if g.SecurityBond.Bond == nil {
+		g.SecurityBond.Bond = make(map[uint64]*big.Int)
+	}
+	if g.SecurityBond.UnbondingRequests == nil {
+		g.SecurityBond.UnbondingRequests = make(map[uint64]*UnbondingRequest)
+	}
+}
+
 func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -333,6 +404,166 @@ func (g *GatewayEngine) WithdrawRelayerTip(caller common.Address) (*big.Int, err
 	}
 	g.RelayerBalances[caller] = big.NewInt(0)
 	return amount, nil
+}
+
+// checkBondCap enforces PerChainAllocation[chainID] <= BondLeverage * SecurityBond.Bond[chainID]
+// (root_anchor_production_security_hardening_plan.md Phase A, mục 5.5.B of shard_design_ton_real.md)
+// against a CANDIDATE new allocation -- callers must compute what the allocation would become and
+// pass it here BEFORE committing the mutation, so a rejection never has to be unwound. A no-op
+// (nil error) whenever g.BondLeverage == 0 -- see that field's own doc comment for why disabled-
+// by-default is the deliberate, safe rollout default. Callers must already hold g.mu.
+func (g *GatewayEngine) checkBondCap(chainID uint64, candidateAlloc *big.Int) error {
+	if g.BondLeverage == 0 {
+		return nil
+	}
+	bond := big.NewInt(0)
+	if g.SecurityBond != nil && g.SecurityBond.Bond[chainID] != nil {
+		bond = g.SecurityBond.Bond[chainID]
+	}
+	capAmount := new(big.Int).Mul(bond, new(big.Int).SetUint64(g.BondLeverage))
+	if candidateAlloc.Cmp(capAmount) > 0 {
+		return fmt.Errorf("%w: chain %d: candidate allocation %s > cap %s (bond %s * leverage %d)",
+			ErrBondCapExceeded, chainID, candidateAlloc.String(), capAmount.String(), bond.String(), g.BondLeverage)
+	}
+	return nil
+}
+
+// forfeitBond moves chainID's entire active Bond (and, if any, its pending UnbondingRequest --
+// closing the "unregister then equivocate during the unbonding window" hit-and-run described in
+// shard_design_ton_real.md mục 5.5.A) into Reserve's own circulating PerChainAllocation, and sets
+// DeadChains[chainID]=true so the existing (Quick Win #0) attestCommitInternal/Outbound guards
+// immediately stop any further outflow -- forfeiting the bond alone does NOT, by itself, stop a
+// captured committee from continuing to spend whatever PerChainAllocation it already holds; the
+// DeadChains flag is what actually does that (see those functions' own doc comments). Purely a
+// bookkeeping reclassification within GATEWAY_CONTRACT_ADDRESS's own already-real balance -- no
+// AccountStateDB movement needed, same reasoning as TransferAllocationWithCert. Callers must
+// already hold g.mu, and must ensureSecurityBond() first.
+func (g *GatewayEngine) forfeitBond(chainID uint64) {
+	total := big.NewInt(0)
+	if bond := g.SecurityBond.Bond[chainID]; bond != nil {
+		total.Add(total, bond)
+		delete(g.SecurityBond.Bond, chainID)
+	}
+	if req := g.SecurityBond.UnbondingRequests[chainID]; req != nil && req.Amount != nil {
+		total.Add(total, req.Amount)
+		delete(g.SecurityBond.UnbondingRequests, chainID)
+	}
+	if total.Sign() > 0 && g.SupplyLedger != nil && g.ReserveChainID != 0 {
+		current := g.SupplyLedger.GetAllocation(g.ReserveChainID)
+		g.SupplyLedger.PerChainAllocation[g.ReserveChainID] = new(big.Int).Add(current, total)
+	}
+	if g.DeadChains == nil {
+		g.DeadChains = make(map[uint64]bool)
+	}
+	g.DeadChains[chainID] = true
+}
+
+// PostSecurityBond permanently locks amount of chainID's already-registered native-coin deposit
+// as collateral, separate from and never converted into circulating PerChainAllocation (see
+// SecurityBond's own doc comment). Permissionless -- like registerCommitteePop, anyone may top up
+// any registered, non-dead chain's bond at any time (most naturally that chain's own operator,
+// but nothing requires it). The real native-coin burn from the caller's wallet happens one layer
+// up in gateway_handler.go (GatewayEngine has no AccountStateDB access), exactly mirroring
+// RegisterChainViaStake's own stake-deposit burn -- this method is pure ledger bookkeeping.
+func (g *GatewayEngine) PostSecurityBond(chainID uint64, amount *big.Int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if amount == nil || amount.Sign() <= 0 {
+		return ErrNoBondToPost
+	}
+	if _, exists := g.ChainRegistry[chainID]; !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, chainID)
+	}
+	if g.DeadChains[chainID] {
+		return fmt.Errorf("%w: chain %d", ErrChainDeclaredDead, chainID)
+	}
+	g.ensureSecurityBond()
+	current := big.NewInt(0)
+	if g.SecurityBond.Bond[chainID] != nil {
+		current = g.SecurityBond.Bond[chainID]
+	}
+	newBond := new(big.Int).Add(current, amount)
+	if g.MinSecurityBondToRegister != nil && g.MinSecurityBondToRegister.Sign() > 0 && newBond.Cmp(g.MinSecurityBondToRegister) < 0 {
+		return fmt.Errorf("%w: got %s, need >= %s", ErrBelowMinSecurityBond, newBond.String(), g.MinSecurityBondToRegister.String())
+	}
+	g.SecurityBond.Bond[chainID] = newBond
+	return nil
+}
+
+// ClaimUnbondedBond releases chainID's pending UnbondingRequest (created by
+// UnregisterChainWithCert) back to its GenesisWallet, once ReleaseAt has passed. Permissionless --
+// anyone may trigger the release (most naturally the GenesisWallet owner itself), matching this
+// codebase's existing convention for similar "anyone can trigger, funds only ever go to the one
+// correct recipient recorded on-chain" operations (e.g. ClaimDeadChainBalance). Returns the amount
+// and destination so gateway_handler.go can perform the real native-coin mint one layer up.
+func (g *GatewayEngine) ClaimUnbondedBond(chainID uint64, blockTime uint64) (*big.Int, common.Address, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.ensureSecurityBond()
+	req := g.SecurityBond.UnbondingRequests[chainID]
+	if req == nil {
+		return nil, common.Address{}, fmt.Errorf("%w: chain %d", ErrNoUnbondingRequest, chainID)
+	}
+	if blockTime < req.ReleaseAt {
+		return nil, common.Address{}, fmt.Errorf("%w: chain %d: releasable at %d, now %d", ErrUnbondingNotReady, chainID, req.ReleaseAt, blockTime)
+	}
+	delete(g.SecurityBond.UnbondingRequests, chainID)
+	return req.Amount, req.GenesisWallet, nil
+}
+
+// SlashOnEquivocation is the permissionless, fast-path bond-forfeiture route (mục 5.5.C.2 of
+// shard_design_ton_real.md): anyone who can produce 2 QuorumCerts, both genuinely signed by
+// chainID's own committee at the same epoch, over 2 DIFFERENT commit roots, has mathematically
+// unforgeable proof that chain's committee equivocated -- no RecoveryCommittee involvement or
+// judgment call needed, unlike DeclareChainDeadWithCert's slower path (still available for every
+// OTHER kind of misbehavior this can't detect, e.g. a captured committee consistently signing one
+// false statement -- see the design doc's own honest limitation note).
+//
+// Verifies against g.ChainRegistry[chainID] if still registered, else falls back to a still-
+// unbonding chain's own UnbondingRequest.Committee/.Epoch snapshot (captured by
+// UnregisterChainWithCert) -- closing the "unregister then equivocate before anyone notices" gap
+// without needing full per-epoch committee history (shard_design_ton_real.md mục 8.6, not built).
+// This fallback only ever covers the LAST committee a chain had before unregistering, not
+// arbitrary historical epochs -- a documented, deliberate MVP scope limit, not an oversight.
+func (g *GatewayEngine) SlashOnEquivocation(
+	chainID uint64,
+	epoch uint64,
+	commitRootA, commitRootB common.Hash,
+	certA, certB QuorumCert,
+) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if commitRootA == commitRootB {
+		return ErrNotEquivocation
+	}
+	if certA.Epoch != epoch || certB.Epoch != epoch {
+		return fmt.Errorf("%w: expected %d, got certA=%d certB=%d", ErrEpochMismatch, epoch, certA.Epoch, certB.Epoch)
+	}
+
+	g.ensureSecurityBond()
+	registry, ok := g.ChainRegistry[chainID]
+	if !ok || registry.Epoch != epoch {
+		req := g.SecurityBond.UnbondingRequests[chainID]
+		if req == nil || req.Epoch != epoch || len(req.Committee) == 0 {
+			return fmt.Errorf("%w: chain %d epoch %d", ErrCannotVerifyEquivocation, chainID, epoch)
+		}
+		registry = ChainRegistry{ChainID: chainID, Committee: req.Committee, Epoch: req.Epoch}
+	}
+
+	if err := VerifyQuorumCertAgainstRegistry(registry, certA, ComputeCommitRootAttestMessage(commitRootA)); err != nil {
+		return fmt.Errorf("SlashOnEquivocation: certA: %w", err)
+	}
+	if err := VerifyQuorumCertAgainstRegistry(registry, certB, ComputeCommitRootAttestMessage(commitRootB)); err != nil {
+		return fmt.Errorf("SlashOnEquivocation: certB: %w", err)
+	}
+
+	// Both certs are real, both signed by the SAME committee at the SAME epoch, over 2 DIFFERENT
+	// commit roots -- mathematically unforgeable proof of equivocation. Forfeit.
+	g.forfeitBond(chainID)
+	return nil
 }
 
 // RegisterChainViaStake admits a new chain into ChainRegistry/Governance.ActiveChains WITHOUT a
@@ -640,6 +871,12 @@ func (g *GatewayEngine) TransferAllocationWithCert(fromChainID, toChainID uint64
 	if err := VerifyQuorumCertAgainstRegistry(fromRegistry, cert, ComputeTransferAllocationMessage(fromChainID, toChainID, amount, nonce)); err != nil {
 		return fmt.Errorf("TransferAllocationWithCert: %w", err)
 	}
+	// Phase A ceiling-cap-by-bond (checkBondCap's own doc comment) -- checked against the
+	// CANDIDATE post-transfer allocation, before the transfer itself mutates anything.
+	candidateToAlloc := new(big.Int).Add(g.SupplyLedger.GetAllocation(toChainID), amount)
+	if err := g.checkBondCap(toChainID, candidateToAlloc); err != nil {
+		return fmt.Errorf("TransferAllocationWithCert: %w", err)
+	}
 	if err := g.SupplyLedger.TransferAllocation(fromChainID, toChainID, amount); err != nil {
 		return fmt.Errorf("TransferAllocationWithCert: %w", err)
 	}
@@ -666,17 +903,26 @@ func (g *GatewayEngine) DeclareChainDeadWithCert(chainID uint64, cert QuorumCert
 	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeDeclareChainDeadMessage(chainID)); err != nil {
 		return fmt.Errorf("DeclareChainDeadWithCert: %w", err)
 	}
-	if g.DeadChains == nil {
-		g.DeadChains = make(map[uint64]bool)
-	}
-	g.DeadChains[chainID] = true
+	// Phase A: forfeit any active/unbonding SecurityBond and set DeadChains[chainID] -- see
+	// forfeitBond's own doc comment for why the DeadChains flag is what actually stops further
+	// outflow (Quick Win #0), not the forfeiture itself.
+	g.ensureSecurityBond()
+	g.forfeitBond(chainID)
 	return nil
 }
 
 // UnregisterChainWithCert removes chainID from ChainRegistry entirely, authorized by
 // RecoveryCommittee -- same non-self-authorizable rationale as DeclareChainDeadWithCert
 // (2026-09-04, replacing ProposalUnregisterChain's governance-vote gate).
-func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert) error {
+//
+// blockTime (Phase A, note/cross_chain/root_anchor_production_security_hardening_plan.md) starts
+// this chain's SecurityBond unbonding clock, if it has an active bond -- see UnbondingRequest's
+// own doc comment for why the bond must NOT be released immediately (the "hit and run" gap
+// shard_design_ton_real.md mục 5.5.A describes: unregister-then-withdraw-bond BEFORE
+// SlashOnEquivocation evidence can be collected+submitted would otherwise make forfeiture
+// pointless). A chain with no active bond (BondLeverage never turned on, or it never posted one)
+// unregisters exactly as before this feature existed -- no behavior change.
+func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert, blockTime uint64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -687,6 +933,20 @@ func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert)
 	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeUnregisterChainMessage(chainID)); err != nil {
 		return fmt.Errorf("UnregisterChainWithCert: %w", err)
 	}
+
+	g.ensureSecurityBond()
+	if bond := g.SecurityBond.Bond[chainID]; bond != nil && bond.Sign() > 0 {
+		registry := g.ChainRegistry[chainID]
+		g.SecurityBond.UnbondingRequests[chainID] = &UnbondingRequest{
+			Amount:        bond,
+			ReleaseAt:     blockTime + g.UnbondingPeriodSeconds,
+			GenesisWallet: registry.GenesisWallet,
+			Committee:     registry.Committee,
+			Epoch:         registry.Epoch,
+		}
+		delete(g.SecurityBond.Bond, chainID)
+	}
+
 	delete(g.ChainRegistry, chainID)
 	return nil
 }
@@ -1868,7 +2128,14 @@ func (g *GatewayEngine) CreditReserveAllocation(
 
 	if g.SupplyLedger != nil {
 		currentAlloc := g.SupplyLedger.GetAllocation(message.DestChainID)
-		g.SupplyLedger.PerChainAllocation[message.DestChainID] = new(big.Int).Add(currentAlloc, message.Value)
+		candidateAlloc := new(big.Int).Add(currentAlloc, message.Value)
+		// Phase A ceiling-cap-by-bond (checkBondCap's own doc comment). Deliberately NOT exempt
+		// here (unlike the refund-restore paths) -- this is a genuine NEW increase in destChainID's
+		// allocation, not restoring a previously-debited amount.
+		if err := g.checkBondCap(message.DestChainID, candidateAlloc); err != nil {
+			return fmt.Errorf("CreditReserveAllocation: %w", err)
+		}
+		g.SupplyLedger.PerChainAllocation[message.DestChainID] = candidateAlloc
 	}
 	g.ReserveCreditedMessages[message.MessageID] = true
 	delete(g.RelayedInFlight, message.MessageID)

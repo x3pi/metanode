@@ -193,6 +193,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err := applyRecoveryCommitteeConfig(freshEngine); err != nil {
 			return nil, err
 		}
+		if err := applySecurityBondConfig(freshEngine); err != nil {
+			return nil, err
+		}
 		return freshEngine, nil
 	}
 
@@ -248,6 +251,9 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if err := applyRecoveryCommitteeConfig(&engine); err != nil {
 		return nil, err
 	}
+	if err := applySecurityBondConfig(&engine); err != nil {
+		return nil, err
+	}
 	return &engine, nil
 }
 
@@ -291,6 +297,31 @@ func applyMinNativeStakeToRegisterConfig(engine *cross_chain.GatewayEngine) erro
 		return fmt.Errorf("cross_chain.min_native_stake_to_register_wei %q is not a valid positive base-10 integer", raw)
 	}
 	engine.MinNativeStakeToRegister = amount
+	return nil
+}
+
+// applySecurityBondConfig sets GatewayEngine.BondLeverage/MinSecurityBondToRegister/
+// UnbondingPeriodSeconds once from config.ConfigApp.CrossChain's matching fields -- see
+// config.CrossChainConfig.BondLeverage's own doc comment for why BondLeverage==0/unset is the
+// deliberate safe default (unlike MinNativeStakeToRegisterWei, this one is opt-in, not required).
+func applySecurityBondConfig(engine *cross_chain.GatewayEngine) error {
+	if config.ConfigApp == nil {
+		return nil
+	}
+	cc := config.ConfigApp.CrossChain
+	if engine.BondLeverage == 0 && cc.BondLeverage > 0 {
+		engine.BondLeverage = cc.BondLeverage
+	}
+	if engine.UnbondingPeriodSeconds == 0 && cc.UnbondingPeriodSeconds > 0 {
+		engine.UnbondingPeriodSeconds = cc.UnbondingPeriodSeconds
+	}
+	if (engine.MinSecurityBondToRegister == nil || engine.MinSecurityBondToRegister.Sign() <= 0) && cc.MinSecurityBondToRegisterWei != "" {
+		amount, ok := new(big.Int).SetString(cc.MinSecurityBondToRegisterWei, 10)
+		if !ok || amount.Sign() <= 0 {
+			return fmt.Errorf("cross_chain.min_security_bond_to_register_wei %q is not a valid positive base-10 integer", cc.MinSecurityBondToRegisterWei)
+		}
+		engine.MinSecurityBondToRegister = amount
+	}
 	return nil
 }
 
@@ -631,7 +662,8 @@ func (h *GatewayHandler) HandleTransaction(
 		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
 		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation",
-		"refundReserveAllocation", "submitMessageSuccessAttestation":
+		"refundReserveAllocation", "submitMessageSuccessAttestation",
+		"postSecurityBond", "claimUnbondedBond", "slashOnEquivocation":
 		eventLogs, returnData, logicErr := h.handleWrite(ctx, chainState, tx, method, inputData[4:], blockTime)
 		if logicErr != nil {
 			logger.Error("GatewayHandler.%s failed: %v", method.Name, logicErr)
@@ -1943,7 +1975,7 @@ func (h *GatewayHandler) handleWrite(
 			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
 		}
-		if err := engine.UnregisterChainWithCert(chainID, cert); err != nil {
+		if err := engine.UnregisterChainWithCert(chainID, cert, blockTime); err != nil {
 			return nil, nil, err
 		}
 		// C6 observability (note/cross_chain_attack_scenario_catalog.md): keep RegisteredChainCount
@@ -2203,6 +2235,81 @@ func (h *GatewayHandler) handleWrite(
 			}
 		}
 		returnData = packed
+
+	case "postSecurityBond":
+		// Phase A (note/cross_chain/root_anchor_production_security_hardening_plan.md), same
+		// burn-then-ledger-record pattern as "registerChainViaStake" above: engine.PostSecurityBond
+		// is pure bookkeeping (GatewayEngine has no AccountStateDB access), the real native-coin
+		// burn from the caller's own wallet happens here. Ledger update first (still fully
+		// discardable on an early return, same ordering rationale as "registerChainViaStake"), real
+		// balance mutation last.
+		bondChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("postSecurityBond: chainId: %w", err)
+		}
+		bondAmount := mustBigInt(args[1])
+		if err := engine.PostSecurityBond(bondChainID, bondAmount); err != nil {
+			return nil, nil, err
+		}
+		if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 1, bondAmount, tx.FromAddress(), tx.ToAddress()); err != nil {
+			logger.Error("❌ [GATEWAY] postSecurityBond native deposit failed (caller=%s, chain=%d, amount=%s): %v", tx.FromAddress().Hex(), bondChainID, bondAmount.String(), err)
+			return nil, nil, fmt.Errorf("postSecurityBond native deposit failed: %w", err)
+		}
+
+	case "claimUnbondedBond":
+		claimChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimUnbondedBond: chainId: %w", err)
+		}
+		claimAmount, genesisWallet, err := engine.ClaimUnbondedBond(claimChainID, blockTime)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Pack before the real mint below -- same "pure-function Pack failure must never follow a
+		// real, non-reversible balance credit" ordering as "withdrawRelayerTip" above.
+		packed, packErr := method.Outputs.Pack(claimAmount)
+		if packErr != nil {
+			return nil, nil, packErr
+		}
+		if claimAmount != nil && claimAmount.Sign() > 0 {
+			if err := processNativeMintBurnForGateway(ctx, chainState, tx, blockTime, 0, claimAmount, tx.FromAddress(), genesisWallet); err != nil {
+				return nil, nil, fmt.Errorf("claimUnbondedBond credit failed: %v", err)
+			}
+		}
+		returnData = packed
+
+	case "slashOnEquivocation":
+		slashChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("slashOnEquivocation: chainId: %w", err)
+		}
+		slashEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("slashOnEquivocation: epoch: %w", err)
+		}
+		commitRootA := mustHash(args[2])
+		commitRootB := mustHash(args[3])
+		certAEpoch, err := mustUint64(args[4])
+		if err != nil {
+			return nil, nil, fmt.Errorf("slashOnEquivocation: certA epoch: %w", err)
+		}
+		certA := cross_chain.QuorumCert{
+			Epoch:              certAEpoch,
+			AggregateSignature: hexutil.Bytes(mustBytes(args[5])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[6])),
+		}
+		certBEpoch, err := mustUint64(args[7])
+		if err != nil {
+			return nil, nil, fmt.Errorf("slashOnEquivocation: certB epoch: %w", err)
+		}
+		certB := cross_chain.QuorumCert{
+			Epoch:              certBEpoch,
+			AggregateSignature: hexutil.Bytes(mustBytes(args[8])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[9])),
+		}
+		if err := engine.SlashOnEquivocation(slashChainID, slashEpoch, commitRootA, commitRootB, certA, certB); err != nil {
+			return nil, nil, err
+		}
 
 	default:
 		return nil, nil, fmt.Errorf("unhandled gateway write method: %s", method.Name)
@@ -2464,6 +2571,36 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 			minStake = big.NewInt(0)
 		}
 		return method.Outputs.Pack(minStake)
+
+	case "getSecurityBond":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getSecurityBond input: %w", err)
+		}
+		bondChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getSecurityBond: chainId: %w", err)
+		}
+		bond := big.NewInt(0)
+		if engine.SecurityBond != nil && engine.SecurityBond.Bond[bondChainID] != nil {
+			bond = engine.SecurityBond.Bond[bondChainID]
+		}
+		return method.Outputs.Pack(bond)
+
+	case "getUnbondingRequest":
+		args, err := method.Inputs.Unpack(argData)
+		if err != nil {
+			return nil, fmt.Errorf("unpack getUnbondingRequest input: %w", err)
+		}
+		reqChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getUnbondingRequest: chainId: %w", err)
+		}
+		if engine.SecurityBond == nil || engine.SecurityBond.UnbondingRequests[reqChainID] == nil {
+			return method.Outputs.Pack(false, big.NewInt(0), big.NewInt(0), common.Address{})
+		}
+		req := engine.SecurityBond.UnbondingRequests[reqChainID]
+		return method.Outputs.Pack(true, req.Amount, new(big.Int).SetUint64(req.ReleaseAt), req.GenesisWallet)
 
 	default:
 		return nil, fmt.Errorf("unhandled gateway view method: %s", method.Name)

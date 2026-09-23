@@ -646,6 +646,60 @@ const GatewayABI = `[
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"}
+		],
+		"name": "postSecurityBond",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "claimUnbondedBond",
+		"outputs": [{"internalType": "uint256", "name": "amount", "type": "uint256"}],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "epoch", "type": "uint64"},
+			{"internalType": "bytes32", "name": "commitRootA", "type": "bytes32"},
+			{"internalType": "bytes32", "name": "commitRootB", "type": "bytes32"},
+			{"internalType": "uint64", "name": "certAEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certAAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certASignerBitmap", "type": "bytes"},
+			{"internalType": "uint64", "name": "certBEpoch", "type": "uint64"},
+			{"internalType": "bytes", "name": "certBAggregateSignature", "type": "bytes"},
+			{"internalType": "bytes", "name": "certBSignerBitmap", "type": "bytes"}
+		],
+		"name": "slashOnEquivocation",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getSecurityBond",
+		"outputs": [{"internalType": "uint256", "name": "bond", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"internalType": "uint256", "name": "chainId", "type": "uint256"}],
+		"name": "getUnbondingRequest",
+		"outputs": [
+			{"internalType": "bool", "name": "exists", "type": "bool"},
+			{"internalType": "uint256", "name": "amount", "type": "uint256"},
+			{"internalType": "uint256", "name": "releaseAt", "type": "uint256"},
+			{"internalType": "address", "name": "genesisWallet", "type": "address"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true, "internalType": "bytes32", "name": "messageId", "type": "bytes32"},

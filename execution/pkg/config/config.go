@@ -136,6 +136,21 @@ type CrossChainConfig struct {
 	// same registration transaction differently). Parsed as a base-10 decimal string of wei (not
 	// a JSON number) to avoid float64 precision loss for large amounts.
 	MinNativeStakeToRegisterWei string `json:"min_native_stake_to_register_wei,omitempty"`
+
+	// BondLeverage / MinSecurityBondToRegisterWei / UnbondingPeriodSeconds (Phase A,
+	// note/cross_chain/root_anchor_production_security_hardening_plan.md, adapted from
+	// note/cross_chain/shard_design_ton_real.md mục 5.5/8.8) — see
+	// cross_chain.GatewayEngine.BondLeverage's own doc comment for the full rationale.
+	// BondLeverage==0 (omitted/default) is DELIBERATELY the safe "feature disabled" state, unlike
+	// MinNativeStakeToRegisterWei above: turning this on retroactively caps every already-live
+	// chain's allocation at BondLeverage*0 (their real bond today) unless they have already posted
+	// one via postSecurityBond -- an operator must only set this after real chains hold real bonds,
+	// never as part of a chain's initial genesis config. Every node that will process
+	// transferAllocationWithCert/creditReserveAllocation transactions MUST agree on the SAME value
+	// -- same Zero-Fork Invariant risk as MinNativeStakeToRegisterWei if validators disagree.
+	BondLeverage                 uint64 `json:"bond_leverage,omitempty"`
+	MinSecurityBondToRegisterWei string `json:"min_security_bond_to_register_wei,omitempty"`
+	UnbondingPeriodSeconds       uint64 `json:"unbonding_period_seconds,omitempty"`
 }
 
 // PruningConfig configures the historical state pruning strategy
