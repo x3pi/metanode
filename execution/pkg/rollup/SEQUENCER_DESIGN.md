@@ -595,3 +595,104 @@ sequenceDiagram
 ### Q6. Vì sao tài liệu ban đầu gọi đây là "BLS Aggregation" nhưng bản hiện tại lại dùng `QuorumCert` kiểu multisig thông thường?
 
 → "BLS Aggregation" theo đúng nghĩa mật mã học (gộp nhiều chữ ký của nhiều signer khác nhau thành 1 chữ ký ngắn) chỉ có giá trị khi có NHIỀU signer độc lập thật sự xác minh cùng 1 nội dung trước khi ký — đúng như `QuorumCert` đang dùng. Vấn đề #1 (mục 8) chỉ ra bản CCM đầu tiên dùng "1 signer đại diện cả pool" — không cần đến BLS aggregation thật để làm việc đó, dùng chữ ký đơn thường là đủ và không gây hiểu nhầm về mức an toàn.
+
+---
+
+## 14. Luồng xử lý nội bộ tại 1 Node: Từ giao dịch đến Gom batch, Ký BLS, và Lưu trạng thái local
+
+Mục 3.1 mới mô tả luồng cross-cluster ở mức khái quát ("gom batch, ký, gửi lên Root Anchor"). Mục này đi sâu vào **bên trong 1 node** — chính xác node lưu trạng thái từng giao dịch cục bộ như thế nào qua từng bước, vì đây là phần quyết định node có **chịu được crash giữa chừng mà không double-spend hay mất giao dịch** hay không (liên quan trực tiếp vấn đề #2, mục 8).
+
+### 14.1. Hai loại giao dịch, hai luồng xử lý hoàn toàn khác nhau
+
+- **Giao dịch NỘI BỘ** (người gửi và người nhận cùng 1 node): xử lý xong ngay tại chỗ, không cần gom batch hay ký BLS gì cả — chiếm đa số giao dịch thực tế.
+- **Giao dịch LIÊN CỤM** (người nhận ở node khác): phải đi qua đường gom batch + ký BLS + gửi lên Parent Chain, mô tả chi tiết ở 14.3.
+
+### 14.2. Giao dịch nội bộ — luồng đơn giản (không qua BLS)
+
+1. Request đến `AccountHandler` của node.
+2. Xác thực chữ ký người gửi (ECDSA/BLS device key — đúng cơ chế ký hộ đã có ở `cmd/rpc`).
+3. Kiểm tra số dư/nonce hiện có trong LevelDB.
+4. Ghi thay đổi (trừ người gửi, cộng người nhận) vào LevelDB trong **1 lần batch-write nguyên tử** — không tách thành 2 thao tác ghi riêng rẽ, để tránh crash đúng lúc giữa 2 lần ghi làm lệch tổng số dư.
+5. Trả kết quả ngay cho user. Xong — không còn bước nào khác, không liên quan gì đến BLS/Parent Chain.
+
+### 14.3. Giao dịch liên cụm — chi tiết từng bước Gom batch → Ký BLS → Lưu trạng thái
+
+**Bước 1 — Thực thi cục bộ trước (giống 14.2 bước 2-4), nhưng khác ở đích đến:**
+Vì người nhận ở node khác, node **không cộng tiền cho ai ngay** — thay vào đó, cùng 1 lần ghi nguyên tử với việc trừ tiền người gửi, node ghi thêm 1 bản ghi "đang chờ gom batch" vào LevelDB. Đây chính là điểm mấu chốt của vấn đề #2 (mục 8): trừ tiền và tạo bản ghi outbound phải là **CÙNG MỘT lần ghi**, không phải 2 bước tách rời — nếu không, crash giữa chừng sẽ làm tiền mất mà không có bản ghi nào để phục hồi.
+→ Trạng thái local: `LOCAL_APPLIED_PENDING_BATCH`.
+
+**Bước 2 — Gom batch (vì sao không gửi ngay từng cái một):**
+Mỗi giao dịch liên cụm không gửi lên Parent Chain ngay lập tức — sẽ tốn quá nhiều lần ký + quá nhiều lần ghi lên Parent Chain, không hiệu quả. Node giữ 1 hàng đợi riêng theo từng chain đích (tương đương `PendingOutboundMessages[destChainID]`), và theo chu kỳ cố định gom tất cả giao dịch đang chờ cho 1 đích lại, build thành 1 cây Merkle, tính ra `commitRoot` đại diện cho cả batch. Danh sách "giao dịch nào thuộc batch nào" được ghi lại — cần thiết để sau này build proof cho từng giao dịch riêng lẻ khi node đích claim.
+→ Trạng thái local: `BATCHED_PENDING_SIGN`.
+
+**Bước 3 — Ký BLS:**
+Vì mỗi chain giờ chỉ có đúng 1 node (đã chốt Q13), "committee ký" ở bước này thực chất là **node tự ký `commitRoot` bằng khoá BLS của chính mình** — không cần chờ ai khác đồng ký. Chữ ký này tạo thành `QuorumCert` (về bản chất là chữ ký đơn — sự thật đã chấp nhận ở Q3, bảo vệ chính nằm ở bond chứ không ở số lượng chữ ký, xem mục 4 điểm 6).
+→ Trạng thái local: `SIGNED_PENDING_SUBMIT`.
+
+**Bước 4 — Gửi lên Parent Chain:**
+Gửi `commitRoot` + `QuorumCert` lên Parent Chain. Nếu gửi thất bại do mất kết nối (mục 6.1): **giữ nguyên** trạng thái `SIGNED_PENDING_SUBMIT`, đẩy vào Retry Queue cục bộ, thử gửi lại sau — **tuyệt đối không ký lại/tạo `commitRoot` mới** cho cùng batch đã ký, chỉ gửi lại đúng y hệt bản đã có. Nếu ký lại, 1 batch sẽ có 2 bản ghi hợp lệ khác nhau, dễ gây xử lý trùng ở phía node đích.
+Khi Parent Chain xác nhận đã lưu: → Trạng thái local: `SUBMITTED_ATTESTED` — node nguồn coi như xong phần trách nhiệm của mình, chỉ còn chờ phản hồi từ node đích.
+
+**Bước 5 — Nhận phản hồi & đóng trạng thái:**
+Khi nhận được `successCert` hoặc `destFailureCert` từ node đích (mục 3.2), node cập nhật trạng thái local cuối cùng: `CONFIRMED_SUCCESS` hoặc `CONFIRMED_FAILED_REFUNDED`. Đây là trạng thái **lưu vĩnh viễn** (không xoá record) — làm audit trail để sau này còn tra cứu lại (phục vụ cả nhu cầu "user tự kiểm tra giao dịch đã xử lý chưa" và dữ liệu cho Snapshot Export ở mục 6.3).
+
+### 14.4. Bảng trạng thái local đầy đủ (state machine nội bộ của 1 node)
+
+> Lưu ý: đây là state machine **nội bộ, riêng của node** (chưa có sẵn trong `GatewayEngine`, cần tự xây), khác với `MessageStatus` (Pending/Success/Failed/FailedTimeout) vốn do `GatewayEngine` quản lý ở tầng cao hơn. 4 trạng thái đầu tiên dưới đây đều nằm gọn trong giai đoạn `MessageStatus = Pending` — node cần theo dõi chi tiết hơn để tự phục hồi đúng khi crash, không phải để lộ ra ngoài cho Parent Chain hay node khác thấy.
+
+| Trạng thái | Ý nghĩa | Lưu ở đâu | Chuyển tiếp khi nào |
+|---|---|---|---|
+| `LOCAL_APPLIED_PENDING_BATCH` | Đã trừ tiền/khoá tài sản người gửi, chưa gom vào batch nào | LevelDB, cùng 1 batch-write với việc trừ tiền (bước 1) | Khi rơi vào 1 chu kỳ gom batch định kỳ |
+| `BATCHED_PENDING_SIGN` | Đã vào 1 batch, có `commitRoot`, chưa ký | LevelDB, kèm `batch_id` | Ngay sau khi ký (thường cùng tiến trình, gần như tức thời) |
+| `SIGNED_PENDING_SUBMIT` | Đã ký `QuorumCert`, chưa gửi thành công lên Parent Chain | LevelDB Retry Queue (mục 6.1) | Khi Parent Chain xác nhận đã nhận |
+| `SUBMITTED_ATTESTED` | Parent Chain đã xác nhận, đang chờ phản hồi từ node đích | LevelDB | Khi nhận `successCert`/`destFailureCert` |
+| `CONFIRMED_SUCCESS` / `CONFIRMED_FAILED_REFUNDED` | Kết thúc, lưu vĩnh viễn làm audit trail | LevelDB (không xoá) | — (trạng thái cuối cùng) |
+
+### 14.5. Vì sao phải tách nhiều trạng thái nhỏ thay vì chỉ "Pending/Done"
+
+Nếu chỉ có 2 trạng thái, node restart sau crash **không biết chính xác đã làm tới đâu** — dễ dẫn tới 1 trong 2 lỗi: làm lại từ đầu (double-spend, vì tiền đã trừ rồi) hoặc bỏ sót (mất giao dịch, vì tưởng đã xong). Ví dụ cụ thể: nếu crash ngay sau bước 3 (đã ký, `SIGNED_PENDING_SUBMIT`) nhưng trước khi gửi thành công ở bước 4, khi khởi động lại node **phải gửi lại đúng `commitRoot`+`QuorumCert` đã ký từ trước** — tuyệt đối không được ký lại một `commitRoot` mới cho cùng batch đó, đúng nguyên tắc đã nêu ở bước 4.
+
+### 14.6. Sơ đồ nội bộ
+
+```mermaid
+sequenceDiagram
+    participant U as User (gửi request)
+    participant AH as AccountHandler (node)
+    participant DB as LevelDB (state local)
+    participant Q as Outbound Queue (theo destChainID)
+    participant RA as Parent Chain
+
+    U->>AH: Gửi giao dịch
+    AH->>AH: Xác thực chữ ký + kiểm tra số dư/nonce
+
+    alt Giao dịch NỘI BỘ (cùng node)
+        AH->>DB: Ghi 1 lần: trừ A, cộng B (nguyên tử)
+        AH-->>U: Trả kết quả ngay — XONG
+    else Giao dịch LIÊN CỤM (đi node khác)
+        AH->>DB: Ghi 1 lần: trừ A + tạo bản ghi outbound\n(status = LOCAL_APPLIED_PENDING_BATCH)
+        AH-->>U: Trả kết quả "đã ghi nhận, đang xử lý"
+
+        Note over Q: Chu kỳ gom batch định kỳ
+        Q->>Q: Gom các bản ghi đang chờ cho cùng 1 đích\n-> build Merkle tree -> commitRoot
+        Q->>DB: Cập nhật status = BATCHED_PENDING_SIGN
+
+        Q->>Q: Node tự ký commitRoot bằng khoá BLS riêng\n(committee = 1, Q3) -> QuorumCert
+        Q->>DB: Cập nhật status = SIGNED_PENDING_SUBMIT
+
+        Q->>RA: Gửi commitRoot + QuorumCert
+        alt Gửi thất bại (mất kết nối, mục 6.1)
+            Q->>DB: Giữ nguyên SIGNED_PENDING_SUBMIT, vào Retry Queue
+            Note over Q: Lần retry sau: gửi lại ĐÚNG bản đã ký,\nKHÔNG ký lại commitRoot mới
+        else Gửi thành công
+            RA-->>Q: Xác nhận đã lưu (AttestedCommits)
+            Q->>DB: Cập nhật status = SUBMITTED_ATTESTED
+        end
+
+        Note over Q,RA: ... (chờ node đích ClaimMessage, xử lý,\nvà gửi successCert/destFailureCert ngược lại — xem 12.3/12.4)
+
+        RA-->>Q: successCert hoặc destFailureCert
+        Q->>DB: Cập nhật status cuối = CONFIRMED_SUCCESS\nhoặc CONFIRMED_FAILED_REFUNDED (lưu vĩnh viễn)
+    end
+```
+
+**Tóm tắt bằng lời:** Khi 1 giao dịch đến, node kiểm tra trước tiên: 2 bên có cùng ở node này không? Nếu có, xử lý xong ngay lập tức, không liên quan gì đến ký BLS hay gửi đi đâu cả. Nếu người nhận ở node khác, node trừ tiền người gửi VÀ ghi nhận "giao dịch này đang chờ xử lý" trong cùng 1 thao tác — không tách rời, để nếu máy có sập giữa chừng thì cũng không bị mất dấu. Sau đó, thay vì gửi ngay từng giao dịch một (tốn kém), node gom nhiều giao dịch đang chờ (cùng đích) lại thành 1 gói, tự ký xác nhận gói đó bằng khoá riêng của mình, rồi mới gửi lên Parent Chain. Nếu gửi thất bại vì mất mạng, node chỉ gửi lại đúng gói đã ký, không tự ý ký gói mới. Mỗi bước đều được ghi lại trạng thái riêng trong cơ sở dữ liệu cục bộ — để nếu node có khởi động lại giữa chừng, nó biết chính xác đã làm đến đâu, tiếp tục đúng chỗ chứ không làm lại từ đầu (tránh trừ tiền 2 lần) hay bỏ quên (tránh mất giao dịch).
