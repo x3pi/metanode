@@ -368,6 +368,8 @@ flowchart TB
     style N2 fill:#eef6ff,stroke:#6699cc,color:#333
 ```
 
+**Tóm tắt bằng lời:** Mỗi node `cmd/rpc` là một đơn vị hoàn toàn độc lập — tự giữ dữ liệu tài khoản của riêng mình, không ai khác nhìn thấy hay đụng vào được. Parent Chain (dùng lại Root Anchor có sẵn) không giữ tiền của ai cả, nó chỉ đóng vai trò như một "cuốn sổ danh bạ": biết account nào thuộc node nào, và biết danh tính (khoá công khai) của từng node để xác minh chữ ký. Mỗi node cũng tự động sao lưu dữ liệu ra ngoài định kỳ, phòng trường hợp chính nó gặp sự cố. Khi 2 node cần chuyển giá trị cho nhau, node gửi tự ký xác nhận rồi báo lên Parent Chain, node nhận lấy thông tin đó về để xử lý — không có ai đứng giữa giữ tiền hộ.
+
 ### 12.2. Tra cứu Account/Contract → Node BLS quản lý (2 bước, ĐÃ ĐƠN GIẢN theo Q13 — mục 2.1/2.4/5.1/5.2)
 
 ```mermaid
@@ -380,6 +382,8 @@ flowchart LR
     D --> E["QuorumCert = chữ ký thật của\nchính node đó (committee size = 1, Q3)"]
     E --> F["Bảo vệ chính nằm ở bất biến\nBond ≥ 2x × velocity_24h (Q7)\nkhông phải ở số lượng chữ ký"]
 ```
+
+**Tóm tắt bằng lời:** Muốn gửi gì đó tới 1 địa chỉ, hệ thống cần biết địa chỉ đó "sống ở đâu". Nếu là tài khoản người dùng thông thường, hệ thống tra 1 cuốn sổ đăng ký để biết nó thuộc node nào. Nếu là hợp đồng thông minh, không cần tra sổ nào cả — người gửi vốn đã phải biết trước hợp đồng đó nằm ở node nào (giống việc bạn phải biết trước 1 website ở domain nào, không có "công cụ tìm kiếm toàn cục" cho việc này). Sau khi biết node, hệ thống tra tiếp danh tính (khoá xác thực) của đúng node đó. Vì quy định mỗi node chỉ quản 1 nhóm tài khoản riêng của mình, chữ ký xác nhận luôn là chữ ký thật của chính node sở hữu — cái giữ an toàn ở đây không phải "có nhiều người cùng ký cho chắc", mà là node đó phải đặt cọc đủ lớn để không có lợi khi làm bậy.
 
 ### 12.3. Luồng chuyển giá trị Cross-Cluster — trường hợp THÀNH CÔNG (mục 3.1, 3.2)
 
@@ -415,6 +419,15 @@ sequenceDiagram
     G1->>G1: Đóng Pending cục bộ, giải phóng Tip đã khoá\n(mục 3.2 — KHÔNG suy luận từ im lặng)
 ```
 
+**Tóm tắt bằng lời:**
+1. User A gửi yêu cầu chuyển giá trị cho User B (ở node khác).
+2. Node của A ghi nhận ngay yêu cầu này ở trạng thái "đang chờ xử lý".
+3. Đến chu kỳ xử lý định kỳ, node của A gom các yêu cầu đang chờ lại, tự ký xác nhận, rồi báo lên Parent Chain.
+4. Parent Chain kiểm tra chữ ký hợp lệ thì lưu lại làm bằng chứng.
+5. Node của B lấy bằng chứng đó về, kiểm tra kỹ B có đúng là tài khoản của mình không, rồi mới thực sự cộng tiền cho B.
+6. Node của B ký một xác nhận "đã xử lý xong" và gửi ngược lại cho node của A.
+7. Node của A nhận được xác nhận này thì mới coi giao dịch đã hoàn tất và đóng lại — nó **không** tự suy diễn "không thấy báo lỗi thì chắc là xong", mà luôn chờ đúng xác nhận này.
+
 ### 12.4. Luồng chuyển giá trị Cross-Cluster — trường hợp THẤT BẠI & Hoàn tiền (mục 3.1 bước 3, 3.2)
 
 ```mermaid
@@ -438,6 +451,8 @@ sequenceDiagram
     Note over G1: Guard: message.SourceChainID == LocalChainID\nGuard: MessageStatus hiện tại phải là Pending\n(chống refund 2 lần nếu cert bị gửi lặp — mục 8 #3)
     G1->>G1: Mint lại cho User A, MessageStatus[id] = Refunded
 ```
+
+**Tóm tắt bằng lời:** Tiếp nối luồng thành công ở trên, nhưng lần này khi node đích kiểm tra thì phát hiện B không phải tài khoản hợp lệ của mình (ví dụ: chưa từng tồn tại). Node đích lập tức huỷ ngay phần vừa ghi nhận — không cộng tiền cho ai cả — rồi ký một xác nhận "thất bại" gửi về node nguồn. Node nguồn nhận được xác nhận thất bại này thì mới hoàn tiền lại cho A. Có một chốt chặn quan trọng: nếu vì lý do nào đó xác nhận "thất bại" bị gửi tới 2 lần, node nguồn chỉ hoàn tiền đúng 1 lần — lần thứ 2 sẽ tự động bị từ chối.
 
 ### 12.5. Luồng gọi Smart Contract Cross-Cluster (Thực thi & Phản hồi)
 
@@ -471,6 +486,8 @@ sequenceDiagram
     end
 ```
 
+**Tóm tắt bằng lời:** 3 bước đầu (gom, ký, gửi lên Parent Chain, lấy về) giống hệt luồng chuyển tiền ở 12.3 — khác biệt duy nhất nằm ở bước cuối. Thay vì cộng thẳng tiền vào tài khoản, node đích đưa dữ liệu vào hợp đồng thông minh để hợp đồng đó tự chạy logic của nó. Nếu hợp đồng chạy trơn tru: coi như thành công, xử lý y hệt luồng 12.3. Nếu hợp đồng bị lỗi giữa chừng (hết gas, logic sai...): mọi thay đổi vừa làm được hoàn tác lại như chưa từng xảy ra, và toàn bộ phần còn lại xử lý y hệt luồng hoàn tiền ở 12.4.
+
 ### 12.6. Cluster đích không phản hồi — Timeout vs Chết hẳn (mục 6.2)
 
 ```mermaid
@@ -499,6 +516,12 @@ flowchart TD
     style Freeze fill:#f8d7da,color:#333,stroke:#c00,stroke-width:2px
     style Release fill:#d4edda,color:#333
 ```
+
+**Tóm tắt bằng lời:**
+1. Nếu 1 yêu cầu bị "treo" (chưa có xác nhận thành công lẫn thất bại), hệ thống không đoán mò — nó chờ đúng khoảng thời gian đã định trước rồi mới coi là "quá hạn", chứ không tự ý huỷ sớm chỉ vì thấy chậm.
+2. Nếu nghi ngờ node đích đã "chết" thật sự (chứ không chỉ mạng chậm), việc tuyên bố "chết" cần nhiều bên cùng xác nhận — không phải chỉ node còn lại tự phán rồi tự rút tiền, tránh trường hợp rút nhầm khi đối phương thực ra vẫn đang hoạt động.
+3. Sau khi đã tuyên bố chết chính thức, user muốn lấy lại tài sản: **chỉ lấy được nếu trước đó node đã từng sao lưu dữ liệu ra bên ngoài.** Nếu node chưa từng sao lưu, tài sản coi như không còn cách nào lấy lại — đây là lý do việc sao lưu định kỳ (mục 6.3) không phải tuỳ chọn.
+4. Ngay cả khi có bản sao lưu hợp lệ, việc rút tiền vẫn phải qua 2 lớp chặn để chống gian lận: (a) mỗi ngày chỉ được rút tối đa 1 phần nhỏ tổng số dư (không cho rút sạch trong 1 lần), và (b) sau khi yêu cầu rút, phải chờ thêm 3 ngày mới thực sự nhận được tiền — khoảng chờ này để cho người vận hành có cơ hội phát hiện và chặn lại nếu phát hiện có dấu hiệu gian lận.
 
 ### 12.7. Giao thức Migration Account (CHỈ User, KHÔNG áp dụng cho Contract — Q17, mục 5.3)
 
@@ -529,6 +552,13 @@ sequenceDiagram
     New-->>Old: Xác nhận flip xong
     Old->>New: Relay tiếp các message đã tạm giữ ở Pha 1\n(2-hop qua Reserve, hoặc trả lỗi có kiểm soát cho Sender)
 ```
+
+**Tóm tắt bằng lời:**
+1. Việc chuyển account sang node khác chỉ áp dụng cho tài khoản người dùng — hợp đồng thông minh không được phép chuyển, muốn "đổi chỗ" thì developer phải tự deploy lại bản mới ở node đích.
+2. Node cũ tạm khoá account lại (không cho giao dịch nội bộ mới), nhưng **không xoá dữ liệu**. Nếu trong lúc này có ai gửi tiền/tin nhắn đến account đang bị khoá, yêu cầu đó được giữ lại chờ chứ không bị từ chối ngay.
+3. Node cũ đóng gói toàn bộ số dư của account, tự ký xác nhận "đây đúng là số liệu cuối cùng", rồi gửi cả gói dữ liệu này sang node mới.
+4. Node mới nhận, kiểm tra chữ ký hợp lệ, nạp dữ liệu vào hệ thống của mình, rồi mới báo lên Parent Chain để đổi "chủ sở hữu" của account — việc đổi này **chỉ xảy ra sau khi** node mới đã chắc chắn nhận đủ dữ liệu, không đổi trước cho "nhanh".
+5. Sau khi đã đổi xong, node cũ mới xử lý nốt các yêu cầu đã giữ lại ở bước 2 — chuyển tiếp chúng sang node mới, hoặc báo lỗi rõ ràng cho người gửi để họ tự gửi lại đúng địa chỉ mới.
 
 ---
 
