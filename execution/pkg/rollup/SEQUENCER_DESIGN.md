@@ -178,8 +178,41 @@ Bản trước chỉ xử lý mất kết nối *tạm thời*. Cần tách rõ 
 
 ### 6.2. Cluster đích không phản hồi vĩnh viễn (chết hẳn, không phải mất mạng tạm thời)
 Đây là lỗ hổng bị bỏ sót hoàn toàn ở bản trước: nếu Cluster 1 tự ý "timeout rồi unlock/refund cho User A" theo phán đoán riêng của mình, trong khi Cluster 2 thực ra chỉ chậm chứ không chết hẳn và **sau đó vẫn credit cho User B** → giá trị bị tạo ra 2 lần từ 1 lần khoá (double-spend kinh điển ở các cầu nối liên chuỗi). Vì vậy:
-- **Không cho một Cluster tự ý unlock theo timeout riêng của nó.** Dùng `TimeoutTimestamp` đã có trên `CrossChainMessage` — khi hết hạn, `ClaimMessage` tự chuyển `MessageStatusFailedTimeout` một cách **thống nhất trên Root Anchor** (nguồn sự thật duy nhất), rồi Cluster 1 mới được refund dựa trên trạng thái đó.
-- **Nếu Cluster chết hẳn (không còn khả năng claim vĩnh viễn):** dùng `DeclareChainDeadWithCert` (cần `QuorumCert`, không phải quyết định đơn phương của Cluster 1) + `ClaimDeadChainBalance` để user rút lại tài sản một cách có kiểm soát, thay vì "Pending/Locked" vô thời hạn như bản thiết kế cũ.
+- **Không cho một Cluster tự ý unlock theo timeout riêng của nó.** Dùng `TimeoutTimestamp` đã có trên `CrossChainMessage` — khi hết hạn, `ClaimMessage` tự chuyển `MessageStatusFailedTimeout` một cách **thống nhất trên Root Anchor** (nguồn sự thật duy nhất), rồi Cluster 1 mới được refund dựa trên trạng thái đó. (Lưu ý: đây chỉ giải quyết được giá trị **đang treo trong 1 message cross-cluster cụ thể** — không giải quyết được số dư thông thường của user nằm trong Cluster/Node đã chết, xem mục 6.3.)
+- **Nếu Cluster chết hẳn:** dùng `DeclareChainDeadWithCert` + `ClaimDeadChainBalance` để user rút lại tài sản — **NHƯNG đã kiểm tra code thật và phát hiện đây KHÔNG tự động hoạt động được** với mô hình đã chốt ở mục 2.4 (mỗi node không chia sẻ state). Chi tiết + thiết kế bổ sung bắt buộc ở mục 6.3.
+
+### 6.3. ⚠️ `ClaimDeadChainBalance` KHÔNG tự hoạt động được — cần xây thêm Snapshot & Archival Pipeline
+
+**Bằng chứng từ code (`gateway.go`):**
+
+```go
+func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLeafHash common.Hash) error {
+    ...
+    if !VerifyMerkleProof(accountLeafHash, proof, registry.AccountTreeRoot) {
+        return ErrInvalidMerkleProof
+    }
+    ...
+}
+```
+
+`ClaimDeadChainBalance` bắt buộc user cung cấp 1 Merkle proof đối chiếu với `ChainRegistry.AccountTreeRoot`. Grep toàn bộ nơi field này được **ghi** thì chỉ có đúng 1 chỗ: `UpdateCommitteeWithRecoveryCert` — một luồng "recovery" ngoại lệ, cần `QuorumCert` riêng. **`SubmitCheckpoint` (luồng chạy định kỳ, bình thường) KHÔNG hề cập nhật field này** — nó chỉ cập nhật `Checkpoints[chainID].StateRoot`, một field hoàn toàn khác, không liên quan.
+
+**Hệ quả — đúng như trực giác đã nêu:**
+
+1. **Trong vận hành bình thường, `AccountTreeRoot` gần như chắc chắn vẫn là hash rỗng (chưa từng được set)** — vì không có gì tự động publish nó. Không có root → `VerifyMerkleProof` luôn thất bại → `ClaimDeadChainBalance` **không thể gọi thành công**, bất kể user có bằng chứng gì.
+2. Ngay cả nếu root từng được publish (qua đúng con đường ngoại lệ `UpdateCommitteeWithRecoveryCert`), **Merkle proof (danh sách sibling hash) không tự nhiên mà có** — dữ liệu để tính proof là **toàn bộ cây tài khoản**, và cây đó **chỉ tồn tại trên chính node đã chết** (mục 2.4: không node nào khác giữ bản sao). Node chết = dữ liệu để tạo proof cũng biến mất theo, không ai — kể cả Root Anchor — có thể tự tính hộ.
+3. **Khác biệt nền tảng với thiết kế gốc của `GatewayEngine`:** cơ chế `AccountTreeRoot`/recovery này vốn được thiết kế cho 1 chain có **committee nhiều validator cùng đồng thuận, cùng giữ replica state** (giống các chain thật khác trong `pkg/cross_chain`) — khi 1 validator/leader chết, các validator còn lại trong committee **vẫn còn đủ state** để tự tính root + attest recovery. Mô hình BLS Cluster (mục 2.4) phá vỡ đúng giả định này: 1 node = 1 partition độc quyền, không ai khác có bản sao.
+
+**Kết luận: nếu không xây thêm hạ tầng dưới đây, mục 6.2 "user tự ClaimDeadChainBalance có kiểm soát" chỉ là lời hứa trên giấy — hậu quả thực tế giống hệt kịch bản tệ nhất từng cảnh báo ở bản CCM đầu tiên (tài sản khoá vĩnh viễn khi node chết).** Đây là **Critical**, liệt kê ở mục 8 #18.
+
+**Thành phần mới bắt buộc phải xây (không có sẵn trong `GatewayEngine`, không thể bỏ qua nếu muốn mục 6.2 có thật):**
+
+1. **Snapshot Export định kỳ, PROACTIVE (lúc node còn sống, không phải sau khi chết):** mỗi node `cmd/rpc` định kỳ (ví dụ mỗi N phút) tự tính cây Merkle của toàn bộ account state, và **export cây (hoặc tối thiểu đủ dữ liệu để tính lại proof cho bất kỳ account nào) ra một nơi lưu trữ BÊN NGOÀI chính node đó** (backup server độc lập, object storage, hoặc broadcast công khai). Nếu chỉ export root mà không export dữ liệu cây, root publish được cũng vô dụng vì không ai tính được proof.
+2. **Publish `AccountTreeRoot` có xác thực lên Root Anchor mỗi lần export** — dùng `UpdateCommitteeWithRecoveryCert` cho việc này là dùng sai mục đích tên gọi (dành cho recovery, không phải publish định kỳ khi khoẻ mạnh); cần xác nhận với đội có nên thêm 1 API mới ở tầng chain-cụ-thể, tránh sửa `GatewayEngine` dùng chung (đúng tinh thần thận trọng đã nêu ở Q11).
+3. **Cửa sổ mất mát = tần suất export:** bất kỳ giao dịch nào xảy ra SAU lần export cuối cùng, nếu node chết ngay sau đó, **không thể chứng minh/claim được** — đây là đánh đổi cố hữu (giống mọi cơ chế "exit bằng last-known-state" của rollup thật), tần suất export càng dày thì cửa sổ mất mát càng nhỏ nhưng chi phí vận hành càng cao — cần đội chốt con số cụ thể (mục 10.1 Q12).
+4. **Ai tính proof hộ user?** Không nên bắt user tự giữ sẵn proof của mình (dễ mất, dễ sai) — nên có 1 dịch vụ archival độc lập giữ bản sao cây mới nhất, tính proof theo yêu cầu bất cứ lúc nào (giống mô hình exit của các rollup thật, ví dụ Optimism/Arbitrum không bắt user tự giữ Merkle proof).
+
+**Câu hỏi chiến lược cần chốt (không chỉ riêng vấn đề này — mục 10.1 Q10/Q11 cũng cùng gốc):** mục 8 #15, #16, #17, #18 đều bắt nguồn từ CÙNG 1 nguyên nhân — nhóm nhiều node `cmd/rpc` độc lập-không-chia-sẻ-state dưới 1 `chainID` khiến MỌI cơ chế sẵn có của `GatewayEngine` (bond, slash, velocity, dead-declare-and-claim) đều vốn được thiết kế cho granularity `chainID` bị lệch pha, phải tự vá thêm 1 lớp `node_id` phía trên cho từng cơ chế. **Cần cân nhắc nghiêm túc phương án thay thế: đăng ký MỖI node `cmd/rpc` như 1 `chainID` riêng** (khớp thẳng với thiết kế gốc của `GatewayEngine`, không cần vá gì thêm) — đổi lại là nhiều `chainID`/bond/registration hơn về mặt hành chính. Đây là quyết định kiến trúc cấp cao nhất trong toàn bộ tài liệu này, nên chốt TRƯỚC khi giải quyết chi tiết #15-#18 riêng lẻ (mục 10.1 Q13).
 
 ---
 
@@ -216,7 +249,7 @@ Bản trước chỉ xử lý mất kết nối *tạm thời*. Cần tách rõ 
 | 3 | Đánh dấu chống-replay ở đích là "tuỳ chọn" | Gửi lại message do retry → credit 2 lần | Bắt buộc, dựa trên `MessageStatus` guard có sẵn trong `ClaimMessage` (mục 3.1 bước 3) |
 | 4 | Chỉ có NACK khi thất bại, không có xác nhận khi thành công | Cluster nguồn không bao giờ biết chắc để dọn trạng thái "Pending/Locked" | Dùng `MessageStatus` (Pending/Success/Failed/FailedTimeout) làm nguồn sự thật duy nhất thay vì kênh ACK riêng (mục 3.2) |
 | 5 | Không có cơ chế nào chặn 1 cluster "mint" giá trị không có thật ở cluster khác | Phá vỡ toàn bộ tính an toàn kinh tế của hệ thống | `SecurityBond` + `SlashOnEquivocation` + hard-cap `FundedAmount/ClaimedAmount` + bất biến `PerChainAllocation` (mục 4) |
-| 6 | Không xử lý cluster đích chết vĩnh viễn — tài sản bị khoá vô thời hạn | Người dùng mất quyền truy cập tài sản không lý do | `TimeoutTimestamp` + `DeclareChainDeadWithCert` + `ClaimDeadChainBalance` (mục 6.2) |
+| 6 | Không xử lý cluster đích chết vĩnh viễn — tài sản bị khoá vô thời hạn | Người dùng mất quyền truy cập tài sản không lý do | `TimeoutTimestamp` + `DeclareChainDeadWithCert` + `ClaimDeadChainBalance` (mục 6.2) — **nhưng bản thân cơ chế claim này lại có lỗ hổng riêng, xem #18** |
 | 7 | Cluster nguồn tự ý quyết định timeout rồi tự unlock | Double-spend nếu cluster đích thực ra chỉ chậm, không chết | Timeout được phân xử tập trung trên Root Anchor (nguồn sự thật duy nhất), không cho quyết định đơn phương (mục 6.2) |
 | 8 | Không có phí/thưởng cho cluster đích khi phải thực thi hộ contract-call | Không có động lực kinh tế, dễ bị spam CCM miễn phí | Tái dùng field `GasFee`/`Tip` đã có sẵn trong `CrossChainMessage`/`OutboundParams` |
 | 9 | Message chỉ có `DstCluster`, không xác minh `B` thật sự thuộc Cluster đó | Credit nhầm/"treo" tiền cho account không tồn tại ở cluster đích | Cluster đích tự kiểm tra Account Registry cục bộ trước khi credit; nếu sai, `Refund` như một revert bình thường (mục 3.1 bước 3, mục 5) |
@@ -228,6 +261,7 @@ Bản trước chỉ xử lý mất kết nối *tạm thời*. Cần tách rõ 
 | 15 | 1 chain gồm nhiều node `cmd/rpc` không chia sẻ state, nhưng `SlashOnEquivocation`/`DeclareChainDeadWithCert` chỉ áp được ở granularity `chainID` | 1 node gian lận kéo theo cả chain bị slash/declare-dead, gây thiệt hại oan cho user của các node khác vô tội cùng chain | Cần chốt chính sách: chấp nhận collateral damage ở mức chain, hay tự xây sub-ledger bond/slash theo `node_id` (mục 2.4, mục 10.1 Q10) |
 | 16 | `checkAndRecordVelocity` tính hạn mức 24h theo `sourceChainID`, dùng chung cho mọi node trong cùng chain | 1 node giao dịch nhiều (hợp lệ) có thể chặn oan node khác cùng chain do dùng chung 1 "quota" (noisy neighbor) | Cùng nhóm quyết định với #15 — cần sub-ledger velocity theo `node_id` nếu muốn tránh (mục 2.4, mục 10.1 Q10) |
 | 17 | `QuorumCert` chỉ chứng minh "đủ ngưỡng committee của chain ký", không chứng minh đúng node sở hữu account đã ký | Node khác trong cùng chain (không sở hữu account đó, không có visibility vào state của nó) có thể đồng ký khống mà không ai phát hiện — làm mất hết ý nghĩa "đa chữ ký" dù chain có N node | Thêm bước verify tầng ứng dụng: chữ ký trong cert phải bao gồm đúng `node_id` sở hữu `Sender` theo Account Registry (mục 2.4, mục 3.1 bước 3) |
+| 18 | **[CRITICAL]** `ClaimDeadChainBalance` cần `ChainRegistry.AccountTreeRoot` + Merkle proof, nhưng field này chỉ được ghi qua `UpdateCommitteeWithRecoveryCert` (không phải qua `SubmitCheckpoint` định kỳ), và dữ liệu để tính proof chỉ tồn tại trên chính node đã chết (mục 2.4: không ai giữ bản sao) | "User tự claim khi cluster chết" ở mục 6.2 KHÔNG hoạt động được trong thực tế — tài sản bị khoá vĩnh viễn, đúng kịch bản tệ nhất từng cảnh báo ở bản CCM cũ | Xây thêm Snapshot & Archival Pipeline: export cây tài khoản định kỳ ra ngoài node + publish root có xác thực + dịch vụ tính proof hộ user (mục 6.3, mục 10.1 Q12-Q13) |
 
 ---
 
@@ -248,6 +282,8 @@ Bản trước chỉ xử lý mất kết nối *tạm thời*. Cần tách rõ 
 | Q9 | Mức rủi ro custody PKS (mục 2.3) có chấp nhận được cho quy mô tài sản dự kiến không, hay bắt buộc phải có chế độ non-custodial cho tài khoản lớn? | Đây là quyết định threat-model của đội vận hành, không phải điều kỹ thuật có thể tự quyết |
 | Q10 | Chấp nhận collateral damage khi 1 node gây lỗi kéo theo cả chain bị slash/declare-dead/chia sẻ velocity limit (mục 2.4, mục 8 #15-#16), hay bắt buộc xây sub-ledger bond/velocity theo `node_id`? | Ảnh hưởng trực tiếp độ phức tạp code cần xây thêm — nếu chấp nhận rủi ro thì dùng thẳng `GatewayEngine`, nếu không thì đây là 1 hệ thống con hoàn toàn mới |
 | Q11 | Cách xác minh "chữ ký trong `QuorumCert` đúng là của `node_id` sở hữu account" (mục 8 #17) triển khai ở đâu — ngay trong `ClaimMessage`/`AttestCommit` (sửa `GatewayEngine`) hay 1 lớp wrapper riêng bên ngoài? | Sửa trực tiếp `GatewayEngine` ảnh hưởng mọi chain khác đang dùng chung engine này (kể cả các hệ cross-chain hiện có ngoài phạm vi BLS Cluster) — cần cân nhắc kỹ trước khi động vào code dùng chung |
+| Q12 | Tần suất export Snapshot & Archival (mục 6.3) là bao nhiêu, và ai vận hành dịch vụ archival tính proof hộ user? | Quyết định trực tiếp "cửa sổ mất mát" nếu node chết đột ngột — export càng thưa, rủi ro mất giao dịch gần nhất càng cao |
+| Q13 | **[Quyết định kiến trúc cấp cao nhất]** Có nên đăng ký MỖI node `cmd/rpc` như 1 `chainID` riêng (khớp thẳng thiết kế gốc `GatewayEngine`, không cần vá #15-#18) thay vì nhóm nhiều node dưới 1 `chainID`? | #15, #16, #17, #18 đều cùng 1 gốc — cần chốt câu này TRƯỚC, có thể làm toàn bộ các vá riêng lẻ ở trên trở nên không cần thiết nếu chọn "1 node = 1 chainID" (mục 6.3) |
 
 ### 10.2. Vận hành (operational, cần có trước khi nhận traffic thật)
 
@@ -418,10 +454,13 @@ flowchart TD
     TO --> RefundFlow["Cluster 1 Refund dựa trên\ntrạng thái FailedTimeout"]
     Dead -- "Chưa đủ" --> Wait
     Dead -- "Đủ" --> DC["DeclareChainDeadWithCert\n(không phải quyết định đơn phương của Cluster 1)"]
-    DC --> Claim["User tự ClaimDeadChainBalance\n(có kiểm soát, không vô thời hạn)"]
+    DC --> Snap{"AccountTreeRoot đã được\nexport+publish TRƯỚC KHI\nnode chết? (mục 6.3)"}
+    Snap -- "Có (Snapshot Pipeline đã xây)" --> Claim["User tự ClaimDeadChainBalance\n(chỉ tới đúng số dư tại\nthời điểm snapshot cuối)"]
+    Snap -- "KHÔNG (mặc định nếu\nchưa xây mục 6.3)" --> Stuck["⚠️ KHÔNG claim được — dữ liệu\nchỉ tồn tại trên node đã chết\n(mục 8 #18, CRITICAL)"]
 
     style TO fill:#fff3cd,color:#333
     style DC fill:#f8d7da,color:#333
+    style Stuck fill:#f8d7da,color:#333,stroke:#c00,stroke-width:2px
 ```
 
 ### 12.6. Giao thức Migration Account/Contract — 3 pha (mục 5.3)
