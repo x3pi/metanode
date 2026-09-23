@@ -768,3 +768,60 @@ Tài liệu trước giờ chưa bàn tới mô hình doanh thu. Đây là quy�
 | 4 | **Phí ưu tiên xử lý checkpoint** | ❌ Chưa có, chỉ đáng cân nhắc khi hệ thống lớn | Giống phí ưu tiên gas ở các chain đông đúc — chỉ thực sự có ý nghĩa khi block space của Root Anchor bắt đầu khan hiếm (nhiều node cùng cạnh tranh), chưa cần thiết ở quy mô ban đầu. |
 
 **Khuyến nghị:** bắt đầu với #1 (đã có sẵn, không tốn công) là đủ cho giai đoạn ra mắt; cân nhắc #2 khi hệ thống có traffic thật để biết mức phí đăng ký hợp lý mà không đẩy node bỏ đi; #3 chỉ có ý nghĩa nếu quyết định vận hành archival tập trung (một trong 2 nhánh mở của Q12); #4 mang tính đầu cơ, không cần tính đến ở giai đoạn này.
+
+---
+
+## 16. Phương án thay thế: Node Float Account — Parent Chain giữ thật "quỹ liên-node" thay vì trần phân bổ + tiền cọc
+
+> ⚠️ **Đây là phương án đang được cân nhắc, CHƯA thay thế mục 4.** Trình bày đầy đủ đánh đổi để đội quyết định có chuyển sang mô hình này hay giữ mô hình bond hiện tại (mục 4). Phạm vi đã chốt với người yêu cầu: **chỉ áp dụng cho "quỹ liên-node"** (phần dự trữ mỗi node dùng để gửi/nhận giá trị cross-node) — **giao dịch nội bộ cùng node giữ nguyên 100% như mục 14.2, không đổi, không chậm đi.**
+
+### 16.1. Ý tưởng cốt lõi
+
+Thay vì mỗi node có `PerChainAllocation` (một **trần phân bổ**, không phải tiền thật) + `SecurityBond` (tiền cọc **riêng biệt**, chỉ có tác dụng răn đe sau khi bị phát hiện gian lận) như mục 4 — mỗi node có 1 **Float Account** trên Parent Chain: **tiền thật**, được Parent Chain tự tay giữ và enforce trực tiếp (không cho rút âm), giống hệt tài khoản thanh toán ở ngân hàng, không phải một "hạn mức tin tưởng".
+
+- **Chuyển giá trị cross-node = chuyển khoản nội bộ giữa 2 Float Account trên Parent Chain** — đơn giản, atomic, **không cần bond/slash/velocity-limit CHO BƯỚC NÀY**, vì Parent Chain tự nó không bao giờ cho phép 1 Float Account bị âm — không có gì để "tin" hay "phạt" nữa, chỉ là kế toán ghi sổ thật.
+- Giao dịch nội bộ (mục 14.2) **hoàn toàn không đổi** — vẫn tức thời, cục bộ, không đụng Parent Chain.
+
+### 16.2. Điểm quan trọng nhất cần hiểu đúng: mô hình này KHÔNG loại bỏ hoàn toàn lỗ hổng gốc — nó THU HẸP phạm vi
+
+Vấn đề #5 (mục 8) — "Parent Chain không lưu state nên không tự kiểm tra được 1 Cluster có thật sự sở hữu giá trị nó tuyên bố hay không" — **vẫn tồn tại**, chỉ là bị đẩy lùi về đúng 1 điểm duy nhất: **bước Nạp quỹ (Deposit)**.
+
+- Khi Node 1 muốn nạp X vào Float Account của mình (chuyển từ "quỹ dự trữ cục bộ" sang "quỹ thật trên Parent Chain"), Node 1 vẫn phải **tự khai báo và tự ký xác nhận** số tiền đó — Parent Chain **không có cách nào tự verify** con số này đúng, vì nó không thấy state cục bộ của Node 1 (đúng nguyên tắc "KHÔNG LƯU STATE" xuyên suốt tài liệu). Về lý thuyết, Node 1 vẫn có thể "khai khống" số dư cục bộ của mình để nạp quỹ nhiều hơn thực có.
+- **Nhưng đây là một cải tiến thật, không phải ảo tưởng**, vì 2 lý do:
+  1. **Thu hẹp bề mặt tấn công:** thay vì MỌI message cross-node đều là 1 điểm có thể gian lận (mô hình cũ), giờ chỉ còn đúng **1 loại thao tác** (Deposit) cần giám sát chặt — tần suất thấp hơn hẳn (nạp quỹ theo chu kỳ, không phải mỗi giao dịch), dễ audit/giám sát tập trung hơn nhiều.
+  2. **Tận dụng lại đúng hạ tầng đã có (không cần xây gì mới ngoài scope):** bước Deposit vẫn cần `QuorumCert` + hard-cap theo bất biến bond-vs-exposure (mục 4 điểm 6) VÀ/HOẶC giới hạn theo đúng dữ liệu Snapshot đã publish (mục 6.3) — ví dụ: **"Node chỉ được nạp quỹ tối đa bằng tổng số dư cục bộ đã được chứng minh qua snapshot gần nhất"** — biến bước Deposit thành có căn cứ kiểm chứng được thay vì chỉ dựa vào lời tự khai.
+
+### 16.3. Luồng chuyển giá trị cross-node dưới mô hình mới (thay thế mục 3.1 bước 2-3 CHỈ CHO PHẦN GIÁ TRỊ)
+
+1. **Nạp quỹ (Deposit, định kỳ, không phải mỗi giao dịch):** Node 1 ký xác nhận + gửi lên Parent Chain "tôi nạp X vào Float Account của tôi", kèm căn cứ (ví dụ tham chiếu tới snapshot gần nhất, mục 16.2). Parent Chain verify chữ ký + hard-cap theo bất biến bond-vs-exposure hoặc theo snapshot, rồi cộng thật vào `NodeFloatAccount[1]`.
+2. **Gửi giá trị cross-node (mỗi giao dịch, tần suất cao):** Node 1 gọi Parent Chain chuyển khoản trực tiếp `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V` — **atomic, không cần QuorumCert riêng cho bước này** (khác hẳn mô hình `Outbound`/`AttestCommit`/`ClaimMessage` 3 bước của mục 3.1), vì đây chỉ là 1 transaction ghi sổ bình thường trên chain Root Anchor, không phải "tuyên bố rồi chờ bên kia claim". Vẫn cần gom batch (mục 14.3 bước 2) để không tốn quá nhiều lần ghi nếu traffic cao, nhưng KHÔNG cần chờ `ClaimMessage` riêng ở phía nhận nữa — tiền đã thật sự nằm ở `NodeFloatAccount[2]` ngay khi transaction được xác nhận.
+3. **Rút quỹ về local (tại Node 2):** Node 2 thấy `NodeFloatAccount[2]` tăng, tự cộng vào balance cục bộ của User B tương ứng (vẫn cần bước kiểm tra tồn tại cục bộ như mục 3.1 bước 3 — B có phải account hợp lệ của Node 2 không).
+
+### 16.4. Tác động lên các vấn đề đã liệt kê — bảng đối chiếu
+
+| Vấn đề cũ | Dưới mô hình bond (mục 4, hiện tại) | Dưới mô hình Float Account (mục 16) |
+|---|---|---|
+| #12 (bond-vs-exposure) | Phải tính hệ số an toàn, duyệt thủ công mỗi lần tăng hạn mức | **Thu nhỏ đáng kể**: chỉ cần áp cho bước Deposit, không cần cho từng giao dịch cross-node |
+| #18/#20 (`ClaimDeadChainBalance`, Snapshot/Archival, DA-withholding, Withdrawal Delay 72h) | Toàn bộ pipeline phức tạp (mục 6.3) áp dụng cho MỌI giá trị treo | **Phần đã nạp vào Float Account: KHÔNG CẦN pipeline này nữa** — tiền đã nằm thật trên Parent Chain, node chết thì Parent Chain trả lại trực tiếp từ `NodeFloatAccount`, không cần Merkle proof từ node đã chết. **Phần CHƯA nạp (còn ở local, chưa float hoá): vẫn cần y hệt pipeline cũ** — mô hình mới không giúp được phần này |
+| Q18 (velocity cho `ClaimDeadChainBalance`) | Bắt buộc | Chỉ cần cho phần chưa-float (nếu còn) |
+| Q7 (hệ số an toàn bond) | Áp cho toàn bộ giá trị cross-node đang treo | Chỉ áp cho giới hạn Deposit |
+
+**Kết luận về tác động:** mô hình Float Account **không thay thế hoàn toàn** mục 6.3 — node vẫn cần Snapshot Pipeline cho phần số dư CHƯA nạp vào quỹ. Nhưng nếu vận hành khuyến khích node giữ ít giá trị "chưa float hoá" (nạp quỹ thường xuyên, giữ local balance thấp), phạm vi rủi ro thực tế của #18 co lại đáng kể theo thời gian.
+
+### 16.5. Vấn đề MỚI phát sinh: quản lý thanh khoản quỹ (chưa có trong mô hình cũ)
+
+Đây là đánh đổi thật, không thể lờ đi — đã nêu rõ khi hỏi phạm vi:
+
+- **Node phải giữ đủ số dư trong Float Account để phục vụ giao dịch outbound liên tục** — nếu quỹ cạn giữa chừng (traffic đột biến, hoặc quên nạp), giao dịch cross-node của user bị BLOCK cho tới khi node kịp nạp thêm — giống hệt bài toán thanh khoản kênh (channel liquidity) của Lightning Network.
+- **Cần cơ chế cảnh báo + tự động nạp quỹ (auto top-up)** khi `NodeFloatAccount` xuống dưới ngưỡng — nếu không, đây là 1 loại "outage" mới chưa từng có trong mô hình cũ (mô hình cũ: chỉ cần có bond đủ theo tỷ lệ, không cần "nạp tiền thật" định kỳ để duy trì khả năng gửi).
+- **Vốn bị khoá (locked capital) tăng lên:** node phải giữ 1 khoản tiền thật "nằm chờ" trên Parent Chain thay vì để tiền đó sinh lời/luân chuyển ở nơi khác — chi phí cơ hội thật, cần tính vào bài toán vận hành.
+
+### 16.6. Quyết định cần chốt nếu chọn hướng này (chưa tự đề xuất, cần đội xác nhận)
+
+| Câu hỏi | Vì sao quan trọng |
+|---|---|
+| Ngưỡng tối thiểu/tối đa của Float Account mỗi node? | Quá thấp → hay bị block giao dịch; quá cao → chôn vốn lãng phí |
+| Cơ chế xác lập "căn cứ" cho Deposit (mục 16.2) — bắt buộc gắn với snapshot mới nhất, hay vẫn dùng bond-vs-exposure như cũ, hay cả hai? | Quyết định mức độ Deposit còn cần tin tưởng bao nhiêu |
+| Có xây mô hình này SONG SONG với mô hình bond (mục 4), hay THAY HẲN? | Ảnh hưởng lớn tới effort — chạy song song nghĩa là 2 hệ kế toán riêng cho 2 loại giao dịch, phức tạp hơn nhưng không phá vỡ phần đã thiết kế; thay hẳn đơn giản hơn về lâu dài nhưng cần viết lại mục 3-4 |
+
+> **Khuyến nghị của tôi (không phải quyết định cuối):** đáng thử nghiệm ở quy mô nhỏ trước khi thay hẳn mục 4 — vì bài toán thanh khoản mới (16.5) là rủi ro vận hành thật, chưa có dữ liệu thực tế để biết ngưỡng hợp lý. Có thể chạy song song: cluster/node nào traffic cao, ổn định thì chuyển sang Float Account để giảm gánh nặng #18; cluster mới/traffic thấp vẫn dùng mô hình bond hiện tại.
