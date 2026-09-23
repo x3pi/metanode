@@ -31,7 +31,7 @@
 
 ### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
 
-Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live (mục 9.1 Q9-phần-build). Mức rủi ro còn lại có chấp nhận được với quy mô tài sản thật hay không là quyết định threat-model của đội (Q9-phần-rủi-ro, còn mở).
+Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live (mục 9.1 Q9-phần-build). Mức rủi ro còn lại có chấp nhận được với quy mô tài sản thật hay không là quyết định threat-model của đội (Q9-phần-rủi-ro, còn mở). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi thật là `RecoveryCommittee` gọi `UpdateCommitteeWithRecoveryCert` để cài khoá mới cho chainID đó (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
 
 ### 2.4. 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
 
@@ -100,9 +100,7 @@ Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường h�
 
 ### 4.1. Vai trò của `SecurityBond`/`RecoveryCommittee` trong mô hình Float Account
 
-Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond`/`RecoveryCommittee` vẫn giữ nguyên vai trò cho các mục đích sẵn có trong `GatewayEngine` (đăng ký chain, `SlashOnEquivocation` khi double-sign checkpoint, `DeclareChainDeadWithCert`), và còn đúng 1 vai trò cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h).
-
-⚠️ **Cần xác nhận khi implement, chưa chắc chắn ở mức thiết kế:** `AccountTreeRoot` (mục 6.3) là artifact MỚI của thiết kế này, khác `checkpoint` gốc trong `GatewayEngine`. Chưa rõ `SlashOnEquivocation` đã wire sẵn để bắt double-sign `AccountTreeRoot` hay chỉ áp dụng cho checkpoint kiểu cũ — nếu node ký 2 `AccountTreeRoot` khác nhau cho cùng 1 chu kỳ, cần đảm bảo có phạt tương đương, không mặc định thừa hưởng miễn phí từ cơ chế cũ.
+Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` vẫn giữ nguyên 2 con đường bị mất vốn có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless, không cần `RecoveryCommittee`** — khi double-sign; (2) forfeit khi `RecoveryCommittee` gọi `DeclareChainDeadWithCert`/`UnregisterChainWithCert` (3 quyền hạn cụ thể của `RecoveryCommittee`, xem mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ⚠️ Riêng câu hỏi "`SlashOnEquivocation` có bắt được double-sign `AccountTreeRoot` hay không" — xem phân tích chi tiết ở mục 6.2 (kết luận: chưa chắc chắn, cần xác nhận khi implement).
 
 ### 4.2. Velocity-limit cho Transfer: không cần để chống mint sai — nhưng vẫn cần vì lý do khác
 
@@ -160,7 +158,15 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 ### 6.2. Node chết hẳn — ai xác nhận, xử lý ra sao
 
 - Tiêu chí trigger: 2 lớp — (1) tự động cảnh báo sau N lần bỏ lỡ chu kỳ hoạt động bình thường liên tiếp, (2) **bắt buộc xác nhận thủ công của operator** trước khi thực sự gọi `DeclareChainDeadWithCert` — không tự động hoá hoàn toàn vì hậu quả quá lớn.
-- `DeclareChainDeadWithCert` đòi hỏi `QuorumCert` của **`RecoveryCommittee`** — một thực thể quyền lực riêng, cố định, set 1 lần từ config lúc triển khai, **chưa được định nghĩa trong tài liệu này** (ai ngồi trong đó, bao nhiêu người, ngưỡng quorum — #7, còn mở). Không phải quyết định đơn phương của node còn lại.
+- `RecoveryCommittee` là 1 BLS committee **cố định, set 1 lần từ config lúc triển khai** (`RecoveryCommitteeJSON`/`RecoveryQuorumThreshold`), **không có đường lớn lên on-chain** (khác hẳn tập hợp Governance cũ từng tự phình ra theo mỗi lần `RegisterChainViaStake` — đúng lỗ hổng Sybil-vote-buying mà thiết kế này chủ đích đóng lại). Set 1 lần, không ai tự thêm mình vào được.
+
+**3 quyền hạn cụ thể của `RecoveryCommittee`** (grounded trực tiếp từ `gateway.go`, không phải suy diễn):
+
+1. **`DeclareChainDeadWithCert(chainID, cert)`** — tuyên bố 1 chainID chết: forfeit `SecurityBond` ngay + set cờ `DeadChains[chainID]` (chính cờ này chặn outflow mới, mục 6.3/mục 7), mở khoá `ClaimDeadChainBalance` cho user bị kẹt. Dùng `RecoveryCommittee` thay vì committee của chính chain đó vì: 1 chain đã chết, theo định nghĩa, không thể tự authorize gì được nữa.
+2. **`UnregisterChainWithCert(chainID, cert, blockTime)`** — xoá hẳn chainID khỏi `ChainRegistry`. Nếu chain còn bond active, **không release ngay** mà bắt đầu unbonding period — chống đúng kịch bản "hit and run": unregister rồi rút bond ngay TRƯỚC KHI ai kịp thu thập bằng chứng equivocation để slash.
+3. **`UpdateCommitteeWithRecoveryCert(update, cert)`** — cài 1 committee (khoá ký) **HOÀN TOÀN MỚI** cho 1 chainID mà committee cũ không còn liên lạc được (khác cơ chế cập nhật committee bình thường, vốn cần chính committee cũ tự ký cho committee kế nhiệm — chỉ dùng khi điều đó bất khả thi). Có guard chống replay: epoch mới bắt buộc > epoch hiện tại, không cho lùi/lặp lại cert cũ. ⚠️ **Đây chính là con đường PHỤC HỒI thật cho rủi ro #8** (khoá node bị lộ/mất — mục 2.3): mục 2.3 hiện mới liệt kê các biện pháp GIẢM THIỆT HẠI (delay, anomaly detection), chưa nói rõ khi khoá đã bị lộ/mất thật thì phục hồi bằng cách nào — câu trả lời là qua `UpdateCommitteeWithRecoveryCert`, cần nêu rõ trong runbook (mục 9.2).
+
+⚠️ **Sửa 1 điểm nhầm lẫn ở mục 4.1 — `SlashOnEquivocation` KHÔNG cần `RecoveryCommittee`:** đây là cơ chế **permissionless** — bất kỳ ai cầm được 2 `QuorumCert` hợp lệ của cùng 1 chain, cùng epoch, ký cho 2 `commitRoot` khác nhau, có thể tự submit để slash bond ngay, không qua `RecoveryCommittee`. ⚠️ **Nhưng `commitRoot` ở đây vốn thuộc cơ chế `BatchOutboundCommit` đã bị loại bỏ hoàn toàn khỏi mô hình Float Account** (banner đầu tài liệu) — cần xác nhận khi implement: `AccountTreeRoot` snapshot (mục 6.3) có được publish qua đúng con đường tạo `commitRoot` tương thích để `SlashOnEquivocation` còn bắt được hay không, hay cơ chế permissionless này giờ **không còn gì để bắt** trong mô hình mới, cần 1 cơ chế equivocation-detection khác riêng cho `AccountTreeRoot` — không nên mặc định thừa hưởng miễn phí từ code cũ.
 
 ### 6.3. Rút lại giá trị khi node chết — bài toán PHÂN BỔ
 
@@ -245,7 +251,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 - **Quản lý khoá `RecoveryCommittee`** (ưu tiên cao hơn khoá node — #7): multisig/HSM/threshold-signing riêng, tách biệt quy trình vận hành khoá node thường.
 - **Giám sát Snapshot Pipeline** (phục vụ chứng minh phân bổ khi node chết, mục 6.3): 2 loại cảnh báo tách biệt — (1) node **bỏ lỡ** chu kỳ export (mức độ: vận hành, có thể do bug/quá tải), và (2) **DA-check thất bại** trên 1 node vẫn đang sống (node CÓ publish `AccountTreeRoot` nhưng Archival Service không lấy đủ dữ liệu khớp root — mục 6.3 điểm 2) — mức độ: **nghi vấn gian lận đang diễn ra**, phải escalate ngay cho operator/`RecoveryCommittee` xem xét, không chờ tới khi node chết mới xử lý.
 - **Backup & DR:** backup LevelDB từng node + state Parent Chain (`ChainRegistry`/`NodeFloatAccount`/`SecurityBondLedger`/`DeadChains`).
-- **Runbook:** kịch bản node bị nghi compromise (khi nào trigger `SlashOnEquivocation`/`DeclareChainDeadWithCert`).
+- **Runbook:** kịch bản node bị nghi compromise (khi nào trigger `SlashOnEquivocation`/`DeclareChainDeadWithCert`), và kịch bản khoá node bị lộ/mất nhưng node vẫn còn muốn hoạt động tiếp (không tuyên bố chết) — quy trình gọi `UpdateCommitteeWithRecoveryCert` (mục 6.2) để cài khoá mới, ai được phép yêu cầu, xác minh danh tính operator thế nào trước khi `RecoveryCommittee` ký cert.
 - **Quản lý tăng trưởng `ClaimedMessages`:** bảng này ghi vĩnh viễn mỗi `MessageID` đã xử lý — cần kế hoạch archive/prune định kỳ các bản ghi cũ (ví dụ sau N tháng) để tránh phình state Parent Chain vô hạn theo thời gian.
 
 ### 9.3. Checklist bảo mật trước khi go-live
@@ -476,7 +482,7 @@ Người gửi luôn phải tự biết trước contract đích nằm ở node 
 
 ### Q5. `RecoveryCommittee` là gì, vì sao quan trọng?
 
-Thực thể BLS committee cố định, set 1 lần từ config lúc triển khai, duy nhất có quyền: tuyên bố 1 node chết + tịch thu bond, hoặc thay hẳn khoá ký của bất kỳ node nào. Chưa được định nghĩa trong tài liệu này (ai, bao nhiêu người, ngưỡng quorum) — chặn cứng go-live vì code bắt buộc cần config này mới chạy được. Xem #7.
+Thực thể BLS committee cố định, set 1 lần từ config lúc triển khai, duy nhất có quyền thực hiện đúng 3 hành động (mục 6.2): `DeclareChainDeadWithCert` (tuyên bố chết + tịch thu bond), `UnregisterChainWithCert` (xoá chain, bond vào unbonding chứ không release ngay), `UpdateCommitteeWithRecoveryCert` (cài khoá ký hoàn toàn mới cho 1 node — con đường phục hồi thật khi khoá bị lộ/mất, mục 2.3). Chưa được định nghĩa trong tài liệu này (ai, bao nhiêu người, ngưỡng quorum) — chặn cứng go-live vì code bắt buộc cần config này mới chạy được. Xem #7.
 
 ---
 
