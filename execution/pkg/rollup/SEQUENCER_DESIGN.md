@@ -26,7 +26,7 @@
 ### 2.2. BLS Node (Execution Layer)
 - **State nội bộ:** LevelDB riêng — balance, nonce, contract state của user thuộc node.
 - **Custody Private Key (PKS):** giữ nguyên như thiết kế `cmd/rpc` gốc.
-- **Giao dịch nội bộ:** xử lý ngay lập tức, không đụng Parent Chain (mục 13.2).
+- **Giao dịch nội bộ:** xử lý ngay lập tức, **không đồng bộ per-transaction** lên Parent Chain (mục 13.2) — nhưng vẫn có 1 kênh đồng bộ nền, định kỳ (không phải per-tx): Snapshot Export mỗi 15 phút publish `AccountTreeRoot` lên Parent Chain (mục 6.3 điểm 1), phục vụ chứng minh phân bổ khi node chết — không phải cơ chế xác nhận/finality cho từng giao dịch.
 - **Giao dịch cross-node:** gọi thẳng thao tác chuyển khoản trên `NodeFloatAccount` của mình (mục 3).
 
 ### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
@@ -170,9 +170,9 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 **Bài toán còn lại — chứng minh PHÂN BỔ:**
 1. **Snapshot Export định kỳ, PROACTIVE** (mỗi 15 phút, mục 9.1) — export cây Merkle **phân bổ** account state ra ngoài node + publish `AccountTreeRoot` có xác thực lên Parent Chain. Root này dùng để chứng minh **"tổng đã biết trước đó (NodeFloatAccount) được chia cho ai bao nhiêu"** — không dùng để chứng minh tổng có thật (đã tự động đúng).
-2. **Chống Data Availability Withholding (fail-closed):** 1 node có thể publish 1 cây phân bổ giả (gán hết cho ví nó kiểm soát) dù TỔNG là thật, rồi giấu dữ liệu chi tiết để Archival Service không đối chiếu được. Archival Service phải xác nhận nhận đủ dữ liệu khớp root trong vài phút sau publish; không đủ = VETO ngay, không đợi hết thời gian chờ.
+2. **Chống Data Availability Withholding (fail-closed):** 1 node có thể publish 1 cây phân bổ giả (gán hết cho ví nó kiểm soát) dù TỔNG là thật, rồi giấu dữ liệu chi tiết để Archival Service không đối chiếu được. Archival Service phải xác nhận nhận đủ dữ liệu khớp root trong vài phút sau publish; không đủ = VETO ngay, không đợi hết thời gian chờ. ⚠️ **Check này chạy MỖI chu kỳ 15 phút, kể cả khi node hoàn toàn khoẻ mạnh** (không phải chỉ kích hoạt sau khi node đã chết) — vì 2 lý do: (a) đảm bảo Archival Service luôn sẵn dữ liệu THẬT từ trước, không phụ thuộc chính node đã chết mới đi lấy; (b) DA-check thất bại trên 1 node đang sống là tín hiệu cảnh báo SỚM (node có thể đang chuẩn bị gian lận) — xem mục 9.2 giám sát riêng loại cảnh báo này, tách khỏi "VETO" (vốn chỉ có ý nghĩa hành động cụ thể — chặn giải ngân — sau khi node đã được tuyên bố chết).
 3. **`ClaimDeadChainBalance` + Withdrawal Delay tối thiểu 72 giờ:** cho operator/Archival thời gian phát hiện cây phân bổ giả mạo trước khi giải ngân thật. Không cần lớp velocity-limit riêng cho bước này — TỔNG tiền đã được `NodeFloatAccount` giới hạn chính xác từ trước (không thể rút vượt tổng thật), rủi ro duy nhất còn lại là phân bổ sai giữa các user trong CÙNG tổng đó, không phải rút vượt tổng — Delay 72h + DA-defense đã đủ xử lý.
-4. **Cửa sổ mất mát = tần suất export** (mặc định 15 phút) — giao dịch NỘI BỘ (cùng node, không qua `NodeFloatAccount`) sau lần export cuối vẫn có thể không chứng minh được PHÂN BỔ chính xác nếu node chết ngay sau đó (dù tổng tiền vẫn an toàn) — đây là lý do vẫn cần export định kỳ dù tổng đã luôn đúng.
+4. **Cửa sổ mất mát = tần suất export** (mặc định 15 phút) — giao dịch NỘI BỘ (cùng node, không qua `NodeFloatAccount`) sau lần export cuối vẫn có thể không chứng minh được PHÂN BỔ chính xác nếu node chết ngay sau đó (dù tổng tiền vẫn an toàn) — đây là lý do vẫn cần export định kỳ dù tổng đã luôn đúng. ⚠️ **Hậu quả cụ thể cho user, làm rõ để tránh hiểu lầm mức độ rủi ro:** claim dựa trên snapshot gần nhất đã xác thực — mọi giao dịch nội bộ SAU snapshot đó (kể cả đã báo thành công cho user tại thời điểm giao dịch) coi như CHƯA từng xảy ra khi tính phân bổ cuối cùng: người gửi được khôi phục về số dư TRƯỚC giao dịch, người nhận KHÔNG được cộng phần đã nhận. Không mất tiền THẬT ngoài cửa sổ này (tổng node vẫn đúng), nhưng user nhận tiền nội bộ trong ≤15 phút cuối trước khi node chết có thể mất đúng khoản đó vĩnh viễn dù giao dịch từng báo thành công — cần công bố rõ giới hạn này với người dùng, không chỉ coi là chi tiết kỹ thuật nội bộ.
 5. **Ai tính proof hộ user:** dịch vụ archival độc lập, không bắt user tự giữ Merkle proof.
 
 ---
@@ -239,7 +239,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 ### 9.2. Vận hành
 
 - **Quản lý khoá `RecoveryCommittee`** (ưu tiên cao hơn khoá node — #7): multisig/HSM/threshold-signing riêng, tách biệt quy trình vận hành khoá node thường.
-- **Giám sát Snapshot Pipeline** (phục vụ chứng minh phân bổ khi node chết, mục 6.3): cảnh báo nếu 1 node bỏ lỡ chu kỳ export.
+- **Giám sát Snapshot Pipeline** (phục vụ chứng minh phân bổ khi node chết, mục 6.3): 2 loại cảnh báo tách biệt — (1) node **bỏ lỡ** chu kỳ export (mức độ: vận hành, có thể do bug/quá tải), và (2) **DA-check thất bại** trên 1 node vẫn đang sống (node CÓ publish `AccountTreeRoot` nhưng Archival Service không lấy đủ dữ liệu khớp root — mục 6.3 điểm 2) — mức độ: **nghi vấn gian lận đang diễn ra**, phải escalate ngay cho operator/`RecoveryCommittee` xem xét, không chờ tới khi node chết mới xử lý.
 - **Backup & DR:** backup LevelDB từng node + state Parent Chain (`ChainRegistry`/`NodeFloatAccount`/`SecurityBondLedger`/`DeadChains`).
 - **Runbook:** kịch bản node bị nghi compromise (khi nào trigger `SlashOnEquivocation`/`DeclareChainDeadWithCert`).
 - **Quản lý tăng trưởng `ClaimedMessages`:** bảng này ghi vĩnh viễn mỗi `MessageID` đã xử lý — cần kế hoạch archive/prune định kỳ các bản ghi cũ (ví dụ sau N tháng) để tránh phình state Parent Chain vô hạn theo thời gian.
@@ -488,6 +488,8 @@ Thực thể BLS committee cố định, set 1 lần từ config lúc triển kh
 3. Kiểm tra số dư/nonce.
 4. Ghi 1 lần nguyên tử: trừ người gửi, cộng người nhận.
 5. Trả kết quả ngay. Xong.
+
+⚠️ **Không có bước nào ở trên đụng Parent Chain — đây là chủ đích** (tốc độ), không phải thiếu sót. Đồng bộ duy nhất cho giao dịch nội bộ là kênh nền định kỳ (Snapshot Export mỗi 15 phút, mục 6.3 điểm 1) — không xác nhận/finality từng giao dịch, chỉ phục vụ chứng minh phân bổ nếu node chết. Hệ quả: giao dịch nội bộ trong khoảng 15 phút chưa export, nếu node chết đúng lúc đó, không có nơi nào ngoài node đã chết biết chúng từng xảy ra — xem hậu quả cụ thể ở mục 6.3 điểm 4.
 
 ### 13.3. Giao dịch cross-node
 
