@@ -64,7 +64,7 @@ Khi User A (Cluster 1) muốn chuyển tiền hoặc gọi Contract cho User/Con
 
 1. **Khởi tạo tại Cluster 1 (Nguồn):**
    - User A gửi yêu cầu tới Cluster 1's `AccountHandler`.
-   - Cluster 1 gọi `GatewayEngine.Outbound(sender=A, params{DestChainID: 2, Target: B, Value, Payload, GasFee, Tip}, txHash)` — hàm này **đã tự** gán `MessageID`, `Sequence`, set `MessageStatusPending`, và đưa vào `PendingOutboundMessages[2]`. **Không tự trừ tiền cục bộ trước** rồi mới build message riêng — việc khoá state phải nằm trong cùng logic với `Outbound` (xem vấn đề #2, mục 8) để tránh trừ tiền xong nhưng message không bao giờ được ghi nhận nếu crash giữa chừng.
+   - Cluster 1 gọi `GatewayEngine.Outbound(sender=A, params{DestChainID: 2, Target: B, Value, Payload, GasFee, Tip}, txHash)` — hàm này **đã tự** gán `MessageID`, `Sequence`, set `MessageStatusPending`, và đưa vào `PendingOutboundMessages[2]`. **Không tự trừ tiền cục bộ trước** rồi mới build message riêng — việc khoá state phải nằm trong cùng logic với `Outbound` (xem vấn đề #2, mục 8) để tránh trừ tiền xong nhưng message không bao giờ được ghi nhận nếu crash giữa chừng. (`Tip` là tham số kế thừa từ chữ ký hàm gốc, không có ý nghĩa kinh tế thật trong kiến trúc này — xem giải thích đầy đủ ở bước 3 bên dưới và mục 15.3.)
    - Cluster 1 **không tự ký CCM bằng khoá node đơn lẻ**. Giá trị chỉ thực sự di chuyển được sau khi message nằm trong một **checkpoint đã được cả committee của Cluster 1 attest** (`QuorumCert`), theo đúng cách `AttestCommit`/`SubmitCheckpoint` đang hoạt động.
 
 2. **Luân chuyển & Attest (qua Root Anchor):**
@@ -73,7 +73,7 @@ Khi User A (Cluster 1) muốn chuyển tiền hoặc gọi Contract cho User/Con
    - Cluster 2 lấy `commitRoot` + Merkle proof của message của mình từ Root Anchor (hoặc P2P trực tiếp, tự verify lại `QuorumCert` — như "Cách 2" ở bản trước, vẫn hợp lệ vì không phụ thuộc phải hỏi Root Anchor real-time).
 
 3. **Thực thi đích (Tại Cluster 2 - Đích):**
-   - Cluster 2 gọi `GatewayEngine.ClaimMessage(message, proof, commitRoot, relayer, blockTime)`. Hàm này đã tự:
+   - Cluster 2 gọi `GatewayEngine.ClaimMessage(message, proof, commitRoot, relayer, blockTime)`. ⚠️ **`relayer` ở đây luôn chính là địa chỉ của Cluster 2 tự gọi cho mình** — vì mỗi node chạy `GatewayEngine` như 1 instance riêng tư trong tiến trình nội bộ (mục 7, Q6), không phải smart contract công khai, nên **không có bên thứ 3 độc lập nào khác gọi được hàm này thay Cluster 2**. Tham số `relayer` chỉ là kế thừa nguyên chữ ký hàm gốc (vốn dùng cho hệ cross-chain công khai rộng hơn, nơi bên thứ 3 thật sự tồn tại) — trong kiến trúc này nó không mang thêm ý nghĩa kinh tế nào khác ngoài việc tự ghi nhận. Hàm này đã tự:
      - Từ chối claim trùng (`currentStatus != MessageStatusPending` → lỗi `ErrAlreadyClaimed`) — **đây chính là chống-replay bắt buộc**, không phải tính năng tuỳ chọn như bản CCM cũ.
      - Verify Merkle proof + domain-separated leaf hash.
      - Kiểm tra timeout (`TimeoutTimestamp`) — tự động set `MessageStatusFailedTimeout` nếu quá hạn.
@@ -248,7 +248,7 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 | 5 | Không có cơ chế nào chặn 1 cluster "mint" giá trị không có thật ở cluster khác | Phá vỡ toàn bộ tính an toàn kinh tế của hệ thống | `SecurityBond` + `SlashOnEquivocation` + hard-cap `FundedAmount/ClaimedAmount` + bất biến `PerChainAllocation` (mục 4) |
 | 6 | Không xử lý cluster đích chết vĩnh viễn — tài sản bị khoá vô thời hạn | Người dùng mất quyền truy cập tài sản không lý do | `TimeoutTimestamp` + `DeclareChainDeadWithCert` + `ClaimDeadChainBalance` (mục 6.2) — **nhưng bản thân cơ chế claim này lại có lỗ hổng riêng, xem #18** |
 | 7 | Cluster nguồn tự ý quyết định timeout rồi tự unlock | Double-spend nếu cluster đích thực ra chỉ chậm, không chết | Timeout được phân xử tập trung trên Root Anchor (nguồn sự thật duy nhất), không cho quyết định đơn phương (mục 6.2) |
-| 8 | Không có phí/thưởng cho cluster đích khi phải thực thi hộ contract-call | Không có động lực kinh tế, dễ bị spam CCM miễn phí | Tái dùng field `GasFee`/`Tip` đã có sẵn trong `CrossChainMessage`/`OutboundParams` |
+| 8 | Không có gì bù chi phí tính toán khi cluster đích phải thực thi contract-call cho user của chính nó | Không có nguồn bù chi phí vận hành, dễ bị spam message miễn phí | Tái dùng field `GasFee` đã có sẵn trong `CrossChainMessage`/`OutboundParams` — **lưu ý sửa lại**: `Tip` (đúng nghĩa gốc là thưởng cho relayer bên thứ 3) không áp dụng được trong kiến trúc này vì không có bên thứ 3 nào relay hộ (mục 3.1 bước 3, mục 15.3) — chỉ `GasFee` (bù chi phí tính toán, trả từ người gửi cho chính node đích) còn ý nghĩa thật |
 | 9 | Message chỉ có `DstCluster`, không xác minh `B` thật sự thuộc Cluster đó | Credit nhầm/"treo" tiền cho account không tồn tại ở cluster đích | Cluster đích tự kiểm tra Account Registry cục bộ trước khi credit; nếu sai, `Refund` như một revert bình thường (mục 3.1 bước 3, mục 5) |
 | 10 | Account Registry cho phép ghi đè mapping tuỳ ý | Report cũ/replay có thể "cướp" account sang cluster khác | Chỉ chấp nhận đăng ký lần đầu hoặc có chữ ký của cluster hiện tại để chuyển nhượng, chi tiết giao thức ở #13 (mục 5.1, 5.3) |
 | 11 | Không có thiết kế nào cho contract tự sinh (deploy trong Cluster) — nếu bắt đăng ký như Account sẽ bị spam | DoS/state-bloat lên Parent Chain (factory contract sinh hàng vạn địa chỉ) + race condition tra cứu khi contract mới deploy chưa kịp đăng ký | Bỏ hẳn Contract Registry toàn cục; dùng `DestChainID` tường minh từ người gửi + kiểm tra tồn tại cục bộ tại đích (đã có sẵn ở #9) (mục 5.2) |
@@ -416,7 +416,7 @@ sequenceDiagram
 
     G2->>G2: Committee gom AddPendingMessageSuccessAttestationShare\n-> successCert
     G2-->>G1: successCert
-    G1->>G1: Đóng Pending cục bộ, giải phóng Tip đã khoá\n(mục 3.2 — KHÔNG suy luận từ im lặng)
+    G1->>G1: Đóng Pending cục bộ, giải phóng Tip đã khoá (nếu có)\n(về lại chính G1 — không có relayer bên thứ 3, mục 15.3)\n(mục 3.2 — KHÔNG suy luận từ im lặng)
 ```
 
 **Tóm tắt bằng lời:**
@@ -472,7 +472,7 @@ sequenceDiagram
         EVM-->>G2: Kết quả OK
         G2->>G2: Committee gom AddPendingMessageSuccessAttestationShare
         G2-->>G1: Trả về successCert
-        G1->>G1: Giải phóng Tip cho Relayer (xong)
+        G1->>G1: Giải phóng Tip đã khoá (nếu có, về lại G1 —\nkhông có relayer bên thứ 3, mục 15.3) — xong
     else Bị lỗi / Revert (Ví dụ: hết gas, sai logic)
         EVM-->>G2: Kết quả REVERT
         deactivate EVM
@@ -743,8 +743,10 @@ Tài liệu trước giờ chưa bàn tới mô hình doanh thu. Đây là quy�
 |---|---|---|---|
 | 1 | **Gas fee cơ bản** của mọi giao dịch gọi vào `GatewayEngine` (đăng ký, bond, checkpoint, claim-dead, ghi Account Registry...) | ✅ **Có sẵn, không cần xây thêm** | Đây là nguồn thu tự nhiên nhất — mọi lệnh ở mục 15.1 đều là 1 transaction thật trên Root Anchor, tự động trả gas theo đúng cơ chế gas hiện có của chain đó, giống bất kỳ giao dịch nào khác. Ổn định, không cần thiết kế gì thêm. |
 | 2 | **Phí đăng ký 1 lần** (tách biệt khỏi stake/bond) | ❌ Chưa có | `RegisterChainViaStake` hiện tại: `amount` node trả **toàn bộ trở thành bond của chính node đó** (không mất đi, có thể unbond lại sau qua `ClaimUnbondedBond`) — không có phần nào tách ra làm doanh thu cho Parent Chain. Muốn có, cần thêm 1 khoản phí KHÔNG hoàn lại, cộng thêm vào bên cạnh stake. |
-| 3 | **Cắt % từ `Tip`** (phí quan hệ relayer) | ❌ Chưa có | `Tip` hiện 100% thuộc về relayer qua `WithdrawRelayerTip` — không có cơ chế giữ lại % nào cho Parent Chain. Có thể thêm (ví dụ 5-10%), giống phí protocol của nhiều DEX/bridge thật — cần cân nhắc mức cắt để không làm giảm động lực relayer thật sự làm việc chuyển tiếp. |
+| 3 | ~~Cắt % từ `Tip` (phí quan hệ relayer)~~ | ❌ **Loại bỏ — không áp dụng được** | **Sửa sai ở bản trước:** `Tip` trong `GatewayEngine` gốc được thiết kế để thưởng cho 1 bên thứ 3 relay hộ, nhưng kiến trúc tài liệu này (mục 7, Q6, mục 15.1) đã chốt **không có bên thứ 3 nào** — `ClaimMessage` luôn do chính node đích tự gọi cho mình (`relayer` = địa chỉ chính nó). "Cắt % Tip" nghĩa là Parent Chain cắt % của khoản node tự trả cho chính mình — không phải dòng tiền thật, không tạo ra doanh thu. Không đưa vào danh sách nguồn thu. |
 | 4 | **Phí dịch vụ Snapshot Archival** (mục 6.3) | ❌ Chưa có, gắn với Q12 | Nếu Root Anchor (hoặc bên liên kết) đứng ra vận hành dịch vụ archival chung cho nhiều node thay vì để từng node tự lo, có thể thu phí định kỳ theo dung lượng/tần suất — giống mô hình "bảo hiểm lưu trữ": node trả phí, đổi lại yên tâm hơn về #18. |
 | 5 | **Phí ưu tiên xử lý checkpoint** | ❌ Chưa có, chỉ đáng cân nhắc khi hệ thống lớn | Giống phí ưu tiên gas ở các chain đông đúc — chỉ thực sự có ý nghĩa khi block space của Root Anchor bắt đầu khan hiếm (nhiều node cùng cạnh tranh), chưa cần thiết ở quy mô ban đầu. |
 
-**Khuyến nghị:** bắt đầu với #1 (đã có sẵn, không tốn công) là đủ cho giai đoạn ra mắt; cân nhắc #2/#3 khi hệ thống có traffic thật để biết mức phí nào hợp lý mà không đẩy node/relayer bỏ đi; #4 chỉ có ý nghĩa nếu quyết định vận hành archival tập trung (một trong 2 nhánh mở của Q12); #5 mang tính đầu cơ, không cần tính đến ở giai đoạn này.
+**Khuyến nghị:** bắt đầu với #1 (đã có sẵn, không tốn công) là đủ cho giai đoạn ra mắt; cân nhắc #2 khi hệ thống có traffic thật để biết mức phí đăng ký hợp lý mà không đẩy node bỏ đi; #4 chỉ có ý nghĩa nếu quyết định vận hành archival tập trung (một trong 2 nhánh mở của Q12); #5 mang tính đầu cơ, không cần tính đến ở giai đoạn này. **#3 đã loại bỏ hoàn toàn** — không phải "chưa cân nhắc" mà là không có cơ sở kinh tế thật để làm.
+
+> **Câu hỏi bỏ ngỏ đáng cân nhắc (không phải quyết định, chỉ là gợi ý hướng mở rộng tương lai):** nếu sau này đội muốn có relayer bên thứ 3 THẬT (ví dụ để tăng độ sẵn sàng — ai đó relay hộ khi chính node đích tạm thời bận/mất kết nối), đây sẽ là **một thay đổi kiến trúc thật sự** (biến `GatewayEngine` từ instance riêng tư thành có thể gọi từ bên ngoài, kèm theo toàn bộ vấn đề uỷ quyền/bảo mật mới phát sinh) — không phải thứ có thể bật lên chỉ bằng cách "giữ nguyên field Tip". Ngoài phạm vi tài liệu này.
