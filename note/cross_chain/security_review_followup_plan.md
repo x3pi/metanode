@@ -25,6 +25,17 @@
   `(2*TotalStake)/3+1` từ trước — đã đồng bộ lại cả 3.
 - Cả 2 nằm trong commit `33eca2eb`. `build_check.sh --all` + toàn bộ `pkg/cross_chain`,
   `pkg/blockchain/tx_processor` test suite pass sạch tại thời điểm commit.
+- **Toàn bộ mục 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 2.4 bên dưới đã xử lý xong** (1 phiên agent khác làm
+  1.1/1.3/2.1/2.2/2.3/2.4 dựa trên plan này + tôi review/sửa lại 2 chỗ đúng sai (index
+  `AttestedCommitsByRoot` bị `json:"-"` nên luôn rỗng, test file có stub `RelayMessage` giả gây 3
+  test fail thật) — commit `7a5a386c`; sau đó tôi tự làm nốt 1.2 lựa chọn (b) — đổi hẳn
+  `mustUint64` sang `(uint64, error)`, cập nhật TẤT CẢ ~35 call site trong `gateway_handler.go`
+  (không chỉ `outbound`), thêm helper `parseCrossChainMessageArgs` dùng chung cho 5 case
+  (`claimMessage`/`creditReserveAllocation`/`refundReserveAllocation`/`refund`/`verifyAndExecute`)
+  để giảm trùng lặp, thêm regression test
+  `TestGatewayHandler_Outbound_RejectsDestChainIdOverflowingUint64`. `build_check.sh --all` +
+  toàn bộ `pkg/cross_chain`, `pkg/blockchain/tx_processor` suite pass sạch. Chi tiết giữ nguyên bên
+  dưới để tham khảo, KHÔNG cần làm lại.
 
 ---
 

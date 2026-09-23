@@ -691,6 +691,40 @@ func (h *GatewayHandler) HandleOffChainQueryResult(tx types.Transaction, chainSt
 	), err
 }
 
+// parseCrossChainMessageArgs decodes the CrossChainMessage core fields shared by identical
+// args[0..12] layout across claimMessage, creditReserveAllocation, refundReserveAllocation and
+// refund (TimeoutTimestamp, present only in claimMessage's own arg list, is set by that case
+// itself afterward -- every other caller leaves it at its zero value, matching prior behavior).
+func parseCrossChainMessageArgs(args []interface{}) (cross_chain.CrossChainMessage, error) {
+	sourceChainID, err := mustUint64(args[1])
+	if err != nil {
+		return cross_chain.CrossChainMessage{}, fmt.Errorf("sourceChainId: %w", err)
+	}
+	destChainID, err := mustUint64(args[2])
+	if err != nil {
+		return cross_chain.CrossChainMessage{}, fmt.Errorf("destChainId: %w", err)
+	}
+	sequence, err := mustUint64(args[3])
+	if err != nil {
+		return cross_chain.CrossChainMessage{}, fmt.Errorf("sequence: %w", err)
+	}
+	return cross_chain.CrossChainMessage{
+		MessageID:     mustHash(args[0]),
+		SourceChainID: sourceChainID,
+		DestChainID:   destChainID,
+		Sequence:      sequence,
+		HopCount:      mustUint8(args[4]),
+		Sender:        mustAddress(args[5]),
+		Target:        mustAddress(args[6]),
+		AssetID:       mustBigInt(args[7]),
+		Value:         mustBigInt(args[8]),
+		Payload:       mustBytes(args[9]),
+		Tip:           mustBigInt(args[10]),
+		GasFee:        mustBigInt(args[11]),
+		Ordered:       mustBool(args[12]),
+	}, nil
+}
+
 func (h *GatewayHandler) handleWrite(
 	ctx context.Context, chainState *blockchain.ChainState, tx types.Transaction, method *abi.Method, argData []byte, blockTime uint64,
 ) ([]types.EventLog, []byte, error) {
@@ -709,11 +743,16 @@ func (h *GatewayHandler) handleWrite(
 
 	switch method.Name {
 	case "outbound":
-		if !args[0].(*big.Int).IsUint64() {
-			return nil, nil, fmt.Errorf("outbound: destChainId overflows uint64")
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("outbound: destChainId: %w", err)
+		}
+		timeoutTimestamp, err := mustUint64(args[9])
+		if err != nil {
+			return nil, nil, fmt.Errorf("outbound: timeoutTimestamp: %w", err)
 		}
 		params := cross_chain.OutboundParams{
-			DestChainID:      mustUint64(args[0]),
+			DestChainID:      destChainID,
 			Target:           mustAddress(args[1]),
 			Payload:          mustBytes(args[2]),
 			AssetID:          mustBigInt(args[3]),
@@ -722,7 +761,7 @@ func (h *GatewayHandler) handleWrite(
 			GasFee:           mustBigInt(args[6]),
 			HopCount:         mustUint8(args[7]),
 			Ordered:          mustBool(args[8]),
-			TimeoutTimestamp: mustUint64(args[9]),
+			TimeoutTimestamp: timeoutTimestamp,
 		}
 
 		// SECURITY FIX (2026-09-05, found in proactive re-audit): unlike the relay-onward path
@@ -846,17 +885,29 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "attestCommit":
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestCommit: sourceChainId: %w", err)
+		}
+		leafIndex, err := mustUint64(args[4])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestCommit: leafIndex: %w", err)
+		}
+		epoch, err := mustUint64(args[6])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestCommit: epoch: %w", err)
+		}
 		assetId := mustBigInt(args[3])
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[4]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[5]),
 		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[6]),
+			Epoch:              epoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
 		}
-		if _, err := engine.AttestCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert, blockTime); err != nil {
+		if _, err := engine.AttestCommit(sourceChainID, mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert, blockTime); err != nil {
 			return nil, nil, err
 		}
 
@@ -867,39 +918,48 @@ func (h *GatewayHandler) handleWrite(
 		// this skips attestCommitInternal's ceiling/Reserve-identity check entirely (enforceCeiling
 		// =false) rather than requiring the CLAIMING chain to itself be the Reserve, which is
 		// exactly what a plain attestCommit() call would otherwise require and fail here.
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestReserveIssuedCommit: sourceChainId: %w", err)
+		}
+		leafIndex, err := mustUint64(args[4])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestReserveIssuedCommit: leafIndex: %w", err)
+		}
+		epoch, err := mustUint64(args[6])
+		if err != nil {
+			return nil, nil, fmt.Errorf("attestReserveIssuedCommit: epoch: %w", err)
+		}
 		assetId := mustBigInt(args[3])
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[4]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[5]),
 		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[6]),
+			Epoch:              epoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[7])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[8])),
 		}
-		if _, err := engine.AttestReserveIssuedCommit(mustUint64(args[0]), mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
+		if _, err := engine.AttestReserveIssuedCommit(sourceChainID, mustHash(args[1]), mustBigInt(args[2]), assetId, proof, cert); err != nil {
 			return nil, nil, err
 		}
 
 	case "claimMessage":
-		msg := cross_chain.CrossChainMessage{
-			MessageID:        mustHash(args[0]),
-			SourceChainID:    mustUint64(args[1]),
-			DestChainID:      mustUint64(args[2]),
-			Sequence:         mustUint64(args[3]),
-			HopCount:         mustUint8(args[4]),
-			Sender:           mustAddress(args[5]),
-			Target:           mustAddress(args[6]),
-			AssetID:          mustBigInt(args[7]),
-			Value:            mustBigInt(args[8]),
-			Payload:          mustBytes(args[9]),
-			Tip:              mustBigInt(args[10]),
-			GasFee:           mustBigInt(args[11]),
-			Ordered:          mustBool(args[12]),
-			TimeoutTimestamp: mustUint64(args[13]),
+		msg, err := parseCrossChainMessageArgs(args)
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimMessage: %w", err)
+		}
+		timeoutTimestamp, err := mustUint64(args[13])
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimMessage: timeoutTimestamp: %w", err)
+		}
+		msg.TimeoutTimestamp = timeoutTimestamp
+		leafIndex, err := mustUint64(args[14])
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimMessage: leafIndex: %w", err)
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[14]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[15]),
 		}
 		commitRoot := mustHash(args[16])
@@ -1144,31 +1204,28 @@ func (h *GatewayHandler) handleWrite(
 		// chain's local ledger copy, which is non-authoritative for any chain other than Reserve
 		// itself). Same calldata shape as claimMessage, submitted by the relayer against Reserve's
 		// own node right after that same message's claimMessage succeeds on its real destination.
-		msg := cross_chain.CrossChainMessage{
-			MessageID:     mustHash(args[0]),
-			SourceChainID: mustUint64(args[1]),
-			DestChainID:   mustUint64(args[2]),
-			Sequence:      mustUint64(args[3]),
-			HopCount:      mustUint8(args[4]),
-			Sender:        mustAddress(args[5]),
-			Target:        mustAddress(args[6]),
-			AssetID:       mustBigInt(args[7]),
-			Value:         mustBigInt(args[8]),
-			Payload:       mustBytes(args[9]),
-			Tip:           mustBigInt(args[10]),
-			GasFee:        mustBigInt(args[11]),
-			Ordered:       mustBool(args[12]),
+		msg, err := parseCrossChainMessageArgs(args)
+		if err != nil {
+			return nil, nil, fmt.Errorf("creditReserveAllocation: %w", err)
+		}
+		leafIndex, err := mustUint64(args[13])
+		if err != nil {
+			return nil, nil, fmt.Errorf("creditReserveAllocation: leafIndex: %w", err)
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[13]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[14]),
 		}
 		commitRoot := mustHash(args[15])
 		// SECURITY FIX (2026-09-05, "Cross-Chain Ledger Inflation via Missing Reserve Refund"):
 		// crediting Reserve's ledger now requires a real success QuorumCert signed by
 		// destChainId's OWN registered committee -- see CreditReserveAllocation's doc comment.
+		successCertEpoch, err := mustUint64(args[16])
+		if err != nil {
+			return nil, nil, fmt.Errorf("creditReserveAllocation: successCert epoch: %w", err)
+		}
 		successCert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[16]),
+			Epoch:              successCertEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
 		}
@@ -1181,23 +1238,16 @@ func (h *GatewayHandler) handleWrite(
 		// counterpart of Refund() -- reverses CreditReserveAllocation's credit to destChainId (if
 		// it happened) and queues a real outbound refund message back to sourceChainId, using the
 		// SAME failure-cert digest/verification as Refund() itself.
-		msg := cross_chain.CrossChainMessage{
-			MessageID:     mustHash(args[0]),
-			SourceChainID: mustUint64(args[1]),
-			DestChainID:   mustUint64(args[2]),
-			Sequence:      mustUint64(args[3]),
-			HopCount:      mustUint8(args[4]),
-			Sender:        mustAddress(args[5]),
-			Target:        mustAddress(args[6]),
-			AssetID:       mustBigInt(args[7]),
-			Value:         mustBigInt(args[8]),
-			Payload:       mustBytes(args[9]),
-			Tip:           mustBigInt(args[10]),
-			GasFee:        mustBigInt(args[11]),
-			Ordered:       mustBool(args[12]),
+		msg, err := parseCrossChainMessageArgs(args)
+		if err != nil {
+			return nil, nil, fmt.Errorf("refundReserveAllocation: %w", err)
+		}
+		leafIndex, err := mustUint64(args[13])
+		if err != nil {
+			return nil, nil, fmt.Errorf("refundReserveAllocation: leafIndex: %w", err)
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[13]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[14]),
 		}
 		commitRoot := mustHash(args[15])
@@ -1206,8 +1256,12 @@ func (h *GatewayHandler) handleWrite(
 		// commitRoot to AggregateSignature/SignerBitmap), leaving destFailureCert.Epoch always 0
 		// and silently defeating the epoch-alignment check RefundReserveAllocation now performs --
 		// same 19-arg layout as refund()'s own failure-cert tail.
+		destFailureCertEpoch, err := mustUint64(args[16])
+		if err != nil {
+			return nil, nil, fmt.Errorf("refundReserveAllocation: failureCert epoch: %w", err)
+		}
 		destFailureCert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[16]),
+			Epoch:              destFailureCertEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
 		}
@@ -1217,28 +1271,25 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "refund":
-		msg := cross_chain.CrossChainMessage{
-			MessageID:     mustHash(args[0]),
-			SourceChainID: mustUint64(args[1]),
-			DestChainID:   mustUint64(args[2]),
-			Sequence:      mustBigInt(args[3]).Uint64(),
-			HopCount:      mustUint8(args[4]),
-			Sender:        mustAddress(args[5]),
-			Target:        mustAddress(args[6]),
-			AssetID:       mustBigInt(args[7]),
-			Value:         mustBigInt(args[8]),
-			Payload:       mustBytes(args[9]),
-			Tip:           mustBigInt(args[10]),
-			GasFee:        mustBigInt(args[11]),
-			Ordered:       mustBool(args[12]),
+		msg, err := parseCrossChainMessageArgs(args)
+		if err != nil {
+			return nil, nil, fmt.Errorf("refund: %w", err)
+		}
+		leafIndex, err := mustUint64(args[13])
+		if err != nil {
+			return nil, nil, fmt.Errorf("refund: leafIndex: %w", err)
 		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustBigInt(args[13]).Uint64(),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[14]),
 		}
 		commitRoot := mustHash(args[15])
+		failCertEpoch, err := mustUint64(args[16])
+		if err != nil {
+			return nil, nil, fmt.Errorf("refund: failCert epoch: %w", err)
+		}
 		failCert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[16]),
+			Epoch:              failCertEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[17])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[18])),
 		}
@@ -1342,8 +1393,14 @@ func (h *GatewayHandler) handleWrite(
 		engine.SetRegisteredPop(hex.EncodeToString(pubkeyBls), popSig)
 
 	case "submitCommitteeAttestation":
-		sourceChainID := mustUint64(args[0])
-		oldEpoch := mustUint64(args[1])
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: sourceChainId: %w", err)
+		}
+		oldEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitteeAttestation: oldEpoch: %w", err)
+		}
 		payloadHash := mustHash(args[2])
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
@@ -1384,8 +1441,14 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "submitCommitAttestation":
-		sourceChainID := mustUint64(args[0])
-		epoch := mustUint64(args[1])
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: sourceChainId: %w", err)
+		}
+		epoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitCommitAttestation: epoch: %w", err)
+		}
 		commitRoot := mustHash(args[2])
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
@@ -1432,9 +1495,15 @@ func (h *GatewayHandler) handleWrite(
 		// only ones whose local execution deterministically observed the exact revert -- see
 		// FinalizeFailedAfterExecutionRevert / MessageFailedCallback, which is what makes a real
 		// validator willing to sign this in the first place, never called speculatively).
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: destChainId: %w", err)
+		}
 		messageID := mustHash(args[1])
-		epoch := mustUint64(args[2])
+		epoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitMessageFailureAttestation: epoch: %w", err)
+		}
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
@@ -1477,9 +1546,15 @@ func (h *GatewayHandler) handleWrite(
 		// this is the production pipeline for validators to produce that cert (see
 		// MessageSucceededCallback's wiring for how a validator decides to sign this, only ever
 		// after its own local claimMessage/verifyAndExecute execution actually succeeded).
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: destChainId: %w", err)
+		}
 		messageID := mustHash(args[1])
-		epoch := mustUint64(args[2])
+		epoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("submitMessageSuccessAttestation: epoch: %w", err)
+		}
 		signerPubkeyBls := mustBytes(args[3])
 		signature := mustBytes(args[4])
 
@@ -1516,12 +1591,21 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "committeeUpdate":
-		sourceChainID := mustUint64(args[0])
-		newEpoch := mustUint64(args[1])
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("committeeUpdate: sourceChainId: %w", err)
+		}
+		newEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("committeeUpdate: newEpoch: %w", err)
+		}
 		newCommitteePubkeys := mustBytesSlice(args[2])
 		newCommitteeStakes := mustUint64Slice(args[3])
 		newCommitteePopSignatures := mustBytesSlice(args[4])
-		quorumThreshold := mustUint64(args[5])
+		quorumThreshold, err := mustUint64(args[5])
+		if err != nil {
+			return nil, nil, fmt.Errorf("committeeUpdate: quorumThreshold: %w", err)
+		}
 		stateRoot := mustHash(args[6])
 		accountTreeRoot := mustHash(args[7])
 		payloadHash := mustHash(args[8])
@@ -1716,14 +1800,20 @@ func (h *GatewayHandler) handleWrite(
 		// trusted from calldata) so the GenesisWallet-only restriction is enforced against who
 		// ACTUALLY signed this transaction, the same pattern every other caller-identity check in
 		// this file uses.
-		targetChainID := mustUint64(args[0])
+		targetChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("setGenesisDigest: targetChainId: %w", err)
+		}
 		digest := mustHash(args[1])
 		if err := engine.SetGenesisDigest(targetChainID, digest, tx.FromAddress()); err != nil {
 			return nil, nil, err
 		}
 
 	case "batchOutboundCommit":
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("batchOutboundCommit: destChainId: %w", err)
+		}
 		epoch := chainState.GetCurrentEpoch()
 		commitRoot, messages, err := engine.BatchOutboundCommit(destChainID, epoch)
 		if err != nil {
@@ -1761,12 +1851,25 @@ func (h *GatewayHandler) handleWrite(
 		// ProposalTransferAllocation with a single call, authorized by fromChainId's OWN
 		// committee self-signing (no third-party vote needed or trusted) -- see
 		// GatewayEngine.TransferAllocationWithCert's own doc comment for the full rationale.
-		fromChainID := mustUint64(args[0])
-		toChainID := mustUint64(args[1])
+		fromChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("transferAllocationWithCert: fromChainId: %w", err)
+		}
+		toChainID, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("transferAllocationWithCert: toChainId: %w", err)
+		}
 		amount := mustBigInt(args[2])
-		nonce := mustUint64(args[3])
+		nonce, err := mustUint64(args[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("transferAllocationWithCert: nonce: %w", err)
+		}
+		certEpoch, err := mustUint64(args[4])
+		if err != nil {
+			return nil, nil, fmt.Errorf("transferAllocationWithCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[4]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[5])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[6])),
 		}
@@ -1777,10 +1880,17 @@ func (h *GatewayHandler) handleWrite(
 	case "allocateSupplyWithCert":
 		// 2026-09-04: replaces ProposalAllocateSupply's governance-vote gate -- authorized by
 		// Reserve's OWN committee self-signing the one-time genesis mint to itself.
-		chainID := mustUint64(args[0])
+		chainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("allocateSupplyWithCert: chainId: %w", err)
+		}
 		amount := mustBigInt(args[1])
+		certEpoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("allocateSupplyWithCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[2]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
 		}
@@ -1792,9 +1902,16 @@ func (h *GatewayHandler) handleWrite(
 		// 2026-09-04: replaces ProposalDeclareChainDead's governance-vote gate -- authorized by
 		// RecoveryCommittee (a fixed, config-set, non-Sybil-able set; the target chain being
 		// declared dead cannot, by definition, self-authorize this).
-		chainID := mustUint64(args[0])
+		chainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("declareChainDeadWithCert: chainId: %w", err)
+		}
+		certEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("declareChainDeadWithCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[1]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
 		}
@@ -1805,9 +1922,16 @@ func (h *GatewayHandler) handleWrite(
 	case "unregisterChainWithCert":
 		// 2026-09-04: replaces ProposalUnregisterChain's governance-vote gate -- same
 		// RecoveryCommittee rationale as declareChainDeadWithCert above.
-		chainID := mustUint64(args[0])
+		chainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("unregisterChainWithCert: chainId: %w", err)
+		}
+		certEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("unregisterChainWithCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[1]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
 		}
@@ -1827,8 +1951,12 @@ func (h *GatewayHandler) handleWrite(
 		if err := json.Unmarshal(payload, &update); err != nil {
 			return nil, nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
 		}
+		certEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("updateCommitteeWithRecoveryCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[1]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
 		}
@@ -1842,8 +1970,12 @@ func (h *GatewayHandler) handleWrite(
 		engine.EnsureAssetRegistry()
 		payload := mustBytes(args[0])
 		totalSupply := mustBigInt(args[1])
+		certEpoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("registerAssetWithCert: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[2]),
+			Epoch:              certEpoch,
 			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
 			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
 		}
@@ -1852,32 +1984,33 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "verifyAndExecute":
-		msg := cross_chain.CrossChainMessage{
-			MessageID:     mustHash(args[0]),
-			SourceChainID: mustUint64(args[1]),
-			DestChainID:   mustUint64(args[2]),
-			Sequence:      mustUint64(args[3]),
-			HopCount:      mustUint8(args[4]),
-			Sender:        mustAddress(args[5]),
-			Target:        mustAddress(args[6]),
-			AssetID:       mustBigInt(args[7]),
-			Value:         mustBigInt(args[8]),
-			Payload:       mustBytes(args[9]),
-			Tip:           mustBigInt(args[10]),
-			GasFee:        mustBigInt(args[11]),
-			Ordered:       mustBool(args[12]),
+		msg, err := parseCrossChainMessageArgs(args)
+		if err != nil {
+			return nil, nil, fmt.Errorf("verifyAndExecute: %w", err)
+		}
+		aggregateLeafIndex, err := mustUint64(args[13])
+		if err != nil {
+			return nil, nil, fmt.Errorf("verifyAndExecute: aggregate leafIndex: %w", err)
 		}
 		aggregateProof := cross_chain.MerkleProof{
-			LeafIndex: mustUint64(args[13]),
+			LeafIndex: aggregateLeafIndex,
 			Siblings:  mustHashSlice(args[14]),
 		}
+		messageLeafIndex, err := mustUint64(args[15])
+		if err != nil {
+			return nil, nil, fmt.Errorf("verifyAndExecute: message leafIndex: %w", err)
+		}
 		messageProof := cross_chain.MerkleProof{
-			LeafIndex: mustUint64(args[15]),
+			LeafIndex: messageLeafIndex,
 			Siblings:  mustHashSlice(args[16]),
 		}
 		commitRoot := mustHash(args[17])
+		certEpoch, err := mustUint64(args[18])
+		if err != nil {
+			return nil, nil, fmt.Errorf("verifyAndExecute: cert epoch: %w", err)
+		}
 		cert := cross_chain.QuorumCert{
-			Epoch:              mustUint64(args[18]),
+			Epoch:              certEpoch,
 			AggregateSignature: mustBytes(args[19]),
 			SignerBitmap:       mustBytes(args[20]),
 		}
@@ -2015,11 +2148,18 @@ func (h *GatewayHandler) handleWrite(
 		}
 
 	case "claimDeadChainBalance":
-		deadChainID := mustUint64(args[0])
+		deadChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimDeadChainBalance: deadChainId: %w", err)
+		}
 		account := mustAddress(args[1])
 		amount := mustBigInt(args[2])
+		leafIndex, err := mustUint64(args[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("claimDeadChainBalance: leafIndex: %w", err)
+		}
 		proof := cross_chain.MerkleProof{
-			LeafIndex: mustUint64(args[3]),
+			LeafIndex: leafIndex,
 			Siblings:  mustHashSlice(args[4]),
 		}
 		accountLeafHash := mustHash(args[5])
@@ -2086,7 +2226,10 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getPendingOutboundCount input: %w", err)
 		}
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getPendingOutboundCount: destChainId: %w", err)
+		}
 		count := engine.GetPendingOutboundCount(destChainID)
 		return method.Outputs.Pack(big.NewInt(int64(count)))
 
@@ -2111,7 +2254,10 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getChainRegistry input: %w", err)
 		}
-		chainID := mustUint64(args[0])
+		chainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getChainRegistry: chainId: %w", err)
+		}
 
 		registry, exists := engine.GetChainRegistryEntry(chainID)
 
@@ -2158,8 +2304,14 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getCommitteeAttestationShares input: %w", err)
 		}
-		sourceChainID := mustUint64(args[0])
-		oldEpoch := mustUint64(args[1])
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getCommitteeAttestationShares: sourceChainId: %w", err)
+		}
+		oldEpoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, fmt.Errorf("getCommitteeAttestationShares: oldEpoch: %w", err)
+		}
 		payloadHash := mustHash(args[2])
 
 		shares := engine.GetPendingCommitteeAttestationShares(committeeAttestationKey(sourceChainID, oldEpoch, payloadHash))
@@ -2176,8 +2328,14 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getCommitAttestationShares input: %w", err)
 		}
-		sourceChainID := mustUint64(args[0])
-		epoch := mustUint64(args[1])
+		sourceChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getCommitAttestationShares: sourceChainId: %w", err)
+		}
+		epoch, err := mustUint64(args[1])
+		if err != nil {
+			return nil, fmt.Errorf("getCommitAttestationShares: epoch: %w", err)
+		}
 		commitRoot := mustHash(args[2])
 
 		shares := engine.GetPendingCommitAttestationShares(commitAttestationKey(sourceChainID, epoch, commitRoot))
@@ -2196,9 +2354,15 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getMessageFailureAttestationShares input: %w", err)
 		}
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getMessageFailureAttestationShares: destChainId: %w", err)
+		}
 		messageID := mustHash(args[1])
-		epoch := mustUint64(args[2])
+		epoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("getMessageFailureAttestationShares: epoch: %w", err)
+		}
 
 		shares := engine.GetPendingMessageFailureAttestationShares(messageFailureAttestationKey(destChainID, messageID, epoch))
 		pubkeys := make([][]byte, len(shares))
@@ -2216,9 +2380,15 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getMessageSuccessAttestationShares input: %w", err)
 		}
-		destChainID := mustUint64(args[0])
+		destChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getMessageSuccessAttestationShares: destChainId: %w", err)
+		}
 		messageID := mustHash(args[1])
-		epoch := mustUint64(args[2])
+		epoch, err := mustUint64(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("getMessageSuccessAttestationShares: epoch: %w", err)
+		}
 
 		shares := engine.GetPendingMessageSuccessAttestationShares(messageSuccessAttestationKey(destChainID, messageID, epoch))
 		pubkeys := make([][]byte, len(shares))
@@ -2247,7 +2417,10 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getAllocation input: %w", err)
 		}
-		targetChainID := mustUint64(args[0])
+		targetChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getAllocation: targetChainId: %w", err)
+		}
 		var alloc *big.Int
 		if engine.SupplyLedger != nil {
 			alloc = engine.SupplyLedger.GetAllocation(targetChainID)
@@ -2266,7 +2439,10 @@ func (h *GatewayHandler) handleView(chainState *blockchain.ChainState, method *a
 		if err != nil {
 			return nil, fmt.Errorf("unpack getTransferAllocationNonce input: %w", err)
 		}
-		targetChainID := mustUint64(args[0])
+		targetChainID, err := mustUint64(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("getTransferAllocationNonce: targetChainId: %w", err)
+		}
 		return method.Outputs.Pack(engine.GetTransferAllocationNonce(targetChainID))
 
 	case "getMinNativeStakeToRegister":
@@ -2326,12 +2502,17 @@ func mustBigInt(v interface{}) *big.Int {
 	return b
 }
 
-func mustUint64(v interface{}) uint64 {
+func mustUint64(v interface{}) (uint64, error) {
 	if b, ok := v.(*big.Int); ok {
-		return b.Uint64()
+		if !b.IsUint64() {
+			return 0, fmt.Errorf("value %s overflows uint64", b.String())
+		}
+		return b.Uint64(), nil
 	}
-	u, _ := v.(uint64)
-	return u
+	if u, ok := v.(uint64); ok {
+		return u, nil
+	}
+	return 0, fmt.Errorf("unexpected ABI arg type %T, want uint256 or uint64", v)
 }
 
 func mustUint8(v interface{}) uint8 {

@@ -278,6 +278,54 @@ func TestGatewayHandler_Outbound_RejectsUnregisteredOrSelfDestChain(t *testing.T
 	}
 }
 
+// TestGatewayHandler_Outbound_RejectsDestChainIdOverflowingUint64 is the regression test for the
+// mustUint64 hardening (security_review_followup_plan.md mục 1.2): big.Int.Uint64() is documented
+// as "undefined" (in practice, silently truncates to the low 64 bits) when the value doesn't fit
+// in a uint64. Before this fix, a destChainId of 2^64+5 would silently alias to chain 5 instead of
+// being rejected -- if chain 5 happened to be a real registered chain, the sender's own funds
+// would go to a destination they never actually specified. mustUint64 must now reject any uint256
+// ABI argument that doesn't fit in a uint64 instead of truncating it.
+func TestGatewayHandler_Outbound_RejectsDestChainIdOverflowingUint64(t *testing.T) {
+	cs, _, _, _ := newPersistentTestChainState(t)
+	h, err := GetGatewayHandler()
+	if err != nil {
+		t.Fatalf("GetGatewayHandler() error: %v", err)
+	}
+
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	target := common.HexToAddress("0x7777777777777777777777777777777777777777")
+
+	if err := cs.GetAccountStateDB().AddBalance(sender, big.NewInt(1000)); err != nil {
+		t.Fatalf("AddBalance for sender failed: %v", err)
+	}
+
+	// 2^64 + 5 -- overflows uint64; the low 64 bits alone would alias to chain 5.
+	overflowingDestChainID := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(5))
+	calldata, err := h.abi.Pack("outbound",
+		overflowingDestChainID, target, []byte{}, big.NewInt(0), big.NewInt(100),
+		big.NewInt(0), big.NewInt(0), uint8(0), false,
+		uint64(0), // timeoutTimestamp
+	)
+	if err != nil {
+		t.Fatalf("pack outbound() calldata: %v", err)
+	}
+
+	tx := newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, calldata))
+	rcp, _, failed := h.HandleTransaction(context.Background(), cs, tx, mt_common.GATEWAY_CONTRACT_ADDRESS, false, 0)
+	if !failed {
+		t.Fatalf("expected outbound() with a destChainId overflowing uint64 to fail, but it succeeded")
+	}
+	if !strings.Contains(string(rcp.Return()), "overflows uint64") {
+		t.Fatalf("expected an 'overflows uint64' rejection, got: %s", string(rcp.Return()))
+	}
+
+	// Sanity: the sender's real balance must be untouched -- no burn happened before the reject.
+	as, err := cs.GetAccountStateDB().AccountState(sender)
+	if err != nil || as == nil || as.Balance().Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected sender balance to remain 1000 (no mutation on a rejected outbound), got %v (err=%v)", as.Balance(), err)
+	}
+}
+
 // TestGatewayHandler_AttestCommitThenClaimMessage exercises the two highest-risk write paths
 // (attestCommit, claimMessage) through real ABI-encoded transactions end-to-end — the part of
 // gateway_handler.go with the most decode complexity (bytes32[] siblings, raw bytes signature/
