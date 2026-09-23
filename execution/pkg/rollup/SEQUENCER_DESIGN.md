@@ -439,7 +439,39 @@ sequenceDiagram
     G1->>G1: Mint lại cho User A, MessageStatus[id] = Refunded
 ```
 
-### 12.5. Cluster đích không phản hồi — Timeout vs Chết hẳn (mục 6.2)
+### 12.5. Luồng gọi Smart Contract Cross-Cluster (Thực thi & Phản hồi)
+
+Bản chất luồng gọi Contract **giống hệt 100%** luồng chuyển giá trị ở các bước 1, 2, 3 (Gom batch, neo lên Parent Chain, và Claim tại đích). Sự khác biệt duy nhất nằm ở bước thực thi tại đích (GatewayEngine giao việc cho Máy ảo / EVM).
+
+```mermaid
+sequenceDiagram
+    participant G1 as GatewayEngine (Nguồn)
+    participant G2 as GatewayEngine (Đích)
+    participant EVM as VM / Smart Contract (Đích)
+
+    Note over G1,G2: Bước 1-3 giống hệt sơ đồ 12.3: Đã ClaimMessage thành công\nMessageStatus[id] = Success (LOCAL)
+
+    G2->>EVM: Truyền payload vào Contract đích
+    activate EVM
+    alt Thực thi Thành Công
+        EVM-->>G2: Kết quả OK
+        G2->>G2: Committee gom AddPendingMessageSuccessAttestationShare
+        G2-->>G1: Trả về successCert
+        G1->>G1: Giải phóng Tip cho Relayer (xong)
+    else Bị lỗi / Revert (Ví dụ: hết gas, sai logic)
+        EVM-->>G2: Kết quả REVERT
+        deactivate EVM
+        G2->>G2: Trả lại state của Contract như trước khi gọi
+        G2->>G2: Gọi FinalizeFailedAfterExecutionRevert(msg, ...)
+        Note over G2: Đảo ngược tiền đã nhận (trừ đi khỏi allocation)\nMessageStatus[id] = Failed
+        
+        G2->>G2: Committee gom AddPendingMessageFailureAttestationShare
+        G2-->>G1: Trả về destFailureCert
+        G1->>G1: Gọi Refund(...) để hoàn tiền cho người gửi ban đầu
+    end
+```
+
+### 12.6. Cluster đích không phản hồi — Timeout vs Chết hẳn (mục 6.2)
 
 ```mermaid
 flowchart TD
@@ -452,15 +484,23 @@ flowchart TD
     Dead -- "Chưa đủ" --> Wait
     Dead -- "Đủ" --> DC["DeclareChainDeadWithCert\n(không phải quyết định đơn phương của Cluster 1)"]
     DC --> Snap{"AccountTreeRoot đã được\nexport+publish TRƯỚC KHI\nnode chết? (mục 6.3)"}
-    Snap -- "Có (Snapshot Pipeline đã xây)" --> Claim["User tự ClaimDeadChainBalance\n(chỉ tới đúng số dư tại\nthời điểm snapshot cuối)"]
     Snap -- "KHÔNG (mặc định nếu\nchưa xây mục 6.3)" --> Stuck["⚠️ KHÔNG claim được — dữ liệu\nchỉ tồn tại trên node đã chết\n(mục 8 #18, CRITICAL)"]
+    Snap -- "Có (Snapshot Pipeline đã xây)" --> Submit["User submit ClaimDeadChainBalance\n(kèm Merkle proof)"]
+    Submit --> Vel{"Lớp 1: checkAndRecordVelocity\n(20%/24h, Q4) — vượt hạn mức?"}
+    Vel -- "Vượt" --> RejectVel["Từ chối claim lần này\n(retry sau khi hạn mức hồi phục)"]
+    Vel -- "OK" --> Delay["Lớp 2: Withdrawal Delay 72h\n(Q18) — chờ để phát hiện root giả mạo"]
+    Delay --> Challenge{"Operator/Archival phát hiện\nroot bất thường trong 72h?"}
+    Challenge -- "Có" --> Freeze["⚠️ Freeze claim trước khi\ngiải ngân — nghi ngờ root giả (Q18)"]
+    Challenge -- "Không" --> Release["Sau 72h: giải ngân thật\n(chỉ tới đúng số dư tại\nthời điểm snapshot cuối)"]
 
     style TO fill:#fff3cd,color:#333
     style DC fill:#f8d7da,color:#333
     style Stuck fill:#f8d7da,color:#333,stroke:#c00,stroke-width:2px
+    style Freeze fill:#f8d7da,color:#333,stroke:#c00,stroke-width:2px
+    style Release fill:#d4edda,color:#333
 ```
 
-### 12.6. Giao thức Migration Account/Contract — 3 pha (mục 5.3)
+### 12.7. Giao thức Migration Account (CHỈ User, KHÔNG áp dụng cho Contract — Q17, mục 5.3)
 
 ```mermaid
 sequenceDiagram
@@ -469,13 +509,15 @@ sequenceDiagram
     participant New as Cluster mới
     participant Sender as Cluster khác (đang gửi CrossChainMessage đến)
 
+    Note over Old,New: Chỉ áp dụng cho User Account.\nContract KHÔNG được migrate (Q17) —\nDeveloper phải tự deploy lại ở cụm mới.
+
     Note over Old: Pha 1 — FREEZE
     Old->>Old: Khoá tx nội bộ mới cho account X\nstatus cục bộ = FROZEN_FOR_MIGRATION
     Sender->>Old: ClaimMessage đến X (đúng lúc đang Freeze)
     Old->>Old: KHÔNG revert ngay — tạm giữ trong hàng đợi nội bộ
 
     Note over Old,New: Pha 2 — EXPORT & ATTEST
-    Old->>Old: Đóng gói state (balance, nonce, storage)
+    Old->>Old: Đóng gói state (balance, nonce)
     Old->>Old: Committee ký QuorumCert xác nhận state cuối cùng
     Old->>New: Gửi gói state + QuorumCert
 
