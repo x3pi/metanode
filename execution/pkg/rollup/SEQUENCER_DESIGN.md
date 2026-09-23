@@ -102,6 +102,8 @@ Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường h�
 
 Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond`/`RecoveryCommittee` vẫn giữ nguyên vai trò cho các mục đích sẵn có trong `GatewayEngine` (đăng ký chain, `SlashOnEquivocation` khi double-sign checkpoint, `DeclareChainDeadWithCert`), và còn đúng 1 vai trò cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h).
 
+⚠️ **Cần xác nhận khi implement, chưa chắc chắn ở mức thiết kế:** `AccountTreeRoot` (mục 6.3) là artifact MỚI của thiết kế này, khác `checkpoint` gốc trong `GatewayEngine`. Chưa rõ `SlashOnEquivocation` đã wire sẵn để bắt double-sign `AccountTreeRoot` hay chỉ áp dụng cho checkpoint kiểu cũ — nếu node ký 2 `AccountTreeRoot` khác nhau cho cùng 1 chu kỳ, cần đảm bảo có phạt tương đương, không mặc định thừa hưởng miễn phí từ cơ chế cũ.
+
 ### 4.2. Velocity-limit cho Transfer: không cần để chống mint sai — nhưng vẫn cần vì lý do khác
 
 Mỗi Transfer là ghi sổ trực tiếp trên số dư THẬT đã có sẵn trong `NodeFloatAccount` — không có gì để "mint sai" ở bước này, nên không cần velocity-limit cho lý do chống-gian-lận. Velocity-limit vẫn cần, nhưng vì 1 lý do khác hẳn: giới hạn thiệt hại khi KHOÁ KÝ của node bị lộ (không phải khi node cố ý gian lận) — xem mục 4.4.
@@ -165,7 +167,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 `NodeFloatAccount` là 1 bất biến tự động (mục 3.2) — mọi số dư user LUÔN tự động phản ánh trong `NodeFloatAccount` ngay khi phát sinh, không có phần "chưa kịp nạp" nằm chờ dài hạn nào cả. Khi node chết, chỉ còn đúng **1 bài toán duy nhất**: `NodeFloatAccount[node chết]` chắc chắn có THẬT (Parent Chain tự verify được, mục 4.3) — nhưng **Parent Chain không biết tổng đó phải CHIA cho user nào bao nhiêu**, vì phân bổ chi tiết chỉ tồn tại trên local node đã chết.
 
 **Phần xử lý ngay, không cần chờ gì:**
-- Transfer đang "đi ngang" tới node chết nhưng chưa `Claimed`: dùng cơ chế **Reclaim** (mục 3.6), Node 1 tự đòi lại, kích hoạt ngay khi `RecoveryCommittee` xác nhận chết — không cần Transfer ngược (mục 3.4, cần node sống mới gửi được).
+- Transfer đang "đi ngang" tới node chết nhưng chưa `Claimed`: dùng cơ chế **Reclaim** (mục 3.6), Node 1 tự đòi lại, kích hoạt ngay khi `RecoveryCommittee` xác nhận chết — không cần Transfer ngược (mục 3.4, cần node sống mới gửi được). ⚠️ Reclaim tự nó CŨNG là 1 outflow từ FA của node chết — `DeadChains` chặn outflow mới (mục 7) phải loại trừ tường minh Reclaim, không thì chính cơ chế bảo vệ này lại chặn luôn đường thu hồi hợp lệ duy nhất cho Transfer đang treo.
 - Không cần Merkle proof cho bước này — đây chỉ là ghi sổ 2 chiều bình thường trên Parent Chain.
 
 **Bài toán còn lại — chứng minh PHÂN BỔ:**
@@ -187,7 +189,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 | **`NodeFloatAccount`** | Cần xây | `chainID -> balance` — tiền thật, thay cho `PerChainAllocation`-làm-trần |
 | **`ClaimedMessages`** | Cần xây | `MessageID -> bool` — đánh dấu đã xử lý (credit local hoặc hoàn tiền), dùng để chống xử lý trùng (#10), chống hoàn tiền 2 lần (#9), và làm điều kiện chặn Reclaim (mục 3.6, #12) |
 | `SecurityBondLedger` | Có sẵn | Bond, bảo vệ đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1) |
-| `DeadChains` | Có sẵn | Node đã tuyên bố chết, chặn outflow mới |
+| `DeadChains` | Có sẵn | Node đã tuyên bố chết, chặn outflow mới — **loại trừ tường minh Reclaim** (mục 6.3), vốn cũng là 1 outflow từ FA node chết nhưng là cơ chế thu hồi hợp lệ, không phải giao dịch mới cần chặn |
 
 ### Tại mỗi BLS Node (Local DB)
 | Bảng / Struct | Key | Value | Vai trò |
@@ -313,7 +315,7 @@ flowchart TB
 **Quy trình từng bước:**
 1. **Lưu trữ dữ liệu:** Mỗi Node thực thi (Node 1, Node 2) tự lưu trữ và quản lý số dư của User trên cơ sở dữ liệu cục bộ (LevelDB) của riêng mình.
 2. **Sổ quỹ Parent Chain:** Thay vì giữ chi tiết từng User, Parent Chain tạo ra một "Sổ quỹ liên-node" (`NodeFloatAccount`). Tại đây, mỗi Node có 1 tài khoản tổng.
-3. **Bất biến của Quỹ:** Số dư quỹ của 1 Node trên Parent Chain luôn tự động bằng ĐÚNG tổng số dư của tất cả User thuộc Node đó. Tiền chảy vào quỹ chỉ thông qua 2 đường: User tự nạp vào trực tiếp, hoặc nhận chuyển khoản từ Node khác.
+3. **Bất biến của Quỹ:** Số dư quỹ của 1 Node trên Parent Chain luôn tự động **≥** tổng số dư của tất cả User thuộc Node đó, và hội tụ về đúng bằng (chênh lệch chỉ tồn tại trong 1 cửa sổ ngắn watch-rồi-credit, luôn lệch theo chiều an toàn — mục 3.2, 3.5). Tiền chảy vào quỹ chỉ thông qua 2 đường: User tự nạp vào trực tiếp, hoặc nhận chuyển khoản từ Node khác.
 4. **Giao dịch liên-node:** Khi cần chuyển tiền giữa các Node, hệ thống chỉ cần trừ quỹ Node gửi và cộng quỹ Node nhận ngay trên Parent Chain (giống hệt thanh toán bù trừ liên ngân hàng).
 
 ### 11.2. Tra cứu Account/Contract → Node quản lý
@@ -611,7 +613,9 @@ sequenceDiagram
 
 Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc ký — response chỉ là 1 câu trả lời thường, node có thể nói bất cứ điều gì mà không để lại bằng chứng chống chối bỏ.
 
-**Đề xuất nền tảng:** mọi phản hồi giao dịch (nội bộ lẫn cross-node) phải kèm 1 **receipt ký bằng `NodeBlsPrivateKey`** (khoá đã có sẵn, cùng khoá dùng ký Transfer lên Parent Chain — mục 3.3), chứa tối thiểu: `{user_address, nonce, pre_balance, post_balance, tx_hash hoặc payload_hash, timestamp, result: success|fail}`. User tự giữ receipt này ở phía client — node không thể từ chối đã ký sau này (non-repudiation).
+**Đề xuất nền tảng:** mọi phản hồi giao dịch (nội bộ lẫn cross-node) phải kèm 1 **receipt ký bằng `NodeBlsPrivateKey`** (khoá đã có sẵn, cùng khoá dùng ký Transfer lên Parent Chain — mục 3.3), chứa tối thiểu: `{user_address, nonce, pre_balance, post_balance, tx_hash hoặc payload_hash, timestamp, result: success|fail, prev_receipt_hash}`. User tự giữ receipt này ở phía client — node không thể từ chối đã ký sau này (non-repudiation).
+
+⚠️ **`prev_receipt_hash` bắt buộc, không phải tuỳ chọn:** nếu receipt không chain hoá với receipt liền trước của CÙNG user, node có thể chọn lọc trình bày 1 tập con receipt để dựng câu chuyện nhất quán giả — đặc biệt nguy hiểm với taxonomy #3 "rollback âm thầm" (mục 15.1): node có thể phát hành thêm 1 receipt "bù" hợp lý-nghe-được để che dấu vết đã đảo ngược, nếu không có gì buộc các receipt phải nối liền mạch. Có `prev_receipt_hash` (giống hash-chain cá nhân hoá cho từng user) thì bất kỳ khoảng hở/rẽ nhánh nào trong chuỗi tự nó là bằng chứng equivocation ở cấp user — cùng nguyên lý với `SlashOnEquivocation` cấp checkpoint (mục 4.1), chỉ áp xuống tận giao dịch cá nhân.
 
 - **Chi phí không đáng kể:** node đã có BLS key sẵn; ký thêm 1 message nhỏ mỗi giao dịch rẻ hơn nhiều so với năng lực đã đo (~52.000 chữ ký/giây theo `cmd/rpc/BLS_PERFORMANCE_REPORT.md` hiện có trong repo) — dư sức cho throughput giao dịch nội bộ thực tế.
 - **Đây là điều kiện NỀN TẢNG bắt buộc** dù chọn Hướng A hay B bên dưới — không có receipt thì không có gì để report/verify cả, kể cả điều tra thủ công.
