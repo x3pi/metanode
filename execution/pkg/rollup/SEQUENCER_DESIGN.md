@@ -688,11 +688,63 @@ sequenceDiagram
             Q->>DB: Cập nhật status = SUBMITTED_ATTESTED
         end
 
-        Note over Q,RA: ... (chờ node đích ClaimMessage, xử lý,\nvà gửi successCert/destFailureCert ngược lại — xem 12.3/12.4)
+        Note over Q,RA: ... (chờ node đích ClaimMessage, xử lý,\nvà gửi successCert/destFailureCert ngược lại — xem 12.3/12.4.\nLưu ý: cert này do NODE ĐÍCH tự tạo, không phải Parent Chain tạo hộ\n— xem mục 15.1 để phân biệt rõ 2 luồng)
 
-        RA-->>Q: successCert hoặc destFailureCert
+        RA-->>Q: successCert hoặc destFailureCert (relay qua Parent Chain hoặc P2P)
         Q->>DB: Cập nhật status cuối = CONFIRMED_SUCCESS\nhoặc CONFIRMED_FAILED_REFUNDED (lưu vĩnh viễn)
     end
 ```
 
 **Tóm tắt bằng lời:** Khi 1 giao dịch đến, node kiểm tra trước tiên: 2 bên có cùng ở node này không? Nếu có, xử lý xong ngay lập tức, không liên quan gì đến ký BLS hay gửi đi đâu cả. Nếu người nhận ở node khác, node trừ tiền người gửi VÀ ghi nhận "giao dịch này đang chờ xử lý" trong cùng 1 thao tác — không tách rời, để nếu máy có sập giữa chừng thì cũng không bị mất dấu. Sau đó, thay vì gửi ngay từng giao dịch một (tốn kém), node gom nhiều giao dịch đang chờ (cùng đích) lại thành 1 gói, tự ký xác nhận gói đó bằng khoá riêng của mình, rồi mới gửi lên Parent Chain. Nếu gửi thất bại vì mất mạng, node chỉ gửi lại đúng gói đã ký, không tự ý ký gói mới. Mỗi bước đều được ghi lại trạng thái riêng trong cơ sở dữ liệu cục bộ — để nếu node có khởi động lại giữa chừng, nó biết chính xác đã làm đến đâu, tiếp tục đúng chỗ chứ không làm lại từ đầu (tránh trừ tiền 2 lần) hay bỏ quên (tránh mất giao dịch).
+
+---
+
+## 15. Trao đổi dữ liệu Node ↔ Parent Chain & Mô hình Doanh thu Parent Chain
+
+### 15.1. Node gửi gì lên Parent Chain, và lấy gì về — 2 chiều tách bạch
+
+⚠️ **Lưu ý quan trọng dễ nhầm:** `ClaimMessage`/`Refund`/`FinalizeFailedAfterExecutionRevert` **không phải lệnh gọi lên Parent Chain** — mỗi node tự chạy 1 instance `GatewayEngine` riêng (mục 7, Q6), nên các hàm này chạy **cục bộ trên chính node đó**, chỉ dùng dữ liệu (commitRoot, proof) đã lấy VỀ từ Parent Chain trước đó. Bảng dưới tách rõ chiều nào thật sự là request/response với Parent Chain, chiều nào là xử lý nội bộ dùng dữ liệu đã lấy về.
+
+**Node → Parent Chain (ghi lên, tốn gas trên Root Anchor):**
+
+| Dữ liệu gửi lên | Khi nào | Vai trò |
+|---|---|---|
+| `RegisterChainViaStake` (payload đăng ký + stake) | 1 lần khi node gia nhập hệ thống | Xác lập danh tính node (`chainID`), cấp vốn khởi tạo cho circulating allocation của node (mục 5.1) |
+| `PostSecurityBond` | Khi đăng ký, hoặc khi cần nâng hạn mức | Đặt cọc kinh tế — điều kiện bắt buộc để được tin tưởng theo bất biến bond-vs-exposure (mục 4 điểm 6) |
+| `commitRoot` + `QuorumCert` (qua `AttestCommit`/`SubmitCheckpoint`) | Định kỳ, mỗi khi gom xong 1 batch giao dịch liên cụm (mục 14.3 bước 4) | **Đây là dữ liệu quan trọng nhất** — chứng thực "batch giao dịch liên cụm này là thật, do đúng node này ký", làm nguồn sự thật duy nhất chống double-spend/double-claim giữa các node |
+| `AccountTreeRoot` snapshot (mục 6.3) | Định kỳ (mặc định 15 phút, Q12) | Phòng hờ khi node chết — cho phép user sau này chứng minh số dư qua `ClaimDeadChainBalance` |
+| Yêu cầu đăng ký/chuyển nhượng Account Registry (mục 5.1, 5.3) | Khi có user đăng ký mới, hoặc khi Migration hoàn tất | Xác lập/cập nhật "account này thuộc node nào" — nguồn tra cứu công khai duy nhất |
+| `DeclareChainDeadWithCert` (thường do bên thứ 3/committee phục hồi gọi, không phải chính node tự báo mình chết) | Khi 1 node khác bị nghi ngờ chết hẳn | Đóng băng outflow từ node đã chết, mở đường cho `ClaimDeadChainBalance` |
+
+**Parent Chain → Node (đọc/lấy về, không tốn gas — đọc dữ liệu công khai):**
+
+| Dữ liệu lấy về | Khi nào | Vai trò |
+|---|---|---|
+| `commitRoot` + Merkle proof của batch cần nhận | Khi có message cross-cluster gửi đến mình | Node đích dùng để tự `ClaimMessage` **cục bộ** (không phải gọi lên Parent Chain) |
+| `ChainRegistry` (danh tính + `NodeBlsPublicKey` của node khác) | Khi cần verify chữ ký 1 node khác (routing P2P trực tiếp, mục 3.1 "Cách 2") | Xác thực nguồn gốc message mà không cần hỏi Parent Chain real-time mỗi lần |
+| `Account Registry` (`user_address -> cluster_id`) | Khi cần định tuyến 1 giao dịch đến đúng node | Biết gửi `Outbound` với `DestChainID` nào (mục 5.1, mục 12.2) |
+| `DeadChains` (danh sách chain đã tuyên bố chết) | Định kỳ hoặc trước khi gửi 1 message mới | Chặn tự gửi thêm giá trị vào 1 chain đã biết là chết (đã có sẵn trong `Outbound`, mục 3.1) |
+
+**Node ↔ Node (không qua Parent Chain, chỉ tham chiếu dữ liệu đã lấy từ đó):** `successCert`/`destFailureCert` (mục 3.2) và gói state khi Migration (mục 5.3) đi **thẳng giữa 2 node** — Parent Chain chỉ đóng vai trò cung cấp danh tính để 2 node verify lẫn nhau, không đứng giữa chuyển tiếp nội dung (trừ khi chọn route "qua Root Anchor" như 1 kênh relay tiện lợi, mục 3.1 "Cách 1" — vẫn là tuỳ chọn, không bắt buộc).
+
+### 15.2. Vai trò tổng thể của việc trao đổi này
+
+Nói ngắn gọn, Parent Chain đóng đúng 4 vai trò qua các trao đổi trên, không hơn:
+1. **Sổ danh bạ** — ai (account) thuộc node nào, node nào có danh tính (khoá công khai) gì.
+2. **Trọng tài trung lập cho bằng chứng** — mọi batch giao dịch liên cụm phải có 1 bản ghi bất biến, công khai, không ai sửa được sau khi đã ghi (chống chối bỏ + chống double-spend giữa các node độc lập không tin nhau).
+3. **Nơi giữ tiền cọc & thực thi hình phạt** — bond, slash, velocity limit — biến "lời hứa trung thực" của mỗi node thành có ràng buộc kinh tế thật.
+4. **Lưới an toàn cuối cùng khi 1 node chết** — dead-declare + claim dựa trên snapshot đã publish trước đó.
+
+### 15.3. Doanh thu Parent Chain — phân tích, CHƯA phải quyết định đã chốt (cần đội sản phẩm/tokenomics quyết)
+
+Tài liệu trước giờ chưa bàn tới mô hình doanh thu. Đây là quyết định kinh doanh thật (ảnh hưởng tokenomics, không phải thuần kỹ thuật), nên tôi liệt kê các nguồn khả dĩ kèm rõ **cái nào đã có sẵn miễn phí trong code** vs **cái nào là gợi ý mới, cần tự xây nếu muốn**, không tự chốt thay đội.
+
+| # | Nguồn doanh thu | Đã có sẵn? | Ghi chú |
+|---|---|---|---|
+| 1 | **Gas fee cơ bản** của mọi giao dịch gọi vào `GatewayEngine` (đăng ký, bond, checkpoint, claim-dead, ghi Account Registry...) | ✅ **Có sẵn, không cần xây thêm** | Đây là nguồn thu tự nhiên nhất — mọi lệnh ở mục 15.1 đều là 1 transaction thật trên Root Anchor, tự động trả gas theo đúng cơ chế gas hiện có của chain đó, giống bất kỳ giao dịch nào khác. Ổn định, không cần thiết kế gì thêm. |
+| 2 | **Phí đăng ký 1 lần** (tách biệt khỏi stake/bond) | ❌ Chưa có | `RegisterChainViaStake` hiện tại: `amount` node trả **toàn bộ trở thành bond của chính node đó** (không mất đi, có thể unbond lại sau qua `ClaimUnbondedBond`) — không có phần nào tách ra làm doanh thu cho Parent Chain. Muốn có, cần thêm 1 khoản phí KHÔNG hoàn lại, cộng thêm vào bên cạnh stake. |
+| 3 | **Cắt % từ `Tip`** (phí quan hệ relayer) | ❌ Chưa có | `Tip` hiện 100% thuộc về relayer qua `WithdrawRelayerTip` — không có cơ chế giữ lại % nào cho Parent Chain. Có thể thêm (ví dụ 5-10%), giống phí protocol của nhiều DEX/bridge thật — cần cân nhắc mức cắt để không làm giảm động lực relayer thật sự làm việc chuyển tiếp. |
+| 4 | **Phí dịch vụ Snapshot Archival** (mục 6.3) | ❌ Chưa có, gắn với Q12 | Nếu Root Anchor (hoặc bên liên kết) đứng ra vận hành dịch vụ archival chung cho nhiều node thay vì để từng node tự lo, có thể thu phí định kỳ theo dung lượng/tần suất — giống mô hình "bảo hiểm lưu trữ": node trả phí, đổi lại yên tâm hơn về #18. |
+| 5 | **Phí ưu tiên xử lý checkpoint** | ❌ Chưa có, chỉ đáng cân nhắc khi hệ thống lớn | Giống phí ưu tiên gas ở các chain đông đúc — chỉ thực sự có ý nghĩa khi block space của Root Anchor bắt đầu khan hiếm (nhiều node cùng cạnh tranh), chưa cần thiết ở quy mô ban đầu. |
+
+**Khuyến nghị:** bắt đầu với #1 (đã có sẵn, không tốn công) là đủ cho giai đoạn ra mắt; cân nhắc #2/#3 khi hệ thống có traffic thật để biết mức phí nào hợp lý mà không đẩy node/relayer bỏ đi; #4 chỉ có ý nghĩa nếu quyết định vận hành archival tập trung (một trong 2 nhánh mở của Q12); #5 mang tính đầu cơ, không cần tính đến ở giai đoạn này.
