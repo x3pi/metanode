@@ -21,7 +21,12 @@
 
 ---
 
-## Quick Win #0 (mới phát hiện khi viết plan này) — `DeadChains` không thực sự chặn gì
+## Quick Win #0 — `DeadChains` không thực sự chặn gì — ✅ ĐÃ FIX (2026-09-23)
+
+> `attestCommitInternal` và `Outbound()` giờ fail-closed với `ErrChainDeclaredDead` nếu chain
+> nguồn/đích đã bị `DeclareChainDeadWithCert` đánh dấu. Test:
+> `TestP8_4_DeadChain_BlocksAttestCommitAndOutbound` (`chain_death_recovery_test.go`). Chi tiết gốc
+> giữ nguyên bên dưới cho tham khảo.
 
 **Phát hiện:** `DeadChains[chainID] = true` (do `DeclareChainDeadWithCert`, uỷ quyền bởi `RecoveryCommittee`) hiện **CHỈ** được đọc ở đúng 1 chỗ — `ClaimDeadChainBalance` (`gateway.go:2222`, luồng thu hồi số dư cho người dùng của 1 chain đã chết). Nó **KHÔNG** được kiểm tra ở `attestCommitInternal` (nơi debit `PerChainAllocation[sourceChainID]`, tức là nơi rút tiền THẬT xảy ra) hay ở bất kỳ đường `outbound()`/`claimMessage()` nào khác.
 

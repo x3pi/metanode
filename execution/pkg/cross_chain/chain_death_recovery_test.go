@@ -203,3 +203,62 @@ func TestP8_3_FuzzMultiAccountDeadChainRescue(t *testing.T) {
 	assert.Equal(t, expectedRemaining, actualRemaining)
 	assert.True(t, supplyLedger.VerifyInvariant())
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TEST P8.4: DeadChains actually stops new value movement (Quick Win #0)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestP8_4_DeadChain_BlocksAttestCommitAndOutbound is the regression test for Quick Win #0
+// (note/cross_chain/root_anchor_production_security_hardening_plan.md): before this fix,
+// DeadChains[chainID]=true was only ever read by ClaimDeadChainBalance -- RecoveryCommittee's
+// DeclareChainDeadWithCert "emergency stop" set the flag but nothing actually stopped a captured
+// committee from continuing to attestCommit() and draining PerChainAllocation as normal, and
+// nothing stopped a NEW Outbound() message being queued to a destination already known dead
+// (locking the sender's own funds into a message no relayer could ever deliver). Both paths must
+// now fail closed with ErrChainDeclaredDead the moment a chain is declared dead.
+func TestP8_4_DeadChain_BlocksAttestCommitAndOutbound(t *testing.T) {
+	gateway, _, _ := setupChainDeathTestEnv()
+	deadChainID := uint64(101)
+	gateway.ReserveChainID = 991 // gateway IS chain 991 here (setupChainDeathTestEnv) -- C8 gate
+
+	kp := bls.GenerateKeyPair()
+	pop := PopSign(kp.PrivateKey(), kp.PublicKey())
+	gateway.ChainRegistry[deadChainID] = ChainRegistry{
+		ChainID:   deadChainID,
+		Epoch:     10,
+		Committee: []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: pop.Bytes()}},
+	}
+
+	// Declare chain 101 dead via RecoveryCommittee -- exactly TestP8_1's real flow.
+	recoveryKP := bls.GenerateKeyPair()
+	recoveryPop := PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
+	gateway.RecoveryCommittee = []ValidatorEntry{
+		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
+	}
+	digest := ComputeDeclareChainDeadMessage(deadChainID)
+	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
+	cert := QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
+	require.NoError(t, gateway.DeclareChainDeadWithCert(deadChainID, cert))
+	assert.True(t, gateway.DeadChains[deadChainID])
+
+	// A "captured" committee for the now-dead chain 101 must NOT be able to attestCommit anymore --
+	// before this fix, this call succeeded and happily debited PerChainAllocation[101].
+	leaf := AggregateValueLeaf{AssetID: big.NewInt(0), AggregateAmount: big.NewInt(100)}
+	root := HashAggregateValueLeaf(leaf)
+	commitMsg := append([]byte("COMMIT_ROOT_ATTEST_V1:"), root.Bytes()...)
+	commitSig := bls.Sign(kp.PrivateKey(), commitMsg)
+	attestCert := QuorumCert{Epoch: 10, AggregateSignature: commitSig.Bytes(), SignerBitmap: []byte{0x01}}
+	_, errAttest := gateway.AttestCommit(deadChainID, root, big.NewInt(100), big.NewInt(0), MerkleProof{}, attestCert, 0)
+	assert.ErrorIs(t, errAttest, ErrChainDeclaredDead, "attestCommit against a chain declared dead must be rejected")
+
+	// A NEW outbound message TO the now-dead chain 101 must also be rejected -- before this fix,
+	// the sender's funds would burn/lock successfully into a message no relayer could ever deliver.
+	sender := common.HexToAddress("0x5555555555555555555555555555555555555555")
+	target := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	params := OutboundParams{
+		DestChainID: deadChainID, Target: target, Payload: []byte{},
+		AssetID: big.NewInt(0), Value: big.NewInt(0), Tip: big.NewInt(0), GasFee: big.NewInt(0), HopCount: 0,
+	}
+	_, errOutbound := gateway.Outbound(sender, params, common.HexToHash("0x7777777777777777777777777777777777777777777777777777777777777777"))
+	assert.ErrorIs(t, errOutbound, ErrChainDeclaredDead, "outbound() to a chain declared dead must be rejected")
+}

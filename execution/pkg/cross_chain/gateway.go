@@ -43,6 +43,7 @@ var (
 	ErrNonReserveCeilingAttestation = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
 	ErrChainAlreadyRegistered       = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
 	ErrInvalidTransferNonce         = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
+	ErrChainDeclaredDead            = errors.New("chain has been declared dead by RecoveryCommittee — cannot attest new commits or accept new outbound messages to it")
 )
 
 // OutboundParams contains user/contract request parameters for outbound cross-chain messages.
@@ -884,6 +885,17 @@ func (g *GatewayEngine) Outbound(
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// SECURITY FIX (production_security_hardening_plan.md Quick Win #0): reject queuing a NEW
+	// outbound message to a destination already known to be dead (RecoveryCommittee's
+	// DeclareChainDeadWithCert) instead of letting the sender lock/burn real funds into a message
+	// no relayer will ever be able to deliver -- same "don't self-inflict a permanent lock" spirit
+	// as the existing self-loop/unregistered-destChainId guards one layer up in
+	// gateway_handler.go's "outbound" case, just also covering the relay-onward path (claimMessage's
+	// 2-hop leg-2 call into this same function) that guard doesn't see.
+	if g.DeadChains[params.DestChainID] {
+		return nil, fmt.Errorf("%w: chain %d", ErrChainDeclaredDead, params.DestChainID)
+	}
+
 	seqKey := fmt.Sprintf("%d:%d", g.LocalChainID, params.DestChainID)
 	seq := g.ChannelSequence[seqKey] + 1
 	g.ChannelSequence[seqKey] = seq
@@ -1321,6 +1333,15 @@ func (g *GatewayEngine) attestCommitInternal(
 	registry, exists := g.ChainRegistry[sourceChainID]
 	if !exists {
 		return nil, fmt.Errorf("%w: chain %d", ErrUnknownSourceChain, sourceChainID)
+	}
+
+	// SECURITY FIX (production_security_hardening_plan.md Quick Win #0): DeadChains[sourceChainID]
+	// was only ever read by ClaimDeadChainBalance -- RecoveryCommittee's DeclareChainDeadWithCert
+	// "emergency stop" set the flag but nothing actually stopped a captured committee from
+	// continuing to attestCommit() and draining PerChainAllocation normally. Fail closed here,
+	// the one place PerChainAllocation is actually debited on ceiling-enforced attestations.
+	if g.DeadChains[sourceChainID] {
+		return nil, fmt.Errorf("%w: chain %d", ErrChainDeclaredDead, sourceChainID)
 	}
 
 	// Fail-closed epoch verification
