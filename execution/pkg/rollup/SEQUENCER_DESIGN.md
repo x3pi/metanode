@@ -326,11 +326,11 @@ flowchart TB
     GEr -- "commitRoot + Merkle proof" --> GE2
     GE2 -. "destFailureCert (nếu revert)" .-> GE1
 
-    style RA fill:#f4f4f4,stroke:#999
-    style C1 fill:#eef6ff,stroke:#6699cc
-    style C2 fill:#eef6ff,stroke:#6699cc
-    style N1a fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3
-    style N1b fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3
+    style RA fill:#f4f4f4,stroke:#999,color:#333
+    style C1 fill:#eef6ff,stroke:#6699cc,color:#333
+    style C2 fill:#eef6ff,stroke:#6699cc,color:#333
+    style N1a fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3,color:#333
+    style N1b fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3,color:#333
 ```
 
 ### 12.2. Tra cứu Account/Contract → Node BLS quản lý (3 bước, mục 2.1/2.4/5.1/5.2)
@@ -420,8 +420,8 @@ flowchart TD
     Dead -- "Đủ" --> DC["DeclareChainDeadWithCert\n(không phải quyết định đơn phương của Cluster 1)"]
     DC --> Claim["User tự ClaimDeadChainBalance\n(có kiểm soát, không vô thời hạn)"]
 
-    style TO fill:#fff3cd
-    style DC fill:#f8d7da
+    style TO fill:#fff3cd,color:#333
+    style DC fill:#f8d7da,color:#333
 ```
 
 ### 12.6. Giao thức Migration Account/Contract — 3 pha (mục 5.3)
