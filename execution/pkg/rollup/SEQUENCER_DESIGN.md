@@ -10,7 +10,7 @@
 
 **Mục tiêu cốt lõi:**
 - **Thực thi phân tán (Sharded Execution):** Mỗi Cụm BLS (Cluster) hoạt động như một shard độc lập, quản lý state, balance và smart contract của tập người dùng thuộc Cluster đó.
-- **Parent Chain làm mỏ neo (Anchor):** Parent Chain chỉ quản lý danh bạ tài khoản (Account → Cluster) và xác thực danh tính các Cluster, hoàn toàn giải phóng khỏi việc xử lý giao dịch. **Về bản chất Parent Chain ở đây chính là vai trò Root Anchor trong `pkg/cross_chain`** — cần chốt xem đây là cùng một chain hay hai chain khác nhau (câu hỏi mở, xem mục 10.1 Q1).
+- **Parent Chain làm mỏ neo (Anchor):** Parent Chain chỉ quản lý danh bạ tài khoản (Account → Cluster) và xác thực danh tính các Cluster, hoàn toàn giải phóng khỏi việc xử lý giao dịch. **Đã chốt: Parent Chain chính là Root Anchor hiện có trong `pkg/cross_chain`**, không dựng chain coordination mới (mục 10.1 Q1).
 - **Cross-Cluster Interoperability:** Chuyển tiền và gọi smart contract giữa 2 Cụm BLS khác nhau, dùng lại cơ chế `CrossChainMessage` + `QuorumCert` đã có, không phát minh giao thức mới.
 
 ---
@@ -22,7 +22,7 @@
 - **Đăng ký & xác thực danh tính Cluster:** Mỗi Cluster đăng ký như một `chainID` qua `GatewayEngine.RegisterChainViaStake` (đã có sẵn) — tự động có `NodeBlsPublicKey`/committee, `SecurityBond`, và tham gia được `PerChainAllocation`.
 - **Relay/Attest tin nhắn:** Dùng nguyên cơ chế checkpoint + `QuorumCert` đã có (`SubmitCheckpoint`, `AttestCommit`, `BatchOutboundCommit`) — **không dùng chữ ký đơn lẻ của 1 node** cho việc di chuyển giá trị (xem mục 8, vấn đề #1).
 - **KHÔNG LƯU STATE ứng dụng:** Không lưu balance/contract-state của người dùng cuối. Nếu đóng vai trò relay/hub cho route "qua Root Anchor" (mục 3.1 bước 2), Root Anchor có thể giữ một bản cache `AttestedCommits` để tiện chuyển tiếp cho Cluster đích — nhưng đây vẫn là sổ cái **kế toán liên-cụm** (protocol ledger), không phải state ứng dụng, và **không phải bản duy nhất/quyền uy nhất**: mỗi Cluster vẫn tự giữ và tự verify lại bản của mình trước khi tin (xem mục 3.2, mục 7 để tránh hiểu nhầm đây là 1 bảng dùng chung toàn hệ thống).
-- **Cách định vị 1 account/contract về đúng Node/BLS quản lý (2 bước tra cứu):** (1) `Account Registry` (mục 5.1) trả về `cluster_id` từ `user_address`; (2) `ChainRegistry` (đã có sẵn) trả về `Committee`/`NodeBlsPublicKey` từ `cluster_id`. Xác thực nguồn gốc message dựa đúng vào chữ ký `QuorumCert` ký trên checkpoint bằng committee đó. **Đúng như mô tả, nhưng lưu ý:** nếu Cluster chỉ có 1 node, `Committee` chỉ có 1 `NodeBlsPublicKey` → `QuorumCert` suy biến thành chữ ký đơn, xem cảnh báo và bất biến bond bắt buộc ở mục 4 điểm 6.
+- **Cách định vị 1 account/contract về đúng Node/BLS quản lý (2 bước tra cứu):** (1) `Account Registry` (mục 5.1) trả về `cluster_id` từ `user_address`; (2) `ChainRegistry` (đã có sẵn) trả về `Committee`/`NodeBlsPublicKey` từ `cluster_id`. Xác thực nguồn gốc message dựa đúng vào chữ ký `QuorumCert` ký trên checkpoint bằng committee đó. **Đúng như mô tả.** Sau khi chốt Q13 (1 node = 1 chainID), `Committee` của mỗi Cluster luôn chỉ có đúng 1 `NodeBlsPublicKey` — `QuorumCert` về bản chất luôn là chữ ký đơn của chính node đó, đây là sự thật đã chấp nhận (Q3), phòng thủ chính nằm ở bất biến bond-vs-exposure (mục 4 điểm 6, Q7).
 
 ### 2.2. BLS Cluster (Execution Layer)
 - **Quản lý State Nội bộ:** Mỗi Cluster sở hữu database riêng (LevelDB) lưu trữ balance, nonce, và state của smart contract.
@@ -41,25 +41,18 @@ Mục 2.2 kế thừa nguyên mô hình custody từ bản thiết kế `cmd/rpc
   3. **Chế độ non-custodial tuỳ chọn cho tài khoản giá trị cao:** cho phép user tự giữ key (tự ký, Cluster chỉ forward) thay vì bắt buộc custody 100% — nên là lựa chọn, không áp đặt toàn hệ thống.
 - **Đây là quyết định về threat model, không phải bug kỹ thuật** — cần đội vận hành xác nhận mức rủi ro custody này có chấp nhận được cho quy mô tài sản dự kiến hay không, trước khi go-live (mục 10.1 Q9).
 
-### 2.4. Kiến trúc nội bộ 1 Chain: nhiều Node `cmd/rpc` độc lập, KHÔNG chia sẻ state (đã xác nhận với đội)
+### 2.4. Kiến trúc nội bộ: 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
 
-⚠️ **Đây là chỉnh sửa nền tảng, ảnh hưởng lại toàn bộ mục 3-8 phía trên.** Xác nhận lại: **1 "chain" (1 `chainID`/Cluster) không phải 1 node duy nhất, mà là một nhóm hành chính gồm NHIỀU node `cmd/rpc`** (mỗi node là 1 "BLS ký hộ" độc lập, đã tích hợp sẵn phần thực thi từ thiết kế gốc). Xác nhận rõ: **các node này KHÔNG chia sẻ/đồng bộ state với nhau** — mỗi node tự quản 1 tập account riêng biệt, không chồng lấn, tự thực thi cục bộ (đúng tinh thần "không đồng thuận" ban đầu của `cmd/rpc`).
+⚠️ **Đây từng là chỉnh sửa nền tảng gây ra #15-#18, nay đã CHỐT hướng giải quyết.** Ban đầu có đề xuất nhóm nhiều node `cmd/rpc` (mỗi node 1 "BLS ký hộ" độc lập, không chia sẻ state, tự thực thi cục bộ) dưới 1 `chainID` chung. Phân tích sâu cho thấy: `GatewayEngine.ChainRegistry.Committee`/`QuorumThreshold`/`SecurityBond`/`checkAndRecordVelocity`/`AccountTreeRoot` **đều hoạt động ở đúng granularity `chainID`**, ngầm giả định `chainID` = 1 đơn vị tin cậy/replication duy nhất (giống các chain BFT thật khác trong `pkg/cross_chain`, nơi cả committee cùng giữ state). Nhóm nhiều node độc lập-không-chia-sẻ-state dưới 1 `chainID` phá vỡ đúng giả định này ở **4 chỗ cùng lúc** (#15 collateral damage, #16 noisy-neighbor velocity, #17 QuorumCert suy biến không phát hiện được, và làm phức tạp thêm #18).
 
-**Hệ quả bảo mật trực tiếp — vì sao đây KHÔNG phải chi tiết vặt:**
+**QUYẾT ĐỊNH: mỗi node `cmd/rpc` đăng ký như 1 `chainID` riêng qua `RegisterChainViaStake`, không nhóm nhiều node dưới 1 chain.** Hệ quả trực tiếp:
 
-- `GatewayEngine.ChainRegistry.Committee`/`QuorumThreshold` (mục 2.1, mục 4) **hoạt động ở granularity `chainID`, không biết đến khái niệm "node con"/"account partition" bên trong 1 chain**. Một `QuorumCert` hợp lệ chỉ chứng minh "đủ ngưỡng chữ ký trong danh sách committee của chainID này" — **KHÔNG chứng minh rằng chính node đang thực sự sở hữu/thực thi account đó đã ký**. Vì các node không chia sẻ state, các node "anh em" khác trong cùng chain **không có cách nào verify độc lập** một message đến từ 1 node cụ thể trước khi (có thể) đồng ký.
-- Kết quả: **"vấn đề chữ ký đơn suy biến" ở mục 4 điểm 6 không còn là trường hợp cạnh (Cluster chỉ có 1 node) — nó là MẶC ĐỊNH của toàn hệ thống.** Dù 1 chain có 10 node, mỗi message vẫn chỉ thực sự được đảm bảo bởi đúng 1 chữ ký có ý nghĩa (của node sở hữu account đó); 9 node còn lại nếu đồng ký cũng chỉ là "ký khống theo niềm tin", không phải xác minh thật.
-
-**3 việc bắt buộc phải làm thêm (chưa có sẵn trong `GatewayEngine`, không được bỏ qua):**
-
-1. **Node Registry nội bộ của chain (mới, KHÔNG đặt trên Root Anchor):** mapping `node_id -> NodeBlsPublicKey, account_partition, sub-bond`. Đây là sổ nội bộ do chính chain/đội vận hành chain đó giữ, không phải Root Anchor — Root Anchor chỉ biết `chainID`, không cần biết có bao nhiêu node bên trong.
-2. **Mở rộng Account Registry (mục 5.1) từ `user_address -> cluster_id` thành `user_address -> (cluster_id, node_id)`:** vì sau khi 1 message được `ClaimMessage` thành công ở mức `chainID` (mục 3.1 bước 3), vẫn cần thêm 1 bước dispatch nội bộ để biết chuyển tiếp cho đúng node nào xử lý — `GatewayEngine` không tự làm việc này.
-3. **Lớp kiểm tra "partition ownership" bổ sung (mới, phải tự xây):** trước khi tin 1 `QuorumCert`, cần kiểm tra thêm **chữ ký thực sự trong cert có bao gồm đúng node sở hữu `Sender`/`Target` của message hay không** — đây là kiểm tra ở tầng ứng dụng, `ClaimMessage`/`AttestCommit` của `GatewayEngine` không tự làm (nó chỉ verify tổng số chữ ký ≥ ngưỡng, không biết chữ ký của "ai" gắn với "account nào").
-
-**Bond & Slashing phải scope theo NODE, không phải theo CHAIN (sửa lại mục 4 điểm 6):**
-- Nếu `SecurityBond`/`SlashOnEquivocation`/`DeclareChainDeadWithCert` chỉ áp được ở granularity `chainID` (đúng như code hiện có), thì **1 node gian lận sẽ kéo theo cả chain bị slash/declare-dead**, gây thiệt hại oan cho user của các node khác hoàn toàn vô tội trong cùng chain — đây là **rủi ro mới (collateral damage)**, liệt kê ở mục 8 #15.
-- Tương tự, `checkAndRecordVelocity` tính theo `sourceChainID` (mục 4 điểm 5) — nghĩa là **các node trong cùng chain đang DÙNG CHUNG 1 hạn mức velocity 24h**, 1 node giao dịch nhiều (hợp lệ) có thể chặn oan node khác cùng chain — rủi ro "noisy neighbor", liệt kê ở mục 8 #16.
-- **Quyết định cần chốt (mục 10.1 Q10):** chấp nhận rủi ro collateral/noisy-neighbor này ở mức chain (đơn giản, dùng thẳng `GatewayEngine` không sửa), hay bắt buộc phải tự xây sub-ledger bond/velocity theo từng `node_id` bên trong chain (an toàn hơn, nhưng là code mới hoàn toàn, không có sẵn).
+- **#15 (collateral damage) — RESOLVED:** `SlashOnEquivocation`/`DeclareChainDeadWithCert` giờ chỉ ảnh hưởng đúng 1 node/chainID, không còn "hàng xóm vô tội" nào để liên luỵ.
+- **#16 (noisy neighbor velocity) — RESOLVED:** `checkAndRecordVelocity` tính theo `sourceChainID` giờ tự nhiên scope đúng theo từng node, không cần sub-ledger nào thêm.
+- **#17 (QuorumCert suy biến không phát hiện được) — RESOLVED theo hướng khác:** không còn "committee nhiều node giả vờ đồng ký hộ 1 node" nữa — mỗi `chainID` chính là 1 node, `QuorumCert` của nó **thành thật là chữ ký của đúng node đó**, không còn nhập nhằng "ai thực sự sở hữu account". Không cần lớp kiểm tra "partition ownership" (Node Registry nội bộ, dispatch `node_id`) nữa — **bỏ hoàn toàn, đơn giản hoá lại mục 3.1/5.1 như bản gốc (`user_address -> cluster_id` 2 cột, không cần `node_id`)**.
+- **Đánh đổi còn lại, KHÔNG biến mất:** vì mỗi node-chainID thực tế vẫn chỉ có 1 signer thật (đúng bản chất `cmd/rpc`), "chữ ký đơn" vẫn là sự thật — nhưng giờ đây là **1 sự thật hiển nhiên, được xử lý đúng bằng bất biến Bond-vs-Exposure (mục 4 điểm 6)**, không còn là 1 lỗ hổng ẩn giấu sau vẻ ngoài "nhiều node cùng ký". Đây chính là câu trả lời cho Q3 (mục 10.1): **committee mỗi node-chainID chấp nhận là 1 (không có redundancy signer thật để thêm mà không phá vỡ tiền đề "1 node = 1 thực thể ký hộ độc lập"), phòng thủ chính nằm ở bất biến bond-vs-exposure, không nằm ở số lượng chữ ký.**
+- **#18 (Snapshot & Archival Pipeline, mục 6.3) — KHÔNG biến mất, vẫn bắt buộc xây:** nguyên nhân gốc của #18 là dữ liệu chỉ tồn tại trên 1 node vật lý, không liên quan gì đến việc gộp nhiều node dưới 1 chainID hay không — dù chọn "1 node = 1 chainID", node đó vẫn là **điểm lưu trữ duy nhất** cho account tree của chính nó.
+- **Chi phí đánh đổi (cần đội xác nhận chấp nhận được, nhưng không chặn thiết kế):** số lượng `chainID`/bond đăng ký tăng theo đúng số node (không theo số "cluster" như dự tính ban đầu) — ảnh hưởng trực tiếp Q5 (kế hoạch vốn Reserve, xem mục 10.1).
 
 ---
 
@@ -87,9 +80,8 @@ Khi User A (Cluster 1) muốn chuyển tiền hoặc gọi Contract cho User/Con
      - Kiểm tra đúng `DestChainID == LocalChainID` — chặn 1 message bị claim nhầm chain.
      - Hard-cap `ClaimedAmount <= FundedAmount` — chặn Cluster 2 (hoặc relayer) claim vượt số đã thực sự attest.
    - `ClaimMessage` set `MessageStatus[messageID] = Success` **trên chính engine cục bộ của Cluster 2** (mỗi `GatewayEngine` là 1 instance riêng — Cluster 1 và Cluster 2 KHÔNG chia sẻ chung 1 bảng `MessageStatus`, xem lưu ý ở mục 3.2).
-   - ⚠️ **Trước khi tin `ClaimMessage` đã đủ (mục 2.4):** vì `QuorumCert` chỉ chứng minh "đủ ngưỡng committee của cả chain ký", cần thêm bước verify tầng ứng dụng: **chữ ký trong cert có thực sự bao gồm đúng `node_id` đang sở hữu `Sender` (theo Account Registry của Cluster 1) hay không** — nếu không, dù `QuorumCert` valid về mặt mật mã vẫn phải coi là đáng ngờ (có thể là node khác trong cùng chain ký khống thay). Đây là kiểm tra mới, `GatewayEngine` không tự làm.
-   - **Bước dispatch nội bộ (mới, mục 2.4):** ngay sau khi `ClaimMessage` trả `Success`, Cluster 2 tra `Account Registry` (mục 5.1) để lấy `node_id` đích, rồi chuyển giao cho đúng node `cmd/rpc` đó xử lý tiếp — **không phải node nào trong chain cũng tự động thấy/xử lý được message này**, vì các node không chia sẻ state (mục 2.4).
-   - **Bước kiểm tra tồn tại cục bộ (chưa có sẵn trong `GatewayEngine`, vì engine chỉ làm việc ở mức `chainID`, không biết B là ai):** node `cmd/rpc` đích (đã xác định ở bước trên) kiểm tra local: **`B` có phải account hợp lệ đang được chính mình quản lý không**. Nếu không hợp lệ:
+   - **(Đã đơn giản hoá theo Q13/mục 2.4):** vì mỗi `chainID` giờ chính là 1 node duy nhất, không còn bước dispatch `node_id` hay verify "partition ownership" nào cần thêm — `QuorumCert` hợp lệ = chính node đó đã ký, không có node "anh em" nào khác để nhầm lẫn.
+   - **Bước kiểm tra tồn tại cục bộ (chưa có sẵn trong `GatewayEngine`, vì engine chỉ làm việc ở mức `chainID`, không biết B là ai):** Cluster 2 kiểm tra local: **`B` có phải account hợp lệ đang được chính mình quản lý không**. Nếu không hợp lệ:
      1. Gọi **ngay lập tức** `FinalizeFailedAfterExecutionRevert(message, commitRoot, relayer)` — hàm này **chỉ chấp nhận gọi khi status hiện tại đúng là `Success` vừa được `ClaimMessage` set** (guard chặn gọi trễ/gọi lại) — nó tự đảo ngược `ClaimedAmount`/`PerChainAllocation` cục bộ và set `MessageStatus = Failed`.
      2. Committee của Cluster 2 gom chữ ký thất bại qua `AddPendingMessageFailureAttestationShare(key, share)` cho đến khi đủ ngưỡng quorum, rồi tổng hợp thành `destFailureCert` (`QuorumCert`).
      3. Gửi `destFailureCert` + proof + `commitRoot` về Cluster 1.
@@ -119,7 +111,7 @@ Vấn đề nghiêm trọng nhất của bản thiết kế CCM cũ: **không c�
    
    Đây là **quy tắc governance cần enforce khi đăng ký/tăng allocation cho Cluster**, không phải thứ `GatewayEngine` tự kiểm tra hộ — phải thêm bước duyệt thủ công hoặc on-chain check riêng trước khi chấp nhận nâng hạn mức 1 Cluster (mục 10.1 Q7).
    
-   ⚠️ **Cập nhật (mục 2.4 — đã xác nhận với đội):** đây KHÔNG chỉ là trường hợp cạnh "Cluster chỉ có 1 node". Vì các node `cmd/rpc` trong cùng 1 chain không chia sẻ state, **mọi message trong thực tế đều chỉ được đảm bảo bởi đúng 1 chữ ký có ý nghĩa** (của node sở hữu account liên quan) dù chain có bao nhiêu node — về bản chất không khác gì chữ ký đơn lẻ ở bản CCM cũ (vấn đề #1 mục 8). Bất biến bond-vs-exposure ở trên **phải áp dụng theo từng `node_id`** (mục 2.4), không phải theo tổng cả chain — nếu không, bond của cả chain có thể "trông có vẻ đủ" trong khi phần bond thực sự gắn với node đang gian lận lại quá nhỏ so với giá trị nó vừa ký khống. Xem thêm Q3, Q10.
+   ⚠️ **Cập nhật (mục 2.4/Q13 — ĐÃ CHỐT):** mỗi node `cmd/rpc` = 1 `chainID` riêng, nên đây không còn là "trường hợp cạnh" mà là **sự thật hiển nhiên của mọi node**: `SecurityBond` của 1 `chainID` áp dụng đúng cho đúng 1 node đó, không còn nhập nhằng "bond chung của cả nhóm node" như phương án bị bác bỏ trước đây. Bất biến bond-vs-exposure ở trên **áp dụng trực tiếp theo từng `chainID`/node**, đơn giản, không cần sub-ledger nào thêm. Xem thêm Q3, Q7.
 
 → Không thiết kế lại các cơ chế này cho BLS Cluster; **đăng ký mỗi Cluster như một `chainID` bình thường trong `GatewayEngine`** là đủ để thừa hưởng toàn bộ tầng bảo mật kinh tế này (trừ điểm 6, là quy tắc governance mới cần tự xây).
 
@@ -129,16 +121,15 @@ Vấn đề nghiêm trọng nhất của bản thiết kế CCM cũ: **không c�
 
 `GatewayEngine` chỉ biết đến `chainID`, không biết định danh user/contract cụ thể nào thuộc cluster nào — đây là phần Parent Chain/Root Anchor cần bổ sung riêng cho use-case này. Cần tách rõ **Account (user, đăng ký tường minh)** và **Contract (sinh ra tự động khi deploy)** vì đặc tính rủi ro khác hẳn nhau.
 
-### 5.1. Account Registry (user, đăng ký tường minh — như bản trước, MỞ RỘNG thêm `node_id` theo mục 2.4)
+### 5.1. Account Registry (user, đăng ký tường minh — ĐÃ ĐƠN GIẢN theo Q13/mục 2.4: 1 node = 1 chainID nên không cần cột `node_id` riêng)
 
 | Bảng | Key | Value | Vai trò |
 |---|---|---|---|
-| Account Registry | `user_address` | `cluster_id`, `node_id` | Định tuyến `Target` của message đến đúng chain, rồi dispatch tiếp tới đúng node `cmd/rpc` bên trong chain đó (mục 2.4) trước khi node đó tự kiểm tra hợp lệ và credit (mục 3.1 bước 3) |
-
-> Lưu ý: `cluster_id` dùng để `ClaimMessage` ở mức `GatewayEngine` (Root Anchor chỉ cần biết đến đây); `node_id` là bước dispatch **nội bộ của chain, sau khi claim ở mức chain đã thành công** — Root Anchor không cần và không nên biết `node_id` (giữ đúng nguyên tắc `GatewayEngine` chỉ làm việc ở granularity `chainID`, mục 2.4).
+| Account Registry | `user_address` | `cluster_id` (= chính `chainID` của node sở hữu) | Định tuyến `Target` của message đến đúng node (chainID); node đó tự kiểm tra hợp lệ và credit (mục 3.1 bước 3) — không còn bước dispatch nội bộ nào thêm |
 
 **Vấn đề cần xử lý (đã áp dụng ở mục 3.1):**
 - **Đăng ký 1 lần, chống ghi đè tuỳ ý:** chỉ chấp nhận đăng ký lần đầu, hoặc yêu cầu chữ ký của chính Cluster đang giữ account hiện tại nếu muốn "chuyển nhượng" account sang cluster khác — tránh một report cũ/replay vô tình đổi chủ account (chi tiết giao thức chuyển nhượng ở mục 5.3).
+- **Chặn 1 account đăng ký đồng thời ở 2 node/Cluster khác nhau (chi tiết đầy đủ ở mục 13, Q1):** cơ chế chặn PHẢI nằm ở chính write vào Account Registry trên Parent Chain (1 dòng transaction, được block/chain xử lý tuần tự) — **không được coi bước admin-confirm cục bộ tại node (`handleSetBlsPublicKey` + confirm, đã có ở `cmd/rpc`) là đủ để "chốt" quyền sở hữu**, vì đó chỉ là hành động local, 2 node khác nhau hoàn toàn có thể cùng confirm cục bộ cho cùng 1 address nếu không có bước xác nhận ngược lại từ Parent Chain.
 - **Cluster đích luôn tự kiểm tra lại** account có thuộc mình không trước khi credit (không tin tưởng mù quáng vào `Target` trong message), vì Account Registry ở Parent Chain có thể chưa đồng bộ kịp lúc User A gửi giao dịch.
 - **Vì sao registry này an toàn trước DoS:** đăng ký account đi qua đúng luồng `handleSetBlsPublicKey` + admin `confirm` đã có ở `cmd/rpc` (2 bước, có gate admin) — **không permissionless, không tự động**, nên không có đường để spam hàng loạt registration miễn phí. Đây là lý do Contract (mục 5.2) phải xử lý khác hẳn — vì contract sinh ra tự động, không qua gate nào cả.
 
@@ -209,10 +200,10 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 
 1. **Snapshot Export định kỳ, PROACTIVE (lúc node còn sống, không phải sau khi chết):** mỗi node `cmd/rpc` định kỳ (ví dụ mỗi N phút) tự tính cây Merkle của toàn bộ account state, và **export cây (hoặc tối thiểu đủ dữ liệu để tính lại proof cho bất kỳ account nào) ra một nơi lưu trữ BÊN NGOÀI chính node đó** (backup server độc lập, object storage, hoặc broadcast công khai). Nếu chỉ export root mà không export dữ liệu cây, root publish được cũng vô dụng vì không ai tính được proof.
 2. **Publish `AccountTreeRoot` có xác thực lên Root Anchor mỗi lần export** — dùng `UpdateCommitteeWithRecoveryCert` cho việc này là dùng sai mục đích tên gọi (dành cho recovery, không phải publish định kỳ khi khoẻ mạnh); cần xác nhận với đội có nên thêm 1 API mới ở tầng chain-cụ-thể, tránh sửa `GatewayEngine` dùng chung (đúng tinh thần thận trọng đã nêu ở Q11).
-3. **Cửa sổ mất mát = tần suất export:** bất kỳ giao dịch nào xảy ra SAU lần export cuối cùng, nếu node chết ngay sau đó, **không thể chứng minh/claim được** — đây là đánh đổi cố hữu (giống mọi cơ chế "exit bằng last-known-state" của rollup thật), tần suất export càng dày thì cửa sổ mất mát càng nhỏ nhưng chi phí vận hành càng cao — cần đội chốt con số cụ thể (mục 10.1 Q12).
+3. **Cửa sổ mất mát = tần suất export:** bất kỳ giao dịch nào xảy ra SAU lần export cuối cùng, nếu node chết ngay sau đó, **không thể chứng minh/claim được** — đây là đánh đổi cố hữu (giống mọi cơ chế "exit bằng last-known-state" của rollup thật). **Đã chốt mặc định: mỗi 15 phút** (mục 10.1 Q12), có thể tăng tần suất sau khi có số liệu chi phí vận hành thật.
 4. **Ai tính proof hộ user?** Không nên bắt user tự giữ sẵn proof của mình (dễ mất, dễ sai) — nên có 1 dịch vụ archival độc lập giữ bản sao cây mới nhất, tính proof theo yêu cầu bất cứ lúc nào (giống mô hình exit của các rollup thật, ví dụ Optimism/Arbitrum không bắt user tự giữ Merkle proof).
 
-**Câu hỏi chiến lược cần chốt (không chỉ riêng vấn đề này — mục 10.1 Q10/Q11 cũng cùng gốc):** mục 8 #15, #16, #17, #18 đều bắt nguồn từ CÙNG 1 nguyên nhân — nhóm nhiều node `cmd/rpc` độc lập-không-chia-sẻ-state dưới 1 `chainID` khiến MỌI cơ chế sẵn có của `GatewayEngine` (bond, slash, velocity, dead-declare-and-claim) đều vốn được thiết kế cho granularity `chainID` bị lệch pha, phải tự vá thêm 1 lớp `node_id` phía trên cho từng cơ chế. **Cần cân nhắc nghiêm túc phương án thay thế: đăng ký MỖI node `cmd/rpc` như 1 `chainID` riêng** (khớp thẳng với thiết kế gốc của `GatewayEngine`, không cần vá gì thêm) — đổi lại là nhiều `chainID`/bond/registration hơn về mặt hành chính. Đây là quyết định kiến trúc cấp cao nhất trong toàn bộ tài liệu này, nên chốt TRƯỚC khi giải quyết chi tiết #15-#18 riêng lẻ (mục 10.1 Q13).
+**Đã chốt (mục 10.1 Q13):** mục 8 #15, #16, #17 (không #18 — xem trên) đều bắt nguồn từ CÙNG 1 nguyên nhân — nhóm nhiều node `cmd/rpc` độc lập-không-chia-sẻ-state dưới 1 `chainID`. Quyết định **mỗi node `cmd/rpc` đăng ký như 1 `chainID` riêng**, khớp thẳng thiết kế gốc `GatewayEngine`, loại bỏ 3/4 vấn đề bằng cách xoá tiền đề gây ra chúng thay vì vá từng lớp.
 
 ---
 
@@ -221,7 +212,7 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 ### Tại Parent Chain / Root Anchor
 | Bảng / Struct | Nguồn | Vai trò |
 |---|---|---|
-| Account Registry | Mới (mục 5) | `user_address -> cluster_id` |
+| Account Registry | Mở rộng `AccountManager` contract có sẵn (Q14) | `user_address -> cluster_id` (= chainID của node, 1 node = 1 chainID theo Q13) |
 | `ChainRegistry` | Có sẵn (`gateway.go`) | Danh tính + committee + bond của từng Cluster (chạy trên instance `GatewayEngine` của chính Root Anchor) |
 | `SecurityBondLedger` | Có sẵn | Bond + slash cho hành vi gian lận/double-sign |
 | `DeadChains` | Có sẵn | Cluster đã tuyên bố chết, chặn outflow mới |
@@ -236,7 +227,7 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 | `MessageStatus` (bản cục bộ) | `message_id` | `Pending/Success/Failed/FailedTimeout` | **Local cho từng engine** — Cluster nguồn và Cluster đích có 2 bản ghi độc lập cho cùng 1 `message_id`, đồng bộ qua `destFailureCert`/success-cert (mục 3.2), không tự động giống nhau |
 | Retry Queue (checkpoint gửi đi) | `message_id` | `payload`, `status` | Chỉ cho mất-kết-nối tạm thời (mục 6.1) |
 
-> Lưu ý: bảng trên giả định mỗi Cluster (kể cả Root Anchor) tự chạy một instance `GatewayEngine` độc lập — cần đội cross-chain hiện tại xác nhận đúng topology triển khai thật (mục 10, mục Q1).
+> Lưu ý: bảng trên giả định mỗi Cluster (kể cả Root Anchor) tự chạy một instance `GatewayEngine` độc lập — đã chốt (mục 10.1 Q6, hệ quả trực tiếp của Q13).
 
 ---
 
@@ -258,32 +249,43 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 | 12 | `QuorumCert` của Cluster chỉ có 1 node suy biến thành chữ ký đơn — không có ràng buộc bond phải đủ che phủ giá trị đang treo | Node có động lực kinh tế ký khống nếu giá trị treo > tiền cọc, chấp nhận mất bond vì vẫn lời | Bất biến `SecurityBond ≥ hệ_số_an_toàn × giới_hạn_velocity_24h`, enforce ở bước duyệt đăng ký/nâng hạn mức Cluster (mục 4 điểm 6) |
 | 13 | Chuyển nhượng account chỉ mô tả bằng 1 câu, không xử lý atomicity của việc di dời state thật | Message đến đúng lúc đang chuyển giao có thể bị cả 2 Cluster từ chối → mất tiền hoặc kẹt vĩnh viễn | Giao thức 3 pha Freeze → Export & Attest (`QuorumCert`) → Import & flip con trỏ, chỉ flip sau khi xác nhận import xong (mục 5.3) |
 | 14 | Custody 100% device key tại Cluster (PKS) không có gì phát hiện nếu Node bị hack và tự ký giao dịch nội bộ giả | Mất tiền không để lại bằng chứng mật mã, nằm ngoài phạm vi bảo vệ của `SecurityBond`/`QuorumCert` (tiền không rời Cluster) | Không tự giải quyết triệt để được (đánh đổi cố hữu của custody) — thêm ngưỡng delay/anomaly-detection, tuỳ chọn non-custodial cho tài khoản lớn, và đây là quyết định threat-model cần chốt (mục 2.3, mục 10.1 Q9) |
-| 15 | 1 chain gồm nhiều node `cmd/rpc` không chia sẻ state, nhưng `SlashOnEquivocation`/`DeclareChainDeadWithCert` chỉ áp được ở granularity `chainID` | 1 node gian lận kéo theo cả chain bị slash/declare-dead, gây thiệt hại oan cho user của các node khác vô tội cùng chain | Cần chốt chính sách: chấp nhận collateral damage ở mức chain, hay tự xây sub-ledger bond/slash theo `node_id` (mục 2.4, mục 10.1 Q10) |
-| 16 | `checkAndRecordVelocity` tính hạn mức 24h theo `sourceChainID`, dùng chung cho mọi node trong cùng chain | 1 node giao dịch nhiều (hợp lệ) có thể chặn oan node khác cùng chain do dùng chung 1 "quota" (noisy neighbor) | Cùng nhóm quyết định với #15 — cần sub-ledger velocity theo `node_id` nếu muốn tránh (mục 2.4, mục 10.1 Q10) |
-| 17 | `QuorumCert` chỉ chứng minh "đủ ngưỡng committee của chain ký", không chứng minh đúng node sở hữu account đã ký | Node khác trong cùng chain (không sở hữu account đó, không có visibility vào state của nó) có thể đồng ký khống mà không ai phát hiện — làm mất hết ý nghĩa "đa chữ ký" dù chain có N node | Thêm bước verify tầng ứng dụng: chữ ký trong cert phải bao gồm đúng `node_id` sở hữu `Sender` theo Account Registry (mục 2.4, mục 3.1 bước 3) |
-| 18 | **[CRITICAL]** `ClaimDeadChainBalance` cần `ChainRegistry.AccountTreeRoot` + Merkle proof, nhưng field này chỉ được ghi qua `UpdateCommitteeWithRecoveryCert` (không phải qua `SubmitCheckpoint` định kỳ), và dữ liệu để tính proof chỉ tồn tại trên chính node đã chết (mục 2.4: không ai giữ bản sao) | "User tự claim khi cluster chết" ở mục 6.2 KHÔNG hoạt động được trong thực tế — tài sản bị khoá vĩnh viễn, đúng kịch bản tệ nhất từng cảnh báo ở bản CCM cũ | Xây thêm Snapshot & Archival Pipeline: export cây tài khoản định kỳ ra ngoài node + publish root có xác thực + dịch vụ tính proof hộ user (mục 6.3, mục 10.1 Q12-Q13) |
+| 15 | ~~1 chain gồm nhiều node không chia sẻ state, nhưng `SlashOnEquivocation`/`DeclareChainDeadWithCert` chỉ áp được ở granularity `chainID`~~ | 1 node gian lận kéo theo cả chain bị slash/declare-dead, gây thiệt hại oan cho user của các node khác vô tội cùng chain | ✅ **RESOLVED (Q13):** mỗi node = 1 `chainID` riêng, không còn "node anh em vô tội" nào để liên luỵ (mục 2.4) |
+| 16 | ~~`checkAndRecordVelocity` tính hạn mức 24h theo `sourceChainID`, dùng chung cho mọi node trong cùng chain~~ | 1 node giao dịch nhiều (hợp lệ) có thể chặn oan node khác cùng chain do dùng chung 1 "quota" (noisy neighbor) | ✅ **RESOLVED (Q13):** velocity limit tự nhiên scope đúng theo từng node vì mỗi node đã là 1 `chainID` riêng (mục 2.4) |
+| 17 | ~~`QuorumCert` chỉ chứng minh "đủ ngưỡng committee của chain ký", không chứng minh đúng node sở hữu account đã ký~~ | Node khác trong cùng chain có thể đồng ký khống mà không ai phát hiện | ✅ **RESOLVED (Q13):** không còn "node khác trong cùng chain" nữa — `QuorumCert` của 1 `chainID` chính là chữ ký thật của đúng node đó (mục 2.4) |
+| 18 | **[CRITICAL — KHÔNG được giải quyết bởi Q13]** `ClaimDeadChainBalance` cần `ChainRegistry.AccountTreeRoot` + Merkle proof, nhưng field này chỉ được ghi qua `UpdateCommitteeWithRecoveryCert` (không phải qua `SubmitCheckpoint` định kỳ), và dữ liệu để tính proof chỉ tồn tại trên chính node đã chết | "User tự claim khi cluster chết" ở mục 6.2 KHÔNG hoạt động được trong thực tế — tài sản bị khoá vĩnh viễn | Xây thêm Snapshot & Archival Pipeline: export cây tài khoản định kỳ ra ngoài node + publish root có xác thực + dịch vụ tính proof hộ user (mục 6.3) — **Q13 không thay được việc này vì nguyên nhân gốc là "1 node = 1 điểm lưu trữ duy nhất", không phải "nhiều node gộp chung"** |
 
 ---
 
 ## 10. Production Readiness Checklist
 
-### 10.1. Quyết định còn mở — PHẢI chốt trước khi triển khai (không phải lỗi kỹ thuật, mà là quyết định thiếu sẽ chặn triển khai)
+### 10.1. Decision Log — 16 câu hỏi đã rà soát, 14 đã CHỐT, 2 còn mở chờ số liệu thật từ đội
 
-| # | Câu hỏi | Vì sao quan trọng |
+**Nguyên tắc phân loại:** những gì thuần kỹ thuật/kiến trúc (không phụ thuộc số liệu tài chính hay khẩu vị rủi ro thật của đội) đã được quyết theo bằng chứng đã kiểm chứng trong tài liệu này. Những gì phụ thuộc dữ liệu chỉ đội mới có (vốn thật, khối lượng giao dịch thật, ngân sách vận hành thật) **không tự bịa số** — để rõ ở cuối bảng.
+
+| # | Câu hỏi | ✅ Quyết định | Căn cứ |
+|---|---|---|---|
+| Q13 | 1 node = 1 chainID hay nhiều node/1 chainID? | **1 node `cmd/rpc` = 1 `chainID` riêng.** | Loại bỏ #15/#16/#17 cùng lúc, khớp thẳng thiết kế gốc `GatewayEngine` (mục 2.4) |
+| Q1 | Parent Chain có phải chính Root Anchor đang chạy? | **Dùng lại Root Anchor hiện có**, không dựng chain coordination mới. | Tránh trùng lặp hạ tầng committee/attest đã đầu tư; dễ đảo ngược sau nếu phát sinh yêu cầu tách biệt (không cascade như Q13) |
+| Q6 | Mỗi chain có tự chạy 1 instance `GatewayEngine` riêng? | **Có** — hệ quả trực tiếp của Q13 (1 node = 1 chainID = 1 instance). | mục 2.4 |
+| Q3 | Committee/`QuorumThreshold` mỗi node bao nhiêu validator? | **Chấp nhận = 1** (chính node đó) — không có redundancy signer thật để thêm mà không phá vỡ tiền đề "1 node = 1 thực thể ký hộ độc lập" (mục cmd/rpc gốc). Phòng thủ chính chuyển sang bất biến bond-vs-exposure (Q7), không nằm ở số chữ ký. | mục 2.4, mục 4 điểm 6 |
+| Q11 | Lớp verify "partition ownership" đặt ở đâu? | **Không cần xây nữa** — vấn đề #17 tự triệt tiêu theo Q13 (mục 2.4). | — |
+| Q10 | Bond/velocity scope theo node hay theo chain? | **Không cần sub-ledger riêng** — Q13 làm cho "theo chain" và "theo node" là MỘT, tự động đúng. | mục 2.4 |
+| Q7 | Hệ số an toàn Bond-vs-Exposure? | **2x** giới hạn velocity 24h làm mặc định khởi điểm (nằm trong khoảng 1.5–2x đã đề xuất ở mục 4 điểm 6) — do đây là hệ số kỹ thuật (bù thời gian phát hiện+slash không tức thời), không phải số tiền thật, có thể chốt được. Đội vận hành **có quyền tăng** nếu thực tế phát hiện chậm hơn giả định, nhưng 2x là sàn khởi điểm để bắt đầu triển khai. | mục 4 điểm 6 |
+| Q4 | Velocity limit 20%/24h có phù hợp? | **Giữ nguyên mặc định có sẵn** (20%/24h) cho giai đoạn ra mắt — chưa có số liệu khối lượng giao dịch thật để tinh chỉnh, và thay đổi hằng số này rẻ/dễ đảo ngược sau khi có dữ liệu thật, không đáng để chặn triển khai. | mục 4 điểm 5 |
+| Q2 | `TimeoutTimestamp` mặc định? | **Công thức, không phải số cố định:** `Timeout = max(3 × chu kỳ SubmitCheckpoint thực tế, sàn tối thiểu 1 giờ)`. Lý do dùng công thức: số tuyệt đối hợp lý phụ thuộc chu kỳ checkpoint thật của hệ thống (chưa đo trong tài liệu này); công thức đảm bảo tự thích nghi mà không cần bịa số. | mục 6.2 |
+| Q15 | Tiêu chí trigger `DeclareChainDeadWithCert`? | **Chính sách 2 lớp:** (1) tự động cảnh báo sau N lần `SubmitCheckpoint` liên tiếp bị lỡ vượt quá `TimeoutTimestamp` (Q2) — lớp phát hiện; (2) **bắt buộc xác nhận thủ công của operator** trước khi thực sự gọi `DeclareChainDeadWithCert` — không tự động hoá hoàn toàn, vì hậu quả (khoá hẳn 1 node, chặn outflow) quá lớn để giao hết cho máy quyết định. | mục 6.2, mục 10.2 runbook |
+| Q14 | Account Registry (mục 5.1) triển khai ở đâu? | **Mở rộng `AccountManager` contract đã có sẵn ở `cmd/rpc`** (đang dùng cho đăng ký BLS hiện tại qua `contracts_interceptor`), không dựng contract/precompile mới hoàn toàn. | Tái dùng gate admin-confirm đã có, đúng tinh thần "tái dùng cái đã audit" xuyên suốt tài liệu này |
+| Q16 | Cần cơ chế reconciliation khi thông báo từ chối bị mất? | **Có — bắt buộc xây.** Node chạy job định kỳ (ví dụ mỗi giờ) tự đối chiếu từng account đang custody cục bộ với Account Registry thật trên Parent Chain; nếu phát hiện lệch (Registry ghi nhận chain khác), tự khoá account đó cục bộ + cảnh báo operator ngay, không đợi user report. | mục 13 Q1 |
+| Q12 | Tần suất Snapshot & Archival + ai vận hành? | **Tần suất mặc định: mỗi 15 phút** (cân bằng cửa sổ mất mát vs chi phí, có thể tăng tần suất sau khi đo chi phí thật). **Ai vận hành:** mặc định chính node operator tự chạy job export (đơn giản nhất để bắt đầu); khuyến nghị bổ sung 1 bên lưu trữ độc lập thứ 2 sau khi hệ thống có tài sản thật đáng kể (không chặn go-live ban đầu). | mục 6.3 |
+| Q9 (phần build) | Có cần xây các lớp giảm thiểu custody risk (mục 2.3)? | **Có — bắt buộc xây cả 3** (ngưỡng+delay, anomaly detection, tuỳ chọn non-custodial) làm baseline trước go-live, bất kể kết quả phần "chấp nhận rủi ro" bên dưới ra sao — chi phí xây thấp, phòng thủ theo chiều sâu. | mục 2.3 |
+| Q8 | Migration 3 pha đã test chưa? | **Không phải quyết định — là task.** Chuyển xuống mục 10.3 checklist go-live (đã có), không phải câu hỏi kiến trúc cần "chốt". | mục 5.3, mục 10.3 |
+
+**2 mục CÒN MỞ THẬT SỰ — cần input từ đội, không thể tự đề xuất số:**
+
+| # | Câu hỏi | Vì sao tôi không tự quyết được |
 |---|---|---|
-| Q1 | "Parent Chain" ở tài liệu này có phải chính là Root Anchor đang chạy, hay là 1 chain hoàn toàn mới? | Quyết định có cần deploy thêm hạ tầng committee/attest mới hay dùng lại committee đã có (mục 1, mục 7 ghi chú) |
-| Q2 | Ngưỡng `TimeoutTimestamp` mặc định cho message cross-cluster là bao lâu? | Quá ngắn → refund oan khi mạng chậm bình thường; quá dài → tài sản User A bị khoá lâu khi Cluster đích thực sự có vấn đề (mục 6.2) |
-| Q3 | `QuorumThreshold` (số chữ ký committee tối thiểu) cho mỗi Cluster là bao nhiêu, và committee của 1 Cluster gồm bao nhiêu validator? | Ảnh hưởng trực tiếp mức độ chống giả mạo của `QuorumCert` (mục 4) — 1 Cluster chỉ có 1-2 node thì "committee" gần như vô nghĩa, cần tối thiểu bao nhiêu node/validator độc lập mới coi là an toàn |
-| Q4 | Ngưỡng velocity limit mặc định (20%/24h, đã có sẵn trong code) có phù hợp quy mô BLS Cluster không, hay cần chỉnh riêng theo từng Cluster? | Cluster nhỏ có thể cần ngưỡng chặt hơn; Cluster lớn/nhiều giao dịch hợp lệ có thể bị chặn oan nếu để mặc định (mục 4 điểm 5) |
-| Q5 | Kế hoạch cấp vốn Reserve ban đầu cho N Cluster dự kiến ra mắt là bao nhiêu? | `RegisterChainViaStake` thất bại nếu Reserve không đủ allocation (mục 5, ghi chú vốn khởi tạo) |
-| Q6 | Mỗi Cluster (kể cả Root Anchor) có thực sự chạy 1 instance `GatewayEngine` riêng, hay có thiết kế tập trung hoá khác? | Ảnh hưởng trực tiếp cách đồng bộ `MessageStatus`/`PerChainAllocation` mô tả ở mục 3.2, mục 7 |
-| Q7 | Hệ số an toàn cho bất biến `SecurityBond ≥ hệ_số × giới_hạn_velocity_24h` là bao nhiêu, và ai duyệt khi 1 Cluster xin nâng hạn mức? | Không chốt số cụ thể thì bất biến ở mục 4 điểm 6 chỉ là khẩu hiệu, không enforce được |
-| Q8 | Giao thức Migration 3 pha (mục 5.3) đã được implement & test kịch bản "message đến đúng lúc đang Freeze" chưa? | Đây là phần hoàn toàn mới, chưa có sẵn trong `GatewayEngine` — rủi ro cao nhất nếu bỏ qua test |
-| Q9 | Mức rủi ro custody PKS (mục 2.3) có chấp nhận được cho quy mô tài sản dự kiến không, hay bắt buộc phải có chế độ non-custodial cho tài khoản lớn? | Đây là quyết định threat-model của đội vận hành, không phải điều kỹ thuật có thể tự quyết |
-| Q10 | Chấp nhận collateral damage khi 1 node gây lỗi kéo theo cả chain bị slash/declare-dead/chia sẻ velocity limit (mục 2.4, mục 8 #15-#16), hay bắt buộc xây sub-ledger bond/velocity theo `node_id`? | Ảnh hưởng trực tiếp độ phức tạp code cần xây thêm — nếu chấp nhận rủi ro thì dùng thẳng `GatewayEngine`, nếu không thì đây là 1 hệ thống con hoàn toàn mới |
-| Q11 | Cách xác minh "chữ ký trong `QuorumCert` đúng là của `node_id` sở hữu account" (mục 8 #17) triển khai ở đâu — ngay trong `ClaimMessage`/`AttestCommit` (sửa `GatewayEngine`) hay 1 lớp wrapper riêng bên ngoài? | Sửa trực tiếp `GatewayEngine` ảnh hưởng mọi chain khác đang dùng chung engine này (kể cả các hệ cross-chain hiện có ngoài phạm vi BLS Cluster) — cần cân nhắc kỹ trước khi động vào code dùng chung |
-| Q12 | Tần suất export Snapshot & Archival (mục 6.3) là bao nhiêu, và ai vận hành dịch vụ archival tính proof hộ user? | Quyết định trực tiếp "cửa sổ mất mát" nếu node chết đột ngột — export càng thưa, rủi ro mất giao dịch gần nhất càng cao |
-| Q13 | **[Quyết định kiến trúc cấp cao nhất]** Có nên đăng ký MỖI node `cmd/rpc` như 1 `chainID` riêng (khớp thẳng thiết kế gốc `GatewayEngine`, không cần vá #15-#18) thay vì nhóm nhiều node dưới 1 `chainID`? | #15, #16, #17, #18 đều cùng 1 gốc — cần chốt câu này TRƯỚC, có thể làm toàn bộ các vá riêng lẻ ở trên trở nên không cần thiết nếu chọn "1 node = 1 chainID" (mục 6.3) |
+| Q5 | Kế hoạch cấp vốn Reserve ban đầu cho N node dự kiến ra mắt (lưu ý: N nay tính theo **số node**, không phải số cluster, sau Q13) là bao nhiêu? | Phụ thuộc số tiền thật đội sẵn sàng phân bổ và số node dự kiến — dữ liệu tài chính thực, không có trong phạm vi thiết kế |
+| Q9 (phần chấp nhận rủi ro) | Với quy mô tài sản thật dự kiến, mức rủi ro custody còn lại (sau khi đã xây đủ 3 lớp giảm thiểu ở trên) có chấp nhận được, hay bắt buộc non-custodial ngay từ đầu cho mọi tài khoản lớn? | Đây là khẩu vị rủi ro kinh doanh thật (bao nhiêu tài sản, đội chấp nhận mất bao nhiêu trong kịch bản xấu nhất) — không phải câu hỏi kỹ thuật |
 
 ### 10.2. Vận hành (operational, cần có trước khi nhận traffic thật)
 
@@ -294,8 +296,8 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 
 ### 10.3. Checklist bảo mật trước khi go-live (đối chiếu mục 8)
 
-- [ ] #1–#14 ở mục 8 đã được review độc lập bởi người khác ngoài người viết thiết kế này (không tự ký-tự duyệt).
-- [ ] Q1–Q9 ở mục 10.1 đã có quyết định bằng văn bản, không còn để ngỏ.
+- [ ] #1–#18 ở mục 8 đã được review độc lập bởi người khác ngoài người viết thiết kế này (không tự ký-tự duyệt) — đặc biệt #18 (vẫn Critical, Q13 không giải quyết được) và các quyết định kỹ thuật tự chốt ở mục 10.1 (Q1, Q3, Q6, Q7, Q10-Q16) cần người khác kiểm tra lại, không chỉ tự tin theo tài liệu này.
+- [ ] Chỉ còn 2 mục thật sự cần đội xác nhận bằng số liệu thật (mục 10.1, cuối bảng): Q5 (vốn Reserve) và Q9-phần-rủi-ro (chấp nhận custody risk ở quy mô tài sản thật) — không được bỏ qua dù 14 câu còn lại đã có đề xuất kỹ thuật.
 - [ ] Đã chạy thử ít nhất 1 kịch bản thất bại thật (Cluster đích revert do account không hợp lệ → refund), 1 kịch bản Cluster chết (`DeclareChainDeadWithCert` → `ClaimDeadChainBalance`), và 1 kịch bản Migration có message đến giữa lúc Freeze (mục 5.3) trên môi trường staging, không chỉ đọc code.
 - [ ] Đã xác nhận `Σ per_chain_allocation == genesis_total_supply` được kiểm tra tự động (không chỉ khi có lỗi) — ví dụ một job định kỳ so khớp, không chỉ dựa vào việc code tự throw `ErrInvariantViolation` khi có thao tác vi phạm.
 - [ ] Đã xác nhận bằng số liệu thật: `SecurityBond` của từng Cluster ≥ hệ số an toàn (Q7) × giới hạn velocity 24h hiện tại của Cluster đó — không chỉ ghi trong tài liệu mà chưa đối chiếu với số thật.
@@ -304,7 +306,7 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 
 ## 11. Lộ trình triển khai (Next Steps)
 
-1. **Chốt Q1–Q6 (mục 10.1)** trước khi viết code — đây là các quyết định kiến trúc/vận hành, không thể lùi lại sau.
+1. **14/16 câu hỏi đã chốt (mục 10.1 Decision Log)**, bao gồm Q13 (1 node = 1 chainID) — đơn giản hoá phần lớn tài liệu. **Chỉ còn Q5 (vốn Reserve) và Q9-phần-rủi-ro cần đội xác nhận bằng số liệu thật** trước khi viết code — không thể tự đề xuất số cho 2 mục này.
 2. **Refactor Parent Chain:** Gỡ bỏ các module xử lý State Machine (EVM/WASM, Balance) ở tầng ứng dụng, chỉ giữ Account Registry (mục 5) và **tái dùng nguyên `GatewayEngine`** làm tầng liên-cụm — không viết `CrossClusterMessage`/`Outbox` mới.
 3. **Nâng cấp Cụm BLS:** Mỗi Cluster chạy 1 instance `GatewayEngine` với `LocalChainID = cluster_id`, đăng ký qua `RegisterChainViaStake`. Tích hợp `AccountHandler` nội bộ gọi `Outbound`/`ClaimMessage`/`Refund`/`FinalizeFailedAfterExecutionRevert` thay vì tự ký/tự verify CCM.
 4. **Bổ sung Account Registry (mục 5):** Đây là phần thực sự cần code mới — mapping `user_address -> cluster_id`, kèm quy tắc chống ghi-đè và bước kiểm tra tại cluster đích trước khi credit (mục 3.1 bước 3, mục 8 #9-#10).
@@ -319,69 +321,56 @@ func (g *GatewayEngine) ClaimDeadChainBalance(..., proof MerkleProof, accountLea
 
 ```mermaid
 flowchart TB
-    subgraph RA["Parent Chain / Root Anchor"]
-        AR["Account Registry\n(user_address -> cluster_id)\nmục 5.1"]
-        CR["ChainRegistry\n(committee, NodeBlsPublicKey)"]
-        SB["SecurityBondLedger + DeadChains"]
+    subgraph RA["Parent Chain (= Root Anchor có sẵn, Q1)"]
+        AR["Account Registry\n(user_address -> cluster_id)\nmở rộng AccountManager contract có sẵn (Q14)"]
+        CR["ChainRegistry\n(1 entry = 1 node, committee size = 1, Q3)"]
+        SB["SecurityBondLedger + DeadChains\n(scope đúng theo từng node, Q13)"]
         GEr["GatewayEngine (instance của Root Anchor)\n- AttestedCommits (cache/hub)"]
     end
 
-    subgraph C1["BLS Cluster 1 (1 chainID) — mục 2.4"]
-        direction TB
-        NR1["Node Registry nội bộ\n(node_id -> pubkey, partition, sub-bond)"]
-        subgraph N1a["Node cmd/rpc A (Cluster 1)"]
-            AH1a["AccountHandler + PKS\n(custody device key, partition A)"]
-            DB1a[("LevelDB riêng — KHÔNG\nchia sẻ với Node B")]
-        end
-        subgraph N1b["Node cmd/rpc B (Cluster 1)"]
-            AH1b["AccountHandler + PKS\n(partition B, độc lập)"]
-            DB1b[("LevelDB riêng")]
-        end
-        GE1["GatewayEngine\nLocalChainID = 1\n(dùng CHUNG cho cả A lẫn B)"]
+    subgraph N1["Node cmd/rpc 1 = chainID 1 (Q13)"]
+        AH1["AccountHandler + PKS\n(custody device key)"]
+        DB1[("LevelDB riêng")]
+        GE1["GatewayEngine\nLocalChainID = 1"]
+        Snap1["Snapshot job định kỳ\n(mỗi 15' — Q12, mục 6.3)"]
     end
 
-    subgraph C2["BLS Cluster 2 (1 chainID)"]
-        AH2["Node cmd/rpc (đơn giản hoá, 1 node)"]
+    subgraph N2["Node cmd/rpc 2 = chainID 2"]
+        AH2["AccountHandler + PKS"]
         DB2[("LevelDB")]
         GE2["GatewayEngine\nLocalChainID = 2"]
     end
 
-    UserA(("User A\n(thuộc partition A)")) --> AH1a
-    AH1a <--> DB1a
-    AH1a -- "chỉ node A tự ký cho\nmessage của mình" --> GE1
-    AH1b <--> DB1b
-    AH1b -.-> GE1
-    NR1 -. "tra node_id trước khi ký/verify\n(mục 2.4, mục 8 #17)" .-> GE1
+    UserA(("User A")) --> AH1
+    AH1 <--> DB1
+    AH1 --> GE1
+    Snap1 -. "export cây account ra ngoài node\n+ publish AccountTreeRoot" .-> RA
     UserB(("User B")) --> AH2
     AH2 <--> DB2
     AH2 --> GE2
 
-    GE1 -- "RegisterChainViaStake / PostSecurityBond\n(1 bond CHUNG cho cả A+B — mục 8 #15)" --> CR
+    GE1 -- "RegisterChainViaStake / PostSecurityBond\n(bond RIÊNG cho từng node)" --> CR
     GE2 -- "RegisterChainViaStake / PostSecurityBond" --> CR
-    GE1 -- "BatchOutboundCommit + QuorumCert\n(chỉ chữ ký của node A có ý nghĩa cho message của A)" --> GEr
+    GE1 -- "BatchOutboundCommit + QuorumCert\n(chữ ký thật của đúng node 1, không suy biến)" --> GEr
     GEr -- "commitRoot + Merkle proof" --> GE2
     GE2 -. "destFailureCert (nếu revert)" .-> GE1
 
     style RA fill:#f4f4f4,stroke:#999,color:#333
-    style C1 fill:#eef6ff,stroke:#6699cc,color:#333
-    style C2 fill:#eef6ff,stroke:#6699cc,color:#333
-    style N1a fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3,color:#333
-    style N1b fill:#ffffff,stroke:#6699cc,stroke-dasharray: 3 3,color:#333
+    style N1 fill:#eef6ff,stroke:#6699cc,color:#333
+    style N2 fill:#eef6ff,stroke:#6699cc,color:#333
 ```
 
-### 12.2. Tra cứu Account/Contract → Node BLS quản lý (3 bước, mục 2.1/2.4/5.1/5.2)
+### 12.2. Tra cứu Account/Contract → Node BLS quản lý (2 bước, ĐÃ ĐƠN GIẢN theo Q13 — mục 2.1/2.4/5.1/5.2)
 
 ```mermaid
 flowchart LR
     Q["Cần gửi tới address X"] --> A{"X là User account\nhay Contract?"}
-    A -- "User account" --> B["Tra Account Registry (mục 5.1)\nuser_address -> (cluster_id, node_id)"]
+    A -- "User account" --> B["Tra Account Registry (mục 5.1)\nuser_address -> cluster_id"]
     A -- "Contract" --> C["KHÔNG tra Parent Chain\n(mục 5.2) — người gửi tự biết\nDestChainID từ trước"]
-    B --> D["Root Anchor: ChainRegistry\ncluster_id -> Committee/QuorumThreshold\n(chỉ biết đến chainID, KHÔNG biết node_id)"]
+    B --> D["Root Anchor: ChainRegistry\ncluster_id -> NodeBlsPublicKey\n(1 chainID = 1 node, Q13 — hết nhập nhằng)"]
     C --> D
-    D --> E["Node Registry NỘI BỘ của chain (mục 2.4)\nnode_id -> NodeBlsPublicKey/partition/sub-bond\n(Root Anchor không thấy bước này)"]
-    E --> F{"Chữ ký trong QuorumCert\ncó đúng của node_id sở hữu X?"}
-    F -- "Có" --> G["Tin cậy — node đúng chủ đã ký\n(mục 8 #17 đã kiểm)"]
-    F -- "Không / không rõ" --> H["⚠️ Coi như chữ ký đơn suy biến\n(mục 2.4) dù chain có N node khác đồng ký\n-> bắt buộc bond theo node ≥ hệ_số × velocity\n(mục 4 điểm 6, Q7, Q10)"]
+    D --> E["QuorumCert = chữ ký thật của\nchính node đó (committee size = 1, Q3)"]
+    E --> F["Bảo vệ chính nằm ở bất biến\nBond ≥ 2x × velocity_24h (Q7)\nkhông phải ở số lượng chữ ký"]
 ```
 
 ### 12.3. Luồng chuyển giá trị Cross-Cluster — trường hợp THÀNH CÔNG (mục 3.1, 3.2)
@@ -490,3 +479,39 @@ sequenceDiagram
     New-->>Old: Xác nhận flip xong
     Old->>New: Relay tiếp các message đã tạm giữ ở Pha 1\n(2-hop qua Reserve, hoặc trả lỗi có kiểm soát cho Sender)
 ```
+
+---
+
+## 13. Câu hỏi thường gặp (Q&A)
+
+### Q1. Làm sao tránh 1 account đăng ký cùng lúc ở 2 node/Cluster BLS khác nhau?
+
+**Vấn đề cụ thể:** luồng gốc của `cmd/rpc` (`handleSetBlsPublicKey` → lưu pending cục bộ → admin `confirm` cục bộ) là hành động **hoàn toàn local tại 1 node**. Nếu User X gửi request đăng ký tới Node A, rồi (vô tình hoặc cố ý) cũng gửi tới Node B trước khi 2 node kịp đồng bộ, **cả 2 node đều có thể tự confirm cục bộ và đều nghĩ mình sở hữu account X** — dẫn tới 2 node cùng custody/ký hộ cho 1 địa chỉ, phá vỡ hoàn toàn bất biến "1 account chỉ có đúng 1 chủ" mà mục 5.1/5.3 dựa vào.
+
+**Câu trả lời — 3 lớp chặn, không lớp nào được bỏ qua:**
+
+1. **Xác thực chủ sở hữu bằng chữ ký, không phải bằng "ai đến trước":** đăng ký chỉ hợp lệ khi có chữ ký ECDSA thật của chính `user_address` đó (`tx.FromAddress()` recover từ tx — đúng cơ chế đã có sẵn ở `cmd/rpc`). Điều này chặn được **kẻ tấn công đăng ký hộ địa chỉ người khác** (squatting), nhưng KHÔNG chặn được trường hợp chính chủ tự gửi đăng ký tới 2 node khác nhau — cần thêm lớp 2.
+2. **Quyền quyết định cuối cùng PHẢI nằm ở ghi vào Account Registry trên Parent Chain, không phải ở admin-confirm cục bộ tại node.** Vì Parent Chain xử lý transaction tuần tự (theo block), việc ghi `user_address -> cluster_id` vào Account Registry tự nhiên trở thành **điểm serialize duy nhất**: dù Node A và Node B cùng gửi transaction đăng ký X lên Parent Chain gần như đồng thời, chỉ 1 trong 2 transaction được xử lý trước và ghi thành công; transaction còn lại **bị Parent Chain từ chối on-chain** vì key đã tồn tại (đúng quy tắc "chỉ chấp nhận đăng ký lần đầu" ở mục 5.1).
+3. **Node không được coi "admin đã confirm cục bộ" là đã sở hữu chắc chắn** — phải đợi xác nhận ngược từ Parent Chain rằng chính `node_id` của mình đứng tên trong Account Registry rồi mới thực sự bắt đầu custody/ký hộ cho account đó. Nếu Parent Chain từ chối (vì node kia đã đăng ký trước), node phải **rollback trạng thái pending/confirmed cục bộ** và báo lỗi rõ ràng cho user ("account đã đăng ký ở Cluster/Node khác"), không được âm thầm giữ account đó ở trạng thái "coi như của mình" — nếu không sẽ tạo đúng kịch bản split-brain đã cảnh báo ở mục 8.
+
+> Đây là một sửa đổi thật với luồng gốc `cmd/rpc` (turn đầu tiên): `handleConfirmAccountWithoutSign` hiện tại đánh dấu `MarkAccountConfirmed` **ngay sau khi gửi transaction thành công** (`SendRawTransactionBinary` trả về txHash), chưa đợi xác nhận riêng rằng chính Account Registry đã ghi nhận đúng node mình — cần bổ sung bước chờ/xác nhận này khi tích hợp vào kiến trúc BLS Cluster.
+
+### Q2. 1 chain có bắt buộc phải gồm nhiều node `cmd/rpc` không, hay nên để 1 node = 1 chainID?
+
+→ **Đã chốt: 1 node = 1 chainID riêng** (mục 10.1 Q13) — loại bỏ 3/4 vấn đề mục 8 #15-#17 bằng cách xoá bỏ tiền đề gây ra chúng, thay vì vá từng lớp riêng lẻ.
+
+### Q3. Vì sao không cần 1 Contract Registry toàn cục trên Parent Chain như Account?
+
+→ Vì bên gửi (`Outbound`) đã luôn phải tự chỉ định `DestChainID` tường minh, và bước kiểm tra tồn tại cục bộ tại đích (đã có sẵn) là đủ — xem phân tích đầy đủ ở mục 5.2.
+
+### Q4. Chain có nhiều node cùng ký `QuorumCert` thì có an toàn hơn chain 1 node không?
+
+→ Không tự động an toàn hơn nếu các node không chia sẻ state — mỗi message thực tế vẫn chỉ được đảm bảo bởi đúng 1 chữ ký có ý nghĩa (của node sở hữu account đó); các node khác đồng ký chỉ là "ký khống theo niềm tin". Xem phân tích đầy đủ ở mục 2.4 và vấn đề #17 (mục 8).
+
+### Q5. Ngay bây giờ (chưa xây gì thêm), nếu 1 node chết đột ngột, user có tự rút lại được tài sản qua `ClaimDeadChainBalance` không?
+
+→ **Không.** `ChainRegistry.AccountTreeRoot` mặc định chưa từng được publish trong vận hành bình thường, và dữ liệu để tính Merkle proof chỉ tồn tại trên chính node đã chết. Phải xây thêm Snapshot & Archival Pipeline trước — xem mục 6.3 và vấn đề #18 (mục 8, Critical).
+
+### Q6. Vì sao tài liệu ban đầu gọi đây là "BLS Aggregation" nhưng bản hiện tại lại dùng `QuorumCert` kiểu multisig thông thường?
+
+→ "BLS Aggregation" theo đúng nghĩa mật mã học (gộp nhiều chữ ký của nhiều signer khác nhau thành 1 chữ ký ngắn) chỉ có giá trị khi có NHIỀU signer độc lập thật sự xác minh cùng 1 nội dung trước khi ký — đúng như `QuorumCert` đang dùng. Vấn đề #1 (mục 8) chỉ ra bản CCM đầu tiên dùng "1 signer đại diện cả pool" — không cần đến BLS aggregation thật để làm việc đó, dùng chữ ký đơn thường là đủ và không gây hiểu nhầm về mức an toàn.
