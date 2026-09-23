@@ -49,13 +49,20 @@ Không đổi so với bản trước — vẫn là quyết định nền tảng
 
 ⚠️ **Hiểu đúng — mô hình mới KHÔNG loại bỏ hoàn toàn lỗ hổng gốc, nó THU HẸP phạm vi:** Parent Chain "không lưu state ứng dụng" nên vẫn không thể tự verify 1 node có thật sự sở hữu giá trị nó khai báo hay không — lỗ hổng này bị đẩy lùi về đúng **1 điểm duy nhất: bước Nạp quỹ** (mục 3.2), thay vì tồn tại ở MỌI giao dịch cross-node như mô hình cũ. Đây là cải tiến thật (bề mặt tấn công thu nhỏ, tần suất thấp hơn, dễ giám sát tập trung hơn), không phải loại bỏ hoàn toàn.
 
-### 3.2. Nạp quỹ (Deposit) — nơi duy nhất còn cần "tin cậy có kiểm chứng"
+### 3.2. Nạp quỹ vào Float Account — 2 đường khác hẳn nhau, không được gộp chung
 
-Node muốn có khả năng gửi giá trị cross-node phải nạp quỹ trước:
+⚠️ **Sửa lại so với bản trước — thiếu 1 đường nạp quỹ khiến node MỚI không có cách nào bootstrap vốn ban đầu.** Có 2 loại nạp quỹ, rủi ro và cơ chế xác minh khác hẳn nhau:
 
-1. Node tự ký xác nhận "tôi nạp X vào Float Account của tôi", kèm căn cứ: tham chiếu snapshot local-balance mới nhất đã publish (mục 6.3) — **không được nạp vượt quá số dư đã chứng minh qua snapshot trừ đi phần đã nạp trước đó**.
+**A. Nạp trực tiếp từ ví (Operator Funding) — KHÔNG cần "tin cậy có kiểm chứng", chỉ là chuyển khoản thường:**
+Bất kỳ ví nào có số dư thật trên Parent Chain (operator của node, nhà đầu tư, hoặc chính node tự chuyển tiếp) đều có thể chuyển thẳng vào `NodeFloatAccount[node]`, **y hệt 1 giao dịch ví-sang-ví bình thường** — Parent Chain chỉ cần verify ví nguồn có đủ số dư thật (bình thường như mọi transaction), **không cần snapshot, không cần bond-vs-deposit, không có gì để "khai khống"** vì đây là tiền đã thật sự tồn tại trên chính Parent Chain từ trước, không phải lời tuyên bố về state cục bộ ở nơi khác.
+- **Đây là đường DUY NHẤT để 1 node MỚI có vốn khởi đầu** — 1 node vừa đăng ký chưa có user nào, snapshot local-balance = 0, nên đường B (dưới đây) không dùng được cho tới khi node đã hoạt động 1 thời gian và tích luỹ số dư local thật.
+- **Giải quyết luôn Q5 (vốn Reserve ban đầu):** dưới mô hình Float Account, **không còn khái niệm Parent Chain phải khởi tạo/quy hoạch 1 "pool Reserve" chia cho N node** như mô hình cũ (`RegisterChainViaStake` từng `TransferAllocation` từ Reserve — tàn dư của `PerChainAllocation`-làm-trần, không còn khớp với Float Account). Ai muốn vận hành/đầu tư vào 1 node chỉ cần chuyển tiền thật vào Float Account của node đó, đúng như chuyển khoản cho 1 ví bất kỳ — không cần đội lập kế hoạch cấp vốn genesis nữa. **Q5 coi như đã đóng** (mục 9.1).
+
+**B. Nạp từ số dư local đã tích luỹ (Snapshot-backed Deposit) — vẫn cần "tin cậy có kiểm chứng" như bản trước:**
+Sau khi node đã hoạt động và có user với số dư local thật, muốn CHUYỂN một phần số dư đó thành quỹ liên-node (thay vì chỉ nằm im ở local), node mới cần đường này:
+1. Node tự ký xác nhận "tôi nạp X vào Float Account", kèm căn cứ: tham chiếu snapshot local-balance mới nhất đã publish (mục 6.3) — **không được nạp vượt quá số dư đã chứng minh qua snapshot trừ đi phần đã nạp trước đó**.
 2. Parent Chain verify chữ ký (committee = 1, chính node đó — Q3) + hard-cap theo bất biến Bond-vs-Deposit (mục 4.1) + đối chiếu căn cứ snapshot, rồi cộng thật vào `NodeFloatAccount[node]`.
-3. Đây là thao tác **định kỳ, tần suất thấp** (node tự quyết khi nào cần nạp thêm), khác hẳn việc phải tin từng giao dịch cross-node riêng lẻ như mô hình cũ.
+3. Lý do vẫn cần kiểm chứng ở đường này (khác đường A): số dư local là state ngoài tầm nhìn của Parent Chain (mục 2.1), node CÓ THỂ khai khống — đây vẫn là điểm duy nhất trong toàn hệ thống còn giữ nguyên rủi ro "tin cậy chưa kiểm chứng được hoàn toàn" (mục 3.1).
 
 ### 3.3. Chuyển giá trị cross-node (Transfer) — luồng thành công
 
@@ -137,7 +144,7 @@ Mô hình cũ cần `checkAndRecordVelocity` áp cho mọi `AttestCommit` vì m�
 - **Đăng ký 1 lần, chống ghi đè:** chỉ chấp nhận lần đầu, hoặc cần chữ ký của node hiện tại để chuyển nhượng (Migration, mục 5.3).
 - **Chặn double-registration:** cơ chế chặn nằm ở chính write vào Account Registry trên Parent Chain (transaction xử lý tuần tự = điểm serialize duy nhất) — không coi admin-confirm cục bộ tại node là đã chốt quyền sở hữu (chi tiết đầy đủ mục 12 Q1).
 - **An toàn trước DoS:** đăng ký qua `handleSetBlsPublicKey` + admin confirm (2 bước, có gate) — không permissionless.
-- **Vốn khởi tạo khi đăng ký node mới:** `RegisterChainViaStake` rút từ pool Reserve (không mint tự do) — cần kế hoạch cấp vốn Reserve cho N node dự kiến (Q5, còn mở).
+- **Vốn khởi tạo khi đăng ký node mới (đã đóng — Q5):** `RegisterChainViaStake` dùng đúng số tiền thật operator/nhà đầu tư tự bỏ ra từ ví của họ (bond đăng ký) — **không còn rút từ 1 "pool Reserve" do Parent Chain khởi tạo genesis** như tàn dư của mô hình `PerChainAllocation`-làm-trần cũ. Vốn khởi đầu cho Float Account của node cũng vậy — nạp trực tiếp từ ví (mục 3.2 đường A). Không cần đội lập kế hoạch cấp vốn Reserve cho N node nữa.
 
 ### 5.2. Contract Registry — KHÔNG dùng registry toàn cục
 
@@ -239,10 +246,10 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 | Q(velocity Transfer outflow) | Ngưỡng circuit-breaker chống lộ khoá cho Transfer (mục 4.4)? | **Mặc định khởi điểm 20%/24h**, giữ nguyên tinh thần bản trước nhưng đổi mục đích — cần đội xác nhận lại theo traffic thật, không chặn triển khai ban đầu | mục 4.4, mục 8 #14 |
 | Q(timeout Reclaim) | Bao lâu thì Node 1 được phép Reclaim nếu Node 2 chưa `Claimed`? | Công thức tương tự `TimeoutTimestamp` cũ (mục 6.2 bản trước) — chưa có số tuyệt đối, cần đo chu kỳ xử lý bình thường thật trước khi chốt | mục 3.6, mục 8 #15 |
 | Q(RecoveryCommittee) | Ai ngồi trong đó, bao nhiêu người, ngưỡng quorum? | **CÒN MỞ THẬT SỰ** — quyết định tổ chức/nhân sự, không tự đề xuất được. **Chặn cứng go-live**: code không chạy được nếu thiếu config này | mục 8 #8 |
-| Q5 | Vốn Reserve ban đầu cho N node? | **CÒN MỞ** — cần số liệu tài chính thật | mục 5.1 |
+| Q5 | Vốn Reserve ban đầu cho N node? | **✅ ĐÃ ĐÓNG — không còn áp dụng.** Không cần Parent Chain khởi tạo/quy hoạch pool Reserve nữa — node lấy vốn khởi đầu trực tiếp từ ví operator/nhà đầu tư (mục 3.2 đường A), đúng bản chất "chuyển khoản ví-sang-ví, chuyển bao nhiêu thì node có bấy nhiêu" | mục 3.2, mục 5.1 |
 | Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | **CÒN MỞ** — khẩu vị rủi ro kinh doanh thật | mục 2.3 |
 
-**3 mục còn mở thật sự, không tự đề xuất số được:** `RecoveryCommittee` thành viên, Q5 (vốn Reserve), Q9-rủi-ro (custody risk acceptance).
+**2 mục còn mở thật sự, không tự đề xuất số được:** `RecoveryCommittee` thành viên, Q9-rủi-ro (custody risk acceptance). (Q5 đã đóng — xem trên.)
 
 ### 9.2. Vận hành
 
@@ -255,7 +262,7 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 ### 9.3. Checklist bảo mật trước khi go-live
 
 - [ ] #1–#15 ở mục 8 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #7 (Snapshot Pipeline cho Trường hợp B), #8 (`RecoveryCommittee`), và #14 (velocity-limit chống lộ khoá — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận).
-- [ ] `RecoveryCommittee`, Q5, Q9-rủi-ro đã có quyết định bằng văn bản từ đội — không được bỏ qua.
+- [ ] `RecoveryCommittee`, Q9-rủi-ro đã có quyết định bằng văn bản từ đội — không được bỏ qua. (Q5 đã đóng, không còn cần quyết định gì thêm.)
 - [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết với Float Account còn dư → rút lại được ngay không cần Merkle proof (Trường hợp A), (4) Node chết với local balance chưa nạp quỹ → chạy đúng pipeline Snapshot+Velocity+Delay 72h (Trường hợp B), (5) Migration có message đến giữa lúc Freeze, (6) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (7) Float không đủ → user thấy đúng thông báo "chờ nạp quỹ", KHÔNG bị trừ tiền cục bộ (#11), (8) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#12), (9) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#14), (10) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#15).
 - [ ] Đã xác nhận `Σ NodeFloatAccount + Σ local-chưa-nạp == genesis_total_supply` được kiểm tra tự động định kỳ.
 - [ ] Đã xác nhận bằng số liệu thật: `SecurityBond` mỗi node ≥ hệ số an toàn × giới hạn nạp quỹ mỗi chu kỳ của node đó.
@@ -264,7 +271,7 @@ Không đổi: giao dịch nội bộ không bị ảnh hưởng. Giao dịch cr
 
 ## 10. Lộ trình triển khai
 
-1. **Chốt 3 mục còn mở** (`RecoveryCommittee`, Q5, Q9-rủi-ro) trước khi viết code.
+1. **Chốt 2 mục còn mở** (`RecoveryCommittee`, Q9-rủi-ro) trước khi viết code.
 2. **Xây `NodeFloatAccount` trên Parent Chain** — cấu trúc dữ liệu mới, thay thế vai trò "trần phân bổ" của `PerChainAllocation` cho mục đích cross-node.
 3. **Xây luồng Nạp quỹ (Deposit)** với căn cứ snapshot + bond-vs-deposit (mục 3.2, 4.1).
 4. **Xây luồng Transfer atomic** (mục 3.3) thay thế `Outbound`/`BatchOutboundCommit`/`ClaimMessage` 3 bước cho phần giá trị — giữ nguyên cơ chế message/payload cho phần gọi Contract.
