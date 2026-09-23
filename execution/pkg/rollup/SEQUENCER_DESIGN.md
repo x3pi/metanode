@@ -761,5 +761,3 @@ Tài liệu trước giờ chưa bàn tới mô hình doanh thu. Đây là quy�
 | 4 | **Phí ưu tiên xử lý checkpoint** | ❌ Chưa có, chỉ đáng cân nhắc khi hệ thống lớn | Giống phí ưu tiên gas ở các chain đông đúc — chỉ thực sự có ý nghĩa khi block space của Root Anchor bắt đầu khan hiếm (nhiều node cùng cạnh tranh), chưa cần thiết ở quy mô ban đầu. |
 
 **Khuyến nghị:** bắt đầu với #1 (đã có sẵn, không tốn công) là đủ cho giai đoạn ra mắt; cân nhắc #2 khi hệ thống có traffic thật để biết mức phí đăng ký hợp lý mà không đẩy node bỏ đi; #3 chỉ có ý nghĩa nếu quyết định vận hành archival tập trung (một trong 2 nhánh mở của Q12); #4 mang tính đầu cơ, không cần tính đến ở giai đoạn này.
-
-> Không liệt kê "cắt % `Tip`" làm nguồn thu — kiến trúc này không có relayer bên thứ 3 (`ClaimMessage` luôn do chính node đích tự gọi cho mình, mục 3.1 bước 3), nên không có dòng tiền thật nào để cắt. Nếu sau này đội muốn có relayer bên thứ 3 thật (ví dụ tăng độ sẵn sàng khi node bận), đó là 1 thay đổi kiến trúc riêng, ngoài phạm vi tài liệu này.
