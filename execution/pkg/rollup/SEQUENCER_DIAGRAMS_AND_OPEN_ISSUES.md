@@ -1,6 +1,6 @@
 # Sơ đồ Luồng & Vấn đề Còn Mở — BLS Node / Node Float Account
 
-> Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chỉ chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính và (2) danh sách vấn đề/quyết định còn mở — không lặp lại nội dung thiết kế, chỉ tham chiếu ngược bằng số mục (ví dụ "mục 3.3") sang `SEQUENCER_DESIGN.md`. Các trích dẫn dạng `#N` (ví dụ `#12`) trong cả 2 file đều trỏ vào đúng bảng "1. Danh sách vấn đề" ở file này.
+> Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính (Phần A) và (2) chỉ những quyết định THẬT SỰ còn chặn việc bắt đầu code (Phần B.1) — mọi vấn đề đã có fix thiết kế sẵn chỉ còn 1 dòng index gọn ở Phần B.2 để `#N` còn tra được, chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`.
 
 ---
 
@@ -188,42 +188,35 @@ sequenceDiagram
 
 ---
 
-## Phần B — Vấn đề & Quyết định còn mở
+## Phần B — Quyết định CẦN CHỐT để triển khai
 
-### B.1. Danh sách vấn đề logic/bảo mật còn hiệu lực
+> Chỉ giữ lại những gì thật sự chặn việc bắt đầu viết code. Toàn bộ vấn đề đã có fix thiết kế sẵn (không cần quyết định gì thêm) đã gộp thành 1 bảng index gọn ở B.2 — chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`, không lặp lại ở đây.
 
-| # | Vấn đề | Rủi ro cụ thể | Xử lý |
-|---|---|---|---|
-| 1 | Committee mỗi node = 1 (chính nó) — không có redundancy signer thật | `QuorumCert` về bản chất là chữ ký đơn | Phòng thủ không nằm ở số lượng chữ ký mà ở giới hạn thiệt hại: velocity-limit cho Transfer OUTFLOW khi khoá bị lộ (mục 4.4) + Snapshot/Delay 72h khi node chết hẳn (mục 6.3) |
-| 2 | Account Registry cho phép ghi đè mapping tuỳ ý nếu không kiểm soát | Report cũ/replay có thể "cướp" account sang node khác | Chỉ chấp nhận đăng ký lần đầu hoặc chữ ký của node hiện tại để chuyển nhượng (mục 5.1, 5.3) |
-| 3 | Contract tự sinh (deploy trong node) không thể đăng ký registry toàn cục | DoS/state-bloat lên Parent Chain nếu bắt đăng ký như Account | Bỏ hẳn Contract Registry toàn cục; dùng `chainID` đích tường minh từ người gửi + kiểm tra tồn tại cục bộ (mục 5.2) |
-| 4 | Chuyển nhượng account (Migration) không atomic nếu không thiết kế kỹ — **có thể không phát sinh nếu Migration (mục 5.3) hoãn triển khai** | Message đến đúng lúc đang chuyển giao có thể bị kẹt/mất | Giao thức 3 pha Freeze → Export & Attest → Import & flip con trỏ (mục 5.3) |
-| 5 | `GasFee` bị hoàn nhầm khi giao dịch cross-node thất bại | Spam-revert trở thành DoS miễn phí lên node đích | Transfer hoàn tiền (mục 3.4) CHỈ hoàn `Value`, không hoàn `GasFee` |
-| 6 | Node chết hẳn — Parent Chain biết TỔNG tiền thật nhưng không biết PHÂN BỔ cho user nào bao nhiêu | Node có thể khai khống PHÂN BỔ (gán hết cho ví nó kiểm soát) dù tổng đã chắc chắn đúng | Snapshot & Archival Pipeline + chống DA-Withholding + Withdrawal Delay 72h — bảo vệ đúng rủi ro phân bổ (mục 6.3) |
-| 7 | **[CÒN MỞ]** `RecoveryCommittee` — thực thể duy nhất có quyền tuyên bố node chết, tịch thu bond, thay khoá ký bất kỳ node nào — chưa được định nghĩa | Lộ/compromise `RecoveryCommittee` ảnh hưởng TOÀN hệ thống, nặng hơn lộ 1 node đơn lẻ | Cần đội xác định thành viên, ngưỡng quorum, quy trình bảo vệ khoá — quyết định tổ chức thật, không tự đề xuất được (mục B.2, còn mở) |
-| 8 | Custody 100% device key (PKS) — Node bị hack có thể ký giao dịch nội bộ giả | Mất tiền không để lại bằng chứng mật mã, ngoài phạm vi bảo vệ của Float Account (tiền không rời node) | Không giải quyết triệt để bằng kỹ thuật — giảm thiểu bằng delay/anomaly-detection/non-custodial tuỳ chọn (mục 2.3); phục hồi thật qua `UpdateCommitteeWithRecoveryCert` (mục 6.2) |
-| 9 | Reverse Transfer (hoàn tiền, mục 3.4) không có cơ chế chống gửi 2 lần | Crash giữa chừng rồi retry có thể gửi hoàn tiền 2 lần, tự bào mòn quỹ của chính node đang hoàn tiền | Đánh dấu `MessageID` = `Claimed` trên Parent Chain TRƯỚC khi gửi hoàn tiền, kiểm tra lại trạng thái này trước khi retry (mục 3.3 bước 7, mục 3.4 bước 2) |
-| 10 | Node đích không có cơ chế chống xử lý trùng 1 credit đến | Node đích có thể credit local 2 lần cho cùng 1 `MessageID` nếu logic theo dõi/watcher bị lỗi hoặc quét lại block cũ | Node đích tự giữ bảng "MessageID đã xử lý", kiểm tra trước khi làm bất cứ gì (mục 3.3 bước 5) |
-| 11 | **[NGHIÊM TRỌNG]** Không có velocity-limit cho Transfer, dù đúng là không cần để chống mint sai — bỏ sót vai trò giới hạn thiệt hại khi KHOÁ KÝ node bị lộ | Node bị lộ khoá có thể bị rút sạch TOÀN BỘ Float Account trong 1 giao dịch tức thời — nặng hơn cả #8 (custody local) vì FA ≈ tổng tiền của MỌI user node đó | Tái áp dụng velocity-limit cho Transfer OUTFLOW — circuit-breaker chống lộ khoá, không phải hard-cap chống gian lận (mục 4.4) |
-| 12 | Không có timeout nếu node đích còn sống nhưng kẹt/chậm xử lý 1 credit đã nhận (khác node chết hẳn, không cần `RecoveryCommittee`) | Tiền nằm im ở Float Account của đích, User A gốc không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian | Cơ chế Reclaim: quá timeout mà `MessageID` chưa `Claimed`, Node 1 tự reclaim thẳng từ Parent Chain không cần Node 2 hợp tác — có chặn race với việc Node 2 vừa kịp `Claimed` (mục 3.6) |
-| 13 | Node đích không có bước phục hồi nếu crash ĐÚNG GIỮA lúc đánh dấu `Claimed` (đã gửi lên Parent Chain) và lúc credit local cho B (chưa kịp làm) | Restart mà không kiểm tra đúng trạng thái này có thể credit local 2 lần, hoặc bỏ sót vĩnh viễn | Node đích cần state machine cục bộ riêng: `MARKED_CLAIMED_PENDING_CREDIT` → `CREDITED` — khi restart, nếu thấy `Claimed` trên Parent Chain nhưng local chưa ghi `CREDITED`, phải tiếp tục credit chứ không được re-mark `Claimed` cũng không được bỏ qua (mục 13.3) |
-| 14 | Velocity-limit chống lộ khoá cho Transfer outflow (#11/mục 4.4) chưa nói rõ có loại trừ Hoàn tiền (mục 3.4)/Reclaim (mục 3.6) hay không | Nếu áp chung 1 ngưỡng cho cả 2 loại, 1 node đang bị tấn công spam-revert (#5) có thể bị chính circuit-breaker này chặn luôn cả việc hoàn tiền hợp lệ cho user vô tội đang chờ — DoS tầng 2 do chính cơ chế phòng thủ gây ra | Loại trừ tường minh: ngưỡng chỉ áp cho Transfer gửi MỚI (mục 3.3); Hoàn tiền/Reclaim luôn được miễn vì chỉ trả lại đúng giá trị đã thực nhận trước đó, không phải bề mặt tấn công mới (mục 4.4) |
-| 15 | **[CÒN MỞ]** Không có cơ chế nào để user report "node thực thi sai" ở cấp giao dịch cá nhân — `RecoveryCommittee`/Snapshot Pipeline chỉ hoạt động cấp toàn-chain (node chết/double-sign), không có nhánh cho node vẫn sống nhưng tính sai/censorship/rollback 1 giao dịch | User bị hại không có kênh nào để khiếu nại có bằng chứng, cũng không có bằng chứng chống chối bỏ (response giao dịch hiện không được ký) | Signed Receipt (bắt buộc, nền tảng) + kênh report vận hành qua `RecoveryCommittee` (Hướng A) làm baseline trước go-live; fraud-proof đầy đủ qua publish tx log (Hướng B) để dành roadmap dài hạn — chi tiết đầy đủ + đánh đổi từng hướng ở mục 15 (`SEQUENCER_DESIGN.md`), **cần đội chọn hướng, không tự đề xuất được** |
-| 16 | **[CÒN MỞ, MỚI]** Chưa xác nhận `SlashOnEquivocation` (permissionless, dựa trên `commitRoot` của cơ chế `BatchOutboundCommit` cũ) có bắt được double-sign `AccountTreeRoot` — artifact MỚI của thiết kế này — hay không (mục 4.1, mục 6.2) | Nếu không, node có thể double-sign `AccountTreeRoot` (2 bản phân bổ khác nhau cho cùng 1 chu kỳ) mà không bị phạt gì — lỗ hổng ngay tại đúng cơ chế được kỳ vọng bắt gian lận phân bổ | Cần xác nhận khi implement: hoặc wire `AccountTreeRoot` qua đúng con đường tạo `commitRoot` tương thích, hoặc xây cơ chế equivocation-detection riêng cho nó — không mặc định thừa hưởng miễn phí từ code cũ |
+### B.1. 5 mục chặn triển khai — cần chốt trước khi viết dòng code đầu tiên
 
-### B.2. Decision Log
+| # | Câu hỏi | Loại | Khuyến nghị | Trạng thái |
+|---|---|---|---|---|
+| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | Không tự đề xuất được | **CÒN MỞ — chặn cứng**, code không chạy được nếu thiếu config này (#7) |
+| Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | Kinh doanh | Không tự đề xuất được | **CÒN MỞ** (mục 2.3) |
+| Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ)? | Kỹ thuật + kinh doanh | **Hướng A** làm baseline (mục 15.5, `SEQUENCER_DESIGN.md`) | Cần đội ký xác nhận chính thức (#15) |
+| Q(Migration scope) | Có triển khai Migration Account (mục 5.3) ở bản đầu không? | Phạm vi | **Hoãn** — không nằm trên đường an toàn tiền | Cần đội xác nhận (#4) |
+| Q(SlashOnEquivocation) | `SlashOnEquivocation` có bắt double-sign `AccountTreeRoot` không? | Kỹ thuật | Cần đọc thêm code/thiết kế cách wire trước khi code Snapshot | **CÒN MỞ** (#16) |
 
-| # | Câu hỏi | Quyết định | Căn cứ |
-|---|---|---|---|
-| Q(mô hình giá trị) | Chuyển hẳn sang Node Float Account hay giữ mô hình bond cũ? | **Đã chốt: chuyển hẳn**, phạm vi giới hạn ở quỹ liên-node (giao dịch nội bộ không đổi) | mục 3 |
-| Q13 | 1 node = 1 chainID? | **Đã chốt** | mục 2.4 |
-| Q3 | Committee mỗi node bao nhiêu validator? | **Chấp nhận = 1** (chính node) | mục 2.4 |
-| Q(tần suất snapshot) | Bao nhiêu lâu 1 lần? | **Mặc định 15 phút**, có thể tăng sau khi đo chi phí thật — Snapshot phục vụ chứng minh PHÂN BỔ (mục 6.3) | mục 6.3 |
-| Q(velocity Transfer outflow) | Ngưỡng circuit-breaker chống lộ khoá cho Transfer (mục 4.4)? | **Mặc định khởi điểm 20%/24h** — cần đội xác nhận lại theo traffic thật, không chặn triển khai ban đầu | mục 4.4, #11 |
-| Q(timeout Reclaim) | Bao lâu thì Node 1 được phép Reclaim nếu Node 2 chưa `Claimed`? | Chưa có số tuyệt đối, cần đo chu kỳ xử lý bình thường thật trước khi chốt | mục 3.6, #12 |
-| Q(RecoveryCommittee) | Ai ngồi trong đó, bao nhiêu người, ngưỡng quorum? | **CÒN MỞ THẬT SỰ** — quyết định tổ chức/nhân sự, không tự đề xuất được. **Chặn cứng go-live**: code không chạy được nếu thiếu config này | #7 |
-| Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | **CÒN MỞ** — khẩu vị rủi ro kinh doanh thật | mục 2.3 |
-| Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ) cho #15? | **CÒN MỞ THẬT SỰ** — khuyến nghị Hướng A làm baseline (mục 15.5), nhưng cần đội chốt chính thức trước khi viết code | mục 15, #15 |
-| Q(SlashOnEquivocation/AccountTreeRoot) | `SlashOnEquivocation` có bắt double-sign `AccountTreeRoot` không? | **CÒN MỞ, kỹ thuật** — cần xác nhận trong code khi implement, không phải quyết định business | mục 4.1, mục 6.2, #16 |
+### B.2. Index vấn đề đã có fix thiết kế (không cần quyết định — chỉ để `#N` còn tra được)
 
-**4 mục còn mở thật sự, không tự đề xuất số được (3 mục đầu là quyết định tổ chức/kinh doanh, mục cuối là việc kỹ thuật cần xác nhận khi code):** `RecoveryCommittee` thành viên, Q9-rủi-ro (custody risk acceptance), Q(report node sai) — hướng A hay B, và Q(SlashOnEquivocation/AccountTreeRoot).
+| # | Tên ngắn | Chi tiết đầy đủ |
+|---|---|---|
+| 1 | Committee=1, không redundancy signer | `SEQUENCER_DESIGN.md` mục 4.4, 6.3 |
+| 2 | Account Registry chống ghi đè | mục 5.1, 5.3 |
+| 3 | Không dùng Contract Registry toàn cục | mục 5.2 |
+| 5 | `GasFee` không hoàn khi thất bại | mục 3.4 |
+| 6 | Node chết — TỔNG biết, PHÂN BỔ cần Snapshot | mục 6.3 |
+| 8 | Custody 100% device key — giảm thiểu + phục hồi qua `RecoveryCommittee` | mục 2.3, 6.2 |
+| 9 | Reverse Transfer chống gửi hoàn 2 lần | mục 3.4 |
+| 10 | Chống credit trùng ở node đích | mục 3.3 |
+| 11 | Velocity-limit Transfer OUTFLOW chống lộ khoá | mục 4.4 |
+| 12 | Timeout & Reclaim khi node đích kẹt (không chết) | mục 3.6 |
+| 13 | Crash-recovery giữa `Claimed` và credit local | mục 13.3 |
+| 14 | Velocity-limit loại trừ Hoàn tiền/Reclaim | mục 4.4 |
+
+**Tham số đã có default, không chặn code, chỉ cần tinh chỉnh sau khi đo traffic thật:** tần suất snapshot (15 phút), ngưỡng velocity outflow (20%/24h), timeout Reclaim (chưa có số tuyệt đối — cần đo chu kỳ xử lý bình thường trước khi chốt số cứng).

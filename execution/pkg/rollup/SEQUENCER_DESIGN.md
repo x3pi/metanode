@@ -210,7 +210,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ## 8. Danh sách vấn đề logic/bảo mật còn hiệu lực
 
-> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — bảng đầy đủ #1-16. Mọi trích dẫn `#N` trong tài liệu này (ví dụ `#12`, `mục 4.4 #11`) trỏ vào đúng bảng đó.
+> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.2) — index #1-16 (đã có fix thiết kế). Mọi trích dẫn `#N` trong tài liệu này (ví dụ `#12`, `mục 4.4 #11`) trỏ vào đúng bảng đó. 5 vấn đề THẬT SỰ còn chặn triển khai được gộp riêng ở mục B.1 (cùng file).
 
 ---
 
@@ -218,7 +218,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 9.1. Decision Log
 
-> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.2) — bảng đầy đủ, gồm 4 mục còn mở thật sự (`RecoveryCommittee` thành viên, Q9-rủi-ro, Q report node sai hướng A/B, Q SlashOnEquivocation/AccountTreeRoot).
+> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — 5 mục CẦN CHỐT trước khi viết code: `RecoveryCommittee` thành viên, Q9-rủi-ro, Q report node sai (hướng A/B), Q Migration scope, Q SlashOnEquivocation/AccountTreeRoot.
 
 ### 9.2. Vận hành
 
@@ -230,7 +230,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 9.3. Checklist bảo mật trước khi go-live
 
-- [ ] #1–#16 ở `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1 đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), #15 (cơ chế report node sai — mục 15, chưa có hướng chốt), và #16 (SlashOnEquivocation/AccountTreeRoot, chưa xác nhận).
+- [ ] #1–#16 (mục B.1 + B.2 của `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md`) đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), #15 (cơ chế report node sai — mục 15, chưa có hướng chốt), và #16 (SlashOnEquivocation/AccountTreeRoot, chưa xác nhận).
 - [ ] `RecoveryCommittee`, Q9-rủi-ro, Q(report node sai) đã có quyết định bằng văn bản từ đội — không được bỏ qua.
 - [ ] Signed Receipt (mục 15.2) đã triển khai cho MỌI giao dịch (nội bộ lẫn cross-node) trước go-live — đây là điều kiện nền tảng bắt buộc dù chọn Hướng A hay B, không phải tính năng tuỳ chọn.
 - [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết → Parent Chain biết TỔNG số thật ngay (mục 4.3, tự động), Archival Service chạy đúng pipeline Snapshot+Delay 72h để chứng minh PHÂN BỔ cho user (mục 6.3), (4) Migration có message đến giữa lúc Freeze — **CHỈ áp dụng nếu Migration (mục 5.3) thật sự được triển khai ở bản đầu, có thể bỏ qua nếu hoãn**, (5) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (6) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#9), (7) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#11), (8) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#12), (9) crash Node 2 đúng giữa lúc `Claimed` và credit local, khởi động lại → xác nhận tự hoàn tất credit, không credit trùng, không bỏ sót (#13), (10) Node 2 chết hẳn khi đang có Transfer tới nhưng chưa `Claimed` → xác nhận dùng đúng cơ chế Reclaim (mục 3.6), không phải Transfer ngược (mục 3.4, vốn cần Node 2 sống), (11) giả lập 1 node vừa bị chạm ngưỡng velocity outflow (#11) vừa cần hoàn tiền hợp lệ cho user khác → xác nhận hoàn tiền vẫn đi qua bình thường, không bị chặn nhầm bởi circuit-breaker (#14).
