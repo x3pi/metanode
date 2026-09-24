@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1.0",
+  "private_key": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b",
+  "parent_connection_address": "0.0.0.0:4200",
+  "parent_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
+  "chain_id": 991,
+  "parent_connection_type:": "client",
+  "owner_file_storage_address": "0xC6E6474A8DEAD25B0e75b1aeA5d35FA19f69588a",
+  "pk_admin_file_storage": "87d931eaa2f76709f2615586e0d560ca9b80f247c9cc431e197ba3e7167db623",
+  "bls_admin_storage": "2b3aa0f620d2d73c046cd93eb64f2eb687a95b22e278500aa251c8c9dda1203b"
+}
