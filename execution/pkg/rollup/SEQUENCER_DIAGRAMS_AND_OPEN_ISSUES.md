@@ -1,6 +1,6 @@
 # Sơ đồ Luồng & Vấn đề Còn Mở — BLS Node / Node Float Account
 
-> Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính (Phần A) và (2) chỉ những quyết định THẬT SỰ còn chặn việc bắt đầu code (Phần B.1) — mọi vấn đề đã có fix thiết kế sẵn chỉ còn 1 dòng index gọn ở Phần B.2 để `#N` còn tra được, chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`.
+> Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính (Phần A) và (2) 5 quyết định từng chặn việc bắt đầu code — nay đã chốt 5/5 (2026-09-24, Phần B.1) — mọi vấn đề đã có fix thiết kế sẵn chỉ còn 1 dòng index gọn ở Phần B.2 để `#N` còn tra được, chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`.
 
 ---
 
@@ -15,7 +15,7 @@ flowchart TB
         CR["ChainRegistry\n1 entry = 1 node"]
         FA["NodeFloatAccount\nchainID -> balance THẬT\n(bất biến = Σ balance user, mục 3.2)"]
         SB["SecurityBondLedger\n(bảo vệ đăng ký/gian lận phân bổ, mục 4.1)"]
-        RC["RecoveryCommittee\n(chưa định nghĩa — #7)"]
+        RC["RecoveryCommittee\n(dev/operator tự ký tạm — đã chốt #7)"]
     end
 
     subgraph N1["Node 1 = chainID 1"]
