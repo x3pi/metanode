@@ -20,6 +20,8 @@ use crate::{
     error::{ConsensusError, ConsensusResult},
     BlockAPI as _,
 };
+#[cfg(test)]
+use crate::commit::{CommitAPI as _, CommitDigest, CommitIndex};
 use async_trait::async_trait;
 use consensus_types::block::{BlockRef, Round};
 use parking_lot::RwLock;
@@ -405,10 +407,18 @@ pub(crate) struct MockCoreThreadDispatcher {
     add_blocks: parking_lot::Mutex<Vec<VerifiedBlock>>,
     missing_blocks: parking_lot::Mutex<BTreeSet<BlockRef>>,
     last_known_proposed_round: parking_lot::Mutex<Vec<Round>>,
+    added_certified_commits: parking_lot::Mutex<Vec<(CommitIndex, CommitDigest)>>,
 }
 
 #[cfg(test)]
 impl MockCoreThreadDispatcher {
+    /// Returns (and clears) the (index, digest) of every certified commit passed to
+    /// `add_certified_commits`.
+    #[cfg(test)]
+    pub(crate) fn take_added_certified_commits(&self) -> Vec<(CommitIndex, CommitDigest)> {
+        self.added_certified_commits.lock().drain(..).collect()
+    }
+
     #[cfg(test)]
     pub(crate) async fn get_add_blocks(&self) -> Vec<VerifiedBlock> {
         let mut add_blocks = self.add_blocks.lock();
@@ -449,9 +459,12 @@ impl CoreThreadDispatcher for MockCoreThreadDispatcher {
 
     async fn add_certified_commits(
         &self,
-        _commits: CertifiedCommits,
+        commits: CertifiedCommits,
     ) -> Result<BTreeSet<BlockRef>, CoreError> {
-        todo!()
+        self.added_certified_commits
+            .lock()
+            .extend(commits.commits().iter().map(|c| (c.index(), c.digest())));
+        Ok(BTreeSet::new())
     }
 
     async fn new_block(&self, _round: Round, _force: bool) -> Result<(), CoreError> {
