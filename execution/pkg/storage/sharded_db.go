@@ -137,6 +137,26 @@ func (s *ShardelDB) Flush() error {
 	return g.Wait()
 }
 
+// SyncDurable makes all buffered writes of every shard durable (see DurableSyncer). Shards that
+// are idle, or that do not support it, are skipped.
+func (s *ShardelDB) SyncDurable() error {
+	var g errgroup.Group
+	for i, shard := range s.shards {
+		d, ok := shard.(DurableSyncer)
+		if !ok {
+			continue
+		}
+		shardIndex, d := i, d
+		g.Go(func() error {
+			if err := d.SyncDurable(); err != nil {
+				return fmt.Errorf("shard %d: %w", shardIndex, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
 // Checkpoint creates an atomic snapshot of all shards to destBaseDir.
 // Each shard is checkpointed in parallel to destBaseDir/db_shard_N.
 func (s *ShardelDB) Checkpoint(destBaseDir string) error {

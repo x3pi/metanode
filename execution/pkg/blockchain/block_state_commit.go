@@ -244,6 +244,21 @@ func (cs *ChainState) CommitBlockState(blk types.Block, opts ...CommitOption) (u
 		// Mappings are durable via PebbleDB's WAL. Flush calls are removed to avoid I/O bottlenecks.
 	}
 
+	// ─── 8b. Durability barrier: block DB BEFORE NOMT ────────────────────
+	// The caller persists this block's NOMT payloads right after we return, and NOMT fsyncs its
+	// own data. The block database, however, only buffers writes (Go-level cache flushed every 5s,
+	// Pebble WAL written with NoSync), so without this a power loss leaves NOMT AHEAD of the block
+	// database: the header/tip of the last blocks is gone while their state is already on disk,
+	// and the node then refuses to start (NOMT root != tip header root). Making the block
+	// database durable first guarantees NOMT can never be ahead of the durable tip.
+	// On failure return the error so the caller does not persist NOMT for this block.
+	if cfg.persistToDB {
+		if err := storage.SyncDurable(cs.blockDatabase.GetDB()); err != nil {
+			logger.Error("❌ [COMMIT STATE] Failed to make block #%d durable before NOMT commit: %v", blockNum, err)
+			return blockNum, err
+		}
+	}
+
 	// ─── 9. Auto-update epoch from block header ──────────────────────────
 	cs.CheckAndUpdateEpochFromBlock(header.Epoch(), header.TimeStamp())
 
