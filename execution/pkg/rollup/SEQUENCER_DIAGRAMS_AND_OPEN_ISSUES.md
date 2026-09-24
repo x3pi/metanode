@@ -188,19 +188,19 @@ sequenceDiagram
 
 ---
 
-## Phần B — Quyết định CẦN CHỐT để triển khai
+## Phần B — Quyết định để triển khai
 
-> Chỉ giữ lại những gì thật sự chặn việc bắt đầu viết code. Toàn bộ vấn đề đã có fix thiết kế sẵn (không cần quyết định gì thêm) đã gộp thành 1 bảng index gọn ở B.2 — chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`, không lặp lại ở đây.
+> Chỉ giữ lại những gì thật sự từng chặn việc bắt đầu viết code. Toàn bộ vấn đề đã có fix thiết kế sẵn (không cần quyết định gì thêm) đã gộp thành 1 bảng index gọn ở B.2 — chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`, không lặp lại ở đây.
 
-### B.1. 5 mục chặn triển khai — cần chốt trước khi viết dòng code đầu tiên
+### B.1. 5 mục từng chặn triển khai — ĐÃ CHỐT 5/5 (2026-09-24)
 
-| # | Câu hỏi | Loại | Khuyến nghị | Trạng thái |
-|---|---|---|---|---|
-| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | Không tự đề xuất được | **CÒN MỞ — chặn cứng**, code không chạy được nếu thiếu config này (#7) |
-| Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | Kinh doanh | Không tự đề xuất được | **CÒN MỞ** (mục 2.3) |
-| Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ)? | Kỹ thuật + kinh doanh | **Hướng A** làm baseline (mục 15.5, `SEQUENCER_DESIGN.md`) | Cần đội ký xác nhận chính thức (#15) |
-| Q(Migration scope) | Có triển khai Migration Account (mục 5.3) ở bản đầu không? | Phạm vi | **Hoãn** — không nằm trên đường an toàn tiền | Cần đội xác nhận (#4) |
-| Q(SlashOnEquivocation) | `SlashOnEquivocation` có bắt double-sign `AccountTreeRoot` không? | Kỹ thuật | Cần đọc thêm code/thiết kế cách wire trước khi code Snapshot | **CÒN MỞ** (#16) |
+| # | Câu hỏi | Loại | Quyết định |
+|---|---|---|---|
+| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | ✅ **Dev/operator tự ký tạm** — 1 committee nhỏ do chính đội vận hành nắm giữ (threshold-signing nội bộ), siết chặt quy trình bảo vệ khoá khi lên production thật với tài sản lớn hơn (#7) |
+| Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | Kinh doanh | ✅ **Chấp nhận cho giai đoạn thử nghiệm/quy mô nhỏ** — đủ 4 biện pháp giảm thiểu (delay, anomaly detection, non-custodial tuỳ chọn, Signed Receipt), đánh giá lại khi quy mô tài sản tăng (mục 2.3) |
+| Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ)? | Kỹ thuật + kinh doanh | ✅ **Hướng A** — Signed Receipt + kênh report vận hành qua `RecoveryCommittee`/operator làm baseline (mục 15.5, `SEQUENCER_DESIGN.md`) (#15) |
+| Q(Migration scope) | Có triển khai Migration Account (mục 5.3) ở bản đầu không? | Phạm vi | ✅ **Hoãn** — user cố định ở node đã đăng ký, không xây giao thức 3 pha Freeze/Export/Import ở bản đầu (#4) |
+| Q(SlashOnEquivocation) | `SlashOnEquivocation` có bắt double-sign `AccountTreeRoot` không? | Kỹ thuật | ✅ **Có, miễn phí** — đọc code thật xác nhận `ComputeCommitRootAttestMessage` hoàn toàn generic (`epoch_sync.go`); chỉ cần publish `AccountTreeRoot` ký qua đúng message này (mục 6.2, `SEQUENCER_DESIGN.md`) — không cần code equivocation-detection riêng (#16) |
 
 ### B.2. Index vấn đề đã có fix thiết kế (không cần quyết định — chỉ để `#N` còn tra được)
 
@@ -218,5 +218,8 @@ sequenceDiagram
 | 12 | Timeout & Reclaim khi node đích kẹt (không chết) | mục 3.6 |
 | 13 | Crash-recovery giữa `Claimed` và credit local | mục 13.3 |
 | 14 | Velocity-limit loại trừ Hoàn tiền/Reclaim | mục 4.4 |
+| 16 | `SlashOnEquivocation` bắt double-sign `AccountTreeRoot` — đã xác nhận, chỉ cần ký đúng message | mục 4.1, 6.2 |
+
+**Không còn mục nào chặn cứng việc bắt đầu viết code.** Có thể bắt đầu theo đúng lộ trình 9 bước ở mục 10 (`SEQUENCER_DESIGN.md`).
 
 **Tham số đã có default, không chặn code, chỉ cần tinh chỉnh sau khi đo traffic thật:** tần suất snapshot (15 phút), ngưỡng velocity outflow (20%/24h), timeout Reclaim (chưa có số tuyệt đối — cần đo chu kỳ xử lý bình thường trước khi chốt số cứng).

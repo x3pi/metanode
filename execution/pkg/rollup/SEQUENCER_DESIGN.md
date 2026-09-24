@@ -31,7 +31,7 @@
 
 ### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
 
-Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live (mục 9.1 Q9-phần-build). Mức rủi ro còn lại có chấp nhận được với quy mô tài sản thật hay không là quyết định threat-model của đội (Q9-phần-rủi-ro, còn mở). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi thật là `RecoveryCommittee` gọi `UpdateCommitteeWithRecoveryCert` để cài khoá mới cho chainID đó (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
+Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live (mục 9.1 Q9-phần-build). ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-phần-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi thật là `RecoveryCommittee` gọi `UpdateCommitteeWithRecoveryCert` để cài khoá mới cho chainID đó (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
 
 ### 2.4. 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
 
@@ -100,7 +100,7 @@ Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường h�
 
 ### 4.1. Vai trò của `SecurityBond`/`RecoveryCommittee` trong mô hình Float Account
 
-Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` vẫn giữ nguyên 2 con đường bị mất vốn có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless, không cần `RecoveryCommittee`** — khi double-sign; (2) forfeit khi `RecoveryCommittee` gọi `DeclareChainDeadWithCert`/`UnregisterChainWithCert` (3 quyền hạn cụ thể của `RecoveryCommittee`, xem mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ⚠️ Riêng câu hỏi "`SlashOnEquivocation` có bắt được double-sign `AccountTreeRoot` hay không" — xem phân tích chi tiết ở mục 6.2 (kết luận: chưa chắc chắn, cần xác nhận khi implement).
+Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` vẫn giữ nguyên 2 con đường bị mất vốn có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless, không cần `RecoveryCommittee`** — khi double-sign; (2) forfeit khi `RecoveryCommittee` gọi `DeclareChainDeadWithCert`/`UnregisterChainWithCert` (3 quyền hạn cụ thể của `RecoveryCommittee`, xem mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ✅ **ĐÃ CHỐT — `SlashOnEquivocation` bắt được double-sign `AccountTreeRoot`, không cần xây thêm gì:** xem xác nhận từ code ở mục 6.2.
 
 ### 4.2. Velocity-limit cho Transfer: không cần để chống mint sai — nhưng vẫn cần vì lý do khác
 
@@ -145,7 +145,7 @@ Bên gửi (`Target`+`chainID` đích) đã phải tự biết trước contract
 
 ### 5.3. Migration Account (CHỈ User, KHÔNG áp dụng Contract)
 
-⚠️ **Có thể KHÔNG cần triển khai ở bản đầu — cân nhắc để dành roadmap sau:** đây là tiện ích vận hành (đổi node quản lý cho 1 user), không nằm trên đường an toàn tiền (Float Account/Transfer/Reclaim ở mục 3 mới là phần bắt buộc). Bỏ qua Migration ở bản đầu không ảnh hưởng tới bất kỳ bất biến bảo mật nào đã thiết kế — user đơn giản là cố định ở node đã đăng ký cho tới khi tính năng này (nếu có) được xây sau. Cần đội xác nhận có thật sự cần ngay từ đầu hay không trước khi đầu tư giao thức 3 pha bên dưới.
+✅ **ĐÃ CHỐT (2026-09-24): HOÃN, không triển khai ở bản đầu.** Đây là tiện ích vận hành (đổi node quản lý cho 1 user), không nằm trên đường an toàn tiền (Float Account/Transfer/Reclaim ở mục 3 mới là phần bắt buộc). User cố định ở node đã đăng ký cho tới khi tính năng này (nếu có) được xây ở roadmap sau — không ảnh hưởng bất kỳ bất biến bảo mật nào đã thiết kế. Giao thức 3 pha bên dưới giữ lại làm tài liệu tham khảo cho lúc cần, chưa lên lịch xây.
 
 Contract không được migrate (vì mục 5.2 không có Contract Registry, contract đổi node sẽ "tàng hình"). Giao thức 3 pha cho User Account: **Freeze** (khoá tx nội bộ mới, giữ lại request đến trong hàng đợi tạm, không revert ngay) → **Export & Attest** (đóng gói balance+nonce, ký `QuorumCert`) → **Import & Flip con trỏ** (chỉ flip Account Registry SAU KHI node mới xác nhận import xong, không lạc quan).
 
@@ -168,7 +168,9 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 2. **`UnregisterChainWithCert(chainID, cert, blockTime)`** — xoá hẳn chainID khỏi `ChainRegistry`. Nếu chain còn bond active, **không release ngay** mà bắt đầu unbonding period — chống đúng kịch bản "hit and run": unregister rồi rút bond ngay TRƯỚC KHI ai kịp thu thập bằng chứng equivocation để slash.
 3. **`UpdateCommitteeWithRecoveryCert(update, cert)`** — cài 1 committee (khoá ký) **HOÀN TOÀN MỚI** cho 1 chainID mà committee cũ không còn liên lạc được (khác cơ chế cập nhật committee bình thường, vốn cần chính committee cũ tự ký cho committee kế nhiệm — chỉ dùng khi điều đó bất khả thi). Có guard chống replay: epoch mới bắt buộc > epoch hiện tại, không cho lùi/lặp lại cert cũ. ⚠️ **Đây chính là con đường PHỤC HỒI thật cho rủi ro #8** (khoá node bị lộ/mất — mục 2.3): mục 2.3 hiện mới liệt kê các biện pháp GIẢM THIỆT HẠI (delay, anomaly detection), chưa nói rõ khi khoá đã bị lộ/mất thật thì phục hồi bằng cách nào — câu trả lời là qua `UpdateCommitteeWithRecoveryCert`, cần nêu rõ trong runbook (mục 9.2).
 
-⚠️ **Sửa 1 điểm nhầm lẫn ở mục 4.1 — `SlashOnEquivocation` KHÔNG cần `RecoveryCommittee`:** đây là cơ chế **permissionless** — bất kỳ ai cầm được 2 `QuorumCert` hợp lệ của cùng 1 chain, cùng epoch, ký cho 2 `commitRoot` khác nhau, có thể tự submit để slash bond ngay, không qua `RecoveryCommittee`. ⚠️ **Nhưng `commitRoot` ở đây vốn thuộc cơ chế `BatchOutboundCommit` đã bị loại bỏ hoàn toàn khỏi mô hình Float Account** (banner đầu tài liệu) — cần xác nhận khi implement: `AccountTreeRoot` snapshot (mục 6.3) có được publish qua đúng con đường tạo `commitRoot` tương thích để `SlashOnEquivocation` còn bắt được hay không, hay cơ chế permissionless này giờ **không còn gì để bắt** trong mô hình mới, cần 1 cơ chế equivocation-detection khác riêng cho `AccountTreeRoot` — không nên mặc định thừa hưởng miễn phí từ code cũ.
+⚠️ **Sửa 1 điểm nhầm lẫn ở mục 4.1 — `SlashOnEquivocation` KHÔNG cần `RecoveryCommittee`:** đây là cơ chế **permissionless** — bất kỳ ai cầm được 2 `QuorumCert` hợp lệ của cùng 1 chain, cùng epoch, ký cho 2 `commitRoot` khác nhau, có thể tự submit để slash bond ngay, không qua `RecoveryCommittee`.
+
+✅ **ĐÃ CHỐT (đọc code thật, `execution/pkg/cross_chain/epoch_sync.go`):** `SlashOnEquivocation` verify mỗi cert qua `ComputeCommitRootAttestMessage(commitRoot)` — message này **hoàn toàn generic** (`"COMMIT_ROOT_ATTEST_V1:" + commitRoot.Bytes()`), không hề gắn với nội dung `BatchOutboundCommit` cụ thể nào. Nghĩa là `SlashOnEquivocation` bắt equivocation cho **BẤT KỲ root nào được attest qua đúng message này**, không quan trọng root đó đại diện cho cái gì. **Yêu cầu implement duy nhất:** khi node publish `AccountTreeRoot` (mục 6.3), phải ký `QuorumCert` cho đúng `ComputeCommitRootAttestMessage(accountTreeRoot)` — dùng lại nguyên primitive có sẵn, không cần code equivocation-detection riêng nào cho `AccountTreeRoot`. Nếu double-sign 2 `AccountTreeRoot` khác nhau cùng epoch, `SlashOnEquivocation` bắt được ngay, miễn phí.
 
 ### 6.3. Rút lại giá trị khi node chết — bài toán PHÂN BỔ
 
@@ -218,7 +220,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 9.1. Decision Log
 
-> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — 5 mục CẦN CHỐT trước khi viết code: `RecoveryCommittee` thành viên, Q9-rủi-ro, Q report node sai (hướng A/B), Q Migration scope, Q SlashOnEquivocation/AccountTreeRoot.
+> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — ✅ **5/5 mục đã chốt (2026-09-24)**: `RecoveryCommittee` = dev/operator tự ký tạm, Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được (chỉ cần ký đúng message có sẵn).
 
 ### 9.2. Vận hành
 
@@ -231,7 +233,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 ### 9.3. Checklist bảo mật trước khi go-live
 
 - [ ] #1–#16 (mục B.1 + B.2 của `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md`) đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), #15 (cơ chế report node sai — mục 15, chưa có hướng chốt), và #16 (SlashOnEquivocation/AccountTreeRoot, chưa xác nhận).
-- [ ] `RecoveryCommittee`, Q9-rủi-ro, Q(report node sai) đã có quyết định bằng văn bản từ đội — không được bỏ qua.
+- [x] `RecoveryCommittee`, Q9-rủi-ro, Q(report node sai), Q(Migration scope), Q(SlashOnEquivocation) — 5/5 đã chốt (2026-09-24, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). Cần ghi lại quyết định bằng văn bản chính thức của đội (không chỉ trong tài liệu này) trước khi coi là final.
 - [ ] Signed Receipt (mục 15.2) đã triển khai cho MỌI giao dịch (nội bộ lẫn cross-node) trước go-live — đây là điều kiện nền tảng bắt buộc dù chọn Hướng A hay B, không phải tính năng tuỳ chọn.
 - [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết → Parent Chain biết TỔNG số thật ngay (mục 4.3, tự động), Archival Service chạy đúng pipeline Snapshot+Delay 72h để chứng minh PHÂN BỔ cho user (mục 6.3), (4) Migration có message đến giữa lúc Freeze — **CHỈ áp dụng nếu Migration (mục 5.3) thật sự được triển khai ở bản đầu, có thể bỏ qua nếu hoãn**, (5) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (6) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#9), (7) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#11), (8) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#12), (9) crash Node 2 đúng giữa lúc `Claimed` và credit local, khởi động lại → xác nhận tự hoàn tất credit, không credit trùng, không bỏ sót (#13), (10) Node 2 chết hẳn khi đang có Transfer tới nhưng chưa `Claimed` → xác nhận dùng đúng cơ chế Reclaim (mục 3.6), không phải Transfer ngược (mục 3.4, vốn cần Node 2 sống), (11) giả lập 1 node vừa bị chạm ngưỡng velocity outflow (#11) vừa cần hoàn tiền hợp lệ cho user khác → xác nhận hoàn tiền vẫn đi qua bình thường, không bị chặn nhầm bởi circuit-breaker (#14).
 - [ ] `Σ NodeFloatAccount == genesis_total_supply` (mục 4.3) được kiểm tra tự động định kỳ trên Parent Chain — đây là bất biến kiểm chứng được hoàn toàn.
@@ -240,11 +242,11 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ## 10. Lộ trình triển khai
 
-1. **Chốt 3 mục còn mở** (`RecoveryCommittee`, Q9-rủi-ro, Q(report node sai) — mục 15) trước khi viết code.
+1. ✅ **Đã chốt 5/5 mục từng chặn triển khai** (`RecoveryCommittee` = dev/operator tự ký tạm, Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được, chỉ cần ký đúng message — chi tiết `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1) — có thể bắt đầu bước 2.
 2. **Xây `NodeFloatAccount` trên Parent Chain** — cấu trúc dữ liệu mới, thay thế vai trò "trần phân bổ" của `PerChainAllocation` cho mục đích cross-node.
 3. **Xây luồng user tự nạp tiền vào tài khoản của mình** — atomic tăng `NodeFloatAccount` cùng lúc với balance cục bộ user, không có bước "nạp quỹ" riêng của node (mục 3.2).
 4. **Xây luồng Transfer atomic** (mục 3.3) thay thế `Outbound`/`BatchOutboundCommit`/`ClaimMessage` 3 bước cho phần giá trị — giữ nguyên cơ chế message/payload cho phần gọi Contract.
-5. **Giữ nguyên Snapshot & Archival Pipeline** (mục 6.3) — phục vụ chứng minh PHÂN BỔ khi node chết, không phải chứng minh tổng số (đã tự động ở mục 4.3).
+5. **Giữ nguyên Snapshot & Archival Pipeline** (mục 6.3) — phục vụ chứng minh PHÂN BỔ khi node chết, không phải chứng minh tổng số (đã tự động ở mục 4.3). **Bắt buộc:** publish `AccountTreeRoot` phải ký qua đúng `ComputeCommitRootAttestMessage(accountTreeRoot)` có sẵn (mục 6.2) để `SlashOnEquivocation` tự động bắt được double-sign, không code thêm equivocation-detection riêng.
 6. **Bổ sung Account Registry** (mục 5.1, 5.2) — riêng Migration (mục 5.3) có thể hoãn sang roadmap sau, không bắt buộc cho bản đầu.
 7. **Xây Signed Receipt cho mọi giao dịch** (mục 15.2) + kênh report vận hành (Hướng A, mục 15.3) — nền tảng bắt buộc trước go-live, không phải tính năng có thể hoãn.
 8. **Dựng hạ tầng vận hành** (mục 9.2) song song, không để tới sau khi code xong mới làm.
@@ -278,7 +280,7 @@ Người gửi luôn phải tự biết trước contract đích nằm ở node 
 
 ### Q5. `RecoveryCommittee` là gì, vì sao quan trọng?
 
-Thực thể BLS committee cố định, set 1 lần từ config lúc triển khai, duy nhất có quyền thực hiện đúng 3 hành động (mục 6.2): `DeclareChainDeadWithCert` (tuyên bố chết + tịch thu bond), `UnregisterChainWithCert` (xoá chain, bond vào unbonding chứ không release ngay), `UpdateCommitteeWithRecoveryCert` (cài khoá ký hoàn toàn mới cho 1 node — con đường phục hồi thật khi khoá bị lộ/mất, mục 2.3). Chưa được định nghĩa trong tài liệu này (ai, bao nhiêu người, ngưỡng quorum) — chặn cứng go-live vì code bắt buộc cần config này mới chạy được. Xem #7.
+Thực thể BLS committee cố định, set 1 lần từ config lúc triển khai, duy nhất có quyền thực hiện đúng 3 hành động (mục 6.2): `DeclareChainDeadWithCert` (tuyên bố chết + tịch thu bond), `UnregisterChainWithCert` (xoá chain, bond vào unbonding chứ không release ngay), `UpdateCommitteeWithRecoveryCert` (cài khoá ký hoàn toàn mới cho 1 node — con đường phục hồi thật khi khoá bị lộ/mất, mục 2.3). ✅ **ĐÃ CHỐT (2026-09-24): dev/operator tự ký tạm** — 1 committee nhỏ do chính đội vận hành nắm giữ (threshold-signing nội bộ), siết chặt quy trình bảo vệ khoá khi lên production thật với tài sản lớn hơn (`SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). Xem #7.
 
 ---
 
@@ -455,7 +457,7 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 | Chi phí vận hành liên tục | Thấp | Cao (băng thông/lưu trữ toàn bộ tx log) |
 | Phù hợp giai đoạn | Bắt buộc trước go-live | Roadmap dài hạn, khi quy mô tài sản đủ lớn để đáng đầu tư |
 
-**Khuyến nghị:** Signed Receipt + Hướng A là **baseline bắt buộc trước go-live** — đây chính là mảnh còn thiếu thứ 4 trong bộ mitigation đã liệt kê ở mục 2.3 cho rủi ro #8 (hiện mới có 3: ngưỡng rút+delay, anomaly detection, non-custodial tuỳ chọn — thiếu hẳn 1 kênh cho user tự report). Hướng B để dành làm lựa chọn dài hạn/tuỳ chọn, không chặn go-live — chỉ đáng đầu tư nếu quy mô tài sản custody tập trung lớn tới mức rủi ro ở #8 không còn chấp nhận được nữa (liên quan trực tiếp Q9-rủi-ro, mục 2.3, còn mở).
+✅ **ĐÃ CHỐT (2026-09-24):** Signed Receipt + Hướng A là **baseline bắt buộc trước go-live** — đây chính là mảnh còn thiếu thứ 4 trong bộ mitigation đã liệt kê ở mục 2.3 cho rủi ro #8 (hiện mới có 3: ngưỡng rút+delay, anomaly detection, non-custodial tuỳ chọn — thiếu hẳn 1 kênh cho user tự report). Hướng B để dành làm lựa chọn dài hạn/tuỳ chọn, không chặn go-live — chỉ đáng đầu tư nếu quy mô tài sản custody tập trung lớn tới mức rủi ro ở #8 không còn chấp nhận được nữa (Q9-rủi-ro cũng đã chốt cùng đợt — mục 2.3).
 
 ### 15.6. Giới hạn nền tảng — dù chọn hướng nào
 
