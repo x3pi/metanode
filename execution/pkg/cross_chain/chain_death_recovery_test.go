@@ -62,22 +62,10 @@ func TestP8_1_CompleteChainDeathRecoveryLifecycle(t *testing.T) {
 		AccountTreeRoot: anchoredStateRoot,
 	}
 
-	// 2. Simulate Chain 101 Permanent Death (Liveness Failure)
-	// Declare Dead(101), authorized by RecoveryCommittee (2026-09-04, replacing the old
-	// propose/vote/72h-timelock/executeProposal governance dance -- see
-	// GatewayEngine.DeclareChainDeadWithCert's own doc comment).
-	recoveryKP := bls.GenerateKeyPair()
-	recoveryPop := PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
-	gateway.RecoveryCommittee = []ValidatorEntry{
-		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
-	}
-
-	digest := ComputeDeclareChainDeadMessage(deadChainID)
-	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
-	cert := QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
-
-	errExec := gateway.DeclareChainDeadWithCert(deadChainID, cert)
-	require.NoError(t, errExec)
+	// 2. Simulate Chain 101 Permanent Death. The production route that sets DeadChains is
+	// SlashOnEquivocation (RecoveryCommittee/DeclareChainDeadWithCert were removed 2026-09-24,
+	// see security_bond_test.go); here the flag is set directly to exercise the claim path.
+	markChainDeadForTest(gateway, deadChainID)
 	assert.True(t, gateway.DeadChains[deadChainID])
 
 	// 3. Alice & Bob submit proofs and Claim their funds
@@ -210,8 +198,7 @@ func TestP8_3_FuzzMultiAccountDeadChainRescue(t *testing.T) {
 
 // TestP8_4_DeadChain_BlocksAttestCommitAndOutbound is the regression test for Quick Win #0
 // (note/cross_chain/root_anchor_production_security_hardening_plan.md): before this fix,
-// DeadChains[chainID]=true was only ever read by ClaimDeadChainBalance -- RecoveryCommittee's
-// DeclareChainDeadWithCert "emergency stop" set the flag but nothing actually stopped a captured
+// DeadChains[chainID]=true was only ever read by ClaimDeadChainBalance -- the forfeit path set the flag but nothing actually stopped a captured
 // committee from continuing to attestCommit() and draining PerChainAllocation as normal, and
 // nothing stopped a NEW Outbound() message being queued to a destination already known dead
 // (locking the sender's own funds into a message no relayer could ever deliver). Both paths must
@@ -229,16 +216,8 @@ func TestP8_4_DeadChain_BlocksAttestCommitAndOutbound(t *testing.T) {
 		Committee: []ValidatorEntry{{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: pop.Bytes()}},
 	}
 
-	// Declare chain 101 dead via RecoveryCommittee -- exactly TestP8_1's real flow.
-	recoveryKP := bls.GenerateKeyPair()
-	recoveryPop := PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
-	gateway.RecoveryCommittee = []ValidatorEntry{
-		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
-	}
-	digest := ComputeDeclareChainDeadMessage(deadChainID)
-	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
-	cert := QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
-	require.NoError(t, gateway.DeclareChainDeadWithCert(deadChainID, cert))
+	// Mark chain 101 dead -- same effect as TestP8_1 (see markChainDeadForTest).
+	markChainDeadForTest(gateway, deadChainID)
 	assert.True(t, gateway.DeadChains[deadChainID])
 
 	// A "captured" committee for the now-dead chain 101 must NOT be able to attestCommit anymore --

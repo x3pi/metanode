@@ -27,8 +27,8 @@ var (
 
 // AssetRegistryEngine manages cross-chain custom tokens (ERC-20 / Wrapped assets) (P6.1 & P6.2).
 // Governed on Root Anchor via the asset's own HomeChainID self-authorizing with a real QuorumCert
-// (2026-09-04, replacing the old ProposalRegisterAsset governance-vote gate -- see
-// GatewayEngine.RecoveryCommittee's own doc comment for the full removal rationale. A new asset's
+// (2026-09-04, replacing the old ProposalRegisterAsset governance-vote gate;
+// that whole governance machinery was removed). A new asset's
 // home chain is the natural, sole legitimate authority over whether its own token gets bridged --
 // no third-party vote needed or trusted).
 type AssetRegistryEngine struct {

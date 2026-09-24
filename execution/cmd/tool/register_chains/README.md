@@ -7,8 +7,8 @@ Công cụ dòng lệnh (CLI) hợp nhất để quản trị **Gateway Precompi
 > timelock/execute) đã bị xoá hẳn — không còn cơ chế vote nào trong hệ thống nữa. Tool này giờ
 > chỉ gọi 2 nhóm hàm: (a) tự ký (self-signed) bằng đúng uỷ ban BLS thật đang sống trên chain
 > nguồn — `registerChainViaStake`/`transferAllocationWithCert`/`allocateSupplyWithCert` — cho các
-> hành động chỉ ảnh hưởng tài nguyên của chính chain đó; (b) không có hành động nào của tool này
-> cần `RecoveryCommittee` (uỷ ban cứu hộ riêng, dùng cho đổi uỷ ban/tuyên bố chết một chain KHÁC).
+> hành động chỉ ảnh hưởng tài nguyên của chính chain đó; (b) tool này không cần thêm uỷ ban ngoài nào
+> (`RecoveryCommittee` đã được gỡ bỏ 2026-09-24).
 > Xem `note/eurozone_unified_native_coin_plan.md` mục "CẬP NHẬT (2026-09-04, phiên sau)" để biết
 > đầy đủ thiết kế thay thế.
 

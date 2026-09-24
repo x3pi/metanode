@@ -479,7 +479,7 @@ if [ "$USE_PREBUILT" == "true" ]; then
     fi
 
     chmod +x "${PREBUILT_BIN_DIR}/metanode" "${PREBUILT_BIN_DIR}/simple_chain" 2>/dev/null || true
-    for tool in cross_chain_relayer register_chains bls_pubkey gen_recovery_committee; do
+    for tool in cross_chain_relayer register_chains bls_pubkey; do
         if [ -f "${PREBUILT_BIN_DIR}/${tool}" ]; then
             chmod +x "${PREBUILT_BIN_DIR}/${tool}" 2>/dev/null || true
         fi

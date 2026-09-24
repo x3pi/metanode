@@ -43,7 +43,8 @@ var (
 	ErrNonReserveCeilingAttestation = errors.New("only the configured Reserve chain may perform a ceiling-enforced attestCommit of a nonzero-value commit from another chain")
 	ErrChainAlreadyRegistered       = errors.New("RegisterChainViaStake: this chain ID is already in ChainRegistry -- use UpdateCommitteeWithRecoveryCert or ApplyCommitteeUpdate to change an existing chain's committee")
 	ErrInvalidTransferNonce         = errors.New("TransferAllocationWithCert: nonce does not match fromChainID's current TransferAllocationNonce (stale or replayed cert)")
-	ErrChainDeclaredDead            = errors.New("chain has been declared dead by RecoveryCommittee — cannot attest new commits or accept new outbound messages to it")
+	ErrChainDeclaredDead            = errors.New("chain has been declared dead (bond forfeited for equivocation) — cannot attest new commits or accept new outbound messages to it")
+	ErrInvalidUnregisterNonce       = errors.New("nonce does not match the chain's current UnregisterNonce (stale or replayed cert)")
 	ErrBondCapExceeded              = errors.New("resulting allocation would exceed this chain's SecurityBond-backed ceiling (PerChainAllocation <= BondLeverage * SecurityBond)")
 	ErrNoBondToPost                 = errors.New("PostSecurityBond: amount must be positive")
 	ErrBelowMinSecurityBond         = errors.New("PostSecurityBond: resulting bond is below MinSecurityBondToRegister")
@@ -101,11 +102,11 @@ type AllocationRejectedListener func(chainID uint64, requested, available *big.I
 // exported accessor below rather than touching a map field directly, so this guarantee actually
 // holds for the whole codebase, not just for calls made from within this file.
 type GatewayEngine struct {
-	mu                    sync.RWMutex
-	LocalChainID          uint64
-	ChainRegistry         map[uint64]ChainRegistry
-	SupplyLedger          *GlobalSupplyLedger
-	AttestedCommits       map[string]AttestedCommit
+	mu              sync.RWMutex
+	LocalChainID    uint64
+	ChainRegistry   map[uint64]ChainRegistry
+	SupplyLedger    *GlobalSupplyLedger
+	AttestedCommits map[string]AttestedCommit
 	// AttestedCommitsByRoot is a commitRoot->sourceChainID index over AttestedCommits, used by
 	// Refund()'s fallback lookup (see its own call site) to avoid an O(n) scan of AttestedCommits
 	// (which only ever grows, never pruned, over a chain's whole lifetime). MUST be persisted
@@ -207,24 +208,14 @@ type GatewayEngine struct {
 	// AssetRegistry manages custom cross-chain tokens and wrapped assets (Milestone G).
 	AssetRegistry *AssetRegistryEngine `json:"asset_registry,omitempty"`
 
-	// RecoveryCommittee + RecoveryQuorumThreshold (2026-09-04, replacing GovernanceEngine's whole
-	// propose/vote/72h-timelock/execute machinery, removed the same day per explicit user
-	// request): a small, FIXED, config-set BLS committee (same ValidatorEntry shape as any
-	// ChainRegistry.Committee, verified with the exact same VerifyQuorumCertAgainstRegistry this
-	// codebase already uses everywhere else -- no new crypto) that authorizes the 3 actions no
-	// affected party can ever self-authorize: DeclareChainDeadWithCert, UnregisterChainWithCert,
-	// and UpdateCommitteeWithRecoveryCert (installing a brand new committee for a chain whose OLD
-	// one is unreachable -- ApplyCommitteeUpdate above still handles the normal case where the
-	// OLD committee signs its own successor; this is only for when that is impossible). Set once
-	// from config (config.CrossChain.RecoveryCommitteeJSON/RecoveryQuorumThreshold,
-	// gateway_handler.go's applyRecoveryCommitteeConfig) — never settable by any on-chain action,
-	// same "lock in once from the pristine state" pattern as ReserveChainID. Deliberately NOT the
-	// same set as the old Governance.ActiveChains: that set grew for free with every
-	// RegisterChainViaStake call (the exact Sybil-vote-buying risk this whole redesign closes,
-	// note/eurozone_unified_native_coin_plan.md mục 2.6) -- RecoveryCommittee has no on-chain
-	// growth path at all, so there is nothing to buy into cheaply.
-	RecoveryCommittee       []ValidatorEntry `json:"recovery_committee,omitempty"`
-	RecoveryQuorumThreshold uint64           `json:"recovery_quorum_threshold,omitempty"`
+	// UnregisterNonce (2026-09-24) is the replay guard for UnregisterChainWithCert, the same
+	// pattern as TransferAllocationNonce: a chain's own committee self-authorizes leaving the
+	// registry, and such a cert is public once submitted, so without a nonce it could be replayed
+	// against a later re-registration of the same chainID (RegisterChainViaStake only checks that
+	// the ID is currently unregistered). The signed digest binds to this exact nonce, which is
+	// bumped by 1 on every successful unregister and never decremented; it is deliberately NOT
+	// deleted along with the ChainRegistry entry.
+	UnregisterNonce map[uint64]uint64 `json:"unregister_nonce,omitempty"`
 
 	// TransferAllocationNonce (2026-09-04 -- found in review immediately after removing
 	// GovernanceEngine, before this ever shipped: TransferAllocationWithCert's self-signed cert
@@ -320,8 +311,8 @@ type GatewayEngine struct {
 // it is NOT a Data Availability proof (nothing here verifies the actual data behind StateRoot is
 // published or reconstructable anywhere -- see root_anchor_production_security_hardening_plan.md
 // §0's calibration of that gap). Its only real job is to make chain silence/staleness an
-// observable, timestamped fact instead of "nobody happened to notice" -- RecoveryCommittee and
-// off-chain monitoring (Phase C) are the consumers, this is purely a reporting primitive.
+// observable, timestamped fact instead of "nobody happened to notice" -- off-chain monitoring
+// (Phase C) is the consumer, this is purely a reporting primitive.
 type ChainCheckpoint struct {
 	Epoch            uint64      `json:"epoch"`
 	BlockHeight      uint64      `json:"block_height"`
@@ -345,7 +336,7 @@ type SecurityBondLedger struct {
 
 // UnbondingRequest is one chain's pending SecurityBond withdrawal, created by
 // UnregisterChainWithCert and resolved by either ClaimUnbondedBond (after ReleaseAt) or
-// forfeiture (DeclareChainDeadWithCert / SlashOnEquivocation, at any time before that).
+// forfeiture (SlashOnEquivocation, at any time before that).
 type UnbondingRequest struct {
 	Amount        *big.Int         `json:"amount"`
 	ReleaseAt     uint64           `json:"release_at"` // blockTime (unix seconds) after which claimable
@@ -388,8 +379,8 @@ func NewGatewayEngine(
 
 // EnsureAssetRegistry ensures the AssetRegistry engine is initialized after JSON deserialization
 // (renamed from EnsureGovernance 2026-09-04 -- GovernanceEngine itself was removed the same day,
-// see RecoveryCommittee's own doc comment above for why; keeping a function named "EnsureGovernance"
-// that no longer did anything governance-related would just be more of the same confusing leftover
+// (its vote-gated actions became per-action cert self-authorization); keeping a function named
+// "EnsureGovernance" that no longer did anything governance-related would just be more of the same confusing leftover
 // this whole cleanup exists to remove).
 func (g *GatewayEngine) EnsureAssetRegistry() {
 	if g.AssetRegistry == nil {
@@ -539,10 +530,11 @@ func (g *GatewayEngine) ClaimUnbondedBond(chainID uint64, blockTime uint64) (*bi
 // SlashOnEquivocation is the permissionless, fast-path bond-forfeiture route (mục 5.5.C.2 of
 // shard_design_ton_real.md): anyone who can produce 2 QuorumCerts, both genuinely signed by
 // chainID's own committee at the same epoch, over 2 DIFFERENT commit roots, has mathematically
-// unforgeable proof that chain's committee equivocated -- no RecoveryCommittee involvement or
-// judgment call needed, unlike DeclareChainDeadWithCert's slower path (still available for every
-// OTHER kind of misbehavior this can't detect, e.g. a captured committee consistently signing one
-// false statement -- see the design doc's own honest limitation note).
+// unforgeable proof that chain's committee equivocated -- no third-party judgment call needed.
+// It is the ONLY route that marks a chain dead (DeadChains): a chain that simply stops or is
+// captured without ever double-signing cannot be declared dead by anyone, and its remaining
+// allocation and bond stay locked (accepted limitation, 2026-09-24, when RecoveryCommittee and
+// DeclareChainDeadWithCert were removed).
 //
 // Verifies against g.ChainRegistry[chainID] if still registered, else falls back to a still-
 // unbonding chain's own UnbondingRequest.Committee/.Epoch snapshot (captured by
@@ -813,8 +805,7 @@ func (g *GatewayEngine) RegisterChainViaStake(payload []byte, amount *big.Int) e
 	}
 	g.ChainRegistry[reg.ChainID] = reg
 	// Governance.ActiveChains (a free governance vote for every registered chain) removed
-	// 2026-09-04 along with the whole GovernanceEngine -- see RecoveryCommittee's own doc comment
-	// for why. Registration no longer grants anything beyond ChainRegistry membership itself.
+	// 2026-09-04 along with the whole GovernanceEngine. Registration no longer grants anything beyond ChainRegistry membership itself.
 
 	return nil
 }
@@ -868,8 +859,7 @@ func (g *GatewayEngine) SetGenesisDigest(chainID uint64, digest common.Hash, cal
 
 // AllocateSupplyWithCert mints GenesisTotalSupply exactly once, entirely to Reserve, authorized by
 // Reserve's OWN committee self-signing (2026-09-04, replacing ProposalAllocateSupply's governance-
-// vote gate -- see RecoveryCommittee's own doc comment on the GatewayEngine struct for the full
-// removal rationale). Every chain other than Reserve must still earn allocation the safe way:
+// vote gate). Every chain other than Reserve must still earn allocation the safe way:
 // receive a real transfer via outbound()/ClaimMessage, or via TransferAllocationWithCert moving
 // Reserve's own already-minted supply outward -- this function is Reserve's one-time genesis mint
 // only, unchanged in scope from the C7 fix it replaces.
@@ -960,33 +950,16 @@ func (g *GatewayEngine) TransferAllocationWithCert(fromChainID, toChainID uint64
 	return nil
 }
 
-// DeclareChainDeadWithCert marks chainID dead (unlocking ClaimDeadChainBalance for its stranded
-// account holders), authorized by RecoveryCommittee -- a fixed, config-set, non-Sybil-able set,
-// used here (instead of the affected chain's own committee) precisely because a chain being
-// declared dead is, by definition, unable to self-authorize anything (2026-09-04, replacing
-// ProposalDeclareChainDead's governance-vote gate -- see RecoveryCommittee's own doc comment).
-func (g *GatewayEngine) DeclareChainDeadWithCert(chainID uint64, cert QuorumCert) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if chainID == 0 {
-		return fmt.Errorf("invalid chain ID: 0")
-	}
-	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
-	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeDeclareChainDeadMessage(chainID)); err != nil {
-		return fmt.Errorf("DeclareChainDeadWithCert: %w", err)
-	}
-	// Phase A: forfeit any active/unbonding SecurityBond and set DeadChains[chainID] -- see
-	// forfeitBond's own doc comment for why the DeadChains flag is what actually stops further
-	// outflow (Quick Win #0), not the forfeiture itself.
-	g.ensureSecurityBond()
-	g.forfeitBond(chainID)
-	return nil
-}
-
-// UnregisterChainWithCert removes chainID from ChainRegistry entirely, authorized by
-// RecoveryCommittee -- same non-self-authorizable rationale as DeclareChainDeadWithCert
-// (2026-09-04, replacing ProposalUnregisterChain's governance-vote gate).
+// UnregisterChainWithCert removes chainID from ChainRegistry entirely, self-authorized by
+// chainID's OWN currently-registered committee (2026-09-24: RecoveryCommittee was removed; a
+// chain leaving voluntarily needs no third party, and the unbonding period below is what stops
+// a captured committee from exiting with its bond before SlashOnEquivocation evidence can be
+// submitted). The cert signs ComputeUnregisterChainMessage(chainID, registry epoch, nonce) where
+// nonce must equal UnregisterNonce[chainID] -- a captured cert can therefore be submitted at
+// most once, even if the same chainID later registers again.
+//
+// There is no longer any way to unregister a chain whose committee can no longer sign; such a
+// chain stays registered, and its bond stays locked unless SlashOnEquivocation proves misbehavior.
 //
 // blockTime (Phase A, note/cross_chain/root_anchor_production_security_hardening_plan.md) starts
 // this chain's SecurityBond unbonding clock, if it has an active bond -- see UnbondingRequest's
@@ -995,21 +968,26 @@ func (g *GatewayEngine) DeclareChainDeadWithCert(chainID uint64, cert QuorumCert
 // SlashOnEquivocation evidence can be collected+submitted would otherwise make forfeiture
 // pointless). A chain with no active bond (BondLeverage never turned on, or it never posted one)
 // unregisters exactly as before this feature existed -- no behavior change.
-func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert, blockTime uint64) error {
+func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, nonce uint64, cert QuorumCert, blockTime uint64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	if chainID == 0 {
 		return fmt.Errorf("invalid chain ID: 0")
 	}
-	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
-	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, ComputeUnregisterChainMessage(chainID)); err != nil {
+	registry, exists := g.ChainRegistry[chainID]
+	if !exists {
+		return fmt.Errorf("%w: chain %d", ErrUnknownChain, chainID)
+	}
+	if want := g.UnregisterNonce[chainID]; nonce != want {
+		return fmt.Errorf("UnregisterChainWithCert: chain %d: %w: got %d, want %d", chainID, ErrInvalidUnregisterNonce, nonce, want)
+	}
+	if err := VerifyQuorumCertAgainstRegistry(registry, cert, ComputeUnregisterChainMessage(chainID, registry.Epoch, nonce)); err != nil {
 		return fmt.Errorf("UnregisterChainWithCert: %w", err)
 	}
 
 	g.ensureSecurityBond()
 	if bond := g.SecurityBond.Bond[chainID]; bond != nil && bond.Sign() > 0 {
-		registry := g.ChainRegistry[chainID]
 		g.SecurityBond.UnbondingRequests[chainID] = &UnbondingRequest{
 			Amount:        bond,
 			ReleaseAt:     blockTime + g.UnbondingPeriodSeconds,
@@ -1020,72 +998,11 @@ func (g *GatewayEngine) UnregisterChainWithCert(chainID uint64, cert QuorumCert,
 		delete(g.SecurityBond.Bond, chainID)
 	}
 
+	if g.UnregisterNonce == nil {
+		g.UnregisterNonce = make(map[uint64]uint64)
+	}
+	g.UnregisterNonce[chainID] = nonce + 1
 	delete(g.ChainRegistry, chainID)
-	return nil
-}
-
-// UpdateCommitteeWithRecoveryCert installs a brand new committee for chainID, authorized by
-// RecoveryCommittee (2026-09-04, replacing ProposalUpdateCommittee's governance-vote gate). This
-// is deliberately separate from ApplyCommitteeUpdate (epoch_sync.go), which still handles the
-// NORMAL case where a chain's OWN current committee signs its own successor and requires strict
-// sequential epoch progression -- this path exists specifically for when that is impossible (the
-// old committee's keys are lost/unreachable), so it neither requires the old committee's signature
-// nor sequential epoch progression, matching what a real recovery scenario needs.
-func (g *GatewayEngine) UpdateCommitteeWithRecoveryCert(update UpdateCommitteePayload, cert QuorumCert) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if update.ChainID == 0 && update.SourceChainID != 0 {
-		update.ChainID = update.SourceChainID
-	}
-	if update.ChainID == 0 {
-		return fmt.Errorf("invalid chain ID: 0")
-	}
-	reg, exists := g.ChainRegistry[update.ChainID]
-	if !exists {
-		return fmt.Errorf("%w: chain %d", ErrUnknownChain, update.ChainID)
-	}
-	// SECURITY FIX (2026-09-04, found in review): a RecoveryCommittee cert, once signed, is
-	// necessarily public forever (it travels in on-chain calldata) -- without this check, the
-	// EXACT SAME cert could be replayed at any later time to roll this chain's committee back to
-	// the recovered one, even after it has since legitimately progressed through many further
-	// epochs of its own (ApplyCommitteeUpdate, epoch_sync.go) with a completely different,
-	// possibly-rotated-out committee. Recovery must always move the chain FORWARD to a genuinely
-	// new epoch, never sideways or backward -- unlike ApplyCommitteeUpdate this deliberately does
-	// NOT require exact sequential (+1) progression (the whole point of recovery is bridging an
-	// arbitrarily large gap), but it must still be strictly greater than the chain's current one.
-	if update.NewEpoch <= reg.Epoch {
-		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: chain %d: %w: new epoch %d must be greater than current epoch %d", update.ChainID, ErrNonSequentialEpoch, update.NewEpoch, reg.Epoch)
-	}
-	if err := ValidateCommittee(update.NewCommittee); err != nil {
-		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: %w", err)
-	}
-	// Security fix carried over from the removed ProposalUpdateCommittee case: QuorumThreshold
-	// must never be applied with no bounds check — a typo (even an honestly-intended one) could
-	// set it below the 2/3 BFT floor, letting a minority of this chain's new committee forge a
-	// "valid" QuorumCert for every future attestCommit()/vote() against it.
-	if err := ValidateQuorumThreshold(update.QuorumThreshold); err != nil {
-		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: chain %d: %w", update.ChainID, err)
-	}
-	recoveryRegistry := ChainRegistry{ChainID: 0, Committee: g.RecoveryCommittee, QuorumThreshold: g.RecoveryQuorumThreshold}
-	digest := ComputeRecoveryUpdateCommitteeMessage(update.ChainID, update.NewEpoch, update.NewCommittee, update.QuorumThreshold, update.StateRoot, update.AccountTreeRoot)
-	if err := VerifyQuorumCertAgainstRegistry(recoveryRegistry, cert, digest); err != nil {
-		return fmt.Errorf("UpdateCommitteeWithRecoveryCert: %w", err)
-	}
-	reg.Committee = update.NewCommittee
-	// Always set, unconditionally -- the guard above already guarantees update.NewEpoch > reg.Epoch
-	// (>= 1), so there is no longer a meaningful "0 means don't change" case to preserve here.
-	reg.Epoch = update.NewEpoch
-	if update.QuorumThreshold > 0 {
-		reg.QuorumThreshold = update.QuorumThreshold
-	}
-	if update.StateRoot != (common.Hash{}) {
-		reg.StateRoot = update.StateRoot
-	}
-	if update.AccountTreeRoot != (common.Hash{}) {
-		reg.AccountTreeRoot = update.AccountTreeRoot
-	}
-	g.ChainRegistry[update.ChainID] = reg
 	return nil
 }
 
@@ -1219,8 +1136,8 @@ func (g *GatewayEngine) Outbound(
 	defer g.mu.Unlock()
 
 	// SECURITY FIX (production_security_hardening_plan.md Quick Win #0): reject queuing a NEW
-	// outbound message to a destination already known to be dead (RecoveryCommittee's
-	// DeclareChainDeadWithCert) instead of letting the sender lock/burn real funds into a message
+	// outbound message to a destination already known to be dead (forfeited by
+	// SlashOnEquivocation) instead of letting the sender lock/burn real funds into a message
 	// no relayer will ever be able to deliver -- same "don't self-inflict a permanent lock" spirit
 	// as the existing self-loop/unregistered-destChainId guards one layer up in
 	// gateway_handler.go's "outbound" case, just also covering the relay-onward path (claimMessage's
@@ -1669,8 +1586,8 @@ func (g *GatewayEngine) attestCommitInternal(
 	}
 
 	// SECURITY FIX (production_security_hardening_plan.md Quick Win #0): DeadChains[sourceChainID]
-	// was only ever read by ClaimDeadChainBalance -- RecoveryCommittee's DeclareChainDeadWithCert
-	// "emergency stop" set the flag but nothing actually stopped a captured committee from
+	// was only ever read by ClaimDeadChainBalance -- the forfeit path (SlashOnEquivocation)
+	// set the flag but nothing actually stopped a captured committee from
 	// continuing to attestCommit() and draining PerChainAllocation normally. Fail closed here,
 	// the one place PerChainAllocation is actually debited on ceiling-enforced attestations.
 	if g.DeadChains[sourceChainID] {

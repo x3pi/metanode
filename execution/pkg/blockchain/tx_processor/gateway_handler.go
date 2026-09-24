@@ -190,9 +190,6 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err := applyMinNativeStakeToRegisterConfig(freshEngine); err != nil {
 			return nil, err
 		}
-		if err := applyRecoveryCommitteeConfig(freshEngine); err != nil {
-			return nil, err
-		}
 		if err := applySecurityBondConfig(freshEngine); err != nil {
 			return nil, err
 		}
@@ -246,9 +243,6 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	}
 	applyReserveChainIDConfig(&engine)
 	if err := applyMinNativeStakeToRegisterConfig(&engine); err != nil {
-		return nil, err
-	}
-	if err := applyRecoveryCommitteeConfig(&engine); err != nil {
 		return nil, err
 	}
 	if err := applySecurityBondConfig(&engine); err != nil {
@@ -322,43 +316,6 @@ func applySecurityBondConfig(engine *cross_chain.GatewayEngine) error {
 		}
 		engine.MinSecurityBondToRegister = amount
 	}
-	return nil
-}
-
-// applyRecoveryCommitteeConfig sets GatewayEngine.RecoveryCommittee/RecoveryQuorumThreshold once
-// from config.ConfigApp.CrossChain.RecoveryCommitteeJSON/RecoveryQuorumThreshold — see
-// GatewayEngine.RecoveryCommittee's own doc comment for the full rationale (2026-09-04, replacing
-// GovernanceEngine.ActiveChains as the authorizer for DeclareChainDeadWithCert/
-// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). A no-op when the raw config string is
-// empty (lets a chain start up before an operator has decided its RecoveryCommittee — the 3 call
-// sites above fail closed on an empty committee via VerifyQuorumCertAgainstRegistry's own
-// ErrEmptyCommittee check, not silently here) or already set (lock-in-once, same pattern as every
-// other config-applied GatewayEngine field). A non-empty but unparseable JSON string is a config
-// mistake, not a silent no-op — fails loudly at startup.
-func applyRecoveryCommitteeConfig(engine *cross_chain.GatewayEngine) error {
-	if config.ConfigApp == nil {
-		return nil
-	}
-	if len(engine.RecoveryCommittee) > 0 {
-		return nil
-	}
-	raw := config.ConfigApp.CrossChain.RecoveryCommitteeJSON
-	if raw == "" {
-		return nil
-	}
-	var committee []cross_chain.ValidatorEntry
-	if err := json.Unmarshal([]byte(raw), &committee); err != nil {
-		return fmt.Errorf("cross_chain.recovery_committee_json is not valid JSON: %w", err)
-	}
-	if err := cross_chain.ValidateCommittee(committee); err != nil {
-		return fmt.Errorf("cross_chain.recovery_committee_json: %w", err)
-	}
-	threshold := config.ConfigApp.CrossChain.RecoveryQuorumThreshold
-	if err := cross_chain.ValidateQuorumThreshold(threshold); err != nil {
-		return fmt.Errorf("cross_chain.recovery_quorum_threshold: %w", err)
-	}
-	engine.RecoveryCommittee = committee
-	engine.RecoveryQuorumThreshold = threshold
 	return nil
 }
 
@@ -659,8 +616,8 @@ func (h *GatewayHandler) HandleTransaction(
 	case "outbound", "attestCommit", "attestReserveIssuedCommit", "claimMessage", "creditReserveAllocation", "refund",
 		"registerCommitteePop", "submitCommitteeAttestation", "submitCommitAttestation", "committeeUpdate",
 		"registerChainViaStake", "setGenesisDigest", "batchOutboundCommit",
-		"transferAllocationWithCert", "allocateSupplyWithCert", "declareChainDeadWithCert",
-		"unregisterChainWithCert", "updateCommitteeWithRecoveryCert", "registerAssetWithCert",
+		"transferAllocationWithCert", "allocateSupplyWithCert",
+		"unregisterChainWithCert", "registerAssetWithCert",
 		"verifyAndExecute", "claimDeadChainBalance", "withdrawRelayerTip", "submitMessageFailureAttestation",
 		"refundReserveAllocation", "submitMessageSuccessAttestation",
 		"postSecurityBond", "claimUnbondedBond", "slashOnEquivocation", "submitCheckpoint":
@@ -1938,71 +1895,32 @@ func (h *GatewayHandler) handleWrite(
 			return nil, nil, err
 		}
 
-	case "declareChainDeadWithCert":
-		// 2026-09-04: replaces ProposalDeclareChainDead's governance-vote gate -- authorized by
-		// RecoveryCommittee (a fixed, config-set, non-Sybil-able set; the target chain being
-		// declared dead cannot, by definition, self-authorize this).
-		chainID, err := mustUint64(args[0])
-		if err != nil {
-			return nil, nil, fmt.Errorf("declareChainDeadWithCert: chainId: %w", err)
-		}
-		certEpoch, err := mustUint64(args[1])
-		if err != nil {
-			return nil, nil, fmt.Errorf("declareChainDeadWithCert: cert epoch: %w", err)
-		}
-		cert := cross_chain.QuorumCert{
-			Epoch:              certEpoch,
-			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
-		}
-		if err := engine.DeclareChainDeadWithCert(chainID, cert); err != nil {
-			return nil, nil, err
-		}
-
 	case "unregisterChainWithCert":
-		// 2026-09-04: replaces ProposalUnregisterChain's governance-vote gate -- same
-		// RecoveryCommittee rationale as declareChainDeadWithCert above.
+		// 2026-09-24: self-authorized by the leaving chain's OWN committee (RecoveryCommittee was
+		// removed); nonce is the replay guard, see GatewayEngine.UnregisterNonce.
 		chainID, err := mustUint64(args[0])
 		if err != nil {
 			return nil, nil, fmt.Errorf("unregisterChainWithCert: chainId: %w", err)
 		}
-		certEpoch, err := mustUint64(args[1])
+		nonce, err := mustUint64(args[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("unregisterChainWithCert: nonce: %w", err)
+		}
+		certEpoch, err := mustUint64(args[2])
 		if err != nil {
 			return nil, nil, fmt.Errorf("unregisterChainWithCert: cert epoch: %w", err)
 		}
 		cert := cross_chain.QuorumCert{
 			Epoch:              certEpoch,
-			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
+			AggregateSignature: hexutil.Bytes(mustBytes(args[3])),
+			SignerBitmap:       hexutil.Bytes(mustBytes(args[4])),
 		}
-		if err := engine.UnregisterChainWithCert(chainID, cert, blockTime); err != nil {
+		if err := engine.UnregisterChainWithCert(chainID, nonce, cert, blockTime); err != nil {
 			return nil, nil, err
 		}
 		// C6 observability (note/cross_chain_attack_scenario_catalog.md): keep RegisteredChainCount
 		// accurate after a real registry-size change.
 		metrics.RegisteredChainCount.Set(float64(len(engine.ChainRegistry)))
-
-	case "updateCommitteeWithRecoveryCert":
-		// 2026-09-04: replaces ProposalUpdateCommittee's governance-vote gate -- authorized by
-		// RecoveryCommittee, for the case where a chain's OWN current committee is unreachable
-		// (ApplyCommitteeUpdate above still handles the normal self-attested successor case).
-		payload := mustBytes(args[0])
-		var update cross_chain.UpdateCommitteePayload
-		if err := json.Unmarshal(payload, &update); err != nil {
-			return nil, nil, fmt.Errorf("invalid UpdateCommitteePayload: %w", err)
-		}
-		certEpoch, err := mustUint64(args[1])
-		if err != nil {
-			return nil, nil, fmt.Errorf("updateCommitteeWithRecoveryCert: cert epoch: %w", err)
-		}
-		cert := cross_chain.QuorumCert{
-			Epoch:              certEpoch,
-			AggregateSignature: hexutil.Bytes(mustBytes(args[2])),
-			SignerBitmap:       hexutil.Bytes(mustBytes(args[3])),
-		}
-		if err := engine.UpdateCommitteeWithRecoveryCert(update, cert); err != nil {
-			return nil, nil, err
-		}
 
 	case "registerAssetWithCert":
 		// 2026-09-04: replaces ProposalRegisterAsset's governance-vote gate -- authorized by the

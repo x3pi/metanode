@@ -358,25 +358,6 @@ type AttestedCommit struct {
 	CeilingDebited bool `json:"ceiling_debited,omitempty"`
 }
 
-// UpdateCommitteePayload is the JSON payload for UpdateCommitteeWithRecoveryCert (RecoveryCommittee-
-// authorized committee replacement -- see gateway.go). Was formerly also used by the deleted
-// GovernanceEngine's ProposalUpdateCommittee proposal kind; that whole propose/vote/execute
-// machinery (GovernanceProposalKind, GovernanceProposal, AllocationGrantPayload,
-// AllocationTransferPayload and the numbered Proposal* kinds) was removed 2026-09-04 in favor of
-// per-action cert-based self-authorization / RecoveryCommittee-authorization (see gateway.go's
-// AllocateSupplyWithCert/TransferAllocationWithCert/DeclareChainDeadWithCert/
-// UnregisterChainWithCert/UpdateCommitteeWithRecoveryCert). This struct is the only piece of that
-// old payload family still live.
-type UpdateCommitteePayload struct {
-	ChainID         uint64           `json:"chain_id"`
-	SourceChainID   uint64           `json:"source_chain_id,omitempty"`
-	NewEpoch        uint64           `json:"new_epoch"`
-	NewCommittee    []ValidatorEntry `json:"new_committee"`
-	QuorumThreshold uint64           `json:"quorum_threshold,omitempty"`
-	StateRoot       common.Hash      `json:"state_root,omitempty"`
-	AccountTreeRoot common.Hash      `json:"account_tree_root,omitempty"`
-}
-
 // AccountLeaf represents account state snapshot for Chain-Death Recovery (Section 11.6 & 5.2.2).
 type AccountLeaf struct {
 	Account common.Address `json:"account"`

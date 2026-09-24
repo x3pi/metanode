@@ -60,8 +60,7 @@ package abi_contract
 // registerChainViaStake() solves the same "chain #1 has no vote path" circular dependency a
 // deleted bootstrapFoundingChains() method (retired 2026-08-28) and a deleted vote-gated
 // ProposalRegisterChain kind (retired 2026-09-04, along with the whole GovernanceEngine it and
-// every other proposal kind used to run on — see cross_chain.GatewayEngine.RecoveryCommittee's own
-// doc comment) used to solve, each in its own way: a Root Anchor starts with zero ChainRegistry
+// every other proposal kind used to run on) used to solve, each in its own way: a Root Anchor starts with zero ChainRegistry
 // entries (NewGatewayEngine is always called with an empty registry — see gateway_handler.go's
 // loadGatewayEngine), so nothing can bootstrap the very first chain's own membership.
 // registerChainViaStake() is vote-free and per-chain
@@ -537,35 +536,12 @@ const GatewayABI = `[
 	{
 		"inputs": [
 			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
-			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
-			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
-			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
-		],
-		"name": "declareChainDeadWithCert",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{"internalType": "uint256", "name": "chainId", "type": "uint256"},
+			{"internalType": "uint64", "name": "nonce", "type": "uint64"},
 			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
 			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
 			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
 		],
 		"name": "unregisterChainWithCert",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{"internalType": "bytes", "name": "payload", "type": "bytes"},
-			{"internalType": "uint64", "name": "certEpoch", "type": "uint64"},
-			{"internalType": "bytes", "name": "certAggregateSignature", "type": "bytes"},
-			{"internalType": "bytes", "name": "certSignerBitmap", "type": "bytes"}
-		],
-		"name": "updateCommitteeWithRecoveryCert",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"

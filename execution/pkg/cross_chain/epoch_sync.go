@@ -99,15 +99,15 @@ func ComputeMessageSuccessAttestMessage(messageID common.Hash, destChainID uint6
 	return buf
 }
 
-// The 5 domain tags and digest functions below (2026-09-04) replace GovernanceEngine's whole
+// The domain tags and digest functions below (2026-09-04) replace GovernanceEngine's whole
 // propose/vote/72h-timelock/execute machinery, removed the same day per explicit user request
 // ("bỏ hoàn toàn vote... vì không có ai thao túng vote cả" -- if there is no vote mechanism, there
 // is nothing to Sybil-manipulate). Vote from Governance.ActiveChains (grown for free by every
 // RegisterChainViaStake call, see note/eurozone_unified_native_coin_plan.md mục 2.6) was itself the
 // Sybil-exploitable primitive; replacing it with a real cryptographic QuorumCert -- from either the
-// affected party's OWN committee (self-authorization) or a small, config-set, non-Sybil-able
-// RecoveryCommittee (for actions a party genuinely cannot self-authorize) -- removes the
-// vote-buying attack surface entirely rather than trying to patch it. Each of these mirrors
+// affected party's OWN committee (self-authorization; a config-set RecoveryCommittee that used
+// to authorize the actions a party could not self-authorize was itself removed 2026-09-24) --
+// removes the vote-buying attack surface entirely rather than trying to patch it. Each of these mirrors
 // ComputeCommitRootAttestMessage/ComputeGovernanceVoteMessage's own domain-separation pattern —
 // a distinct tag per action so a signature over one can never be replayed as another.
 
@@ -153,33 +153,23 @@ func ComputeAllocateSupplyMessage(chainID uint64, amount *big.Int) []byte {
 	return buf
 }
 
-// DeclareChainDeadDomainTag domain-separates GatewayEngine.DeclareChainDeadWithCert's payload:
-// this is NOT self-authorizable (the whole point is the target chain is unresponsive), so it is
-// signed by the config-set RecoveryCommittee instead.
-var DeclareChainDeadDomainTag = []byte("DECLARE_CHAIN_DEAD_V1:")
-
-// ComputeDeclareChainDeadMessage computes the digest the RecoveryCommittee signs to declare
-// chainID dead (unlocking ClaimDeadChainBalance for its stranded account holders).
-func ComputeDeclareChainDeadMessage(chainID uint64) []byte {
-	var buf []byte
-	buf = append(buf, DeclareChainDeadDomainTag...)
-	var idBuf [8]byte
-	binary.BigEndian.PutUint64(idBuf[:], chainID)
-	buf = append(buf, idBuf[:]...)
-	return buf
-}
-
-// UnregisterChainDomainTag domain-separates GatewayEngine.UnregisterChainWithCert's payload —
-// same non-self-authorizable rationale as DeclareChainDead, signed by RecoveryCommittee.
+// UnregisterChainDomainTag domain-separates GatewayEngine.UnregisterChainWithCert's payload,
+// signed by the leaving chain's OWN currently-registered committee (self-authorized).
 var UnregisterChainDomainTag = []byte("UNREGISTER_CHAIN_V1:")
 
-// ComputeUnregisterChainMessage computes the digest the RecoveryCommittee signs to remove chainID
-// from ChainRegistry entirely.
-func ComputeUnregisterChainMessage(chainID uint64) []byte {
+// ComputeUnregisterChainMessage computes the digest chainID's own committee signs to remove
+// itself from ChainRegistry. It binds the chain's current registry epoch and its UnregisterNonce
+// (see GatewayEngine.UnregisterNonce) so a captured cert can be used at most once and cannot be
+// replayed against a later registration of the same chainID.
+func ComputeUnregisterChainMessage(chainID, epoch, nonce uint64) []byte {
 	var buf []byte
 	buf = append(buf, UnregisterChainDomainTag...)
 	var idBuf [8]byte
 	binary.BigEndian.PutUint64(idBuf[:], chainID)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], epoch)
+	buf = append(buf, idBuf[:]...)
+	binary.BigEndian.PutUint64(idBuf[:], nonce)
 	buf = append(buf, idBuf[:]...)
 	return buf
 }
@@ -188,14 +178,14 @@ func ComputeUnregisterChainMessage(chainID uint64) []byte {
 // note/cross_chain/root_anchor_production_security_hardening_plan.md, adapted from
 // shard_design_ton_real.md mục 5.6's ShardCheckpoint) — signed by the reporting chain's OWN
 // currently-registered committee, self-authorized (a chain reporting its own liveness/state needs
-// no third-party authorization, unlike DeclareChainDead/UnregisterChain).
+// no third-party authorization).
 var CheckpointDomainTag = []byte("CHECKPOINT_V1:")
 
 // ComputeCheckpointMessage computes the digest chainID's own committee signs to periodically
 // self-report a liveness/state signal to Root Anchor -- NOT a Data Availability proof (it proves
 // only that the committee could produce and sign a state root at this height, not that the data
-// behind it is published/reconstructable anywhere), just a signal RecoveryCommittee and off-chain
-// monitoring can act on when it goes stale.
+// behind it is published/reconstructable anywhere), just a signal off-chain monitoring
+// can act on when it goes stale.
 func ComputeCheckpointMessage(chainID, epoch, blockHeight uint64, stateRoot, validatorSetHash common.Hash) []byte {
 	var buf []byte
 	buf = append(buf, CheckpointDomainTag...)
@@ -208,50 +198,6 @@ func ComputeCheckpointMessage(chainID, epoch, blockHeight uint64, stateRoot, val
 	buf = append(buf, idBuf[:]...)
 	buf = append(buf, stateRoot.Bytes()...)
 	buf = append(buf, validatorSetHash.Bytes()...)
-	return buf
-}
-
-// RecoveryUpdateCommitteeDomainTag domain-separates GatewayEngine.UpdateCommitteeWithRecoveryCert's
-// payload — distinct from CommitteeUpdateDomainTag (ApplyCommitteeUpdate's OWN-committee-signs-its-
-// successor path, epoch_sync.go above) on purpose: that path requires the chain's CURRENT/OLD
-// committee to still be reachable to sign, which is exactly what is impossible in the recovery
-// scenario this path exists for (old committee's keys lost/unreachable) — signed by
-// RecoveryCommittee instead, and deliberately does NOT require sequential epoch progression the
-// way ApplyCommitteeUpdate does, since a stuck chain's epoch counter may be arbitrarily far behind.
-var RecoveryUpdateCommitteeDomainTag = []byte("RECOVERY_UPDATE_COMMITTEE_V1:")
-
-// ComputeRecoveryUpdateCommitteeMessage computes the digest the RecoveryCommittee signs to install
-// a brand new committee for chainID. newCommittee is sorted by PubkeyBLS first (same rationale as
-// ComputeCommitteeUpdateDigest) so the digest is independent of slice order.
-func ComputeRecoveryUpdateCommitteeMessage(chainID, newEpoch uint64, newCommittee []ValidatorEntry, quorumThreshold uint64, stateRoot, accountTreeRoot common.Hash) []byte {
-	sorted := make([]ValidatorEntry, len(newCommittee))
-	copy(sorted, newCommittee)
-	sort.Slice(sorted, func(i, j int) bool {
-		return bytes.Compare(sorted[i].PubkeyBLS, sorted[j].PubkeyBLS) < 0
-	})
-	var committeeBuf []byte
-	for _, v := range sorted {
-		committeeBuf = append(committeeBuf, v.PubkeyBLS...)
-		var stakeBuf [8]byte
-		binary.BigEndian.PutUint64(stakeBuf[:], v.Stake)
-		committeeBuf = append(committeeBuf, stakeBuf[:]...)
-		committeeBuf = append(committeeBuf, v.PopSignature...)
-	}
-	committeeHash := Keccak256(committeeBuf)
-
-	var buf []byte
-	buf = append(buf, RecoveryUpdateCommitteeDomainTag...)
-	var idBuf [8]byte
-	binary.BigEndian.PutUint64(idBuf[:], chainID)
-	buf = append(buf, idBuf[:]...)
-	binary.BigEndian.PutUint64(idBuf[:], newEpoch)
-	buf = append(buf, idBuf[:]...)
-	buf = append(buf, committeeHash.Bytes()...)
-	var qtBuf [8]byte
-	binary.BigEndian.PutUint64(qtBuf[:], quorumThreshold)
-	buf = append(buf, qtBuf[:]...)
-	buf = append(buf, stateRoot.Bytes()...)
-	buf = append(buf, accountTreeRoot.Bytes()...)
 	return buf
 }
 

@@ -92,20 +92,6 @@ type CrossChainConfig struct {
 	// disables the CommitteeAttestationWorker entirely (alongside RootAnchorRpcUrls).
 	RootAnchorSubmitterPrivateKeyHex string `json:"root_anchor_submitter_private_key_hex,omitempty"`
 
-	// RecoveryCommitteeJSON + RecoveryQuorumThreshold (2026-09-04, replacing GovernanceEngine's
-	// whole propose/vote/72h-timelock/execute machinery — see
-	// cross_chain.GatewayEngine.RecoveryCommittee's own doc comment for the full rationale): a
-	// small, FIXED, JSON-encoded BLS committee ([]cross_chain.ValidatorEntry — pubkey_bls/stake/
-	// pop_signature per member) that authorizes the 3 actions no affected chain can ever self-
-	// authorize (declareChainDeadWithCert, unregisterChainWithCert,
-	// updateCommitteeWithRecoveryCert). Empty/omitted leaves those 3 calls failing closed
-	// (VerifyQuorumCertAgainstRegistry's own ErrEmptyCommittee) rather than silently permissive.
-	// RecoveryQuorumThreshold follows the same convention as ChainRegistry.QuorumThreshold: basis
-	// points, 0 meaning "use the real 2/3 BFT default". Set once, never on-chain-settable — same
-	// "lock in from the pristine state" pattern as ReserveChainID.
-	RecoveryCommitteeJSON   string `json:"recovery_committee_json,omitempty"`
-	RecoveryQuorumThreshold uint64 `json:"recovery_quorum_threshold,omitempty"`
-
 	// ReserveChainID — the chain ID of this system's unconditional issuer ("Reserve", design
 	// doc Section 2.3). On the Reserve chain's OWN config, set this to its own chainId. On
 	// every OTHER chain, set this to the Reserve's chainId so it can correctly reject a

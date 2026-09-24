@@ -106,7 +106,7 @@ build_binaries() {
         cp "$PREBUILT_DIR/simple_chain" "$STAGING_BIN_DIR/"
         chmod +x "$STAGING_BIN_DIR/metanode" "$STAGING_BIN_DIR/simple_chain"
 
-        for tool in cross_chain_relayer register_chains bls_pubkey gen_recovery_committee; do
+        for tool in cross_chain_relayer register_chains bls_pubkey; do
             if [ -f "$PREBUILT_DIR/$tool" ]; then
                 cp "$PREBUILT_DIR/$tool" "$STAGING_BIN_DIR/"
                 chmod +x "$STAGING_BIN_DIR/$tool"
@@ -144,12 +144,6 @@ build_binaries() {
             log_ok "simple_chain binary compiled."
 
             cd "$PROJECT_ROOT/execution"
-            if [ -d "cmd/tool/gen_recovery_committee" ]; then
-                go build -o gen_recovery_committee ./cmd/tool/gen_recovery_committee
-                cp gen_recovery_committee "$STAGING_BIN_DIR/"
-                log_ok "gen_recovery_committee compiled."
-            fi
-
             # Tools build (optional but good to have)
             for tool in cross_chain_relayer register_chains bls_pubkey; do
                 if [ -d "cmd/tool/$tool" ]; then

@@ -900,192 +900,24 @@ func TestGateway_P2_2_MultiValidatorQuorumBitmap(t *testing.T) {
 	assert.Equal(t, commitRoot4, attested4.CommitRoot)
 }
 
-// setupRecoveryCommittee gives engine a real, single-member RecoveryCommittee and returns a
-// closure that signs a real QuorumCert against it -- the authorization
-// UpdateCommitteeWithRecoveryCert now requires (2026-09-04, replacing the removed
-// propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) governance dance).
-func setupRecoveryCommittee(engine *GatewayEngine) func(digest []byte) QuorumCert {
-	kp := bls.GenerateKeyPair()
-	pop := PopSign(kp.PrivateKey(), kp.PublicKey())
-	engine.RecoveryCommittee = []ValidatorEntry{
-		{PubkeyBLS: kp.BytesPublicKey(), Stake: 10000, PopSignature: pop.Bytes()},
-	}
-	return func(digest []byte) QuorumCert {
-		sig := bls.Sign(kp.PrivateKey(), digest)
-		return QuorumCert{Epoch: 0, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
-	}
+// signUnregisterCert signs chainID's self-authorized UnregisterChainWithCert cert with its own
+// committee key (kp), bound to the chain's current registry epoch and the given nonce.
+func signUnregisterCert(engine *GatewayEngine, kp *bls.KeyPair, chainID, nonce uint64) QuorumCert {
+	reg := engine.ChainRegistry[chainID]
+	sig := bls.Sign(kp.PrivateKey(), ComputeUnregisterChainMessage(chainID, reg.Epoch, nonce))
+	return QuorumCert{Epoch: reg.Epoch, AggregateSignature: sig.Bytes(), SignerBitmap: []byte{0x01}}
 }
 
-func TestGateway_UpdateCommitteeWithRecoveryCert_Lifecycle(t *testing.T) {
-	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	kp2 := bls.GenerateKeyPair()
-	popSig2 := PopSign(kp2.PrivateKey(), kp2.PublicKey())
-
-	newCommittee := []ValidatorEntry{
-		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
-		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: popSig2.Bytes()},
-	}
-
-	payloadObj := UpdateCommitteePayload{
-		ChainID:  101,
-		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5) -- see the
-		// epoch-monotonicity SECURITY FIX on UpdateCommitteeWithRecoveryCert (2026-09-04)
-		NewCommittee:    newCommittee,
-		QuorumThreshold: 6700,
-		StateRoot:       common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
-		AccountTreeRoot: common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
-	}
-
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
-	require.NoError(t, err)
-
-	// Verify updated ChainRegistry state
-	reg := engine.ChainRegistry[101]
-	assert.Equal(t, uint64(6), reg.Epoch)
-	assert.Equal(t, uint64(6700), reg.QuorumThreshold)
-	assert.Equal(t, payloadObj.StateRoot, reg.StateRoot)
-	assert.Equal(t, payloadObj.AccountTreeRoot, reg.AccountTreeRoot)
-	assert.Equal(t, 2, len(reg.Committee))
-	assert.Equal(t, kp1.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
-	assert.Equal(t, kp2.BytesPublicKey(), reg.Committee[1].PubkeyBLS)
-}
-
-func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsInvalidPoP(t *testing.T) {
-	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	kp2 := bls.GenerateKeyPair()
-	badPopSig := make([]byte, 96) // Zeroed / invalid PoP signature
-
-	newCommittee := []ValidatorEntry{
-		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 6000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
-		{PubkeyBLS: kp2.BytesPublicKey(), Stake: 4000, PopSignature: badPopSig},
-	}
-
-	payloadObj := UpdateCommitteePayload{
-		ChainID:  101,
-		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5), else the epoch
-		// check rejects this first -- this test is specifically about PoP rejection
-		NewCommittee: newCommittee,
-	}
-
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
-	assert.ErrorIs(t, err, ErrPopVerifyFailed)
-
-	// Ensure registry was NOT modified
-	reg := engine.ChainRegistry[101]
-	assert.Equal(t, uint64(5), reg.Epoch)
-	assert.Equal(t, 1, len(reg.Committee))
-}
-
-func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsUnknownChain(t *testing.T) {
-	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	newCommittee := []ValidatorEntry{
-		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
-	}
-
-	payloadObj := UpdateCommitteePayload{
-		ChainID:      999, // Unknown chain
-		NewEpoch:     2,
-		NewCommittee: newCommittee,
-	}
-
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
-	assert.ErrorIs(t, err, ErrUnknownChain)
-}
-
-// TestGateway_UpdateCommitteeWithRecoveryCert_RejectsSubBftQuorumThreshold is the regression test
-// for a real gap found reviewing this same feature: QuorumThreshold was applied with no bounds
-// check at all. VerifyQuorumCertAgainstRegistry treats it as the fraction of a committee's TOTAL
-// STAKE required to sign before a QuorumCert verifies — a nonzero value below 2/3 lets a cert
-// verify without Byzantine fault tolerance, i.e. a minority (even one low-stake signer) could
-// forge a "valid" quorum for that chain's attestCommit()/vote() from then on.
-func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsSubBftQuorumThreshold(t *testing.T) {
-	engine, kp1 := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	newCommittee := []ValidatorEntry{
-		{PubkeyBLS: kp1.BytesPublicKey(), Stake: 10000, PopSignature: PopSign(kp1.PrivateKey(), kp1.PublicKey()).Bytes()},
-	}
-
-	// 3334 basis points = 33.34% -- well under the 2/3 BFT floor (6667).
-	payloadObj := UpdateCommitteePayload{
-		ChainID:  101,
-		NewEpoch: 6, // must be > setupTestGatewayEngine's fixture epoch (5) -- this test is
-		// specifically about QuorumThreshold rejection
-		NewCommittee:    newCommittee,
-		QuorumThreshold: 3334,
-	}
-
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
-	assert.ErrorIs(t, err, ErrInvalidQuorumThreshold)
-
-	// Registry must be untouched -- still the original committee/threshold from setupTestGatewayEngine.
-	reg := engine.ChainRegistry[101]
-	assert.Equal(t, uint64(5), reg.Epoch)
-	assert.Equal(t, uint64(6667), reg.QuorumThreshold)
-}
-
-// TestGateway_UpdateCommitteeWithRecoveryCert_RejectsReplayAsRollback is the regression test for
-// a second real vulnerability found in the same review pass as the TransferAllocationWithCert
-// replay bug: a RecoveryCommittee cert, once signed, is necessarily public forever (it travels in
-// on-chain calldata) -- without an epoch-monotonicity check, the EXACT SAME cert that legitimately
-// recovered a chain once could be replayed at ANY LATER TIME to roll that chain's committee back
-// to the old, recovered one, even after it has since progressed through many further epochs of
-// its own via ApplyCommitteeUpdate (self-attested, epoch_sync.go) with a completely different,
-// possibly-rotated-out committee. This is arguably worse than a simple double-spend: it can
-// silently hijack a chain's entire validator set at an attacker-chosen future time.
-func TestGateway_UpdateCommitteeWithRecoveryCert_RejectsReplayAsRollback(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	// Chain 101 starts at Epoch 5 (setupTestGatewayEngine's fixture).
-	recoveredKP := bls.GenerateKeyPair()
-	recoveredPop := PopSign(recoveredKP.PrivateKey(), recoveredKP.PublicKey())
-	payloadObj := UpdateCommitteePayload{
-		ChainID:      101,
-		NewEpoch:     6,
-		NewCommittee: []ValidatorEntry{{PubkeyBLS: recoveredKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveredPop.Bytes()}},
-	}
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	cert := signRecovery(digest)
-
-	// First use: a genuine recovery -- MUST SUCCEED.
-	require.NoError(t, engine.UpdateCommitteeWithRecoveryCert(payloadObj, cert))
-	require.Equal(t, uint64(6), engine.ChainRegistry[101].Epoch)
-
-	// Chain 101 now legitimately progresses on its own, self-attested, to a much later epoch with
-	// a brand new (rotated) committee -- simulated directly here since ApplyCommitteeUpdate's own
-	// mechanics are exercised elsewhere; this test is specifically about what happens to the OLD
-	// recovery cert afterward.
-	kpNew := bls.GenerateKeyPair()
-	popNew := PopSign(kpNew.PrivateKey(), kpNew.PublicKey())
-	engine.ChainRegistry[101] = ChainRegistry{
-		ChainID:   101,
-		Epoch:     50,
-		Committee: []ValidatorEntry{{PubkeyBLS: kpNew.BytesPublicKey(), Stake: 10000, PopSignature: popNew.Bytes()}},
-	}
-
-	// REPLAY: the exact same recovery cert from epoch 6, resubmitted now that the chain is
-	// genuinely at epoch 50 -- this is precisely what a real attacker does (the cert is public,
-	// no signing key needed to replay it). MUST FAIL, and must NOT roll the committee back.
-	errReplay := engine.UpdateCommitteeWithRecoveryCert(payloadObj, cert)
-	assert.ErrorIs(t, errReplay, ErrNonSequentialEpoch, "a recovery cert targeting an epoch <= the chain's CURRENT epoch must be rejected")
-	assert.Equal(t, uint64(50), engine.ChainRegistry[101].Epoch, "replay must not roll the epoch back")
-	assert.Equal(t, kpNew.BytesPublicKey(), engine.ChainRegistry[101].Committee[0].PubkeyBLS, "replay must not reinstall the old recovered committee")
+// markChainDeadForTest forfeits chainID's bond and sets DeadChains[chainID] exactly the way
+// SlashOnEquivocation does (the only production route, since RecoveryCommittee and
+// DeclareChainDeadWithCert were removed 2026-09-24), without needing real equivocation certs --
+// for tests that only care about what a dead chain blocks or unlocks. The real slash route is
+// covered by the SlashOnEquivocation tests in security_bond_test.go.
+func markChainDeadForTest(g *GatewayEngine, chainID uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ensureSecurityBond()
+	g.forfeitBond(chainID)
 }
 
 // TestGateway_RegisterChainViaStake is the regression test for the vote-free registration path.
@@ -1410,55 +1242,6 @@ func TestGateway_RegisterChainViaStake_RejectsSubBftQuorumThreshold(t *testing.T
 	_, exists := engine.ChainRegistry[104]
 	assert.False(t, exists, "the sub-BFT entry itself must still be rejected")
 	assert.Len(t, engine.ChainRegistry, 3, "the three valid entries registered before it must be unaffected")
-}
-
-// TestGateway_UpdateCommitteeWithRecoveryCert_RecoversChainStuckManyEpochsBehind is the decision
-// test for all_remaining_fixes_plan.md's Mục 1 ("epoch catch-up: chain mất kết nối nhiều epoch
-// không có đường bắt kịp"). ApplyCommitteeUpdate (epoch_sync.go) requires strict sequential
-// epoch progression AND a valid quorum cert from the chain's CURRENT committee -- if a chain
-// loses connectivity for many epochs and its old committee's signing keys are gone (validators
-// rotated in the meantime), self-attested continuity is permanently impossible; no amount of
-// clever cryptography can prove continuity from keys that no longer exist.
-// UpdateCommitteeWithRecoveryCert (2026-09-04, replacing the removed
-// propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) governance dance) is the
-// real, working answer: recovery via RecoveryCommittee -- a fixed, config-set, non-Sybil-able
-// set vouching for the stuck chain's claimed new committee (e.g. based on real-world proof the
-// stuck chain's operators published out of band) -- rather than cryptographic self-continuity.
-func TestGateway_UpdateCommitteeWithRecoveryCert_RecoversChainStuckManyEpochsBehind(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	engine.EnsureAssetRegistry()
-	signRecovery := setupRecoveryCommittee(engine)
-
-	// Chain 101 (from setupTestGatewayEngine) is stuck at Epoch 5. Simulate the real-world
-	// failure this mechanism exists for: its old committee's keys are gone -- nobody in this
-	// test ever produces a QuorumCert signed by the Epoch-5 committee, proving the recovery
-	// path genuinely does not need one.
-	require.Equal(t, uint64(5), engine.ChainRegistry[101].Epoch)
-
-	kpNew := bls.GenerateKeyPair()
-	popSigNew := PopSign(kpNew.PrivateKey(), kpNew.PublicKey())
-	recoveredCommittee := []ValidatorEntry{
-		{PubkeyBLS: kpNew.BytesPublicKey(), Stake: 10000, PopSignature: popSigNew.Bytes()},
-	}
-
-	// A big, non-sequential jump (5 -> 500) -- ApplyCommitteeUpdate would reject this outright
-	// (ErrNonSequentialEpoch expects exactly 6). UpdateCommitteeWithRecoveryCert has no such
-	// restriction: RecoveryCommittee's real signature is the safety property here, not epoch
-	// sequencing.
-	payloadObj := UpdateCommitteePayload{
-		ChainID:      101,
-		NewEpoch:     500,
-		NewCommittee: recoveredCommittee,
-	}
-
-	digest := ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	err := engine.UpdateCommitteeWithRecoveryCert(payloadObj, signRecovery(digest))
-	require.NoError(t, err)
-
-	reg := engine.ChainRegistry[101]
-	assert.Equal(t, uint64(500), reg.Epoch, "chain recovered to the current epoch despite the 495-epoch gap")
-	assert.Equal(t, 1, len(reg.Committee))
-	assert.Equal(t, kpNew.BytesPublicKey(), reg.Committee[0].PubkeyBLS)
 }
 
 // TestGateway_ClaimMessage_BadProofDoesNotBurnClaimedAmountCap is the regression test for the
