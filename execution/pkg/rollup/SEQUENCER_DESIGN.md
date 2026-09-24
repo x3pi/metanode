@@ -452,9 +452,14 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 
 | Tiêu chí | Hướng A (report vận hành) | Hướng B (fraud-proof đầy đủ) |
 |---|---|---|
-| Trustless | Không — dựa vào operator/`RecoveryCommittee` | Có |
-| Effort triển khai | Thấp — chỉ cần thêm signed receipt + quy trình | Rất cao — đổi kiến trúc thực thi + verifier engine độc lập |
-| Chi phí vận hành liên tục | Thấp | Cao (băng thông/lưu trữ toàn bộ tx log) |
+| Cơ chế cốt lõi | User giữ receipt → gửi khiếu nại kèm receipt cho operator/`RecoveryCommittee` → người đó tự tay đối chiếu LevelDB/log thật của node | Node publish **toàn bộ transaction log** (không chỉ root) → bất kỳ ai cũng tự replay để tính ra state, so khớp với root node công bố |
+| Trustless | Không — dựa vào operator/`RecoveryCommittee` | Có — ai cũng tự verify được, không cần tin ai |
+| Effort triển khai | Thấp — chỉ cần thêm signed receipt + quy trình | Rất cao — cần đặc tả lại giao dịch nội bộ thành state-transition function deterministic + xây engine replay **độc lập** với chính binary node |
+| Chi phí vận hành liên tục | Thấp | Cao (băng thông/lưu trữ toàn bộ tx log — giao dịch nội bộ chiếm đa số traffic, mục 13.1) |
+| SLA / tự động hoá | Không — phụ thuộc thời gian điều tra của operator | Có — phát hiện sai → tự động trigger slash `SecurityBond` + hoàn tiền, dùng lại khung Delay 72h có sẵn |
+| Hậu quả cho node sai | Escalate thành "compromise" → kích hoạt luồng #8 (đổi khoá qua `RecoveryCommittee`) | Slash bond trực tiếp, không cần con người can thiệp |
+| Rủi ro xung đột lợi ích | Có — phải tách vai trò người điều tra khỏi chính operator của node bị report | Không — verify là toán học |
+| Mâu thuẫn kiến trúc | Không | Có — đảo ngược 1 phần giả định nền tảng "Parent Chain không lưu state ứng dụng" (mục 3.1) mà cả thiết kế Float Account đang theo đuổi |
 | Phù hợp giai đoạn | Bắt buộc trước go-live | Roadmap dài hạn, khi quy mô tài sản đủ lớn để đáng đầu tư |
 
 ✅ **ĐÃ CHỐT (2026-09-24):** Signed Receipt + Hướng A là **baseline bắt buộc trước go-live** — đây chính là mảnh còn thiếu thứ 4 trong bộ mitigation đã liệt kê ở mục 2.3 cho rủi ro #8 (hiện mới có 3: ngưỡng rút+delay, anomaly detection, non-custodial tuỳ chọn — thiếu hẳn 1 kênh cho user tự report). Hướng B để dành làm lựa chọn dài hạn/tuỳ chọn, không chặn go-live — chỉ đáng đầu tư nếu quy mô tài sản custody tập trung lớn tới mức rủi ro ở #8 không còn chấp nhận được nữa (Q9-rủi-ro cũng đã chốt cùng đợt — mục 2.3).
@@ -463,3 +468,4 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 
 - **Không giải quyết được trường hợp khoá bị lộ hoàn toàn (loại 4 ở mục 15.1):** nếu kẻ tấn công tự tạo VÀ tự ký request giả từ đầu, receipt chỉ chứng minh "node đã ký cái này" — không chứng minh "user thật sự yêu cầu cái này". Đây vẫn là giới hạn của #8 đã ghi nhận từ trước — Signed Receipt giải quyết lớp "node nói dối về kết quả nó tự thực thi", KHÔNG giải quyết lớp "khoá bị lộ, request giả từ đầu".
 - **Không giúp gì cho giao dịch trong "cửa sổ mất mát 15 phút"** (mục 6.3 điểm 4) nếu node chết trước khi ai kịp lấy được receipt hoặc archival data — receipt chỉ hữu ích nếu đã có nơi lưu ngoài node (client của user, hoặc archival đã kịp thu thập).
+- **Cả 2 hướng đều KHÔNG giải quyết trọn vẹn taxonomy #2 — Censorship** (node từ chối xử lý 1 giao dịch hợp lệ, mục 15.1): Hướng A chỉ dựa vào "báo miệng" của user (không có receipt nào được tạo vì node chưa từng xử lý, nên không có gì cryptographic để chứng minh); Hướng B cũng bó tay tương tự — nếu node âm thầm bỏ qua 1 giao dịch ngay từ đầu (không đưa vào tx log), log vẫn tự nhất quán với root nó publish, **replay không phát hiện được gì bất thường** vì đơn giản là thiếu 1 giao dịch, không phải tính sai 1 giao dịch có mặt. Giải quyết censorship thật sự cần thêm cơ chế "forced inclusion" (kiểu based-rollup) — nằm ngoài phạm vi cả 2 hướng đã thiết kế ở đây.
