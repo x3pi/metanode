@@ -1,6 +1,6 @@
 # Kế hoạch Triển khai — BLS Node nội bộ + Cụm HA ngang hàng
 
-> **Trạng thái:** DRAFT (2026-09-24). ⚠️ **Mục 2, 4, 6 bên dưới ĐÃ BỊ THAY THẾ** bởi các quyết định đã chốt trong `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1: giữ committee = 1 validator; dự phòng bằng SyncOnly kèm bảo đảm "dữ liệu nằm trên đa số node trước khi kết quả được nhả ra ngoài" (thay vì cụm N validator + QuorumCert); HA custody hoãn. Failover do operator quyết định, không tự động. Mục 1 (hiện trạng) và mục 3 (state machine) vẫn còn hiệu lực. Đọc file `SEQUENCER_STEP_BY_STEP_PLAN.md` để biết kế hoạch hiện hành.
+> **Trạng thái:** DRAFT (2026-09-24). ⚠️ **Mục 2, 4, 6 bên dưới ĐÃ BỊ THAY THẾ** bởi các quyết định đã chốt trong `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1: giữ committee = 1 validator; dự phòng bằng SyncOnly kèm bảo đảm "dữ liệu nằm trên đa số node trước khi kết quả được nhả ra ngoài" (thay vì cụm N validator + QuorumCert); HA custody hoãn. Failover do operator quyết định, không tự động. Mục 1 (hiện trạng) và mục 3 (state machine) vẫn còn hiệu lực. **Cập nhật thêm (2026-09-24):** không có binary hay RPC mới — đây là chế độ `consensus_mode = "raft"` của `simple_chain`: giữ nguyên RPC, bộ gom batch và xử lý block Go, chỉ đổi nguồn tạo block sang Raft (bầu leader tự động, cùng 1 khoá ký); không SyncOnly, không epoch. Đọc `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1, 0.5, 0.6 và Giai đoạn C.
 > **Tài liệu gốc:** `SEQUENCER_DESIGN.md` (kiến trúc), `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (sơ đồ + index `#N`).
 > **Mục tiêu:** (1) chạy được 1 node nội bộ end-to-end với state machine cross-node; (2) xây cụm có khả năng phục hồi — 1 node chết thì node đồng bộ sẵn còn lại tiếp quản, các node vai trò ngang nhau (không primary cố định).
 
@@ -26,7 +26,7 @@ Một "node" logic (1 chainID) = **cụm N validator ngang hàng** (N ≥ 4). T�
 |---|---|---|
 | **State** (state machine cross-node) | Chạy trong execution layer như `GatewayHandler` — deterministic, mọi validator có state giống hệt nhau qua BFT. Trạng thái giao dịch là state on-chain của chain đó, không phải bộ nhớ theo process. | Quorum 2f+1 còn lại tiếp tục, không cần bầu lại. |
 | **Hành động ra ngoài** (Transfer / `Claimed` / Reclaim lên Parent Chain) | Mọi replica chạy cùng worker (mẫu `CommitteeAttestationWorker`). Chữ ký là QuorumCert của committee, không phải 1 node tự ký. | Submit trùng vô hại vì Parent Chain chống trùng theo `MessageID`. An toàn dựa vào idempotency, không dựa vào thời gian. |
-| **Khôi phục mức dự phòng** | Observer (`execution/cmd/observer`) đồng bộ sẵn, nâng lên committee ở ranh giới epoch qua `UpdateCommittee` (cơ chế `CommitteeAttestationWorker`). | Sau khi mất node vĩnh viễn, đưa cụm về lại đủ N. |
+| **Khôi phục mức dự phòng** | Replica của Rollup Node (Go thuần, nhận batch qua bản sao đa số — không dùng SyncOnly) đồng bộ sẵn, nâng lên committee ở ranh giới epoch qua `UpdateCommittee` (cơ chế `CommitteeAttestationWorker`). | Sau khi mất node vĩnh viễn, đưa cụm về lại đủ N. |
 
 Ràng buộc Zero-Fork (AGENTS.md Part 2.5):
 - Không dùng timeout/sleep để quyết định dispatch commit. Reclaim dựa trên `blockTime` **on-chain** của Parent Chain, không phải đồng hồ local.

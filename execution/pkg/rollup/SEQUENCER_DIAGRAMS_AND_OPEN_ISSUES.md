@@ -195,7 +195,7 @@ sequenceDiagram
 
 | # | Câu hỏi | Loại | Quyết định |
 |---|---|---|---|
-| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | ✅ **Gỡ hoàn toàn (2026-09-24)** — thay quyết định "dev/operator tự ký tạm" trước đó. `UnregisterChainWithCert` do chính committee của chain tự ký; đổi khoá bằng `ApplyCommitteeUpdate`/chứng nhận kế nhiệm ký trước; không còn tuyên bố chết (`DeadChains` chỉ do `SlashOnEquivocation`). Hệ quả chấp nhận: chain chết hẳn mà không double-sign thì tiền và bond bị khoá (#7) |
+| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | ✅ **Gỡ hoàn toàn (2026-09-24)** — thay quyết định "dev/operator tự ký tạm" trước đó. `UnregisterChainWithCert` do chính committee của chain tự ký; đổi khoá bằng `ApplyCommitteeUpdate` (khoá hiện hành ký); không còn tuyên bố chết (`DeadChains` chỉ do `SlashOnEquivocation`). Hệ quả chấp nhận: chain chết hẳn mà không double-sign thì tiền và bond bị khoá (#7) |
 | Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | Kinh doanh | ✅ **Chấp nhận cho giai đoạn thử nghiệm/quy mô nhỏ** — đủ 4 biện pháp giảm thiểu (delay, anomaly detection, non-custodial tuỳ chọn, Signed Receipt), đánh giá lại khi quy mô tài sản tăng (mục 2.3) |
 | Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ)? | Kỹ thuật + kinh doanh | ✅ **Hướng A** — Signed Receipt + kênh report vận hành qua `RecoveryCommittee`/operator làm baseline (mục 15.5, `SEQUENCER_DESIGN.md`) (#15) |
 | Q(Migration scope) | Có triển khai Migration Account (mục 5.3) ở bản đầu không? | Phạm vi | ✅ **Hoãn** — user cố định ở node đã đăng ký, không xây giao thức 3 pha Freeze/Export/Import ở bản đầu (#4) |
@@ -210,7 +210,7 @@ sequenceDiagram
 | 3 | Không dùng Contract Registry toàn cục | mục 5.2 |
 | 5 | `GasFee` không hoàn khi thất bại | mục 3.4 |
 | 6 | Node chết — TỔNG biết, PHÂN BỔ cần Snapshot | mục 6.3 |
-| 8 | Custody 100% device key — giảm thiểu + phục hồi qua `ApplyCommitteeUpdate`/chứng nhận kế nhiệm ký trước (`RecoveryCommittee` đã gỡ) | mục 2.3, 6.2 |
+| 8 | Custody 100% device key — giảm thiểu + phục hồi qua `ApplyCommitteeUpdate` khi còn replica giữ khoá (`RecoveryCommittee` đã gỡ) | mục 2.3, 6.2 |
 | 9 | Reverse Transfer chống gửi hoàn 2 lần | mục 3.4 |
 | 10 | Chống credit trùng ở node đích | mục 3.3 |
 | 11 | Velocity-limit Transfer OUTFLOW chống lộ khoá | mục 4.4 |
