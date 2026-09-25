@@ -174,7 +174,7 @@ func hashesToBytes32(hashes []common.Hash) [][32]byte {
 // Get/Put/BatchPut are all no-ops (see storage/dummy_db.go), so it is unsuitable for a test that
 // needs writes to actually be found again after rebuilding a ChainState from a committed root
 // (i.e. simulating a restart). MemoryDb is a real (if non-persistent-to-disk) key/value store.
-func newPersistentTestChainState(t *testing.T) (cs *blockchain.ChainState, accountStorage, codeStorage, scStorage storage.Storage) {
+func newPersistentTestChainState(t testing.TB) (cs *blockchain.ChainState, accountStorage, codeStorage, scStorage storage.Storage) {
 	t.Helper()
 
 	prevBackend := trie.GetStateBackend()

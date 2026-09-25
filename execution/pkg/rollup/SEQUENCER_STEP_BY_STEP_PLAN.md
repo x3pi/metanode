@@ -461,7 +461,7 @@ Ba bước đã có kết quả ban đầu đạt đợt 1 nhưng **giữ trạn
 | Restart: Raft phát lại entry đã commit, block đã thực thi có bị thực thi lại không | C0, C2 | Thử kill -9 + restart |
 | Ghi `AccountStateDB` + `SmartContractDB` trong cùng 1 block commit atomic khi mất điện | B2, B4, C1 | Đọc đường commit + thử kill -9; liên quan `634b0d39` |
 | Danh sách H1–H6 đã đầy đủ chưa (startup check Rust, snapshot gắn `CommitIndex`, `GEI authority`, handler epoch/validators…) | C0 | Chạy `simple_chain` không Rust, tìm chỗ còn gọi ngược |
-| Thông lượng khi tx Gateway chạy tuần tự (barrier) và mỗi tx nạp cả blob | B8 | Benchmark |
+| Thông lượng khi tx Gateway chạy tuần tự (barrier) và mỗi tx nạp cả blob | B8 | **Đã đo cho Gateway cũ (2026-09-25):** 0,7 ms → 5,4 ms → 31 ms mỗi `outbound` khi trung bình 50 → 500 → 3.000 message tích luỹ (tăng tuyến tính, xem `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` F0-11). B3 phải lưu per-key và đo lại bằng `BenchmarkGatewayHandler_Outbound` |
 | Cách dựng state cho replica mới (Raft snapshot chỉ giữ metadata) và ràng buộc reflink | C0, C4 | `executor/snapshot_init.go`, `snapshot_manager.go` |
 | Raft index có nằm trong 32 bit (`commit_index` là uint32) suốt vòng đời | C0 | Tính toán theo tốc độ batch |
 
