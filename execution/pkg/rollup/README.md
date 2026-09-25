@@ -29,7 +29,7 @@
 | **B1** (máy trạng thái thuần), **A0** (so với `PerChainAllocation`/Gateway) | ✅ Có | Không phụ thuộc gì chưa xác minh |
 | **C0** (spike xác định: cùng chuỗi `ExecutableBlock` → cùng state root trên 2 tiến trình, không Rust) | ✅ Có, **làm đầu tiên** | **Cổng bắt buộc** cho C1–C6: mọi mục "Chạy thật; chưa có bằng chứng" ở STEP_BY_STEP mục 3 chỉ được đóng bằng C0. Nếu C0 fail thì phải sửa thiết kế trước, không viết tiếp |
 | **C1–C6** (Raft mode) | ⏳ Sau C0 | Chốt `is_authoritative_gei`, số replica, kênh chuyển tiếp ở C0/C2 |
-| **Kiểm chứng gỡ `RecoveryCommittee`** | ⚠️ Chưa làm | Cần wipe + redeploy đồng thời trên cụm thử rồi `./ci.sh run-now`; hiện chỉ có `build_check.sh` 4/4 và `go test` |
+| **Kiểm chứng gỡ `RecoveryCommittee`** | ✅ Xong (2026-09-25) | `./ci.sh run-now --reset` trên cụm thử cục bộ (.232, 4 validator + 1 sync-only): wipe + deploy lại, TPS Blast ~7623 tx/s PASS, Chaos Rolling Restart 6 vòng PASS (62m33s), Zero-Fork khớp block hash + state root trên cả 5 node, dữ liệu Xapian/EVM của 19 contract đồng nhất. Chưa kiểm: đường `unregisterChainWithCert` trên cụm thật (chỉ có unit test) |
 | **F0 còn lại** | ✅ Có (S) | Xác nhận `transactionsRoot` tích luỹ; giao dịch chuẩn có R,S,V hay chỉ BLS (quyết định Parent kiểm chữ ký thế nào); chạy thử revert token thật |
 | **F1–F6** (bằng chứng ERC20) | ❌ Chưa | Chờ F0; chờ **A3** (chính sách token trong phạm vi + cảnh báo ví dùng router — quyết định vận hành); tham số mục 10 chưa đo; chi phí kiểm chữ ký trong Gateway chưa benchmark |
 
