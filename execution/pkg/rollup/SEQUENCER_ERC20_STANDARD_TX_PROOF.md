@@ -29,7 +29,7 @@
 |---|---|---|
 | **A0** | **Số dư bắt đầu bằng 0**: chỉ chứng minh trên **toàn bộ lịch sử từ sự kiện đầu** của `(token, holder)`; không baseline, không theo đoạn | ví nhập sẵn token, client thiếu lịch sử đầu ⇒ `FROM_ZERO=false`, **không** hỗ trợ |
 | **A1** | Người dùng **thu thập đủ** mọi giao dịch ảnh hưởng số dư của mình (tiền ra: của mình; tiền vào và bị `transferFrom`: người trả/người tiêu đưa lại `tx_bytes`) | không kiểm chứng được; vi phạm ⇒ **bảo vệ yếu đi** cho phần thiếu, **node không lợi dụng được** (mục 7, phản bác) |
-| **A2** | **Kiểm toán root chỉ ở mức block**; node chỉ cung cấp **tập hash giao dịch** của block (không nội dung) khi cần | phụ thuộc cách trie băm lá (F0) |
+| **A2** | **Kiểm toán root chỉ ở mức block**; node chỉ cung cấp **tập hash giao dịch** của block (không nội dung) khi cần | F0 đã xác minh: `transactionsRoot` là bộ cộng dồn cộng, kiểm bằng 256 bucket + `txset_root` (mục 14.2) |
 | **A3** | **Chỉ chứng minh khi mọi giao dịch ảnh hưởng token là giao dịch chuẩn** | phát hiện lúc tranh chấp; cờ `nonstandard` (mục 4.3) |
 | **A4** | **Token chuẩn**: không phí chuyển, không rebasing, không hook, không hàm quản trị làm giảm số dư, mọi số dư ban đầu tạo bằng lời gọi chuẩn (mint đã đăng ký) | kiểm tra tuân thủ trước khi đăng ký token |
 
@@ -134,9 +134,9 @@ message TxRecord {                 // dùng cho giao dịch của mình VÀ giao
   uint64 block_number     = 5;
   bytes  block_header     = 6;     // header preimage
   bytes  block_hash       = 7;
-  bytes  tx_proof         = 8;     // tx ∈ transactionsRoot
-  bytes  receipt_bytes    = 9;     // cần status, exception, return
-  bytes  receipt_proof    = 10;    // receipt ∈ receiptRoot
+  bytes  tx_proof         = 8;     // Merkle proof (tx_hash,status) ∈ txset_root của block (F0: transactionsRoot là bộ cộng dồn, không có proof)
+  bytes  receipt_bytes    = 9;     // cần status, exception, return (do node tạo; chỉ có giá trị khi kèm signed_response)
+  bytes  receipt_proof    = 10;    // (dành riêng, không dùng: receiptRoot không có proof)
   bytes  block_mmr_proof  = 11;    // block_hash ∈ block_mmr_root của anchor `anchor_index`
   uint64 anchor_index     = 12;
   bytes  anchor_proof     = 13;    // anchor ∈ anchors_root
@@ -167,26 +167,26 @@ B_calc(X, đến b) = Σ_{b' ≤ b} delta_{b'}(X)      (từ 0)
 
 | Mã | Kiểm tra | Phát hiện |
 |---|---|---|
-| **P1** | Với mỗi giao dịch: chữ ký hợp lệ; `tx ∈ transactionsRoot`; `receipt ∈ receiptRoot`; block ∈ MMR ∈ anchor | giao dịch/kết quả của tôi đúng như đã cam kết |
+| **P1** | Với mỗi giao dịch: chữ ký hợp lệ; `(tx_hash,status) ∈ txset_root` (neo trong `AnchorLeaf`); block ∈ MMR ∈ anchor | giao dịch/kết quả của tôi đúng như đã cam kết |
 | **P4'** | `delta_b(X)` tính từ `H_X` **==** `BlockLeaf(X,b).delta_sum` của node, với mọi block | node cam kết sai tổng biến động của một block |
 | **P7** | Số dư tích luỹ tại **ranh giới block** luôn ≥ 0 (`minPrefix ≥ 0`); block đầu `delta_sum > 0` | sổ tự mâu thuẫn (bỏ sót tiền vào rồi có chi thật; hoặc success bất khả thi) |
 | **P8** | **Không thất bại sai giao dịch của mình** (dưới đây) | node đánh dấu FAILED một giao dịch chuyển hợp lệ |
 | **P6** | Nếu có `signed_response` cho block `b`: `block_hash` đã ký == hash tại vị trí `b` trong `block_mmr_root` | viết lại lịch sử / chia nhìn |
-| **P5'** | Chữ ký từng giao dịch trong `transactionsRoot` hợp lệ với `FromAddress` | node đưa giao dịch chưa được uỷ quyền |
+| **P5'** | Chữ ký từng giao dịch trong tập giao dịch của block (kiểm cùng bộ cộng dồn `transactionsRoot`, mục 14.2) hợp lệ với `FromAddress` | node đưa giao dịch chưa được uỷ quyền |
 | **NS** | Block trong phạm vi không nằm trong `ns_root` (cờ không chuẩn) | phạm vi bị vô hiệu (client biết ngay) |
 
 **P8 — chi tiết (vá lỗ hổng "success/fail là lời của node"):**
 Cho block `b` và giao dịch `t` của `X` là `transfer(to, amt)` với `status = FAILED`. Đặt
 `S_start = B_calc(X, b−1)` (đã kiểm toán đến cuối block trước) và
 `Out_b = Σ số lượng của MỌI khoản chi ảnh hưởng X trong block b mà X biết` (mọi `transfer` của X + mọi `transferFrom` rút từ X, **bất kể status**).
-Nếu **`S_start ≥ Out_b`** thì mọi khoản chi đó **phải** thành công dù thứ tự thực thi thế nào (tổng chi tối đa không vượt số dư đầu block). Khi đó `t` bị FAILED **vì lý do "không đủ số dư"** là **mâu thuẫn** ⇒ node sai. **Loại trừ để không kết tội oan:** chỉ áp dụng khi receipt cho thấy lý do là **revert của token** (không phải hết gas / thiếu phí gốc / lỗi khác): `Exception` là revert **và** `Return` chứa lỗi "vượt số dư" chuẩn của token **[CHƯA XÁC MINH mã EXCEPTION và nội dung revert cụ thể — F0]**. Lý do khác ⇒ **không áp dụng P8** (không báo cáo).
+Nếu **`S_start ≥ Out_b`** thì mọi khoản chi đó **phải** thành công dù thứ tự thực thi thế nào (tổng chi tối đa không vượt số dư đầu block). Khi đó `t` bị FAILED **vì lý do "không đủ số dư"** là **mâu thuẫn** ⇒ node sai. **Loại trừ để không kết tội oan:** chỉ áp dụng khi receipt cho thấy lý do là **revert của token** (không phải hết gas / thiếu phí gốc / lỗi khác): `Status == THREW` **và** `Exception == ERR_EXECUTION_REVERTED (5)` (đã xác minh trong code, mục 14.1 F0-4); **không** dựa vào chuỗi lý do trong `Return` (token không chuẩn) **[còn chạy thử với token thật, mục 14.3]**. Lý do khác ⇒ **không áp dụng P8** (không báo cáo).
 
 ---
 
 ## 6. Quy trình và báo cáo
 
 ### 6.1. Ghi nhận (client, mỗi giao dịch)
-1. Nhận receipt; kiểm cục bộ hash header, `tx ∈ transactionsRoot`, `receipt ∈ receiptRoot`.
+1. Nhận receipt (kèm phản hồi ký của node, H8); kiểm cục bộ hash header và `(tx_hash,status) ∈ txset_root`.
 2. Lưu `TxRecord`; khi anchor phủ block, lấy bằng chứng MMR/anchor và lưu.
 3. Giao dịch **người khác gửi cho mình** (A1): người trả đưa `tx_bytes`; client xin node `status` + bằng chứng, lưu cùng dạng `TxRecord`.
 
@@ -203,10 +203,10 @@ Mọi báo cáo cần **chữ ký holder + ký quỹ**; mốc thời gian theo `
 
 | Báo cáo | Người dùng nộp | Parent Chain kiểm | Node được làm gì | Kết quả |
 |---|---|---|---|---|
-| **`reportBalanceMismatch`** (P4') | các giao dịch của X trong `b*` (`tx_bytes` có chữ ký, bằng chứng inclusion + status) + đường Merkle-sum-min tới `BlockLeaf(X,b*)` | header ∈ MMR ∈ anchor; **chữ ký từng giao dịch**; `t ∈ transactionsRoot`; `status` ∈ `receiptRoot`; giao dịch là **chuẩn**; tính `delta_{b*}(X)`; so `delta_sum` | **Phản bác** (6.4) trong `W_resp` | node không phản bác được & lệch ⇒ `NODE_AT_FAULT` |
+| **`reportBalanceMismatch`** (P4') | các giao dịch của X trong `b*` (`tx_bytes` có chữ ký, bằng chứng inclusion + status) + đường Merkle-sum-min tới `BlockLeaf(X,b*)` | header ∈ MMR ∈ anchor; **chữ ký từng giao dịch**; `(t,status) ∈ txset_root`; giao dịch là **chuẩn**; tính `delta_{b*}(X)`; so `delta_sum` | **Phản bác** (6.4) trong `W_resp` | node không phản bác được & lệch ⇒ `NODE_AT_FAULT` |
 | **`reportNegativePrefix`** (P7) | `HolderLeaf` + đường bằng chứng tới nút/điểm `minPrefix < 0` (mở `sum_root_hash`) | bằng chứng hợp lệ; `(sum, minPrefix)` nhất quán dọc đường; giá trị âm | không có (sổ tự mâu thuẫn) | `NODE_AT_FAULT` ngay |
 | **`reportWrongFailure`** (P8) | giao dịch `t`, receipt (Exception/Return), lịch sử đến `b−1` cho `S_start` và `Out_b` (mỗi giao dịch kèm bằng chứng) | điều kiện `S_start ≥ Out_b` và lý do revert "vượt số dư" | phản bác bằng giao dịch **thật** làm `Out_b` lớn hơn `S_start` | `NODE_AT_FAULT` nếu không phản bác được |
-| **`reportInvalidSignature`** (P5') | `tx_bytes` (có `Sign`) + bằng chứng ∈ `transactionsRoot` ∈ anchor | Parent tự kiểm chữ ký với `FromAddress` | không có | `NODE_AT_FAULT` ngay |
+| **`reportInvalidSignature`** (P5') | `tx_bytes` (có `Sign`) + Merkle proof ∈ `txset_root` ∈ anchor | Parent tự kiểm chữ ký với `FromAddress` | không có | `NODE_AT_FAULT` ngay |
 | **`reportRewrite`** (P6) | phản hồi ký `{chain, epoch, block_number, block_hash,…, sig}` + bằng chứng MMR cho hash khác tại vị trí đó | chữ ký hợp lệ (khoá tại `epoch`); MMR/anchor hợp lệ; hash khác | không có | equivocation ⇒ slash ngay |
 | **`challengeNonstandard`** (cờ NS giả) | `(token, block)` bị cờ | — | node phải chứng minh **một** giao dịch không chuẩn thật (receipt có log `Transfer` của token + giao dịch không chuẩn) trong `W_resp` | node im lặng/sai ⇒ `NODE_AT_FAULT` |
 
@@ -225,7 +225,7 @@ Node **không thể** bịa giao dịch (thiếu chữ ký hợp lệ) và **kh�
 | Báo cáo không đủ bằng chứng | từ chối; ký quỹ bị phạt một phần |
 
 ### 6.6. Kiểm toán root của block bằng tập hash giao dịch (A2)
-Chỉ khi cần (node phản bác rằng "block `b*` có giao dịch mà bạn thiếu", hoặc nghi ngờ header): node nộp **danh sách hash giao dịch đã sắp** của `b*`; Parent tính lại và so `transactionsRoot` ⇒ **tập giao dịch của block đầy đủ** (đếm `N_b`). **Không lộ nội dung.** Hash **không** cho biết giao dịch nào ảnh hưởng `X` — phần đó dựa vào A1 và phản bác 6.4. **Điều kiện: F0** (trie phải cam kết lá bằng hash giá trị). Không đưa lên Parent thường xuyên.
+Chỉ khi cần (node phản bác rằng "block `b*` có giao dịch mà bạn thiếu", hoặc nghi ngờ header): node nộp **danh sách hash giao dịch đã sắp** của `b*`; Parent tính lại và so `transactionsRoot` ⇒ **tập giao dịch của block đầy đủ** (đếm `N_b`). **Không lộ nội dung.** Hash **không** cho biết giao dịch nào ảnh hưởng `X` — phần đó dựa vào A1 và phản bác 6.4. **F0 đã trả lời:** `transactionsRoot` là bộ cộng dồn cộng (không phải Merkle) nên node nộp 256 bucket của block N (8 KB, kiểm bằng `keccak(bucket…)==header.transactionsRoot`) và tập giao dịch; Parent kiểm `bucket_N−bucket_{N-1}` khớp và `txset_root` khớp (mục 14.2). Vì bộ cộng dồn hash cả bytes giao dịch, phải nộp đủ `tx_bytes` (không chỉ hash) khi kiểm mức này; kiểm chỉ theo hash dùng `txset_root`. Không đưa lên Parent thường xuyên.
 
 ---
 
@@ -283,7 +283,7 @@ Chỉ khi cần (node phản bác rằng "block `b*` có giao dịch mà bạn t
 
 | Bước | Việc | Phụ thuộc | Kích thước |
 |---|---|---|---|
-| **F0** | **Xác minh** (mục 14): định dạng bằng chứng của `transactionsRoot`/`receiptRoot`; trie cam kết lá bằng hash giá trị hay nhúng giá trị; sơ đồ chữ ký giao dịch và xác minh lại trong Go; `Exception`/`Return` của revert "vượt số dư"; `tx_bytes` gồm `Sign` | — | S–M |
+| **F0** | **Đã đọc code (mục 14.1–14.2)**: root là bộ cộng dồn, chữ ký BLS+ETH, revert=5. **Còn lại (mục 14.3):** xác nhận root tích luỹ, R,S,V của tx chuẩn, chạy thử revert thật | — | S |
 | **F1** | `AnchorState` + MMR các anchor trên Parent Chain (append, đơn điệu, equivocation slash); gap analysis với `SubmitCheckpoint` | A0 (kế hoạch), F0 | M |
 | **F2** | **Bộ dựng sổ tối giản theo block** (cây Merkle-sum-min từ giao dịch chuẩn) + **`ns_root`** + MMR hash block trên mọi replica (xác định, đối chiếu gốc); job kiểm tra tuân thủ token; sổ đăng ký token/bộ mô tả | F0, C2 | L |
 | **F3** | Node: worker neo (leader, sau commit Raft + bền DB); **mở sổ riêng** cho holder (xác thực); **H7** cổng đọc riêng tư; **H8** RPC ký phản hồi; dịch vụ bằng chứng (tx, receipt, block MMR, đường Merkle-sum-min) | C1, F2 | L |
@@ -317,14 +317,36 @@ Các test `T-SD-01..15` (đã có ở `SEQUENCER_ERC20_USER_HISTORY_PROOF.md` m�
 
 ---
 
-## 14. Điểm chưa xác minh (gom cho F0)
+## 14. Kết quả F0 và điểm còn chưa xác minh
+
+### 14.1. Đã xác minh bằng đọc code (F0, chưa chạy thực tế)
+
+| # | Điểm | Kết quả (nguồn) | Hệ quả cho thiết kế |
+|---|---|---|---|
+| F0-1 | Cấu trúc `transactionsRoot` / `receiptRoot` | **Không phải cây Merkle.** Dù backend mặc định là NOMT, hai namespace `transaction_state` và `receipts` bị ép dùng `FlatStateTrie` ("PERF FIX", `pkg/trie/trie_factory.go`). `FlatStateTrie` là **256 bộ cộng dồn cộng modulo** `p = 2^256-189`: `bucket[i] = Σ keccak256(key‖value) mod p` (key[0]==i), `root = keccak256(bucket[0]‖…‖bucket[255])` (`pkg/trie/flat_state_trie.go`). Giá trị `value` của trie giao dịch là **bytes đã marshal của giao dịch** (gồm `Sign`), khoá là `tx.Hash()`. Không có API chứng minh thành viên | **Bằng chứng thành viên O(log n) cho `transactionsRoot`/`receiptRoot` không tồn tại.** Mọi chỗ trong spec dựa vào "Merkle inclusion proof của giao dịch/receipt vào header" phải bỏ (xem 14.2) |
+| F0-2 | Root có tích luỹ qua các block không | **Có vẻ tích luỹ** (mỗi block dựng trie từ root của block trước rồi thêm giao dịch: `postProcessBlock`, `NewTransactionStateDBFromRoot(header.TransactionsRoot())`) — *suy ra từ cách dùng, chưa đọc nơi ghi root* | Kiểm toán block N = kiểm `bucket(N) − bucket(N-1)` khớp với tập giao dịch của block N |
+| F0-3 | Băm/xác minh chữ ký | `tx.Hash()` = keccak256(proto tất định của `TransactionHashData`) gồm from, to, amount, gas, data, nonce, chainID, **R, S, V**, …; **không gồm `Sign` (BLS)** và `Sidecar`. Xác minh mempool (`validation.go`): (1) BLS `NewVerifyTransactionRequest(hash, PublicKeyBls của tài khoản, Sign)`; nếu BLS sai thì **vẫn hợp lệ nếu `ValidEthSign()`** (khôi phục địa chỉ từ chữ ký secp256k1 kiểu Ethereum rồi so `FromAddress`); (2) tài khoản `AccountType==1` phải có **cả hai** chữ ký; (3) khoá BLS đặt bằng giao dịch `setBlsPublicKey` (nonce 0, chỉ ký secp256k1, **không đổi được sau đó** — `PublicKeyExists`) | Parent Chain có thể kiểm chữ ký **chỉ bằng ECDSA** (`ValidEthSign`) khi giao dịch mang R,S,V; nếu chỉ có BLS thì cần thêm giao dịch `setBlsPublicKey` của chính người dùng (nonce 0, tự chứng minh địa chỉ↔khoá BLS). Vì `Sign` không nằm trong `tx_hash`, `tx_bytes` phải gồm `Sign` và bằng chứng phải nộp đủ bytes (không chỉ hash) |
+| F0-4 | Revert "vượt số dư" (P8) | Receipt `Status = THREW`, `Exception = ERR_EXECUTION_REVERTED (5)`, `Return` = dữ liệu revert của EVM (`pkg/mvm/helpers.go`); `Exception` chỉ đọc khi `THREW`. Lỗi khác (hết gas = 0, `ERR_INSUFFICIENT_BALANCE = 3` là số dư **gốc**, không phải token) tách biệt | P8 chỉ áp dụng khi `Exception == 5`; **không** được dựa vào chuỗi lý do trong `Return` (token không chuẩn). Loại trừ 0/3 như đã nêu ở T-SD-17 |
+| F0-5 | `SKIP_MEMPOOL_SIG_VERIFY` trên deploy | Mặc định **tắt**: `mtn-orchestrator.sh` chỉ bật khi `MTN_SKIP_MEMPOOL_SIG_VERIFY=true`; ansible (`metanode-execution.service.j2`, `metanode-private.service.j2`) chỉ bật khi biến `skip_mempool_sig_verify` = true (mặc định false). **Bật cứng** trong `deploy/cluster/local_devnet/run_load_test.sh:125` (chỉ bản đo tải cục bộ). Còn thêm điểm dùng ở `cmd/simple_chain/eth_tx_converter.go:82` | Cụm production không bật cờ; kịch bản devnet/đo tải thì bật ⇒ `reportInvalidSignature` vẫn cần. Thêm kiểm tra khởi động: chế độ `raft` + `privacy_mode` **từ chối chạy** nếu cờ bật |
+| F0-6 | Chỉ số trong block | `Receipt.TransactionIndex` có; log **không có** `logIndex` (suy ra theo vị trí trong `EventLogs`) | Đã phản ánh ở sổ tối giản (không cần logIndex trong P7 mức block) |
+
+### 14.2. Sửa thiết kế do F0-1 (quan trọng)
+
+Vì `transactionsRoot`/`receiptRoot` là bộ cộng dồn cộng, không có bằng chứng thành viên. Hệ quả và cách xử lý:
+
+1. **Không cần Merkle proof từ header cho giao dịch.** Giao dịch có **chữ ký của người dùng** nên không thể bị làm giả; vai trò của `transactionsRoot` chỉ là cam kết "tập giao dịch của block". Kiểm toán block (A2) đổi thành: node công bố **8 KB** (256 bucket × 32 byte) của block N; người kiểm tra thấy `keccak256(bucket[0]‖…‖bucket[255]) == header.transactionsRoot` rồi so `bucket_N[i] − bucket_{N-1}[i] == Σ keccak256(hash‖tx_bytes) mod p` trên các giao dịch của block. Chi phí O(số giao dịch trong block), không có bằng chứng O(log n).
+2. **Receipt do node tạo ra** nên `receiptRoot` (cũng là bộ cộng dồn) **không đủ** làm chứng cứ chống node; spec vốn đã **không** dùng receipt làm bằng chứng (chỉ dùng giao dịch có chữ ký + sổ tối giản của node), nên **không đổi**. Mọi câu chữ "bằng chứng receipt vào `receiptRoot`" trong tài liệu phụ (`SEQUENCER_ERC20_USER_HISTORY_PROOF.md`, các mục P5/P6 cũ) coi là **đã bị thay thế**.
+3. **Cảnh báo an ninh của chính mã nguồn** (`SetStateBackend`: "additive mod prime accumulators are vulnerable to Wagner's attack"): với bộ cộng cộng modulo, kẻ vận hành độc hại có thể dựng tập phần tử giả có tổng bằng mục tiêu bằng tấn công sinh nhật tổng quát (chi phí dưới 2^128 khi có nhiều phần tử tự chọn). Với **giao dịch có chữ ký** kẻ đó không tự chọn được phần tử; với **receipt** thì chọn được. Kết luận: **không được coi `receiptRoot` là cam kết chống node**; `transactionsRoot` chỉ đáng tin vì mỗi phần tử có chữ ký người dùng, và kiểm toán (mục 1) phải nộp đủ bytes có chữ ký chứ không chỉ hash.
+4. **Chọn cam kết riêng của node, neo trong `AnchorLeaf`:** thay vì sửa backend trie (đụng code cũ, đã bị đẩy sang flat vì NOMT đồng bộ mất >3.5 s/block), node dựng thêm **cây Merkle theo block** với lá `(tx_hash, status)` (sắp theo hash) và đưa `txset_root` vào `AnchorLeaf` — nhờ đó `status` (do node tạo, không nằm trong bộ cộng dồn tin cậy) trở thành **cam kết có neo** thay cho `receiptRoot`. Kiểm toán A2 kiểm **cả hai**: (a) `txset_root` khớp tập hash công bố; (b) bộ cộng dồn của block khớp header (mục 1). Bằng chứng "giao dịch X thuộc block N" khi đó là Merkle proof O(log n) trên `txset_root`. **[ĐỀ XUẤT, cần bạn duyệt vì thêm một trường vào cam kết neo]**
+5. **Tuỳ chọn thay thế (không khuyến nghị):** đổi backend hai namespace này sang NOMT/MPT. Đụng code cũ, ảnh hưởng hiệu năng đã đo, và chỉ có lợi cho receipt — không cần cho thiết kế hiện tại.
+
+### 14.3. Điểm còn chưa xác minh
 
 | Điểm | Cách xác minh |
 |---|---|
-| Trie `transactionsRoot` và `receiptRoot` (khoá là hash giao dịch): lá băm giá trị hay nhúng giá trị; định dạng bằng chứng; tính lại gốc **chỉ từ hash** có làm được không | đọc `pkg/trie`, `pkg/transaction_state_db`, `pkg/receipt` |
-| Sơ đồ chữ ký giao dịch (ECDSA/BLS/khoá thiết bị) và cách xác minh lại **trong Go trên Parent Chain**; `tx_bytes` gồm `Sign` và tái tạo đúng `tx_hash` | đọc `pkg/transaction`, `validation.go` |
-| Mã `Exception` và nội dung `Return` của revert "vượt số dư" (P8) | chạy thử với token chuẩn |
-| Cờ `SKIP_MEMPOOL_SIG_VERIFY` trên các template deploy (`validation.go:153`); nếu bật thì chuỗi không tự chặn giao dịch ký sai — báo cáo `reportInvalidSignature` là lớp bảo vệ trên Parent Chain | đọc `deploy/` |
+| Nơi ghi `transactionsRoot` của header: xác nhận **tích luỹ** hay theo block (F0-2 mới suy ra) | đọc `block_processor_processing.go` phần dựng header |
+| Giao dịch người dùng chuẩn có mang **R,S,V (ECDSA)** hay chỉ `Sign` BLS; nếu chỉ BLS thì Gateway trên Parent cần cách xác minh BLS (thư viện, chi phí) | đọc `cmd/rpc` chuyển đổi giao dịch + chạy thử với ví thật |
+| Đo thực tế mã `Exception`/`Return` với token ERC20 chuẩn | chạy thử trên devnet |
 | Khoá xác thực dùng cho cổng đọc H7 và mở sổ riêng | đọc lớp tài khoản/khoá |
 | Chi phí xác minh trong handler Gateway (giao dịch tuần tự, blob `GatewayEngine`) | benchmark; quyết định `N_tx_max`, `W_resp` |
 | Bộ mô tả token và job kiểm tra tuân thủ (không phí, không hook, số dư ban đầu bằng mint chuẩn) | thiết kế + test trên token thật |
@@ -337,7 +359,7 @@ Các test `T-SD-01..15` (đã có ở `SEQUENCER_ERC20_USER_HISTORY_PROOF.md` m�
 |---|---|
 | **Chế độ giao dịch chuẩn có chữ ký (A0–A4) là đường chính**; chế độ tổng quát dựa trên log **chưa làm** | ✅ Chốt |
 | Kiến trúc hai vai trò: **cam kết tối giản của node (cây Merkle-sum-min theo block)** + **kiểm toán bằng giao dịch có chữ ký** | ✅ Chốt |
-| Kiểm toán root chỉ ở mức block bằng **tập hash giao dịch**, không đưa lên Parent thường xuyên | ✅ Chốt |
+| Kiểm toán root chỉ ở mức block bằng **tập hash giao dịch** (cộng `txset_root`, mục 14.2), không đưa lên Parent thường xuyên | ✅ Chốt |
 | Thêm **P7** (mức block), **P8** (không thất bại sai giao dịch của mình, phạm vi hẹp) và **cờ `ns_root`** có thể thách thức | ✅ Chốt |
 | Phán quyết theo `blockTime` Parent; **im lặng = thua**; ký quỹ người báo; `H_audit` = unbonding | ✅ Chốt |
 | **H7** (cổng đọc riêng tư) và **H8** (RPC ký phản hồi) là điểm móc mặc định-tắt trong code cũ | ⏳ **Cần bạn duyệt riêng** khi bắt đầu F3 |
