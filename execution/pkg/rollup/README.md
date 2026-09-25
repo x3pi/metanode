@@ -6,6 +6,7 @@
 
 | # | Tài liệu | Vai trò |
 |---|---|---|
+| 0 | `NEXT_STEPS_PLAN.md` | **Việc tiếp theo (bàn giao):** hiện trạng đã kiểm chứng, quyết định chờ chủ dự án, danh sách việc N1–N9 có tiêu chí nghiệm thu, danh sách kiểm tra trước PR |
 | 1 | `SEQUENCER_STEP_BY_STEP_PLAN.md` | **Kế hoạch triển khai chính** (quyết định 0.1, phát hiện đã xác minh 0.5, kiến trúc 0.6, các giai đoạn A–F, điểm móc H1–H8, bảng chưa xác minh mục 3, quyết định mục 4) |
 | 2 | `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` | Schema, cấu hình, ABI, 11 bất biến, danh mục test |
 | 3 | `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` | **Đặc tả cuối cùng** của bằng chứng gian lận ERC20 (giai đoạn F); mục 14 là kết quả F0, mục 15 là quyết định đã chốt |
@@ -27,7 +28,7 @@
 | Giai đoạn | Sẵn sàng giao dev? | Điều kiện / chặn |
 |---|---|---|
 | **B1** (máy trạng thái thuần), **A0** (so với `PerChainAllocation`/Gateway) | ✅ Có | Không phụ thuộc gì chưa xác minh |
-| **C0** (spike xác định: cùng chuỗi `ExecutableBlock` → cùng state root trên 2 tiến trình, không Rust) | ✅ Có, **làm đầu tiên** | **Cổng bắt buộc** cho C1–C6: mọi mục "Chạy thật; chưa có bằng chứng" ở STEP_BY_STEP mục 3 chỉ được đóng bằng C0. Nếu C0 fail thì phải sửa thiết kế trước, không viết tiếp |
+| **C0** (spike xác định: cùng chuỗi `ExecutableBlock` → cùng state root trên 2 tiến trình, không Rust) | ◐ **Các cổng thực nghiệm đã đạt (PR #130, 2026-09-25)**; chờ chủ dự án quyết định đánh dấu ☑ | Đã kiểm: 2 vòng × 2 tiến trình, workload EVM + Gateway, `kill -9` tại 3 điểm, cách ly Rust đo thật, `build_check` 4/4, `ci.sh run-now --reset` sạch; sửa lỗi bền vững `smart_contract_code`. **Cổng cho C1–C6 vẫn là ☑.** Việc chuyển sang C1 (guard các điểm Go→Rust chưa xử lý): xem `NEXT_STEPS_PLAN.md` N3 |
 | **C1–C6** (Raft mode) | ⏳ Sau C0 | Chốt `is_authoritative_gei`, số replica, kênh chuyển tiếp ở C0/C2 |
 | **Kiểm chứng gỡ `RecoveryCommittee`** | ✅ Xong (2026-09-25) | `./ci.sh run-now --reset` trên cụm thử cục bộ (.232, 4 validator + 1 sync-only): wipe + deploy lại, TPS Blast ~7623 tx/s PASS, Chaos Rolling Restart 6 vòng PASS (62m33s), Zero-Fork khớp block hash + state root trên cả 5 node, dữ liệu Xapian/EVM của 19 contract đồng nhất. Chưa kiểm: đường `unregisterChainWithCert` trên cụm thật (chỉ có unit test) |
 | **F0 còn lại** | ✅ Có (S) | Xác nhận `transactionsRoot` tích luỹ; giao dịch chuẩn có R,S,V hay chỉ BLS (quyết định Parent kiểm chữ ký thế nào); chạy thử revert token thật |
