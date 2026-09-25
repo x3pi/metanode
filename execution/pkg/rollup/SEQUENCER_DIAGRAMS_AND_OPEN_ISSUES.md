@@ -1,6 +1,8 @@
 # Sơ đồ Luồng & Vấn đề Còn Mở — BLS Node / Node Float Account
 
 > Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính (Phần A) và (2) 5 quyết định từng chặn việc bắt đầu code — nay đã chốt 5/5 (2026-09-24, Phần B.1) — mọi vấn đề đã có fix thiết kế sẵn chỉ còn 1 dòng index gọn ở Phần B.2 để `#N` còn tra được, chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`.
+> **⚠️ Cập nhật quyết định (2026-09-25) — đọc trước:** chế độ vận hành của node thực thi đã chốt là **`consensus_mode = "raft"` của `simple_chain`** (không binary mới, không RPC mới; giữ nguyên RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; **chỉ thay Rust đồng thuận bằng Raft** `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký trên mọi replica, thực thi chỉ sau khi Raft commit). Tài liệu này mô tả **mô hình giá trị liên-node (Float Account)**, **không** mô tả cách nhân bản/dự phòng node; mọi chỗ ngầm hiểu "1 node = 1 tiến trình duy nhất" hoặc dự phòng kiểu khác phải đọc theo `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6. Bước **A1** (viết lại phần này cho khớp Raft) vẫn chưa làm.
+
 
 ---
 

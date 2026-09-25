@@ -71,3 +71,70 @@ func TestEthSendRawTransaction_RSV(t *testing.T) {
 	// Print sizes to demonstrate RSV are preserved
 	t.Logf("ValidEthSign succeeded!")
 }
+
+func TestEthSendRawTransaction_RSV_EIP1559(t *testing.T) {
+privateKey, _ := crypto.GenerateKey()
+to := common.HexToAddress("0x1230000000000000000000000000000000000000")
+tx := types.NewTx(&types.DynamicFeeTx{
+ChainID:   big.NewInt(1),
+Nonce:     2,
+To:        &to,
+Value:     big.NewInt(100),
+Gas:       21000,
+GasFeeCap: big.NewInt(2),
+GasTipCap: big.NewInt(1),
+Data:      nil,
+})
+signer := types.LatestSignerForChainID(big.NewInt(1))
+signedTx, _ := types.SignTx(tx, signer, privateKey)
+
+metaTxIface, err := mt_transaction.NewTransactionFromEth(signedTx)
+if err != nil {
+t.Fatalf("NewTransactionFromEth failed: %v", err)
+}
+metaTx := metaTxIface.(*mt_transaction.Transaction)
+
+if !metaTx.ValidEthSign() {
+t.Fatalf("ValidEthSign returned false for EIP-1559")
+}
+
+b, err := metaTx.Marshal()
+if err != nil {
+t.Fatalf("Marshal failed: %v", err)
+}
+
+unmarshaledTx, err := mt_transaction.UnmarshalTransaction(b)
+if err != nil {
+t.Fatalf("UnmarshalTransaction failed: %v", err)
+}
+unmarshaledMetaTx := unmarshaledTx.(*mt_transaction.Transaction)
+if !unmarshaledMetaTx.ValidEthSign() {
+t.Fatalf("ValidEthSign returned false after Unmarshal for EIP-1559")
+}
+}
+
+func TestEthSendRawTransaction_RSV_EIP2930(t *testing.T) {
+privateKey, _ := crypto.GenerateKey()
+to := common.HexToAddress("0x1230000000000000000000000000000000000000")
+tx := types.NewTx(&types.AccessListTx{
+ChainID:  big.NewInt(1),
+Nonce:    3,
+To:       &to,
+Value:    big.NewInt(100),
+Gas:      21000,
+GasPrice: big.NewInt(1),
+Data:     nil,
+})
+signer := types.LatestSignerForChainID(big.NewInt(1))
+signedTx, _ := types.SignTx(tx, signer, privateKey)
+
+metaTxIface, err := mt_transaction.NewTransactionFromEth(signedTx)
+if err != nil {
+t.Fatalf("NewTransactionFromEth failed: %v", err)
+}
+metaTx := metaTxIface.(*mt_transaction.Transaction)
+
+if !metaTx.ValidEthSign() {
+t.Fatalf("ValidEthSign returned false for EIP-2930")
+}
+}
