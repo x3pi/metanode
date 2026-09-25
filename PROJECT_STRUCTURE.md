@@ -195,12 +195,13 @@ metanode/
 | `tx_async_queue.go` | 338 | Async tx submission queue |
 | `debug_api.go` | 870 | Debug/admin endpoints |
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
-| `c0_spike.go` | 750 | C0 spike harness (`//go:build c0spike`) for determinism, state mutation & restart bypass verification |
+| `c0_spike.go` | ~1200 | C0 spike harness (`//go:build c0spike`): multi-round determinism, EVM+Gateway workload, progress-driven `kill -9` at several points, measured Rust-consensus isolation |
 | `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
 
 *CLI Flags & Config:*
 - `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
-- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-restart`: Parameters for C0 spike execution.
+- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-restart`, `-c0-report`: Parameters for C0 spike execution (`-c0-report` defaults to a temp file; the spike never writes into the repo).
+- `pkg/blockchain/tx_processor/gateway_harness_hooks.go` (no-op) / `gateway_handler_c0spike.go` (`//go:build c0spike`): test-harness hooks for the Gateway handler; the production build is unchanged.
 - `consensus_mode`: "raft" (Rollup Raft ingestion queue mode) or empty (default Rust BFT consensus).
 
 ### `cmd/simple_chain/processor/` — Core Block Processing

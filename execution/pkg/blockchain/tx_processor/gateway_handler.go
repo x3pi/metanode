@@ -193,6 +193,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err := applySecurityBondConfig(freshEngine); err != nil {
 			return nil, err
 		}
+		applyHarnessInitialRegistries(freshEngine)
 		return freshEngine, nil
 	}
 
@@ -248,6 +249,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if err := applySecurityBondConfig(&engine); err != nil {
 		return nil, err
 	}
+	applyHarnessInitialRegistries(&engine)
 	return &engine, nil
 }
 
@@ -340,7 +342,12 @@ func saveGatewayEngine(chainState *blockchain.ChainState, engine *cross_chain.Ga
 	accountStateDB := chainState.GetAccountStateDB()
 	as, err := accountStateDB.AccountState(mt_common.GATEWAY_CONTRACT_ADDRESS)
 	if err != nil {
-		return fmt.Errorf("load Gateway account state: %w", err)
+		// Production: always an error. Only the c0spike test harness (build tag) supplies a fallback
+		// account for chains whose genesis does not contain the Gateway account.
+		as = harnessGatewayAccountFallback()
+		if as == nil {
+			return fmt.Errorf("load Gateway account state: %w", err)
+		}
 	}
 	if as.SmartContractState() == nil {
 		as.SetSmartContractState(state.NewEmptySmartContractState())

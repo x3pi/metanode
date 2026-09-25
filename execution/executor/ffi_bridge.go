@@ -59,6 +59,7 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -125,9 +126,16 @@ type AuthoritativeBlockRequest struct {
 // Global channel for authoritative mode block requests (synchronous).
 // When nil, falls back to legacy fire-and-forget mode.
 var defaultAuthoritativeBlockQueue chan *AuthoritativeBlockRequest
+var ffiBridgeInitCount uint64
+
+// InitFFIBridgeCallCount returns the number of times InitFFIBridge was invoked.
+func InitFFIBridgeCallCount() uint64 {
+	return atomic.LoadUint64(&ffiBridgeInitCount)
+}
 
 // InitFFIBridge is called from main application startup
 func InitFFIBridge(configPath string, dataDir string, reqHandler *RequestHandler, blockQueue chan *pb.ExecutableBlock) error {
+	atomic.AddUint64(&ffiBridgeInitCount, 1)
 	defaultRequestHandler = reqHandler
 	defaultListenerBlockQueue = blockQueue
 

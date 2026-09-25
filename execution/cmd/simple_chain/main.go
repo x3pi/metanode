@@ -40,6 +40,7 @@ var (
 	c0OutPath             = flag.String("c0-out", "", "Output path for C0 worker results JSON")
 	c0Blocks              = flag.Int("c0-blocks", 5, "Number of blocks to execute in C0 spike")
 	c0Restart             = flag.Bool("c0-restart", false, "Test restart bypass behavior in C0 spike")
+	c0ReportPath          = flag.String("c0-report", "", "Optional path to write C0 verification markdown report (default: write to tmp file)")
 )
 
 var logCleaner *loggerfile.LogCleaner
@@ -99,7 +100,7 @@ func main() {
 	}
 
 	if *toolC0Spike != "" {
-		runC0Spike(*toolC0Spike, *defaultConfigPath, *c0DataDir, *c0OutPath, *c0Blocks, *c0Restart)
+		runC0Spike(*toolC0Spike, *defaultConfigPath, *c0DataDir, *c0OutPath, *c0Blocks, *c0Restart, *c0ReportPath)
 		os.Exit(0)
 	}
 
