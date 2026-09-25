@@ -1,7 +1,7 @@
 # Kế hoạch Triển khai Từng Bước — chế độ `raft` của `simple_chain` (bỏ đồng thuận Rust, giữ nguyên phần còn lại)
 
 > **Trạng thái:** cập nhật 2026-09-24 sau khi bạn chốt 5 quyết định ở mục 0.1.
-> **Tài liệu liên quan:** `SEQUENCER_DESIGN.md` (kiến trúc), `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (sơ đồ, index `#N`), `SEQUENCER_IMPLEMENTATION_PLAN.md` (tổng quan + hiện trạng; các mục 2, 4, 6 của file đó đã được file này thay thế), **`SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` (schema dữ liệu + kế hoạch kiểm thử đầy đủ — đọc kèm khi làm bất kỳ bước nào)**.
+> **Tài liệu liên quan:** `SEQUENCER_DESIGN.md` (kiến trúc), `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (sơ đồ, index `#N`), `SEQUENCER_IMPLEMENTATION_PLAN.md` (tổng quan + hiện trạng; các mục 2, 4, 6 của file đó đã được file này thay thế), **`SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` (schema dữ liệu + kế hoạch kiểm thử đầy đủ — đọc kèm khi làm bất kỳ bước nào)**, **`SEQUENCER_PARENT_ANCHORING.md` (phương án A: neo sổ holder ERC20 — Giai đoạn F)**, **`SEQUENCER_ERC20_DISPUTE.md` (phương án B: khiếu nại optimistic)**, **`SEQUENCER_FRAUD_PROOF_DESIGN.md` (thiết kế khuyến nghị hiện hành, hợp nhất A+B dưới mô hình "không ai giám sát" — thay Giai đoạn F/F-min)**, **`SEQUENCER_ERC20_USER_HISTORY_PROOF.md` (luồng chứng minh ERC20 chi tiết chỉ dựa trên lịch sử người dùng, test `T-UH-*`)**, ✅ **`SEQUENCER_ERC20_STANDARD_TX_PROOF.md` (ĐẶC TẢ CHỐT cho phần bằng chứng gian lận ERC20 — chế độ giao dịch chuẩn có chữ ký; nguồn sự thật cho triển khai)**.
 
 ---
 
@@ -60,6 +60,8 @@
    - **H4 — RPC chỉ có ý nghĩa với Rust:** `rpc_block.go:875,888` và `mtn_api.go:768,781` (`GetConsensusVotes`/`GetCommitVotes`), `admin_api.go:43,61` (`AttestPayloadLoss*`): ở chế độ `raft` trả lỗi "không hỗ trợ" thay vì gọi FFI.
    - **H5 — client TCP tới Rust:** `block_processor_core.go:471` (`txsender.NewClient`): ở chế độ `raft` bỏ qua (chưa xác minh có cần không — C0).
    - **H6 — cấu hình:** `pkg/config/config.go` thêm `consensus_mode` (mặc định rỗng) và khối cấu hình Raft.
+   - **H7 — cổng đọc riêng tư (chỉ khi làm phần bằng chứng gian lận, độc lập với chế độ raft):** các RPC đọc `rpc_transaction.go` (`GetTransactionByHash`, `GetTransactionReceipt`, `GetLogs`), `rpc_block.go` (`GetBlockByNumber`), `rpc_state.go` (`GetBalance`, `Call`), lớp đăng ký WebSocket và chế độ explorer: ở `privacy_mode` xác thực bằng chữ ký thách thức và chỉ trả bản ghi của người tham gia. **Hiện các RPC này không có kiểm soát truy cập** (`SEQUENCER_ERC20_USER_HISTORY_PROOF.md` mục 13); mặc định-tắt, cần bạn duyệt.
+   - **H8 — RPC ký phản hồi (chỉ khi làm phần bằng chứng gian lận ERC20):** các RPC trả receipt/kết quả mang `block_hash` (`rpc_transaction.go`, `rpc_block.go`) thêm chữ ký của node trên `(chain, block_number, block_hash, tx_hash)` ở chế độ `signed_responses` (mặc định-tắt); cần bạn duyệt. Dùng cho `reportRewrite` (P6) — `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 6.3.
    Ước lượng tổng cộng chỉ vài chục dòng trong file cũ, mỗi chỗ là một nhánh `if raftfeed.Enabled()`; **chứng minh mặc định-tắt** bằng test hiện có + test mới (mục C1).
 6. Chỉ 1 file trong `pkg/` kéo package `executor` (và `-lmetanode`) vào: `pkg/blockchain/tx_processor/validation_transaction.go` (2 lời gọi `NotifyValidatorRegistered`/`Deregistered`). Vì `processor` cũng import `executor`, binary mới **vẫn link `libmetanode` lúc build** dù không bao giờ khởi động nó; chấp nhận (không sửa file cũ).
 7. **`SmartContractDB` không có API duyệt theo prefix** → B2 cần key index riêng cho `MessageID` chưa terminal, có trần kích thước.
@@ -316,6 +318,30 @@ flowchart TD
 
 ---
 
+## GIAI ĐOẠN F — Neo block lên Parent Chain và bằng chứng (sau C5)
+
+Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Phạm vi thu hẹp (2026-09-25): chỉ ERC20, chứng minh số dư của 1 holder khi biết toàn bộ lịch sử của họ → dùng Sổ holder ERC20 (cam kết `event_count` + chuỗi băm sự kiện theo `(token, holder)`), xem mục 3.2 của tài liệu neo.** Tóm tắt: **không** đưa danh sách hash từng giao dịch lên Parent Chain; neo **`BlockAnchor`** (hash block + `accountStatesRoot` + `transactionsRoot` + `receiptRoot`) cho mỗi K block đã commit Raft và bền DB; người dùng nộp giao dịch chứng minh **`proveTxIncluded`** (hành động) hoặc **`proveStorageSlot`** (số dư ERC20 bằng bằng chứng state). "Mọi input của X thành công" **không đủ** để chứng minh số dư ERC20 (thiếu dòng vào từ người khác, thiếu nội dung/số lượng, thiếu logic contract).
+
+| Bước | Việc | Phụ thuộc | Kích thước |
+|---|---|---|---|
+| F0 | Xác minh: định dạng bằng chứng MPT receipt (`txIndex`/`logIndex`), dùng `pkg/trie` MPT làm sổ holder tăng dần | — | S–M |
+| F1 | `BlockAnchor` trên Parent Chain (+ gap analysis với `SubmitCheckpoint`) | A0, F0 | M |
+| F2 | Worker neo (leader, sau commit + bền DB) | C2, F1 | M |
+| F2b | **Bộ dựng Sổ holder ERC20 + MMR hash block** trên mọi replica, đối chiếu gốc giữa replica, job kiểm tra tuân thủ token | F0, C2 | L |
+| F3 | Dịch vụ bằng chứng (header, receipt, sổ holder, MMR, toàn bộ sự kiện của 1 holder) | F0, F2b | L |
+| F4 | `proveErc20Balance`, `proveErc20History` (+ theo đoạn), `proveTxIncluded`, `ClaimedProofs`, sổ đăng ký token | F1, F3 | L |
+| F5 | Cửa sổ thử thách + slash anchor mâu thuẫn + tái thực thi độc lập | F4 | L |
+
+> ✅ **ĐÃ CHỐT (2026-09-25): Giai đoạn F dùng danh sách bước F0–F6 ở `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 12** (cam kết tối giản theo block + kiểm toán bằng giao dịch chuẩn có chữ ký + SDK tự kiểm toán; thêm điểm móc H7, H8). Phần bên dưới chỉ là lịch sử phân tích.
+
+> **⚠️ Thay thế (2026-09-25):** Giai đoạn F/F-min bên dưới được **hợp nhất và thay bằng `SEQUENCER_FRAUD_PROOF_DESIGN.md` mục 9 (F0–F6)**: cam kết chủ động trên Parent Chain (sổ holder 2 tầng trong anchor), tự kiểm toán của khách hàng, `reportRewrite`/`reportTxMismatch`/`demand*` với im lặng = thua. Phần dưới giữ làm lịch sử phân tích.
+
+**Phương án B — Giai đoạn F-min (khuyến nghị, 2026-09-25):** Parent Chain chỉ lưu **MMR root + size** của hash block (mỗi chain) cộng `SecurityBond` có sẵn; người dùng lưu lời khai có chữ ký của node và bằng chứng của mình; node ký lời khai truy vấn ERC20 và giữ chỉ mục ngoài chuỗi. Khiếu nại theo đoạn giữa hai lời khai của node; **Parent Chain là trọng tài** (node chỉ hỗ trợ ngoài chuỗi); node im lặng quá hạn ⇒ người dùng thắng; bỏ sót/bịa/tổng sai bị thử thách bằng Merkle-sum. Chi tiết, schema và test `T-DP-*` ở `SEQUENCER_ERC20_DISPUTE.md`. Bước: F0 (xác minh), G1 (`MmrAnchor` + MMR ở node), G2 (RPC ký lời khai), G3 (chỉ mục + dịch vụ `prepare`), G4 (hợp đồng khiếu nại), G5 (công cụ người dùng + watcher), G6 (đối kháng). **Nếu chọn B thì F2b–F4 của phương án A trở thành tuỳ chọn.**
+
+**Cập nhật ràng buộc (2026-09-25): người dùng chỉ nhớ giao dịch của chính mình** ⇒ mặc định là **Tầng 1** (`SEQUENCER_ERC20_DISPUTE.md` mục 11): `FLOOR_VIOLATION` (cận dưới số dư), `SELF_CONTRADICTION` (mâu thuẫn lời khai của node), `TX_MISMATCH` (giao dịch xử lý khác điều đã ký); chỉ cần dữ liệu của chính người dùng và chữ ký của node, không cần watcher. Tầng 1 **không chứng minh được số dư chính xác**; muốn thế phải dùng phương án A hoặc C. Bước G2 phải thêm `SignedTxStatement` và `SignedNonceStatement`; G4 làm `reportViolation` trước, Merkle-sum (Tầng 2) để sau.
+
+---
+
 ## GIAI ĐOẠN E — Ngoài phạm vi (theo dõi riêng)
 - **BFT thật (chịu node độc hại):** cần khi replica thuộc nhiều tổ chức không tin nhau; nghĩa là quay lại đồng thuận nhiều validator.
 - **Nhiều khoá riêng thay vì 1 khoá chung** (committee N + QuorumCert trên Parent Chain) — không cần nếu chấp nhận rủi ro lộ khoá ở 0.2.
@@ -350,6 +376,8 @@ flowchart TD
 | C5 | Chaos test + đa máy | L | C4 | ☐ |
 | C6 | CI, build, tài liệu cấu trúc | S | C5 | ☐ |
 | D1 | Giám sát + runbook | M | C5 | ☐ |
+| F0–F5 | Neo block lên Parent Chain + bằng chứng (phương án A, xem Giai đoạn F) | S–L | C5 | ☐ |
+| F0–F6 (chốt) | **Bằng chứng gian lận ERC20 — chế độ giao dịch chuẩn có chữ ký** (`SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 12) | S–L | C5 | ☐ |
 
 ---
 
