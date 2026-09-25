@@ -85,6 +85,23 @@ func runC0Spike(mode, configPath, dataDir, outPath string, blocksCount int, isRe
 	}
 }
 
+// ownSocketInodes returns the inode numbers of the socket file descriptors held by this process.
+func ownSocketInodes() map[string]bool {
+	inodes := make(map[string]bool)
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return inodes
+	}
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil || !strings.HasPrefix(target, "socket:[") {
+			continue
+		}
+		inodes[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")] = true
+	}
+	return inodes
+}
+
 func measureRustConsensusIsolation() (*RustIsolationEvidence, error) {
 	ev := &RustIsolationEvidence{
 		FFIBridgeCallCount: executor.InitFFIBridgeCallCount(),
@@ -123,7 +140,10 @@ func measureRustConsensusIsolation() (*RustIsolationEvidence, error) {
 		}
 	}
 
-	// 2. Network socket inspection via /proc/self/net/tcp and tcp6
+	// 2. Listening TCP sockets owned by THIS process. /proc/self/net/tcp{,6} lists every socket of
+	// the whole network namespace (other processes included), so keep only entries whose inode is
+	// one of our own socket file descriptors.
+	ownInodes := ownSocketInodes()
 	for _, netFile := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
 		lines, err := os.ReadFile(netFile)
 		if err != nil {
@@ -131,7 +151,8 @@ func measureRustConsensusIsolation() (*RustIsolationEvidence, error) {
 		}
 		for _, line := range strings.Split(string(lines), "\n") {
 			fields := strings.Fields(line)
-			if len(fields) >= 4 && fields[3] == "0A" { // 0A = TCP_LISTEN
+			// sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
+			if len(fields) >= 10 && fields[3] == "0A" && ownInodes[fields[9]] { // 0A = TCP_LISTEN
 				ev.ListenSockets = append(ev.ListenSockets, fmt.Sprintf("%s:%s", netFile, fields[1]))
 			}
 		}
@@ -178,7 +199,8 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	sender1Addr := e_common.HexToAddress("0x616969160142a381bb315A286fA54B7eD1749C49")
 	recipAddr := e_common.HexToAddress("0x1111111111111111111111111111111111111111")
 
-	// Ensure Gateway destination chain 102 is registered in GatewayEngine
+	// Register Gateway destination chain 102 for this worker process (harness-only hook, compiled with
+	// -tags c0spike). It is applied to every GatewayEngine loaded during block execution.
 	tx_processor.RegisterInitialChain(cross_chain.ChainRegistry{
 		ChainID: 102,
 		Epoch:   1,
@@ -596,7 +618,7 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 	fmt.Printf("   - Consensus Mode: 'raft'\n")
 	fmt.Printf("   - InitFFIBridge Call Count: %d (asserted 0)\n", iso.FFIBridgeCallCount)
 	fmt.Printf("   - Tokio Consensus Threads: %d (asserted 0)\n", iso.TokioThreadsCount)
-	fmt.Printf("   - Consensus Listen Sockets: %d (asserted 0)\n", len(iso.ListenSockets))
+	fmt.Printf("   - Listening TCP sockets owned by the worker process: %d (asserted 0; counted by fd inode, not by network namespace)\n", len(iso.ListenSockets))
 	fmt.Printf("   - NOMT Internal Rust Threads (Storage Only): %d distinct thread types detected\n", len(iso.NOMTThreads))
 	for name, count := range iso.NOMTThreads {
 		fmt.Printf("     • %s: %d threads\n", name, count)
@@ -611,6 +633,9 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 	if len(iso.ConsensusThreads) > 0 {
 		return fmt.Errorf("Rust isolation failure: found consensus threads: %v", iso.ConsensusThreads)
 	}
+	if len(iso.ListenSockets) != 0 {
+		return fmt.Errorf("Rust isolation failure: worker process owns %d listening TCP sockets: %v", len(iso.ListenSockets), iso.ListenSockets)
+	}
 	fmt.Printf("   - Status: PASS (Empirically verified: no Rust consensus runtime; NOMT storage threads isolated)\n")
 
 	// STEP 4: PROGRESS-DRIVEN ABRUPT CRASH (kill -9) & RECOVERY TEST
@@ -618,120 +643,29 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 	fmt.Println("💥 STEP 4: Progress-Driven Abrupt Crash (kill -9) & Recovery Test")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	dirCrash := filepath.Join(tmpBase, "crash_node")
-	outCrashTemp := filepath.Join(dirCrash, "temp_result.json")
-	outCrashRecovered := filepath.Join(tmpBase, "res_crash_recovered.json")
-	progressMarker := filepath.Join(dirCrash, "commit_progress.txt")
-
-	fmt.Printf("\n▶ Launching worker on %s to be killed abruptly mid-flight...\n", dirCrash)
-	cmdCrash := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirCrash,
-		"-c0-out="+outCrashTemp,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-	)
-	cmdCrash.Stdout = os.Stdout
-	cmdCrash.Stderr = os.Stderr
-
-	if err := cmdCrash.Start(); err != nil {
-		return fmt.Errorf("failed to start crash target process: %w", err)
+	// Kill points: right after the first block, after the second, and one block before the end.
+	killPoints := []uint64{1, 2}
+	if last := uint64(blocksCount - 1); last > 2 {
+		killPoints = append(killPoints, last)
 	}
-	pid := cmdCrash.Process.Pid
-	fmt.Printf("🚀 [CRASH TEST] Worker PID %d started. Waiting for progress marker (lastBlock >= 2)...\n", pid)
-
-	// Progress-driven wait: poll commit_progress.txt until lastBlock >= 2
-	killedAtBlock := uint64(0)
-	deadline := time.Now().Add(25 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(progressMarker); err == nil {
-			var bNum uint64
-			if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &bNum); err == nil && bNum >= 2 {
-				killedAtBlock = bNum
-				break
-			}
+	var lastCrash *crashScenarioResult
+	var crashSummaries []string
+	for _, kp := range killPoints {
+		res, err := runCrashScenario(selfExe, baseConfigPath, tmpBase, blocksCount, kp, resR1P1.Records)
+		if err != nil {
+			return fmt.Errorf("crash scenario (kill at block >= %d): %w", kp, err)
 		}
-		time.Sleep(25 * time.Millisecond)
+		lastCrash = res
+		crashSummaries = append(crashSummaries, fmt.Sprintf("kill at block #%d -> startBlockNum=%d, bypassed=%d", res.KilledAtBlock, res.StartBlockNum, res.BypassedBlocks))
 	}
-
-	if killedAtBlock < 2 {
-		_ = cmdCrash.Process.Kill()
-		return fmt.Errorf("crash target failed to reach block >= 2 within deadline (last recorded: %d)", killedAtBlock)
-	}
-
-	// Small delay to ensure kill strikes mid-stream
-	time.Sleep(20 * time.Millisecond)
-
-	fmt.Printf("💥 [CRASH TEST] Progress marker confirmed worker reached block #%d. Sending SIGKILL (kill -9) to PID %d...\n", killedAtBlock, pid)
-	_ = cmdCrash.Process.Kill()
-	_ = cmdCrash.Wait()
-	fmt.Printf("☠️ [CRASH TEST] Process %d killed abruptly at block #%d (unclean shutdown, no defer/flush).\n", pid, killedAtBlock)
-
-	// Restart in recovery mode
-	fmt.Printf("\n▶ Restarting node on %s in recovery mode (c0-restart=true)...\n", dirCrash)
-	startRestart := time.Now()
-	cmdRecover := exec.Command(selfExe,
-		"-tool-c0-spike=worker",
-		"-config="+baseConfigPath,
-		"-c0-data-dir="+dirCrash,
-		"-c0-out="+outCrashRecovered,
-		fmt.Sprintf("-c0-blocks=%d", blocksCount),
-		"-c0-restart=true",
-	)
-	cmdRecover.Stdout = os.Stdout
-	cmdRecover.Stderr = os.Stderr
-	if err := cmdRecover.Run(); err != nil {
-		return fmt.Errorf("Crash recovery worker failed: %w", err)
-	}
-	durRestart := time.Since(startRestart)
-
-	resCrashRecovered, err := loadWorkerResult(outCrashRecovered)
-	if err != nil {
-		return fmt.Errorf("loadWorkerResult(%s): %w", outCrashRecovered, err)
-	}
-
-	// Assertions for restart & recovery
-	if resCrashRecovered.StartBlockNum < killedAtBlock {
-		return fmt.Errorf("crash recovery started at block #%d, expected >= #%d",
-			resCrashRecovered.StartBlockNum, killedAtBlock)
-	}
-	if resCrashRecovered.BypassedBlocks < int(killedAtBlock) {
-		return fmt.Errorf("expected at least %d bypassed blocks, got %d",
-			killedAtBlock, resCrashRecovered.BypassedBlocks)
-	}
-	recCrash := resCrashRecovered.Records
-	if len(recCrash) != blocksCount+1 {
-		return fmt.Errorf("expected %d records after recovery continuation, got %d", blocksCount+1, len(recCrash))
-	}
-
-	// Verify historical blocks match Round 1 identically
-	for i := 0; i < blocksCount; i++ {
-		if recCrash[i].Hash != resR1P1.Records[i].Hash {
-			return fmt.Errorf("crash recovery altered historical block #%d hash: recovered=%s vs expected=%s",
-				i+1, recCrash[i].Hash, resR1P1.Records[i].Hash)
-		}
-		if recCrash[i].AccountStatesRoot != resR1P1.Records[i].AccountStatesRoot {
-			return fmt.Errorf("crash recovery altered historical block #%d state root: recovered=%s vs expected=%s",
-				i+1, recCrash[i].AccountStatesRoot, resR1P1.Records[i].AccountStatesRoot)
-		}
-	}
-
-	// Verify Block N+1 continued and state advanced
+	durRestart := lastCrash.Duration
+	recCrash := lastCrash.Records
 	blkN1 := recCrash[blocksCount]
-	if blkN1.Number != uint64(blocksCount+1) {
-		return fmt.Errorf("expected block #%d at tip, got #%d", blocksCount+1, blkN1.Number)
-	}
-	if blkN1.AccountStatesRoot == resR1P1.Records[blocksCount-1].AccountStatesRoot {
-		return fmt.Errorf("block #%d did not advance state root from block #%d", blocksCount+1, blocksCount)
-	}
-	if !blkN1.AllReceiptsSuccess {
-		return fmt.Errorf("block #%d has failed receipts", blocksCount+1)
-	}
 
-	fmt.Printf("✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS]\n")
-	fmt.Printf("   - Progress-driven kill at block #%d verified: startBlockNum=%d, bypassed=%d blocks with identity match (Zero-Fork P2.5)\n",
-		killedAtBlock, resCrashRecovered.StartBlockNum, resCrashRecovered.BypassedBlocks)
-	fmt.Printf("   - Re-executed remaining blocks with 100%% state root match\n")
+	fmt.Printf("✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS] (%d kill points)\n", len(killPoints))
+	for _, line := range crashSummaries {
+		fmt.Printf("   - %s (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)\n", line)
+	}
 	fmt.Printf("   - Successfully executed & committed Block #%d ($N+1$) with StateRoot=%s\n",
 		blkN1.Number, blkN1.AccountStatesRoot[:16]+"...")
 
@@ -754,6 +688,121 @@ func runC0Verify(baseConfigPath string, blocksCount int, customReportPath string
 	fmt.Printf("🏆 C0 SPIKE VERIFICATION COMPLETED WITH 100%% EMPIRICAL ACCURACY!\n")
 	fmt.Println("═════════════════════════════════════════════════════════════════════")
 	return nil
+}
+
+// crashScenarioResult is the outcome of one kill -9 + recovery scenario.
+type crashScenarioResult struct {
+	KilledAtBlock  uint64
+	StartBlockNum  uint64
+	BypassedBlocks int
+	Records        []BlockRecord
+	Duration       time.Duration
+}
+
+// runCrashScenario starts a worker, SIGKILLs it as soon as its progress marker reaches killAt, restarts it
+// on the same data directory in recovery mode and checks that (1) the blocks committed before the kill are
+// bypassed with an identity check, (2) their hashes/state roots equal a clean run (ref) and (3) block N+1
+// is executed on top of them.
+func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, killAt uint64, ref []BlockRecord) (*crashScenarioResult, error) {
+	dirCrash := filepath.Join(tmpBase, fmt.Sprintf("crash_node_k%d", killAt))
+	outCrashTemp := filepath.Join(dirCrash, "temp_result.json")
+	outCrashRecovered := filepath.Join(tmpBase, fmt.Sprintf("res_crash_recovered_k%d.json", killAt))
+	progressMarker := filepath.Join(dirCrash, "commit_progress.txt")
+
+	fmt.Printf("\n▶ [kill point %d] Launching worker on %s to be killed abruptly...\n", killAt, dirCrash)
+	cmdCrash := exec.Command(selfExe,
+		"-tool-c0-spike=worker",
+		"-config="+baseConfigPath,
+		"-c0-data-dir="+dirCrash,
+		"-c0-out="+outCrashTemp,
+		fmt.Sprintf("-c0-blocks=%d", blocksCount),
+	)
+	cmdCrash.Stdout = os.Stdout
+	cmdCrash.Stderr = os.Stderr
+	if err := cmdCrash.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start crash target process: %w", err)
+	}
+	pid := cmdCrash.Process.Pid
+	fmt.Printf("🚀 [CRASH TEST] Worker PID %d started. Waiting for progress marker (lastBlock >= %d)...\n", pid, killAt)
+
+	killedAtBlock := uint64(0)
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(progressMarker); err == nil {
+			var bNum uint64
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &bNum); err == nil && bNum >= killAt {
+				killedAtBlock = bNum
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if killedAtBlock < killAt {
+		_ = cmdCrash.Process.Kill()
+		_ = cmdCrash.Wait()
+		return nil, fmt.Errorf("crash target failed to reach block >= %d within deadline (last recorded: %d)", killAt, killedAtBlock)
+	}
+	if killedAtBlock >= uint64(blocksCount) {
+		_ = cmdCrash.Process.Kill()
+		_ = cmdCrash.Wait()
+		return nil, fmt.Errorf("worker finished all %d blocks before the kill landed (marker=%d): the kill was not mid-run", blocksCount, killedAtBlock)
+	}
+
+	fmt.Printf("💥 [CRASH TEST] Progress marker confirmed worker reached block #%d. Sending SIGKILL (kill -9) to PID %d...\n", killedAtBlock, pid)
+	_ = cmdCrash.Process.Kill()
+	_ = cmdCrash.Wait()
+	fmt.Printf("☠️ [CRASH TEST] Process %d killed abruptly at block #%d (unclean shutdown, no defer/flush).\n", pid, killedAtBlock)
+
+	fmt.Printf("\n▶ Restarting node on %s in recovery mode (c0-restart=true)...\n", dirCrash)
+	startRestart := time.Now()
+	cmdRecover := exec.Command(selfExe,
+		"-tool-c0-spike=worker",
+		"-config="+baseConfigPath,
+		"-c0-data-dir="+dirCrash,
+		"-c0-out="+outCrashRecovered,
+		fmt.Sprintf("-c0-blocks=%d", blocksCount),
+		"-c0-restart=true",
+	)
+	cmdRecover.Stdout = os.Stdout
+	cmdRecover.Stderr = os.Stderr
+	if err := cmdRecover.Run(); err != nil {
+		return nil, fmt.Errorf("crash recovery worker failed: %w", err)
+	}
+	dur := time.Since(startRestart)
+
+	res, err := loadWorkerResult(outCrashRecovered)
+	if err != nil {
+		return nil, fmt.Errorf("loadWorkerResult(%s): %w", outCrashRecovered, err)
+	}
+	if res.StartBlockNum < killedAtBlock {
+		return nil, fmt.Errorf("crash recovery started at block #%d, expected >= #%d", res.StartBlockNum, killedAtBlock)
+	}
+	if res.BypassedBlocks < int(killedAtBlock) {
+		return nil, fmt.Errorf("expected at least %d bypassed blocks, got %d", killedAtBlock, res.BypassedBlocks)
+	}
+	rec := res.Records
+	if len(rec) != blocksCount+1 {
+		return nil, fmt.Errorf("expected %d records after recovery continuation, got %d", blocksCount+1, len(rec))
+	}
+	for i := 0; i < blocksCount; i++ {
+		if rec[i].Hash != ref[i].Hash {
+			return nil, fmt.Errorf("crash recovery altered historical block #%d hash: recovered=%s vs expected=%s", i+1, rec[i].Hash, ref[i].Hash)
+		}
+		if rec[i].AccountStatesRoot != ref[i].AccountStatesRoot {
+			return nil, fmt.Errorf("crash recovery altered historical block #%d state root: recovered=%s vs expected=%s", i+1, rec[i].AccountStatesRoot, ref[i].AccountStatesRoot)
+		}
+	}
+	blkN1 := rec[blocksCount]
+	if blkN1.Number != uint64(blocksCount+1) {
+		return nil, fmt.Errorf("expected block #%d at tip, got #%d", blocksCount+1, blkN1.Number)
+	}
+	if blkN1.AccountStatesRoot == ref[blocksCount-1].AccountStatesRoot {
+		return nil, fmt.Errorf("block #%d did not advance state root from block #%d", blocksCount+1, blocksCount)
+	}
+	if !blkN1.AllReceiptsSuccess {
+		return nil, fmt.Errorf("block #%d has failed receipts", blocksCount+1)
+	}
+	return &crashScenarioResult{KilledAtBlock: killedAtBlock, StartBlockNum: res.StartBlockNum, BypassedBlocks: res.BypassedBlocks, Records: rec, Duration: dur}, nil
 }
 
 func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
@@ -1080,7 +1129,7 @@ func writeC0VerificationReportExtended(
 	sb.WriteString("Thực nghiệm kiểm tra runtime của worker qua `/proc/self/task/*/comm`, `/proc/self/net/tcp*`, và cờ `InitFFIBridgeCallCount`:\n\n")
 	sb.WriteString(fmt.Sprintf("- **`InitFFIBridge` Invocations:** `%d` (Hook H1 hoạt động hoàn hảo, FFI consensus bridge bị bỏ qua hoàn toàn).\n", iso.FFIBridgeCallCount))
 	sb.WriteString(fmt.Sprintf("- **Rust Tokio Consensus Threads:** `%d` (không có tokio runtime nào được khởi tạo).\n", iso.TokioThreadsCount))
-	sb.WriteString(fmt.Sprintf("- **Consensus TCP Listen Sockets:** `%d` (không có P2P socket nào mở).\n", len(iso.ListenSockets)))
+	sb.WriteString(fmt.Sprintf("- **Socket TCP đang LISTEN thuộc chính tiến trình worker:** `%d` (đếm theo inode của fd, không phải theo network namespace).\n", len(iso.ListenSockets)))
 	sb.WriteString("- **Phân biệt ranh giới thread NOMT vs Consensus:**\n")
 	sb.WriteString("  - **NOMT Threads (Lưu trữ thuần túy):** NOMT là thư viện Rust nhúng vào Go để quản lý state trie. Các thread quan sát được gồm:\n")
 	if len(iso.NOMTThreads) > 0 {
@@ -1106,26 +1155,29 @@ func writeC0VerificationReportExtended(
 
 	sb.WriteString("---\n\n")
 	sb.WriteString("## 7. Rà Soát Thực Tế Các Lời Gọi Go → Rust Khi Chạy Chế Độ Raft\n\n")
-	sb.WriteString("| Điểm gọi Go → Rust | Vị trí code | Trạng thái ở chế độ Raft | Cơ chế kiểm soát / Guard |\n")
+	sb.WriteString("Danh sách lấy từ `git grep 'executor\\.'` trong `cmd/simple_chain` (không tính test/spike). Cột trạng thái phản ánh **code hiện tại**; điểm nào chưa có guard được ghi rõ là **CHƯA GUARD** (việc của C1), không phải đã xử lý.\n\n")
+	sb.WriteString("| Điểm gọi Go → Rust | Vị trí | Trạng thái ở chế độ Raft | Bằng chứng / ghi chú |\n")
 	sb.WriteString("|---|---|:---:|---|\n")
-	sb.WriteString("| `executor.InitFFIBridge` | `block_processor_network.go:123` | **Tắt (Bypassed)** | Guard bởi `if bp.config.ConsensusMode == \"raft\"` (Hook H1) |\n")
-	sb.WriteString("| `executor.GetAuthoritativeBlockQueue` | `block_processor_network.go:155` | **Không tới được** | Trả về `nil` vì `InitFFIBridge` không được gọi; select case rỗng |\n")
-	sb.WriteString("| `executor.SubmitTransactionBatch` | `tx_batch_forwarder_core.go:219` | **Chưa nối** | Trả về `false` khi consensus bridge chưa kích hoạt (sẽ nối Raft ở C1) |\n")
-	sb.WriteString("| `executor.IsRustConsensusReadyForTransactions` | `rpc_block.go:396` | **Guarded** | Trả về `ConsensusReady=false` khi chạy raft mode (Hook H3) |\n")
-	sb.WriteString("| `executor.GetConsensusVotes` / `GetCommitVotes` | `rpc_block.go:887, 900` | **Không dùng** | Không được gọi trong luồng block execution của C0 |\n")
-	sb.WriteString("| `executor.AttestPayloadLoss` | `admin_api.go:43, 61` | **Không dùng** | Admin RPC của Mysticeti/Narwhal, không tới được trong Raft |\n")
-	sb.WriteString("| `executor.RegisterTraceCallback` | `block_processor_network.go:122` | **Tắt** | Bỏ qua cùng nhánh với `InitFFIBridge` |\n")
-	sb.WriteString("| `executor.RunSocketExecutor` | `peer_discovery_socket.go:26` | **Tắt** | Bị vô hiệu hoá khi chạy chế độ Raft |\n\n")
+	sb.WriteString("| `executor.InitFFIBridge`, `RegisterTraceCallback` | `processor/block_processor_network.go` (`runUnixSocket`) | **Bỏ qua** | Nhánh raft `return` trước khi gọi; **đo thật**: bộ đếm `InitFFIBridgeCallCount` = 0 (Step 3) |\n")
+	sb.WriteString("| `executor.NewRequestHandler`, `GetGlobalSnapshotManager` | `processor/block_processor_network.go` (đầu `runUnixSocket`) | **Chạy (thuần Go)** | Nằm trước nhánh raft, được thực thi trong mọi lần chạy spike; không có thread/socket Rust sinh ra (Step 3) |\n")
+	sb.WriteString("| `executor.GetAuthoritativeBlockQueue` | `processor/block_processor_network.go` (`processRustEpochData`) | **Chạy, trả `nil`** | Spike chạy qua nhánh dự phòng dùng `blockIngestionQueue`; các block được thực thi bình thường |\n")
+	sb.WriteString("| `executor.IsRustConsensusReadyForTransactions` | `rpc_block.go` (`ConsensusReady`) | **Có guard** | Nhánh raft trả `ready=false` mà không gọi `executor` |\n")
+	sb.WriteString("| `executor.SubmitTransactionBatch` | `processor/tx_batch_forwarder_core.go` | **CHƯA GUARD** | Gọi thẳng `C.metanode_submit_transaction_batch`; vòng lặp thử lại vô hạn khi trả `false`. Spike đưa block trực tiếp vào queue nên **không thực thi** đường này. C1 (H2) phải thay bằng đích Raft |\n")
+	sb.WriteString("| `executor.GetConsensusVotes`, `GetCommitVotes` | `rpc_block.go`, `mtn_api.go` | **CHƯA GUARD** | RPC gọi được từ ngoài; spike không chạy RPC server. C1 (H4) phải trả \"unsupported in raft mode\" |\n")
+	sb.WriteString("| `executor.AttestPayloadLoss`, `AttestPayloadLossForCommit` | `admin_api.go` | **CHƯA GUARD** | Như trên (H4) |\n")
+	sb.WriteString("| `executor.PauseRustConsensus`, `ResumeRustConsensus`, `InitSnapshotSystem` | `processor/block_processor_core.go` | **CHƯA GUARD** | Chỉ chạy khi snapshot bật; spike đặt `SnapshotEnabled=false`. C1/C4 phải xử lý |\n")
+	sb.WriteString("| `executor.RunSocketExecutor` | `processor/peer_discovery_socket.go` | **CHƯA GUARD** | Không nằm trong đường `NewApp` của spike nên **không được thử nghiệm**; không có guard theo `ConsensusMode` |\n")
 
 	sb.WriteString("---\n\n")
-	sb.WriteString("## 8. Kết Luận Nghiệm Thu Đợt 2 (Status: ◐ In-Progress)\n\n")
-	sb.WriteString("Toàn bộ các tiêu chí kỹ thuật thực nghiệm của Milestone C0 đã được đáp ứng với bằng chứng đo đạc thực tế:\n")
-	sb.WriteString("- [x] 100% determinism giữa các OS processes độc lập qua nhiều vòng (Multi-Round).\n")
-	sb.WriteString("- [x] Workload mở rộng đầy đủ: Native Transfers (RW/WW) + EVM Smart Contract (`TestCounter`) + Gateway State Mutating Outbound (`0x1002`).\n")
-	sb.WriteString("- [x] Ngắt đột ngột bằng `kill -9` theo tiến độ xác thực (`lastBlock >= 2`), đối chiếu identity lịch sử, thực thi tiếp Block $N+1$.\n")
-	sb.WriteString("- [x] Đo lường ranh giới Rust runtime: 0 Tokio threads, 0 consensus P2P sockets; phân lập rõ ràng thread NOMT storage.\n")
-	sb.WriteString("- [x] Báo cáo xuất ra tệp tạm độc lập, cờ cấu hình linh hoạt `-c0-report`.\n\n")
-	sb.WriteString("**Trạng thái Milestone C0:** `◐ ĐẠT ĐỢT 2 / CHỜ DUYỆT CỔNG MERGE TRƯỚC KHI CHUYỂN ☑️`\n")
+	sb.WriteString("## 8. Kết Luận Các Cổng Thực Nghiệm C0 (Status: ◐ chờ quyết định đánh dấu ☑)\n\n")
+	sb.WriteString("Đã đạt bằng chứng đo đạc thực tế cho:\n")
+	sb.WriteString("- [x] Determinism giữa các OS process độc lập qua nhiều vòng (2 vòng × 2 process, so chéo giữa các vòng).\n")
+	sb.WriteString("- [x] Workload: Native Transfers (RW/WW) + EVM Smart Contract (`TestCounter`) + Gateway `outbound()` ghi trạng thái (chain đích 102 được seed).\n")
+	sb.WriteString("- [x] `kill -9` theo tiến độ tại nhiều điểm (sau block 1, block 2, và một block trước cuối); restart bỏ qua các block đã commit có đối chiếu identity (GEI + số tx), hash/state root lịch sử trùng lần chạy sạch, block N+1 thực thi tiếp.\n")
+	sb.WriteString("- [x] Cách ly Rust consensus: `InitFFIBridge` = 0 lần, 0 thread tokio/consensus, 0 socket LISTEN thuộc tiến trình (thread NOMT vẫn tồn tại vì NOMT là thư viện Rust).\n")
+	sb.WriteString("- [x] Phát hiện và sửa lỗi bền vững thật: kho `smart_contract_code` phải `SyncDurable` sau khi ghi bytecode (nếu không, replay sau `kill -9` cho hash khác); có test hồi quy ở `pkg/smart_contract_db`.\n\n")
+	sb.WriteString("Chưa thuộc phạm vi C0 (chuyển sang C1+): các điểm **CHƯA GUARD** ở mục 7; ánh xạ `commit_index` uint32; snapshot gắn `CommitIndex`; kill giữa lúc thực thi một block (spike chỉ kill giữa hai block); kiểm tra mất điện thật.\n\n")
+	sb.WriteString("**Trạng thái Milestone C0:** `◐` cho tới khi người quản lý kế hoạch đánh dấu ☑ sau khi xem bằng chứng này, `go test -race`, `build_check.sh` và `ci.sh run-now`.\n")
 
 	if reportPath == "stdout" {
 		fmt.Println("\n" + sb.String())

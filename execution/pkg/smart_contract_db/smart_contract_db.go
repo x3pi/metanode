@@ -8,14 +8,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
-	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie/node"
@@ -343,20 +341,10 @@ func (db *SmartContractDB) CommitAllStorage() error {
 
 		// Update account state with new storage root
 		as, asErr := db.accountStateDB.AccountState(address)
-		if asErr != nil || as == nil || as.SmartContractState() == nil {
-			if address == mt_common.GATEWAY_CONTRACT_ADDRESS {
-				if as == nil {
-					as = state.NewAccountState(address)
-				}
-				if as.SmartContractState() == nil {
-					as.SetSmartContractState(state.NewEmptySmartContractState())
-				}
-				db.accountStateDB.SetState(as)
-			} else {
-				logger.Error("Invalid account state for address:", address)
-				finalErr = asErr
-				continue
-			}
+		if asErr != nil || as.SmartContractState() == nil {
+			logger.Error("Invalid account state for address:", address)
+			finalErr = asErr
+			continue
 		}
 
 		if as.SmartContractState().StorageRoot() != root {
@@ -592,6 +580,10 @@ func (db *SmartContractDB) Commit() error {
 			logger.Error("Error batch putting code:", err)
 			return err
 		}
+		// Contract bytecode is referenced by the account state committed with this block, but
+		// codeStorage is a buffered (Lazy)Pebble store: without an explicit sync a crash shortly after
+		// the block commit can lose the bytecode (observed by the C0 spike: after kill -9 the replayed
+		// block had a different hash). Only blocks that deploy new code pay for the sync.
 		if err := storage.SyncDurable(db.codeStorage); err != nil {
 			logger.Error("Error making code storage durable:", err)
 			return err

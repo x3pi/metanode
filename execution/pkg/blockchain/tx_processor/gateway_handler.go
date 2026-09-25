@@ -139,23 +139,6 @@ func GetGatewayHandler() (*GatewayHandler, error) {
 	return gatewayHandlerInstance, nil
 }
 
-// GetABI returns the parsed Gateway ABI for tools and tests.
-func (h *GatewayHandler) GetABI() *abi.ABI {
-	return &h.abi
-}
-
-var (
-	initialRegistries   = make(map[uint64]cross_chain.ChainRegistry)
-	initialRegistriesMu sync.RWMutex
-)
-
-// RegisterInitialChain registers an initial chain in GatewayEngine (useful for test harnesses/c0 spike).
-func RegisterInitialChain(reg cross_chain.ChainRegistry) {
-	initialRegistriesMu.Lock()
-	defer initialRegistriesMu.Unlock()
-	initialRegistries[reg.ChainID] = reg
-}
-
 // gatewayStateStorageKey is the single fixed storage slot (on GATEWAY_CONTRACT_ADDRESS) holding
 // the JSON-serialized GatewayEngine state. Keccak256, matching every other storage-key derivation
 // convention used across this codebase's contract storage (see smart_contract_db.go).
@@ -210,13 +193,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 		if err := applySecurityBondConfig(freshEngine); err != nil {
 			return nil, err
 		}
-		initialRegistriesMu.RLock()
-		for id, reg := range initialRegistries {
-			if _, exists := freshEngine.ChainRegistry[id]; !exists {
-				freshEngine.ChainRegistry[id] = reg
-			}
-		}
-		initialRegistriesMu.RUnlock()
+		applyHarnessInitialRegistries(freshEngine)
 		return freshEngine, nil
 	}
 
@@ -272,18 +249,7 @@ func loadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayE
 	if err := applySecurityBondConfig(&engine); err != nil {
 		return nil, err
 	}
-	initialRegistriesMu.RLock()
-	if len(initialRegistries) > 0 {
-		if engine.ChainRegistry == nil {
-			engine.ChainRegistry = make(map[uint64]cross_chain.ChainRegistry)
-		}
-		for id, reg := range initialRegistries {
-			if _, exists := engine.ChainRegistry[id]; !exists {
-				engine.ChainRegistry[id] = reg
-			}
-		}
-	}
-	initialRegistriesMu.RUnlock()
+	applyHarnessInitialRegistries(&engine)
 	return &engine, nil
 }
 
@@ -371,22 +337,17 @@ func allZero(data []byte) bool {
 // CommitAllStorage silently skips committing the storage of any address whose AccountState has no
 // SmartContractState, so without this the very first write on a fresh chain would look like it
 // succeeded (no error from SetStorageValue, which only touches the in-memory trie cache) but never
-// LoadGatewayEngine exposes loadGatewayEngine for harness/tool initialization
-func LoadGatewayEngine(chainState *blockchain.ChainState) (*cross_chain.GatewayEngine, error) {
-	return loadGatewayEngine(chainState)
-}
-
-// SaveGatewayEngine exposes saveGatewayEngine for harness/tool initialization
-func SaveGatewayEngine(chainState *blockchain.ChainState, engine *cross_chain.GatewayEngine) error {
-	return saveGatewayEngine(chainState, engine)
-}
-
 // actually land in the state root or survive a restart.
 func saveGatewayEngine(chainState *blockchain.ChainState, engine *cross_chain.GatewayEngine) error {
 	accountStateDB := chainState.GetAccountStateDB()
 	as, err := accountStateDB.AccountState(mt_common.GATEWAY_CONTRACT_ADDRESS)
-	if err != nil || as == nil {
-		as = state.NewAccountState(mt_common.GATEWAY_CONTRACT_ADDRESS)
+	if err != nil {
+		// Production: always an error. Only the c0spike test harness (build tag) supplies a fallback
+		// account for chains whose genesis does not contain the Gateway account.
+		as = harnessGatewayAccountFallback()
+		if as == nil {
+			return fmt.Errorf("load Gateway account state: %w", err)
+		}
 	}
 	if as.SmartContractState() == nil {
 		as.SetSmartContractState(state.NewEmptySmartContractState())

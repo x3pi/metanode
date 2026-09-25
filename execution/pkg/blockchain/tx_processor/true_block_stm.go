@@ -882,7 +882,6 @@ func (stm *TrueBlockSTM) execOne(
 							if exRs.MapCodeHash() != nil {
 								mapCreator := exRs.MapCreatorPubkey()
 								mapStorage := exRs.MapStorageAddress()
-								mapCodeChange := exRs.MapCodeChange()
 								for addrHex, newCodeHashBytes := range exRs.MapCodeHash() {
 									addr := common.HexToAddress(addrHex)
 									newCodeHash := common.BytesToHash(newCodeHashBytes)
@@ -895,14 +894,6 @@ func (stm *TrueBlockSTM) execOne(
 									if mapStorage != nil {
 										if storageAddr, ok := mapStorage[addrHex]; ok {
 											mvccDB.SetStorageAddress(addr, storageAddr)
-										}
-									}
-									if mapCodeChange != nil {
-										if code, ok := mapCodeChange[addrHex]; ok {
-											scDB.SetCode(addr, newCodeHash, code)
-											if chainState != nil && chainState.GetSmartContractDB() != nil {
-												chainState.GetSmartContractDB().SetCode(addr, newCodeHash, code)
-											}
 										}
 									}
 								}
