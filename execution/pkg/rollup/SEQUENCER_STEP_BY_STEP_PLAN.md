@@ -400,7 +400,7 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 
 | Quyết định | Mặc định đề xuất | Chốt khi |
 |---|---|---|
-| Thư viện Raft cụ thể | `hashicorp/raft` (API đơn giản, có transport TCP và snapshot) + kho log bền có fsync; `etcd raft` là thư viện thấp hơn, phải tự viết transport và lưu trữ | Trước C2 |
+| Thư viện Raft cụ thể | `hashicorp/raft` (API đơn giản, có transport TCP và snapshot) + kho log bền có fsync; `etcd raft` là thư viện thấp hơn, phải tự viết transport và lưu trữ | ✅ Chốt 2026-09-25: `hashicorp/raft` |
 | `is_authoritative_gei`: Go tự cấp GEI hay cấp sẵn | Chọn ở C0 | C0 |
 | Số replica N | 3 | C2, theo số liệu |
 | Có sửa `validation_transaction.go` để bỏ hẳn phụ thuộc build vào `libmetanode` | Không | Sau C1 |

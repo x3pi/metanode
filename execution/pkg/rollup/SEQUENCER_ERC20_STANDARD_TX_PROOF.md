@@ -362,6 +362,8 @@ Vì `transactionsRoot`/`receiptRoot` là bộ cộng dồn cộng, không có b�
 | Kiểm toán root chỉ ở mức block bằng **tập hash giao dịch** (cộng `txset_root`, mục 14.2), không đưa lên Parent thường xuyên | ✅ Chốt |
 | Thêm **P7** (mức block), **P8** (không thất bại sai giao dịch của mình, phạm vi hẹp) và **cờ `ns_root`** có thể thách thức | ✅ Chốt |
 | Phán quyết theo `blockTime` Parent; **im lặng = thua**; ký quỹ người báo; `H_audit` = unbonding | ✅ Chốt |
-| **H7** (cổng đọc riêng tư) và **H8** (RPC ký phản hồi) là điểm móc mặc định-tắt trong code cũ | ⏳ **Cần bạn duyệt riêng** khi bắt đầu F3 |
+| **H7** (cổng đọc riêng tư) và **H8** (RPC ký phản hồi) là điểm móc mặc định-tắt trong code cũ | ✅ Chốt (2026-09-25): duyệt cả hai |
+| Thêm `txset_root` (cây Merkle theo block, lá `(tx_hash,status)`) vào `AnchorLeaf`; không đổi backend trie (mục 14.2) | ✅ Chốt (2026-09-25) |
+| Thư viện Raft cho `consensus_mode = raft`: `hashicorp/raft` | ✅ Chốt (2026-09-25) |
 | Chính sách hệ sinh thái cho A3 (danh sách token thuộc phạm vi, cảnh báo ví khi dùng router) | ⏳ Quyết định vận hành |
 | Chấp nhận các giới hạn ở mục 8 | ✅ Chốt |
