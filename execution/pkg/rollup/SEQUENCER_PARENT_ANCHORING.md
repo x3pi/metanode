@@ -7,6 +7,8 @@
 >
 > **Phạm vi thu hẹp (2026-09-25):** chỉ cần chứng minh **số dư của 1 người trên 1 contract ERC20**, khi đã có **toàn bộ lịch sử giao dịch (vào và ra) của người đó**. Thiết kế chọn nằm ở **mục 3.2** và thay thế các phần "bằng chứng state" ở mục 5.2 trên đường chính; các phần khác của tài liệu vẫn đúng.
 >
+> **⚠️ Cảnh báo F0 (2026-09-25):** các đoạn giả định `transactionsRoot`/`receiptRoot` là cây Merkle có bằng chứng thành viên (đặc biệt mục về bằng chứng giao dịch/receipt) là **SAI**: hai root này là bộ cộng dồn cộng modulo (`FlatStateTrie`). Xem `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 14. Đọc `README.md` của thư mục này để biết tài liệu nào là hiện hành.
+>
 > **Quy ước:** **[XÁC MINH]** = đã đối chiếu code (có vị trí). **[ĐỀ XUẤT]** = thiết kế mới. **[CHƯA XÁC MINH]** = phải kiểm tra trước khi làm.
 
 ---
