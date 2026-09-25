@@ -181,6 +181,7 @@ type SimpleChainConfig struct {
 	RewardSenderAddress    string `json:"reward_sender_address"`
 
 	ChainId                            *big.Int       `json:"chainId"`
+	ConsensusMode                      string         `json:"consensus_mode,omitempty"`
 	PrivateKey                         string         `json:"private_key"`
 	Address                            string         `json:"address"`
 	LogPath                            string         `json:"log_path"`

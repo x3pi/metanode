@@ -577,3 +577,4 @@ deploy/ansible/auto_deploy.lock
 deploy/.bin.lock
 deploy/.build.lock
 deploy/.bin_staging.*
+execution/gen_recovery_committee

@@ -385,14 +385,26 @@ func (api *MetaAPI) BlockNumber() string {
 // non-breaking option; renaming the existing method to free up "Syncing" was not, since it would
 // change the eth_subscribe topic name for any existing subscriber.
 func (api *MetaAPI) ConsensusReady() map[string]interface{} {
-	ready := executor.IsRustConsensusReadyForTransactions()
+	var ready bool
+	var notReadyNote string
+	if api.App != nil && api.App.config != nil && api.App.config.ConsensusMode == "raft" {
+		// Raft consensus mode: Raftfeed RPC transaction forwarding is not yet fully wired to a live Raft cluster.
+		// Fail-closed to prevent clients from dispatching transactions into an unforwarded void.
+		ready = false
+		notReadyNote = "Raft consensus mode is active but Raftfeed cluster forwarding is not yet accepting transactions (under C0/Phase D implementation)."
+	} else {
+		ready = executor.IsRustConsensusReadyForTransactions()
+		if !ready {
+			notReadyNote = "Rust consensus layer is not yet in a phase that accepts proposals (still initializing/bootstrapping/catching-up/state-syncing/aligning) -- a transaction sent now may sit unconfirmed until this reports ready: true."
+		}
+	}
 	current := storage.GetLastBlockNumber()
 	result := map[string]interface{}{
 		"ready":       ready,
 		"blockNumber": hexutil.EncodeUint64(current),
 	}
 	if !ready {
-		result["note"] = "Rust consensus layer is not yet in a phase that accepts proposals (still initializing/bootstrapping/catching-up/state-syncing/aligning) -- a transaction sent now may sit unconfirmed until this reports ready: true."
+		result["note"] = notReadyNote
 	}
 	return result
 }

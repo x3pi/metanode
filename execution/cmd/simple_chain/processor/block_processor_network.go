@@ -4,7 +4,6 @@ package processor
 
 import (
 	"fmt"
-	"time"
 
 	// "github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/executor"
@@ -86,9 +85,30 @@ func (bp *BlockProcessor) runUnixSocket() {
 		}
 	})
 
-	// 2. Create the block ingestion channel (was listener.DataChannel())
-	// In the legacy setup, processRustEpochData reads from this channel
-	blockQueue := make(chan *pb.ExecutableBlock, 5000)
+	// 2. Obtain the block ingestion channel (Hook H1)
+	// Synchronously initialized in NewBlockProcessor; fallback if nil
+	blockQueue := bp.blockIngestionQueue
+	if blockQueue == nil {
+		blockQueue = make(chan *pb.ExecutableBlock, 1000)
+		bp.blockIngestionQueue = blockQueue
+	}
+
+	// Hook H1: ở chế độ "raft", không gọi InitFFIBridge (bỏ qua Rust consensus FFI),
+	// mà khởi động trực tiếp nguồn cấp khối vào blockQueue và committer loop.
+	if bp.config != nil && bp.config.ConsensusMode == "raft" {
+		logger.Info("🚀 [CONSENSUS-MODE] Running in Raft mode (Rust FFI consensus bypassed)")
+		lastBlock := storage.GetLastBlockNumber()
+		fmt.Printf("✅ [READY] Go Master executor initialized in Raft mode: block=%d\n", lastBlock)
+
+		go bp.processRustEpochData(blockQueue)
+		go bp.StartCommitterLoop()
+
+		select {
+		case <-bp.stopChan:
+			logger.Info("🛑 [RAFT FEED] Raft processor stopped cleanly via stopChan")
+			return
+		}
+	}
 
 	// 3. Find Rust configuration path
 	rustConfigPath := bp.config.RustConfigPath
@@ -121,10 +141,10 @@ func (bp *BlockProcessor) runUnixSocket() {
 	// The runUnixSocket caller expects this function to block/run in background
 	// We can simply return here, or keep it alive like it did. It's normally run as a goroutine.
 	// Since the previous function had a block wait, we can mimic it or just let it exit.
-	// The processRustEpochData is backgrounded now.
-	for {
-		time.Sleep(30 * time.Second)
-		logger.Debug("🔌 [FFI BRIDGE] Main thread monitoring FFI alive")
+	select {
+	case <-bp.stopChan:
+		logger.Info("🛑 [FFI BRIDGE] FFI bridge loop stopped cleanly via stopChan")
+		return
 	}
 }
 

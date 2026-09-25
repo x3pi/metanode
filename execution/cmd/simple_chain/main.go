@@ -35,6 +35,11 @@ var (
 	// Tool flags
 	toolRegisterValidator = flag.String("tool-register-validator", "", "Path to config.json for validator registration tool. If set, runs the tool and exits.")
 	toolGetAddress        = flag.String("tool-get-address", "", "Hex private key to calculate address. If set, prints address and exits.")
+	toolC0Spike           = flag.String("tool-c0-spike", "", "Run C0 spike: 'worker', 'verify'")
+	c0DataDir             = flag.String("c0-data-dir", "", "Data directory for C0 worker")
+	c0OutPath             = flag.String("c0-out", "", "Output path for C0 worker results JSON")
+	c0Blocks              = flag.Int("c0-blocks", 5, "Number of blocks to execute in C0 spike")
+	c0Restart             = flag.Bool("c0-restart", false, "Test restart bypass behavior in C0 spike")
 )
 
 var logCleaner *loggerfile.LogCleaner
@@ -90,6 +95,11 @@ func main() {
 
 	if *toolGetAddress != "" {
 		runGetAddress(*toolGetAddress)
+		os.Exit(0)
+	}
+
+	if *toolC0Spike != "" {
+		runC0Spike(*toolC0Spike, *defaultConfigPath, *c0DataDir, *c0OutPath, *c0Blocks, *c0Restart)
 		os.Exit(0)
 	}
 
