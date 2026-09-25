@@ -121,8 +121,12 @@ func (db *MVCCSmartContractDB) SetAccountStateDB(asdb types.AccountStateDB) {
 	db.accountState = asdb
 }
 
-func (db *MVCCSmartContractDB) SetBlockNumber(blockNumber uint64)                                 {}
-func (db *MVCCSmartContractDB) SetCode(address common.Address, codeHash common.Hash, code []byte) {}
+func (db *MVCCSmartContractDB) SetBlockNumber(blockNumber uint64) {}
+func (db *MVCCSmartContractDB) SetCode(address common.Address, codeHash common.Hash, code []byte) {
+	if db.baseDB != nil {
+		db.baseDB.SetCode(address, codeHash, code)
+	}
+}
 func (db *MVCCSmartContractDB) StorageRoot(address common.Address, customRoot ...*common.Hash) common.Hash {
 	return common.Hash{}
 }
