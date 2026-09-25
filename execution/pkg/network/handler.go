@@ -129,7 +129,23 @@ func (h *Handler) HandleRequest(r network.Request) (err error) {
 		cmd == "Receipt" ||
 		cmd == "Ping"
 
+	// An unknown command is a client protocol error, not a server health signal: it must not
+	// feed the breaker (one client sending e.g. eth_call would otherwise open it for everyone).
+	route, routeExists := h.routes[cmd]
+	if !routeExists {
+		err = fmt.Errorf("không tìm thấy lệnh: %s", cmd)
+		return err
+	}
+
 	if !isCritical {
+		// Circuit breaker check — reject if circuit is open (non-critical only).
+		// A rejection must NOT be recorded as a failure: that refreshes lastFailureTime, so any
+		// client polling more often than the OPEN timeout would keep the breaker OPEN forever.
+		if !h.circuitBreaker.CanExecute() {
+			err = fmt.Errorf("circuit breaker open: rejecting command %s", cmd)
+			return err
+		}
+
 		// Record success/failure in circuit breaker after execution (non-critical only)
 		defer func() {
 			if err != nil {
@@ -138,12 +154,6 @@ func (h *Handler) HandleRequest(r network.Request) (err error) {
 				h.circuitBreaker.RecordSuccess()
 			}
 		}()
-
-		// Circuit breaker check — reject if circuit is open (non-critical only)
-		if !h.circuitBreaker.CanExecute() {
-			err = fmt.Errorf("circuit breaker open: rejecting command %s", cmd)
-			return err
-		}
 	}
 
 	// Update TPS counter
@@ -152,12 +162,6 @@ func (h *Handler) HandleRequest(r network.Request) (err error) {
 	// h.tps.mu.Unlock()
 
 	// Dispatch to route handler
-	route, routeExists := h.routes[cmd]
-	if !routeExists {
-		err = fmt.Errorf("không tìm thấy lệnh: %s", cmd)
-		return err
-	}
-
 	err = route(r)
 	return err
 }
