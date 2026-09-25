@@ -63,7 +63,7 @@ go build -tags c0spike -o /tmp/sc ./cmd/simple_chain
 
 | ID | Quyết định | Vì sao chặn |
 |---|---|---|
-| D1 | Đánh dấu **C0 ☑** hay giữ ◐ | C1–C6 chỉ được bắt đầu khi C0 ☑. Các cổng thực nghiệm đã đạt (mục 1); các điểm Go→Rust chưa guard và `commit_index` uint32 là việc của C1 |
+| D1 | Đánh dấu **C0 ☑** hay giữ ◐ | C1–C6 chỉ được bắt đầu khi C0 ☑. **Lưu ý:** cổng của kế hoạch chính (mục 2.1 P1–P2) đã đạt qua spike, nhưng tiêu chí thoát C0 ở `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5 đòi thêm `T-DET-01..07` (lặp ≥ 20 lần, đổi `GOMAXPROCS`, đảo thứ tự tx trong batch…) — xem **N0**. Khuyến nghị: chỉ ☑ sau khi N0 xong |
 | D2 | Chính sách **A3**: token nào được bảo vệ; chỉ tài khoản ký bằng ví ECDSA được bảo vệ (tài khoản chỉ có BLS nằm ngoài) | Chặn F1–F6 |
 | D3 | Duyệt triển khai bản sửa `SyncDurable` lên cụm thật 231/230 | Xem N2 |
 | D4 | Thu hồi token GitHub đã dán trong chat | Bảo mật |
@@ -73,6 +73,21 @@ go build -tags c0spike -o /tmp/sc ./cmd/simple_chain
 ---
 
 ## 3. Danh sách việc, theo thứ tự ưu tiên
+
+### N0 — Đóng nốt tiêu chí thoát C0 (`T-DET-*`) bằng cách mở rộng spike (P0, nhỏ, làm trước N3)
+Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DET-01..07 đạt, có tài liệu kết luận; nếu T-DET-01/02 lệch thì dừng, không sang C1.** Đối chiếu với spike hiện tại (`cmd/simple_chain/c0_spike.go`):
+
+| Test | Yêu cầu (mục 2.3) | Hiện trạng | Việc còn lại |
+|---|---|---|---|
+| T-DET-01 | Cùng chuỗi `ExecutableBlock` (EVM + Gateway) trên 2 tiến trình, **lặp ≥ 20 lần**, so `state_root` và `block_hash` từng block | Một phần: 2 vòng × 2 tiến trình, có EVM + Gateway | Chạy ≥ 20 vòng (thêm tham số, ví dụ `-c0-rounds`, là đề xuất), mỗi vòng thư mục dữ liệu mới; thêm vòng với seed/nội dung khác |
+| T-DET-02 | Như trên nhưng có tải song song (Block-STM nhiều worker) | Một phần: có xung đột RW/WW trong 8 tx mỗi block | Thêm block lớn (hàng trăm tx, nhiều sender, nhiều tx cùng hợp đồng), thay đổi số worker của Block-STM nếu cấu hình được |
+| T-DET-03 | Đổi `GOMAXPROCS`, đổi thứ tự lên lịch goroutine | **Chưa** | Chạy 2 tiến trình với `GOMAXPROCS` khác nhau (1, 2, số lõi) và so kết quả |
+| T-DET-04 | `Apply` trên 2 replica cho cùng `BatchRecord` → dãy byte `ExecutableBlock` giống hệt | **Chưa thể** (chưa có `FSM.Apply`) | Chuyển sang C2 (ghi rõ trong báo cáo, không tính vào C0) |
+| T-DET-05 | Đảo thứ tự tx **trong batch** → kết quả block giống nhau (Go sắp theo hash sau dedup) | **Chưa** | Trộn ngẫu nhiên thứ tự `transactions` trong `ExecutableBlock` (nhiều hoán vị) và so `state_root`/`block_hash` |
+| T-DET-06 | `BlockProcessor` không gọi `InitFFIBridge` vẫn commit block, không panic vì kênh authoritative `nil` | **Đạt** | — |
+| T-DET-07 | Link `libmetanode` nhưng không khởi động → không tạo thread/socket/file của Rust | **Đạt** (đo `/proc/self/task`, socket theo inode fd, `InitFFIBridgeCallCount`=0; thread NOMT là ngoại lệ có chủ đích) | Tuỳ chọn: bổ sung `strace -f -e trace=network,execve` |
+
+**Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.**
 
 ### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (P0, độc lập, làm ngay)
 **Vì sao:** lỗi vừa sửa (`smart_contract_code`) là một trường hợp của lớp lỗi "ghi có đệm rồi crash". Có thể còn kho khác, hậu quả là hash/state lệch giữa các node sau crash (fork).
@@ -132,10 +147,10 @@ Chờ: C5 (chaos đa máy), D2 (A3), D6. Việc chuẩn bị không cần code: 
 
 ```
 Ngay bây giờ (song song, không phụ thuộc nhau):
-  N1  rà soát bền vững         N4  A1 → A2 → B1        N6  A0 → B3 (sau A2)     N7  sửa test race
+  N0  T-DET còn thiếu (mở rộng spike)   N1  rà soát bền vững         N4  A1 → A2 → B1        N6  A0 → B3 (sau A2)     N7  sửa test race
   N2  runbook triển khai (cần D3 để chạy thật)
 
-Sau D1 (C0 ☑):
+Sau N0 và D1 (C0 ☑):
   N3  C1 (guard Go→Rust, nguồn cấp Raft)  →  C2 → C3 → C4 → C5 → C6   (theo kế hoạch chính)
 Sau N4:   N5 (B2) → B4 → B5 → B6 → B7 → B8 → B9  (chuỗi tuần tự)
 Tuỳ chọn: N8 (cần D5)            Chưa bắt đầu: N9 (cần C5, D2, D6)
@@ -154,3 +169,88 @@ Tuỳ chọn: N8 (cần D5)            Chưa bắt đầu: N9 (cần C5, D2, D6)
 - [ ] `PROJECT_STRUCTURE.md` cập nhật nếu thêm package/cờ/khoá cấu hình.
 - [ ] Sau merge: `git show origin/dev:<file>` kiểm nội dung thật.
 - [ ] Ghi trạng thái ◐/☑ trong bảng theo dõi của `SEQUENCER_STEP_BY_STEP_PLAN.md` **chỉ khi** đạt cổng và có bằng chứng trong PR.
+
+
+---
+
+## 6. Schema — nguồn sự thật, trạng thái và quy tắc thay đổi
+
+**Nguồn sự thật:** `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 1 (schema), `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 4 (schema bằng chứng gian lận), và code đã cài. **Khi code và tài liệu lệch nhau, sửa tài liệu trong cùng PR (A2) — không để hai bản khác nhau.**
+
+| Schema | Định nghĩa ở | Trạng thái | Quy tắc quan trọng |
+|---|---|---|---|
+| Máy trạng thái B1: `State`, `EventType`, `ActionType`, `Outcome`, `Role` | code `pkg/rollup/types.go`, `statemachine.go`; bảng chuyển ở SCHEMAS 1.7 | **Đã cài** (B1 ◐) | Số trạng thái cố định: gửi 10, 11, 12, 13, 18, 19; nhận 21, 22, 23, 27, 28, 29. Code **không có** trạng thái `20 OBSERVED` của tài liệu (chốt ở A2). Cặp `(state,event)` không có trong bảng ⇒ **lỗi, không panic**. `Value` phải > 0 (nil/≤ 0 bị từ chối). Không I/O, không thời gian, idempotent |
+| `BatchRecord` (entry log Raft) | SCHEMAS 1.2 (`raftfeed/proto/batch.proto`) | **Đề xuất** | Protobuf `Deterministic: true`: **cùng batch ⇒ cùng dãy byte**. Có `schema_version` (=1), `timestamp_ms` do **leader** đóng dấu, `txs` = đúng output `transaction.MarshalTransactions`, `tx_count` kiểm chéo (lệch ⇒ từ chối), **không bao giờ propose batch rỗng**, `len(txs) ≤ max_batch_bytes` |
+| Ánh xạ batch → `pb.ExecutableBlock` | SCHEMAS 1.3 (15 trường) | **Đề xuất giá trị, các trường đã xác minh** | `transactions[i].digest` = bytes tx **đầy đủ** (không phải hash); `commit_index = uint32(raftIndex)`, `raftIndex > 2^32-1` ⇒ dừng replica, **không cắt cụt**; `leader_address` = `raft.sequencer_address` cố định trên mọi replica; `commit_hash = keccak256("ROLLUP_BATCH_V1:" ‖ prev ‖ be64(ts) ‖ keccak256(txs))`; bỏ entry có `block_number ≤ storage.GetLastBlockNumber()` khi restart; `Apply` **cấm** đọc đồng hồ/ngẫu nhiên |
+| `FsmSnapshotMeta` + bố cục kho Raft | SCHEMAS 1.4 | Đề xuất | Snapshot chỉ ghi metadata cho block **đã bền trong DB** (`last_block_number` ≤ block bền); không thu gọn log vượt dữ liệu đã fsync |
+| Cấu hình | SCHEMAS 1.1; code `pkg/config/config.go` | **Chỉ có `consensus_mode`** (rỗng = Rust như cũ, `"raft"`); khối `raft.*` là đề xuất | `consensus_mode` rỗng: **không** đọc/tạo thư mục `raft/`, không đổi hành vi (chứng minh bằng `T-OFF-*`) |
+| `RollupRecord` và khoá lưu | SCHEMAS 1.6; khoá `rollup_msg_v1` | Đề xuất (vị trí ghi [TẠM]) | Lưu **per-key**, không nạp cả blob; `SmartContractDB` không có duyệt tiền tố ⇒ cần chỉ mục riêng cho `ScanNonTerminal` |
+| Kênh chuyển tiếp follower → leader | SCHEMAS 1.5 | Đề xuất | Hàng đợi có trần rõ ràng |
+| Sự kiện quan sát từ Parent Chain | SCHEMAS 1.8 | Đề xuất | Trùng `(parent_block, log_index)` ⇒ bỏ qua (idempotent) |
+| Parent Chain: `NodeFloatAccount`, `ClaimedMessages`, ABI | SCHEMAS 1.9 (**[TẠM — chốt sau A0]**); khoá `rollup_fa_v1`, `rollup_claimed_v1` | Chưa cài | `FA ≥ 0`, `Σ FA == supply`, `Claimed` ghi một lần; đổi ABI Gateway ⇒ nâng cấp đồng loạt |
+| Metric, log, đầu ra công cụ | SCHEMAS 1.10 | Đề xuất | Đầu ra `check` phải đúng schema JSON (`T-CL-01`) |
+| Bằng chứng gian lận ERC20: `TxRecord`, `txset_root` (lá `(tx_hash,status)`) trong `AnchorLeaf`, sổ tối giản theo block, `ns_root`, `AnchorState` + MMR | `SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 4 | Đề xuất (giai đoạn F) | `transactionsRoot` **không** có bằng chứng thành viên (bộ cộng dồn theo block); giao dịch hợp lệ = có `ValidEthSign()` (ECDSA), không phải chữ ký BLS |
+
+**Quy tắc phiên bản và thay đổi schema (SCHEMAS 1.11, bắt buộc):**
+1. Mọi proto có `schema_version`. Replica **từ chối** entry/record có phiên bản lớn hơn phiên bản nó hiểu (dừng, không đoán).
+2. Thêm trường proto chỉ ở **cuối**, không đổi số thứ tự, không tái dùng số đã bỏ.
+3. Bất kỳ thay đổi nào làm đổi **byte** của state (record, khoá, thứ tự ghi) là thay đổi **state root** ⇒ phải nâng cấp **đồng loạt** mọi replica (bài học khi gỡ `RecoveryCommittee`: chạy lẫn binary cũ/mới sẽ lệch state); trên cụm thử cần wipe + deploy lại.
+4. Thứ tự làm việc khi đổi schema: (a) sửa tài liệu SCHEMAS (A2) và tăng `schema_version` nếu cần; (b) thêm **golden vector** (mục 7.2); (c) code; (d) test tương thích/từ chối phiên bản; (e) ghi vào PR mọi khoá/byte bị đổi và tác động lên state root.
+5. Không dùng `map` để tuần tự hoá hay lặp khi sinh dữ liệu ảnh hưởng state (thứ tự lặp map trong Go là ngẫu nhiên ⇒ không xác định ⇒ fork). Sắp xếp khoá tường minh.
+6. Không I/O, đồng hồ hay ngẫu nhiên trong logic thuần và trong `FSM.Apply`.
+
+---
+
+## 7. Yêu cầu kiểm thử (bắt buộc, không thương lượng)
+
+Nguồn chi tiết: `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2 (danh mục test có ID, hạ tầng test, 11 bất biến, tiêu chí thoát theo phase). Dưới đây là **yêu cầu tối thiểu** cho mọi PR có code.
+
+### 7.1. Nguyên tắc
+1. **Test trước khi coi là xong:** không có test thì bước đó chưa xong, dù code chạy được.
+2. **Xác định trước, chaos sau:** logic thuần test bằng bảng; Raft trong tiến trình; sau đó mới đa tiến trình/đa máy.
+3. **Kill tại mọi điểm chuyển trạng thái**, không chỉ vài điểm ví dụ (`T-TX-16`, `T-CH-01`): sinh test từ bảng chuyển 1.7.
+4. **Không `time.Sleep` để "chờ đủ lâu"** trong test logic; dùng `FakeClock` và điều kiện đồng bộ. Chỉ test cụm thật được đợi theo sự kiện có giới hạn.
+5. **Mọi test hồi quy phải thất bại khi gỡ bản sửa** (kiểm mutation thủ công: tạm xoá dòng sửa, test phải đỏ). Cách đã dùng với `SyncDurable(codeStorage)`.
+6. **Test chứng minh "mặc định-tắt"** (`T-OFF-*`) là điều kiện bắt buộc trước khi sửa file cũ (hook H1–H6).
+7. Chaos/cụm: **lặp ≥ 20 lần, 0 flake**; đồng thời `go test -race -count=1`.
+8. Không ghi PASS nếu không đo; benchmark đúng quy tắc ở mục 0.
+
+### 7.2. Yêu cầu riêng cho schema (mỗi schema/proto/khoá lưu)
+- **Golden vector:** với mỗi message/khoá, một test so **từng byte** đầu ra với vector cố định lưu trong repo (đổi byte ⇒ test đỏ ⇒ buộc người sửa thừa nhận đổi state root).
+- **Marshal xác định:** cùng đối tượng, marshal nhiều lần và trên nhiều goroutine ⇒ cùng dãy byte; không phụ thuộc thứ tự lặp `map`.
+- **Round-trip:** encode → decode → encode cho ra cùng byte; kiểm cả giá trị biên (`uint64` tối đa, số dư `big.Int` rất lớn, chuỗi/bytes rỗng và dài tối đa).
+- **Từ chối phiên bản lạ:** `schema_version` lớn hơn ⇒ lỗi rõ ràng, replica dừng, không đoán.
+- **Từ chối dữ liệu sai:** `tx_count` lệch, batch rỗng, `raftIndex > 2^32-1`, trường bắt buộc thiếu ⇒ từ chối, không panic (`T-AP-02/03/05`).
+- **Fuzz decode:** `go test -fuzz` cho bộ giải mã (không panic, không cấp phát vô hạn, không đọc ngoài biên).
+- **Tương thích:** đọc bản ghi cũ sau khi thêm trường cuối vẫn đúng; thay đổi làm đổi byte state phải có test nâng cấp đồng loạt (ví dụ `ci.sh run-now --reset`).
+- **Ổn định state root:** cùng chuỗi giao dịch ⇒ cùng `state_root`/`block_hash` trên 2 tiến trình (`TwoProcessHarness`, `T-DET-*`).
+
+### 7.3. Test tối thiểu theo việc
+
+| Việc | Test bắt buộc (ID trong SCHEMAS mục 2.3 nếu có) | Ghi chú |
+|---|---|---|
+| N0 | `T-DET-01,02,03,05` (+ `06,07` đã có) | Nếu lệch: dừng |
+| N1 | Test `kill -9` cho từng kho; test có `FaultyStore` (lỗi/ghi chậm/mất điện giữa fsync); test hồi quy có mutation; đo chi phí fsync | Bảng rà soát kho là sản phẩm |
+| N3 | `T-OFF-01..07` (đường Rust mặc định không đổi), `T-R1-*`, test riêng cho **từng** guard (trả lỗi rõ ràng, không treo, không gọi FFI) | Diff file cũ chỉ được gồm nhánh H1–H6 (script kiểm `scripts/rollup_cluster/check_default_off_diff.sh` là **dự kiến trong SCHEMAS 2.5, chưa có**: viết nó cùng C1) |
+| N4 | `T-SM-*` (bảng phủ **mọi** cạnh 1.7; tích Descartes `(State,EventType)` từ chối mọi cặp không có; replay không phát hành động lần hai; mutation `Event.Value` sau `Next` không đổi `Action.Amount`; biên `uint64`; property/fuzz: không vừa success vừa refunded) | `go test -race -count=1 ./pkg/rollup` |
+| N5 | `T-ST-*`: ghi/đóng/mở lại `ChainState` đọc đúng từng trường; `ScanNonTerminal` đúng; kill giữa ghi; chi phí không tăng theo số record | Golden vector cho khoá `rollup_msg_v1` |
+| N6 | `T-PC-*` (chuỗi `depositToFloat/transferFloat/reclaimFloat` ngẫu nhiên: `FA ≥ 0`, `Σ FA == supply` sau mỗi bước), `T-TX-*` (số dư không đủ, trùng, đua Reclaim vs `markClaimed`…), `T-SEC-*`, hồi quy Gateway cũ, benchmark 50/500/3.000 bản ghi | Đổi trạng thái tuần tự hoá ⇒ wipe + nâng cấp đồng loạt |
+| N7 | `go test -race` sạch không cần `-skip`; giữ nguyên ý nghĩa test | Không xoá test |
+| C2 (theo kế hoạch chính) | `T-RF-*`, `T-SUB-*`, `T-AP-*` gồm `T-AP-07/08` (thu gọn log vs block chưa bền); `T-DET-04` (2 replica cùng `BatchRecord` ⇒ cùng byte) | Lặp ≥ 20 lần, 0 flake |
+| C5 | `T-CH-*` (gồm cắt điện thật `T-CH-09`), `T-E2E-04..05`, `Σ FA == supply` xuyên suốt, `ci.sh run-now` | |
+| F (sau này) | `T-SD-01..30` (`SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 13) và các test riêng tư `T-PV-*` (`SEQUENCER_ERC20_USER_HISTORY_PROOF.md` mục 13) | Sau C5 |
+
+### 7.4. 11 bất biến toàn cục (`InvariantChecker`) phải kiểm sau **mọi** kịch bản L3–L6
+1. Tiền tố log đã commit giống nhau giữa mọi cặp replica. 2. Cùng `block_number` ⇒ cùng `state_root` và `block_hash` trên mọi replica. 3. `commit_index` chỉ tiến. 4. Mỗi tx thực thi tối đa một lần trên mỗi replica, mọi replica cùng tập tx. 5. Không hành động ra ngoài từ batch chưa commit. 6. `Σ NodeFloatAccount == supply` và `FA ≥ 0`. 7. Mỗi `messageID` `Claimed` tối đa 1 lần; credit/hoàn tối đa 1 lần. 8. Không entry nào bị thu gọn khỏi log trước khi block tương ứng đã bền trong DB. 9. Không record nào kẹt vô hạn. 10. `leader_address` trong mọi block = `sequencer_address`. 11. Số tx đã có receipt ⊆ số tx đã commit.
+
+### 7.5. Tiêu chí thoát theo phase (SCHEMAS 2.5) — không được bỏ qua
+| Phase | Điều kiện thoát |
+|---|---|
+| B (B1–B9) | `T-SM`, `T-ST`, `T-PC`, `T-TX` đạt; `T-E2E-01..03` đạt lặp lại; `build_check.sh` sạch |
+| **C0** | **`T-DET-01..07` đạt, có tài liệu kết luận; nếu `T-DET-01/02` lệch: dừng, không sang C1** |
+| C1 | `T-OFF-01..07`, `T-R1-*` đạt; diff file cũ chỉ gồm H1–H6 |
+| C2 | `T-RF`, `T-SUB`, `T-AP` đạt (gồm `T-AP-07/08`), lặp ≥ 20 lần, 0 flake |
+| C3 | `T-REL-*` đạt |
+| C4 | `T-LD-*`, `T-CL-*` đạt |
+| C5 | `T-CH-*` (gồm cắt điện thật), mọi kịch bản lặp ≥ 20 lần; `T-E2E-04..05`; `Σ FA == supply` xuyên suốt; `ci.sh run-now` sạch |
+| C6 | `T-PF-*` có số đo được ghi lại; `PROJECT_STRUCTURE.md` cập nhật |
