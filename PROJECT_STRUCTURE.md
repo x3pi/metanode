@@ -39,7 +39,6 @@ metanode/
 ├── crates/             ← Shared Rust crates (crypto, metrics, storage, macros)
 ├── docs/               ← Docusaurus-based web documentation site
 ├── note/               ← Architecture documentation & known bugs (relocated from /docs)
-│   ├── node_roles_implementation_plan.md ← Proposed Sub/Master/Consensus configuration, replication and role handoff plan (not implemented)
 ├── scripts/            ← Operational scripts
 ├── DATABASE_STRUCTURE.md ← Database directory structure and requirements based on node roles
 └── OPERATIONS_GUIDE.md  ← Complete End-to-End deployment & Day-2 Operations Runbook
@@ -196,6 +195,13 @@ metanode/
 | `tx_async_queue.go` | 338 | Async tx submission queue |
 | `debug_api.go` | 870 | Debug/admin endpoints |
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
+| `c0_spike.go` | 750 | C0 spike harness (`//go:build c0spike`) for determinism, state mutation & restart bypass verification |
+| `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
+
+*CLI Flags & Config:*
+- `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
+- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-restart`: Parameters for C0 spike execution.
+- `consensus_mode`: "raft" (Rollup Raft ingestion queue mode) or empty (default Rust BFT consensus).
 
 ### `cmd/simple_chain/processor/` — Core Block Processing
 | File | Role |

@@ -532,9 +532,9 @@ func NewBlockProcessor(
 		backupDbChannel:    make(chan CommitJob, 1000),
 		geiUpdateChan:      make(chan AsyncGEIUpdate, 100),
 
-		// Raft mode block ingestion queue (Hook H1) & clean shutdown lifecycle
-		// Bounded capacity (1000) prevents unbounded memory accumulation while providing smooth ingestion
-		blockIngestionQueue: make(chan *mt_proto.ExecutableBlock, 1000),
+		// Block ingestion queue & clean shutdown lifecycle
+		// Bounded capacity (5000) preserves legacy Rust FFI buffer capacity
+		blockIngestionQueue: make(chan *mt_proto.ExecutableBlock, 5000),
 		stopChan:            make(chan struct{}),
 
 		lastRateCheckTime:   time.Now(),

@@ -1,3 +1,5 @@
+//go:build c0spike
+
 package main
 
 import (
@@ -122,6 +124,11 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	senderAddr := e_common.HexToAddress("0x294f72878a83B7d076E1d28eedecd184863df846")
 	recipAddr := e_common.HexToAddress("0x1111111111111111111111111111111111111111")
 
+	// Pre-flight check: ensure genesis funds the C0 spike sender to prevent silent empty runs
+	if asSender, err := asDb.AccountStateReadOnly(senderAddr); err != nil || asSender == nil || asSender.Balance() == nil || asSender.Balance().Sign() <= 0 {
+		return fmt.Errorf("genesis at %q does not fund C0 spike sender %s (account not found or balance <= 0). Ensure genesis has funded accounts, e.g. cmd/simple_chain/genesis-main.json or deploy/systemd/genesis.json", cfgFile, senderAddr.Hex())
+	}
+
 	type blockSample struct {
 		nonce   uint64
 		balance string
@@ -152,19 +159,39 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 		}
 		fmt.Printf("✅ [C0 WORKER] Block #%d processed (committed height=%d)\n", targetHeight, storage.GetLastBlockNumber())
 
-		// Ensure block state is fully persisted to DB before sampling
+		// Ensure block state is fully persisted to DB
 		app.blockProcessor.WaitForPersistence()
 
-		// Sample state mutation immediately after block persistence
+		// Sample state mutation immediately when this block is the tip
+		_ = app.chainState.GetAccountStateDB().Discard() // Invalidate loadedAccounts cache to read fresh from disk
 		sNonce := uint64(0)
-		if asSender, err := asDb.AccountStateReadOnly(senderAddr); err == nil && asSender != nil {
+		if asSender, err := app.chainState.GetAccountStateDB().AccountStateReadOnly(senderAddr); err == nil && asSender != nil {
 			sNonce = asSender.Nonce()
 		}
 		rBal := "0"
-		if asRecip, err := asDb.AccountStateReadOnly(recipAddr); err == nil && asRecip != nil && asRecip.Balance() != nil {
+		if asRecip, err := app.chainState.GetAccountStateDB().AccountStateReadOnly(recipAddr); err == nil && asRecip != nil && asRecip.Balance() != nil {
 			rBal = asRecip.Balance().String()
 		}
 		samples[targetHeight] = blockSample{nonce: sNonce, balance: rBal}
+
+		// If this is a historical block during restart bypass, verify identity against DB (Zero-Fork P2.5)
+		if isRestart && targetHeight <= startBlockNum {
+			bc := blockchain.GetBlockChainInstance()
+			bDb := app.chainState.GetBlockDatabase()
+			bHash, ok := bc.GetBlockHashByNumber(targetHeight)
+			if !ok {
+				return fmt.Errorf("restart bypass: block #%d hash not found in chain index", targetHeight)
+			}
+			committedBlk, err := bDb.GetBlockByHash(bHash)
+			if err != nil || committedBlk == nil {
+				return fmt.Errorf("restart bypass: block #%d hash %s not found in DB", targetHeight, bHash.Hex())
+			}
+			if len(committedBlk.Transactions()) != len(eb.Transactions) {
+				return fmt.Errorf("restart bypass: block #%d tx count mismatch: db=%d, consensus=%d", targetHeight, len(committedBlk.Transactions()), len(eb.Transactions))
+			}
+			fmt.Printf("⏭️ [C0 WORKER] Block #%d bypassed cleanly with identity match (Hash=%s, Txs=%d)\n",
+				targetHeight, bHash.Hex()[:16]+"...", len(committedBlk.Transactions()))
+		}
 
 		_ = bIdx
 		time.Sleep(50 * time.Millisecond)
@@ -179,6 +206,7 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	bDb := app.chainState.GetBlockDatabase()
 	rcpStorage := app.storageManager.GetStorageReceipt()
 
+	var prevStatesRoot string
 	for b := 1; b <= totalBlocks; b++ {
 		hash, ok := bc.GetBlockHashByNumber(uint64(b))
 		if !ok {
@@ -189,6 +217,16 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 			return fmt.Errorf("block #%d not found in blockDatabase: %v", b, err)
 		}
 		hdr := blkIface.Header()
+
+		// Assert tx_count > 0 to prevent silent pass on empty blocks
+		if len(blkIface.Transactions()) == 0 {
+			return fmt.Errorf("block #%d has 0 transactions! Consensus expected txs. Check genesis configuration.", b)
+		}
+		// Assert state root advances on each block
+		if b > 1 && hdr.AccountStatesRoot().Hex() == prevStatesRoot {
+			return fmt.Errorf("block #%d state root (%s) did not advance from block #%d! State mutation failed.", b, hdr.AccountStatesRoot().Hex(), b-1)
+		}
+		prevStatesRoot = hdr.AccountStatesRoot().Hex()
 
 		allReceiptsSuccess := true
 		rcpDb, err := receipt.NewReceiptsFromRoot(hdr.ReceiptRoot(), rcpStorage)
@@ -241,17 +279,17 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 }
 
 func runC0Verify(baseConfigPath string, blocksCount int) error {
-	dir1 := "/tmp/c0_node_process1"
-	dir2 := "/tmp/c0_node_process2"
-	out1 := "/tmp/c0_res_node1.json"
-	out2 := "/tmp/c0_res_node2.json"
-	outRestart := "/tmp/c0_res_node1_restart.json"
+	tmpBase, err := os.MkdirTemp("", "c0_spike_*")
+	if err != nil {
+		return fmt.Errorf("os.MkdirTemp: %w", err)
+	}
+	defer os.RemoveAll(tmpBase)
 
-	_ = os.RemoveAll(dir1)
-	_ = os.RemoveAll(dir2)
-	_ = os.Remove(out1)
-	_ = os.Remove(out2)
-	_ = os.Remove(outRestart)
+	dir1 := filepath.Join(tmpBase, "node_proc1")
+	dir2 := filepath.Join(tmpBase, "node_proc2")
+	out1 := filepath.Join(tmpBase, "res_node1.json")
+	out2 := filepath.Join(tmpBase, "res_node2.json")
+	outRestart := filepath.Join(tmpBase, "res_node1_restart.json")
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -433,9 +471,15 @@ func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
 	cfg, err := config.LoadConfig(baseConfigPath)
 	if err != nil {
 		// Fallback minimal config
+		mvmCache := true
 		cfg = &config.SimpleChainConfig{
-			ChainId: big.NewInt(991),
+			ChainId:         big.NewInt(991),
+			MVMCacheEnabled: &mvmCache,
 		}
+	}
+	if cfg.MVMCacheEnabled == nil {
+		mvmCache := true
+		cfg.MVMCacheEnabled = &mvmCache
 	}
 
 	cfg.ConsensusMode = "raft"
@@ -455,7 +499,7 @@ func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
 	cfg.DBType = storage.TypePebbleDB
 	cfg.RpcPort = "" // Disable RPC server port binding
 
-	// Ensure genesis path
+	// Ensure genesis path — prioritize funded genesis configs for C0 spike
 	genesisFound := false
 	if cfg.GenesisFilePath != "" {
 		candidates := []string{
@@ -472,6 +516,11 @@ func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
 	}
 	if !genesisFound {
 		candidates := []string{
+			"cmd/simple_chain/genesis-main.json",
+			"execution/cmd/simple_chain/genesis-main.json",
+			filepath.Join(filepath.Dir(baseConfigPath), "genesis-main.json"),
+			"deploy/systemd/genesis.json",
+			"deploy/systemd/genesis.json.example",
 			"genesis.json",
 			filepath.Join(filepath.Dir(baseConfigPath), "genesis.json"),
 			"cmd/simple_chain/genesis.json",
@@ -480,6 +529,7 @@ func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
 		for _, c := range candidates {
 			if abs, err := filepath.Abs(c); err == nil && fileExists(abs) {
 				cfg.GenesisFilePath = abs
+				genesisFound = true
 				break
 			}
 		}
@@ -659,15 +709,19 @@ func writeC0VerificationReport(
 		sb.WriteString(fmt.Sprintf("  - **Recipient Balance sau block #%d:** `%s` wei\n\n", blkN1.Number, blkN1.SampleRecipientBalance))
 	}
 	sb.WriteString("---\n\n")
-	sb.WriteString("## 6. Kết Luận & Nghiệm Thu\n\n")
-	sb.WriteString("Hệ thống đạt chuẩn C0 theo toàn bộ tiêu chí của `SEQUENCER_STEP_BY_STEP_PLAN.md`:\n")
+	sb.WriteString("## 6. Kết Luận & Cổng Nghiệm Thu Đợt 1 (Status: ◐ In-Progress)\n\n")
+	sb.WriteString("Spike C0 đã đạt các tiêu chí cơ bản của bước kiểm chứng xác định:\n")
 	sb.WriteString("- [x] Khởi tạo `blockIngestionQueue` đồng bộ trong constructor `NewBlockProcessor`.\n")
 	sb.WriteString("- [x] Đóng `stopChan` qua `sync.Once` trong `StopWait()` an toàn không panic.\n")
-	sb.WriteString("- [x] `ConsensusReady()` trả về `ready: false` fail-closed trung thực ở chế độ raft khi chưa có cluster.\n")
 	sb.WriteString("- [x] 100% determinism giữa 2 process độc lập có state mutation thật (receipts, nonce, balance).\n")
 	sb.WriteString("- [x] Block-STM xử lý chính xác cả RW lẫn WW conflicts.\n")
-	sb.WriteString("- [x] Restart bypass an toàn và tiếp tục tiến triển sang block $N+1$.\n\n")
-	sb.WriteString("**Chữ ký nghiệm thu:** `MetaNode Core Dev Agent` — APPROVED / HOÀN THÀNH\n")
+	sb.WriteString("- [x] Restart bypass đối chiếu identity (block hash & tx count) và tiếp tục tiến triển sang block $N+1$.\n\n")
+	sb.WriteString("### 🛑 Các cổng nghiệm thu bắt buộc trước khi chuyển C0/C1 sang ☑:\n")
+	sb.WriteString("1. Workload có EVM contract và giao dịch tương tác Gateway/barrier chạy nhiều vòng liên tục (multi-round).\n")
+	sb.WriteString("2. Restart thử nghiệm bằng `kill -9` đột ngột (thay vì shutdown tuần tự) và đối chiếu identity toàn vẹn.\n")
+	sb.WriteString("3. Bằng chứng không khởi động Rust runtime (`InitFFIBridge` không được gọi) qua log và strace.\n")
+	sb.WriteString("4. Rà soát danh sách H1–H6 cuối cùng và kiểm tra `go test -race` toàn diện.\n\n")
+	sb.WriteString("**Trạng thái:** `◐ ĐẠT ĐỢT 1 / ĐANG CHỜ CỔNG P1–P2 CHO NGHIỆM THU TOÀN DIỆN`\n")
 
 	_ = os.MkdirAll(filepath.Dir(reportPath), 0755)
 	return os.WriteFile(reportPath, []byte(sb.String()), 0644)

@@ -1,6 +1,6 @@
 # 📋 Báo Cáo Nghiệm Thu C0 Spike — Determinism & State Mutation Verification
 
-**Ngày thực hiện:** 2026-09-25 05:02:32 UTC
+**Ngày thực hiện:** 2026-09-25 07:19:09 UTC
 **Môi trường:** Linux x86_64, NOMT state trie backend, Raft consensus mode (Hook H1/H3/H5)
 **Cấu hình:** 2 OS processes độc lập, separate data dirs (`/tmp/c0_node_process1`, `/tmp/c0_node_process2`)
 
@@ -19,9 +19,9 @@
 
 ## 2. Số Liệu Hiệu Năng (Execution Metrics)
 
-- **Process 1 (5 blocks, 30 txs):** 5.847257121s (~1.169451424s/block)
-- **Process 2 (5 blocks, 30 txs):** 5.797644856s (~1.159528971s/block)
-- **Restart Bypass & Block #6 Continuation:** 1.389546564s
+- **Process 1 (5 blocks, 30 txs):** 5.84890628s (~1.169781256s/block)
+- **Process 2 (5 blocks, 30 txs):** 5.951896344s (~1.190379268s/block)
+- **Restart Bypass & Block #6 Continuation:** 1.347280694s
 
 ---
 
@@ -29,11 +29,11 @@
 
 | Block | Txs | Block Hash | State Root | Receipts Root | Sender Nonce | Recip Balance (wei) | All Receipts OK |
 |---|:---:|---|---|---|:---:|---:|:---:|
-| #1 | 6 | `0x7e02c7053912f3...` | `0x64e5906d074387...` | `0x0675c5a44649b5...` | 1 | 6000000000000000 | ✅ true |
-| #2 | 6 | `0x87e01b79172ddc...` | `0x39030e67f34787...` | `0x200f7a89654abc...` | 1 | 6000000000000000 | ✅ true |
-| #3 | 6 | `0xfde97c23de6b0f...` | `0x640a1b6b8bd2ca...` | `0xbd276acdd0a71e...` | 1 | 6000000000000000 | ✅ true |
-| #4 | 6 | `0x46fb0414797dd8...` | `0x380f411400c9cd...` | `0xaf2c4f995f9627...` | 1 | 6000000000000000 | ✅ true |
-| #5 | 6 | `0xeb8a33cd8a935b...` | `0x24b16f924653cf...` | `0x2b065533df7452...` | 1 | 6000000000000000 | ✅ true |
+| #1 | 6 | `0x7e02c7053912f3...` | `0x64e5906d074387...` | `0x0675c5a44649b5...` | 3 | 6000000000000000 | ✅ true |
+| #2 | 6 | `0x87e01b79172ddc...` | `0x39030e67f34787...` | `0x200f7a89654abc...` | 5 | 12000000000000000 | ✅ true |
+| #3 | 6 | `0xfde97c23de6b0f...` | `0x640a1b6b8bd2ca...` | `0xbd276acdd0a71e...` | 7 | 18000000000000000 | ✅ true |
+| #4 | 6 | `0x46fb0414797dd8...` | `0x380f411400c9cd...` | `0xaf2c4f995f9627...` | 9 | 24000000000000000 | ✅ true |
+| #5 | 6 | `0xeb8a33cd8a935b...` | `0x24b16f924653cf...` | `0x2b065533df7452...` | 11 | 30000000000000000 | ✅ true |
 
 ---
 
@@ -53,19 +53,24 @@ Workload mỗi block gồm 6 giao dịch được thiết kế đặc thù gây 
   - **Block #6 Hash:** `0x17b76f9aece85d39265b75170d4e33d071d553a50f0344b27bd5e791cbc2c4d9`
   - **Block #6 StateRoot:** `0x75e947dec6e090a9db95056dd66122924f0e4cf8b94736d15910d5eb68041c19`
   - **Block #6 Receipts:** 100% `Status == 1` (true)
-  - **Sender Nonce sau block #6:** `11` (tiến triển từ `1`)
-  - **Recipient Balance sau block #6:** `30000000000000000` wei
+  - **Sender Nonce sau block #6:** `13` (tiến triển từ `11`)
+  - **Recipient Balance sau block #6:** `36000000000000000` wei
 
 ---
 
-## 6. Kết Luận & Nghiệm Thu
+## 6. Kết Luận & Cổng Nghiệm Thu Đợt 1 (Status: ◐ In-Progress)
 
-Hệ thống đạt chuẩn C0 theo toàn bộ tiêu chí của `SEQUENCER_STEP_BY_STEP_PLAN.md`:
+Spike C0 đã đạt các tiêu chí cơ bản của bước kiểm chứng xác định:
 - [x] Khởi tạo `blockIngestionQueue` đồng bộ trong constructor `NewBlockProcessor`.
 - [x] Đóng `stopChan` qua `sync.Once` trong `StopWait()` an toàn không panic.
-- [x] `ConsensusReady()` trả về `ready: false` fail-closed trung thực ở chế độ raft khi chưa có cluster.
 - [x] 100% determinism giữa 2 process độc lập có state mutation thật (receipts, nonce, balance).
 - [x] Block-STM xử lý chính xác cả RW lẫn WW conflicts.
-- [x] Restart bypass an toàn và tiếp tục tiến triển sang block $N+1$.
+- [x] Restart bypass đối chiếu identity (block hash & tx count) và tiếp tục tiến triển sang block $N+1$.
 
-**Chữ ký nghiệm thu:** `MetaNode Core Dev Agent` — APPROVED / HOÀN THÀNH
+### 🛑 Các cổng nghiệm thu bắt buộc trước khi chuyển C0/C1 sang ☑:
+1. Workload có EVM contract và giao dịch tương tác Gateway/barrier chạy nhiều vòng liên tục (multi-round).
+2. Restart thử nghiệm bằng `kill -9` đột ngột (thay vì shutdown tuần tự) và đối chiếu identity toàn vẹn.
+3. Bằng chứng không khởi động Rust runtime (`InitFFIBridge` không được gọi) qua log và strace.
+4. Rà soát danh sách H1–H6 cuối cùng và kiểm tra `go test -race` toàn diện.
+
+**Trạng thái:** `◐ ĐẠT ĐỢT 1 / ĐANG CHỜ CỔNG P1–P2 CHO NGHIỆM THU TOÀN DIỆN`

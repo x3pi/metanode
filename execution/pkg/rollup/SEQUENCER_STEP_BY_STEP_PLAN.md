@@ -358,11 +358,11 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 
 | Bước | Tên | Kích thước | Phụ thuộc | Trạng thái |
 |---|---|---|---|---|
-| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ☑ |
+| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ◐ |
 | A1 | Sửa tài liệu thiết kế | S | A0 | ☐ |
 | A2 | Chốt đặc tả dữ liệu | S | A1 | ☐ |
-| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ☑ |
-| B1 | State machine thuần | M | A2 | ☑ |
+| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ◐ |
+| B1 | State machine thuần | M | A2 | ◐ |
 | B2 | Store per-key | M | B1 | ☐ |
 | B3 | Parent Chain: Float + Claimed | L | A0, A2 | ☐ |
 | B4 | Handler gửi cross-node | M | B2, B3 | ☐ |
@@ -383,16 +383,16 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 
 ---
 
-## 2.1. Kế hoạch sửa sau review A0/B1/C0 (2026-09-25) — ✅ ĐÃ HOÀN TẤT & NGHIỆM THU
+## 2.1. Kế hoạch sửa sau review A0/B1/C0 (2026-09-25) — ◐ ĐẠT ĐỢT 1 / ĐANG CHỜ CỔNG P1–P2 TOÀN DIỆN
 
-> ✅ **NGHIỆM THU TOÀN DIỆN (2026-09-25):** Toàn bộ các hạng mục P0, P1, P2, P3, P4 đã được triển khai, kiểm thử và nghiệm thu 100%:
-> - **P0 (B1):** Clone `*big.Int` loại bỏ triệt để aliasing, validate `Value <= 0`, chống overflow uint64 timeout, loại bỏ dead state, đạt 100% test suite (143 Descartes pairs, property/fuzz test, boundary tests).
-> - **P1 (C0):** Queue `blockIngestionQueue` khởi tạo đồng bộ trong constructor `NewBlockProcessor`, expose send-only `chan<-`, shutdown an toàn qua `stopChan`/`sync.Once`, `ConsensusReady()` fail-closed trung thực.
-> - **P2 (C0):** 100% determinism giữa 2 process độc lập có state mutation thật (receipts status=1, sender nonce increment, recipient balance increment), inject RW & WW Block-STM conflicts, restart bypass và Block #6 (N+1) continuation thành công. Báo cáo nghiệm thu đã xuất tại [`C0_VERIFICATION_REPORT.md`](./C0_VERIFICATION_REPORT.md).
-> - **P3 (A0):** Chuẩn hóa symbols callable, giải trình barrier Block-STM cho Gateway, ghi nhận blast radius thực tế và bảng Ownership & Invariants trong [`SEQUENCER_DESIGN.md`](./SEQUENCER_DESIGN.md).
-> - **Build Verification:** `build_check.sh` vượt qua 4/4 builds (Go, Rust Consensus, Rust NOMT FFI, C++ EVM/NOMT FFI) không có cảnh báo/lỗi.
+> ◐ **TIẾN ĐỘ NGHIỆM THU (2026-09-25):** Các hạng mục A0, B1, C0 được đặt ở trạng thái `◐` (Đạt đợt 1 / Đang hoàn thiện các cổng P1–P2).
+> - **P0 (B1 - ◐):** Clone `*big.Int` loại bỏ triệt để aliasing, validate `Value <= 0`, chống overflow uint64 timeout, loại bỏ dead state, đạt test suite (143 Descartes pairs, property/fuzz test, boundary tests). Đang chờ đối chiếu tích hợp sâu với schema A2.
+> - **P1 (C0 - ◐):** Queue `blockIngestionQueue` khởi tạo đồng bộ trong constructor `NewBlockProcessor`, expose send-only `chan<-`, shutdown an toàn qua `stopChan`/`sync.Once`, `ConsensusReady()` fail-closed trung thực, cách ly cờ test `--tool-c0-spike`.
+> - **P2 (C0 - ◐):** 100% determinism giữa 2 process độc lập có state mutation thật (receipts status=1, sender nonce increment 1->3->5->7->9->11->13, recipient balance increment), inject RW & WW Block-STM conflicts, restart bypass đối chiếu identity (Zero-Fork P2.5) và Block #6 (N+1) continuation thành công. Báo cáo nghiệm thu đã xuất tại [`C0_VERIFICATION_REPORT.md`](./C0_VERIFICATION_REPORT.md).
+> - **P3 (A0 - ◐):** Chuẩn hóa symbols callable, giải trình barrier Block-STM cho Gateway, ghi nhận blast radius thực tế và bảng Ownership & Invariants trong [`SEQUENCER_DESIGN.md`](./SEQUENCER_DESIGN.md).
+> - **Các cổng còn lại để chuyển A0/B1/C0 sang ☑:** (1) Workload có EVM contract & barrier gateway chạy nhiều vòng; (2) Restart thử nghiệm bằng `kill -9` đột ngột; (3) Bằng chứng không khởi động Rust runtime (`InitFFIBridge`) qua log/strace. C1 chỉ bắt đầu khi C0 đạt `☑`.
 
-Ba bước đã có kết quả ban đầu nhưng **chưa đủ điều kiện đánh dấu hoàn thành**. Sửa theo đúng thứ tự dưới đây; không bắt đầu C1 trước khi C0 quay lại `☑`.
+Ba bước đã có kết quả ban đầu đạt đợt 1 nhưng **giữ trạng thái ◐ cho tới khi hoàn tất các cổng nghiệm thu sâu**. Sửa theo đúng thứ tự dưới đây; không bắt đầu C1 trước khi C0 quay lại `☑`.
 
 ### P0 — B1: sửa tính đúng đắn của state machine
 
