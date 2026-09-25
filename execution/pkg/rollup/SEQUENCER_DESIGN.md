@@ -1,6 +1,6 @@
-# Thiết kế Kiến trúc BLS Node & Node Float Account (Cross-Node Value Transfer)
+# Thiết kế Kiến trúc Raft Sequencer Cluster & Node Float Account (Cross-Node Value Transfer)
 
-> **Tổng quan:** Mỗi node thực thi (`cmd/rpc`) là 1 `chainID` độc lập, tự quản state/balance/contract của user thuộc node đó. Parent Chain (Root Anchor) giữ 2 việc: sổ danh bạ (Account Registry, ChainRegistry) và **`NodeFloatAccount`** — quỹ liên-node **tiền thật** cho từng node, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của node đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` (mục 3.3), không cần "khoá batch → attest → claim". Giao dịch nội bộ cùng node vẫn tức thời, không đụng Parent Chain.
+> **Tổng quan:** Mỗi cụm Sequencer (sử dụng thuật toán đồng thuận Raft) là 1 `chainID` độc lập, tự quản state/balance/contract của user thuộc cụm đó. Cụm Raft bao gồm 1 Leader xử lý giao dịch và các Follower đồng bộ trạng thái, đảm bảo tính sẵn sàng cao (High Availability - HA) và tuân thủ tuyệt đối quy tắc Zero-Fork của dự án. Parent Chain (Root Anchor) giữ 2 việc: sổ danh bạ (Account Registry, ChainRegistry) và **`NodeFloatAccount`** — quỹ liên-node **tiền thật** cho từng cụm, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của cụm đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` (mục 3.3), không cần "khoá batch → attest → claim". Giao dịch nội bộ cùng cụm vẫn tức thời, không đụng Parent Chain.
 > **⚠️ Cập nhật quyết định (2026-09-25) — đọc trước:** chế độ vận hành của node thực thi đã chốt là **`consensus_mode = "raft"` của `simple_chain`** (không binary mới, không RPC mới; giữ nguyên RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; **chỉ thay Rust đồng thuận bằng Raft** `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký trên mọi replica, thực thi chỉ sau khi Raft commit). Tài liệu này mô tả **mô hình giá trị liên-node (Float Account)**, **không** mô tả cách nhân bản/dự phòng node; mọi chỗ ngầm hiểu "1 node = 1 tiến trình duy nhất" hoặc dự phòng kiểu khác phải đọc theo `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6. Bước **A1** (viết lại phần này cho khớp Raft) vẫn chưa làm.
 
 
@@ -11,7 +11,7 @@
 ## 1. Tổng quan Kiến trúc
 
 **Mục tiêu cốt lõi:**
-- **Thực thi phân tán:** Mỗi Node (`cmd/rpc`) là 1 `chainID` độc lập (đã chốt — mục 2.4), tự quản state, balance, smart contract của user thuộc node đó.
+- **Thực thi phân tán:** Mỗi cụm Raft Sequencer là 1 `chainID` độc lập (đã chốt — mục 2.4), tự quản state, balance, smart contract của user thuộc cụm đó.
 - **Parent Chain = Root Anchor có sẵn** (đã chốt), đóng 2 vai trò: (1) sổ danh bạ (Account Registry, ChainRegistry), (2) **nơi giữ thật "quỹ liên-node"** của từng node (`NodeFloatAccount`) — tiền thật, không phải trần phân bổ trừu tượng.
 - **Cross-Node Interoperability:** Chuyển giá trị = ghi sổ chuyển khoản trực tiếp giữa 2 `NodeFloatAccount` trên Parent Chain — atomic, không cần dance "khoá batch → attest → claim" nhiều bước.
 
@@ -25,19 +25,19 @@
 - **`NodeFloatAccount`** (thay cho `PerChainAllocation`-làm-trần): `chainID -> balance` — **tiền thật**, Parent Chain trực tiếp enforce không cho âm. Đây là state duy nhất Parent Chain giữ ngoài registry — vẫn **không giữ balance của từng user cuối** (state đó vẫn 100% ở local mỗi node).
 - **`SecurityBondLedger` + `SlashOnEquivocation`:** phạm vi bảo vệ: đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1).
 
-### 2.2. BLS Node (Execution Layer)
-- **State nội bộ:** LevelDB riêng — balance, nonce, contract state của user thuộc node.
-- **Custody Private Key (PKS):** giữ nguyên như thiết kế `cmd/rpc` gốc.
-- **Giao dịch nội bộ:** xử lý ngay lập tức, **không đồng bộ per-transaction** lên Parent Chain (mục 13.2) — nhưng vẫn có 1 kênh đồng bộ nền, định kỳ (không phải per-tx): Snapshot Export mỗi 15 phút publish `AccountTreeRoot` lên Parent Chain (mục 6.3 điểm 1), phục vụ chứng minh phân bổ khi node chết — không phải cơ chế xác nhận/finality cho từng giao dịch.
-- **Giao dịch cross-node:** gọi thẳng thao tác chuyển khoản trên `NodeFloatAccount` của mình (mục 3).
+### 2.2. Raft Sequencer Cluster (Execution Layer)
+- **State nội bộ:** LevelDB riêng đồng bộ qua Raft (Leader -> Followers) — balance, nonce, contract state của user thuộc cụm. Tuân thủ tuyệt đối Zero-Fork nội bộ.
+- **Custody Private Key (PKS):** Khoá ký BLS của cụm được Leader đương nhiệm sử dụng để ký giao dịch gửi lên Parent Chain.
+- **Giao dịch nội bộ:** Leader xử lý ngay lập tức và đồng bộ log sang Follower qua Raft, **không đồng bộ per-transaction** lên Parent Chain (mục 13.2) — nhưng vẫn có 1 kênh đồng bộ nền, định kỳ (không phải per-tx): Snapshot Export mỗi 15 phút publish `AccountTreeRoot` lên Parent Chain (mục 6.3 điểm 1), phục vụ chứng minh phân bổ khi cụm chết — không phải cơ chế xác nhận/finality cho từng giao dịch.
+- **Giao dịch cross-node:** Leader gọi thẳng thao tác chuyển khoản trên `NodeFloatAccount` của cụm mình (mục 3).
 
-### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
+### 2.3. Rủi ro Custody tập trung (Cụm Raft giữ Device Key)
 
-Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live. ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi là đổi khoá của chainID đó bằng `ApplyCommitteeUpdate` (khi khoá cũ còn ký được) (việc đổi khoá do chính khoá hiện hành ký). Với Rollup Node mọi replica giữ cùng 1 khoá nên mất khoá chỉ xảy ra khi mất khoá trên **mọi** replica (`SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.2, C4). `RecoveryCommittee` đã bị gỡ hoàn toàn 2026-09-24, nên nếu mất khoá trên mọi replica thì chain không đổi khoá được (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
+Cụm Sequencer giữ 100% device key để ký hộ — nếu Leader/toàn bộ cụm bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ cụm thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live. ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi là đổi khoá của chainID đó bằng `ApplyCommitteeUpdate` (khi khoá cũ còn ký được) (việc đổi khoá do chính khoá hiện hành ký). Với Rollup Cluster mọi thành viên giữ cùng 1 khoá nên mất khoá chỉ xảy ra khi mất khoá trên **mọi** thành viên (`SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.2, C4). `RecoveryCommittee` đã bị gỡ hoàn toàn 2026-09-24, nên nếu mất khoá trên mọi node thì chain không đổi khoá được (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
 
-### 2.4. 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
+### 2.4. 1 Cụm Raft = 1 `chainID` riêng (ĐÃ CHỐT)
 
-Mỗi node đăng ký `chainID` riêng qua `RegisterChainViaStake`, không nhóm nhiều node dưới 1 chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất — nhóm nhiều node độc lập dưới 1 chain phá vỡ giả định này. Hệ quả: committee mỗi node = 1 (chính nó), không có redundancy signer thật.
+Mỗi cụm Raft đăng ký `chainID` riêng qua `RegisterChainViaStake`, đại diện như một node duy nhất trên Parent Chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất. Cụm Raft che giấu độ phức tạp nội bộ (bầu Leader, replicate log), chỉ xuất ra ngoài 1 danh tính (BLS Public Key của cụm) và giao tiếp với Parent Chain như 1 thực thể đồng nhất. Hệ quả: chữ ký gửi lên Parent Chain do Leader đương nhiệm ký đại diện cho toàn cụm, không có redundancy signer thật trên góc nhìn của Parent Chain, nhưng có tính HA (High Availability) mạnh mẽ nhờ Raft nội bộ.
 
 ---
 
@@ -66,7 +66,7 @@ Mô hình `PerChainAllocation`-làm-trần + `SecurityBond` tách biệt (răn �
 
 1. User A (Node 1) gửi yêu cầu chuyển cho User B (Node 2).
 2. Vì `NodeFloatAccount` luôn ≥ balance của A (mục 3.5), không có kịch bản "Float không đủ" cần phân biệt với mất-kết-nối — bước này chỉ là **kiểm tra số dư cục bộ của A** (bình thường, không liên quan Parent Chain) trước khi trừ. Việc đọc-kiểm tra-rồi-ghi cần node tự serialize/khoá nội bộ, để tránh 2 yêu cầu cùng lúc từ CÙNG 1 user A đọc thấy "đủ" rồi cùng trừ vượt quá số dư thật.
-3. Qua được bước kiểm tra: Node 1 trừ balance cục bộ của A, đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V`, kèm metadata (`Target: B`, `MessageID` duy nhất, `Payload` nếu là contract-call). Committee mỗi node = 1 nên chữ ký chính là Node 1 tự ký, gộp luôn vào transaction này.
+3. Qua được bước kiểm tra: Leader của Cụm 1 trừ balance cục bộ của A (đồng thời replicate log qua Raft), đồng thời gửi 1 giao dịch **duy nhất, atomic** lên Parent Chain: `NodeFloatAccount[1] -= V`, `NodeFloatAccount[2] += V`, kèm metadata (`Target: B`, `MessageID` duy nhất, `Payload` nếu là contract-call). Chữ ký là do Leader của Cụm 1 tự ký đại diện cho toàn cụm, gộp luôn vào transaction này.
 4. Ngay khi transaction confirm trên Parent Chain: **tiền đã thật sự nằm ở `NodeFloatAccount[2]`** — không có khái niệm "Pending chờ claim" cho phần GIÁ TRỊ.
 5. Node 2 theo dõi Parent Chain, thấy có credit mới addressed cho mình. **Chống xử lý trùng bắt buộc (#10):** Node 2 phải tự kiểm tra `MessageID` này đã xử lý (credit hoặc refund) chưa trước khi làm bất cứ gì — tự giữ 1 bảng "MessageID đã xử lý" cục bộ (không có hàm trung tâm nào làm hộ).
 6. Node 2 kiểm tra local: `B` có phải account hợp lệ đang được chính mình quản lý không.
