@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -331,6 +332,15 @@ func (p *PebbleDB) Flush() error {
 	return nil
 }
 
+// SyncDurable fsyncs the write-ahead log so every write accepted so far (all committed with
+// pebble.NoSync) survives a power loss. It does not force a memtable flush.
+func (p *PebbleDB) SyncDurable() error {
+	if p.db == nil {
+		return nil
+	}
+	return p.db.LogData([]byte("sync"), pebble.Sync)
+}
+
 // Checkpoint creates an atomic, consistent snapshot of the database at destDir.
 // This uses Pebble's native checkpoint which hardlinks SST files and copies
 // the MANIFEST and WAL atomically — safe for concurrent reads/writes.
@@ -360,6 +370,12 @@ type LazyPebbleDB struct {
 	isClosed      bool
 	mu            sync.RWMutex
 	flushCounter  int
+
+	// flushMu serialises flushToDisk so a SyncDurable caller cannot return while a concurrent
+	// background flush still holds data that is not yet in Pebble.
+	flushMu sync.Mutex
+	// dirty is set by every buffered write and cleared by SyncDurable, so idle shards cost nothing.
+	dirty atomic.Bool
 }
 
 // NewLazyPebbleDB creates a new LazyPebbleDB with memory buffering.
@@ -409,6 +425,9 @@ func (lp *LazyPebbleDB) backgroundFlusher() {
 }
 
 func (lp *LazyPebbleDB) flushToDisk() {
+	lp.flushMu.Lock()
+	defer lp.flushMu.Unlock()
+
 	lp.mu.Lock()
 	if lp.isClosed {
 		lp.mu.Unlock()
@@ -507,6 +526,7 @@ func (lp *LazyPebbleDB) Put(key, value []byte) error {
 	if lp.isClosed {
 		return fmt.Errorf("database is closed")
 	}
+	lp.dirty.Store(true)
 	valCopy := make([]byte, len(value))
 	copy(valCopy, value)
 	lp.memoryCache.Store(string(key), valCopy)
@@ -520,6 +540,7 @@ func (lp *LazyPebbleDB) Delete(key []byte) error {
 	if lp.isClosed {
 		return fmt.Errorf("database is closed")
 	}
+	lp.dirty.Store(true)
 	lp.memoryCache.Store(string(key), nil)
 	return nil
 }
@@ -531,6 +552,7 @@ func (lp *LazyPebbleDB) BatchPut(kvs [][2][]byte) error {
 	if lp.isClosed {
 		return fmt.Errorf("database is closed")
 	}
+	lp.dirty.Store(true)
 	for _, kv := range kvs {
 		valCopy := make([]byte, len(kv[1]))
 		copy(valCopy, kv[1])
@@ -546,6 +568,7 @@ func (lp *LazyPebbleDB) BatchDelete(keys [][]byte) error {
 	if lp.isClosed {
 		return fmt.Errorf("database is closed")
 	}
+	lp.dirty.Store(true)
 	for _, key := range keys {
 		lp.memoryCache.Store(string(key), nil)
 	}
@@ -644,6 +667,21 @@ func (lp *LazyPebbleDB) Flush() error {
 	// Forcing SST compaction on every block caused massive I/O stalls leading to
 	// 300s epoch fatal errors. Durability is now guaranteed by pebble.Sync in BatchPut
 	// which fsyncs the WAL instead of forcing a full compaction.
+	return nil
+}
+
+// SyncDurable makes every write buffered so far durable: the Go-level memory cache is written to
+// Pebble and the WAL is fsynced. It is a no-op for a shard that has had no writes since the last
+// call.
+func (lp *LazyPebbleDB) SyncDurable() error {
+	if !lp.dirty.Swap(false) {
+		return nil
+	}
+	lp.flushToDisk()
+	if err := lp.db.SyncDurable(); err != nil {
+		lp.dirty.Store(true) // not durable yet, retry on the next call
+		return fmt.Errorf("pebble WAL sync failed (%s): %w", lp.db.path, err)
+	}
 	return nil
 }
 

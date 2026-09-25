@@ -150,9 +150,8 @@ kiện `MinFoundingChains`, có thể giảm xuống **1 validator + 1 synconly 
    `propose`/`vote`/`executeProposal` đã bị xoá hẳn, không còn "1 chain = 1 phiếu" nào để
    chiếm nữa. `RegisterChainViaStake` không cấp bất kỳ quyền biểu quyết nào — đăng ký chỉ
    tạo `ChainRegistry` entry, không có khái niệm "phiếu governance" nào còn tồn tại trong
-   codebase. Rủi ro tập trung quyền lực CÒN LẠI duy nhất liên quan tới chain sáng lập là
-   `RecoveryCommittee` (nếu bạn chọn tái dùng khoá của chính các founding chain cho
-   RecoveryCommittee — **không nên**, xem `production_deployment_guide.md` mục 7 checklist).
+   codebase. (`RecoveryCommittee`, từng là rủi ro tập trung quyền lực còn lại, đã bị xoá hoàn
+   toàn 2026-09-24 — không còn khoá cứu hộ nào để tái dùng hay để lộ.)
 
 **Khi nào chấp nhận được**: chain đó dùng cho mục đích nội bộ/giá trị thấp/pilot-demo, VÀ bạn
 chủ động giữ `per_chain_allocation` cấp cho nó ở mức thấp (qua `register_chains -action
@@ -530,9 +529,8 @@ khi làm thật, tài liệu này chỉ tóm tắt các mốc xác thực chính
 để tránh ở bước 6 theo kiểu cũ nữa. Bước 6 giờ chỉ là mỗi tổ chức tự gửi
 `registerChainViaStake` của riêng mình, trả tiền cọc thật từ ví của chính mình — không có
 coordinator/cửa sổ front-run nào để lo (chi tiết: `production_deployment_guide.md` mục 5.3).
-**🔒 Điều cần chú ý thay thế:** nếu dự định dùng chính uỷ ban các founding chain làm luôn
-`RecoveryCommittee` — ĐỪNG, sinh khoá RecoveryCommittee hoàn toàn riêng, out-of-band (xem
-`production_deployment_guide.md` mục 7 checklist).
+**🔒 Lưu ý:** `RecoveryCommittee` đã bị xoá (2026-09-24) — không còn bước sinh khoá cứu hộ riêng.
+Xem hệ quả ở `production_deployment_guide.md` mục 7 checklist.
 
 | Bước | Việc làm | ✅ Xác nhận thành công |
 | :--- | :--- | :--- |

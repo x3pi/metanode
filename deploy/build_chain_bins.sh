@@ -5,13 +5,12 @@
 # ║  Biên dịch mới nhất từ mã nguồn repo và cập nhật vào thư mục:                ║
 # ║  deploy/bin/                                                                 ║
 # ║                                                                              ║
-# ║  Bao gồm 6 file nhị phân:                                                    ║
+# ║  Bao gồm 5 file nhị phân:                                                    ║
 # ║  1. metanode               (Consensus Engine - Rust)                         ║
 # ║  2. simple_chain           (Execution Node - Go + CGO + Rust FFI + MVM)      ║
 # ║  3. cross_chain_relayer    (Relayer daemon - Go)                              ║
 # ║  4. register_chains        (On-chain Chain & BLS Registration Tool - Go)      ║
 # ║  5. bls_pubkey             (BLS G1 Pubkey Derivation Tool - Go)               ║
-# ║  6. gen_recovery_committee (Recovery Committee BLS Setup Tool - Go)        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -e
@@ -186,10 +185,6 @@ if [ "$BUILD_NODE_ONLY" = false ]; then
     echo -e "    🔨 Building bls_pubkey..."
     (cd "$GO_ROOT" && go build -o "$DEST_BIN/bls_pubkey" ./cmd/tool/bls_pubkey)
     chmod +x "$DEST_BIN/bls_pubkey"
-    
-    echo -e "    🔨 Building gen_recovery_committee..."
-    (cd "$GO_ROOT" && go build -o "$DEST_BIN/gen_recovery_committee" ./cmd/tool/gen_recovery_committee)
-    chmod +x "$DEST_BIN/gen_recovery_committee"
     
     echo -e "${GREEN}  ✅ Bộ công cụ Go Cross-Chain đã cập nhật vào $DEST_BIN ($(( $(date +%s) - t_start ))s)${NC}"
 fi

@@ -2650,7 +2650,21 @@ impl<C: NetworkClient> CommitSyncer<C> {
         );
 
         // Only add new blocks if at least some of them are not already synced.
-        if self.synced_commit_index < commit_end {
+        //
+        // EXCEPTION (2026-09-24, root cause of a node that silently stopped executing after a
+        // full-cluster cold restart): synced_commit_index may have just been advanced to the
+        // local DAG tip by the "Healthy -> trust local DAG" branch above, which makes this
+        // fetched range look "already synced" and drops it. But a local commit whose index is
+        // still above highest_handled_commit has NOT been dispatched to Go yet -- it is only
+        // buffered behind the CommitProcessor's digest gate, unverified. If that local commit
+        // is wrong (all validators restarted together and each formed a different local view),
+        // the gate discards it and waits for the CertifiedCommit -- which we would have just
+        // thrown away here, leaving a permanent hole at that index (pending_ooo grows forever,
+        // Go never confirms another commit). Keep the range so Core can compare digests
+        // (Core::filter_new_commits drops equal ones and lets a divergent certified commit
+        // replace the local one) whenever any of its commits is still unhandled.
+        let highest_handled_for_range = self.inner.commit_consumer_monitor.highest_handled_commit();
+        if self.synced_commit_index < commit_end || commit_end > highest_handled_for_range {
             self.fetched_ranges
                 .insert((commit_start..=commit_end).into(), certified_commits);
             info!(
@@ -2704,8 +2718,15 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 metrics.commit_sync_gap_on_processing.inc();
                 break;
             };
-            // Avoid sending to Core a whole batch of already synced blocks.
-            if fetched_commit_range.end() <= self.synced_commit_index {
+            // Avoid sending to Core a whole batch of already synced blocks -- but only when
+            // they are also already handled: a range that overlaps commits above
+            // highest_handled_commit must still reach Core so a certified commit can replace a
+            // wrong, not-yet-dispatched local one (see the EXCEPTION above).
+            let synced_before_send = self.synced_commit_index;
+            if fetched_commit_range.end() <= self.synced_commit_index
+                && fetched_commit_range.end()
+                    <= self.inner.commit_consumer_monitor.highest_handled_commit()
+            {
                 continue;
             }
 
@@ -2800,7 +2821,11 @@ impl<C: NetworkClient> CommitSyncer<C> {
                 .end()
                 .saturating_sub(fetched_commit_range.start())
                 + 1;
-            self.network_synced_commits += commits_in_range as u64;
+            // A range re-sent only to reconcile unhandled local commits (end <= synced before
+            // this send) adds no new network-synced progress.
+            if fetched_commit_range.end() > synced_before_send {
+                self.network_synced_commits += commits_in_range as u64;
+            }
 
             // RATE-LIMIT RESET: Removed active-sync schedule recovery rate limiter
             if self.schedule_recovery_fetch_pending {
@@ -3416,6 +3441,132 @@ mod tests {
             0,
             "multi-validator synced_commit_index must stay guarded while CatchingUp — \
              only a peer-verified fetch may advance it, never local DAG state alone"
+        );
+    }
+
+    // Builds a 4-validator CommitSyncer in the Healthy phase whose DAG already holds a LOCAL
+    // commit at `local_index` (digest derived from CommitDigest::MIN), created after the syncer
+    // so synced_commit_index starts at 0. Returns the mock core dispatcher so tests can see
+    // which certified commits were actually handed to Core, and the consumer monitor so they
+    // can choose highest_handled_commit.
+    fn build_healthy_syncer_with_local_commit(
+        local_index: u32,
+    ) -> (
+        CommitSyncer<FakeNetworkClient>,
+        Arc<MockCoreThreadDispatcher>,
+        Arc<CommitConsumerMonitor>,
+    ) {
+        let (context, _) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        let block_verifier = Arc::new(NoopBlockVerifier {});
+        let core_thread_dispatcher = Arc::new(MockCoreThreadDispatcher::default());
+        let network_client = Arc::new(FakeNetworkClient::default());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let (blocks_sender, _blocks_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let transaction_certifier = TransactionCertifier::new(
+            context.clone(),
+            block_verifier.clone(),
+            dag_state.clone(),
+            blocks_sender,
+        );
+        let commit_vote_monitor = Arc::new(CommitVoteMonitor::new(context.clone()));
+        let commit_consumer_monitor = Arc::new(CommitConsumerMonitor::new(0, 0));
+        let dag_state_writer = crate::dag_state_actor::DagStateActor::spawn(dag_state.clone());
+        let coordination_hub = crate::coordination_hub::ConsensusCoordinationHub::new_for_testing();
+        coordination_hub.set_phase(crate::coordination_hub::NodeConsensusPhase::Healthy);
+
+        let commit_syncer = CommitSyncer::new(
+            context,
+            core_thread_dispatcher.clone(),
+            commit_vote_monitor,
+            commit_consumer_monitor.clone(),
+            block_verifier,
+            transaction_certifier,
+            network_client,
+            dag_state.clone(),
+            coordination_hub,
+            None,
+            dag_state_writer,
+        );
+
+        let leader_block = VerifiedBlock::new_for_test(TestBlock::new(1, 0).build());
+        let local_commit = TrustedCommit::new_for_test(
+            local_index,
+            CommitDigest::MIN,
+            leader_block.timestamp_ms(),
+            leader_block.reference(),
+            vec![leader_block.reference()],
+            1,
+        );
+        dag_state.write().add_commit(local_commit);
+        assert_eq!(dag_state.read().last_commit_index(), local_index);
+
+        (commit_syncer, core_thread_dispatcher, commit_consumer_monitor)
+    }
+
+    fn certified_commit_with_other_digest(index: u32) -> crate::commit::CertifiedCommits {
+        let leader_block = VerifiedBlock::new_for_test(TestBlock::new(1, 0).build());
+        // Different previous digest => different commit digest than the local commit.
+        let commit = TrustedCommit::new_for_test(
+            index,
+            CommitDigest::MAX,
+            leader_block.timestamp_ms(),
+            leader_block.reference(),
+            vec![leader_block.reference()],
+            1,
+        );
+        crate::commit::CertifiedCommits::new(
+            vec![crate::commit::CertifiedCommit::new_certified(
+                commit,
+                vec![leader_block],
+            )],
+            vec![],
+        )
+    }
+
+    // Regression for the cold-restart hole (2026-09-24): a Healthy node trusts its local DAG,
+    // advances synced_commit_index to the local commit, and used to DROP the just-fetched
+    // certified copy of that same (not yet dispatched, unverified) commit. If the local
+    // commit turns out to be wrong, nothing could ever replace it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetched_certified_commit_reaches_core_when_local_commit_is_not_yet_handled() {
+        let (mut commit_syncer, core, monitor) = build_healthy_syncer_with_local_commit(1);
+        assert_eq!(monitor.highest_handled_commit(), 0);
+
+        let certified = certified_commit_with_other_digest(1);
+        let certified_digest = certified.commits()[0].digest();
+        let shutdown = commit_syncer.handle_fetch_result(1, certified).await;
+        assert!(!shutdown);
+
+        // synced_commit_index followed the local DAG (existing Healthy behaviour)...
+        assert_eq!(commit_syncer.synced_commit_index(), 1);
+        // ...but the certified commit must still have been handed to Core so that a divergent
+        // local commit can be replaced instead of leaving a permanent hole.
+        assert_eq!(
+            core.take_added_certified_commits(),
+            vec![(1, certified_digest)],
+            "a fetched certified commit above highest_handled must reach Core even though \
+             synced_commit_index already covers it"
+        );
+    }
+
+    // The old behaviour is still right for commits Go has already been handed: re-sending
+    // certified copies of already-dispatched commits is pointless (and never wanted).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetched_certified_commit_is_skipped_when_already_handled_and_synced() {
+        let (mut commit_syncer, core, monitor) = build_healthy_syncer_with_local_commit(1);
+        monitor.set_highest_handled_commit(1);
+
+        let shutdown = commit_syncer
+            .handle_fetch_result(1, certified_commit_with_other_digest(1))
+            .await;
+        assert!(!shutdown);
+
+        assert_eq!(commit_syncer.synced_commit_index(), 1);
+        assert!(
+            core.take_added_certified_commits().is_empty(),
+            "an already handled and synced commit must not be re-sent to Core"
         );
     }
 

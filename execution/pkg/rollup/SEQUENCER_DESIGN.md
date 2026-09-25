@@ -2,7 +2,7 @@
 
 > **Tổng quan:** Mỗi node thực thi (`cmd/rpc`) là 1 `chainID` độc lập, tự quản state/balance/contract của user thuộc node đó. Parent Chain (Root Anchor) giữ 2 việc: sổ danh bạ (Account Registry, ChainRegistry) và **`NodeFloatAccount`** — quỹ liên-node **tiền thật** cho từng node, không phải trần phân bổ trừu tượng. `NodeFloatAccount` không có bước "nạp quỹ" rời rạc — nó là 1 bất biến tự động, luôn ≥ và tự hội tụ về đúng tổng số dư user của node đó (mục 3.2). Chuyển giá trị cross-node = ghi sổ chuyển khoản atomic trực tiếp giữa 2 `NodeFloatAccount` (mục 3.3), không cần "khoá batch → attest → claim". Giao dịch nội bộ cùng node vẫn tức thời, không đụng Parent Chain.
 
-> ⚠️ **Nền tảng kỹ thuật:** đăng ký chain (stake), `SecurityBond`, `RecoveryCommittee`, `DeclareChainDeadWithCert` dùng nguyên `GatewayEngine` có sẵn (`execution/pkg/cross_chain/gateway.go`) — chỉ riêng cơ chế **di chuyển giá trị giữa các node** là thiết kế riêng (Float Account), thay cho mô hình mint-theo-trần-rồi-claim.
+> ⚠️ **Nền tảng kỹ thuật:** đăng ký chain (stake), `SecurityBond`, `SlashOnEquivocation`, `UnregisterChainWithCert` (tự ký) dùng nguyên `GatewayEngine` có sẵn (`execution/pkg/cross_chain/gateway.go`) — chỉ riêng cơ chế **di chuyển giá trị giữa các node** là thiết kế riêng (Float Account), thay cho mô hình mint-theo-trần-rồi-claim.
 
 ---
 
@@ -21,7 +21,7 @@
 - **Account Registry:** `user_address -> chainID` (mục 5.1).
 - **ChainRegistry:** danh tính + `NodeBlsPublicKey` từng node (có sẵn trong `GatewayEngine`).
 - **`NodeFloatAccount`** (thay cho `PerChainAllocation`-làm-trần): `chainID -> balance` — **tiền thật**, Parent Chain trực tiếp enforce không cho âm. Đây là state duy nhất Parent Chain giữ ngoài registry — vẫn **không giữ balance của từng user cuối** (state đó vẫn 100% ở local mỗi node).
-- **`SecurityBondLedger` + `RecoveryCommittee`:** phạm vi bảo vệ: đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1).
+- **`SecurityBondLedger` + `SlashOnEquivocation`:** phạm vi bảo vệ: đăng ký chain + chống khai khống PHÂN BỔ khi node chết (mục 4.1).
 
 ### 2.2. BLS Node (Execution Layer)
 - **State nội bộ:** LevelDB riêng — balance, nonce, contract state của user thuộc node.
@@ -31,11 +31,11 @@
 
 ### 2.3. Rủi ro Custody tập trung (PKS giữ Device Key)
 
-Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live. ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi thật là `RecoveryCommittee` gọi `UpdateCommitteeWithRecoveryCert` để cài khoá mới cho chainID đó (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
+Node giữ 100% device key để ký hộ — nếu bị hack, kẻ tấn công ký được giao dịch nội bộ giả mà không để lại bằng chứng phân biệt được với user thật. Không giải quyết triệt để bằng kỹ thuật được (đánh đổi cố hữu của mô hình ký hộ); giảm thiểu bằng: (1) ngưỡng rút + delay cho giao dịch lớn, (2) anomaly detection, (3) tuỳ chọn non-custodial cho tài khoản lớn, (4) **Signed Receipt + kênh report cho user** khi nghi ngờ node thực thi sai (mục 15) — bắt buộc xây cả 4 làm baseline trước go-live. ✅ **ĐÃ CHỐT (2026-09-24):** chấp nhận custodial thuần cho giai đoạn thử nghiệm/quy mô nhỏ, đánh giá lại khi quy mô tài sản tăng (Q9-rủi-ro, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). ⚠️ **4 biện pháp trên chỉ GIẢM THIỆT HẠI, không phải PHỤC HỒI** — khi khoá đã thực sự bị lộ/mất, con đường phục hồi là đổi khoá của chainID đó bằng `ApplyCommitteeUpdate` (khi khoá cũ còn ký được) (việc đổi khoá do chính khoá hiện hành ký). Với Rollup Node mọi replica giữ cùng 1 khoá nên mất khoá chỉ xảy ra khi mất khoá trên **mọi** replica (`SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.2, C4). `RecoveryCommittee` đã bị gỡ hoàn toàn 2026-09-24, nên nếu mất khoá trên mọi replica thì chain không đổi khoá được (mục 6.2) — cần đưa vào runbook (mục 9.2), không phải chi tiết ngầm hiểu.
 
 ### 2.4. 1 Node `cmd/rpc` = 1 `chainID` riêng (ĐÃ CHỐT — Q13)
 
-Mỗi node đăng ký `chainID` riêng qua `RegisterChainViaStake`, không nhóm nhiều node dưới 1 chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`, `RecoveryCommittee`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất — nhóm nhiều node độc lập dưới 1 chain phá vỡ giả định này. Hệ quả: committee mỗi node = 1 (chính nó), không có redundancy signer thật.
+Mỗi node đăng ký `chainID` riêng qua `RegisterChainViaStake`, không nhóm nhiều node dưới 1 chain. Lý do: `GatewayEngine` (`ChainRegistry`, `SecurityBond`) hoạt động ở đúng granularity `chainID`, ngầm giả định đây là 1 đơn vị tin cậy duy nhất — nhóm nhiều node độc lập dưới 1 chain phá vỡ giả định này. Hệ quả: committee mỗi node = 1 (chính nó), không có redundancy signer thật.
 
 ---
 
@@ -88,7 +88,7 @@ Vì `NodeFloatAccount[node] = Σ balance mọi user thuộc node đó`, và mọ
 
 ### 3.6. Node đích còn sống nhưng kẹt/chậm xử lý — Timeout & Reclaim (#12)
 
-Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường hợp này là Node 2 **vẫn hoạt động bình thường** nhưng vì lý do nào đó (backlog, bug, quá tải) không xử lý (không credit local, không hoàn tiền) 1 credit đã nhận trong thời gian dài — tiền nằm im ở `NodeFloatAccount[2]`, User A không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian nếu không thiết kế thêm.
+Khác với node chết hẳn (mục 6), trường hợp này là Node 2 **vẫn hoạt động bình thường** nhưng vì lý do nào đó (backlog, bug, quá tải) không xử lý (không credit local, không hoàn tiền) 1 credit đã nhận trong thời gian dài — tiền nằm im ở `NodeFloatAccount[2]`, User A không được phục vụ cũng không được hoàn, không có điểm dừng theo thời gian nếu không thiết kế thêm.
 
 - **Cơ chế Reclaim:** nếu quá 1 khoảng thời gian cấu hình kể từ lúc Transfer confirm mà `MessageID` vẫn CHƯA được đánh dấu `Claimed` (mục 3.3 bước 7), **chính Node 1** (thay mặt User A) có quyền gửi 1 transaction Reclaim thẳng lên Parent Chain: `NodeFloatAccount[2] -= Value`, `NodeFloatAccount[1] += Value` — **không cần Node 2 hợp tác**, vì tiền vốn dĩ do Parent Chain custody thật.
 - ⚠️ **Điều kiện "quá timeout" phải do chính Parent Chain kiểm tra on-chain (so sánh `blockTime` hiện tại với thời điểm Transfer confirm), KHÔNG được chỉ là quy ước Node 1 tự giác tuân theo ở tầng client.** Nếu không enforce on-chain, 1 implementation lỗi/hấp tấp ở Node 1 có thể Reclaim ngay lập tức sau khi gửi, trước khi Node 2 (dù hoàn toàn khoẻ mạnh, chỉ hơi chậm) kịp xử lý — không làm mất tiền của ai (vẫn có guard chặn race ở dưới), nhưng phá hỏng đúng mục đích của cơ chế Reclaim và tạo ma sát/trải nghiệm xấu không cần thiết cho Node 2.
@@ -98,9 +98,9 @@ Khác với node chết hẳn (mục 6, cần `RecoveryCommittee`), trường h�
 
 ## 4. Bảo mật kinh tế
 
-### 4.1. Vai trò của `SecurityBond`/`RecoveryCommittee` trong mô hình Float Account
+### 4.1. Vai trò của `SecurityBond` trong mô hình Float Account
 
-Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` vẫn giữ nguyên 2 con đường bị mất vốn có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless, không cần `RecoveryCommittee`** — khi double-sign; (2) forfeit khi `RecoveryCommittee` gọi `DeclareChainDeadWithCert`/`UnregisterChainWithCert` (3 quyền hạn cụ thể của `RecoveryCommittee`, xem mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ✅ **ĐÃ CHỐT — `SlashOnEquivocation` bắt được double-sign `AccountTreeRoot`, không cần xây thêm gì:** xem xác nhận từ code ở mục 6.2.
+Không cần bất biến "Bond-vs-Deposit" nào — `NodeFloatAccount` là 1 bất biến tự động (mục 3.2), không có bước "nạp quỹ" rời rạc để node khai khống, nên không còn gì để giới hạn thiệt hại ở bước đó. `SecurityBond` còn 2 con đường có sẵn trong `GatewayEngine`: (1) `SlashOnEquivocation` — **permissionless** — khi double-sign; sau khi `RecoveryCommittee`/`DeclareChainDeadWithCert` bị gỡ (2026-09-24), đây là đường DUY NHẤT forfeit bond và đặt `DeadChains`; (2) rút bond hợp lệ qua `UnregisterChainWithCert` do chính committee của chain tự ký, sau unbonding period (mục 6.2). Còn đúng 1 vai trò MỚI cần bảo vệ: chống **node khai khống PHÂN BỔ** khi chết (gán tổng tiền thật cho 1 địa chỉ nó kiểm soát thay vì chia đúng cho user) — cơ chế bảo vệ xem mục 6.3 (Snapshot + DA-Withholding + Delay 72h). ✅ **ĐÃ CHỐT — `SlashOnEquivocation` bắt được double-sign `AccountTreeRoot`, không cần xây thêm gì:** xem xác nhận từ code ở mục 6.2.
 
 ### 4.2. Velocity-limit cho Transfer: không cần để chống mint sai — nhưng vẫn cần vì lý do khác
 
@@ -159,25 +159,25 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 6.2. Node chết hẳn — ai xác nhận, xử lý ra sao
 
-- Tiêu chí trigger: 2 lớp — (1) tự động cảnh báo sau N lần bỏ lỡ chu kỳ hoạt động bình thường liên tiếp, (2) **bắt buộc xác nhận thủ công của operator** trước khi thực sự gọi `DeclareChainDeadWithCert` — không tự động hoá hoàn toàn vì hậu quả quá lớn.
-- `RecoveryCommittee` là 1 BLS committee **cố định, set 1 lần từ config lúc triển khai** (`RecoveryCommitteeJSON`/`RecoveryQuorumThreshold`), **không có đường lớn lên on-chain** (khác hẳn tập hợp Governance cũ từng tự phình ra theo mỗi lần `RegisterChainViaStake` — đúng lỗ hổng Sybil-vote-buying mà thiết kế này chủ đích đóng lại). Set 1 lần, không ai tự thêm mình vào được.
+- Tiêu chí trigger: 2 lớp — (1) tự động cảnh báo sau N lần bỏ lỡ chu kỳ hoạt động bình thường liên tiếp, (2) **bắt buộc xác nhận thủ công của operator** trước khi failover/thay node (`SEQUENCER_STEP_BY_STEP_PLAN.md` C5) — không tự động hoá vì hậu quả quá lớn. (Không còn bước "tuyên bố chết": `DeclareChainDeadWithCert` đã bị gỡ 2026-09-24.)
+- ⚠️ **CẬP NHẬT 2026-09-24 — `RecoveryCommittee` đã bị gỡ hoàn toàn** (code, config, tooling deploy). Thẩm quyền còn lại trên Parent Chain:
 
-**3 quyền hạn cụ thể của `RecoveryCommittee`** (grounded trực tiếp từ `gateway.go`, không phải suy diễn):
+1. **Đặt `DeadChains` / forfeit bond:** chỉ qua `SlashOnEquivocation` (permissionless, bằng chứng double-sign). **Không còn** `DeclareChainDeadWithCert`: node chết hẳn mà không double-sign thì không ai tuyên bố chết được → `NodeFloatAccount` và bond của node đó bị khoá (hệ quả chấp nhận — xem mục 6.3).
+2. **`UnregisterChainWithCert(chainID, nonce, cert, blockTime)`** — tự ký bằng committee hiện hành của chính chain đó. Digest gắn `(chainID, epoch, nonce)` và `UnregisterNonce` chống phát lại kể cả khi chainID đăng ký lại. Nếu chain còn bond active thì **không release ngay** mà bắt đầu unbonding period — chống kịch bản "hit and run": unregister rồi rút bond TRƯỚC KHI ai kịp thu thập bằng chứng equivocation để slash.
+3. **Đổi khoá:** `ApplyCommitteeUpdate` (committee cũ ký committee kế nhiệm, epoch +1). `UpdateCommitteeWithRecoveryCert` đã bị gỡ — khi khoá cũ đã mất trên mọi replica thì không còn đường đổi khoá (`SEQUENCER_STEP_BY_STEP_PLAN.md` C5b, chưa kiểm chứng — C0). Nếu không có, chain không đổi khoá được: rủi ro #8 khi khoá bị mất **không có đường phục hồi trên Parent Chain**.
 
-1. **`DeclareChainDeadWithCert(chainID, cert)`** — tuyên bố 1 chainID chết: forfeit `SecurityBond` ngay + set cờ `DeadChains[chainID]` (chính cờ này chặn outflow mới, mục 6.3/mục 7), mở khoá `ClaimDeadChainBalance` cho user bị kẹt. Dùng `RecoveryCommittee` thay vì committee của chính chain đó vì: 1 chain đã chết, theo định nghĩa, không thể tự authorize gì được nữa.
-2. **`UnregisterChainWithCert(chainID, cert, blockTime)`** — xoá hẳn chainID khỏi `ChainRegistry`. Nếu chain còn bond active, **không release ngay** mà bắt đầu unbonding period — chống đúng kịch bản "hit and run": unregister rồi rút bond ngay TRƯỚC KHI ai kịp thu thập bằng chứng equivocation để slash.
-3. **`UpdateCommitteeWithRecoveryCert(update, cert)`** — cài 1 committee (khoá ký) **HOÀN TOÀN MỚI** cho 1 chainID mà committee cũ không còn liên lạc được (khác cơ chế cập nhật committee bình thường, vốn cần chính committee cũ tự ký cho committee kế nhiệm — chỉ dùng khi điều đó bất khả thi). Có guard chống replay: epoch mới bắt buộc > epoch hiện tại, không cho lùi/lặp lại cert cũ. ⚠️ **Đây chính là con đường PHỤC HỒI thật cho rủi ro #8** (khoá node bị lộ/mất — mục 2.3): mục 2.3 hiện mới liệt kê các biện pháp GIẢM THIỆT HẠI (delay, anomaly detection), chưa nói rõ khi khoá đã bị lộ/mất thật thì phục hồi bằng cách nào — câu trả lời là qua `UpdateCommitteeWithRecoveryCert`, cần nêu rõ trong runbook (mục 9.2).
-
-⚠️ **Sửa 1 điểm nhầm lẫn ở mục 4.1 — `SlashOnEquivocation` KHÔNG cần `RecoveryCommittee`:** đây là cơ chế **permissionless** — bất kỳ ai cầm được 2 `QuorumCert` hợp lệ của cùng 1 chain, cùng epoch, ký cho 2 `commitRoot` khác nhau, có thể tự submit để slash bond ngay, không qua `RecoveryCommittee`.
+⚠️ **`SlashOnEquivocation` là đường DUY NHẤT đặt `DeadChains`** (sau khi `RecoveryCommittee` bị gỡ): permissionless — bất kỳ ai cầm được 2 `QuorumCert` hợp lệ của cùng 1 chain, cùng epoch, ký cho 2 `commitRoot` khác nhau, có thể tự submit để slash bond ngay, không cần bên thứ ba.
 
 ✅ **ĐÃ CHỐT (đọc code thật, `execution/pkg/cross_chain/epoch_sync.go`):** `SlashOnEquivocation` verify mỗi cert qua `ComputeCommitRootAttestMessage(commitRoot)` — message này **hoàn toàn generic** (`"COMMIT_ROOT_ATTEST_V1:" + commitRoot.Bytes()`), không hề gắn với nội dung `BatchOutboundCommit` cụ thể nào. Nghĩa là `SlashOnEquivocation` bắt equivocation cho **BẤT KỲ root nào được attest qua đúng message này**, không quan trọng root đó đại diện cho cái gì. **Yêu cầu implement duy nhất:** khi node publish `AccountTreeRoot` (mục 6.3), phải ký `QuorumCert` cho đúng `ComputeCommitRootAttestMessage(accountTreeRoot)` — dùng lại nguyên primitive có sẵn, không cần code equivocation-detection riêng nào cho `AccountTreeRoot`. Nếu double-sign 2 `AccountTreeRoot` khác nhau cùng epoch, `SlashOnEquivocation` bắt được ngay, miễn phí.
 
 ### 6.3. Rút lại giá trị khi node chết — bài toán PHÂN BỔ
 
+> ⚠️ **CẬP NHẬT 2026-09-24:** `DeclareChainDeadWithCert` đã bị gỡ; `DeadChains` chỉ được đặt qua `SlashOnEquivocation`. Toàn bộ pipeline phân bổ bên dưới (Snapshot → DA-check → Delay 72h → `ClaimDeadChainBalance`) chỉ chạy được khi chain đã bị slash. Node chết hẳn mà không double-sign: `NodeFloatAccount[node]` và bond bị khoá, không có đường giải ngân — hệ quả đã được chấp nhận (quyết định 2026-09-24), giảm thiểu bằng các replica nhân bản batch trên đa số (`SEQUENCER_STEP_BY_STEP_PLAN.md`). Vì vậy Snapshot & Archival (roadmap mục 10 bước 5) hạ ưu tiên: chỉ đáng xây nếu sau này có lại một cơ chế tuyên bố chết.
+
 `NodeFloatAccount` là 1 bất biến tự động (mục 3.2) — mọi số dư user LUÔN tự động phản ánh trong `NodeFloatAccount` ngay khi phát sinh, không có phần "chưa kịp nạp" nằm chờ dài hạn nào cả. Khi node chết, chỉ còn đúng **1 bài toán duy nhất**: `NodeFloatAccount[node chết]` chắc chắn có THẬT (Parent Chain tự verify được, mục 4.3) — nhưng **Parent Chain không biết tổng đó phải CHIA cho user nào bao nhiêu**, vì phân bổ chi tiết chỉ tồn tại trên local node đã chết.
 
 **Phần xử lý ngay, không cần chờ gì:**
-- Transfer đang "đi ngang" tới node chết nhưng chưa `Claimed`: dùng cơ chế **Reclaim** (mục 3.6), Node 1 tự đòi lại, kích hoạt ngay khi `RecoveryCommittee` xác nhận chết — không cần Transfer ngược (mục 3.4, cần node sống mới gửi được). ⚠️ Reclaim tự nó CŨNG là 1 outflow từ FA của node chết — `DeadChains` chặn outflow mới (mục 7) phải loại trừ tường minh Reclaim, không thì chính cơ chế bảo vệ này lại chặn luôn đường thu hồi hợp lệ duy nhất cho Transfer đang treo.
+- Transfer đang "đi ngang" tới node chết nhưng chưa `Claimed`: dùng cơ chế **Reclaim** (mục 3.6), Node 1 tự đòi lại, kích hoạt khi đủ điều kiện timeout on-chain (không cần chờ "tuyên bố chết" — cơ chế đó đã bị gỡ) — không cần Transfer ngược (mục 3.4, cần node sống mới gửi được). ⚠️ Reclaim tự nó CŨNG là 1 outflow từ FA của node chết — `DeadChains` chặn outflow mới (mục 7) phải loại trừ tường minh Reclaim, không thì chính cơ chế bảo vệ này lại chặn luôn đường thu hồi hợp lệ duy nhất cho Transfer đang treo.
 - Không cần Merkle proof cho bước này — đây chỉ là ghi sổ 2 chiều bình thường trên Parent Chain.
 
 **Bài toán còn lại — chứng minh PHÂN BỔ:**
@@ -220,20 +220,20 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ### 9.1. Decision Log
 
-> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — ✅ **5/5 mục đã chốt (2026-09-24)**: `RecoveryCommittee` = dev/operator tự ký tạm, Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được (chỉ cần ký đúng message có sẵn).
+> **Đã tách sang file riêng:** `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` (mục B.1) — ✅ **5/5 mục đã chốt (2026-09-24)**: `RecoveryCommittee` = đã gỡ hoàn toàn (2026-09-24), Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được (chỉ cần ký đúng message có sẵn).
 
 ### 9.2. Vận hành
 
-- **Quản lý khoá `RecoveryCommittee`** (ưu tiên cao hơn khoá node — #7): multisig/HSM/threshold-signing riêng, tách biệt quy trình vận hành khoá node thường.
-- **Giám sát Snapshot Pipeline** (phục vụ chứng minh phân bổ khi node chết, mục 6.3): 2 loại cảnh báo tách biệt — (1) node **bỏ lỡ** chu kỳ export (mức độ: vận hành, có thể do bug/quá tải), và (2) **DA-check thất bại** trên 1 node vẫn đang sống (node CÓ publish `AccountTreeRoot` nhưng Archival Service không lấy đủ dữ liệu khớp root — mục 6.3 điểm 2) — mức độ: **nghi vấn gian lận đang diễn ra**, phải escalate ngay cho operator/`RecoveryCommittee` xem xét, không chờ tới khi node chết mới xử lý.
+- **Quản lý khoá ký của Rollup Node** (cùng 1 khoá trên mọi replica, thay cho khoá `RecoveryCommittee` đã gỡ — #7): lưu mã hoá, nạp khi khởi động, sao lưu offline/HSM; lộ 1 replica là lộ khoá nên phải quy trình xoay khoá.
+- **Giám sát Snapshot Pipeline** (phục vụ chứng minh phân bổ khi node chết, mục 6.3): 2 loại cảnh báo tách biệt — (1) node **bỏ lỡ** chu kỳ export (mức độ: vận hành, có thể do bug/quá tải), và (2) **DA-check thất bại** trên 1 node vẫn đang sống (node CÓ publish `AccountTreeRoot` nhưng Archival Service không lấy đủ dữ liệu khớp root — mục 6.3 điểm 2) — mức độ: **nghi vấn gian lận đang diễn ra**, phải escalate ngay cho operator (bên điều tra độc lập) xem xét, không chờ tới khi node chết mới xử lý.
 - **Backup & DR:** backup LevelDB từng node + state Parent Chain (`ChainRegistry`/`NodeFloatAccount`/`SecurityBondLedger`/`DeadChains`).
-- **Runbook:** kịch bản node bị nghi compromise (khi nào trigger `SlashOnEquivocation`/`DeclareChainDeadWithCert`), và kịch bản khoá node bị lộ/mất nhưng node vẫn còn muốn hoạt động tiếp (không tuyên bố chết) — quy trình gọi `UpdateCommitteeWithRecoveryCert` (mục 6.2) để cài khoá mới, ai được phép yêu cầu, xác minh danh tính operator thế nào trước khi `RecoveryCommittee` ký cert.
+- **Runbook:** kịch bản node bị nghi compromise (khi nào nộp bằng chứng cho `SlashOnEquivocation`), và kịch bản khoá node bị lộ/mất nhưng node vẫn còn muốn hoạt động tiếp (không tuyên bố chết) — quy trình đổi khoá bằng `ApplyCommitteeUpdate` (mục 6.2, `SEQUENCER_STEP_BY_STEP_PLAN.md` C4), ai được phép kích hoạt, và cách xác minh danh tính operator trước khi nộp chứng nhận.
 - **Quản lý tăng trưởng `ClaimedMessages`:** bảng này ghi vĩnh viễn mỗi `MessageID` đã xử lý — cần kế hoạch archive/prune định kỳ các bản ghi cũ (ví dụ sau N tháng) để tránh phình state Parent Chain vô hạn theo thời gian.
 
 ### 9.3. Checklist bảo mật trước khi go-live
 
-- [ ] #1–#16 (mục B.1 + B.2 của `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md`) đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (`RecoveryCommittee`, đã chốt dev/operator tự ký tạm — vẫn cần review lại quy trình bảo vệ khoá), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), #15 (cơ chế report node sai — đã chốt Hướng A, vẫn cần review lại toàn bộ luồng vận hành trước go-live), và #16 (SlashOnEquivocation/AccountTreeRoot — đã xác nhận qua code, vẫn cần review lại đúng chỗ ký `ComputeCommitRootAttestMessage` khi implement thật).
-- [x] `RecoveryCommittee`, Q9-rủi-ro, Q(report node sai), Q(Migration scope), Q(SlashOnEquivocation) — 5/5 đã chốt (2026-09-24, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). Cần ghi lại quyết định bằng văn bản chính thức của đội (không chỉ trong tài liệu này) trước khi coi là final.
+- [ ] #1–#16 (mục B.1 + B.2 của `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md`) đã được review độc lập bởi người khác (không tự ký-tự duyệt) — đặc biệt #6 (Snapshot Pipeline chứng minh phân bổ khi node chết), #7 (bảo quản khoá ký dùng chung của các replica, thay cho `RecoveryCommittee` đã gỡ — cần review quy trình), #11/#14 (velocity-limit chống lộ khoá + loại trừ hoàn tiền — dễ bị bỏ sót nhất vì trực giác "Float Account tự an toàn" dễ khiến quên mất đây là rủi ro KHÁC, không phải gian lận), #13 (crash-recovery giữa `Claimed` và credit local), #15 (cơ chế report node sai — đã chốt Hướng A, vẫn cần review lại toàn bộ luồng vận hành trước go-live), và #16 (SlashOnEquivocation/AccountTreeRoot — đã xác nhận qua code, vẫn cần review lại đúng chỗ ký `ComputeCommitRootAttestMessage` khi implement thật).
+- [x] Q(RecoveryCommittee → gỡ hoàn toàn), Q9-rủi-ro, Q(report node sai), Q(Migration scope), Q(SlashOnEquivocation) — 5/5 đã chốt (2026-09-24, `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). Cần ghi lại quyết định bằng văn bản chính thức của đội (không chỉ trong tài liệu này) trước khi coi là final.
 - [ ] Signed Receipt (mục 15.2) đã triển khai cho MỌI giao dịch (nội bộ lẫn cross-node) trước go-live — đây là điều kiện nền tảng bắt buộc dù chọn Hướng A hay B, không phải tính năng tuỳ chọn.
 - [ ] Đã test trên staging: (1) Transfer thành công, (2) Transfer thất bại → hoàn đúng `Value`, không hoàn `GasFee`, (3) Node chết → Parent Chain biết TỔNG số thật ngay (mục 4.3, tự động), Archival Service chạy đúng pipeline Snapshot+Delay 72h để chứng minh PHÂN BỔ cho user (mục 6.3), (4) Migration có message đến giữa lúc Freeze — **CHỈ áp dụng nếu Migration (mục 5.3) thật sự được triển khai ở bản đầu, có thể bỏ qua nếu hoãn**, (5) node cố tình giấu dữ liệu snapshot → Archival Service VETO được, (6) retry crash-giữa-chừng ở bước hoàn tiền → không hoàn 2 lần (#9), (7) giả lập khoá node bị lộ, thử rút vượt ngưỡng velocity outflow → bị chặn (#11), (8) Node 2 chậm xử lý quá timeout → Node 1 Reclaim thành công mà không cần Node 2 hợp tác, và thử race Reclaim-vs-Claimed để xác nhận chỉ 1 bên thắng (#12), (9) crash Node 2 đúng giữa lúc `Claimed` và credit local, khởi động lại → xác nhận tự hoàn tất credit, không credit trùng, không bỏ sót (#13), (10) Node 2 chết hẳn khi đang có Transfer tới nhưng chưa `Claimed` → xác nhận dùng đúng cơ chế Reclaim (mục 3.6), không phải Transfer ngược (mục 3.4, vốn cần Node 2 sống), (11) giả lập 1 node vừa bị chạm ngưỡng velocity outflow (#11) vừa cần hoàn tiền hợp lệ cho user khác → xác nhận hoàn tiền vẫn đi qua bình thường, không bị chặn nhầm bởi circuit-breaker (#14).
 - [ ] `Σ NodeFloatAccount == genesis_total_supply` (mục 4.3) được kiểm tra tự động định kỳ trên Parent Chain — đây là bất biến kiểm chứng được hoàn toàn.
@@ -242,7 +242,7 @@ Giao dịch nội bộ không bị ảnh hưởng. Giao dịch cross-node gửi 
 
 ## 10. Lộ trình triển khai
 
-1. ✅ **Đã chốt 5/5 mục từng chặn triển khai** (`RecoveryCommittee` = dev/operator tự ký tạm, Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được, chỉ cần ký đúng message — chi tiết `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1) — có thể bắt đầu bước 2.
+1. ✅ **Đã chốt 5/5 mục từng chặn triển khai** (`RecoveryCommittee` = đã gỡ hoàn toàn (2026-09-24), Q9-rủi-ro = chấp nhận giai đoạn thử nghiệm, report node sai = Hướng A, Migration = hoãn, `SlashOnEquivocation`/`AccountTreeRoot` = có bắt được, chỉ cần ký đúng message — chi tiết `SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1) — có thể bắt đầu bước 2.
 2. **Xây `NodeFloatAccount` trên Parent Chain** — cấu trúc dữ liệu mới, thay thế vai trò "trần phân bổ" của `PerChainAllocation` cho mục đích cross-node.
 3. **Xây luồng user tự nạp tiền vào tài khoản của mình** — atomic tăng `NodeFloatAccount` cùng lúc với balance cục bộ user, không có bước "nạp quỹ" riêng của node (mục 3.2).
 4. **Xây luồng Transfer atomic** (mục 3.3) thay thế `Outbound`/`BatchOutboundCommit`/`ClaimMessage` 3 bước cho phần giá trị — giữ nguyên cơ chế message/payload cho phần gọi Contract.
@@ -278,9 +278,9 @@ Rủi ro khai khống TỔNG SỐ bị loại bỏ hoàn toàn — không còn b
 
 Người gửi luôn phải tự biết trước contract đích nằm ở node nào — kiểm tra tồn tại cục bộ tại đích là đủ, không cần Parent Chain tra cứu hộ. Xem mục 5.2.
 
-### Q5. `RecoveryCommittee` là gì, vì sao quan trọng?
+### Q5. `RecoveryCommittee` đã đi đâu? (gỡ hoàn toàn 2026-09-24)
 
-Thực thể BLS committee cố định, set 1 lần từ config lúc triển khai, duy nhất có quyền thực hiện đúng 3 hành động (mục 6.2): `DeclareChainDeadWithCert` (tuyên bố chết + tịch thu bond), `UnregisterChainWithCert` (xoá chain, bond vào unbonding chứ không release ngay), `UpdateCommitteeWithRecoveryCert` (cài khoá ký hoàn toàn mới cho 1 node — con đường phục hồi thật khi khoá bị lộ/mất, mục 2.3). ✅ **ĐÃ CHỐT (2026-09-24): dev/operator tự ký tạm** — 1 committee nhỏ do chính đội vận hành nắm giữ (threshold-signing nội bộ), siết chặt quy trình bảo vệ khoá khi lên production thật với tài sản lớn hơn (`SEQUENCER_DIAGRAMS_AND_OPEN_ISSUES.md` mục B.1). Xem #7.
+Từng là BLS committee cố định (set từ config) duy nhất có quyền `DeclareChainDeadWithCert`, `UnregisterChainWithCert` và `UpdateCommitteeWithRecoveryCert`. **Đã gỡ hoàn toàn khỏi code, config và tooling deploy (2026-09-24).** Thay thế: `UnregisterChainWithCert` do chính committee của chain tự ký (có `UnregisterNonce`); đổi khoá bằng `ApplyCommitteeUpdate` (khoá hiện hành ký); không còn cơ chế tuyên bố chết — `DeadChains` chỉ do `SlashOnEquivocation` đặt. Hệ quả chấp nhận: chain chết hẳn mà không double-sign thì `NodeFloatAccount` và bond của nó bị khoá. Xem mục 6.2, 6.3 và #7.
 
 ---
 
@@ -403,7 +403,7 @@ sequenceDiagram
 ### 15.1. Vấn đề & phạm vi — gap hiện tại
 
 **Hiện trạng: KHÔNG có cơ chế nào cho user report "node tôi thực thi sai" ở cấp giao dịch/tài khoản cá nhân.** Cần phân biệt rõ với các cơ chế đã có, vì cả 2 đều hoạt động ở **cấp toàn-chain**, không phải cấp giao dịch:
-- `RecoveryCommittee` (mục 6.2) chỉ can thiệp khi tuyên bố **cả node chết hẳn**, hoặc bắt được double-sign checkpoint (`SlashOnEquivocation`) — không có nhánh nào cho "node vẫn sống, nhưng tính sai balance của 1 user cụ thể".
+- Cơ chế cấp Parent Chain (mục 6.2) chỉ can thiệp khi bắt được double-sign checkpoint (`SlashOnEquivocation`) — không có nhánh nào cho "node vẫn sống, nhưng tính sai balance của 1 user cụ thể".
 - Snapshot Pipeline (mục 6.3) chỉ chụp **state hiện tại** định kỳ để chứng minh PHÂN BỔ khi node chết — không lưu **transaction log replay được**, nên không ai verify được node đã tính đúng hay sai cho 1 giao dịch cụ thể trong quá khứ, chỉ verify được "state hôm nay có khớp với root node từng công bố hay không".
 
 **Taxonomy lỗi cần phân biệt (mỗi loại cần bằng chứng/xử lý khác nhau):**
@@ -429,11 +429,11 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 - User giữ receipt đã ký làm bằng chứng.
 - Khi nghi ngờ sai lệch: gửi report (kèm receipt liên quan) qua kênh support/operator — dùng chung khung runbook đã có ở mục 9.2 ("kịch bản node bị nghi compromise").
 - Operator điều tra: truy cập LevelDB/log thực tế của node, đối chiếu receipt vs state thực tế.
-- Nếu xác nhận sai: xử lý thủ công (hoàn tiền qua thao tác vận hành trực tiếp), hoặc escalate lên `RecoveryCommittee` nếu đủ nghiêm trọng để coi là node compromise (kích hoạt luồng #8).
-- **Bắt buộc tách vai trò:** người điều tra report KHÔNG được là chính operator của node bị report (xung đột lợi ích) — nên route qua `RecoveryCommittee` hoặc 1 bên vận hành độc lập, không phải chính đội vận hành node đó tự điều tra mình.
+- Nếu xác nhận sai: xử lý thủ công (hoàn tiền qua thao tác vận hành trực tiếp), hoặc escalate thành node compromise nếu đủ nghiêm trọng (kích hoạt luồng #8: đổi khoá qua `ApplyCommitteeUpdate`).
+- **Bắt buộc tách vai trò:** người điều tra report KHÔNG được là chính operator của node bị report (xung đột lợi ích) — nên route qua 1 bên vận hành độc lập do đội chỉ định, không phải chính đội vận hành node đó tự điều tra mình.
 
 **Ưu điểm:** triển khai nhanh, không cần thay đổi kiến trúc cốt lõi, không cần node publish dữ liệu công khai.
-**Nhược điểm:** KHÔNG trustless — phụ thuộc thiện chí + năng lực điều tra của operator/`RecoveryCommittee`; không có SLA bắt buộc; không tự động hoá.
+**Nhược điểm:** KHÔNG trustless — phụ thuộc thiện chí + năng lực điều tra của operator (bên điều tra độc lập); không có SLA bắt buộc; không tự động hoá.
 
 ### 15.4. Hướng B — Fraud-proof đầy đủ qua publish transaction log (nặng, đổi kiến trúc)
 
@@ -441,7 +441,7 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 - Mở rộng vai trò Archival Service (mục 6.3): dùng liên tục để bất kỳ verifier nào (không cần quyền đặc biệt) tự replay kiểm tra, không chỉ để phục hồi lúc node chết.
 - **Challenge window:** nếu verifier phát hiện root công bố không khớp kết quả replay → submit fraud-proof lên Parent Chain trong 1 khung thời gian (có thể dùng lại cơ chế Withdrawal Delay 72h đã có, mục 6.3) → nếu đúng, trigger slash `SecurityBond` + hoàn tiền cho user bị hại từ phần bond bị tịch thu.
 
-**Ưu điểm:** thật sự trustless — không cần tin operator/`RecoveryCommittee` điều tra công tâm, ai cũng tự verify được.
+**Ưu điểm:** thật sự trustless — không cần tin operator (bên điều tra độc lập) điều tra công tâm, ai cũng tự verify được.
 **Nhược điểm — đáng kể, không phải chi tiết nhỏ:**
 1. Chi phí băng thông/lưu trữ lớn hơn hẳn (toàn bộ tx log thay vì chỉ root) — đặc biệt nặng vì giao dịch nội bộ "chiếm đa số giao dịch thực tế" (mục 13.1).
 2. Cần đặc tả lại "giao dịch nội bộ" (mục 13.2) theo 1 state-transition function **deterministic, replay được** — hiện tài liệu mới mô tả ở mức khái niệm, chưa cam kết determinism nào.
@@ -452,12 +452,12 @@ Hiện mục 13.2 bước 5 ("Trả kết quả ngay") không có cấu trúc k�
 
 | Tiêu chí | Hướng A (report vận hành) | Hướng B (fraud-proof đầy đủ) |
 |---|---|---|
-| Cơ chế cốt lõi | User giữ receipt → gửi khiếu nại kèm receipt cho operator/`RecoveryCommittee` → người đó tự tay đối chiếu LevelDB/log thật của node | Node publish **toàn bộ transaction log** (không chỉ root) → bất kỳ ai cũng tự replay để tính ra state, so khớp với root node công bố |
-| Trustless | Không — dựa vào operator/`RecoveryCommittee` | Có — ai cũng tự verify được, không cần tin ai |
+| Cơ chế cốt lõi | User giữ receipt → gửi khiếu nại kèm receipt cho operator (bên điều tra độc lập) → người đó tự tay đối chiếu LevelDB/log thật của node | Node publish **toàn bộ transaction log** (không chỉ root) → bất kỳ ai cũng tự replay để tính ra state, so khớp với root node công bố |
+| Trustless | Không — dựa vào operator (bên điều tra độc lập) | Có — ai cũng tự verify được, không cần tin ai |
 | Effort triển khai | Thấp — chỉ cần thêm signed receipt + quy trình | Rất cao — cần đặc tả lại giao dịch nội bộ thành state-transition function deterministic + xây engine replay **độc lập** với chính binary node |
 | Chi phí vận hành liên tục | Thấp | Cao (băng thông/lưu trữ toàn bộ tx log — giao dịch nội bộ chiếm đa số traffic, mục 13.1) |
 | SLA / tự động hoá | Không — phụ thuộc thời gian điều tra của operator | Có — phát hiện sai → tự động trigger slash `SecurityBond` + hoàn tiền, dùng lại khung Delay 72h có sẵn |
-| Hậu quả cho node sai | Escalate thành "compromise" → kích hoạt luồng #8 (đổi khoá qua `RecoveryCommittee`) | Slash bond trực tiếp, không cần con người can thiệp |
+| Hậu quả cho node sai | Escalate thành "compromise" → kích hoạt luồng #8 (đổi khoá qua `ApplyCommitteeUpdate`) | Slash bond trực tiếp, không cần con người can thiệp |
 | Rủi ro xung đột lợi ích | Có — phải tách vai trò người điều tra khỏi chính operator của node bị report | Không — verify là toán học |
 | Mâu thuẫn kiến trúc | Không | Có — đảo ngược 1 phần giả định nền tảng "Parent Chain không lưu state ứng dụng" (mục 3.1) mà cả thiết kế Float Account đang theo đuổi |
 | Phù hợp giai đoạn | Bắt buộc trước go-live | Roadmap dài hạn, khi quy mô tài sản đủ lớn để đáng đầu tư |

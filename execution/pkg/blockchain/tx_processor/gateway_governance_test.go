@@ -76,67 +76,6 @@ func TestGatewayHandler_RegisterAssetWithCert_Lifecycle(t *testing.T) {
 	assert.True(t, failed, "a cert not actually signed by chain 101's own committee must be rejected")
 }
 
-// TestGatewayHandler_UpdateCommitteeWithRecoveryCert_Lifecycle is the end-to-end regression test
-// for chain-committee recovery, authorized by RecoveryCommittee's real QuorumCert (2026-09-04,
-// replacing the removed propose/vote/72h-timelock/executeProposal(ProposalUpdateCommittee) dance
-// -- see GatewayEngine.UpdateCommitteeWithRecoveryCert's own doc comment).
-func TestGatewayHandler_UpdateCommitteeWithRecoveryCert_Lifecycle(t *testing.T) {
-	cs, _, _, _ := newPersistentTestChainState(t)
-	h, err := GetGatewayHandler()
-	require.NoError(t, err)
-
-	kp101 := bls.GenerateKeyPair()
-	recoveryKP := bls.GenerateKeyPair()
-	recoveryPop := cross_chain.PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
-	engine, err := loadGatewayEngine(cs)
-	require.NoError(t, err)
-	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
-		101: {ChainID: 101, Epoch: 1, Committee: []cross_chain.ValidatorEntry{{PubkeyBLS: kp101.PublicKey().Bytes(), Stake: 100}}},
-	}
-	engine.RecoveryCommittee = []cross_chain.ValidatorEntry{
-		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
-	}
-	require.NoError(t, saveGatewayEngine(cs, engine))
-
-	sender := common.HexToAddress("0x3333333333333333333333333333333333333333")
-
-	kpNew1 := bls.GenerateKeyPair()
-	kpNew2 := bls.GenerateKeyPair()
-	popSigNew1 := cross_chain.PopSign(kpNew1.PrivateKey(), kpNew1.PublicKey())
-	popSigNew2 := cross_chain.PopSign(kpNew2.PrivateKey(), kpNew2.PublicKey())
-
-	newCommittee := []cross_chain.ValidatorEntry{
-		{PubkeyBLS: kpNew1.BytesPublicKey(), Stake: 5000, PopSignature: popSigNew1.Bytes()},
-		{PubkeyBLS: kpNew2.BytesPublicKey(), Stake: 5000, PopSignature: popSigNew2.Bytes()},
-	}
-
-	payloadObj := cross_chain.UpdateCommitteePayload{
-		ChainID:         101,
-		NewEpoch:        2,
-		NewCommittee:    newCommittee,
-		QuorumThreshold: 6700,
-	}
-	payload, err := json.Marshal(payloadObj)
-	require.NoError(t, err)
-
-	digest := cross_chain.ComputeRecoveryUpdateCommitteeMessage(payloadObj.ChainID, payloadObj.NewEpoch, payloadObj.NewCommittee, payloadObj.QuorumThreshold, payloadObj.StateRoot, payloadObj.AccountTreeRoot)
-	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
-	updateCalldata, err := h.abi.Pack("updateCommitteeWithRecoveryCert", payload, uint64(0), sig.Bytes(), []byte{0x01})
-	require.NoError(t, err)
-	_, _, failed := h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, updateCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
-	require.False(t, failed)
-
-	// Verify updated ChainRegistry state
-	engineAfter, err := loadGatewayEngine(cs)
-	require.NoError(t, err)
-	reg101 := engineAfter.ChainRegistry[101]
-	assert.Equal(t, uint64(2), reg101.Epoch)
-	assert.Equal(t, uint64(6700), reg101.QuorumThreshold)
-	assert.Equal(t, 2, len(reg101.Committee))
-	assert.Equal(t, kpNew1.BytesPublicKey(), reg101.Committee[0].PubkeyBLS)
-	assert.Equal(t, kpNew2.BytesPublicKey(), reg101.Committee[1].PubkeyBLS)
-}
-
 // TestGatewayHandler_RegisterChainViaStake_TracksChainCountViaMetric is the regression test for
 // note/cross_chain_attack_scenario_catalog.md item C6: with BootstrapFoundingChains retired
 // (2026-08-28), registerChainViaStake is now gated by a REAL native-coin deposit from the

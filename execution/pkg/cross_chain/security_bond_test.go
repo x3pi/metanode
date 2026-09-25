@@ -117,20 +117,18 @@ func TestSecurityBond_CheckBondCap_EnforcedWhenLeverageSet(t *testing.T) {
 	assert.Equal(t, uint64(0), engine.TransferAllocationNonce[102])
 }
 
-// TestSecurityBond_DeclareChainDead_ForfeitsBondToReserve proves DeclareChainDeadWithCert's new
-// forfeiture branch: the bond moves into Reserve's own circulating PerChainAllocation, and
-// DeadChains is set (already covered independently by TestP8_4, re-asserted here as part of the
-// same call).
-func TestSecurityBond_DeclareChainDead_ForfeitsBondToReserve(t *testing.T) {
+// TestSecurityBond_ForfeitBond_MovesBondToReserveAndKillsChain proves forfeitBond's behavior: the
+// bond moves into Reserve's own circulating PerChainAllocation, and DeadChains is set (already
+// covered independently by TestP8_4). The real production route into forfeitBond is
+// SlashOnEquivocation, tested end-to-end below.
+func TestSecurityBond_ForfeitBond_MovesBondToReserveAndKillsChain(t *testing.T) {
 	engine, _ := setupTestGatewayEngine()
 	engine.ReserveChainID = 102 // engine IS chain 102
-	signRecovery := setupRecoveryCommittee(engine)
 
 	require.NoError(t, engine.PostSecurityBond(101, big.NewInt(300)))
 	reserveAllocBefore := engine.SupplyLedger.GetAllocation(102)
 
-	digest := ComputeDeclareChainDeadMessage(101)
-	require.NoError(t, engine.DeclareChainDeadWithCert(101, signRecovery(digest)))
+	markChainDeadForTest(engine, 101)
 
 	assert.True(t, engine.DeadChains[101])
 	_, stillHasBond := engine.SecurityBond.Bond[101]
@@ -144,19 +142,17 @@ func TestSecurityBond_DeclareChainDead_ForfeitsBondToReserve(t *testing.T) {
 // ReleaseAt (blockTime + UnbondingPeriodSeconds) has passed -- and ClaimUnbondedBond must return
 // the exact amount + the chain's own recorded GenesisWallet.
 func TestSecurityBond_UnregisterThenClaim_RespectsUnbondingPeriod(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
+	engine, kp := setupTestGatewayEngine()
 	engine.UnbondingPeriodSeconds = 1000
 	genesisWallet := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	reg := engine.ChainRegistry[101]
 	reg.GenesisWallet = genesisWallet
 	engine.ChainRegistry[101] = reg
-	signRecovery := setupRecoveryCommittee(engine)
 
 	require.NoError(t, engine.PostSecurityBond(101, big.NewInt(500)))
 
 	const unregisterAt = uint64(10_000)
-	digest := ComputeUnregisterChainMessage(101)
-	require.NoError(t, engine.UnregisterChainWithCert(101, signRecovery(digest), unregisterAt))
+	require.NoError(t, engine.UnregisterChainWithCert(101, 0, signUnregisterCert(engine, kp, 101, 0), unregisterAt))
 
 	// ChainRegistry entry is gone (unchanged existing behavior), bond is no longer "active".
 	_, stillRegistered := engine.ChainRegistry[101]
@@ -180,11 +176,9 @@ func TestSecurityBond_UnregisterThenClaim_RespectsUnbondingPeriod(t *testing.T) 
 }
 
 func TestSecurityBond_UnregisterWithNoBond_UnchangedBehavior(t *testing.T) {
-	engine, _ := setupTestGatewayEngine()
-	signRecovery := setupRecoveryCommittee(engine)
+	engine, kp := setupTestGatewayEngine()
 
-	digest := ComputeUnregisterChainMessage(101)
-	require.NoError(t, engine.UnregisterChainWithCert(101, signRecovery(digest), 12345))
+	require.NoError(t, engine.UnregisterChainWithCert(101, 0, signUnregisterCert(engine, kp, 101, 0), 12345))
 
 	_, stillRegistered := engine.ChainRegistry[101]
 	assert.False(t, stillRegistered)
@@ -194,7 +188,7 @@ func TestSecurityBond_UnregisterWithNoBond_UnchangedBehavior(t *testing.T) {
 
 // TestSecurityBond_SlashOnEquivocation_RealProof_ForfeitsAndKillsChain proves the permissionless
 // fast path: 2 genuinely conflicting QuorumCerts (same committee, same epoch, different commit
-// roots) forfeit the bond and set DeadChains -- no RecoveryCommittee call needed at all.
+// roots) forfeit the bond and set DeadChains -- no third-party authorization needed at all.
 func TestSecurityBond_SlashOnEquivocation_RealProof_ForfeitsAndKillsChain(t *testing.T) {
 	engine, kp := setupTestGatewayEngine() // kp is chain 101's real committee key
 	engine.ReserveChainID = 102
@@ -252,13 +246,11 @@ func TestSecurityBond_SlashOnEquivocation_WorksDuringUnbonding(t *testing.T) {
 	engine, kp := setupTestGatewayEngine()
 	engine.ReserveChainID = 102
 	engine.UnbondingPeriodSeconds = 10_000
-	signRecovery := setupRecoveryCommittee(engine)
 
 	require.NoError(t, engine.PostSecurityBond(101, big.NewInt(400)))
 
 	const unregisterAt = uint64(1_000_000)
-	digest := ComputeUnregisterChainMessage(101)
-	require.NoError(t, engine.UnregisterChainWithCert(101, signRecovery(digest), unregisterAt))
+	require.NoError(t, engine.UnregisterChainWithCert(101, 0, signUnregisterCert(engine, kp, 101, 0), unregisterAt))
 
 	_, stillRegistered := engine.ChainRegistry[101]
 	require.False(t, stillRegistered, "sanity: chain really is gone from ChainRegistry now")
@@ -277,4 +269,52 @@ func TestSecurityBond_SlashOnEquivocation_WorksDuringUnbonding(t *testing.T) {
 	// The bond that was pending unbonding must now be gone entirely (forfeited), not claimable.
 	_, _, claimErr := engine.ClaimUnbondedBond(101, unregisterAt+10_000)
 	assert.ErrorIs(t, claimErr, ErrNoUnbondingRequest, "a slashed bond must never still be claimable")
+}
+
+// TestUnregisterChain_SelfAuthorized_RejectsCertFromAnotherKey proves the removed RecoveryCommittee
+// is not silently replaced by "anyone can unregister": only chain 101's OWN committee key works.
+func TestUnregisterChain_SelfAuthorized_RejectsCertFromAnotherKey(t *testing.T) {
+	engine, _ := setupTestGatewayEngine()
+	otherKP := bls.GenerateKeyPair()
+
+	err := engine.UnregisterChainWithCert(101, 0, signUnregisterCert(engine, otherKP, 101, 0), 1000)
+	require.Error(t, err)
+	_, stillRegistered := engine.ChainRegistry[101]
+	assert.True(t, stillRegistered, "a cert from a key outside the chain's own committee must not unregister it")
+}
+
+func TestUnregisterChain_RejectsUnknownChain(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	err := engine.UnregisterChainWithCert(999, 0, signUnregisterCert(engine, kp, 999, 0), 1000)
+	assert.ErrorIs(t, err, ErrUnknownChain)
+}
+
+func TestUnregisterChain_RejectsWrongNonce(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	err := engine.UnregisterChainWithCert(101, 1, signUnregisterCert(engine, kp, 101, 1), 1000)
+	assert.ErrorIs(t, err, ErrInvalidUnregisterNonce)
+	_, stillRegistered := engine.ChainRegistry[101]
+	assert.True(t, stillRegistered)
+}
+
+// TestUnregisterChain_CertCannotBeReplayedAfterReRegistration is the regression test for the
+// replay risk of a self-authorized unregister cert: it is public once submitted, and
+// RegisterChainViaStake only requires the chainID to be currently unregistered, so without the
+// nonce the identical cert could unregister a chain that legitimately registered again.
+func TestUnregisterChain_CertCannotBeReplayedAfterReRegistration(t *testing.T) {
+	engine, kp := setupTestGatewayEngine()
+	savedReg := engine.ChainRegistry[101]
+	cert0 := signUnregisterCert(engine, kp, 101, 0)
+
+	require.NoError(t, engine.UnregisterChainWithCert(101, 0, cert0, 1000))
+	assert.Equal(t, uint64(1), engine.UnregisterNonce[101], "nonce must survive the registry entry's deletion")
+
+	engine.ChainRegistry[101] = savedReg // the same chainID registers again
+	err := engine.UnregisterChainWithCert(101, 0, cert0, 2000)
+	assert.ErrorIs(t, err, ErrInvalidUnregisterNonce, "replaying the old cert must fail")
+	_, stillRegistered := engine.ChainRegistry[101]
+	assert.True(t, stillRegistered)
+
+	// A freshly signed cert at the new nonce still works.
+	require.NoError(t, engine.UnregisterChainWithCert(101, 1, signUnregisterCert(engine, kp, 101, 1), 3000))
 }

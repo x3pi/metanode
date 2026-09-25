@@ -15,7 +15,6 @@ flowchart TB
         CR["ChainRegistry\n1 entry = 1 node"]
         FA["NodeFloatAccount\nchainID -> balance THẬT\n(bất biến = Σ balance user, mục 3.2)"]
         SB["SecurityBondLedger\n(bảo vệ đăng ký/gian lận phân bổ, mục 4.1)"]
-        RC["RecoveryCommittee\n(dev/operator tự ký tạm — đã chốt #7)"]
     end
 
     subgraph N1["Node 1 = chainID 1"]
@@ -37,7 +36,7 @@ flowchart TB
     N1 -- "Transfer atomic (mỗi giao dịch)\nFA[1] -= V, FA[2] += V" --> FA
     FA -. "credit đến, Node 2 tự theo dõi" .-> N2
     N1 -- "RegisterChainViaStake / PostSecurityBond" --> CR
-    RC -. "DeclareChainDeadWithCert /\nUnregisterChainWithCert" .-> CR
+    CR -. "UnregisterChainWithCert\n(tự ký bởi committee của chain)" .-> CR
 
     style RA fill:#f4f4f4,stroke:#999,color:#333
     style N1 fill:#eef6ff,stroke:#6699cc,color:#333
@@ -143,7 +142,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Dead["RecoveryCommittee xác nhận\n1 node chết hẳn (mục 6.2)"] --> Total["TỔNG số dư node đó đã biết ngay,\ntự động, on-chain: chính FA[node] (mục 4.3)"]
+    Dead["Node chết hẳn + đã bị slash\n(SlashOnEquivocation, mục 6.2)"] --> Total["TỔNG số dư node đó đã biết ngay,\ntự động, on-chain: chính FA[node] (mục 4.3)"]
     Total --> Inflight["Transfer đang bay tới node chết\nmà chưa Claimed"] --> Reclaim["Reclaim ngay lập tức\n(mục 3.6, không chờ timeout thường)"]
     Total --> Distrib["Câu hỏi còn lại: TIỀN NÀY CỦA AI\n(phân bổ theo từng user)?"]
     Distrib --> Pipeline["Snapshot + chống DA-Withholding\n+ Delay 72h (mục 6.3)\n— chứng minh PHÂN BỔ, không phải TỔNG"]
@@ -153,7 +152,7 @@ flowchart TD
 ```
 
 **Quy trình từng bước:**
-1. **Xác nhận Node tử vong:** `RecoveryCommittee` (Hội đồng phục hồi) chính thức xác nhận một Node đã chết hoàn toàn (offline vĩnh viễn).
+1. **Xác nhận Node tử vong:** chỉ xảy ra khi có bằng chứng double-sign và `SlashOnEquivocation` đặt `DeadChains` (không còn Hội đồng phục hồi — `RecoveryCommittee` đã gỡ 2026-09-24). Node chết hẳn mà không double-sign thì sơ đồ này không được kích hoạt.
 2. **Chốt Quỹ tổng:** Quỹ Float Account của Node đó trên Parent Chain lập tức bị đóng băng. Vì toàn bộ tiền thật luôn nằm sẵn ở Quỹ này, hệ thống bảo toàn 100% tổng tài sản.
 3. **Cứu hộ giao dịch treo:** Những giao dịch đang chuyển dở dang tới Node chết sẽ được Node nguồn kích hoạt lệnh `Reclaim` để đòi lại ngay lập tức (không cần đợi hết hạn Timeout).
 4. **Bài toán Phân bổ:** Vấn đề duy nhất còn lại là số tiền lớn trong Quỹ thuộc về những User nào (vì danh sách số dư chi tiết nằm ở Node đã chết).
@@ -196,7 +195,7 @@ sequenceDiagram
 
 | # | Câu hỏi | Loại | Quyết định |
 |---|---|---|---|
-| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | ✅ **Dev/operator tự ký tạm** — 1 committee nhỏ do chính đội vận hành nắm giữ (threshold-signing nội bộ), siết chặt quy trình bảo vệ khoá khi lên production thật với tài sản lớn hơn (#7) |
+| Q(RecoveryCommittee) | Ai ngồi trong `RecoveryCommittee`, bao nhiêu người, ngưỡng quorum? | Tổ chức/nhân sự | ✅ **Gỡ hoàn toàn (2026-09-24)** — thay quyết định "dev/operator tự ký tạm" trước đó. `UnregisterChainWithCert` do chính committee của chain tự ký; đổi khoá bằng `ApplyCommitteeUpdate` (khoá hiện hành ký); không còn tuyên bố chết (`DeadChains` chỉ do `SlashOnEquivocation`). Hệ quả chấp nhận: chain chết hẳn mà không double-sign thì tiền và bond bị khoá (#7) |
 | Q9-rủi-ro | Mức rủi ro custody PKS chấp nhận được với quy mô tài sản thật? | Kinh doanh | ✅ **Chấp nhận cho giai đoạn thử nghiệm/quy mô nhỏ** — đủ 4 biện pháp giảm thiểu (delay, anomaly detection, non-custodial tuỳ chọn, Signed Receipt), đánh giá lại khi quy mô tài sản tăng (mục 2.3) |
 | Q(report node sai) | Hướng A (report vận hành) hay Hướng B (fraud-proof đầy đủ)? | Kỹ thuật + kinh doanh | ✅ **Hướng A** — Signed Receipt + kênh report vận hành qua `RecoveryCommittee`/operator làm baseline (mục 15.5, `SEQUENCER_DESIGN.md`) (#15) |
 | Q(Migration scope) | Có triển khai Migration Account (mục 5.3) ở bản đầu không? | Phạm vi | ✅ **Hoãn** — user cố định ở node đã đăng ký, không xây giao thức 3 pha Freeze/Export/Import ở bản đầu (#4) |
@@ -211,7 +210,7 @@ sequenceDiagram
 | 3 | Không dùng Contract Registry toàn cục | mục 5.2 |
 | 5 | `GasFee` không hoàn khi thất bại | mục 3.4 |
 | 6 | Node chết — TỔNG biết, PHÂN BỔ cần Snapshot | mục 6.3 |
-| 8 | Custody 100% device key — giảm thiểu + phục hồi qua `RecoveryCommittee` | mục 2.3, 6.2 |
+| 8 | Custody 100% device key — giảm thiểu + phục hồi qua `ApplyCommitteeUpdate` khi còn replica giữ khoá (`RecoveryCommittee` đã gỡ) | mục 2.3, 6.2 |
 | 9 | Reverse Transfer chống gửi hoàn 2 lần | mục 3.4 |
 | 10 | Chống credit trùng ở node đích | mục 3.3 |
 | 11 | Velocity-limit Transfer OUTFLOW chống lộ khoá | mục 4.4 |

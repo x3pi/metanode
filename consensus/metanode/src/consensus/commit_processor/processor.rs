@@ -901,7 +901,13 @@ impl CommitProcessor {
                 if stuck_secs > RECOVERY_STUCK_TIMEOUT_SECS
                     && gap_recovery_bypass_ceiling.is_none()
                     && !halt_alert_sent_for_current_stall
-                    && !pending_local_commits.is_empty()
+                    // A hole can also leave NO pending local commit at all: the local commit at
+                    // next_expected_index was discarded by the digest gate (conflict with the
+                    // quorum digest) and its CertifiedCommit never arrived, so everything behind
+                    // it sits only in the out-of-order buffer. Observed live (2026-09-24, node
+                    // silently buffered 7,400+ commits for 25 minutes with no alert) -- the alert
+                    // must cover that case too. This branch only logs; it never dispatches.
+                    && (!pending_local_commits.is_empty() || !pending_commits.is_empty())
                     && !transitioning_now
                 {
                     // PHUONG AN A (2026-09-10): this used to grant a bounded verification
@@ -945,7 +951,7 @@ impl CommitProcessor {
                         .saturating_sub(next_expected_index);
                     warn!(
                         "🛑🚨 [CONSENSUS-HALT-SUSPECTED-DIVERGENCE] next_expected_index={} has not \
-                         advanced in {}s (pending_local head stuck, {} OOO commits buffered behind \
+                         advanced in {}s (pending_local={}, {} OOO commits buffered behind \
                          it, {} commits behind the DAG's own quorum-confirmed tip). Peer digest \
                          votes for this index cannot ever reappear once peers move past it (see \
                          gap_recovery_bypass_ceiling's doc comment for why). Per Phuong an A \
@@ -956,7 +962,7 @@ impl CommitProcessor {
                          point without one. THIS NEEDS AN OPERATOR: verify what happened, then \
                          choose --restore-node from a known-good snapshot or a coordinated \
                          cluster restart. See note/consensus_local_dag_trust_gap_design_2026-09.md.",
-                        next_expected_index, stuck_secs, pending_commits.len(), backlog_size
+                        next_expected_index, stuck_secs, pending_local_commits.len(), pending_commits.len(), backlog_size
                     );
                     halt_alert_sent_for_current_stall = true;
                 }
@@ -1608,8 +1614,8 @@ impl CommitProcessor {
                     // Heartbeat logic
                     if commit_index >= last_heartbeat_commit + HEARTBEAT_INTERVAL {
                         let elapsed = last_heartbeat_time.elapsed().as_secs();
-                        info!("💓 [COMMIT PROCESSOR HEARTBEAT] Processed {} commits (last {} commits in {}s, pending_ooo={})", 
-                            commit_index, HEARTBEAT_INTERVAL, elapsed, pending_commits.len());
+                        info!("💓 [COMMIT PROCESSOR HEARTBEAT] Processed {} commits (last {} commits in {}s, pending_ooo={}, next_expected={})", 
+                            commit_index, HEARTBEAT_INTERVAL, elapsed, pending_commits.len(), next_expected_index);
                         last_heartbeat_commit = commit_index;
                         last_heartbeat_time = std::time::Instant::now();
                     }

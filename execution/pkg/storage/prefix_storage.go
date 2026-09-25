@@ -110,6 +110,12 @@ func (ps *PrefixStorage) Open() error {
 	return nil
 }
 
+// SyncDurable makes the underlying shared database durable. The prefix only isolates keys, the
+// write-ahead log is shared, so everything written so far through any prefix becomes durable.
+func (ps *PrefixStorage) SyncDurable() error {
+	return SyncDurable(ps.db)
+}
+
 // Flush is a NO-OP but we could potentially invoke db.Flush() here if we want isolated triggers.
 func (ps *PrefixStorage) Flush() error {
 	return nil

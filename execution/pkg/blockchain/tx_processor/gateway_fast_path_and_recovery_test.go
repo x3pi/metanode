@@ -128,13 +128,6 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// RecoveryCommittee (2026-09-04, replacing the removed propose/vote/72h-timelock/
-	// executeProposal(ProposalDeclareChainDead) governance dance -- see
-	// GatewayEngine.DeclareChainDeadWithCert's own doc comment): a fixed, config-set committee
-	// authorizes declaring a chain dead directly, no vote from unrelated chains needed.
-	recoveryKP := bls.GenerateKeyPair()
-	recoveryPop := cross_chain.PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
-
 	engine, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
 	engine.LocalChainID = localChainID
@@ -142,12 +135,8 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	engine.ChainRegistry = map[uint64]cross_chain.ChainRegistry{
 		deadChainID: {ChainID: deadChainID, StateRoot: common.HexToHash("0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"), AccountTreeRoot: stateRoot, Epoch: 1},
 	}
-	engine.RecoveryCommittee = []cross_chain.ValidatorEntry{
-		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
-	}
 	require.NoError(t, saveGatewayEngine(cs, engine))
 
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
 
 	// Negative Test 1: Alice attempts to claim balance before chain is declared dead -> REJECTED
 	leafAliceHash := cross_chain.HashAccountLeaf(alice)
@@ -164,14 +153,16 @@ func TestGatewayHandler_ClaimDeadChainBalance_Lifecycle(t *testing.T) {
 	_, _, failed := h.HandleTransaction(context.Background(), cs, newTx(alice.Account, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimAliceCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 50)
 	assert.True(t, failed, "Claiming balance on live chain must revert")
 
-	// Declare Chain 404 Dead, authorized by RecoveryCommittee's real BLS signature (2026-09-04,
-	// replacing the removed propose/vote/72h-timelock/executeProposal governance dance).
-	digest := cross_chain.ComputeDeclareChainDeadMessage(deadChainID)
-	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
-	declareDeadCalldata, err := h.abi.Pack("declareChainDeadWithCert", big.NewInt(deadChainID), uint64(0), sig.Bytes(), []byte{0x01})
+	// Mark Chain 404 dead. The production route is SlashOnEquivocation (RecoveryCommittee and
+	// declareChainDeadWithCert were removed 2026-09-24); here the flag is set directly in the
+	// persisted engine to exercise the claim path.
+	engineDead, err := loadGatewayEngine(cs)
 	require.NoError(t, err)
-	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(sender, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, declareDeadCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 120)
-	require.False(t, failed)
+	if engineDead.DeadChains == nil {
+		engineDead.DeadChains = make(map[uint64]bool)
+	}
+	engineDead.DeadChains[deadChainID] = true
+	require.NoError(t, saveGatewayEngine(cs, engineDead))
 
 	// Alice claims 1500 -> SUCCESS
 	_, _, failed = h.HandleTransaction(context.Background(), cs, newTx(alice.Account, mt_common.GATEWAY_CONTRACT_ADDRESS, 0, big.NewInt(0), marshalCallData(t, claimAliceCalldata)), mt_common.GATEWAY_CONTRACT_ADDRESS, false, 121)

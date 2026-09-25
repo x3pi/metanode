@@ -2,6 +2,12 @@
 
 > **Tài liệu đặc tả vận hành khẩn cấp (Emergency Runbook)** theo chuẩn kiến trúc Root Anchor (Mục 10.8 & Kịch bản T3.c trong `cross_chain_root_anchor_architecture.md`).
 
+> ⚠️ **CẬP NHẬT 2026-09-24 — tài liệu này đã LỖI THỜI ở Pha 2.** Cơ chế `DeclareDead` bằng biểu quyết (và cả bản thay thế
+> `RecoveryCommittee` + `declareChainDeadWithCert`) đã bị xoá khỏi code. Hiện `DeadChains[chainID]` chỉ được đặt bởi
+> `slashOnEquivocation` (bằng chứng chain ký 2 commit root khác nhau cùng epoch, permissionless). Một chain chết hẳn
+> mà không double-sign thì KHÔNG ai tuyên bố chết được, nên Pha 3–4 (`ClaimDeadChainBalance`) không có điểm kích hoạt.
+> Pha 3–4 vẫn còn nguyên trong code và chạy được sau khi `DeadChains` đã được đặt qua đường slash.
+
 ---
 
 ## 🎯 1. Mục đích & Nguyên Tắc Cốt Lõi

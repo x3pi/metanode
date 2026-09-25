@@ -839,7 +839,7 @@ def main():
                 # GovernanceEngine (the only thing that ever read it) was deleted the same day --
                 # granting a chain its initial cross-chain spending allocation is now
                 # AllocateSupplyWithCert/TransferAllocationWithCert (self-sign, no timelock at
-                # all any more) or RecoveryCommittee-authorized, not a 72h governance vote.
+                # all any more), not a 72h governance vote.
             },
             "meta_node_rpc_address": f"{args.ip}:{meta_rpc_port}",
             "connection_address": f"0.0.0.0:{primary_port}",

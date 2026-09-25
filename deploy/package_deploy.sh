@@ -81,7 +81,7 @@ fi
 
 # 3. Kiểm tra các file binary trong deploy/bin
 if [ "$CHECK_BIN" = true ]; then
-    REQUIRED_BINS=("metanode" "simple_chain" "cross_chain_relayer" "register_chains" "bls_pubkey" "gen_recovery_committee")
+    REQUIRED_BINS=("metanode" "simple_chain" "cross_chain_relayer" "register_chains" "bls_pubkey")
     MISSING_BINS=()
 
     for b in "${REQUIRED_BINS[@]}"; do

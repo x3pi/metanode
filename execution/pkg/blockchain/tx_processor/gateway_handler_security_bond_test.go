@@ -143,16 +143,18 @@ func TestGatewayHandler_ClaimUnbondedBond_CreditsRealBalanceAfterUnbondingPeriod
 		t.Fatalf("GetGatewayHandler: %v", err)
 	}
 
-	recoveryKP := bls.GenerateKeyPair()
-	recoveryPop := cross_chain.PopSign(recoveryKP.PrivateKey(), recoveryKP.PublicKey())
+	chainKP := bls.GenerateKeyPair()
+	chainPop := cross_chain.PopSign(chainKP.PrivateKey(), chainKP.PublicKey())
 	genesisWallet := common.HexToAddress("0xC2222222C2222222C2222222C2222222C2222222")
 
 	engine := cross_chain.NewGatewayEngine(991, map[uint64]cross_chain.ChainRegistry{
-		101: {ChainID: 101, Epoch: 0, GenesisWallet: genesisWallet},
+		101: {
+			ChainID: 101, Epoch: 0, GenesisWallet: genesisWallet,
+			Committee: []cross_chain.ValidatorEntry{
+				{PubkeyBLS: chainKP.BytesPublicKey(), Stake: 10000, PopSignature: chainPop.Bytes()},
+			},
+		},
 	}, nil)
-	engine.RecoveryCommittee = []cross_chain.ValidatorEntry{
-		{PubkeyBLS: recoveryKP.BytesPublicKey(), Stake: 10000, PopSignature: recoveryPop.Bytes()},
-	}
 	engine.UnbondingPeriodSeconds = 1000
 	if err := engine.PostSecurityBond(101, big.NewInt(2_000)); err != nil {
 		t.Fatalf("seed PostSecurityBond: %v", err)
@@ -164,9 +166,10 @@ func TestGatewayHandler_ClaimUnbondedBond_CreditsRealBalanceAfterUnbondingPeriod
 	caller := common.HexToAddress("0xC3333333C3333333C3333333C3333333C3333333")
 
 	// Unregister at blockTime=10_000 -- starts the unbonding clock.
-	digest := cross_chain.ComputeUnregisterChainMessage(101)
-	sig := bls.Sign(recoveryKP.PrivateKey(), digest)
-	unregCalldata, err := h.abi.Pack("unregisterChainWithCert", new(big.Int).SetUint64(101), uint64(0), sig.Bytes(), []byte{0x01})
+	// Self-authorized by chain 101's own committee key (nonce 0, registry epoch 0).
+	digest := cross_chain.ComputeUnregisterChainMessage(101, 0, 0)
+	sig := bls.Sign(chainKP.PrivateKey(), digest)
+	unregCalldata, err := h.abi.Pack("unregisterChainWithCert", new(big.Int).SetUint64(101), uint64(0), uint64(0), sig.Bytes(), []byte{0x01})
 	if err != nil {
 		t.Fatalf("pack unregisterChainWithCert: %v", err)
 	}

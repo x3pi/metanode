@@ -162,10 +162,11 @@ P5 + T2, không phải chạy thêm script.
 - **`GatewayPrecompile`** (địa chỉ `0x1002`) chạy trên cả private chain lẫn Root Anchor,
   expose `outbound`, `attestCommit`, `claimMessage`, `verifyAndExecute`,
   `claimDeadChainBalance`, `refund`, `registerChainViaStake`,
-  `allocateSupplyWithCert`/`transferAllocationWithCert`/`registerAssetWithCert` (tự-ký),
-  `declareChainDeadWithCert`/`unregisterChainWithCert`/`updateCommitteeWithRecoveryCert`
-  (RecoveryCommittee-ký). (`propose`/`vote`/`executeProposal` và `bootstrapFoundingChains` đã
-  bị xoá — lần lượt 2026-09-04 và 2026-08-28, xem `note/eurozone_unified_native_coin_plan.md`.)
+  `allocateSupplyWithCert`/`transferAllocationWithCert`/`registerAssetWithCert`/
+  `unregisterChainWithCert` (tự-ký bằng uỷ ban của chính chain đó; `unregisterChainWithCert`
+  có thêm tham số `nonce` chống phát lại). (`propose`/`vote`/`executeProposal`,
+  `bootstrapFoundingChains` đã bị xoá — lần lượt 2026-09-04 và 2026-08-28; `RecoveryCommittee`
+  cùng `declareChainDeadWithCert`/`updateCommitteeWithRecoveryCert` bị xoá 2026-09-24.)
 - **`CommitteeAttestationWorker`** và **`GatewayRegistryMonitor`** chạy kèm mỗi node (cấu
   hình qua khối `cross_chain` trong `config.json`, xem mục 5.1) — theo dõi trạng thái
   registry, ký attest.
@@ -174,12 +175,12 @@ P5 + T2, không phải chạy thêm script.
 - **Không còn governance/vote trên Root Anchor** (xoá 2026-09-04, quyết định trực tiếp của
   người dùng — xem `note/eurozone_unified_native_coin_plan.md`). Đăng ký chain mới:
   `registerChainViaStake` — không cần vote, không cần "ai đó đã đăng ký trước" (không còn
-  vòng gà-trứng nữa). Hành động ảnh hưởng chain KHÁC (đổi uỷ ban/tuyên bố chết/huỷ đăng ký):
-  ký bởi `RecoveryCommittee` — 1 uỷ ban cố định, cấu hình qua
-  `cross_chain.recovery_committee_json`, KHÔNG lớn lên theo đăng ký chain mới. Production thật:
-  sinh khoá RecoveryCommittee hoàn toàn out-of-band (air-gapped), set qua
-  `recovery_committee_json_override_file` trong `inventory.yml` — KHÔNG dùng bộ tự sinh devnet
-  (`deploy/systemd/gen_recovery_committee_keys.py`) cho mạng có giá trị thật (mục 7 checklist).
+  vòng gà-trứng nữa). **Không còn `RecoveryCommittee` (xoá 2026-09-24):** không có cơ quan
+  nào ngoài chain có thể tuyên bố chết hay thay uỷ ban của chain khác. Huỷ đăng ký (và rút
+  bond sau thời gian unbonding) do chính uỷ ban của chain đó tự ký. `DeadChains` chỉ được đặt
+  bởi `slashOnEquivocation` (bằng chứng double-sign, ai cũng nộp được). **Hệ quả chấp nhận:**
+  chain chết/bị chiếm mà không double-sign thì không ai tuyên bố chết được — tiền còn lại của
+  chain đó và bond của nó bị khoá.
 
 Tài liệu thiết kế đầy đủ: `note/cross_chain_root_anchor_architecture.md`. Tiến độ/lỗi đã sửa:
 `note/cross_chain_production_readiness_plan.md`.
@@ -472,16 +473,11 @@ của chính người gửi giao dịch đó. Không cần diễn tập/rehearsa
       tồn tại nữa (mục 1). Không cần kiểm tra field này nữa.
 - [ ] ~~Đã set `CrossChainConfig.GenesisCoordinatorAddress`~~ / ~~ceremony giảm thiểu front-run
       `bootstrapFoundingChains`~~ — MOOT (2026-08-28): cả field lẫn hàm đã bị xoá (mục 5.3).
-- [ ] **`cross_chain.recovery_committee_json` được set từ khoá RecoveryCommittee sinh HOÀN
-      TOÀN out-of-band/air-gapped** (`recovery_committee_json_override_file` trong
-      `inventory.yml`) — **KHÔNG** dùng bộ khoá tự sinh của
-      `deploy/systemd/gen_recovery_committee_keys.py` (mặc định devnet), và **KHÔNG** trùng
-      với bất kỳ khoá validator/consensus nào của chính Root Anchor hay chain nào khác (tập
-      trung quyền lực thật — phát hiện + vá 2026-09-04, xem
-      `note/eurozone_unified_native_coin_plan.md`). RecoveryCommittee là bên duy nhất có thể
-      `declareChainDeadWithCert`/`unregisterChainWithCert`/`updateCommitteeWithRecoveryCert`
-      cho MỌI chain đã đăng ký — mất khoá này hoặc để nó trùng khoá consensus là mất toàn bộ
-      ý nghĩa "cứu hộ tách biệt quyền lực".
+- [x] ~~`cross_chain.recovery_committee_json`~~ — MOOT (2026-09-24): `RecoveryCommittee` đã bị
+      xoá hoàn toàn, không còn trường cấu hình này (config cũ còn khoá này vẫn tải được, giá
+      trị bị bỏ qua). Chấp nhận hệ quả: chain chết hẳn mà không double-sign thì tiền còn lại và
+      bond của nó bị khoá vĩnh viễn — cần chuẩn bị dự phòng ở tầng vận hành (nhiều node dự
+      phòng đồng bộ theo đa số, xem `execution/pkg/rollup/SEQUENCER_STEP_BY_STEP_PLAN.md`).
 - [ ] Mọi `config.json` khối `cross_chain` đã xác nhận field đúng snake_case bằng cách xem
       log thật (mục 5.1), không chỉ tin node khởi động không lỗi.
 - [ ] Đã đọc và xử lý toàn bộ mục còn mở trong `note/cross_chain_production_readiness_plan.md`
