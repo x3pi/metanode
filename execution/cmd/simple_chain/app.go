@@ -112,7 +112,11 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 		return nil, fmt.Errorf("failed to load config: %v", err)
 	}
 
-	logger.Info("🔧 [MVM CACHE] C++ MVM account state caching enabled: %v", *app.config.MVMCacheEnabled)
+	cacheEnabled := false
+	if app.config.MVMCacheEnabled != nil {
+		cacheEnabled = *app.config.MVMCacheEnabled
+	}
+	logger.Info("🔧 [MVM CACHE] C++ MVM account state caching enabled: %v", cacheEnabled)
 
 	// Configure Xapian base path — combine RootPath + Databases.XapianPath, same pattern as other DBs.
 	// e.g. RootPath="./sample/node0/data-write/data" + XapianPath="/xapian"

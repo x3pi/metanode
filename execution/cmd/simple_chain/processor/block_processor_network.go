@@ -86,9 +86,32 @@ func (bp *BlockProcessor) runUnixSocket() {
 		}
 	})
 
-	// 2. Create the block ingestion channel (was listener.DataChannel())
-	// In the legacy setup, processRustEpochData reads from this channel
-	blockQueue := make(chan *pb.ExecutableBlock, 5000)
+	// 2. Obtain the block ingestion channel (Hook H1)
+	var blockQueue chan *pb.ExecutableBlock
+	if bp.config != nil && bp.config.ConsensusMode == "raft" {
+		blockQueue = bp.blockIngestionQueue
+		if blockQueue == nil {
+			blockQueue = make(chan *pb.ExecutableBlock, 1000)
+			bp.blockIngestionQueue = blockQueue
+		}
+
+		logger.Info("🚀 [CONSENSUS-MODE] Running in Raft mode (Rust FFI consensus bypassed)")
+		lastBlock := storage.GetLastBlockNumber()
+		logger.Warn("⚠️ [CONSENSUS-MODE] Raft mode active (ConsensusReady=false, engine under construction), block=%d", lastBlock)
+
+		go bp.processRustEpochData(blockQueue)
+		go bp.StartCommitterLoop()
+
+		select {
+		case <-bp.stopChan:
+			logger.Info("🛑 [RAFT FEED] Raft processor stopped cleanly via stopChan")
+			return
+		}
+	}
+
+	// Default Rust FFI path: preserve exact legacy buffer capacity (5000)
+	blockQueue = make(chan *pb.ExecutableBlock, 5000)
+	bp.blockIngestionQueue = blockQueue
 
 	// 3. Find Rust configuration path
 	rustConfigPath := bp.config.RustConfigPath
@@ -119,12 +142,14 @@ func (bp *BlockProcessor) runUnixSocket() {
 	go bp.StartCommitterLoop()
 
 	// The runUnixSocket caller expects this function to block/run in background
-	// We can simply return here, or keep it alive like it did. It's normally run as a goroutine.
-	// Since the previous function had a block wait, we can mimic it or just let it exit.
-	// The processRustEpochData is backgrounded now.
 	for {
-		time.Sleep(30 * time.Second)
-		logger.Debug("🔌 [FFI BRIDGE] Main thread monitoring FFI alive")
+		select {
+		case <-bp.stopChan:
+			logger.Info("🛑 [FFI BRIDGE] FFI bridge loop stopped cleanly via stopChan")
+			return
+		case <-time.After(30 * time.Second):
+			logger.Debug("🔌 [FFI BRIDGE] Main thread monitoring FFI alive")
+		}
 	}
 }
 

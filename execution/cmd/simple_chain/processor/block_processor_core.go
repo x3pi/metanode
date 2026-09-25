@@ -177,6 +177,11 @@ type BlockProcessor struct {
 	txClientMutex sync.RWMutex     // G-H4 FIX: Protects txClient and txSender from data races
 	txClient      *txsender.Client // Legacy TCP client (for backward compatibility)
 
+	// Raft mode block ingestion queue (Hook H1)
+	blockIngestionQueue chan *mt_proto.ExecutableBlock
+	stopChan            chan struct{}
+	stopOnce            sync.Once
+
 	// Phase 7 Decomposition
 	txBatchForwarder *TxBatchForwarder
 
@@ -404,6 +409,25 @@ func (bp *BlockProcessor) GetTxClient() *txsender.Client {
 	return bp.txClient
 }
 
+// GetBlockIngestionQueue returns a send-only ingestion channel for ExecutableBlocks (Hook H1 / Raft mode).
+// Callers can only write blocks to this queue, preserving BlockProcessor's exclusive read and lifecycle ownership.
+func (bp *BlockProcessor) GetBlockIngestionQueue() chan<- *mt_proto.ExecutableBlock {
+	return bp.blockIngestionQueue
+}
+
+// SubmitExecutableBlock safely sends an ExecutableBlock to the ingestion channel
+func (bp *BlockProcessor) SubmitExecutableBlock(b *mt_proto.ExecutableBlock) bool {
+	if bp.blockIngestionQueue == nil {
+		return false
+	}
+	select {
+	case bp.blockIngestionQueue <- b:
+		return true
+	default:
+		return false
+	}
+}
+
 // ConnectionByTypeAndAddress implements the IConnectionManager interface for TransactionProcessor.
 func (bp *BlockProcessor) ConnectionByTypeAndAddress(connType int, addr common.Address) network.Connection {
 	if bp.connectionsManager != nil {
@@ -468,11 +492,14 @@ func NewBlockProcessor(
 
 	// Tạo một client để gửi giao dịch đến MetaNode
 	// Client sẽ ưu tiên dùng Unix Domain Socket (nhanh hơn), fallback về HTTP nếu UDS không available
-	txClient, err := txsender.NewClient(rpcAddress, poolSize)
-	if err != nil {
-		logger.Error("Không thể tạo transaction client: %v (sẽ retry trong background)", err)
-		// LAZY RETRY: Khởi động goroutine để retry kết nối sau khi Rust khởi động
-		// Điều này cho phép Go chạy trước Rust
+	// Hook H5: ở chế độ "raft", không cần kết nối tới Rust consensus client
+	var txClient *txsender.Client
+	if config == nil || config.ConsensusMode != "raft" {
+		var err error
+		txClient, err = txsender.NewClient(rpcAddress, poolSize)
+		if err != nil {
+			logger.Error("Không thể tạo transaction client: %v (sẽ retry trong background)", err)
+		}
 	}
 
 	bp := &BlockProcessor{
@@ -504,6 +531,11 @@ func NewBlockProcessor(
 		processingLockChan: make(chan struct{}, 1),
 		backupDbChannel:    make(chan CommitJob, 1000),
 		geiUpdateChan:      make(chan AsyncGEIUpdate, 100),
+
+		// Block ingestion queue & clean shutdown lifecycle
+		// Bounded capacity (5000) preserves legacy Rust FFI buffer capacity
+		blockIngestionQueue: make(chan *mt_proto.ExecutableBlock, 5000),
+		stopChan:            make(chan struct{}),
 
 		lastRateCheckTime:   time.Now(),
 		lastLazyRefreshTime: time.Now(),
@@ -1140,6 +1172,11 @@ func (bp *BlockProcessor) StopWait() {
 	logger.Info("🛑 [SHUTDOWN] Draining BlockProcessor pipeline...")
 	waitStart := time.Now()
 	bp.WaitForPersistence()
+	bp.stopOnce.Do(func() {
+		if bp.stopChan != nil {
+			close(bp.stopChan)
+		}
+	})
 	logger.Info("✅ [SHUTDOWN] BlockProcessor pipeline drained. Safe to flush. (took %v)", time.Since(waitStart))
 }
 

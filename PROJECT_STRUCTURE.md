@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-18
+> **Last updated:** 2026-09-25
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -95,6 +95,7 @@ metanode/
 │  │  ├── proto/        ← gRPC protobuf defs  │   │
 │  │  ├── models/       ← Shared data models  │   │
 │  │  ├── config/       ← Node configuration  │   │
+│  │  ├── rollup/       ← Pure Rollup FSM (cross-node state machine) │   │
 │  │  └── metrics/      ← Prometheus metrics  │   │
 │  └──────────────────────────────────────────┘   │
 └──────────────────┬──────────────────────────────┘
@@ -194,6 +195,13 @@ metanode/
 | `tx_async_queue.go` | 338 | Async tx submission queue |
 | `debug_api.go` | 870 | Debug/admin endpoints |
 | `startup_integrity_check.go` | 272 | Post-crash integrity verification |
+| `c0_spike.go` | 750 | C0 spike harness (`//go:build c0spike`) for determinism, state mutation & restart bypass verification |
+| `c0_spike_stub.go` | 25 | Stub for production binary (`//go:build !c0spike`), exits cleanly if invoked without build tag |
+
+*CLI Flags & Config:*
+- `--tool-c0-spike=verify|worker`: Tool mode for C0 multi-process spike verification harness.
+- `-c0-data-dir`, `-c0-out`, `-c0-blocks`, `-c0-restart`: Parameters for C0 spike execution.
+- `consensus_mode`: "raft" (Rollup Raft ingestion queue mode) or empty (default Rust BFT consensus).
 
 ### `cmd/simple_chain/processor/` — Core Block Processing
 | File | Role |
@@ -236,6 +244,7 @@ metanode/
 | `pruning/` | State pruning manager | 🟡 MED — async background |
 | `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine (per-action self-signed cert model; GovernanceEngine propose/vote/execute removed 2026-09-04, RecoveryCommittee + DeclareChainDeadWithCert + UpdateCommitteeWithRecoveryCert removed 2026-09-24 — `UnregisterChainWithCert` is now self-authorized by the leaving chain's own committee with an `UnregisterNonce` replay guard, and `DeadChains` is set only by `SlashOnEquivocation`), AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
 | `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
+| `rollup/` | Pure deterministic Rollup State Machine (Phase B1), no I/O, idempotent lifecycle management for cross-node transfers | 🟢 LOW — pure logic |
 
 ---
 

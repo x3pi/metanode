@@ -43,11 +43,39 @@ Mỗi cụm Raft đăng ký `chainID` riêng qua `RegisterChainViaStake`, đại
 
 ## 3. Cơ chế Chuyển giá trị Cross-Node — Node Float Account
 
-### 3.1. Vì sao Node Float Account thay vì trần phân bổ + bond
+### 3.1. Vì sao Node Float Account thay vì trần phân bổ + bond (Phân tích khoảng cách A0 & Quyết định kiến trúc)
 
 Mô hình `PerChainAllocation`-làm-trần + `SecurityBond` tách biệt (răn đe SAU KHI phát hiện gian lận) cần 3 bước cho mỗi giao dịch cross-node (`Outbound` → `BatchOutboundCommit`+`QuorumCert` → `ClaimMessage` với hard-cap `FundedAmount`/`ClaimedAmount`), và khi node chết cần cả 1 pipeline nặng (Snapshot, Archival, Velocity, Delay 72h, chống DA-Withholding) mới rút lại được tài sản treo.
 
 `NodeFloatAccount` là tiền thật, Parent Chain tự enforce không cho âm — chuyển giá trị cross-node là 1 lệnh ghi sổ atomic, không cần "khoá rồi chờ claim".
+
+#### Bảng phân tích khoảng cách với Gateway hiện có (Gap Analysis — Bước A0)
+
+| Thao tác (Mục 3.3–3.6) | Hàm Gateway hiện có (`gateway.go`) | Khác biệt cốt lõi / Điểm cần thiết | Đánh giá tái dùng |
+|---|---|---|---|
+| **1. Transfer (Chuyển tiền cross-node)** | `Outbound` + `BatchOutboundCommit` + `AttestCommit` (trừ trần `PerChainAllocation`) | `TransferFloat` là ghi sổ chuyển tiền thật atomic (`FA[src] -= V, FA[dst] += V`), không gom batch Merkle tree, không qua QuorumCert nhiều vòng. | **Không dùng chung logic.** Tạo hàm mới `transferFloat` trên Parent Chain. |
+| **2. Claimed (Đánh dấu đã nhận/xử lý)** | `ClaimMessage` (verify Merkle proof, mint native coin trên dest chain, cập nhật `MessageStatus`) | `MarkClaimed` trên Parent Chain chỉ là chốt trạng thái `ClaimedMessages[msgID] = outcome (CREDITED/REFUND)`, TÁCH RỜI khỏi việc credit balance tại local. Tiền đã nằm ở `FA[dst]` từ trước. | **Tách rời.** Dùng bảng `ClaimedMessages` lưu per-key. |
+| **3. Hoàn tiền (Refund khi lỗi/revert)** | `Refund` + `PendingMessageFailureAttestations` + `RefundReserveAllocation` | Không cần committee ký failure cert; Node 2 tự phát lệnh Transfer ngược `FA[2] -= V, FA[1] += V` (chỉ hoàn `Value`, không hoàn `GasFee`). | **Đơn giản hóa.** Tái dùng cơ chế `TransferFloat` chiều ngược lại. |
+| **4. Reclaim (Đòi lại tiền khi node đích kẹt)** | **Chưa có** (Gateway chỉ có `Refund` và `ClaimDeadChainBalance` khi slash cả chain) | Cơ chế hoàn toàn mới: Node gửi tự reclaim khi `parentBlockTime >= timeout` và `messageID` chưa bị `Claimed`. Enforce on-chain. | **Xây mới hoàn toàn** (`reclaimFloat`). |
+| **5. Nạp tiền (Deposit)** | `AllocateSupplyWithCert` / `GrantAllocation` (cấp trần cho Reserve) | User nạp tiền thật trực tiếp vào contract Root Anchor, tăng ngay `FA[node]`. Không có bước xin cấp hạn mức trần. | **Xây mới** (`depositToFloat`). |
+
+#### Quyết định kiến trúc chốt (Bước A0)
+Chốt chọn: **(ii) Xây dựng `NodeFloatAccount` và `ClaimedMessages` song song với cơ chế lưu trữ per-key riêng biệt.**
+
+* **Lý do kỹ thuật cốt lõi:**
+  1. **Tối ưu hóa phạm vi đọc/ghi (Per-Key Storage):** `GatewayEngine` hiện tại nạp và ghi lại toàn bộ trạng thái dưới dạng 1 JSON blob lớn (`gateway_engine_state_v1` trong `gateway_handler.go`). `NodeFloatAccount` dùng **storage per-key** (`rollup_fa_v1`, `rollup_claimed_v1`), cho phép đọc/ghi $O(1)$ từng slot mà không cần serialize cả bộ nhớ.
+  2. **Thực tế về Block-STM Barrier:** Cần lưu ý rằng vì các giao dịch gửi tới `GATEWAY_CONTRACT_ADDRESS` được phân loại là **barrier transaction** (`true_block_stm.go:185`), các giao dịch cross-node này vẫn được xử lý tuần tự theo địa chỉ hợp đồng tại tầng Block-STM. Việc lưu per-key **không tự động làm chúng song song hoàn toàn**, nhưng giúp giảm triệt để chi phí CPU/RAM khi không phải decode/encode JSON blob 2.500 dòng trên mỗi block.
+  3. **Blast Radius thực tế:** Code logic nghiệp vụ của Gateway cũ được bảo toàn nguyên vẹn. Tuy nhiên, vì cả hai hệ thống cùng chia sẻ `ChainRegistry`, cơ chế `SlashOnEquivocation`, bộ dispatch contract và cùng ghi vào State Trie của Parent Chain, hệ thống vẫn tồn tại coupling tài nguyên. Do đó, cần có bộ kiểm thử regression toàn diện khi tích hợp vào `gateway_handler.go`.
+  4. **Tái sử dụng an toàn:** Chỉ dùng lại các thành phần trung lập: `ChainRegistry` (tra cứu danh tính chain) và `SlashOnEquivocation` (xử phạt khi double-sign). Luồng `outbound`/`attestCommit`/`claimMessage` cũ được **giữ nguyên vẹn** cho các mạng BFT thông thường, không bị thay thế hay ẩn đi.
+
+#### Bảng Quyền sở hữu & Bất biến (Ownership & Invariant Table)
+
+| Cấu trúc dữ liệu | Nơi lưu trữ & Chủ sở hữu | Bất biến bắt buộc (Invariants) | Quyền gọi (Caller Authorization) |
+|---|---|---|---|
+| `NodeFloatAccount[chainID]` | Parent Chain (Root Anchor per-key: `rollup_fa_v1`) | `FA[chainID] >= 0`; $\sum FA == \text{genesis\_total\_supply}$ | `depositToFloat` (User nạp tiền); `transferFloat` (Node gửi đã xác thực); `refundFloat` (Node nhận khi revert); `reclaimFloat` (Parent Chain khi timeout). |
+| `ClaimedMessages[messageID]` | Parent Chain (Root Anchor per-key: `rollup_claimed_v1`) | Write-once (Idempotent), ghi nhận `Outcome` (CREDITED hoặc REFUND); một khi đã ghi thì `reclaimFloat` bị từ chối vĩnh viễn. | Node đích (`markClaimed` kèm chữ ký node). |
+| `RollupRecord[messageID]` | Local Rollup Node (SmartContractDB per-key: `rollup_msg_v1`) | Trạng thái chuyển đổi đơn điệu qua pure state machine `Next()`. Không bao giờ vừa SUCCESS vừa REFUNDED. | Engine thực thi nội bộ của Rollup Node. |
+| `ReplayGuard / Nonce` | Parent Chain (`UnregisterNonce`, `sourceSeq`) | Đơn điệu tăng dần (strictly monotonic), chống replay các chứng chỉ hoặc giao dịch đã gửi. | Committee của node hoặc User ký giao dịch. |
 
 ⚠️ **Giới hạn thật còn lại:** Parent Chain "không lưu state ứng dụng" nên vẫn không thể tự verify 1 node có credit đúng cho user cục bộ của mình hay không. Đây **không phải** 1 "bước Nạp quỹ" rời rạc nào (mục 3.2: không có bước đó, không có gì để khai khống ở đây) — mà là rủi ro custody đã biết (mục 2.3/#8: node toàn quyền với state cục bộ). Cách duy nhất bắt được sai lệch này là ở thời điểm node chết, qua Snapshot/Allocation-proof pipeline (mục 6.3).
 

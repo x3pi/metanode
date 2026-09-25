@@ -354,13 +354,15 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 
 ## 2. Bảng theo dõi tiến độ
 
+> **Quy ước:** `☑` = đã đạt toàn bộ Definition of Done; `◐` = đã có triển khai/kết quả ban đầu nhưng còn hạng mục bắt buộc sau review; `☐` = chưa làm.
+
 | Bước | Tên | Kích thước | Phụ thuộc | Trạng thái |
 |---|---|---|---|---|
-| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ☐ |
+| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ◐ |
 | A1 | Sửa tài liệu thiết kế | S | A0 | ☐ |
 | A2 | Chốt đặc tả dữ liệu | S | A1 | ☐ |
-| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ☐ |
-| B1 | State machine thuần | M | A2 | ☐ |
+| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ◐ |
+| B1 | State machine thuần | M | A2 | ◐ |
 | B2 | Store per-key | M | B1 | ☐ |
 | B3 | Parent Chain: Float + Claimed | L | A0, A2 | ☐ |
 | B4 | Handler gửi cross-node | M | B2, B3 | ☐ |
@@ -378,6 +380,73 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 | D1 | Giám sát + runbook | M | C5 | ☐ |
 | F0–F5 | Neo block lên Parent Chain + bằng chứng (phương án A, xem Giai đoạn F) | S–L | C5 | ☐ |
 | F0–F6 (chốt) | **Bằng chứng gian lận ERC20 — chế độ giao dịch chuẩn có chữ ký** (`SEQUENCER_ERC20_STANDARD_TX_PROOF.md` mục 12) | S–L | C5 | ☐ |
+
+---
+
+## 2.1. Kế hoạch sửa sau review A0/B1/C0 (2026-09-25) — ◐ ĐẠT ĐỢT 1 / ĐANG CHỜ CỔNG P1–P2 TOÀN DIỆN
+
+> ◐ **TIẾN ĐỘ NGHIỆM THU (2026-09-25):** Các hạng mục A0, B1, C0 được đặt ở trạng thái `◐` (Đạt đợt 1 / Đang hoàn thiện các cổng P1–P2).
+> - **P0 (B1 - ◐):** Clone `*big.Int` loại bỏ triệt để aliasing, validate `Value <= 0`, chống overflow uint64 timeout, loại bỏ dead state, đạt test suite (143 Descartes pairs, property/fuzz test, boundary tests). Đang chờ đối chiếu tích hợp sâu với schema A2.
+> - **P1 (C0 - ◐):** Queue `blockIngestionQueue` khởi tạo đồng bộ trong constructor `NewBlockProcessor`, expose send-only `chan<-`, shutdown an toàn qua `stopChan`/`sync.Once`, `ConsensusReady()` fail-closed trung thực, cách ly cờ test `--tool-c0-spike`.
+> - **P2 (C0 - ◐):** 100% determinism giữa 2 process độc lập có state mutation thật (receipts status=1, sender nonce increment 1->3->5->7->9->11->13, recipient balance increment), inject RW & WW Block-STM conflicts, restart bypass đối chiếu identity (Zero-Fork P2.5) và Block #6 (N+1) continuation thành công. Báo cáo nghiệm thu đã xuất tại [`C0_VERIFICATION_REPORT.md`](./C0_VERIFICATION_REPORT.md).
+> - **P3 (A0 - ◐):** Chuẩn hóa symbols callable, giải trình barrier Block-STM cho Gateway, ghi nhận blast radius thực tế và bảng Ownership & Invariants trong [`SEQUENCER_DESIGN.md`](./SEQUENCER_DESIGN.md).
+> - **Các cổng còn lại để chuyển A0/B1/C0 sang ☑:** (1) Workload có EVM contract & barrier gateway chạy nhiều vòng; (2) Restart thử nghiệm bằng `kill -9` đột ngột; (3) Bằng chứng không khởi động Rust runtime (`InitFFIBridge`) qua log/strace. C1 chỉ bắt đầu khi C0 đạt `☑`.
+
+Ba bước đã có kết quả ban đầu đạt đợt 1 nhưng **giữ trạng thái ◐ cho tới khi hoàn tất các cổng nghiệm thu sâu**. Sửa theo đúng thứ tự dưới đây; không bắt đầu C1 trước khi C0 quay lại `☑`.
+
+### P0 — B1: sửa tính đúng đắn của state machine
+
+1. **Loại bỏ alias `*big.Int`:** mọi `Action.Amount` phải sở hữu bản sao bằng `new(big.Int).Set(...)`; không trả lại trực tiếp `event.Value`. Áp dụng đồng nhất cho `ReclaimEligible`, hai nhánh `CreditObserved` và rà toàn bộ action còn lại.
+2. **Validate amount tại nơi phát action:** `nil` hoặc số âm phải bị từ chối trước khi tạo `SendReclaim`/`MarkClaimed`/`CreditLocal`/`SendRefund`. Chốt bằng đặc tả việc `Value == 0` có hợp lệ hay không rồi test đúng quyết định đó.
+3. **Chống overflow khi xét Reclaim:** không dùng `ParentConfirmTime + Timeout`. Chỉ cho phép khi `ParentBlockTime >= ParentConfirmTime` và `ParentBlockTime-ParentConfirmTime >= Timeout`.
+4. **Đối chiếu `StateObserved` và `Role`:** xác nhận chúng thực sự thuộc schema B1. Nếu `StateObserved` cần tồn tại thì phải có cạnh đi vào rõ ràng; nếu `Role` là bất biến thì `Next` phải nhận/enforce role hoặc loại bỏ type/error chưa dùng. Không để state/type “trang trí” mà không có đường hợp lệ.
+5. **Bổ sung test theo đặc tả T-SM:**
+   - table-driven phủ toàn bộ cạnh hợp lệ;
+   - sinh toàn bộ tích Descartes `(State, EventType)` và từ chối mọi cặp không có trong bảng;
+   - replay không phát action lần hai;
+   - mutation test chứng minh sửa `Event.Value` sau `Next` không đổi `Action.Amount`;
+   - boundary test cho `uint64` và property/fuzz test bất biến không thể vừa success vừa refunded.
+
+**Cổng hoàn thành B1:** `go test -race -count=1 ./pkg/rollup`, fuzz/property suite đạt; package chỉ có dependency được A2 cho phép; bảng transition và code khớp từng cạnh.
+
+### P1 — C0: sửa lifecycle, race và readiness trước khi tin kết quả harness
+
+1. **Khởi tạo channel đồng bộ:** tạo `blockIngestionQueue` trong constructor trước khi khởi chạy `runUnixSocket`; không gán trong một goroutine rồi poll từ goroutine khác. Chỉ expose hướng channel cần thiết (`chan<-` cho producer, `<-chan` cho consumer), giữ buffer có giới hạn và ghi rõ lý do chọn capacity.
+2. **Có lifecycle dừng sạch:** thay vòng `for { Sleep(...) }` bằng chờ `ctx.Done()`; quy định owner đóng channel và đợi ingestion/committer goroutine kết thúc. `App.Stop()` phải dừng được harness mà không rò goroutine.
+3. **Readiness phản ánh sự thật:** chế độ `raft` chỉ trả `ready=true` khi nguồn cấp block đã khởi tạo, có leader/nguồn submit hợp lệ và đã bắt kịp tip. Trong C0 chưa có H2/raftfeed thì không quảng bá khả năng nhận transaction qua RPC.
+4. **Tách spike khỏi C1:** C0 là harness kiểm chứng, không được vô tình biến nhánh `consensus_mode=raft` chưa hoàn chỉnh thành chế độ sản phẩm. Hoặc cô lập hook bằng cờ tool-only, hoặc hoàn thiện tối thiểu readiness/submit lifecycle trước khi để config công khai kích hoạt.
+5. **Rà toàn bộ đường gọi Rust:** lập danh sách thực tế H1–H6 (và bổ sung H mới nếu có) gồm startup, tx submit, vote/admin RPC, snapshot pause/resume, GEI, epoch/validator callbacks. Với mỗi điểm ghi rõ: giữ nguyên, thay bằng Go, hay trả lỗi `unsupported` trong raft mode.
+
+**Cổng an toàn P1:** `go test -race` không báo race; shutdown hoàn tất; queue đầy trả backpressure rõ ràng; `consensus_mode` rỗng vẫn đi nguyên đường Rust cũ.
+
+### P2 — C0: làm lại bằng chứng determinism và restart
+
+1. **Xác minh nội dung thực thi, không chỉ hash:** ngoài block hash/state root/receipt root/tx root, kiểm receipt status, nonce và balance kỳ vọng để loại trường hợp mọi giao dịch cùng fail nhưng hai node vẫn cho kết quả giống nhau.
+2. **Mở rộng workload:** có chuyển native coin, EVM contract, tx chạm Gateway/barrier, nhiều tx cùng sender và conflict Block-STM. Chạy nhiều vòng trên hai process độc lập với cùng input đóng băng.
+3. **Restart có acknowledgment:** mỗi replay phải trả kết quả `already committed`/`skipped` theo GEI hoặc block identity; đợi ingestion xác nhận đã xử lý toàn bộ replay rồi mới so state. Deadline trong test chỉ dùng để báo test treo, tuyệt đối không dùng để quyết định commit/dispatch.
+4. **Kiểm tiếp tục sau restart:** sau khi replay các block cũ, cấp thêm block `N+1`; yêu cầu block mới commit đúng parent, GEI liên tục và state root giống process đối chứng. Đây là bằng chứng DB và state trong bộ nhớ đã cùng tip.
+5. **Kiểm identity khi bypass:** không bỏ qua chỉ vì height/GEI nhỏ hơn tip; phải đối chiếu block/commit identity đã lưu. Khác identity thì fail closed, không dispatch.
+6. **Chứng minh không khởi động Rust:** thu log/`strace` cho thấy link library không tự tạo runtime/thread/socket khi `InitFFIBridge` không được gọi.
+7. **Ghi artifact C0:** lưu command, config đã đóng băng, số vòng, workload, kết quả từng block, kết quả restart và danh sách H1–H6 cuối cùng vào một báo cáo ngắn trong `pkg/rollup/`.
+
+**Cổng hoàn thành C0:** hai process khớp từng block qua nhiều vòng và workload đầy đủ; restart/replay có acknowledgment, block `N+1` tiếp tục đúng; không còn gọi Rust ngoài danh sách đã xử lý; `build_check.sh` sạch.
+
+### P3 — A0: hiệu chỉnh tài liệu và blast radius
+
+1. Đối chiếu lại **symbol callable hiện tại** trong `gateway.go`/`gateway_handler.go`; không dùng tên hàm đã bị xoá nhưng còn sót trong comment làm bằng chứng gap analysis.
+2. Sửa khẳng định “per-key cho phép chạy song song”: per-key chỉ giảm phạm vi đọc/ghi; khả năng song song còn phụ thuộc contract address, barrier classification và conflict set của Block-STM.
+3. Thay “Zero Blast Radius” bằng blast radius thực tế: code Gateway cũ được giữ nguyên, nhưng dùng chung `ChainRegistry`, `SlashOnEquivocation`, contract dispatch, storage/state-root và Parent Chain vẫn tạo coupling cần test regression.
+4. Bổ sung bảng ownership/invariant cho `NodeFloatAccount`, `ClaimedMessages`, nonce/replay guard và quyền gọi từng thao tác trước khi A1/A2 chốt schema.
+
+**Cổng hoàn thành A0:** mọi tên hàm trong bảng trỏ tới code đang tồn tại; quyết định xây song song vẫn có lập luận đúng sau khi tính đủ barrier và shared dependencies; blast radius được ghi trung thực.
+
+### P4 — Thứ tự kiểm chứng cuối
+
+1. Hoàn tất P0 và chạy test B1.
+2. Hoàn tất P1 rồi chạy race test cho processor/harness.
+3. Hoàn tất P2 và chạy C0 lặp lại từ data directory mới hoàn toàn.
+4. Hoàn tất P3, đối chiếu tài liệu với code.
+5. Chạy `cd consensus/metanode/scripts && ./build_check.sh`; chỉ đổi A0/B1/C0 về `☑` khi tất cả cổng tương ứng đều đạt và lưu được bằng chứng.
 
 ---
 
