@@ -186,11 +186,14 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 			if err != nil || committedBlk == nil {
 				return fmt.Errorf("restart bypass: block #%d hash %s not found in DB", targetHeight, bHash.Hex())
 			}
+			if committedBlk.Header().GlobalExecIndex() != eb.GlobalExecIndex {
+				return fmt.Errorf("restart bypass: block #%d GEI mismatch: db=%d, consensus=%d", targetHeight, committedBlk.Header().GlobalExecIndex(), eb.GlobalExecIndex)
+			}
 			if len(committedBlk.Transactions()) != len(eb.Transactions) {
 				return fmt.Errorf("restart bypass: block #%d tx count mismatch: db=%d, consensus=%d", targetHeight, len(committedBlk.Transactions()), len(eb.Transactions))
 			}
-			fmt.Printf("⏭️ [C0 WORKER] Block #%d bypassed cleanly with identity match (Hash=%s, Txs=%d)\n",
-				targetHeight, bHash.Hex()[:16]+"...", len(committedBlk.Transactions()))
+			fmt.Printf("⏭️ [C0 WORKER] Block #%d bypassed cleanly with identity match (GEI=%d, Txs=%d, Hash=%s)\n",
+				targetHeight, committedBlk.Header().GlobalExecIndex(), len(committedBlk.Transactions()), bHash.Hex()[:16]+"...")
 		}
 
 		_ = bIdx
@@ -715,7 +718,7 @@ func writeC0VerificationReport(
 	sb.WriteString("- [x] Đóng `stopChan` qua `sync.Once` trong `StopWait()` an toàn không panic.\n")
 	sb.WriteString("- [x] 100% determinism giữa 2 process độc lập có state mutation thật (receipts, nonce, balance).\n")
 	sb.WriteString("- [x] Block-STM xử lý chính xác cả RW lẫn WW conflicts.\n")
-	sb.WriteString("- [x] Restart bypass đối chiếu identity (block hash & tx count) và tiếp tục tiến triển sang block $N+1$.\n\n")
+	sb.WriteString("- [x] Restart bypass đối chiếu identity (GEI & tx count) và tiếp tục tiến triển sang block $N+1$.\n\n")
 	sb.WriteString("### 🛑 Các cổng nghiệm thu bắt buộc trước khi chuyển C0/C1 sang ☑:\n")
 	sb.WriteString("1. Workload có EVM contract và giao dịch tương tác Gateway/barrier chạy nhiều vòng liên tục (multi-round).\n")
 	sb.WriteString("2. Restart thử nghiệm bằng `kill -9` đột ngột (thay vì shutdown tuần tự) và đối chiếu identity toàn vẹn.\n")

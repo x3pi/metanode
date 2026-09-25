@@ -87,14 +87,14 @@ func (bp *BlockProcessor) runUnixSocket() {
 	})
 
 	// 2. Obtain the block ingestion channel (Hook H1)
-	var blockQueue chan *pb.ExecutableBlock
+	// The queue is created once, synchronously, in NewBlockProcessor (bounded, 5000):
+	// never (re)assign bp.blockIngestionQueue from this goroutine.
+	blockQueue := bp.blockIngestionQueue
+	if blockQueue == nil {
+		logger.Error("❌ [BLOCK QUEUE] blockIngestionQueue was not initialized by NewBlockProcessor")
+		fatal.Exit("Fatal exit from block_processor_network.go: nil blockIngestionQueue")
+	}
 	if bp.config != nil && bp.config.ConsensusMode == "raft" {
-		blockQueue = bp.blockIngestionQueue
-		if blockQueue == nil {
-			blockQueue = make(chan *pb.ExecutableBlock, 1000)
-			bp.blockIngestionQueue = blockQueue
-		}
-
 		logger.Info("🚀 [CONSENSUS-MODE] Running in Raft mode (Rust FFI consensus bypassed)")
 		lastBlock := storage.GetLastBlockNumber()
 		logger.Warn("⚠️ [CONSENSUS-MODE] Raft mode active (ConsensusReady=false, engine under construction), block=%d", lastBlock)
@@ -108,10 +108,6 @@ func (bp *BlockProcessor) runUnixSocket() {
 			return
 		}
 	}
-
-	// Default Rust FFI path: preserve exact legacy buffer capacity (5000)
-	blockQueue = make(chan *pb.ExecutableBlock, 5000)
-	bp.blockIngestionQueue = blockQueue
 
 	// 3. Find Rust configuration path
 	rustConfigPath := bp.config.RustConfigPath

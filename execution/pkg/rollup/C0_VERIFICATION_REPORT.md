@@ -65,7 +65,7 @@ Spike C0 đã đạt các tiêu chí cơ bản của bước kiểm chứng xác
 - [x] Đóng `stopChan` qua `sync.Once` trong `StopWait()` an toàn không panic.
 - [x] 100% determinism giữa 2 process độc lập có state mutation thật (receipts, nonce, balance).
 - [x] Block-STM xử lý chính xác cả RW lẫn WW conflicts.
-- [x] Restart bypass đối chiếu identity (block hash & tx count) và tiếp tục tiến triển sang block $N+1$.
+- [x] Restart bypass đối chiếu identity (GEI & tx count) và tiếp tục tiến triển sang block $N+1$.
 
 ### 🛑 Các cổng nghiệm thu bắt buộc trước khi chuyển C0/C1 sang ☑:
 1. Workload có EVM contract và giao dịch tương tác Gateway/barrier chạy nhiều vòng liên tục (multi-round).
