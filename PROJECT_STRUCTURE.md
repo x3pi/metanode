@@ -1,5 +1,5 @@
 # 🗺️ Metanode Project Structure
-> **Last updated:** 2026-09-26
+> **Last updated:** 2026-09-26 (C2 Raft cluster in `rollup/raftfeed/`)
 > **Rule:** This file MUST be updated whenever a new module, package, or significant file is added/removed/renamed.
 
 ---
@@ -247,7 +247,7 @@ metanode/
 | `cross_chain/` | Cross-chain types, Root Anchor ledger, GatewayEngine (per-action self-signed cert model; GovernanceEngine propose/vote/execute removed 2026-09-04, RecoveryCommittee + DeclareChainDeadWithCert + UpdateCommitteeWithRecoveryCert removed 2026-09-24 — `UnregisterChainWithCert` is now self-authorized by the leaving chain's own committee with an `UnregisterNonce` replay guard, and `DeadChains` is set only by `SlashOnEquivocation`), AssetRegistryEngine, Ceremony, Root Anchor RPC client, Relayer reference engine, and `relayer_daemon/` automated service (Milestones A-I) | 🟢 LOW |
 | `blockchain/tx_processor/` | Transaction processor, VM dispatch, `GatewayHandler` native bridge contract dispatcher, `CommitteeAttestationWorker`, `CommitAttestationWorker` | 🔴 HIGH — EVM state |
 | `rollup/` | Pure deterministic Rollup State Machine (Phase B1), no I/O, idempotent lifecycle management for cross-node transfers | 🟢 LOW — pure logic |
-| `rollup/raftfeed/` | `consensus_mode="raft"` switch (`Enabled()`), config validation (`ValidateConfig`) and the C1 single-node block source: `Submit(batch)` → bounded queue → `Feeder` stamps timestamp/GEI/block number/hash chain → `ExecutableBlock` into `BlockProcessor.blockIngestionQueue`; started by the raft branch of `block_processor_network.go`; `tx_batch_forwarder` sends batches here instead of the Rust FFI (`batchSubmitter`); default-off guards on Rust-consensus entry points. No replication yet (C2) | 🟡 MED — guards on RPC/forwarder paths; only active when `consensus_mode="raft"` |
+| `rollup/raftfeed/` | `consensus_mode="raft"` switch (`Enabled()`), `ValidateConfig`, and the block source. **C1** (no `raft{}` config block): single-node `Feeder`. **C2** (`raft{}` block present): replicated `hashicorp/raft` cluster — `node.go` (bolt log/stable stores with fsync, TCP transport, bounded propose queue, re-route on lost leadership), `fsm.go` (`Apply` builds the same `ExecutableBlock` on every replica; `Snapshot` waits for DB durability before Raft may compact; `Restore` fail-closed), `forward.go` (follower→leader HTTP + HMAC), `stamper.go` (shared block stamping), `proto/batch.proto` → `pb/` (`BatchRecord`, `FsmSnapshotMeta`). Blocks are handed to the pipeline only when the previous block is durable (`waitPreviousDurable`). Config: `pkg/config/raft_config.go`. Started by the raft branch of `block_processor_network.go`; `tx_batch_forwarder` sends batches here (`batchSubmitter`); default-off guards on Rust-consensus entry points | 🟡 MED — guards on RPC/forwarder paths; only active when `consensus_mode="raft"`; adds direct deps `hashicorp/raft`, `raft-boltdb/v2` |
 
 ---
 

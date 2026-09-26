@@ -4,6 +4,7 @@ package processor
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	// "github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
@@ -107,6 +108,38 @@ func (bp *BlockProcessor) runUnixSocket() {
 			nextIndex = ci
 		}
 		nextIndex++
+		if rc := bp.config.Raft; rc != nil {
+			// C2: replicated Raft cluster. Every replica builds the blocks from the committed batches, and the
+			// leader address stamped in every block is the fixed sequencer address, never "whoever leads".
+			if !strings.EqualFold(rc.SequencerAddress, bp.validatorAddress.Hex()) {
+				logger.Error("❌ [RAFT] raft.sequencer_address %s does not match this node's signing address %s", rc.SequencerAddress, bp.validatorAddress.Hex())
+				fatal.Exit("Fatal exit from block_processor_network.go: raft sequencer_address mismatch")
+			}
+			node, err := raftfeed.StartCluster(raftfeed.ClusterConfig{
+				Raft:    *rc,
+				Sink:    blockQueue,
+				Durable: storage.GetLastBlockNumber,
+				OnFatal: func(err error) {
+					// A replica that cannot apply an entry exactly must not keep serving a chain that may differ.
+					logger.Error("🚨 [RAFT] replica cannot continue: %v", err)
+					fatal.Exit("Fatal exit from block_processor_network.go: raft replica failed closed")
+				},
+			})
+			if err != nil {
+				logger.Error("❌ [RAFT] cannot start the cluster node: %v", err)
+				fatal.Exit("Fatal exit from block_processor_network.go: raft cluster did not start")
+			}
+			defer node.Stop()
+			logger.Info("🚀 [RAFT] Cluster node %s started (peers=%d, lastBlock=%d)", rc.NodeID, len(rc.Peers), lastBlock)
+
+			go bp.processRustEpochData(blockQueue)
+			go bp.StartCommitterLoop()
+
+			<-bp.stopChan
+			logger.Info("🛑 [RAFT] Raft processor stopped cleanly via stopChan")
+			return
+		}
+
 		// The feed's leader is this node (C1 has one node); Go never derives a leader itself, it is stamped here.
 		feeder, err := raftfeed.Start(raftfeed.StartConfig{
 			Sink:          blockQueue,
@@ -114,6 +147,7 @@ func (bp *BlockProcessor) runUnixSocket() {
 			NextBlock:     lastBlock + 1,
 			Epoch:         storage.GetLastHandledCommitEpoch(),
 			LeaderAddress: bp.validatorAddress,
+			Durable:       storage.GetLastBlockNumber,
 		})
 		if err != nil {
 			logger.Error("❌ [RAFT FEED] cannot start the block feed: %v", err)

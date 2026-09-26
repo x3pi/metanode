@@ -182,6 +182,7 @@ type SimpleChainConfig struct {
 
 	ChainId                            *big.Int       `json:"chainId"`
 	ConsensusMode                      string         `json:"consensus_mode,omitempty"`
+	Raft                               *RaftConfig    `json:"raft,omitempty"` // only read when consensus_mode="raft"; nil = single-node feed (C1)
 	PrivateKey                         string         `json:"private_key"`
 	Address                            string         `json:"address"`
 	LogPath                            string         `json:"log_path"`

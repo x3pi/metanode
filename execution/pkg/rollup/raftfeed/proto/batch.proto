@@ -1,0 +1,25 @@
+syntax = "proto3";
+package rollup;
+option go_package = "github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed/pb";
+
+// One entry of the Raft log. Immutable once the leader wrote it. Encoded with Deterministic marshalling:
+// the same batch must always give the same bytes.
+message BatchRecord {
+  uint32 schema_version = 1; // = 1
+  uint64 timestamp_ms = 2;   // stamped by the LEADER when proposing; replicas never read a clock
+  bytes txs = 3;             // exactly transaction.MarshalTransactions output (pb.Transactions)
+  uint32 tx_count = 4;       // cross-check against the real number of txs; mismatch => entry rejected at Apply
+  string proposer_id = 5;    // leader node_id, diagnostics only; NEVER affects block content
+}
+
+// Metadata of a Raft snapshot of the FSM. The real state lives in NOMT/DB, so the snapshot only carries the
+// counters needed to continue numbering. Every value must describe blocks that are DURABLE in the DB.
+message FsmSnapshotMeta {
+  uint32 schema_version = 1;    // = 1
+  uint64 applied_index = 2;     // last Raft index applied
+  uint64 last_block_number = 3; // last block number handed to the pipeline (and durable when the snapshot is taken)
+  uint64 last_global_exec_index = 4; // GEI counter of the last block (next one = +1)
+  bytes last_commit_hash = 5;   // 32 bytes, head of the commit-hash chain
+  bytes last_state_root = 6;    // reserved (state-root cross-check, T-RF-09 deferred); empty for now
+  uint64 last_timestamp_ms = 7; // block timestamp of the last block (keeps timestamps strictly increasing after restore)
+}
