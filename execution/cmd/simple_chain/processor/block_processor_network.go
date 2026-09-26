@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	// "github.com/meta-node-blockchain/meta-node/cmd/simple_chain/processor/pipeline"
 	"github.com/meta-node-blockchain/meta-node/executor"
 	"github.com/meta-node-blockchain/meta-node/pkg/blockchain"
@@ -119,6 +121,9 @@ func (bp *BlockProcessor) runUnixSocket() {
 				Raft:    *rc,
 				Sink:    blockQueue,
 				Durable: storage.GetLastBlockNumber,
+				BlockHash: func(n uint64) (common.Hash, bool) {
+					return blockchain.GetBlockChainInstance().GetBlockHashByNumber(n)
+				},
 				OnFatal: func(err error) {
 					// A replica that cannot apply an entry exactly must not keep serving a chain that may differ.
 					logger.Error("🚨 [RAFT] replica cannot continue: %v", err)

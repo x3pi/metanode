@@ -125,3 +125,5 @@ func (n *Node) leaderForwardAddr() (string, bool) {
 	a, ok := n.forwardAddr[id]
 	return a, ok
 }
+
+func macEqual(a, b []byte) bool { return hmac.Equal(a, b) }

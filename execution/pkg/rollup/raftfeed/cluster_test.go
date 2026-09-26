@@ -2,6 +2,7 @@ package raftfeed
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/hashicorp/raft"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
@@ -77,6 +79,9 @@ type harness struct {
 	secret  []byte
 	mutate  func(*config.RaftConfig)
 	tune    func(*raft.Config)
+	wrap    map[string]func(raft.LogStore) raft.LogStore // per node id
+	badMu   sync.Mutex
+	badHash map[string]bool // node ids whose BlockHash lies
 	fatalMu sync.Mutex
 	fatals  map[string]error
 }
@@ -133,7 +138,7 @@ func (h *harness) start(m *member) {
 	go m.disk.run(sink, m.stopPipe)
 	m.node, err = startNode(ClusterConfig{
 		Raft: h.rcfg(m), Sink: sink, Durable: m.disk.last.Load, Secret: h.secret,
-		Transport: tr, ForwardListener: ln, Tune: h.tune,
+		Transport: tr, ForwardListener: ln, Tune: h.tune, WrapLogStore: h.wrap[m.id], BlockHash: h.blockHashFor(m),
 		OnFatal: func(e error) { h.fatalMu.Lock(); h.fatals[m.id] = e; h.fatalMu.Unlock() },
 	})
 	if err != nil {
@@ -153,6 +158,28 @@ func (h *harness) stop(m *member) {
 func (h *harness) startAll() {
 	for _, m := range h.m {
 		h.start(m)
+	}
+}
+
+// blockHashFor stands in for the execution layer's header hash: the FSM's commit hash of the block, or a wrong
+// value when the member is configured to lie (simulating a replica that executed a different state).
+func (h *harness) blockHashFor(m *member) BlockHashFunc {
+	return func(n uint64) (common.Hash, bool) {
+		if n == 0 || n > m.disk.last.Load() {
+			return common.Hash{}, false
+		}
+		bl := m.disk.blocks()
+		if n > uint64(len(bl)) {
+			return common.Hash{}, false
+		}
+		hash := common.BytesToHash(bl[n-1].CommitHash)
+		h.badMu.Lock()
+		bad := h.badHash[m.id]
+		h.badMu.Unlock()
+		if bad {
+			hash[0] ^= 0xff
+		}
+		return hash, true
 	}
 }
 
@@ -795,5 +822,184 @@ func TestValidateConfig_Raft(t *testing.T) {
 	}
 	if err := ValidateConfig(&config.SimpleChainConfig{ConsensusMode: "raft"}); err != nil {
 		t.Fatalf("raft mode without a raft block (single-node C1 feed) rejected: %v", err)
+	}
+}
+
+// faultyLogStore fails every write after `okWrites` successful StoreLogs calls, like a disk that stops taking
+// (fsync'd) writes. Reads keep working.
+type faultyLogStore struct {
+	raft.LogStore
+	okWrites atomic.Int64
+}
+
+var errDisk = errors.New("injected disk failure")
+
+func (f *faultyLogStore) StoreLog(l *raft.Log) error { return f.StoreLogs([]*raft.Log{l}) }
+func (f *faultyLogStore) StoreLogs(ls []*raft.Log) error {
+	if f.okWrites.Add(-1) < 0 {
+		return errDisk
+	}
+	return f.LogStore.StoreLogs(ls)
+}
+
+// T-RF-08 (log-store failure form; a real power cut mid-fsync is not simulated): the leader's log store starts
+// failing writes. Nothing already committed is lost, nothing diverges, the other two replicas elect a new leader
+// and every submitted tx is executed; the failing node's chain is a prefix of theirs.
+func TestCluster_LeaderLogStoreFailureLosesNothingAndForksNothing(t *testing.T) {
+	h := newHarness(t, 3)
+	var fs *faultyLogStore
+	h.wrap = map[string]func(raft.LogStore) raft.LogStore{
+		"n0": func(ls raft.LogStore) raft.LogStore {
+			fs = &faultyLogStore{LogStore: ls}
+			fs.okWrites.Store(1 << 30)
+			return fs
+		},
+	}
+	h.startAll()
+	l := h.leader()
+	if l.id != "n0" {
+		t.Skip("n0 did not win the first election; the fault is injected on n0")
+	}
+	for i := 0; i < 20; i++ {
+		h.submit(l, testBatch(t, uint64(i)))
+	}
+	h.waitBlocks(20, h.m...)
+	fs.okWrites.Store(0)             // the disk dies here
+	l.node.Submit(testBatch(t, 999)) // first write after the failure: the node must take itself out
+	var alive []*member
+	for _, m := range h.m {
+		if m.id != "n0" {
+			alive = append(alive, m)
+		}
+	}
+	nl := h.leader(l)
+	for i := 20; i < 60; i++ {
+		h.submit(nl, testBatch(t, uint64(i)))
+	}
+	h.waitBlocks(60, alive...)
+	time.Sleep(500 * time.Millisecond)
+	h.assertIdentical(alive...)
+	// Every tx that was replicated (0..59) is executed exactly once. The one batch the failing node had only
+	// accepted (nonce 999, in its propose queue, never replicated) dies with that replica, exactly like a kill -9:
+	// the sender must resend it. So 60 or 61 distinct txs, never fewer, never a duplicate of 0..59.
+	seen := map[uint64]int{}
+	for _, b := range alive[0].disk.blocks() {
+		seen[nonceOf(t, b)]++
+	}
+	for n := uint64(0); n < 60; n++ {
+		if seen[n] != 1 {
+			t.Fatalf("nonce %d executed %d times", n, seen[n])
+		}
+	}
+	if seen[999] > 1 {
+		t.Fatalf("nonce 999 executed %d times", seen[999])
+	}
+	if !l.node.Failed() {
+		t.Fatal("the node with the failing disk did not take itself out")
+	}
+	// the failed node must not have executed anything the others did not (prefix of their chain)
+	got, ref := l.disk.blocks(), alive[0].disk.blocks()
+	if len(got) > len(ref) {
+		t.Fatalf("failed node has %d blocks, the majority %d", len(got), len(ref))
+	}
+	for i := range got {
+		if !bytes.Equal(marshalBlock(t, got[i]), marshalBlock(t, ref[i])) {
+			t.Fatalf("failed node diverged at block %d", i+1)
+		}
+	}
+}
+
+// T-RF-09 (with the header hash standing in for the state root): a replica whose executed chain differs from the
+// one a majority holds stops and is counted; the other two keep committing. And on a healthy cluster no replica
+// is ever flagged (no false positives).
+func TestCluster_ReplicaWithDifferentStateStopsAndOthersContinue(t *testing.T) {
+	old := attestInterval
+	attestInterval = 50 * time.Millisecond
+	t.Cleanup(func() { attestInterval = old })
+
+	// healthy first: 40 blocks, several checkpoints, nobody flagged
+	h := newHarness(t, 3)
+	h.startAll()
+	l := h.leader()
+	for i := 0; i < 40; i++ {
+		h.submit(l, testBatch(t, uint64(i)))
+	}
+	h.waitBlocks(40, h.m...)
+	time.Sleep(600 * time.Millisecond)
+	for _, m := range h.m {
+		if m.node.Failed() || m.node.Mismatches() != 0 {
+			t.Fatalf("%s flagged on a healthy cluster", m.id)
+		}
+		if m.node.Attested() == 0 {
+			t.Fatalf("%s never verified a checkpoint (the check is not running)", m.id)
+		}
+	}
+
+	// now one replica "executes something else"
+	var victim *member
+	for _, m := range h.m {
+		if m != l {
+			victim = m
+		}
+	}
+	h.badMu.Lock()
+	h.badHash = map[string]bool{victim.id: true}
+	h.badMu.Unlock()
+	for i := 40; i < 60; i++ { // new blocks => new checkpoints, which the victim answers with a wrong hash
+		h.submit(l, testBatch(t, uint64(i)))
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !victim.node.Failed() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !victim.node.Failed() || victim.node.Mismatches() == 0 {
+		t.Fatal("the replica with a different state was not stopped")
+	}
+	h.fatalMu.Lock()
+	_, reported := h.fatals[victim.id]
+	h.fatalMu.Unlock()
+	if !reported {
+		t.Fatal("OnFatal was not called for the diverged replica")
+	}
+	for _, m := range h.m {
+		if m != victim && m.node.Failed() {
+			t.Fatalf("healthy replica %s was flagged", m.id)
+		}
+	}
+	var rest []*member
+	for _, m := range h.m {
+		if m != victim {
+			rest = append(rest, m)
+		}
+	}
+	h.waitBlocks(60, rest...)
+	h.assertIdentical(rest...)
+}
+
+func TestCluster_HashEndpointRejectsBadAuth(t *testing.T) {
+	h := newHarness(t, 3)
+	h.startAll()
+	l := h.leader()
+	now := time.Now().UnixMilli()
+	get := func(node string, mac string) int {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+l.fwdAddr+hashPath+"?n=1", nil)
+		req.Header.Set(hdrNode, node)
+		req.Header.Set(hdrTs, strconv.FormatInt(now, 10))
+		req.Header.Set(hdrMac, mac)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := get("n1", forwardMAC([]byte("wrong-secret-wrong-secret-wrong-xx"), "n1", now, []byte("1"))); c != http.StatusUnauthorized {
+		t.Fatalf("wrong mac: %d", c)
+	}
+	if c := get("evil", forwardMAC(h.secret, "evil", now, []byte("1"))); c != http.StatusUnauthorized {
+		t.Fatalf("unknown node: %d", c)
+	}
+	if c := get("n1", forwardMAC(h.secret, "n1", now, []byte("2"))); c != http.StatusUnauthorized {
+		t.Fatalf("mac for a different query: %d", c)
 	}
 }
