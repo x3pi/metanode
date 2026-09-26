@@ -47,7 +47,7 @@
 | B3 (Parent Chain Float) | **Chưa** | Chờ A0 — có nguy cơ trùng `PerChainAllocation`/`AttestCommit`/`ClaimMessage` đã audit |
 | C0 (spike) | **Có, nên làm sớm** | Điểm nối đã tìm ra (dưới); cần chứng minh thực thi xác định giữa 2 tiến trình |
 | C1 | **Đã làm (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3 |
-| C2 | **Đã làm tập con khả thi (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3b (còn `T-RF-08/09`, đo TPS, đa máy) |
+| C2 | **Đã làm tập con khả thi (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3b (còn mất điện giữa fsync thật, đa máy) |
 | C3–C6, D1 | **Chưa** | Chờ C2 |
 
 **Điểm đã xác minh — điểm nối vào xử lý block Go:**
@@ -374,7 +374,7 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 | B8 | E2E trên node hiện có | M | B7 | ☐ |
 | B9 | Cổng chất lượng Phase B | S | B8 | ☐ |
 | C1 | Chế độ `raft` trên 1 node: điểm móc H1–H6, nguồn cấp Go | L | C0 | ☑ (2026-09-26) |
-| C2 | Raft: nhân bản batch, FSM cấp block | L | C1 | ☑ (2026-09-26, tập con: còn `T-RF-08/09`, TPS, đa máy) |
+| C2 | Raft: nhân bản batch, FSM cấp block | L | C1 | ☑ (2026-09-26, tập con: còn mất điện giữa fsync thật, đa máy, C4) |
 | C3 | Hành động ra ngoài chỉ từ batch đã commit | M | B9, C2 | ☐ |
 | C4 | Đổi leader, thay replica, `rollup-cluster` | L | C3 | ☐ |
 | C5 | Chaos test + đa máy | L | C4 | ☐ |

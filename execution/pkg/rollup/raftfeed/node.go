@@ -40,13 +40,16 @@ type ClusterConfig struct {
 	Sink chan<- *pb.ExecutableBlock
 	// Durable returns the last block number durably committed in the DB (storage.GetLastBlockNumber).
 	Durable func() uint64
+	// BlockHash returns the header hash of a durable block for the cross-replica state check (nil disables it).
+	BlockHash BlockHashFunc
 	// Now supplies the timestamp the LEADER stamps on a batch (defaults to time.Now).
 	Now func() time.Time
 	// OnFatal is called once, from a goroutine, when this replica must stop (cannot apply an entry exactly).
 	OnFatal func(error)
 
 	// Test hooks: an injected transport (in-memory, partitionable), an already bound forward listener, a secret.
-	Tune            func(*raft.Config) // last word on the library config (e.g. a short snapshot interval)
+	WrapLogStore    func(raft.LogStore) raft.LogStore // test hook: inject log-store faults
+	Tune            func(*raft.Config)                // last word on the library config (e.g. a short snapshot interval)
 	Transport       raft.Transport
 	ForwardListener net.Listener
 	Secret          []byte
@@ -84,6 +87,12 @@ type Node struct {
 	wg       sync.WaitGroup
 	stores   []interface{ Close() error }
 	failed   atomic.Bool
+
+	blockHash  BlockHashFunc
+	durable    func() uint64
+	fatal      func(error) // fail-closed exit for this replica (set in start)
+	mismatches atomic.Uint64
+	attested   atomic.Uint64
 
 	dropped atomic.Uint64 // batches that can never become a block (malformed / oversize)
 	lost    atomic.Uint64 // batches whose proposal kept failing (reported, sender must resend)
@@ -190,22 +199,26 @@ func (n *Node) start(cc ClusterConfig) error {
 		}
 	}
 
+	// One fail-closed exit for everything that must take this replica out: an entry the FSM cannot apply, or a
+	// log store that stopped accepting writes.
+	onFatal := func(err error) {
+		n.failed.Store(true)
+		if cc.OnFatal != nil {
+			cc.OnFatal(err)
+		}
+		// Stop voting/applying; the rest of the cluster continues if it still has a quorum. n.raft is only
+		// safe to read once start() has assigned it, hence the wait.
+		select {
+		case <-n.ready:
+			n.raft.Shutdown()
+		case <-n.stop:
+		}
+	}
+	n.fatal = onFatal
+	n.blockHash, n.durable = cc.BlockHash, cc.Durable
 	n.fsm = newFSM(
 		stamper{epoch: 0, leader: common.HexToAddress(rc.SequencerAddress), nextIndex: 1, nextBlock: 1},
-		cc.Sink, cc.Durable, n.stop,
-		func(err error) {
-			n.failed.Store(true)
-			if cc.OnFatal != nil {
-				cc.OnFatal(err)
-			}
-			// Stop voting/applying; the rest of the cluster continues if it still has a quorum. n.raft is only
-			// safe to read once start() has assigned it, hence the wait.
-			select {
-			case <-n.ready:
-				n.raft.Shutdown()
-			case <-n.stop:
-			}
-		},
+		cc.Sink, cc.Durable, n.stop, onFatal,
 	)
 
 	rcfg := raft.DefaultConfig()
@@ -222,7 +235,14 @@ func (n *Node) start(cc ClusterConfig) error {
 		cc.Tune(rcfg)
 	}
 
-	if n.raft, err = raft.NewRaft(rcfg, n.fsm, logs, stable, snaps, trans); err != nil {
+	var logStore raft.LogStore = logs
+	if cc.WrapLogStore != nil {
+		logStore = cc.WrapLogStore(logs)
+	}
+	// A log write that fails may or may not have reached the disk: continuing (as a leader that keeps sending
+	// heartbeats, or a follower that acks) could acknowledge entries that are not durable. Leave the cluster.
+	logStore = &failClosedLogStore{LogStore: logStore, onFatal: func(err error) { go onFatal(err) }}
+	if n.raft, err = raft.NewRaft(rcfg, n.fsm, logStore, stable, snaps, trans); err != nil {
 		return fmt.Errorf("raft start: %w", err)
 	}
 	close(n.ready)
@@ -244,8 +264,10 @@ func (n *Node) start(cc ClusterConfig) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(submitPath, n.handleSubmit)
+	mux.HandleFunc(hashPath, n.handleBlockHash)
 	n.httpSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
-	n.wg.Add(3)
+	n.wg.Add(4)
+	go func() { defer n.wg.Done(); n.attestLoop() }()
 	go func() { defer n.wg.Done(); _ = n.httpSrv.Serve(ln) }()
 	go func() { defer n.wg.Done(); n.proposeLoop() }()
 	go func() { defer n.wg.Done(); n.resultLoop() }()
@@ -461,10 +483,12 @@ func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
 func (n *Node) AppliedIndex() uint64 { return n.raft.AppliedIndex() }
 
 // Dropped / Lost / Skipped / Failed expose the counters used by tests and diagnostics.
-func (n *Node) Dropped() uint64 { return n.dropped.Load() }
-func (n *Node) Lost() uint64    { return n.lost.Load() }
-func (n *Node) Skipped() uint64 { return n.fsm.skipped.Load() }
-func (n *Node) Failed() bool    { return n.failed.Load() }
+func (n *Node) Dropped() uint64    { return n.dropped.Load() }
+func (n *Node) Lost() uint64       { return n.lost.Load() }
+func (n *Node) Skipped() uint64    { return n.fsm.skipped.Load() }
+func (n *Node) Failed() bool       { return n.failed.Load() }
+func (n *Node) Mismatches() uint64 { return n.mismatches.Load() }
+func (n *Node) Attested() uint64   { return n.attested.Load() }
 
 // logWriter routes hashicorp's logger into the project logger.
 type logWriter struct{}
@@ -472,4 +496,21 @@ type logWriter struct{}
 func (logWriter) Write(p []byte) (int, error) {
 	logger.Warn("%s", strings.TrimSpace(string(p)))
 	return len(p), nil
+}
+
+// failClosedLogStore turns the first failed log write into a fatal error for this replica.
+type failClosedLogStore struct {
+	raft.LogStore
+	onFatal func(error)
+	once    sync.Once
+}
+
+func (f *failClosedLogStore) StoreLog(l *raft.Log) error { return f.StoreLogs([]*raft.Log{l}) }
+
+func (f *failClosedLogStore) StoreLogs(ls []*raft.Log) error {
+	err := f.LogStore.StoreLogs(ls)
+	if err != nil {
+		f.once.Do(func() { f.onFatal(fmt.Errorf("raft log store write failed: %w", err)) })
+	}
+	return err
 }
