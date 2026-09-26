@@ -691,10 +691,15 @@ func (stm *TrueBlockSTM) execOne(
 		var authGasUsed uint64
 		if len(tx.AuthorizationList()) > 0 {
 			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
+			// processAuthorizationList reads each authority through mvccDB; an ESTIMATE hit there makes it skip that
+			// authority silently (the tx would still succeed with the authorization dropped), so wait for the
+			// blocking tx and re-execute instead. Pass mvccDB/scDB: their Set* calls already wrote earlier
+			// authorities into the shared MVCC map, and the next incarnation must know to clean those up if it
+			// no longer writes them (e.g. the authorization has become invalid).
 			if mvccDB.BlockingVersion != mvcc.BaseVersion {
 				atomic.AddInt32(&stm.abortCount, 1)
 				markSuspended()
-				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, nil, nil)
+				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
 				return
 			}
 		}

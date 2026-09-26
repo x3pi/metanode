@@ -93,7 +93,7 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 
 **Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.** (C0 ĐÃ ĐƯỢC ĐÁNH DẤU LÀ HOÀN TẤT)
 
-### N0.5 — Báo cáo Audit `ErrEstimateHit` trong `TrueBlockSTM` (Đã hoàn tất)
+### N0.5 — Báo cáo Audit `ErrEstimateHit` trong `TrueBlockSTM` (SƠ BỘ — chưa đầy đủ, chưa đóng)
 
 **Mục tiêu:** Đảm bảo lỗi `mvcc.ErrEstimateHit` không bị nuốt làm mất cập nhật (như đã xảy ra ở nhánh Native Transfer).
 
@@ -103,12 +103,12 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 | Đọc Recipient (Native) | `mvccDB.AccountState(To)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
 | Cộng tiền Recipient (Native) | `mvccDB.AddBalance(To, amt)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
 | Trừ tiền Sender (Native/Gas) | `mvccDB.SubTotalBalance` | Không dính lỗi vì Sender đã được đọc thành công (vào cache) ở đầu hàm. | Đạt (An toàn) |
-| Uỷ quyền EIP-7702 | `processAuthorizationList` | Kiểm tra `mvccDB.BlockingVersion != mvcc.BaseVersion` ngay sau khi gọi. Đã sửa mã lỗi nuốt `ErrEstimateHit` và vượt qua bài stress test. | Đạt (An toàn) |
+| Uỷ quyền EIP-7702 | `processAuthorizationList` (`authorization.go`) | Hàm nuốt `ErrEstimateHit` bằng `continue` (bỏ qua authority). Đã sửa: `execOne` kiểm tra `mvccDB.BlockingVersion != mvcc.BaseVersion` ngay sau lời gọi rồi `markSuspended()` + `suspendOnEstimate(..., mvccDB, scDB)`. **Phải truyền `mvccDB, scDB`**: `Set*` của `MVCCAccountStateDB` ghi ngay vào bản đồ MVCC dùng chung, nên phần ghi dở của authority đứng trước phải được ghi vào write set để lần thực thi sau dọn (truyền `nil, nil` để lại mục ghi ma — đã tái hiện 424 lần lỗi trong 12000 vòng). | Đã sửa, có test: `TestTrueBlockSTM_EIP7702_NativeTransfer_EstimateHit` (trước sửa: 89–126/1000 vòng lỗi ở `GOMAXPROCS>=2`, 0 ở `GOMAXPROCS=1`; sau sửa 0/15000) và `TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp` (trước sửa: 931–1546/3000; `nil,nil`: 13–166/3000; `mvccDB,scDB`: 0/12000) |
 | Logic EVM / Gateway | `HandleTransaction` | Mã lỗi bị nuốt hoặc trả về FAILED Receipt, nhưng `TrueBlockSTM` có chốt chặn kiểm tra `mvccDB.BlockingVersion` ở cuối luồng (dòng ~932). Nếu bị dính estimate, tx sẽ suspend và vứt bỏ Receipt sai. | Đạt (An toàn) |
 | Áp dụng State từ Receipt | `MapAddBalance`, `SetCodeHash` | Không kiểm tra trực tiếp, nhưng `BlockingVersion` được set bên trong `mvccDB` và được bắt ở bước tổng kết như trên. | Đạt (An toàn) |
 | Logic ngoài `TrueBlockSTM` | `receipt_helper`, `state_merger` | Gọi Global DB (không phải MVCC), Global DB không sinh ra `ErrEstimateHit`. | Đạt (An toàn) |
 
-**Kết luận Audit:** Đã rà soát toàn bộ các điểm sử dụng `mvccDB` trong `tx_processor`. Chỉ có khu vực Native Transfer dễ bị lọt do return sớm mà không đi qua chốt chặn kiểm tra `BlockingVersion` ở cuối. Bản vá cho EIP-7702 đã bịt kín kẽ hở cuối cùng này. Không phát hiện thêm lỗ hổng nào.
+**Kết luận Audit (sơ bộ):** bảng trên chỉ liệt kê các nhóm lời gọi chính, **chưa** liệt kê từng lời gọi kèm `file:dòng` và chưa nêu cách đảm bảo không sót, nên **chưa đủ để kết luận "không còn lỗ hổng nào khác"**. Đã tìm và sửa được 3 lỗi cùng họ: mất cộng tiền người nhận (`execOne`, nhánh native), ESTIMATE rò rỉ gây livelock (`markSuspended`), và bỏ qua uỷ quyền EIP-7702. Cần audit từng lời gọi (bảng `file:dòng | hàm | có xử lý ESTIMATE không | kết luận | bằng chứng`) trước khi đóng N0.5.
 
 ### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (P0, độc lập, làm ngay)
 **Vì sao:** lỗi vừa sửa (`smart_contract_code`) là một trường hợp của lớp lỗi "ghi có đệm rồi crash". Có thể còn kho khác, hậu quả là hash/state lệch giữa các node sau crash (fork).
