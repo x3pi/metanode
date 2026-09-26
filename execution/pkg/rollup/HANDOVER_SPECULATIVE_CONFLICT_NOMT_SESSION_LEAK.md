@@ -1,6 +1,8 @@
 # Handover: speculative-executor conflict path leaves a NOMT session pending (pipeline deadlock)
 
-> Found 2026-09-26 while running the C2 Raft cluster live. **Not fixed in the executor** (hot path shared with the Rust consensus mode; the right way to discard a speculative state needs the module owner). `raftfeed` avoids it with a delivery gate (block n is handed to the pipeline only when block n-1 is durable), see `NEXT_STEPS_PLAN.md` N3b.
+> Found 2026-09-26 while running the C2 Raft cluster live.
+>
+> **STATUS (2026-09-27): PARTIALLY FIXED.** The leak itself is fixed (`AbortSpeculative`, see "Fix applied" below). What is **not** fixed is a second, related hazard — concurrent *later* speculative executions can take the NOMT handle before the conflicted block's re-execution does — so `raftfeed`'s delivery gate (block n is handed to the pipeline only when n-1 is durable, `NEXT_STEPS_PLAN.md` N3b) **must stay**. See "What the fix does not cover".
 
 ## Symptom
 Under a fast stream of small blocks (raft mode / C1 feeder, no gate) the block pipeline stops for good: `WATCHDOG-STATE ... Block #N đang thực thi IntermediateRoot`, `eth_blockNumber` frozen, later speculative blocks report `FAST-PATH-NONCE-REJECT` (they run on a stale base). Nothing recovers without a restart.
@@ -29,3 +31,19 @@ Rust consensus is effectively lock-step (it waits for the execution response of 
 1. Add `Abort/DiscardPending` to the trie interface (NOMT: `pendingFinishedSession.Abort()` under `LockCommitPayload`, clear `pendingChangelog`, republish read view without the committing map).
 2. Call it for `res.ClonedState` in the conflict branch before re-execution (and audit the other `CloseSpeculative` call sites).
 3. Regression test: force parent-hash conflict with a non-empty pending session and assert `BeginSession` proceeds; then remove the need for `raftfeed`'s delivery gate only if throughput requires it (gate ceiling ≈ 1/commit latency; measured ~9.2k tx/s end to end with 2000 senders, so it is not the bottleneck today).
+
+
+## Fix applied (2026-09-27)
+- `NomtStateTrie.AbortPending()` (`pkg/trie/nomt_state_trie.go`): aborts the active session and the finished-but-unpersisted session (under `LockCommitPayload`, same rule as the reset path), clears the pending changelog. **Does not persist.**
+- `SmartContractDB.AbortPending()` (aborts every contract-storage trie's pending session, then `Discard`), `ChainState.AbortSpeculative()` (account + stake + contract).
+- `commitSpeculativeResult` conflict branch calls `res.ClonedState.AbortSpeculative()` before the sequential re-execution.
+- Tests (`pkg/trie/nomt_abort_pending_test.go`, real NOMT handle): the re-execution really blocks while the discarded speculative session is pending (precondition), is released by `AbortPending`, and the discarded write is not on disk; mutants "no-op abort" and "persist instead of abort" both fail.
+
+## What the fix does not cover (measured)
+Experiment: C1 single node, two senders x 1500 native transfers, **delivery gate disabled** (temporary local binary, not committed):
+- without the fix: hung in 3 of 3 runs (first conflict = permanent stall);
+- with the fix: 4 of 4 conflicts recovered in one run, but only 2 of 9 runs finished cleanly; the others hung again after 2-10 conflicts.
+Goroutine dump of a remaining hang: the committer is in the conflict re-execution (`speculative_executor.go` -> `tx_processor.go:194` waiting for its `IntermediateRoot` goroutine) and that goroutine is in `BeginSession` waiting on `activeCount > 0` with no holder. Explanation: a **later** block n+1 was speculated concurrently, reached `IntermediateRoot` and took the handle (its finished session stays pending until n+1 is committed) *before* the re-execution of n began; n's re-execution now waits for n+1, which can only be committed after n. A priority inversion.
+Not observed in Rust mode because it is lock-step (no later speculation exists when a conflict is detected), and avoided in raft mode by the delivery gate.
+
+To remove the need for the gate the executor needs an ordering rule for the NOMT handle, e.g. when a conflict at GEI n is detected: (1) reserve the handles for the committer, (2) abort every finished later speculative result (set `ClonedState=nil` so the existing "ClonedState is nil -> re-execute sequentially" branch takes over) and (3) hold in-flight later speculations at `BeginSession` until n's re-execution has begun. That needs a "speculative caller" marker on the tries and the handle reservation; it is a protocol change, not a patch, and needs the owner's design review.

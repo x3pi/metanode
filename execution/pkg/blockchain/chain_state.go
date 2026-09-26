@@ -1687,3 +1687,27 @@ func (cs *ChainState) CloseSpeculative() {
 		scDB.Discard()
 	}
 }
+
+// AbortSpeculative discards a speculative ChainState that lost a conflict and will never be adopted: unlike
+// CloseSpeculative it does not persist the tries' pending NOMT sessions, it aborts them, releasing the shared
+// handle for the sequential re-execution of the same block.
+func (cs *ChainState) AbortSpeculative() {
+	abort := func(t interface{}) {
+		if a, ok := t.(interface{ AbortPending() }); ok {
+			a.AbortPending()
+		}
+	}
+	if asDB := cs.GetAccountStateDB(); asDB != nil {
+		abort(asDB.Trie())
+		asDB.Close()
+	}
+	if stakeDB := cs.GetStakeStateDB(); stakeDB != nil {
+		abort(stakeDB.Trie())
+		if closer, ok := stakeDB.Trie().(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+	if scDB := cs.GetSmartContractDB(); scDB != nil {
+		scDB.AbortPending()
+	}
+}

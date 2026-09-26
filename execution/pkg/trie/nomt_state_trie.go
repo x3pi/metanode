@@ -1630,6 +1630,37 @@ func (n *NomtStateTrie) Close() {
 	n.pendingCommittingMap = nil
 }
 
+// AbortPending throws away everything this trie holds that was staged but never persisted: the active
+// session and the finished-but-unpersisted session (with its changelog), releasing their claim on the
+// shared NOMT handle. It is for a trie whose state is being DISCARDED (a speculative execution that lost a
+// parent-hash conflict). Unlike Close it does NOT persist the pending session: persisting a discarded
+// speculative state would write data that never became part of the chain.
+//
+// Without this, the discarded trie's FinishedSession keeps handle.activeCount > 0 forever, and the next
+// BeginSession on the handle (the sequential re-execution of the same block) waits for it eternally.
+func (n *NomtStateTrie) AbortPending() {
+	n.sessionMu.Lock()
+	active := n.activeSession
+	n.activeSession = nil
+	fs := n.pendingFinishedSession
+	n.pendingFinishedSession = nil
+	n.pendingChangelog = nil
+	n.pendingChangelogBlock = 0
+	n.pendingCommittingMap = nil
+	n.sessionMu.Unlock()
+
+	if active != nil {
+		active.Abort()
+	}
+	if fs != nil {
+		// Same rule as the reset path: hold LockCommitPayload so an async CommitPayload cannot race the abort
+		// on the same session pointer (double free).
+		n.handle.LockCommitPayload()
+		fs.Abort()
+		n.handle.UnlockCommitPayload()
+	}
+}
+
 // HasUnbatchedChanges reports whether the trie has writes that have not yet been handed to a NOMT session
 // (i.e. are still in the live dirty map). Unlike HasUncommittedChanges it is FALSE once the writes were
 // batched by CommitBatchRaw, even though their data stays visible in the read view until the session is
