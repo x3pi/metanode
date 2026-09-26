@@ -14,20 +14,19 @@ import (
 )
 
 type SubscribeProcessor struct {
-	// THAY ĐỔI: Chuyển từ map thông thường sang sync.Map
-	// subscribers map[common.Address][]network.Connection
-	// mapConnectionSubcribeAddresses map[network.Connection][]common.Address
-	subscribers                    sync.Map // Kiểu: common.Address -> []network.Connection
-	mapConnectionSubcribeAddresses sync.Map // Kiểu: network.Connection -> []common.Address
+	mu                             sync.RWMutex
+	subscribers                    map[common.Address][]network.Connection
+	mapConnectionSubcribeAddresses map[network.Connection][]common.Address
 	messageSender                  network.MessageSender
 }
 
 func NewSubscribeProcessor(
 	messageSender network.MessageSender,
 ) *SubscribeProcessor {
-	// sync.Map không cần khởi tạo với make, giá trị zero của nó đã sẵn sàng để sử dụng.
 	sp := &SubscribeProcessor{
-		messageSender: messageSender,
+		subscribers:                    make(map[common.Address][]network.Connection),
+		mapConnectionSubcribeAddresses: make(map[network.Connection][]common.Address),
+		messageSender:                  messageSender,
 	}
 	// Khởi chạy goroutine cleanup để tránh rò rỉ bộ nhớ
 	go sp.cleanupDisconnectedSubscribers()
@@ -37,12 +36,10 @@ func NewSubscribeProcessor(
 func (p *SubscribeProcessor) ProcessSubscribeToAddress(request network.Request) error {
 	address := common.BytesToAddress(request.Message().Body())
 	clientConnection := request.Connection()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	// Cập nhật map subscribers
-	actual, _ := p.subscribers.LoadOrStore(address, []network.Connection{clientConnection})
-	connections := actual.([]network.Connection)
-
-	// Kiểm tra nếu clientConnection đã tồn tại thì không thêm nữa
+	connections := p.subscribers[address]
 	existed := false
 	for _, c := range connections {
 		if c == clientConnection {
@@ -51,13 +48,10 @@ func (p *SubscribeProcessor) ProcessSubscribeToAddress(request network.Request) 
 		}
 	}
 	if !existed {
-		connections = append(connections, clientConnection)
-		p.subscribers.Store(address, connections)
+		p.subscribers[address] = append(connections, clientConnection)
 	}
 
-	// Cập nhật map ngược
-	actual, _ = p.mapConnectionSubcribeAddresses.LoadOrStore(clientConnection, []common.Address{address})
-	addresses := actual.([]common.Address)
+	addresses := p.mapConnectionSubcribeAddresses[clientConnection]
 	existed = false
 	for _, addr := range addresses {
 		if addr == address {
@@ -66,8 +60,7 @@ func (p *SubscribeProcessor) ProcessSubscribeToAddress(request network.Request) 
 		}
 	}
 	if !existed {
-		addresses = append(addresses, address)
-		p.mapConnectionSubcribeAddresses.Store(clientConnection, addresses)
+		p.mapConnectionSubcribeAddresses[clientConnection] = append(addresses, address)
 	}
 
 	return nil
@@ -77,16 +70,21 @@ func (p *SubscribeProcessor) BroadcastLogToSubscriber(
 	address common.Address,
 	eventLogList []types.EventLog,
 ) {
-	if connections, ok := p.subscribers.Load(address); ok {
-		clients := connections.([]network.Connection)
+	p.mu.RLock()
+	clients, ok := p.subscribers[address]
+	p.mu.RUnlock()
+
+	if ok {
 		wg := &sync.WaitGroup{}
-		newClients := make([]network.Connection, 0, len(clients))
+		var newClients []network.Connection
+		var modified bool
 
 		for _, client := range clients {
-			// Bổ sung kiểm tra nil hoặc disconnect
 			if client == nil || client.TcpRemoteAddr() == nil {
-				// Xóa luôn map ngược nếu connection không hợp lệ
-				p.mapConnectionSubcribeAddresses.Delete(client)
+				modified = true
+				p.mu.Lock()
+				delete(p.mapConnectionSubcribeAddresses, client)
+				p.mu.Unlock()
 				continue
 			}
 
@@ -110,24 +108,27 @@ func (p *SubscribeProcessor) BroadcastLogToSubscriber(
 				}
 			}(wg, clientCopy)
 		}
-		// Nếu có thay đổi (loại bỏ nil/disconnect), cập nhật lại map
-		if len(newClients) != len(clients) {
+		// Nếu có thay đổi, cập nhật lại map
+		if modified {
+			p.mu.Lock()
 			if len(newClients) > 0 {
-				p.subscribers.Store(address, newClients)
+				p.subscribers[address] = newClients
 			} else {
-				p.subscribers.Delete(address)
+				delete(p.subscribers, address)
 			}
+			p.mu.Unlock()
 		}
 		wg.Wait()
 	}
 }
 
 func (p *SubscribeProcessor) RemoveSubcriber(conn network.Connection) {
-	// THAY ĐỔI: Dùng Load() và Store()/Delete() để cập nhật an toàn
-	if addresses, ok := p.mapConnectionSubcribeAddresses.Load(conn); ok {
-		for _, address := range addresses.([]common.Address) {
-			if subscribers, ok := p.subscribers.Load(address); ok {
-				oldSubscribers := subscribers.([]network.Connection)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if addresses, ok := p.mapConnectionSubcribeAddresses[conn]; ok {
+		for _, address := range addresses {
+			if oldSubscribers, ok := p.subscribers[address]; ok {
 				newSubscribers := make([]network.Connection, 0, len(oldSubscribers)-1)
 				for _, subscriber := range oldSubscribers {
 					if subscriber != conn {
@@ -136,16 +137,13 @@ func (p *SubscribeProcessor) RemoveSubcriber(conn network.Connection) {
 				}
 
 				if len(newSubscribers) > 0 {
-					// Cập nhật lại danh sách subscribers cho address
-					p.subscribers.Store(address, newSubscribers)
+					p.subscribers[address] = newSubscribers
 				} else {
-					// Nếu không còn subscriber nào, xóa key đi
-					p.subscribers.Delete(address)
+					delete(p.subscribers, address)
 				}
 			}
 		}
-		// Xóa connection khỏi map ngược
-		p.mapConnectionSubcribeAddresses.Delete(conn)
+		delete(p.mapConnectionSubcribeAddresses, conn)
 	}
 }
 
@@ -158,28 +156,23 @@ func (p *SubscribeProcessor) cleanupDisconnectedSubscribers() {
 	for range ticker.C {
 		removedConnections := 0
 		removedAddresses := 0
-
-		// Duyệt qua tất cả connections trong mapConnectionSubcribeAddresses
 		var connectionsToRemove []network.Connection
-		p.mapConnectionSubcribeAddresses.Range(func(key, value interface{}) bool {
-			conn := key.(network.Connection)
-			// Kiểm tra nếu connection đã disconnect (nil hoặc không có remote address)
+
+		p.mu.RLock()
+		for conn := range p.mapConnectionSubcribeAddresses {
 			if conn == nil || conn.TcpRemoteAddr() == nil {
 				connectionsToRemove = append(connectionsToRemove, conn)
 			}
-			return true
-		})
+		}
+		p.mu.RUnlock()
 
-		// Xóa các disconnected connections
 		for _, conn := range connectionsToRemove {
 			p.RemoveSubcriber(conn)
 			removedConnections++
 		}
 
-		// Dọn dẹp các addresses không còn subscribers
-		p.subscribers.Range(func(key, value interface{}) bool {
-			address := key.(common.Address)
-			connections := value.([]network.Connection)
+		p.mu.Lock()
+		for address, connections := range p.subscribers {
 			newConnections := make([]network.Connection, 0, len(connections))
 			for _, conn := range connections {
 				if conn != nil && conn.TcpRemoteAddr() != nil {
@@ -188,26 +181,21 @@ func (p *SubscribeProcessor) cleanupDisconnectedSubscribers() {
 			}
 			if len(newConnections) != len(connections) {
 				if len(newConnections) > 0 {
-					p.subscribers.Store(address, newConnections)
+					p.subscribers[address] = newConnections
 				} else {
-					p.subscribers.Delete(address)
+					delete(p.subscribers, address)
 					removedAddresses++
 				}
 			}
-			return true
-		})
+		}
+		subscriberCount := len(p.subscribers)
+		p.mu.Unlock()
 
 		if removedConnections > 0 || removedAddresses > 0 {
 			logger.Info("cleanupDisconnectedSubscribers: Đã xóa %d disconnected connections và %d addresses không còn subscribers",
 				removedConnections, removedAddresses)
 		}
 
-		// Log tổng số subscribers mỗi lần cleanup
-		subscriberCount := 0
-		p.subscribers.Range(func(key, value interface{}) bool {
-			subscriberCount++
-			return true
-		})
 		if subscriberCount > 10000 {
 			logger.Warn("cleanupDisconnectedSubscribers: Số lượng subscribers lớn (%d), có thể có vấn đề", subscriberCount)
 		}
