@@ -2,7 +2,7 @@
 
 > **Mã định danh:** `HANDOVER-NOMT-ATOMICITY-01`  
 > **Mức độ nghiêm trọng:** 🔴 **CRITICAL / ZERO-FORK INVARIANT VIOLATION**  
-> **Trạng thái:** 📋 **Mở — Bàn giao sang PR/Nhân sự chuyên trách Storage Engine**  
+> **Trạng thái:** 🟡 **Có bản sửa chờ quyết định (2026-09-26)** — `verify` đạt 7 kill point nhưng bản sửa đổi quy tắc đồng thuận (hard fork), xem `NOMT_STORAGE_ATOMICITY_DESIGN.md` mục "Rà soát và xác minh"  
 > **Thuộc phạm vi gốc:** N1 (Durability & Crash Recovery)  
 > **Ngày lập:** 2026-09-26  
 
@@ -67,10 +67,13 @@ Tại kịch bản crash `crash_after_mapping_k2` (failpoint `after-mapping-barr
 
 ## 4. Cách Tái Hiện (Reproduction Steps)
 
-Chạy kịch bản C0 Spike:
+Chạy kịch bản C0 Spike (lệnh cũ `go test -run TestC0CrashRecoveryMatrix` **không tồn tại**; dùng `verify`, tái hiện trong ~5 giây):
 ```bash
-cd execution/cmd/simple_chain
-go test -tags c0spike -v -run TestC0CrashRecoveryMatrix
+cd execution
+go build -tags c0spike -o /đường/dẫn/c0spike ./cmd/simple_chain
+C0_LARGE_BLOCK=1 /đường/dẫn/c0spike -config cmd/simple_chain/config.json -tool-c0-spike verify -c0-blocks 3 -c0-rounds 2
+# tuỳ chọn: mỗi block đụng 2 hợp đồng
+C0_TWO_CONTRACTS=1 C0_LARGE_BLOCK=1 /đường/dẫn/c0spike ... verify -c0-blocks 4 -c0-rounds 2
 ```
 Quan sát kết quả ở kịch bản `crash_after_mapping_k2`:
 - Worker bị kill tại block #2 sau khi mapping barrier hoàn tất.
@@ -100,7 +103,7 @@ Người tiếp nhận xử lý có thể lựa chọn 1 trong 3 phương án sa
 
 ## 6. Tiêu Chí Nghiệm Thu (Acceptance Criteria)
 
-- [ ] Toàn bộ kịch bản trong `TestC0CrashRecoveryMatrix` (đặc biệt là `crash_after_mapping_k2` và các điểm crash trước Block DB) chạy PASS 100%.
+- [ ] Toàn bộ kịch bản trong `verify` (C0 spike) (đặc biệt là `crash_after_mapping_k2` và các điểm crash trước Block DB); `verify` dừng ở kịch bản lỗi đầu tiên nên phải chạy đủ cả 7-8 kịch bản chạy PASS 100%.
 - [ ] So sánh sau recovery: `AccountStatesRoot`, `StorageRoot`, `EventLogs`, và `BlockHash` phải trùng khớp 100% với lần chạy sạch (`cleanRun`).
 - [ ] Tuyệt đối KHÔNG nới lỏng điều kiện so sánh trong `c0_spike.go`.
 - [ ] `consensus/metanode/scripts/build_check.sh` biên dịch sạch cả Go, Rust và FFI không có warning/error.
