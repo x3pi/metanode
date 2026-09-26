@@ -705,6 +705,13 @@ func (bp *BlockProcessor) commitSpeculativeResult(res *SpeculativeResult, fileLo
 	if hasConflict && len(res.Txs) > 0 {
 		logger.Info("🔄 [COMMITTER] Re-executing GEI=%d sequentially...", res.GEI)
 
+		// The speculative state is discarded. Its trie may hold a NOMT session that IntermediateRoot already
+		// finished but nobody will ever persist; it keeps the handle's activeCount > 0, so the re-execution's own
+		// IntermediateRoot -> BeginSession would wait for it forever (observed live). Abort it, do NOT persist it.
+		if res.ClonedState != nil {
+			res.ClonedState.AbortSpeculative()
+		}
+
 		// Clone state mới từ tip thực tế hiện tại
 		csCopy, cloneErr := bp.chainState.CloneSpeculative(lastBlock.Header())
 		if cloneErr != nil {

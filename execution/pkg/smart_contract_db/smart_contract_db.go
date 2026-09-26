@@ -863,6 +863,19 @@ func (db *SmartContractDB) Discard() {
 	})
 }
 
+// AbortPending drops a DISCARDED speculative contract state: every contract-storage trie aborts its staged
+// (finished, unpersisted) NOMT session first, then the in-memory state is cleared like Discard. Discard alone
+// closes the tries, and closing a trie persists its pending session — wrong for state that must never land.
+func (db *SmartContractDB) AbortPending() {
+	db.smartContractStorageTries.Range(func(_, value interface{}) bool {
+		if a, ok := value.(interface{ AbortPending() }); ok {
+			a.AbortPending()
+		}
+		return true
+	})
+	db.Discard()
+}
+
 // InvalidateAllCaches clears all in-memory caches. This is CRITICAL for fork-safety
 // after applying P2P synchronization batches, which write directly to PebbleDB/NOMT.
 // Without this, cached pre-sync reads (from eth_call or virtual execution) will persist
