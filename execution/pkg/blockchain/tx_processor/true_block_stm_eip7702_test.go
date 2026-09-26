@@ -202,6 +202,17 @@ func TestTrueBlockSTM_EIP7702_NativeTransfer_EstimateHit(t *testing.T) {
 // the final incarnation. If the suspended incarnation's write set is not recorded, nobody deletes that
 // stale entry and the authority ends up delegating although the correct execution skips its authorization.
 func TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp(t *testing.T) {
+	// Where the ESTIMATE is hit AFTER the first authority was already written:
+	//   second-authority: reading the second authority inside processAuthorizationList
+	//   native-recipient: reading the recipient of the native transfer (recipient = hot account)
+	//   contract-call:    the EVM call reads the hot account through the VM callback
+	for _, mode := range []string{"second-authority", "native-recipient", "contract-call"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) { runPartialAuthScenario(t, mode) })
+	}
+}
+
+func runPartialAuthScenario(t *testing.T, mode string) {
 	iters := stressIterations(40)
 	procsChoices := []int{2, 4, 8, 16}
 	if v := os.Getenv("STM_STRESS_PROCS"); v != "" {
@@ -278,8 +289,16 @@ func TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp(t *testing.T) {
 			Value:     uint256.NewInt(0),
 			AuthList: []types.SetCodeAuthorization{
 				signAuthorization(t, trapKey, chainID, delegateAddr, 0), // written first, invalid in the end
-				signAuthorization(t, hotKey, chainID, delegateAddr, 0),  // read second: can hit an ESTIMATE
 			},
+		}
+		switch mode {
+		case "second-authority":
+			inner.AuthList = append(inner.AuthList, signAuthorization(t, hotKey, chainID, delegateAddr, 0)) // read second
+		case "native-recipient":
+			inner.To = hotAddr
+		case "contract-call":
+			inner.To = hotAddr
+			inner.Data = []byte{0xde, 0xad, 0xbe, 0xef}
 		}
 		ethTx, err := types.SignNewTx(sponsorKey, types.NewPragueSigner(big.NewInt(chainID)), inner)
 		if err != nil {
@@ -306,8 +325,17 @@ func TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp(t *testing.T) {
 
 		var problems []string
 		for i, rcp := range rcps {
+			// A call with calldata to an account without code always ends in TRANSACTION_ERROR here (same as
+			// TestTrueBlockSTM_SmartContractGasDeduction), so for that one tx only require "a receipt exists".
+			if mode == "contract-call" && txs[i].Hash() == txB.Hash() && rcp != nil {
+				continue
+			}
 			if rcp == nil || rcp.Status() != pb.RECEIPT_STATUS_RETURNED {
-				problems = append(problems, "tx "+strconv.Itoa(i)+" did not succeed")
+				detail := "nil receipt"
+				if rcp != nil {
+					detail = "status " + rcp.Status().String() + " exception " + rcp.Exception().String() + " return " + string(rcp.Return())
+				}
+				problems = append(problems, "tx "+strconv.Itoa(i)+" did not succeed ("+detail+")")
 				break
 			}
 		}
@@ -327,11 +355,13 @@ func TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp(t *testing.T) {
 			if st.TotalBalance().Cmp(wantHot) != 0 {
 				problems = append(problems, "hot balance "+st.TotalBalance().String()+", want "+wantHot.String())
 			}
-			if st.Nonce() != 1 {
-				problems = append(problems, "hot nonce "+strconv.FormatUint(st.Nonce(), 10)+", want 1 (authorization dropped)")
-			}
-			if sc := st.SmartContractState(); sc == nil || sc.CodeHash() != expectedCodeHash {
-				problems = append(problems, "hot has no delegation (authorization dropped)")
+			if mode == "second-authority" {
+				if st.Nonce() != 1 {
+					problems = append(problems, "hot nonce "+strconv.FormatUint(st.Nonce(), 10)+", want 1 (authorization dropped)")
+				}
+				if sc := st.SmartContractState(); sc == nil || sc.CodeHash() != expectedCodeHash {
+					problems = append(problems, "hot has no delegation (authorization dropped)")
+				}
 			}
 		}
 		if len(problems) > 0 {

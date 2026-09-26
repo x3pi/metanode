@@ -93,22 +93,27 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 
 **Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.** (C0 ĐÃ ĐƯỢC ĐÁNH DẤU LÀ HOÀN TẤT)
 
-### N0.5 — Báo cáo Audit `ErrEstimateHit` trong `TrueBlockSTM` (SƠ BỘ — chưa đầy đủ, chưa đóng)
+### N0.5 — Audit `ErrEstimateHit` trong `TrueBlockSTM` (đã rà từng lời gọi; còn 1 quan sát mở)
 
-**Mục tiêu:** Đảm bảo lỗi `mvcc.ErrEstimateHit` không bị nuốt làm mất cập nhật (như đã xảy ra ở nhánh Native Transfer).
+**Cơ chế:** chỉ có **hai** nguồn ESTIMATE — `MVCCAccountStateDB.AccountState` (`mvcc_state_db.go:40-50`) và `MVCCSmartContractDB.StorageValue` (`mvcc_smart_contract_db.go:66-75`); cả hai đặt `BlockingVersion` (cờ dính, không bao giờ tự xoá trong một incarnation). Mọi `Set*/AddBalance/SubBalance` của `MVCCAccountStateDB` đều đi qua `AccountState`, và sau lần đọc thành công địa chỉ đó nằm trong `localState` nên **lần đọc lặp lại không thể gặp ESTIMATE**. Quan trọng: các `Set*` **ghi ngay vào bản đồ MVCC dùng chung** (không chờ cuối `execOne`), nên mọi lần tạm dừng SAU khi đã ghi phải lưu write set (hợp của cũ và mới) qua `suspendOnEstimate(..., mvccDB, scDB)`; truyền `nil, nil` chỉ đúng khi mới chỉ có lần đọc.
 
-| Vị trí / Tác vụ | Hàm gọi / Logic | Cơ chế bắt `ErrEstimateHit` | Đánh giá |
+| `true_block_stm.go` | Lời gọi | Xử lý ESTIMATE | Kết luận |
 |---|---|---|---|
-| Đọc Sender ở đầu `execOne` | `mvccDB.AccountState(From)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
-| Đọc Recipient (Native) | `mvccDB.AccountState(To)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
-| Cộng tiền Recipient (Native) | `mvccDB.AddBalance(To, amt)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
-| Trừ tiền Sender (Native/Gas) | `mvccDB.SubTotalBalance` | Không dính lỗi vì Sender đã được đọc thành công (vào cache) ở đầu hàm. | Đạt (An toàn) |
-| Uỷ quyền EIP-7702 | `processAuthorizationList` (`authorization.go`) | Hàm nuốt `ErrEstimateHit` bằng `continue` (bỏ qua authority). Đã sửa: `execOne` kiểm tra `mvccDB.BlockingVersion != mvcc.BaseVersion` ngay sau lời gọi rồi `markSuspended()` + `suspendOnEstimate(..., mvccDB, scDB)`. **Phải truyền `mvccDB, scDB`**: `Set*` của `MVCCAccountStateDB` ghi ngay vào bản đồ MVCC dùng chung, nên phần ghi dở của authority đứng trước phải được ghi vào write set để lần thực thi sau dọn (truyền `nil, nil` để lại mục ghi ma — đã tái hiện 424 lần lỗi trong 12000 vòng). | Đã sửa, có test: `TestTrueBlockSTM_EIP7702_NativeTransfer_EstimateHit` (trước sửa: 89–126/1000 vòng lỗi ở `GOMAXPROCS>=2`, 0 ở `GOMAXPROCS=1`; sau sửa 0/15000) và `TestTrueBlockSTM_EIP7702_PartialAuthWriteIsCleanedUp` (trước sửa: 931–1546/3000; `nil,nil`: 13–166/3000; `mvccDB,scDB`: 0/12000) |
-| Logic EVM / Gateway | `HandleTransaction` | Mã lỗi bị nuốt hoặc trả về FAILED Receipt, nhưng `TrueBlockSTM` có chốt chặn kiểm tra `mvccDB.BlockingVersion` ở cuối luồng (dòng ~932). Nếu bị dính estimate, tx sẽ suspend và vứt bỏ Receipt sai. | Đạt (An toàn) |
-| Áp dụng State từ Receipt | `MapAddBalance`, `SetCodeHash` | Không kiểm tra trực tiếp, nhưng `BlockingVersion` được set bên trong `mvccDB` và được bắt ở bước tổng kết như trên. | Đạt (An toàn) |
-| Logic ngoài `TrueBlockSTM` | `receipt_helper`, `state_merger` | Gọi Global DB (không phải MVCC), Global DB không sinh ra `ErrEstimateHit`. | Đạt (An toàn) |
+| :497 | `AccountState(from)` | `errors.Is` → `suspendOnEstimate(nil,nil)` :513 (chưa ghi gì; nếu không có phiên bản chặn thì xếp lại tx, không bỏ mất) | An toàn (đã đổi sang hàm chung) |
+| :589, :618 | `PlusOneNonce/SetLastHash(fromAddr)` (account-setting) | `fromAddr` đã nằm trong `localState` từ :497 → không thể gặp ESTIMATE | An toàn |
+| :681 | `processAuthorizationList` (`authorization.go:67`) | Hàm **nuốt** lỗi bằng `continue`. Chốt ngay sau lời gọi :687-690, `suspendOnEstimate(mvccDB,scDB)` | **Lỗi đã sửa** (test `EstimateHit`, `PartialAuth/second-authority`) |
+| :699 | `AccountState(to)` (native) | `errors.Is` → :707 `suspendOnEstimate(mvccDB,scDB)` | **Lỗi đã sửa** (trước đây `nil,nil` sau khi authority đã được ghi; `PartialAuth/native-recipient`) |
+| :734, :738 | `SubTotalBalance/PlusOneNonce/SetLastHash(from)` | `from` đã ở `localState` | An toàn |
+| :752 | `AddBalance(to)` | `errors.Is` → :760 (PR #132). `to` đã ở `localState` sau :699 nên thực tế không xảy ra, giữ làm phòng thủ | An toàn |
+| :779 → :785-793 | `ExecuteTransactionWithMvmId`; VM đọc qua `mvm_api.go:1425` (AccountState → status 3), `:1452` (Code), `:1548-1556` (StorageValue → status suspend) | Lỗi bị VM nuốt/đổi thành receipt "halted", nhưng cờ dính được kiểm tra ngay sau khi VM chạy (:785) trước khi dùng kết quả | **Lỗi đã sửa**: nhánh này trước đây tạm dừng mà **không lưu write set** (authority của 7702 đã ghi); `PartialAuth/contract-call` |
+| :844, :864-910 | Áp kết quả VM: `SubTotalBalance`, `SetNonce`, `AddBalance`, `BatchSetStorageValues`, `SetCodeHash`, `SetCreatorPublicKey`, `SetStorageAddress` | Lỗi bị bỏ qua, nhưng cờ dính được kiểm tra lại :922-933 | **Lỗi đã sửa**: trước đây khối này **thay** write set bằng bản ghi dở thay vì hợp với bản cũ, làm mục cũ không còn được theo dõi/dọn |
+| :918-919 | `SetLastHash/SetNewDeviceKey(from)` | `from` đã ở `localState` | An toàn |
+| `validateOne` :1036 | Đọc thẳng `accountMap/storageMap` (không qua wrapper) | Gặp ESTIMATE ⇒ `blockingVer != Base` ⇒ tx bị huỷ và chạy lại (vô hiệu hoá theo thiết kế) | An toàn |
+| `runBarrierTx` :1262, `gateway_handler.go:378` | Dùng `chainState` toàn cục, không có MVCC | Không sinh ESTIMATE | Không áp dụng |
 
-**Kết luận Audit (sơ bộ):** bảng trên chỉ liệt kê các nhóm lời gọi chính, **chưa** liệt kê từng lời gọi kèm `file:dòng` và chưa nêu cách đảm bảo không sót, nên **chưa đủ để kết luận "không còn lỗ hổng nào khác"**. Đã tìm và sửa được 3 lỗi cùng họ: mất cộng tiền người nhận (`execOne`, nhánh native), ESTIMATE rò rỉ gây livelock (`markSuspended`), và bỏ qua uỷ quyền EIP-7702. Cần audit từng lời gọi (bảng `file:dòng | hàm | có xử lý ESTIMATE không | kết luận | bằng chứng`) trước khi đóng N0.5.
+**Đã tìm và sửa (cùng họ, cùng gốc "ESTIMATE bị nuốt / write set không được lưu"):** (1) mất cộng tiền người nhận; (2) ESTIMATE rò rỉ gây livelock (`markSuspended`); (3) bỏ qua uỷ quyền EIP-7702; (4) tạm dừng giữa danh sách uỷ quyền bằng `nil,nil`; (5) đọc người nhận sau khi đã ghi authority bằng `nil,nil`; (6) nhánh contract tạm dừng không lưu write set và khối "áp kết quả" thay vì hợp write set. Số liệu (mỗi cấu hình 2000–3000 vòng, `GOMAXPROCS` 2/4/8/16): chưa sửa — `native-recipient` 40–51/2000 lỗi, `contract-call` 55–70/2000 lỗi; sau sửa — 0 lỗi ở cả 3 chế độ `PartialAuth`, test `EstimateHit` (5 mức GOMAXPROCS) và stress gốc 8000 vòng.
+
+**Quan sát mở (chưa chứng minh, KHÔNG sửa trong PR này):** `commitDeviceKeyIfPending` (:1356, `sm.CommitDeviceKey(txHash)`) ghi vào storage toàn cục ngay trong `execOne`, trước khi biết incarnation có bị huỷ hay không, và không đi qua MVCC. Nếu một incarnation cũ (đọc trạng thái cũ) vượt qua kiểm tra nonce nhưng incarnation cuối thì không, device key vẫn được commit cho tx mà thực thi tuần tự sẽ bỏ qua. Cần chủ sở hữu module xác nhận tính tất định (thao tác theo `txHash`, idempotent) trước khi coi là an toàn hay sửa.
 
 ### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (P0, độc lập, làm ngay)
 **Vì sao:** lỗi vừa sửa (`smart_contract_code`) là một trường hợp của lớp lỗi "ghi có đệm rồi crash". Có thể còn kho khác, hậu quả là hash/state lệch giữa các node sau crash (fork).
