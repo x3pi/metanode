@@ -332,7 +332,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	var smartContractStorageBatch []byte
 	var codeBatchPut []byte
 
-	retAccount, retStake, retSmartContract, retSmartContractStorage, retCodeBatchPut, commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
+	retAccount, retStake, retSmartContract, retSmartContractStorage, retCodeBatchPut, scNomtPayload, commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
 	if commitErr != nil {
 		logger.Error("🚨 [COMMIT-MEMORY] commitToMemoryParallel error for block #%d: %v — reverting draft block to prevent fork", currentBlockNumber, commitErr)
 		mappingWg.Wait()
@@ -483,6 +483,7 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 		CommitIndex:               commitIndex,
 		AccountNomtPayload:        bp.pendingAccountPayload,
 		StakeNomtPayload:          bp.pendingStakePayload,
+		SmartContractNomtPayload:  scNomtPayload,
 	}
 	bp.pendingAccountPayload = nil
 	bp.pendingStakePayload = nil

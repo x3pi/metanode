@@ -297,7 +297,7 @@ func TestGatewayHandler_OutboundPersistsAcrossChainStateReload(t *testing.T) {
 	if err := cs1.GetSmartContractDB().LateBindRoots(); err != nil {
 		t.Fatalf("LateBindRoots failed: %v", err)
 	}
-	if err := cs1.GetSmartContractDB().CommitAllStorage(); err != nil {
+	if _, err := cs1.GetSmartContractDB().CommitAllStorage(); err != nil {
 		t.Fatalf("CommitAllStorage failed: %v", err)
 	}
 	if _, err := cs1.GetAccountStateDB().IntermediateRoot(true); err != nil {

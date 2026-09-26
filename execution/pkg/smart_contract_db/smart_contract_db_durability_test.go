@@ -47,13 +47,14 @@ func (d *durableRecordingDB) recorded() []string {
 
 func TestCommit_SyncsCodeStorageAfterWritingBytecode(t *testing.T) {
 	code := newDurableRecordingDB()
-	db := NewSmartContractDB(code, newTestDB(), nil)
+	db := NewSmartContractDB(code, newTestDB(), nil, nil)
 
 	addr := common.HexToAddress("0x1000000000000000000000000000000000000001")
 	codeHash := common.HexToHash("0xc0de")
 	db.SetCode(addr, codeHash, []byte{0x60, 0x80, 0x60, 0x40})
 
-	require.NoError(t, db.Commit())
+	_, commitErr := db.Commit()
+	require.NoError(t, commitErr)
 	require.Equal(t, []string{"batchput", "sync"}, code.recorded(),
 		"bytecode must be written and then made durable, in that order, exactly once")
 
@@ -65,33 +66,35 @@ func TestCommit_SyncsCodeStorageAfterWritingBytecode(t *testing.T) {
 func TestCommit_PropagatesCodeStorageSyncError(t *testing.T) {
 	code := newDurableRecordingDB()
 	code.syncErr = errors.New("fsync failed")
-	db := NewSmartContractDB(code, newTestDB(), nil)
+	db := NewSmartContractDB(code, newTestDB(), nil, nil)
 	db.SetCode(common.HexToAddress("0x1000000000000000000000000000000000000002"), common.HexToHash("0xc0de02"), []byte{0x01})
 
-	err := db.Commit()
+	_, err := db.Commit()
 	require.Error(t, err, "a failed sync must fail the commit rather than report a durable block")
 	require.Contains(t, err.Error(), "fsync failed")
 }
 
 func TestCommit_DoesNotSyncCodeStorageWhenNoNewCode(t *testing.T) {
 	code := newDurableRecordingDB()
-	db := NewSmartContractDB(code, newTestDB(), nil)
+	db := NewSmartContractDB(code, newTestDB(), nil, nil)
 
-	require.NoError(t, db.Commit())
+	_, commitErr := db.Commit()
+	require.NoError(t, commitErr)
 	require.Empty(t, code.recorded(), "blocks without new bytecode must not pay for an fsync")
 }
 
 func TestCommit_SyncsEventLogStorageAfterWritingLogs(t *testing.T) {
 	code := newDurableRecordingDB()
 	eventStorage := newDurableRecordingDB()
-	db := NewSmartContractDB(code, eventStorage, nil)
+	db := NewSmartContractDB(code, eventStorage, nil, nil)
 
 	addr := common.HexToAddress("0x2000000000000000000000000000000000000001")
 	txHash := common.HexToHash("0xaaaa")
 	log := smart_contract.NewEventLog(txHash, addr, []byte("deposit"), [][]byte{[]byte("topic1")})
 	db.AddEventLogs([]types.EventLog{log})
 
-	require.NoError(t, db.Commit())
+	_, commitErr := db.Commit()
+	require.NoError(t, commitErr)
 	require.Equal(t, []string{"batchput", "sync"}, eventStorage.recorded(),
 		"event logs must be written and then made durable via SyncDurable, in that order")
 }
@@ -100,14 +103,14 @@ func TestCommit_PropagatesEventLogStorageSyncError(t *testing.T) {
 	code := newDurableRecordingDB()
 	eventStorage := newDurableRecordingDB()
 	eventStorage.syncErr = errors.New("event log fsync failed")
-	db := NewSmartContractDB(code, eventStorage, nil)
+	db := NewSmartContractDB(code, eventStorage, nil, nil)
 
 	addr := common.HexToAddress("0x2000000000000000000000000000000000000002")
 	txHash := common.HexToHash("0xbbbb")
 	log := smart_contract.NewEventLog(txHash, addr, []byte("transfer"), [][]byte{[]byte("topic1")})
 	db.AddEventLogs([]types.EventLog{log})
 
-	err := db.Commit()
+	_, err := db.Commit()
 	require.Error(t, err, "a failed event log sync must fail the commit")
 	require.Contains(t, err.Error(), "event log fsync failed")
 }
@@ -115,8 +118,9 @@ func TestCommit_PropagatesEventLogStorageSyncError(t *testing.T) {
 func TestCommit_DoesNotSyncEventLogStorageWhenNoLogs(t *testing.T) {
 	code := newDurableRecordingDB()
 	eventStorage := newDurableRecordingDB()
-	db := NewSmartContractDB(code, eventStorage, nil)
+	db := NewSmartContractDB(code, eventStorage, nil, nil)
 
-	require.NoError(t, db.Commit())
+	_, commitErr := db.Commit()
+	require.NoError(t, commitErr)
 	require.Empty(t, eventStorage.recorded(), "blocks without event logs must not pay for an fsync")
 }

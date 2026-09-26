@@ -15,10 +15,11 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/meta-node-blockchain/meta-node/pkg/account_state_db"
-	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/blob_store"
+	"github.com/meta-node-blockchain/meta-node/pkg/block"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/nomt_ffi"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract_db"
 	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
@@ -222,10 +223,27 @@ func NewChainStateWithGenesis(
 
 	stakeStateDB := stake_state_db.NewStakeStateDB(stakeStateTrie, stakeStorage)
 
+	var scChangelogDB *state_changelog.StateChangelogDB
+	// The shared contract storage has its own changelog (namespace-scoped), created from a throw-away trie
+	// handle only because initChangelog needs one.
+	if scHandle, _ := nomtContractStorageHandle(); scHandle != nil {
+		scTrie := trie.NewNomtStateTrie(scHandle, true, trie.SharedContractStorageNamespace)
+		scChangelogDB = initChangelog(scTrie, "changelog_db_sc", trie.SharedContractStorageNamespace)
+
+		// A crash can leave the shared contract storage ahead of the canonical block (its data is written
+		// while the block executes, before the block is durable). Roll it back before anything reads it.
+		// Fail closed: a node that cannot prove its contract storage matches the canonical block must not run.
+		if err := alignSmartContractStorage(scChangelogDB, currentBlockHeader.BlockNumber()); err != nil {
+			return nil, fmt.Errorf("smart_contract_storage crash recovery at startup: %w", err)
+		}
+	}
+
 	scDB := smart_contract_db.NewSmartContractDB(
 		sm.GetStorageCode(),
 		sm.GetStorageSmartContract(),
-		asDB)
+		asDB,
+		scChangelogDB,
+	)
 
 	// Determine maxCachedEpochs from config
 	var maxCached uint64 = 10 // sensible default
@@ -386,6 +404,17 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 
 		logger.Info("🔧 [NOMT-FAST-PATH] UpdateStateForNewHeader lightweight re-alignment for block #%d (accountRoot=%s, stakeRoot=%s)",
 			newHeader.BlockNumber(), newAccountRoot.Hex()[:18], newStakeRoot.Hex()[:18])
+	}
+
+	// Shared contract storage may be ahead of the canonical block after a crash (see
+	// alignSmartContractStorage). Fail closed if it cannot be brought back and verified.
+	if scDB := cs.GetSmartContractDB(); scDB != nil {
+		if err := alignSmartContractStorage(scDB.GetChangelogDB(), newHeader.BlockNumber()); err != nil {
+			return fmt.Errorf("smart_contract_storage crash recovery for block #%d: %w", newHeader.BlockNumber(), err)
+		}
+	}
+
+	if trie.GetStateBackend() == trie.BackendNOMT {
 		return nil
 	}
 
@@ -430,6 +459,7 @@ func (cs *ChainState) updateStateForNewHeader(newHeader types.BlockHeader) error
 		cs.storageManager.GetStorageCode(),
 		cs.storageManager.GetStorageSmartContract(),
 		newAsDB, // Sử dụng asDB mới tạo
+		cs.GetSmartContractDB().GetChangelogDB(),
 	)
 
 	// 4. Atomic Lock-Free DB Swaps (no delayed Close)
@@ -480,6 +510,51 @@ func (cs *ChainState) UpdateStateForNewHeaderUnlocked(newHeader types.BlockHeade
 	return cs.updateStateForNewHeader(newHeader)
 }
 
+// nomtContractStorageHandle returns the shared contract-storage NOMT handle, or nil when the state backend is
+// not NOMT (no NOMT handle must be created for MPT/Flat/Verkle deployments).
+func nomtContractStorageHandle() (*nomt_ffi.Handle, error) {
+	if trie.GetStateBackend() != trie.BackendNOMT {
+		return nil, nil
+	}
+	return trie.GetOrInitNomtHandle(trie.SharedContractStorageNamespace)
+}
+
+// alignSmartContractStorage brings the shared contract storage (NOMT) back to the state it had after
+// blockNumber when the changelog shows it was written for a LATER block, i.e. a crash happened between the
+// block's execution (which writes contract storage) and the block becoming durable. Replaying that block
+// on top of the already-advanced storage would read post-block values and produce a different state root.
+//
+// The rollback is applied in place from the changelog and then verified against the root recorded for
+// blockNumber; without a recorded root the rollback cannot be proven and an error is returned.
+func alignSmartContractStorage(changelogDB *state_changelog.StateChangelogDB, blockNumber uint64) error {
+	if changelogDB == nil || changelogDB.GetHighestBlock() <= blockNumber {
+		return nil
+	}
+	logger.Warn("⚠️ [NOMT-CRASH-RECOVERY] smart_contract_storage was written up to block %d but the canonical block is %d; rolling back",
+		changelogDB.GetHighestBlock(), blockNumber)
+
+	expectedRoot, recordedBlock, found, err := changelogDB.GetRootAtOrBefore(blockNumber)
+	if err != nil {
+		return fmt.Errorf("read recorded root at or before block %d: %w", blockNumber, err)
+	}
+	if !found {
+		return fmt.Errorf("no root recorded at or before block %d: the rollback cannot be verified (restore from a snapshot)", blockNumber)
+	}
+
+	handle, err := trie.GetOrInitNomtHandle(trie.SharedContractStorageNamespace)
+	if err != nil {
+		return fmt.Errorf("open smart_contract_storage handle: %w", err)
+	}
+	t := trie.NewNomtStateTrie(handle, true, trie.SharedContractStorageNamespace)
+	t.SetChangelogDB(changelogDB)
+	if err := t.AlignWithExpectedRoot(nil, common.BytesToHash(expectedRoot), blockNumber); err != nil {
+		return fmt.Errorf("roll back to block %d (root recorded at block %d): %w", blockNumber, recordedBlock, err)
+	}
+	logger.Info("✅ [NOMT-CRASH-RECOVERY] smart_contract_storage rolled back to block %d and verified against the recorded root %x",
+		blockNumber, expectedRoot[:8])
+	return nil
+}
+
 // NewChainState tạo một đối tượng ChainState mới.
 // Nó cần một StorageManager và header của block cuối cùng (lastHeader) đã biết.
 func NewChainStateRemote(
@@ -498,7 +573,9 @@ func NewChainStateRemote(
 	scDB := smart_contract_db.NewSmartContractDB(
 		codeStorage,
 		dbSmartContract,
-		asDB)
+		asDB,
+		nil,
+	)
 
 	cs := &ChainState{
 		freeFeeAddress: freeFeeAddress,
@@ -684,6 +761,7 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 		cs.storageManager.GetStorageCode(),
 		cs.storageManager.GetStorageSmartContract(),
 		clonedAccDB,
+		cs.GetSmartContractDB().GetChangelogDB(),
 	)
 
 	// 4. Construct cloned ChainState
@@ -713,7 +791,6 @@ func (cs *ChainState) CloneSpeculative(header types.BlockHeader) (*ChainState, e
 
 	return clonedCS, nil
 }
-
 
 // InvalidateAllState clears all in-memory caches across all state databases.
 // This ensures that subsequent reads will fetch fresh data from the underlying PebbleDB/NOMT storage.
@@ -1063,7 +1140,7 @@ func (cs *ChainState) advanceEpochLocked(newEpoch uint64, epochStartTimestampMs 
 		if ok && boundaryBlockToPrune > 0 {
 			go func(epoch, block uint64) {
 				logger.Info("🧹 [CHANGELOG PRUNER] Starting background prune for epoch %d (before block %d)", epoch, block)
-				
+
 				if cs.changelogDB != nil {
 					if err := cs.changelogDB.PruneBeforeBlock(block); err != nil {
 						logger.Error("❌ [CHANGELOG PRUNER] Failed to prune account changelog: %v", err)

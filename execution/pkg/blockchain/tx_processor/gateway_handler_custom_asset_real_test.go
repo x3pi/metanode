@@ -130,7 +130,7 @@ func deployTestWrappedAsset(t *testing.T, cs *blockchain.ChainState, deployer co
 	if err := cs.GetSmartContractDB().LateBindRoots(); err != nil {
 		t.Fatalf("LateBindRoots after deploy: %v", err)
 	}
-	if err := cs.GetSmartContractDB().Commit(); err != nil {
+	if _, err := cs.GetSmartContractDB().Commit(); err != nil {
 		t.Fatalf("commit deployed contract code: %v", err)
 	}
 	if len(res.MapCodeHash) != 1 {

@@ -24,6 +24,10 @@ type StateChangelogDB struct {
 	// Persisted as a PebbleDB key: "__meta__:start_block" → 8-byte big-endian.
 	startBlock atomic.Uint64 // 0 = not yet initialized
 
+	// highestBlock tracks the highest block recorded in this changelog.
+	// Used for detecting if the underlying storage advanced further than canonical state.
+	highestBlock atomic.Uint64
+
 	// Cache to track if a key already has changelog entries to avoid costly Pebble Iterators.
 	hasEntryCache sync.Map // string -> bool
 }
@@ -63,7 +67,17 @@ func NewStateChangelogDB(path string, namespace string) (*StateChangelogDB, erro
 		logger.Info("📜 [CHANGELOG] Loaded startBlock=%d for namespace %s", block, namespace)
 	}
 
-	logger.Info("📜 [CHANGELOG] Initialized StateChangelogDB at %s for namespace %s (startBlock=%d)", path, namespace, c.startBlock.Load())
+	// Load persisted highestBlock from DB (if exists)
+	highestMetaKey := []byte("__meta__:" + namespace + ":highest_block")
+	hVal, hCloser, hGetErr := db.Get(highestMetaKey)
+	if hGetErr == nil && len(hVal) == 8 {
+		hBlock := binary.BigEndian.Uint64(hVal)
+		c.highestBlock.Store(hBlock)
+		hCloser.Close()
+		logger.Info("📜 [CHANGELOG] Loaded highestBlock=%d for namespace %s", hBlock, namespace)
+	}
+
+	logger.Info("📜 [CHANGELOG] Initialized StateChangelogDB at %s for namespace %s (startBlock=%d, highestBlock=%d)", path, namespace, c.startBlock.Load(), c.highestBlock.Load())
 
 	return c, nil
 }
@@ -110,6 +124,20 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 			return fmt.Errorf("failed to persist startBlock: %w", err)
 		}
 		logger.Info("📜 [CHANGELOG] startBlock set to %d for namespace %s (first write)", blockNumber, c.namespace)
+	}
+
+	// Update highestBlock (in memory only after the batch below is durable, so a failed commit cannot
+	// leave the in-memory value ahead of what a restart would read).
+	advancedHighest := false
+	currentHighest := c.highestBlock.Load()
+	if blockNumber > currentHighest {
+		highestMetaKey := []byte("__meta__:" + c.namespace + ":highest_block")
+		blockBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(blockBytes, blockNumber)
+		if err := batch.Set(highestMetaKey, blockBytes, pebble.NoSync); err != nil {
+			return fmt.Errorf("failed to persist highestBlock: %w", err)
+		}
+		advancedHighest = true
 	}
 
 	for _, change := range changes {
@@ -169,15 +197,80 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("failed to commit changelog batch: %w", err)
 	}
+	if advancedHighest {
+		for {
+			cur := c.highestBlock.Load()
+			if blockNumber <= cur || c.highestBlock.CompareAndSwap(cur, blockNumber) {
+				break
+			}
+		}
+	}
 
 	logger.Debug("📜 [CHANGELOG] Recorded %d state changes for block %d in namespace %s", len(changes), blockNumber, c.namespace)
 	return nil
+}
+
+// blockRootMetaPrefix is the key prefix under which the state root that a namespace had AFTER a given block
+// is recorded (block number big-endian appended). It lets crash recovery verify that a rollback reproduced
+// the exact root of the canonical block instead of trusting the rollback blindly.
+func (c *StateChangelogDB) blockRootMetaPrefix() []byte {
+	return []byte("__meta__:" + c.namespace + ":root:")
+}
+
+// SetBlockRoot records the root the namespace had after blockNumber. It is written without fsync: a later
+// WriteBlockChanges (which syncs the same WAL) makes it durable before it can ever be needed, because a
+// root record is only consulted to roll back to a block that is followed by a newer changelog write.
+func (c *StateChangelogDB) SetBlockRoot(blockNumber uint64, root []byte) error {
+	if len(root) == 0 {
+		return fmt.Errorf("empty root for block %d", blockNumber)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.db == nil {
+		return fmt.Errorf("changelog db is closed")
+	}
+	key := binary.BigEndian.AppendUint64(c.blockRootMetaPrefix(), blockNumber)
+	return c.db.Set(key, root, pebble.NoSync)
+}
+
+// GetRootAtOrBefore returns the newest recorded root for a block <= targetBlock, and the block it belongs to.
+// found is false when no root has been recorded at or before targetBlock.
+func (c *StateChangelogDB) GetRootAtOrBefore(targetBlock uint64) (root []byte, block uint64, found bool, err error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.db == nil {
+		return nil, 0, false, fmt.Errorf("changelog db is closed")
+	}
+	prefix := c.blockRootMetaPrefix()
+	iter, err := c.db.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer iter.Close()
+
+	if targetBlock == ^uint64(0) {
+		return nil, 0, false, fmt.Errorf("target block out of range")
+	}
+	if !iter.SeekLT(binary.BigEndian.AppendUint64(append([]byte{}, prefix...), targetBlock+1)) {
+		return nil, 0, false, nil
+	}
+	key := iter.Key()
+	if len(key) != len(prefix)+8 || !bytes.HasPrefix(key, prefix) {
+		return nil, 0, false, nil
+	}
+	root = append([]byte{}, iter.Value()...)
+	return root, binary.BigEndian.Uint64(key[len(prefix):]), true, nil
 }
 
 // GetStartBlock returns the first block that was committed with changelog enabled.
 // Returns 0 if not yet initialized (no blocks committed yet).
 func (c *StateChangelogDB) GetStartBlock() uint64 {
 	return c.startBlock.Load()
+}
+
+// GetHighestBlock returns the highest block recorded in the changelog
+func (c *StateChangelogDB) GetHighestBlock() uint64 {
+	return c.highestBlock.Load()
 }
 
 // GetBlockChanges scans the changelog to find all state changes that occurred AT a specific block.

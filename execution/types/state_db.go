@@ -36,6 +36,8 @@ type AccountStateDB interface {
 	IntermediateRoot(isLockProcess ...bool) (common.Hash, error)
 	Commit() (common.Hash, error)
 	Discard() error
+
+	GetTrieCommitBlock() uint64
 	// Storage() storage.Storage
 
 	// smart contract state

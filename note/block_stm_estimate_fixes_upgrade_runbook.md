@@ -59,3 +59,14 @@ Sau khi chạy xong:
 - Chưa có bản đo trên cluster thật/đa máy.
 - Bài Chaos Rolling Restart từng có 1 lần FAIL do halt mất payload (chưa chứng minh là không liên quan; 1 lần chạy lại PASS). Nếu lặp lại thì bisect với `69c2f28b`.
 - Bảng audit `ErrEstimateHit` theo từng lời gọi nằm ở `execution/pkg/rollup/NEXT_STEPS_PLAN.md` mục N0.5.
+
+## 8. Bổ sung: hard fork `StorageRoot` của contract storage NOMT (PR `fix/nomt-storage-atomicity`)
+Khác với các bản sửa Block-STM ở trên (làm kết quả *tất định*), bản sửa contract storage NOMT **đổi chủ đích cách gán `StorageRoot`**: mọi hợp đồng bị đụng trong một block nhận **cùng một root cuối** của cây dùng chung; code cũ gán cho mỗi hợp đồng root ngay sau phiên của riêng nó (theo thứ tự địa chỉ). Với cùng workload, `account_states_root` và hash block khác nhau từ block 2 (hợp đồng hệ thống `0x…1002` bị đụng ở hầu như mọi block).
+
+Hệ quả và quy trình:
+1. **Không nâng cấp tại chỗ một chuỗi đã có lịch sử.** Node chạy code mới không tái chạy được các block cũ (root khác). Nếu cần giữ lịch sử thì phải thiết kế kích hoạt theo độ cao block (chưa được triển khai) hoặc dùng biến thể giữ root cũ (xem `NOMT_STORAGE_ATOMICITY_DESIGN.md`).
+2. **Chuỗi test/T2 được phép reset:** dừng **toàn cụm**, triển khai binary mới trên **mọi** node và tạo lại chuỗi (`./ansible_deploy.sh --reset-all --yes-reset-all --prebuilt-bin` hoặc bản build tại chỗ; **phá dữ liệu**, chỉ dùng cho môi trường được phép reset). Không trộn node cũ và mới.
+3. Dữ liệu mới: mỗi node có thêm changelog `changelog_db_sc` cho `smart_contract_storage`. Khi khởi động sau crash, nếu changelog cho thấy contract storage đi trước block canonical mà **không có root đã ghi** để xác minh rollback, node **từ chối chạy** (fail-closed) và cần khôi phục từ snapshot.
+4. Xác nhận sau nâng cấp: `block_hash_checker` không lệch giữa các node (kể cả node SyncOnly); chạy `spam_contract` (có node SyncOnly) vì test này bắt được lỗi replication mà spike C0 không thấy; so hash/root mọi block giữa các node.
+5. Đã đo (cluster local 4 validator + 1 SyncOnly): `verify` 7-8 kill point đạt, `spam_contract` PASS, `node_chaos_restart` PASS 63m7s (676 block × 5 node giống hệt). Chưa đo: cluster đa máy, dữ liệu thật, TPS/độ trễ commit với tải contract.
+

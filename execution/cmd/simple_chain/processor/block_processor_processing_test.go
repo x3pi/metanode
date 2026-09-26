@@ -340,7 +340,7 @@ func TestCommitToMemoryParallel_ReceiptsErrorPropagation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Passing nil receipts triggers error in receipts.CommitPipeline()
-	_, _, _, _, _, commitErr := bp.commitToMemoryParallel(txDB, nil, false, nil, 1)
+	_, _, _, _, _, _, commitErr := bp.commitToMemoryParallel(txDB, nil, false, nil, 1)
 	assert.Error(t, commitErr, "commitToMemoryParallel must return error when receipts task fails")
 	assert.Contains(t, commitErr.Error(), "Receipts")
 }

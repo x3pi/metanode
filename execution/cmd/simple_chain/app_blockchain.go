@@ -1506,8 +1506,12 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		}
 
 		// 5. Commit state changes synchronously (updates both MPT/NOMT tries and swaps pointers)
-		if err := app.chainState.GetSmartContractDB().Commit(); err != nil {
+		if scPayload, err := app.chainState.GetSmartContractDB().Commit(); err != nil {
 			return fmt.Errorf("failed to commit SmartContractDB for block #%d: %v", bn, err)
+		} else if scPayload != nil {
+			if payload, ok := scPayload.(interface{ CommitAsync() }); ok {
+				payload.CommitAsync()
+			}
 		}
 		newAccountRoot, err := app.chainState.GetAccountStateDB().Commit()
 		if err != nil {

@@ -37,6 +37,11 @@ func NewMVCCAccountStateDB(baseDB types.AccountStateDB, accountMap *MVCCAccountM
 	}
 }
 
+// GetTrieCommitBlock delegates to baseDB
+func (db *MVCCAccountStateDB) GetTrieCommitBlock() uint64 {
+	return db.baseDB.GetTrieCommitBlock()
+}
+
 // AccountState reads the state. First checks localState, then MVCC, then BaseDB.
 func (db *MVCCAccountStateDB) AccountState(addr common.Address) (types.AccountState, error) {
 	if state, ok := db.localState[addr]; ok {
