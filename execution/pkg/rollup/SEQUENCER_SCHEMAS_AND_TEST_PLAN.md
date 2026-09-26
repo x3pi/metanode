@@ -141,6 +141,14 @@ Nguồn trường: `execution/pkg/proto/executor.proto`. `FSM.Apply` (mọi repl
 - **Chống thực thi lặp khi restart:** trước khi đẩy vào `blockQueue`, `Apply` bỏ qua entry có `block_number ≤ storage.GetLastBlockNumber()` (Raft phát lại log sau snapshot).
 - `Apply` **không được** đọc đồng hồ, số ngẫu nhiên, hay bất kỳ trạng thái cục bộ nào ngoài `BatchRecord` và metadata FSM.
 
+> **Ghi chú triển khai C2 (2026-09-26) — code đã cài lệch đề xuất ở các điểm sau; code là nguồn sự thật:**
+> - `commit_index` và `global_exec_index` là **bộ đếm liền mạch của FSM** (bắt đầu từ 1), **không** phải Raft index (Raft index có lỗ vì entry cấu hình/no-op). `block_number` cũng do FSM đếm; bộ đếm chỉ khớp số block khi chuỗi **bắt đầu cùng cụm** — khởi động với state Raft rỗng mà DB đã có block ⇒ bị từ chối (C4).
+> - `commit_hash = keccak256(prev ‖ be64(index) ‖ be64(ts) ‖ batch)` (như C1), **không** có tiền tố `ROLLUP_BATCH_V1:`; `prev` khởi đầu rỗng. `epoch = 0`. `timestamp` = `max(BatchRecord.timestamp_ms, ts_trước + 1)` (đóng dấu bởi leader, làm tăng nghiêm ngặt tại `Apply` nên leader đổi/đồng hồ lùi vẫn xác định).
+> - Cấu hình: thêm `peers[].forward_address` và `forward_bind_address` (kênh mục 1.5); **không có** `block_queue_size` (dùng hàng đợi nạp block 5000 sẵn có).
+> - 413: follower **bỏ + đếm** batch quá lớn thay vì trả `false` (forwarder thử lại `false` vô hạn). Batch vượt `max_batch_bytes` được **tách theo ranh giới tx** ở leader.
+> - **Cổng giao block:** `Apply` chỉ giao block n khi block n-1 đã bền trong DB (bộ đếm cục bộ) — xem `NEXT_STEPS_PLAN.md` N3b (lý do: treo NOMT ở đường xung đột của speculative executor).
+> - `FsmSnapshotMeta` có thêm `last_global_exec_index=4` và `last_timestamp_ms=7`; `last_state_root=6` dành sẵn, chưa dùng.
+
 ### 1.4. Metadata snapshot của FSM và bố cục lưu trữ Raft  **[ĐỀ XUẤT]**
 
 State thật nằm trong NOMT/DB, không nằm trong bộ nhớ FSM, nên snapshot Raft chỉ giữ metadata:

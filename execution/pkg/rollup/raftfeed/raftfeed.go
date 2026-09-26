@@ -12,21 +12,17 @@
 package raftfeed
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
-	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
 )
 
 // SubmitQueueCap bounds the batches accepted by Submit but not yet turned into blocks. A full queue makes
@@ -50,6 +46,15 @@ func ValidateConfig(cfg *config.SimpleChainConfig) error {
 		// snapshot taken here would restore to a state the feed cannot continue from.
 		return errors.New("consensus_mode=raft does not support snapshot_enabled yet (needs the Raft CommitIndex, plan C4): disable snapshots")
 	}
+	if cfg.Raft != nil {
+		rc, err := effectiveRaftConfig(cfg.Raft)
+		if err != nil {
+			return err
+		}
+		if _, err := readForwardSecret(rc.ForwardSecretFile); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -69,6 +74,9 @@ type StartConfig struct {
 	// LeaderAddress is the address stamped as the block's leader. Go must never derive a leader itself; in C1
 	// it is this node's own validator address, in C2 it comes from the replicated batch record.
 	LeaderAddress common.Address
+	// Durable returns the last block number durable in the DB. When set, the feeder hands block n to the pipeline
+	// only once block n-1 is durable (see fsm.waitPreviousDurable for why); nil disables the gate (unit tests).
+	Durable func() uint64
 	// Now supplies the timestamp source (defaults to time.Now); injectable so tests can prove determinism.
 	Now func() time.Time
 }
@@ -86,11 +94,7 @@ type Feeder struct {
 	failed  atomic.Bool
 	dropped atomic.Uint64
 
-	// Owned by the run goroutine only.
-	nextIndex uint64
-	nextBlock uint64
-	lastTs    uint64
-	prevHash  []byte
+	st stamper // owned by the run goroutine only
 }
 
 var current atomic.Pointer[Feeder]
@@ -107,13 +111,17 @@ func Start(cfg StartConfig) (*Feeder, error) {
 		cfg.Now = time.Now
 	}
 	f := &Feeder{
-		cfg:       cfg,
-		queue:     make(chan []byte, SubmitQueueCap),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		nextIndex: cfg.NextIndex,
-		nextBlock: cfg.NextBlock,
-		prevHash:  append([]byte(nil), cfg.PrevCommitHash...),
+		cfg:   cfg,
+		queue: make(chan []byte, SubmitQueueCap),
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
+		st: stamper{
+			epoch:     cfg.Epoch,
+			leader:    cfg.LeaderAddress,
+			nextIndex: cfg.NextIndex,
+			nextBlock: cfg.NextBlock,
+			prevHash:  append([]byte(nil), cfg.PrevCommitHash...),
+		},
 	}
 	if !current.CompareAndSwap(nil, f) {
 		return nil, errors.New("raftfeed: already started")
@@ -150,11 +158,29 @@ func (f *Feeder) Dropped() uint64 { return f.dropped.Load() }
 // Failed reports whether the feeder stopped itself because it could not keep numbering safely.
 func (f *Feeder) Failed() bool { return f.failed.Load() }
 
+// waitPreviousDurable is the feeder's copy of the delivery gate (fsm.waitPreviousDurable).
+func (f *Feeder) waitPreviousDurable(blockNumber uint64) bool {
+	if f.cfg.Durable == nil {
+		return true
+	}
+	for f.cfg.Durable()+1 < blockNumber {
+		select {
+		case <-f.stop:
+			return false
+		case <-time.After(gatePollInterval):
+		}
+	}
+	return true
+}
+
 // Submit hands a marshalled transaction batch (transaction.MarshalTransactions) to the feeder.
 //
 // It returns true only once the batch is accepted into the bounded queue. tx_batch_forwarder retries a false
 // result forever, so false must mean "not accepted, keep the batch": no feeder running, or the queue is full.
 func Submit(batch []byte) bool {
+	if n := cluster.Load(); n != nil {
+		return n.Submit(batch)
+	}
 	f := current.Load()
 	if f == nil || !f.running.Load() {
 		return false
@@ -170,6 +196,9 @@ func Submit(batch []byte) bool {
 // Ready reports whether the node may accept transactions: a feeder is running, has not failed, and its
 // submit queue is not saturated.
 func Ready() bool {
+	if n := cluster.Load(); n != nil {
+		return n.Ready()
+	}
 	f := current.Load()
 	return f != nil && f.running.Load() && !f.failed.Load() && len(f.queue) < cap(f.queue)
 }
@@ -182,7 +211,7 @@ func (f *Feeder) run() {
 		case <-f.stop:
 			return
 		case batch := <-f.queue:
-			blk, err := f.build(batch)
+			blk, err := f.st.build(batch, uint64(f.cfg.Now().UnixMilli()))
 			if err != nil {
 				if errors.Is(err, errNumberingExhausted) {
 					logger.Error("🚨 [RAFT-FEED] %v — stopping the feed (fail closed)", err)
@@ -193,68 +222,15 @@ func (f *Feeder) run() {
 				logger.Error("❌ [RAFT-FEED] dropping a batch that cannot become a block: %v", err)
 				continue
 			}
+			if !f.waitPreviousDurable(blk.BlockNumber) {
+				return
+			}
 			select {
 			case f.cfg.Sink <- blk:
-				f.advance(blk)
+				f.st.advance(blk)
 			case <-f.stop:
 				return
 			}
 		}
 	}
-}
-
-var errNumberingExhausted = errors.New("raftfeed: commit index no longer fits in uint32")
-
-// build decodes a batch and stamps a block WITHOUT consuming any numbers: they are advanced only after the
-// block was delivered, so a shutdown between build and delivery never leaves a hole.
-func (f *Feeder) build(batch []byte) (*pb.ExecutableBlock, error) {
-	txs, err := transaction.UnmarshalTransactions(batch)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal batch: %w", err)
-	}
-	if len(txs) == 0 {
-		return nil, errors.New("empty batch")
-	}
-	exes := make([]*pb.TransactionExe, len(txs))
-	for i, tx := range txs {
-		raw, err := tx.Marshal()
-		if err != nil {
-			return nil, fmt.Errorf("marshal tx %d: %w", i, err)
-		}
-		exes[i] = &pb.TransactionExe{Digest: raw}
-	}
-	// CommitIndex is uint32 in ExecutableBlock while indexes are uint64: refuse to wrap around silently.
-	if f.nextIndex > math.MaxUint32 {
-		return nil, errNumberingExhausted
-	}
-
-	ts := uint64(f.cfg.Now().UnixMilli())
-	if ts <= f.lastTs { // block timestamps never go backwards or repeat
-		ts = f.lastTs + 1
-	}
-	return &pb.ExecutableBlock{
-		Transactions:      exes,
-		GlobalExecIndex:   f.nextIndex,
-		CommitIndex:       uint32(f.nextIndex),
-		Epoch:             f.cfg.Epoch,
-		CommitTimestampMs: ts,
-		LeaderAddress:     f.cfg.LeaderAddress.Bytes(),
-		BlockNumber:       f.nextBlock,
-		CommitHash:        f.chainHash(f.nextIndex, ts, batch),
-	}, nil
-}
-
-func (f *Feeder) advance(blk *pb.ExecutableBlock) {
-	f.nextIndex = blk.GlobalExecIndex + 1
-	f.nextBlock = blk.BlockNumber + 1
-	f.lastTs = blk.CommitTimestampMs
-	f.prevHash = blk.CommitHash
-}
-
-// chainHash = keccak256(prev || index || timestamp || batch): deterministic for a given batch stream.
-func (f *Feeder) chainHash(index, ts uint64, batch []byte) []byte {
-	var num [16]byte
-	binary.BigEndian.PutUint64(num[:8], index)
-	binary.BigEndian.PutUint64(num[8:], ts)
-	return crypto.Keccak256(f.prevHash, num[:], batch)
 }
