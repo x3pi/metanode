@@ -46,7 +46,8 @@
 | B2, B4, B5–B8 | **Sau A0** | Phụ thuộc quyết định "mở rộng Gateway hiện có hay xây song song" |
 | B3 (Parent Chain Float) | **Chưa** | Chờ A0 — có nguy cơ trùng `PerChainAllocation`/`AttestCommit`/`ClaimMessage` đã audit |
 | C0 (spike) | **Có, nên làm sớm** | Điểm nối đã tìm ra (dưới); cần chứng minh thực thi xác định giữa 2 tiến trình |
-| C1–C6, D1 | **Chưa** | Chờ C0 |
+| C1 | **Đã làm (2026-09-26)** | Xem `NEXT_STEPS_PLAN.md` N3 |
+| C2–C6, D1 | **Chưa** | Chờ C1 |
 
 **Điểm đã xác minh — điểm nối vào xử lý block Go:**
 1. `BlockProcessor.processRustEpochData(dataChan)` (`cmd/simple_chain/processor/block_processor_network.go:129`) đọc **hai** nguồn trong cùng một `select`: `executor.GetAuthoritativeBlockQueue()` (Rust) và `dataChan` (kênh `chan *pb.ExecutableBlock`, "legacy"); cả hai cùng đổ vào `speculativeExecutor.ExecuteSpeculative(epochData, lastHeader, authRespCh)`. **Xử lý block Go nhận `ExecutableBlock` từ bất kỳ nguồn nào.** Nguồn Rust chỉ bị bỏ qua nếu không gọi `executor.InitFFIBridge` (nó ở dòng 104 cùng file): khi đó kênh authoritative là `nil`, nhánh đó của `select` không bao giờ được chọn.
@@ -361,7 +362,7 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 | A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ☑ |
 | A1 | Sửa tài liệu thiết kế | S | A0 | ☑ |
 | A2 | Chốt đặc tả dữ liệu | S | A1 | ☑ |
-| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ◐ |
+| C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ☑ (theo D1, 2026-09-26; còn điều kiện chưa đo — xem `NEXT_STEPS_PLAN.md` mục 2) |
 | B1 | State machine thuần | M | A2 | ☑ |
 | B2 | Store per-key | M | B1 | ☑ |
 | B3 | Parent Chain: Float + Claimed | L | A0, A2 | ☐ |
@@ -371,7 +372,7 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 | B7 | Reclaim + resume sau crash | M | B5, B6 | ☐ |
 | B8 | E2E trên node hiện có | M | B7 | ☐ |
 | B9 | Cổng chất lượng Phase B | S | B8 | ☐ |
-| C1 | Chế độ `raft` trên 1 node: điểm móc H1–H6, nguồn cấp Go | L | C0 | ☐ |
+| C1 | Chế độ `raft` trên 1 node: điểm móc H1–H6, nguồn cấp Go | L | C0 | ☑ (2026-09-26) |
 | C2 | Raft: nhân bản batch, FSM cấp block | L | C1 | ☐ |
 | C3 | Hành động ra ngoài chỉ từ batch đã commit | M | B9, C2 | ☐ |
 | C4 | Đổi leader, thay replica, `rollup-cluster` | L | C3 | ☐ |
