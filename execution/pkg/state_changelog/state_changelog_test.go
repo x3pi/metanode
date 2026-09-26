@@ -115,3 +115,99 @@ func TestPruneBeforeBlock_MultipleStaleEntriesCollapseToOne(t *testing.T) {
 		t.Fatalf("GetStateAt(addr, 200) = %q, want %q", got, "v")
 	}
 }
+
+// Roots recorded per block are what crash recovery verifies a rollback against, so the "newest record at or
+// before the target block" lookup has to be exact at every boundary.
+func TestBlockRoot_NewestAtOrBefore(t *testing.T) {
+	db := newTestDB(t)
+	for block, root := range map[uint64]byte{3: 0xA3, 5: 0xA5, 9: 0xA9} {
+		if err := db.SetBlockRoot(block, []byte{root, 0x01}); err != nil {
+			t.Fatalf("SetBlockRoot(%d): %v", block, err)
+		}
+	}
+
+	cases := []struct {
+		target    uint64
+		wantFound bool
+		wantBlock uint64
+		wantRoot  byte
+	}{
+		{0, false, 0, 0},
+		{2, false, 0, 0},
+		{3, true, 3, 0xA3},
+		{4, true, 3, 0xA3},
+		{5, true, 5, 0xA5},
+		{8, true, 5, 0xA5},
+		{9, true, 9, 0xA9},
+		{1_000_000, true, 9, 0xA9},
+	}
+	for _, c := range cases {
+		root, block, found, err := db.GetRootAtOrBefore(c.target)
+		if err != nil {
+			t.Fatalf("GetRootAtOrBefore(%d): %v", c.target, err)
+		}
+		if found != c.wantFound || block != c.wantBlock || (found && (len(root) != 2 || root[0] != c.wantRoot)) {
+			t.Errorf("GetRootAtOrBefore(%d) = (%x, %d, %v), want block %d root %#x found %v",
+				c.target, root, block, found, c.wantBlock, c.wantRoot, c.wantFound)
+		}
+	}
+}
+
+func TestBlockRoot_RejectsEmptyRoot(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.SetBlockRoot(1, nil); err == nil {
+		t.Fatal("an empty root must be rejected, not stored")
+	}
+}
+
+// Root records live under a meta prefix. They must neither be reported as state keys nor be affected by
+// (or affect) the real changelog entries of the same namespace.
+func TestBlockRoot_DoesNotMixWithStateKeys(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.WriteBlockChanges(4, []StateChange{{Key: []byte("k"), OldValue: nil, NewValue: []byte("v")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlockRoot(4, []byte{0x04}); err != nil {
+		t.Fatal(err)
+	}
+	addrs, err := db.GetAllUniqueAddresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 1 || string(addrs[0]) != "k" {
+		t.Fatalf("GetAllUniqueAddresses = %q, want only the real state key", addrs)
+	}
+	got, err := db.GetStateAt([]byte("k"), 4)
+	if err != nil || string(got) != "v" {
+		t.Fatalf("GetStateAt = %q, %v, want %q", got, err, "v")
+	}
+}
+
+// The crash-recovery trigger compares the highest block written to the changelog with the canonical block, so
+// it must survive a restart and must never run ahead of what is durable.
+func TestHighestBlock_PersistsAcrossReopen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "changelog")
+	db, err := NewStateChangelogDB(dir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []uint64{2, 7, 5} { // out of order: the highest must not go down
+		if err := db.WriteBlockChanges(b, []StateChange{{Key: []byte("k"), NewValue: []byte{byte(b)}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := db.GetHighestBlock(); got != 7 {
+		t.Fatalf("highest before reopen = %d, want 7", got)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db2, err := NewStateChangelogDB(dir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	if got := db2.GetHighestBlock(); got != 7 {
+		t.Fatalf("highest after reopen = %d, want 7", got)
+	}
+}

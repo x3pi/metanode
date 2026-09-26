@@ -1073,6 +1073,14 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 	sender0Addr := crypto.PubkeyToAddress(keys[0].PublicKey)
 	counterAddr := crypto.CreateAddress(sender0Addr, 1)
 
+	// C0_TWO_CONTRACTS=1: a second TestCounter is deployed from sender 2 in block #1 and BOTH counters are
+	// incremented in every later block, so each block dirties two contracts' storage at once. This is the
+	// case the shared NOMT storage session has to batch (and roll back) correctly; the default workload only
+	// ever dirties one contract per block.
+	twoContracts := os.Getenv("C0_TWO_CONTRACTS") == "1"
+	sender2Addr := crypto.PubkeyToAddress(keys[2].PublicKey)
+	var counter2Addr e_common.Address
+
 	// TestCounter contract bytecode
 	testCounterBytecode, err := hex.DecodeString("608060405234801561000f575f80fd5b506101818061001d5f395ff3fe608060405234801561000f575f80fd5b5060043610610034575f3560e01c8063a87d942c14610038578063d09de08a14610056575b5f80fd5b610040610060565b60405161004d91906100d2565b60405180910390f35b61005e610068565b005b5f8054905090565b60015f808282546100799190610118565b925050819055507f20d8a6f5a693f9d1d627a598e8820f7a55ee74c183aa8f1a30e8d4e8dd9a8d845f546040516100b091906100d2565b60405180910390a1565b5f819050919050565b6100cc816100ba565b82525050565b5f6020820190506100e55f8301846100c3565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f610122826100ba565b915061012d836100ba565b9250828201905080821115610145576101446100eb565b5b9291505056fea2646970667358221220124c20a0a92375b56d64655ddf70bcd5eccdd0fea4724fc3b1130c754d3eedd964736f6c63430008140033")
 	if err != nil {
@@ -1133,6 +1141,15 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 			if err := addTx(0, deployTx, 0); err != nil {
 				return nil, err
 			}
+			if twoContracts {
+				deployNonce2 := nonces[2]
+				nonces[2]++
+				counter2Addr = crypto.CreateAddress(sender2Addr, deployNonce2)
+				deployTx2 := e_types.NewContractCreation(deployNonce2, big.NewInt(0), 1000000, big.NewInt(1000000000), testCounterBytecode)
+				if err := addTx(2, deployTx2, 0); err != nil {
+					return nil, err
+				}
+			}
 		} else {
 			// Tx 0: EVM contract call: increment() on TestCounter (sender 0)
 			callNonce := nonces[0]
@@ -1140,6 +1157,14 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 			callTx := e_types.NewTransaction(callNonce, counterAddr, big.NewInt(0), 500000, big.NewInt(1000000000), incrementCalldata)
 			if err := addTx(0, callTx, 0); err != nil {
 				return nil, err
+			}
+			if twoContracts {
+				callNonce2 := nonces[2]
+				nonces[2]++
+				callTx2 := e_types.NewTransaction(callNonce2, counter2Addr, big.NewInt(0), 500000, big.NewInt(1000000000), incrementCalldata)
+				if err := addTx(2, callTx2, 0); err != nil {
+					return nil, err
+				}
 			}
 			if b == 2 {
 				// Deploy the same bytecode from another funded sender so the code

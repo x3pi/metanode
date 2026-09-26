@@ -723,7 +723,7 @@ func deployTestWrappedAssetDirect(cs *blockchain.ChainState, deployer common.Add
 	if err := cs.GetSmartContractDB().LateBindRoots(); err != nil {
 		return common.Address{}, err
 	}
-	if err := cs.GetSmartContractDB().Commit(); err != nil {
+	if _, err := cs.GetSmartContractDB().Commit(); err != nil {
 		return common.Address{}, err
 	}
 	for addrHex := range res.MapCodeHash {

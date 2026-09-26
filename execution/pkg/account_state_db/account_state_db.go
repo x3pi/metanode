@@ -215,6 +215,14 @@ func (db *AccountStateDB) SetTrieCommitBlock(blockNumber uint64) {
 	}
 }
 
+// GetTrieCommitBlock returns the current commit block number from the underlying trie
+func (db *AccountStateDB) GetTrieCommitBlock() uint64 {
+	if nomtTrie, ok := db.trie.(*p_trie.NomtStateTrie); ok {
+		return nomtTrie.GetCurrentCommitBlock()
+	}
+	return 0
+}
+
 // DirtyAccountCount returns the number of dirty accounts (for debugging).
 func (db *AccountStateDB) DirtyAccountCount() int {
 	count := 0

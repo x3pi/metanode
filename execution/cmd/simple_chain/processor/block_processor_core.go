@@ -81,8 +81,9 @@ type CommitJob struct {
 	SerializedBackup []byte
 
 	// Extracted NOMT payloads for sequential async commit to disk
-	AccountNomtPayload interface{}
-	StakeNomtPayload   interface{}
+	AccountNomtPayload       interface{}
+	StakeNomtPayload         interface{}
+	SmartContractNomtPayload interface{}
 }
 
 // PersistJob REMOVED (May 2026): Was a no-op fence struct. PersistAsync runs

@@ -162,6 +162,9 @@ func ProcessTransactions(ctx context.Context, chainState *blockchain.ChainState,
 	// This ensures NOMT writes changes to the correct block in StateChangelogDB.
 	chainState.GetAccountStateDB().SetTrieCommitBlock(blockNum)
 	chainState.GetStakeStateDB().SetTrieCommitBlock(blockNum)
+	if scDB := chainState.GetSmartContractDB(); scDB != nil {
+		scDB.SetTrieCommitBlock(blockNum)
+	}
 
 	var irWg sync.WaitGroup
 	irWg.Add(2)
@@ -324,6 +327,9 @@ func ProcessTransactionsRemote(ctx context.Context, chainState *blockchain.Chain
 	// This ensures NOMT writes changes to the correct block in StateChangelogDB.
 	chainState.GetAccountStateDB().SetTrieCommitBlock(blockNum)
 	chainState.GetStakeStateDB().SetTrieCommitBlock(blockNum)
+	if scDB := chainState.GetSmartContractDB(); scDB != nil {
+		scDB.SetTrieCommitBlock(blockNum)
+	}
 
 	var rootWg sync.WaitGroup
 	rootWg.Add(2)

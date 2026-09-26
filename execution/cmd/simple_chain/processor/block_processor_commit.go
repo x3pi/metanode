@@ -128,6 +128,18 @@ func (bp *BlockProcessor) commitWorker() {
 				}
 			}
 		}
+		if job.SmartContractNomtPayload != nil {
+			if payload, ok := job.SmartContractNomtPayload.(interface{ WriteChangelog() error }); ok {
+				if err := payload.WriteChangelog(); err != nil {
+					commitErr := fmt.Errorf("block #%d smart contract changelog durability failed: %w", blockNum, err)
+					bp.SetLastCommitErr(commitErr)
+					if job.ErrChan != nil {
+						job.ErrChan <- commitErr
+					}
+					continue
+				}
+			}
+		}
 
 		lastBlockBeforeCommit := storage.GetLastBlockNumber()
 		logger.Debug("📋 [COMMIT-WORKER] CommitBlockState for block #%d (txs=%d, lastBlockNum_before=%d, commitChannelLen=%d/%d)",
@@ -151,6 +163,11 @@ func (bp *BlockProcessor) commitWorker() {
 		}
 		if job.StakeNomtPayload != nil {
 			if payload, ok := job.StakeNomtPayload.(interface{ CommitAsync() }); ok {
+				payload.CommitAsync()
+			}
+		}
+		if job.SmartContractNomtPayload != nil {
+			if payload, ok := job.SmartContractNomtPayload.(interface{ CommitAsync() }); ok {
 				payload.CommitAsync()
 			}
 		}
@@ -397,7 +414,7 @@ func (bp *BlockProcessor) commitWorker() {
 // instead of Commit() (slow, holds locks until BatchPut completes).
 // PersistAsync runs inline (synchronous) to guarantee trie swap completes before
 // the next block starts processing — eliminating the fork race condition.
-func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) (accountBatch []byte, stakeBatch []byte, smartContractBatch []byte, smartContractStorageBatch []byte, codeBatchPut []byte, err error) {
+func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.TransactionStateDB, receipts types.Receipts, isStateChanging bool, trieDBSnapshots map[common.Hash]*trie_database.TrieDatabaseSnapshot, blockNumber uint64) (accountBatch []byte, stakeBatch []byte, smartContractBatch []byte, smartContractStorageBatch []byte, codeBatchPut []byte, smartContractNomtPayload interface{}, err error) {
 	overallStart := time.Now()
 
 	// Will hold the pipeline results for async persistence
@@ -432,10 +449,16 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			// them into AccountStateDB. If this runs in parallel with AccountStateDB.CommitPipeline(),
 			// a severe race condition occurs causing non-deterministic StateRoots (i.e. cluster forks).
 			scStart := time.Now()
-			if err := bp.chainState.GetSmartContractDB().Commit(); err != nil {
+			scNomtPayload, err := bp.chainState.GetSmartContractDB().Commit()
+			if err != nil {
 				logger.Error("🚨 [COMMIT] Sequential SmartContractDB commit error: %v — cannot proceed", err)
-				return nil, nil, nil, nil, nil, fmt.Errorf("SmartContractDB commit failed: %w", err)
+				return nil, nil, nil, nil, nil, nil, fmt.Errorf("SmartContractDB commit failed: %w", err)
 			}
+
+			if payload, ok := scNomtPayload.(interface{ SetBlockNumber(uint64) }); ok {
+				payload.SetBlockNumber(blockNumber)
+			}
+			smartContractNomtPayload = scNomtPayload
 			scDuration = time.Since(scStart)
 			logger.Debug("[PERF] SmartContractDB (Sequential): %v", scDuration)
 
@@ -537,7 +560,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 	if len(commitErrors) > 0 {
 		errMsg := strings.Join(commitErrors, "; ")
 		logger.Error("🚨 [COMMIT] Parallel commit task(s) failed: %s — block MUST be reverted to prevent fork", errMsg)
-		return nil, nil, nil, nil, nil, fmt.Errorf("parallel commit failure: %s", errMsg)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("parallel commit failure: %s", errMsg)
 	}
 
 	var accountPersistDuration, stakePersistDuration, receiptPersistDuration time.Duration
@@ -554,7 +577,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		startPersist := time.Now()
 		if err := bp.chainState.GetAccountStateDB().PersistAsync(accountPipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for AccountStateDB: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("AccountStateDB PersistAsync failed: %w", err)
 		}
 		accountPersistDuration = time.Since(startPersist)
 		if accountPersistDuration > 10*time.Millisecond {
@@ -573,7 +596,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		startPersist := time.Now()
 		if err := bp.chainState.GetStakeStateDB().PersistAsync(stakePipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for StakeStateDB: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("StakeStateDB PersistAsync failed: %w", err)
 		}
 		stakePersistDuration = time.Since(startPersist)
 		if stakePersistDuration > 10*time.Millisecond {
@@ -584,7 +607,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 		startPersist := time.Now()
 		if err := receipts.PersistAsync(receiptPipelineResult); err != nil {
 			logger.Error("🚨 [COMMIT] PersistAsync failed for Receipts: %v", err)
-			return nil, nil, nil, nil, nil, fmt.Errorf("Receipts PersistAsync failed: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("Receipts PersistAsync failed: %w", err)
 		}
 		receiptPersistDuration = time.Since(startPersist)
 		if receiptPersistDuration > 10*time.Millisecond {
@@ -605,7 +628,7 @@ func (bp *BlockProcessor) commitToMemoryParallel(txDB *transaction_state_db.Tran
 			blockNumber, scDuration, maxDuration, maxTask, accountPersistDuration, stakePersistDuration, receiptPersistDuration, overallDuration)
 	}
 
-	return accountBatch, stakeBatch, smartContractBatch, smartContractStorageBatch, codeBatchPut, nil
+	return accountBatch, stakeBatch, smartContractBatch, smartContractStorageBatch, codeBatchPut, smartContractNomtPayload, nil
 }
 
 // persistWorker REMOVED (May 2026): Was a no-op fence goroutine. PersistAsync

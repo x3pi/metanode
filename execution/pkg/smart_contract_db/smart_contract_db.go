@@ -11,6 +11,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/pkg/state_changelog"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
@@ -39,6 +40,9 @@ type SmartContractDB struct {
 
 	// Track read storage keys for speculative execution (Block-STM)
 	readStorageKeys sync.Map // map[common.Address]*sync.Map (map[string]struct{})
+
+	changelogDB        *state_changelog.StateChangelogDB
+	currentCommitBlock uint64
 }
 
 func (db *SmartContractDB) CodeStorage() storage.Storage {
@@ -47,6 +51,24 @@ func (db *SmartContractDB) CodeStorage() storage.Storage {
 
 func (db *SmartContractDB) DbSmartContract() storage.Storage {
 	return db.dbSmartContract
+}
+
+func (db *SmartContractDB) SetChangelogDB(changelogDB *state_changelog.StateChangelogDB) {
+	db.changelogDB = changelogDB
+}
+
+func (db *SmartContractDB) SetTrieCommitBlock(blockNumber uint64) {
+	db.currentCommitBlock = blockNumber
+	db.smartContractStorageTries.Range(func(key, value interface{}) bool {
+		if nomtTrie, ok := value.(*trie.NomtStateTrie); ok {
+			nomtTrie.SetCurrentCommitBlock(blockNumber)
+		}
+		return true
+	})
+}
+
+func (db *SmartContractDB) GetChangelogDB() *state_changelog.StateChangelogDB {
+	return db.changelogDB
 }
 
 func (db *SmartContractDB) SetSmartContractStorageBatch(batch []byte) {
@@ -83,11 +105,13 @@ func NewSmartContractDB(
 	codeStorage storage.Storage,
 	dbSmartContract storage.Storage,
 	accountStateDB types.AccountStateDB,
+	changelogDB *state_changelog.StateChangelogDB,
 ) *SmartContractDB {
 	db := &SmartContractDB{
 		codeStorage:     codeStorage,
 		accountStateDB:  accountStateDB,
 		dbSmartContract: dbSmartContract,
+		changelogDB:     changelogDB,
 	} // go db.cleanupLoop() // Start the cleanup goroutine
 	return db
 }
@@ -276,10 +300,12 @@ func GroupEventLogsByAddress(eventLogs []types.EventLog) map[common.Address][]ty
 	return groupedLogs
 }
 
-func (db *SmartContractDB) CommitAllStorage() error {
+func (db *SmartContractDB) CommitAllStorage() (interface{}, error) {
 	var allBatches [][2][]byte
 	var finalErr error
 	backend := trie.GetStateBackend()
+
+	var pendingSession interface{}
 
 	var addresses []common.Address
 	db.smartContractStorageTries.Range(func(key, _ interface{}) bool {
@@ -309,17 +335,40 @@ func (db *SmartContractDB) CommitAllStorage() error {
 		// ═══════════════════════════════════════════════════════════════════════
 		// NOMT FAST PATH: If the trie was already committed by LateBindRoots
 		// (detected by HasUncommittedChanges=false), skip the redundant
-		// Copy→Commit→CommitPayload cycle. The root and replication batch
-		// are already available on the original trie.
+		// Copy→Commit cycle. The root and replication batch are already available.
 		// ═══════════════════════════════════════════════════════════════════════
-		if nomtTrie, isNomt := t.(*trie.NomtStateTrie); isNomt && !nomtTrie.HasUncommittedChanges() {
-			root = nomtTrie.Hash()
-			commitSource = t
-			// CommitPayload was already called in LateBindRoots — nothing to persist.
+		if nomtTrie, isNomt := t.(*trie.NomtStateTrie); isNomt {
+			if !nomtTrie.HasUnbatchedChanges() {
+				root = nomtTrie.Hash()
+				commitSource = t
+			} else {
+				commitTrie := t.Copy()
+				var err error
+				root, _, _, err = commitTrie.Commit(true)
+				if err != nil {
+					logger.Error("Error committing storage trie for address:", address)
+					finalErr = err
+					continue
+				}
+				commitSource = commitTrie
+				nomtTrie = commitSource.(*trie.NomtStateTrie)
+			}
+
+			// Only call CommitPayload for non-NOMT backends. NOMT payloads are returned
+			// to be flushed atomically at the end of CommitBlockState.
+			if backend != trie.BackendNOMT {
+				if err := nomtTrie.CommitPayload(); err != nil {
+					logger.Error("Error committing NOMT payload for address:", address, "error:", err)
+					finalErr = err
+					continue
+				}
+			} else {
+				if payload := nomtTrie.ExtractPendingPayload(); payload != nil {
+					pendingSession = payload
+				}
+			}
 		} else {
-			// Normal path: Create a snapshot copy and commit.
-			// This handles MPT, Flat, Verkle, and NOMT tries that were NOT
-			// processed by LateBindRoots (e.g. read-only tries kept in map).
+			// Normal path for non-NOMT (MPT, Flat, Verkle)
 			commitTrie := t.Copy()
 
 			var err error
@@ -328,14 +377,6 @@ func (db *SmartContractDB) CommitAllStorage() error {
 				logger.Error("Error committing storage trie for address:", address)
 				finalErr = err
 				continue
-			}
-
-			if nomtTrie, isNomt := commitTrie.(*trie.NomtStateTrie); isNomt {
-				if err := nomtTrie.CommitPayload(); err != nil {
-					logger.Error("Error committing NOMT payload for address:", address, "error:", err)
-					finalErr = err
-					continue
-				}
 			}
 			commitSource = commitTrie
 		}
@@ -404,12 +445,12 @@ func (db *SmartContractDB) CommitAllStorage() error {
 		data, err := storage.SerializeBatch(allBatches)
 		if err != nil {
 			logger.Error("CommitAllStorage serialize error:", err)
-			return err
+			return nil, err
 		}
 		db.SetSmartContractStorageBatch(data)
 	}
 
-	return finalErr
+	return pendingSession, finalErr
 }
 
 // LateBindRoots computes the definitive StorageRoot for all dirty smart contracts
@@ -418,6 +459,8 @@ func (db *SmartContractDB) CommitAllStorage() error {
 func (db *SmartContractDB) LateBindRoots() error {
 	var finalErr error
 	var addresses []common.Address
+	var nomtTries []*trie.NomtStateTrie
+	var nomtAddresses []common.Address
 	db.smartContractStorageTries.Range(func(key, _ interface{}) bool {
 		addresses = append(addresses, key.(common.Address))
 		return true
@@ -442,50 +485,27 @@ func (db *SmartContractDB) LateBindRoots() error {
 		// a read-only trie loaded prior to a state update, it will revert `StorageRoot` to a stale value.
 		var hasChanges bool = true
 		if nomtTrie, isNomt := t.(*trie.NomtStateTrie); isNomt {
-			hasChanges = nomtTrie.HasUncommittedChanges()
+			// Batched flow: only writes not yet handed to a session need binding; data that is already in a
+			// finished (but not yet persisted) session must not be batched a second time.
+			hasChanges = nomtTrie.HasUnbatchedChanges()
 		}
 		if !hasChanges {
 			continue
 		}
 
 		// ═══════════════════════════════════════════════════════════════════════
-		// CRITICAL FORK-SAFETY FIX (Apr 2026):
-		//
-		// For NOMT: commit the ORIGINAL trie directly and persist immediately.
-		// The previous Copy→Commit→Abort pattern corrupted NOMT's shared handle:
-		//   1. Copy creates a new NomtStateTrie sharing the same NOMT Handle
-		//   2. Commit calls session.Finish(handle) which modifies the handle's
-		//      internal Merkle tree state
-		//   3. Close/Abort calls nomt_finished_session_abort which frees the
-		//      session but does NOT fully revert the handle's Beatree state
-		//   4. The next session on this handle starts from corrupted state
-		//
-		// By committing the original and calling CommitPayload immediately,
-		// the handle always transitions through a clean lifecycle:
-		//   BeginSession → Write → Finish → CommitPayload (persist)
-		// CommitAllStorage then detects the trie is already committed and
-		// skips redundant work.
+		// CRITICAL FORK-SAFETY FIX (Apr 2026 / Oct 2026):
+		// For NOMT, we batch all dirty states into a SINGLE session.
+		// We DO NOT commit per contract here to prevent session deadlock.
+		// We DO NOT call CommitPayload here to maintain block atomicity.
 		// ═══════════════════════════════════════════════════════════════════════
 		var root common.Hash
 		if _, isNomt := t.(*trie.NomtStateTrie); isNomt {
-			var err error
-			root, _, _, err = t.Commit(true)
-			if err != nil {
-				logger.Error("LateBindRoots: Error committing NOMT storage trie for address:", address)
-				finalErr = err
-				continue
-			}
-			// Persist immediately so the NOMT handle transitions to a clean state
-			// before the next contract's session begins.
-			if nomtTrie, ok := t.(*trie.NomtStateTrie); ok {
-				if err := nomtTrie.CommitPayload(); err != nil {
-					logger.Error("LateBindRoots: Error persisting NOMT payload for address:", address, "error:", err)
-					finalErr = err
-					continue
-				}
-			}
+			nomtTries = append(nomtTries, t.(*trie.NomtStateTrie))
+			nomtAddresses = append(nomtAddresses, address)
+			continue // Skip root assignment for now; we'll do it after batch commit
 		} else {
-			// Non-NOMT: safe to use Copy→Commit→Close (no shared mutable handle)
+			// Non-NOMT: safe to use Copy→Commit (no shared mutable handle)
 			commitTrie := t.Copy()
 			var err error
 			var nodeSet *node.NodeSet
@@ -550,10 +570,57 @@ func (db *SmartContractDB) LateBindRoots() error {
 			db.accountStateDB.SetState(as)
 		}
 	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// NOMT GLOBAL BATCH COMMIT
+	// Group all dirty contract state into a single session and commit them together.
+	// ═══════════════════════════════════════════════════════════════════════
+	if len(nomtTries) > 0 {
+		dirtyStates := make([]trie.NomtDirtyState, len(nomtTries))
+		for i, nt := range nomtTries {
+			dirtyStates[i] = nt.ExportDirty()
+			addr := nomtAddresses[i]
+			dirtyStates[i].Prefix = addr[:]
+		}
+
+		blockNum := uint64(0)
+		if db.accountStateDB != nil {
+			blockNum = db.accountStateDB.GetTrieCommitBlock()
+		}
+
+		handle := nomtTries[0].GetHandle()
+		globalRoot, fs, changes, err := trie.CommitBatchRaw(handle, dirtyStates, db.changelogDB, blockNum)
+		if err != nil {
+			logger.Error("LateBindRoots: CommitBatchRaw failed: %v", err)
+			return err
+		}
+
+		// Clear dirty states and set pendingFinishedSession on the FIRST trie
+		for i, nt := range nomtTries {
+			nt.ClearDirty(globalRoot)
+			if i == 0 {
+				nt.SetPendingSession(fs)
+				nt.SetPendingChangelog(changes, nt.GetCurrentCommitBlock())
+			}
+		}
+
+		// Assign globalRoot to all those contracts' AccountStates
+		for _, address := range nomtAddresses {
+			as, asErr := db.accountStateDB.AccountState(address)
+			if asErr != nil || as.SmartContractState() == nil {
+				continue
+			}
+			if as.SmartContractState().StorageRoot() != globalRoot {
+				as.SetStorageRoot(globalRoot)
+				db.accountStateDB.SetState(as)
+			}
+		}
+	}
+
 	return finalErr
 }
 
-func (db *SmartContractDB) Commit() error {
+func (db *SmartContractDB) Commit() (interface{}, error) {
 	var batch [][2][]byte
 
 	// Commit code
@@ -579,7 +646,7 @@ func (db *SmartContractDB) Commit() error {
 	if len(batch) > 0 {
 		if err := db.codeStorage.BatchPut(batch); err != nil {
 			logger.Error("Error batch putting code:", err)
-			return err
+			return nil, err
 		}
 		failpoint.Hit("after-logical-write")
 		// Contract bytecode is referenced by the account state committed with this block, but
@@ -589,7 +656,7 @@ func (db *SmartContractDB) Commit() error {
 		failpoint.Hit("before-sync-durable")
 		if err := storage.SyncDurable(db.codeStorage); err != nil {
 			logger.Error("Error making code storage durable:", err)
-			return err
+			return nil, err
 		}
 		failpoint.Hit("after-sync-durable")
 
@@ -597,16 +664,17 @@ func (db *SmartContractDB) Commit() error {
 			data, err := storage.SerializeBatch(batch)
 			if err != nil {
 				logger.Error("Error serializing code batch:", err)
-				return err
+				return nil, err
 			}
 			db.SetCodeBatchPut(data)
 		}
 	}
 
 	// Commit smart contract storage
-	if err := db.CommitAllStorage(); err != nil {
+	pendingSession, err := db.CommitAllStorage()
+	if err != nil {
 		logger.Error("Error committing smart contract storage:", err)
-		return err
+		return nil, err
 	}
 
 	// Commit event logs
@@ -647,7 +715,7 @@ func (db *SmartContractDB) Commit() error {
 	}
 
 	if eventLogErr != nil {
-		return eventLogErr
+		return pendingSession, eventLogErr
 	}
 
 	if len(globalEventLogBatch) > 0 {
@@ -655,25 +723,25 @@ func (db *SmartContractDB) Commit() error {
 			data, err := storage.SerializeBatch(globalEventLogBatch)
 			if err != nil {
 				logger.Error("Error serializing event log batch:", err)
-				return err
+				return nil, err
 			}
 			db.SetSmartContractBatch(data)
 		}
 
 		if err := db.dbSmartContract.BatchPut(globalEventLogBatch); err != nil {
 			logger.Error("Error batch putting event logs:", err)
-			return err
+			return nil, err
 		}
 		failpoint.Hit("after-batch-put")
 		failpoint.Hit("before-sync-durable-events")
 		if err := storage.SyncDurable(db.dbSmartContract); err != nil {
 			logger.Error("Error making event log storage durable:", err)
-			return err
+			return nil, err
 		}
 		failpoint.Hit("after-sync-durable-events")
 	}
 
-	return nil
+	return pendingSession, nil
 }
 
 func (db *SmartContractDB) GetLogsByHash(hash common.Hash) (*smart_contract.EventLog, error) {
@@ -758,6 +826,13 @@ func (db *SmartContractDB) loadStorageTrie(address common.Address, customRoot ..
 	t, err := trie.NewStateTrie(root, trieDB, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trie for address: %s, root %s, error: %w", address.Hex(), root, err)
+	}
+
+	if nomtTrie, ok := t.(*trie.NomtStateTrie); ok {
+		nomtTrie.SetCurrentCommitBlock(db.currentCommitBlock)
+		if db.changelogDB != nil {
+			nomtTrie.SetChangelogDB(db.changelogDB)
+		}
 	}
 
 	if !hasCustomRoot {

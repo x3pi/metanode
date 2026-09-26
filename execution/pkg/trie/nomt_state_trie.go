@@ -94,6 +94,7 @@ type NomtStateTrie struct {
 	wDirty     map[string]*nomtDirtyEntry // live mutable dirty map
 	wOldValues map[string][]byte          // pre-commit values for replication
 	wOldLoaded map[string]bool            // tracks which old values were loaded
+	Prefix     []byte
 
 	// registry is a thread-safe registry of all known keys shared across trie clones.
 	registry *sharedRegistry
@@ -165,10 +166,27 @@ func FlushNomtSessions(sessions []NomtSessionToFlush) error {
 // DEPRECATED: Registry is now stored in a separate file, NOT in the NOMT Merkle trie.
 const nomtRegistryKeyPrefix = "__nomt_registry__:"
 
+// SharedContractStorageNamespace is the NOMT namespace shared by every contract's storage. Its state cannot
+// be rebuilt by wiping the handle (the changelog only holds keys that changed, not the full state), so crash
+// recovery rolls it back IN PLACE using the changelog and then verifies the resulting root.
+const SharedContractStorageNamespace = "smart_contract_storage"
+
 // addressToKeyPath converts a MetaNode address (20 bytes) to a NOMT KeyPath (32 bytes)
 // using Keccak256 for uniform distribution across the binary trie.
 // The namespace prefix ensures key isolation between different trie instances.
 func addressToKeyPathWithNamespace(namespace, key []byte) [32]byte {
+	if string(namespace) == SharedContractStorageNamespace && len(key) == 52 {
+		// CRITICAL FIX: The dummyTrie used for crash recovery alignment passes 52-byte keys
+		// (20-byte address + 32-byte slot). We must reconstruct the correct keyPrefix
+		// "smart_contract_storage_<hex_addr>" to match normal execution hashing.
+		addr := hex.EncodeToString(key[:20])
+		slot := key[20:]
+		keyPrefix := "smart_contract_storage_" + addr
+		combined := make([]byte, len(keyPrefix)+len(slot))
+		copy(combined, keyPrefix)
+		copy(combined[len(keyPrefix):], slot)
+		return crypto.Keccak256Hash(combined)
+	}
 	if len(namespace) == 0 {
 		return crypto.Keccak256Hash(key)
 	}
@@ -539,6 +557,12 @@ func (n *NomtStateTrie) SetCurrentCommitBlock(blockNumber uint64) {
 	n.writerMu.Lock()
 	defer n.writerMu.Unlock()
 	n.currentCommitBlock = blockNumber
+}
+
+func (n *NomtStateTrie) GetCurrentCommitBlock() uint64 {
+	n.writerMu.RLock()
+	defer n.writerMu.RUnlock()
+	return n.currentCommitBlock
 }
 
 // SetReplicationSync configures the trie to bypass registry tracking and modifications.
@@ -1212,8 +1236,12 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		if err == nil && len(addresses) > 0 {
 			for _, addr := range addresses {
 				val, err := n.changelogDB.GetStateAt(addr, blockNumber)
-				if err == nil && len(val) > 0 {
+				if err == nil {
 					kvs = append(kvs, [2][]byte{addr, val})
+				} else {
+					// The key did not exist at or before blockNumber.
+					// Since we skipped ResetNomtHandle, we MUST explicitly delete it from the C++ trie.
+					kvs = append(kvs, [2][]byte{addr, nil})
 				}
 			}
 			if len(kvs) > 0 {
@@ -1243,16 +1271,23 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		for _, origKey := range knownKeys {
 			// First attempt to read the key-value from the persistent flat DB (storage)
 			// as it represents the true committed state, bypassing any C++ handle corruption.
-			storageKey := append([]byte("nomt:"), origKey...)
-			val, readErr := storage.Get(storageKey)
+			var val []byte
+			var readErr error
+			if storage != nil {
+				storageKey := append([]byte("nomt:"), origKey...)
+				val, readErr = storage.Get(storageKey)
+			} else {
+				readErr = fmt.Errorf("storage is nil")
+			}
+
 			if readErr == nil && len(val) > 0 {
 				kvs = append(kvs, [2][]byte{origKey, val})
 				readFromStorageCount++
 			} else {
 				// Fallback to reading from the old C++ handle if not found in storage
 				keyPath := addressToKeyPathWithNamespace(n.namespace, origKey)
-				val, found, readErr := n.handle.StateDbGet(keyPath)
-				if readErr == nil && found && len(val) > 0 {
+				val, found, handleErr := n.handle.StateDbGet(keyPath)
+				if handleErr == nil && found && len(val) > 0 {
 					kvs = append(kvs, [2][]byte{origKey, val})
 					readFromHandleCount++
 				}
@@ -1260,7 +1295,7 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		}
 
 		// Fallback to prefix scan from shared storage if no keys retrieved from registry
-		if len(kvs) == 0 {
+		if len(kvs) == 0 && storage != nil {
 			var scanErr error
 			// Scan only 'nomt:' prefixed keys which yields exact key-value pairs with 'nomt:' prefix stripped.
 			kvs, scanErr = storage.PrefixScan([]byte("nomt:"))
@@ -1306,15 +1341,18 @@ func (n *NomtStateTrie) AlignWithExpectedRoot(storage storage.Storage, expectedR
 		n.handle.UnlockCommitPayload()
 	}
 
-	// 2. Reset the NOMT handle (closes, wipes, and reopens)
-	newHandle, err := ResetNomtHandle(string(n.namespace))
-	if err != nil {
-		return fmt.Errorf("failed to reset NOMT handle: %w", err)
+	// 2. Reset the NOMT handle (closes, wipes, and reopens). The shared contract storage is rolled back in
+	// place instead (see SharedContractStorageNamespace); its result is verified against expectedRoot below.
+	if string(n.namespace) != SharedContractStorageNamespace {
+		newHandle, err := ResetNomtHandle(string(n.namespace))
+		if err != nil {
+			return fmt.Errorf("failed to reset NOMT handle: %w", err)
+		}
+		n.handle = newHandle
 	}
 
 	// 3. Update handle and reset internal trie state under writerMu
 	n.writerMu.Lock()
-	n.handle = newHandle
 	n.wDirty = make(map[string]*nomtDirtyEntry)
 	n.wOldValues = make(map[string][]byte)
 	n.wOldLoaded = make(map[string]bool)
@@ -1592,6 +1630,18 @@ func (n *NomtStateTrie) Close() {
 	n.pendingCommittingMap = nil
 }
 
+// HasUnbatchedChanges reports whether the trie has writes that have not yet been handed to a NOMT session
+// (i.e. are still in the live dirty map). Unlike HasUncommittedChanges it is FALSE once the writes were
+// batched by CommitBatchRaw, even though their data stays visible in the read view until the session is
+// persisted. Callers deciding "does this trie still need to be committed?" in the batched flow must use this
+// one: HasUncommittedChanges stays true until the asynchronous persist lands, which sent CommitAllStorage down
+// the copy-and-recommit path (empty replication batch for SyncOnly nodes, pending session never extracted).
+func (n *NomtStateTrie) HasUnbatchedChanges() bool {
+	n.writerMu.RLock()
+	defer n.writerMu.RUnlock()
+	return len(n.wDirty) > 0
+}
+
 func (n *NomtStateTrie) HasUncommittedChanges() bool {
 	n.writerMu.RLock()
 	hasWDirty := len(n.wDirty) > 0
@@ -1702,6 +1752,12 @@ type NomtPayload struct {
 	doneOnce        sync.Once
 	changes         []state_changelog.StateChange
 	blockNum        uint64
+}
+
+func (p *NomtPayload) SetBlockNumber(blockNum uint64) {
+	if p != nil {
+		p.blockNum = blockNum
+	}
 }
 
 func (p *NomtPayload) Discard() {
@@ -2048,4 +2104,191 @@ func (n *NomtStateTrie) GenerateProof(key []byte) ([]byte, error) {
 	}
 
 	return proof, nil
+}
+
+// NomtDirtyState represents the uncommitted dirty state of a NomtStateTrie.
+type NomtDirtyState struct {
+	Dirty     map[string]*nomtDirtyEntry
+	OldValues map[string][]byte
+	OldLoaded map[string]bool
+	Prefix    []byte
+}
+
+// ExportDirty safely extracts the current dirty state without committing it.
+func (n *NomtStateTrie) ExportDirty() NomtDirtyState {
+	n.writerMu.Lock()
+	defer n.writerMu.Unlock()
+	return NomtDirtyState{
+		Dirty:     n.wDirty,
+		OldValues: n.wOldValues,
+		OldLoaded: n.wOldLoaded,
+	}
+}
+
+// ClearDirty clears the writer buffers and publishes a new read view.
+func (n *NomtStateTrie) ClearDirty(newRoot e_common.Hash) {
+	n.writerMu.Lock()
+	defer n.writerMu.Unlock()
+
+	committingSnapshot := n.wDirty
+	n.wDirty = make(map[string]*nomtDirtyEntry)
+	n.wOldValues = make(map[string][]byte)
+	n.wOldLoaded = make(map[string]bool)
+
+	// Commit() records the replication batch here; the batched path (CommitBatchRaw) bypasses Commit(), so it
+	// must be recorded too. SyncOnly nodes receive contract storage ONLY through this batch
+	// (SmartContractDB.CommitAllStorage reads it via GetCommitBatch); without it they silently miss every
+	// contract-storage write.
+	n.lastCommitBatch = nomtReplicationBatch(committingSnapshot)
+
+	n.publishReadView(
+		make(map[string]*nomtDirtyEntry),
+		committingSnapshot, // keep in readView until asynchronously committed
+		newRoot,
+	)
+}
+
+// nomtReplicationBatch builds the "nomt:"-prefixed (original key, value) batch, in key order, that SyncOnly
+// nodes consume; it is the same batch Commit() builds.
+func nomtReplicationBatch(dirty map[string]*nomtDirtyEntry) [][2][]byte {
+	sortedKeys := make([]string, 0, len(dirty))
+	for hexKey := range dirty {
+		sortedKeys = append(sortedKeys, hexKey)
+	}
+	sort.Strings(sortedKeys)
+	batch := make([][2][]byte, 0, len(dirty))
+	for _, hexKey := range sortedKeys {
+		entry := dirty[hexKey]
+		nomtKey := make([]byte, 5+len(entry.originalKey))
+		copy(nomtKey[:5], "nomt:")
+		copy(nomtKey[5:], entry.originalKey)
+		batch = append(batch, [2][]byte{nomtKey, entry.value})
+	}
+	return batch
+}
+
+// CommitBatchRaw groups multiple dirty states into a single NOMT session to ensure
+// atomicity across multiple trie instances sharing the same handle (e.g. SmartContractDB).
+func CommitBatchRaw(handle *nomt_ffi.Handle, dirtyStates []NomtDirtyState, changelogDB *state_changelog.StateChangelogDB, blockNumber uint64) (e_common.Hash, *nomt_ffi.FinishedSession, []state_changelog.StateChange, error) {
+	if handle == nil {
+		return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: nil handle")
+	}
+
+	totalDirty := 0
+	for _, s := range dirtyStates {
+		totalDirty += len(s.Dirty)
+	}
+	if totalDirty == 0 {
+		return e_common.Hash{}, nil, nil, nil
+	}
+
+	writes := make([][32]byte, 0, totalDirty)
+	writeVals := make([][]byte, 0, totalDirty)
+	reads := make([][32]byte, 0, totalDirty)
+	readVals := make([][]byte, 0, totalDirty)
+
+	var changes []state_changelog.StateChange
+
+	for _, state := range dirtyStates {
+		if len(state.Dirty) == 0 {
+			continue
+		}
+		sortedDirtyKeys := make([]string, 0, len(state.Dirty))
+		for hexKey := range state.Dirty {
+			sortedDirtyKeys = append(sortedDirtyKeys, hexKey)
+		}
+		sort.Strings(sortedDirtyKeys)
+
+		for _, hexKey := range sortedDirtyKeys {
+			entry := state.Dirty[hexKey]
+			writes = append(writes, entry.keyPath)
+			writeVals = append(writeVals, entry.value)
+
+			if oldVal, ok := state.OldValues[hexKey]; ok {
+				reads = append(reads, entry.keyPath)
+				readVals = append(readVals, oldVal)
+			}
+			var changeKey []byte
+			if len(state.Prefix) > 0 {
+				changeKey = make([]byte, len(state.Prefix)+len(entry.originalKey))
+				copy(changeKey, state.Prefix)
+				copy(changeKey[len(state.Prefix):], entry.originalKey)
+			} else {
+				changeKey = entry.originalKey
+			}
+
+			changes = append(changes, state_changelog.StateChange{
+				Key:      changeKey,
+				OldValue: state.OldValues[hexKey],
+				NewValue: entry.value,
+			})
+		}
+	}
+
+	// Synchronous changelog write to guarantee crash safety BEFORE modifying mmap
+	if changelogDB != nil && len(changes) > 0 {
+		if err := changelogDB.WriteBlockChanges(blockNumber, changes); err != nil {
+			return e_common.Hash{}, nil, nil, fmt.Errorf("failed to sync changelog: %v", err)
+		}
+	}
+
+	session := nomt_ffi.BeginSession(handle)
+	if session == nil {
+		return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: BeginSession failed")
+	}
+
+	if len(reads) > 0 {
+		if err := session.BatchRecordRead(reads, readVals); err != nil {
+			session.Abort()
+			return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: BatchRecordRead failed: %w", err)
+		}
+	}
+
+	if len(writes) > 0 {
+		if err := session.BatchWrite(writes, writeVals); err != nil {
+			session.Abort()
+			return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: BatchWrite failed: %w", err)
+		}
+	}
+
+	newRootArray, fs, err := session.Finish(handle)
+	if err != nil {
+		return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: Finish failed: %w", err)
+	}
+	newRoot := e_common.BytesToHash(newRootArray[:])
+
+	// Record the root this block produced so crash recovery can verify a rollback to it. If it cannot be
+	// recorded the block must not proceed: release the finished session and fail closed.
+	if changelogDB != nil && len(changes) > 0 {
+		if err := changelogDB.SetBlockRoot(blockNumber, newRoot[:]); err != nil {
+			fs.Abort()
+			return e_common.Hash{}, nil, nil, fmt.Errorf("CommitBatchRaw: failed to record block root: %w", err)
+		}
+	}
+
+	return newRoot, fs, changes, nil
+}
+
+// GetHandle returns the underlying NOMT handle.
+func (n *NomtStateTrie) GetHandle() *nomt_ffi.Handle {
+	return n.handle
+}
+
+func (n *NomtStateTrie) GetPendingSession() *nomt_ffi.FinishedSession {
+	return n.pendingFinishedSession
+}
+
+// SetPendingSession assigns a FinishedSession to this trie to be flushed later.
+func (n *NomtStateTrie) SetPendingSession(fs *nomt_ffi.FinishedSession) {
+	n.sessionMu.Lock()
+	defer n.sessionMu.Unlock()
+	n.pendingFinishedSession = fs
+}
+
+// SetPendingChangelog sets the pending changelog for the trie.
+func (n *NomtStateTrie) SetPendingChangelog(changes []state_changelog.StateChange, blockNum uint64) {
+	n.sessionMu.Lock()
+	defer n.sessionMu.Unlock()
+	n.pendingChangelog = changes
+	n.pendingChangelogBlock = blockNum
 }
