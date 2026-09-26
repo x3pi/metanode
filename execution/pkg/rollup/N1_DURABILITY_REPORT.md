@@ -159,6 +159,8 @@ Lần chạy thực tế ngày 2026-09-26 với 2 round, 5 block đã đi qua ki
 
 > **Trạng thái bằng chứng:** **CHƯA ĐO**. Không có raw output, commit SHA và mô tả thiết bị của một lần benchmark trước/sau có thể kiểm chứng trong repository. Vì vậy báo cáo này không công bố số p50/p95/p99 hoặc TPS ước lượng như thể đó là kết quả thực nghiệm. N1 chỉ được đánh dấu hoàn tất sau khi các artifact này tồn tại.
 
+> **Cập nhật 2026-09-26 (đo bởi reviewer, `ci.sh run-now --reset --only tps_blast`, cluster local 4 validator + 1 sync trên một máy, mỗi lần reset cluster):** TPS end-to-end của bài TPS Blast, hai mẫu xen kẽ cho mỗi bên — `dev` (`a21d68da`): **6616** và **6984** tx/s; nhánh PR sau khi merge `dev`: **6268** và **6496** tx/s. Trung bình PR thấp hơn ~6% và thấp hơn ở cả hai cặp xen kẽ, nhưng mẫu nhỏ (n=2) và các lần chạy cùng một bản dao động ~5%, nên đây là **ước lượng sơ bộ, không phải kết luận**. Một lần `ci.sh run-now` đầy đủ trên `dev` trước đó cho ~7695 tx/s (điều kiện khác: chạy sau chuỗi bài khác) nên **không** dùng làm mốc so sánh. Chưa đo: p50/p95/p99 độ trễ commit, số `fsync()` vật lý mỗi block, và thiết bị lưu trữ chi tiết. Raw output nằm trong log CI của phiên đó, chưa được đưa vào repository.
+
 ### 7.1. Barrier theo đường đi mã nguồn (không phải số `fsync()` vật lý đã đo)
 
 | Miền lưu trữ | Barrier trên code path hiện tại | Điều kiện gọi | Ghi chú đo lường |
