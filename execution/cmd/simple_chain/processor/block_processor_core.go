@@ -421,6 +421,11 @@ func (bp *BlockProcessor) GetTxClient() *txsender.Client {
 	return bp.txClient
 }
 
+// ValidatorAddress returns this node's validator address (the leader the raft feed stamps in C1).
+func (bp *BlockProcessor) ValidatorAddress() common.Address {
+	return bp.validatorAddress
+}
+
 // GetBlockIngestionQueue returns a send-only ingestion channel for ExecutableBlocks (Hook H1 / Raft mode).
 // Callers can only write blocks to this queue, preserving BlockProcessor's exclusive read and lifecycle ownership.
 func (bp *BlockProcessor) GetBlockIngestionQueue() chan<- *mt_proto.ExecutableBlock {
