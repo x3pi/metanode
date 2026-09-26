@@ -93,6 +93,23 @@ Tiêu chí thoát C0 theo `SEQUENCER_SCHEMAS_AND_TEST_PLAN.md` mục 2.5: **T-DE
 
 **Nghiệm thu:** báo cáo spike liệt kê từng `T-DET-*` với trạng thái đạt/không kèm số lần lặp thực tế; T-DET-01/02/03/05 đạt; ghi rõ T-DET-04 chuyển sang C2. **Nếu bất kỳ lần chạy nào lệch hash/state root: dừng, báo cáo, không làm C1.** (C0 ĐÃ ĐƯỢC ĐÁNH DẤU LÀ HOÀN TẤT)
 
+### N0.5 — Báo cáo Audit `ErrEstimateHit` trong `TrueBlockSTM` (Đã hoàn tất)
+
+**Mục tiêu:** Đảm bảo lỗi `mvcc.ErrEstimateHit` không bị nuốt làm mất cập nhật (như đã xảy ra ở nhánh Native Transfer).
+
+| Vị trí / Tác vụ | Hàm gọi / Logic | Cơ chế bắt `ErrEstimateHit` | Đánh giá |
+|---|---|---|---|
+| Đọc Sender ở đầu `execOne` | `mvccDB.AccountState(From)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
+| Đọc Recipient (Native) | `mvccDB.AccountState(To)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
+| Cộng tiền Recipient (Native) | `mvccDB.AddBalance(To, amt)` | Kiểm tra trực tiếp `errors.Is(err, mvcc.ErrEstimateHit)` | Đạt (An toàn) |
+| Trừ tiền Sender (Native/Gas) | `mvccDB.SubTotalBalance` | Không dính lỗi vì Sender đã được đọc thành công (vào cache) ở đầu hàm. | Đạt (An toàn) |
+| Uỷ quyền EIP-7702 | `processAuthorizationList` | Kiểm tra `mvccDB.BlockingVersion != mvcc.BaseVersion` ngay sau khi gọi. Đã sửa mã lỗi nuốt `ErrEstimateHit` và vượt qua bài stress test. | Đạt (An toàn) |
+| Logic EVM / Gateway | `HandleTransaction` | Mã lỗi bị nuốt hoặc trả về FAILED Receipt, nhưng `TrueBlockSTM` có chốt chặn kiểm tra `mvccDB.BlockingVersion` ở cuối luồng (dòng ~932). Nếu bị dính estimate, tx sẽ suspend và vứt bỏ Receipt sai. | Đạt (An toàn) |
+| Áp dụng State từ Receipt | `MapAddBalance`, `SetCodeHash` | Không kiểm tra trực tiếp, nhưng `BlockingVersion` được set bên trong `mvccDB` và được bắt ở bước tổng kết như trên. | Đạt (An toàn) |
+| Logic ngoài `TrueBlockSTM` | `receipt_helper`, `state_merger` | Gọi Global DB (không phải MVCC), Global DB không sinh ra `ErrEstimateHit`. | Đạt (An toàn) |
+
+**Kết luận Audit:** Đã rà soát toàn bộ các điểm sử dụng `mvccDB` trong `tx_processor`. Chỉ có khu vực Native Transfer dễ bị lọt do return sớm mà không đi qua chốt chặn kiểm tra `BlockingVersion` ở cuối. Bản vá cho EIP-7702 đã bịt kín kẽ hở cuối cùng này. Không phát hiện thêm lỗ hổng nào.
+
 ### N1 — Rà soát bền vững các kho có bộ đệm trên đường commit (P0, độc lập, làm ngay)
 **Vì sao:** lỗi vừa sửa (`smart_contract_code`) là một trường hợp của lớp lỗi "ghi có đệm rồi crash". Có thể còn kho khác, hậu quả là hash/state lệch giữa các node sau crash (fork).
 **Việc:**

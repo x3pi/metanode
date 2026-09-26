@@ -691,14 +691,10 @@ func (stm *TrueBlockSTM) execOne(
 		var authGasUsed uint64
 		if len(tx.AuthorizationList()) > 0 {
 			authGasUsed = processAuthorizationList(tx, chainState.GetConfig().ChainId.Uint64(), mvccDB, chainState.GetSmartContractDB())
-			
-			// FIX: processAuthorizationList delegates to mvccDB.AccountState(authority), which sets
-			// mvccDB.BlockingVersion if it hits an ESTIMATE. Native Transfers don't check BlockingVersion 
-			// at the end, so we must check it here immediately to avoid silently losing the authorization.
 			if mvccDB.BlockingVersion != mvcc.BaseVersion {
 				atomic.AddInt32(&stm.abortCount, 1)
 				markSuspended()
-				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, mvccDB, scDB)
+				stm.suspendOnEstimate(ctx, mvccDB.BlockingVersion, txIndex, execCh, activeTasks, nil, nil)
 				return
 			}
 		}
