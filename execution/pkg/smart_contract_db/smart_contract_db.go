@@ -13,6 +13,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/trie"
@@ -580,14 +581,17 @@ func (db *SmartContractDB) Commit() error {
 			logger.Error("Error batch putting code:", err)
 			return err
 		}
+		failpoint.Hit("after-logical-write")
 		// Contract bytecode is referenced by the account state committed with this block, but
 		// codeStorage is a buffered (Lazy)Pebble store: without an explicit sync a crash shortly after
 		// the block commit can lose the bytecode (observed by the C0 spike: after kill -9 the replayed
 		// block had a different hash). Only blocks that deploy new code pay for the sync.
+		failpoint.Hit("before-sync-durable")
 		if err := storage.SyncDurable(db.codeStorage); err != nil {
 			logger.Error("Error making code storage durable:", err)
 			return err
 		}
+		failpoint.Hit("after-sync-durable")
 
 		if config.ConfigApp != nil {
 			data, err := storage.SerializeBatch(batch)
@@ -660,6 +664,13 @@ func (db *SmartContractDB) Commit() error {
 			logger.Error("Error batch putting event logs:", err)
 			return err
 		}
+		failpoint.Hit("after-batch-put")
+		failpoint.Hit("before-sync-durable-events")
+		if err := storage.SyncDurable(db.dbSmartContract); err != nil {
+			logger.Error("Error making event log storage durable:", err)
+			return err
+		}
+		failpoint.Hit("after-sync-durable-events")
 	}
 
 	return nil

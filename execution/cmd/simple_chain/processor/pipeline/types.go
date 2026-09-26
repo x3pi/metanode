@@ -32,6 +32,7 @@ type CommitJob struct {
 	Receipts       types.Receipts
 	TxDB           *transaction_state_db.TransactionStateDB
 	DoneChan       chan struct{}
+	ErrChan        chan error
 	// MappingWg is waited on before broadcasting receipts.
 	// Ensures async SetTxHashMapBlockNumber goroutine finishes before clients can query TXs.
 	MappingWg *sync.WaitGroup

@@ -153,7 +153,14 @@ func (rh *RequestHandler) HandleSyncBlocksRequest(request *pb.SyncBlocksRequest)
 	// ═══════════════════════════════════════════════════════════════════════════
 	if sm := rh.getSnapshotManager(); sm != nil {
 		logger.Info("⏳ [SYNC] Waiting for commitWorker to flush pending blocks before processing sync...")
-		sm.WaitForPersistence()
+		if err := sm.WaitForPersistence(); err != nil {
+			logger.Error("🚨 [SYNC] WaitForPersistence reported error: %v — aborting sync to prevent state corruption", err)
+			return &pb.SyncBlocksResponse{
+				SyncedCount:     0,
+				LastSyncedBlock: 0,
+				Error:           fmt.Sprintf("prior commit failed: %v", err),
+			}, nil
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════

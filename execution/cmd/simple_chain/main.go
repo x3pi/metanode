@@ -72,6 +72,21 @@ func main() {
 	// Gọi Parse() sau khi đã định nghĩa TẤT CẢ các flag
 	flag.Parse()
 
+	if *toolRegisterValidator != "" {
+		runRegisterValidator(*toolRegisterValidator)
+		os.Exit(0)
+	}
+
+	if *toolGetAddress != "" {
+		runGetAddress(*toolGetAddress)
+		os.Exit(0)
+	}
+
+	if *toolC0Spike != "" {
+		runC0Spike(*toolC0Spike, *defaultConfigPath, *c0DataDir, *c0OutPath, *c0Blocks, *c0Rounds, *c0Restart, *c0ReportPath)
+		os.Exit(0)
+	}
+
 	// --- BẮT ĐẦU PROFILING NẾU LÀ MASTER 0 ---
 	if *pprofAddr == "0.0.0.0:6061" || *pprofAddr == "localhost:6060" || os.Getenv("PPROF_PROFILE") == "1" {
 		f, err := os.Create("startup_cpu.prof")
@@ -89,21 +104,6 @@ func main() {
 		}
 	}
 	// ----------------------------------------
-
-	if *toolRegisterValidator != "" {
-		runRegisterValidator(*toolRegisterValidator)
-		os.Exit(0)
-	}
-
-	if *toolGetAddress != "" {
-		runGetAddress(*toolGetAddress)
-		os.Exit(0)
-	}
-
-	if *toolC0Spike != "" {
-		runC0Spike(*toolC0Spike, *defaultConfigPath, *c0DataDir, *c0OutPath, *c0Blocks, *c0Rounds, *c0Restart, *c0ReportPath)
-		os.Exit(0)
-	}
 
 	// Log thông tin process
 	logger.Info("[MAIN] ===== Khởi động process =====")

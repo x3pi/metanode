@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
+	"github.com/meta-node-blockchain/meta-node/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,4 +79,44 @@ func TestCommit_DoesNotSyncCodeStorageWhenNoNewCode(t *testing.T) {
 
 	require.NoError(t, db.Commit())
 	require.Empty(t, code.recorded(), "blocks without new bytecode must not pay for an fsync")
+}
+
+func TestCommit_SyncsEventLogStorageAfterWritingLogs(t *testing.T) {
+	code := newDurableRecordingDB()
+	eventStorage := newDurableRecordingDB()
+	db := NewSmartContractDB(code, eventStorage, nil)
+
+	addr := common.HexToAddress("0x2000000000000000000000000000000000000001")
+	txHash := common.HexToHash("0xaaaa")
+	log := smart_contract.NewEventLog(txHash, addr, []byte("deposit"), [][]byte{[]byte("topic1")})
+	db.AddEventLogs([]types.EventLog{log})
+
+	require.NoError(t, db.Commit())
+	require.Equal(t, []string{"batchput", "sync"}, eventStorage.recorded(),
+		"event logs must be written and then made durable via SyncDurable, in that order")
+}
+
+func TestCommit_PropagatesEventLogStorageSyncError(t *testing.T) {
+	code := newDurableRecordingDB()
+	eventStorage := newDurableRecordingDB()
+	eventStorage.syncErr = errors.New("event log fsync failed")
+	db := NewSmartContractDB(code, eventStorage, nil)
+
+	addr := common.HexToAddress("0x2000000000000000000000000000000000000002")
+	txHash := common.HexToHash("0xbbbb")
+	log := smart_contract.NewEventLog(txHash, addr, []byte("transfer"), [][]byte{[]byte("topic1")})
+	db.AddEventLogs([]types.EventLog{log})
+
+	err := db.Commit()
+	require.Error(t, err, "a failed event log sync must fail the commit")
+	require.Contains(t, err.Error(), "event log fsync failed")
+}
+
+func TestCommit_DoesNotSyncEventLogStorageWhenNoLogs(t *testing.T) {
+	code := newDurableRecordingDB()
+	eventStorage := newDurableRecordingDB()
+	db := NewSmartContractDB(code, eventStorage, nil)
+
+	require.NoError(t, db.Commit())
+	require.Empty(t, eventStorage.recorded(), "blocks without event logs must not pay for an fsync")
 }

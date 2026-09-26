@@ -358,12 +358,12 @@ Chi tiết, schema và test `T-AN-*` ở `SEQUENCER_PARENT_ANCHORING.md`. **Ph�
 
 | Bước | Tên | Kích thước | Phụ thuộc | Trạng thái |
 |---|---|---|---|---|
-| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ◐ |
-| A1 | Sửa tài liệu thiết kế | S | A0 | ☐ |
-| A2 | Chốt đặc tả dữ liệu | S | A1 | ☐ |
+| A0 | Phân tích khoảng cách với Gateway hiện có | S | — | ☑ |
+| A1 | Sửa tài liệu thiết kế | S | A0 | ☑ |
+| A2 | Chốt đặc tả dữ liệu | S | A1 | ☑ |
 | C0 | **Spike: cấp ExecutableBlock từ Go, thực thi xác định** | M | A2 | ◐ |
-| B1 | State machine thuần | M | A2 | ◐ |
-| B2 | Store per-key | M | B1 | ☐ |
+| B1 | State machine thuần | M | A2 | ☑ |
+| B2 | Store per-key | M | B1 | ☑ |
 | B3 | Parent Chain: Float + Claimed | L | A0, A2 | ☐ |
 | B4 | Handler gửi cross-node | M | B2, B3 | ☐ |
 | B5 | Worker gửi | M | B4 | ☐ |

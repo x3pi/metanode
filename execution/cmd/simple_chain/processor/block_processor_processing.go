@@ -334,18 +334,16 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 
 	retAccount, retStake, retSmartContract, retSmartContractStorage, retCodeBatchPut, commitErr := bp.commitToMemoryParallel(txDB, receipts, isStateChanging, trieDBSnapshots, currentBlockNumber)
 	if commitErr != nil {
-		// CRITICAL: commitToMemoryParallel failed (SmartContractDB, AccountPipeline, or StakePipeline).
-		// Block has already been SetLastBlock'd (line 398) so we cannot fully revert here.
-		// The error is logged at ERROR level for monitoring. The commitWorker will still
-		// persist whatever state was successfully committed.
-		logger.Error("🚨 [COMMIT-MEMORY] commitToMemoryParallel error for block #%d: %v — block will be committed with partial state", currentBlockNumber, commitErr)
-	} else {
-		accountBatch = retAccount
-		stakeBatch = retStake
-		smartContractBatch = retSmartContract
-		smartContractStorageBatch = retSmartContractStorage
-		codeBatchPut = retCodeBatchPut
+		logger.Error("🚨 [COMMIT-MEMORY] commitToMemoryParallel error for block #%d: %v — reverting draft block to prevent fork", currentBlockNumber, commitErr)
+		mappingWg.Wait()
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
 	}
+	accountBatch = retAccount
+	stakeBatch = retStake
+	smartContractBatch = retSmartContract
+	smartContractStorageBatch = retSmartContractStorage
+	codeBatchPut = retCodeBatchPut
 	phase32Elapsed := time.Since(phase32Start)
 	pipeline.GlobalBlockTraceStore.UpdateCommitMemoryTime(currentBlockNumber, phase32Elapsed.Microseconds())
 
@@ -427,7 +425,9 @@ func (bp *BlockProcessor) createBlockFromResults(processResults tx_processor.Pro
 	// Wait for mapping generation to complete before constructing CommitJob
 	mappingWg.Wait()
 	if mappingErr != nil {
-		logger.Error("🚨 [COMMIT-MEMORY] mapping generation error for block #%d: %v", currentBlockNumber, mappingErr)
+		logger.Error("🚨 [COMMIT-MEMORY] mapping generation error for block #%d: %v — reverting draft block to prevent fork", currentBlockNumber, mappingErr)
+		bp.revertDraftBlock(txDB, currentBlockNumber)
+		return nil
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -716,10 +716,20 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 
 	// 1. Discard all dirty trie state (in-memory, no I/O)
 	trie_database.GetTrieDatabaseManager().DiscardAllTrieDatabases()
-	bp.chainState.GetAccountStateDB().Discard()
-	bp.chainState.GetSmartContractDB().Discard()
-	bp.chainState.GetStakeStateDB().Discard() // CRITICAL FIX: Prevent stake state divergence
-	blockchain.GetBlockChainInstance().DiscardBlockMappings(failedBlockNumber)
+	if bp.chainState != nil {
+		if accDB := bp.chainState.GetAccountStateDB(); accDB != nil {
+			accDB.Discard()
+		}
+		if scDB := bp.chainState.GetSmartContractDB(); scDB != nil {
+			scDB.Discard()
+		}
+		if stakeDB := bp.chainState.GetStakeStateDB(); stakeDB != nil {
+			stakeDB.Discard() // CRITICAL FIX: Prevent stake state divergence
+		}
+	}
+	if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		bc.DiscardBlockMappings(failedBlockNumber)
+	}
 
 	// 2. Discard pending NOMT payloads to release the commit wait group
 	if bp.pendingAccountPayload != nil {
@@ -737,10 +747,15 @@ func (bp *BlockProcessor) revertDraftBlock(txDB *transaction_state_db.Transactio
 
 	// 3. Reset lastBlock pointer to the parent (the block BEFORE the failed one)
 	parentBlockNumber := failedBlockNumber - 1
-	parentBlock := blockchain.GetBlockChainInstance().GetBlockByNumber(parentBlockNumber)
+	var parentBlock types.Block
+	if bc := blockchain.GetBlockChainInstance(); bc != nil {
+		parentBlock = bc.GetBlockByNumber(parentBlockNumber)
+	}
 	if parentBlock != nil {
 		bp.SetLastBlock(parentBlock)
-		bp.chainState.GetBlockDatabase().SaveLastBlock(parentBlock)
+		if bp.chainState != nil && bp.chainState.GetBlockDatabase() != nil {
+			bp.chainState.GetBlockDatabase().SaveLastBlock(parentBlock)
+		}
 		logger.Info("✅ [REVERT] State reset to parent block #%d (hash=%s)",
 			parentBlockNumber, parentBlock.Header().Hash().Hex()[:18]+"...")
 	} else {

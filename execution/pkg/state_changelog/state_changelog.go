@@ -163,8 +163,10 @@ func (c *StateChangelogDB) WriteBlockChanges(blockNumber uint64, changes []State
 		c.hasEntryCache.Store(addrStr, true)
 	}
 
-	// Use pebble.NoSync instead of Sync to remove blocking fsyncs during block execution.
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	// The canonical block may become visible before its NOMT payload is committed.
+	// Keep this recovery source durable first so startup can rebuild NOMT to the
+	// canonical header after an abrupt crash in that interval.
+	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("failed to commit changelog batch: %w", err)
 	}
 

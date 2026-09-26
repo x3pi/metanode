@@ -550,6 +550,19 @@ func (app *App) initBlockchain() error {
 			return fmt.Errorf("failed NewChainState: %v", err)
 		}
 
+		// A crash can leave the canonical block durable while its asynchronous
+		// NOMT payload is not. The changelog is synced before block publication,
+		// so rebuild both NOMT domains to the canonical header before integrity
+		// checks or execution resume. Fail closed if the recovery data cannot
+		// reproduce the exact header roots.
+		if futureNomtRoot != (e_common.Hash{}) {
+			if _, err := app.chainState.CommitBlockState(app.startLastBlock, blockchain.WithRebuildTries()); err != nil {
+				return fmt.Errorf("failed to reconcile NOMT to canonical block #%d after crash: %w", app.startLastBlock.Header().BlockNumber(), err)
+			}
+			logger.Info("🛡️ [STARTUP] Reconciled NOMT to canonical block #%d from durable changelog", app.startLastBlock.Header().BlockNumber())
+			futureNomtRoot = e_common.Hash{}
+		}
+
 		// ═══════════════════════════════════════════════════════════════
 		// REPOPULATE GENESIS STATE FOR WIPED NOMT (May 2026):
 		// If NOMT was wiped and tip block reset to 0, NOMT is empty.
@@ -628,7 +641,7 @@ func (app *App) initBlockchain() error {
 				storage.UpdateLastHandledCommitEpoch(uint64(app.startLastBlock.Header().Epoch()))
 				blockchain.GetBlockChainInstance().SetBlockNumberToHash(uint64(app.startLastBlock.Header().BlockNumber()), app.startLastBlock.Header().Hash())
 				blockchain.GetBlockChainInstance().Commit()
-				
+
 				// 🛡️ CRITICAL FIX: We MUST update the master block pointer (lastBlockHashKey) and backup JSON
 				// to point to the rolled-back tip. Otherwise, the next restart will read the orphaned originalLastBlock!
 				if saveErr := blockDatabase.SaveLastBlockSync(app.startLastBlock); saveErr != nil {
@@ -889,8 +902,6 @@ SKIP_GENESIS:
 			}
 		}
 	}
-
-
 
 	return nil
 }
@@ -1443,7 +1454,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 				}
 			}
 		} else {
-			keyPrev := []byte(fmt.Sprintf("blockNumber_%d", bn - 1))
+			keyPrev := []byte(fmt.Sprintf("blockNumber_%d", bn-1))
 			if dataPrev, err := app.storageManager.GetStorageMapping().Get(keyPrev); err == nil && len(dataPrev) == 32 {
 				hashPrev := e_common.BytesToHash(dataPrev)
 				if blkPrev, err := blockDatabase.GetBlockByHash(hashPrev); err == nil && blkPrev != nil {
@@ -1487,7 +1498,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		// 4. Process transactions
 		blockTimeSec := blk.Header().TimeStamp() / 1000
 		leaderAddr := blk.Header().LeaderAddress()
-		
+
 		// Run execution
 		_, execErr := tx_processor.ProcessTransactions(context.Background(), app.chainState, groupedGroups, false, true, blockTimeSec, leaderAddr, bn, false)
 		if execErr != nil {
@@ -1520,7 +1531,7 @@ func (app *App) reexecuteBlocksToCatchUp(blockDatabase *block.BlockDatabase, sta
 		storage.UpdateLastGlobalExecIndex(blk.Header().GlobalExecIndex())
 		storage.UpdateLastHandledCommitIndex(uint32(blk.Header().CommitIndex()))
 		storage.UpdateLastHandledCommitEpoch(uint64(blk.Header().Epoch()))
-		
+
 		headerCopy := blk.Header()
 		app.chainState.SetcurrentBlockHeader(&headerCopy)
 		app.startLastBlock = blk

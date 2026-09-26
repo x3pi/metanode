@@ -25,28 +25,41 @@ import (
 	mt_common "github.com/meta-node-blockchain/meta-node/pkg/common"
 	"github.com/meta-node-blockchain/meta-node/pkg/config"
 	"github.com/meta-node-blockchain/meta-node/pkg/cross_chain"
+	"github.com/meta-node-blockchain/meta-node/pkg/failpoint"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction"
+	"github.com/meta-node-blockchain/meta-node/pkg/transaction_state_db"
 	"github.com/meta-node-blockchain/meta-node/types"
 )
 
+// EventLogRecord stores verified smart contract event log attributes for cross-process determinism
+type EventLogRecord struct {
+	TxHash  string   `json:"tx_hash"`
+	Address string   `json:"address"`
+	Topics  []string `json:"topics"`
+	Data    string   `json:"data"`
+}
+
 // BlockRecord stores execution result of a single block for determinism comparison
 type BlockRecord struct {
-	Number                 uint64 `json:"number"`
-	Hash                   string `json:"hash"`
-	AccountStatesRoot      string `json:"account_states_root"`
-	StakeStatesRoot        string `json:"stake_states_root"`
-	ReceiptsRoot           string `json:"receipts_root"`
-	TxsRoot                string `json:"txs_root"`
-	TxCount                int    `json:"tx_count"`
-	SampleSenderNonce      uint64 `json:"sample_sender_nonce"`
-	SampleRecipientBalance string `json:"sample_recipient_balance"`
-	AllReceiptsSuccess     bool   `json:"all_receipts_success"`
-	ContractAddress        string `json:"contract_address,omitempty"`
+	Number                 uint64           `json:"number"`
+	Hash                   string           `json:"hash"`
+	AccountStatesRoot      string           `json:"account_states_root"`
+	StakeStatesRoot        string           `json:"stake_states_root"`
+	ReceiptsRoot           string           `json:"receipts_root"`
+	TxsRoot                string           `json:"txs_root"`
+	TxCount                int              `json:"tx_count"`
+	SampleSenderNonce      uint64           `json:"sample_sender_nonce"`
+	SampleRecipientBalance string           `json:"sample_recipient_balance"`
+	AllReceiptsSuccess     bool             `json:"all_receipts_success"`
+	ContractAddress        string           `json:"contract_address,omitempty"`
+	TxStateVerified        bool             `json:"tx_state_verified"`
+	EventLogs              []EventLogRecord `json:"event_logs,omitempty"`
 }
 
 // RustIsolationEvidence records empirical measurements of process threads, sockets, and FFI state
@@ -136,7 +149,10 @@ func measureRustConsensusIsolation() (*RustIsolationEvidence, error) {
 			if strings.Contains(comm, "tokio") {
 				ev.TokioThreadsCount++
 			}
-			if strings.Contains(comm, "consensus") || strings.Contains(comm, "metanode-") {
+			// Do not classify a thread solely from the executable name: Linux truncates
+			// comm to 15 bytes, so a test binary named metanode-c0-spike makes every Go
+			// runtime thread look like a consensus thread.
+			if strings.Contains(comm, "consensus") {
 				ev.ConsensusThreads = append(ev.ConsensusThreads, comm)
 			}
 		}
@@ -171,6 +187,14 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 		outPath = filepath.Join(dataDir, "c0_result.json")
 	}
 
+	// Register failpoint marker dir for deterministic crash harness
+	failpoint.SetMarkerDir(dataDir)
+	activeRunID := os.Getenv("C0_RUN_ID")
+	if activeRunID == "" {
+		activeRunID = fmt.Sprintf("worker-%d", time.Now().UnixNano())
+	}
+	failpoint.SetRunContext(activeRunID, 0)
+
 	// 1. Prepare isolated config
 	cfgFile, err := prepareC0Config(baseConfigPath, dataDir)
 	if err != nil {
@@ -194,6 +218,7 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	}
 
 	startBlockNum := storage.GetLastBlockNumber()
+	failpoint.SetRunContext(activeRunID, startBlockNum)
 	fmt.Printf("🚀 [C0 WORKER] Initialized node at %s (current block: #%d, isRestart: %v)\n", dataDir, startBlockNum, isRestart)
 
 	asDb := app.chainState.GetAccountStateDB()
@@ -311,6 +336,8 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 		fmt.Printf("📥 [C0 WORKER] Submitting ExecutableBlock #%d (txs: %d, GEI: %d)...\n",
 			targetHeight, len(eb.Transactions), eb.GlobalExecIndex)
 
+		failpoint.SetRunContext(fmt.Sprintf("%s-b%d", activeRunID, targetHeight), targetHeight)
+
 		q <- eb
 
 		// Wait for this block to commit
@@ -330,9 +357,11 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 		fmt.Printf("✅ [C0 WORKER] Block #%d processed (committed height=%d)\n", targetHeight, storage.GetLastBlockNumber())
 
 		// Ensure block processor finished persisting this block
-		app.blockProcessor.WaitForPersistence()
+		if err := app.blockProcessor.WaitForPersistence(); err != nil {
+			return fmt.Errorf("WaitForPersistence failed at block #%d: %w", targetHeight, err)
+		}
 
-		// Write progress marker for progress-driven kill -9 coordination
+		// Write the fallback progress marker used by non-failpoint scenarios.
 		progressFile := filepath.Join(dataDir, "commit_progress.txt")
 		_ = os.WriteFile(progressFile, []byte(fmt.Sprintf("%d", targetHeight)), 0644)
 
@@ -352,13 +381,17 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	}
 
 	// Drain persistence pipeline
-	app.blockProcessor.WaitForPersistence()
+	if err := app.blockProcessor.WaitForPersistence(); err != nil {
+		return fmt.Errorf("final WaitForPersistence failed: %w", err)
+	}
 
 	// 5. Collect block records with state mutation assertions
 	records := make([]BlockRecord, 0, totalBlocks)
 	bc := blockchain.GetBlockChainInstance()
 	bDb := app.chainState.GetBlockDatabase()
 	rcpStorage := app.storageManager.GetStorageReceipt()
+	txStorage := app.storageManager.GetStorageTransaction()
+	scDB := app.chainState.GetSmartContractDB()
 
 	var prevStatesRoot string
 	for b := 1; b <= totalBlocks; b++ {
@@ -383,6 +416,7 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 		prevStatesRoot = hdr.AccountStatesRoot().Hex()
 
 		allReceiptsSuccess := true
+		var eventLogs []EventLogRecord
 		rcpDb, err := receipt.NewReceiptsFromRoot(hdr.ReceiptRoot(), rcpStorage)
 		if err != nil {
 			allReceiptsSuccess = false
@@ -393,14 +427,57 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 					allReceiptsSuccess = false
 					break
 				}
+				for _, receiptLog := range rcp.EventLogs() {
+					expectedLog := smart_contract.NewEventLogFromProto(receiptLog)
+					persistedLog, err := scDB.GetLogsByHash(expectedLog.Hash())
+					if err != nil || persistedLog == nil || persistedLog.Proto() == nil {
+						return fmt.Errorf("block #%d event log %s missing from smart-contract DB: err=%v", b, expectedLog.Hash().Hex(), err)
+					}
+					pbLog := persistedLog.Proto()
+					var topics []string
+					for _, topic := range pbLog.Topics {
+						topics = append(topics, hex.EncodeToString(topic))
+					}
+					eventLogs = append(eventLogs, EventLogRecord{
+						TxHash:  hex.EncodeToString(pbLog.TransactionHash),
+						Address: hex.EncodeToString(pbLog.Address),
+						Topics:  topics,
+						Data:    hex.EncodeToString(pbLog.Data),
+					})
+				}
 			}
+		}
+
+		// Verify TransactionStateDB for this block
+		txStateVerified := true
+		txDB, err := transaction_state_db.NewTransactionStateDBFromRoot(hdr.TransactionsRoot(), txStorage)
+		if err != nil {
+			return fmt.Errorf("block #%d NewTransactionStateDBFromRoot failed: %w", b, err)
+		}
+		for _, txHash := range blkIface.Transactions() {
+			tx, err := txDB.GetTransaction(txHash)
+			if err != nil || tx == nil || tx.Hash() != txHash {
+				txStateVerified = false
+				break
+			}
+		}
+
+		if b >= 2 && len(eventLogs) == 0 {
+			return fmt.Errorf("block #%d increment() emitted no persisted event log", b)
 		}
 
 		smp := samples[uint64(b)]
 
 		contractAddrStr := ""
 		if b == 1 {
-			contractAddrStr = crypto.CreateAddress(senderAddr, 1).Hex()
+			cAddr := crypto.CreateAddress(senderAddr, 1)
+			contractAddrStr = cAddr.Hex()
+			// Code storage is content-addressed by code hash, not contract address.
+			// SmartContractDB.Code resolves the persisted hash from account state and
+			// then reads the bytecode from the physical code store.
+			if codeBytes := scDB.Code(cAddr); len(codeBytes) == 0 {
+				return fmt.Errorf("contract code missing for %s at block 1", cAddr.Hex())
+			}
 		}
 
 		records = append(records, BlockRecord{
@@ -415,6 +492,8 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 			SampleRecipientBalance: smp.balance,
 			AllReceiptsSuccess:     allReceiptsSuccess,
 			ContractAddress:        contractAddrStr,
+			TxStateVerified:        txStateVerified,
+			EventLogs:              eventLogs,
 		})
 	}
 
@@ -476,6 +555,21 @@ func compareBlockRecords(rec1, rec2 []BlockRecord, context string) error {
 		if r1.TxCount != r2.TxCount {
 			diffs = append(diffs, fmt.Sprintf("TxCount %d vs %d", r1.TxCount, r2.TxCount))
 		}
+		if !r1.TxStateVerified || !r2.TxStateVerified {
+			diffs = append(diffs, fmt.Sprintf("TxStateVerified %v vs %v", r1.TxStateVerified, r2.TxStateVerified))
+		}
+		if len(r1.EventLogs) != len(r2.EventLogs) {
+			diffs = append(diffs, fmt.Sprintf("EventLogs count %d vs %d", len(r1.EventLogs), len(r2.EventLogs)))
+		} else {
+			for j := range r1.EventLogs {
+				el1 := r1.EventLogs[j]
+				el2 := r2.EventLogs[j]
+				if el1.TxHash != el2.TxHash || el1.Address != el2.Address || el1.Data != el2.Data || strings.Join(el1.Topics, ",") != strings.Join(el2.Topics, ",") {
+					diffs = append(diffs, fmt.Sprintf("EventLog[%d] mismatch (tx %s vs %s)", j, el1.TxHash, el2.TxHash))
+					break
+				}
+			}
+		}
 		if len(diffs) > 0 {
 			return fmt.Errorf("[%s] Block #%d mismatch in %d field(s): %s", context, r1.Number, len(diffs), strings.Join(diffs, "; "))
 		}
@@ -514,7 +608,7 @@ func runC0Verify(baseConfigPath string, blocksCount, roundsCount int, customRepo
 	}
 
 	fmt.Println("═════════════════════════════════════════════════════════════════════")
-	fmt.Printf("🧪 C0 SPIKE: DETERMINISM, WORKLOAD EXPANSION & PROGRESS-DRIVEN KILL -9\n")
+	fmt.Printf("🧪 C0 SPIKE: DETERMINISM, WORKLOAD EXPANSION & STORE-BOUNDARY KILL -9\n")
 	fmt.Printf("   Blocks: %d | Backend: NOMT | Mode: Raft | Workload: Native+EVM+Gateway\n", blocksCount)
 	fmt.Println("═════════════════════════════════════════════════════════════════════")
 	var resR1P1, resR1P2, resR2P1 *WorkerResult
@@ -636,31 +730,52 @@ func runC0Verify(baseConfigPath string, blocksCount, roundsCount int, customRepo
 	}
 	fmt.Printf("   - Status: PASS (Empirically verified: no Rust consensus runtime; NOMT storage threads isolated)\n")
 
-	// STEP 4: PROGRESS-DRIVEN ABRUPT CRASH (kill -9) & RECOVERY TEST
+	// STEP 4: STORE-BOUNDARY ABRUPT CRASH (kill -9) & RECOVERY TEST
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("💥 STEP 4: Progress-Driven Abrupt Crash (kill -9) & Recovery Test")
+	fmt.Println("💥 STEP 4: Store-Boundary Abrupt Crash (kill -9) & Recovery Test")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Kill points: right after the first block, after the second, and one block before the end.
-	killPoints := []uint64{1, 2}
+	// Kill points: failpoint-targeted kill across individual store durability boundaries
+	type crashTarget struct {
+		scenarioID           string
+		killAt               uint64
+		minimumDurableHeight uint64
+		failpointMarker      string
+		label                string
+	}
+	crashTargets := []crashTarget{
+		{scenarioID: "crash_after_mapping_k2", killAt: 2, minimumDurableHeight: 1, failpointMarker: "failpoint_after-mapping-barrier.marker", label: "after mapping barrier (block #2)"},
+		{scenarioID: "crash_after_code_k2", killAt: 2, minimumDurableHeight: 1, failpointMarker: "failpoint_after-sync-durable.marker", label: "after contract code barrier (block #2)"},
+		{scenarioID: "crash_after_receipts_k2", killAt: 2, minimumDurableHeight: 1, failpointMarker: "failpoint_after-receipts-barrier.marker", label: "after receipts barrier (block #2)"},
+		{scenarioID: "crash_after_tx_state_k2", killAt: 2, minimumDurableHeight: 1, failpointMarker: "failpoint_after-transaction-state-barrier.marker", label: "after transaction-state barrier (block #2)"},
+		{scenarioID: "crash_after_block_k2", killAt: 2, minimumDurableHeight: 2, failpointMarker: "failpoint_after-block-barrier.marker", label: "after block barrier (block #2)"},
+		{scenarioID: "crash_after_events_k2", killAt: 2, minimumDurableHeight: 1, failpointMarker: "failpoint_after-sync-durable-events.marker", label: "after event log barrier (block #2)"},
+		{scenarioID: "crash_before_nomt_k2", killAt: 2, minimumDurableHeight: 2, failpointMarker: "failpoint_before-nomt-commit.marker", label: "before NOMT payload commit (block #2)"},
+	}
 	if last := uint64(blocksCount - 1); last > 2 {
-		killPoints = append(killPoints, last)
+		crashTargets = append(crashTargets, crashTarget{
+			scenarioID:           fmt.Sprintf("crash_before_done_k%d", last),
+			killAt:               last,
+			minimumDurableHeight: last,
+			failpointMarker:      "failpoint_before-done-signal.marker",
+			label:                fmt.Sprintf("before done signal (block #%d)", last),
+		})
 	}
 	var lastCrash *crashScenarioResult
 	var crashSummaries []string
-	for _, kp := range killPoints {
-		res, err := runCrashScenario(selfExe, baseConfigPath, tmpBase, blocksCount, kp, resR1P1.Records)
+	for _, ct := range crashTargets {
+		res, err := runCrashScenario(selfExe, baseConfigPath, tmpBase, ct.scenarioID, blocksCount, ct.killAt, ct.minimumDurableHeight, ct.failpointMarker, ct.label, resR1P1.Records)
 		if err != nil {
-			return fmt.Errorf("crash scenario (kill at block >= %d): %w", kp, err)
+			return fmt.Errorf("crash scenario (%s): %w", ct.label, err)
 		}
 		lastCrash = res
-		crashSummaries = append(crashSummaries, fmt.Sprintf("kill at block #%d -> startBlockNum=%d, bypassed=%d", res.KilledAtBlock, res.StartBlockNum, res.BypassedBlocks))
+		crashSummaries = append(crashSummaries, fmt.Sprintf("%s -> killedAt=%d, startBlockNum=%d, bypassed=%d", ct.label, res.KilledAtBlock, res.StartBlockNum, res.BypassedBlocks))
 	}
 	durRestart := lastCrash.Duration
 	recCrash := lastCrash.Records
 	blkN1 := recCrash[blocksCount]
 
-	fmt.Printf("✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS] (%d kill points)\n", len(killPoints))
+	fmt.Printf("✅ [KILL -9 RECOVERY & N+1 CONTINUATION SUCCESS] (%d kill points)\n", len(crashTargets))
 	for _, line := range crashSummaries {
 		fmt.Printf("   - %s (identity match GEI+txs, Zero-Fork P2.5; historical hashes == clean run)\n", line)
 	}
@@ -697,17 +812,25 @@ type crashScenarioResult struct {
 	Duration       time.Duration
 }
 
-// runCrashScenario starts a worker, SIGKILLs it as soon as its progress marker reaches killAt, restarts it
-// on the same data directory in recovery mode and checks that (1) the blocks committed before the kill are
+// runCrashScenario starts a worker, SIGKILLs it as soon as its progress marker or failpoint marker reaches killAt,
+// restarts it on the same data directory in recovery mode and checks that (1) the blocks committed before the kill are
 // bypassed with an identity check, (2) their hashes/state roots equal a clean run (ref) and (3) block N+1
 // is executed on top of them.
-func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, killAt uint64, ref []BlockRecord) (*crashScenarioResult, error) {
-	dirCrash := filepath.Join(tmpBase, fmt.Sprintf("crash_node_k%d", killAt))
+func runCrashScenario(selfExe, baseConfigPath, tmpBase, scenarioID string, blocksCount int, killAt, minimumDurableHeight uint64, failpointMarker, label string, ref []BlockRecord) (*crashScenarioResult, error) {
+	if scenarioID == "" || filepath.Base(scenarioID) != scenarioID {
+		return nil, fmt.Errorf("invalid crash scenario ID %q", scenarioID)
+	}
+	dirCrash := filepath.Join(tmpBase, scenarioID)
+	if err := os.RemoveAll(dirCrash); err != nil {
+		return nil, fmt.Errorf("clean crash scenario directory %s: %w", dirCrash, err)
+	}
 	outCrashTemp := filepath.Join(dirCrash, "temp_result.json")
-	outCrashRecovered := filepath.Join(tmpBase, fmt.Sprintf("res_crash_recovered_k%d.json", killAt))
+	outCrashRecovered := filepath.Join(tmpBase, fmt.Sprintf("res_%s_recovered.json", scenarioID))
 	progressMarker := filepath.Join(dirCrash, "commit_progress.txt")
 
-	fmt.Printf("\n▶ [kill point %d] Launching worker on %s to be killed abruptly...\n", killAt, dirCrash)
+	runID := fmt.Sprintf("%s-r%d", scenarioID, time.Now().UnixNano())
+
+	fmt.Printf("\n▶ [%s] Launching worker on %s (runID=%s) to be killed abruptly...\n", label, dirCrash, runID)
 	cmdCrash := exec.Command(selfExe,
 		"-tool-c0-spike=worker",
 		"-config="+baseConfigPath,
@@ -715,23 +838,46 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 		"-c0-out="+outCrashTemp,
 		fmt.Sprintf("-c0-blocks=%d", blocksCount),
 	)
-	cmdCrash.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7001")
+	cmdCrash.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7001", fmt.Sprintf("C0_RUN_ID=%s", runID))
 	cmdCrash.Stdout = os.Stdout
 	cmdCrash.Stderr = os.Stderr
 	if err := cmdCrash.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start crash target process: %w", err)
 	}
 	pid := cmdCrash.Process.Pid
-	fmt.Printf("🚀 [CRASH TEST] Worker PID %d started. Waiting for progress marker (lastBlock >= %d)...\n", pid, killAt)
+	fmt.Printf("🚀 [CRASH TEST] Worker PID %d started. Waiting for target (%s, block >= %d, runID=%s)...\n", pid, label, killAt, runID)
 
 	killedAtBlock := uint64(0)
 	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(progressMarker); err == nil {
-			var bNum uint64
-			if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &bNum); err == nil && bNum >= killAt {
-				killedAtBlock = bNum
-				break
+		if failpointMarker != "" {
+			fpPath := filepath.Join(dirCrash, failpointMarker)
+			if data, err := os.ReadFile(fpPath); err == nil {
+				hasRunID := false
+				var bNum uint64
+				for _, line := range strings.Split(string(data), "\n") {
+					if strings.HasPrefix(line, "run_id:") {
+						hasRunID = strings.TrimSpace(strings.TrimPrefix(line, "run_id:")) != ""
+					}
+					if strings.HasPrefix(line, "block_num:") {
+						_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "block_num:")), "%d", &bNum)
+					}
+				}
+				// The scenario directory was removed immediately before this process
+				// started, so any marker here belongs to this run. Some commit-layer
+				// failpoints replace the worker run ID with their canonical batch ID.
+				if hasRunID && bNum >= killAt {
+					killedAtBlock = bNum
+					break
+				}
+			}
+		} else {
+			if data, err := os.ReadFile(progressMarker); err == nil {
+				var bNum uint64
+				if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &bNum); err == nil && bNum >= killAt {
+					killedAtBlock = bNum
+					break
+				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -754,6 +900,7 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 
 	fmt.Printf("\n▶ Restarting node on %s in recovery mode (c0-restart=true)...\n", dirCrash)
 	startRestart := time.Now()
+	recoverRunID := fmt.Sprintf("%s-recovered-r%d", scenarioID, time.Now().UnixNano())
 	cmdRecover := exec.Command(selfExe,
 		"-tool-c0-spike=worker",
 		"-config="+baseConfigPath,
@@ -762,7 +909,7 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 		fmt.Sprintf("-c0-blocks=%d", blocksCount),
 		"-c0-restart=true",
 	)
-	cmdRecover.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7002")
+	cmdRecover.Env = append(os.Environ(), "C0_RANDOMIZE_TX=1", "C0_LARGE_BLOCK=1", "C0_TX_SHUFFLE_SEED=7002", fmt.Sprintf("C0_RUN_ID=%s", recoverRunID))
 	cmdRecover.Stdout = os.Stdout
 	cmdRecover.Stderr = os.Stderr
 	if err := cmdRecover.Run(); err != nil {
@@ -774,24 +921,22 @@ func runCrashScenario(selfExe, baseConfigPath, tmpBase string, blocksCount int, 
 	if err != nil {
 		return nil, fmt.Errorf("loadWorkerResult(%s): %w", outCrashRecovered, err)
 	}
-	if res.StartBlockNum < killedAtBlock {
-		return nil, fmt.Errorf("crash recovery started at block #%d, expected >= #%d", res.StartBlockNum, killedAtBlock)
+	if res.StartBlockNum < minimumDurableHeight {
+		return nil, fmt.Errorf("crash recovery started at block #%d, expected durable height >= #%d at %s", res.StartBlockNum, minimumDurableHeight, label)
 	}
-	if res.BypassedBlocks < int(killedAtBlock) {
-		return nil, fmt.Errorf("expected at least %d bypassed blocks, got %d", killedAtBlock, res.BypassedBlocks)
+	if res.BypassedBlocks < int(res.StartBlockNum) {
+		return nil, fmt.Errorf("expected at least %d bypassed blocks for recovered height, got %d", res.StartBlockNum, res.BypassedBlocks)
 	}
 	rec := res.Records
 	if len(rec) != blocksCount+1 {
 		return nil, fmt.Errorf("expected %d records after recovery continuation, got %d", blocksCount+1, len(rec))
 	}
-	for i := 0; i < blocksCount; i++ {
-		if rec[i].Hash != ref[i].Hash {
-			return nil, fmt.Errorf("crash recovery altered historical block #%d hash: recovered=%s vs expected=%s", i+1, rec[i].Hash, ref[i].Hash)
-		}
-		if rec[i].AccountStatesRoot != ref[i].AccountStatesRoot {
-			return nil, fmt.Errorf("crash recovery altered historical block #%d state root: recovered=%s vs expected=%s", i+1, rec[i].AccountStatesRoot, ref[i].AccountStatesRoot)
-		}
+	// Verify that all historical blocks equal the reference clean run across ALL dimensions:
+	// hash, state roots, tx count, receipts, tx_state DB, and smart contract event logs.
+	if err := compareBlockRecords(rec[:blocksCount], ref, fmt.Sprintf("%s (Historical)", label)); err != nil {
+		return nil, fmt.Errorf("crash recovery historical comparison failed: %w", err)
 	}
+
 	blkN1 := rec[blocksCount]
 	if blkN1.Number != uint64(blocksCount+1) {
 		return nil, fmt.Errorf("expected block #%d at tip, got #%d", blocksCount+1, blkN1.Number)
@@ -820,6 +965,10 @@ func prepareC0Config(baseConfigPath, dataDir string) (string, error) {
 	}
 
 	cfg.ConsensusMode = "raft"
+	// The spike must be self-contained even when the supplied base config is a
+	// genesis-only deployment file without node signing keys.
+	cfg.PrivateKey = "372e9d6411071707a7e7ba76a51c7907a6c799f0cb972df1671e582d649caabf"
+	cfg.Databases.BLSPrivateKey = "0109751113666a88b1d335c312a6fb49a0981c2147489f5ec264e91177b42777"
 	cfg.Databases.RootPath = filepath.Join(dataDir, "data")
 	cfg.BackupPath = filepath.Join(dataDir, "backup")
 	cfg.LogPath = filepath.Join(dataDir, "logs")
@@ -992,6 +1141,17 @@ func buildDeterministicC0Blocks(chainId *big.Int, count int) ([]*pb.ExecutableBl
 			if err := addTx(0, callTx, 0); err != nil {
 				return nil, err
 			}
+			if b == 2 {
+				// Deploy the same bytecode from another funded sender so the code
+				// durability failpoint can be exercised after block #1 is a stable
+				// recovery base.
+				deployNonce := nonces[2]
+				nonces[2]++
+				deployTx := e_types.NewContractCreation(deployNonce, big.NewInt(0), 1000000, big.NewInt(1000000000), testCounterBytecode)
+				if err := addTx(2, deployTx, 0); err != nil {
+					return nil, err
+				}
+			}
 		}
 
 		// Tx 1: Gateway barrier call: real state-mutating outbound() to registered chain 102 (sender 1)
@@ -1105,7 +1265,7 @@ func writeC0VerificationReportExtended(
 	sb.WriteString("| **EVM Smart Contract Execution** | **PASS (100%)** | Deploy `TestCounter` ở Block #1, gọi `increment()` ở Blocks #2..N thành công |\n")
 	sb.WriteString("| **Gateway Barrier Execution** | **PASS (100%)** | Gọi `outbound()` tới destination chain 102 (`0x1002`), ghi trạng thái `GatewayEngine` và receipt OK |\n")
 	sb.WriteString("| **Block-STM Concurrency Conflicts** | **PASS (100%)** | RW (cùng sender, consecutive nonces) và WW (3 txs cùng recipient) hội tụ tuyệt đối |\n")
-	sb.WriteString("| **Progress-Driven Crash & Recovery (`kill -9`)** | **PASS (100%)** | SIGKILL đột ngột khi `lastBlock >= 2`; restart bỏ qua block đã commit, đối chiếu identity, tiếp tục thực thi Block $N+1$ |\n")
+	sb.WriteString("| **Store-Boundary Failpoint Crash & Recovery (`kill -9`)** | **PASS (100%)** | SIGKILL tại các barrier vật lý (mapping, block DB, code, event logs, NOMT); restart đối chiếu identity, tiếp tục thực thi Block $N+1$ |\n")
 	sb.WriteString("| **Rust Consensus Runtime Isolation** | **PASS (100%)** | `InitFFIBridge` không được gọi (đếm = 0); 0 Tokio runtime threads, 0 P2P listen sockets; NOMT threads phân lập lưu trữ |\n")
 	sb.WriteString("| **Zero-Fork Invariant (Part 2.5)** | **PASS (100%)** | Không timeout dispatch; đối chiếu hash + tx count trước khi bypass; fail-closed khi sai lệch |\n\n")
 
@@ -1136,12 +1296,12 @@ func writeC0VerificationReportExtended(
 
 	sb.WriteString("---\n\n")
 	sb.WriteString("## 4. Kiểm Thử Đột Ngột `kill -9` Theo Tiến Độ & Tự Phục Hồi\n\n")
-	sb.WriteString("1. **Kịch bản sự cố có điều khiển:** Node đang thực thi blocks thì tiến trình điều phối theo dõi `commit_progress.txt`. Ngay khi block #2 được commit bền vững xuống đĩa, tín hiệu `SIGKILL` (`kill -9`) được gửi cưỡng bức tới PID. Không có graceful shutdown, không có flush bộ đệm `app.Stop()`.\n")
+	sb.WriteString("1. **Kịch bản sự cố có điều khiển:** Node đang thực thi blocks thì tiến trình điều phối theo dõi failpoint markers tương ứng với từng ranh giới bền vững của từng kho dữ liệu vật lý (mapping barrier, contract code barrier, block barrier, event log barrier, NOMT commit barrier). Ngay khi ranh giới lưu trữ được xác nhận bởi failpoint marker (kèm xác minh `run_id` và block number), tín hiệu `SIGKILL` (`kill -9`) được gửi cưỡng bức tới PID. Không có graceful shutdown, không có flush bộ đệm `app.Stop()`.\n")
 	sb.WriteString("2. **Quy trình tái khởi động & Replay:**\n")
-	sb.WriteString("   - Node khởi động lại trên cùng thư mục dữ liệu đã crash với cờ `-c0-restart=true`.\n")
-	sb.WriteString("   - Database đọc `storage.GetLastBlockNumber()` xác định các blocks đã ghi bền (startBlockNum >= 2).\n")
-	sb.WriteString("   - **Zero-Fork Identity Verification:** Các block lịch sử được kiểm tra đối chiếu block hash và transaction count từ DB trước khi gán nhãn `[ALREADY COMMITTED / SKIPPED]`. Tuyệt đối không thực thi lại mutation lên state trie.\n")
-	sb.WriteString("   - **Block N+1 Continuation:** Sau khi hoàn tất đối chiếu các block cũ, hệ thống tiếp tục nhận và thực thi Block #6 ($N+1$).\n")
+	sb.WriteString("   - Node khởi động lại trên thư mục dữ liệu đã crash với cờ `-c0-restart=true` (mỗi kịch bản crash sở hữu một thư mục dữ liệu độc lập hoàn toàn, ngăn chặn việc tái sử dụng marker hoặc database cũ).\n")
+	sb.WriteString("   - Database đọc `storage.GetLastBlockNumber()` xác định các blocks đã ghi bền.\n")
+	sb.WriteString("   - **Zero-Fork Identity Verification:** Các block lịch sử được kiểm tra đối chiếu block hash, state roots, transaction count, và toàn bộ dữ liệu nghiệp vụ: đối chiếu trực tiếp `transaction_state` DB, các event logs trong `SmartContractDB`, và mã hợp đồng. Tuyệt đối không thực thi lại mutation lên state trie.\n")
+	sb.WriteString("   - **Block N+1 Continuation:** Sau khi hoàn tất đối chiếu các block cũ, hệ thống tiếp tục nhận và thực thi Block #N+1.\n")
 
 	if len(recCrashRecovered) > blocksCount {
 		blkN1 := recCrashRecovered[blocksCount]
@@ -1198,7 +1358,7 @@ func writeC0VerificationReportExtended(
 	sb.WriteString("Đã đạt bằng chứng đo đạc thực tế cho:\n")
 	sb.WriteString(fmt.Sprintf("- [x] Determinism giữa các OS process độc lập qua nhiều vòng (%d vòng × 2 process, so chéo giữa các vòng; `GOMAXPROCS` và thứ tự tx khác nhau giữa 2 tiến trình).\n", roundsCount))
 	sb.WriteString("- [x] Workload: Native Transfers (RW/WW) + EVM Smart Contract (`TestCounter`) + Gateway `outbound()` ghi trạng thái (chain đích 102 được seed).\n")
-	sb.WriteString("- [x] `kill -9` theo tiến độ tại nhiều điểm (sau block 1, block 2, và một block trước cuối); restart bỏ qua các block đã commit có đối chiếu identity (GEI + số tx), hash/state root lịch sử trùng lần chạy sạch, block N+1 thực thi tiếp.\n")
+	sb.WriteString("- [x] `kill -9` có điều khiển tại từng ranh giới lưu trữ per-store (sau mapping barrier, sau contract code barrier, sau block barrier, sau event log barrier, trước NOMT commit); restart bỏ qua các block đã commit có đối chiếu identity (GEI + số tx + transaction_state DB + event logs), hash/state root/logs lịch sử trùng 100% lần chạy sạch, block N+1 thực thi tiếp.\n")
 	sb.WriteString("- [x] Cách ly Rust consensus: `InitFFIBridge` = 0 lần, 0 thread tokio/consensus, 0 socket LISTEN thuộc tiến trình (thread NOMT vẫn tồn tại vì NOMT là thư viện Rust).\n")
 	sb.WriteString("- [x] Phát hiện và sửa lỗi bền vững thật: kho `smart_contract_code` phải `SyncDurable` sau khi ghi bytecode (nếu không, replay sau `kill -9` cho hash khác); có test hồi quy ở `pkg/smart_contract_db`.\n\n")
 	sb.WriteString("Chưa thuộc phạm vi C0 (chuyển sang C1+): ánh xạ `commit_index` uint32; snapshot gắn `CommitIndex`; kill giữa lúc thực thi một block (spike chỉ kill giữa hai block); kiểm tra mất điện thật.\n\n")

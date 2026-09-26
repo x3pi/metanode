@@ -1,48 +1,89 @@
 # Sơ đồ Luồng & Vấn đề Còn Mở — BLS Node / Node Float Account
 
 > Tách từ `SEQUENCER_DESIGN.md` (mục 8, 9.1, 11 gốc) để tài liệu chính gọn hơn, tập trung vào kiến trúc. File này chứa (1) toàn bộ sơ đồ minh hoạ các luồng chính (Phần A) và (2) 5 quyết định từng chặn việc bắt đầu code — nay đã chốt 5/5 (2026-09-24, Phần B.1) — mọi vấn đề đã có fix thiết kế sẵn chỉ còn 1 dòng index gọn ở Phần B.2 để `#N` còn tra được, chi tiết đầy đủ nằm trong `SEQUENCER_DESIGN.md`.
-> **⚠️ Cập nhật quyết định (2026-09-25) — đọc trước:** chế độ vận hành của node thực thi đã chốt là **`consensus_mode = "raft"` của `simple_chain`** (không binary mới, không RPC mới; giữ nguyên RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; **chỉ thay Rust đồng thuận bằng Raft** `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký trên mọi replica, thực thi chỉ sau khi Raft commit). Tài liệu này mô tả **mô hình giá trị liên-node (Float Account)**, **không** mô tả cách nhân bản/dự phòng node; mọi chỗ ngầm hiểu "1 node = 1 tiến trình duy nhất" hoặc dự phòng kiểu khác phải đọc theo `SEQUENCER_STEP_BY_STEP_PLAN.md` mục 0.1 và 0.6. Bước **A1** (viết lại phần này cho khớp Raft) vẫn chưa làm.
-
+> **Chế độ vận hành đã chốt (Bước A1):** Chế độ vận hành của node thực thi là **`consensus_mode = "raft"`** tích hợp trực tiếp trong `simple_chain` (không binary mới, không RPC mới; giữ nguyên JSON-RPC, tx pool, `tx_batch_forwarder`, xử lý block Go, NOMT/MVM/Xapian; thay thế Rust consensus engine bằng `hashicorp/raft`, bầu leader tự động, cùng 1 khoá ký BLS trên mọi replica, và thực thi block chỉ sau khi Raft commit).
 
 ---
 
 ## Phần A — Sơ đồ các luồng chính
 
-### A.1. Kiến trúc tổng quan
+### A.1. Kiến trúc tổng quan (Raft Sequencer Cluster & Root Anchor)
 
 ```mermaid
 flowchart TB
     subgraph RA["Parent Chain (Root Anchor)"]
         AR["Account Registry\nuser_address -> chainID"]
-        CR["ChainRegistry\n1 entry = 1 node"]
+        CR["ChainRegistry\n1 entry = 1 cluster (chainID)"]
         FA["NodeFloatAccount\nchainID -> balance THẬT\n(bất biến = Σ balance user, mục 3.2)"]
         SB["SecurityBondLedger\n(bảo vệ đăng ký/gian lận phân bổ, mục 4.1)"]
     end
 
-    subgraph N1["Node 1 = chainID 1"]
-        AH1["AccountHandler + PKS"]
-        DB1[("LevelDB")]
+    subgraph C1["Cluster 1 = chainID 1 (Raft Cluster)"]
+        L1["Leader 1\n(PKS Shared Key)"]
+        F1A["Follower 1A"]
+        F1B["Follower 1B"]
+        L1 <-. "Raft SMR Log" .-> F1A
+        L1 <-. "Raft SMR Log" .-> F1B
     end
 
-    subgraph N2["Node 2 = chainID 2"]
-        AH2["AccountHandler + PKS"]
-        DB2[("LevelDB")]
+    subgraph C2["Cluster 2 = chainID 2 (Raft Cluster)"]
+        L2["Leader 2\n(PKS Shared Key)"]
+        F2A["Follower 2A"]
+        F2B["Follower 2B"]
+        L2 <-. "Raft SMR Log" .-> F2A
+        L2 <-. "Raft SMR Log" .-> F2B
     end
 
-    UserA(("User A")) --> AH1
-    AH1 <--> DB1
-    UserB(("User B")) --> AH2
-    AH2 <--> DB2
+    UserA(("User A")) --> L1
+    UserB(("User B")) --> L2
 
-    UserA -- "User tự nạp tiền vào TK của mình\n(atomic: balance cục bộ += V, FA[1] += V)" --> FA
-    N1 -- "Transfer atomic (mỗi giao dịch)\nFA[1] -= V, FA[2] += V" --> FA
-    FA -. "credit đến, Node 2 tự theo dõi" .-> N2
-    N1 -- "RegisterChainViaStake / PostSecurityBond" --> CR
-    CR -. "UnregisterChainWithCert\n(tự ký bởi committee của chain)" .-> CR
+    UserA -- "User nạp tiền vào TK\n(atomic: balance local += V, FA[1] += V)" --> FA
+    L1 -- "Transfer atomic (mỗi giao dịch)\nFA[1] -= V, FA[2] += V" --> FA
+    FA -. "credit đến, Cluster 2 tự theo dõi" .-> L2
+    L1 -- "RegisterChainViaStake / PostSecurityBond" --> CR
+    CR -. "UnregisterChainWithCert\n(tự ký bởi cluster key)" .-> CR
 
     style RA fill:#f4f4f4,stroke:#999,color:#333
-    style N1 fill:#eef6ff,stroke:#6699cc,color:#333
-    style N2 fill:#eef6ff,stroke:#6699cc,color:#333
+    style C1 fill:#eef6ff,stroke:#6699cc,color:#333
+    style C2 fill:#eef6ff,stroke:#6699cc,color:#333
+```
+
+### A.1b. Chu trình Raft SMR Pipeline (Propose → Majority Commit → FSM Apply → Execution)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as RPC Client / User
+    participant Mempool as TxPool / Forwarder
+    participant Leader as Raft Leader
+    participant Followers as Raft Followers (2f)
+    participant FSM as FSM.Apply()
+    participant Processor as BlockProcessor & NOMT
+    participant Parent as Parent Chain (Root Anchor)
+
+    Client->>Mempool: Submit Transaction (JSON-RPC)
+    Mempool->>Leader: Bounded Batching (BatchRecord)
+    Leader->>Leader: Raft Log Append (Local fsync)
+    par Replicate to Followers
+        Leader->>Followers: AppendEntries RPC
+        Followers->>Followers: Raft Log Append (Local fsync)
+        Followers-->>Leader: AppendEntries Success
+    end
+    Note over Leader,Followers: Quorum đạt 2f+1 nodes bền vững -> Raft Commit!
+    par Apply on all replicas
+        Leader->>FSM: FSM.Apply(BatchRecord)
+        Followers->>FSM: FSM.Apply(BatchRecord)
+    end
+    FSM->>Processor: Deterministic ExecutableBlock
+    Processor->>Processor: Block-STM & EVM Execution
+    Processor->>Processor: NOMT Trie Swap & Barrier 8b SyncDurable
+    Processor-->>Leader: Block Committed Successfully
+    par Outbox Actions & Client Responses
+        Leader->>Client: Send JSON-RPC Success Response
+        opt Cross-node Transfer
+            Leader->>Parent: TransferFloat / MarkClaimed (signed with Cluster Key)
+        end
+    end
 ```
 
 **Quy trình từng bước:**

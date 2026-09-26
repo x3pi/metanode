@@ -96,8 +96,8 @@ type SnapshotManager struct {
 	nomtSnapshotCallback func(destPath string, useReflink bool) error
 
 	// Callbacks for pausing/resuming execution
-	waitPersistenceCallback func()
-	pauseCallback           func()
+	waitPersistenceCallback func() error
+	pauseCallback           func() error
 	resumeCallback          func()
 	rustPauseCallback       func()
 	rustResumeCallback      func()
@@ -214,7 +214,7 @@ func (sm *SnapshotManager) SetNomtSnapshotCallback(cb func(destPath string, useR
 }
 
 // SetPauseCallback registers a callback to pause transaction execution
-func (sm *SnapshotManager) SetPauseCallback(cb func()) {
+func (sm *SnapshotManager) SetPauseCallback(cb func() error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.pauseCallback = cb
@@ -265,7 +265,7 @@ func (sm *SnapshotManager) SetRustResumeCallback(cb func()) {
 }
 
 // SetWaitPersistenceCallback registers a callback to wait for async commit jobs before snapping
-func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
+func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func() error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.waitPersistenceCallback = cb
@@ -273,14 +273,15 @@ func (sm *SnapshotManager) SetWaitPersistenceCallback(cb func()) {
 
 // WaitForPersistence manually triggers the waitPersistenceCallback to wait for the commit pipeline to flush.
 // This is used to prevent concurrent NOMT mutations between STARTUP-SYNC and commitWorker.
-func (sm *SnapshotManager) WaitForPersistence() {
+func (sm *SnapshotManager) WaitForPersistence() error {
 	sm.mu.Lock()
 	cb := sm.waitPersistenceCallback
 	sm.mu.Unlock()
 	if cb != nil {
 		logger.Info("⏳ [SNAPSHOT-MANAGER] Manually triggering wait persistence callback to flush pipeline...")
-		cb()
+		return cb()
 	}
+	return nil
 }
 
 // SetSnapshotFrequency cho phép cấu hình trigger dựa trên số lượng block cố định
@@ -469,31 +470,15 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 	// Nó cũng drain toàn bộ commit queue cũ, đưa memory state về sync hoàn toàn.
 	if pauseCb != nil {
 		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Go Master execution for atomic database snapshot...")
-		pauseCb()
+		if err := pauseCb(); err != nil {
+			logger.Error("🚨 [SNAPSHOT] Pause execution failed: %v — aborting snapshot to prevent corrupt state", err)
+			return fmt.Errorf("pause execution failed: %w", err)
+		}
 		pausedGo = true
 	}
 
-	// 2. Flush memory tables
-	// An toàn để flush vì Go execution đã dừng, không có data mới ghi vào memory db.
-	if flushCb != nil {
-		logger.Info("💾 [SNAPSHOT] Force flushing all memory tables to disk before snapshotting...")
-		if err := flushCb(); err != nil {
-			logger.Error("❌ [SNAPSHOT] Memory table flush failed: %v", err)
-		} else {
-			logger.Info("✅ [SNAPSHOT] Successfully flushed all memory tables to disk")
-		}
-	}
-
-	// 3. Dừng Rust Consensus (bắt đầu 30s timer)
-	// Vì Go đã flush và commitChannel đã rỗng, phần snapshot phía sau sẽ hoàn thành
-	// cực kỳ nhanh, tránh hoàn toàn rủi ro PAUSE TIMEOUT (vượt quá 30s watchdog).
-	if rustPauseCb != nil {
-		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Rust consensus writing for atomic snapshot...")
-		rustPauseCb()
-	}
-
-	// CRITICAL: Đảm bảo resume luôn được gọi kể cả khi panic/error xảy ra
-	// Thứ tự resume phải ngược lại: Resume Rust trước, sau đó Resume Go.
+	// CRITICAL: Ensure resume is always called even if panic or error occurs
+	// Reverse order: Resume Rust first, then Resume Go.
 	defer func() {
 		if rustResumeCb != nil {
 			logger.Info("📸 [SNAPSHOT] ▶️  Resuming Rust consensus writing after DB snapshots")
@@ -504,6 +489,25 @@ func (sm *SnapshotManager) createAtomicSnapshot(epoch, blockNumber, boundaryBloc
 			resumeCb()
 		}
 	}()
+
+	// 2. Flush memory tables
+	// Safe to flush because Go execution is paused, no new data is being written.
+	if flushCb != nil {
+		logger.Info("💾 [SNAPSHOT] Force flushing all memory tables to disk before snapshotting...")
+		if err := flushCb(); err != nil {
+			logger.Error("🚨 [SNAPSHOT] Memory table flush failed: %v — aborting snapshot to prevent incomplete state", err)
+			return fmt.Errorf("memory table flush failed: %w", err)
+		}
+		logger.Info("✅ [SNAPSHOT] Successfully flushed all memory tables to disk")
+	}
+
+	// 3. Dừng Rust Consensus (bắt đầu 30s timer)
+	// Vì Go đã flush và commitChannel đã rỗng, phần snapshot phía sau sẽ hoàn thành
+	// cực kỳ nhanh, tránh hoàn toàn rủi ro PAUSE TIMEOUT (vượt quá 30s watchdog).
+	if rustPauseCb != nil {
+		logger.Info("📸 [SNAPSHOT] ⏸️  Pausing Rust consensus writing for atomic snapshot...")
+		rustPauseCb()
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// PHASE 0.5: CAPTURE ATOMIC STATE METADATA

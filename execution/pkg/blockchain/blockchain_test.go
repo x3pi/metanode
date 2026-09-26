@@ -1,11 +1,13 @@
 package blockchain
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -299,4 +301,60 @@ func TestBlockChain_Concurrent_DirtyStorage(t *testing.T) {
 
 	wg.Wait()
 	bc.Discard()
+}
+
+type mockMappingStorage struct {
+	storage.Storage
+	batchPutErr     error
+	syncDurableErr   error
+	syncDurableCalls int
+	putCalls         [][2][]byte
+}
+
+func (m *mockMappingStorage) BatchPut(pairs [][2][]byte) error {
+	if m.batchPutErr != nil {
+		return m.batchPutErr
+	}
+	m.putCalls = append(m.putCalls, pairs...)
+	return nil
+}
+
+func (m *mockMappingStorage) SyncDurable() error {
+	m.syncDurableCalls++
+	if m.syncDurableErr != nil {
+		return m.syncDurableErr
+	}
+	return nil
+}
+
+func TestBlockChain_Commit_SynchronousAndErrorPropagation(t *testing.T) {
+	bc := newTestBlockChain()
+	sm := storage.NewStorageManager()
+	mock := &mockMappingStorage{}
+	require.NoError(t, sm.AddStorageMapping(mock))
+	bc.storageManager = sm
+
+	// Case 1: Synchronous commit succeeds immediately and calls SyncDurable
+	bc.storeToDirty("key1", []byte("val1"))
+	err := bc.Commit()
+	require.NoError(t, err)
+	require.Len(t, mock.putCalls, 1)
+	assert.Equal(t, "key1", string(mock.putCalls[0][0]))
+	assert.Equal(t, []byte("val1"), mock.putCalls[0][1])
+	assert.Equal(t, 1, mock.syncDurableCalls, "SyncDurable must be called after successful BatchPut")
+
+	// Case 2: Error in BatchPut is propagated, not swallowed
+	mock.batchPutErr = errors.New("simulated disk full")
+	bc.storeToDirty("key2", []byte("val2"))
+	err = bc.Commit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated disk full")
+
+	// Case 3: Error in SyncDurable barrier is propagated, not swallowed
+	mock.batchPutErr = nil
+	mock.syncDurableErr = errors.New("simulated fsync failure")
+	bc.storeToDirty("key3", []byte("val3"))
+	err = bc.Commit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated fsync failure")
 }
