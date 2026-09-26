@@ -29,6 +29,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
 	pb "github.com/meta-node-blockchain/meta-node/pkg/proto"
 	"github.com/meta-node-blockchain/meta-node/pkg/receipt"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/smart_contract"
 	"github.com/meta-node-blockchain/meta-node/pkg/state"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
@@ -306,6 +307,10 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 	bypassedBlocks := 0
 
 	// 4. Feed blocks into ingestion queue
+	viaRaftFeed := os.Getenv("C0_VIA_RAFTFEED") == "1"
+	// C0_LEADER_FROM_NODE=1: stamp this node's validator address as leader (what the raft feed does), so a direct
+	// run and a via-feed run pay the fees to the same account and their state roots are comparable.
+	leaderFromNode := os.Getenv("C0_LEADER_FROM_NODE") == "1"
 	for _, eb := range executableBlocks {
 		targetHeight := eb.BlockNumber
 
@@ -338,7 +343,23 @@ func runC0Worker(baseConfigPath, dataDir, outPath string, blocksCount int, isRes
 
 		failpoint.SetRunContext(fmt.Sprintf("%s-b%d", activeRunID, targetHeight), targetHeight)
 
-		q <- eb
+		if leaderFromNode {
+			eb.LeaderAddress = app.blockProcessor.ValidatorAddress().Bytes()
+		}
+		if viaRaftFeed {
+			// C0_VIA_RAFTFEED=1: hand the block's transactions to the real C1 feed (started by the block processor's
+			// raft branch, exactly as in production) as a batch instead of pushing the ExecutableBlock directly. The feed
+			// stamps its own timestamp, so the block HASH differs from the direct run; state roots must not.
+			batch, err := batchFromExecutableBlock(eb)
+			if err != nil {
+				return fmt.Errorf("batchFromExecutableBlock(block #%d): %w", targetHeight, err)
+			}
+			if !raftfeed.Submit(batch) {
+				return fmt.Errorf("raftfeed.Submit rejected the batch for block #%d", targetHeight)
+			}
+		} else {
+			q <- eb
+		}
 
 		// Wait for this block to commit
 		committed := false
@@ -1421,3 +1442,16 @@ func fileExists(p string) bool {
 // Suppress unused warnings
 var _ = hex.EncodeToString
 var _ types.Transaction
+
+// batchFromExecutableBlock rebuilds the marshalled transaction batch a forwarder would have submitted for eb.
+func batchFromExecutableBlock(eb *pb.ExecutableBlock) ([]byte, error) {
+	txs := make([]types.Transaction, 0, len(eb.Transactions))
+	for i, te := range eb.Transactions {
+		tx, err := transaction.UnmarshalTransaction(te.Digest)
+		if err != nil {
+			return nil, fmt.Errorf("tx %d: %w", i, err)
+		}
+		txs = append(txs, tx)
+	}
+	return transaction.MarshalTransactions(txs)
+}

@@ -17,6 +17,16 @@ import (
 	"github.com/meta-node-blockchain/meta-node/types/network"
 )
 
+// batchSubmitter picks where a marshalled batch goes: the raft feed in raft mode, the Rust FFI otherwise. A false
+// result means "not accepted, keep the batch and retry" in both cases, so the raft feed must return true only
+// once it really accepted the batch (see raftfeed.Submit).
+func batchSubmitter() func([]byte) bool {
+	if raftfeed.Enabled() {
+		return raftfeed.Submit
+	}
+	return executor.SubmitTransactionBatch
+}
+
 // TxBatchForwarder handles transaction processing and forwarding to Rust FFI
 type TxBatchForwarder struct {
 	transactionProcessor *TransactionProcessor
@@ -217,12 +227,7 @@ func (bf *TxBatchForwarder) StartForwardingLoop() {
 
 			// Gửi batch qua FFI (synchronous zero-copy injection)
 			for {
-				var success bool
-				if raftfeed.Enabled() {
-					success = raftfeed.Submit(bTransaction)
-				} else {
-					success = executor.SubmitTransactionBatch(bTransaction)
-				}
+				success := batchSubmitter()(bTransaction)
 				if success {
 					if shouldLogSend {
 						logger.Debug("✅ [TX FLOW] Injected batch [%d/%d]: %d txs via FFI (Zero-Copy)",

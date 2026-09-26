@@ -30,6 +30,7 @@ import (
 	"github.com/meta-node-blockchain/meta-node/pkg/network"
 	"github.com/meta-node-blockchain/meta-node/pkg/node"
 	"github.com/meta-node-blockchain/meta-node/pkg/pruning"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 	"github.com/meta-node-blockchain/meta-node/pkg/storage"
 	"github.com/meta-node-blockchain/meta-node/pkg/tracing"
 	"github.com/meta-node-blockchain/meta-node/pkg/transaction_pool"
@@ -110,6 +111,9 @@ func NewApp(configFilePath string, logLevel int) (*App, error) {
 	app.config, err = config.LoadConfig(configFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %v", err)
+	}
+	if err := raftfeed.ValidateConfig(app.config); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	cacheEnabled := false

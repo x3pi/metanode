@@ -13,6 +13,7 @@ import (
 
 	"github.com/meta-node-blockchain/meta-node/pkg/fatal"
 	"github.com/meta-node-blockchain/meta-node/pkg/logger"
+	"github.com/meta-node-blockchain/meta-node/pkg/rollup/raftfeed"
 
 	// "github.com/meta-node-blockchain/meta-node/pkg/loggerfile"
 	"github.com/meta-node-blockchain/meta-node/pkg/mvm"
@@ -98,6 +99,28 @@ func (bp *BlockProcessor) runUnixSocket() {
 		logger.Info("🚀 [CONSENSUS-MODE] Running in Raft mode (Rust FFI consensus bypassed)")
 		lastBlock := storage.GetLastBlockNumber()
 		logger.Warn("⚠️ [CONSENSUS-MODE] Raft mode active (ConsensusReady=false, engine under construction), block=%d", lastBlock)
+
+		// Numbering resumes after BOTH the last executed GEI and the last handled commit index, so a restart (or a
+		// chain that ran under Rust consensus before) can never reuse an index that was already executed.
+		nextIndex := storage.GetLastGlobalExecIndex()
+		if ci := uint64(storage.GetLastHandledCommitIndex()); ci > nextIndex {
+			nextIndex = ci
+		}
+		nextIndex++
+		// The feed's leader is this node (C1 has one node); Go never derives a leader itself, it is stamped here.
+		feeder, err := raftfeed.Start(raftfeed.StartConfig{
+			Sink:          blockQueue,
+			NextIndex:     nextIndex,
+			NextBlock:     lastBlock + 1,
+			Epoch:         storage.GetLastHandledCommitEpoch(),
+			LeaderAddress: bp.validatorAddress,
+		})
+		if err != nil {
+			logger.Error("❌ [RAFT FEED] cannot start the block feed: %v", err)
+			fatal.Exit("Fatal exit from block_processor_network.go: raft feed did not start")
+		}
+		defer feeder.Stop()
+		logger.Info("🚀 [RAFT FEED] Block feed started (nextIndex=%d, nextBlock=%d)", nextIndex, lastBlock+1)
 
 		go bp.processRustEpochData(blockQueue)
 		go bp.StartCommitterLoop()
